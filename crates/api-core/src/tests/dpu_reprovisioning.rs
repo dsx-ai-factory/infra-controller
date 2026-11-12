@@ -2643,3 +2643,887 @@ impl<ID: HostMachineIdSubtypeTrait> TestAnyManagedHost<ID> {
             .unwrap();
     }
 }
+
+mod lifecycle_request_admission {
+    use std::time::Duration;
+
+    use carbide_uuid::machine::{HostMachineId, MachineIdSource, MachineInterfaceId, MachineType};
+    use db::test_support::postgres::wait_for_blocked_query;
+    use model::machine::machine_search_config::MachineSearchConfig;
+    use tokio::time::timeout;
+
+    use super::*;
+
+    type TestResult = Result<(), Box<dyn std::error::Error>>;
+    const COMPLETION_TIMEOUT: Duration = Duration::from_secs(25);
+    const MACHINE_WAIT: &str = "SELECT id FROM machines WHERE id = $1 FOR NO KEY UPDATE";
+
+    struct HostWithDpus {
+        host: HostMachineId,
+        dpus: [DpuMachineId; 2],
+        spare: DpuMachineId,
+        interfaces: [MachineInterfaceId; 2],
+    }
+
+    // A `Ready` host with two data interfaces, a spare DPU, and the `host-update`
+    // marker required by `Restart`. Raw rows let the tests change admission
+    // dependencies without advancing controllers.
+    async fn seed_host(
+        pool: &sqlx::PgPool,
+        seed: u8,
+    ) -> Result<HostWithDpus, Box<dyn std::error::Error>> {
+        let id = |offset, kind| {
+            MachineId::new(
+                MachineIdSource::ProductBoardChassisSerial,
+                [seed + offset; 32],
+                kind,
+            )
+        };
+        let host = HostMachineId::try_from(id(0, MachineType::Host))?;
+        let mut dpus = [
+            DpuMachineId::try_from(id(0, MachineType::Dpu))?,
+            DpuMachineId::try_from(id(1, MachineType::Dpu))?,
+        ];
+        dpus.sort_unstable();
+        let spare = DpuMachineId::try_from(id(2, MachineType::Dpu))?;
+        let mut txn = pool.begin().await?;
+        // Oppose heap/snapshot order to the native order used for admission.
+        for machine_id in [host.into(), dpus[1].into(), dpus[0].into(), spare.into()] {
+            db::machine::create(
+                txn.as_mut(),
+                None,
+                &machine_id,
+                ManagedHostState::Ready,
+                None,
+                model::machine::CURRENT_STATE_MODEL_VERSION,
+            )
+            .await?;
+        }
+        let segment: carbide_uuid::network::NetworkSegmentId = sqlx::query_scalar(
+            "INSERT INTO network_segments (name, version) VALUES ($1, 'V1-T0') RETURNING id",
+        )
+        .bind(format!("lifecycle-admission-{seed}"))
+        .fetch_one(txn.as_mut())
+        .await?;
+        let mut interfaces = Vec::new();
+        for (index, dpu) in dpus.iter().enumerate() {
+            let link = sqlx::query_scalar(
+                "INSERT INTO machine_interfaces
+                    (machine_id, attached_dpu_machine_id, association_type, segment_id,
+                     mac_address, primary_interface, hostname, interface_type)
+                 VALUES ($1, $2, 'Machine', $3, $4::macaddr, $5, 'admission', 'Data')
+                 RETURNING id",
+            )
+            .bind(host)
+            .bind(dpu)
+            .bind(segment)
+            .bind(format!("02:89:07:{seed:02x}:00:{index:02x}"))
+            .bind(index == 1)
+            .fetch_one(txn.as_mut())
+            .await?;
+            interfaces.push(link);
+        }
+        let report = health_report::HealthReport {
+            source: "host-update".to_string(),
+            triggered_by: None,
+            observed_at: None,
+            successes: Vec::new(),
+            alerts: vec![health_report::HealthProbeAlert {
+                id: "HostUpdateInProgress".parse()?,
+                target: None,
+                in_alert_since: None,
+                message: "Update".to_string(),
+                tenant_message: None,
+                classifications: vec![
+                    health_report::HealthAlertClassification::prevent_allocations(),
+                ],
+            }],
+        };
+        db::machine::insert_health_report(
+            txn.as_mut(),
+            &host.into(),
+            health_report::HealthReportApplyMode::Merge,
+            &report,
+            false,
+        )
+        .await?;
+        txn.commit().await?;
+        Ok(HostWithDpus {
+            host,
+            dpus,
+            spare,
+            interfaces: [interfaces[0], interfaces[1]],
+        })
+    }
+
+    fn dpf_request(
+        host: HostMachineId,
+        dpf_enabled: bool,
+    ) -> tonic::Request<rpc::forge::ModifyDpfStateRequest> {
+        tonic::Request::new(rpc::forge::ModifyDpfStateRequest {
+            machine_id: Some(host),
+            dpf_enabled,
+        })
+    }
+
+    fn reprovision_request(
+        id: MachineId,
+        mode: Mode,
+    ) -> tonic::Request<rpc::forge::DpuReprovisioningRequest> {
+        tonic::Request::new(rpc::forge::DpuReprovisioningRequest {
+            machine_id: Some(id),
+            mode: mode as i32,
+            update_firmware: false,
+            ..Default::default()
+        })
+    }
+
+    // Walk the retained direct database error to its SQLx diagnostic.
+    fn sqlx_error_from_status(status: &tonic::Status) -> Option<&sqlx::Error> {
+        let mut source: &(dyn std::error::Error + 'static) = status;
+        loop {
+            if let Some(error) = source.downcast_ref::<sqlx::Error>() {
+                return Some(error);
+            }
+            source = source.source()?;
+        }
+    }
+
+    async fn enabled_flags(
+        pool: &sqlx::PgPool,
+        ids: &[MachineId],
+    ) -> Result<Vec<bool>, sqlx::Error> {
+        sqlx::query_scalar(
+            r#"SELECT (dpf->>'enabled')::boolean FROM machines
+               WHERE id = ANY($1) ORDER BY id COLLATE "C""#,
+        )
+        .bind(ids)
+        .fetch_all(pool)
+        .await
+    }
+
+    // Ingestion can change before initial admission or during an isolated DPU
+    // wait after a rejected attempt. Both paths must use the new marker.
+    #[crate::sqlx_test]
+    async fn dpf_disable_rechecks_ingestion_after_waiting(pool: sqlx::PgPool) -> TestResult {
+        #[derive(Clone, Copy, Debug)]
+        enum Wait {
+            Host,
+            LaterDpu,
+        }
+        let env = create_test_env(pool).await;
+        for (seed, wait) in [(10, Wait::Host), (13, Wait::LaterDpu)] {
+            let host = seed_host(&env.pool, seed).await?;
+            let mut gate = env.pool.begin().await?;
+            let (gate_id, wait_query) = match wait {
+                Wait::Host => (
+                    host.host.into(),
+                    "SELECT id FROM machines WHERE id = $1 FOR UPDATE",
+                ),
+                Wait::LaterDpu => (host.dpus[1].into(), MACHINE_WAIT),
+            };
+            db::machine::lock_by_id_for_update(gate.as_mut(), &gate_id).await?;
+            let pid = sqlx::query_scalar("SELECT pg_backend_pid()")
+                .fetch_one(gate.as_mut())
+                .await?;
+            let update = env.api.modify_dpf_state(dpf_request(host.host, false));
+            tokio::pin!(update);
+            tokio::select! {
+                result = &mut update => panic!("{wait:?}: disable passed the gate: {result:?}"),
+                _ = wait_for_blocked_query(&env.pool, pid, wait_query) => {}
+            }
+            sqlx::query("SELECT id FROM machines WHERE id = $1 FOR UPDATE NOWAIT")
+                .bind(host.host)
+                .fetch_one(gate.as_mut())
+                .await?;
+            db::machine::mark_machine_ingestion_done_with_dpf(gate.as_mut(), &host.host.into())
+                .await?;
+            gate.commit().await?;
+            let error = timeout(COMPLETION_TIMEOUT, update)
+                .await?
+                .expect_err("ingestion forbids disable");
+            assert_eq!(error.code(), tonic::Code::FailedPrecondition, "{wait:?}");
+            assert!(
+                error.message().contains("machine was ingested via DPF"),
+                "{wait:?}"
+            );
+            assert_eq!(
+                enabled_flags(
+                    &env.pool,
+                    &[host.host.into(), host.dpus[0].into(), host.dpus[1].into()]
+                )
+                .await?,
+                [true; 3],
+                "{wait:?}"
+            );
+        }
+        Ok(())
+    }
+
+    // Rebind an attachment while the RPC waits for the later DPU in isolation.
+    // The retry must update the spare and leave the detached DPU alone.
+    #[crate::sqlx_test]
+    async fn dpf_late_contention_releases_prefix_and_reloads_cohort(
+        pool: sqlx::PgPool,
+    ) -> TestResult {
+        let env = create_test_env(pool).await;
+        let host = seed_host(&env.pool, 20).await?;
+        let independent = seed_host(&env.pool, 30).await?;
+        let mut first_gate = env.pool.begin().await?;
+        db::machine::lock_by_id_for_update(first_gate.as_mut(), &host.dpus[0].into()).await?;
+        let first_pid = sqlx::query_scalar("SELECT pg_backend_pid()")
+            .fetch_one(first_gate.as_mut())
+            .await?;
+        let mut later_gate = env.pool.begin().await?;
+        db::machine::lock_by_id_for_update(later_gate.as_mut(), &host.dpus[1].into()).await?;
+        let later_pid = sqlx::query_scalar("SELECT pg_backend_pid()")
+            .fetch_one(later_gate.as_mut())
+            .await?;
+        let update = env.api.modify_dpf_state(dpf_request(host.host, false));
+        tokio::pin!(update);
+        tokio::select! {
+            result = &mut update => panic!("DPF passed the first native DPU gate: {result:?}"),
+            _ = wait_for_blocked_query(&env.pool, first_pid, MACHINE_WAIT) => {}
+        }
+        first_gate.commit().await?;
+        tokio::select! {
+            result = &mut update => panic!("DPF passed the later DPU gate: {result:?}"),
+            _ = wait_for_blocked_query(&env.pool, later_pid, MACHINE_WAIT) => {}
+        }
+        // The isolated later-DPU wait must retain none of the admitted prefix.
+        sqlx::query("SELECT id FROM machines WHERE id = ANY($1) FOR UPDATE NOWAIT")
+            .bind([MachineId::from(host.host), host.dpus[0].into()].as_slice())
+            .fetch_all(later_gate.as_mut())
+            .await?;
+        let locked_links: Vec<MachineInterfaceId> = sqlx::query_scalar(
+            "SELECT id FROM machine_interfaces WHERE machine_id = $1 FOR UPDATE NOWAIT",
+        )
+        .bind(host.host)
+        .fetch_all(later_gate.as_mut())
+        .await?;
+        assert_eq!(locked_links.len(), host.interfaces.len());
+        assert_eq!(
+            enabled_flags(
+                &env.pool,
+                &[host.host.into(), host.dpus[0].into(), host.dpus[1].into()]
+            )
+            .await?,
+            [true; 3]
+        );
+        timeout(
+            COMPLETION_TIMEOUT,
+            env.api
+                .modify_dpf_state(dpf_request(independent.host, false)),
+        )
+        .await??;
+        assert_eq!(
+            enabled_flags(
+                &env.pool,
+                &[
+                    independent.host.into(),
+                    independent.dpus[0].into(),
+                    independent.dpus[1].into()
+                ]
+            )
+            .await?,
+            [false; 3]
+        );
+        db::machine_interface::associate_interface_with_dpu_machine(
+            &host.interfaces[1],
+            &host.spare.into(),
+            later_gate.as_mut(),
+        )
+        .await?;
+        later_gate.commit().await?;
+        timeout(COMPLETION_TIMEOUT, update).await??;
+        assert_eq!(
+            enabled_flags(
+                &env.pool,
+                &[host.host.into(), host.dpus[0].into(), host.spare.into()]
+            )
+            .await?,
+            [false; 3]
+        );
+        assert_eq!(
+            enabled_flags(&env.pool, &[host.dpus[1].into()]).await?,
+            [true]
+        );
+        Ok(())
+    }
+
+    // A BMC interface becomes a data attachment while the RPC waits. Persisted
+    // flags identify whether the retry used the changed classification.
+    #[crate::sqlx_test]
+    async fn dpf_reloads_bmc_classification_after_interface_wait(pool: sqlx::PgPool) -> TestResult {
+        let env = create_test_env(pool).await;
+        let host = seed_host(&env.pool, 70).await?;
+        sqlx::query("UPDATE machine_interfaces SET interface_type = 'Bmc' WHERE id = $1")
+            .bind(host.interfaces[1])
+            .execute(&env.pool)
+            .await?;
+        let mut gate = env.pool.begin().await?;
+        sqlx::query("SELECT id FROM machine_interfaces WHERE id = $1 FOR UPDATE")
+            .bind(host.interfaces[1])
+            .fetch_one(gate.as_mut())
+            .await?;
+        let pid = sqlx::query_scalar("SELECT pg_backend_pid()")
+            .fetch_one(gate.as_mut())
+            .await?;
+        let update = env.api.modify_dpf_state(dpf_request(host.host, false));
+        tokio::pin!(update);
+        tokio::select! {
+            result = &mut update => panic!("DPF failed to admit the BMC interface: {result:?}"),
+            _ = wait_for_blocked_query(&env.pool, pid, "SELECT id FROM machine_interfaces WHERE id = $1 FOR NO KEY UPDATE") => {}
+        }
+        sqlx::query("SELECT id FROM machines WHERE id = $1 FOR UPDATE NOWAIT")
+            .bind(host.host)
+            .fetch_one(gate.as_mut())
+            .await?;
+        sqlx::query("SELECT id FROM machine_interfaces WHERE id = $1 FOR UPDATE NOWAIT")
+            .bind(host.interfaces[0])
+            .fetch_one(gate.as_mut())
+            .await?;
+        sqlx::query("UPDATE machine_interfaces SET interface_type = 'Data', attached_dpu_machine_id = $2 WHERE id = $1")
+            .bind(host.interfaces[1]).bind(host.spare).execute(gate.as_mut()).await?;
+        gate.commit().await?;
+        timeout(COMPLETION_TIMEOUT, update).await??;
+        assert_eq!(
+            enabled_flags(
+                &env.pool,
+                &[host.host.into(), host.dpus[0].into(), host.spare.into()]
+            )
+            .await?,
+            [false; 3]
+        );
+        assert_eq!(
+            enabled_flags(&env.pool, &[host.dpus[1].into()]).await?,
+            [true]
+        );
+        Ok(())
+    }
+
+    // Pool admission, row waits, retries, and an in-flight commit consume one
+    // caller budget. Wait for backend cleanup before checking state and recovery.
+    #[crate::sqlx_test]
+    async fn dpf_timeout_bounds_pool_waits_and_retries(pool: sqlx::PgPool) -> TestResult {
+        #[derive(Clone, Copy, Debug)]
+        enum Wait {
+            Host,
+            Pool,
+            Retry,
+            Commit,
+        }
+        async fn wait_until_idle(pool: &sqlx::PgPool, pid: i32) -> TestResult {
+            timeout(COMPLETION_TIMEOUT, async {
+                loop {
+                    let idle: bool = sqlx::query_scalar(
+                        "SELECT NOT EXISTS(SELECT 1 FROM pg_stat_activity
+                         WHERE pid = $1 AND (state <> 'idle' OR xact_start IS NOT NULL))",
+                    )
+                    .bind(pid)
+                    .fetch_one(pool)
+                    .await?;
+                    if idle {
+                        return Ok::<_, sqlx::Error>(());
+                    }
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await??;
+            Ok(())
+        }
+        let control = pool.clone();
+        let env = create_test_env(pool).await;
+        for (seed, wait, budget) in [
+            (40, Wait::Host, Duration::from_secs(2)),
+            (43, Wait::Pool, Duration::from_millis(200)),
+            (46, Wait::Retry, Duration::from_secs(3)),
+            (49, Wait::Commit, Duration::from_secs(2)),
+        ] {
+            let host = seed_host(&env.pool, seed).await?;
+            let mut gate = None;
+            let mut gate_pid = None;
+            let mut held = Vec::new();
+            if matches!(wait, Wait::Pool) {
+                for _ in 0..env.api.pg_pool().options().get_max_connections() {
+                    held.push(timeout(COMPLETION_TIMEOUT, env.api.pg_pool().acquire()).await??);
+                }
+                assert_eq!(env.api.pg_pool().num_idle(), 0);
+            } else if matches!(wait, Wait::Commit) {
+                // Deferred trigger work executes in COMMIT, after all flag writes.
+                sqlx::raw_sql(
+                    "CREATE TABLE test_dpf_commit_target (id text PRIMARY KEY);
+                     CREATE FUNCTION gate_test_dpf_commit() RETURNS trigger AS $$
+                     BEGIN
+                         IF EXISTS(SELECT 1 FROM test_dpf_commit_target WHERE id = NEW.id) THEN
+                             PERFORM pg_advisory_xact_lock(8907002);
+                         END IF;
+                         RETURN NEW;
+                     END;
+                     $$ LANGUAGE plpgsql;
+                     CREATE CONSTRAINT TRIGGER gate_test_dpf_commit AFTER UPDATE ON machines
+                     DEFERRABLE INITIALLY DEFERRED FOR EACH ROW
+                     WHEN (NEW.dpf IS DISTINCT FROM OLD.dpf)
+                     EXECUTE FUNCTION gate_test_dpf_commit()",
+                )
+                .execute(&env.pool)
+                .await?;
+                sqlx::query("INSERT INTO test_dpf_commit_target (id) VALUES ($1)")
+                    .bind(host.dpus[1])
+                    .execute(&env.pool)
+                    .await?;
+                let mut txn = env.pool.begin().await?;
+                sqlx::query("SELECT pg_advisory_xact_lock(8907002)")
+                    .execute(txn.as_mut())
+                    .await?;
+                gate_pid = Some(
+                    sqlx::query_scalar("SELECT pg_backend_pid()")
+                        .fetch_one(txn.as_mut())
+                        .await?,
+                );
+                gate = Some(txn);
+            } else {
+                let mut txn = env.pool.begin().await?;
+                let id = if matches!(wait, Wait::Host) {
+                    host.host.into()
+                } else {
+                    host.dpus[1].into()
+                };
+                db::machine::lock_by_id_for_update(txn.as_mut(), &id).await?;
+                gate_pid = Some(
+                    sqlx::query_scalar("SELECT pg_backend_pid()")
+                        .fetch_one(txn.as_mut())
+                        .await?,
+                );
+                gate = Some(txn);
+            }
+            let mut request = dpf_request(host.host, false);
+            request.set_timeout(budget);
+            let started = tokio::time::Instant::now();
+            let update = env.api.modify_dpf_state(request);
+            tokio::pin!(update);
+            let mut waiter = None;
+            if let Some(pid) = gate_pid {
+                let query = match wait {
+                    Wait::Host => "SELECT id FROM machines WHERE id = $1 FOR UPDATE",
+                    Wait::Commit => "COMMIT",
+                    Wait::Retry => MACHINE_WAIT,
+                    Wait::Pool => unreachable!(),
+                };
+                waiter = Some(tokio::select! {
+                    result = &mut update => panic!("{wait:?}: request never reached its lock wait: {result:?}"),
+                    pid = wait_for_blocked_query(&control, pid, query) => pid,
+                });
+            }
+            if matches!(wait, Wait::Retry) {
+                let mut host_gate = env.pool.begin().await?;
+                sqlx::query("SELECT id FROM machines WHERE id = $1 FOR UPDATE NOWAIT")
+                    .bind(host.host)
+                    .fetch_one(host_gate.as_mut())
+                    .await?;
+                let host_pid = sqlx::query_scalar("SELECT pg_backend_pid()")
+                    .fetch_one(host_gate.as_mut())
+                    .await?;
+                tokio::time::sleep_until(started + Duration::from_secs(2)).await;
+                gate.take().unwrap().commit().await?;
+                waiter = Some(tokio::select! {
+                    result = &mut update => panic!("retry did not reach the new host wait: {result:?}"),
+                    pid = wait_for_blocked_query(&control, host_pid, "SELECT id FROM machines WHERE id = $1 FOR UPDATE") => pid,
+                });
+                gate = Some(host_gate);
+            }
+            let result = if matches!(wait, Wait::Retry) {
+                // Resetting the three-second budget on retry would expire after
+                // five seconds; the one original budget expires after three.
+                tokio::time::timeout_at(started + Duration::from_secs(4), &mut update).await?
+            } else {
+                timeout(COMPLETION_TIMEOUT, &mut update).await?
+            };
+            let error = result.expect_err("the finite caller budget expires");
+            assert_eq!(error.code(), tonic::Code::DeadlineExceeded, "{wait:?}");
+            assert_eq!(
+                error.metadata().get("nico-error-code").unwrap(),
+                "NICO-API-504"
+            );
+            if let Some(txn) = gate {
+                txn.rollback().await?;
+            }
+            drop(held);
+            if let Some(pid) = waiter {
+                wait_until_idle(&control, pid).await?;
+            }
+            if matches!(wait, Wait::Commit) {
+                sqlx::raw_sql("DROP TRIGGER gate_test_dpf_commit ON machines; DROP FUNCTION gate_test_dpf_commit(); DROP TABLE test_dpf_commit_target")
+                    .execute(&env.pool).await?;
+            }
+            let ids = [
+                MachineId::from(host.host),
+                host.dpus[0].into(),
+                host.dpus[1].into(),
+            ];
+            let flags = enabled_flags(&env.pool, &ids).await?;
+            if matches!(wait, Wait::Commit) {
+                // A commit already sent to PostgreSQL can succeed despite the
+                // deadline response. Either complete outcome is allowed.
+                assert!(flags == [true; 3] || flags == [false; 3], "{flags:?}");
+            } else {
+                assert_eq!(flags, [true; 3], "{wait:?}");
+            }
+            timeout(
+                COMPLETION_TIMEOUT,
+                env.api.modify_dpf_state(dpf_request(host.host, false)),
+            )
+            .await??;
+            assert_eq!(
+                enabled_flags(&env.pool, &ids).await?,
+                [false; 3],
+                "{wait:?}: a fresh update recovers"
+            );
+        }
+        Ok(())
+    }
+
+    // Change requests or their authorization while `Restart` waits in isolation.
+    // Comparing the selected request detects stale writes and requires replacement
+    // fields to survive its merge. The database test checks multi-row atomicity.
+    #[crate::sqlx_test]
+    async fn restart_revalidates_requests_authorization_and_attachments(
+        pool: sqlx::PgPool,
+    ) -> TestResult {
+        #[derive(Debug, Clone, Copy)]
+        enum Change {
+            Clear,
+            Expand,
+            Replace,
+            RemoveMarker,
+            Rebind,
+            RebindDuringInterfaceWait,
+        }
+        let env = create_test_env(pool).await;
+        for (seed, change, expected_code) in [
+            (50, Change::Clear, Some(tonic::Code::FailedPrecondition)),
+            (53, Change::Expand, Some(tonic::Code::FailedPrecondition)),
+            (56, Change::Replace, None),
+            (59, Change::RemoveMarker, Some(tonic::Code::InvalidArgument)),
+            (62, Change::Rebind, Some(tonic::Code::FailedPrecondition)),
+            (
+                65,
+                Change::RebindDuringInterfaceWait,
+                Some(tonic::Code::FailedPrecondition),
+            ),
+        ] {
+            let host = seed_host(&env.pool, seed).await?;
+            let mut set_request = reprovision_request(host.dpus[0].into(), Mode::Set);
+            set_request.get_mut().dpu_id = Some(host.dpus[1].into());
+            env.api.trigger_dpu_reprovisioning(set_request).await?;
+            let mut gate = env.pool.begin().await?;
+            let wait_query = if matches!(change, Change::RebindDuringInterfaceWait) {
+                sqlx::query("SELECT id FROM machine_interfaces WHERE id = $1 FOR UPDATE")
+                    .bind(host.interfaces[1])
+                    .fetch_one(gate.as_mut())
+                    .await?;
+                "SELECT id FROM machine_interfaces WHERE id = $1 FOR NO KEY UPDATE"
+            } else {
+                db::machine::lock_by_id_for_update(gate.as_mut(), &host.dpus[1].into()).await?;
+                MACHINE_WAIT
+            };
+            let pid = sqlx::query_scalar("SELECT pg_backend_pid()")
+                .fetch_one(gate.as_mut())
+                .await?;
+            // One row first proves that Restart reaches the lower native DPU
+            // before contending on the higher primary DPU below.
+            let mut first_gate = if matches!(change, Change::Clear) {
+                let mut first = env.pool.begin().await?;
+                db::machine::lock_by_id_for_update(first.as_mut(), &host.dpus[0].into()).await?;
+                Some(first)
+            } else {
+                None
+            };
+            let first_pid: Option<i32> = if let Some(first) = &mut first_gate {
+                Some(
+                    sqlx::query_scalar("SELECT pg_backend_pid()")
+                        .fetch_one(first.as_mut())
+                        .await?,
+                )
+            } else {
+                None
+            };
+            let restart = env
+                .api
+                .trigger_dpu_reprovisioning(reprovision_request(host.host.into(), Mode::Restart));
+            tokio::pin!(restart);
+            if let Some(first_pid) = first_pid {
+                tokio::select! {
+                    result = &mut restart => panic!("Restart missed the first native DPU: {result:?}"),
+                    _ = wait_for_blocked_query(&env.pool, first_pid, MACHINE_WAIT) => {}
+                }
+                first_gate.take().unwrap().commit().await?;
+            }
+            tokio::select! {
+                result = &mut restart => panic!("{change:?}: Restart passed the DPU gate: {result:?}"),
+                _ = wait_for_blocked_query(&env.pool, pid, wait_query) => {}
+            }
+            // These mutations must be possible while Restart waits in isolation.
+            sqlx::query("SELECT id FROM machines WHERE id = ANY($1) FOR UPDATE NOWAIT")
+                .bind([MachineId::from(host.host), host.dpus[0].into()].as_slice())
+                .fetch_all(gate.as_mut())
+                .await?;
+            let locked_interfaces: Vec<MachineInterfaceId> = sqlx::query_scalar(
+                "SELECT id FROM machine_interfaces WHERE machine_id = $1 FOR UPDATE NOWAIT",
+            )
+            .bind(host.host)
+            .fetch_all(gate.as_mut())
+            .await?;
+            assert_eq!(locked_interfaces.len(), host.interfaces.len(), "{change:?}");
+            match change {
+                Change::Clear => {
+                    db::machine::clear_dpu_reprovisioning_request(
+                        gate.as_mut(),
+                        &host.dpus[0],
+                        true,
+                    )
+                    .await?
+                }
+                Change::Expand => {
+                    db::machine::trigger_dpu_reprovisioning_request(
+                        &host.dpus[1],
+                        gate.as_mut(),
+                        "expanded",
+                        true,
+                    )
+                    .await?
+                }
+                Change::Replace => {
+                    db::machine::trigger_dpu_reprovisioning_request(
+                        &host.dpus[0],
+                        gate.as_mut(),
+                        "replacement",
+                        true,
+                    )
+                    .await?;
+                }
+                Change::RemoveMarker => {
+                    db::machine::remove_health_report(
+                        gate.as_mut(),
+                        &host.host.into(),
+                        health_report::HealthReportApplyMode::Merge,
+                        "host-update",
+                    )
+                    .await?
+                }
+                Change::Rebind | Change::RebindDuringInterfaceWait => {
+                    db::machine_interface::associate_interface_with_dpu_machine(
+                        &host.interfaces[1],
+                        &host.spare.into(),
+                        gate.as_mut(),
+                    )
+                    .await?;
+                }
+            }
+            let mut expected = Vec::new();
+            for id in host.dpus {
+                expected.push(
+                    db::machine::find_one(gate.as_mut(), &id, MachineSearchConfig::default())
+                        .await?
+                        .unwrap()
+                        .reprovision_requested,
+                );
+            }
+            gate.commit().await?;
+            let result = timeout(COMPLETION_TIMEOUT, restart).await?;
+            assert_eq!(
+                result.as_ref().err().map(tonic::Status::code),
+                expected_code,
+                "{change:?}"
+            );
+            if let Err(error) = &result {
+                let expected = match change {
+                    Change::Clear | Change::Expand => "request selection changed",
+                    Change::Rebind | Change::RebindDuringInterfaceWait => "attached DPUs changed",
+                    Change::RemoveMarker => "HostUpdateInProgress",
+                    Change::Replace => unreachable!(),
+                };
+                assert!(error.message().contains(expected), "{change:?}: {error}");
+            }
+            let mut check = env.pool.begin().await?;
+            let mut actual = Vec::new();
+            for id in host.dpus {
+                actual.push(
+                    db::machine::find_one(check.as_mut(), &id, MachineSearchConfig::default())
+                        .await?
+                        .unwrap()
+                        .reprovision_requested,
+                );
+            }
+            check.rollback().await?;
+            if expected_code.is_none() {
+                let replacement = expected[0].as_mut().unwrap();
+                assert_eq!(replacement.initiator, "replacement");
+                replacement.update_firmware = false;
+                replacement.restart_reprovision_requested_at =
+                    actual[0].as_ref().unwrap().restart_reprovision_requested_at;
+            }
+            assert_eq!(
+                actual, expected,
+                "{change:?}: preserve exact concurrent requests except the accepted Restart merge"
+            );
+        }
+        Ok(())
+    }
+
+    // Fail the final DPU write after the host and first DPU update. A later
+    // accepted enable must preserve every ingestion marker as well.
+    #[crate::sqlx_test]
+    async fn dpf_flag_updates_are_atomic_and_preserve_ingestion(pool: sqlx::PgPool) -> TestResult {
+        let env = create_test_env(pool).await;
+        let host = seed_host(&env.pool, 80).await?;
+        let ids = [
+            MachineId::from(host.host),
+            host.dpus[0].into(),
+            host.dpus[1].into(),
+        ];
+        let before: Vec<serde_json::Value> = sqlx::query_scalar(
+            r#"SELECT dpf FROM machines WHERE id = ANY($1)
+               ORDER BY id COLLATE "C""#,
+        )
+        .bind(ids.as_slice())
+        .fetch_all(&env.pool)
+        .await?;
+        sqlx::raw_sql(
+            "CREATE TABLE test_dpf_failure_target (id text PRIMARY KEY, fail boolean NOT NULL);
+             CREATE FUNCTION reject_test_dpf_write() RETURNS trigger AS $$
+             BEGIN
+                 IF EXISTS(SELECT 1 FROM test_dpf_failure_target WHERE id = NEW.id AND fail) THEN
+                     IF EXISTS(SELECT 1 FROM machines m
+                               JOIN test_dpf_failure_target target ON target.id = m.id
+                               WHERE NOT target.fail AND m.dpf->>'enabled' <> 'false') THEN
+                         RAISE EXCEPTION 'test fault did not follow earlier flag writes';
+                     END IF;
+                     RAISE EXCEPTION 'test final DPU flag failure' USING ERRCODE = '23514';
+                 END IF;
+                 RETURN NEW;
+             END;
+             $$ LANGUAGE plpgsql;
+             CREATE TRIGGER reject_test_dpf_write BEFORE UPDATE OF dpf ON machines
+             FOR EACH ROW WHEN (NEW.dpf->>'enabled' = 'false')
+             EXECUTE FUNCTION reject_test_dpf_write()",
+        )
+        .execute(&env.pool)
+        .await?;
+        sqlx::query("INSERT INTO test_dpf_failure_target (id, fail) VALUES ($1, true), ($2, false), ($3, false)")
+            .bind(host.dpus[1])
+            .bind(host.host)
+            .bind(host.dpus[0])
+            .execute(&env.pool)
+            .await?;
+        let error = timeout(
+            COMPLETION_TIMEOUT,
+            env.api.modify_dpf_state(dpf_request(host.host, false)),
+        )
+        .await?
+        .expect_err("the final DPU write must fail");
+        assert_eq!(
+            sqlx_error_from_status(&error)
+                .and_then(sqlx::Error::as_database_error)
+                .and_then(sqlx::error::DatabaseError::code)
+                .as_deref(),
+            Some("23514"),
+            "{error:?}"
+        );
+        let after: Vec<serde_json::Value> = sqlx::query_scalar(
+            r#"SELECT dpf FROM machines WHERE id = ANY($1)
+               ORDER BY id COLLATE "C""#,
+        )
+        .bind(ids.as_slice())
+        .fetch_all(&env.pool)
+        .await?;
+        assert_eq!(
+            after, before,
+            "a later DPU failure must roll back every flag write"
+        );
+        sqlx::raw_sql("DROP TRIGGER reject_test_dpf_write ON machines; DROP FUNCTION reject_test_dpf_write(); DROP TABLE test_dpf_failure_target")
+            .execute(&env.pool).await?;
+        timeout(
+            COMPLETION_TIMEOUT,
+            env.api.modify_dpf_state(dpf_request(host.host, false)),
+        )
+        .await??;
+        assert_eq!(enabled_flags(&env.pool, &ids).await?, [false; 3]);
+        let mut marker = env.pool.begin().await?;
+        for id in [host.host.into(), host.dpus[1].into()] {
+            db::machine::mark_machine_ingestion_done_with_dpf(marker.as_mut(), &id).await?;
+        }
+        marker.commit().await?;
+        let before: Vec<serde_json::Value> = sqlx::query_scalar(
+            r#"SELECT dpf FROM machines WHERE id = ANY($1)
+               ORDER BY id COLLATE "C""#,
+        )
+        .bind(ids.as_slice())
+        .fetch_all(&env.pool)
+        .await?;
+        timeout(
+            COMPLETION_TIMEOUT,
+            env.api.modify_dpf_state(dpf_request(host.host, true)),
+        )
+        .await??;
+        let after: Vec<serde_json::Value> = sqlx::query_scalar(
+            r#"SELECT dpf FROM machines WHERE id = ANY($1)
+               ORDER BY id COLLATE "C""#,
+        )
+        .bind(ids.as_slice())
+        .fetch_all(&env.pool)
+        .await?;
+        let expected: Vec<_> = before
+            .into_iter()
+            .map(|mut settings| {
+                settings["enabled"] = serde_json::Value::Bool(true);
+                settings
+            })
+            .collect();
+        assert_eq!(
+            after, expected,
+            "enable changes every flag from false to true and preserves other settings"
+        );
+        Ok(())
+    }
+
+    // Approval retains primary-first snapshot order. Host Clear must wait for
+    // that primary without holding the lower secondary against approval.
+    #[crate::sqlx_test]
+    async fn host_clear_preserves_approval_lock_order(pool: sqlx::PgPool) -> TestResult {
+        let env = create_test_env(pool).await;
+        let host = seed_host(&env.pool, 90).await?;
+        env.api
+            .trigger_dpu_reprovisioning(reprovision_request(host.host.into(), Mode::Set))
+            .await?;
+        let mut approval = env.pool.begin().await?;
+        db::machine::approve_dpu_reprovision_request(&host.dpus[1], approval.as_mut()).await?;
+        let pid = sqlx::query_scalar("SELECT pg_backend_pid()")
+            .fetch_one(approval.as_mut())
+            .await?;
+        let clear = env
+            .api
+            .trigger_dpu_reprovisioning(reprovision_request(host.host.into(), Mode::Clear));
+        tokio::pin!(clear);
+        tokio::select! {
+            result = &mut clear => panic!("Clear passed the primary approval gate: {result:?}"),
+            _ = wait_for_blocked_query(&env.pool, pid, "UPDATE machines SET reprovisioning_requested=NULL") => {}
+        }
+        sqlx::query("SELECT id FROM machines WHERE id = $1 FOR UPDATE NOWAIT")
+            .bind(host.dpus[0])
+            .fetch_one(approval.as_mut())
+            .await?;
+        db::machine::approve_dpu_reprovision_request(&host.dpus[0], approval.as_mut()).await?;
+        approval.commit().await?;
+        timeout(COMPLETION_TIMEOUT, clear).await??;
+        let pending: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM machines WHERE id = ANY($1)
+             AND reprovisioning_requested IS NOT NULL",
+        )
+        .bind(host.dpus.as_slice())
+        .fetch_one(&env.pool)
+        .await?;
+        assert_eq!(pending, 0);
+        Ok(())
+    }
+}

@@ -1,9 +1,9 @@
-# Machine Network Write Locks
+# Machine Write Locks
 
-This reference describes network configuration persistence, Discovery, and IPv6
-loopback backfill. Each caller retains its locks until its transaction commits
-or rolls back. These protocols do not establish a global order for all Machine
-lifecycle operations.
+This reference describes network configuration persistence, Discovery, IPv6
+loopback backfill, DPF flags, and DPU reprovisioning requests. Each caller retains
+its locks until its transaction commits or rolls back. These protocols do not
+establish a global order for all Machine lifecycle operations.
 
 ## Network Configuration Persistence
 
@@ -124,3 +124,70 @@ without scheduling a later pass. A busy DPU can therefore remain without an
 IPv6 loopback until another startup, pool-growth request, or DPU rediscovery.
 This is bounded best-effort reconciliation, without eventual-completion or
 fairness guarantees.
+
+## DPF Flags and DPU Reprovisioning Requests
+
+`handlers::dpf::modify_dpf_state` takes a strong host `FOR UPDATE` lock before
+reading eligibility. New interface owner references require a conflicting
+foreign-key lock. Existing interfaces can change attachment or classification
+without updating the host, so `try_lock_host_interfaces` tries every existing
+host interface, including `Bmc`, in interface ID order with `FOR NO KEY UPDATE`.
+This permits foreign-key readers inserting DHCP/address records while excluding
+changes to the selected interfaces. A moved or removed selection restarts
+admission. DPF then reloads attached DPUs, deduplicates them, and tries their
+rows with `FOR NO KEY UPDATE` in native Machine ID order. Host and DPU enabled
+flags commit together; `used_for_ingestion` is preserved, and a committed host
+ingestion marker prevents disabling DPF.
+
+A rejected dependency releases the entire outer transaction, including every
+acquired host, interface, and DPU lock. `wait_for_host_interface` or
+`wait_for_machine_no_key_update` waits for that one dependency in an isolated
+transaction and rolls it back before returning. A missing dependency returns
+promptly. The handler starts a fresh transaction and reloads its complete
+selection and authorization. Retaining earlier locks while waiting can cycle
+with `handlers::dpu::record_dpu_network_status`, queued controller machine
+writes, or interface updates in Discovery.
+
+DPF database preparation has a 300-second cap from the listener's receipt
+stamp, including time in earlier authorization/admission layers. Direct handler
+calls fall back to handler entry. Valid shorter `grpc-timeout` metadata reduces
+the cap. Pool acquisition, all retries and waits, and commit use this one
+deadline. Expiry returns `DeadlineExceeded` with `NICO-API-504`, drops work, and
+queues SQLx rollback for an open transaction. PostgreSQL can finish that cleanup
+later, and a commit already in flight may have succeeded. Inspect current host
+and attached-DPU flags before retrying an ambiguous result. The deadline does
+not extend to other DPF endpoints or public reprovisioning requests.
+
+Public Set retains its `machine::find(for_update)` admission in C collation
+order and its migration validation. Host Clear and controller writes retain their
+primary-first snapshot order, including approval and queued request starts.
+DPF and Restart release their complete transaction before waiting for a DPU, so
+these writers cannot block behind an earlier DPU held by either admission loop.
+Full Set/Clear admission and repeated-interface semantics remain assigned to [the lifecycle follow-up](https://github.com/dsx-ai-factory/infra-controller/issues/8788).
+
+Restart captures the initial distinct attached-DPU and pending-ID sets, then
+admits the host, every host interface, and all current DPUs with the same
+reject, release, wait, and reload protocol as DPF. Its input transaction must
+contain only reads because a retry rolls it back and replaces it. Before
+persistence, it reloads aggregate host health and current requests. Changed
+attachments or pending membership return `FailedPrecondition`; missing
+host-update authorization returns `InvalidArgument`. A selected request replaced
+with another pending request remains selected; Restart merges fields into that
+current request. Machine/interface locks preserve host-owned dependencies;
+rack health reports included in aggregate health retain their existing
+point-in-time read semantics. These locks do not serialize rack-report updates.
+
+`machine::restart_dpu_reprovisioning` independently locks pending rows in C
+order with `FOR NO KEY UPDATE`, deduplicates input, and rejects empty, missing,
+or cleared selection before changing any survivor. It checks complete update
+cardinality, and the caller retains the transaction through commit. Set uses
+its separate ordered admission; the two persistence paths acquire DPU rows in
+the same order. These operations acquire no history locks.
+
+Set/Clear retain their existing open transaction and admin-segment coordination
+locks across the bounded Kubernetes migration check and request writes.
+Releasing those locks during that read would change migration coordination.
+DPF and Restart admission can cause Discovery to return its existing transient
+`Unavailable` response. Restart does not enforce a total deadline across
+admission waits and retries. Full Set/Clear interface admission and remaining endpoint deadlines
+belong to [the lifecycle follow-up](https://github.com/dsx-ai-factory/infra-controller/issues/8788).
