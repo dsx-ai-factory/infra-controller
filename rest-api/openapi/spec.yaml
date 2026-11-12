@@ -14626,7 +14626,7 @@ paths:
                 nvswitch:
                   summary: NVSwitch tray
                   value:
-                    - id: c52f20b1-384d-4b1d-9e2e-42af3eb3e77a
+                    - id: sw100nt038bg3qsho433vkg684heguv282qaggmrsh2ugn1qk096n2c6hcg
                       type: NVSwitch
                       name: rack-01-nvswitch-01
                       manufacturer: NVIDIA
@@ -16276,7 +16276,7 @@ paths:
                   summary: NVSwitch tray
                   description: Illustrative NVSwitch inventory with separate BMC and NVOS addresses; the primary NVOS port has both IPv4 and IPv6 addresses.
                   value:
-                    id: c52f20b1-384d-4b1d-9e2e-42af3eb3e77a
+                    id: sw100nt038bg3qsho433vkg684heguv282qaggmrsh2ugn1qk096n2c6hcg
                     type: NVSwitch
                     name: rack-01-nvswitch-01
                     manufacturer: NVIDIA
@@ -27676,7 +27676,7 @@ components:
             observedAt: '2026-09-28T12:00:00Z'
             successes: []
             alerts: []
-        - id: c52f20b1-384d-4b1d-9e2e-42af3eb3e77a
+        - id: sw100nt038bg3qsho433vkg684heguv282qaggmrsh2ugn1qk096n2c6hcg
           type: NVSwitch
           name: rack-01-nvswitch-01
           manufacturer: NVIDIA
