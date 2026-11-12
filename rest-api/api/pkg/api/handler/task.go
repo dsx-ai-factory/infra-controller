@@ -153,6 +153,9 @@ func (gth GetTaskHandler) Handle(c echo.Context) error {
 		fmt.Sprintf("task-get-%s", taskID), temporalEnums.WORKFLOW_ID_CONFLICT_POLICY_USE_EXISTING,
 	)
 	if proxyErr != nil {
+		if proxyErr.Code == http.StatusNotFound {
+			return cutil.NewAPIErrorResponse(c, http.StatusNotFound, "Task not found", nil)
+		}
 		return cutil.NewAPIErrorResponse(c, proxyErr.Code, proxyErr.Message, nil)
 	}
 
@@ -309,6 +312,9 @@ func (cth CancelTaskHandler) Handle(c echo.Context) error {
 		workflowID, temporalEnums.WORKFLOW_ID_CONFLICT_POLICY_USE_EXISTING,
 	)
 	if proxyErr != nil {
+		if proxyErr.Code == http.StatusNotFound {
+			return cutil.NewAPIErrorResponse(c, http.StatusNotFound, "Task not found", nil)
+		}
 		return cutil.NewAPIErrorResponse(c, proxyErr.Code, proxyErr.Message, nil)
 	}
 

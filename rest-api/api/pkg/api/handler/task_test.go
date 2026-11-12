@@ -80,6 +80,11 @@ func TestGetTaskHandler_Handle(t *testing.T) {
 	failedTask := proto.Clone(mockTask).(*flowv1.Task)
 	failedTask.Status = flowv1.TaskStatus_TASK_STATUS_FAILED
 
+	failureConverter := tp.GetDefaultFailureConverter()
+	missingTaskError := failureConverter.FailureToError(failureConverter.ErrorToFailure(
+		swe.WrapErr(status.Error(codes.NotFound, "task not found")),
+	))
+
 	ctx := context.Background()
 
 	tests := []struct {
@@ -132,7 +137,7 @@ func TestGetTaskHandler_Handle(t *testing.T) {
 			user:           providerUser,
 			taskUUID:       taskUUID,
 			queryParams:    map[string]string{"siteId": site.ID.String()},
-			mockResultErr:  swe.WrapErr(status.Error(codes.NotFound, "task not found")),
+			mockResultErr:  missingTaskError,
 			expectedStatus: http.StatusNotFound,
 		},
 		{
@@ -226,11 +231,11 @@ func TestGetTaskHandler_Handle(t *testing.T) {
 			if tt.mockResultErr != nil {
 				expectedError := tt.mockResultErr
 				if tt.expectedStatus == http.StatusNotFound {
-					expectedError = status.Error(codes.NotFound, "task not found")
+					expectedError = errors.New("Task not found")
 					var appErr *tp.ApplicationError
 					require.ErrorAs(t, tt.mockResultErr, &appErr)
 					require.True(t, appErr.NonRetryable())
-					require.Contains(t, rec.Body.String(), "task not found")
+					require.Contains(t, rec.Body.String(), "Task not found")
 					require.NotContains(t, rec.Body.String(), "sql:")
 					require.NotContains(t, rec.Body.String(), "retryable: true")
 				}
@@ -689,6 +694,11 @@ func TestCancelTaskHandler_Handle(t *testing.T) {
 		Message:     "Cancelled by user",
 	}
 
+	failureConverter := tp.GetDefaultFailureConverter()
+	missingTaskError := failureConverter.FailureToError(failureConverter.ErrorToFailure(
+		swe.WrapErr(status.Error(codes.NotFound, "task not found")),
+	))
+
 	ctx := context.Background()
 
 	tests := []struct {
@@ -781,7 +791,7 @@ func TestCancelTaskHandler_Handle(t *testing.T) {
 			user:           providerUser,
 			taskUUID:       taskUUID,
 			body:           model.APICancelTaskRequest{SiteID: site.ID.String()},
-			mockResultErr:  swe.WrapErr(status.Error(codes.NotFound, "task not found")),
+			mockResultErr:  missingTaskError,
 			expectedStatus: http.StatusNotFound,
 			expectNullData: true,
 		},
@@ -842,6 +852,13 @@ func TestCancelTaskHandler_Handle(t *testing.T) {
 				var apiErr map[string]any
 				require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &apiErr))
 				require.NotEmpty(t, apiErr["message"])
+				if tt.expectedStatus == http.StatusNotFound {
+					var appErr *tp.ApplicationError
+					require.ErrorAs(t, tt.mockResultErr, &appErr)
+					require.True(t, appErr.NonRetryable())
+					require.Equal(t, "Task not found", apiErr["message"])
+					require.NotContains(t, rec.Body.String(), "retryable: true")
+				}
 				if tt.expectNullData {
 					require.Contains(t, apiErr, "data")
 					assert.Nil(t, apiErr["data"])
