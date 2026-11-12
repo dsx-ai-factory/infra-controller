@@ -131,6 +131,8 @@ pub async fn run(
     };
     carbide_api_core::validate_resource_pool_config(&carbide_config, initial_objects.as_ref())?;
 
+    let instrumentation =
+        carbide_instrument::Instrumentation::from_meter_provider(&metrics.meter_provider);
     let MetricsSetup {
         registry,
         meter,
@@ -183,6 +185,7 @@ pub async fn run(
     let listen_address = await_api_runtime_and_database_before_marking_ready(
         &health_controller,
         start_runtime(RuntimeInputs {
+            instrumentation,
             carbide_config,
             initial_objects,
             meter: meter.clone(),

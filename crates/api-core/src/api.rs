@@ -94,6 +94,8 @@ pub(crate) fn grpc_receipt_layer<B>() -> tower::util::MapRequestLayer<
 }
 
 pub struct Api {
+    /// Event destination for migrated handlers; other paths retain global recording.
+    pub(crate) instrumentation: carbide_instrument::Instrumentation,
     // `pub` (not `pub(crate)`): read by the `carbide-api-web` admin UI (e.g. IPAM/DNS pages).
     pub database_connection: sqlx::PgPool,
     pub(crate) credential_manager: Arc<dyn CredentialManager>,

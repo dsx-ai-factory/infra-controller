@@ -18,10 +18,12 @@
 use std::sync::{Arc, OnceLock};
 
 use dashmap::DashMap;
-use opentelemetry::metrics::{Counter, Gauge, Histogram, Meter};
+use opentelemetry::metrics::{Counter, Gauge, Histogram, Meter, MeterProvider};
 
 use crate::__private::MetricKey;
 use crate::{Event, LogAt, MetricKind};
+
+const METER_NAME: &str = "carbide-instrument";
 
 /// A metric destination and its cache of declared Event instruments.
 ///
@@ -51,6 +53,14 @@ struct Instruments {
 }
 
 impl Instrumentation {
+    /// Creates a cache using the compatibility destination's meter scope on
+    /// this provider, without changing the global provider. This keeps migrated
+    /// and compatibility callers on the same instruments when sharing a provider.
+    /// The caller must retain the provider for all recording tasks and scrapes.
+    pub fn from_meter_provider(provider: &impl MeterProvider) -> Self {
+        Self::new(provider.meter(METER_NAME))
+    }
+
     /// Creates an instrument cache using the supplied meter, including its
     /// provider's existing exporters, resource attributes, and aggregations.
     /// This does not install or change the global OpenTelemetry provider.
@@ -135,7 +145,7 @@ impl Instrumentation {
             Source::Global => {
                 static GLOBAL: OnceLock<Instruments> = OnceLock::new();
                 GLOBAL.get_or_init(|| Instruments {
-                    meter: opentelemetry::global::meter("carbide-instrument"),
+                    meter: opentelemetry::global::meter(METER_NAME),
                     cache: DashMap::new(),
                 })
             }

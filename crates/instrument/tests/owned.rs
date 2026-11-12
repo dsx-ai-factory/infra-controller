@@ -18,7 +18,7 @@
 use std::sync::Barrier;
 use std::time::Duration;
 
-use carbide_instrument::testing::capture_logs;
+use carbide_instrument::testing::{MetricsCapture, capture_logs};
 use carbide_instrument::{DynamicLog, Event, Instrumentation, LogAt, MetricFamily, Outcome};
 use opentelemetry::metrics::MeterProvider;
 use opentelemetry_sdk::metrics::SdkMeterProvider;
@@ -192,6 +192,8 @@ fn inline_and_family_declarations_on_one_type_keep_their_own_identity() {
 fn independent_providers_record_the_same_declarations_concurrently() {
     let first = Metrics::new();
     let second = Metrics::new();
+    let first_capture = MetricsCapture::for_registry(&first.registry);
+    let second_capture = MetricsCapture::for_registry(&second.registry);
     // Initialize the counter in the first provider and the observation
     // instruments in the second: neither initialization order may bind the
     // other owner to its destination.
@@ -229,31 +231,27 @@ fn independent_providers_record_the_same_declarations_concurrently() {
         }
     });
 
-    for (metrics, counter, observations, level) in
-        [(&first, 8.0, 7, 7.0), (&second, 11.0, 12, 11.0)]
-    {
+    for (capture, counter, observations, level) in [
+        (&first_capture, 8.0, 7, 7.0),
+        (&second_capture, 11.0, 12, 11.0),
+    ] {
+        let labels = &[("outcome", "ok")];
         assert_eq!(
-            metrics
-                .metric("carbide_test_owned_total", Outcome::Ok)
-                .unwrap()
-                .get_counter()
-                .value(),
+            capture.counter_delta("carbide_test_owned_total", labels),
             counter
         );
-        let histogram = metrics
-            .metric("carbide_test_owned_milliseconds", Outcome::Ok)
-            .unwrap();
-        assert_eq!(histogram.get_histogram().get_sample_count(), observations);
         assert_eq!(
-            histogram.get_histogram().get_sample_sum(),
+            capture.histogram_count_delta("carbide_test_owned_milliseconds", labels),
+            observations
+        );
+        assert_eq!(
+            capture
+                .histogram_sum_delta("carbide_test_owned_milliseconds", labels)
+                .0,
             observations as f64 * 2.0
         );
         assert_eq!(
-            metrics
-                .metric("carbide_test_owned_bytes", Outcome::Ok)
-                .unwrap()
-                .get_gauge()
-                .value(),
+            capture.gauge_value("carbide_test_owned_bytes", labels),
             level
         );
     }

@@ -139,6 +139,7 @@ impl<'a> PreparedDpuLoopback<'a> {
                                             ResourcePoolError::Empty,
                                         );
                                     db::resource_pool::emit_allocation_failure(
+                                        &carbide_instrument::Instrumentation::global(),
                                         pool.value_type,
                                         &owner_id,
                                         false,
@@ -292,6 +293,7 @@ impl<'a> PreparedDpuLoopback<'a> {
                         Ok(value) => value,
                         Err(ResourcePoolBackendError::Integrated(error)) => {
                             db::resource_pool::emit_allocation_failure(
+                                &carbide_instrument::Instrumentation::global(),
                                 self.pools.ethernet.pool_loopback_ip.value_type,
                                 &owner_id,
                                 false,

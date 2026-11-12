@@ -310,6 +310,7 @@ pub async fn start_runtime(runtime_inputs: RuntimeInputs<'_>) -> eyre::Result<So
         carbide_config,
         initial_objects,
         meter,
+        instrumentation,
         per_object_metrics,
         join_set,
         runtime_prelude: RuntimePrelude { dynamic_settings },
@@ -828,6 +829,7 @@ pub async fn start_runtime(runtime_inputs: RuntimeInputs<'_>) -> eyre::Result<So
     );
 
     let api_service = Arc::new(Api {
+        instrumentation,
         certificate_provider,
         common_pools,
         resource_pool_registry: registry,

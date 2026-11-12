@@ -44,6 +44,7 @@ fn emit_and_map_dpa_vni_allocation_failure(
             requested_vni,
         ) => {
             db::resource_pool::emit_allocation_failure(
+                &carbide_instrument::Instrumentation::global(),
                 source_pool.value_type,
                 owner_id,
                 requested_vni.is_some(),
@@ -56,6 +57,7 @@ fn emit_and_map_dpa_vni_allocation_failure(
             if db::resource_pool::is_requested_value_unavailable(&error) =>
         {
             db::resource_pool::emit_requested_vni_unavailable(
+                &carbide_instrument::Instrumentation::global(),
                 source_pool.value_type,
                 owner_id,
                 requested_vni,
@@ -67,6 +69,7 @@ fn emit_and_map_dpa_vni_allocation_failure(
         }
         (ResourcePoolDatabaseError::Database(error), Some(_)) => {
             db::resource_pool::emit_database_allocation_failure(
+                &carbide_instrument::Instrumentation::global(),
                 source_pool.value_type,
                 owner_id,
                 true,
@@ -77,6 +80,7 @@ fn emit_and_map_dpa_vni_allocation_failure(
         }
         (error, requested_vni) => {
             db::resource_pool::emit_allocation_failure(
+                &carbide_instrument::Instrumentation::global(),
                 source_pool.value_type,
                 owner_id,
                 requested_vni.is_some(),

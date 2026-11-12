@@ -289,6 +289,7 @@ async fn api_with_incompatible_internal_route_target(env: &TestEnv) -> Result<Ap
         env.common_pools.clone(),
         env.api.work_lock_manager_handle.clone(),
     )
+    .with_instrumentation(env.api.instrumentation.clone())
     .with_resource_pool_registry(resource_pool_registry)
     .with_runtime_config(Arc::new(config))
     .build())
@@ -898,6 +899,7 @@ async fn vpc_consumers_observe_external_pool_growth_after_a_miss(
                 env.common_pools.clone(),
                 env.api.work_lock_manager_handle.clone(),
             )
+            .with_instrumentation(env.api.instrumentation.clone())
             .with_resource_pool_registry(registry)
             .with_runtime_config(env.config.clone())
             .build();
@@ -911,9 +913,7 @@ async fn vpc_consumers_observe_external_pool_growth_after_a_miss(
                 .routing_profile_type("EXTERNAL".to_string())
                 .tonic_request()
                 .into_inner();
-            // Every intentional miss increments the global counter, including
-            // the cases that do not assert its value below.
-            let metrics = MetricsCapture::start();
+            let metrics = MetricsCapture::for_registry(env.test_meter.registry());
             let create = api.create_vpc(tonic::Request::new(request.clone()));
             let result = if name == "local" && matches!(growth, Growth::PublicApi) {
                 let metric_name = "carbide_resource_pool_lifecycle_failures_total";
@@ -939,13 +939,7 @@ async fn vpc_consumers_observe_external_pool_growth_after_a_miss(
                 for (key, value) in labels {
                     assert_eq!(event.field(key), Some(value), "{key}");
                 }
-                // Tests without a `MetricsCapture` can increment this shared
-                // counter. The log capture above checks this request's event.
-                let observed = metrics.counter_delta(metric_name, &labels);
-                assert!(
-                    observed >= 1.0,
-                    "expected at least one external pool allocation failure, observed {observed}"
-                );
+                assert_eq!(metrics.counter_delta(metric_name, &labels), 1.0);
                 result
             } else {
                 create.await
@@ -1165,6 +1159,7 @@ async fn vpc_binding_read_failures_preserve_allocations_and_report_errors(
         env.common_pools.clone(),
         env.api.work_lock_manager_handle.clone(),
     )
+    .with_instrumentation(env.api.instrumentation.clone())
     .with_resource_pool_registry(registry)
     .with_runtime_config(env.config.clone())
     .build();
@@ -1188,6 +1183,7 @@ async fn vpc_binding_read_failures_preserve_allocations_and_report_errors(
         env.common_pools.clone(),
         env.api.work_lock_manager_handle.clone(),
     )
+    .with_instrumentation(env.api.instrumentation.clone())
     .build();
     // Keep inventory readable so routing gets as far as loading the binding.
     sqlx::query("ALTER TABLE resource_pool_binding RENAME TO unavailable_resource_pool_binding")
@@ -1208,7 +1204,7 @@ async fn vpc_binding_read_failures_preserve_allocations_and_report_errors(
         ),
         (Allocation::ConfiguredCreation, "automatic", VPC_VNI, None),
     ] {
-        let metrics = MetricsCapture::start();
+        let metrics = MetricsCapture::for_registry(env.test_meter.registry());
         let (result, logs) = capture_logs_async(async {
             match allocation {
                 Allocation::AutomaticCreation => api
@@ -1961,8 +1957,7 @@ async fn change_vpc_routing_profile_rejects_unavailable_exact_vni_without_change
         },
     ] {
         let scenario = case.scenario;
-        // Serialize this emission with other metric-asserting tests.
-        let metrics = MetricsCapture::start();
+        let metrics = MetricsCapture::for_registry(env.test_meter.registry());
         let (result, logs) = capture_logs_async(env.api.change_vpc_routing_profile(
             tonic::Request::new(rpc::forge::VpcChangeRoutingProfileRequest {
                 id: Some(vpc_id),
@@ -1984,8 +1979,6 @@ async fn change_vpc_routing_profile_rejects_unavailable_exact_vni_without_change
                 events[0].field("event_name"),
                 Some("resource_pool_requested_vni_unavailable")
             );
-            // Non-capturing tests can increment the shared counter. Check this
-            // request's event and labels instead of the process-wide delta.
             for (key, value) in [
                 ("operation", "allocate"),
                 ("failure", "requested_value_unavailable"),
@@ -1995,6 +1988,20 @@ async fn change_vpc_routing_profile_rejects_unavailable_exact_vni_without_change
             ] {
                 assert_eq!(events[0].field(key), Some(value), "{scenario}: {key}");
             }
+            assert_eq!(
+                metrics.counter_delta(
+                    metric,
+                    &[
+                        ("operation", "allocate"),
+                        ("failure", "requested_value_unavailable"),
+                        ("failure_policy", "required"),
+                        ("allocation_mode", "requested"),
+                        ("value_type", "integer"),
+                    ]
+                ),
+                1.0,
+                "{scenario}",
+            );
         }
         drop(metrics);
         assert_eq!(
@@ -2017,6 +2024,91 @@ async fn change_vpc_routing_profile_rejects_unavailable_exact_vni_without_change
             "{scenario}"
         );
     }
+    Ok(())
+}
+
+#[crate::sqlx_test]
+async fn change_vpc_routing_profile_failure_metrics_are_isolated_between_services(
+    pool: sqlx::PgPool,
+) -> Result<(), eyre::Report> {
+    const METRIC: &str = "carbide_resource_pool_lifecycle_failures_total";
+    let env =
+        create_test_env_with_overrides(pool, TestEnvOverrides::default().with_fnn_config(None))
+            .await;
+    let first_vpc = create_routing_profile_vpc(&env, "first-metric-owner", None).await?;
+    let second_vpc = create_routing_profile_vpc(&env, "second-metric-owner", None).await?;
+    let second_meter = carbide_utils::test_support::test_meter::TestMeter::default();
+    // Share database state deliberately: only the recording owners differ.
+    let second_api = Arc::new(
+        TestApiBuilder::new(
+            env.pool.clone(),
+            env.common_pools.clone(),
+            env.api.work_lock_manager_handle.clone(),
+        )
+        .with_runtime_config(env.config.clone())
+        .with_resource_pool_registry(env.api.resource_pool_registry.clone())
+        .with_metric_emitter(crate::test_support::ApiMetricsEmitter::new(
+            &second_meter.meter(),
+        ))
+        .with_instrumentation(carbide_instrument::Instrumentation::new(
+            second_meter.meter(),
+        ))
+        .build(),
+    );
+    let allocations_before = vpc_vni_pool_state(&env).await?;
+    let start = Arc::new(tokio::sync::Barrier::new(2));
+    let mut tasks = tokio::task::JoinSet::new();
+    for (api, vpc, count, capture) in [
+        (
+            env.api.clone(),
+            first_vpc.clone(),
+            1,
+            MetricsCapture::for_registry(env.test_meter.registry()),
+        ),
+        (
+            second_api,
+            second_vpc.clone(),
+            3,
+            MetricsCapture::for_registry(second_meter.registry()),
+        ),
+    ] {
+        let start = start.clone();
+        tasks.spawn(async move {
+            start.wait().await;
+            for _ in 0..count {
+                let error = api
+                    .change_vpc_routing_profile(tonic::Request::new(
+                        rpc::forge::VpcChangeRoutingProfileRequest {
+                            id: vpc.id,
+                            if_version_match: Some(vpc.version.clone()),
+                            routing_profile_type: "EXTERNAL".to_string(),
+                            vni: Some(50000),
+                        },
+                    ))
+                    .await
+                    .expect_err("the requested VNI does not exist in the destination pool");
+                assert_eq!(error.code(), tonic::Code::FailedPrecondition);
+            }
+            assert_eq!(
+                capture.counter_delta(
+                    METRIC,
+                    &[
+                        ("operation", "allocate"),
+                        ("failure", "requested_value_unavailable"),
+                        ("failure_policy", "required"),
+                        ("allocation_mode", "requested"),
+                        ("value_type", "integer"),
+                    ]
+                ),
+                f64::from(count),
+            );
+        });
+    }
+    tasks.join_all().await;
+    for before in [first_vpc, second_vpc] {
+        assert_eq!(find_test_vpc(&env, before.id.unwrap()).await?, before);
+    }
+    assert_eq!(vpc_vni_pool_state(&env).await?, allocations_before);
     Ok(())
 }
 
@@ -2216,8 +2308,6 @@ async fn change_vpc_routing_profile_rejects_unsupported_state_without_changes(
         };
         let before = find_test_vpc(&env, vpc_id).await?;
         let allocations_before = vpc_vni_pool_state(&env).await?;
-        // Allocation failures share the global counter measured by other tests.
-        let metrics = MetricsCapture::start();
         let error = env
             .api
             .change_vpc_routing_profile(tonic::Request::new(
@@ -2230,7 +2320,6 @@ async fn change_vpc_routing_profile_rejects_unsupported_state_without_changes(
             ))
             .await
             .expect_err(expected.message);
-        drop(metrics);
         assert_eq!(error.code(), expected.code, "{failure:?}: {error}");
         assert!(
             error.message().contains(expected.message),
@@ -2733,6 +2822,7 @@ async fn create_vpc_rejects_allocations_without_external_pool(
         env.common_pools.clone(),
         env.api.work_lock_manager_handle.clone(),
     )
+    .with_instrumentation(env.api.instrumentation.clone())
     .with_resource_pool_registry(registry)
     .with_runtime_config(env.config.clone())
     .build();
@@ -2749,13 +2839,10 @@ async fn create_vpc_rejects_allocations_without_external_pool(
             .tonic_request()
             .into_inner();
         request.vni = requested_vni;
-        // These failures emit the global counter even without asserting it here.
-        let metrics = MetricsCapture::start();
         let error = api
             .create_vpc(tonic::Request::new(request))
             .await
             .expect_err("a missing pool must reject both allocation modes");
-        drop(metrics);
         assert_eq!(error.code(), tonic::Code::FailedPrecondition);
         assert_eq!(
             error.message(),
@@ -2801,14 +2888,11 @@ async fn create_vpc_rejects_unconfigured_assignment_mode(
             .tonic_request()
             .into_inner();
         request.vni = requested_vni;
-        // These failures emit the global counter even without asserting it here.
-        let metrics = MetricsCapture::start();
         let error = env
             .api
             .create_vpc(tonic::Request::new(request))
             .await
             .expect_err("the pool must reject an unconfigured assignment mode");
-        drop(metrics);
         assert_eq!(error.code(), tonic::Code::FailedPrecondition, "{scenario}");
         let assignment_mode = if requested_vni.is_some() {
             "explicit"
@@ -5714,6 +5798,7 @@ async fn admin_vpc_rejects_unencodable_startup_profile_without_changes(pool: sql
         env.common_pools.clone(),
         env.api.work_lock_manager_handle.clone(),
     )
+    .with_instrumentation(env.api.instrumentation.clone())
     .with_runtime_config(Arc::new(config))
     .build();
 

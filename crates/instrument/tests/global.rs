@@ -20,7 +20,6 @@
 
 use carbide_instrument::testing::capture_logs;
 use carbide_instrument::{Event, Instrumentation, emit, emit_count, initialize_counter_series};
-use opentelemetry::metrics::MeterProvider;
 use opentelemetry_sdk::metrics::SdkMeterProvider;
 
 #[derive(Event)]
@@ -60,7 +59,7 @@ fn global_alias_resolves_lazily_and_shares_all_free_function_instruments() {
         .build()
         .unwrap();
     let provider = SdkMeterProvider::builder().with_reader(exporter).build();
-    let owned = Instrumentation::new(provider.meter("carbide-instrument"));
+    let owned = Instrumentation::from_meter_provider(&provider);
     // Explicit recording must not initialize the global compatibility meter.
     owned.emit_count(Count, 10);
     opentelemetry::global::set_meter_provider(provider);
