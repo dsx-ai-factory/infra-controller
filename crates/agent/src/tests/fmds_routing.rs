@@ -177,7 +177,7 @@ async fn routed_metadata() {
                 .parse()
                 .expect("DPU ID"),
             "http://127.0.0.1:1".to_string(),
-            Arc::new(ForgeClientConfig::default()),
+            Arc::new(CarbideClientConfig::default()),
             MachineIdentityConfig::default(),
         )
         .expect("metadata state"),

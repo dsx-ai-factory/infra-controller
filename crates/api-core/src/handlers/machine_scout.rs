@@ -239,20 +239,31 @@ pub(crate) async fn forge_agent_control(
                     && !db::machine::has_recorded_managed_host_failure(&mut txn, &host_machine.id)
                         .await
                         .map_err(CarbideError::from)?;
+                // Even saved NIC work cannot overlap an earlier MLX command
+                // whose result is still unknown. The contact write owns this row.
+                let command_pending = db::hardware_dispatch::has_pending(&mut txn, host_machine.id)
+                    .await
+                    .map_err(CarbideError::from)?;
                 // Finish the contact write before credential lookup. The saved
                 // phase authorizes delivery; no row lock spans external I/O.
                 txn.commit().await.map_err(CarbideError::from)?;
                 // Lost ownership or recorded failure stops new submissions,
-                // while observation and lockdown restoration remain available.
+                // while observation and lockdown restoration remain available when no
+                // earlier hardware command is pending.
                 (
-                    super::nic_firmware_operation::control_action(
-                        api,
-                        host_machine.id,
-                        machine.current_version(),
-                        operation,
-                        submission_permitted,
-                    )
-                    .await?,
+                    if command_pending {
+                        Action::noop()
+                    } else {
+                        super::nic_firmware_operation::control_action(
+                            api,
+                            host_machine.id,
+                            machine.current_version(),
+                            operation,
+                            submission_permitted,
+                            request.nic_firmware_site_cache_supported,
+                        )
+                        .await?
+                    },
                     None,
                 )
             }

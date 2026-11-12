@@ -28,7 +28,6 @@ use carbide_resource_pool::ResourcePoolRegistry;
 use carbide_secrets::credentials::CredentialManager;
 use carbide_secrets::test_support::certificates::TestCertificateProvider;
 use carbide_secrets::test_support::credentials::TestCredentialManager;
-use carbide_site_explorer::config::SiteExplorerExploreMode;
 use carbide_site_explorer::test_support::MockEndpointExplorer;
 use carbide_site_explorer::{
     AuthenticatedBmc, AuthenticatedBmcClient, EndpointExplorationService, EndpointExplorer,
@@ -295,7 +294,6 @@ impl TestApiBuilder {
         let real_endpoint_explorer = carbide_site_explorer::new_bmc_explorer(
             real_bmc_client.clone(),
             Arc::new(std::sync::atomic::AtomicBool::new(false)),
-            SiteExplorerExploreMode::NvRedfish,
             false,
             self.db_pool.clone(),
         );
@@ -349,6 +347,7 @@ impl TestApiBuilder {
             // dyn upcast: the ops handle is also the general pool in tests.
             redfish_pool: redfish_pool.clone(),
             bmc_credential_ops: redfish_pool,
+            driver_connector: None,
             bmc_proxy_passthrough: None,
             eth_data,
             common_pools: self.common_pools,

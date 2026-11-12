@@ -109,7 +109,7 @@ async fn test_find_available_outdated_dpus(
     pool: sqlx::PgPool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let env = create_test_env(pool).await;
-    let dpu_count: usize = 10;
+    let dpu_count: usize = 2;
     let snapshots = create_machines(&env, dpu_count).await;
     let dpus = DpuMachineUpdate::find_available_outdated_dpus(
         None,
@@ -127,11 +127,11 @@ async fn test_find_available_outdated_dpus_with_unhealthy(
     pool: sqlx::PgPool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let env = create_test_env(pool).await;
-    let snapshots = create_machines(&env, 10).await;
-    let dpu_machine_id = snapshots.iter().next().unwrap().1.dpu_snapshots[0].id;
+    let snapshots = create_machines(&env, 2).await;
+    let unhealthy_dpu_machine_id = snapshots.iter().next().unwrap().1.dpu_snapshots[0].id;
 
     let machine_obs = MachineNetworkStatusObservation {
-        machine_id: dpu_machine_id,
+        machine_id: unhealthy_dpu_machine_id,
         agent_version: None,
         observed_at: chrono::Utc::now(),
         network_config_version: None,
@@ -139,6 +139,7 @@ async fn test_find_available_outdated_dpus_with_unhealthy(
         agent_version_superseded_at: None,
         instance_network_observation: None,
         fabric_interfaces: vec![],
+        accepted_lldp_snapshot_fingerprint: None,
     };
 
     let health_report = health_report::HealthReport {
@@ -164,11 +165,20 @@ async fn test_find_available_outdated_dpus_with_unhealthy(
         .expect("Failed to create transaction");
 
     assert_eq!(
-        db::machine::update_network_status_observation(&mut txn, &dpu_machine_id, &machine_obs)
-            .await?,
+        db::machine::update_network_status_observation(
+            &mut txn,
+            &unhealthy_dpu_machine_id,
+            &machine_obs
+        )
+        .await?,
         db::ConditionalWrite::Applied(())
     );
-    db::machine::update_dpu_agent_health_report(&mut txn, &dpu_machine_id, &health_report).await?;
+    db::machine::update_dpu_agent_health_report(
+        &mut txn,
+        &unhealthy_dpu_machine_id,
+        &health_report,
+    )
+    .await?;
 
     txn.commit().await.unwrap();
 
@@ -181,7 +191,8 @@ async fn test_find_available_outdated_dpus_with_unhealthy(
         &[],
     )?;
 
-    assert_eq!(dpus.len(), 9);
+    assert_eq!(dpus.len(), 1);
+    assert_ne!(dpus[0].dpu_machine_id, unhealthy_dpu_machine_id);
     Ok(())
 }
 
@@ -190,7 +201,7 @@ async fn test_find_available_outdated_dpus_limit(
     pool: sqlx::PgPool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let env = create_test_env(pool).await;
-    let snapshots = create_machines(&env, 10).await;
+    let snapshots = create_machines(&env, 2).await;
     let dpus = DpuMachineUpdate::find_available_outdated_dpus(
         Some(1),
         &env.config.dpu_config.dpu_nic_firmware_update_versions,
@@ -233,7 +244,7 @@ async fn test_find_unavailable_outdated_dpus_when_none(
     pool: sqlx::PgPool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let env = create_test_env(pool).await;
-    let snapshots = create_machines(&env, 10).await;
+    let snapshots = create_machines(&env, 1).await;
 
     let dpus = DpuMachineUpdate::find_unavailable_outdated_dpus(
         &env.config.dpu_config.dpu_nic_firmware_update_versions,

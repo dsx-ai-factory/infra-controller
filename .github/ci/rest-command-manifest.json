@@ -45,17 +45,17 @@
       "output": "bin/migrations"
     },
     {
-      "name": "sitemgr",
-      "package": "./site-manager/cmd/sitemgr",
+      "name": "site-manager",
+      "package": "./site-manager/cmd/site-manager",
       "target": "linux-amd64",
       "cgo_enabled": false,
       "ldflags": [
         "-extldflags=-static",
         "-w",
         "-s",
-        "-X=github.com/NVIDIA/infra-controller/rest-api/cert-manager/pkg/core.Version=${VERSION}"
+        "-X=github.com/NVIDIA/infra-controller/rest-api/site-manager/pkg/metadata.Version=${VERSION}"
       ],
-      "output": "bin/sitemgr"
+      "output": "bin/site-manager"
     },
     {
       "name": "workflow",
@@ -65,7 +65,8 @@
       "ldflags": [
         "-extldflags=-static",
         "-w",
-        "-s"
+        "-s",
+        "-X=github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/metadata.Version=${VERSION}"
       ],
       "output": "bin/workflow"
     },
@@ -196,17 +197,17 @@
       "output": "bin/migrations"
     },
     {
-      "name": "sitemgr",
-      "package": "./site-manager/cmd/sitemgr",
+      "name": "site-manager",
+      "package": "./site-manager/cmd/site-manager",
       "target": "linux-arm64",
       "cgo_enabled": false,
       "ldflags": [
         "-extldflags=-static",
         "-w",
         "-s",
-        "-X=github.com/NVIDIA/infra-controller/rest-api/cert-manager/pkg/core.Version=${VERSION}"
+        "-X=github.com/NVIDIA/infra-controller/rest-api/site-manager/pkg/metadata.Version=${VERSION}"
       ],
-      "output": "bin/sitemgr"
+      "output": "bin/site-manager"
     },
     {
       "name": "workflow",
@@ -216,7 +217,8 @@
       "ldflags": [
         "-extldflags=-static",
         "-w",
-        "-s"
+        "-s",
+        "-X=github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/metadata.Version=${VERSION}"
       ],
       "output": "bin/workflow"
     },
@@ -340,21 +342,23 @@
       "output": "bin/migrations"
     },
     {
-      "name": "sitemgr",
-      "package": "./site-manager/cmd/sitemgr",
+      "name": "site-manager",
+      "package": "./site-manager/cmd/site-manager",
       "target": "darwin-arm64",
       "cgo_enabled": false,
       "ldflags": [
-        "-X=github.com/NVIDIA/infra-controller/rest-api/cert-manager/pkg/core.Version=${VERSION}"
+        "-X=github.com/NVIDIA/infra-controller/rest-api/site-manager/pkg/metadata.Version=${VERSION}"
       ],
-      "output": "bin/sitemgr"
+      "output": "bin/site-manager"
     },
     {
       "name": "workflow",
       "package": "./workflow/cmd/workflow",
       "target": "darwin-arm64",
       "cgo_enabled": false,
-      "ldflags": [],
+      "ldflags": [
+        "-X=github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/metadata.Version=${VERSION}"
+      ],
       "output": "bin/workflow"
     },
     {

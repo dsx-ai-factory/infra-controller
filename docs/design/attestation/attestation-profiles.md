@@ -45,10 +45,12 @@ classified and `NoProfile` for one it has; seeding `any` ends both.
 | 2   | The class, the BMC's `ComponentIntegrity` list, and the attester set it implies are recorded          | §5.1, §7.1, §7.5                                                  |
 | 3   | An operator writes a profile keyed to a hardware class                                               | §4, §6                                                            |
 | 4   | Attestation resolves machine → BMC → class → profile, then writes one work row per selected attester | §5                                                                |
-| 5   | The controller collects evidence per work row                                                        | Exists, unchanged                                                 |
-| 6   | The evidence is verified and recorded                                                                | Exists, unchanged                                                 |
+| 5   | The controller collects evidence per work row                                                        | SPDM controller                                                   |
+| 6   | The evidence is verified and recorded                                                                | SPDM controller                                                   |
 
-Steps 1 through 4 are this document's scope.
+Steps 1 through 4 are this document's scope. The selected devices are scheduled
+as an [SPDM attestation job](spdm-jobs.md), which gives each attempt its own
+identity and retained results.
 
 **Resolution goes through the BMC.** A machine row carries no class; its BMC
 endpoint does. The scheduler goes from `machine_id` to that machine's BMC
@@ -350,9 +352,13 @@ list attesters before collecting.
    would stop attesting working hardware. The version is not persisted.
 8. Apply the selection's patterns to what remains and take the outcome from
   §5.3.
-9. On success, write one `spdm_machine_devices_attestation` row per selected
-  attester — keyed `(machine_id, device_id)`, where `device_id` is that
-  attester's `ComponentIntegrity` `Id` — which the existing controller picks up.
+9. When devices are selected, create a job and write one
+  `spdm_machine_devices_attestation` row per selected attester, keyed
+  `(machine_id, device_id, job_id)`. The `device_id` is that attester's
+  `ComponentIntegrity` `Id`; all rows from this scheduling attempt share the
+  same `job_id` and `started_at`. The SPDM controller processes those rows.
+  An empty selection creates no job. Earlier jobs retain their own records;
+  see [job identity and history](spdm-jobs.md).
 
 Step 6 stays a live call even though exploration records the same collection
 (§7.1). Selection has to use what the BMC reports now, since the recorded copy
@@ -643,9 +649,9 @@ a derived class always has two `_`-separated fields, and `any` has one.
 
 ### 6.3 The admin CLI
 
-The commands sit under the existing `attestation spdm` group, alongside the
-`trigger`, `get`, `list`, and `cancel` commands that act on the machines these
-profiles decide:
+The commands sit under the existing `attestation spdm` group, alongside
+`trigger` and the `job get`, `job list`, `job waive`, and `job fail` commands that
+act on the machines these profiles decide:
 
 ```text
 nico-admin-cli attestation spdm profile list
@@ -765,9 +771,28 @@ is present. `--format` is a root-level flag and must precede the command path:
 
 ### 6.5 What editing a profile does not do
 
-A profile is consulted once, when attestation is scheduled. Changing one affects
-attestations scheduled afterwards and does not alter those already scheduled or
-in flight. Deleting one does not cancel scheduled work.
+A job keeps the devices selected when it was created. Editing or deleting a
+profile does not add or remove device records from an existing job.
+
+The managed-host controller polls its job's database status without contacting
+the BMC while the job is in progress. Once the job has passed, failed, or been
+waived, it rechecks the selected device IDs before accepting the results.
+If that set changes, including becoming empty, it returns to scheduling without
+modifying the old job or its cancellation request. Stored device outcomes and
+completion timestamps stay unchanged. An empty selection then follows
+the skip path. If the selected IDs stay the same, it evaluates their latest results.
+
+Device removals and profile edits therefore do not restart an in-progress job.
+If a removed device leaves the job stuck, use `attestation spdm job fail` with
+that job's ID. Unfinished devices are resolved as failed after BMC cleanup, allowing the controller
+to recheck the selection. If the selected IDs still match, failed latest results
+put the machine in its attestation failure state; a successful new run can let it
+recover. See [job fail semantics](spdm-jobs.md#progress-waivers-and-failure).
+A new manual trigger creates a separate job and does not replace the job the
+managed-host controller is waiting for. The final selection check requires
+the BMC to respond when the resolved profile needs inventory; BMC errors leave
+the machine polling for a later retry. Jobs started directly through the
+trigger API are not automatically invalidated by profile edits.
 
 ## 7 Storage
 
@@ -839,7 +864,8 @@ checks stay in the API (§6.2).
 
 ### 7.3 The existing tables
 
-Relevant columns only; all as they are on `main`.
+Relevant columns only. Device work records include the job identity described
+in [SPDM attestation jobs](spdm-jobs.md).
 
 ```sql
 -- Where the hardware class is read from. Keyed by BMC IP.
@@ -850,7 +876,7 @@ explored_endpoints (
     attester_digest      text             -- NULL until an attester set is seen
 )
 
--- One attestation run per machine.
+-- Machine-level attestation record, separate from per-job device work.
 spdm_machine_attestation (
     machine_id         varchar NOT NULL UNIQUE REFERENCES machines(id),
     requested_at       timestamptz NOT NULL,
@@ -858,17 +884,18 @@ spdm_machine_attestation (
     attestation_status spdm_attestation_status_t NOT NULL DEFAULT 'not_started'
 )
 
--- One work row per selected attester. Written by §5 step 9.
+-- One work row per selected attester per job. Written by §5 step 9.
 spdm_machine_devices_attestation (
     machine_id  varchar NOT NULL,
     device_id   varchar NOT NULL,       -- the ComponentIntegrity Id
+    job_id      uuid NOT NULL,          -- shared by this scheduling attempt's rows
     nonce       uuid NOT NULL,          -- fresh, per attester
     started_at  timestamptz NOT NULL,   -- stamped per scheduling pass; see §8
     state       jsonb,                  -- SpdmAttestationState
     metadata    jsonb,                  -- firmware_version, fetched at FetchMetadata
     evidence    jsonb,
     ca_certificate jsonb,
-    PRIMARY KEY (machine_id, device_id)
+    PRIMARY KEY (machine_id, device_id, job_id)
 )
 
 -- How a machine resolves to the BMC that answers for it.
@@ -900,8 +927,8 @@ erDiagram
     machine_interface_addresses |o..o| explored_endpoints : "same IP, no FK"
     explored_endpoints }o..o| attestation_profiles : "class name, no FK"
     explored_endpoints }o..o| hardware_class_attesters : "class + digest, no FK"
-    machines ||--o| spdm_machine_attestation : "one run"
-    machines ||--o{ spdm_machine_devices_attestation : "one row per attester"
+    machines ||--o| spdm_machine_attestation : "one record"
+    machines ||--o{ spdm_machine_devices_attestation : "one row per attester per job"
 
     machines {
         varchar id PK
@@ -941,6 +968,7 @@ erDiagram
     spdm_machine_devices_attestation {
         varchar machine_id PK
         varchar device_id PK "ComponentIntegrity Id"
+        uuid job_id PK "scheduling attempt"
         uuid nonce
         timestamptz started_at "one value per scheduling pass"
         jsonb state
@@ -1035,8 +1063,8 @@ that have to reckon with it. Within a class, distinct digests are the drift sign
 
 ## 8 The trigger API
 
-`TriggerMachineAttestation` keeps its signature. Five response fields are added,
-which does not break clients.
+`TriggerMachineAttestation` returns the profile selection details and a job ID
+when work is scheduled:
 
 ```protobuf
 message SpdmMachineAttestationTriggerResponse {
@@ -1047,6 +1075,7 @@ message SpdmMachineAttestationTriggerResponse {
   bool used_any_fallback = 5;
   optional string profile_version = 6;
   optional google.protobuf.Timestamp started_at = 7;
+  common.UUID job_id = 8;
 }
 ```
 
@@ -1084,15 +1113,22 @@ unknown rather than none.
 It answers "which policy produced this response", not "which policy the machine
 is attesting under".
 
-`started_at` tells a caller whether the devices it scheduled are still the ones
-the machine has. Scheduling stamps every device row it writes with one value, so
-a caller that still finds its own there knows nothing has replaced it.
+`job_id` identifies the scheduling attempt. It is present only when devices
+were scheduled, including a `PartiallySatisfied` outcome. Use it with
+`GetAttestation` to read that job's device details in
+`SpdmGetAttestationResponse`, with `WaiveAttestation` to request a waiver,
+or with `FailAttestation` to request failure. Either request may replace the
+previous target, including after completion. Terminal devices immediately count
+as waived or failed for status and recovery; unfinished devices finish BMC cleanup
+first. Stored attestation results and completion timestamps remain unchanged.
+See [job resolution semantics](spdm-jobs.md#progress-waivers-and-failure).
 
-It takes the name the column and the read API already use: the same value is
-`SpdmAttestationDetails.started_at` in `SpdmGetAttestationMachineResponse`.
-Comparing the two is the whole point of reporting it, so a second name for one
-instant would hide the comparison it exists for. It is `optional` here and not
-there because a call that scheduled nothing has nothing to stamp.
+`started_at` records when the job's device rows were written. Every row in the
+job carries the same value, also returned as `SpdmAttestationDetails.started_at`.
+It is optional in the trigger response because a call that schedules nothing
+has no job to timestamp. Earlier jobs can remain as history, so finding that
+timestamp does not establish that the job is the latest attempt. See
+[SPDM attestation jobs](spdm-jobs.md) for identity, progress, and history.
 
 What a caller does with a failing outcome is not decided here; that belongs to
 whatever drives host ingestion, firmware update, and tenant switching (§12).
@@ -1241,8 +1277,6 @@ own ticket.
 
 - **Per-subject outcomes under one run:** attesting a host covering its attached
 DPU machines and reporting one result.
-- **Attestation run identity,** so a late worker from an old attempt cannot write
-onto a new one.
 - **Having attestation record the attesters it saw,** the way exploration
 already does (§7.5). Only exploration writes to the inventory today, so a
 machine that starts reporting fewer attesters stays invisible until the next

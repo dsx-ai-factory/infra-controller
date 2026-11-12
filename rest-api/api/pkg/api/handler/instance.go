@@ -1008,6 +1008,10 @@ func (cih CreateInstanceHandler) Handle(c echo.Context) error {
 			return cutil.NewAPIErrorResponse(c, http.StatusForbidden, fmt.Sprintf("DPU Extension Service: %s does not belong to Site where Instance is being created", desID.String()), nil)
 		}
 
+		if des.DeploymentType == cdbm.DpuExtensionServiceDeploymentTypeBaseline {
+			return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Baseline DPU Extension Services cannot be attached to Instances", nil)
+		}
+
 		versionFound := false
 		for _, version := range des.ActiveVersions {
 			if version == apiDesd.Version {
@@ -2714,7 +2718,7 @@ func (uih UpdateInstanceHandler) Handle(c echo.Context) error {
 	instanceDAO := cdbm.NewInstanceDAO(uih.dbSession)
 
 	// Check that Instance exists
-	instance, err := instanceDAO.GetByID(ctx, nil, instanceID, []string{cdbm.SiteRelationName, cdbm.TenantRelationName, cdbm.VpcRelationName, cdbm.MachineRelationName})
+	instance, err := instanceDAO.GetByID(ctx, nil, instanceID, []string{cdbm.SiteRelationName, cdbm.TenantRelationName, cdbm.VpcRelationName, cdbm.MachineRelationName}, false)
 	if err != nil {
 		logger.Warn().Err(err).Msg("error retrieving Instance DB entity")
 		return cutil.NewAPIErrorResponse(c, http.StatusNotFound, "Could not retrieve Instance to update", nil)
@@ -3452,6 +3456,10 @@ func (uih UpdateInstanceHandler) Handle(c echo.Context) error {
 			return cutil.NewAPIErrorResponse(c, http.StatusForbidden, fmt.Sprintf("DPU Extension Service: %s does not belong to Site where Instance is being created", desID.String()), nil)
 		}
 
+		if des.DeploymentType == cdbm.DpuExtensionServiceDeploymentTypeBaseline {
+			return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Baseline DPU Extension Services cannot be attached to Instances", nil)
+		}
+
 		versionFound := false
 		for _, version := range des.ActiveVersions {
 			if version == adesdr.Version {
@@ -4093,8 +4101,11 @@ func (uih UpdateInstanceHandler) Handle(c echo.Context) error {
 					newIbIfcs = append(newIbIfcs, *dbibifc)
 				}
 
-				// Update status of existing InfiniBand Interfaces to Deleting
+				// Keep Updated unchanged for deleting rows so reissues do not defer inventory cleanup.
 				for i := range existingIbIfcs {
+					if existingIbIfcs[i].Status == cdbm.InfiniBandInterfaceStatusDeleting {
+						continue
+					}
 					existingIbIfcs[i].Status = cdbm.InfiniBandInterfaceStatusDeleting
 					_, err = ibiDAO.Update(ctx, tx, cdbm.InfiniBandInterfaceUpdateInput{
 						InfiniBandInterfaceID: existingIbIfcs[i].ID,
@@ -4435,16 +4446,19 @@ func (uih UpdateInstanceHandler) Handle(c echo.Context) error {
 					}
 					newNvlIfcs = append(newNvlIfcs, *newNvlIfc)
 				}
-				// Update status of existing NVLink interfaces to Deleting
-				if len(existingNvlIfcs) > 0 {
-					nvlIfcUpdateInputs := make([]cdbm.NVLinkInterfaceUpdateInput, len(existingNvlIfcs))
-					for i := range existingNvlIfcs {
-						existingNvlIfcs[i].Status = cdbm.NVLinkInterfaceStatusDeleting
-						nvlIfcUpdateInputs[i] = cdbm.NVLinkInterfaceUpdateInput{
-							NVLinkInterfaceID: existingNvlIfcs[i].ID,
-							Status:            cutil.GetPtr(cdbm.NVLinkInterfaceStatusDeleting),
-						}
+				// Keep Updated unchanged for deleting rows so reissues do not defer inventory cleanup.
+				nvlIfcUpdateInputs := make([]cdbm.NVLinkInterfaceUpdateInput, 0, len(existingNvlIfcs))
+				for i := range existingNvlIfcs {
+					if existingNvlIfcs[i].Status == cdbm.NVLinkInterfaceStatusDeleting {
+						continue
 					}
+					existingNvlIfcs[i].Status = cdbm.NVLinkInterfaceStatusDeleting
+					nvlIfcUpdateInputs = append(nvlIfcUpdateInputs, cdbm.NVLinkInterfaceUpdateInput{
+						NVLinkInterfaceID: existingNvlIfcs[i].ID,
+						Status:            cutil.GetPtr(cdbm.NVLinkInterfaceStatusDeleting),
+					})
+				}
+				if len(nvlIfcUpdateInputs) > 0 {
 					_, err := nvlIfcDAO.UpdateMultiple(ctx, tx, nvlIfcUpdateInputs)
 					if err != nil {
 						logger.Error().Err(err).Msg("failed to update NVLink Interface records in DB")
@@ -4917,7 +4931,7 @@ func (gih GetInstanceHandler) Handle(c echo.Context) error {
 	// Get Instance
 	instanceDAO := cdbm.NewInstanceDAO(gih.dbSession)
 
-	instance, err := instanceDAO.GetByID(ctx, nil, instanceID, qIncludeRelations)
+	instance, err := instanceDAO.GetByID(ctx, nil, instanceID, qIncludeRelations, false)
 	if err != nil {
 		if err == cdb.ErrDoesNotExist {
 			return cutil.NewAPIErrorResponse(c, http.StatusNotFound, "Could not find Instance with specified ID", nil)
@@ -5824,7 +5838,7 @@ func (dih DeleteInstanceHandler) Handle(c echo.Context) error {
 	// Get Instance
 	instanceDAO := cdbm.NewInstanceDAO(dih.dbSession)
 
-	instance, err := instanceDAO.GetByID(ctx, nil, instanceID, []string{cdbm.SiteRelationName, cdbm.TenantRelationName, cdbm.VpcRelationName})
+	instance, err := instanceDAO.GetByID(ctx, nil, instanceID, []string{cdbm.SiteRelationName, cdbm.TenantRelationName, cdbm.VpcRelationName}, false)
 	if err != nil {
 		if err == cdb.ErrDoesNotExist {
 			return cutil.NewAPIErrorResponse(c, http.StatusNotFound, "Could not find Instance with specified ID", nil)
@@ -6092,7 +6106,7 @@ func (gisdh GetInstanceStatusDetailsHandler) Handle(c echo.Context) error {
 
 	// Get Instance
 	instanceDAO := cdbm.NewInstanceDAO(gisdh.dbSession)
-	instance, err := instanceDAO.GetByID(ctx, nil, instanceID, qIncludeRelations)
+	instance, err := instanceDAO.GetByID(ctx, nil, instanceID, qIncludeRelations, false)
 	if err != nil {
 		if err == cdb.ErrDoesNotExist {
 			return cutil.NewAPIErrorResponse(c, http.StatusNotFound, "Could not find Instance with specified ID", nil)

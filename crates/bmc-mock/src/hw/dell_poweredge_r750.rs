@@ -36,6 +36,15 @@ pub(crate) struct EmbeddedNic {
 }
 
 impl DellPowerEdgeR750<'_> {
+    pub(crate) fn service_root_config(&self) -> redfish::service_root::Config {
+        redfish::service_root::Config {
+            vendor: redfish::oem::BmcVendor::Dell,
+            product: None,
+            redfish_version: "1.18.0",
+            advertises_computer_systems: true,
+        }
+    }
+
     fn sensor_layout() -> redfish::sensor::Layout {
         redfish::sensor::Layout {
             temperature: 10,
@@ -135,7 +144,7 @@ impl DellPowerEdgeR750<'_> {
             .collect::<Vec<_>>();
 
         redfish::computer_system::Config {
-            systems: vec![redfish::computer_system::SingleSystemConfig {
+            systems: Some(vec![redfish::computer_system::SingleSystemConfig {
                 id: Cow::Borrowed(system_id),
                 manufacturer: Some("Dell Inc.".into()),
                 model: Some("PowerEdge R750".into()),
@@ -180,7 +189,7 @@ impl DellPowerEdgeR750<'_> {
                         "PxeDev1EnDis": "Disabled",
                         "HttpDev1Interface": "NIC.Slot.5-1",
                     }))),
-            }],
+            }]),
         }
     }
 

@@ -5,6 +5,7 @@ package inventorysync
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"os"
 	"testing"
@@ -690,6 +691,14 @@ func compType() string {
 	return devicetypes.ComponentTypeToString(devicetypes.ComponentTypeCompute)
 }
 
+const mirroredNvosPortsJSON = `[
+	{"mac":"00:11:22:33:44:55","servicePort":22,"addresses":[
+		{"addressFamily":"ADDRESS_FAMILY_V4","address":"192.0.2.20"},
+		{"addressFamily":"ADDRESS_FAMILY_V6","address":"2001:db8::20"}
+	],"isPrimary":true},
+	{"mac":"00:11:22:33:44:56","servicePort":null,"addresses":[],"isPrimary":false}
+]`
+
 func TestMirrorComponents_DescriptionLifecycle(t *testing.T) {
 	for _, tc := range []struct {
 		name          string
@@ -728,7 +737,9 @@ func TestMirrorComponents_DescriptionLifecycle(t *testing.T) {
 			assert.Equal(t, "initial description", component.Description[expectedDescriptionKey])
 
 			component.Description["operator"] = "keep"
-			component.Description["nvos_ip"] = "10.0.0.2"
+			if tc.componentType == devicetypes.ComponentTypeNVSwitch {
+				component.Description[nvosPortsDescriptionKey] = json.RawMessage(mirroredNvosPortsJSON)
+			}
 			_, err := pool.DB.NewUpdate().Model(&component).Column("description").WherePK().Exec(ctx)
 			require.NoError(t, err)
 
@@ -737,14 +748,22 @@ func TestMirrorComponents_DescriptionLifecycle(t *testing.T) {
 			component = loadComponent()
 			assert.Equal(t, "updated description", component.Description[expectedDescriptionKey])
 			assert.Equal(t, "keep", component.Description["operator"])
-			assert.Equal(t, "10.0.0.2", component.Description["nvos_ip"])
+			if tc.componentType == devicetypes.ComponentTypeNVSwitch {
+				data, err := json.Marshal(component.Description[nvosPortsDescriptionKey])
+				require.NoError(t, err)
+				assert.JSONEq(t, mirroredNvosPortsJSON, string(data))
+			}
 
 			spec.Description = ""
 			mirrorExpectedComponents(ctx, pool, componentType, []expectedComponentSpec{spec}, map[string]uuid.UUID{})
 			component = loadComponent()
 			assert.NotContains(t, component.Description, expectedDescriptionKey)
 			assert.Equal(t, "keep", component.Description["operator"])
-			assert.Equal(t, "10.0.0.2", component.Description["nvos_ip"])
+			if tc.componentType == devicetypes.ComponentTypeNVSwitch {
+				data, err := json.Marshal(component.Description[nvosPortsDescriptionKey])
+				require.NoError(t, err)
+				assert.JSONEq(t, mirroredNvosPortsJSON, string(data))
+			}
 		})
 	}
 }
@@ -761,7 +780,7 @@ func TestUpdateMirroredComponent_PreservesRuntimeWriteAfterReconciliationRead(t 
 		t.Run(tc.name, func(t *testing.T) {
 			ctx, pool := mirrorTestPool(t)
 			component := model.Component{
-				Type:         compType(),
+				Type:         devicetypes.ComponentTypeToString(devicetypes.ComponentTypeNVSwitch),
 				Manufacturer: "Mfg",
 				SerialNumber: "INTERLEAVE-" + tc.name,
 				Name:         "before",
@@ -777,16 +796,12 @@ func TestUpdateMirroredComponent_PreservesRuntimeWriteAfterReconciliationRead(t 
 
 			// Simulate runtime sync committing after reconciliation read the row
 			// but before the mirror writes its planned update.
-			_, err := pool.DB.NewUpdate().
-				Model((*model.Component)(nil)).
-				Set(
-					"description = jsonb_set(COALESCE(description, '{}'::jsonb), ARRAY[?::text], to_jsonb(?::text), true)",
-					nvosIPDescriptionKey,
-					"10.0.0.2",
-				).
-				Where("id = ?", component.ID).
-				Exec(ctx)
-			require.NoError(t, err)
+			const switchID = "core-switch-id"
+			var ports []nicoapi.SwitchNvosPort
+			require.NoError(t, json.Unmarshal([]byte(mirroredNvosPortsJSON), &ports))
+			client := nicoapi.NewMockClient()
+			client.SetSwitchNvosPorts(switchID, ports)
+			syncSwitchNvosPorts(ctx, pool, client, map[string]*model.Component{switchID: &component})
 
 			reconciliationSnapshot.Name = "after"
 			reconciliationSnapshot.UpdatedAt = time.Now()
@@ -795,7 +810,9 @@ func TestUpdateMirroredComponent_PreservesRuntimeWriteAfterReconciliationRead(t 
 			var updated model.Component
 			require.NoError(t, pool.DB.NewSelect().Model(&updated).Where("id = ?", component.ID).Scan(ctx))
 			assert.Equal(t, "after", updated.Name)
-			assert.Equal(t, "10.0.0.2", updated.Description[nvosIPDescriptionKey])
+			data, err := json.Marshal(updated.Description[nvosPortsDescriptionKey])
+			require.NoError(t, err)
+			assert.JSONEq(t, mirroredNvosPortsJSON, string(data))
 			assert.Equal(t, "keep", updated.Description["operator"])
 			if tc.wantExpected {
 				assert.Equal(t, tc.expectedDescription, updated.Description[expectedDescriptionKey])

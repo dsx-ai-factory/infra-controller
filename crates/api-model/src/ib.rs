@@ -72,7 +72,7 @@ pub struct IBNetwork {
 /// Quality of service configuration
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct IBQosConf {
-    /// Default 2k; one of 2k or 4k; the MTU of the services.
+    /// MTU of the services: 2 KiB or 4 KiB (the default).
     pub mtu: IBMtu,
     /// Default is None, value can be range from 0-15.
     pub service_level: IBServiceLevel,

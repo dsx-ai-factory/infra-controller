@@ -19,10 +19,10 @@ use std::future::Future;
 use std::net::SocketAddr;
 use std::time::Duration;
 
+use carbide_tls::client_config::ClientCert;
 use eyre::{Context, ContextCompat};
-use forge_tls::client_config::ClientCert;
 use rand::prelude::IndexedRandom;
-use rpc::forge_tls_client::{ForgeClientConfig, ForgeClientT, ForgeTlsClient};
+use rpc::carbide_tls_client::{CarbideClientConfig, CarbideClientT, CarbideTlsClient};
 use tonic::{Response, Status};
 
 use crate::utils::LOCALHOST_CERTS;
@@ -35,7 +35,7 @@ pub(crate) async fn call<T, F, Fut>(
     call_rpc: F,
 ) -> eyre::Result<T>
 where
-    F: FnOnce(ForgeClientT) -> Fut,
+    F: FnOnce(CarbideClientT) -> Fut,
     Fut: Future<Output = Result<Response<T>, Status>>,
 {
     tokio::time::timeout(RPC_TIMEOUT, async {
@@ -46,11 +46,11 @@ where
             cert_path: LOCALHOST_CERTS.client_cert.to_string_lossy().into_owned(),
             key_path: LOCALHOST_CERTS.client_key.to_string_lossy().into_owned(),
         };
-        let config = ForgeClientConfig::new(
+        let config = CarbideClientConfig::new(
             LOCALHOST_CERTS.ca_cert.to_string_lossy().into_owned(),
             Some(client_cert),
         );
-        let client = ForgeTlsClient::new(&config)
+        let client = CarbideTlsClient::new(&config)
             .build(format!("https://{address}"))
             .await
             .wrap_err_with(|| format!("building client for {rpc_name}"))?;

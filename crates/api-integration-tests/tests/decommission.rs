@@ -36,11 +36,11 @@ use carbide_secrets::create_credential_manager;
 use carbide_secrets::credentials::{
     BmcCredentialType, CredentialKey, CredentialReader, Credentials,
 };
+use carbide_tls::client_config::ClientCert;
 use carbide_utils::HostPortPair;
 use carbide_uuid::machine::MachineId;
 use carbide_uuid::rack::{RackId, RackProfileId};
 use eyre::{ContextCompat, WrapErr};
-use forge_tls::client_config::ClientCert;
 use futures::FutureExt;
 use mac_address::MacAddress;
 use machine_a_tron::{
@@ -55,8 +55,8 @@ use model::power_shelf::{PowerShelfControllerState, PowerShelfDecommissioningSta
 use model::rack::{RackMaintenanceState, RackState};
 use model::site_explorer::EndpointExplorationError;
 use model::switch::{SwitchControllerState, SwitchDecommissioningState};
+use rpc::carbide_tls_client::{CarbideClientConfig, CarbideClientT, CarbideTlsClient};
 use rpc::forge;
-use rpc::forge_tls_client::{ForgeClientConfig, ForgeClientT, ForgeTlsClient};
 use serde_json::{Value, json};
 use tokio::time::{Instant, sleep, timeout};
 use tokio_util::sync::CancellationToken;
@@ -138,7 +138,7 @@ async fn run() -> eyre::Result<()> {
             .await?,
         );
         let api_url = format!("https://{}", env.carbide_api_addrs[0]);
-        let client_config = ForgeClientConfig::new(
+        let client_config = CarbideClientConfig::new(
             LOCALHOST_CERTS.ca_cert.to_string_lossy().into_owned(),
             Some(ClientCert {
                 cert_path: LOCALHOST_CERTS.client_cert.to_string_lossy().into_owned(),
@@ -147,7 +147,7 @@ async fn run() -> eyre::Result<()> {
         );
         let client = timeout(
             RPC_TIMEOUT,
-            ForgeTlsClient::new(&client_config).build(&api_url),
+            CarbideTlsClient::new(&client_config).build(&api_url),
         )
         .await??;
         // Fresh sites have no NVOS rotation target. Publish one before any switch
@@ -499,6 +499,7 @@ fn mat_config(api_url: &str) -> eyre::Result<MachineATronConfig> {
             power_off_force = "100ms"
             reboot = "1s"
             bmc_reset = "100ms"
+            firmware_upgrade = "100ms"
             "#,
         ))?;
         machine.hw_type = hw_type;
@@ -518,7 +519,7 @@ struct View {
 impl View {
     async fn read(
         env: &IntegrationTestEnvironment,
-        client: &ForgeClientT,
+        client: &CarbideClientT,
         host: &DeviceHandle,
     ) -> eyre::Result<Option<Self>> {
         let Some(host_id) = host.observed_machine_id() else {
@@ -535,7 +536,7 @@ impl View {
             .clone()
             .find_machines_by_ids(forge::MachinesByIdsRequest {
                 machine_ids: ids,
-                include_history: true,
+                include_history: false,
             }))
         .await?
         .machines;
@@ -601,18 +602,28 @@ impl View {
     }
 }
 
+#[derive(Debug)]
+enum ViewTarget {
+    /// Return the first Ready cohort with a finalized, verified boot fingerprint.
+    Ready,
+    /// Also hold that fingerprint across multiple controller periods.
+    StableReady,
+    /// Wait for the host, switch and shelf to reach their terminal decommission states.
+    Decommissioned,
+}
+
 async fn wait_for_view(
     env: &IntegrationTestEnvironment,
-    client: &ForgeClientT,
+    client: &CarbideClientT,
     host: &DeviceHandle,
-    decommissioned: bool,
+    target: ViewTarget,
 ) -> eyre::Result<View> {
     let deadline = Instant::now() + CONVERGENCE_TIMEOUT;
     let mut last = Value::Null;
     let mut stable_ready: Option<(Value, Instant)> = None;
     loop {
         if let Some(view) = View::read(env, client, host).await? {
-            if decommissioned {
+            if matches!(target, ViewTarget::Decommissioned) {
                 if view.decommissioned(host.observed_machine_id().context("no host id")?)? {
                     return Ok(view);
                 }
@@ -621,6 +632,11 @@ async fn wait_for_view(
                 let (converged, fingerprint) = ready_fingerprint(client, host, &view).await?;
                 last = fingerprint.clone();
                 if converged {
+                    if matches!(target, ViewTarget::Ready) {
+                        return Ok(view);
+                    }
+                    // Hold all five state versions and the boot fingerprint
+                    // across multiple configured 100 ms controller periods.
                     match &stable_ready {
                         Some((previous, since)) if *previous == fingerprint => {
                             if since.elapsed() >= READY_STABILITY_WINDOW {
@@ -638,17 +654,17 @@ async fn wait_for_view(
         }
         eyre::ensure!(
             Instant::now() < deadline,
-            "timed out waiting for decommissioned={decommissioned}; last states: {last}"
+            "timed out waiting for {target:?}; last states: {last}"
         );
         sleep(Duration::from_millis(200)).await;
     }
 }
 
 /// A provisional chassis/serial pick can be replaced by the first Scout PCI report
-/// even after Ready. Wait for its final source and verified generation, then hold
-/// all five state versions across multiple configured 100 ms controller periods.
+/// even after Ready. Check its final source and verified generation, and capture
+/// the boot selection and all five state versions for optional stability polling.
 async fn ready_fingerprint(
-    client: &ForgeClientT,
+    client: &CarbideClientT,
     host: &DeviceHandle,
     view: &View,
 ) -> eyre::Result<(bool, Value)> {
@@ -733,7 +749,7 @@ async fn ready_fingerprint(
 /// this request to ConfigureNmxCluster so no firmware or power activity is injected.
 async fn configure_fabric(
     env: &IntegrationTestEnvironment,
-    client: &ForgeClientT,
+    client: &CarbideClientT,
 ) -> eyre::Result<Value> {
     let deadline = Instant::now() + CONVERGENCE_TIMEOUT;
     let initial_version = loop {
@@ -826,7 +842,7 @@ async fn configure_fabric(
     }
 }
 
-async fn rack_state(client: &ForgeClientT) -> eyre::Result<(RackState, String)> {
+async fn rack_state(client: &CarbideClientT) -> eyre::Result<(RackState, String)> {
     let racks = rpc(client.clone().find_racks_by_ids(forge::RacksByIdsRequest {
         rack_ids: vec![RackId::new(RACK_ID)],
     }))
@@ -966,17 +982,18 @@ async fn bmc_interface_generations(
 
 /// Prepare can delete Ready rows without resetting the hardware. Only periodic
 /// BMC DHCP can recreate these interfaces: the actors and their BMCs stay alive.
+/// Return the rebuilt cohort's stable Ready view for the next admission baseline.
 async fn ready_force_delete_rebuild(
     env: &IntegrationTestEnvironment,
-    client: &ForgeClientT,
+    client: &CarbideClientT,
     handles: &BTreeMap<String, DeviceHandle>,
     http: &reqwest::Client,
     bmc_addr: SocketAddr,
     credentials: &dyn CredentialReader,
     evidence: &Path,
-) -> eyre::Result<()> {
+) -> eyre::Result<View> {
     let host = &handles["host"];
-    let ready = wait_for_view(env, client, host, false).await?;
+    let ready = wait_for_view(env, client, host, ViewTarget::StableReady).await?;
     let (_, before_ready) = ready_fingerprint(client, host, &ready).await?;
     let host_id = host.observed_machine_id().context("ready host has no id")?;
     let dpu_ids: BTreeSet<_> = host
@@ -1081,7 +1098,7 @@ async fn ready_force_delete_rebuild(
         old_interfaces, 0,
         "Ready force-delete retained old BMC interfaces"
     );
-    let rebuilt = wait_for_view(env, client, host, false).await?;
+    let rebuilt = wait_for_view(env, client, host, ViewTarget::StableReady).await?;
     let (_, after_ready) = ready_fingerprint(client, host, &rebuilt).await?;
     assert_eq!(core_identity(env, &rebuilt, handles).await?, core_before);
     let after_generations = generations(env).await?;
@@ -1157,13 +1174,13 @@ async fn ready_force_delete_rebuild(
             "aux_generations": before_aux,
         }))?,
     )?;
-    Ok(())
+    Ok(rebuilt)
 }
 
 #[allow(clippy::too_many_arguments)]
 async fn cycles(
     env: &IntegrationTestEnvironment,
-    client: &ForgeClientT,
+    client: &CarbideClientT,
     handles: &BTreeMap<String, DeviceHandle>,
     rms_service: &RmsMock,
     rms_addr: SocketAddr,
@@ -1182,13 +1199,13 @@ async fn cycles(
         .timeout(RPC_TIMEOUT)
         .build()?;
     let credentials = create_credential_manager(&env.credential_config).await?;
-    wait_for_view(env, client, host, false).await?;
+    wait_for_view(env, client, host, ViewTarget::Ready).await?;
     let initial_fabric = configure_fabric(env, client).await?;
     std::fs::write(
         evidence.join("initial-fabric-maintenance.json"),
         serde_json::to_vec_pretty(&initial_fabric)?,
     )?;
-    ready_force_delete_rebuild(
+    let mut ready = ready_force_delete_rebuild(
         env,
         client,
         handles,
@@ -1198,7 +1215,6 @@ async fn cycles(
         evidence,
     )
     .await?;
-    let mut ready = wait_for_view(env, client, host, false).await?;
     let mut previous_generations = generations(env).await?;
     assert_eq!(previous_generations.len(), 5);
     let rms_client_config = librms::client_config::RmsClientConfig::new(None, None, None, false);
@@ -1354,7 +1370,7 @@ async fn cycles(
         let ((boot_pre_ingestion, os_pre_ingestion), aux_power, terminal, ()) = tokio::try_join!(
             observe_pre_ingestion_boots(&http, bmc_addr, host, credentials.as_ref(), &os_before),
             observe_aux_power_cycle(client, host, bmc_addr.port(), &aux_before),
-            wait_for_view(env, client, host, true),
+            wait_for_view(env, client, host, ViewTarget::Decommissioned),
             async {
                 rpc(client.clone().decommission_managed_host(
                     forge::DecommissionManagedHostRequest {
@@ -1805,9 +1821,9 @@ async fn cycles(
             }
             txn.commit().await?;
         }
-        wait_for_view(env, client, host, false).await?;
+        wait_for_view(env, client, host, ViewTarget::Ready).await?;
         let fabric_maintenance = configure_fabric(env, client).await?;
-        ready = wait_for_view(env, client, host, false).await?;
+        ready = wait_for_view(env, client, host, ViewTarget::StableReady).await?;
         let new_ip = host.bmc_ip().context("rebuilt host has no BMC IP")?;
         if cycle == 2 {
             assert_ne!(new_ip, old_ip, "Core reused the occupied BMC address");
@@ -2619,7 +2635,7 @@ fn aux_power_generations(host: &DeviceHandle) -> eyre::Result<BTreeMap<String, u
 }
 
 async fn observe_aux_power_cycle(
-    client: &ForgeClientT,
+    client: &CarbideClientT,
     host: &DeviceHandle,
     bmc_port: u16,
     before: &BTreeMap<String, u64>,

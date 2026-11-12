@@ -79,7 +79,7 @@ func TestRun_ClosesConnectionWhoseBodyNeverArrives(t *testing.T) {
 		conn = c
 		return true
 	}, 5*time.Second, 10*time.Millisecond)
-	defer conn.Close()
+	defer func() { assert.NoError(t, conn.Close()) }()
 
 	// Declare a body and never send it. The handler does not read bodies, so
 	// the server drains the declared body before it responds and must give
@@ -103,7 +103,7 @@ func TestRun_ClosesConnectionWhoseBodyNeverArrives(t *testing.T) {
 func TestRun_ListenError(t *testing.T) {
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	require.NoError(t, err)
-	defer ln.Close()
+	defer func() { assert.NoError(t, ln.Close()) }()
 
 	err = Run(context.Background(), ln.Addr().String(), http.NotFoundHandler(), zerolog.Nop(), "test endpoint")
 	require.Error(t, err, "binding an occupied port must fail")

@@ -14,6 +14,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+use std::borrow::Cow;
 use std::collections::{BTreeSet, HashMap};
 use std::fmt;
 use std::fmt::{Debug, Display};
@@ -292,11 +293,7 @@ impl fmt::Display for FirmwareComponentType {
 
 impl Serialize for FirmwareComponentType {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        match self {
-            // A drive's stored name is its Display text.
-            FirmwareComponentType::Drive { .. } => serializer.collect_str(self),
-            other => serializer.serialize_str(other.slug()),
-        }
+        serializer.serialize_str(&self.config_name())
     }
 }
 
@@ -321,6 +318,15 @@ impl<'de> Deserialize<'de> for FirmwareComponentType {
 }
 
 impl FirmwareComponentType {
+    /// The stored configuration name, including a drive's exact model selector.
+    /// Serialization and public expected targets share this spelling.
+    pub fn config_name(self) -> Cow<'static, str> {
+        match self {
+            Self::Drive { .. } => Cow::Owned(self.to_string()),
+            other => Cow::Borrowed(other.slug()),
+        }
+    }
+
     /// Parses a serialized component name; unrecognized names are `Unknown`.
     fn from_name(name: &str) -> Self {
         match name {

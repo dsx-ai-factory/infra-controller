@@ -21,8 +21,10 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
+use carbide_resource_pool::ResourcePoolRegistry;
 use component_manager::MachineInfoProvider;
 use mac_address::MacAddress;
+use model::expected_machine::HostDpuPolicy;
 use model::rack_type::RackProfileConfig;
 use model::resource_pool::common::CommonPools;
 use sqlx::PgPool;
@@ -64,6 +66,8 @@ pub struct Config {
     pub switches_created_per_run: u64,
     /// Whether host interfaces can use IPv6-only admin segments.
     pub admin_fnn_enabled: bool,
+    /// Site policy inherited by hosts without an explicit Nic or Ignore policy.
+    pub dpu_policy: Option<HostDpuPolicy>,
     /// How long retained boot interfaces remain applicable; `None` means forever.
     pub retained_boot_interface_window: Option<chrono::Duration>,
 }
@@ -77,9 +81,19 @@ pub(super) struct InventoryCreator {
 }
 
 impl InventoryCreator {
+    /// Stop new provider preparation on Site Explorer shutdown while existing
+    /// exploration and creation transactions retain their normal drain behavior.
+    pub(super) fn set_preparation_cancel_token(
+        &mut self,
+        cancel_token: tokio_util::sync::CancellationToken,
+    ) {
+        self.machine_creator.preparation_cancel_token = cancel_token;
+    }
+
     pub(super) fn new(
         database_connection: PgPool,
         config: Config,
+        resource_pool_registry: ResourcePoolRegistry,
         common_pools: Arc<CommonPools>,
         rack_profiles: Arc<RackProfileConfig>,
         machine_info_provider: Option<Arc<dyn MachineInfoProvider>>,
@@ -89,6 +103,7 @@ impl InventoryCreator {
             machine_creator: MachineCreator::new(
                 database_connection.clone(),
                 config.clone(),
+                resource_pool_registry,
                 common_pools,
                 rack_profiles,
                 machine_info_provider,
@@ -103,16 +118,15 @@ impl InventoryCreator {
         }
     }
 
-    /// Creates machines, power shelves, and switches in their existing order.
-    pub(super) async fn create_inventory(
+    /// Creates hosts, with periodic switch and power-shelf passes.
+    pub(super) async fn create_hosts(
         &self,
         metrics: &mut SiteExplorationMetrics,
         identified_hosts: &mut [IdentifiedManagedHost],
         expected_endpoint_index: &ExploredEndpointIndex,
         already_ingested_bmc_ips: &HashSet<IpAddr>,
-        explored_this_run: &HashSet<IpAddr>,
         suppressed_bmc_macs: &HashSet<MacAddress>,
-    ) -> SiteExplorerResult<()> {
+    ) {
         if self.config.create_machines.load(Ordering::Relaxed) {
             // The identify phase hands the hosts over in hash order. Creating
             // them in rack order lets each run complete the racks it can.
@@ -140,7 +154,6 @@ impl InventoryCreator {
                 identified_hosts,
                 expected_endpoint_index,
                 already_ingested_bmc_ips,
-                explored_this_run,
             );
             let mut create_machines_latency = Duration::ZERO;
             loop {
@@ -172,48 +185,7 @@ impl InventoryCreator {
             }
             metrics.create_machines_latency = Some(create_machines_latency);
             metrics.record_phase_latency("create_machines", create_machines_latency);
-        } else {
-            // `create_machines` revisits ingested hosts explored this run on
-            // its steady-state path; with it off, revisit them here so a
-            // pending admin address repair is still made.
-            let reconcile_admin_addresses_start = Instant::now();
-            self.machine_creator
-                .reconcile_explored_host_admin_addresses(
-                    identified_hosts,
-                    already_ingested_bmc_ips,
-                    explored_this_run,
-                )
-                .await;
-            metrics.record_phase_latency(
-                "reconcile_explored_host_admin_addresses",
-                reconcile_admin_addresses_start.elapsed(),
-            );
         }
-
-        let reconcile_desired_boot_interfaces_start = Instant::now();
-        let reconcile_desired_boot_interfaces_res = self
-            .machine_creator
-            .reconcile_desired_boot_interfaces()
-            .await;
-        metrics.record_phase_latency(
-            "reconcile_desired_boot_interfaces",
-            reconcile_desired_boot_interfaces_start.elapsed(),
-        );
-        if let Err(error) = reconcile_desired_boot_interfaces_res {
-            tracing::warn!(
-                %error,
-                "Desired boot-interface reconciliation pass failed; a later Site Explorer run will retry"
-            );
-        }
-
-        self.create_switches_and_power_shelves(
-            metrics,
-            expected_endpoint_index,
-            suppressed_bmc_macs,
-        )
-        .await?;
-
-        Ok(())
     }
 
     /// Identifies and creates the power shelves and switches whose endpoints
@@ -227,7 +199,7 @@ impl InventoryCreator {
     /// and restarts when the pass becomes due, before the pass runs. The
     /// per-run latency totals and the per-run caps accumulate over the passes
     /// of one run.
-    async fn create_switches_and_power_shelves(
+    pub(super) async fn create_switches_and_power_shelves(
         &self,
         metrics: &mut SiteExplorationMetrics,
         expected_endpoint_index: &ExploredEndpointIndex,

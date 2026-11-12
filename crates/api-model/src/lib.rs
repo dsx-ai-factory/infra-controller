@@ -57,6 +57,7 @@ pub mod expected_rack_group;
 pub mod expected_switch;
 pub mod extension_service;
 pub mod firmware;
+pub mod hardware_dispatch;
 pub mod hardware_info;
 pub mod health;
 pub mod host_machine_update;

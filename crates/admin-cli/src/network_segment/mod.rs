@@ -15,6 +15,7 @@
  * limitations under the License.
  */
 
+mod add_prefix;
 mod attach_vpc;
 mod create;
 mod delete;
@@ -35,6 +36,8 @@ use crate::cfg::dispatch::Dispatch;
 pub(crate) enum Cmd {
     #[clap(about = "Display Network Segment information")]
     Show(show::Args),
+    #[clap(about = "Append the missing address family to an existing Underlay segment")]
+    AddPrefix(add_prefix::Args),
     #[clap(about = "Attach Network Segment to VPC")]
     AttachVpc(attach_vpc::Args),
     #[clap(about = "Delete Network Segment")]

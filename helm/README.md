@@ -12,7 +12,7 @@ The chart is designed for production environments where NICo manages the full li
 
 | #  | Subchart | Description |
 |----|----------|-------------|
-| 1  | **nico-api** | Core API server (gRPC + REST). Manages machines, provisioning, networking, and firmware. Requires PostgreSQL and Vault. |
+| 1  | **nico-api** | Core API server (gRPC + REST). Manages machines, provisioning, networking, and firmware. Requires PostgreSQL and, unless `nico-api.vault.enabled` is `false`, Vault. |
 | 2  | **nico-bmc-proxy** | Authenticating proxy for connecting to BMCs over HTTPS (Redfish). Required for DPS-based power provisioning. |
 | 3  | **nico-dhcp** | Kea DHCP server for bare-metal PXE boot and IP assignment. |
 | 4  | **nico-dns** | Authoritative DNS server (StatefulSet) for managed machines and VPCs. |
@@ -29,11 +29,11 @@ The chart is designed for production environments where NICo manages the full li
 
 - **Kubernetes** 1.27+
 - **Helm** 3.12+
-- **cert-manager** with a `ClusterIssuer` configured (default issuer name: `vault-nico-issuer`)
-- **HashiCorp Vault** for PKI certificate issuance and, by default, secret storage. NICo can keep its managed credentials in Postgres instead; see [Secrets Storage](../docs/configuration/secrets-storage.md).
+- **cert-manager** with a `ClusterIssuer` configured (default issuer name: `vault-nico-issuer`; a site without Vault uses a CA issuer such as the reference installation's `site-issuer`)
+- **HashiCorp Vault**, by default, for PKI certificate issuance and secret storage. NICo can keep its managed credentials in Postgres instead (refer to [Secrets Storage](../docs/configuration/secrets-storage.md)), and a site that also issues certificates through a cert-manager CA issuer can run without Vault; refer to [Running without Vault](#running-without-vault).
 - **PostgreSQL** (SSL-enabled) for the `nico-api` database backend
 - **Prometheus Operator CRDs** if you enable `ServiceMonitor` resources
-- **Required Kubernetes Secrets and ConfigMaps** (Vault tokens, database credentials, SSO secrets, etc.)
+- **Required Kubernetes Secrets and ConfigMaps** (Vault tokens when Vault is used, database credentials, SSO secrets, etc.)
 
 For the full list of required secrets, ConfigMaps, and infrastructure setup steps, see [PREREQUISITES.md](./PREREQUISITES.md).
 
@@ -69,11 +69,40 @@ Top-level `global:` values are automatically passed to all subcharts.
 | `global.certificate.renewBefore` | Renew certificates before expiry | `360h0m0s` |
 | `global.certificate.privateKey.algorithm` | Certificate private key algorithm | `ECDSA` |
 | `global.certificate.privateKey.size` | Certificate private key size | `384` |
-| `global.certificate.issuerRef.name` | cert-manager ClusterIssuer name | `vault-nico-issuer` |
+| `global.certificate.issuerRef.name` | cert-manager ClusterIssuer name (`site-issuer` on a site without Vault) | `vault-nico-issuer` |
 | `global.certificate.issuerRef.kind` | cert-manager issuer kind | `ClusterIssuer` |
 | `global.certificate.issuerRef.group` | cert-manager issuer API group | `cert-manager.io` |
 | `global.spiffe.trustDomain` | SPIFFE trust domain for mTLS | `nico.local` |
 | `global.labels` | Common labels applied to all resources | See `values.yaml` |
+
+### Running without Vault
+
+The `nico-api.vault.enabled` value (default `true`) controls whether the
+`nico-api` Deployment takes its Vault connection from the cluster. With `false`, the chart
+renders none of the `VAULT_*` environment variables (the AppRole, token, and
+`vault-cluster-info` references under `nico-api.envFrom`) and rejects a
+non-empty `nico-api.vaultClusterInfo` at render time with
+`nico-api.vaultClusterInfo is set but nico-api.vault.enabled is false: remove vaultClusterInfo or set vault.enabled=true`.
+Set it to `false` only when `nico-api` needs no Vault:
+
+- The `[secrets]` section in the site configuration keeps credentials in
+  Postgres, with no `vault` backend, writer, or `import_from`, and no `transit`
+  KEK provider.
+- Both `global.certificate.useCertManager` and `global.certificate.useCertManagerUfm`
+  are `true`, so machine and UFM certificates come from cert-manager
+  `CertificateRequest` resources against `nico-api.machineCertificates.issuerRef`
+  (default `site-issuer`) instead of Vault PKI.
+- The `global.certificate.issuerRef.name` value, and every `issuerRef` that
+  overrides it, names a cert-manager issuer that does not sign through Vault,
+  such as the reference installation's `site-issuer` CA issuer.
+
+If the site configuration still needs Vault, `nico-api` fails at startup and
+names the setting; refer to
+[How It Works](../docs/configuration/secrets-storage.md#how-it-works). A
+`Certificate` that still references an absent `vault-nico-issuer` is never
+issued, so its pod does not start. The reference installer sets all of this
+with `setup.sh --skip-vault`; refer to
+[Installing without Vault](../helm-prereqs/README.md#installing-without-vault).
 
 ### NVSwitch mTLS Certificates
 
@@ -476,7 +505,7 @@ set `alternatePort: 0` to work around it.
 
 ```text
                          +-----------------+
-                         |    nico-api     |  <-- PostgreSQL, Vault
+                         |    nico-api     |  <-- PostgreSQL, Vault (optional)
                          +--------+--------+
                                   |
           +-----------+-----------+-----------+-----------+
@@ -488,7 +517,7 @@ set `alternatePort: 0` to work around it.
      (PXE boot)            (OS install)
 ```
 
-All services that communicate with `nico-api` use mTLS via SPIFFE-based certificates issued by cert-manager and backed by Vault PKI.
+All services that communicate with `nico-api` use mTLS via SPIFFE-based certificates issued by cert-manager through the configured ClusterIssuer: Vault PKI (`vault-nico-issuer`) by default, or a CA issuer such as `site-issuer` on a site without Vault.
 
 ## Examples
 

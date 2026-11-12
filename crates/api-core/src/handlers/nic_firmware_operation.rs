@@ -8,6 +8,7 @@
 
 use carbide_libmlx_model::device::identity::MlxDeviceSelector;
 use carbide_libmlx_model::device::info::MlxDeviceInfo;
+use carbide_libmlx_model::firmware::FirmwareDeliveryMode;
 use carbide_libmlx_model::firmware::operation::FirmwareOperation;
 use carbide_uuid::machine::{HostMachineId, MachineId};
 use db::ConditionalWrite;
@@ -31,12 +32,16 @@ use crate::{CarbideError, CarbideResult};
 /// recorded machine failures. When false, updates become observations and a
 /// pending unlock change yields no action. Status reads and restoration of the
 /// original lockdown policy remain permitted.
+/// SiteCache firmware delivery requires the polling Scout's capability;
+/// unsupported polls are rejected without changing saved progress. Inventory
+/// and restoration do not depend on that transport support.
 pub(super) async fn control_action(
     api: &Api,
     host: HostMachineId,
     version: config_version::ConfigVersion,
     operation: &NicFirmwareOperation,
     submission_permitted: bool,
+    site_cache_supported: bool,
 ) -> CarbideResult<fac::Action> {
     operation.validate().map_err(|error| {
         CarbideError::internal(format!("invalid persisted NIC firmware operation: {error}"))
@@ -49,6 +54,19 @@ pub(super) async fn control_action(
     let Some(target) = operation.current_target() else {
         return Ok(fac::Action::noop());
     };
+    if operation.delivery_mode == FirmwareDeliveryMode::SiteCache
+        && !site_cache_supported
+        && matches!(
+            operation.phase,
+            NicFirmwarePhase::ObservingSupervisor { .. }
+                | NicFirmwarePhase::Unlocking { .. }
+                | NicFirmwarePhase::UpdatingFirmware { .. }
+        )
+    {
+        return Err(CarbideError::FailedPrecondition(
+            "scout does not support the saved NIC firmware SiteCache delivery mode; upgrade scout before continuing".into(),
+        ));
+    }
     let command = match operation.phase {
         NicFirmwarePhase::Unlocking { .. } | NicFirmwarePhase::RestoringLockdown { .. } => {
             if operation.lockdown.result.is_some()
@@ -141,6 +159,7 @@ pub(super) async fn control_action(
                     profile: Some(frozen_profile(&operation.options, target)),
                     expected_digests: Some(frozen_digests(target)),
                     expected_device: Some(target.selector.clone().into()),
+                    delivery_mode: pb::FirmwareDeliveryMode::from(operation.delivery_mode).into(),
                 })
             }
         }
@@ -166,6 +185,7 @@ fn observe_request(
         profile: Some(frozen_profile(&operation.options, target)),
         expected_digests: Some(frozen_digests(target)),
         expected_device: Some(target.selector.clone().into()),
+        delivery_mode: pb::FirmwareDeliveryMode::from(operation.delivery_mode).into(),
     }
 }
 

@@ -33,6 +33,8 @@ service Forge {
   // the RBAC middleware rejects unknown RPC names with HTTP 403 before gRPC
   // dispatch, so Unimplemented is never reached on those servers.
   rpc GetRmsVersion(GetRmsVersionRequest) returns (GetRmsVersionResponse);
+  // Admin-only inspection of backend jobs; normal component callers query by device.
+  rpc GetRmsJobStatus(GetRmsJobStatusRequest) returns (GetRmsJobStatusResponse);
 
   // Stream recent and live machine console output.
   rpc StreamConsoleLogs(console_log.StreamConsoleLogsRequest)
@@ -68,13 +70,16 @@ service Forge {
   // allocation. Success means Core committed, not that the dataplane converged.
   rpc ChangeVpcRoutingProfile(VpcChangeRoutingProfileRequest) returns (VpcRoutingState);
   // Operator cleanup after independently verifying that no DPU or fabric route
-  // still uses the retained VNI. Core does not verify dataplane convergence.
+  // still uses the retained VNI. Integrated release completes in the VPC
+  // transaction. Remote success follows provider release confirmation; an error
+  // can follow committed release intent and an advanced VPC version.
+  // Core does not verify dataplane convergence.
   rpc ReleaseVpcInactiveVni(VpcReleaseInactiveVniRequest) returns (VpcReleaseInactiveVniResult);
   rpc UpdateVpcVirtualization(VpcUpdateVirtualizationRequest) returns (VpcUpdateVirtualizationResult);
   // Deletion does not release a retained VNI implicitly. Call
   // ReleaseVpcInactiveVni after verifying convergence before deleting the VPC.
   // Retained or inconsistent owned allocations cause FailedPrecondition, as do
-  // live DNS domains owned by this VPC. Deleted domains do not block deletion.
+  // unfinished remote cancellation or release.
   rpc DeleteVpc(VpcDeletionRequest) returns (VpcDeletionResult);
   rpc FindVpcIds(VpcSearchFilter) returns (VpcIdList);
   rpc FindVpcsByIds(VpcsByIdsRequest) returns (VpcList);
@@ -119,6 +124,20 @@ service Forge {
   rpc FindNetworkSegmentIds(NetworkSegmentSearchFilter) returns (NetworkSegmentIdList);
   rpc FindNetworkSegmentsByIds(NetworkSegmentsByIdsRequest) returns (NetworkSegmentList);
   rpc CreateNetworkSegment(NetworkSegmentCreationRequest) returns (NetworkSegment);
+  // Admin-only: append the missing family to a live, Ready, unattached Underlay
+  // segment with one prefix. Matching any stored same-family prefix and settings
+  // returns the current segment without a write; different same-family settings
+  // fail with FAILED_PRECONDITION. Existing prefixes, IDs, addresses, policy and
+  // lifecycle are unchanged; the stored initial network_def is not modified.
+  // Existing SLAAC inference policy also applies to the added prefix.
+  // Invalid input, overlap with any NetworkPrefix or VPC-scoped VpcPrefix, and
+  // reused relay selectors return INVALID_ARGUMENT. A global VpcPrefix parent
+  // may overlap an unattached Underlay, as with initial network creation.
+  // Unknown segment IDs return NOT_FOUND; unsupported targets return
+  // FAILED_PRECONDITION. Success commits the prefix, version and reverse zone
+  // together; a zone is created only for zone-boundary-aligned prefixes.
+  // It does not configure site routing, router advertisements or DHCP relays.
+  rpc AddNetworkSegmentPrefix(AddNetworkSegmentPrefixRequest) returns (NetworkSegment);
   rpc AttachNetworkSegmentToVpc(AttachNetworkSegmentToVpcRequest) returns (NetworkSegment);
   rpc DeleteNetworkSegment(NetworkSegmentDeletionRequest) returns (NetworkSegmentDeletionResult);
   // TODO: This functionality should get integrated into NetworkSegmentSearchFilter
@@ -264,7 +283,13 @@ service Forge {
   rpc InvokeInstancePower(InstancePowerRequest) returns (InstancePowerResult);
 
   rpc ForgeAgentControl(ForgeAgentControlRequest) returns (ForgeAgentControlResponse);
-  // PRIVILEGED: Creates a new machine from nothing
+  // PRIVILEGED: Creates a new machine from nothing.
+  // Loopback group admission can return FailedPrecondition when the group
+  // changed or is busy. A lock-unavailable database error during loopback
+  // attachment, or a rejected selected-host row/history check, returns
+  // Unavailable. These rejections roll back the complete entity transaction;
+  // retry discovery with a fresh request after contention clears. These checks
+  // do not bound earlier foreign-key waits or later attached-DPU state writes.
   rpc DiscoverMachine(MachineDiscoveryInfo) returns (MachineDiscoveryResult);
   rpc RenewMachineCertificate(MachineCertificateRenewRequest) returns (MachineCertificateResult);
   rpc DiscoveryCompleted(MachineDiscoveryCompletedRequest) returns (MachineDiscoveryCompletedResponse);
@@ -284,6 +309,9 @@ service Forge {
   rpc FindIpAddress(FindIpAddressRequest) returns (FindIpAddressResponse);
   rpc FindMachineIds(MachineSearchConfig) returns (common.MachineIdList);
   rpc FindMachinesByIds(MachinesByIdsRequest) returns (MachineList);
+  // Current host and DPU lifecycle states without full machine records.
+  // Query or state-decoding errors fail the entire request with INTERNAL.
+  rpc FindMachineStatesByIds(MachineStatesByIdsRequest) returns (MachineStateList);
   // Compact per-host state for monitoring: allocatability, update eligibility
   // and the explored firmware report, read from one database snapshot.
   rpc FindHostStatesByIds(HostStatesByIdsRequest) returns (HostStateList);
@@ -351,6 +379,9 @@ service Forge {
   rpc IsBmcInManagedHost(BmcEndpointRequest) returns (IsBmcInManagedHostResponse);
   // BmcCredentialStatus returns true if site explorer has the credentials to login to this BMC
   rpc BmcCredentialStatus(BmcEndpointRequest) returns (BmcCredentialStatusResponse);
+  // Returns the drivers this API server's rules select for a BMC from its
+  // latest exploration report, and the identity they were selected from
+  rpc FindBmcDriverSelection(BmcEndpointRequest) returns (BmcDriverSelection);
   // Explore an individual BMC and show the report
   // The results of this exploration call will not be persisted in the database
   rpc Explore(BmcEndpointRequest) returns (site_explorer.EndpointExplorationReport);
@@ -433,7 +464,16 @@ service Forge {
   // Inspects local and remote pools without treating unknown capacity as zero.
   rpc AdminInspectResourcePools(InspectResourcePoolsRequest) returns (InspectResourcePoolsResponse);
 
-  // Add capacity to a resource pool
+  // Add capacity to a resource pool.
+  // Adding IPv6 loopback capacity commits the pool before DPU backfill.
+  // Backfill makes up to three fresh attempts per DPU. If the reported failure
+  // is lock contention, the call returns Unavailable. Exhausted capacity returns
+  // ResourceExhausted; exhausted version conflicts or a vanished pool return
+  // FailedPrecondition; other database failures return Internal. Earlier DPU
+  // updates and pool growth remain committed after any backfill failure. The
+  // first DPU that exhausts its attempts supplies its last error, unless another
+  // non-retryable error ends the pass. Inspect current capacity and missing
+  // loopbacks before retrying the same growth request.
   rpc AdminGrowResourcePool(GrowResourcePoolRequest) returns (GrowResourcePoolResponse);
 
   // Update the Metadata of a Machine
@@ -969,7 +1009,8 @@ service Forge {
   // Remove a SKU assignemnt from a machine.  Must be in the Ready or SkuVerifyFailed states.
   // The machine will move to the WaitingForSkuAssignment state.
   rpc RemoveSkuAssociation(RemoveSkuRequest) returns (google.protobuf.Empty);
-  // Removes an unused SKU
+  // Removes an unused SKU. If the initial lookup finds no match, a request
+  // containing exactly one nonempty SKU ID returns `NOT_FOUND`.
   rpc DeleteSku(SkuIdList) returns (google.protobuf.Empty);
   rpc GetAllSkuIds(google.protobuf.Empty) returns (SkuIdList);
   rpc FindSkusByIds(SkusByIdsRequest) returns (SkuList);
@@ -1089,11 +1130,17 @@ service Forge {
 
   // SPDM attestation APIs start
   rpc TriggerMachineAttestation(SpdmMachineAttestationTriggerRequest) returns (SpdmMachineAttestationTriggerResponse);
-  rpc CancelMachineAttestation(common.MachineId) returns (google.protobuf.Empty);
+  // Records the latest waiver target, including for terminal jobs. Unfinished devices
+  // finish BMC cleanup before the override takes effect. Later fail or waive calls replace
+  // this request. Returns NOT_FOUND for an unknown job and INVALID_ARGUMENT for an invalid UUID.
+  rpc WaiveAttestation(common.UUID) returns (google.protobuf.Empty);
+  // Records the latest failure target with the same cleanup and replacement semantics.
+  rpc FailAttestation(common.UUID) returns (google.protobuf.Empty);
 
-  rpc ListAttestationMachines(SpdmListAttestationMachinesRequest) returns (SpdmListAttestationMachinesResponse);
-  rpc GetAttestationMachine(common.MachineId) returns (SpdmGetAttestationMachineResponse);
-
+  rpc ListAttestation(SpdmListAttestationRequest) returns (SpdmListAttestationResponse);
+  rpc GetAttestation(common.UUID) returns (SpdmGetAttestationResponse);
+  // Lists fleet predictions in pages or assesses one machine using current attesters.
+  rpc ListMachineAttestationStatuses(ListMachineAttestationStatusesRequest) returns (ListMachineAttestationStatusesResponse);
   // Attestation profiles APIs
   rpc CreateAttestationProfile(CreateAttestationProfileRequest) returns (AttestationProfile);
   rpc UpdateAttestationProfile(UpdateAttestationProfileRequest) returns (AttestationProfile);
@@ -1149,6 +1196,12 @@ service Forge {
   // interconnect with a scout agent listening via an open ScoutStream connection.
   //
   // MlxAdminProfileSync is used to sync an MlxConfigProfile to a given device.
+  // Reserves the managed host (including commands sent to an attached DPU).
+  // Pending hardware commands or admitted NIC firmware work reject this request
+  // with FAILED_PRECONDITION. A reserved-host reply wait expires after 30 minutes
+  // with DEADLINE_EXCEEDED; timeout or uncertain delivery retains the reservation.
+  // Unattached DPUs have no host reservation or added reply deadline. Do not retry
+  // unresolved work as a replacement command. Read-only requests remain available.
   rpc MlxAdminProfileSync(mlx_device.MlxAdminProfileSyncRequest) returns (mlx_device.MlxAdminProfileSyncResponse);
   // MlxAdminProfileShow shows the configuration of a specific MlxConfigProfile
   // loaded into nico-core-api.
@@ -1165,9 +1218,21 @@ service Forge {
   //
   // MlxAdminLockdownLock locks a Mellanox device, using whatever key is currently
   // managed internally within NICo.
+  // Reserves the managed host (including commands sent to an attached DPU).
+  // Pending hardware commands or admitted NIC firmware work reject this request
+  // with FAILED_PRECONDITION. A reserved-host reply wait expires after 30 minutes
+  // with DEADLINE_EXCEEDED; timeout or uncertain delivery retains the reservation.
+  // Unattached DPUs have no host reservation or added reply deadline. Do not retry
+  // unresolved work as a replacement command. Read-only requests remain available.
   rpc MlxAdminLockdownLock(mlx_device.MlxAdminLockdownLockRequest) returns (mlx_device.MlxAdminLockdownLockResponse);
   // MlxAdminLockdownUnlock unlocks a Mellanox device, using whatever key is currently
   // managed internally within NICo.
+  // Reserves the managed host (including commands sent to an attached DPU).
+  // Pending hardware commands or admitted NIC firmware work reject this request
+  // with FAILED_PRECONDITION. A reserved-host reply wait expires after 30 minutes
+  // with DEADLINE_EXCEEDED; timeout or uncertain delivery retains the reservation.
+  // Unattached DPUs have no host reservation or added reply deadline. Do not retry
+  // unresolved work as a replacement command. Read-only requests remain available.
   rpc MlxAdminLockdownUnlock(mlx_device.MlxAdminLockdownUnlockRequest) returns (mlx_device.MlxAdminLockdownUnlockResponse);
   // MlxAdminLockdownStatus returns the live lock status of a Mellanox device
   // by querying over an open ScoutStream connection.
@@ -1206,10 +1271,22 @@ service Forge {
   rpc MlxAdminConfigQuery(mlx_device.MlxAdminConfigQueryRequest) returns (mlx_device.MlxAdminConfigQueryResponse);
   // MlxAdminConfigSet is used to set one or more running mlxconfig
   // variable values for the provided target machine device.
+  // Reserves the managed host (including commands sent to an attached DPU).
+  // Pending hardware commands or admitted NIC firmware work reject this request
+  // with FAILED_PRECONDITION. A reserved-host reply wait expires after 30 minutes
+  // with DEADLINE_EXCEEDED; timeout or uncertain delivery retains the reservation.
+  // Unattached DPUs have no host reservation or added reply deadline. Do not retry
+  // unresolved work as a replacement command. Read-only requests remain available.
   rpc MlxAdminConfigSet(mlx_device.MlxAdminConfigSetRequest) returns (mlx_device.MlxAdminConfigSetResponse);
   // MlxAdminConfigSync is used to sync one or more running mlxconfig
   // variable values for the provided target machine device, reporting back
   // specifics of what changed.
+  // Reserves the managed host (including commands sent to an attached DPU).
+  // Pending hardware commands or admitted NIC firmware work reject this request
+  // with FAILED_PRECONDITION. A reserved-host reply wait expires after 30 minutes
+  // with DEADLINE_EXCEEDED; timeout or uncertain delivery retains the reservation.
+  // Unattached DPUs have no host reservation or added reply deadline. Do not retry
+  // unresolved work as a replacement command. Read-only requests remain available.
   rpc MlxAdminConfigSync(mlx_device.MlxAdminConfigSyncRequest) returns (mlx_device.MlxAdminConfigSyncResponse);
   // MlxAdminConfigSync is used to compare one or more running mlxconfig
   // variable values for the provided target machine device, reporting back
@@ -1279,6 +1356,31 @@ service Forge {
   // read budgets, whose expiry reports ReadFailed. This method never registers
   // devices, writes policy, or submits power operations.
   rpc GetComponentPowerDetails(GetComponentPowerDetailsRequest) returns (GetComponentPowerDetailsResponse);
+  // Reads installed inventory, existing effective defaults and current firmware
+  // work independently. Flow and ForgeAdminCLI may call this passive method.
+  // Database preparation has five seconds including acquisition and commit.
+  // After release, credentials, manifest fetches and all reads share thirty
+  // seconds. Earlier caller expiry wins, including time waiting for API admission.
+  // Within each request, up to eight public read workflows run concurrently.
+  // Preparation failure, including expiry, aborts the RPC with fixed INTERNAL.
+  // After preparation, completed sections survive peer failures; unfinished
+  // reads report DeadlineExceeded. Cancellation drops pending work. This never
+  // registers devices, writes tracking or advances updates.
+  rpc GetComponentFirmwareDetails(GetComponentFirmwareDetailsRequest) returns (GetComponentFirmwareDetailsResponse);
+  // Dispatch a reset directly, without scheduling state-controller maintenance.
+  // Valid devices proceed even when other targets cannot be resolved or accepted.
+  // The RMS backend supports SDN and NVOS factory reset on switches. SDN reset
+  // disrupts fabric traffic and restores SDN defaults without reinstalling NVOS.
+  // NVOS reset erases operating-system configuration and reboots the switch.
+  // SUCCESS means accepted and tracked, not completed. A submission error may
+  // follow dispatch: do not automatically resubmit.
+  rpc ComponentReset(ComponentResetRequest) returns (ComponentResetResponse);
+  // Observe the latest successfully recorded accepted reset for each device/action.
+  // A failed or unknown submission attempt may leave an earlier reference in place.
+  // References survive NICo restarts, but RMS job state may be lost on restart.
+  // Missing/unobservable jobs never imply completion. Terminal observations are
+  // not persisted.
+  rpc GetComponentResetStatus(GetComponentResetStatusRequest) returns (GetComponentResetStatusResponse);
   rpc ComponentConfigureSwitchCertificate(ComponentConfigureSwitchCertificateRequest) returns (ComponentConfigureSwitchCertificateResponse);
   rpc GetComponentInventory(GetComponentInventoryRequest) returns (GetComponentInventoryResponse);
   rpc UpdateComponentFirmware(UpdateComponentFirmwareRequest) returns (UpdateComponentFirmwareResponse);
@@ -1355,15 +1457,23 @@ message LifecycleStatus {
 }
 
 enum SpdmAttestationStatus{
+  option allow_alias = true;
   SPDM_ATT_IN_PROGRESS = 0;
-  SPDM_ATT_CANCELLED = 1;
+  // At least one device was waived, with no unfinished or failed devices.
+  SPDM_ATT_WAIVED = 1;
+  // Legacy spelling retained for source and schema compatibility.
+  SPDM_ATT_CANCELLED = 1 [deprecated = true];
   SPDM_ATT_PASSED = 2;
   SPDM_ATT_FAILED = 3;
 }
 
-message SpdmMachineAttestationStatus {
-  common.MachineId machine_id = 1;
+message SpdmAttestationJobStatus {
+  reserved 1;
+  reserved "machine_id";
   SpdmAttestationStatus attestation_status = 2;
+  common.UUID job_id = 3;
+  // Distinct machines this job affects.
+  repeated common.MachineId machine_ids = 4;
 }
 
 // Why one attestation scheduling attempt ended as it did.
@@ -1402,14 +1512,22 @@ message SpdmMachineAttestationTriggerResponse {
   // written for this machine's own class.
   bool used_any_fallback = 5;
   // Version of the profile that decided this call, absent when no profile
-  // applied. Scoped to this call: a later trigger replaces the machine's whole
-  // work set, so this is not a lasting claim about the attestation in flight.
+  // applied. Describes the policy used to select this job's devices.
   optional string profile_version = 6;
   // When the scheduled devices were written, absent unless something was
   // scheduled. Every device row this call wrote carries it, so a caller can
-  // tell whether its scheduling is still the live one or was replaced. The same
+  // correlate its scheduling with the stored device rows. The same
   // value is reported as SpdmAttestationDetails.started_at.
   optional google.protobuf.Timestamp started_at = 7;
+  // Present only when devices were scheduled. Use this ID to get or cancel the job.
+  common.UUID job_id = 8;
+}
+
+// Requested effective outcome after BMC evidence collection cleanup.
+enum SpdmCancellationTarget {
+  SPDM_CANCELLATION_TARGET_UNSPECIFIED = 0;
+  SPDM_CANCELLATION_TARGET_WAIVE = 1;
+  SPDM_CANCELLATION_TARGET_FAIL = 2;
 }
 
 message SpdmAttestationDetails{
@@ -1418,11 +1536,14 @@ message SpdmAttestationDetails{
   string state = 3;
 
   google.protobuf.Timestamp started_at = 7;
+  // Latest cancellation request time; legacy field name retained for wire compatibility.
   optional google.protobuf.Timestamp cancelled_at = 8;
   optional google.protobuf.Timestamp completed_at = 9;
+  // Latest operator target. Terminal stored state remains the historical attestation result.
+  optional SpdmCancellationTarget cancellation_target = 10;
 }
 
-message SpdmGetAttestationMachineResponse {
+message SpdmGetAttestationResponse {
   repeated SpdmAttestationDetails attestations_details = 1;
 }
 
@@ -1431,20 +1552,39 @@ message SpdmMachineAttestationTriggerRequest {
   uint32 redfish_timeout_secs = 2;
 }
 
-enum SpdmListAttestationMachinesRequestSelector {
+enum SpdmListAttestationRequestSelector {
+  option allow_alias = true;
+  reserved 1;
+  reserved "SPDM_LIST_UNSUCCESSFUL";
   SPDM_LIST_IN_PROGRESS = 0;
-  SPDM_LIST_UNSUCCESSFUL = 1;
+  SPDM_LIST_WAIVED = 2;
+  // Legacy spelling retained for source and schema compatibility.
+  SPDM_LIST_CANCELLED = 2 [deprecated = true];
+  SPDM_LIST_FAILED = 3;
+  SPDM_LIST_PASSED = 4;
 }
 
-message SpdmListAttestationMachinesRequest {
-  oneof variant {
-    common.MachineId machine_id = 1;
-    SpdmListAttestationMachinesRequestSelector selector = 2;
-  }
+// Lists retained jobs by aggregate status, ordered by ascending job UUID.
+// Pages are separate reads; concurrent status changes and retention can affect membership.
+message SpdmListAttestationRequest {
+  reserved 1;
+  reserved "machine_id";
+  // Omission selects in-progress jobs. Unknown enum values return INVALID_ARGUMENT.
+  SpdmListAttestationRequestSelector selector = 2;
+  // Maximum matching jobs to return. Zero uses RuntimeConfig.max_find_by_ids;
+  // larger values are capped at that setting, which defaults to 100.
+  uint32 page_size = 4;
+  // Empty for the first page; otherwise copy the preceding response's next_page_token.
+  // Tokens are opaque and bound to selector; keep it unchanged. Page size may change.
+  // Malformed tokens or a changed selector return INVALID_ARGUMENT.
+  string page_token = 5;
 }
 
-message SpdmListAttestationMachinesResponse {
-  repeated SpdmMachineAttestationStatus statuses = 1;
+message SpdmListAttestationResponse {
+  // Matching jobs in ascending UUID order; empty when no jobs match.
+  repeated SpdmAttestationJobStatus statuses = 1;
+  // Empty when no further matching jobs exist; otherwise pass it as page_token.
+  string next_page_token = 2;
 }
 
 // Attestation profiles: one policy per hardware class, naming which attesters
@@ -2206,6 +2346,41 @@ message PrefixFilterPolicyEntries {
   repeated PrefixFilterPolicyEntry values = 1;
 }
 
+// Prefix containment semantics for additional type-5 export route targets.
+// Zero defaults to GE independently of the prefix-search API's match enum.
+enum ExportPrefixMatchType {
+  // The configured prefix and all contained more-specific prefixes.
+  EXPORT_PREFIX_MATCH_TYPE_GE = 0;
+  // Contained prefixes through max_prefix_length (family width when omitted).
+  EXPORT_PREFIX_MATCH_TYPE_LE = 1;
+  // Only the configured prefix.
+  EXPORT_PREFIX_MATCH_TYPE_EXACT = 2;
+}
+
+// Adds targets to routes already eligible for type-5 export from this VPC.
+// Every matching entry contributes its targets. Order and duplicates do not change
+// routing behavior.
+// Each effective profile accepts at most 256 prefix/route-target pairs across both
+// address families. Repeated configured pairs also count.
+// This does not originate routes, authorize host announcements, or configure imports.
+message PrefixRouteTarget {
+  // Required IPv4 or IPv6 CIDR prefix; host bits are cleared during conversion.
+  string prefix = 1;
+  // Omission defaults to GE; unknown enum values are rejected.
+  ExportPrefixMatchType match_type = 2;
+  // Valid only with LE, from the configured prefix length through 32 or 128.
+  // Omission means the address-family width; explicit zero remains distinguishable.
+  optional uint32 max_prefix_length = 3;
+  // Required nonempty targets using the existing literal/symbolic RT contract.
+  // Stored definitions preserve vni_self; effective and DPU profiles resolve it.
+  repeated common.RouteTarget route_targets = 4;
+}
+
+// Presence-aware conditional export list: omission inherits; empty clears.
+message PrefixRouteTargets {
+  repeated PrefixRouteTarget values = 1;
+}
+
 // Routing-profile properties set directly on a VPC. Present properties
 // override its named routing profile; omitted properties inherit from it.
 // Route targets retain symbolic `vni_self` values in this stored definition.
@@ -2219,6 +2394,8 @@ message VpcRoutingProfileOverrides {
   optional bool tenant_leak_communities_accepted = 5;
   optional PrefixFilterPolicyEntries accepted_leaks_from_underlay = 6;
   optional PrefixFilterPolicyEntries allowed_anycast_prefixes = 7;
+  // Present lists replace inherited rules, including an empty list to clear them.
+  optional PrefixRouteTargets route_targets_on_exports_by_prefix = 8;
 }
 
 // The fully resolved routing profile applied to an FNN VPC. Unlike
@@ -2234,6 +2411,8 @@ message VpcEffectiveRoutingProfile {
   repeated PrefixFilterPolicyEntry allowed_anycast_prefixes = 7;
   bool internal = 8;
   uint32 access_tier = 9;
+  // Concrete conditional export targets, accumulated across all matching rules.
+  repeated PrefixRouteTarget route_targets_on_exports_by_prefix = 10;
 }
 
 message VpcConfig {
@@ -2328,7 +2507,11 @@ message VpcCreationRequest {
 
   // Desired ID for this VPC. If the ID is not provided, NICo will generate
   // a random ID.
-  // The VPC ID must be unique within the NICo site.
+  // The VPC ID must be unique within the NICo site, including soft-deleted
+  // VPCs whose rows remain stored.
+  // An existing ID found during admission fails ALREADY_EXISTS before
+  // allocation preparation. Concurrent insertion remains subject to uniqueness
+  // enforcement when the VPC is persisted.
   optional common.VpcId id = 6;
   Metadata metadata = 12;
 
@@ -3294,6 +3477,8 @@ message ExpectedRackGroupMember {
   string manufacturer = 2;
   // Non-blank external inventory identifier.
   string id = 3;
+  // Required in declarations; absent in legacy records. Zero is valid.
+  optional uint32 cartridge_index = 4;
 }
 
 message ExpectedRackGroupRequest {
@@ -3524,6 +3709,10 @@ message NetworkPrefix {
   // True when `free_ip_count_v2` was capped because the exact count exceeds
   // `2^64 - 1`.
   bool free_ip_count_saturated = 11;
+  // Output-only DHCPv6 relay link-address used to identify this prefix in relayed
+  // requests. Set by the initial TOML definition or AddNetworkSegmentPrefix;
+  // CreateNetworkSegment ignores this field.
+  optional string dhcpv6_link_address = 12;
 }
 
 message MachineState {
@@ -5398,6 +5587,12 @@ message SshRequest {
 }
 
 message CopyBfbToDpuRshimRequest {
+  // The DPU BMC IP must resolve to a machine interface. If endpoint_request.mac_address
+  // is supplied, it must match that interface; it does not override credential lookup.
+  // The resolved MAC is retained even when omitted, and rechecked before BFB copy
+  // and host power-off. Invalid requests do not queue recovery or pause remediation.
+  // A changed/missing target at execution fails recovery and releases the host pause.
+  // Legacy queued states without a retained MAC must be explicitly requeued.
   SshRequest ssh_request = 1;
   reserved 2;
   // Host BMC IP address. Required for the mandatory post-copy host
@@ -5629,6 +5824,10 @@ message ManagedHostNetworkConfigResponse {
   // not supply an inventory; present and empty means the deployment has zero
   // service slots.
   optional ServiceVpcSlotInventory service_vpc_slot_inventory = 122;
+
+  // Fingerprint of the last LLDP snapshot committed by Core. Agents send
+  // UNCHANGED only when this matches their current snapshot.
+  optional bytes accepted_lldp_snapshot_fingerprint = 123;
 }
 
 // Resolved network state for one service interface on the receiving DPU.
@@ -5665,6 +5864,14 @@ message ManagedHostServiceInterfaceConfig {
   string mac_address = 15;
   // Stable identity used to correlate this service interface across reconciliation.
   common.UUID internal_uuid = 16;
+  // DPU-local loopback shared by host and service ports in this VPC.
+  // Unlike ManagedHostNetworkConfig.loopback_ip, this address is not the DPU VXLAN VTEP.
+  // If present, must be one non-empty IPv4 or IPv6 address without CIDR notation.
+  // Omitted when fnn.use_vpc_vrf_loopback is false.
+  // Omission is valid. A rendered host port in this VPC can supply the loopback.
+  // The VPC has no loopback if no rendered port supplies one.
+  // Present host and service loopback values for the same VNI must match.
+  optional string tenant_vrf_loopback_ip = 17;
 }
 
 // Complete fixed service-slot inventory for one DPU deployment.
@@ -6247,6 +6454,12 @@ message ForgeAgentControlRequest {
   common.MachineId machine_id = 1;
   reserved 2;
   reserved "capabilities";
+  // This Scout can pass authenticated SiteCache delivery to the durable
+  // firmware supervisor. Omission is false. This advertises code support, not
+  // transport readiness. Unsupported SiteCache polls return FAILED_PRECONDITION
+  // without changing saved progress or selecting anonymous Direct delivery.
+  // Receipt observation and recovery do not require current download settings.
+  bool nic_firmware_site_cache_supported = 3;
 }
 
 message ForgeAgentControlResponse {
@@ -6411,6 +6624,10 @@ message ForgeAgentControlResponse {
     // Physical card this update is for, checked by the supervisor before any
     // mutation. Omission targets the PCI address alone.
     mlx_device.MlxDeviceSelector expected_device = 6;
+    // Frozen delivery choice. Omission retains Direct behavior. SiteCache
+    // requires the request's nic_firmware_site_cache_supported advertisement;
+    // Scout supplies its own Core client configuration only over the local UDS.
+    mlx_device.FirmwareDeliveryMode delivery_mode = 7;
   }
 
   // Read the receipt for an earlier MlxDeviceUpdateFirmware without submitting,
@@ -6425,6 +6642,9 @@ message ForgeAgentControlResponse {
     mlx_device.FirmwareFlasherProfile profile = 3;
     mlx_device.FirmwareArtifactDigests expected_digests = 4;
     mlx_device.MlxDeviceSelector expected_device = 5;
+    // Repeat the original delivery choice without requiring current credentials
+    // or downloading files merely to observe an existing receipt.
+    mlx_device.FirmwareDeliveryMode delivery_mode = 6;
   }
 
   // Read or change the lockdown state of one physical card for the controller
@@ -6702,6 +6922,10 @@ message DpuNetworkStatus {
   // LLDP neighbors this DPU sees, attached to the status push rather than sent
   // on its own RPC. Absent when the agent did not attempt a collection.
   optional LldpReport lldp = 18;
+  // Fingerprint of the current snapshot for UPDATED and UNCHANGED reports.
+  // Core validates it against the attached interfaces for UPDATED reports
+  // and against its accepted fingerprint for UNCHANGED reports.
+  optional bytes lldp_snapshot_fingerprint = 19;
 }
 
 message LastDhcpRequest {
@@ -7605,10 +7829,14 @@ message ExpectedHostNic {
   // On update, omission clears this guard.
   optional NetworkSegmentType network_segment_type = 7;
   // Machine endpoint that owns this interface. The role selects interface type
-  // and primary behavior only; every role accepts the same allocation policies
-  // and optional segment guard. On create, missing and Unspecified mean Host.
-  // On update, omission preserves the stored role while explicit Unspecified
-  // resets it to Host.
+  // and primary behavior. DpuLoopback instead reserves fixed_ip from the
+  // loopback resource pool using the DPU OS/admin MAC; only Fixed (or inferred
+  // Fixed) is supported and physical-interface settings are rejected.
+  // On create, missing and Unspecified mean Host.
+  // On update, omission preserves a matching stored physical-interface role.
+  // An omitted DpuLoopback role is preserved only when both its MAC and fixed_ip
+  // match the stored loopback; changing its address requires explicit DpuLoopback.
+  // Explicit Unspecified resets the role to Host.
   optional ExpectedInterfaceRole role = 8;
   // Optional allocation policy. On create, omission and explicit Unspecified
   // infer Fixed from `fixed_ip`. Without one, Host BMC infers Retained and every
@@ -7616,7 +7844,8 @@ message ExpectedHostNic {
   // matching stored policy while `fixed_ip` presence is unchanged; explicit
   // Unspecified resets to inference. New interfaces use create behavior.
   // Explicit Dynamic rejects `fixed_ip`. Explicit Fixed, or a DPU role that
-  // infers Fixed, requires `fixed_ip` inside a configured managed prefix. A
+  // infers Fixed, requires `fixed_ip` inside a configured managed prefix
+  // (DpuLoopback instead requires a non-auto-assign loopback pool address). A
   // legacy Host declaration, or an inferred Host BMC Fixed policy that omits
   // `network_segment_type`, may instead fall back to `static-assignments`; only
   // the legacy Host case leaves `network_segment_type` as a first-DHCP
@@ -7682,6 +7911,12 @@ message HostLifecycleProfile {
   // If true, do not lock down the server as part of host lifecycle management. If unset or false, preserve
   // the default behavior of locking down the server after configuring the BIOS.
   optional bool disable_lockdown = 1;
+  // If true, designate the machine to retain HBN config on boot even if NICo
+  // is unavailable. The machine must declare a DPU BMC and a DPU OS interface,
+  // and the host BMC and both DPU interfaces must then use a fixed or retained
+  // IP allocation. A machine whose dpu_policy attaches no DPU declares neither.
+  // If unset or false, the machine does not retain the configuration.
+  optional bool retain_hbn_config_on_boot = 2;
 }
 
 message ExpectedMachine {
@@ -7729,7 +7964,8 @@ message ExpectedMachine {
   // Unspecified resets it to AUTO. On replace-all, omission resets a
   // legacy-only row to AUTO but preserves an existing nested HostBmc policy.
   optional BmcIpAllocationType bmc_ip_allocation = 18;
-  // Marks host_nics as a complete replacement. This is needed because a
+  // Marks physical-interface entries in host_nics as a complete replacement;
+  // DpuLoopback entries follow replace_dpu_loopbacks below. This is needed because a
   // repeated protobuf field cannot distinguish an omitted list from an empty
   // list. New update clients set this when they intentionally supply
   // host_nics, including `[]`; older clients leave it false so an unknown
@@ -7739,6 +7975,14 @@ message ExpectedMachine {
   // name will be presented to the switches in LLDP responses and is potentially
   // used for cable validation, etc.
   optional string server_name = 20;
+  // Replace the DpuLoopback subset of host_nics, including clearing it when
+  // empty. False/omitted preserves stored loopbacks unless DpuLoopback entries
+  // are supplied, which also explicitly replace the subset. This preserves
+  // reservations across older clients' read-modify-write and replace-all.
+  // Create always persists supplied DpuLoopback entries regardless of this flag.
+  // On patch, this flag applies only when host_nics is selected in the update mask.
+  // 21-28 are used by the REST protobuf snapshot's additional inventory fields.
+  bool replace_dpu_loopbacks = 29;
 
   // WARNING: Following fields are not present in Core, but added directly in REST snapshot
   optional string name = 21;
@@ -8012,7 +8256,8 @@ message ConfigureNmxClusterActivity {
 }
 
 message PowerSequenceActivity {
-  // Per-activity configuration (extend as needed).
+  // Explicitly gracefully reboot all rack compute hosts before NMX-C configuration.
+  // Pending maintenance, instances, or ineligible hosts block the entire batch.
 }
 
 // A single maintenance activity with its per-activity configuration.
@@ -8028,13 +8273,14 @@ message MaintenanceActivityConfig {
 
 // Scope of an on-demand rack maintenance request: which devices to include
 // and which activities to run. When all three device-id lists are empty the
-// full rack is maintained. When the activities list is empty all activities
-// are run.
+// full rack is maintained. Empty activities select all non-power activities;
+// compute resets require an explicit PowerSequenceActivity.
 message RackMaintenanceScope {
   repeated string machine_ids = 1;
   repeated string switch_ids = 2;
   repeated string power_shelf_ids = 3;
-  // Which maintenance activities to run. Empty means all activities.
+  // Activities run in firmware, NVOS, power sequence, then NMX-C order.
+  // Empty selects all non-power activities; power sequence must be explicit.
   repeated MaintenanceActivityConfig activities = 4;
 }
 
@@ -8210,6 +8456,16 @@ message MachineValidationHeartbeatResponse {
 
 message IsBmcInManagedHostResponse {
   bool in_managed_host = 1;
+}
+
+// A BMC's driver selection. Every field is absent until site exploration
+// records the BMC's service root in its report.
+message BmcDriverSelection {
+  // The drivers by capability, the rule that chose each, the quirks, and the
+  // rules hash, as JSON.
+  optional string selection = 1;
+  // What the latest exploration report says about the BMC, as JSON.
+  optional string identity = 2;
 }
 
 message BmcCredentialStatusResponse {
@@ -8987,6 +9243,11 @@ message Sku {
   uint32 schema_version = 6;
   repeated common.MachineId associated_machine_ids = 7;
   optional string device_type = 8;
+  // Time the SKU was last modified. Set to the creation time on creation and
+  // advanced by UpdateSkuMetadata, ReplaceSku and ReplaceSkuComponents. Ignored
+  // on input. Unset for SKUs that predate update tracking or when the server
+  // predates this field.
+  optional google.protobuf.Timestamp updated = 9;
 }
 
 message SkuMachinePair {
@@ -10476,6 +10737,8 @@ message RoutingProfile {
   // IP prefixes that tenant hosts are allowed to announce to the DPU as
   // anycast routes. Accepts IPv4 and IPv6 CIDR prefixes.
   repeated PrefixFilterPolicyEntry allowed_anycast_prefixes = 7;
+  // Concrete additional targets on eligible type-5 exports; all matching rules apply.
+  repeated PrefixRouteTarget route_targets_on_exports_by_prefix = 8;
 }
 
 // ============================================================================
@@ -10710,6 +10973,9 @@ enum ComponentManagerStatusCode {
   COMPONENT_MANAGER_STATUS_CODE_NOT_FOUND = 3;
   COMPONENT_MANAGER_STATUS_CODE_ALREADY_EXISTS = 4;
   COMPONENT_MANAGER_STATUS_CODE_UNAVAILABLE = 5;
+  // A side effect may have started, or its outcome cannot be observed. Do not
+  // automatically retry the operation based on this result.
+  COMPONENT_MANAGER_STATUS_CODE_OUTCOME_UNKNOWN = 6;
 }
 
 message ComponentResult {
@@ -10917,8 +11183,8 @@ enum ComponentPowerActionOperation {
   COMPONENT_POWER_ACTION_OPERATION_POWER_ON = 1;
   // Power off the component; graceful identifies the saved shutdown mode.
   COMPONENT_POWER_ACTION_OPERATION_POWER_OFF = 2;
-  // Reset the component. The saved state cannot distinguish original restart
-  // and AC-cycle requests, so no original power-control variant is inferred.
+  // Restart the component. graceful=true identifies an explicit graceful host
+  // reboot. Legacy Reset records do not distinguish restart and AC-cycle requests.
   COMPONENT_POWER_ACTION_OPERATION_RESET = 3;
   // Reset a specific Redfish chassis through a compute tray's BMC.
   COMPONENT_POWER_ACTION_OPERATION_CHASSIS_RESET = 4;
@@ -10937,8 +11203,9 @@ message ComponentPowerAction {
   // Saved initiator, including an explicitly stored empty string. Absent only
   // when legacy active maintenance has no admitted request metadata.
   optional string initiator = 4;
-  // Present exactly for PowerOff. False means forced power off; true means
-  // graceful shutdown. Legacy operations without this flag default to false.
+  // Present for PowerOff (false: forced off, true: graceful shutdown) and for
+  // explicit graceful host reboots (operation Reset, true). Absent for legacy
+  // Reset records whose original restart mode was not preserved.
   optional bool graceful = 5;
   // Present exactly for ChassisReset; the recorded Redfish chassis identifier.
   optional string chassis_id = 6;
@@ -11021,6 +11288,92 @@ message ComponentConfigureSwitchCertificateRequest {
 
 message ComponentConfigureSwitchCertificateResponse {
   repeated ComponentResult results = 1;
+}
+
+// Reset operations supported by the component manager. Only SDN factory reset
+// and NVOS factory reset are implemented.
+enum ComponentResetAction {
+  COMPONENT_RESET_ACTION_UNSPECIFIED = 0;
+  // Reset the management controller on a compute, switch, or power shelf tray.
+  COMPONENT_RESET_ACTION_BMC_RESET = 1;
+  // Restore management-controller defaults on a compute, switch, or power shelf tray.
+  COMPONENT_RESET_ACTION_BMC_FACTORY_RESET = 2;
+  // Initiate NVOS factory reset and reboot the switch; switch targets only.
+  COMPONENT_RESET_ACTION_NVOS_FACTORY_RESET = 3;
+  // Restore switch SDN configuration to factory defaults; switch targets only.
+  COMPONENT_RESET_ACTION_SDN_FACTORY_RESET = 4;
+}
+
+message ComponentResetRequest {
+  // Required, non-empty explicit targets. Duplicates are InvalidArgument.
+  // Only switch IDs and switch BMC MACs are supported in this version. MACs can
+  // target expected inventory before ingestion; malformed MACs fail per device.
+  oneof target {
+    common.MachineIdList machine_ids = 1;
+    SwitchIdList switch_ids = 2;
+    PowerShelfIdList power_shelf_ids = 3;
+    MacAddressList compute_bmc_macs = 4;
+    MacAddressList switch_bmc_macs = 5;
+    MacAddressList power_shelf_pmc_macs = 6;
+  }
+  // Required; unspecified or unknown values are InvalidArgument.
+  ComponentResetAction action = 7;
+  // Optional NVL certificate-domain selector, only valid for SDN factory reset.
+  // Omission uses the RMS configured domain. This is not a DNS suffix; an
+  // explicitly empty or whitespace-only value is InvalidArgument.
+  optional string domain_name = 8;
+}
+
+message ComponentResetResponse {
+  // One result per requested device, in request order. SUCCESS means the reset
+  // was accepted and its reference recorded. OUTCOME_UNKNOWN means the reset may
+  // have started, including when RMS accepted it but NICo could not record its
+  // reference; do not automatically resubmit. INVALID_ARGUMENT means the target
+  // could not be prepared or RMS rejected it before dispatch. NOT_FOUND means the
+  // target or its credentials could not be resolved. A non-SUCCESS result leaves
+  // the previous recorded reference in place.
+  repeated ComponentResult results = 1;
+}
+
+message GetComponentResetStatusRequest {
+  // Required, non-empty explicit targets, with the same selection and duplicate
+  // rules as ComponentResetRequest. MAC status lookup requires no credentials.
+  oneof target {
+    common.MachineIdList machine_ids = 1;
+    SwitchIdList switch_ids = 2;
+    PowerShelfIdList power_shelf_ids = 3;
+    MacAddressList compute_bmc_macs = 4;
+    MacAddressList switch_bmc_macs = 5;
+    MacAddressList power_shelf_pmc_macs = 6;
+  }
+  // Required; selects the tracked reset of this action, not the latest action.
+  ComponentResetAction action = 7;
+}
+
+enum ComponentResetState {
+  COMPONENT_RESET_STATE_UNKNOWN = 0;
+  COMPONENT_RESET_STATE_QUEUED = 1;
+  COMPONENT_RESET_STATE_IN_PROGRESS = 2;
+  COMPONENT_RESET_STATE_COMPLETED = 3;
+  COMPONENT_RESET_STATE_FAILED = 4;
+}
+
+message ComponentResetStatus {
+  // Observation of the latest successfully recorded accepted reset reference,
+  // including per-device correlation and diagnostics. This may describe an
+  // earlier reset than a subsequent failed or unknown submission attempt.
+  // No reference is NOT_FOUND/UNKNOWN; it does not prove no reset occurred.
+  // A lost job or unknown backend execution state is OUTCOME_UNKNOWN/UNKNOWN, never
+  // completed. Transient observation failures return UNAVAILABLE/UNKNOWN and
+  // permit retrying the status query, not resubmitting the reset.
+  ComponentResult result = 1;
+  ComponentResetAction action = 2;
+  ComponentResetState state = 3;
+}
+
+message GetComponentResetStatusResponse {
+  // One status per requested device, in request order.
+  repeated ComponentResetStatus statuses = 1;
 }
 
 // --- Component firmware ---
@@ -11283,12 +11636,16 @@ enum OperatingSystemType {
 }
 
 // Identifies which machine endpoint owns an entry in `ExpectedMachine.host_nics`.
-// Each role accepts Dynamic, Fixed, and Retained allocation plus the optional
-// segment guard. The role only derives interface type and primary behavior.
+// Physical-interface roles accept Dynamic, Fixed, and Retained allocation plus
+// the optional segment guard, and derive interface type and primary behavior.
+// DpuLoopback accepts only Fixed allocation, explicit or inferred from fixed_ip,
+// and rejects physical-interface settings.
 //
 // On create, missing and `EXPECTED_INTERFACE_ROLE_UNSPECIFIED` mean Host. On
-// update, omission preserves the stored role, while explicit
-// `EXPECTED_INTERFACE_ROLE_UNSPECIFIED` resets it to Host. A Host BMC entry
+// update, omission preserves a matching physical-interface role. An omitted
+// DpuLoopback role is preserved only when both MAC and fixed_ip match the stored
+// loopback; changing its address requires explicit DpuLoopback. Explicit
+// `EXPECTED_INTERFACE_ROLE_UNSPECIFIED` resets the role to Host. A Host BMC entry
 // configures network allocation, while its identity remains on
 // `ExpectedMachine.bmc_mac_address`.
 enum ExpectedInterfaceRole {
@@ -11302,6 +11659,9 @@ enum ExpectedInterfaceRole {
   EXPECTED_INTERFACE_ROLE_DPU_BMC = 3;
   // Host Redfish/BMC interface. Never primary.
   EXPECTED_INTERFACE_ROLE_HOST_BMC = 4;
+  // Underlay loopback reservation identified by the DPU OS/admin MAC. Fixed
+  // allocation only, one fixed_ip per family. No physical interface is created.
+  EXPECTED_INTERFACE_ROLE_DPU_LOOPBACK = 5;
 }
 
 // Controls how an expected interface receives and retains its IP address.
@@ -11396,8 +11756,16 @@ message UpdateOperatingSystemRequest {
   optional string ipxe_script = 20;
   optional common.IpxeTemplateId ipxe_template_id = 22;
   optional IpxeTemplateParameters ipxe_template_parameters = 23;
+  // Omitted lists keep their stored values; present lists replace them, including empty lists.
+  // Caller-supplied cached_url values are ignored. An unchanged template, parameter list,
+  // and artifact definition (including cache_strategy) retain the site's stored cached URLs.
+  // Changing that definition clears the cached URLs and recomputes readiness: an uncached
+  // CACHED_ONLY artifact makes the OS PROVISIONING; otherwise it is READY.
+  // Use UpdateOperatingSystemCachableIpxeTemplateArtifacts to set or clear cached URLs.
   optional IpxeTemplateArtifacts ipxe_template_artifacts = 24;
-  optional string ipxe_template_definition_hash = 25; // if provided, used as-is; otherwise recomputed
+  // If provided, used as-is. Otherwise validate the effective definition and recompute
+  // its hash. Correcting a stored hash alone does not invalidate unchanged artifacts.
+  optional string ipxe_template_definition_hash = 25;
 }
 
 message DeleteOperatingSystemRequest {
@@ -11869,6 +12237,23 @@ enum DpuNvConfigProfile {
 // inactive VNI, and prevent attachment, peering, and routing changes through
 // cleanup. Unreachable consumers require retaining the allocation unless they
 // have been isolated. Core validates ownership, not dataplane convergence.
+// Integrated release completes in the VPC transaction; its cleanup wait returns
+// immediately.
+// Remote release intent and the advanced VPC version commit before waiting for
+// provider confirmation. Success confirms release; cancellation, timeout, or a
+// provider/database error during that wait does not roll back the committed
+// intent. Recovery finishes the original allocation's release. Keep the original
+// observation on retries, inspect GetVpcRoutingState, and wait for confirmed
+// cleanup before attempting another routing mutation.
+// Remote waits return CANCELLED on API shutdown. With either VNI pool remote,
+// acquisition, admission, and commit share a five-second SQL-phase budget.
+// Expiry returns DEADLINE_EXCEEDED. Remote SQL statements also have a five-second
+// maximum, preserving shorter operator limits. A statement timeout can return
+// INTERNAL before the phase deadline. Integrated keeps its database/session limits.
+// After commit, remote provider confirmation has a separate 30-second budget.
+// Expiry returns DEADLINE_EXCEEDED; provider unavailability returns UNAVAILABLE,
+// and database or invalid-record failures return INTERNAL. These errors after
+// commit leave release intent recoverable.
 message VpcReleaseInactiveVniRequest {
   // Required VPC whose inactive allocation will be released.
   common.VpcId id = 1;
@@ -11884,7 +12269,10 @@ message VpcReleaseInactiveVniRequest {
 }
 
 message VpcReleaseInactiveVniResult {
-  // Authoritative VPC with its advanced version after cleanup committed.
+  // VPC snapshot and advanced version committed with Integrated release or
+  // remote release intent. Remote success confirms provider release; another
+  // mutation during confirmation can make this snapshot older than the current
+  // VPC.
   Vpc vpc = 1;
   // Exact inactive allocation released by this operation.
   uint32 released_inactive_vni = 2;
@@ -11901,7 +12289,11 @@ message VpcRoutingStateRequest {
 // Supports any virtualization type with one owned allocation matching its
 // active VNI and at most one distinct allocation in the other pool. Missing,
 // duplicate, or inconsistent ownership fails instead of reporting no retained
-// allocation. VPCs without pool ownership (including configured admin VPCs)
+// allocation. One original remote assignment awaiting release confirmation is
+// reported as retained; this response does not distinguish it from an assignment
+// whose release has not started. Unattached pending/cancelling requests are
+// excluded. Routing mutations still reject unfinished cancellation or release.
+// VPCs without pool ownership (including configured admin VPCs)
 // fail FAILED_PRECONDITION. Pool values that cannot be parsed as signed 32-bit
 // integers fail INTERNAL; parsed negative values fail FAILED_PRECONDITION.
 // This is not an effective routing profile or evidence of DPU/fabric convergence;
@@ -11941,14 +12333,28 @@ message VpcRetainedVniAllocation {
 // separate operator action.
 //
 // Requires FNN configuration, named source/destination profiles, distinct
-// nonoverlapping materialized pools, and VNIs in 1..16777215. Site-global VNIs,
-// substantive VPC/interface routing overrides, and tenant-managed SitePrefix
-// attachments are unsupported. Empty override reset objects are allowed.
+// nonoverlapping pool membership, and VNIs in 1..16777215. Integrated membership
+// uses persisted inventory; remote membership uses acknowledged eligibility.
+// Site-global VNIs, substantive VPC/interface routing overrides, and
+// tenant-managed SitePrefix attachments are unsupported. Empty override reset
+// objects are allowed.
 // Same-polarity changes and a destination pool already holding the active VNI
 // are rejected. Unsupported configurations and inconsistent ownership fail
 // FAILED_PRECONDITION; missing profiles/VPCs fail NOT_FOUND; automatic allocation
-// from an exhausted pool fails RESOURCE_EXHAUSTED. Rejected requests commit
-// no changes.
+// from an exhausted pool fails RESOURCE_EXHAUSTED. Unfinished cancellation or
+// release fails FAILED_PRECONDITION. Updates rejected before VPC commit preserve
+// configuration and the active assignment. An unused remote reservation can
+// remain pending cancellation until recovery confirms cleanup. A lost commit
+// response leaves VPC commit status uncertain; inspect state using the original
+// observation.
+// API shutdown returns CANCELLED. With either VNI pool remote, each SQL phase
+// (acquisition through commit) has a five-second budget; expiry returns
+// DEADLINE_EXCEEDED. Remote SQL statements also have a five-second maximum,
+// preserving shorter operator limits; either bound can fire first, and statement
+// timeout returns INTERNAL. Integrated keeps its database/session limits.
+// Provider unavailability returns UNAVAILABLE; provider deadlines return
+// DEADLINE_EXCEEDED. Other provider rejections follow Core's provider-error
+// mapping, and invalid saved assignments or database failures return INTERNAL.
 //
 // Preserves the VPC ID, prefixes, instances, addresses, NSGs, metadata, and
 // creation-time requested VNI. External routing does not supply public
@@ -11964,8 +12370,8 @@ message VpcChangeRoutingProfileRequest {
   // Required live VPC ID. Omission fails INVALID_ARGUMENT.
   common.VpcId id = 1;
   // Required version from the original observation; missing/malformed values
-  // fail INVALID_ARGUMENT and stale versions fail FAILED_PRECONDITION. Keep this exact
-  // version on retries. A lost response leaves commit status unknown: inspect
+  // fail INVALID_ARGUMENT and stale versions fail FAILED_PRECONDITION. Keep
+  // this exact version on retries. A lost response leaves commit status unknown: inspect
   // GetVpcRoutingState and never automatically substitute a fresh version.
   optional string if_version_match = 2;
   // Required nonempty configuration-defined destination name, not a closed
@@ -11975,9 +12381,12 @@ message VpcChangeRoutingProfileRequest {
   // otherwise allocates automatically. A retained destination must match an
   // explicit request; a different value fails FAILED_PRECONDITION even if free.
   // Without a retained destination, the requested value must be a free
-  // materialized destination-pool entry, regardless of its auto_assign flag.
-  // Missing or occupied entries and the active VNI fail FAILED_PRECONDITION
-  // without falling back. Zero and values above 16777215 fail INVALID_ARGUMENT.
+  // eligible destination-pool value from either assignment partition. Integrated
+  // uses persisted inventory; remote uses its accepted eligibility revision.
+  // Integrated missing or occupied values and the active VNI fail
+  // FAILED_PRECONDITION without falling back. Remote rejection follows the
+  // provider contract and Core's error mapping; it never falls back to another
+  // value or backend. Zero and values above 16777215 fail INVALID_ARGUMENT.
   // Use only when every serving Core supports this field: older Core ignores
   // it and may choose another VNI. Verify the returned profile and active VNI;
   // a mismatched or lost response does not undo a committed change.
@@ -12048,6 +12457,7 @@ message PatchExpectedMachineRequest {
   // default_pause_ingestion_and_poweron, bmc_retain_credentials, dpu_mode,
   // bmc_ip_address, bmc_ip_allocation, host_nics,
   // host_lifecycle_profile.disable_lockdown,
+  // host_lifecycle_profile.retain_hbn_config_on_boot,
   // metadata.name, metadata.description, metadata.labels.
   //
   // Unselected values are ignored. Selected values replace the stored field,
@@ -12055,7 +12465,8 @@ message PatchExpectedMachineRequest {
   // A selected `bmc_ip_address` must be present: an empty string clears it,
   // otherwise it must parse as IPv4 or IPv6. Selected optional booleans and
   // enums must be present. False disables the selected setting; for
-  // `disable_lockdown`, it restores lockdown. `DPU_MODE_UNSPECIFIED` resets to
+  // `disable_lockdown`, it restores lockdown; for `retain_hbn_config_on_boot`, it removes the
+  // retain-hbn-config-on-boot designation. `DPU_MODE_UNSPECIFIED` resets to
   // site inheritance. Selecting only `bmc_ip_address` preserves the merged
   // allocation policy; an address incompatible with that policy is rejected.
   // Select `bmc_ip_allocation` with `BMC_IP_ALLOCATION_TYPE_UNSPECIFIED` to
@@ -12064,12 +12475,18 @@ message PatchExpectedMachineRequest {
   // Selecting Dynamic or Retained allocation clears a stored fixed address;
   // selecting a nonempty BMC address with either policy is invalid.
   //
-  // Selecting `host_nics` replaces the entire list, including an empty list.
+  // Selecting `host_nics` replaces the physical-interface entries, including an
+  // empty list. DpuLoopback entries follow the separate replacement rule below.
   // Matched interfaces retain omitted roles and allocation policies under
   // `ExpectedHostNic`'s update rules; explicit Unspecified resets them.
   // Selected top-level `bmc_ip_address` and `bmc_ip_allocation` override the
   // nested Host BMC values. The legacy `replace_host_nics` flag is ignored;
   // only the mask selects interface replacement.
+  //
+  // When host_nics is selected, replace_dpu_loopbacks explicitly replaces its
+  // loopback subset, including clearing it when empty. Without this signal or
+  // any supplied DpuLoopback entries, stored loopbacks are preserved for older
+  // clients. The flag has no effect when host_nics is not selected.
   //
   // A selected `chassis_serial_number` must contain 4-32 ASCII letters,
   // digits, hyphens, or underscores. Selected `fallback_dpu_serial_numbers`
@@ -12607,6 +13024,86 @@ message GetDesiredNicFirmwareResponse {
   repeated string warnings = 3;
 }
 
+// Lists either fleet predictions or a definitive assessment of one machine.
+// The target must be supplied; an omitted target returns INVALID_ARGUMENT.
+message ListMachineAttestationStatusesRequest {
+  oneof target {
+    // Database-only predictions, with filtering and pagination.
+    SpdmMachineAttestationFleetRequest fleet = 4;
+    // Read-only assessment using the current profile and BMC component inventory.
+    SpdmMachineAttestationMachineRequest machine = 5;
+  }
+}
+
+// Each page is ordered by ascending machine ID. Inventory and externally triggered jobs
+// are not consulted. Pages are separate reads: concurrent changes can affect membership.
+message SpdmMachineAttestationFleetRequest {
+  // Omission includes all machines of the selected type, including those without a retained controller job.
+  // A supplied status excludes machines without such a job. Unknown enum values are rejected.
+  optional SpdmAttestationStatus attestation_status = 1;
+  // Maximum matching records to return. Zero uses RuntimeConfig.max_find_by_ids;
+  // larger values are capped at that setting. This setting defaults to 100.
+  uint32 page_size = 2;
+  // Empty for the first page; otherwise copy the preceding response's next_page_token.
+  // Tokens are opaque and bound to the status and machine_type filters; keep both unchanged.
+  // Malformed tokens or changed filters return INVALID_ARGUMENT. Page size may change.
+  string page_token = 3;
+  // Omission includes every machine type. HOST selects discovered hosts, excluding predicted hosts;
+  // DPU selects DPUs. UNKNOWN, POWER_SHELF and unrecognised values return INVALID_ARGUMENT.
+  // Applied before pagination and combined with attestation_status.
+  optional MachineType machine_type = 4;
+}
+
+message SpdmMachineAttestationMachineRequest {
+  // Required. Unknown machines return NOT_FOUND; omission returns INVALID_ARGUMENT.
+  common.MachineId machine_id = 1;
+  // Omission uses 30 seconds. Explicit zero returns INVALID_ARGUMENT.
+  // Bounds the entire assessment, including profile lookup, Redfish discovery and status reads.
+  // Expiry returns DEADLINE_EXCEEDED. BMC errors are reported without a prediction fallback.
+  optional uint32 redfish_timeout_secs = 2;
+}
+
+// Why current policy and inventory selected this set of attesters. This is a read-only
+// decision: no outcome creates, cancels, or modifies attestation jobs.
+enum SpdmAttesterSelectionStatus {
+  SPDM_ATTESTER_SELECTION_STATUS_UNSPECIFIED = 0;
+  // All selection requirements were satisfied and at least one attester was selected.
+  SPDM_ATTESTER_SELECTION_STATUS_SELECTED = 1;
+  // Some allowlist patterns matched nothing. Status covers only the selected subset.
+  SPDM_ATTESTER_SELECTION_STATUS_PARTIALLY_SATISFIED = 2;
+  // Site-wide SPDM or the resolved profile disables attestation; the BMC is not contacted.
+  SPDM_ATTESTER_SELECTION_STATUS_DISABLED = 3;
+  SPDM_ATTESTER_SELECTION_STATUS_NO_ATTESTERS_FOUND = 4;
+  SPDM_ATTESTER_SELECTION_STATUS_POLICY_MATCHED_NOTHING = 5;
+  SPDM_ATTESTER_SELECTION_STATUS_CLASS_NOT_RECORDED = 6;
+  SPDM_ATTESTER_SELECTION_STATUS_NO_PROFILE = 7;
+}
+
+message SpdmMachineAttestationStatus {
+  // Always present: the machine whose status is reported.
+  common.MachineId machine_id = 1;
+  // Unfinished takes precedence over failed, waived, then all-passed.
+  // Fleet: aggregate this machine's devices in its latest retained controller job;
+  // absent when no controller job is retained (unknown).
+  // Machine: aggregate each currently selected device's latest result, including external
+  // jobs, by started_at DESC then job_id DESC. Missing device results mean in-progress.
+  // Absent when selection is empty; inspect attester_selection_status for the reason.
+  optional SpdmAttestationStatus attestation_status = 2;
+  // Present and non-UNSPECIFIED only for a definitive single-machine assessment.
+  // Partial coverage is explicit even when the selected subset's aggregate is passed.
+  optional SpdmAttesterSelectionStatus attester_selection_status = 5;
+}
+
+message ListMachineAttestationStatusesResponse {
+  // Fleet: matching machines ordered by ID, at most the effective page size.
+  // No matches produces an empty list and empty next_page_token.
+  // Machine: exactly one definitive assessment, with attester_selection_status.
+  repeated SpdmMachineAttestationStatus statuses = 1;
+  // Fleet continuation, strictly after the last returned ID. Empty means no further matches.
+  // Always empty in machine mode. This does not preserve a snapshot across requests.
+  string next_page_token = 2;
+}
+
 // Administrator-managed desired inventory, separate from an NMX-C observed domain.
 // Membership and attributes are immutable; delete and recreate to change them.
 message ExpectedNvLinkDomain {
@@ -13008,6 +13505,8 @@ message NamedRoutingProfileConfig {
   optional uint32 access_tier = 9;
   // Profile opt-in to tenant prefix reuse; alone does not establish eligibility.
   bool tenant_prefix_overlap_eligible = 10;
+  // Unresolved conditional exports; omission remains distinct from an empty list.
+  PrefixRouteTargets route_targets_on_exports_by_prefix = 11;
 }
 
 message NamedRoutingProfileList {
@@ -13026,4 +13525,541 @@ message ComponentCredentialOverrides {
   optional UsernamePassword bmc = 1;
   // Switch NVOS credentials. Ignored for compute and power-shelf targets.
   optional UsernamePassword nvos = 2;
+}
+
+// --- RMS job diagnostics ---
+
+// Inspect one RMS job, optionally including its child records.
+message GetRmsJobStatusRequest {
+  // Required, non-whitespace backend job identifier.
+  string job_id = 1;
+  // Defaults to false. When true, RMS also returns child job records.
+  bool include_child_job_states = 2;
+}
+
+message GetRmsJobStatusResponse {
+  // RMS ordering is preserved; the queried parent is first when present.
+  repeated RmsJobStatus job_states = 1;
+}
+
+enum RmsJobExecutionState {
+  RMS_JOB_EXECUTION_STATE_UNSPECIFIED = 0;
+  RMS_JOB_EXECUTION_STATE_QUEUED = 1;
+  RMS_JOB_EXECUTION_STATE_RUNNING = 2;
+  RMS_JOB_EXECUTION_STATE_COMPLETED = 3;
+  RMS_JOB_EXECUTION_STATE_FAILED = 4;
+}
+
+enum RmsJobError {
+  RMS_JOB_ERROR_UNSPECIFIED = 0;
+  RMS_JOB_ERROR_INTERNAL = 1;
+  RMS_JOB_ERROR_OTHER = 2;
+  RMS_JOB_ERROR_INVALID_ARGUMENT = 3;
+  RMS_JOB_ERROR_CLIENT_ERROR = 11;
+  RMS_JOB_ERROR_SERVER_ERROR = 12;
+  RMS_JOB_ERROR_TIMEOUT = 13;
+  RMS_JOB_ERROR_INVALID_RESPONSE = 14;
+  RMS_JOB_ERROR_UNAUTHENTICATED = 15;
+  RMS_JOB_ERROR_TARGET_NOT_FOUND = 21;
+  RMS_JOB_ERROR_FILE_NOT_FOUND = 22;
+  RMS_JOB_ERROR_UPDATE_IN_PROGRESS = 23;
+}
+
+// Backend diagnostic record. Unknown enum values are preserved for diagnostics.
+message RmsJobStatus {
+  string job_id = 1;
+  optional string parent_job_id = 2;
+  repeated string child_job_ids = 3;
+  RmsJobExecutionState execution_state = 4;
+  string error_message = 5;
+  RmsJobError error_code = 6;
+  // Workflow-specific JSON supplied by RMS; no component-level schema is implied.
+  string result_json = 7;
+  string state_description = 8;
+  optional string rack_id = 9;
+  optional string node_id = 10;
+  google.protobuf.Timestamp created_at = 11;
+  google.protobuf.Timestamp updated_at = 12;
+}
+
+// Adds the missing address family to an existing Underlay network segment.
+message AddNetworkSegmentPrefixRequest {
+  // Required; omission returns INVALID_ARGUMENT.
+  common.NetworkSegmentId network_segment_id = 1;
+  // Required network CIDR with an explicit numeric length and no host bits set.
+  // IPv4 must be shorter than /32 to contain its required gateway.
+  string prefix = 2;
+  // Required for IPv4, within that prefix; not accepted for IPv6.
+  optional string gateway = 3;
+  // Non-negative number of initial addresses excluded from dynamic allocation.
+  // Defaults to zero. This does not reserve or move existing allocations.
+  int32 reserve_first = 4;
+  // Optional IPv6 DHCP relay link-address selector, only for an IPv6 addition.
+  // It need not be within the added prefix. Omission uses prefix-based selection.
+  // Exact link-address matches take precedence over prefix matching. Operators
+  // must choose a selector that does not redirect another network's requests.
+  optional string dhcpv6_link_address = 5;
+}
+
+// Select current machine states without hardware, network, health, or history data.
+// Database acquisition and execution share a 300-second outer deadline; its
+// expiry fails the whole request with INTERNAL. Each SQL statement is capped
+// at 300 seconds, preserving shorter PostgreSQL limits. Configured pool or SQL
+// timeouts can fail the request earlier.
+message MachineStatesByIdsRequest {
+  // Host, predicted-host, and DPU IDs. Empty requests and requests exceeding
+  // the server's max_find_by_ids limit fail with INVALID_ARGUMENT. Duplicates
+  // count toward that limit but produce only one result per existing machine.
+  repeated common.MachineId machine_ids = 1;
+}
+
+// One machine's lifecycle state.
+message MachineStateSummary {
+  // Always present in FindMachineStatesByIds responses.
+  common.MachineId id = 1;
+  // The same string as Machine.state, using the machine's own controller state.
+  string state = 2;
+}
+
+// Current lifecycle states for the requested machines.
+message MachineStateList {
+  // Existing requested machines, sorted by ID, including DPUs without a host
+  // or loopback IP. Missing IDs are omitted.
+  repeated MachineStateSummary machines = 1;
+}
+
+// --- Component firmware details ---
+
+// Selects 1-64 unique managed IDs of one kind. Missing target, empty or oversized
+// lists, duplicates and malformed grpc-timeout return INVALID_ARGUMENT before
+// preparation. A zero timeout is already expired. Preparation failure, including
+// expiry, aborts the RPC with fixed INTERNAL; per-section deadlines apply after
+// preparation succeeds. Malformed typed IDs, including DPU IDs, can return
+// INTERNAL during decoding.
+// Missing managed records return NotFound per section. ForceDeletion and
+// Decommissioning hosts, Decommissioning switches/shelves and deletion-marked
+// switches/shelves return Ineligible without external reads or outstanding-work
+// projection. Other states are readable.
+// Endpoint readiness is checked in the stored snapshot: IP, MAC, role and owner
+// must agree before credentials or hardware reads. Reassignment after that
+// snapshot is not fenced. A missing/deleted owning rack supplies no profile/work.
+//
+// Standalone hosts (no rack and no MNNVL capability) use direct Core Redfish;
+// other inventory uses the selected component backend. An absent capability is
+// Unsupported before credentials. Switch inventory also requires NVOS discovery
+// and credentials. Switch comparisons and job reads require the owned BMC;
+// comparison NVOS details are optional and only use an owned endpoint. Missing
+// or unowned required endpoints report EndpointUnavailable before backend checks.
+// Host defaults use existing effective host configuration only for standalone
+// hosts. Rack state-controller and direct RMS routes use their owning profile's
+// configured firmware object, not a pending request's frozen target. Other direct
+// routes with no configured-default contract, or a selected profile route without
+// its RMS client, return Unsupported. These are configured expectations, not a
+// guarantee that an updater applies every compared component. Missing profile,
+// report or catalog/source selection is ConfigurationUnavailable. An exact
+// owning rack that is absent/deleted reports NotFound/Ineligible in desired and
+// stored rack context without erasing independent device facts. A failed fetch
+// is ManifestUnavailable. A matched host configuration without defaults is empty.
+//
+// Catalog files load synchronously before the database budget and cannot be
+// interrupted; caller expiry is checked before and after. After preparation,
+// all work shares thirty seconds. Inventory/comparison backends additionally
+// enforce thirty seconds; RMS job reads enforce ten. These limits do not promise
+// that every admitted device completes. Public API admission retains its existing
+// configured global/per-client limits and overload policy, including disablement.
+// The eight workflow slots are per request, not an outbound-call cap; credential
+// and backend member/job concurrency remain independently bounded. A job batch
+// supplies its result when complete; unfinished outer expiry has no partial
+// returned batch to publish. Other completed sections remain available.
+message GetComponentFirmwareDetailsRequest {
+  // Required homogeneous selection; never inferred from another identifier.
+  oneof target {
+    // Host IDs only; the typed Rust decoder rejects DPU IDs.
+    common.MachineIdList machine_ids = 1;
+    // Managed NVLink switch IDs.
+    SwitchIdList switch_ids = 2;
+    // Managed power shelf IDs.
+    PowerShelfIdList power_shelf_ids = 3;
+  }
+}
+
+// Firmware evidence for every requested managed ID.
+message GetComponentFirmwareDetailsResponse {
+  // Exactly one entry per requested ID, in request order, including missing IDs.
+  repeated ComponentFirmwareDetails entries = 1;
+}
+
+// Independent installed, expected and current/pending firmware evidence.
+// Supporting servers populate every section and required result. Clients must
+// treat absent sections/results as unsupported data, never successful empty data.
+// With internal RBAC enabled, older servers reject the unknown RPC with
+// PERMISSION_DENIED before dispatch. If gRPC dispatch is reached, they return
+// UNIMPLEMENTED. No field establishes whole-update completion, latest-update
+// identity or exhaustive remote coverage.
+message ComponentFirmwareDetails {
+  // Requested managed ID in its canonical representation.
+  string component_id = 1;
+  // Always present, including unavailable observations.
+  ComponentFirmwareInstalled actual = 2;
+  // Always present; independent of installed inventory and pending targets.
+  ComponentFirmwareExpected desired = 3;
+  // Always present; stored facts survive failed hardware/manifest/job reads.
+  ComponentFirmwareActions actions = 4;
+}
+
+// Bounded evidence sources; component names and versions remain open strings.
+enum ComponentFirmwareSource {
+  // Never emitted; absent optional source means selection did not complete.
+  COMPONENT_FIRMWARE_SOURCE_UNSPECIFIED = 0;
+  // A passive direct BMC Redfish read.
+  COMPONENT_FIRMWARE_SOURCE_REDFISH = 1;
+  // A passive RMS inventory, comparison or tracking read.
+  COMPONENT_FIRMWARE_SOURCE_RMS = 2;
+  // Static/metadata host catalog with persisted runtime overrides applied.
+  COMPONENT_FIRMWARE_SOURCE_EFFECTIVE_HOST_CONFIGURATION = 3;
+}
+
+// Safe failure categories; errors do not establish firmware-update failure.
+enum ComponentFirmwareErrorCode {
+  // Never emitted; clients should require a specific code.
+  COMPONENT_FIRMWARE_ERROR_CODE_UNSPECIFIED = 0;
+  // Managed ID or exact owning rack is absent.
+  COMPONENT_FIRMWARE_ERROR_CODE_NOT_FOUND = 1;
+  // Managed target or owning rack is being removed/deleted.
+  COMPONENT_FIRMWARE_ERROR_CODE_INELIGIBLE = 2;
+  // Component Manager is not configured.
+  COMPONENT_FIRMWARE_ERROR_CODE_DISABLED = 3;
+  // Selected backend/remote protocol has no passive capability.
+  COMPONENT_FIRMWARE_ERROR_CODE_UNSUPPORTED = 4;
+  // Required endpoint is missing or fails snapshot ownership validation.
+  COMPONENT_FIRMWARE_ERROR_CODE_ENDPOINT_UNAVAILABLE = 5;
+  // Required management credentials cannot be loaded.
+  COMPONENT_FIRMWARE_ERROR_CODE_CREDENTIALS_UNAVAILABLE = 6;
+  // Required configured source, report, rack profile or catalog match is absent.
+  COMPONENT_FIRMWARE_ERROR_CODE_CONFIGURATION_UNAVAILABLE = 7;
+  // Configured firmware-object fetch or JSON validation failed.
+  COMPONENT_FIRMWARE_ERROR_CODE_MANIFEST_UNAVAILABLE = 8;
+  // Read failed or its result identity/cardinality was invalid.
+  COMPONENT_FIRMWARE_ERROR_CODE_READ_FAILED = 9;
+  // Backend retained-evidence bounds were exceeded; text is never clipped.
+  COMPONENT_FIRMWARE_ERROR_CODE_LIMIT_EXCEEDED = 10;
+  // Shared caller/read deadline or a backend's local read budget expired.
+  COMPONENT_FIRMWARE_ERROR_CODE_DEADLINE_EXCEEDED = 11;
+  // Persisted current tracking could not be read; no absence is established.
+  COMPONENT_FIRMWARE_ERROR_CODE_TRACKING_READ_FAILED = 12;
+  // Backend reports the retained job ID absent; this is not completion.
+  COMPONENT_FIRMWARE_ERROR_CODE_JOB_NOT_FOUND = 13;
+  // The known-job poll failed before usable evidence was obtained.
+  COMPONENT_FIRMWARE_ERROR_CODE_POLL_FAILED = 14;
+  // Known-job protocol/state/echo is unavailable or unrecognized.
+  COMPONENT_FIRMWARE_ERROR_CODE_STATUS_UNAVAILABLE = 15;
+}
+
+// Fixed safe explanation; never a backend diagnostic, payload or credential.
+message ComponentFirmwareError {
+  // Specific failure category on which callers may branch.
+  ComponentFirmwareErrorCode code = 1;
+  // Fixed text corresponding to code.
+  string message = 2;
+}
+
+// One live inventory collection or an explicit unavailable result.
+message ComponentFirmwareInstalled {
+  // Backend selected for the read, retained if it later fails. Absent if no
+  // backend could be selected.
+  optional ComponentFirmwareSource source = 1;
+  // NICo receipt time, not device time; present only with inventory.
+  google.protobuf.Timestamp observed_at = 2;
+  // Always selected; a default generated getter does not establish success.
+  oneof result {
+    // May be empty or include failed members without discarding healthy peers.
+    // The collection is available only after the backend call returns. If the
+    // public read budget expires first, this section reports DeadlineExceeded;
+    // members buffered inside the unfinished call are not returned.
+    ComponentFirmwareInventory inventory = 3;
+    // No installed collection could be obtained.
+    ComponentFirmwareError error = 4;
+  }
+}
+
+// Backend inventory order, including repeated members; not one tray version.
+message ComponentFirmwareInventory {
+  // Every listed member, including members whose individual read failed.
+  repeated ComponentFirmwareInventoryEntry entries = 1;
+}
+
+// Separately listed member and its metadata/read result.
+message ComponentFirmwareInventoryEntry {
+  // Backend lookup identifier; absent when the backend exposes no separate ID.
+  optional string inventory_id = 1;
+  // Always selected. Member failure does not discard other entries.
+  oneof result {
+    // Selected backend identity/name/version fields; no artifact or update URL.
+    ComponentFirmwareInstalledComponent component = 2;
+    // Categorized failure reading this member.
+    ComponentFirmwareError error = 3;
+  }
+}
+
+// Backend metadata. Reported versions do not establish active/staged image choice.
+// Presence, including an empty string, describes the backend model; proto3
+// backends cannot always distinguish an omitted wire string from explicit empty.
+message ComponentFirmwareInstalledComponent {
+  // Backend component ID, distinct from lookup ID; never inferred.
+  optional string id = 1;
+  // Backend component name; not guaranteed unique and never inferred from ID.
+  optional string name = 2;
+  // Observed version, including backend vendor normalization; never shortened.
+  optional string version = 3;
+}
+
+// Existing effective defaults or logical manifest comparison; not pending intent.
+message ComponentFirmwareExpected {
+  // EffectiveHostConfiguration or Rms after source selection, including failures.
+  optional ComponentFirmwareSource source = 1;
+  // NICo comparison receipt time only; host defaults have no invented timestamp.
+  google.protobuf.Timestamp observed_at = 2;
+  // Always selected; missing configuration is an error, not installed fallback.
+  oneof result {
+    // Configured defaults selected with stored vendor/model identity only.
+    ComponentHostFirmwareExpectations host = 3;
+    // RMS comparisons, not an attribution to each physical inventory instance.
+    ComponentFirmwareComparisons comparisons = 4;
+    // The expected section is unavailable independently of installed/actions.
+    ComponentFirmwareError error = 5;
+  }
+}
+
+// Existing effective host defaults. Report presence is not collection freshness.
+message ComponentHostFirmwareExpectations {
+  // Catalog-selected vendor.
+  string vendor = 1;
+  // Catalog-selected hardware model.
+  string model = 2;
+  // Existing default components sorted by component name; may be empty for a
+  // matched configuration without defaults. No installed version supplies one.
+  repeated ComponentHostFirmwareExpectation entries = 3;
+}
+
+// One configured host component default.
+message ComponentHostFirmwareExpectation {
+  // Existing configuration component spelling, including drive-model selectors.
+  string component = 1;
+  // Existing default version, preserved exactly.
+  string version = 2;
+}
+
+// Logical comparison rows in backend order, including duplicates and empty lists.
+message ComponentFirmwareComparisons {
+  // No row proves physical-instance matching or complete manifest compliance.
+  repeated ComponentFirmwareComparison entries = 1;
+}
+
+// RMS's classification of a logical manifest component/SKU comparison.
+enum ComponentFirmwareComparisonStatus {
+  // RMS supplied no classification.
+  COMPONENT_FIRMWARE_COMPARISON_STATUS_UNSPECIFIED = 0;
+  // RMS reported a matching logical comparison.
+  COMPONENT_FIRMWARE_COMPARISON_STATUS_MATCHED = 1;
+  // RMS reported a differing logical comparison.
+  COMPONENT_FIRMWARE_COMPARISON_STATUS_MISMATCHED = 2;
+  // RMS reported missing comparison inventory.
+  COMPONENT_FIRMWARE_COMPARISON_STATUS_MISSING = 3;
+  // RMS could not verify the logical comparison.
+  COMPONENT_FIRMWARE_COMPARISON_STATUS_UNVERIFIED = 4;
+  // This Core revision does not recognize the classification integer.
+  COMPONENT_FIRMWARE_COMPARISON_STATUS_UNRECOGNIZED = 5;
+}
+
+// Selected logical comparison metadata, without raw targets/URLs or diagnostics.
+message ComponentFirmwareComparison {
+  // Opaque RMS component selector; absent when RMS supplies empty text.
+  optional string component = 1;
+  // Proposed manifest version; absent does not fall back to installed firmware.
+  optional string proposed_version = 2;
+  // Reported SKU selector; absence does not identify a wildcard SKU.
+  optional string sku_id = 3;
+  // Reported logical classification, not locally computed compliance.
+  ComponentFirmwareComparisonStatus status = 4;
+  // Present exactly for Unrecognized, preserving the unknown wire integer.
+  optional int32 unrecognized_status = 5;
+}
+
+// Stored work and independently observed backend work. Neither list is history.
+message ComponentFirmwareActions {
+  // Always present, including unavailable/partial owning-rack context.
+  ComponentStoredFirmwareActions stored = 1;
+  // Always present. No backend record is joined to a replacement request by MAC.
+  ComponentFirmwareBackendWork backend = 2;
+}
+
+// Sanitized controller/request evidence from the preparation snapshot.
+message ComponentStoredFirmwareActions {
+  // Current controller work, including unresolved cleanup, in projector order.
+  repeated ComponentCurrentFirmwareWork current = 1;
+  // Outstanding saved requests; not proof of approval, admission or execution.
+  repeated ComponentFirmwareRequest outstanding_requests = 2;
+  // NotFound/Ineligible for an unreadable managed member; lists are empty then.
+  ComponentFirmwareError error = 3;
+  // NotFound/Ineligible when the member names an absent/deleted rack. Independent
+  // per-device records survive; no metadata is borrowed from another rack.
+  ComponentFirmwareError rack_context_error = 4;
+}
+
+// Selected target facts; payloads, URLs and stored failure text never appear.
+message ComponentFirmwareWorkTarget {
+  // Always selected; an absent leaf field means unknown recorded metadata.
+  oneof target {
+    // Host firmware controller work.
+    ComponentHostFirmwareTarget host = 1;
+    // RMS firmware-object work.
+    ComponentFirmwareObjectTarget firmware_object = 2;
+    // NVOS system-image work, independent of password recovery.
+    ComponentNvosFirmwareTarget nvos = 3;
+  }
+}
+
+// Target frozen by the host controller, not a later effective default.
+message ComponentHostFirmwareTarget {
+  // Existing configuration component spelling, including drive-model selectors;
+  // absent when the phase has no known component.
+  optional string component = 1;
+  // Frozen target version; absent when the phase did not record one.
+  optional string version = 2;
+}
+
+// Firmware object identity only; never inline JSON or an artifact location.
+message ComponentFirmwareObjectTarget {
+  // Recorded Id/object_id, or absent for unavailable/malformed target metadata.
+  optional string object_id = 1;
+}
+
+// Selected recorded NVOS target metadata.
+message ComponentNvosFirmwareTarget {
+  // Recorded firmware-object ID, if known.
+  optional string object_id = 1;
+  // Recorded NVOS version, if known.
+  optional string version = 2;
+}
+
+// Current controller work does not establish that RMS is executing it.
+message ComponentCurrentFirmwareWork {
+  // Recorded operation target; always present.
+  ComponentFirmwareWorkTarget target = 1;
+  // Recorded firmware/image job handle, if known; no synthetic action ID.
+  optional string job_id = 2;
+  // Recorded start time, if known; poll times are not submission times.
+  google.protobuf.Timestamp started_at = 3;
+  // Separate recorded password recovery job, if known.
+  optional string password_recovery_job_id = 4;
+}
+
+// Saved record that supplies request evidence; not a stable operation identity.
+enum ComponentFirmwareRequestSource {
+  // Never emitted.
+  COMPONENT_FIRMWARE_REQUEST_SOURCE_UNSPECIFIED = 0;
+  // Host reprovision request.
+  COMPONENT_FIRMWARE_REQUEST_SOURCE_HOST_REPROVISION = 1;
+  // Switch reprovision request.
+  COMPONENT_FIRMWARE_REQUEST_SOURCE_SWITCH_REPROVISION = 2;
+  // Shelf reprovision request.
+  COMPONENT_FIRMWARE_REQUEST_SOURCE_SHELF_REPROVISION = 3;
+  // Owning rack maintenance request.
+  COMPONENT_FIRMWARE_REQUEST_SOURCE_RACK_MAINTENANCE = 4;
+}
+
+// Outstanding saved request; it may replace work already executing.
+message ComponentFirmwareRequest {
+  // Source record, never Unspecified.
+  ComponentFirmwareRequestSource source = 1;
+  // Saved selected target metadata; always present.
+  ComponentFirmwareWorkTarget target = 2;
+  // Saved request time; absent for legacy records with no boundary.
+  google.protobuf.Timestamp requested_at = 3;
+  // Saved initiator, including supplied empty; absent when not recorded.
+  optional string initiator = 4;
+}
+
+// Passive observations of current tracking references, not exhaustive remote
+// discovery. Association with stored current/replacement requests is unknown.
+// Terminal jobs and abandoned Failed local stages are excluded as history.
+// Empty lists, missing jobs and absent stages never establish whole-update success.
+message ComponentFirmwareBackendWork {
+  // Rms after selection; absent for earlier Disabled/Unsupported/endpoint failures.
+  optional ComponentFirmwareSource source = 1;
+  // NICo receipt time for a completed typed reader reply, including a tracking
+  // failure with no stage. Absent before the batch replies; never the stage's
+  // sample time or a remote job timestamp.
+  google.protobuf.Timestamp observed_at = 2;
+  // Recognized nonterminal observations in firmware-object then image order.
+  repeated ComponentFirmwareActiveJob active_jobs = 3;
+  // Retained references without usable state; these do not assert active work.
+  repeated ComponentFirmwareUnresolvedReference unresolved_references = 4;
+  // Process-local Queued/Submitting sample, independent of tracking failure.
+  // It can change before receipt, differ by replica, or disappear on restart.
+  ComponentFirmwareLocalStage local_stage = 5;
+  // Reader/tracking failure. A sampled stage survives in a completed reply;
+  // an unfinished batch has no returned stage to publish.
+  ComponentFirmwareError error = 6;
+}
+
+// Protocol that owns a retained backend job ID.
+enum ComponentFirmwareJobKind {
+  // Never emitted.
+  COMPONENT_FIRMWARE_JOB_KIND_UNSPECIFIED = 0;
+  // Firmware-object apply.
+  COMPONENT_FIRMWARE_JOB_KIND_FIRMWARE_OBJECT = 1;
+  // Switch NVOS system-image apply.
+  COMPONENT_FIRMWARE_JOB_KIND_SWITCH_SYSTEM_IMAGE = 2;
+}
+
+// Only nonterminal job states are published by this read.
+enum ComponentFirmwareActiveJobState {
+  // Never emitted; unknown states are unresolved references.
+  COMPONENT_FIRMWARE_ACTIVE_JOB_STATE_UNSPECIFIED = 0;
+  // Accepted but not executing.
+  COMPONENT_FIRMWARE_ACTIVE_JOB_STATE_QUEUED = 1;
+  // Executing.
+  COMPONENT_FIRMWARE_ACTIVE_JOB_STATE_IN_PROGRESS = 2;
+  // Backend verification is pending.
+  COMPONENT_FIRMWARE_ACTIVE_JOB_STATE_VERIFYING = 3;
+}
+
+// One recognized nonterminal observation of a current tracking reference.
+message ComponentFirmwareActiveJob {
+  // Protocol used to read this handle.
+  ComponentFirmwareJobKind kind = 1;
+  // Exact retained ID; a remote echoed ID never replaces it.
+  string job_id = 2;
+  // Recognized nonterminal state; never Unspecified.
+  ComponentFirmwareActiveJobState state = 3;
+}
+
+// A current reference whose job existence/state could not be established.
+message ComponentFirmwareUnresolvedReference {
+  // Protocol associated with the retained handle.
+  ComponentFirmwareJobKind kind = 1;
+  // Exact retained ID, even when the backend no longer knows it.
+  string job_id = 2;
+  // Typed uncertainty; not a failed-update classification. Always present.
+  ComponentFirmwareError error = 3;
+}
+
+// Process-local staged firmware-object evidence; no durable admission is implied.
+enum ComponentFirmwareLocalStageState {
+  // Never emitted.
+  COMPONENT_FIRMWARE_LOCAL_STAGE_STATE_UNSPECIFIED = 0;
+  // Firmware-object phase has not been submitted; it may remain queued after
+  // the preceding image job completes, until the updater advances it.
+  COMPONENT_FIRMWARE_LOCAL_STAGE_STATE_QUEUED = 1;
+  // Submission began; this does not prove RMS accepted or rejected it.
+  COMPONENT_FIRMWARE_LOCAL_STAGE_STATE_SUBMITTING = 2;
+}
+
+// The updater's process-local phase sampled before its passive job reads.
+message ComponentFirmwareLocalStage {
+  // Queued or Submitting; terminal Failed samples are excluded.
+  ComponentFirmwareLocalStageState state = 1;
+  // Exact preceding system-image handle, not a whole-update identity.
+  string system_image_job_id = 2;
 }

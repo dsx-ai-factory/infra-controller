@@ -76,8 +76,18 @@ pub(super) async fn handle_maintenance(
         MachineMaintenanceOperation::PowerOff { graceful } => {
             handle_power_off(host_machine_id, mh_snapshot, request, ctx, *graceful).await
         }
-        MachineMaintenanceOperation::Reset => {
-            handle_reset(host_machine_id, mh_snapshot, request, ctx).await
+        MachineMaintenanceOperation::Reset { graceful } => {
+            handle_reset(host_machine_id, mh_snapshot, request, ctx, *graceful).await
+        }
+        MachineMaintenanceOperation::Reboot => {
+            invoke_power_operation(
+                host_machine_id,
+                mh_snapshot,
+                request,
+                ctx,
+                PowerAction::GracefulRestart,
+            )
+            .await
         }
         MachineMaintenanceOperation::ChassisReset { chassis_id } => {
             handle_chassis_reset(host_machine_id, mh_snapshot, request, ctx, chassis_id).await
@@ -92,15 +102,7 @@ async fn handle_power_on(
     ctx: &mut StateHandlerContext<'_, MachineStateHandlerContextObjects>,
 ) -> Result<StateHandlerOutcome<ManagedHostState>, StateHandlerError> {
     tracing::info!(machine_id = %host_machine_id, "Machine maintenance: PowerOn");
-    invoke_power_operation(
-        host_machine_id,
-        mh_snapshot,
-        request,
-        ctx,
-        PowerAction::On,
-        "PowerOn",
-    )
-    .await
+    invoke_power_operation(host_machine_id, mh_snapshot, request, ctx, PowerAction::On).await
 }
 
 async fn handle_power_off(
@@ -116,15 +118,7 @@ async fn handle_power_off(
         PowerAction::ForceOff
     };
     tracing::info!(machine_id = %host_machine_id, graceful, "Machine maintenance: PowerOff");
-    invoke_power_operation(
-        host_machine_id,
-        mh_snapshot,
-        request,
-        ctx,
-        action,
-        "PowerOff",
-    )
-    .await
+    invoke_power_operation(host_machine_id, mh_snapshot, request, ctx, action).await
 }
 
 async fn handle_reset(
@@ -132,17 +126,15 @@ async fn handle_reset(
     mh_snapshot: &ManagedHostStateSnapshot,
     request: Option<&MachineMaintenanceRequest>,
     ctx: &mut StateHandlerContext<'_, MachineStateHandlerContextObjects>,
+    graceful: bool,
 ) -> Result<StateHandlerOutcome<ManagedHostState>, StateHandlerError> {
-    tracing::info!(machine_id = %host_machine_id, "Machine maintenance: Reset");
-    invoke_power_operation(
-        host_machine_id,
-        mh_snapshot,
-        request,
-        ctx,
-        PowerAction::ForceRestart,
-        "Reset",
-    )
-    .await
+    let action = if graceful {
+        PowerAction::GracefulRestart
+    } else {
+        PowerAction::ForceRestart
+    };
+    tracing::info!(machine_id = %host_machine_id, graceful, "Machine maintenance: Reset");
+    invoke_power_operation(host_machine_id, mh_snapshot, request, ctx, action).await
 }
 
 async fn handle_chassis_reset(
@@ -209,13 +201,12 @@ async fn invoke_power_operation(
     request: Option<&MachineMaintenanceRequest>,
     ctx: &mut StateHandlerContext<'_, MachineStateHandlerContextObjects>,
     action: PowerAction,
-    operation_label: &'static str,
 ) -> Result<StateHandlerOutcome<ManagedHostState>, StateHandlerError> {
     let machine = &mh_snapshot.host_snapshot;
 
     let component_manager = ctx.services.component_manager.as_ref().ok_or_else(|| {
         StateHandlerError::GenericError(eyre::eyre!(
-            "machine {host_machine_id} maintenance ({operation_label}): component manager not configured"
+            "machine {host_machine_id} maintenance ({action:?}): component manager not configured"
         ))
     })?;
 
@@ -227,7 +218,7 @@ async fn invoke_power_operation(
     .await
     .map_err(|cause| {
         StateHandlerError::GenericError(eyre::eyre!(
-            "machine {host_machine_id} maintenance ({operation_label}): {cause}"
+            "machine {host_machine_id} maintenance ({action:?}): {cause}"
         ))
     })?;
 
@@ -248,7 +239,7 @@ async fn invoke_power_operation(
             if result.success {
                 tracing::info!(
                     machine_id = %host_machine_id,
-                    operation = operation_label,
+                    operation = ?action,
                     backend = component_manager.compute_tray.name(),
                     "Machine power control succeeded; returning host to Ready"
                 );
@@ -261,25 +252,25 @@ async fn invoke_power_operation(
                 .unwrap_or_else(|| "power control failed".into());
             tracing::warn!(
                 machine_id = %host_machine_id,
-                operation = operation_label,
+                operation = ?action,
                 backend = component_manager.compute_tray.name(),
                 summary = %summary,
                 "Machine power control returned a non-success result",
             );
             Err(StateHandlerError::GenericError(eyre::eyre!(
-                "machine {host_machine_id} maintenance ({operation_label}): power control failed: {summary}"
+                "machine {host_machine_id} maintenance ({action:?}): power control failed: {summary}"
             )))
         }
         Err(error) => {
             tracing::warn!(
                 machine_id = %host_machine_id,
-                operation = operation_label,
+                operation = ?action,
                 backend = component_manager.compute_tray.name(),
                 error = %error,
                 "Machine power control transport error",
             );
             let context = format!(
-                "machine {host_machine_id} maintenance ({operation_label}): power control failed: {error}"
+                "machine {host_machine_id} maintenance ({action:?}): power control failed: {error}"
             );
             Err(StateHandlerError::GenericError(
                 eyre::Report::new(error).wrap_err(context),

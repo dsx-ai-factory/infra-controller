@@ -112,6 +112,10 @@ include_diagnostics = false
 
 [sinks.prometheus]
 enabled = true
+# Offer negotiated gzip for /telemetry. Both settings require a restart.
+gzip = false
+# Accepted range: 1 through 9. Validated for enabled sinks even when gzip is false.
+gzip_level = 1
 
 [sinks.log_file]
 enabled = false
@@ -291,8 +295,9 @@ fetch_interval = "2m"
 [collectors.firmware]
 firmware_refresh_interval = "30m"
 
-# Power shelf manager (PMC) status: `manager_status` and `manager_last_reset`.
-# Runs for power shelf endpoints only and is enabled by default with a 5m poll.
+# Redfish Manager status: `manager_status` and `manager_last_reset`.
+# Runs for power-shelf endpoints by default and for generic Redfish endpoints
+# when [processors.resource_status] is enabled. The default poll is 5m.
 [collectors.manager]
 poll_interval = "2m"
 
@@ -655,6 +660,11 @@ minimum_alerts_per_report = 1
 
 [processors.rack_leak]
 leaking_tray_threshold = 2
+
+# Project Status from resources fetched by entity discovery and the enabled
+# Manager and Firmware collectors into structured OTLP log records.
+[processors.resource_status]
+enabled = true
 
 # ==============================================================================
 # Metrics

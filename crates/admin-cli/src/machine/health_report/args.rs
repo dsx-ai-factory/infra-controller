@@ -75,6 +75,7 @@ pub(crate) enum HealthReportTemplates {
     HostUpdate,
     InternalMaintenance,
     OutForRepair,
+    ComputeTrayDueForSwap,
     Degraded,
     Validation,
     SuppressExternalAlerting,

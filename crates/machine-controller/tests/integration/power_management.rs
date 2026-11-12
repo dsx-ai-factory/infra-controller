@@ -18,14 +18,15 @@
 use std::sync::Arc;
 
 use carbide_redfish::libredfish::RedfishClientPool as _;
-use carbide_redfish::libredfish::test_support::RedfishSimAction;
+use carbide_redfish::libredfish::test_support::{RedfishSimAction, RedfishSimPlatformAction};
+use carbide_secrets::credentials::{CredentialKey, Credentials};
 use carbide_test_harness::prelude::*;
 use carbide_test_harness::test_support::fixture_config::{
     FixtureDefault as _, ManagedHostConfigExt as _,
 };
 use carbide_utils::redfish::BmcAccessInfo;
 use model::machine::{
-    DpuInitState, DpuInitStates, MachineMaintenanceOperation, ManagedHostState,
+    DpuInitState, DpuInitStates, MachineMaintenanceOperation, MachineState, ManagedHostState,
     PerformPowerOperation,
 };
 use model::power_manager::PowerState;
@@ -33,7 +34,7 @@ use model::test_support::ManagedHostConfig;
 use rpc::forge::{
     MaintenanceOperation, MaintenanceRequest, PowerOptionRequest, PowerOptionUpdateRequest,
 };
-use tonic::Request;
+use tonic::{IntoRequest, Request};
 
 use crate::env::Env;
 
@@ -144,7 +145,7 @@ impl TestManagedHostPowerExt for TestManagedHost {
 }
 
 #[sqlx_test]
-async fn dpu_init_power_cycle_waits_for_observed_host_power_off(
+async fn dpu_init_power_cycle_and_uefi_restart_wait_for_observations(
     pool: PgPool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let TestContext { mut env, mh } = TestContext::from_env_with_config(
@@ -255,6 +256,112 @@ async fn dpu_init_power_cycle_waits_for_observed_host_power_off(
             .actions_since(&redfish_timepoint)
             .for_host(&bmc_access_info.host)
             .is_empty(),
+    );
+
+    let mut txn = env.test_harness.db_txn().await;
+    db::machine::mark_machine_ingestion_done_with_dpf(&mut txn, &mh.host.id.into()).await?;
+    txn.commit().await?;
+    mh.report_dpu_network_status().await;
+    env.redfish_sim
+        .seed_credential(
+            &CredentialKey::dpu_uefi_site_default(0),
+            &Credentials::UsernamePassword {
+                username: String::new(),
+                password: "uefi-v0".to_string(),
+            },
+        )
+        .await;
+    env.redfish_sim.set_uefi_setup_job_id(Some(String::new()));
+    env.run_single_iteration().await;
+    env.run_single_iteration().await;
+    let waiting_for_uefi = dpu_init_state(DpuInitState::WaitingForUefiRestart);
+    assert_eq!(mh.host.machine().await.current_state(), &waiting_for_uefi);
+    let dpu = mh.first_dpu().machine().await;
+    let restart = dpu.status.last_reboot_requested.unwrap().time;
+    let older = restart - chrono::Duration::seconds(1);
+    let newer = restart + chrono::Duration::microseconds(1);
+
+    for (case, network_time, health_time) in [
+        ("old reports", older, Some(older)),
+        ("reports at restart boundary", restart, Some(restart)),
+        ("old network report", older, Some(newer)),
+        ("old health report", newer, Some(older)),
+        ("missing health timestamp", newer, None),
+    ] {
+        let mut txn = env.test_harness.db_txn().await;
+        sqlx::query("UPDATE machines SET network_status_observation = jsonb_set(network_status_observation::jsonb, '{observed_at}', $2), health_reports = jsonb_set(health_reports, '{merges,forge-dpu-agent,observed_at}', $3) WHERE id = $1")
+            .bind(dpu.id)
+            .bind(sqlx::types::Json(network_time))
+            .bind(sqlx::types::Json(health_time))
+            .execute(txn.as_mut()).await?;
+        txn.commit().await?;
+        env.run_single_iteration().await;
+        assert_eq!(
+            mh.host.machine().await.current_state(),
+            &waiting_for_uefi,
+            "{case}"
+        );
+        assert_eq!(
+            mh.first_dpu()
+                .machine()
+                .await
+                .status
+                .last_reboot_requested
+                .unwrap()
+                .time,
+            restart,
+            "{case}"
+        );
+    }
+
+    let status = mh.first_dpu().network_status().build().await;
+    mh.api
+        .record_dpu_network_status(status.into_request())
+        .await
+        .expect("DPU network status should be recorded");
+    env.run_single_iteration().await;
+    let first_dpu_ready = ManagedHostState::DPUInit {
+        dpu_states: DpuInitStates {
+            states: mh
+                .dpus
+                .iter()
+                .map(|dpu| {
+                    (
+                        dpu.id,
+                        if dpu.id == mh.first_dpu().id {
+                            DpuInitState::WaitingForNetworkConfig
+                        } else {
+                            DpuInitState::WaitingForUefiRestart
+                        },
+                    )
+                })
+                .collect(),
+        },
+    };
+    assert_eq!(mh.host.machine().await.current_state(), &first_dpu_ready);
+    // A network-ready DPU must let the dispatcher finish the other DPU.
+    env.run_single_iteration().await;
+    assert_eq!(mh.host.machine().await.current_state(), &first_dpu_ready);
+    mh.report_dpu_network_status().await;
+    env.run_single_iteration().await;
+    assert_eq!(
+        mh.host.machine().await.current_state(),
+        &dpu_init_state(DpuInitState::WaitingForNetworkConfig)
+    );
+    env.run_single_iteration().await;
+    assert_eq!(
+        mh.host.machine().await.current_state(),
+        &ManagedHostState::HostInit {
+            machine_state: MachineState::EnableIpmiOverLan
+        }
+    );
+    assert_eq!(
+        env.redfish_sim
+            .platform_actions()
+            .iter()
+            .filter(|action| matches!(action, RedfishSimPlatformAction::UefiSetup { dpu: true }))
+            .count(),
+        mh.dpus.len()
     );
 
     Ok(())

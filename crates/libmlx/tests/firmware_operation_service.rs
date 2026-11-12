@@ -537,6 +537,7 @@ async fn guarded_updates_check_card_identity_and_preserve_restart_recovery() {
             ));
             profile.flash_options.reset = true;
             let context = FirmwareUpdateContext {
+                delivery_mode: Default::default(),
                 phase_id: "checked-selector".into(),
                 expected_digests: FirmwareArtifactDigests {
                     image_sha256: Sha256::digest(&image).into(),

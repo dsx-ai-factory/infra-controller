@@ -45,6 +45,18 @@ pub(super) async fn handle(
         ))
     })?;
 
+    if snapshot
+        .host_snapshot
+        .status
+        .hardware_dispatch
+        .as_ref()
+        .is_some_and(|dispatch| dispatch.is_pending())
+    {
+        return Ok(StateHandlerOutcome::wait(
+            "an earlier hardware command is still awaiting its result".to_string(),
+        ));
+    }
+
     let machine_failure = super::get_failed_state(snapshot);
     let machine_failure_reason = machine_failure.as_ref().map(|(machine_id, details)| {
         // FailureDetails Display can include free text for some causes.

@@ -24,7 +24,7 @@ use tracing::Instrument;
 /// Wraps the handler in a `request` span shared by logfmt and OTLP export.
 ///
 /// A `traceparent` header continues the caller's trace, otherwise the span starts
-/// a new one. `ForgeTlsClient` sends this span's context on outbound gRPC calls.
+/// a new one. `CarbideTlsClient` sends this span's context on outbound gRPC calls.
 pub(crate) async fn logger(
     ConnectInfo(socket_addr): ConnectInfo<SocketAddr>,
     request: Request,

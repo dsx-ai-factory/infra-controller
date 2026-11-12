@@ -20,7 +20,7 @@ defines the end-user routes, OpenAPI schemas, and SDK types on top of this
 Core contract.
 The authoritative wire definitions are [external-validation messages](../../crates/rpc/proto/external_validation.proto)
 and [Forge RPC declarations](../../crates/rpc/proto/forge.proto). The `carbide-rpc`
-build generates Rust client/server types and the `ForgeApiClient` wrapper from
+build generates Rust client/server types and the `CarbideApiClient` wrapper from
 these sources.
 
 ## Availability

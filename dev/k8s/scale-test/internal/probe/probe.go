@@ -172,7 +172,7 @@ read:
 				continue read
 			case err != nil:
 				return nil, err
-			case !fresh(reply.SweepInfo): // the age is per reply, so any page can go stale
+			case !Fresh(reply.SweepInfo): // the age is per reply, so any page can go stale
 				return nil, unavailable("the %s sweep is %.0f s old, interval %.0f s",
 					reply.Family, reply.SweepAgeSeconds, reply.SweepIntervalSeconds)
 			case snapshot != nil && *snapshot != reply.SnapshotID: // an ID is reply text, so it is not named
@@ -198,8 +198,8 @@ read:
 	}
 }
 
-// The probe is the only v1 user of these bound-call and freshness helpers,
-// so they live here. A run-wide clock and the sweep target math arrive with
+// The bound-call and freshness helpers live here; fleet-up's empty-site check
+// reads Fresh too. A run-wide clock and the sweep target math arrive with
 // their second users in later changes.
 
 var (
@@ -237,8 +237,8 @@ func bounded[T any](ctx context.Context, until time.Time, call func(context.Cont
 	return v, err
 }
 
-// fresh reports whether a sweep is at most two intervals old. NaN is never
+// Fresh reports whether a sweep is at most two intervals old. NaN is never
 // fresh.
-func fresh(s probeapi.SweepInfo) bool {
+func Fresh(s probeapi.SweepInfo) bool {
 	return s.SweepIntervalSeconds > 0 && s.SweepAgeSeconds >= 0 && s.SweepAgeSeconds <= 2*s.SweepIntervalSeconds
 }

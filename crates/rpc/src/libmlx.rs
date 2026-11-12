@@ -19,11 +19,11 @@ use std::str::FromStr;
 
 use carbide_libmlx_model::device::identity::{MlxDeviceSelector, MlxDeviceSelectorError};
 use carbide_libmlx_model::device::info::MlxDeviceInfo;
-use carbide_libmlx_model::firmware::FirmwareSpec;
 use carbide_libmlx_model::firmware::operation::{
     FirmwareOperation, FirmwareOperationPhase, FirmwareOperationState, ObserverExitBehavior,
 };
 use carbide_libmlx_model::firmware::result::FirmwareFlashReport;
+use carbide_libmlx_model::firmware::{FirmwareDeliveryMode, FirmwareSpec};
 use carbide_libmlx_model::nvconfig::DpuNvConfigProfile;
 use carbide_utils::none_if_empty::NoneIfEmpty;
 use mac_address::MacAddress;
@@ -31,11 +31,29 @@ use mac_address::MacAddress;
 use crate::forge::DpuNvConfigProfile as DpuNvConfigProfilePb;
 use crate::protos::firmware_supervisor::ObserverExitBehavior as ObserverExitBehaviorPb;
 use crate::protos::mlx_device::{
-    FirmwareFlashReport as FirmwareFlashReportPb, FirmwareOperation as FirmwareOperationPb,
-    FirmwareOperationPhase as FirmwareOperationPhasePb,
+    FirmwareDeliveryMode as FirmwareDeliveryModePb, FirmwareFlashReport as FirmwareFlashReportPb,
+    FirmwareOperation as FirmwareOperationPb, FirmwareOperationPhase as FirmwareOperationPhasePb,
     FirmwareOperationState as FirmwareOperationStatePb, FirmwareSpec as FirmwareSpecPb,
     MlxDeviceInfo as MlxDeviceInfoPb, MlxDeviceSelector as MlxDeviceSelectorPb,
 };
+
+impl From<FirmwareDeliveryMode> for FirmwareDeliveryModePb {
+    fn from(mode: FirmwareDeliveryMode) -> Self {
+        match mode {
+            FirmwareDeliveryMode::Direct => Self::Direct,
+            FirmwareDeliveryMode::SiteCache => Self::SiteCache,
+        }
+    }
+}
+
+impl From<FirmwareDeliveryModePb> for FirmwareDeliveryMode {
+    fn from(mode: FirmwareDeliveryModePb) -> Self {
+        match mode {
+            FirmwareDeliveryModePb::Direct => Self::Direct,
+            FirmwareDeliveryModePb::SiteCache => Self::SiteCache,
+        }
+    }
+}
 
 impl From<DpuNvConfigProfile> for DpuNvConfigProfilePb {
     fn from(profile: DpuNvConfigProfile) -> Self {

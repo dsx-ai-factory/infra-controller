@@ -41,8 +41,10 @@ Power shelf IDs to include (omit for full rack)
 
 `--activities <ACTIVITIES>...`
 
-Maintenance activities to perform: firmware-upgrade, nvos-update,
-configure-nmx-cluster, power-sequence (omit for all)
+Activities: firmware-upgrade, nvos-update, power-sequence,
+configure-nmx-cluster (execution order). Omit for all except
+power-sequence; select power-sequence explicitly to reboot all rack
+compute hosts before NMX-C configuration
 
 `--firmware-version <FIRMWARE_VERSION>`
 
@@ -86,7 +88,7 @@ Sort output by specified field
 
 `-h, --help`
 
-Print help (see a summary with -h)
+Print help (see a summary with '-h')
 
 ## Examples
 

@@ -37,7 +37,7 @@ type APIPowerActionOperation string
 // APIPowerTaskOperation names the power operation requested through Flow.
 type APIPowerTaskOperation string
 
-// APIPowerTaskRelevance explains why a task appears for the requested tray.
+// APIPowerTaskRelevance explains a member's relationship to a task; root rack tasks use `Unknown`.
 type APIPowerTaskRelevance string
 
 // APITaskType categorizes an active conflict or earlier waiting task, including non-power work.
@@ -182,14 +182,15 @@ type APIPowerAction struct {
 	// Status is `Active` for admitted maintenance (not hardware dispatch), `Pending` for a distinct saved
 	// request without a promise of admission, or `Unknown` for an unrecognized service value.
 	Status APIPowerActionStatus `json:"status"`
-	// Operation is the recorded operation; `Reset` doesn't keep the original graceful, forced or AC-cycle choice.
+	// Operation is the recorded operation; `Reset` includes graceful host reboots and legacy resets.
 	Operation APIPowerActionOperation `json:"operation"`
 	// Requested is the saved submission time (not admission or start time), or nil for legacy admitted
 	// requests without metadata.
 	Requested *time.Time `json:"requested"`
 	// Initiator is the saved initiator, which can be an empty string, or nil when unavailable.
 	Initiator *string `json:"initiator"`
-	// Graceful is set for `PowerOff` only: true is graceful and false is forced.
+	// Graceful is set for `PowerOff` and explicit graceful host reboots (`Reset`, true).
+	// Legacy reset records leave it nil because the original restart mode is unknown.
 	Graceful *bool `json:"graceful"`
 	// ChassisID is the recorded Redfish chassis for `ChassisReset`, otherwise nil.
 	ChassisID *string `json:"chassisId"`
@@ -219,7 +220,8 @@ type APIPowerTask struct {
 	// Started is the recorded execution start, or nil until recorded.
 	Started *time.Time `json:"started"`
 	// Relevance is `Selected` when the tray is a recorded target, or `RackAffected` when the task
-	// selects a shelf in the tray's current rack.
+	// selects a shelf in the tray's current rack. Root rack tasks and unrecognized service values use `Unknown`;
+	// member references supply each tray's relevance to a root task.
 	Relevance APIPowerTaskRelevance `json:"relevance"`
 	// WaitingContext describes other work in the rack for a Flow `Waiting` task, and is nil for every other
 	// task. When an older service doesn't supply it, both lists are empty and Error is `Unsupported`.

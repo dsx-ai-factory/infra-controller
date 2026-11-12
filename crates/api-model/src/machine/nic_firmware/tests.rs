@@ -986,6 +986,7 @@ fn populated_operation_round_trips_through_json() {
     // Populate workflow options and progress so the round trip detects loss of
     // those values.
     let mut operation = operation();
+    operation.delivery_mode = FirmwareDeliveryMode::SiteCache;
     operation.purpose = NicFirmwarePurpose::RestoreBaseline {
         instance_id: uuid::Uuid::nil().into(),
         cleanup_context: CleanupContext::Reset,
@@ -1022,6 +1023,18 @@ fn populated_operation_round_trips_through_json() {
     let encoded = serde_json::to_string(&operation).expect("encode operation");
     let decoded: NicFirmwareOperation = serde_json::from_str(&encoded).expect("decode operation");
 
+    assert_eq!(decoded, operation);
+}
+
+/// Operations saved without a delivery mode retain Direct semantics.
+#[test]
+fn omitted_delivery_mode_preserves_direct_operations() {
+    let operation = operation();
+    let encoded = serde_json::to_value(&operation).expect("encode legacy-compatible operation");
+    assert!(encoded.get("delivery_mode").is_none());
+    let decoded: NicFirmwareOperation =
+        serde_json::from_value(encoded).expect("decode saved operation");
+    assert_eq!(decoded.delivery_mode, FirmwareDeliveryMode::Direct);
     assert_eq!(decoded, operation);
 }
 

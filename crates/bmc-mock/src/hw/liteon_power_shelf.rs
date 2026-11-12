@@ -28,6 +28,15 @@ pub(crate) struct LiteOnPowerShelf<'a> {
 }
 
 impl LiteOnPowerShelf<'_> {
+    pub(crate) fn service_root_config(&self) -> redfish::service_root::Config {
+        redfish::service_root::Config {
+            vendor: redfish::oem::BmcVendor::LiteOn,
+            product: None,
+            redfish_version: "1.9.0",
+            advertises_computer_systems: false,
+        }
+    }
+
     fn sensor_layout() -> redfish::sensor::Layout {
         redfish::sensor::Layout {
             temperature: 20,
@@ -72,7 +81,7 @@ impl LiteOnPowerShelf<'_> {
         let system_id = "system";
 
         redfish::computer_system::Config {
-            systems: vec![redfish::computer_system::SingleSystemConfig {
+            systems: Some(vec![redfish::computer_system::SingleSystemConfig {
                 id: Cow::Borrowed(system_id),
                 manufacturer: None,
                 model: None,
@@ -94,7 +103,7 @@ impl LiteOnPowerShelf<'_> {
                 ),
                 serial_console: Some(hw::openbmc::enabled_serial_console()),
                 secure_boot_available: false,
-            }],
+            }]),
         }
     }
 

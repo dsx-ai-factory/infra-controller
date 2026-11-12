@@ -116,6 +116,7 @@ pub(in crate::tests) mod tests {
         "id": "sku id",
         "description": "PowerEdge R760; 2xCPU; 8xGPU; 256 GiB",
         "created": "2025-01-22T04:33:27.950438037Z",
+        "updated": "2025-01-22T04:33:27.950438037Z",
         "machines_associated_count": 0,
         "components": {
           "chassis": {
@@ -173,6 +174,7 @@ pub(in crate::tests) mod tests {
   "id": "sku id",
   "description": "PowerEdge R750; 1xCPU; 1xGPU; 2 GiB; 6xIB",
   "created": "2025-01-24T21:51:12.465131195Z",
+  "updated": "2025-01-24T21:51:12.465131195Z",
   "machines_associated_count": 0,
   "components": {
     "chassis": {
@@ -404,6 +406,9 @@ pub(in crate::tests) mod tests {
 
     #[crate::sqlx_test]
     pub(in crate::tests) async fn test_sku_create(pool: sqlx::PgPool) -> Result<(), eyre::Error> {
+        use carbide_test_support::Outcome::FailsWith;
+        use carbide_test_support::{Case, check_cases_async};
+
         let mut txn = pool.begin().await?;
         let rpc_sku: rpc::forge::Sku = serde_json::de::from_str(FULL_SKU_DATA)?;
         let expected_sku: Sku = rpc_sku.into();
@@ -414,24 +419,183 @@ pub(in crate::tests) mod tests {
         let mut actual_sku = db::sku::find(&mut txn, std::slice::from_ref(&expected_sku.id))
             .await?
             .remove(0);
-        // cheat the created timestamp
+        // cheat the created/updated timestamps (DB sets both to now())
         actual_sku.created = expected_sku.created;
+        actual_sku.updated = expected_sku.updated;
 
         let actual_sku_json = serde_json::ser::to_string_pretty(&actual_sku)?;
 
         assert_eq!(actual_sku_json, expected_sku_json);
+        txn.commit().await?;
 
-        let error = db::sku::create(&mut txn, &expected_sku)
+        let mut different_vendor = expected_sku.clone();
+        different_vendor.id = "different-vendor-sku".to_string();
+        different_vendor.components.chassis.vendor = "different vendor".to_string();
+        let expected_error = format!(
+            "argument is invalid: Specified SKU matches SKU with ID: {}",
+            expected_sku.id
+        );
+        check_cases_async(
+            [
+                Case {
+                    scenario: "identical definition",
+                    input: expected_sku.clone(),
+                    expect: FailsWith(expected_error.clone()),
+                },
+                Case {
+                    scenario: "hardware match with a different informational vendor",
+                    input: different_vendor,
+                    expect: FailsWith(expected_error),
+                },
+            ],
+            |candidate| {
+                let pool = &pool;
+                async move {
+                    let mut connection = pool.acquire().await.map_err(|error| error.to_string())?;
+                    db::sku::create(&mut connection, &candidate)
+                        .await
+                        .map_err(|error| error.to_string())
+                }
+            },
+        )
+        .await;
+        assert_eq!(db::sku::get_sku_ids(&pool).await?, vec![expected_sku.id]);
+        Ok(())
+    }
+
+    #[crate::sqlx_test]
+    async fn test_sku_create_rejects_exact_two_drive_definition(
+        pool: sqlx::PgPool,
+    ) -> Result<(), eyre::Error> {
+        let rpc_sku: rpc::forge::Sku = serde_json::de::from_str(FULL_SKU_DATA)?;
+        let mut sku: Sku = rpc_sku.into();
+        sku.components.storage[0].count = 2;
+
+        let mut txn = pool.begin().await?;
+        db::sku::create(&mut txn, &sku).await?;
+
+        let error = db::sku::create(&mut txn, &sku)
             .await
-            .expect_err("Duplicate SKU create should have failed");
+            .expect_err("reusing this ID must preserve the unique-ID error");
+        assert!(
+            matches!(error, DatabaseError::AlreadyFoundError { kind: "SKU", ref id } if id == &sku.id),
+            "{error}"
+        );
 
+        let duplicate = Sku {
+            id: "duplicate-two-drive-sku".to_string(),
+            description: "different description".to_string(),
+            device_type: Some("different device type".to_string()),
+            ..sku.clone()
+        };
+        // The hardware comparison sees one drive, while this definition asks for two.
+        assert!(
+            db::sku::find_matching(&mut txn, &duplicate)
+                .await?
+                .is_none()
+        );
+        let error = db::sku::create(&mut txn, &duplicate)
+            .await
+            .expect_err("an exact two-drive definition must be rejected");
         assert_eq!(
             error.to_string(),
             format!(
                 "argument is invalid: Specified SKU matches SKU with ID: {}",
-                expected_sku.id
+                sku.id
             )
         );
+        txn.commit().await?;
+
+        assert_eq!(db::sku::get_sku_ids(&pool).await?, vec![sku.id]);
+        Ok(())
+    }
+
+    #[crate::sqlx_test]
+    async fn test_sku_create_preserves_exact_definition_boundaries(
+        pool: sqlx::PgPool,
+    ) -> Result<(), eyre::Error> {
+        use carbide_test_support::Outcome::Yields;
+        use carbide_test_support::{Case, check_cases_async};
+
+        let rpc_sku: rpc::forge::Sku = serde_json::de::from_str(FULL_SKU_DATA)?;
+        let mut sku: Sku = rpc_sku.into();
+        sku.components.storage[0].count = 2;
+        let mut second_storage = sku.components.storage[0].clone();
+        second_storage.model = "another storage model".to_string();
+        sku.components.storage.push(second_storage);
+        let mut txn = pool.begin().await?;
+        db::sku::create(&mut txn, &sku).await?;
+        txn.commit().await?;
+
+        let mut different_model = sku.clone();
+        different_model.id = "different-storage-model".to_string();
+        different_model.components.storage[0].model = "informational model".to_string();
+        let mut different_order = sku;
+        different_order.id = "different-storage-order".to_string();
+        different_order.components.storage.reverse();
+
+        check_cases_async(
+            [
+                Case {
+                    scenario: "informational storage model differs",
+                    input: different_model,
+                    expect: Yields(()),
+                },
+                Case {
+                    scenario: "storage collection order differs",
+                    input: different_order,
+                    expect: Yields(()),
+                },
+            ],
+            |candidate| {
+                let pool = &pool;
+                async move {
+                    let mut txn = pool.begin().await.map_err(|error| error.to_string())?;
+                    db::sku::create(&mut txn, &candidate)
+                        .await
+                        .map_err(|error| error.to_string())?;
+                    txn.commit().await.map_err(|error| error.to_string())?;
+                    let mut connection = pool.acquire().await.map_err(|error| error.to_string())?;
+                    let saved = db::sku::find(&mut connection, &[candidate.id])
+                        .await
+                        .map_err(|error| error.to_string())?;
+                    assert_eq!(saved[0].components, candidate.components);
+                    Ok::<(), String>(())
+                }
+            },
+        )
+        .await;
+        Ok(())
+    }
+
+    #[crate::sqlx_test]
+    async fn test_sku_create_preserves_cross_version_definition_matching(
+        pool: sqlx::PgPool,
+    ) -> Result<(), eyre::Error> {
+        let rpc_sku: rpc::forge::Sku = serde_json::de::from_str(FULL_SKU_DATA)?;
+        let mut candidate: Sku = rpc_sku.into();
+        candidate.components.storage.clear();
+        candidate
+            .components
+            .gpus
+            .push(candidate.components.gpus[0].clone());
+
+        let mut txn = pool.begin().await?;
+        // Historical rows cannot be created through the current-version-only writer.
+        sqlx::query(
+            "INSERT INTO machine_skus (id, description, components, schema_version)
+             VALUES ('historical-definition', '', $1, 4)",
+        )
+        .bind(sqlx::types::Json(&candidate.components))
+        .execute(&mut *txn)
+        .await?;
+        db::sku::create(&mut txn, &candidate).await?;
+        txn.commit().await?;
+
+        let mut connection = pool.acquire().await?;
+        let saved = db::sku::find(&mut connection, &[candidate.id]).await?;
+        assert_eq!(saved[0].schema_version, CURRENT_SKU_VERSION);
+        assert_eq!(saved[0].components, candidate.components);
         Ok(())
     }
 
@@ -585,9 +749,10 @@ pub(in crate::tests) mod tests {
         let expected_sku: Sku = serde_json::de::from_str::<rpc::forge::Sku>(SKU_DATA)?.into();
 
         let mut actual_sku = db::sku::generate_sku_from_machine(&pool, &machine_id).await?;
-        // cheat the created timestamp and id
+        // cheat the created/updated timestamps (DB sets both to now()) and id
         actual_sku.id = "sku id".to_string();
         actual_sku.created = expected_sku.created;
+        actual_sku.updated = expected_sku.updated;
 
         let actual_sku_json: String = serde_json::ser::to_string_pretty(&actual_sku)?;
         tracing::info!(
@@ -976,6 +1141,7 @@ pub(in crate::tests) mod tests {
                     bmc_ip_allocation: Default::default(),
                     host_lifecycle_profile: Default::default(),
                     server_name: None,
+                    replace_dpu_loopbacks: false,
                 },
             },
         )
@@ -1073,6 +1239,7 @@ pub(in crate::tests) mod tests {
                     bmc_ip_allocation: Default::default(),
                     host_lifecycle_profile: Default::default(),
                     server_name: None,
+                    replace_dpu_loopbacks: false,
                 },
             },
         )
@@ -1145,6 +1312,7 @@ pub(in crate::tests) mod tests {
                     bmc_ip_allocation: Default::default(),
                     host_lifecycle_profile: Default::default(),
                     server_name: None,
+                    replace_dpu_loopbacks: false,
                 },
             },
         )
@@ -1234,6 +1402,7 @@ pub(in crate::tests) mod tests {
                     bmc_ip_allocation: Default::default(),
                     host_lifecycle_profile: Default::default(),
                     server_name: None,
+                    replace_dpu_loopbacks: false,
                 },
             },
         )
@@ -1723,6 +1892,7 @@ pub(in crate::tests) mod tests {
                     bmc_ip_allocation: Default::default(),
                     host_lifecycle_profile: Default::default(),
                     server_name: None,
+                    replace_dpu_loopbacks: false,
                 },
             },
         )
@@ -2242,12 +2412,11 @@ pub(in crate::tests) mod tests {
         let replacement_sku_json = serde_json::ser::to_string_pretty(&replacement_sku)?;
         tracing::info!(replacement_sku_json, "replacment");
 
-        let expected_sku = Sku {
+        let mut expected_sku = Sku {
             schema_version: CURRENT_SKU_VERSION,
             components: replacement_sku.components,
             ..original_sku
         };
-        let expected_sku_json = serde_json::ser::to_string_pretty(&expected_sku)?;
 
         let returned_sku = db::sku::replace(&mut txn, &expected_sku).await?;
 
@@ -2255,9 +2424,11 @@ pub(in crate::tests) mod tests {
 
         let mut actual_sku = db::sku::find(&mut txn, &[sku_id]).await?.remove(0);
 
-        // cheat the created timestamp
+        // cheat the created timestamp; preserve the persisted replacement timestamp for comparison
         actual_sku.created = expected_sku.created;
+        expected_sku.updated = actual_sku.updated;
 
+        let expected_sku_json = serde_json::ser::to_string_pretty(&expected_sku)?;
         let actual_sku_json = serde_json::ser::to_string_pretty(&actual_sku)?;
 
         assert_eq!(actual_sku_json, returned_sku_json);
@@ -2286,6 +2457,89 @@ pub(in crate::tests) mod tests {
             returned_sku_json
         );
 
+        Ok(())
+    }
+
+    #[crate::sqlx_test]
+    async fn test_sku_replace_rejects_exact_anchored_pci_definition(
+        pool: sqlx::PgPool,
+    ) -> Result<(), eyre::Error> {
+        #[derive(Debug)]
+        enum Replacement {
+            Full,
+            Components,
+        }
+
+        let rpc_sku: rpc::forge::Sku = serde_json::de::from_str(FULL_SKU_DATA)?;
+        let mut sku: Sku = rpc_sku.into();
+        let storage = &mut sku.components.storage[0];
+        storage.pci_patterns = vec![r"^/devices/pci0000:00/0000:64:00\.0/nvme$".to_string()];
+
+        let mut target = sku.clone();
+        target.id = "anchored-pci-replacement-target".to_string();
+        target.components.chassis.model = "different chassis".to_string();
+        let mut txn = pool.begin().await?;
+        db::sku::create(&mut txn, &sku).await?;
+        db::sku::create(&mut txn, &target).await?;
+        let original_target = db::sku::find(&mut txn, std::slice::from_ref(&target.id))
+            .await?
+            .pop()
+            .expect("replacement target should exist");
+        txn.commit().await?;
+
+        let replacement = Sku {
+            id: target.id.clone(),
+            description: "rejected description".to_string(),
+            device_type: Some("rejected device type".to_string()),
+            ..sku.clone()
+        };
+        for method in [Replacement::Full, Replacement::Components] {
+            let mut txn = pool.begin().await?;
+            // An anchored pattern cannot match its own text as a discovered path.
+            assert!(
+                db::sku::find_matching(&mut txn, &replacement)
+                    .await?
+                    .is_none()
+            );
+            let result = match method {
+                Replacement::Full => db::sku::replace(&mut txn, &replacement).await,
+                Replacement::Components => {
+                    db::sku::replace_components(
+                        &mut txn,
+                        SkuComponentsReplacement {
+                            id: replacement.id.clone(),
+                            components: replacement.components.clone(),
+                            schema_version: replacement.schema_version,
+                            description: Some(replacement.description.clone()),
+                            device_type: replacement.device_type.clone(),
+                        },
+                    )
+                    .await
+                }
+            };
+            let error = result.expect_err("an exact anchored PCI definition must be rejected");
+            assert_eq!(
+                error.to_string(),
+                format!(
+                    "argument is invalid: Specified SKU matches SKU with ID: {}",
+                    sku.id
+                ),
+                "{method:?}"
+            );
+            // Commit so any write escaping rejection is visible to the saved-target check.
+            txn.commit().await?;
+
+            let mut connection = pool.acquire().await?;
+            let saved_target = db::sku::find(&mut connection, std::slice::from_ref(&target.id))
+                .await?
+                .pop()
+                .expect("rejected replacement should retain its target");
+            assert_eq!(
+                serde_json::to_value(saved_target)?,
+                serde_json::to_value(&original_target)?,
+                "{method:?}"
+            );
+        }
         Ok(())
     }
 
@@ -2708,6 +2962,7 @@ pub(in crate::tests) mod tests {
         db::sku::create(&mut txn, &other_sku).await?;
         txn.commit().await?;
 
+        other_sku.components.chassis.vendor = "different informational vendor".to_string();
         let error = env
             .api
             .replace_sku_components(tonic::Request::new(
@@ -2744,6 +2999,168 @@ pub(in crate::tests) mod tests {
                 .and_then(|status| status.verify_request_time),
             original_verify_request_time,
             "rejected components must not request verification"
+        );
+
+        Ok(())
+    }
+
+    #[crate::sqlx_test]
+    async fn test_sku_updates_use_transaction_timestamp(
+        pool: sqlx::PgPool,
+    ) -> Result<(), eyre::Error> {
+        use rpc::forge::forge_server::Forge;
+
+        let env = create_test_env(pool.clone()).await;
+        let mut connection = pool.acquire().await?;
+        let (machine_id, _) = create_managed_host(&env).await.into();
+        let machine_id: MachineId = machine_id.into();
+
+        let original_sku =
+            db::sku::generate_sku_from_machine(connection.as_mut(), &machine_id).await?;
+        db::sku::create(&mut connection, &original_sku).await?;
+
+        let fetched = db::sku::find(&mut connection, std::slice::from_ref(&original_sku.id))
+            .await?
+            .pop()
+            .expect("created SKU should exist");
+        assert_eq!(fetched.updated, Some(fetched.created));
+
+        let mut txn = db::Transaction::begin_inner(connection.as_mut()).await?;
+        let metadata_updated: chrono::DateTime<chrono::Utc> = sqlx::query_scalar("SELECT NOW()")
+            .fetch_one(txn.as_pgconn())
+            .await?;
+        db::sku::update_metadata(
+            txn.as_pgconn(),
+            original_sku.id.clone(),
+            Some("updated description".to_string()),
+            None,
+        )
+        .await?;
+        txn.commit().await?;
+
+        let after_metadata = db::sku::find(&mut connection, std::slice::from_ref(&original_sku.id))
+            .await?
+            .pop()
+            .expect("SKU should exist after metadata update");
+        assert_eq!(after_metadata.description, "updated description");
+        assert_eq!(after_metadata.updated, Some(metadata_updated));
+
+        let mut replace_req = original_sku.clone();
+        replace_req.description = "replaced description".to_string();
+        let mut txn = db::Transaction::begin_inner(connection.as_mut()).await?;
+        let replacement_updated: chrono::DateTime<chrono::Utc> = sqlx::query_scalar("SELECT NOW()")
+            .fetch_one(txn.as_pgconn())
+            .await?;
+        let replaced_sku = db::sku::replace(txn.as_pgconn(), &replace_req).await?;
+        txn.commit().await?;
+        assert_eq!(replaced_sku.description, "replaced description");
+        assert_eq!(replaced_sku.created, fetched.created);
+        assert_eq!(replaced_sku.updated, Some(replacement_updated));
+
+        // Verify across gRPC boundary
+        let rpc_res = env
+            .api
+            .find_skus_by_ids(tonic::Request::new(rpc::forge::SkusByIdsRequest {
+                ids: vec![original_sku.id],
+            }))
+            .await?
+            .into_inner();
+        let rpc_sku = &rpc_res.skus[0];
+        assert!(rpc_sku.created.is_some());
+        assert_eq!(rpc_sku.updated, replaced_sku.updated.map(Into::into));
+
+        Ok(())
+    }
+
+    #[crate::sqlx_test]
+    async fn test_delete_sku_errors_and_committed_deletion(
+        pool: sqlx::PgPool,
+    ) -> Result<(), eyre::Error> {
+        use carbide_test_support::Outcome::FailsWith;
+        use carbide_test_support::{Case, check_cases_async};
+        use rpc::forge::SkuIdList;
+        use rpc::forge::forge_server::Forge;
+
+        let env =
+            create_test_env_with_overrides(pool.clone(), TestEnvOverrides::no_network_segments())
+                .await;
+        let api = &env.api;
+        let sku: Sku = serde_json::from_str::<rpc::forge::Sku>(FULL_SKU_DATA)?.into();
+        let mut txn = pool.begin().await?;
+        db::sku::create(&mut txn, &sku).await?;
+        txn.commit().await?;
+
+        check_cases_async(
+            [
+                Case {
+                    scenario: "one nonempty missing ID",
+                    input: vec!["missing-sku"],
+                    expect: FailsWith((
+                        tonic::Code::NotFound,
+                        "SKU not found: missing-sku".to_string(),
+                        Some("NICO-API-404".to_string()),
+                    )),
+                },
+                Case {
+                    scenario: "no IDs",
+                    input: vec![],
+                    expect: FailsWith((
+                        tonic::Code::InvalidArgument,
+                        "the SKU  does not exist".to_string(),
+                        Some("NICO-API-400".to_string()),
+                    )),
+                },
+                Case {
+                    scenario: "one empty ID",
+                    input: vec![""],
+                    expect: FailsWith((
+                        tonic::Code::InvalidArgument,
+                        "the SKU  does not exist".to_string(),
+                        Some("NICO-API-400".to_string()),
+                    )),
+                },
+                Case {
+                    scenario: "multiple missing IDs",
+                    input: vec!["missing-sku", "other-missing-sku"],
+                    expect: FailsWith((
+                        tonic::Code::InvalidArgument,
+                        "the SKU missing-sku does not exist".to_string(),
+                        Some("NICO-API-400".to_string()),
+                    )),
+                },
+            ],
+            |ids| async move {
+                api.delete_sku(tonic::Request::new(SkuIdList {
+                    ids: ids.into_iter().map(str::to_string).collect(),
+                }))
+                .await
+                .map(tonic::Response::into_inner)
+                .map_err(|error| {
+                    (
+                        error.code(),
+                        error.message().to_string(),
+                        error
+                            .metadata()
+                            .get("nico-error-code")
+                            .and_then(|value| value.to_str().ok())
+                            .map(str::to_string),
+                    )
+                })
+            },
+        )
+        .await;
+
+        api.delete_sku(tonic::Request::new(SkuIdList {
+            ids: vec![sku.id.clone()],
+        }))
+        .await?;
+
+        let mut connection = pool.acquire().await?;
+        assert!(
+            db::sku::find(&mut connection, std::slice::from_ref(&sku.id))
+                .await?
+                .is_empty(),
+            "successful handler deletion must be committed"
         );
 
         Ok(())

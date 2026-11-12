@@ -31,12 +31,14 @@ use model::machine_update_module::{
     AutomaticFirmwareUpdateReference, DpuReprovisionInitiator, HOST_UPDATE_HEALTH_REPORT_SOURCE,
 };
 use sqlx::PgConnection;
+use tokio::sync::Notify;
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 
 use crate::cfg::file::CarbideConfig;
 use crate::machine_update_manager::MachineUpdateManager;
 use crate::machine_update_manager::machine_update_module::MachineUpdateModule;
+use crate::machine_update_manager::metrics::FirmwareUpdateProgress;
 use crate::tests::common;
 use crate::tests::common::api_fixtures::create_managed_host;
 use crate::{CarbideError, CarbideResult};
@@ -48,7 +50,9 @@ struct TestUpdateModule {
     pub(in crate::tests) updates_in_progress: Vec<HostMachineId>,
     pub(in crate::tests) updates_started: HashSet<HostMachineId>,
     start_update_budgets: Arc<Mutex<Vec<i32>>>,
+    start_updates_notified: Arc<Notify>,
     clear_completed_updates_called: Arc<Mutex<i32>>,
+    cleanup_marker: Option<HostMachineId>,
 }
 
 #[async_trait]
@@ -63,6 +67,7 @@ impl MachineUpdateModule for TestUpdateModule {
     async fn start_updates(
         &self,
         _pool: &sqlx::Pool<sqlx::Postgres>,
+        _work_lock: &db::work_lock_manager::WorkLock,
         available_updates: i32,
         _updating_machines: &HashSet<HostMachineId>,
         _snapshots: &HashMap<HostMachineId, ManagedHostStateSnapshot>,
@@ -71,15 +76,27 @@ impl MachineUpdateModule for TestUpdateModule {
             .lock()
             .unwrap()
             .push(available_updates);
+        self.start_updates_notified.notify_one();
         Ok(self.updates_started.clone())
     }
 
-    async fn clear_completed_updates(&self, _txn: &mut PgConnection) -> CarbideResult<()> {
+    async fn clear_completed_updates(
+        &self,
+        txn: &mut PgConnection,
+    ) -> CarbideResult<Vec<FirmwareUpdateProgress>> {
+        if let Some(host_id) = self.cleanup_marker {
+            let query = "UPDATE machines SET update_complete = true WHERE id = $1";
+            sqlx::query(query)
+                .bind(host_id)
+                .execute(txn)
+                .await
+                .map_err(|error| db::DatabaseError::query(query, error))?;
+        }
         if let Ok(mut guard) = self.clear_completed_updates_called.lock() {
             (*guard) += 1;
         }
 
-        Ok(())
+        Ok(Vec::new())
     }
 
     async fn update_metrics(
@@ -100,7 +117,9 @@ impl TestUpdateModule {
             updates_in_progress,
             updates_started,
             start_update_budgets: Arc::new(Mutex::new(Vec::new())),
+            start_updates_notified: Arc::new(Notify::new()),
             clear_completed_updates_called: Arc::new(Mutex::new(0)),
+            cleanup_marker: None,
         }
     }
     pub(in crate::tests) fn get_start_updates_called(&self) -> usize {
@@ -109,6 +128,28 @@ impl TestUpdateModule {
 
     pub(in crate::tests) fn get_clear_completed_updates_called(&self) -> i32 {
         *self.clear_completed_updates_called.lock().unwrap()
+    }
+
+    async fn wait_for_start_updates(&self, minimum_calls: usize) -> usize {
+        tokio::time::timeout(Duration::from_secs(30), async {
+            loop {
+                let calls = self.get_start_updates_called();
+                if calls >= minimum_calls {
+                    return calls;
+                }
+
+                // `notify_one` retains a permit if an iteration runs between
+                // the count check and this wait. The count handles coalescing.
+                self.start_updates_notified.notified().await;
+            }
+        })
+        .await
+        .unwrap_or_else(|_| {
+            panic!(
+                "expected at least {minimum_calls} update iterations, observed {}",
+                self.get_start_updates_called()
+            )
+        })
     }
 }
 
@@ -133,26 +174,50 @@ async fn test_max_outstanding_updates(
             .unwrap(),
     );
 
-    let mut machines_started = HashSet::default();
-    machines_started.insert(host_machine_id.into());
+    // Zero capacity still runs cleanup. At one slot, the first module fills
+    // the budget and the next module cannot admit another host.
+    for (scenario, capacity, expected_starts) in [
+        ("zero capacity", 0, 0),
+        ("first module fills capacity", 1, 1),
+    ] {
+        let mut config = (*config).clone();
+        config
+            .machine_updater
+            .max_concurrent_machine_updates_absolute = Some(capacity);
+        config
+            .machine_updater
+            .max_concurrent_machine_updates_percent = None;
+        let module1 = Box::new(TestUpdateModule::new(
+            vec![],
+            HashSet::from([host_machine_id.into()]),
+        ));
+        let module2 = Box::new(TestUpdateModule::new(vec![], HashSet::default()));
+        let manager = MachineUpdateManager::new_with_modules(
+            env.pool.clone(),
+            Arc::new(config),
+            vec![module1.clone(), module2.clone()],
+            env.api.work_lock_manager_handle.clone(),
+        );
 
-    let module1 = Box::new(TestUpdateModule::new(vec![], machines_started));
-    let module2 = Box::new(TestUpdateModule::new(vec![], HashSet::default()));
+        manager.run_single_iteration().await?;
 
-    let machine_update_manager = MachineUpdateManager::new_with_modules(
-        env.pool.clone(),
-        config,
-        vec![module1.clone(), module2.clone()],
-        env.api.work_lock_manager_handle.clone(),
-    );
-
-    machine_update_manager.run_single_iteration().await?;
-
-    assert_eq!(module1.get_start_updates_called(), 1);
-    assert_eq!(module2.get_start_updates_called(), 0);
-
-    assert_eq!(module1.get_clear_completed_updates_called(), 1);
-    assert_eq!(module2.get_clear_completed_updates_called(), 1);
+        assert_eq!(
+            module1.get_start_updates_called(),
+            expected_starts,
+            "{scenario}"
+        );
+        assert_eq!(module2.get_start_updates_called(), 0, "{scenario}");
+        assert_eq!(
+            module1.get_clear_completed_updates_called(),
+            1,
+            "{scenario}"
+        );
+        assert_eq!(
+            module2.get_clear_completed_updates_called(),
+            1,
+            "{scenario}"
+        );
+    }
 
     Ok(())
 }
@@ -303,27 +368,18 @@ fn test_start(pool: sqlx::PgPool) {
         .start(&mut join_set, cancel_token.clone())
         .expect("Start failed");
 
-    tokio::time::sleep(Duration::from_secs(4)).await;
-
-    let start_count = test_module.get_start_updates_called();
-
-    tokio::time::sleep(Duration::from_secs(4)).await;
-
-    let end_count = test_module.get_start_updates_called();
-
-    assert_ne!(start_count, end_count);
+    let start_count = test_module.wait_for_start_updates(1).await;
+    let end_count = test_module.wait_for_start_updates(start_count + 1).await;
+    assert!(end_count > start_count);
 
     cancel_token.cancel();
 
-    join_set.join_all().await;
-
-    let start_count = test_module.get_start_updates_called();
-
-    tokio::time::sleep(Duration::from_secs(4)).await;
-
-    let end_count = test_module.get_start_updates_called();
-
-    assert_eq!(start_count, end_count);
+    // Joining both tasks proves the manager and its work-lock service have
+    // stopped; neither can start another iteration after the join.
+    let completed_tasks = tokio::time::timeout(Duration::from_secs(30), join_set.join_all())
+        .await
+        .expect("machine update tasks did not stop after cancellation");
+    assert_eq!(completed_tasks.len(), 2);
 }
 
 /// A lock acquisition that fails for infrastructure reasons (here: the work
@@ -420,5 +476,223 @@ async fn add_host_update_alert(
     )
     .await?;
 
+    Ok(())
+}
+
+// Cards and update modules share a host slot. A second candidate must fit
+// beside a multi-card NIC recovery that also has an outstanding DPU request.
+#[crate::sqlx_test]
+async fn admitted_nic_recovery_shares_the_host_budget(
+    pool: sqlx::PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use carbide_utils::test_support::test_meter::TestMeter;
+    use model::machine::ManagedHostState;
+    use model::machine::nic_firmware::NicFirmwarePhase;
+
+    let env = create_test_env(pool).await;
+    let recovering = create_managed_host(&env).await;
+    let candidate = create_managed_host(&env).await;
+    let mut operation = model::test_support::nic_firmware::operation();
+    let mut second_card = operation.targets[0].clone();
+    second_card.pci_name = "0000:02:00.0".into();
+    second_card.selector =
+        model::nic_firmware::NicFirmwareCardSelector::Mac("02:00:00:00:00:02".parse()?);
+    operation.targets.push(second_card);
+    operation.phase = NicFirmwarePhase::RestoringLockdown {
+        target_index: 0,
+        failure: Some("restore after a settled preparation failure".into()),
+    };
+    operation.validate()?;
+    let recovering_state = ManagedHostState::NicFirmwareUpdating { operation };
+    let mut txn = env.pool.begin().await?;
+    db::machine::update_state(&mut txn, &recovering.id, &recovering_state).await?;
+    candidate.update_nic_firmware_version(&mut txn).await?;
+    txn.commit().await?;
+
+    let mut config = (*env.config).clone();
+    config
+        .machine_updater
+        .max_concurrent_machine_updates_absolute = Some(1);
+    config
+        .machine_updater
+        .max_concurrent_machine_updates_percent = None;
+    config.firmware_global.autoupdate = false;
+    config
+        .dpu_config
+        .dpu_nic_firmware_reprovision_update_enabled = true;
+    let meter = TestMeter::default();
+    let manager = MachineUpdateManager::new(
+        env.pool.clone(),
+        Arc::new(config.clone()),
+        meter.meter(),
+        env.api.work_lock_manager_handle.clone(),
+        None,
+    );
+    manager.run_single_iteration().await?;
+
+    // First isolate NIC accounting: no other module occupies this host's slot.
+    let mut txn = env.pool.begin().await?;
+    assert_eq!(
+        recovering.host().db_machine(&mut txn).await.state.value,
+        recovering_state
+    );
+    assert!(
+        candidate
+            .dpu()
+            .db_machine(&mut txn)
+            .await
+            .reprovision_requested
+            .is_none()
+    );
+    txn.commit().await?;
+    assert_eq!(
+        meter
+            .formatted_metric("carbide_machines_in_maintenance_count")
+            .as_deref(),
+        Some("1")
+    );
+    assert_eq!(
+        meter
+            .formatted_metric("carbide_machine_updates_started_count")
+            .as_deref(),
+        Some("0")
+    );
+    drop(manager);
+
+    // Add a second module's work on the same host; one remaining slot must
+    // still admit the distinct candidate despite two NIC targets and overlap.
+    let mut txn = env.pool.begin().await?;
+    // Seed the request in Ready, then atomically restore the NIC workflow.
+    // update_state mirrors host state to its DPUs, and admission requires Ready.
+    db::machine::update_state(&mut txn, &recovering.id, &ManagedHostState::Ready).await?;
+    recovering.update_nic_firmware_version(&mut txn).await?;
+    assert!(
+        db::dpu_machine_update::trigger_reprovisioning_for_managed_host(
+            &mut txn,
+            &[DpuMachineUpdate {
+                host_machine_id: recovering.id.into(),
+                dpu_machine_id: recovering.dpu().id,
+                firmware_version: "11.10.1000".into(),
+                dpf_managed: false,
+            }],
+        )
+        .await?
+    );
+    db::machine::update_state(&mut txn, &recovering.id, &recovering_state).await?;
+    let dpu_work = db::dpu_machine_update::get_reprovisioning_machines(&mut txn).await?;
+    assert_eq!(dpu_work.len(), 1);
+    assert_eq!(dpu_work[0].host_machine_id, recovering.id.into());
+    txn.commit().await?;
+    config
+        .machine_updater
+        .max_concurrent_machine_updates_absolute = Some(2);
+    let meter = TestMeter::default();
+    let manager = MachineUpdateManager::new(
+        env.pool.clone(),
+        Arc::new(config),
+        meter.meter(),
+        env.api.work_lock_manager_handle.clone(),
+        None,
+    );
+    manager.run_single_iteration().await?;
+
+    let mut txn = env.pool.begin().await?;
+    let recovery = recovering.host().db_machine(&mut txn).await;
+    assert_eq!(recovery.state.value, recovering_state);
+    assert!(
+        recovering
+            .dpu()
+            .db_machine(&mut txn)
+            .await
+            .reprovision_requested
+            .is_some()
+    );
+    assert!(
+        candidate
+            .dpu()
+            .db_machine(&mut txn)
+            .await
+            .reprovision_requested
+            .is_some()
+    );
+    txn.commit().await?;
+    assert_eq!(
+        meter
+            .formatted_metric("carbide_machines_in_maintenance_count")
+            .as_deref(),
+        Some("2")
+    );
+    assert_eq!(
+        meter
+            .formatted_metric("carbide_machine_updates_started_count")
+            .as_deref(),
+        Some("1")
+    );
+    Ok(())
+}
+
+// Cleanup must retain the manager fence until its supplied transaction commits
+// the marker, even while the callback waits for a machine row.
+#[crate::sqlx_test]
+async fn manager_cleanup_keeps_ownership_until_marker_commit(
+    pool: sqlx::PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use crate::tests::common::postgres::wait_for_blocked_query;
+
+    let env = create_test_env(pool).await;
+    let host = create_managed_host(&env).await;
+    sqlx::query("UPDATE machines SET update_complete = false WHERE id = $1")
+        .bind(host.id)
+        .execute(&env.pool)
+        .await?;
+    let mut module = TestUpdateModule::new(vec![], HashSet::new());
+    module.cleanup_marker = Some(host.id.into());
+    let mut config = (*env.config).clone();
+    config
+        .machine_updater
+        .max_concurrent_machine_updates_absolute = Some(0);
+    config
+        .machine_updater
+        .max_concurrent_machine_updates_percent = None;
+    let manager = MachineUpdateManager::new_with_modules(
+        env.pool.clone(),
+        Arc::new(config),
+        vec![Box::new(module)],
+        env.api.work_lock_manager_handle.clone(),
+    );
+    let mut blocker = env.pool.begin().await?;
+    db::machine::lock_by_id_for_update(blocker.as_mut(), &host.id.into()).await?;
+    let blocker_pid = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(blocker.as_mut())
+        .await?;
+    let iteration = manager.run_single_iteration();
+    tokio::pin!(iteration);
+    let cleanup_pid = tokio::select! {
+        result = &mut iteration => panic!("cleanup escaped the machine row: {result:?}"),
+        pid = wait_for_blocked_query(&env.pool, blocker_pid, "UPDATE machines SET update_complete") => pid,
+    };
+    let takeover =
+        sqlx::query("UPDATE work_locks SET worker_id = gen_random_uuid() WHERE work_key = $1")
+            .bind("MachineUpdateManager::run_single_iteration")
+            .execute(&env.pool);
+    tokio::pin!(takeover);
+    tokio::select! {
+        result = &mut iteration => panic!("cleanup escaped the machine row: {result:?}"),
+        result = &mut takeover => panic!("ownership changed before cleanup committed: {result:?}"),
+        _ = wait_for_blocked_query(&env.pool, cleanup_pid, "UPDATE work_locks SET worker_id") => {},
+    }
+    blocker.commit().await?;
+    let (iteration, takeover) = tokio::time::timeout(Duration::from_secs(30), async {
+        tokio::join!(iteration, takeover)
+    })
+    .await
+    .expect("cleanup and takeover finish after releasing the machine row");
+    iteration?;
+    assert_eq!(takeover?.rows_affected(), 1);
+    let committed: bool = sqlx::query_scalar("SELECT update_complete FROM machines WHERE id = $1")
+        .bind(host.id)
+        .fetch_one(&env.pool)
+        .await?;
+    assert!(committed);
     Ok(())
 }

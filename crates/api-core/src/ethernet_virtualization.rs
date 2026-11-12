@@ -38,7 +38,8 @@ use model::network_security_group::{
 };
 use model::network_segment::NetworkSegment;
 use model::resource_pool::common::CommonPools;
-use model::vpc::{ALL_VPC_VIRTUALIZATION_TYPES, VpcVirtualizationTypeCapabilities};
+use model::vpc::{ALL_VPC_VIRTUALIZATION_TYPES, Vpc, VpcVirtualizationTypeCapabilities};
+use model::vpc_prefix::VpcPrefix;
 use sqlx::PgConnection;
 
 use crate::CarbideError;
@@ -54,10 +55,22 @@ pub(crate) struct EthVirtData {
 
 pub(crate) struct AdminNetworkOptions<'a> {
     pub(crate) fnn_enabled: bool,
+    pub(crate) l3_only: bool,
     pub(crate) common_pools: &'a CommonPools,
     pub(crate) booturl: &'a Option<String>,
     pub(crate) use_vpc_vrf_loopback: bool,
     pub(crate) routing_profile: Option<&'a FnnRoutingProfileConfig>,
+}
+
+/// Carries one VPC's fresh routing inputs so host and service interfaces use the same FNN resolution rules.
+pub(crate) struct ResolvedVpcNetworkConfig {
+    pub(crate) vpc: Vpc,
+    pub(crate) active_vpc_prefixes: Vec<VpcPrefix>,
+    pub(crate) vpc_vni: Option<u32>,
+    pub(crate) vpc_prefixes: Vec<String>,
+    pub(crate) vpc_peer_prefixes: Vec<String>,
+    pub(crate) vpc_peer_vnis: Vec<u32>,
+    pub(crate) vpc_routing_profile: Option<rpc::RoutingProfile>,
 }
 
 #[derive(Clone)]
@@ -398,6 +411,7 @@ pub(crate) async fn admin_network(
 ) -> Result<(rpc::FlatInterfaceConfig, MachineInterfaceId), tonic::Status> {
     let AdminNetworkOptions {
         fnn_enabled: fnn_enabled_on_admin,
+        l3_only,
         common_pools,
         booturl,
         use_vpc_vrf_loopback,
@@ -654,7 +668,7 @@ pub(crate) async fn admin_network(
         booturl: booturl.clone(),
         svi_ip,
         tenant_vrf_loopback_ip: tenant_vrf_loopback_for_legacy_ipv4_field(tenant_vrf_loopback_ip),
-        is_l2_segment: true,
+        is_l2_segment: !(fnn_enabled_on_admin && l3_only),
         vpc_peer_prefixes: vec![],
         vpc_peer_vnis: vec![],
         network_security_group: None,
@@ -681,6 +695,187 @@ pub(crate) async fn admin_network(
     Ok((cfg, interface.id))
 }
 
+/// Resolves one VPC's prefixes, peers, VNI, and routing profile for reuse by host and service interface builders.
+pub(crate) async fn resolve_vpc_network_config(
+    txn: &mut PgConnection,
+    vpc_id: VpcId,
+    vpc_peering_policy_on_existing: Option<VpcPeeringPolicy>,
+    fnn_config: Option<&FnnConfig>,
+) -> Result<ResolvedVpcNetworkConfig, tonic::Status> {
+    // Load the selected VPC and its complete active prefix set before resolving dependent policy.
+    let vpc = db::vpc::find_by(&mut *txn, ObjectColumnFilter::One(vpc::IdColumn, &vpc_id))
+        .await?
+        .pop()
+        .ok_or_else(|| CarbideError::FindOneReturnedNoResultsError(vpc_id.into()))?;
+    let active_vpc_prefixes = db::vpc_prefix::find_by_vpc(txn, vpc_id).await?;
+    let mut vpc_prefixes = active_vpc_prefixes
+        .iter()
+        .map(|vpc_prefix| vpc_prefix.config.prefix.to_string())
+        .collect::<Vec<_>>();
+    vpc_prefixes.extend(
+        db::network_prefix::find_by_vpc(txn, vpc_id)
+            .await?
+            .into_iter()
+            .map(|segment_prefix| segment_prefix.prefix.to_string()),
+    );
+
+    // The per-type capability layer dictates which peer types are
+    // compatible (for example, an FNN VPC can have Flat peers through
+    // Flat's `peers_with` listing). Deprecated `Mixed` now has the same
+    // behavior as `Exclusive`; `None` disables all peer imports.
+    let mut vpc_peer_vnis = vec![];
+    let mut vpc_peer_prefixes = vec![];
+    if let Some(policy) = vpc_peering_policy_on_existing {
+        let vpc_peer_ids: Vec<VpcId> = match policy {
+            VpcPeeringPolicy::Exclusive | VpcPeeringPolicy::Mixed => {
+                let allowed_peer_types = vpc
+                    .config
+                    .network_virtualization_type
+                    .capabilities()
+                    .peers_with
+                    .to_vec();
+                db::vpc_peering::get_active_vpc_peer_vnis(txn, vpc_id, allowed_peer_types)
+                    .await?
+                    .into_iter()
+                    .map(|(id, _)| id)
+                    .collect()
+            }
+            VpcPeeringPolicy::None => vec![],
+        };
+        vpc_peer_prefixes = get_prefixes_by_vpcs(txn, &vpc_peer_ids).await?;
+
+        // VNI-based peer route imports are a per-type question on both sides
+        // when stored peerings are enabled.
+        // - Self: does this VPC's DPU plumb peer VNIs into its VRF?
+        //   (`imports_peer_vnis_into_overlay`, FNN-only today.)
+        // - Peer: should this peer's VNI be exposed for the self-side
+        //   to pick up? (`vni_advertised_to_peers`, FNN + Flat today;
+        //   Flat advertises its VNI so pluggable SDN integrations on
+        //   the network operator's fabric can use it.)
+        if policy != VpcPeeringPolicy::None
+            && vpc
+                .config
+                .network_virtualization_type
+                .imports_peer_vnis_into_overlay()
+        {
+            let vni_peer_types = ALL_VPC_VIRTUALIZATION_TYPES
+                .iter()
+                .copied()
+                .filter(|vpc_type| vpc_type.vni_advertised_to_peers())
+                .collect();
+            vpc_peer_vnis = db::vpc_peering::get_active_vpc_peer_vnis(txn, vpc_id, vni_peer_types)
+                .await?
+                .into_iter()
+                .map(|(_, vni)| vni as u32)
+                .collect();
+        }
+    }
+    // Keep API responses deterministic so downstream config rendering does
+    // not flap due to ordering jitter in peering query results.
+    vpc_peer_vnis.sort_unstable();
+    vpc_peer_prefixes.sort_unstable();
+
+    // Resolve VNI-dependent FNN routing targets from the current VPC policy.
+    let vpc_vni =
+        vpc.status
+            .vni
+            .map(u32::try_from)
+            .transpose()
+            .map_err(|_| CarbideError::Internal {
+                message: format!("VPC {vpc_id} has a negative VNI"),
+            })?;
+    let vpc_routing_profile = match fnn_config {
+        Some(fnn) if vpc.config.network_virtualization_type == VpcVirtualizationType::Fnn => {
+            let profile = fnn.resolve_vpc_routing_profile(&vpc.config)?;
+            Some(
+                profile
+                    .to_rpc(vpc_vni)
+                    .map_err(|error| CarbideError::FailedPrecondition(error.to_string()))?,
+            )
+        }
+        None if vpc.config.network_virtualization_type == VpcVirtualizationType::Fnn => {
+            return Err(CarbideError::Internal {
+                message: "FNN VPC found but no FNN config found".to_string(),
+            }
+            .into());
+        }
+        _ => None,
+    };
+
+    Ok(ResolvedVpcNetworkConfig {
+        vpc,
+        active_vpc_prefixes,
+        vpc_vni,
+        vpc_prefixes,
+        vpc_peer_prefixes,
+        vpc_peer_vnis,
+        vpc_routing_profile,
+    })
+}
+
+/// Loads the network security group selected by one VPC for interface rendering.
+pub(crate) async fn resolve_vpc_network_security_group(
+    txn: &mut PgConnection,
+    vpc: &Vpc,
+) -> Result<Option<(rpc::NetworkSecurityGroupSource, NetworkSecurityGroup)>, tonic::Status> {
+    let Some(network_security_group_id) = vpc.config.network_security_group_id.as_ref() else {
+        return Ok(None);
+    };
+    let tenant_id =
+        vpc.config
+            .tenant_organization_id
+            .parse()
+            .map_err(|_| CarbideError::Internal {
+                message: "invalid tenant org in VPC data".to_string(),
+            })?;
+    let network_security_group = network_security_group::find_by_ids(
+        txn,
+        std::slice::from_ref(network_security_group_id),
+        Some(&tenant_id),
+        false,
+    )
+    .await?
+    .pop()
+    .ok_or(CarbideError::NotFoundError {
+        kind: "NetworkSecurityGroup",
+        id: network_security_group_id.to_string(),
+    })?;
+
+    Ok(Some((
+        rpc::NetworkSecurityGroupSource::NsgSourceVpc,
+        network_security_group,
+    )))
+}
+
+/// Converts resolved network security group rules so host and service responses share the wire contract.
+pub(crate) fn network_security_group_config(
+    details: Option<(rpc::NetworkSecurityGroupSource, NetworkSecurityGroup)>,
+) -> Result<Option<rpc::FlatInterfaceNetworkSecurityGroupConfig>, tonic::Status> {
+    details
+        .map(|(source, network_security_group)| {
+            Ok(rpc::FlatInterfaceNetworkSecurityGroupConfig {
+                id: network_security_group.id.to_string(),
+                version: network_security_group.version.to_string(),
+                source: source.into(),
+                stateful_egress: network_security_group.stateful_egress,
+                rules: network_security_group
+                    .rules
+                    .into_iter()
+                    .map(resolve_security_group_rule)
+                    .collect::<Result<Vec<_>, CarbideError>>()?,
+            })
+        })
+        .transpose()
+        .map_err(|error: CarbideError| {
+            CarbideError::Internal {
+                message: format!(
+                    "failed to configure FlatInterfaceConfig.network_security_group: {error}"
+                ),
+            }
+            .into()
+        })
+}
+
 #[allow(clippy::too_many_arguments)]
 // This writer keeps the deprecated IPv4 fields populated when IPv4 is configured so older
 // agents can consume IPv4-only and dual-stack payloads during the rollout.
@@ -693,7 +888,7 @@ pub(crate) async fn tenant_network(
     loopback_ip: Option<IpAddr>,
     network_virtualization_type: VpcVirtualizationType,
     suppress_tenant_security_groups: bool,
-    network_security_group_details: Option<(i32, NetworkSecurityGroup)>,
+    network_security_group_details: Option<(rpc::NetworkSecurityGroupSource, NetworkSecurityGroup)>,
     segment: &NetworkSegment,
     vpc_peering_policy_on_existing: Option<VpcPeeringPolicy>,
     booturl: &Option<String>,
@@ -734,136 +929,51 @@ pub(crate) async fn tenant_network(
     let v6_address = ds.v6_address(iface);
     let v6_interface_prefix = ds.v6_interface_prefix(iface);
 
-    let vpc_prefixes: Vec<String> = match segment.config.vpc_id {
-        Some(vpc_id) => {
-            let vpc_prefixes = db::vpc_prefix::find_by_vpc(txn, vpc_id)
-                .await?
-                .into_iter()
-                .map(|vpc_prefix| vpc_prefix.config.prefix.to_string());
-            let vpc_segment_prefixes = db::network_prefix::find_by_vpc(txn, vpc_id)
-                .await?
-                .into_iter()
-                .map(|segment_prefix| segment_prefix.prefix.to_string());
-            vpc_prefixes.chain(vpc_segment_prefixes).collect()
-        }
-        None => ds
-            .v4()
-            .map(|p| vec![p.prefix.to_string()])
-            .unwrap_or_default(),
-    };
-
-    let mut vpc_peer_vnis = vec![];
-    let mut vpc_peer_prefixes = vec![];
-    if let Some(policy) = vpc_peering_policy_on_existing
-        && let Some(vpc_id) = segment.config.vpc_id
-    {
-        // The per-type capability layer dictates which peer types are
-        // compatible (e.g. an FNN VPC can have Flat peers via Flat's
-        // `peers_with` listing). Deprecated `Mixed` now has the same
-        // behavior as `Exclusive`; `None` disables all peer imports.
-        let vpc_peer_ids: Vec<VpcId> = match policy {
-            VpcPeeringPolicy::Exclusive | VpcPeeringPolicy::Mixed => {
-                let allowed_peer_types = network_virtualization_type
-                    .capabilities()
-                    .peers_with
-                    .to_vec();
-                db::vpc_peering::get_active_vpc_peer_vnis(txn, vpc_id, allowed_peer_types)
-                    .await?
-                    .into_iter()
-                    .map(|(id, _)| id)
-                    .collect()
-            }
-            VpcPeeringPolicy::None => vec![],
-        };
-
-        vpc_peer_prefixes = get_prefixes_by_vpcs(txn, &vpc_peer_ids).await?;
-
-        // VNI-based peer route imports are a per-type question on both sides
-        // when stored peerings are enabled.
-        // - Self: does this VPC's DPU plumb peer VNIs into its VRF?
-        //   (`imports_peer_vnis_into_overlay`, FNN-only today.)
-        // - Peer: should this peer's VNI be exposed for the self-side
-        //   to pick up? (`vni_advertised_to_peers`, FNN + Flat today --
-        //   Flat advertises its VNI so pluggable SDN integrations on
-        //   the network operator's fabric can use it.)
-        if policy != VpcPeeringPolicy::None
-            && network_virtualization_type.imports_peer_vnis_into_overlay()
-        {
-            let vni_peer_types: Vec<_> = ALL_VPC_VIRTUALIZATION_TYPES
-                .iter()
-                .copied()
-                .filter(|t| t.vni_advertised_to_peers())
-                .collect();
-            vpc_peer_vnis = db::vpc_peering::get_active_vpc_peer_vnis(txn, vpc_id, vni_peer_types)
-                .await?
-                .iter()
-                .map(|(_, vni)| *vni as u32)
-                .collect();
-        }
-    }
-    // Keep API responses deterministic so downstream config rendering
-    // does not flap due to ordering jitter in peering query results.
-    vpc_peer_vnis.sort_unstable();
-    vpc_peer_prefixes.sort_unstable();
-
-    let vpc = match segment.config.vpc_id {
-        Some(vpc_id) => {
-            let mut vpcs =
-                db::vpc::find_by(&mut *txn, ObjectColumnFilter::One(vpc::IdColumn, &vpc_id))
-                    .await?;
-            if vpcs.is_empty() {
-                return Err(CarbideError::FindOneReturnedNoResultsError(vpc_id.into()).into());
-            }
-            vpcs.pop()
-        }
+    let resolved_vpc = match segment.config.vpc_id {
+        Some(vpc_id) => Some(
+            resolve_vpc_network_config(txn, vpc_id, vpc_peering_policy_on_existing, fnn_config)
+                .await?,
+        ),
         None => None,
     };
-
-    let vpc_vni = vpc
+    let vpc_prefixes = resolved_vpc
         .as_ref()
-        .and_then(|vpc| vpc.status.vni)
-        .map(u32::try_from)
-        .transpose()
-        .map_err(|_| CarbideError::Internal {
-            message: format!("VPC attached to segment {} has a negative VNI", segment.id),
-        })?;
-    let slaac_enabled = vpc.as_ref().is_some_and(|vpc| vpc.config.slaac_enabled);
+        .map(|resolved| resolved.vpc_prefixes.clone())
+        .unwrap_or_else(|| {
+            ds.v4()
+                .map(|prefix| vec![prefix.prefix.to_string()])
+                .unwrap_or_default()
+        });
+    let vpc_peer_prefixes = resolved_vpc
+        .as_ref()
+        .map(|resolved| resolved.vpc_peer_prefixes.clone())
+        .unwrap_or_default();
+    let vpc_peer_vnis = resolved_vpc
+        .as_ref()
+        .map(|resolved| resolved.vpc_peer_vnis.clone())
+        .unwrap_or_default();
+    let vpc_vni = resolved_vpc.as_ref().and_then(|resolved| resolved.vpc_vni);
+    let vpc_routing_profile = resolved_vpc
+        .as_ref()
+        .and_then(|resolved| resolved.vpc_routing_profile.clone());
+    let vpc = resolved_vpc.as_ref().map(|resolved| &resolved.vpc);
+    let slaac_enabled = vpc.is_some_and(|vpc| vpc.config.slaac_enabled);
 
-    // Resolve the routing profile from the VPC attached to this interface.
-    let (vpc_routing_profile, interface_routing_profile) = match (vpc.as_ref(), fnn_config) {
-        (Some(vpc), Some(fnn))
+    // Only host interfaces apply iface.routing_profile; service endpoints store no override.
+    let interface_routing_profile = match (vpc, iface.routing_profile.as_ref()) {
+        (Some(vpc), Some(profile))
             if vpc.config.network_virtualization_type == VpcVirtualizationType::Fnn =>
         {
-            let profile = fnn.resolve_vpc_routing_profile(&vpc.config)?;
-
-            (
-                Some(
-                    profile
-                        .to_rpc(vpc_vni)
-                        .map_err(|error| CarbideError::FailedPrecondition(error.to_string()))?,
-                ),
-                iface
-                    .routing_profile
-                    .as_ref()
-                    .map(rpc::FlatInterfaceRoutingProfile::from),
-            )
+            Some(profile.into())
         }
-        (Some(vpc), None)
-            if vpc.config.network_virtualization_type == VpcVirtualizationType::Fnn =>
-        {
-            return Err(CarbideError::Internal {
-                message: "FNN VPC found but no FNN config found".to_string(),
-            }
-            .into());
-        }
-        _ if iface.routing_profile.is_some() => {
+        (_, Some(_)) => {
             return Err(CarbideError::InvalidArgument(
                 "instance interface routing_profile is only supported for FNN VPC interfaces"
                     .to_string(),
             )
             .into());
         }
-        _ => (None, None),
+        _ => None,
     };
 
     let rpc_ft: rpc::InterfaceFunctionType = iface.function_id.function_type().into();
@@ -872,41 +982,10 @@ pub(crate) async fn tenant_network(
     let network_security_group_details = match (
         suppress_tenant_security_groups,
         network_security_group_details,
-        vpc.as_ref(),
+        vpc,
     ) {
-        // If NSGs aren't being suppressed, and there are no
-        // details coming from the parent instance,
-        // see if there's an associated VPC (there should be),
-        // and see if the VPC has an NSG attached.
-        (false, None, Some(v)) => {
-            match v.config.network_security_group_id.as_ref() {
-                None => None,
-                Some(vpc_nsg_id) => {
-                    // Make our DB query for the IDs to get our NetworkSecurityGroup
-                    let network_security_group = network_security_group::find_by_ids(
-                        txn,
-                        std::slice::from_ref(vpc_nsg_id),
-                        Some(&v.config.tenant_organization_id.parse().map_err(|_| {
-                            CarbideError::Internal {
-                                message: "invalid tenant org in VPC data".to_string(),
-                            }
-                        })?),
-                        false,
-                    )
-                    .await?
-                    .pop()
-                    .ok_or(CarbideError::NotFoundError {
-                        kind: "NetworkSecurityGroup",
-                        id: vpc_nsg_id.to_string(),
-                    })?;
-
-                    Some((
-                        i32::from(rpc::NetworkSecurityGroupSource::NsgSourceVpc),
-                        network_security_group,
-                    ))
-                }
-            }
-        }
+        // The instance NSG remains authoritative; only its absence permits VPC fallback.
+        (false, None, Some(vpc)) => resolve_vpc_network_security_group(txn, vpc).await?,
 
         // If NSGs aren't being suppressed and details are already coming from
         // the parent instance, use those.
@@ -939,31 +1018,7 @@ pub(crate) async fn tenant_network(
         is_l2_segment,
         vpc_peer_prefixes,
         vpc_peer_vnis,
-        network_security_group: network_security_group_details
-            .map(|(source, nsg)| {
-                Ok(
-                        rpc::FlatInterfaceNetworkSecurityGroupConfig {
-                            id: nsg.id.to_string(),
-                            version: nsg.version.to_string(),
-                            source,
-                            stateful_egress: nsg.stateful_egress,
-                            rules:
-                                nsg.rules
-                                    .into_iter()
-                                    .map(resolve_security_group_rule)
-                                    .collect::<Result<
-                                        Vec<rpc::ResolvedNetworkSecurityGroupRule>,
-                                        CarbideError,
-                                    >>()?,
-                        },
-                    )
-            })
-            .transpose()
-            .map_err(|e: CarbideError| CarbideError::Internal {
-                message: format!(
-                    "failed to configure FlatInterfaceConfig.network_security_group: {e}"
-                ),
-            })?,
+        network_security_group: network_security_group_config(network_security_group_details)?,
         internal_uuid: Some(iface.internal_uuid.into()),
         mtu: u32::try_from(segment.config.mtu).ok(),
         ipv6_interface_config: build_ipv6_interface_config(

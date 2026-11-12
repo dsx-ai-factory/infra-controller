@@ -109,6 +109,72 @@ func TestAPIDpuExtensionServiceCreateRequest_Validate(t *testing.T) {
 			},
 			expectErr: false,
 		},
+		// Baseline placement is independent of instance-scoped target selection.
+		{
+			desc: "ok when baseline Helm service has no target",
+			obj: APIDpuExtensionServiceCreateRequest{
+				Name:           "baseline-test",
+				ServiceType:    DpuExtensionServiceTypeDpfHelmChart,
+				DeploymentType: cutil.GetPtr("Baseline"),
+				SiteID:         validUUID,
+				Data:           `{"repoURL":"https://example.com/charts","chartName":"chart","chartVersion":"1.0.0","serviceID":"chart-v1","deployInCluster":false,"security":{"privileged":false}}`,
+			},
+		},
+		// Even All is host-scoped and conflicts with baseline placement.
+		{
+			desc: "error when baseline has an instance target",
+			obj: APIDpuExtensionServiceCreateRequest{
+				Name:           "baseline-test",
+				ServiceType:    DpuExtensionServiceTypeDpfHelmChart,
+				DeploymentType: cutil.GetPtr("Baseline"),
+				SiteID:         validUUID,
+				Data:           `{"repoURL":"https://example.com/charts","chartName":"chart","chartVersion":"1.0.0","serviceID":"chart-v1","deployInCluster":false,"security":{"privileged":false}}`,
+				DpuTarget:      cutil.GetPtr("All"),
+			},
+			expectErr:               true,
+			expectedValidationField: "dpuTarget",
+		},
+		// Pod delivery cannot implement baseline deployment.
+		{
+			desc: "error when baseline is used for Pod services",
+			obj: APIDpuExtensionServiceCreateRequest{
+				Name:           "baseline-test",
+				ServiceType:    DpuExtensionServiceTypeKubernetesPod,
+				DeploymentType: cutil.GetPtr("Baseline"),
+				SiteID:         validUUID,
+				Data:           `{"repoURL":"https://example.com/charts","chartName":"chart","chartVersion":"1.0.0","serviceID":"chart-v1","deployInCluster":false,"security":{"privileged":false}}`,
+			},
+			expectErr:               true,
+			expectedValidationField: "deploymentType",
+		},
+		// Unknown policies must not silently fall back to attachment-based deployment.
+		{
+			desc: "error when deployment type is unknown",
+			obj: APIDpuExtensionServiceCreateRequest{
+				Name:           "baseline-test",
+				ServiceType:    DpuExtensionServiceTypeDpfHelmChart,
+				DeploymentType: cutil.GetPtr("Unknown"),
+				SiteID:         validUUID,
+				Data:           `{"repoURL":"https://example.com/charts","chartName":"chart","chartVersion":"1.0.0","serviceID":"chart-v1","deployInCluster":false,"security":{"privileged":false}}`,
+				DpuTarget:      cutil.GetPtr("All"),
+			},
+			expectErr:               true,
+			expectedValidationField: "deploymentType",
+		},
+		// An empty string is invalid; only omission or null selects the default.
+		{
+			desc: "error when deployment type is explicitly empty",
+			obj: APIDpuExtensionServiceCreateRequest{
+				Name:           "baseline-test",
+				ServiceType:    DpuExtensionServiceTypeDpfHelmChart,
+				DeploymentType: cutil.GetPtr(""),
+				SiteID:         validUUID,
+				Data:           `{"repoURL":"https://example.com/charts","chartName":"chart","chartVersion":"1.0.0","serviceID":"chart-v1","deployInCluster":false,"security":{"privileged":false}}`,
+				DpuTarget:      cutil.GetPtr("All"),
+			},
+			expectErr:               true,
+			expectedValidationField: "deploymentType",
+		},
 		// Omitting the service ID is rejected before the request reaches Core.
 		{
 			desc: "error when DPF Helm chart service ID is omitted",
@@ -695,7 +761,9 @@ func TestAPIDpuExtensionServiceCreateRequest_Validate(t *testing.T) {
 				var fieldErrors validation.Errors
 				require.ErrorAs(t, err, &fieldErrors)
 				require.Contains(t, fieldErrors, tc.expectedValidationField)
-				assert.EqualError(t, fieldErrors[tc.expectedValidationField], tc.expectedValidationError)
+				if tc.expectedValidationError != "" {
+					assert.EqualError(t, fieldErrors[tc.expectedValidationField], tc.expectedValidationError)
+				}
 			}
 			if err != nil {
 				fmt.Println(err.Error())
@@ -938,13 +1006,16 @@ func TestAPIDpuExtensionServiceCredentials_Validate(t *testing.T) {
 	}
 }
 
+// TestNewAPIDpuExtensionService verifies cached fields reach REST responses so
+// placement intent remains visible when reading a registration.
 func TestNewAPIDpuExtensionService(t *testing.T) {
 	obsName := "busybox-metrics"
 	dbdes := &cdbm.DpuExtensionService{
-		ID:          uuid.New(),
-		Name:        "test-service",
-		ServiceType: "test-type",
-		Version:     cutil.GetPtr("v1"),
+		ID:             uuid.New(),
+		Name:           "test-service",
+		DeploymentType: cdbm.DpuExtensionServiceDeploymentTypeBaseline,
+		ServiceType:    "test-type",
+		Version:        cutil.GetPtr("v1"),
 		VersionInfo: &cdbm.DpuExtensionServiceVersionInfo{
 			Version:        "v1",
 			Data:           "apiVersion: v1\nkind: Pod",
@@ -999,6 +1070,7 @@ func TestNewAPIDpuExtensionService(t *testing.T) {
 			assert.Equal(t, tc.dbdes.ID.String(), ades.ID)
 			assert.Equal(t, tc.dbdes.Name, ades.Name)
 			assert.Equal(t, tc.dbdes.ServiceType, ades.ServiceType)
+			assert.Equal(t, tc.dbdes.DeploymentType, ades.DeploymentType)
 			assert.Equal(t, tc.dbdes.SiteID.String(), ades.SiteID)
 			assert.Equal(t, tc.dbdes.TenantID.String(), ades.TenantID)
 			assert.Equal(t, tc.dbdes.Version, ades.Version)
@@ -1043,6 +1115,8 @@ func TestAPIDpuExtensionServiceCredentials_ToProto(t *testing.T) {
 	})
 }
 
+// TestAPIDpuExtensionServiceCreateRequest_ToProto verifies placement survives the
+// REST-to-Core boundary so baseline publication cannot become attachment-based deployment.
 func TestAPIDpuExtensionServiceCreateRequest_ToProto(t *testing.T) {
 	t.Run("populated request maps fields through", func(t *testing.T) {
 		desc := "primary"
@@ -1098,6 +1172,38 @@ func TestAPIDpuExtensionServiceCreateRequest_ToProto(t *testing.T) {
 		require.NotNil(t, req.DpuTarget)
 		assert.Equal(t, corev1.DpuExtensionServiceDpuTarget_DPU_EXTENSION_SERVICE_DPU_TARGET_ALL_ACTIVE, *req.DpuTarget)
 	})
+	// Exercise omission and both explicit policies because zero-valued Core enums default to DemandDriven.
+	for _, tc := range []struct {
+		name   string
+		policy *string
+		want   corev1.DpuExtensionServiceDeploymentType
+	}{
+		// Old clients must retain their attachment-based placement when the field is absent.
+		{name: "omitted policy", want: corev1.DpuExtensionServiceDeploymentType_DPU_EXTENSION_SERVICE_DEPLOYMENT_TYPE_DEMAND_DRIVEN},
+		// Explicit default policy must produce the same Core intent as omission.
+		{name: "explicit demand driven", policy: cutil.GetPtr(cdbm.DpuExtensionServiceDeploymentTypeDemandDriven), want: corev1.DpuExtensionServiceDeploymentType_DPU_EXTENSION_SERVICE_DEPLOYMENT_TYPE_DEMAND_DRIVEN},
+		// Baseline must cross the wire explicitly and without a host-scoped target.
+		{name: "baseline", policy: cutil.GetPtr(cdbm.DpuExtensionServiceDeploymentTypeBaseline), want: corev1.DpuExtensionServiceDeploymentType_DPU_EXTENSION_SERVICE_DEPLOYMENT_TYPE_BASELINE},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			// Map a valid Helm request for the selected policy.
+			request := APIDpuExtensionServiceCreateRequest{
+				Name: "placement-service", ServiceType: DpuExtensionServiceTypeDpfHelmChart,
+				DeploymentType: tc.policy, SiteID: uuid.NewString(),
+				Data: `{"repoURL":"https://example.com/charts","chartName":"chart","chartVersion":"1.0.0","serviceID":"chart-v1","deployInCluster":false,"security":{"privileged":false}}`,
+			}
+			if tc.want == corev1.DpuExtensionServiceDeploymentType_DPU_EXTENSION_SERVICE_DEPLOYMENT_TYPE_DEMAND_DRIVEN {
+				request.DpuTarget = cutil.GetPtr(DpuExtensionServiceDpuTargetAll)
+			}
+			require.NoError(t, request.Validate())
+			got := request.ToProto("service-id", "tenant-org")
+
+			// Prove the wire policy and target agree with the validated request.
+			assert.Equal(t, tc.want, got.DeploymentType)
+			assert.Equal(t, request.DpuTarget == nil, got.DpuTarget == nil)
+		})
+	}
+
 }
 
 func TestAPIDpuExtensionServiceUpdateRequest_ToProto(t *testing.T) {
@@ -1126,4 +1232,19 @@ func TestAPIDpuExtensionServiceUpdateRequest_ToProto(t *testing.T) {
 		assert.Nil(t, req.Credential)
 		assert.Nil(t, req.Observability)
 	})
+}
+
+// TestNewAPIDpuExtensionServiceSummary verifies nested service summaries expose
+// baseline placement so instance-facing responses do not hide deployment policy.
+func TestNewAPIDpuExtensionServiceSummary(t *testing.T) {
+	// Construct a persisted baseline registration, which has no instance target.
+	stored := &cdbm.DpuExtensionService{
+		ID: uuid.New(), Name: "baseline-summary", ServiceType: DpuExtensionServiceTypeDpfHelmChart,
+		DeploymentType: cdbm.DpuExtensionServiceDeploymentTypeBaseline,
+	}
+	got := NewAPIDpuExtensionServiceSummary(stored)
+
+	// The summary must carry placement alongside service type and target absence.
+	assert.Equal(t, cdbm.DpuExtensionServiceDeploymentTypeBaseline, got.DeploymentType)
+	assert.Nil(t, got.DpuTarget)
 }

@@ -30,6 +30,7 @@ carbide-machine-a-tron = { path = "../machine-a-tron" }
 carbide-dhcp = { path = "../dhcp", features = ["test-support"] }
 carbide-health = { path = "../health", features = ["test-support"] }
 carbide-resource-pool = { path = "../resource-pool" }
+carbide-site-explorer = { path = "../site-explorer", features = ["test-support"] }
 carbide-rpc = { path = "../rpc" }
 carbide-uuid = { path = "../uuid" }
 carbide-utils = { path = "../utils", features = ["sqlx"] }
@@ -45,7 +46,9 @@ carbide-api-db = { path = "../api-db", default-features = false, features = [
   "test-support",
 ] }
 carbide-api-model = { path = "../api-model", default-features = false }
+carbide-health-report = { path = "../health-report" }
 carbide-nvlink-manager = { path = "../nvlink-manager" }
+config-version = { path = "../config-version" }
 bmc-mock = { path = "../bmc-mock" }
 bmc-vendor = { path = "../bmc-vendor" }
 libnmxc = { path = "../libnmxc" }

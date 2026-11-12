@@ -185,6 +185,7 @@ func (cesh CreateExpectedSwitchHandler) Handle(c echo.Context) error {
 				SwitchSerialNumber:    apiRequest.SwitchSerialNumber,
 				NvosMacAddresses:      nvosMacAddresses,
 				NvosPrimaryMacAddress: nvosInterfaces.PrimaryMacAddress(),
+				NvosIpAddress:         nvosInterfaces.IPAddress(),
 				RackID:                apiRequest.RackID,
 				Name:                  apiRequest.Name,
 				Manufacturer:          apiRequest.Manufacturer,
@@ -661,6 +662,8 @@ func (uesh UpdateExpectedSwitchHandler) Handle(c echo.Context) error {
 	nvosPrimaryMacAddress := nvosInterfaces.PrimaryMacAddress()
 	nvosInterfacesPresent := apiRequest.NvosInterfaces != nil
 	clearNvosPrimaryMacAddress := nvosInterfacesPresent && nvosPrimaryMacAddress == nil
+	nvosIPAddress := nvosInterfaces.IPAddress()
+	clearNvosIPAddress := nvosInterfacesPresent && nvosIPAddress == nil
 
 	updatedExpectedSwitch, err := cdb.WithTxResult(ctx, uesh.dbSession, func(tx *cdb.Tx) (*cdbm.ExpectedSwitch, error) {
 		if apiErr := acquireExpectedInventorySharedMutationLock(ctx, logger, tx, site.ID); apiErr != nil {
@@ -676,6 +679,7 @@ func (uesh UpdateExpectedSwitchHandler) Handle(c echo.Context) error {
 				SwitchSerialNumber:    apiRequest.SwitchSerialNumber,
 				NvosMacAddresses:      nvosMacAddresses,
 				NvosPrimaryMacAddress: nvosPrimaryMacAddress,
+				NvosIpAddress:         nvosIPAddress,
 				RackID:                apiRequest.RackID,
 				Name:                  apiRequest.Name,
 				Manufacturer:          apiRequest.Manufacturer,
@@ -692,11 +696,12 @@ func (uesh UpdateExpectedSwitchHandler) Handle(c echo.Context) error {
 			return nil, cutil.NewAPIError(http.StatusInternalServerError, "Failed to update Expected Switch due to DB error", nil)
 		}
 
-		if clearBmcIPAddress || clearNvosPrimaryMacAddress {
+		if clearBmcIPAddress || clearNvosPrimaryMacAddress || clearNvosIPAddress {
 			es, err = esDAO.Clear(ctx, tx, cdbm.ExpectedSwitchClearInput{
 				ExpectedSwitchID:      expectedSwitch.ID,
 				BmcIpAddress:          clearBmcIPAddress,
 				NvosPrimaryMacAddress: clearNvosPrimaryMacAddress,
+				NvosIpAddress:         clearNvosIPAddress,
 			})
 			if err != nil {
 				logger.Error().Err(err).Msg("failed to clear ExpectedSwitch fields in DB")
@@ -907,13 +912,24 @@ func (h ReplaceAllExpectedSwitchesHandler) Handle(c echo.Context) error {
 		nvosInterfaces := expectedSwitch.NvosInterfaces
 		credentials[id] = cdbm.ExpectedSwitchCredentials{BmcUsername: expectedSwitch.DefaultBmcUsername, BmcPassword: expectedSwitch.DefaultBmcPassword, NvosUsername: expectedSwitch.NvOsUsername, NvosPassword: expectedSwitch.NvOsPassword}
 		inputs = append(inputs, cdbm.ExpectedSwitchCreateInput{
-			ExpectedSwitchID: id, SiteID: site.ID, BmcMacAddress: expectedSwitch.BmcMacAddress,
-			SwitchSerialNumber: expectedSwitch.SwitchSerialNumber, BmcIpAddress: expectedSwitch.BmcIpAddress,
-			NvosMacAddresses: nvosInterfaces.MacAddresses(), NvosPrimaryMacAddress: nvosInterfaces.PrimaryMacAddress(),
-			RackID: expectedSwitch.RackID,
-			Name:   expectedSwitch.Name, Manufacturer: expectedSwitch.Manufacturer, Model: expectedSwitch.Model,
-			Description: expectedSwitch.Description, SlotID: expectedSwitch.SlotID, TrayIdx: expectedSwitch.TrayIdx,
-			HostID: expectedSwitch.HostID, Labels: expectedSwitch.Labels, CreatedBy: dbUser.ID,
+			ExpectedSwitchID:      id,
+			SiteID:                site.ID,
+			BmcMacAddress:         expectedSwitch.BmcMacAddress,
+			SwitchSerialNumber:    expectedSwitch.SwitchSerialNumber,
+			BmcIpAddress:          expectedSwitch.BmcIpAddress,
+			NvosMacAddresses:      nvosInterfaces.MacAddresses(),
+			NvosPrimaryMacAddress: nvosInterfaces.PrimaryMacAddress(),
+			NvosIpAddress:         nvosInterfaces.IPAddress(),
+			RackID:                expectedSwitch.RackID,
+			Name:                  expectedSwitch.Name,
+			Manufacturer:          expectedSwitch.Manufacturer,
+			Model:                 expectedSwitch.Model,
+			Description:           expectedSwitch.Description,
+			SlotID:                expectedSwitch.SlotID,
+			TrayIdx:               expectedSwitch.TrayIdx,
+			HostID:                expectedSwitch.HostID,
+			Labels:                expectedSwitch.Labels,
+			CreatedBy:             dbUser.ID,
 		})
 	}
 	stc, err := h.scp.GetClientByID(site.ID)

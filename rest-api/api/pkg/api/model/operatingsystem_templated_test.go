@@ -10,6 +10,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"google.golang.org/protobuf/encoding/protojson"
 
 	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
 	cdbm "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/model"
@@ -135,7 +136,6 @@ func TestOperatingSystemRequest_ToProto(t *testing.T) {
 	tenantID := uuid.New()
 	authToken := "secret-token"
 	createRequest := &APIOperatingSystemCreateRequest{}
-	updateRequest := &APIOperatingSystemUpdateRequest{}
 	os := &cdbm.OperatingSystem{
 		ID:               id,
 		Name:             "templated-os",
@@ -154,7 +154,6 @@ func TestOperatingSystemRequest_ToProto(t *testing.T) {
 		IpxeTemplateArtifacts: []cdbm.OperatingSystemIpxeArtifact{
 			{Name: "kernel", URL: "http://x/k", AuthType: cutil.GetPtr(cdbm.OperatingSystemAuthTypeBearer), AuthToken: &authToken, CacheStrategy: cdbm.OperatingSystemIpxeArtifactCacheStrategyCacheAsNeeded},
 		},
-		IpxeTemplateDefinitionHash: cutil.GetPtr("hash-1"),
 	}
 
 	t.Run("tenant-owned create request maps all fields and tenant org", func(t *testing.T) {
@@ -189,26 +188,73 @@ func TestOperatingSystemRequest_ToProto(t *testing.T) {
 		assert.Nil(t, req.TenantOrganizationId)
 	})
 
-	t.Run("update request maps all fields", func(t *testing.T) {
-		req := updateRequest.ToProto(os)
-		require.NotNil(t, req)
-		assert.Equal(t, id.String(), req.GetId().GetValue())
-		require.NotNil(t, req.Name)
-		assert.Equal(t, "templated-os", *req.Name)
-		assert.Equal(t, "tmpl-1", req.GetIpxeTemplateId().GetValue())
-		require.NotNil(t, req.IpxeTemplateParameters)
-		require.Len(t, req.IpxeTemplateParameters.Items, 1)
-		require.NotNil(t, req.IpxeTemplateArtifacts)
-		require.Len(t, req.IpxeTemplateArtifacts.Items, 1)
-		require.NotNil(t, req.IpxeTemplateDefinitionHash)
-		assert.Equal(t, "hash-1", *req.IpxeTemplateDefinitionHash)
-	})
-
 	t.Run("delete request maps id", func(t *testing.T) {
 		req := os.ToDeletionRequestProto()
 		require.NotNil(t, req)
 		assert.Equal(t, id.String(), req.GetId().GetValue())
 	})
+}
+
+func TestAPIOperatingSystemUpdateRequest_ToProto(t *testing.T) {
+	for _, tt := range []struct {
+		name      string
+		artifacts []cdbm.OperatingSystemIpxeArtifact
+	}{
+		{
+			name: "full saved definition",
+			artifacts: []cdbm.OperatingSystemIpxeArtifact{
+				{
+					Name: "kernel", URL: "http://example.com/kernel",
+					SHA: cutil.GetPtr("sha256:abc"), AuthType: cutil.GetPtr(cdbm.OperatingSystemAuthTypeBearer),
+					AuthToken: cutil.GetPtr("artifact-token"), CacheStrategy: cdbm.OperatingSystemIpxeArtifactCacheStrategyCachedOnly,
+				},
+			},
+		},
+		{name: "explicit artifact removal", artifacts: []cdbm.OperatingSystemIpxeArtifact{}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			os := &cdbm.OperatingSystem{
+				ID:             uuid.New(),
+				Name:           "templated-os",
+				IpxeTemplateId: cutil.GetPtr("tmpl-1"),
+				IpxeTemplateParameters: []cdbm.OperatingSystemIpxeParameter{
+					{Name: "version", Value: "22.04"},
+				},
+				IpxeTemplateArtifacts:      tt.artifacts,
+				IpxeTemplateDefinitionHash: cutil.GetPtr("previous-definition-hash"),
+			}
+
+			req := (&APIOperatingSystemUpdateRequest{}).ToProto(os)
+			assert.Equal(t, os.ID.String(), req.GetId().GetValue())
+			assert.Equal(t, os.Name, req.GetName())
+			assert.Equal(t, "tmpl-1", req.GetIpxeTemplateId().GetValue())
+			require.NotNil(t, req.IpxeTemplateParameters)
+			require.Len(t, req.IpxeTemplateParameters.Items, 1)
+			assert.Equal(t, "version", req.IpxeTemplateParameters.Items[0].Name)
+			assert.Equal(t, "22.04", req.IpxeTemplateParameters.Items[0].Value)
+			require.NotNil(t, req.IpxeTemplateArtifacts)
+			require.Len(t, req.IpxeTemplateArtifacts.Items, len(tt.artifacts))
+			for i, artifact := range req.IpxeTemplateArtifacts.Items {
+				assert.Equal(t, tt.artifacts[i].Name, artifact.Name)
+				assert.Equal(t, tt.artifacts[i].URL, artifact.Url)
+				assert.Equal(t, tt.artifacts[i].SHA, artifact.Sha)
+				assert.Equal(t, tt.artifacts[i].AuthType, artifact.AuthType)
+				assert.Equal(t, tt.artifacts[i].AuthToken, artifact.AuthToken)
+				assert.Equal(t, corev1.IpxeTemplateArtifactCacheStrategy_CACHED_ONLY, artifact.CacheStrategy)
+				assert.Nil(t, artifact.CachedUrl)
+			}
+			assert.Nil(t, req.IpxeTemplateDefinitionHash)
+
+			// An empty wrapper must survive the proxy's JSON encoding as removal, not omission.
+			encoded, err := protojson.Marshal(req)
+			require.NoError(t, err)
+			var forwarded corev1.UpdateOperatingSystemRequest
+			require.NoError(t, protojson.Unmarshal(encoded, &forwarded))
+			require.NotNil(t, forwarded.IpxeTemplateArtifacts)
+			assert.Len(t, forwarded.IpxeTemplateArtifacts.Items, len(tt.artifacts))
+			assert.Nil(t, forwarded.IpxeTemplateDefinitionHash)
+		})
+	}
 }
 
 func TestNewAPIOperatingSystem_RedactsArtifactAuthToken(t *testing.T) {

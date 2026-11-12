@@ -17,6 +17,8 @@
 
 use std::collections::{HashMap, HashSet};
 use std::net::IpAddr;
+use std::sync::Arc;
+use std::time::Duration;
 
 use ::rpc::common::SystemPowerControl;
 use ::rpc::forge::{self as rpc};
@@ -41,7 +43,7 @@ use component_manager::power_shelf_manager::{
     PowerShelfEndpoint, PowerShelfManager, PowerShelfVendor,
 };
 use component_manager::types::{ComponentCredentials, FirmwareUpdateOptions};
-use db::{self, WithTransaction};
+use db::{self, DbSessionGuard, WithTransaction};
 use futures_util::FutureExt;
 use mac_address::MacAddress;
 use model::component_manager::{
@@ -64,11 +66,29 @@ use crate::handlers::firmware::load_desired_firmware_version_entries;
 
 #[cfg(test)]
 mod credentials_tests;
+pub(crate) mod firmware_details;
 pub(crate) mod power_details;
 
 const MACHINE_POWER_OVERRIDE_SOURCE: &str = "component_power_control";
 const MACHINE_POWER_OVERRIDE_MESSAGE: &str = "Compute-Tray component power control in progress";
 const UNTRACKED_SWITCH_FIRMWARE_ERROR: &str = "no firmware job tracked for this switch";
+
+// Cap each expected-inventory statement at five seconds, preserving a shorter
+// operator limit. This PostgreSQL cap applies after snapshot setup; it does not
+// bound connection acquisition, setup or the total helper duration.
+const EXPECTED_CREDENTIAL_STATEMENT_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// The core compute-tray backend standalone hosts use. It authenticates with
+/// explicit per-endpoint credentials, which the proxied pool rejects by
+/// design, so it always dials BMCs directly through the credential-ops pool.
+pub(crate) fn standalone_compute_tray_manager(api: &Api) -> CoreComputeTrayManager {
+    let direct_pool: Arc<dyn carbide_redfish::libredfish::RedfishClientPool> =
+        api.bmc_credential_ops.clone();
+    CoreComputeTrayManager::new(direct_pool).with_driver_connector(
+        api.driver_connector.clone(),
+        api.database_connection.clone(),
+    )
+}
 
 fn parse_component_credentials(
     overrides: Option<rpc::ComponentCredentialOverrides>,
@@ -206,6 +226,22 @@ fn status_result(id: &str, status: Status) -> rpc::ComponentResult {
         component_status_code_for(status.code()),
         Some(status.message().to_string()),
     )
+}
+
+fn component_manager_error_to_result(
+    mut result: rpc::ComponentResult,
+    error: ComponentManagerError,
+) -> rpc::ComponentResult {
+    // Preserve the uncertain operation outcome before gRPC maps it to Unavailable.
+    if let ComponentManagerError::OperationOutcomeUnknown(error) = error {
+        result.status = rpc::ComponentManagerStatusCode::OutcomeUnknown as i32;
+        result.error = error;
+    } else {
+        let status = component_manager_error_to_status(error);
+        result.status = component_status_code_for(status.code()) as i32;
+        result.error = status.message().to_owned();
+    }
+    result
 }
 
 fn not_found_component_result(id: &str, message: impl Into<String>) -> rpc::ComponentResult {
@@ -797,24 +833,34 @@ fn map_power_action(raw: i32) -> Result<PowerAction, Status> {
     }
 }
 
-fn map_switch_maintenance_operation(action: PowerAction) -> SwitchMaintenanceOperation {
+fn map_switch_maintenance_operation(
+    action: PowerAction,
+) -> Result<SwitchMaintenanceOperation, &'static str> {
     match action {
-        PowerAction::On => SwitchMaintenanceOperation::PowerOn,
-        PowerAction::GracefulShutdown => SwitchMaintenanceOperation::PowerOff { graceful: true },
-        PowerAction::ForceOff => SwitchMaintenanceOperation::PowerOff { graceful: false },
-        PowerAction::GracefulRestart | PowerAction::ForceRestart | PowerAction::AcPowercycle => {
-            SwitchMaintenanceOperation::Reset
+        PowerAction::On => Ok(SwitchMaintenanceOperation::PowerOn),
+        PowerAction::GracefulShutdown => {
+            Ok(SwitchMaintenanceOperation::PowerOff { graceful: true })
         }
+        PowerAction::ForceOff => Ok(SwitchMaintenanceOperation::PowerOff { graceful: false }),
+        PowerAction::GracefulRestart => Ok(SwitchMaintenanceOperation::Reset { graceful: true }),
+        PowerAction::ForceRestart => Ok(SwitchMaintenanceOperation::Reset { graceful: false }),
+        PowerAction::AcPowercycle => Err("switch state controller does not support AC power cycle"),
     }
 }
 
-fn map_machine_maintenance_operation(action: PowerAction) -> MachineMaintenanceOperation {
+fn map_machine_maintenance_operation(
+    action: PowerAction,
+) -> Result<MachineMaintenanceOperation, &'static str> {
     match action {
-        PowerAction::On => MachineMaintenanceOperation::PowerOn,
-        PowerAction::GracefulShutdown => MachineMaintenanceOperation::PowerOff { graceful: true },
-        PowerAction::ForceOff => MachineMaintenanceOperation::PowerOff { graceful: false },
-        PowerAction::GracefulRestart | PowerAction::ForceRestart | PowerAction::AcPowercycle => {
-            MachineMaintenanceOperation::Reset
+        PowerAction::On => Ok(MachineMaintenanceOperation::PowerOn),
+        PowerAction::GracefulShutdown => {
+            Ok(MachineMaintenanceOperation::PowerOff { graceful: true })
+        }
+        PowerAction::ForceOff => Ok(MachineMaintenanceOperation::PowerOff { graceful: false }),
+        PowerAction::GracefulRestart => Ok(MachineMaintenanceOperation::Reset { graceful: true }),
+        PowerAction::ForceRestart => Ok(MachineMaintenanceOperation::Reset { graceful: false }),
+        PowerAction::AcPowercycle => {
+            Err("machine state controller does not support AC power cycle")
         }
     }
 }
@@ -840,7 +886,15 @@ async fn queue_switch_power_control_via_state_controller(
     switch_ids: &[SwitchId],
     action: PowerAction,
 ) -> Result<Vec<rpc::ComponentResult>, Status> {
-    let operation = map_switch_maintenance_operation(action);
+    let operation = match map_switch_maintenance_operation(action) {
+        Ok(operation) => operation,
+        Err(reason) => {
+            return Ok(switch_ids
+                .iter()
+                .map(|id| error_result(&id.to_string(), reason.to_string()))
+                .collect());
+        }
+    };
     queue_switch_maintenance_via_state_controller(api, cm, switch_ids, operation).await
 }
 
@@ -881,7 +935,15 @@ async fn queue_machine_power_control_via_state_controller(
     machine_ids: &[HostMachineId],
     action: PowerAction,
 ) -> Result<Vec<rpc::ComponentResult>, Status> {
-    let operation = map_machine_maintenance_operation(action);
+    let operation = match map_machine_maintenance_operation(action) {
+        Ok(operation) => operation,
+        Err(reason) => {
+            return Ok(machine_ids
+                .iter()
+                .map(|id| error_result(&id.to_string(), reason.to_string()))
+                .collect());
+        }
+    };
     queue_machine_maintenance_via_state_controller(api, cm, machine_ids, operation).await
 }
 
@@ -1633,8 +1695,9 @@ struct SwitchEndpoints {
     unresolved: Vec<UnresolvedDevice<SwitchId>>,
 }
 
-// Only direct-dispatch handlers use this fallback. State controllers require
-// credentials already configured in Vault during ingestion/rotation.
+// Direct dispatch and passive component reads may fall back to expected
+// inventory. State-controller writers still require credentials in Vault from
+// ingestion/rotation; a successful passive read does not admit an update.
 async fn fetch_credentials(
     api: &Api,
     component: RackComponent,
@@ -1647,7 +1710,7 @@ async fn fetch_credentials(
             tracing::info!(
                 rack_component = ?component,
                 management_mac_address = %bmc_mac,
-                "using expected inventory credentials for direct dispatch because Vault credentials are absent"
+                "using expected inventory credentials because Vault credentials are absent"
             );
             Ok(credentials)
         }
@@ -1676,6 +1739,15 @@ async fn fetch_vault_credentials(
     })
 }
 
+/// `fetch_expected_credentials` shares the statement cap across passive and
+/// direct-dispatch callers. Passive readers wrap credential resolution in their
+/// own deadlines, including acquisition and setup. Legacy direct-dispatch callers
+/// rely on the pool's configured acquisition timeout for that wait; this helper
+/// adds no overall deadline.
+///
+/// Dropping the future discards its connection and releases local pool capacity.
+/// The abandoned PostgreSQL session can outlive that release: the statement cap
+/// and eventual server/socket cleanup are separate from local cancellation.
 async fn fetch_expected_credentials(
     component: RackComponent,
     pool: &sqlx::PgPool,
@@ -1686,26 +1758,26 @@ async fn fetch_expected_credentials(
             "failed to fetch expected credentials for {component:?} at {bmc_mac}: {e}"
         ))
     };
-    let mut conn = pool
-        .acquire()
+    let mut connection = DbSessionGuard::acquire(pool).await.map_err(map_error)?;
+    let mut txn = connection
+        .begin_read_only_snapshot(EXPECTED_CREDENTIAL_STATEMENT_TIMEOUT)
         .await
-        .map_err(db::DatabaseError::acquire)
         .map_err(map_error)?;
     let credentials = match component {
         RackComponent::ComputeBmc => {
-            db::expected_machine::find_by_bmc_mac_address(&mut *conn, bmc_mac)
+            db::expected_machine::find_by_bmc_mac_address(txn.as_pgconn(), bmc_mac)
                 .await
                 .map(|row| {
                     row.map(|row| Credentials::new(row.data.bmc_username, row.data.bmc_password))
                 })
         }
         RackComponent::SwitchBmc => {
-            db::expected_switch::find_by_bmc_mac_address(&mut conn, bmc_mac)
+            db::expected_switch::find_by_bmc_mac_address(txn.as_pgconn(), bmc_mac)
                 .await
                 .map(|row| row.map(|row| Credentials::new(row.bmc_username, row.bmc_password)))
         }
         RackComponent::SwitchNvos => {
-            db::expected_switch::find_by_bmc_mac_address(&mut conn, bmc_mac)
+            db::expected_switch::find_by_bmc_mac_address(txn.as_pgconn(), bmc_mac)
                 .await
                 .map(|row| {
                     row.and_then(|row| {
@@ -1716,12 +1788,16 @@ async fn fetch_expected_credentials(
                 })
         }
         RackComponent::PowerShelfPmc => {
-            db::expected_power_shelf::find_by_bmc_mac_address(&mut conn, bmc_mac)
+            db::expected_power_shelf::find_by_bmc_mac_address(txn.as_pgconn(), bmc_mac)
                 .await
                 .map(|row| row.map(|row| Credentials::new(row.bmc_username, row.bmc_password)))
         }
     };
-    credentials.map_err(map_error)?.ok_or_else(|| {
+    let credentials = credentials.map_err(map_error)?;
+    txn.commit().await.map_err(map_error)?;
+    connection.return_to_pool();
+    // An absent row is a successful read and must also return its healthy session.
+    credentials.ok_or_else(|| {
         ComponentManagerError::NotFound(format!(
             "no credentials found for {component:?} at {bmc_mac}"
         ))
@@ -2523,7 +2599,7 @@ async fn dispatch_pre_ingestion_switch_power_control(
                     } else {
                         rpc::ComponentManagerStatusCode::InternalError
                     },
-                    r.error,
+                    r.error.map(|error| error.to_string()),
                 )
             }));
         }
@@ -2954,6 +3030,19 @@ async fn power_control_ingested_machine_ids(
             }
         };
 
+        // Reject RMS AC cycles before changing the desired power
+        // state, which could otherwise cause the power manager to turn on the host.
+        if is_rack_scale
+            && action == PowerAction::AcPowercycle
+            && cm.compute_tray.backend() == ComputeTrayBackend::Rms
+        {
+            results.push(error_result(
+                &machine_id.to_string(),
+                "RMS power control does not support AC power cycle".to_string(),
+            ));
+            continue;
+        }
+
         let override_inserted = power_control_health_override(api, machine_id, true).await;
 
         let power_req = rpc::PowerOptionUpdateRequest {
@@ -3038,13 +3127,7 @@ async fn power_control_ingested_machine_ids(
     // stack (never the state machine, which has no non-rack path), so
     // power control works even when the configured backend is RMS.
     if !standalone_ids.is_empty() {
-        // CoreComputeTrayManager authenticates with explicit per-endpoint
-        // credentials (RedfishAuth::Direct), which the proxied pool rejects
-        // by design -- keep it on the direct pool (the credential-ops handle,
-        // upcast to a plain pool) until it moves to credential-key auth.
-        let direct_pool: std::sync::Arc<dyn carbide_redfish::libredfish::RedfishClientPool> =
-            api.bmc_credential_ops.clone();
-        let core_backend = CoreComputeTrayManager::new(direct_pool);
+        let core_backend = standalone_compute_tray_manager(api);
         match dispatch_compute_tray_power_control(
             api,
             &core_backend,
@@ -3108,7 +3191,10 @@ async fn power_control_switch_ids(
             if r.success {
                 success_result(&id)
             } else {
-                error_result(&id, r.error.unwrap_or_default())
+                error_result(
+                    &id,
+                    r.error.map(|error| error.to_string()).unwrap_or_default(),
+                )
             }
         }));
 
@@ -3440,13 +3526,7 @@ pub(crate) async fn component_power_control(
                 // NICo-core's Redfish stack, which needs only the BMC IP and
                 // credentials — matching the ingested standalone path.
                 if !standalone_macs.is_empty() {
-                    // Same direct-pool requirement as the ingested
-                    // standalone path above: explicit per-endpoint
-                    // credentials cannot route through the proxied pool.
-                    let direct_pool: std::sync::Arc<
-                        dyn carbide_redfish::libredfish::RedfishClientPool,
-                    > = api.bmc_credential_ops.clone();
-                    let core_backend = CoreComputeTrayManager::new(direct_pool);
+                    let core_backend = standalone_compute_tray_manager(api);
                     let (standalone_server_results, standalone_server_ips) =
                         dispatch_pre_ingestion_compute_power_control(
                             api,
@@ -3567,6 +3647,508 @@ async fn dispatch_compute_tray_power_control(
     }));
 
     Ok((results, ips))
+}
+
+fn validate_component_reset_request(
+    request: &rpc::ComponentResetRequest,
+) -> Result<&rpc::component_reset_request::Target, Status> {
+    use rpc::component_reset_request::Target;
+    let target = request
+        .target
+        .as_ref()
+        .ok_or_else(|| CarbideError::InvalidArgument("target is required".into()))?;
+    let (is_switch, target_count) = match target {
+        Target::SwitchIds(list) => (true, list.ids.len()),
+        Target::SwitchBmcMacs(list) => (true, list.mac_addresses.len()),
+        Target::MachineIds(list) => (false, list.machine_ids.len()),
+        Target::PowerShelfIds(list) => (false, list.ids.len()),
+        Target::ComputeBmcMacs(list) | Target::PowerShelfPmcMacs(list) => {
+            (false, list.mac_addresses.len())
+        }
+    };
+    validate_component_reset_options(
+        request.action(),
+        request.domain_name.as_deref(),
+        is_switch,
+        target_count,
+    )?;
+    match target {
+        Target::SwitchIds(list) => validate_distinct_component_reset_switch_ids(&list.ids)?,
+        Target::SwitchBmcMacs(list) => {
+            validate_distinct_component_reset_switch_macs(&list.mac_addresses)?
+        }
+        _ => unreachable!("validated reset targets must be switches"),
+    }
+    Ok(target)
+}
+
+fn validate_component_reset_status_request(
+    request: &rpc::GetComponentResetStatusRequest,
+) -> Result<&rpc::get_component_reset_status_request::Target, Status> {
+    use rpc::get_component_reset_status_request::Target;
+    let target = request
+        .target
+        .as_ref()
+        .ok_or_else(|| CarbideError::InvalidArgument("target is required".into()))?;
+    let (is_switch, target_count) = match target {
+        Target::SwitchIds(list) => (true, list.ids.len()),
+        Target::SwitchBmcMacs(list) => (true, list.mac_addresses.len()),
+        Target::MachineIds(list) => (false, list.machine_ids.len()),
+        Target::PowerShelfIds(list) => (false, list.ids.len()),
+        Target::ComputeBmcMacs(list) | Target::PowerShelfPmcMacs(list) => {
+            (false, list.mac_addresses.len())
+        }
+    };
+    validate_component_reset_options(request.action(), None, is_switch, target_count)?;
+    match target {
+        Target::SwitchIds(list) => validate_distinct_component_reset_switch_ids(&list.ids)?,
+        Target::SwitchBmcMacs(list) => {
+            validate_distinct_component_reset_switch_macs(&list.mac_addresses)?
+        }
+        _ => unreachable!("validated reset targets must be switches"),
+    }
+    Ok(target)
+}
+
+fn validate_component_reset_options(
+    action: rpc::ComponentResetAction,
+    domain_name: Option<&str>,
+    is_switch: bool,
+    target_count: usize,
+) -> Result<(), Status> {
+    if action == rpc::ComponentResetAction::Unspecified {
+        return Err(
+            CarbideError::InvalidArgument("a recognized reset action is required".into()).into(),
+        );
+    }
+    if target_count == 0 {
+        return Err(CarbideError::InvalidArgument("targets must be non-empty".into()).into());
+    }
+    if !is_switch
+        && matches!(
+            action,
+            rpc::ComponentResetAction::SdnFactoryReset
+                | rpc::ComponentResetAction::NvosFactoryReset
+        )
+    {
+        return Err(CarbideError::InvalidArgument(
+            "this reset action requires switch targets".into(),
+        )
+        .into());
+    }
+    if let Some(domain) = domain_name
+        && (action != rpc::ComponentResetAction::SdnFactoryReset || domain.trim().is_empty())
+    {
+        return Err(CarbideError::InvalidArgument(
+            "domain_name must be non-empty and only applies to SDN factory reset".into(),
+        )
+        .into());
+    }
+    match action {
+        rpc::ComponentResetAction::SdnFactoryReset
+        | rpc::ComponentResetAction::NvosFactoryReset => Ok(()),
+        _ => Err(component_manager_error_to_status(
+            ComponentManagerError::Unsupported(
+                "only SDN and NVOS factory reset are implemented".into(),
+            ),
+        )),
+    }
+}
+
+fn validate_distinct_component_reset_switch_ids(ids: &[SwitchId]) -> Result<(), Status> {
+    if ids.iter().collect::<HashSet<_>>().len() != ids.len() {
+        return Err(CarbideError::InvalidArgument("reset targets must be distinct".into()).into());
+    }
+    Ok(())
+}
+
+fn validate_distinct_component_reset_switch_macs(macs: &[String]) -> Result<(), Status> {
+    let mut seen = HashSet::new();
+    for raw in macs {
+        let identity = raw
+            .parse::<MacAddress>()
+            .map(|mac| mac.to_string())
+            .unwrap_or_else(|_| raw.clone());
+        if !seen.insert(identity) {
+            return Err(
+                CarbideError::InvalidArgument("reset targets must be distinct".into()).into(),
+            );
+        }
+    }
+    Ok(())
+}
+
+async fn component_reset_switch_endpoint_by_id(
+    api: &Api,
+    id: SwitchId,
+) -> Result<SwitchEndpoint, Status> {
+    let mut resolved = resolve_switch_endpoints(api, &[id], None).await?;
+    if let Some(endpoint) = resolved.resolved.endpoints.pop() {
+        Ok(endpoint)
+    } else {
+        let error = resolved
+            .unresolved
+            .pop()
+            .map(|failure| failure.reason)
+            .unwrap_or_else(|| "switch endpoint not found".into());
+        Err(Status::not_found(error))
+    }
+}
+
+async fn component_reset_switch_endpoint_by_mac(
+    api: &Api,
+    raw: &String,
+) -> Result<(SwitchEndpoint, Option<SwitchId>), rpc::ComponentResult> {
+    let mac = raw
+        .parse::<MacAddress>()
+        .map_err(|_| invalid_mac_result(raw))?;
+    let resolution = resolve_switch_macs(api, std::slice::from_ref(raw))
+        .await
+        .map_err(|error| mac_status_result(&mac, &error))?;
+    if let Some(id) = resolution.ingested.keys().next().copied() {
+        component_reset_switch_endpoint_by_id(api, id)
+            .await
+            .map(|endpoint| (endpoint, Some(id)))
+            .map_err(|error| {
+                let mut result = mac_status_result(&mac, &error);
+                result.component_id = Some(id.to_string());
+                result
+            })
+    } else {
+        let (mut endpoints, mut errors) = build_pre_ingestion_switch_endpoints(api, &[mac], None)
+            .await
+            .map_err(|error| mac_status_result(&mac, &error))?;
+        endpoints
+            .pop()
+            .map(|endpoint| (endpoint, None))
+            .ok_or_else(|| {
+                errors.pop().unwrap_or_else(|| {
+                    mac_result(
+                        &mac,
+                        rpc::ComponentManagerStatusCode::NotFound,
+                        Some("switch endpoint not found".into()),
+                    )
+                })
+            })
+    }
+}
+
+async fn dispatch_component_reset(
+    cm: &ComponentManager,
+    action: rpc::ComponentResetAction,
+    domain_name: Option<&str>,
+    endpoints: &[SwitchEndpoint],
+) -> HashMap<MacAddress, rpc::ComponentResult> {
+    let outcome = match action {
+        rpc::ComponentResetAction::SdnFactoryReset => {
+            cm.nv_switch
+                .batch_reset_sdn_factory_default(endpoints, domain_name)
+                .await
+        }
+        rpc::ComponentResetAction::NvosFactoryReset => {
+            cm.nv_switch
+                .batch_reset_switch_factory_default(endpoints, domain_name)
+                .await
+        }
+        rpc::ComponentResetAction::BmcReset | rpc::ComponentResetAction::BmcFactoryReset => {
+            Err(ComponentManagerError::Unsupported(
+                "only SDN and NVOS factory reset are implemented".into(),
+            ))
+        }
+        rpc::ComponentResetAction::Unspecified => Err(ComponentManagerError::InvalidArgument(
+            "a recognized reset action is required".into(),
+        )),
+    };
+    match outcome {
+        Ok(responses) => responses
+            .into_iter()
+            .map(|response| {
+                let outcome = response.result;
+                let mut result = mac_result(
+                    &outcome.bmc_mac,
+                    if outcome.success {
+                        rpc::ComponentManagerStatusCode::Success
+                    } else {
+                        rpc::ComponentManagerStatusCode::InternalError
+                    },
+                    None,
+                );
+                if let Some(error) = outcome.error {
+                    result = component_manager_error_to_result(result, error);
+                }
+                (outcome.bmc_mac, result)
+            })
+            .collect(),
+        Err(error) => {
+            let result = component_manager_error_to_result(Default::default(), error);
+            endpoints
+                .iter()
+                .map(|endpoint| {
+                    (
+                        endpoint.bmc_mac,
+                        rpc::ComponentResult {
+                            mac_address: Some(endpoint.bmc_mac.to_string()),
+                            ..result.clone()
+                        },
+                    )
+                })
+                .collect()
+        }
+    }
+}
+
+pub(crate) async fn component_reset(
+    api: &Api,
+    request: Request<rpc::ComponentResetRequest>,
+) -> Result<Response<rpc::ComponentResetResponse>, Status> {
+    use rpc::component_reset_request::Target;
+
+    log_request_data(&request);
+    let request = request.into_inner();
+    let target = validate_component_reset_request(&request)?;
+    let action = request.action();
+    let domain_name = request.domain_name.as_deref();
+    let cm = require_component_manager(api)?;
+    let mut endpoints = Vec::new();
+    let mut target_resolutions = Vec::new();
+    match target {
+        Target::SwitchIds(list) => {
+            for &id in &list.ids {
+                match component_reset_switch_endpoint_by_id(api, id).await {
+                    Ok(endpoint) => {
+                        target_resolutions.push(Ok((endpoint.bmc_mac, Some(id))));
+                        endpoints.push(endpoint);
+                    }
+                    Err(error) => {
+                        target_resolutions.push(Err(status_result(&id.to_string(), error)))
+                    }
+                }
+            }
+        }
+        Target::SwitchBmcMacs(list) => {
+            for raw in &list.mac_addresses {
+                match component_reset_switch_endpoint_by_mac(api, raw).await {
+                    Ok((endpoint, id)) => {
+                        target_resolutions.push(Ok((endpoint.bmc_mac, id)));
+                        endpoints.push(endpoint);
+                    }
+                    Err(result) => target_resolutions.push(Err(result)),
+                }
+            }
+        }
+        _ => unreachable!("validated reset targets must be switches"),
+    }
+    let mut backend_results = if endpoints.is_empty() {
+        HashMap::new()
+    } else {
+        dispatch_component_reset(cm, action, domain_name, &endpoints).await
+    };
+    let results = target_resolutions
+        .into_iter()
+        .map(|resolution| {
+            let (mac, id) = match resolution {
+                Ok(identity) => identity,
+                Err(result) => return result,
+            };
+            let mut result = backend_results.remove(&mac).unwrap_or_else(|| {
+                mac_result(
+                    &mac,
+                    rpc::ComponentManagerStatusCode::InternalError,
+                    Some("component manager returned no reset result for this switch".into()),
+                )
+            });
+            result.component_id = id.map(|id| id.to_string());
+            result
+        })
+        .collect();
+    Ok(Response::new(rpc::ComponentResetResponse { results }))
+}
+
+/// Resolve stable identity only: polling must work after credentials or NVOS
+/// addresses change, and after a pre-ingestion switch acquires its NICo ID.
+async fn component_reset_status_identity_by_id(
+    api: &Api,
+    id: SwitchId,
+) -> Result<MacAddress, Status> {
+    let mut txn = api.txn_begin().await?;
+    let switch = db::switch::find_by_id(&mut txn, &id)
+        .await
+        .map_err(CarbideError::from)?;
+    txn.commit().await.map_err(CarbideError::from)?;
+    switch
+        .and_then(|switch| switch.bmc_mac_address)
+        .ok_or_else(|| Status::not_found("switch BMC MAC not found"))
+}
+
+async fn component_reset_status_identity_by_mac(
+    api: &Api,
+    raw: &String,
+) -> Result<(MacAddress, Option<SwitchId>), Status> {
+    let mac = raw
+        .parse::<MacAddress>()
+        .map_err(|_| CarbideError::InvalidArgument(format!("invalid MAC address: {raw}")))?;
+    let resolution = resolve_switch_macs(api, std::slice::from_ref(raw)).await?;
+    Ok((mac, resolution.ingested.keys().next().copied()))
+}
+
+async fn get_component_reset_statuses(
+    cm: &ComponentManager,
+    action: rpc::ComponentResetAction,
+    bmc_macs: &[MacAddress],
+) -> HashMap<MacAddress, rpc::ComponentResetStatus> {
+    let observations = match action {
+        rpc::ComponentResetAction::SdnFactoryReset => {
+            cm.nv_switch.get_sdn_factory_reset_status(bmc_macs).await
+        }
+        rpc::ComponentResetAction::NvosFactoryReset => {
+            cm.nv_switch.get_nvos_factory_reset_status(bmc_macs).await
+        }
+        rpc::ComponentResetAction::BmcReset | rpc::ComponentResetAction::BmcFactoryReset => {
+            Err(ComponentManagerError::Unsupported(
+                "only SDN and NVOS factory reset are implemented".into(),
+            ))
+        }
+        rpc::ComponentResetAction::Unspecified => Err(ComponentManagerError::InvalidArgument(
+            "a recognized reset action is required".into(),
+        )),
+    };
+    match observations {
+        Ok(observations) => observations
+            .into_iter()
+            .map(|observed| {
+                use component_manager::nv_switch_manager::ComponentResetState;
+
+                let mut result = mac_result(
+                    &observed.bmc_mac,
+                    rpc::ComponentManagerStatusCode::Success,
+                    None,
+                );
+                let state = match observed.state {
+                    Ok(ComponentResetState::Queued) => rpc::ComponentResetState::Queued,
+                    Ok(ComponentResetState::InProgress) => rpc::ComponentResetState::InProgress,
+                    Ok(ComponentResetState::Completed) => rpc::ComponentResetState::Completed,
+                    Ok(ComponentResetState::Failed(error)) => {
+                        result.error = error;
+                        rpc::ComponentResetState::Failed
+                    }
+                    Err(error) => {
+                        result = component_manager_error_to_result(result, error);
+                        rpc::ComponentResetState::Unknown
+                    }
+                };
+                (
+                    observed.bmc_mac,
+                    rpc::ComponentResetStatus {
+                        result: Some(result),
+                        action: action as i32,
+                        state: state as i32,
+                    },
+                )
+            })
+            .collect(),
+        Err(error) => {
+            let result = component_manager_error_to_result(Default::default(), error);
+            bmc_macs
+                .iter()
+                .map(|&mac| {
+                    (
+                        mac,
+                        rpc::ComponentResetStatus {
+                            result: Some(rpc::ComponentResult {
+                                mac_address: Some(mac.to_string()),
+                                ..result.clone()
+                            }),
+                            action: action as i32,
+                            state: rpc::ComponentResetState::Unknown as i32,
+                        },
+                    )
+                })
+                .collect()
+        }
+    }
+}
+
+pub(crate) async fn get_component_reset_status(
+    api: &Api,
+    request: Request<rpc::GetComponentResetStatusRequest>,
+) -> Result<Response<rpc::GetComponentResetStatusResponse>, Status> {
+    use rpc::get_component_reset_status_request::Target;
+
+    log_request_data(&request);
+    let request = request.into_inner();
+    let target = validate_component_reset_status_request(&request)?;
+    let action = request.action();
+    let cm = require_component_manager(api)?;
+    let mut target_resolutions = Vec::new();
+    match target {
+        Target::SwitchIds(list) => {
+            for &id in &list.ids {
+                target_resolutions.push(
+                    component_reset_status_identity_by_id(api, id)
+                        .await
+                        .map(|mac| (mac, Some(id)))
+                        .map_err(|error| status_result(&id.to_string(), error)),
+                );
+            }
+        }
+        Target::SwitchBmcMacs(list) => {
+            for raw in &list.mac_addresses {
+                target_resolutions.push(
+                    component_reset_status_identity_by_mac(api, raw)
+                        .await
+                        .map_err(|error| rpc::ComponentResult {
+                            mac_address: Some(raw.clone()),
+                            status: component_status_code_for(error.code()) as i32,
+                            error: error.message().to_owned(),
+                            component_id: None,
+                        }),
+                );
+            }
+        }
+        _ => unreachable!("validated reset targets must be switches"),
+    }
+    let bmc_macs: Vec<_> = target_resolutions
+        .iter()
+        .filter_map(|resolution| resolution.as_ref().ok().map(|(mac, _)| *mac))
+        .collect();
+    let mut backend_statuses = if bmc_macs.is_empty() {
+        HashMap::new()
+    } else {
+        get_component_reset_statuses(cm, action, &bmc_macs).await
+    };
+    let mut statuses = Vec::with_capacity(target_resolutions.len());
+    for resolution in target_resolutions {
+        let (mac, switch_id) = match resolution {
+            Ok(identity) => identity,
+            Err(result) => {
+                statuses.push(rpc::ComponentResetStatus {
+                    result: Some(result),
+                    action: action as i32,
+                    state: rpc::ComponentResetState::Unknown as i32,
+                });
+                continue;
+            }
+        };
+        let mut status =
+            backend_statuses
+                .remove(&mac)
+                .unwrap_or_else(|| rpc::ComponentResetStatus {
+                    result: Some(mac_result(
+                        &mac,
+                        rpc::ComponentManagerStatusCode::OutcomeUnknown,
+                        Some("component manager returned no reset status for this switch".into()),
+                    )),
+                    action: action as i32,
+                    state: rpc::ComponentResetState::Unknown as i32,
+                });
+        if let Some(result) = status.result.as_mut() {
+            result.component_id = switch_id.map(|id| id.to_string());
+        }
+        statuses.push(status);
+    }
+    Ok(Response::new(rpc::GetComponentResetStatusResponse {
+        statuses,
+    }))
 }
 
 pub(crate) async fn component_configure_switch_certificate(
@@ -4090,7 +4672,10 @@ async fn update_switch_firmware_by_ids(
             if r.success {
                 success_result(&id)
             } else {
-                error_result(&id, r.error.unwrap_or_default())
+                error_result(
+                    &id,
+                    r.error.map(|error| error.to_string()).unwrap_or_default(),
+                )
             }
         }));
 
@@ -4180,7 +4765,7 @@ async fn dispatch_pre_ingestion_switch_firmware(
             } else {
                 rpc::ComponentManagerStatusCode::InternalError
             },
-            r.error,
+            r.error.map(|error| error.to_string()),
         )
     }));
 
@@ -5390,7 +5975,7 @@ async fn routed_machine_firmware_statuses(
             .filter_map(|id| machines_by_id.get(id).and_then(|m| m.status.bmc_info.mac))
             .collect();
 
-        db::direct_dispatch_firmware_job::find_macs_with_job(api.pg_pool(), &bmc_macs)
+        db::direct_dispatch_rms_job::find_macs_with_firmware_job(api.pg_pool(), &bmc_macs)
             .await
             .map_err(|e| Status::internal(format!("db error: {e}")))?
     } else {
@@ -6302,7 +6887,7 @@ mod tests {
             },
             ErrorToStatusCase {
                 scenario: "transport maps to unavailable",
-                error: ComponentManagerError::Transport(transport_error()),
+                error: transport_error().into(),
                 expected_code: Code::Unavailable,
                 message_contains: Some("transport error"),
             },
@@ -7511,49 +8096,49 @@ mod tests {
 
     #[test]
     fn map_switch_maintenance_operation_variants() {
+        use carbide_test_support::Outcome::{FailsWith, Yields};
+        use carbide_test_support::scenarios;
         use model::switch::SwitchMaintenanceOperation;
 
         use super::map_switch_maintenance_operation;
 
-        assert_eq!(
-            map_switch_maintenance_operation(PowerAction::On),
-            SwitchMaintenanceOperation::PowerOn,
-        );
-        assert_eq!(
-            map_switch_maintenance_operation(PowerAction::ForceOff),
-            SwitchMaintenanceOperation::PowerOff { graceful: false },
-        );
-        assert_eq!(
-            map_switch_maintenance_operation(PowerAction::GracefulShutdown),
-            SwitchMaintenanceOperation::PowerOff { graceful: true },
-        );
-        assert_eq!(
-            map_switch_maintenance_operation(PowerAction::ForceRestart),
-            SwitchMaintenanceOperation::Reset,
+        scenarios!(map_switch_maintenance_operation:
+            "power on/off" {
+                PowerAction::On => Yields(SwitchMaintenanceOperation::PowerOn),
+                PowerAction::ForceOff => Yields(SwitchMaintenanceOperation::PowerOff { graceful: false }),
+                PowerAction::GracefulShutdown => Yields(SwitchMaintenanceOperation::PowerOff { graceful: true }),
+            }
+            "restart intent" {
+                PowerAction::GracefulRestart => Yields(SwitchMaintenanceOperation::Reset { graceful: true }),
+                PowerAction::ForceRestart => Yields(SwitchMaintenanceOperation::Reset { graceful: false }),
+            }
+            "unsupported AC cycle" {
+                PowerAction::AcPowercycle => FailsWith("switch state controller does not support AC power cycle"),
+            }
         );
     }
 
     #[test]
     fn map_machine_maintenance_operation_variants() {
+        use carbide_test_support::Outcome::{FailsWith, Yields};
+        use carbide_test_support::scenarios;
         use model::machine::MachineMaintenanceOperation;
 
         use super::map_machine_maintenance_operation;
 
-        assert_eq!(
-            map_machine_maintenance_operation(PowerAction::On),
-            MachineMaintenanceOperation::PowerOn,
-        );
-        assert_eq!(
-            map_machine_maintenance_operation(PowerAction::ForceOff),
-            MachineMaintenanceOperation::PowerOff { graceful: false },
-        );
-        assert_eq!(
-            map_machine_maintenance_operation(PowerAction::GracefulShutdown),
-            MachineMaintenanceOperation::PowerOff { graceful: true },
-        );
-        assert_eq!(
-            map_machine_maintenance_operation(PowerAction::ForceRestart),
-            MachineMaintenanceOperation::Reset,
+        scenarios!(map_machine_maintenance_operation:
+            "power on/off" {
+                PowerAction::On => Yields(MachineMaintenanceOperation::PowerOn),
+                PowerAction::ForceOff => Yields(MachineMaintenanceOperation::PowerOff { graceful: false }),
+                PowerAction::GracefulShutdown => Yields(MachineMaintenanceOperation::PowerOff { graceful: true }),
+            }
+            "restart intent" {
+                PowerAction::GracefulRestart => Yields(MachineMaintenanceOperation::Reset { graceful: true }),
+                PowerAction::ForceRestart => Yields(MachineMaintenanceOperation::Reset { graceful: false }),
+            }
+            "unsupported AC cycle" {
+                PowerAction::AcPowercycle => FailsWith("machine state controller does not support AC power cycle"),
+            }
         );
     }
 

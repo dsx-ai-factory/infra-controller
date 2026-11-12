@@ -61,9 +61,10 @@ pub(super) async fn forge_agent_control(
     machine_id: MachineId,
 ) -> Option<ForgeAgentControlResponse> {
     match app_context
-        .forge_api_client
+        .carbide_api_client
         .forge_agent_control(ForgeAgentControlRequest {
             machine_id: Some(machine_id),
+            nic_firmware_site_cache_supported: false,
         })
         .await
     {
@@ -101,7 +102,7 @@ pub(super) async fn send_pxe_boot_request(
     product: Option<String>,
 ) -> Result<PxeResponse, PxeError> {
     let pxe_script = app_context
-        .forge_api_client
+        .carbide_api_client
         .get_pxe_instructions(rpc::forge::PxeInstructionRequest {
             arch: arch.into(),
             product,

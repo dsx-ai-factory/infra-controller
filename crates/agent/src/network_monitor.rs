@@ -22,8 +22,8 @@ use std::net::IpAddr;
 use std::str::FromStr;
 use std::sync::Arc;
 
+use ::rpc::carbide_tls_client::{ApiConfig, CarbideClientConfig, CarbideTlsClient};
 use ::rpc::forge::{self as rpc};
-use ::rpc::forge_tls_client::{ApiConfig, ForgeClientConfig, ForgeTlsClient};
 use carbide_uuid::machine::{DpuMachineId, MachineId};
 use chrono::Utc;
 use clap::ValueEnum;
@@ -115,7 +115,7 @@ impl NetworkMonitor {
     pub async fn run(
         &mut self,
         forge_api: &str,
-        client_config: Arc<ForgeClientConfig>,
+        client_config: Arc<CarbideClientConfig>,
         close_receiver: &mut watch::Receiver<bool>,
     ) {
         // Initial fetch peer dpu list from API
@@ -222,7 +222,7 @@ impl NetworkMonitor {
 
     /// Handle one time network check request from commandline
     /// Fetches new list from
-    pub async fn run_onetime(&mut self, forge_api: &str, client_config: &ForgeClientConfig) {
+    pub async fn run_onetime(&mut self, forge_api: &str, client_config: &CarbideClientConfig) {
         let (loopback_ip, peer_dpus) = match self
             .find_all_dpu_info(&self.machine_id, forge_api, client_config)
             .await
@@ -345,7 +345,7 @@ impl NetworkMonitor {
         &self,
         dpu_machine_id: &MachineId,
         forge_api: &str,
-        client_config: &ForgeClientConfig,
+        client_config: &CarbideClientConfig,
     ) -> Result<(DpuInfo, Vec<DpuInfo>), eyre::Report> {
         // Get list of DPU information from API
         let dpu_info_list = fetch_dpu_info_list(forge_api, client_config)
@@ -398,10 +398,10 @@ impl NetworkMonitor {
 /// Fetches the list of DPU information from the API
 pub(crate) async fn fetch_dpu_info_list(
     forge_api: &str,
-    client_config: &ForgeClientConfig,
+    client_config: &CarbideClientConfig,
 ) -> Result<rpc::GetDpuInfoListResponse, eyre::Report> {
     let api_config = ApiConfig::new(forge_api, client_config);
-    let mut client = ForgeTlsClient::retry_build(&api_config)
+    let mut client = CarbideTlsClient::retry_build(&api_config)
         .await
         .map_err(|err| {
             eyre::Report::new(err).wrap_err(format!(

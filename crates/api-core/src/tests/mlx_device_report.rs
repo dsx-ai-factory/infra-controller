@@ -1930,3 +1930,597 @@ async fn live_report_is_returned_when_snapshot_write_fails(pool: sqlx::PgPool) {
         Some("3")
     );
 }
+
+/// A caller can disappear while Scout still has the request. Only valid
+/// completion from the saved DPU settles it, even after that DPU detaches.
+#[crate::sqlx_test]
+async fn live_mlx_hardware_dispatch_survives_a_lost_caller(pool: sqlx::PgPool) {
+    use model::hardware_dispatch::{HardwareDispatchOwner, MlxAdminCommand};
+    use rpc::protos::mlx_device as pb;
+
+    let env = create_test_env(pool).await;
+    let host = create_managed_host(&env).await;
+    let machine_id: MachineId = host.dpu().id.into();
+    let host_id = *host.id;
+    let (sender, mut requests) = scout_connection(&env.api, machine_id, Some(machine_id))
+        .await
+        .unwrap();
+    let api = Arc::clone(&env.api);
+    let caller = tokio::spawn(async move { dispatch_config_set(&api, machine_id).await });
+    let request = tokio::time::timeout(Duration::from_secs(5), requests.next())
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    let saved = saved_dispatch(&env.pool, host_id).await;
+    assert_eq!(
+        saved.token,
+        uuid::Uuid::try_from(request.flow_uuid.clone().unwrap()).unwrap()
+    );
+    assert_eq!(
+        saved.owner,
+        HardwareDispatchOwner::MlxAdmin {
+            machine_id,
+            command: MlxAdminCommand::ConfigSet
+        }
+    );
+    assert!(saved.is_pending());
+    caller.abort();
+    assert!(caller.await.unwrap_err().is_cancelled());
+
+    // The same token on another authenticated machine is not this DPU's result.
+    let host_machine: MachineId = host_id.into();
+    let (other_sender, mut other_requests) =
+        scout_connection(&env.api, host_machine, Some(host_machine))
+            .await
+            .unwrap();
+    other_sender
+        .send(config_set_reply(request.flow_uuid.clone()))
+        .await
+        .unwrap();
+    ping_barrier(&env.api, host_machine, &other_sender, &mut other_requests).await;
+    assert_eq!(saved_dispatch(&env.pool, host_id).await, saved);
+
+    // Exact-token invalid evidence must pass through the real ingress guard.
+    // These rows protect that wiring; the pure table covers individual shapes.
+    for payload in [
+        None,
+        Some(
+            scout_stream_api_bound_message::Payload::MlxDeviceConfigSetResponse(
+                pb::MlxDeviceConfigSetResponse {
+                    reply: Some(pb::mlx_device_config_set_response::Reply::Error(
+                        Default::default(),
+                    )),
+                },
+            ),
+        ),
+        Some(
+            scout_stream_api_bound_message::Payload::MlxDeviceConfigSyncResponse(Default::default()),
+        ),
+    ] {
+        sender
+            .send(ScoutStreamApiBoundMessage {
+                flow_uuid: request.flow_uuid.clone(),
+                payload,
+            })
+            .await
+            .unwrap();
+        ping_barrier(&env.api, machine_id, &sender, &mut requests).await;
+        assert_eq!(saved_dispatch(&env.pool, host_id).await, saved);
+    }
+
+    // Topology is not completion. A reply on the original live stream must find
+    // its original host by the durable token, without the current attachment.
+    sqlx::query("UPDATE machine_interfaces SET attached_dpu_machine_id = NULL WHERE machine_id = $1 AND attached_dpu_machine_id = $2")
+        .bind(host_id).bind(machine_id).execute(&env.pool).await.unwrap();
+    sender
+        .send(config_set_reply(request.flow_uuid))
+        .await
+        .unwrap();
+    ping_barrier(&env.api, machine_id, &sender, &mut requests).await;
+    let settled = saved_dispatch(&env.pool, host_id).await;
+    assert_eq!(settled.token, saved.token);
+    assert_eq!(settled.owner, saved.owner);
+    assert!(settled.settled_at.is_some());
+}
+
+/// Drive the public mutation boundary without repeating its request fixture.
+async fn dispatch_config_set(
+    api: &Api,
+    machine_id: MachineId,
+) -> Result<tonic::Response<rpc::protos::mlx_device::MlxAdminConfigSetResponse>, tonic::Status> {
+    api.mlx_admin_config_set(Request::new(
+        rpc::protos::mlx_device::MlxAdminConfigSetRequest {
+            machine_id: Some(machine_id),
+            device_id: "0000:01:00.0".into(),
+            ..Default::default()
+        },
+    ))
+    .await
+}
+
+/// Reload the stored record independently of sender and connection lifetimes.
+async fn saved_dispatch(
+    pool: &sqlx::PgPool,
+    host: HostMachineId,
+) -> model::hardware_dispatch::HardwareDispatch {
+    db::machine::find_one(pool, &host, Default::default())
+        .await
+        .unwrap()
+        .unwrap()
+        .status
+        .hardware_dispatch
+        .unwrap()
+}
+
+/// A successful zero-change result still establishes the command completed.
+fn config_set_reply(flow_uuid: Option<rpc::common::Uuid>) -> ScoutStreamApiBoundMessage {
+    use rpc::protos::mlx_device as pb;
+    ScoutStreamApiBoundMessage {
+        flow_uuid,
+        payload: Some(
+            scout_stream_api_bound_message::Payload::MlxDeviceConfigSetResponse(
+                pb::MlxDeviceConfigSetResponse {
+                    reply: Some(pb::mlx_device_config_set_response::Reply::TotalApplied(0)),
+                },
+            ),
+        ),
+    }
+}
+
+/// A read-only ping on the same FIFO proves preceding replies were processed,
+/// without requiring a machine-row write that could hide settlement lock waits.
+async fn ping_barrier(
+    api: &Api,
+    machine_id: MachineId,
+    sender: &mpsc::Sender<ScoutStreamApiBoundMessage>,
+    requests: &mut ScoutStreamType,
+) {
+    let ping = api.scout_stream_ping(Request::new(rpc::forge::ScoutStreamAdminPingRequest {
+        machine_id: Some(machine_id),
+    }));
+    let reply = async {
+        let request = requests.next().await.unwrap().unwrap();
+        sender
+            .send(ScoutStreamApiBoundMessage {
+                flow_uuid: request.flow_uuid,
+                payload: Some(
+                    scout_stream_api_bound_message::Payload::ScoutStreamAgentPingResponse(
+                        rpc::forge::ScoutStreamAgentPingResponse {
+                            reply: Some(rpc::forge::scout_stream_agent_ping_response::Reply::Pong(
+                                "test barrier".into(),
+                            )),
+                        },
+                    ),
+                ),
+            })
+            .await
+            .unwrap();
+    };
+    let (result, ()) =
+        tokio::time::timeout(Duration::from_secs(5), async { tokio::join!(ping, reply) })
+            .await
+            .expect("Scout reader must keep routing replies");
+    result.unwrap();
+}
+
+/// A queue closed after the connected precheck is a proof of local non-enqueue,
+/// distinct from a disconnected caller after the command may have reached Scout.
+#[crate::sqlx_test]
+async fn live_mlx_hardware_dispatch_settles_a_rejected_dpu_enqueue(pool: sqlx::PgPool) {
+    let env = create_test_env(pool).await;
+    let host = create_managed_host(&env).await;
+    let machine_id: MachineId = host.dpu().id.into();
+    let host_id = *host.id;
+    let (commands, receiver) = mpsc::channel(1);
+    let (_replies, replies) = mpsc::channel(1);
+    env.api
+        .scout_stream_registry
+        .register(machine_id, commands, replies)
+        .await;
+    drop(receiver);
+    let error = dispatch_config_set(&env.api, machine_id).await.unwrap_err();
+    assert_eq!(error.code(), tonic::Code::Internal);
+    let saved = db::machine::find_one(&env.pool, &host_id, Default::default())
+        .await
+        .unwrap()
+        .unwrap()
+        .status
+        .hardware_dispatch
+        .unwrap();
+    assert!(
+        !saved.is_pending(),
+        "only the never-enqueued command releases its host"
+    );
+    assert_eq!(
+        saved.owner,
+        model::hardware_dispatch::HardwareDispatchOwner::MlxAdmin {
+            machine_id,
+            command: model::hardware_dispatch::MlxAdminCommand::ConfigSet,
+        }
+    );
+    assert!(!saved.token.is_nil());
+    env.api.scout_stream_registry.unregister(machine_id).await;
+}
+
+/// An unattached DPU has no host reservation. Preserve its unbounded stream wait
+/// beyond the tracked-host deadline rather than reporting a nonexistent claim.
+#[crate::sqlx_test]
+async fn hardware_dispatch_unattached_dpu_keeps_its_existing_wait(pool: sqlx::PgPool) {
+    use rpc::protos::mlx_device as pb;
+
+    let env = create_test_env(pool).await;
+    let machine_id: MachineId = model::test_support::machine_snapshot::dpu_machine_id(0).into();
+    let (commands, mut requests) = mpsc::channel(1);
+    let (replies, responses) = mpsc::channel(1);
+    env.api
+        .scout_stream_registry
+        .register(machine_id, commands, responses)
+        .await;
+    let api = Arc::clone(&env.api);
+    let mut caller = tokio::spawn(async move {
+        api.mlx_admin_config_set(Request::new(pb::MlxAdminConfigSetRequest {
+            machine_id: Some(machine_id),
+            device_id: "0000:01:00.0".into(),
+            ..Default::default()
+        }))
+        .await
+    });
+    let request = tokio::time::timeout(Duration::from_secs(5), requests.recv())
+        .await
+        .expect("the unattached DPU request must enqueue")
+        .unwrap()
+        .unwrap();
+
+    // Enqueue proves the sender's database transaction already committed. Pause
+    // only after that boundary; no transaction is kept across virtual time.
+    tokio::time::pause();
+    tokio::time::advance(Duration::from_secs(3600)).await;
+    let still_waiting = tokio::time::timeout(Duration::from_secs(1), &mut caller).await;
+    assert!(
+        still_waiting.is_err(),
+        "an unreserved DPU must keep waiting for its reply"
+    );
+    tokio::time::resume();
+
+    replies
+        .send(ScoutStreamApiBoundMessage {
+            flow_uuid: request.flow_uuid,
+            payload: Some(
+                scout_stream_api_bound_message::Payload::MlxDeviceConfigSetResponse(
+                    pb::MlxDeviceConfigSetResponse {
+                        reply: Some(pb::mlx_device_config_set_response::Reply::TotalApplied(0)),
+                    },
+                ),
+            ),
+        })
+        .await
+        .unwrap();
+    let response = tokio::time::timeout(Duration::from_secs(5), caller)
+        .await
+        .expect("the retained caller must receive its reply")
+        .unwrap()
+        .unwrap()
+        .into_inner();
+    assert_eq!(response.total_applied, 0);
+    env.api.scout_stream_registry.unregister(machine_id).await;
+}
+
+/// Distinct sender exits must preserve the distinction between an acknowledged
+/// result, a possible send, and a reply deadline. Unbound success uses the caller
+/// settlement path rather than authenticated ingress.
+#[crate::sqlx_test]
+async fn hardware_dispatch_sender_outcomes(pool: sqlx::PgPool) {
+    use rpc::protos::mlx_device as pb;
+    enum Outcome {
+        Success,
+        SettlementFailure,
+        VendorError,
+        Uncertain,
+        Timeout,
+    }
+    let env = create_test_env(pool).await;
+    for outcome in [
+        Outcome::Success,
+        Outcome::SettlementFailure,
+        Outcome::VendorError,
+        Outcome::Uncertain,
+        Outcome::Timeout,
+    ] {
+        let host = create_managed_host(&env).await;
+        let host_id = *host.id;
+        let machine_id: MachineId = host_id.into();
+        let authenticated = matches!(outcome, Outcome::Timeout).then_some(machine_id);
+        let (sender, mut requests) = scout_connection(&env.api, machine_id, authenticated)
+            .await
+            .unwrap();
+        let mut sender = Some(sender);
+        if matches!(outcome, Outcome::SettlementFailure) {
+            // Reject bookkeeping only; the device still returns a known success.
+            // Skip validation of earlier settled rows, but check every later write.
+            sqlx::query("ALTER TABLE machines ADD CONSTRAINT test_reject_sender_settlement CHECK (hardware_dispatch->>'settled_at' IS NULL) NOT VALID")
+                .execute(&env.pool).await.unwrap();
+        }
+        let api = Arc::clone(&env.api);
+        let caller = tokio::spawn(async move { dispatch_config_set(&api, machine_id).await });
+        let request = tokio::time::timeout(Duration::from_secs(5), requests.next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        let flow_uuid = request.flow_uuid;
+        let saved = saved_dispatch(&env.pool, host_id).await;
+        match outcome {
+            Outcome::Success | Outcome::SettlementFailure => sender
+                .as_ref()
+                .unwrap()
+                .send(config_set_reply(flow_uuid.clone()))
+                .await
+                .unwrap(),
+            Outcome::VendorError => sender
+                .as_ref()
+                .unwrap()
+                .send(ScoutStreamApiBoundMessage {
+                    flow_uuid: flow_uuid.clone(),
+                    payload: Some(
+                        scout_stream_api_bound_message::Payload::MlxDeviceConfigSetResponse(
+                            pb::MlxDeviceConfigSetResponse {
+                                reply: Some(pb::mlx_device_config_set_response::Reply::Error(
+                                    Default::default(),
+                                )),
+                            },
+                        ),
+                    ),
+                })
+                .await
+                .unwrap(),
+            Outcome::Uncertain => drop(sender.take()),
+            Outcome::Timeout => {
+                // Delivery is confirmed and no database phase spans virtual time.
+                // An expired caller wait says nothing about the hardware result.
+                tokio::time::pause();
+                tokio::time::advance(Duration::from_secs(1801)).await;
+                tokio::task::yield_now().await;
+                tokio::time::resume();
+            }
+        }
+        let result = tokio::time::timeout(Duration::from_secs(5), caller)
+            .await
+            .expect("sender must terminate at its defined boundary")
+            .unwrap();
+        let retained = saved_dispatch(&env.pool, host_id).await;
+        if matches!(outcome, Outcome::Success | Outcome::SettlementFailure) {
+            assert_eq!(result.unwrap().into_inner().total_applied, 0);
+            assert_eq!(retained.token, saved.token);
+            assert_eq!(retained.owner, saved.owner);
+            if matches!(outcome, Outcome::SettlementFailure) {
+                assert_eq!(retained, saved);
+                sqlx::query("ALTER TABLE machines DROP CONSTRAINT test_reject_sender_settlement")
+                    .execute(&env.pool)
+                    .await
+                    .unwrap();
+            } else {
+                assert!(!retained.is_pending());
+            }
+        } else {
+            let error = result.unwrap_err();
+            assert_eq!(
+                error.code(),
+                if matches!(outcome, Outcome::Timeout) {
+                    tonic::Code::DeadlineExceeded
+                } else {
+                    tonic::Code::Internal
+                }
+            );
+            assert!(error.metadata().get("nico-error-code").is_some());
+            assert_eq!(retained, saved);
+            if matches!(outcome, Outcome::Uncertain) {
+                // A new connection does not erase the original pending record.
+                let (replacement, stream) =
+                    scout_connection(&env.api, machine_id, None).await.unwrap();
+                sender = Some(replacement);
+                requests = stream;
+            }
+            let blocked = dispatch_config_set(&env.api, machine_id).await.unwrap_err();
+            assert_eq!(blocked.code(), tonic::Code::FailedPrecondition);
+            assert!(futures::FutureExt::now_or_never(requests.next()).is_none());
+            if matches!(outcome, Outcome::Timeout) {
+                // The original authenticated stream can still deliver the exact
+                // late result. This is not a synthetic Scout replay after reconnect.
+                sender
+                    .as_ref()
+                    .unwrap()
+                    .send(config_set_reply(flow_uuid))
+                    .await
+                    .unwrap();
+                ping_barrier(
+                    &env.api,
+                    machine_id,
+                    sender.as_ref().unwrap(),
+                    &mut requests,
+                )
+                .await;
+                let settled = saved_dispatch(&env.pool, host_id).await;
+                assert_eq!(settled.token, saved.token);
+                assert_eq!(settled.owner, saved.owner);
+                assert!(!settled.is_pending());
+            }
+        }
+        env.api.scout_stream_registry.unregister(machine_id).await;
+    }
+}
+
+/// Backpressure separates a committed reservation from delivery. Removing the
+/// commit-before-send ordering would leave the record invisible at this barrier.
+#[crate::sqlx_test]
+async fn hardware_dispatch_commits_before_blocked_enqueue(pool: sqlx::PgPool) {
+    let env = create_test_env(pool).await;
+    let host = create_managed_host(&env).await;
+    let host_id = *host.id;
+    let machine_id: MachineId = host_id.into();
+    let (commands, mut requests) = mpsc::channel(1);
+    let (replies, responses) = mpsc::channel(1);
+    commands
+        .send(Ok(rpc::forge::ScoutStreamScoutBoundMessage::default()))
+        .await
+        .unwrap();
+    env.api
+        .scout_stream_registry
+        .register(machine_id, commands, responses)
+        .await;
+    let api = Arc::clone(&env.api);
+    let caller = tokio::spawn(async move { dispatch_config_set(&api, machine_id).await });
+    // Read using independent committed snapshots while the one-slot queue stays full.
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let row = db::machine::find_one(&env.pool, &host_id, Default::default())
+                .await
+                .unwrap()
+                .unwrap();
+            if row.status.hardware_dispatch.is_some() {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("reservation must commit before the full queue can drain");
+    assert!(!caller.is_finished());
+    let error = dispatch_config_set(&env.api, machine_id).await.unwrap_err();
+    assert_eq!(error.code(), tonic::Code::FailedPrecondition);
+    let saved = saved_dispatch(&env.pool, host_id).await;
+    for context in [
+        host_id.to_string(),
+        saved.token.to_string(),
+        format!("{:?}", saved.owner),
+        saved.started_at.to_string(),
+    ] {
+        assert!(
+            error.message().contains(&context),
+            "missing saved context: {context}"
+        );
+    }
+    requests.recv().await.unwrap().unwrap(); // Release only the occupied queue slot.
+    let request = requests.recv().await.unwrap().unwrap();
+    replies
+        .send(config_set_reply(request.flow_uuid))
+        .await
+        .unwrap();
+    caller.await.unwrap().unwrap();
+    assert!(!saved_dispatch(&env.pool, host_id).await.is_pending());
+    assert!(
+        requests.try_recv().is_err(),
+        "rejected competing command must never enqueue"
+    );
+
+    // A fresh public request is permitted after the exact earlier settlement.
+    let api = Arc::clone(&env.api);
+    let retry = tokio::spawn(async move { dispatch_config_set(&api, machine_id).await });
+    let replacement = requests.recv().await.unwrap().unwrap();
+    assert_ne!(
+        uuid::Uuid::try_from(replacement.flow_uuid.clone().unwrap()).unwrap(),
+        saved.token
+    );
+    replies
+        .send(config_set_reply(replacement.flow_uuid))
+        .await
+        .unwrap();
+    retry.await.unwrap().unwrap();
+
+    // The reverse exclusion also applies through the public API, independently
+    // of whether an earlier dispatch is settled.
+    sqlx::query("UPDATE machines SET controller_state = $2 WHERE id = $1")
+        .bind(host_id)
+        .bind(sqlx::types::Json(
+            model::machine::ManagedHostState::NicFirmwareUpdating {
+                operation: model::test_support::nic_firmware::operation(),
+            },
+        ))
+        .execute(&env.pool)
+        .await
+        .unwrap();
+    let error = dispatch_config_set(&env.api, machine_id).await.unwrap_err();
+    assert_eq!(error.code(), tonic::Code::FailedPrecondition);
+    assert!(requests.try_recv().is_err());
+    env.api.scout_stream_registry.unregister(machine_id).await;
+}
+
+/// A blocked settlement must not monopolize Scout's reader. Write failure also
+/// retains the exact command and permits a later matching reply to settle it.
+#[crate::sqlx_test]
+async fn hardware_dispatch_settlement_failure_keeps_stream_usable(pool: sqlx::PgPool) {
+    let env = create_test_env(pool).await;
+    let host = create_managed_host(&env).await;
+    let host_id = *host.id;
+    let machine_id: MachineId = host_id.into();
+    let (sender, mut requests) = scout_connection(&env.api, machine_id, Some(machine_id))
+        .await
+        .unwrap();
+    let api = Arc::clone(&env.api);
+    let caller = tokio::spawn(async move { dispatch_config_set(&api, machine_id).await });
+    let request = requests.next().await.unwrap().unwrap();
+    // Normal authenticated routing must return the device result and leave a
+    // settled record before testing the independent late-caller failure path.
+    sender
+        .send(config_set_reply(request.flow_uuid))
+        .await
+        .unwrap();
+    assert_eq!(caller.await.unwrap().unwrap().into_inner().total_applied, 0);
+    assert!(!saved_dispatch(&env.pool, host_id).await.is_pending());
+    let api = Arc::clone(&env.api);
+    let caller = tokio::spawn(async move { dispatch_config_set(&api, machine_id).await });
+    let request = requests.next().await.unwrap().unwrap();
+    let saved = saved_dispatch(&env.pool, host_id).await;
+    caller.abort();
+    assert!(caller.await.unwrap_err().is_cancelled());
+
+    // Observe the real PostgreSQL wait before expiring the database attempt;
+    // virtual time advances only after acquisition and the statement are active.
+    let mut lock = env.pool.begin().await.unwrap();
+    let blocker: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(lock.as_mut())
+        .await
+        .unwrap();
+    sqlx::query("SELECT id FROM machines WHERE id = $1 FOR NO KEY UPDATE")
+        .bind(host_id)
+        .execute(lock.as_mut())
+        .await
+        .unwrap();
+    sender
+        .send(config_set_reply(request.flow_uuid.clone()))
+        .await
+        .unwrap();
+    db::test_support::postgres::wait_for_blocked_query(
+        &env.pool,
+        blocker,
+        "UPDATE machines SET hardware_dispatch",
+    )
+    .await;
+    tokio::time::pause();
+    tokio::time::advance(Duration::from_secs(11)).await;
+    tokio::task::yield_now().await;
+    tokio::time::resume();
+    ping_barrier(&env.api, machine_id, &sender, &mut requests).await;
+    assert_eq!(saved_dispatch(&env.pool, host_id).await, saved);
+    lock.rollback().await.unwrap();
+
+    // A targeted constraint rejects only settlement, leaving read-only routing
+    // available and making a later recovery independent of the timeout case.
+    sqlx::query("ALTER TABLE machines ADD CONSTRAINT test_reject_dispatch_settlement CHECK (hardware_dispatch->>'settled_at' IS NULL)").execute(&env.pool).await.unwrap();
+    sender
+        .send(config_set_reply(request.flow_uuid.clone()))
+        .await
+        .unwrap();
+    ping_barrier(&env.api, machine_id, &sender, &mut requests).await;
+    assert_eq!(saved_dispatch(&env.pool, host_id).await, saved);
+    sqlx::query("ALTER TABLE machines DROP CONSTRAINT test_reject_dispatch_settlement")
+        .execute(&env.pool)
+        .await
+        .unwrap();
+    sender
+        .send(config_set_reply(request.flow_uuid))
+        .await
+        .unwrap();
+    ping_barrier(&env.api, machine_id, &sender, &mut requests).await;
+    assert!(!saved_dispatch(&env.pool, host_id).await.is_pending());
+}

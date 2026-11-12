@@ -19,14 +19,23 @@ pub enum FirmwareInventorySource {
 }
 
 /// `FirmwareReadError` describes unavailable evidence without backend error text.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum FirmwareReadError {
-    /// Client creation, collection metadata, or one member read failed.
+    /// Endpoint preparation, transport, collection or member evidence failed.
+    #[error("firmware inventory read failed")]
     ReadFailed,
     /// The shared request deadline expired before this read completed.
+    #[error("firmware inventory read deadline exceeded")]
     DeadlineExceeded,
     /// The inventory or its text exceeds the reader's documented bound.
+    #[error("firmware inventory read limit exceeded")]
     LimitExceeded,
+    /// The remote service explicitly rejected an attempted read as unimplemented.
+    /// This nested endpoint error can follow I/O; whole-call
+    /// [`crate::error::ComponentManagerError::Unsupported`] rejects a backend
+    /// without this capability before I/O.
+    #[error("firmware inventory read is unsupported by the remote service")]
+    Unsupported,
 }
 
 /// `ComponentFirmwareInventoryResult` keeps an observation with its requested endpoint.

@@ -23,7 +23,7 @@ use std::error::Error;
 use std::net::{Ipv6Addr, SocketAddr, SocketAddrV6};
 use std::sync::Arc;
 
-use ::rpc::forge_tls_client::ForgeClientConfig;
+use ::rpc::carbide_tls_client::CarbideClientConfig;
 use carbide_dhcp_server::cache::{self, CacheEntry};
 use carbide_dhcp_server::errors::DhcpError;
 use carbide_dhcp_server::metrics::{
@@ -39,10 +39,10 @@ use carbide_dhcp_server::{
 };
 use carbide_instrument::emit;
 use carbide_rpc_utils::dhcp::{DhcpConfig, DhcpTimestamps, DhcpTimestampsFilePath, ServiceConfig};
+use carbide_tls::client_config::ClientCert;
+use carbide_tls::default::{default_client_cert, default_client_key, default_root_ca};
 use chrono::Utc;
 use command_line::{Args, ServerMode};
-use forge_tls::client_config::ClientCert;
-use forge_tls::default::{default_client_cert, default_client_key, default_root_ca};
 use grpc_server::{ApplyError, ControlRequest, run_grpc_server};
 use lru::LruCache;
 use metrics_endpoint::{MetricsEndpointConfig, new_metrics_setup, run_metrics_endpoint};
@@ -1346,7 +1346,7 @@ async fn load_config(
     candidate_host: Option<String>,
     allow_missing_host: bool,
 ) -> Result<Config, DhcpError> {
-    let forge_client_config = forge_client_config(args)?;
+    let carbide_client_config = carbide_client_config(args)?;
     let dhcp_config = read_dhcp_config(&args.dhcp_config, candidate_dhcp).await?;
 
     let host_config;
@@ -1381,11 +1381,11 @@ async fn load_config(
         dhcp_config,
         host_config,
         args.relay_response_port,
-        forge_client_config,
+        carbide_client_config,
     ))
 }
 
-fn forge_client_config(args: &Args) -> Result<ForgeClientConfig, DhcpError> {
+fn carbide_client_config(args: &Args) -> Result<CarbideClientConfig, DhcpError> {
     let root_ca_path = args
         .forge_root_ca_path
         .clone()
@@ -1406,7 +1406,7 @@ fn forge_client_config(args: &Args) -> Result<ForgeClientConfig, DhcpError> {
         }
     };
 
-    Ok(ForgeClientConfig::new(root_ca_path, Some(client_cert)))
+    Ok(CarbideClientConfig::new(root_ca_path, Some(client_cert)))
 }
 
 const MINIMUM_DHCP_PKT_SIZE: usize = 236;
@@ -1576,8 +1576,8 @@ mod test {
     use carbide_dhcp_server::modes::dpu::Dpu;
     use carbide_instrument::testing::{MetricsCapture, capture_logs_async};
     use carbide_rpc_utils::dhcp::{
-        DhcpTimestamps, DhcpTimestampsFilePath, ServiceConfig, ServiceInterfaceReservations,
-        ServiceLink, ServiceLinkV4, ServiceReservation,
+        DhcpTimestamps, DhcpTimestampsFilePath, ServiceConfig, ServiceDhcpInterfaceReservations,
+        ServiceDhcpReservation, ServiceLink, ServiceLinkV4,
     };
     use carbide_test_support::value_scenarios;
     use chrono::{DateTime, Utc};
@@ -1598,7 +1598,7 @@ mod test {
     use crate::command_line::{Args, ServerMode};
     use crate::{
         Config, DhcpMode, ListenerFailure, ReplyStatus, admit_v6_packet, cache,
-        forge_client_config, handle_reload, init, packet_handler, process,
+        carbide_client_config, handle_reload, init, packet_handler, process,
         supervise_listener_tasks, validate_v6_source_port,
     };
 
@@ -1926,7 +1926,7 @@ mod test {
                         dhcp,
                         None,
                         67,
-                        forge_client_config(&args).unwrap(),
+                        carbide_client_config(&args).unwrap(),
                     );
                     let cancel = CancellationToken::new();
                     // Port zero isolates the socket from other test binaries.
@@ -1962,7 +1962,7 @@ mod test {
         let mut dhcp = ipv6_only_config();
         dhcp.carbide_dhcp_server = Some(Ipv4Addr::LOCALHOST);
         dhcp.carbide_provisioning_server_ipv4 = Some(Ipv4Addr::LOCALHOST);
-        let config = Config::new(dhcp, None, 67, forge_client_config(&args).unwrap());
+        let config = Config::new(dhcp, None, 67, carbide_client_config(&args).unwrap());
 
         // Cancel before startup so socket setup and retirement are simultaneously eligible.
         let cancel = CancellationToken::new();
@@ -2723,9 +2723,9 @@ mod test {
         let old_cancel = CancellationToken::new();
         let mut token = Some(old_cancel.clone());
         let mut active_service_config =
-            ServiceConfig::try_new(vec![ServiceInterfaceReservations {
+            ServiceConfig::try_new(vec![ServiceDhcpInterfaceReservations {
                 receiving_interface: "lo".to_string(),
-                reservations: vec![ServiceReservation {
+                reservations: vec![ServiceDhcpReservation {
                     attachment_id: "11111111-1111-1111-1111-111111111111".parse().unwrap(),
                     interface_ordinal: 0,
                     internal_uuid: "22222222-2222-2222-2222-222222222222".parse().unwrap(),
@@ -2935,7 +2935,7 @@ mod test {
         let old_cancel = CancellationToken::new();
         let mut token = Some(old_cancel.clone());
         // The first reservation is removed and therefore drives the retirement assertion.
-        let removed = ServiceReservation {
+        let removed = ServiceDhcpReservation {
             attachment_id: "11111111-1111-1111-1111-111111111111".parse().unwrap(),
             interface_ordinal: 0,
             internal_uuid: "22222222-2222-2222-2222-222222222222".parse().unwrap(),
@@ -2947,7 +2947,7 @@ mod test {
             }),
         };
         // The adjacent reservation survives to prove replacement does not clear the whole slot.
-        let survivor = ServiceReservation {
+        let survivor = ServiceDhcpReservation {
             attachment_id: "33333333-3333-3333-3333-333333333333".parse().unwrap(),
             interface_ordinal: 0,
             internal_uuid: "44444444-4444-4444-4444-444444444444".parse().unwrap(),
@@ -2959,12 +2959,12 @@ mod test {
             }),
         };
         let mut active_service_config =
-            ServiceConfig::try_new(vec![ServiceInterfaceReservations {
+            ServiceConfig::try_new(vec![ServiceDhcpInterfaceReservations {
                 receiving_interface: "lo".to_string(),
                 reservations: vec![removed.clone(), survivor.clone()],
             }])
             .unwrap();
-        let replacement = ServiceConfig::try_new(vec![ServiceInterfaceReservations {
+        let replacement = ServiceConfig::try_new(vec![ServiceDhcpInterfaceReservations {
             receiving_interface: "lo".to_string(),
             reservations: vec![survivor.clone()],
         }])
@@ -3110,9 +3110,9 @@ mod test {
     #[tokio::test]
     async fn packet_task_drain_joins_prepared_service_response() {
         // The exact MAC and IPv4 link drive packet selection; the remaining identities only satisfy validation.
-        let service_config = ServiceConfig::try_new(vec![ServiceInterfaceReservations {
+        let service_config = ServiceConfig::try_new(vec![ServiceDhcpInterfaceReservations {
             receiving_interface: "vlan200".to_string(),
-            reservations: vec![ServiceReservation {
+            reservations: vec![ServiceDhcpReservation {
                 attachment_id: "11111111-1111-1111-1111-111111111111".parse().unwrap(),
                 interface_ordinal: 0,
                 internal_uuid: "22222222-2222-2222-2222-222222222222".parse().unwrap(),
@@ -3488,24 +3488,27 @@ mod test {
 
     #[test]
     fn forge_client_tls_paths_are_configurable() {
-        let defaults = forge_client_config(&get_test_args()).unwrap();
-        assert_eq!(defaults.root_ca_path, forge_tls::default::ROOT_CA);
+        let defaults = carbide_client_config(&get_test_args()).unwrap();
+        assert_eq!(defaults.root_ca_path, carbide_tls::default::ROOT_CA);
         let default_identity = defaults.client_cert.unwrap();
-        assert_eq!(default_identity.cert_path, forge_tls::default::CLIENT_CERT);
-        assert_eq!(default_identity.key_path, forge_tls::default::CLIENT_KEY);
+        assert_eq!(
+            default_identity.cert_path,
+            carbide_tls::default::CLIENT_CERT
+        );
+        assert_eq!(default_identity.key_path, carbide_tls::default::CLIENT_KEY);
 
         let mut explicit = get_test_args();
         explicit.forge_root_ca_path = Some("/local/ca.crt".to_string());
         explicit.client_cert_path = Some("/local/client.crt".to_string());
         explicit.client_key_path = Some("/local/client.key".to_string());
-        let configured = forge_client_config(&explicit).unwrap();
+        let configured = carbide_client_config(&explicit).unwrap();
         assert_eq!(configured.root_ca_path, "/local/ca.crt");
         let configured_identity = configured.client_cert.unwrap();
         assert_eq!(configured_identity.cert_path, "/local/client.crt");
         assert_eq!(configured_identity.key_path, "/local/client.key");
 
         explicit.client_key_path = None;
-        assert!(forge_client_config(&explicit).is_err());
+        assert!(carbide_client_config(&explicit).is_err());
     }
 
     #[tokio::test]
@@ -4010,9 +4013,9 @@ mod test {
     #[tokio::test]
     async fn service_packets_do_not_record_host_activity() {
         // Attach a service reservation to an existing host interface so an erroneous timestamp update is observable.
-        let service_config = ServiceConfig::try_new(vec![ServiceInterfaceReservations {
+        let service_config = ServiceConfig::try_new(vec![ServiceDhcpInterfaceReservations {
             receiving_interface: "vlan200".to_string(),
-            reservations: vec![ServiceReservation {
+            reservations: vec![ServiceDhcpReservation {
                 attachment_id: "11111111-1111-1111-1111-111111111111".parse().unwrap(),
                 interface_ordinal: 0,
                 internal_uuid: "22222222-2222-2222-2222-222222222222".parse().unwrap(),

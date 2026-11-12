@@ -41,10 +41,10 @@ use mac_address::MacAddress;
 use opentelemetry::trace::TracerProvider;
 use opentelemetry_sdk::trace::{InMemorySpanExporter, SdkTracerProvider};
 use rcgen::ExtendedKeyUsagePurpose;
+use rpc::carbide_api_client::CarbideApiClient;
+use rpc::carbide_tls_client::{ApiConfig, CarbideClientConfig};
 use rpc::forge;
 use rpc::forge::find_bmc_ips_request::LookupBy;
-use rpc::forge_api_client::ForgeApiClient;
-use rpc::forge_tls_client::{ApiConfig, ForgeClientConfig};
 use tokio_rustls::rustls;
 use tokio_rustls::rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use tracing_subscriber::layer::SubscriberExt;
@@ -81,10 +81,10 @@ const ROTATED_PATH: &str = "/redfish/v1/Rotated";
 const REJECTING_PATH: &str = "/redfish/v1/UpdateService/rejecting";
 /// Answers after [`SLOW_ANSWER_DELAY`].
 const SLOW_PATH: &str = "/redfish/v1/Slow";
-/// Answers after two and a half seconds.
+/// Answers after [`BRIEFLY_SLOW_DELAY`].
 const BRIEFLY_SLOW_PATH: &str = "/redfish/v1/BrieflySlow";
 /// Rejects the cached credential at once, and answers [`FRESH_PASSWORD`]
-/// after two and a half seconds.
+/// after [`BRIEFLY_SLOW_DELAY`].
 const BRIEFLY_SLOW_ROTATED_PATH: &str = "/redfish/v1/BrieflySlowRotated";
 /// Rejects the cached credential at once, and answers [`FRESH_PASSWORD`]
 /// after [`SLOW_ANSWER_DELAY`].
@@ -92,11 +92,14 @@ const SLOW_ROTATED_PATH: &str = "/redfish/v1/SlowRotated";
 /// Answers at once with part of its body, and sends the rest after
 /// [`SLOW_ANSWER_DELAY`].
 const SLOW_BODY_PATH: &str = "/redfish/v1/SlowBody";
-/// Ten times [`QUICK_CLASS`]'s budget, and a third of the default budget:
+/// Far longer than [`QUICK_CLASS`]'s budget, and shorter than the default:
 /// a request held to its class's budget is cut off long before the BMC
 /// answers, and one held to the default budget gets the answer. A test
 /// waits only for the budget, never for this.
 const SLOW_ANSWER_DELAY: Duration = Duration::from_secs(20);
+/// Longer than a queued first attempt has left, but shorter than a fresh
+/// replay's budget, so the same BMC response distinguishes the two.
+const BRIEFLY_SLOW_DELAY: Duration = Duration::from_millis(500);
 
 fn fake_bmc_mac() -> MacAddress {
     MacAddress::new([0x02, 0, 0, 0, 0, 0x08])
@@ -187,13 +190,13 @@ async fn fake_bmc_handler(
         }
         (Method::GET, ROTATED_PATH) => StatusCode::UNAUTHORIZED.into_response(),
         (Method::GET, BRIEFLY_SLOW_PATH) => {
-            tokio::time::sleep(Duration::from_millis(2500)).await;
+            tokio::time::sleep(BRIEFLY_SLOW_DELAY).await;
             SYSTEM_BODY.into_response()
         }
         (Method::GET, BRIEFLY_SLOW_ROTATED_PATH)
             if authorization == Some(basic(FRESH_PASSWORD).as_str()) =>
         {
-            tokio::time::sleep(Duration::from_millis(2500)).await;
+            tokio::time::sleep(BRIEFLY_SLOW_DELAY).await;
             SYSTEM_BODY.into_response()
         }
         (Method::GET, BRIEFLY_SLOW_ROTATED_PATH) => StatusCode::UNAUTHORIZED.into_response(),
@@ -421,10 +424,13 @@ struct FakeNicoApi {
     inventory: FakeInventory,
     nvos: StoredNvos,
     lookups: Lookups,
+    headers: CapturedHeaders,
 }
 
 /// The switch and credential lookups a fake nico-api received, in order.
 type Lookups = Arc<Mutex<Vec<String>>>;
+
+type CapturedHeaders = Arc<Mutex<Vec<HeaderMap>>>;
 
 /// The NVOS username and password nico-api stores for the switch it knows,
 /// which a test changes as a rotation would.
@@ -492,6 +498,7 @@ impl tower::Service<http::Request<tonic::body::Body>> for FakeNicoApi {
     }
 
     fn call(&mut self, request: http::Request<tonic::body::Body>) -> Self::Future {
+        self.headers.lock().unwrap().push(request.headers().clone());
         let lookup_delay = self.lookup_delay;
         let inventory = self.inventory;
         let nvos = self.nvos.clone();
@@ -625,12 +632,12 @@ where
 
 /// A client for a fake nico-api listening on a fresh local port, knowing no
 /// switch.
-async fn fake_nico_api() -> ForgeApiClient {
+async fn fake_nico_api() -> CarbideApiClient {
     fake_nico_api_answering_after(Duration::ZERO).await
 }
 
 /// [`fake_nico_api`], answering lookups after `lookup_delay`.
-async fn fake_nico_api_answering_after(lookup_delay: Duration) -> ForgeApiClient {
+async fn fake_nico_api_answering_after(lookup_delay: Duration) -> CarbideApiClient {
     fake_nico_api_with(lookup_delay, FakeInventory::NoSwitch)
         .await
         .0
@@ -641,7 +648,7 @@ async fn fake_nico_api_answering_after(lookup_delay: Duration) -> ForgeApiClient
 async fn fake_nico_api_with(
     lookup_delay: Duration,
     inventory: FakeInventory,
-) -> (ForgeApiClient, Lookups) {
+) -> (CarbideApiClient, Lookups) {
     fake_nico_api_storing(lookup_delay, inventory, stored_nvos()).await
 }
 
@@ -650,17 +657,29 @@ async fn fake_nico_api_storing(
     lookup_delay: Duration,
     inventory: FakeInventory,
     nvos: StoredNvos,
-) -> (ForgeApiClient, Lookups) {
+) -> (CarbideApiClient, Lookups) {
+    let (client, lookups, _) = fake_nico_api_capturing_headers(lookup_delay, inventory, nvos).await;
+    (client, lookups)
+}
+
+/// [`fake_nico_api_storing`], also capturing the headers of every wire request.
+async fn fake_nico_api_capturing_headers(
+    lookup_delay: Duration,
+    inventory: FakeInventory,
+    nvos: StoredNvos,
+) -> (CarbideApiClient, Lookups, CapturedHeaders) {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
         .expect("bind fake nico-api");
     let addr = listener.local_addr().expect("fake nico-api address");
     let lookups = Lookups::default();
+    let headers = Arc::new(Mutex::new(Vec::new()));
     let api = FakeNicoApi {
         lookup_delay,
         inventory,
         nvos,
         lookups: lookups.clone(),
+        headers: headers.clone(),
     };
     tokio::spawn(async move {
         tonic::transport::Server::builder()
@@ -669,11 +688,11 @@ async fn fake_nico_api_storing(
             .await
             .expect("fake nico-api serves");
     });
-    let client = ForgeApiClient::new(&ApiConfig::new(
+    let client = CarbideApiClient::new(&ApiConfig::new(
         &format!("http://{addr}"),
-        &ForgeClientConfig::default(),
+        &CarbideClientConfig::default(),
     ));
-    (client, lookups)
+    (client, lookups, headers)
 }
 
 fn root_password() -> BmcCredentials {
@@ -1266,6 +1285,98 @@ async fn proxy_resolving_through(inventory: FakeInventory) -> (BmcProxyState, Fa
     (state, bmc, lookups)
 }
 
+/// Metadata lookups and BMC requests follow the caller's sampling decision;
+/// requests without valid caller context propagate unsampled context.
+#[tokio::test]
+async fn outbound_requests_follow_parent_sampling_with_unsampled_roots() {
+    use opentelemetry::trace::TraceContextExt;
+    use opentelemetry_sdk::propagation::TraceContextPropagator;
+    use opentelemetry_sdk::trace::Sampler;
+
+    opentelemetry::global::set_text_map_propagator(TraceContextPropagator::new());
+    keep_callsites_enabled();
+    let metrics = MetricsCapture::start();
+    let exporter = InMemorySpanExporter::default();
+    let provider = SdkTracerProvider::builder()
+        .with_sampler(Sampler::ParentBased(Box::new(Sampler::AlwaysOff)))
+        .with_simple_exporter(exporter.clone())
+        .build();
+    let _traced = tracing::subscriber::set_default(
+        tracing_subscriber::registry()
+            .with(tracing_opentelemetry::layer().with_tracer(provider.tracer("test"))),
+    );
+    let (addr, bmc) = spawn_fake_bmc();
+    let mut state = proxy_reaching(addr, root_password()).await;
+    let (api_client, _, api_headers) =
+        fake_nico_api_capturing_headers(Duration::ZERO, FakeInventory::NoSwitch, stored_nvos())
+            .await;
+    state.api_client = api_client;
+
+    for (scenario, traceparent, inherited, sampled) in [
+        ("absent", None, false, false),
+        (
+            "sampled",
+            Some("00-00000000000000000000000000000042-0000000000000055-01"),
+            true,
+            true,
+        ),
+        (
+            "unsampled",
+            Some("00-00000000000000000000000000000042-0000000000000055-00"),
+            true,
+            false,
+        ),
+        ("malformed", Some("invalid"), false, false),
+    ] {
+        exporter.reset();
+        api_headers.lock().unwrap().clear();
+        state
+            .credential_cache
+            .remove(&FAKE_BMC_IP.parse::<IpAddr>().unwrap())
+            .await;
+        let mut request = get(SYSTEM_PATH);
+        if let Some(value) = traceparent {
+            request
+                .headers_mut()
+                .insert("traceparent", value.parse().unwrap());
+        }
+        let answer = exchange(&metrics, &state, request).await;
+        assert_eq!(answer.status, 200, "{scenario}");
+        let mut headers = api_headers.lock().unwrap().clone();
+        assert!(
+            !headers.is_empty(),
+            "metadata requests were sent: {scenario}"
+        );
+        headers.push(bmc.received().last().expect("BMC request").headers.clone());
+        let trace_id = trace_propagation::extract_context(&headers[0])
+            .span()
+            .span_context()
+            .trace_id();
+        if inherited {
+            assert_eq!(trace_id, opentelemetry::TraceId::from(0x42), "{scenario}");
+        }
+        for headers in headers {
+            let context = trace_propagation::extract_context(&headers);
+            let span = context.span();
+            let context = span.span_context();
+            assert!(context.is_valid(), "{scenario}");
+            assert_eq!(context.is_sampled(), sampled, "{scenario}");
+            assert_eq!(context.trace_id(), trace_id, "{scenario}");
+        }
+        let spans = exporter.get_finished_spans().unwrap();
+        assert_eq!(!spans.is_empty(), sampled, "{scenario}");
+        if sampled {
+            assert!(spans.iter().any(|span| span.name == "bmc_proxy_request"));
+            assert!(spans.iter().any(|span| span.name == "grpc_client_request"));
+            assert!(
+                spans
+                    .iter()
+                    .all(|span| span.span_context.trace_id() == opentelemetry::TraceId::from(0x42))
+            );
+        }
+    }
+}
+
 /// What a `GET` of `path` at an address the proxy has no credentials for
 /// leads to, when nico-api knows `inventory` of the switch with the MAC at
 /// the address: (status the caller got, the `Authorization` values the
@@ -1527,8 +1638,8 @@ async fn requests_the_proxy_does_not_deliver() {
 
 /// A class for `GET`s of the slow paths, and of [`ROTATED_PATH`], whose
 /// replay can wait on nico-api. Its budget is far shorter than
-/// [`SLOW_ANSWER_DELAY`], and long enough for an attempt to reach the BMC
-/// even on a loaded machine.
+/// [`SLOW_ANSWER_DELAY`]. Credential lookup and admission must leave at
+/// least half the budget for a timeout to count against the BMC's breaker.
 const QUICK_CLASS: &str = r#"
     [[class]]
     name = "quick"
@@ -1538,7 +1649,7 @@ const QUICK_CLASS: &str = r#"
         "GET /redfish/v1/SlowBody",
         "GET /redfish/v1/Rotated",
     ]
-    upstream_timeout = "2s"
+    upstream_timeout = "800ms"
 "#;
 
 /// How nico-api answers the proxy's lookups of the BMC's credentials.
@@ -1763,7 +1874,7 @@ const ONE_AT_A_TIME: &str = r#"
     name = "one_at_a_time"
     match = ["GET /redfish/v1/Systems/System_0"]
     max_in_flight = 1
-    upstream_timeout = "2s"
+    upstream_timeout = "800ms"
 "#;
 
 /// A request holds its slot at its BMC until its response body has been
@@ -1790,7 +1901,9 @@ async fn a_slot_is_held_until_the_response_body_is_sent() {
     drop(unread);
     let sent_at = tokio::time::Instant::now();
     let after = answer(&state, get(SYSTEM_PATH)).await.status().as_u16();
-    let after_at_once = sent_at.elapsed() < Duration::from_secs(1);
+    // A dropped body must release its slot before the two-budget hold
+    // bound reclaims it; keep the promptness bound below one class budget.
+    let after_at_once = sent_at.elapsed() < Duration::from_millis(400);
 
     assert_eq!(
         (
@@ -1804,8 +1917,8 @@ async fn a_slot_is_held_until_the_response_body_is_sent() {
     );
 }
 
-/// What a request for `path` gets from a class of one at a time with a
-/// 3-second budget, once it has waited 1.5 seconds for its slot.
+/// What a request for `path` gets from a class of one at a time with an
+/// 800-millisecond budget, once it has waited 400 milliseconds for its slot.
 async fn after_waiting_for_a_slot(path: &'static str) -> u16 {
     let _metrics = MetricsCapture::start();
     let (addr, _bmc) = spawn_fake_bmc();
@@ -1818,7 +1931,7 @@ async fn after_waiting_for_a_slot(path: &'static str) -> u16 {
             name = "one_at_a_time"
             match = ["GET {SYSTEM_PATH}", "GET {BRIEFLY_SLOW_PATH}", "GET {BRIEFLY_SLOW_ROTATED_PATH}"]
             max_in_flight = 1
-            upstream_timeout = "3s"
+            upstream_timeout = "800ms"
             "#
         ),
         root_password(),
@@ -1829,7 +1942,7 @@ async fn after_waiting_for_a_slot(path: &'static str) -> u16 {
     let unread = answer(&state, get(SYSTEM_PATH)).await;
     let waiting = answer(&state, get(path));
     let release = async {
-        tokio::time::sleep(Duration::from_millis(1500)).await;
+        tokio::time::sleep(Duration::from_millis(400)).await;
         drop(unread);
     };
     let (response, ()) = tokio::join!(waiting, release);
@@ -1838,8 +1951,8 @@ async fn after_waiting_for_a_slot(path: &'static str) -> u16 {
 
 /// Time a request spends waiting for its slot comes out of its first
 /// attempt's budget, and not out of a replay's with fresh credentials. With
-/// 1.5 of its 3 seconds left, a BMC that answers in 2.5 seconds is cut off,
-/// unless it answers a replay.
+/// at most 400 of its 800 milliseconds left, a BMC that answers in 500
+/// milliseconds is cut off, unless it answers a replay.
 #[tokio::test]
 async fn waiting_for_a_slot_spends_the_first_attempts_budget() {
     check_cases_async(
@@ -1876,7 +1989,7 @@ async fn a_replay_keeps_its_slot() {
             name = "one_at_a_time"
             match = ["GET {SYSTEM_PATH}", "GET {ROTATED_PATH}"]
             max_in_flight = 1
-            upstream_timeout = "2s"
+            upstream_timeout = "800ms"
             "#
         ),
         root_password(),
@@ -2053,9 +2166,10 @@ async fn what_trips_a_bmcs_breaker() {
 }
 
 /// A request cut short by its wait for a slot does not count against the
-/// BMC: the BMC answers in 2.5 seconds, a class of one at a time has 3, and
-/// the request that waited for the first one's slot runs out of time. With
-/// a breaker that opens on one failure, the next request is still served.
+/// BMC: the unread first response holds the slot for 500 milliseconds,
+/// leaving at most 300 of the next request's 800-millisecond budget. That
+/// is below the half-budget cutoff for a BMC failure, so even a breaker
+/// that opens on one failure still serves the request after it.
 #[tokio::test]
 async fn a_timeout_from_waiting_is_not_the_bmcs() {
     let metrics = MetricsCapture::start();
@@ -2067,9 +2181,9 @@ async fn a_timeout_from_waiting_is_not_the_bmcs() {
             r#"
             [[class]]
             name = "one_at_a_time"
-            match = ["GET {BRIEFLY_SLOW_PATH}"]
+            match = ["GET {SYSTEM_PATH}", "GET {BRIEFLY_SLOW_PATH}"]
             max_in_flight = 1
-            upstream_timeout = "3s"
+            upstream_timeout = "800ms"
 
             [admission.breaker]
             window = 1
@@ -2081,15 +2195,17 @@ async fn a_timeout_from_waiting_is_not_the_bmcs() {
         "follow_same_origin",
     )
     .await;
-    let first = exchange(&metrics, &state, get(BRIEFLY_SLOW_PATH));
-    let waiting = async {
-        tokio::time::sleep(Duration::from_millis(100)).await;
-        exchange(&metrics, &state, get(BRIEFLY_SLOW_PATH)).await
+    let unread = answer(&state, get(SYSTEM_PATH)).await;
+    let first_status = unread.status().as_u16();
+    let waiting = exchange(&metrics, &state, get(BRIEFLY_SLOW_PATH));
+    let release = async {
+        tokio::time::sleep(BRIEFLY_SLOW_DELAY).await;
+        drop(unread);
     };
-    let (first, waiting) = tokio::join!(first, waiting);
+    let (waiting, ()) = tokio::join!(waiting, release);
     tokio::time::sleep(Duration::from_millis(20)).await;
     let next = exchange(&metrics, &state, get(BRIEFLY_SLOW_PATH)).await;
-    assert_eq!((first.status, waiting.status, next.status), (200, 502, 200));
+    assert_eq!((first_status, waiting.status, next.status), (200, 502, 200));
 }
 
 /// Only the BMC's answer to a request's last attempt counts: the 401 that
@@ -2120,9 +2236,10 @@ async fn only_the_last_attempts_answer_counts() {
     assert_eq!((replayed.status, next.status), (200, 200));
 }
 
-/// The misses counted for a class with a one-second latency target, judged
-/// on each answer, after one request for `path` with a three-second budget.
-async fn slo_misses_after(path: &'static str) -> f64 {
+/// The misses counted for a class with a 200-millisecond latency target,
+/// judged on each answer, and the HTTP status after one request for `path`
+/// with an 800-millisecond budget.
+async fn slo_misses_after(path: &'static str) -> (u16, f64) {
     let metrics = MetricsCapture::start();
     let (addr, _bmc) = spawn_fake_bmc();
     let state = proxy_configured(
@@ -2139,20 +2256,23 @@ async fn slo_misses_after(path: &'static str) -> f64 {
             [[class]]
             name = "targeted"
             match = ["GET {SYSTEM_PATH}", "GET {BRIEFLY_SLOW_PATH}", "GET {SLOW_PATH}"]
-            upstream_timeout = "3s"
-            slo = {{ latency = "1s" }}
+            upstream_timeout = "800ms"
+            slo = {{ latency = "200ms" }}
             "#
         ),
         root_password(),
         "follow_same_origin",
     )
     .await;
-    exchange(&metrics, &state, get(path)).await;
+    let answer = exchange(&metrics, &state, get(path)).await;
     // The BMC's runtime weighs the answer once it sees the slot freed.
     tokio::time::sleep(Duration::from_millis(20)).await;
-    metrics.counter_delta(
-        "carbide_bmc_proxy_slo_missed_total",
-        &[("class", "targeted")],
+    (
+        answer.status,
+        metrics.counter_delta(
+            "carbide_bmc_proxy_slo_missed_total",
+            &[("class", "targeted")],
+        ),
     )
 }
 
@@ -2163,14 +2283,14 @@ async fn latency_counts_until_the_bmc_answers() {
     check_cases_async(
         [
             Case {
-                scenario: "the BMC answers after 2.5 seconds",
+                scenario: "the BMC answers after 500 milliseconds",
                 input: BRIEFLY_SLOW_PATH,
-                expect: Yields(1.0),
+                expect: Yields((200, 1.0)),
             },
             Case {
                 scenario: "the BMC does not answer within the budget",
                 input: SLOW_PATH,
-                expect: Yields(1.0),
+                expect: Yields((502, 1.0)),
             },
         ],
         |path| async move { Ok::<_, Infallible>(slo_misses_after(path).await) },

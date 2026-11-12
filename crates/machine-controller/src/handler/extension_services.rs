@@ -459,8 +459,9 @@ fn dpf_helm_chart_placement_label_changes(
         .collect()
 }
 
-/// Removes endpoint-free terminated attachments and reports whether the Instance configuration
-/// changed, allowing callers to commit only real cleanup writes.
+/// Removes terminated attachments that no service-interface or VPC-local interface record names
+/// and reports whether the Instance configuration changed, allowing callers to commit only real
+/// cleanup writes.
 pub(super) async fn cleanup_terminated_extension_services(
     instance: &InstanceSnapshot,
     extension_services_status: &mut InstanceExtensionServicesStatus,
@@ -479,12 +480,20 @@ pub(super) async fn cleanup_terminated_extension_services(
     // network child, HBN state, and DHCP state have all been removed.
     // TODO(#6133): Reclaim the attachment and endpoint together after observed
     // service-network cleanup has been persisted.
-    let retained_attachment_ids = instance
-        .config
-        .network
+    // A VPC-local record names its attachment the same way, and snapshot loading
+    // rejects a record whose attachment is gone, so whatever removes the record
+    // releases the attachment rather than this cleanup.
+    let network = &instance.config.network;
+    let retained_attachment_ids = network
         .service_interfaces
         .iter()
         .map(|service_interface| service_interface.attachment_id)
+        .chain(
+            network
+                .vpc_local_interfaces
+                .iter()
+                .map(|vpc_local_interface| vpc_local_interface.attachment_id),
+        )
         .collect::<HashSet<_>>();
     let reclaimable_service_keys = terminated_service_keys
         .into_iter()

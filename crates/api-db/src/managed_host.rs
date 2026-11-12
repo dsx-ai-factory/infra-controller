@@ -202,9 +202,9 @@ where
     let host_ids = if !requested_dpu_ids.is_empty() {
         [
             requested_host_id_strings,
-            crate::machine::lookup_host_machine_ids_by_dpu_ids(&mut *txn, &requested_dpu_ids)
+            crate::machine::DpuHostAssociations::load(&mut *txn, &requested_dpu_ids)
                 .await?
-                .into_values()
+                .host_machine_ids()
                 .map(|host_id| host_id.to_string())
                 .collect::<Vec<_>>(),
         ]

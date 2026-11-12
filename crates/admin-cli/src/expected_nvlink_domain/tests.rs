@@ -15,8 +15,8 @@ use hyper::service::service_fn;
 use hyper::{Request, Response};
 use hyper_util::rt::{TokioExecutor, TokioIo};
 use prost::Message;
-use rpc::forge_api_client::ForgeApiClient;
-use rpc::forge_tls_client::{ApiConfig, ForgeClientConfig};
+use rpc::carbide_api_client::CarbideApiClient;
+use rpc::carbide_tls_client::{ApiConfig, CarbideClientConfig};
 use tokio::net::TcpListener;
 
 use super::*;
@@ -251,13 +251,13 @@ async fn dispatch(
             .await
             .unwrap();
     });
-    let config = ForgeClientConfig {
+    let config = CarbideClientConfig {
         request_timeout: Some(Duration::from_secs(5)),
         ..Default::default()
     };
     let mut captured = CapturedOutput::new();
     let context = RuntimeContext {
-        api_client: ApiClient(ForgeApiClient::new(&ApiConfig::new(
+        api_client: ApiClient(CarbideApiClient::new(&ApiConfig::new(
             &format!("http://{address}"),
             &config,
         ))),
