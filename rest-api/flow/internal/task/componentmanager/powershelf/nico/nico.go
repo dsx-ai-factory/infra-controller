@@ -414,6 +414,7 @@ func (m *Manager) GetFirmwareStatus(
 		result[compID] = operations.FirmwareUpdateStatus{
 			ComponentID: compID,
 			State:       nicoprovider.MapFirmwareState(s.GetState()),
+			Error:       s.GetResult().GetError(),
 		}
 	}
 

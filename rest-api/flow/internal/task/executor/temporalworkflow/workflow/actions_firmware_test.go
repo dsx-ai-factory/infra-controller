@@ -5,6 +5,7 @@ package workflow
 
 import (
 	"context"
+	"errors"
 	"sync"
 	"testing"
 	"time"
@@ -87,6 +88,8 @@ func TestExecuteFirmwareControlAction(t *testing.T) {
 		legacyHistory     bool
 		wantErrorContains []string
 		wantMinimumPolls  int
+		queryErrors       []error
+		wantAbsent        string
 	}{
 		{
 			name: "all requested components complete",
@@ -135,7 +138,7 @@ func TestExecuteFirmwareControlAction(t *testing.T) {
 				},
 			},
 			pollTimeout:       5 * time.Second,
-			wantErrorContains: []string{"firmware update failed", "comp-1"},
+			wantErrorContains: []string{"firmware update failed", "comp-1", "no failure reason reported"},
 			wantMinimumPolls:  2,
 		},
 		{
@@ -153,11 +156,48 @@ func TestExecuteFirmwareControlAction(t *testing.T) {
 		{
 			name: "timeout reports failed and unresolved components",
 			responses: []map[string]operations.FirmwareUpdateStatus{{
-				"comp-1": firmwareStatus("comp-1", failed),
+				"comp-1": {ComponentID: "comp-1", State: failed, Error: "BMC flash failed"},
 				"comp-2": firmwareStatus("comp-2", queued),
 			}},
 			pollTimeout:       2 * time.Second,
-			wantErrorContains: []string{"timed out", "failed components: [comp-1]", "unresolved components: [comp-2]"},
+			wantErrorContains: []string{"timed out", "failed components: [comp-1]", "unresolved components: [comp-2]", "comp-1: BMC flash failed"},
+			wantMinimumPolls:  2,
+		},
+		{
+			name: "multiple failure reasons survive aggregation",
+			responses: []map[string]operations.FirmwareUpdateStatus{{
+				"comp-1": {ComponentID: "comp-1", State: failed, Error: "signature rejected\nby device"},
+				"comp-2": {ComponentID: "comp-2", State: failed, Error: "flash write failed"},
+			}},
+			pollTimeout:       5 * time.Second,
+			wantErrorContains: []string{"firmware update failed for components: [comp-1 comp-2]; comp-1: signature rejected by device; comp-2: flash write failed"},
+			wantMinimumPolls:  1,
+		},
+		{
+			name: "legacy aggregation retains failure reason",
+			responses: []map[string]operations.FirmwareUpdateStatus{{
+				"comp-1": {ComponentID: "comp-1", State: failed, Error: "firmware rejected"},
+			}},
+			legacyHistory:     true,
+			pollTimeout:       5 * time.Second,
+			wantErrorContains: []string{"firmware update failed for components: [comp-1]; comp-1: firmware rejected"},
+			wantMinimumPolls:  1,
+		},
+		{
+			name:              "firmware query error retained at timeout",
+			responses:         []map[string]operations.FirmwareUpdateStatus{{}},
+			queryErrors:       []error{errors.New("RMS status service\nunavailable")},
+			pollTimeout:       2 * time.Second,
+			wantErrorContains: []string{"timed out", "last status query failed", "RMS status service unavailable"},
+			wantMinimumPolls:  2,
+		},
+		{
+			name:              "successful firmware read clears stale query error",
+			responses:         []map[string]operations.FirmwareUpdateStatus{nil, {"comp-1": firmwareStatus("comp-1", queued)}},
+			queryErrors:       []error{errors.New("temporary firmware query failure"), nil},
+			pollTimeout:       2 * time.Second,
+			wantErrorContains: []string{"timed out", "unresolved components"},
+			wantAbsent:        "temporary firmware query failure",
 			wantMinimumPolls:  2,
 		},
 		{
@@ -206,7 +246,11 @@ func TestExecuteFirmwareControlAction(t *testing.T) {
 				defer statusMu.Unlock()
 				responseIndex := min(statusCalls, len(tc.responses)-1)
 				statusCalls++
-				return &activitypkg.GetFirmwareStatusResult{Statuses: tc.responses[responseIndex]}, nil
+				var queryErr error
+				if len(tc.queryErrors) > 0 {
+					queryErr = tc.queryErrors[min(responseIndex, len(tc.queryErrors)-1)]
+				}
+				return &activitypkg.GetFirmwareStatusResult{Statuses: tc.responses[responseIndex]}, queryErr
 			})
 
 			target := common.Target{
@@ -223,6 +267,9 @@ func TestExecuteFirmwareControlAction(t *testing.T) {
 				for _, expected := range tc.wantErrorContains {
 					require.ErrorContains(t, workflowErr, expected)
 				}
+			}
+			if tc.wantAbsent != "" {
+				require.NotContains(t, workflowErr.Error(), tc.wantAbsent)
 			}
 			statusMu.Lock()
 			defer statusMu.Unlock()
