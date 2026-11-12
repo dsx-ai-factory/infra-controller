@@ -19,6 +19,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"reflect"
 	"strings"
 )
 
@@ -981,8 +982,8 @@ type ApiGetAllRackRequest struct {
 	siteId            *string
 	org               string
 	includeComponents *bool
-	name              *string
-	manufacturer      *string
+	name              *[]string
+	manufacturer      *[]string
 	pageNumber        *int32
 	pageSize          *int32
 	orderBy           *string
@@ -1000,14 +1001,14 @@ func (r ApiGetAllRackRequest) IncludeComponents(includeComponents bool) ApiGetAl
 	return r
 }
 
-// Filter by rack name
-func (r ApiGetAllRackRequest) Name(name string) ApiGetAllRackRequest {
+// Filter by rack name. Repeat the parameter to specify multiple values.
+func (r ApiGetAllRackRequest) Name(name []string) ApiGetAllRackRequest {
 	r.name = &name
 	return r
 }
 
-// Filter by manufacturer
-func (r ApiGetAllRackRequest) Manufacturer(manufacturer string) ApiGetAllRackRequest {
+// Filter by manufacturer. Repeat the parameter to specify multiple values.
+func (r ApiGetAllRackRequest) Manufacturer(manufacturer []string) ApiGetAllRackRequest {
 	r.manufacturer = &manufacturer
 	return r
 }
@@ -1084,10 +1085,26 @@ func (a *RackAPIService) GetAllRackExecute(r ApiGetAllRackRequest) ([]Rack, *htt
 		parameterAddToHeaderOrQuery(localVarQueryParams, "includeComponents", r.includeComponents, "form", "")
 	}
 	if r.name != nil {
-		parameterAddToHeaderOrQuery(localVarQueryParams, "name", r.name, "form", "")
+		t := *r.name
+		if reflect.TypeOf(t).Kind() == reflect.Slice {
+			s := reflect.ValueOf(t)
+			for i := 0; i < s.Len(); i++ {
+				parameterAddToHeaderOrQuery(localVarQueryParams, "name", s.Index(i).Interface(), "form", "multi")
+			}
+		} else {
+			parameterAddToHeaderOrQuery(localVarQueryParams, "name", t, "form", "multi")
+		}
 	}
 	if r.manufacturer != nil {
-		parameterAddToHeaderOrQuery(localVarQueryParams, "manufacturer", r.manufacturer, "form", "")
+		t := *r.manufacturer
+		if reflect.TypeOf(t).Kind() == reflect.Slice {
+			s := reflect.ValueOf(t)
+			for i := 0; i < s.Len(); i++ {
+				parameterAddToHeaderOrQuery(localVarQueryParams, "manufacturer", s.Index(i).Interface(), "form", "multi")
+			}
+		} else {
+			parameterAddToHeaderOrQuery(localVarQueryParams, "manufacturer", t, "form", "multi")
+		}
 	}
 	if r.pageNumber != nil {
 		parameterAddToHeaderOrQuery(localVarQueryParams, "pageNumber", r.pageNumber, "form", "")
@@ -2445,8 +2462,8 @@ type ApiValidateRacksRequest struct {
 	ApiService   *RackAPIService
 	siteId       *string
 	org          string
-	name         *string
-	manufacturer *string
+	name         *[]string
+	manufacturer *[]string
 }
 
 // ID of the Site
@@ -2455,14 +2472,14 @@ func (r ApiValidateRacksRequest) SiteId(siteId string) ApiValidateRacksRequest {
 	return r
 }
 
-// Filter racks by name
-func (r ApiValidateRacksRequest) Name(name string) ApiValidateRacksRequest {
+// Filter racks by name. Repeat the parameter to specify multiple values.
+func (r ApiValidateRacksRequest) Name(name []string) ApiValidateRacksRequest {
 	r.name = &name
 	return r
 }
 
-// Filter racks by manufacturer
-func (r ApiValidateRacksRequest) Manufacturer(manufacturer string) ApiValidateRacksRequest {
+// Filter racks by manufacturer. Repeat the parameter to specify multiple values.
+func (r ApiValidateRacksRequest) Manufacturer(manufacturer []string) ApiValidateRacksRequest {
 	r.manufacturer = &manufacturer
 	return r
 }
@@ -2522,10 +2539,26 @@ func (a *RackAPIService) ValidateRacksExecute(r ApiValidateRacksRequest) (*RackV
 
 	parameterAddToHeaderOrQuery(localVarQueryParams, "siteId", r.siteId, "form", "")
 	if r.name != nil {
-		parameterAddToHeaderOrQuery(localVarQueryParams, "name", r.name, "form", "")
+		t := *r.name
+		if reflect.TypeOf(t).Kind() == reflect.Slice {
+			s := reflect.ValueOf(t)
+			for i := 0; i < s.Len(); i++ {
+				parameterAddToHeaderOrQuery(localVarQueryParams, "name", s.Index(i).Interface(), "form", "multi")
+			}
+		} else {
+			parameterAddToHeaderOrQuery(localVarQueryParams, "name", t, "form", "multi")
+		}
 	}
 	if r.manufacturer != nil {
-		parameterAddToHeaderOrQuery(localVarQueryParams, "manufacturer", r.manufacturer, "form", "")
+		t := *r.manufacturer
+		if reflect.TypeOf(t).Kind() == reflect.Slice {
+			s := reflect.ValueOf(t)
+			for i := 0; i < s.Len(); i++ {
+				parameterAddToHeaderOrQuery(localVarQueryParams, "manufacturer", s.Index(i).Interface(), "form", "multi")
+			}
+		} else {
+			parameterAddToHeaderOrQuery(localVarQueryParams, "manufacturer", t, "form", "multi")
+		}
 	}
 	// to determine the Content-Type header
 	localVarHTTPContentTypes := []string{}

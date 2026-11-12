@@ -19,6 +19,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"reflect"
 	"strings"
 )
 
@@ -466,7 +467,7 @@ type ApiGetAllExpectedSwitchRequest struct {
 	ApiService      *ExpectedSwitchAPIService
 	org             string
 	siteId          *string
-	includeRelation *string
+	includeRelation *[]string
 	pageNumber      *int32
 	pageSize        *int32
 	orderBy         *string
@@ -478,8 +479,8 @@ func (r ApiGetAllExpectedSwitchRequest) SiteId(siteId string) ApiGetAllExpectedS
 	return r
 }
 
-// Related entity to expand
-func (r ApiGetAllExpectedSwitchRequest) IncludeRelation(includeRelation string) ApiGetAllExpectedSwitchRequest {
+// Related entity to expand. Repeat the parameter to specify multiple values.
+func (r ApiGetAllExpectedSwitchRequest) IncludeRelation(includeRelation []string) ApiGetAllExpectedSwitchRequest {
 	r.includeRelation = &includeRelation
 	return r
 }
@@ -554,7 +555,15 @@ func (a *ExpectedSwitchAPIService) GetAllExpectedSwitchExecute(r ApiGetAllExpect
 		parameterAddToHeaderOrQuery(localVarQueryParams, "siteId", r.siteId, "form", "")
 	}
 	if r.includeRelation != nil {
-		parameterAddToHeaderOrQuery(localVarQueryParams, "includeRelation", r.includeRelation, "form", "")
+		t := *r.includeRelation
+		if reflect.TypeOf(t).Kind() == reflect.Slice {
+			s := reflect.ValueOf(t)
+			for i := 0; i < s.Len(); i++ {
+				parameterAddToHeaderOrQuery(localVarQueryParams, "includeRelation", s.Index(i).Interface(), "form", "multi")
+			}
+		} else {
+			parameterAddToHeaderOrQuery(localVarQueryParams, "includeRelation", t, "form", "multi")
+		}
 	}
 	if r.pageNumber != nil {
 		parameterAddToHeaderOrQuery(localVarQueryParams, "pageNumber", r.pageNumber, "form", "")
@@ -649,11 +658,11 @@ type ApiGetExpectedSwitchRequest struct {
 	ApiService       *ExpectedSwitchAPIService
 	org              string
 	expectedSwitchId string
-	includeRelation  *string
+	includeRelation  *[]string
 }
 
-// Related entity to expand
-func (r ApiGetExpectedSwitchRequest) IncludeRelation(includeRelation string) ApiGetExpectedSwitchRequest {
+// Related entity to expand. Repeat the parameter to specify multiple values.
+func (r ApiGetExpectedSwitchRequest) IncludeRelation(includeRelation []string) ApiGetExpectedSwitchRequest {
 	r.includeRelation = &includeRelation
 	return r
 }
@@ -710,7 +719,15 @@ func (a *ExpectedSwitchAPIService) GetExpectedSwitchExecute(r ApiGetExpectedSwit
 	localVarFormParams := url.Values{}
 
 	if r.includeRelation != nil {
-		parameterAddToHeaderOrQuery(localVarQueryParams, "includeRelation", r.includeRelation, "form", "")
+		t := *r.includeRelation
+		if reflect.TypeOf(t).Kind() == reflect.Slice {
+			s := reflect.ValueOf(t)
+			for i := 0; i < s.Len(); i++ {
+				parameterAddToHeaderOrQuery(localVarQueryParams, "includeRelation", s.Index(i).Interface(), "form", "multi")
+			}
+		} else {
+			parameterAddToHeaderOrQuery(localVarQueryParams, "includeRelation", t, "form", "multi")
+		}
 	}
 	// to determine the Content-Type header
 	localVarHTTPContentTypes := []string{}

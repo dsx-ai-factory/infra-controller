@@ -276,7 +276,7 @@ func (emm ExpectedMachineManager) Get(ctx context.Context, id string) (*Expected
 	ctx = context.WithValue(ctx, standard.ContextAccessToken, emm.client.Config.Token)
 
 	apiEM, resp, err := emm.client.apiClient.ExpectedMachineAPI.GetExpectedMachine(ctx, emm.client.apiMetadata.Organization, id).
-		IncludeRelation("Sku").IncludeRelation("Machine").Execute()
+		IncludeRelation([]string{"Sku"}).IncludeRelation([]string{"Machine"}).Execute()
 	apiErr := HandleResponseError(resp, err)
 	if apiErr != nil {
 		return nil, apiErr
@@ -291,7 +291,7 @@ func (emm ExpectedMachineManager) GetExpectedMachines(ctx context.Context, pagin
 	ctx = context.WithValue(ctx, standard.ContextAccessToken, emm.client.Config.Token)
 
 	gmr := emm.client.apiClient.ExpectedMachineAPI.GetAllExpectedMachine(ctx, emm.client.apiMetadata.Organization).
-		SiteId(emm.client.apiMetadata.SiteID).IncludeRelation("Sku").IncludeRelation("Machine")
+		SiteId(emm.client.apiMetadata.SiteID).IncludeRelation([]string{"Sku"}).IncludeRelation([]string{"Machine"})
 	if paginationFilter != nil {
 		if paginationFilter.PageNumber != nil {
 			gmr = gmr.PageNumber(int32(*paginationFilter.PageNumber))

@@ -246,7 +246,7 @@ func (im InstanceManager) GetInstances(ctx context.Context, instanceFilter *Inst
 	ctx = context.WithValue(ctx, standard.ContextAccessToken, im.client.Config.Token)
 
 	gir := im.client.apiClient.InstanceAPI.GetAllInstance(ctx, im.client.apiMetadata.Organization).
-		SiteId(im.client.apiMetadata.SiteID)
+		SiteId([]string{im.client.apiMetadata.SiteID})
 	if instanceFilter != nil {
 		if instanceFilter.Name != nil {
 			gir = gir.Name(*instanceFilter.Name)
@@ -255,17 +255,17 @@ func (im InstanceManager) GetInstances(ctx context.Context, instanceFilter *Inst
 			gir = gir.Query(*instanceFilter.Query)
 		}
 		if instanceFilter.VpcID != nil {
-			gir = gir.VpcId(*instanceFilter.VpcID)
+			gir = gir.VpcId([]string{*instanceFilter.VpcID})
 		}
 		if instanceFilter.IPAddress != nil {
-			gir = gir.IpAddress(*instanceFilter.IPAddress)
+			gir = gir.IpAddress([]string{*instanceFilter.IPAddress})
 		}
 	}
 	// If no explicit VPC filter was provided, fall back to the client's default VPC (if set),
 	// unless the caller requested a search across all VPCs.
 	useDefaultVPC := instanceFilter == nil || (instanceFilter.VpcID == nil && !instanceFilter.AllVPCs)
 	if useDefaultVPC && im.client.apiMetadata.VpcID != "" {
-		gir = gir.VpcId(im.client.apiMetadata.VpcID)
+		gir = gir.VpcId([]string{im.client.apiMetadata.VpcID})
 	}
 	if paginationFilter != nil {
 		if paginationFilter.PageNumber != nil {
@@ -410,7 +410,7 @@ func (im InstanceManager) sshKeyGroupIDsUsedByOtherInstances(ctx context.Context
 	pageSize := int32(100)
 	for {
 		instances, resp, err := im.client.apiClient.InstanceAPI.GetAllInstance(ctx, im.client.apiMetadata.Organization).
-			SiteId(im.client.apiMetadata.SiteID).
+			SiteId([]string{im.client.apiMetadata.SiteID}).
 			PageNumber(pageNumber).
 			PageSize(pageSize).
 			Execute()

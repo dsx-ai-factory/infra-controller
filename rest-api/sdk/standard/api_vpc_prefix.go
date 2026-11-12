@@ -19,6 +19,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"reflect"
 	"strings"
 )
 
@@ -313,7 +314,7 @@ type ApiGetAllVpcPrefixRequest struct {
 	vpcId             *string
 	status            *string
 	query             *string
-	includeRelation   *string
+	includeRelation   *[]string
 	includeUsageStats *bool
 	pageNumber        *int32
 	pageSize          *int32
@@ -344,8 +345,8 @@ func (r ApiGetAllVpcPrefixRequest) Query(query string) ApiGetAllVpcPrefixRequest
 	return r
 }
 
-// Related entity to expand
-func (r ApiGetAllVpcPrefixRequest) IncludeRelation(includeRelation string) ApiGetAllVpcPrefixRequest {
+// Related entity to expand. Repeat the parameter to specify multiple values.
+func (r ApiGetAllVpcPrefixRequest) IncludeRelation(includeRelation []string) ApiGetAllVpcPrefixRequest {
 	r.includeRelation = &includeRelation
 	return r
 }
@@ -433,7 +434,15 @@ func (a *VPCPrefixAPIService) GetAllVpcPrefixExecute(r ApiGetAllVpcPrefixRequest
 		parameterAddToHeaderOrQuery(localVarQueryParams, "query", r.query, "form", "")
 	}
 	if r.includeRelation != nil {
-		parameterAddToHeaderOrQuery(localVarQueryParams, "includeRelation", r.includeRelation, "form", "")
+		t := *r.includeRelation
+		if reflect.TypeOf(t).Kind() == reflect.Slice {
+			s := reflect.ValueOf(t)
+			for i := 0; i < s.Len(); i++ {
+				parameterAddToHeaderOrQuery(localVarQueryParams, "includeRelation", s.Index(i).Interface(), "form", "multi")
+			}
+		} else {
+			parameterAddToHeaderOrQuery(localVarQueryParams, "includeRelation", t, "form", "multi")
+		}
 	}
 	if r.includeUsageStats != nil {
 		parameterAddToHeaderOrQuery(localVarQueryParams, "includeUsageStats", r.includeUsageStats, "form", "")
@@ -520,12 +529,12 @@ type ApiGetVpcPrefixRequest struct {
 	ApiService        *VPCPrefixAPIService
 	org               string
 	vpcPrefixId       string
-	includeRelation   *string
+	includeRelation   *[]string
 	includeUsageStats *bool
 }
 
-// Related entity to expand
-func (r ApiGetVpcPrefixRequest) IncludeRelation(includeRelation string) ApiGetVpcPrefixRequest {
+// Related entity to expand. Repeat the parameter to specify multiple values.
+func (r ApiGetVpcPrefixRequest) IncludeRelation(includeRelation []string) ApiGetVpcPrefixRequest {
 	r.includeRelation = &includeRelation
 	return r
 }
@@ -586,7 +595,15 @@ func (a *VPCPrefixAPIService) GetVpcPrefixExecute(r ApiGetVpcPrefixRequest) (*Vp
 	localVarFormParams := url.Values{}
 
 	if r.includeRelation != nil {
-		parameterAddToHeaderOrQuery(localVarQueryParams, "includeRelation", r.includeRelation, "form", "")
+		t := *r.includeRelation
+		if reflect.TypeOf(t).Kind() == reflect.Slice {
+			s := reflect.ValueOf(t)
+			for i := 0; i < s.Len(); i++ {
+				parameterAddToHeaderOrQuery(localVarQueryParams, "includeRelation", s.Index(i).Interface(), "form", "multi")
+			}
+		} else {
+			parameterAddToHeaderOrQuery(localVarQueryParams, "includeRelation", t, "form", "multi")
+		}
 	}
 	if r.includeUsageStats != nil {
 		parameterAddToHeaderOrQuery(localVarQueryParams, "includeUsageStats", r.includeUsageStats, "form", "")

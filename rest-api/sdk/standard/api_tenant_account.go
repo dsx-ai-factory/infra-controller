@@ -19,6 +19,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"reflect"
 	"strings"
 )
 
@@ -291,7 +292,7 @@ type ApiGetAllTenantAccountRequest struct {
 	infrastructureProviderId *string
 	tenantId                 *string
 	query                    *string
-	includeRelation          *string
+	includeRelation          *[]string
 	pageNumber               *int32
 	pageSize                 *int32
 	orderBy                  *string
@@ -316,8 +317,8 @@ func (r ApiGetAllTenantAccountRequest) Query(query string) ApiGetAllTenantAccoun
 	return r
 }
 
-// Related entity to expand
-func (r ApiGetAllTenantAccountRequest) IncludeRelation(includeRelation string) ApiGetAllTenantAccountRequest {
+// Related entity to expand. Repeat the parameter to specify multiple values.
+func (r ApiGetAllTenantAccountRequest) IncludeRelation(includeRelation []string) ApiGetAllTenantAccountRequest {
 	r.includeRelation = &includeRelation
 	return r
 }
@@ -396,7 +397,15 @@ func (a *TenantAccountAPIService) GetAllTenantAccountExecute(r ApiGetAllTenantAc
 		parameterAddToHeaderOrQuery(localVarQueryParams, "query", r.query, "form", "")
 	}
 	if r.includeRelation != nil {
-		parameterAddToHeaderOrQuery(localVarQueryParams, "includeRelation", r.includeRelation, "form", "")
+		t := *r.includeRelation
+		if reflect.TypeOf(t).Kind() == reflect.Slice {
+			s := reflect.ValueOf(t)
+			for i := 0; i < s.Len(); i++ {
+				parameterAddToHeaderOrQuery(localVarQueryParams, "includeRelation", s.Index(i).Interface(), "form", "multi")
+			}
+		} else {
+			parameterAddToHeaderOrQuery(localVarQueryParams, "includeRelation", t, "form", "multi")
+		}
 	}
 	if r.pageNumber != nil {
 		parameterAddToHeaderOrQuery(localVarQueryParams, "pageNumber", r.pageNumber, "form", "")
@@ -482,7 +491,7 @@ type ApiGetTenantAccountRequest struct {
 	accountId                string
 	infrastructureProviderId *string
 	tenantId                 *string
-	includeRelation          *string
+	includeRelation          *[]string
 }
 
 // Filter Tenant Accounts by Infrastructure Provider ID. Deprecated: Infrastructure Provider is now inferred from the org&#39;s membership.
@@ -499,8 +508,8 @@ func (r ApiGetTenantAccountRequest) TenantId(tenantId string) ApiGetTenantAccoun
 	return r
 }
 
-// Related entity to expand
-func (r ApiGetTenantAccountRequest) IncludeRelation(includeRelation string) ApiGetTenantAccountRequest {
+// Related entity to expand. Repeat the parameter to specify multiple values.
+func (r ApiGetTenantAccountRequest) IncludeRelation(includeRelation []string) ApiGetTenantAccountRequest {
 	r.includeRelation = &includeRelation
 	return r
 }
@@ -561,7 +570,15 @@ func (a *TenantAccountAPIService) GetTenantAccountExecute(r ApiGetTenantAccountR
 		parameterAddToHeaderOrQuery(localVarQueryParams, "tenantId", r.tenantId, "form", "")
 	}
 	if r.includeRelation != nil {
-		parameterAddToHeaderOrQuery(localVarQueryParams, "includeRelation", r.includeRelation, "form", "")
+		t := *r.includeRelation
+		if reflect.TypeOf(t).Kind() == reflect.Slice {
+			s := reflect.ValueOf(t)
+			for i := 0; i < s.Len(); i++ {
+				parameterAddToHeaderOrQuery(localVarQueryParams, "includeRelation", s.Index(i).Interface(), "form", "multi")
+			}
+		} else {
+			parameterAddToHeaderOrQuery(localVarQueryParams, "includeRelation", t, "form", "multi")
+		}
 	}
 	// to determine the Content-Type header
 	localVarHTTPContentTypes := []string{}

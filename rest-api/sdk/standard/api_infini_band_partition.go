@@ -19,6 +19,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"reflect"
 	"strings"
 )
 
@@ -286,42 +287,42 @@ type ApiGetAllInfinibandInterfaceRequest struct {
 	ctx                   context.Context
 	ApiService            *InfiniBandPartitionAPIService
 	org                   string
-	siteId                *string
-	instanceId            *string
-	infinibandPartitionId *string
-	status                *string
-	includeRelation       *string
+	siteId                *[]string
+	instanceId            *[]string
+	infinibandPartitionId *[]string
+	status                *[]string
+	includeRelation       *[]string
 	pageNumber            *int32
 	pageSize              *int32
 	orderBy               *string
 }
 
 // Filter InfiniBand Interfaces by Site ID.  Can be specified multiple times to filter on more than one ID.
-func (r ApiGetAllInfinibandInterfaceRequest) SiteId(siteId string) ApiGetAllInfinibandInterfaceRequest {
+func (r ApiGetAllInfinibandInterfaceRequest) SiteId(siteId []string) ApiGetAllInfinibandInterfaceRequest {
 	r.siteId = &siteId
 	return r
 }
 
 // Filter InfiniBand Interfaces by Instance ID.  Can be specified multiple times to filter on more than one ID.
-func (r ApiGetAllInfinibandInterfaceRequest) InstanceId(instanceId string) ApiGetAllInfinibandInterfaceRequest {
+func (r ApiGetAllInfinibandInterfaceRequest) InstanceId(instanceId []string) ApiGetAllInfinibandInterfaceRequest {
 	r.instanceId = &instanceId
 	return r
 }
 
 // Filter InfiniBand Interfaces by InfiniBand Partition ID.  Can be specified multiple times to filter on more than one ID.
-func (r ApiGetAllInfinibandInterfaceRequest) InfinibandPartitionId(infinibandPartitionId string) ApiGetAllInfinibandInterfaceRequest {
+func (r ApiGetAllInfinibandInterfaceRequest) InfinibandPartitionId(infinibandPartitionId []string) ApiGetAllInfinibandInterfaceRequest {
 	r.infinibandPartitionId = &infinibandPartitionId
 	return r
 }
 
 // Filter InfiniBand Interfaces by Status. Can be specified multiple times to filter on more than one status.
-func (r ApiGetAllInfinibandInterfaceRequest) Status(status string) ApiGetAllInfinibandInterfaceRequest {
+func (r ApiGetAllInfinibandInterfaceRequest) Status(status []string) ApiGetAllInfinibandInterfaceRequest {
 	r.status = &status
 	return r
 }
 
-// Related entity to expand
-func (r ApiGetAllInfinibandInterfaceRequest) IncludeRelation(includeRelation string) ApiGetAllInfinibandInterfaceRequest {
+// Related entity to expand. Repeat the parameter to specify multiple values.
+func (r ApiGetAllInfinibandInterfaceRequest) IncludeRelation(includeRelation []string) ApiGetAllInfinibandInterfaceRequest {
 	r.includeRelation = &includeRelation
 	return r
 }
@@ -391,19 +392,59 @@ func (a *InfiniBandPartitionAPIService) GetAllInfinibandInterfaceExecute(r ApiGe
 	localVarFormParams := url.Values{}
 
 	if r.siteId != nil {
-		parameterAddToHeaderOrQuery(localVarQueryParams, "siteId", r.siteId, "form", "")
+		t := *r.siteId
+		if reflect.TypeOf(t).Kind() == reflect.Slice {
+			s := reflect.ValueOf(t)
+			for i := 0; i < s.Len(); i++ {
+				parameterAddToHeaderOrQuery(localVarQueryParams, "siteId", s.Index(i).Interface(), "form", "multi")
+			}
+		} else {
+			parameterAddToHeaderOrQuery(localVarQueryParams, "siteId", t, "form", "multi")
+		}
 	}
 	if r.instanceId != nil {
-		parameterAddToHeaderOrQuery(localVarQueryParams, "instanceId", r.instanceId, "form", "")
+		t := *r.instanceId
+		if reflect.TypeOf(t).Kind() == reflect.Slice {
+			s := reflect.ValueOf(t)
+			for i := 0; i < s.Len(); i++ {
+				parameterAddToHeaderOrQuery(localVarQueryParams, "instanceId", s.Index(i).Interface(), "form", "multi")
+			}
+		} else {
+			parameterAddToHeaderOrQuery(localVarQueryParams, "instanceId", t, "form", "multi")
+		}
 	}
 	if r.infinibandPartitionId != nil {
-		parameterAddToHeaderOrQuery(localVarQueryParams, "infinibandPartitionId", r.infinibandPartitionId, "form", "")
+		t := *r.infinibandPartitionId
+		if reflect.TypeOf(t).Kind() == reflect.Slice {
+			s := reflect.ValueOf(t)
+			for i := 0; i < s.Len(); i++ {
+				parameterAddToHeaderOrQuery(localVarQueryParams, "infinibandPartitionId", s.Index(i).Interface(), "form", "multi")
+			}
+		} else {
+			parameterAddToHeaderOrQuery(localVarQueryParams, "infinibandPartitionId", t, "form", "multi")
+		}
 	}
 	if r.status != nil {
-		parameterAddToHeaderOrQuery(localVarQueryParams, "status", r.status, "form", "")
+		t := *r.status
+		if reflect.TypeOf(t).Kind() == reflect.Slice {
+			s := reflect.ValueOf(t)
+			for i := 0; i < s.Len(); i++ {
+				parameterAddToHeaderOrQuery(localVarQueryParams, "status", s.Index(i).Interface(), "form", "multi")
+			}
+		} else {
+			parameterAddToHeaderOrQuery(localVarQueryParams, "status", t, "form", "multi")
+		}
 	}
 	if r.includeRelation != nil {
-		parameterAddToHeaderOrQuery(localVarQueryParams, "includeRelation", r.includeRelation, "form", "")
+		t := *r.includeRelation
+		if reflect.TypeOf(t).Kind() == reflect.Slice {
+			s := reflect.ValueOf(t)
+			for i := 0; i < s.Len(); i++ {
+				parameterAddToHeaderOrQuery(localVarQueryParams, "includeRelation", s.Index(i).Interface(), "form", "multi")
+			}
+		} else {
+			parameterAddToHeaderOrQuery(localVarQueryParams, "includeRelation", t, "form", "multi")
+		}
 	}
 	if r.pageNumber != nil {
 		parameterAddToHeaderOrQuery(localVarQueryParams, "pageNumber", r.pageNumber, "form", "")
@@ -489,7 +530,7 @@ type ApiGetAllInfinibandPartitionRequest struct {
 	siteId          *string
 	status          *string
 	query           *string
-	includeRelation *string
+	includeRelation *[]string
 	pageNumber      *int32
 	pageSize        *int32
 	orderBy         *string
@@ -513,8 +554,8 @@ func (r ApiGetAllInfinibandPartitionRequest) Query(query string) ApiGetAllInfini
 	return r
 }
 
-// Related entity to expand
-func (r ApiGetAllInfinibandPartitionRequest) IncludeRelation(includeRelation string) ApiGetAllInfinibandPartitionRequest {
+// Related entity to expand. Repeat the parameter to specify multiple values.
+func (r ApiGetAllInfinibandPartitionRequest) IncludeRelation(includeRelation []string) ApiGetAllInfinibandPartitionRequest {
 	r.includeRelation = &includeRelation
 	return r
 }
@@ -593,7 +634,15 @@ func (a *InfiniBandPartitionAPIService) GetAllInfinibandPartitionExecute(r ApiGe
 		parameterAddToHeaderOrQuery(localVarQueryParams, "query", r.query, "form", "")
 	}
 	if r.includeRelation != nil {
-		parameterAddToHeaderOrQuery(localVarQueryParams, "includeRelation", r.includeRelation, "form", "")
+		t := *r.includeRelation
+		if reflect.TypeOf(t).Kind() == reflect.Slice {
+			s := reflect.ValueOf(t)
+			for i := 0; i < s.Len(); i++ {
+				parameterAddToHeaderOrQuery(localVarQueryParams, "includeRelation", s.Index(i).Interface(), "form", "multi")
+			}
+		} else {
+			parameterAddToHeaderOrQuery(localVarQueryParams, "includeRelation", t, "form", "multi")
+		}
 	}
 	if r.pageNumber != nil {
 		parameterAddToHeaderOrQuery(localVarQueryParams, "pageNumber", r.pageNumber, "form", "")
@@ -677,11 +726,11 @@ type ApiGetInfinibandPartitionRequest struct {
 	ApiService            *InfiniBandPartitionAPIService
 	org                   string
 	infiniBandPartitionId string
-	includeRelation       *string
+	includeRelation       *[]string
 }
 
-// Related entity to expand
-func (r ApiGetInfinibandPartitionRequest) IncludeRelation(includeRelation string) ApiGetInfinibandPartitionRequest {
+// Related entity to expand. Repeat the parameter to specify multiple values.
+func (r ApiGetInfinibandPartitionRequest) IncludeRelation(includeRelation []string) ApiGetInfinibandPartitionRequest {
 	r.includeRelation = &includeRelation
 	return r
 }
@@ -738,7 +787,15 @@ func (a *InfiniBandPartitionAPIService) GetInfinibandPartitionExecute(r ApiGetIn
 	localVarFormParams := url.Values{}
 
 	if r.includeRelation != nil {
-		parameterAddToHeaderOrQuery(localVarQueryParams, "includeRelation", r.includeRelation, "form", "")
+		t := *r.includeRelation
+		if reflect.TypeOf(t).Kind() == reflect.Slice {
+			s := reflect.ValueOf(t)
+			for i := 0; i < s.Len(); i++ {
+				parameterAddToHeaderOrQuery(localVarQueryParams, "includeRelation", s.Index(i).Interface(), "form", "multi")
+			}
+		} else {
+			parameterAddToHeaderOrQuery(localVarQueryParams, "includeRelation", t, "form", "multi")
+		}
 	}
 	// to determine the Content-Type header
 	localVarHTTPContentTypes := []string{}

@@ -115,7 +115,7 @@ func (vm VpcManager) GetVpcs(ctx context.Context, vpcFilter *VpcFilter, paginati
 
 	gvr := vm.client.apiClient.VPCAPI.GetAllVpc(ctx, vm.client.apiMetadata.Organization)
 	if vpcFilter != nil && vpcFilter.SiteID != nil {
-		gvr = gvr.SiteId(*vpcFilter.SiteID)
+		gvr = gvr.SiteId([]string{*vpcFilter.SiteID})
 	}
 	if paginationFilter != nil {
 		if paginationFilter.PageNumber != nil {

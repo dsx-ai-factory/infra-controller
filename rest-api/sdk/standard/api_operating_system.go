@@ -19,6 +19,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"reflect"
 	"strings"
 )
 
@@ -315,30 +316,30 @@ type ApiGetAllOperatingSystemRequest struct {
 	ctx             context.Context
 	ApiService      *OperatingSystemAPIService
 	org             string
-	siteId          *string
-	type_           *string
-	status          *string
+	siteId          *[]string
+	type_           *[]string
+	status          *[]string
 	query           *string
-	includeRelation *string
+	includeRelation *[]string
 	pageNumber      *int32
 	pageSize        *int32
 	orderBy         *string
 }
 
 // Filter Operating Systems by Site ID.  Can be specified multiple times to filter on more than one ID.
-func (r ApiGetAllOperatingSystemRequest) SiteId(siteId string) ApiGetAllOperatingSystemRequest {
+func (r ApiGetAllOperatingSystemRequest) SiteId(siteId []string) ApiGetAllOperatingSystemRequest {
 	r.siteId = &siteId
 	return r
 }
 
-// Filter Operating Systems by Type
-func (r ApiGetAllOperatingSystemRequest) Type_(type_ string) ApiGetAllOperatingSystemRequest {
+// Filter Operating Systems by Type. Repeat the parameter to specify multiple values.
+func (r ApiGetAllOperatingSystemRequest) Type_(type_ []string) ApiGetAllOperatingSystemRequest {
 	r.type_ = &type_
 	return r
 }
 
 // Filter Operating Systems by Status.  Can be specified multiple times to filter on more than one status.
-func (r ApiGetAllOperatingSystemRequest) Status(status string) ApiGetAllOperatingSystemRequest {
+func (r ApiGetAllOperatingSystemRequest) Status(status []string) ApiGetAllOperatingSystemRequest {
 	r.status = &status
 	return r
 }
@@ -349,8 +350,8 @@ func (r ApiGetAllOperatingSystemRequest) Query(query string) ApiGetAllOperatingS
 	return r
 }
 
-// Related entity to expand
-func (r ApiGetAllOperatingSystemRequest) IncludeRelation(includeRelation string) ApiGetAllOperatingSystemRequest {
+// Related entity to expand. Repeat the parameter to specify multiple values.
+func (r ApiGetAllOperatingSystemRequest) IncludeRelation(includeRelation []string) ApiGetAllOperatingSystemRequest {
 	r.includeRelation = &includeRelation
 	return r
 }
@@ -424,19 +425,51 @@ func (a *OperatingSystemAPIService) GetAllOperatingSystemExecute(r ApiGetAllOper
 	localVarFormParams := url.Values{}
 
 	if r.siteId != nil {
-		parameterAddToHeaderOrQuery(localVarQueryParams, "siteId", r.siteId, "form", "")
+		t := *r.siteId
+		if reflect.TypeOf(t).Kind() == reflect.Slice {
+			s := reflect.ValueOf(t)
+			for i := 0; i < s.Len(); i++ {
+				parameterAddToHeaderOrQuery(localVarQueryParams, "siteId", s.Index(i).Interface(), "form", "multi")
+			}
+		} else {
+			parameterAddToHeaderOrQuery(localVarQueryParams, "siteId", t, "form", "multi")
+		}
 	}
 	if r.type_ != nil {
-		parameterAddToHeaderOrQuery(localVarQueryParams, "type", r.type_, "form", "")
+		t := *r.type_
+		if reflect.TypeOf(t).Kind() == reflect.Slice {
+			s := reflect.ValueOf(t)
+			for i := 0; i < s.Len(); i++ {
+				parameterAddToHeaderOrQuery(localVarQueryParams, "type", s.Index(i).Interface(), "form", "multi")
+			}
+		} else {
+			parameterAddToHeaderOrQuery(localVarQueryParams, "type", t, "form", "multi")
+		}
 	}
 	if r.status != nil {
-		parameterAddToHeaderOrQuery(localVarQueryParams, "status", r.status, "form", "")
+		t := *r.status
+		if reflect.TypeOf(t).Kind() == reflect.Slice {
+			s := reflect.ValueOf(t)
+			for i := 0; i < s.Len(); i++ {
+				parameterAddToHeaderOrQuery(localVarQueryParams, "status", s.Index(i).Interface(), "form", "multi")
+			}
+		} else {
+			parameterAddToHeaderOrQuery(localVarQueryParams, "status", t, "form", "multi")
+		}
 	}
 	if r.query != nil {
 		parameterAddToHeaderOrQuery(localVarQueryParams, "query", r.query, "form", "")
 	}
 	if r.includeRelation != nil {
-		parameterAddToHeaderOrQuery(localVarQueryParams, "includeRelation", r.includeRelation, "form", "")
+		t := *r.includeRelation
+		if reflect.TypeOf(t).Kind() == reflect.Slice {
+			s := reflect.ValueOf(t)
+			for i := 0; i < s.Len(); i++ {
+				parameterAddToHeaderOrQuery(localVarQueryParams, "includeRelation", s.Index(i).Interface(), "form", "multi")
+			}
+		} else {
+			parameterAddToHeaderOrQuery(localVarQueryParams, "includeRelation", t, "form", "multi")
+		}
 	}
 	if r.pageNumber != nil {
 		parameterAddToHeaderOrQuery(localVarQueryParams, "pageNumber", r.pageNumber, "form", "")
@@ -520,11 +553,11 @@ type ApiGetOperatingSystemRequest struct {
 	ApiService        *OperatingSystemAPIService
 	org               string
 	operatingSystemId string
-	includeRelation   *string
+	includeRelation   *[]string
 }
 
-// Related entity to expand
-func (r ApiGetOperatingSystemRequest) IncludeRelation(includeRelation string) ApiGetOperatingSystemRequest {
+// Related entity to expand. Repeat the parameter to specify multiple values.
+func (r ApiGetOperatingSystemRequest) IncludeRelation(includeRelation []string) ApiGetOperatingSystemRequest {
 	r.includeRelation = &includeRelation
 	return r
 }
@@ -583,7 +616,15 @@ func (a *OperatingSystemAPIService) GetOperatingSystemExecute(r ApiGetOperatingS
 	localVarFormParams := url.Values{}
 
 	if r.includeRelation != nil {
-		parameterAddToHeaderOrQuery(localVarQueryParams, "includeRelation", r.includeRelation, "form", "")
+		t := *r.includeRelation
+		if reflect.TypeOf(t).Kind() == reflect.Slice {
+			s := reflect.ValueOf(t)
+			for i := 0; i < s.Len(); i++ {
+				parameterAddToHeaderOrQuery(localVarQueryParams, "includeRelation", s.Index(i).Interface(), "form", "multi")
+			}
+		} else {
+			parameterAddToHeaderOrQuery(localVarQueryParams, "includeRelation", t, "form", "multi")
+		}
 	}
 	// to determine the Content-Type header
 	localVarHTTPContentTypes := []string{}

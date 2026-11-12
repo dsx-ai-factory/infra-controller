@@ -19,6 +19,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"reflect"
 	"strings"
 )
 
@@ -34,7 +35,7 @@ type ApiGetAllInterfacesRequest struct {
 	instanceTenantId *string
 	vpcTenantId      *string
 	status           *InterfaceStatus
-	includeRelation  *string
+	includeRelation  *[]string
 	pageNumber       *int32
 	pageSize         *int32
 	orderBy          *string
@@ -71,7 +72,7 @@ func (r ApiGetAllInterfacesRequest) Status(status InterfaceStatus) ApiGetAllInte
 }
 
 // Related entity to expand; repeat the parameter to request multiple relations.
-func (r ApiGetAllInterfacesRequest) IncludeRelation(includeRelation string) ApiGetAllInterfacesRequest {
+func (r ApiGetAllInterfacesRequest) IncludeRelation(includeRelation []string) ApiGetAllInterfacesRequest {
 	r.includeRelation = &includeRelation
 	return r
 }
@@ -160,7 +161,15 @@ func (a *InterfaceAPIService) GetAllInterfacesExecute(r ApiGetAllInterfacesReque
 		parameterAddToHeaderOrQuery(localVarQueryParams, "status", r.status, "form", "")
 	}
 	if r.includeRelation != nil {
-		parameterAddToHeaderOrQuery(localVarQueryParams, "includeRelation", r.includeRelation, "form", "")
+		t := *r.includeRelation
+		if reflect.TypeOf(t).Kind() == reflect.Slice {
+			s := reflect.ValueOf(t)
+			for i := 0; i < s.Len(); i++ {
+				parameterAddToHeaderOrQuery(localVarQueryParams, "includeRelation", s.Index(i).Interface(), "form", "multi")
+			}
+		} else {
+			parameterAddToHeaderOrQuery(localVarQueryParams, "includeRelation", t, "form", "multi")
+		}
 	}
 	if r.pageNumber != nil {
 		parameterAddToHeaderOrQuery(localVarQueryParams, "pageNumber", r.pageNumber, "form", "")

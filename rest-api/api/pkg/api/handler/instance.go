@@ -4881,7 +4881,7 @@ func NewGetInstanceHandler(dbSession *cdb.Session, tc temporalClient.Client, cfg
 // @Security ApiKeyAuth
 // @Param org path string true "Name of NGC organization"
 // @Param id path string true "ID of Instance"
-// @Param includeRelation query string false "Related entities to include in response e.g. 'InfrastructureProvider', 'Tenant', 'Site'"
+// @Param includeRelation query []string false "Related entities to include in response e.g. 'InfrastructureProvider', 'Tenant', 'Site'" collectionFormat(multi)
 // @Success 200 {object} model.APIInstance
 // @Router /v2/org/{org}/nico/instance/{id} [get]
 func (gih GetInstanceHandler) Handle(c echo.Context) error {
@@ -5115,18 +5115,20 @@ func NewGetAllInstanceHandler(dbSession *cdb.Session, tc temporalClient.Client, 
 // @Security ApiKeyAuth
 // @Param org path string true "Name of NGC organization"
 // @Param infrastructureProviderId query string false "Deprecated: Instances will no longer be filtered by Infrastructure Provider; results are scoped to the org's Tenant. Use siteId to scope results to a specific Infrastructure Provider's Sites."
-// @Param siteId query string true "ID of Site"
-// @Param vpcId query string true "ID of Vpc"
-// @Param instanceTypeId query string false "ID of Instance Type"
-// @Param operatingSystemId query string false "ID of Operating System"
+// @Param siteId query []string false "ID of Site" collectionFormat(multi)
+// @Param vpcId query []string false "ID of Vpc" collectionFormat(multi)
+// @Param instanceTypeId query []string false "ID of Instance Type" collectionFormat(multi)
+// @Param operatingSystemId query []string false "ID of Operating System" collectionFormat(multi)
 // @Param name query string false "Filter by Instance name"
-// @Param status query string false "Filter by status" e.g. 'Pending', 'Error'"
-// @Param ipAddress query string false "Filter by IP address. Can be specified multiple times to filter on more than one IP address."
+// @Param status query []string false "Filter Instances by Status e.g. 'Pending', 'Error'. Can be specified multiple times to filter on more than one status." collectionFormat(multi)
+// @Param ipAddress query []string false "Filter by IP address. Can be specified multiple times to filter on more than one IP address." collectionFormat(multi)
 // @Param query query string false "Query input for full text search"
-// @Param includeRelation query string false "Related entities to include in response e.g. 'InfrastructureProvider', 'Tenant', 'Site'"
+// @Param includeRelation query []string false "Related entities to include in response e.g. 'InfrastructureProvider', 'Tenant', 'Site'" collectionFormat(multi)
 // @Param pageNumber query integer false "Page number of results returned"
 // @Param pageSize query integer false "Number of results per page"
 // @Param orderBy query string false "Order by field"
+// @Param machineId query []string false "Filter by machineId; repeat the parameter to specify multiple values" collectionFormat(multi)
+// @Param networkSecurityGroupId query []string false "Filter by networkSecurityGroupId; repeat the parameter to specify multiple values" collectionFormat(multi)
 // @Success 200 {array} []model.APIInstance
 // @Router /v2/org/{org}/nico/instance [get]
 func (gaih GetAllInstanceHandler) Handle(c echo.Context) error {
@@ -6058,6 +6060,7 @@ func NewGetInstanceStatusDetailsHandler(dbSession *cdb.Session) GetInstanceStatu
 // @Security ApiKeyAuth
 // @Param org path string true "Name of NGC organization"
 // @Param id path string true "ID of Instance"
+// @Param includeRelation query []string false "Related Instance entities to load while retrieving status history e.g. 'InfrastructureProvider', 'Tenant', 'Site'. Repeat the parameter to request multiple relations." collectionFormat(multi)
 // @Success 200 {object} []model.APIStatusDetail
 // @Router /v2/org/{org}/nico/instance/{id}/status-history [get]
 func (gisdh GetInstanceStatusDetailsHandler) Handle(c echo.Context) error {

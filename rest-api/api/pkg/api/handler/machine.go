@@ -177,7 +177,7 @@ func NewGetAllMachineHandler(dbSession *cdb.Session, tc temporalClient.Client, c
 // @Param hwSkuDeviceType query []string false "Filter by hardware SKU Device Types" collectionFormat(multi)
 // @Param query query string false "Query input for full text search"
 // @Param includeMetadata query boolean false "Include metadata info in response"
-// @Param includeRelation query string false "Related entities to include in response e.g. 'InfrastructureProvider', 'Site', 'InstanceType'"
+// @Param includeRelation query []string false "Related entities to include in response e.g. 'InfrastructureProvider', 'Site', 'InstanceType'" collectionFormat(multi)
 // @Param pageNumber query integer false "Page number of results returned"
 // @Param pageSize query integer false "Number of results per page"
 // @Param orderBy query string false "Order by field"
@@ -546,6 +546,7 @@ func NewGetMachineHandler(dbSession *cdb.Session, tc temporalClient.Client, cfg 
 // @Param org path string true "Name of NGC organization"
 // @Param id path string true "ID of Machine"
 // @Param includeMetadata query boolean false "Include metadata info in response"
+// @Param includeRelation query []string false "Related entities to include in response e.g. 'InfrastructureProvider', 'Site', 'InstanceType'. Repeat the parameter to request multiple relations." collectionFormat(multi)
 // @Success 200 {object} model.APIMachine
 // @Router /v2/org/{org}/nico/machine/{id} [get]
 func (gmh GetMachineHandler) Handle(c echo.Context) error {

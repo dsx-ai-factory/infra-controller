@@ -410,7 +410,7 @@ func NewGetAllVpcPrefixHandler(dbSession *cdb.Session, tc temporalClient.Client,
 // @Param siteId query string false "Site ID"
 // @Param vpcId query string true "ID of Vpc"
 // @Param query query string false "Query input for full text search"
-// @Param includeRelation query string false "Related entities to include in response e.g. 'Site', 'Vpc', 'IPBlock'"
+// @Param includeRelation query []string false "Related entities to include in response e.g. 'Site', 'Vpc', 'IPBlock'" collectionFormat(multi)
 // @Param includeUsageStats query boolean false "IPv4 usage (interface/instance-derived; same shape as IP Block usage)"
 // @Param pageNumber query integer false "Page number of results returned"
 // @Param pageSize query integer false "Number of results per page"
@@ -649,7 +649,7 @@ func NewGetVpcPrefixHandler(dbSession *cdb.Session, tc temporalClient.Client, cf
 // @Security ApiKeyAuth
 // @Param org path string true "Name of NGC organization"
 // @Param id path string true "ID of VPC prefix"
-// @Param includeRelation query string false "Related entities to include in response e.g. 'Site', 'Vpc', 'Tenant', 'IPv4Block', 'IPv6Block'"
+// @Param includeRelation query []string false "Related entities to include in response e.g. 'Site', 'Vpc', 'Tenant', 'IPv4Block', 'IPv6Block'" collectionFormat(multi)
 // @Param includeUsageStats query boolean false "IPv4 usage (interface/instance-derived; same shape as IP Block usage)"
 // @Success 200 {object} model.APIVpcPrefix
 // @Router /v2/org/{org}/nico/vpcprefix/{id} [get]

@@ -1507,8 +1507,12 @@ func paramToFlag(operationID string, p Parameter) cli.Flag {
 		}
 		usage = deprecatedUsage
 	}
-	if p.Schema != nil && len(p.Schema.Enum) > 0 {
-		usage += " [" + strings.Join(p.Schema.Enum, ", ") + "]"
+	valueSchema := p.Schema
+	if valueSchema != nil && valueSchema.Type == "array" {
+		valueSchema = valueSchema.Items
+	}
+	if valueSchema != nil && len(valueSchema.Enum) > 0 {
+		usage += " [" + strings.Join(valueSchema.Enum, ", ") + "]"
 	}
 
 	if isRepeatableQueryParameter(operationID, p) {

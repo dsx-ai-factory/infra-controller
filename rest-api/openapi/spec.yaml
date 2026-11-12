@@ -660,13 +660,17 @@ paths:
           name: query
           description: 'Search string to filter Tenant Accounts by account number, tenant org, or tenant org display name'
         - schema:
-            type: string
-            enum:
-              - InfrastructureProvider
-              - Tenant
+            type: array
+            items:
+              type: string
+              enum:
+                - InfrastructureProvider
+                - Tenant
           in: query
           name: includeRelation
-          description: Related entity to expand
+          description: "Related entity to expand. Repeat the parameter to specify multiple values."
+          style: form
+          explode: true
         - schema:
             $ref: '#/components/schemas/PageNumber'
             example: 1
@@ -841,13 +845,17 @@ paths:
           deprecated: true
           description: "Filter Tenant Accounts by Tenant ID. Deprecated: Tenant is now inferred from the org's membership."
         - schema:
-            type: string
-            enum:
-              - InfrastructureProvider
-              - Tenant
+            type: array
+            items:
+              type: string
+              enum:
+                - InfrastructureProvider
+                - Tenant
           in: query
           name: includeRelation
-          description: Related entity to expand
+          description: "Related entity to expand. Repeat the parameter to specify multiple values."
+          style: form
+          explode: true
     patch:
       summary: Update Tenant Account
       operationId: update-tenant-account
@@ -993,10 +1001,14 @@ paths:
           deprecated: true
           description: "Filter Sites by Tenant ID. Deprecated: Tenant is now inferred from the org's membership."
         - schema:
-            type: string
+            type: array
+            items:
+              type: string
           in: query
           name: status
           description: Filter Sites by Status. Can be specified multiple times to filter on more than one status
+          style: form
+          explode: true
         - schema:
             type: boolean
           in: query
@@ -1033,12 +1045,16 @@ paths:
           name: query
           description: 'Search for matches across all Sites. Input will be matched against name, description, location, contact, and status fields'
         - schema:
-            type: string
-            enum:
-              - InfrastructureProvider
+            type: array
+            items:
+              type: string
+              enum:
+                - InfrastructureProvider
           in: query
           name: includeRelation
-          description: Related entity to expand
+          description: "Related entity to expand. Repeat the parameter to specify multiple values."
+          style: form
+          explode: true
         - schema:
             $ref: '#/components/schemas/PageNumber'
             example: 1
@@ -1152,7 +1168,18 @@ paths:
         - The Site is owned by the org's Infrastructure Provider
         - The org's Tenant has an Allocation for Site
         - The org's Tenant is privileged and has Account with Site's Provider
-      parameters: []
+      parameters:
+        - schema:
+            type: array
+            items:
+              type: string
+              enum:
+                - InfrastructureProvider
+          in: query
+          name: includeRelation
+          description: Related entities to expand. Repeat the parameter to request multiple relations.
+          style: form
+          explode: true
     patch:
       summary: Update Site
       operationId: update-site
@@ -1957,68 +1984,104 @@ paths:
           deprecated: true
           description: Filter Allocations by Infrastructure Provider ID.
         - schema:
-            type: string
-            format: uuid
+            type: array
+            items:
+              type: string
+              format: uuid
           in: query
           name: tenantId
-          description: Filter Allocations by Tenant ID.
+          description: "Filter Allocations by Tenant ID. Repeat the parameter to specify multiple values."
+          style: form
+          explode: true
         - schema:
-            type: string
-            format: uuid
+            type: array
+            items:
+              type: string
+              format: uuid
           in: query
           name: siteId
           description: Filter Allocations by Site ID. Can be specified multiple times to filter on more than one Site ID.
+          style: form
+          explode: true
         - schema:
-            type: string
+            type: array
+            items:
+              type: string
           in: query
           name: id
           description: Filter Allocations by ID. Can be specified multiple times to filter on more than one ID.
+          style: form
+          explode: true
         - schema:
-            type: string
-            enum:
-              - InstanceType
-              - IPBlock
+            type: array
+            items:
+              type: string
+              enum:
+                - InstanceType
+                - IPBlock
           in: query
           name: resourceType
           description: Filter Allocations by Constraint Resource Type. Can be specified multiple times to filter on more than one Constraint Resource Type.
+          style: form
+          explode: true
         - schema:
-            type: string
+            type: array
+            items:
+              type: string
           in: query
           name: status
           description: Filter Allocations by Status. Can be specified multiple times to filter on more than one Status.
+          style: form
+          explode: true
         - schema:
-            type: string
+            type: array
+            items:
+              type: string
           in: query
           name: resourceTypeId
           description: Filter Allocations by Constraint Resource Type ID. Can be specified multiple times to filter on more than one Constraint Resource Type ID.
+          style: form
+          explode: true
         - schema:
-            type: string
-            enum:
-              - Reserved
-              - OnDemand
-              - Preemptible
+            type: array
+            items:
+              type: string
+              enum:
+                - Reserved
+                - OnDemand
+                - Preemptible
           in: query
           name: constraintType
           description: Filter Allocations by Constraint Type. Can be specified multiple times to filter on more than one Constraint Type.
+          style: form
+          explode: true
         - schema:
-            type: integer
+            type: array
+            items:
+              type: integer
           in: query
           name: constraintValue
           description: Filter Allocations by Constraint Value. Can be specified multiple times to filter on more than one Constraint Value.
+          style: form
+          explode: true
         - schema:
             type: string
           in: query
           name: query
           description: 'Search for matches across all Allocations. Input will be matched against name, description, and status fields'
         - schema:
-            type: string
-            enum:
-              - InfrastructureProvider
-              - Tenant
-              - Site
+            type: array
+            items:
+              type: string
+              enum:
+                - InfrastructureProvider
+                - Tenant
+                - Site
           in: query
           name: includeRelation
-          description: Related entity to expand
+          description: "Related entity to expand. Repeat the parameter to specify multiple values."
+          style: form
+          explode: true
         - schema:
             $ref: '#/components/schemas/PageNumber'
             example: 1
@@ -2220,14 +2283,18 @@ paths:
           deprecated: true
           description: Filter Allocations by Tenant ID.
         - schema:
-            type: string
-            enum:
-              - InfrastructureProvider
-              - Tenant
-              - Site
+            type: array
+            items:
+              type: string
+              enum:
+                - InfrastructureProvider
+                - Tenant
+                - Site
           in: query
           name: includeRelation
-          description: Related entity to expand
+          description: "Related entity to expand. Repeat the parameter to specify multiple values."
+          style: form
+          explode: true
     delete:
       summary: Delete Allocation
       operationId: delete-allocation
@@ -2488,14 +2555,18 @@ paths:
           name: query
           description: 'Search for matches across all IP Blocks. Input will be matched against name, description, and status fields'
         - schema:
-            type: string
-            enum:
-              - InfrastructureProvider
-              - Tenant
-              - Site
+            type: array
+            items:
+              type: string
+              enum:
+                - InfrastructureProvider
+                - Tenant
+                - Site
           in: query
           name: includeRelation
-          description: Related entity to expand
+          description: "Related entity to expand. Repeat the parameter to specify multiple values."
+          style: form
+          explode: true
         - schema:
             $ref: '#/components/schemas/PageNumber'
             example: 1
@@ -2684,14 +2755,18 @@ paths:
           name: includeUsageStats
           description: Include IP Block usage stats in response
         - schema:
-            type: string
-            enum:
-              - InfrastructureProvider
-              - Tenant
-              - Site
+            type: array
+            items:
+              type: string
+              enum:
+                - InfrastructureProvider
+                - Tenant
+                - Site
           in: query
           name: includeRelation
-          description: Related entity to expand
+          description: "Related entity to expand. Repeat the parameter to specify multiple values."
+          style: form
+          explode: true
     delete:
       summary: Delete IP Block
       operationId: delete-ipblock
@@ -2868,14 +2943,18 @@ paths:
           name: query
           description: 'Search for matches across all derived IP Blocks. Input will be matched against name, description, and status fields'
         - schema:
-            type: string
-            enum:
-              - InfrastructureProvider
-              - Tenant
-              - Site
+            type: array
+            items:
+              type: string
+              enum:
+                - InfrastructureProvider
+                - Tenant
+                - Site
           in: query
           name: includeRelation
-          description: Related entity to expand
+          description: "Related entity to expand. Repeat the parameter to specify multiple values."
+          style: form
+          explode: true
         - schema:
             $ref: '#/components/schemas/PageNumber'
             example: 1
@@ -2983,42 +3062,62 @@ paths:
         Org must have a Tenant entity. User must have authorization role with `TENANT_ADMIN` suffix
       parameters:
         - schema:
-            type: string
-            format: uuid
+            type: array
+            items:
+              type: string
+              format: uuid
           in: query
           name: siteId
           description: Filter VPCs by Site ID. Can be specified multiple times to filter on more than one Site.
+          style: form
+          explode: true
         - schema:
-            type: string
+            type: array
+            items:
+              type: string
           in: query
           name: status
           description: Filter VPCs by Status. Can be specified multiple times to filter on more than one Status.
+          style: form
+          explode: true
         - schema:
-            type: string
+            type: array
+            items:
+              type: string
           in: query
           name: networkSecurityGroupId
           description: Filter VPCs by Network Security Group ID. Can be specified multiple times to filter on more than one Network Security Group.
+          style: form
+          explode: true
         - schema:
-            type: string
-            format: uuid
+            type: array
+            items:
+              type: string
+              format: uuid
           in: query
           name: nvLinkLogicalPartitionId
           description: Filter VPCs by NVLink Logical Partition ID. Can be specified multiple times to filter on more than one NVLink Logical Partition.
+          style: form
+          explode: true
         - schema:
             type: string
           in: query
           name: query
           description: 'Search for matches across all VPCs. Input will be matched against name, description, labels, and status fields'
         - schema:
-            type: string
-            enum:
-              - InfrastructureProvider
-              - Tenant
-              - Site
-              - NetworkSecurityGroup
+            type: array
+            items:
+              type: string
+              enum:
+                - InfrastructureProvider
+                - Tenant
+                - Site
+                - NetworkSecurityGroup
           in: query
           name: includeRelation
-          description: Related entity to expand
+          description: "Related entity to expand. Repeat the parameter to specify multiple values."
+          style: form
+          explode: true
         - schema:
             $ref: '#/components/schemas/PageNumber'
             example: 1
@@ -3249,15 +3348,19 @@ paths:
         Org must have a Tenant entity. User must have authorization role with `TENANT_ADMIN` suffix.
       parameters:
         - schema:
-            type: string
-            enum:
-              - InfrastructureProvider
-              - Tenant
-              - Site
-              - NetworkSecurityGroup
+            type: array
+            items:
+              type: string
+              enum:
+                - InfrastructureProvider
+                - Tenant
+                - Site
+                - NetworkSecurityGroup
           in: query
           name: includeRelation
-          description: Related entity to expand
+          description: "Related entity to expand. Repeat the parameter to specify multiple values."
+          style: form
+          explode: true
     delete:
       summary: Delete a VPC
       operationId: delete-vpc
@@ -3498,14 +3601,18 @@ paths:
           name: status
           description: Filter Interfaces by status
         - schema:
-            type: string
-            enum:
-              - Instance
-              - Subnet
-              - VpcPrefix
+            type: array
+            items:
+              type: string
+              enum:
+                - Instance
+                - Subnet
+                - VpcPrefix
           in: query
           name: includeRelation
           description: Related entity to expand; repeat the parameter to request multiple relations.
+          style: form
+          explode: true
         - schema:
             $ref: '#/components/schemas/PageNumber'
             default: 1
@@ -3857,43 +3964,59 @@ paths:
           required: false
           description: Optional filter by peering tenancy type (single-tenant or multi-tenant).
         - schema:
-            type: string
-            enum:
-              - Pending
-              - Configuring
-              - Requested
-              - Ready
-              - Deleting
-              - Error
+            type: array
+            items:
+              type: string
+              enum:
+                - Pending
+                - Configuring
+                - Requested
+                - Ready
+                - Deleting
+                - Error
           in: query
           name: status
           required: false
           description: Optional filter by peering status. Repeat the parameter to match multiple statuses.
+          style: form
+          explode: true
         - schema:
-            type: string
-            format: uuid
+            type: array
+            items:
+              type: string
+              format: uuid
           in: query
           name: vpcId
           required: false
           description: Optional filter by VPC ID involved in the peering as either vpc1 or vpc2. Repeat the parameter to match multiple VPCs.
+          style: form
+          explode: true
         - schema:
-            type: string
-            format: uuid
+            type: array
+            items:
+              type: string
+              format: uuid
           in: query
           name: peerTenantId
           required: false
           description: Optional filter by tenant ID of a VPC involved in the peering. Repeat the parameter to match multiple tenants.
+          style: form
+          explode: true
         - schema:
-            type: string
-            enum:
-              - Vpc1
-              - Vpc2
-              - Site
-              - Tenant
+            type: array
+            items:
+              type: string
+              enum:
+                - Vpc1
+                - Vpc2
+                - Site
+                - Tenant
           in: query
           name: includeRelation
           required: false
-          description: Related entity to expand
+          description: "Related entity to expand. Repeat the parameter to specify multiple values."
+          style: form
+          explode: true
     post:
       summary: Create VPC peering
       tags:
@@ -3973,16 +4096,20 @@ paths:
           $ref: '#/components/responses/NotFoundError'
       parameters:
         - schema:
-            type: string
-            enum:
-              - Vpc1
-              - Vpc2
-              - Site
-              - Tenant
+            type: array
+            items:
+              type: string
+              enum:
+                - Vpc1
+                - Vpc2
+                - Site
+                - Tenant
           in: query
           name: includeRelation
           required: false
-          description: Related entity to expand
+          description: "Related entity to expand. Repeat the parameter to specify multiple values."
+          style: form
+          explode: true
     delete:
       summary: Delete a VPC peering
       tags:
@@ -4088,14 +4215,18 @@ paths:
           name: query
           description: Search for matches across all VPC Prefixes. Input will be matched against name and status fields
         - schema:
-            type: string
-            enum:
-              - VPC
-              - Tenant
-              - IPBlock
+            type: array
+            items:
+              type: string
+              enum:
+                - VPC
+                - Tenant
+                - IPBlock
           in: query
           name: includeRelation
-          description: Related entity to expand
+          description: "Related entity to expand. Repeat the parameter to specify multiple values."
+          style: form
+          explode: true
         - schema:
             type: boolean
           in: query
@@ -4196,14 +4327,18 @@ paths:
         Org must have a Tenant entity. User must have authorization role with `TENANT_ADMIN` suffix.
       parameters:
         - schema:
-            type: string
-            enum:
-              - VPC
-              - Tenant
-              - IPBlock
+            type: array
+            items:
+              type: string
+              enum:
+                - VPC
+                - Tenant
+                - IPBlock
           in: query
           name: includeRelation
-          description: Related entity to expand
+          description: "Related entity to expand. Repeat the parameter to specify multiple values."
+          style: form
+          explode: true
         - schema:
             type: boolean
           in: query
@@ -4346,15 +4481,19 @@ paths:
           name: query
           description: 'Search for matches across all Subnets. Input will be matched against name, description, and status fields'
         - schema:
-            type: string
-            enum:
-              - VPC
-              - Tenant
-              - IPv4Block
-              - IPv6Block
+            type: array
+            items:
+              type: string
+              enum:
+                - VPC
+                - Tenant
+                - IPv4Block
+                - IPv6Block
           in: query
           name: includeRelation
-          description: Related entity to expand
+          description: "Related entity to expand. Repeat the parameter to specify multiple values."
+          style: form
+          explode: true
         - schema:
             type: boolean
           in: query
@@ -4512,15 +4651,19 @@ paths:
         Org must have a Tenant entity. User must have authorization role with `TENANT_ADMIN` suffix.
       parameters:
         - schema:
-            type: string
-            enum:
-              - VPC
-              - Tenant
-              - IPv4Block
-              - IPv6Block
+            type: array
+            items:
+              type: string
+              enum:
+                - VPC
+                - Tenant
+                - IPv4Block
+                - IPv6Block
           in: query
           name: includeRelation
-          description: Related entity to expand
+          description: "Related entity to expand. Repeat the parameter to specify multiple values."
+          style: form
+          explode: true
         - schema:
             type: boolean
           in: query
@@ -4688,14 +4831,18 @@ paths:
           in: query
           description: ID of the Site to filter Expected Machines by
         - schema:
-            type: string
-            enum:
-              - Site
-              - Sku
-              - Machine
+            type: array
+            items:
+              type: string
+              enum:
+                - Site
+                - Sku
+                - Machine
           in: query
           name: includeRelation
-          description: Related entity to expand
+          description: "Related entity to expand. Repeat the parameter to specify multiple values."
+          style: form
+          explode: true
         - schema:
             $ref: '#/components/schemas/PageNumber'
             example: 1
@@ -4996,14 +5143,18 @@ paths:
         Alternatively, Tenant Admins with `TargetedInstanceCreation` capability can also retrieve Expected Machines if they have an account with the Site's Infrastructure Provider.
       parameters:
         - schema:
-            type: string
-            enum:
-              - Site
-              - Sku
-              - Machine
+            type: array
+            items:
+              type: string
+              enum:
+                - Site
+                - Sku
+                - Machine
           in: query
           name: includeRelation
-          description: Related entity to expand
+          description: "Related entity to expand. Repeat the parameter to specify multiple values."
+          style: form
+          explode: true
       responses:
         '200':
           description: OK
@@ -5335,12 +5486,16 @@ paths:
           in: query
           description: ID of the Site to filter Expected Power Shelves by
         - schema:
-            type: string
-            enum:
-              - Site
+            type: array
+            items:
+              type: string
+              enum:
+                - Site
           in: query
           name: includeRelation
-          description: Related entity to expand
+          description: "Related entity to expand. Repeat the parameter to specify multiple values."
+          style: form
+          explode: true
         - schema:
             $ref: '#/components/schemas/PageNumber'
             example: 1
@@ -5488,12 +5643,16 @@ paths:
         Alternatively, Tenant Admins with `TargetedInstanceCreation` capability can also retrieve Expected Power Shelves if they have an account with the Site's Infrastructure Provider.
       parameters:
         - schema:
-            type: string
-            enum:
-              - Site
+            type: array
+            items:
+              type: string
+              enum:
+                - Site
           in: query
           name: includeRelation
-          description: Related entity to expand
+          description: "Related entity to expand. Repeat the parameter to specify multiple values."
+          style: form
+          explode: true
       responses:
         '200':
           description: OK
@@ -5661,12 +5820,16 @@ paths:
           in: query
           description: ID of the Site to filter Expected Racks by
         - schema:
-            type: string
-            enum:
-              - Site
+            type: array
+            items:
+              type: string
+              enum:
+                - Site
           in: query
           name: includeRelation
-          description: Related entity to expand
+          description: "Related entity to expand. Repeat the parameter to specify multiple values."
+          style: form
+          explode: true
         - schema:
             $ref: '#/components/schemas/PageNumber'
             example: 1
@@ -5882,12 +6045,16 @@ paths:
         Alternatively, Tenant Admins with `TargetedInstanceCreation` capability can also retrieve Expected Racks if they have an account with the Site's Infrastructure Provider.
       parameters:
         - schema:
-            type: string
-            enum:
-              - Site
+            type: array
+            items:
+              type: string
+              enum:
+                - Site
           in: query
           name: includeRelation
-          description: Related entity to expand
+          description: "Related entity to expand. Repeat the parameter to specify multiple values."
+          style: form
+          explode: true
       responses:
         '200':
           description: OK
@@ -6059,12 +6226,16 @@ paths:
           in: query
           description: ID of the Site to filter Expected Rack Groups by
         - schema:
-            type: string
-            enum:
-              - Site
+            type: array
+            items:
+              type: string
+              enum:
+                - Site
           in: query
           name: includeRelation
-          description: Related entity to expand
+          description: "Related entity to expand. Repeat the parameter to specify multiple values."
+          style: form
+          explode: true
         - schema:
             $ref: '#/components/schemas/PageNumber'
             example: 1
@@ -6293,12 +6464,16 @@ paths:
         Alternatively, Tenant Admins with `TargetedInstanceCreation` capability can also retrieve Expected Rack Groups if they have an account with the Site's Infrastructure Provider.
       parameters:
         - schema:
-            type: string
-            enum:
-              - Site
+            type: array
+            items:
+              type: string
+              enum:
+                - Site
           in: query
           name: includeRelation
-          description: Related entity to expand
+          description: "Related entity to expand. Repeat the parameter to specify multiple values."
+          style: form
+          explode: true
       responses:
         '200':
           description: OK
@@ -6470,12 +6645,16 @@ paths:
           in: query
           description: ID of the Site to filter Expected Switches by
         - schema:
-            type: string
-            enum:
-              - Site
+            type: array
+            items:
+              type: string
+              enum:
+                - Site
           in: query
           name: includeRelation
-          description: Related entity to expand
+          description: "Related entity to expand. Repeat the parameter to specify multiple values."
+          style: form
+          explode: true
         - schema:
             $ref: '#/components/schemas/PageNumber'
             example: 1
@@ -6623,12 +6802,16 @@ paths:
         Alternatively, Tenant Admins with `TargetedInstanceCreation` capability can also retrieve Expected Switches if they have an account with the Site's Infrastructure Provider.
       parameters:
         - schema:
-            type: string
-            enum:
-              - Site
+            type: array
+            items:
+              type: string
+              enum:
+                - Site
           in: query
           name: includeRelation
-          description: Related entity to expand
+          description: "Related entity to expand. Repeat the parameter to specify multiple values."
+          style: form
+          explode: true
       responses:
         '200':
           description: OK
@@ -7103,14 +7286,18 @@ paths:
           name: query
           description: 'Search for matches across all InfiniBand Partitions. Input will be matched against name, description, and status fields'
         - schema:
-            type: string
-            enum:
-              - Site
-              - VPC
-              - Tenant
+            type: array
+            items:
+              type: string
+              enum:
+                - Site
+                - VPC
+                - Tenant
           in: query
           name: includeRelation
-          description: Related entity to expand
+          description: "Related entity to expand. Repeat the parameter to specify multiple values."
+          style: form
+          explode: true
         - schema:
             $ref: '#/components/schemas/PageNumber'
             example: 1
@@ -7261,14 +7448,18 @@ paths:
         Tenant must own the Partition.
       parameters:
         - schema:
-            type: string
-            enum:
-              - Site
-              - VPC
-              - Tenant
+            type: array
+            items:
+              type: string
+              enum:
+                - Site
+                - VPC
+                - Tenant
           in: query
           name: includeRelation
-          description: Related entity to expand
+          description: "Related entity to expand. Repeat the parameter to specify multiple values."
+          style: form
+          explode: true
       tags:
         - InfiniBand Partition
     delete:
@@ -7410,35 +7601,47 @@ paths:
         Org must have a Tenant entity. User must have authorization role with `TENANT_ADMIN` suffix.
       parameters:
         - schema:
-            type: string
-            format: uuid
+            type: array
+            items:
+              type: string
+              format: uuid
           in: query
           name: siteId
           description: Filter Partitions by Site. Repeat the parameter to match multiple Sites.
+          style: form
+          explode: true
         - schema:
-            type: string
-            enum:
-              - Pending
-              - Provisioning
-              - Ready
-              - Error
-              - Deleting
+            type: array
+            items:
+              type: string
+              enum:
+                - Pending
+                - Provisioning
+                - Ready
+                - Error
+                - Deleting
           in: query
           name: status
           description: Filter Partitions by Status. Repeat the parameter to match multiple Statuses.
+          style: form
+          explode: true
         - schema:
             type: string
           in: query
           name: query
           description: 'Search for matches across all SpectrumX Partitions. Input will be matched against name, description, status and labels fields'
         - schema:
-            type: string
-            enum:
-              - Site
-              - Tenant
+            type: array
+            items:
+              type: string
+              enum:
+                - Site
+                - Tenant
           in: query
           name: includeRelation
-          description: Related entity to expand
+          description: "Related entity to expand. Repeat the parameter to specify multiple values."
+          style: form
+          explode: true
         - schema:
             $ref: '#/components/schemas/PageNumber'
             example: 1
@@ -7588,13 +7791,17 @@ paths:
         Tenant must own the Partition.
       parameters:
         - schema:
-            type: string
-            enum:
-              - Site
-              - Tenant
+            type: array
+            items:
+              type: string
+              enum:
+                - Site
+                - Tenant
           in: query
           name: includeRelation
-          description: Related entity to expand
+          description: "Related entity to expand. Repeat the parameter to specify multiple values."
+          style: form
+          explode: true
       tags:
         - SpectrumX Partition
     delete:
@@ -7714,13 +7921,17 @@ paths:
           name: includeVpcs
           description: Include VPCs in response.
         - schema:
-            type: string
-            enum:
-              - Site
-              - Tenant
+            type: array
+            items:
+              type: string
+              enum:
+                - Site
+                - Tenant
           in: query
           name: includeRelation
-          description: Related entity to expand
+          description: "Related entity to expand. Repeat the parameter to specify multiple values."
+          style: form
+          explode: true
         - schema:
             $ref: '#/components/schemas/PageNumber'
             example: 1
@@ -7845,13 +8056,17 @@ paths:
           name: includeVpcs
           description: Include all attached VPCs in response
         - schema:
-            type: string
-            enum:
-              - Site
-              - Tenant
+            type: array
+            items:
+              type: string
+              enum:
+                - Site
+                - Tenant
           in: query
           name: includeRelation
-          description: Related entity to expand
+          description: "Related entity to expand. Repeat the parameter to specify multiple values."
+          style: form
+          explode: true
     patch:
       summary: Update NVLink Logical Partition
       operationId: update-nvlink-logical-partition
@@ -8041,13 +8256,17 @@ paths:
           name: query
           description: 'Search for matches across all Instance Types. Input will be matched against name, display name, description, labels, and status fields'
         - schema:
-            type: string
-            enum:
-              - InfrastructureProvider
-              - Site
+            type: array
+            items:
+              type: string
+              enum:
+                - InfrastructureProvider
+                - Site
           in: query
           name: includeRelation
-          description: Related entity to expand
+          description: "Related entity to expand. Repeat the parameter to specify multiple values."
+          style: form
+          explode: true
         - schema:
             type: boolean
           in: query
@@ -8263,13 +8482,17 @@ paths:
           name: includeAllocationStats
           description: Include Allocation stats. Currently can only be requested by Tenant
         - schema:
-            type: string
-            enum:
-              - InfrastructureProvider
-              - Site
+            type: array
+            items:
+              type: string
+              enum:
+                - InfrastructureProvider
+                - Site
           in: query
           name: includeRelation
-          description: Related entity to expand
+          description: "Related entity to expand. Repeat the parameter to specify multiple values."
+          style: form
+          explode: true
     delete:
       summary: Delete Instance Type
       operationId: delete-instance-type
@@ -8860,69 +9083,101 @@ paths:
           deprecated: true
           description: "Filter by Infrastructure Provider ID. Deprecated: Instances will no longer be filtered by Infrastructure Provider; results are scoped to the org's Tenant. Use the siteId parameter to scope results to a specific Infrastructure Provider's Sites."
         - schema:
-            type: string
-            format: uuid
+            type: array
+            items:
+              type: string
+              format: uuid
           in: query
           name: siteId
           description: Filter by Site ID. Can be specified multiple times to filter on more than one site.
+          style: form
+          explode: true
         - schema:
-            type: string
-            format: uuid
+            type: array
+            items:
+              type: string
+              format: uuid
           in: query
           name: vpcId
           description: Filter by VPC ID. Can be specified multiple times to filter on more than one VPC.
+          style: form
+          explode: true
         - schema:
-            type: string
-            format: uuid
+            type: array
+            items:
+              type: string
+              format: uuid
           in: query
           name: instanceTypeId
           description: Filter by instance type ID. Can be specified multiple times to filter on more than one instance type.
+          style: form
+          explode: true
         - schema:
-            type: string
-            format: uuid
+            type: array
+            items:
+              type: string
+              format: uuid
           in: query
           name: operatingSystemId
           description: Filter by operating system ID. Can be specified multiple times to filter on more than one operating system.
+          style: form
+          explode: true
         - schema:
-            type: string
+            type: array
+            items:
+              type: string
           in: query
           name: machineId
           description: Filter by machine ID. Can be specified multiple times to filter on more than one machine.
+          style: form
+          explode: true
         - schema:
             type: string
           in: query
           name: name
           description: Filter by Instance name
         - schema:
-            type: string
+            type: array
+            items:
+              type: string
           in: query
           name: status
           description: Filter Instances by Status. Can be specified multiple times to filter on more than one status.
+          style: form
+          explode: true
         - schema:
-            type: string
+            type: array
+            items:
+              type: string
           in: query
           name: ipAddress
           description: Filter by IP address. Can be specified multiple times to filter on more than one IP address.
+          style: form
+          explode: true
         - schema:
             type: string
           in: query
           name: query
           description: 'Search for matches across all Instances. Input will be matched against name, description, status, and labels fields'
         - schema:
-            type: string
-            enum:
-              - InfrastructureProvider
-              - Tenant
-              - Site
-              - InstanceType
-              - Allocation
-              - VPC
-              - Machine
-              - OperatingSystem
-              - NetworkSecurityGroup
+            type: array
+            items:
+              type: string
+              enum:
+                - InfrastructureProvider
+                - Tenant
+                - Site
+                - InstanceType
+                - Allocation
+                - VPC
+                - Machine
+                - OperatingSystem
+                - NetworkSecurityGroup
           in: query
           name: includeRelation
-          description: Related entity to expand
+          description: "Related entity to expand. Repeat the parameter to specify multiple values."
+          style: form
+          explode: true
         - schema:
             $ref: '#/components/schemas/PageNumber'
             example: 1
@@ -8961,10 +9216,14 @@ paths:
           name: orderBy
           description: Ordering for pagination query
         - schema:
-            type: string
+            type: array
+            items:
+              type: string
           in: query
           name: networkSecurityGroupId
           description: Filter by Network Security Group ID. Can be specified multiple times to filter on more than one Network Security Group.
+          style: form
+          explode: true
     post:
       summary: Create an Instance
       operationId: create-instance
@@ -9620,19 +9879,23 @@ paths:
         Org must have a Tenant entity. Instance must belong to Tenant. User must have authorization role with `TENANT_ADMIN` suffix.
       parameters:
         - schema:
-            type: string
-            enum:
-              - InfrastructureProvider
-              - Tenant
-              - Site
-              - InstanceType
-              - Allocation
-              - VPC
-              - OperatingSystem
-              - NetworkSecurityGroup
+            type: array
+            items:
+              type: string
+              enum:
+                - InfrastructureProvider
+                - Tenant
+                - Site
+                - InstanceType
+                - Allocation
+                - VPC
+                - OperatingSystem
+                - NetworkSecurityGroup
           in: query
           name: includeRelation
-          description: Related entity to expand
+          description: "Related entity to expand. Repeat the parameter to specify multiple values."
+          style: form
+          explode: true
     delete:
       summary: Delete Instance
       operationId: delete-instance
@@ -9946,6 +10209,24 @@ paths:
           in: query
           name: orderBy
           description: Ordering for pagination query
+        - schema:
+            type: array
+            items:
+              type: string
+              enum:
+                - InfrastructureProvider
+                - Tenant
+                - Site
+                - InstanceType
+                - Machine
+                - VPC
+                - OperatingSystem
+                - NetworkSecurityGroup
+          in: query
+          name: includeRelation
+          description: Related Instance entities to load while retrieving status history. Repeat the parameter to request multiple relations.
+          style: form
+          explode: true
   '/v2/org/{org}/nico/instance/{instanceId}/interface':
     parameters:
       - schema:
@@ -10022,13 +10303,17 @@ paths:
           name: status
           description: Filter Interfaces by Status
         - schema:
-            type: string
-            enum:
-              - Instance
-              - Subnet
+            type: array
+            items:
+              type: string
+              enum:
+                - Instance
+                - Subnet
           in: query
           name: includeRelation
-          description: Related entity to expand
+          description: "Related entity to expand. Repeat the parameter to specify multiple values."
+          style: form
+          explode: true
         - schema:
             $ref: '#/components/schemas/PageNumber'
             example: 1
@@ -10123,18 +10408,26 @@ paths:
         Org must have a Tenant entity. User must have authorization role with `TENANT_ADMIN` suffix.
       parameters:
         - schema:
-            type: string
+            type: array
+            items:
+              type: string
           in: query
           name: status
-          description: Filter InfiniBand Interfaces by Status
+          description: "Filter InfiniBand Interfaces by Status. Repeat the parameter to specify multiple values."
+          style: form
+          explode: true
         - schema:
-            type: string
-            enum:
-              - Instance
-              - InfiniBandPartition
+            type: array
+            items:
+              type: string
+              enum:
+                - Instance
+                - InfiniBandPartition
           in: query
           name: includeRelation
-          description: Related entity to expand
+          description: "Related entity to expand. Repeat the parameter to specify multiple values."
+          style: form
+          explode: true
         - schema:
             $ref: '#/components/schemas/PageNumber'
             example: 1
@@ -10225,18 +10518,26 @@ paths:
         Org must have a Tenant entity. User must have authorization role with `TENANT_ADMIN` suffix.
       parameters:
         - schema:
-            type: string
+            type: array
+            items:
+              type: string
           in: query
           name: status
           description: Filter NVLink Interfaces by Status. Can be specified multiple times to filter on more than one status.
+          style: form
+          explode: true
         - schema:
-            type: string
-            enum:
-              - Instance
-              - NVLinkLogicalPartition
+            type: array
+            items:
+              type: string
+              enum:
+                - Instance
+                - NVLinkLogicalPartition
           in: query
           name: includeRelation
-          description: Related entity to expand
+          description: "Related entity to expand. Repeat the parameter to specify multiple values."
+          style: form
+          explode: true
         - schema:
             $ref: '#/components/schemas/PageNumber'
             example: 1
@@ -10315,34 +10616,54 @@ paths:
         Org must have a Tenant entity. User must have authorization role with `TENANT_ADMIN` suffix.
       parameters:
         - schema:
-            type: string
+            type: array
+            items:
+              type: string
           in: query
           name: siteId
           description: Filter InfiniBand Interfaces by Site ID.  Can be specified multiple times to filter on more than one ID.
+          style: form
+          explode: true
         - schema:
-            type: string
+            type: array
+            items:
+              type: string
           in: query
           name: instanceId
           description: Filter InfiniBand Interfaces by Instance ID.  Can be specified multiple times to filter on more than one ID.
+          style: form
+          explode: true
         - schema:
-            type: string
+            type: array
+            items:
+              type: string
           in: query
           name: infinibandPartitionId
           description: Filter InfiniBand Interfaces by InfiniBand Partition ID.  Can be specified multiple times to filter on more than one ID.
+          style: form
+          explode: true
         - schema:
-            type: string
+            type: array
+            items:
+              type: string
           in: query
           name: status
           description: Filter InfiniBand Interfaces by Status. Can be specified multiple times to filter on more than one status.
+          style: form
+          explode: true
         - schema:
-            type: string
-            enum:
-              - Instance
-              - InfiniBandPartition
-              - Site
+            type: array
+            items:
+              type: string
+              enum:
+                - Instance
+                - InfiniBandPartition
+                - Site
           in: query
           name: includeRelation
-          description: Related entity to expand
+          description: "Related entity to expand. Repeat the parameter to specify multiple values."
+          style: form
+          explode: true
         - schema:
             $ref: '#/components/schemas/PageNumber'
             example: 1
@@ -10418,38 +10739,62 @@ paths:
         Org must have a Tenant entity. User must have authorization role with `TENANT_ADMIN` suffix.
       parameters:
         - schema:
-            type: string
+            type: array
+            items:
+              type: string
           in: query
           name: status
           description: Filter NVLink Interfaces by Status. Can be specified multiple times to filter on more than one status.
+          style: form
+          explode: true
         - schema:
-            type: string
+            type: array
+            items:
+              type: string
           in: query
           name: siteId
           description: Filter NVLink Interfaces by Site ID.  Can be specified multiple times to filter on more than one ID.
+          style: form
+          explode: true
         - schema:
-            type: string
+            type: array
+            items:
+              type: string
           in: query
           name: instanceId
           description: Filter NVLink Interfaces by Instance ID.  Can be specified multiple times to filter on more than one ID.
+          style: form
+          explode: true
         - schema:
-            type: string
+            type: array
+            items:
+              type: string
           in: query
           name: nvLinkLogicalPartitionId
           description: Filter NVLink Interfaces by NVLink Logical Partition ID.  Can be specified multiple times to filter on more than one ID.
+          style: form
+          explode: true
         - schema:
-            type: string
+            type: array
+            items:
+              type: string
           in: query
           name: nvLinkDomainId
           description: Filter NVLink Interfaces by Core-reported NVLink domain UUID, not the rack group ID returned by the Domain API. Can be specified multiple times to filter on more than one UUID.
+          style: form
+          explode: true
         - schema:
-            type: string
-            enum:
-              - Instance
-              - NVLinkLogicalPartition
+            type: array
+            items:
+              type: string
+              enum:
+                - Instance
+                - NVLinkLogicalPartition
           in: query
           name: includeRelation
-          description: Related entity to expand
+          description: "Related entity to expand. Repeat the parameter to specify multiple values."
+          style: form
+          explode: true
         - schema:
             $ref: '#/components/schemas/PageNumber'
             example: 1
@@ -10629,37 +10974,53 @@ paths:
         - Dual-role (both Provider and Tenant): returns the union of the Tenant's and the Provider's Operating Systems.
       parameters:
         - schema:
-            type: string
+            type: array
+            items:
+              type: string
           in: query
           name: siteId
           description: Filter Operating Systems by Site ID.  Can be specified multiple times to filter on more than one ID.
+          style: form
+          explode: true
         - schema:
-            type: string
-            enum:
-              - Image
-              - iPXE
-              - TemplatedIpxe
+            type: array
+            items:
+              type: string
+              enum:
+                - Image
+                - iPXE
+                - TemplatedIpxe
           in: query
           name: type
-          description: Filter Operating Systems by Type
+          description: "Filter Operating Systems by Type. Repeat the parameter to specify multiple values."
+          style: form
+          explode: true
         - schema:
-            type: string
+            type: array
+            items:
+              type: string
           in: query
           name: status
           description: Filter Operating Systems by Status.  Can be specified multiple times to filter on more than one status.
+          style: form
+          explode: true
         - schema:
             type: string
           in: query
           name: query
           description: 'Provide query to search for matches. Input will be matched against name, description and status fields'
         - schema:
-            type: string
-            enum:
-              - InfrastructureProvider
-              - Tenant
+            type: array
+            items:
+              type: string
+              enum:
+                - InfrastructureProvider
+                - Tenant
           in: query
           name: includeRelation
-          description: Related entity to expand
+          description: "Related entity to expand. Repeat the parameter to specify multiple values."
+          style: form
+          explode: true
         - schema:
             $ref: '#/components/schemas/PageNumber'
             example: 1
@@ -10962,13 +11323,17 @@ paths:
         A Tenant admin may also read a Provider-owned Operating System when it is associated with at least one Site the Tenant can access.
       parameters:
         - schema:
-            type: string
-            enum:
-              - InfrastructureProvider
-              - Tenant
+            type: array
+            items:
+              type: string
+              enum:
+                - InfrastructureProvider
+                - Tenant
           in: query
           name: includeRelation
-          description: Related entity to expand
+          description: "Related entity to expand. Repeat the parameter to specify multiple values."
+          style: form
+          explode: true
     delete:
       summary: Delete Operating System
       operationId: delete-operating-system
@@ -11290,14 +11655,18 @@ paths:
           name: query
           description: 'Provide query to search for matches. Input will be matched against Machine ID, vendor, product name, hostname and status'
         - schema:
-            type: string
-            enum:
-              - InfrastructureProvider
-              - Site
-              - InstanceType
+            type: array
+            items:
+              type: string
+              enum:
+                - InfrastructureProvider
+                - Site
+                - InstanceType
           in: query
           name: includeRelation
-          description: Related entity to expand
+          description: "Related entity to expand. Repeat the parameter to specify multiple values."
+          style: form
+          explode: true
         - schema:
             $ref: '#/components/schemas/PageNumber'
             example: 1
@@ -11881,14 +12250,18 @@ paths:
         If org has a Tenant entity, then a user with `TENANT_ADMIN` role can request details for any Machine associated with Tenant's active Instances.
       parameters:
         - schema:
-            type: string
-            enum:
-              - InfrastructureProvider
-              - Site
-              - InstanceType
+            type: array
+            items:
+              type: string
+              enum:
+                - InfrastructureProvider
+                - Site
+                - InstanceType
           in: query
           name: includeRelation
-          description: Related entity to expand
+          description: "Related entity to expand. Repeat the parameter to specify multiple values."
+          style: form
+          explode: true
         - schema:
             type: boolean
           in: query
@@ -13324,10 +13697,14 @@ paths:
           name: vendor
           description: Filter Capabilities by Vendor
         - schema:
-            type: string
+            type: array
+            items:
+              type: integer
           in: query
           name: inactiveDevices
           description: 'Filter Capabilities by Inactive Devices value. Since the value is an array, multiple query parameters should be specified in the correct order. For example, to filter for [1, 3], specify inactiveDevices=1&inactiveDevices=3'
+          style: form
+          explode: true
         - schema:
             type: string
           in: query
@@ -13574,15 +13951,23 @@ paths:
           name: includeComponents
           description: Include rack components in response
         - schema:
-            type: string
+            type: array
+            items:
+              type: string
           in: query
           name: name
-          description: Filter by rack name
+          description: "Filter by rack name. Repeat the parameter to specify multiple values."
+          style: form
+          explode: true
         - schema:
-            type: string
+            type: array
+            items:
+              type: string
           in: query
           name: manufacturer
-          description: Filter by manufacturer
+          description: "Filter by manufacturer. Repeat the parameter to specify multiple values."
+          style: form
+          explode: true
         - schema:
             $ref: '#/components/schemas/PageNumber'
             example: 1
@@ -13796,17 +14181,25 @@ paths:
           required: true
           description: ID of the Site
         - schema:
-            type: string
+            type: array
+            items:
+              type: string
           name: name
           in: query
           required: false
-          description: Filter racks by name
+          description: "Filter racks by name. Repeat the parameter to specify multiple values."
+          style: form
+          explode: true
         - schema:
-            type: string
+            type: array
+            items:
+              type: string
           name: manufacturer
           in: query
           required: false
-          description: Filter racks by manufacturer
+          description: "Filter racks by manufacturer. Repeat the parameter to specify multiple values."
+          style: form
+          explode: true
       responses:
         '200':
           description: OK
@@ -14546,10 +14939,14 @@ paths:
           in: query
           description: Filter by tray type. When `id` is specified, the type disambiguates component IDs shared by different component types.
         - schema:
-            type: string
+            type: array
+            items:
+              type: string
           name: id
           in: query
           description: Filter by component ID. Can be specified multiple times to filter on more than one Tray ID.
+          style: form
+          explode: true
         - schema:
             type: integer
             format: int32
@@ -16371,17 +16768,25 @@ paths:
           required: false
           description: Scope to a specific Rack by name (mutually exclusive with rackId)
         - schema:
-            type: string
+            type: array
+            items:
+              type: string
           name: name
           in: query
           required: false
-          description: Filter trays by name
+          description: "Filter trays by name. Repeat the parameter to specify multiple values."
+          style: form
+          explode: true
         - schema:
-            type: string
+            type: array
+            items:
+              type: string
           name: manufacturer
           in: query
           required: false
-          description: Filter trays by manufacturer
+          description: "Filter trays by manufacturer. Repeat the parameter to specify multiple values."
+          style: form
+          explode: true
         - schema:
             type: string
             enum:
@@ -16393,11 +16798,15 @@ paths:
           required: false
           description: Filter trays by type. When `id` is specified, the type disambiguates component IDs shared by different component types.
         - schema:
-            type: string
+            type: array
+            items:
+              type: string
           name: id
           in: query
           required: false
           description: Filter by component ID (mutually exclusive with rackId/rackName; use repeated params for multiple values)
+          style: form
+          explode: true
         - schema:
             type: integer
             format: int32
@@ -17201,13 +17610,17 @@ paths:
           name: query
           description: 'Search for matches across all Network Security Groups. Input will be matched against name, description, and status fields'
         - schema:
-            type: string
-            enum:
-              - Tenant
-              - Site
+            type: array
+            items:
+              type: string
+              enum:
+                - Tenant
+                - Site
           in: query
           name: includeRelation
-          description: Related entity to expand
+          description: "Related entity to expand. Repeat the parameter to specify multiple values."
+          style: form
+          explode: true
         - schema:
             $ref: '#/components/schemas/PageNumber'
             example: 1
@@ -17324,13 +17737,17 @@ paths:
         Org must have a Tenant entity. Instance must belong to Tenant. User must have authorization role with `TENANT_ADMIN` suffix.
       parameters:
         - schema:
-            type: string
-            enum:
-              - Tenant
-              - Site
+            type: array
+            items:
+              type: string
+              enum:
+                - Tenant
+                - Site
           in: query
           name: includeRelation
-          description: Related entity to expand
+          description: "Related entity to expand. Repeat the parameter to specify multiple values."
+          style: form
+          explode: true
       tags:
         - Network Security Group
     patch:
@@ -17462,13 +17879,17 @@ paths:
           name: query
           description: 'Search for matches across all DPU Extension Services. Input will be matched against name, description, and status fields'
         - schema:
-            type: string
-            enum:
-              - Site
-              - Tenant
+            type: array
+            items:
+              type: string
+              enum:
+                - Site
+                - Tenant
           in: query
           name: includeRelation
-          description: Related entity to expand
+          description: "Related entity to expand. Repeat the parameter to specify multiple values."
+          style: form
+          explode: true
         - schema:
             $ref: '#/components/schemas/PageNumber'
             example: 1
@@ -17561,6 +17982,19 @@ paths:
         Org must have a Tenant entity. User must have authorization role with `TENANT_ADMIN` suffix.
       tags:
         - DPU Extension Service
+      parameters:
+        - schema:
+            type: array
+            items:
+              type: string
+              enum:
+                - Site
+                - Tenant
+          in: query
+          name: includeRelation
+          description: Related entities to expand. Repeat the parameter to request multiple relations.
+          style: form
+          explode: true
     delete:
       summary: Delete DPU Extension Service
       operationId: delete-dpu-extension-service
@@ -17773,12 +18207,16 @@ paths:
           name: query
           description: Search for matches across all SSH Key Groups. Input will be matched against the name field
         - schema:
-            type: string
-            enum:
-              - Tenant
+            type: array
+            items:
+              type: string
+              enum:
+                - Tenant
           in: query
           name: includeRelation
-          description: Related entity to expand
+          description: "Related entity to expand. Repeat the parameter to specify multiple values."
+          style: form
+          explode: true
         - schema:
             $ref: '#/components/schemas/PageNumber'
             example: 1
@@ -17963,6 +18401,18 @@ paths:
         Org must have a Tenant entity. User must have authorization role with `TENANT_ADMIN` suffix.
       tags:
         - SSH Key Group
+      parameters:
+        - schema:
+            type: array
+            items:
+              type: string
+              enum:
+                - Tenant
+          in: query
+          name: includeRelation
+          description: Related entities to expand. Repeat the parameter to request multiple relations.
+          style: form
+          explode: true
     delete:
       summary: Delete an SSH Key Group
       operationId: delete-ssh-key-group
@@ -18139,12 +18589,16 @@ paths:
           name: query
           description: Search for matches across all SSH Keys. Input will be matched against the name field
         - schema:
-            type: string
-            enum:
-              - Tenant
+            type: array
+            items:
+              type: string
+              enum:
+                - Tenant
           in: query
           name: includeRelation
-          description: Related entity to expand
+          description: "Related entity to expand. Repeat the parameter to specify multiple values."
+          style: form
+          explode: true
         - schema:
             $ref: '#/components/schemas/PageNumber'
             example: 1
@@ -18257,6 +18711,18 @@ paths:
         Org must have a Tenant entity. User must have authorization role with `TENANT_ADMIN` suffix.
       tags:
         - SSH Key
+      parameters:
+        - schema:
+            type: array
+            items:
+              type: string
+              enum:
+                - Tenant
+          in: query
+          name: includeRelation
+          description: Related entities to expand. Repeat the parameter to request multiple relations.
+          style: form
+          explode: true
     delete:
       summary: Delete an SSH Key
       operationId: delete-ssh-key
