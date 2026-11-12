@@ -140,7 +140,7 @@ async fn register_and_map(
         }
 
         mac_to_uuid.insert(ep.bmc_mac, reg_resp.uuid.clone());
-        uuid_to_mac.insert(reg_resp.uuid.clone(), ep.bmc_mac);
+        uuid_to_mac.insert(reg_resp.uuid, ep.bmc_mac);
     }
 
     if mac_to_uuid.is_empty() && !endpoints.is_empty() {

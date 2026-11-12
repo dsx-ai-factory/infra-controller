@@ -52,7 +52,9 @@ pub(super) fn validate_and_build_ports(
     let inventory = match config.service_vpc_slot_inventory.as_ref() {
         Some(inventory) => inventory,
         None if config.service_interfaces.is_empty() => return Ok(Vec::new()),
-        None => eyre::bail!("service interfaces require a fixed-slot inventory"),
+        None => {
+            eyre::bail!("service interfaces require a fixed-slot inventory");
+        }
     };
 
     // Validate configured topology even when no endpoint currently occupies a slot.
@@ -127,28 +129,34 @@ pub(super) fn validate_and_build_ports(
         })?;
 
         match slot_vpcs.get(&interface.slot_index) {
-            Some(existing) if *existing != vpc_id => eyre::bail!(
-                "service slot {} is bound to both VPC {existing} and VPC {vpc_id}",
-                interface.slot_index
-            ),
+            Some(existing) if *existing != vpc_id => {
+                eyre::bail!(
+                    "service slot {} is bound to both VPC {existing} and VPC {vpc_id}",
+                    interface.slot_index
+                );
+            }
             _ => {
                 slot_vpcs.insert(interface.slot_index, vpc_id);
             }
         }
         match vpc_slots.get(&vpc_id) {
-            Some(existing) if *existing != interface.slot_index => eyre::bail!(
-                "service VPC {vpc_id} is bound to both slot {existing} and slot {}",
-                interface.slot_index
-            ),
+            Some(existing) if *existing != interface.slot_index => {
+                eyre::bail!(
+                    "service VPC {vpc_id} is bound to both slot {existing} and slot {}",
+                    interface.slot_index
+                );
+            }
             _ => {
                 vpc_slots.insert(vpc_id, interface.slot_index);
             }
         }
         match vni_vpcs.get(&interface.vpc_vni) {
-            Some(existing) if *existing != vpc_id => eyre::bail!(
-                "service VNI {} is associated with both VPC {existing} and VPC {vpc_id}",
-                interface.vpc_vni
-            ),
+            Some(existing) if *existing != vpc_id => {
+                eyre::bail!(
+                    "service VNI {} is associated with both VPC {existing} and VPC {vpc_id}",
+                    interface.vpc_vni
+                );
+            }
             _ => {
                 vni_vpcs.insert(interface.vpc_vni, vpc_id);
             }

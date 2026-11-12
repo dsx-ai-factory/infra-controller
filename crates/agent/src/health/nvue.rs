@@ -72,7 +72,7 @@ impl NvueHealthCheck<'_> {
             Err(alert) => {
                 // If the NVUE API wasn't healthy, we can't use it to check
                 // anything else.
-                report.alerts.push(alert);
+                report.alerts.push(*alert);
                 return report;
             }
         }
@@ -114,18 +114,18 @@ impl NvueHealthCheck<'_> {
     }
 
     /// Checks whether the NVUE API can answer a basic system-information request.
-    async fn nvue_api_health(&self) -> Result<HealthProbeSuccess, HealthProbeAlert> {
+    async fn nvue_api_health(&self) -> Result<HealthProbeSuccess, Box<HealthProbeAlert>> {
         match self.nvue_client.system_info().await {
             Ok(_) => Ok(HealthProbeSuccess {
                 id: probe_ids::NvueApiRunning.clone(),
                 target: None,
             }),
-            Err(e) => Err(make_alert(
+            Err(e) => Err(Box::new(make_alert(
                 probe_ids::NvueApiRunning.clone(),
                 None,
                 format!("Error communicating with NVUE API: {e}"),
                 true,
-            )),
+            ))),
         }
     }
 }

@@ -372,7 +372,7 @@ impl Ufm {
         for pb in ports {
             membership = pb.membership;
             index0 = pb.index0;
-            guids.push(pb.guid.to_string());
+            guids.push(pb.guid);
         }
 
         #[derive(Serialize, Deserialize, Debug)]

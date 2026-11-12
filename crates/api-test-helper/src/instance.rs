@@ -56,7 +56,7 @@ async fn wait_for_powered_off_alert_to_clear(
         tokio::time::sleep(Duration::from_millis(500)).await;
     }
 
-    eyre::bail!("machine {host_machine_id} still has a PoweredOff health alert")
+    eyre::bail!("machine {host_machine_id} still has a PoweredOff health alert");
 }
 
 pub async fn create(

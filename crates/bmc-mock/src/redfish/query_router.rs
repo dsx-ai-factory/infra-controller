@@ -80,7 +80,7 @@ async fn process(State(mut state): State<Querying>, request: Request<Body>) -> R
     let (parts, bytes) = match json_bytes(response).await {
         Ok(buffered) => buffered,
         // Collection queries are defined for JSON, never streaming bodies.
-        Err(BufferError::NotJson(response)) => return response,
+        Err(BufferError::NotJson(response)) => return *response,
         Err(BufferError::Read(e)) => {
             return http::redfish_error(
                 StatusCode::INTERNAL_SERVER_ERROR,

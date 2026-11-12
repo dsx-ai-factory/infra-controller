@@ -204,7 +204,7 @@ pub(in crate::bmc) enum SpawnError {
     #[error("error sending message from BMC to frontend: no active receivers")]
     SendingMsgToFrontend,
     #[error("error connecting to SSH BMC: {0}")]
-    ClientCreation(#[from] ClientCreationError),
+    ClientCreation(#[source] Box<ClientCreationError>),
     #[error("error opening session to SSH BMC: {error}")]
     OpeningSession { error: russh::Error },
     #[error("error activating serial console: {0}")]
@@ -213,6 +213,12 @@ pub(in crate::bmc) enum SpawnError {
     MessageProxying { error: MessageProxyError },
     #[error("cancelled during {0:?}")]
     Cancelled(CancelPhase),
+}
+
+impl From<ClientCreationError> for SpawnError {
+    fn from(error: ClientCreationError) -> Self {
+        Self::ClientCreation(Box::new(error))
+    }
 }
 
 impl SpawnError {
@@ -250,7 +256,7 @@ pub(in crate::bmc) enum ClientCreationError {
         kind: &'static str,
         user: String,
         addr: SocketAddr,
-        error: russh::Error,
+        error: Box<russh::Error>,
     },
 
     #[error("could not authenticate to {addr} as {user}, all authentication attempts failed")]
@@ -330,7 +336,7 @@ async fn make_authenticated_client(
                         kind: "PublicKey",
                         user: user.to_owned(),
                         addr: *addr,
-                        error,
+                        error: Box::new(error),
                     })? {
                     AuthResult::Success => {
                         tracing::debug!(
@@ -352,7 +358,7 @@ async fn make_authenticated_client(
                         kind: "KeyboardInteractive",
                         user: user.to_owned(),
                         addr: *addr,
-                        error,
+                        error: Box::new(error),
                     })?;
 
                 loop {
@@ -367,7 +373,7 @@ async fn make_authenticated_client(
                                     kind: "KeyboardInteractive authentication response",
                                     user: user.to_owned(),
                                     addr: *addr,
-                                    error,
+                                    error: Box::new(error),
                                 })?;
                             // We may get multiple info requests, so we to do this in a loop
                             // until we get a success or failure.
@@ -397,7 +403,7 @@ async fn make_authenticated_client(
                         kind: "Password",
                         user: user.to_owned(),
                         addr: *addr,
-                        error,
+                        error: Box::new(error),
                     })? {
                     AuthResult::Success => {
                         tracing::debug!(

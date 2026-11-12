@@ -4351,7 +4351,7 @@ impl NvSwitchManager for RmsBackend {
                         let summary = if info.message.is_empty() {
                             format!("status {}", info.status)
                         } else {
-                            info.message.clone()
+                            info.message
                         };
                         results.push(SwitchSlotAndTrayResult {
                             bmc_mac: ep.bmc_mac,
