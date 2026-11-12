@@ -4505,9 +4505,27 @@ async fn test_firmware_upgrade_wait_for_complete_transitions_to_error_on_job_fai
     let mut outcome = outcome?;
     match &outcome {
         StateHandlerOutcome::Transition {
-            next_state: RackState::Error { cause, .. },
+            next_state:
+                RackState::Error {
+                    cause,
+                    recovery_policy,
+                    ..
+                },
             ..
-        } => assert_logged_error_transition(&logs, cause),
+        } => {
+            assert_logged_error_transition(&logs, cause);
+            assert_eq!(
+                cause,
+                &format!(
+                    "firmware upgrade failed: 1/1 devices failed; failed devices: [{}]",
+                    host.host_snapshot.id
+                )
+            );
+            assert_eq!(
+                *recovery_policy,
+                model::rack::RackErrorRecoveryPolicy::MaintenanceRequestRequired
+            );
+        }
         StateHandlerOutcome::Transition { next_state, .. } => {
             panic!("Expected rack to transition to Error, got {next_state:?}")
         }
@@ -4772,11 +4790,16 @@ async fn test_firmware_upgrade_wait_for_complete_waits_for_all_nodes_to_be_termi
     }
 
     match outcome {
-        StateHandlerOutcome::Transition { next_state, .. } => {
-            assert!(
-                matches!(next_state, RackState::Error { .. }),
-                "Expected rack to transition to Error after all tracked machines left firmware wait with a failure, got {:?}",
-                next_state
+        StateHandlerOutcome::Transition {
+            next_state: RackState::Error { cause, .. },
+            ..
+        } => {
+            assert_eq!(
+                cause,
+                format!(
+                    "firmware upgrade failed: 1/2 devices failed; failed devices: [{}]",
+                    host_a.host_snapshot.id
+                )
             );
         }
         other => panic!(
@@ -6263,12 +6286,70 @@ async fn test_nvos_update_waits_for_all_images_before_failure_and_starts_passwor
 
     assert!(
         rack.nvos_update_job
+            .as_ref()
             .expect("NVOS update job should remain persisted during password recovery")
             .all_switches()
             .all(|switch| matches!(
                 switch.password_update,
                 NvosPasswordUpdateState::InProgress { .. }
             ))
+    );
+
+    // Once both password jobs complete, only the failed image's switch belongs
+    // in the persisted rack error, not its successfully updated peer.
+    for switch in rack.nvos_update_job.as_ref().unwrap().all_switches() {
+        let NvosPasswordUpdateState::InProgress { job_id } = &switch.password_update else {
+            panic!("expected a password recovery job");
+        };
+        env.rms_sim
+            .queue_get_job_status_response(Ok(rms::GetJobStatusResponse {
+                job_states: vec![rms::JobStatus {
+                    job_id: job_id.clone(),
+                    execution_state: rms::JobExecutionState::Completed as i32,
+                    ..Default::default()
+                }],
+            }))
+            .await;
+    }
+    env.run_rack_controller_iteration().await;
+
+    let rack = get_db_rack(env.db_reader().as_mut(), &rack_id).await;
+    let RackState::Error {
+        cause,
+        recovery_policy,
+        ..
+    } = &rack.controller_state.value
+    else {
+        panic!("failed NVOS image should transition the rack to Error");
+    };
+    assert_eq!(
+        cause,
+        &format!(
+            "NVOS update failed: 1/2 switches failed; failed switches: [{}]",
+            switch_ids[0]
+        )
+    );
+    assert_eq!(
+        *recovery_policy,
+        model::rack::RackErrorRecoveryPolicy::MaintenanceRequestRequired
+    );
+    assert!(rack.config.maintenance_requested.is_none());
+
+    let response = env
+        .api
+        .get_rack(Request::new(rpc::forge::GetRackRequest {
+            id: Some(rack_id.to_string()),
+        }))
+        .await?
+        .into_inner();
+    let public_rack = response
+        .rack
+        .into_iter()
+        .find(|rack| rack.id.as_ref() == Some(&rack_id))
+        .unwrap();
+    assert_eq!(
+        serde_json::from_str::<RackState>(&public_rack.status.unwrap().lifecycle.unwrap().state)?,
+        rack.controller_state.value
     );
 
     Ok(())

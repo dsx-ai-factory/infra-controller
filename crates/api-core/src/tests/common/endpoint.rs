@@ -152,7 +152,6 @@ fn build_exploration_report(
         lockdown_status: None,
         power_shelf_id: None,
         switch_id: None,
-        remediation_error: None,
         ..Default::default()
     }
 }

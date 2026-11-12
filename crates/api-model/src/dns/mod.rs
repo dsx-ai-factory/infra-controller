@@ -42,8 +42,6 @@ pub struct Domain {
     pub name: String,
     /// Default TTL for the zone's records; `None` means the site default of 300 seconds.
     pub default_ttl: Option<ZoneTtl>,
-    /// Owning VPC, or `None` for an infrastructure domain. Immutable after creation.
-    pub vpc_id: Option<carbide_uuid::vpc::VpcId>,
     pub created: DateTime<Utc>,
     pub updated: DateTime<Utc>,
     pub deleted: Option<DateTime<Utc>>,
@@ -75,8 +73,6 @@ pub struct NewDomain {
     pub name: String,
     /// Default TTL for the zone's records; omission means the site default of 300 seconds.
     pub default_ttl: Option<ZoneTtl>,
-    /// Owning VPC; omission creates an infrastructure domain.
-    pub vpc_id: Option<carbide_uuid::vpc::VpcId>,
     pub soa: Option<SoaSnapshot>,
 }
 
@@ -87,7 +83,6 @@ impl NewDomain {
         Self {
             soa: Some(SoaSnapshot::new(&name)),
             default_ttl: None,
-            vpc_id: None,
             name,
         }
     }

@@ -36,11 +36,11 @@ use carbide_secrets::create_credential_manager;
 use carbide_secrets::credentials::{
     BmcCredentialType, CredentialKey, CredentialReader, Credentials,
 };
+use carbide_tls::client_config::ClientCert;
 use carbide_utils::HostPortPair;
 use carbide_uuid::machine::MachineId;
 use carbide_uuid::rack::{RackId, RackProfileId};
 use eyre::{ContextCompat, WrapErr};
-use forge_tls::client_config::ClientCert;
 use futures::FutureExt;
 use mac_address::MacAddress;
 use machine_a_tron::{
@@ -55,8 +55,8 @@ use model::power_shelf::{PowerShelfControllerState, PowerShelfDecommissioningSta
 use model::rack::{RackMaintenanceState, RackState};
 use model::site_explorer::EndpointExplorationError;
 use model::switch::{SwitchControllerState, SwitchDecommissioningState};
+use rpc::carbide_tls_client::{CarbideClientConfig, CarbideClientT, CarbideTlsClient};
 use rpc::forge;
-use rpc::forge_tls_client::{ForgeClientConfig, ForgeClientT, ForgeTlsClient};
 use serde_json::{Value, json};
 use tokio::time::{Instant, sleep, timeout};
 use tokio_util::sync::CancellationToken;
@@ -138,7 +138,7 @@ async fn run() -> eyre::Result<()> {
             .await?,
         );
         let api_url = format!("https://{}", env.carbide_api_addrs[0]);
-        let client_config = ForgeClientConfig::new(
+        let client_config = CarbideClientConfig::new(
             LOCALHOST_CERTS.ca_cert.to_string_lossy().into_owned(),
             Some(ClientCert {
                 cert_path: LOCALHOST_CERTS.client_cert.to_string_lossy().into_owned(),
@@ -147,7 +147,7 @@ async fn run() -> eyre::Result<()> {
         );
         let client = timeout(
             RPC_TIMEOUT,
-            ForgeTlsClient::new(&client_config).build(&api_url),
+            CarbideTlsClient::new(&client_config).build(&api_url),
         )
         .await??;
         // Fresh sites have no NVOS rotation target. Publish one before any switch
@@ -519,7 +519,7 @@ struct View {
 impl View {
     async fn read(
         env: &IntegrationTestEnvironment,
-        client: &ForgeClientT,
+        client: &CarbideClientT,
         host: &DeviceHandle,
     ) -> eyre::Result<Option<Self>> {
         let Some(host_id) = host.observed_machine_id() else {
@@ -614,7 +614,7 @@ enum ViewTarget {
 
 async fn wait_for_view(
     env: &IntegrationTestEnvironment,
-    client: &ForgeClientT,
+    client: &CarbideClientT,
     host: &DeviceHandle,
     target: ViewTarget,
 ) -> eyre::Result<View> {
@@ -664,7 +664,7 @@ async fn wait_for_view(
 /// even after Ready. Check its final source and verified generation, and capture
 /// the boot selection and all five state versions for optional stability polling.
 async fn ready_fingerprint(
-    client: &ForgeClientT,
+    client: &CarbideClientT,
     host: &DeviceHandle,
     view: &View,
 ) -> eyre::Result<(bool, Value)> {
@@ -749,7 +749,7 @@ async fn ready_fingerprint(
 /// this request to ConfigureNmxCluster so no firmware or power activity is injected.
 async fn configure_fabric(
     env: &IntegrationTestEnvironment,
-    client: &ForgeClientT,
+    client: &CarbideClientT,
 ) -> eyre::Result<Value> {
     let deadline = Instant::now() + CONVERGENCE_TIMEOUT;
     let initial_version = loop {
@@ -842,7 +842,7 @@ async fn configure_fabric(
     }
 }
 
-async fn rack_state(client: &ForgeClientT) -> eyre::Result<(RackState, String)> {
+async fn rack_state(client: &CarbideClientT) -> eyre::Result<(RackState, String)> {
     let racks = rpc(client.clone().find_racks_by_ids(forge::RacksByIdsRequest {
         rack_ids: vec![RackId::new(RACK_ID)],
     }))
@@ -985,7 +985,7 @@ async fn bmc_interface_generations(
 /// Return the rebuilt cohort's stable Ready view for the next admission baseline.
 async fn ready_force_delete_rebuild(
     env: &IntegrationTestEnvironment,
-    client: &ForgeClientT,
+    client: &CarbideClientT,
     handles: &BTreeMap<String, DeviceHandle>,
     http: &reqwest::Client,
     bmc_addr: SocketAddr,
@@ -1180,7 +1180,7 @@ async fn ready_force_delete_rebuild(
 #[allow(clippy::too_many_arguments)]
 async fn cycles(
     env: &IntegrationTestEnvironment,
-    client: &ForgeClientT,
+    client: &CarbideClientT,
     handles: &BTreeMap<String, DeviceHandle>,
     rms_service: &RmsMock,
     rms_addr: SocketAddr,
@@ -2635,7 +2635,7 @@ fn aux_power_generations(host: &DeviceHandle) -> eyre::Result<BTreeMap<String, u
 }
 
 async fn observe_aux_power_cycle(
-    client: &ForgeClientT,
+    client: &CarbideClientT,
     host: &DeviceHandle,
     bmc_port: u16,
     before: &BTreeMap<String, u64>,

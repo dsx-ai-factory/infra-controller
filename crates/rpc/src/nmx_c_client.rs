@@ -22,9 +22,9 @@ use chrono::{DateTime, Utc};
 use nonempty::NonEmpty;
 use tonic::Status;
 
-use crate::forge_api_client::FailOverOn;
-use crate::forge_tls_client::{
-    ApiConfig, ForgeClientConfig, ForgeTlsClient, NmxCClientT, RetryConfig,
+use crate::carbide_api_client::FailOverOn;
+use crate::carbide_tls_client::{
+    ApiConfig, CarbideClientConfig, CarbideTlsClient, NmxCClientT, RetryConfig,
 };
 use crate::protos::nmx_c_client::NmxCApiClient;
 
@@ -46,7 +46,7 @@ impl NmxCApiClient {
 #[derive(Debug)]
 pub struct NmxCTlsConnectionProvider {
     pub urls: NonEmpty<String>,
-    pub client_config: ForgeClientConfig,
+    pub client_config: CarbideClientConfig,
     pub retry_config: RetryConfig,
     pub fail_over_on: FailOverOn,
     pub last_connection_index: AtomicUsize,
@@ -86,7 +86,7 @@ impl tonic_client_wrapper::ConnectionProvider<NmxCClientT> for NmxCTlsConnection
 
         let mut retries = 0;
         loop {
-            match ForgeTlsClient::retry_build_nmx_c(
+            match CarbideTlsClient::retry_build_nmx_c(
                 &ApiConfig::new(url, &self.client_config).with_retry_config(RetryConfig {
                     // We do our own retry counting
                     retries: 1,
@@ -124,7 +124,7 @@ impl tonic_client_wrapper::ConnectionProvider<NmxCClientT> for NmxCTlsConnection
                         cert_path = &client_cert.cert_path,
                         %old_cert_date,
                         %new_cert_date,
-                        "ForgeApiClient: Reconnecting to pick up newer client certificate"
+                        "CarbideApiClient: Reconnecting to pick up newer client certificate"
                     );
                     true
                 } else {
@@ -141,7 +141,7 @@ impl tonic_client_wrapper::ConnectionProvider<NmxCClientT> for NmxCTlsConnection
                         key_path = &client_cert.key_path,
                         %old_key_date,
                         %new_key_date,
-                        "ForgeApiClient: Reconnecting to pick up newer client key"
+                        "CarbideApiClient: Reconnecting to pick up newer client key"
                     );
                     true
                 } else {

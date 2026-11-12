@@ -256,7 +256,9 @@ impl From<Args> for rpc::forge::ExpectedSwitch {
 mod tests {
     use carbide_test_support::Outcome::{FailsWith, Yields};
     use carbide_test_support::scenarios;
-    use rpc::forge_api_client::{ExpectedSwitchUpdateField as Field, expected_switch_update_mask};
+    use rpc::carbide_api_client::{
+        ExpectedSwitchUpdateField as Field, expected_switch_update_mask,
+    };
 
     use super::*;
     use crate::cfg::cli_options::{CliCommand, CliOptions};

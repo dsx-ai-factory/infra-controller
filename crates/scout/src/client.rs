@@ -15,8 +15,8 @@
  * limitations under the License.
  */
 
-use ::rpc::forge_tls_client::{self, ApiConfig, ForgeClientConfig};
-use forge_tls::client_config::ClientCert;
+use ::rpc::carbide_tls_client::{self, ApiConfig, CarbideClientConfig};
+use carbide_tls::client_config::ClientCert;
 use scout::{CarbideClientError, CarbideClientResult};
 
 use crate::Options;
@@ -24,8 +24,8 @@ use crate::Options;
 /// The client TLS config every scout connection to the API uses. Callers that
 /// hold a long-lived client of their own build it from here so none of them
 /// silently drops the node-auth JWT.
-pub(super) fn forge_client_config(config: &Options) -> ForgeClientConfig {
-    ForgeClientConfig::new(
+pub(super) fn carbide_client_config(config: &Options) -> CarbideClientConfig {
+    CarbideClientConfig::new(
         config.root_ca.clone(),
         Some(ClientCert {
             cert_path: config.client_cert.clone(),
@@ -39,11 +39,11 @@ pub(super) fn forge_client_config(config: &Options) -> ForgeClientConfig {
 
 pub(super) async fn create_forge_client(
     config: &Options,
-) -> CarbideClientResult<forge_tls_client::ForgeClientT> {
-    let client_config = forge_client_config(config);
+) -> CarbideClientResult<carbide_tls_client::CarbideClientT> {
+    let client_config = carbide_client_config(config);
     let api_config = ApiConfig::new(&config.api, &client_config);
 
-    let client = forge_tls_client::ForgeTlsClient::retry_build(&api_config)
+    let client = carbide_tls_client::CarbideTlsClient::retry_build(&api_config)
         .await
         .map_err(|err| CarbideClientError::TransportError(err.to_string()))?;
     Ok(client)
@@ -60,7 +60,7 @@ pub(super) fn firmware_download_config(
 > {
     use libmlx::firmware::core_download::CoreFirmwareDownloadConfig;
     use libmlx::firmware::operation::SupervisorLaunchError;
-    let config = forge_client_config(options);
+    let config = carbide_client_config(options);
     let invalid = || {
         SupervisorLaunchError::InvalidConfiguration("core firmware transport settings are invalid")
     };

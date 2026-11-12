@@ -25,8 +25,8 @@ use axum::response::IntoResponse;
 use axum::routing::{get, post};
 use carbide_host_support::agent_config::AgentConfig;
 use carbide_instrument::testing::{capture_logs, capture_logs_async};
+use rpc::carbide_tls_client::CarbideClientConfig;
 use rpc::forge;
-use rpc::forge_tls_client::ForgeClientConfig;
 use tokio::sync::{Notify, mpsc};
 use tokio::time::Instant;
 
@@ -209,7 +209,7 @@ async fn dropping_config_fetcher_releases_state_before_next_interval() {
     });
     let (address, server) = run_server(state).await;
     let config = fetcher_config(address, Duration::from_secs(30));
-    let client_config = Arc::downgrade(&config.forge_client_config);
+    let client_config = Arc::downgrade(&config.carbide_client_config);
     let fetcher = PeriodicConfigFetcher::new(config).await;
     // Allow the background task to enter its first wait. Keep no reader, which
     // would independently retain the shared state after the owner is dropped.
@@ -241,7 +241,7 @@ async fn failed_initial_fetch_retries_before_host_id_lookup_expires() {
     });
     let (address, server) = run_server(state.clone()).await;
     let config = fetcher_config(address, Duration::from_secs(30));
-    let client_config = config.forge_client_config.clone();
+    let client_config = config.carbide_client_config.clone();
     let forge_api = config.forge_api.clone();
     let agent_config = AgentConfig::default();
     assert!(agent_config.machine.interface_id.is_none());
@@ -414,7 +414,7 @@ fn fetcher_config(address: SocketAddr, interval: Duration) -> PeriodicConfigFetc
             .parse()
             .unwrap(),
         forge_api: format!("https://{address}"),
-        forge_client_config: Arc::new(ForgeClientConfig {
+        carbide_client_config: Arc::new(CarbideClientConfig {
             root_ca_path: concat!(env!("CARGO_MANIFEST_DIR"), "/test-certs/tls.crt").into(),
             ..Default::default()
         }),

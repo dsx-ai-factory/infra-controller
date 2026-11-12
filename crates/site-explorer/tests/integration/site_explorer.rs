@@ -1819,7 +1819,7 @@ async fn test_rejected_report_is_not_treated_as_refreshed_for_ingestion(
 }
 
 #[sqlx_test]
-async fn test_rejected_successful_report_preserves_topology_and_skips_only_its_remediation(
+async fn test_rejected_successful_report_preserves_only_accepted_topology(
     pool: PgPool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let env = Env::new(pool).await;
@@ -1849,7 +1849,6 @@ async fn test_rejected_successful_report_preserves_topology_and_skips_only_its_r
             CURRENT_STATE_MODEL_VERSION,
         )
         .await?;
-        // Leave the BMC interface unattached for preingestion remediation.
         // The report's machine_id identifies this topology for firmware writes.
         db::machine_topology::create_or_update(&mut txn, &machine_id, &hardware_info).await?;
         db::machine_topology::update_firmware_version_by_machine_id(
@@ -1932,11 +1931,6 @@ async fn test_rejected_successful_report_preserves_topology_and_skips_only_its_r
         report.systems[0].model = Some("updated hardware model".to_string());
         report.systems[0].bios_version = Some("new-bios".to_string());
         report.service[0].inventories[0].version = Some("new-bmc".to_string());
-        report.remediation_error = Some(EndpointExplorationError::RedfishError {
-            details: "transient redfish failure".to_string(),
-            response_body: None,
-            response_code: Some(500),
-        });
         explorer.insert_endpoint_result(endpoint.address, Ok(report));
         explorer
             .endpoint_explorer()
@@ -2025,17 +2019,14 @@ async fn test_rejected_successful_report_preserves_topology_and_skips_only_its_r
             .bios_version,
         "new-bios"
     );
-    assert_eq!(
+    assert!(
         explorer
             .endpoint_explorer()
             .redfish_power_control_calls
             .lock()
             .unwrap()
-            .as_slice(),
-        &[(
-            std::net::SocketAddr::new(sibling_endpoint.address, 443),
-            libredfish::SystemPowerControl::On,
-        )],
+            .is_empty(),
+        "successful reports do not trigger error remediation"
     );
     Ok(())
 }
@@ -2375,6 +2366,7 @@ async fn test_expected_machine_device_type_metrics(
         id: test_sku_gpu_id.clone(),
         description: "Test GPU SKU".to_string(),
         created: chrono::Utc::now(),
+        updated: None,
         components: model::sku::SkuComponents {
             chassis: model::sku::SkuComponentChassis {
                 vendor: format!("test_vendor_gpu_{}", uuid::Uuid::new_v4()),
@@ -2396,6 +2388,7 @@ async fn test_expected_machine_device_type_metrics(
         id: test_sku_no_type_id.clone(),
         description: "Test SKU without device type".to_string(),
         created: chrono::Utc::now(),
+        updated: None,
         components: model::sku::SkuComponents {
             chassis: model::sku::SkuComponentChassis {
                 vendor: format!("test_vendor_no_type_{}", uuid::Uuid::new_v4()),
@@ -2541,7 +2534,6 @@ async fn test_expected_machine_device_type_metrics(
                 lockdown_status: None,
                 power_shelf_id: None,
                 switch_id: None,
-                remediation_error: None,
                 ..Default::default()
             }),
         ),
@@ -2567,7 +2559,6 @@ async fn test_expected_machine_device_type_metrics(
                 lockdown_status: None,
                 power_shelf_id: None,
                 switch_id: None,
-                remediation_error: None,
                 ..Default::default()
             }),
         ),
@@ -2593,7 +2584,6 @@ async fn test_expected_machine_device_type_metrics(
                 lockdown_status: None,
                 power_shelf_id: None,
                 switch_id: None,
-                remediation_error: None,
                 ..Default::default()
             }),
         ),
@@ -2928,7 +2918,6 @@ async fn test_site_explorer_main(pool: PgPool) -> Result<(), Box<dyn std::error:
                 lockdown_status: None,
                 power_shelf_id: None,
                 switch_id: None,
-                remediation_error: None,
                 ..Default::default()
             }),
         ),
@@ -3332,7 +3321,6 @@ async fn test_site_explorer_audit_exploration_results(
                 lockdown_status: None,
                 power_shelf_id: None,
                 switch_id: None,
-                remediation_error: None,
                 ..Default::default()
             },
         ),
@@ -3363,7 +3351,6 @@ async fn test_site_explorer_audit_exploration_results(
                 lockdown_status: None,
                 power_shelf_id: None,
                 switch_id: None,
-                remediation_error: None,
                 ..Default::default()
             },
         ),
@@ -3389,7 +3376,6 @@ async fn test_site_explorer_audit_exploration_results(
                 lockdown_status: None,
                 power_shelf_id: None,
                 switch_id: None,
-                remediation_error: None,
                 ..Default::default()
             },
         ),
@@ -3419,7 +3405,6 @@ async fn test_site_explorer_audit_exploration_results(
                 lockdown_status: None,
                 power_shelf_id: None,
                 switch_id: None,
-                remediation_error: None,
                 ..Default::default()
             },
         ),
@@ -3973,6 +3958,7 @@ async fn test_fallback_dpu_serial(pool: PgPool) -> Result<(), Box<dyn std::error
         id: "Sku1".to_string(),
         description: "Test SKU for site explorer test".to_string(),
         created: chrono::Utc::now(),
+        updated: None,
         components: model::sku::SkuComponents {
             chassis: model::sku::SkuComponentChassis {
                 vendor: "Vendor1".to_string(),

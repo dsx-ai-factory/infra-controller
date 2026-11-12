@@ -21,13 +21,13 @@ use std::path::Path;
 use std::time::{Duration, Instant};
 
 use carbide_instrument::{Event, LabelValue, Outcome, emit};
+use carbide_tls::client_config::ClientCert;
 use carbide_utils::cmd::TokioCmd;
 use carbide_uuid::machine::MachineId;
 use carbide_uuid::machine_validation::MachineValidationId;
 use chrono::Utc;
-use forge_tls::client_config::ClientCert;
-use rpc::forge_tls_client;
-use rpc::forge_tls_client::{ApiConfig, ForgeClientConfig};
+use rpc::carbide_tls_client;
+use rpc::carbide_tls_client::{ApiConfig, CarbideClientConfig};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tokio::sync::mpsc;
@@ -518,8 +518,8 @@ impl MachineValidation {
     }
     pub(crate) async fn create_forge_client(
         &self,
-    ) -> Result<forge_tls_client::ForgeClientT, MachineValidationError> {
-        let client_config = ForgeClientConfig::new(
+    ) -> Result<carbide_tls_client::CarbideClientT, MachineValidationError> {
+        let client_config = CarbideClientConfig::new(
             self.options.root_ca.clone(),
             Some(ClientCert {
                 cert_path: self.options.client_cert.clone(),
@@ -528,7 +528,7 @@ impl MachineValidation {
         );
         let api_config = ApiConfig::new(&self.options.api, &client_config);
 
-        let client = forge_tls_client::ForgeTlsClient::retry_build(&api_config)
+        let client = carbide_tls_client::CarbideTlsClient::retry_build(&api_config)
             .await
             .map_err(|err| MachineValidationError::Generic(err.to_string()))?;
         Ok(client)

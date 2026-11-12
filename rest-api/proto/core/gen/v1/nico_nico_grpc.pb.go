@@ -562,6 +562,7 @@ const (
 	Forge_ReleaseDPUServiceSyncHold_FullMethodName                          = "/forge.Forge/ReleaseDPUServiceSyncHold"
 	Forge_ComponentPowerControl_FullMethodName                              = "/forge.Forge/ComponentPowerControl"
 	Forge_GetComponentPowerDetails_FullMethodName                           = "/forge.Forge/GetComponentPowerDetails"
+	Forge_GetComponentFirmwareDetails_FullMethodName                        = "/forge.Forge/GetComponentFirmwareDetails"
 	Forge_ComponentReset_FullMethodName                                     = "/forge.Forge/ComponentReset"
 	Forge_GetComponentResetStatus_FullMethodName                            = "/forge.Forge/GetComponentResetStatus"
 	Forge_ComponentConfigureSwitchCertificate_FullMethodName                = "/forge.Forge/ComponentConfigureSwitchCertificate"
@@ -626,13 +627,16 @@ type ForgeClient interface {
 	// allocation. Success means Core committed, not that the dataplane converged.
 	ChangeVpcRoutingProfile(ctx context.Context, in *VpcChangeRoutingProfileRequest, opts ...grpc.CallOption) (*VpcRoutingState, error)
 	// Operator cleanup after independently verifying that no DPU or fabric route
-	// still uses the retained VNI. Core does not verify dataplane convergence.
+	// still uses the retained VNI. Integrated release completes in the VPC
+	// transaction. Remote success follows provider release confirmation; an error
+	// can follow committed release intent and an advanced VPC version.
+	// Core does not verify dataplane convergence.
 	ReleaseVpcInactiveVni(ctx context.Context, in *VpcReleaseInactiveVniRequest, opts ...grpc.CallOption) (*VpcReleaseInactiveVniResult, error)
 	UpdateVpcVirtualization(ctx context.Context, in *VpcUpdateVirtualizationRequest, opts ...grpc.CallOption) (*VpcUpdateVirtualizationResult, error)
 	// Deletion does not release a retained VNI implicitly. Call
 	// ReleaseVpcInactiveVni after verifying convergence before deleting the VPC.
 	// Retained or inconsistent owned allocations cause FailedPrecondition, as do
-	// live DNS domains owned by this VPC. Deleted domains do not block deletion.
+	// unfinished remote cancellation or release.
 	DeleteVpc(ctx context.Context, in *VpcDeletionRequest, opts ...grpc.CallOption) (*VpcDeletionResult, error)
 	FindVpcIds(ctx context.Context, in *VpcSearchFilter, opts ...grpc.CallOption) (*VpcIdList, error)
 	FindVpcsByIds(ctx context.Context, in *VpcsByIdsRequest, opts ...grpc.CallOption) (*VpcList, error)
@@ -812,7 +816,13 @@ type ForgeClient interface {
 	// Power Control
 	InvokeInstancePower(ctx context.Context, in *InstancePowerRequest, opts ...grpc.CallOption) (*InstancePowerResult, error)
 	ForgeAgentControl(ctx context.Context, in *ForgeAgentControlRequest, opts ...grpc.CallOption) (*ForgeAgentControlResponse, error)
-	// PRIVILEGED: Creates a new machine from nothing
+	// PRIVILEGED: Creates a new machine from nothing.
+	// Loopback group admission can return FailedPrecondition when the group
+	// changed or is busy. A lock-unavailable database error during loopback
+	// attachment, or a rejected selected-host row/history check, returns
+	// Unavailable. These rejections roll back the complete entity transaction;
+	// retry discovery with a fresh request after contention clears. These checks
+	// do not bound earlier foreign-key waits or later attached-DPU state writes.
 	DiscoverMachine(ctx context.Context, in *MachineDiscoveryInfo, opts ...grpc.CallOption) (*MachineDiscoveryResult, error)
 	RenewMachineCertificate(ctx context.Context, in *MachineCertificateRenewRequest, opts ...grpc.CallOption) (*MachineCertificateResult, error)
 	DiscoveryCompleted(ctx context.Context, in *MachineDiscoveryCompletedRequest, opts ...grpc.CallOption) (*MachineDiscoveryCompletedResponse, error)
@@ -967,7 +977,16 @@ type ForgeClient interface {
 	AdminListResourcePools(ctx context.Context, in *ListResourcePoolsRequest, opts ...grpc.CallOption) (*ResourcePools, error)
 	// Inspects local and remote pools without treating unknown capacity as zero.
 	AdminInspectResourcePools(ctx context.Context, in *InspectResourcePoolsRequest, opts ...grpc.CallOption) (*InspectResourcePoolsResponse, error)
-	// Add capacity to a resource pool
+	// Add capacity to a resource pool.
+	// Adding IPv6 loopback capacity commits the pool before DPU backfill.
+	// Backfill makes up to three fresh attempts per DPU. If the reported failure
+	// is lock contention, the call returns Unavailable. Exhausted capacity returns
+	// ResourceExhausted; exhausted version conflicts or a vanished pool return
+	// FailedPrecondition; other database failures return Internal. Earlier DPU
+	// updates and pool growth remain committed after any backfill failure. The
+	// first DPU that exhausts its attempts supplies its last error, unless another
+	// non-retryable error ends the pass. Inspect current capacity and missing
+	// loopbacks before retrying the same growth request.
 	AdminGrowResourcePool(ctx context.Context, in *GrowResourcePoolRequest, opts ...grpc.CallOption) (*GrowResourcePoolResponse, error)
 	// Update the Metadata of a Machine
 	UpdateMachineMetadata(ctx context.Context, in *MachineMetadataUpdateRequest, opts ...grpc.CallOption) (*emptypb.Empty, error)
@@ -1572,6 +1591,12 @@ type ForgeClient interface {
 	// interconnect with a scout agent listening via an open ScoutStream connection.
 	//
 	// MlxAdminProfileSync is used to sync an MlxConfigProfile to a given device.
+	// Reserves the managed host (including commands sent to an attached DPU).
+	// Pending hardware commands or admitted NIC firmware work reject this request
+	// with FAILED_PRECONDITION. A reserved-host reply wait expires after 30 minutes
+	// with DEADLINE_EXCEEDED; timeout or uncertain delivery retains the reservation.
+	// Unattached DPUs have no host reservation or added reply deadline. Do not retry
+	// unresolved work as a replacement command. Read-only requests remain available.
 	MlxAdminProfileSync(ctx context.Context, in *MlxAdminProfileSyncRequest, opts ...grpc.CallOption) (*MlxAdminProfileSyncResponse, error)
 	// MlxAdminProfileShow shows the configuration of a specific MlxConfigProfile
 	// loaded into nico-core-api.
@@ -1587,9 +1612,21 @@ type ForgeClient interface {
 	//
 	// MlxAdminLockdownLock locks a Mellanox device, using whatever key is currently
 	// managed internally within NICo.
+	// Reserves the managed host (including commands sent to an attached DPU).
+	// Pending hardware commands or admitted NIC firmware work reject this request
+	// with FAILED_PRECONDITION. A reserved-host reply wait expires after 30 minutes
+	// with DEADLINE_EXCEEDED; timeout or uncertain delivery retains the reservation.
+	// Unattached DPUs have no host reservation or added reply deadline. Do not retry
+	// unresolved work as a replacement command. Read-only requests remain available.
 	MlxAdminLockdownLock(ctx context.Context, in *MlxAdminLockdownLockRequest, opts ...grpc.CallOption) (*MlxAdminLockdownLockResponse, error)
 	// MlxAdminLockdownUnlock unlocks a Mellanox device, using whatever key is currently
 	// managed internally within NICo.
+	// Reserves the managed host (including commands sent to an attached DPU).
+	// Pending hardware commands or admitted NIC firmware work reject this request
+	// with FAILED_PRECONDITION. A reserved-host reply wait expires after 30 minutes
+	// with DEADLINE_EXCEEDED; timeout or uncertain delivery retains the reservation.
+	// Unattached DPUs have no host reservation or added reply deadline. Do not retry
+	// unresolved work as a replacement command. Read-only requests remain available.
 	MlxAdminLockdownUnlock(ctx context.Context, in *MlxAdminLockdownUnlockRequest, opts ...grpc.CallOption) (*MlxAdminLockdownUnlockResponse, error)
 	// MlxAdminLockdownStatus returns the live lock status of a Mellanox device
 	// by querying over an open ScoutStream connection.
@@ -1624,10 +1661,22 @@ type ForgeClient interface {
 	MlxAdminConfigQuery(ctx context.Context, in *MlxAdminConfigQueryRequest, opts ...grpc.CallOption) (*MlxAdminConfigQueryResponse, error)
 	// MlxAdminConfigSet is used to set one or more running mlxconfig
 	// variable values for the provided target machine device.
+	// Reserves the managed host (including commands sent to an attached DPU).
+	// Pending hardware commands or admitted NIC firmware work reject this request
+	// with FAILED_PRECONDITION. A reserved-host reply wait expires after 30 minutes
+	// with DEADLINE_EXCEEDED; timeout or uncertain delivery retains the reservation.
+	// Unattached DPUs have no host reservation or added reply deadline. Do not retry
+	// unresolved work as a replacement command. Read-only requests remain available.
 	MlxAdminConfigSet(ctx context.Context, in *MlxAdminConfigSetRequest, opts ...grpc.CallOption) (*MlxAdminConfigSetResponse, error)
 	// MlxAdminConfigSync is used to sync one or more running mlxconfig
 	// variable values for the provided target machine device, reporting back
 	// specifics of what changed.
+	// Reserves the managed host (including commands sent to an attached DPU).
+	// Pending hardware commands or admitted NIC firmware work reject this request
+	// with FAILED_PRECONDITION. A reserved-host reply wait expires after 30 minutes
+	// with DEADLINE_EXCEEDED; timeout or uncertain delivery retains the reservation.
+	// Unattached DPUs have no host reservation or added reply deadline. Do not retry
+	// unresolved work as a replacement command. Read-only requests remain available.
 	MlxAdminConfigSync(ctx context.Context, in *MlxAdminConfigSyncRequest, opts ...grpc.CallOption) (*MlxAdminConfigSyncResponse, error)
 	// MlxAdminConfigSync is used to compare one or more running mlxconfig
 	// variable values for the provided target machine device, reporting back
@@ -1692,6 +1741,17 @@ type ForgeClient interface {
 	// read budgets, whose expiry reports ReadFailed. This method never registers
 	// devices, writes policy, or submits power operations.
 	GetComponentPowerDetails(ctx context.Context, in *GetComponentPowerDetailsRequest, opts ...grpc.CallOption) (*GetComponentPowerDetailsResponse, error)
+	// Reads installed inventory, existing effective defaults and current firmware
+	// work independently. Flow and ForgeAdminCLI may call this passive method.
+	// Database preparation has five seconds including acquisition and commit.
+	// After release, credentials, manifest fetches and all reads share thirty
+	// seconds. Earlier caller expiry wins, including time waiting for API admission.
+	// Within each request, up to eight public read workflows run concurrently.
+	// Preparation failure, including expiry, aborts the RPC with fixed INTERNAL.
+	// After preparation, completed sections survive peer failures; unfinished
+	// reads report DeadlineExceeded. Cancellation drops pending work. This never
+	// registers devices, writes tracking or advances updates.
+	GetComponentFirmwareDetails(ctx context.Context, in *GetComponentFirmwareDetailsRequest, opts ...grpc.CallOption) (*GetComponentFirmwareDetailsResponse, error)
 	// Dispatch a reset directly, without scheduling state-controller maintenance.
 	// Valid devices proceed even when other targets cannot be resolved or accepted.
 	// The RMS backend supports SDN and NVOS factory reset on switches. SDN reset
@@ -7182,6 +7242,16 @@ func (c *forgeClient) GetComponentPowerDetails(ctx context.Context, in *GetCompo
 	return out, nil
 }
 
+func (c *forgeClient) GetComponentFirmwareDetails(ctx context.Context, in *GetComponentFirmwareDetailsRequest, opts ...grpc.CallOption) (*GetComponentFirmwareDetailsResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(GetComponentFirmwareDetailsResponse)
+	err := c.cc.Invoke(ctx, Forge_GetComponentFirmwareDetails_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 func (c *forgeClient) ComponentReset(ctx context.Context, in *ComponentResetRequest, opts ...grpc.CallOption) (*ComponentResetResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(ComponentResetResponse)
@@ -7460,13 +7530,16 @@ type ForgeServer interface {
 	// allocation. Success means Core committed, not that the dataplane converged.
 	ChangeVpcRoutingProfile(context.Context, *VpcChangeRoutingProfileRequest) (*VpcRoutingState, error)
 	// Operator cleanup after independently verifying that no DPU or fabric route
-	// still uses the retained VNI. Core does not verify dataplane convergence.
+	// still uses the retained VNI. Integrated release completes in the VPC
+	// transaction. Remote success follows provider release confirmation; an error
+	// can follow committed release intent and an advanced VPC version.
+	// Core does not verify dataplane convergence.
 	ReleaseVpcInactiveVni(context.Context, *VpcReleaseInactiveVniRequest) (*VpcReleaseInactiveVniResult, error)
 	UpdateVpcVirtualization(context.Context, *VpcUpdateVirtualizationRequest) (*VpcUpdateVirtualizationResult, error)
 	// Deletion does not release a retained VNI implicitly. Call
 	// ReleaseVpcInactiveVni after verifying convergence before deleting the VPC.
 	// Retained or inconsistent owned allocations cause FailedPrecondition, as do
-	// live DNS domains owned by this VPC. Deleted domains do not block deletion.
+	// unfinished remote cancellation or release.
 	DeleteVpc(context.Context, *VpcDeletionRequest) (*VpcDeletionResult, error)
 	FindVpcIds(context.Context, *VpcSearchFilter) (*VpcIdList, error)
 	FindVpcsByIds(context.Context, *VpcsByIdsRequest) (*VpcList, error)
@@ -7646,7 +7719,13 @@ type ForgeServer interface {
 	// Power Control
 	InvokeInstancePower(context.Context, *InstancePowerRequest) (*InstancePowerResult, error)
 	ForgeAgentControl(context.Context, *ForgeAgentControlRequest) (*ForgeAgentControlResponse, error)
-	// PRIVILEGED: Creates a new machine from nothing
+	// PRIVILEGED: Creates a new machine from nothing.
+	// Loopback group admission can return FailedPrecondition when the group
+	// changed or is busy. A lock-unavailable database error during loopback
+	// attachment, or a rejected selected-host row/history check, returns
+	// Unavailable. These rejections roll back the complete entity transaction;
+	// retry discovery with a fresh request after contention clears. These checks
+	// do not bound earlier foreign-key waits or later attached-DPU state writes.
 	DiscoverMachine(context.Context, *MachineDiscoveryInfo) (*MachineDiscoveryResult, error)
 	RenewMachineCertificate(context.Context, *MachineCertificateRenewRequest) (*MachineCertificateResult, error)
 	DiscoveryCompleted(context.Context, *MachineDiscoveryCompletedRequest) (*MachineDiscoveryCompletedResponse, error)
@@ -7801,7 +7880,16 @@ type ForgeServer interface {
 	AdminListResourcePools(context.Context, *ListResourcePoolsRequest) (*ResourcePools, error)
 	// Inspects local and remote pools without treating unknown capacity as zero.
 	AdminInspectResourcePools(context.Context, *InspectResourcePoolsRequest) (*InspectResourcePoolsResponse, error)
-	// Add capacity to a resource pool
+	// Add capacity to a resource pool.
+	// Adding IPv6 loopback capacity commits the pool before DPU backfill.
+	// Backfill makes up to three fresh attempts per DPU. If the reported failure
+	// is lock contention, the call returns Unavailable. Exhausted capacity returns
+	// ResourceExhausted; exhausted version conflicts or a vanished pool return
+	// FailedPrecondition; other database failures return Internal. Earlier DPU
+	// updates and pool growth remain committed after any backfill failure. The
+	// first DPU that exhausts its attempts supplies its last error, unless another
+	// non-retryable error ends the pass. Inspect current capacity and missing
+	// loopbacks before retrying the same growth request.
 	AdminGrowResourcePool(context.Context, *GrowResourcePoolRequest) (*GrowResourcePoolResponse, error)
 	// Update the Metadata of a Machine
 	UpdateMachineMetadata(context.Context, *MachineMetadataUpdateRequest) (*emptypb.Empty, error)
@@ -8406,6 +8494,12 @@ type ForgeServer interface {
 	// interconnect with a scout agent listening via an open ScoutStream connection.
 	//
 	// MlxAdminProfileSync is used to sync an MlxConfigProfile to a given device.
+	// Reserves the managed host (including commands sent to an attached DPU).
+	// Pending hardware commands or admitted NIC firmware work reject this request
+	// with FAILED_PRECONDITION. A reserved-host reply wait expires after 30 minutes
+	// with DEADLINE_EXCEEDED; timeout or uncertain delivery retains the reservation.
+	// Unattached DPUs have no host reservation or added reply deadline. Do not retry
+	// unresolved work as a replacement command. Read-only requests remain available.
 	MlxAdminProfileSync(context.Context, *MlxAdminProfileSyncRequest) (*MlxAdminProfileSyncResponse, error)
 	// MlxAdminProfileShow shows the configuration of a specific MlxConfigProfile
 	// loaded into nico-core-api.
@@ -8421,9 +8515,21 @@ type ForgeServer interface {
 	//
 	// MlxAdminLockdownLock locks a Mellanox device, using whatever key is currently
 	// managed internally within NICo.
+	// Reserves the managed host (including commands sent to an attached DPU).
+	// Pending hardware commands or admitted NIC firmware work reject this request
+	// with FAILED_PRECONDITION. A reserved-host reply wait expires after 30 minutes
+	// with DEADLINE_EXCEEDED; timeout or uncertain delivery retains the reservation.
+	// Unattached DPUs have no host reservation or added reply deadline. Do not retry
+	// unresolved work as a replacement command. Read-only requests remain available.
 	MlxAdminLockdownLock(context.Context, *MlxAdminLockdownLockRequest) (*MlxAdminLockdownLockResponse, error)
 	// MlxAdminLockdownUnlock unlocks a Mellanox device, using whatever key is currently
 	// managed internally within NICo.
+	// Reserves the managed host (including commands sent to an attached DPU).
+	// Pending hardware commands or admitted NIC firmware work reject this request
+	// with FAILED_PRECONDITION. A reserved-host reply wait expires after 30 minutes
+	// with DEADLINE_EXCEEDED; timeout or uncertain delivery retains the reservation.
+	// Unattached DPUs have no host reservation or added reply deadline. Do not retry
+	// unresolved work as a replacement command. Read-only requests remain available.
 	MlxAdminLockdownUnlock(context.Context, *MlxAdminLockdownUnlockRequest) (*MlxAdminLockdownUnlockResponse, error)
 	// MlxAdminLockdownStatus returns the live lock status of a Mellanox device
 	// by querying over an open ScoutStream connection.
@@ -8458,10 +8564,22 @@ type ForgeServer interface {
 	MlxAdminConfigQuery(context.Context, *MlxAdminConfigQueryRequest) (*MlxAdminConfigQueryResponse, error)
 	// MlxAdminConfigSet is used to set one or more running mlxconfig
 	// variable values for the provided target machine device.
+	// Reserves the managed host (including commands sent to an attached DPU).
+	// Pending hardware commands or admitted NIC firmware work reject this request
+	// with FAILED_PRECONDITION. A reserved-host reply wait expires after 30 minutes
+	// with DEADLINE_EXCEEDED; timeout or uncertain delivery retains the reservation.
+	// Unattached DPUs have no host reservation or added reply deadline. Do not retry
+	// unresolved work as a replacement command. Read-only requests remain available.
 	MlxAdminConfigSet(context.Context, *MlxAdminConfigSetRequest) (*MlxAdminConfigSetResponse, error)
 	// MlxAdminConfigSync is used to sync one or more running mlxconfig
 	// variable values for the provided target machine device, reporting back
 	// specifics of what changed.
+	// Reserves the managed host (including commands sent to an attached DPU).
+	// Pending hardware commands or admitted NIC firmware work reject this request
+	// with FAILED_PRECONDITION. A reserved-host reply wait expires after 30 minutes
+	// with DEADLINE_EXCEEDED; timeout or uncertain delivery retains the reservation.
+	// Unattached DPUs have no host reservation or added reply deadline. Do not retry
+	// unresolved work as a replacement command. Read-only requests remain available.
 	MlxAdminConfigSync(context.Context, *MlxAdminConfigSyncRequest) (*MlxAdminConfigSyncResponse, error)
 	// MlxAdminConfigSync is used to compare one or more running mlxconfig
 	// variable values for the provided target machine device, reporting back
@@ -8526,6 +8644,17 @@ type ForgeServer interface {
 	// read budgets, whose expiry reports ReadFailed. This method never registers
 	// devices, writes policy, or submits power operations.
 	GetComponentPowerDetails(context.Context, *GetComponentPowerDetailsRequest) (*GetComponentPowerDetailsResponse, error)
+	// Reads installed inventory, existing effective defaults and current firmware
+	// work independently. Flow and ForgeAdminCLI may call this passive method.
+	// Database preparation has five seconds including acquisition and commit.
+	// After release, credentials, manifest fetches and all reads share thirty
+	// seconds. Earlier caller expiry wins, including time waiting for API admission.
+	// Within each request, up to eight public read workflows run concurrently.
+	// Preparation failure, including expiry, aborts the RPC with fixed INTERNAL.
+	// After preparation, completed sections survive peer failures; unfinished
+	// reads report DeadlineExceeded. Cancellation drops pending work. This never
+	// registers devices, writes tracking or advances updates.
+	GetComponentFirmwareDetails(context.Context, *GetComponentFirmwareDetailsRequest) (*GetComponentFirmwareDetailsResponse, error)
 	// Dispatch a reset directly, without scheduling state-controller maintenance.
 	// Valid devices proceed even when other targets cannot be resolved or accepted.
 	// The RMS backend supports SDN and NVOS factory reset on switches. SDN reset
@@ -10222,6 +10351,9 @@ func (UnimplementedForgeServer) ComponentPowerControl(context.Context, *Componen
 }
 func (UnimplementedForgeServer) GetComponentPowerDetails(context.Context, *GetComponentPowerDetailsRequest) (*GetComponentPowerDetailsResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method GetComponentPowerDetails not implemented")
+}
+func (UnimplementedForgeServer) GetComponentFirmwareDetails(context.Context, *GetComponentFirmwareDetailsRequest) (*GetComponentFirmwareDetailsResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method GetComponentFirmwareDetails not implemented")
 }
 func (UnimplementedForgeServer) ComponentReset(context.Context, *ComponentResetRequest) (*ComponentResetResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method ComponentReset not implemented")
@@ -19999,6 +20131,24 @@ func _Forge_GetComponentPowerDetails_Handler(srv interface{}, ctx context.Contex
 	return interceptor(ctx, in, info, handler)
 }
 
+func _Forge_GetComponentFirmwareDetails_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(GetComponentFirmwareDetailsRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ForgeServer).GetComponentFirmwareDetails(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Forge_GetComponentFirmwareDetails_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ForgeServer).GetComponentFirmwareDetails(ctx, req.(*GetComponentFirmwareDetailsRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 func _Forge_ComponentReset_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(ComponentResetRequest)
 	if err := dec(in); err != nil {
@@ -22585,6 +22735,10 @@ var Forge_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "GetComponentPowerDetails",
 			Handler:    _Forge_GetComponentPowerDetails_Handler,
+		},
+		{
+			MethodName: "GetComponentFirmwareDetails",
+			Handler:    _Forge_GetComponentFirmwareDetails_Handler,
 		},
 		{
 			MethodName: "ComponentReset",

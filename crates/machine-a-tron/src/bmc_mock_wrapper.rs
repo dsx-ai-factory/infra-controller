@@ -1278,8 +1278,8 @@ mod recovery_tests {
     // actor's RPC. The runtime must drive that waiter while the actor awaits.
     #[tokio::test(flavor = "current_thread")]
     async fn api_renewal_does_not_park_the_shared_connection_lock() {
-        use rpc::forge_api_client::ForgeApiClient;
-        use rpc::forge_tls_client::ForgeClientT;
+        use rpc::carbide_api_client::CarbideApiClient;
+        use rpc::carbide_tls_client::CarbideClientT;
 
         #[derive(Debug, Default)]
         struct Gate {
@@ -1290,8 +1290,8 @@ mod recovery_tests {
         #[derive(Debug)]
         struct Provider(Arc<Gate>);
         #[async_trait::async_trait]
-        impl tonic_client_wrapper::ConnectionProvider<ForgeClientT> for Provider {
-            async fn provide_connection(&self) -> Result<ForgeClientT, tonic::Status> {
+        impl tonic_client_wrapper::ConnectionProvider<CarbideClientT> for Provider {
+            async fn provide_connection(&self) -> Result<CarbideClientT, tonic::Status> {
                 if self.0.calls.fetch_add(1, Ordering::SeqCst) == 0 {
                     // connection() holds the generated client's shared mutex here.
                     self.0.entered.notify_one();
@@ -1310,7 +1310,7 @@ mod recovery_tests {
         }
 
         let gate = Arc::new(Gate::default());
-        let api = crate::api_client::ApiClient(ForgeApiClient::build(Provider(gate.clone())));
+        let api = crate::api_client::ApiClient(CarbideApiClient::build(Provider(gate.clone())));
         let blocker_client = api.0.clone();
         let blocker = tokio::spawn(async move { blocker_client.connection().await });
         tokio::time::timeout(Duration::from_secs(1), gate.entered.notified())

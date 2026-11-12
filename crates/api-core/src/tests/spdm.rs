@@ -1195,6 +1195,9 @@ pub(in crate::tests) mod tests {
             .create_client("cancellation-fixture", None, RedfishAuth::Anonymous, None)
             .await?;
 
+        env.redfish_sim.set_evidence_collection_running(false);
+        let (machine_id, _dpu_id) = create_managed_host(&env).await.into();
+
         for Case {
             scenario,
             initially_cancelling,
@@ -1240,8 +1243,6 @@ pub(in crate::tests) mod tests {
                 cancel_error: None,
             },
         ] {
-            env.redfish_sim.set_evidence_collection_running(false);
-            let (machine_id, _dpu_id) = create_managed_host(&env).await.into();
             env.redfish_sim.set_evidence_collection_running(true);
             let job_id = uuid::Uuid::try_from(
                 env.api
@@ -1507,7 +1508,27 @@ pub(in crate::tests) mod tests {
                     "cleanup must not read evidence"
                 );
             }
-            if !finish_collection && operator_outcome.is_none() {
+            if finish_collection {
+                // Finish the retry before the next job uses the same devices; an
+                // unfinished job can claim them again on the next controller scan.
+                // With requeue disabled, five passes trigger collection, store evidence,
+                // verify it, enter `Passed`, and record completion.
+                for _ in 0..5 {
+                    env.run_spdm_controller_iteration_no_requeue().await;
+                }
+                for device in &devices {
+                    let snapshot = db::attestation::spdm::load_snapshot_for_machine_and_device_id(
+                        &mut txn,
+                        &machine_id,
+                        &device.device_id,
+                        &job_id,
+                    )
+                    .await?;
+                    assert_eq!(snapshot.state, SpdmAttestationState::Passed, "{scenario}");
+                    assert!(snapshot.completed_at.is_some(), "{scenario}");
+                    assert!(!snapshot.evidence_collection_locked, "{scenario}");
+                }
+            } else if operator_outcome.is_none() {
                 // The Failed handler records completion on the following iteration.
                 env.run_spdm_controller_iteration_no_requeue().await;
                 for device in &devices {
@@ -1647,15 +1668,15 @@ pub(in crate::tests) mod tests {
                 .unwrap_err();
             assert_eq!(error.code(), code);
         }
+        // Host setup performs its own attestation before the scenario starts.
+        env.redfish_sim.set_evidence_collection_running(false);
+        let (machine_id, _dpu_id) = create_managed_host(&env).await.into();
         for case in cases {
             let expected_state = if case.fail {
                 SpdmAttestationState::Failed("Failed by operator".to_string())
             } else {
                 SpdmAttestationState::Waived
             };
-            // Host setup performs its own attestation before the scenario starts.
-            env.redfish_sim.set_evidence_collection_running(false);
-            let (machine_id, _dpu_id) = create_managed_host(&env).await.into();
             let initial_cancel_requests = env.redfish_sim.task_cancellation_requests().len();
             env.redfish_sim.set_evidence_collection_running(true);
             let job_id = uuid::Uuid::try_from(
