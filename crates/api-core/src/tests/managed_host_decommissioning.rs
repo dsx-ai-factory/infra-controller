@@ -15,11 +15,15 @@
  * limitations under the License.
  */
 
+use std::collections::HashSet;
+use std::time::Duration;
+
 use carbide_machine_controller::metrics::MachineMetrics;
 use carbide_redfish::libredfish::test_support::RedfishSimAction;
 use carbide_uuid::machine::HostMachineId;
 use db::ConditionalWrite;
 use libredfish::{PowerState, RedfishError, SystemPowerControl};
+use model::bmc_suppression::{BmcSuppressionSource, BmcSuppressionSubsystem, NewBmcSuppression};
 use model::dpa_interface::{DpaInterfaceControllerState, DpaInterfaceType, NewDpaInterface};
 use model::machine::{
     DecommissioningState, DeconfiguringHostState, MachineLastRebootRequestedMode, ManagedHostState,
@@ -31,6 +35,198 @@ use state_controller::state_handler::{StateHandler, StateHandlerContext, StateHa
 use tonic::{Code, Request};
 
 use crate::tests::common::api_fixtures::{create_managed_host, create_test_env};
+
+#[crate::sqlx_test]
+async fn dpu_bmc_reset_recovers_after_losing_reachability(pool: sqlx::PgPool) {
+    let env = create_test_env(pool).await;
+    let managed_host = create_managed_host(&env).await;
+    let host_id: HostMachineId = managed_host.id.into();
+    let host_completed = HashSet::from([host_id.into()]);
+    let mut txn = env.db_txn().await;
+    let host_mac = managed_host
+        .host()
+        .db_machine(&mut txn)
+        .await
+        .status
+        .bmc_info
+        .mac
+        .unwrap();
+    let dpu = managed_host.dpu().db_machine(&mut txn).await;
+    let dpu_mac = dpu.status.bmc_info.mac.unwrap();
+    let dpu_bmc_ip = dpu.status.bmc_info.ip.unwrap().to_string();
+    db::bmc_suppression::upsert(
+        &mut txn,
+        &NewBmcSuppression {
+            bmc_mac_address: host_mac,
+            subsystem: BmcSuppressionSubsystem::Dhcp,
+            source: BmcSuppressionSource::Decommissioning,
+            reason: "host BMC reset already completed".to_string(),
+        },
+    )
+    .await
+    .unwrap();
+    db::machine::update_state(
+        &mut txn,
+        &host_id,
+        &ManagedHostState::Decommissioning {
+            decommissioning_state: DecommissioningState::FactoryResettingBmcs {
+                completed: host_completed.clone(),
+            },
+        },
+    )
+    .await
+    .unwrap();
+    let initial_version = managed_host.host().db_machine(&mut txn).await.state.version;
+    txn.commit().await.unwrap();
+
+    struct Step {
+        name: &'static str,
+        unreachable: bool,
+        fail_reset: bool,
+        suppressed: bool,
+        completed: bool,
+        client_calls: usize,
+        action: Option<RedfishSimAction>,
+    }
+    for step in [
+        Step {
+            name: "DPU BMC still recovering from the host power cycle",
+            unreachable: true,
+            fail_reset: false,
+            suppressed: false,
+            completed: false,
+            client_calls: 1,
+            action: None,
+        },
+        Step {
+            name: "BMC answers the readiness check but its reset fails",
+            unreachable: false,
+            fail_reset: true,
+            suppressed: true,
+            completed: false,
+            client_calls: 1,
+            action: Some(RedfishSimAction::BmcResetToDefaultsFailed),
+        },
+        Step {
+            name: "restore DHCP while the BMC is unreachable",
+            unreachable: true,
+            fail_reset: false,
+            suppressed: false,
+            completed: false,
+            client_calls: 0,
+            action: None,
+        },
+        Step {
+            name: "retry succeeds after BMC connectivity recovers",
+            unreachable: false,
+            fail_reset: false,
+            suppressed: true,
+            completed: true,
+            client_calls: 1,
+            action: Some(RedfishSimAction::BmcResetToDefaults),
+        },
+    ] {
+        if step.unreachable {
+            env.redfish_sim
+                .set_create_client_error("DPU BMC has no DHCP address");
+        } else {
+            env.redfish_sim.clear_create_client_error();
+        }
+        let reset_request = step
+            .fail_reset
+            .then(|| env.redfish_sim.intercept_next_bmc_factory_reset());
+        let timepoint = env.redfish_sim.timepoint();
+        let client_calls = env.redfish_sim.create_client_calls().len();
+        tokio::time::timeout(Duration::from_secs(30), async {
+            let observe_reset = async {
+                if let Some(reset_request) = reset_request {
+                    let request = reset_request.await.unwrap();
+                    assert_eq!(request.host, dpu_bmc_ip);
+                    // A separate connection must see suppression before the
+                    // reset responds: it cannot remain in an open transaction.
+                    assert!(
+                        db::bmc_suppression::find(
+                            &env.pool,
+                            dpu_mac,
+                            BmcSuppressionSubsystem::Dhcp,
+                            BmcSuppressionSource::Decommissioning,
+                        )
+                        .await
+                        .unwrap()
+                        .is_some()
+                    );
+                    request
+                        .respond
+                        .send(Err(RedfishError::GenericError {
+                            error: "transient timeout sending the factory-reset request"
+                                .to_string(),
+                        }))
+                        .unwrap();
+                }
+            };
+            tokio::join!(
+                env.run_machine_state_controller_iteration_without_requeue(),
+                observe_reset
+            );
+        })
+        .await
+        .expect("controller tick and reset observation should finish");
+
+        let mut txn = env.db_txn().await;
+        let host = managed_host.host().db_machine(&mut txn).await;
+        let mut expected_completed = host_completed.clone();
+        if step.completed {
+            expected_completed.insert(dpu.id.into());
+            assert_ne!(host.state.version, initial_version, "{}", step.name);
+        } else {
+            // Recovery writes must not restart the lack-of-progress SLA clock.
+            assert_eq!(host.state.version, initial_version, "{}", step.name);
+        }
+        assert_eq!(
+            host.current_state(),
+            &ManagedHostState::Decommissioning {
+                decommissioning_state: DecommissioningState::FactoryResettingBmcs {
+                    completed: expected_completed,
+                },
+            },
+            "{}",
+            step.name,
+        );
+        for (mac, suppressed) in [(host_mac, true), (dpu_mac, step.suppressed)] {
+            assert_eq!(
+                db::bmc_suppression::find(
+                    &mut *txn,
+                    mac,
+                    BmcSuppressionSubsystem::Dhcp,
+                    BmcSuppressionSource::Decommissioning,
+                )
+                .await
+                .unwrap()
+                .is_some(),
+                suppressed,
+                "{}: suppression for {mac}",
+                step.name,
+            );
+        }
+        txn.commit().await.unwrap();
+        let actions = env.redfish_sim.actions_since(&timepoint);
+        assert_eq!(
+            actions.for_host(&dpu_bmc_ip),
+            step.action.into_iter().collect::<Vec<_>>(),
+            "{}",
+            step.name
+        );
+        assert_eq!(
+            env.redfish_sim.create_client_calls()[client_calls..]
+                .iter()
+                .filter(|call| call.host == dpu_bmc_ip)
+                .count(),
+            step.client_calls,
+            "{}: Redfish client creation",
+            step.name,
+        );
+    }
+}
 
 #[crate::sqlx_test]
 async fn uefi_password_job_advances_to_completion_wait(pool: sqlx::PgPool) {

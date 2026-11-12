@@ -1663,9 +1663,13 @@ impl MachineStateHandler {
                     decommissioning::handle_waiting_for_oob_dhcp_acknowledgement(mh_snapshot, ctx)
                         .await
                 }
-                DecommissioningState::SuppressingBmcDhcp => {
-                    decommissioning::handle_suppressing_bmc_dhcp(mh_snapshot, ctx).await
-                }
+                DecommissioningState::SuppressingBmcDhcp => Ok(StateHandlerOutcome::transition(
+                    ManagedHostState::Decommissioning {
+                        decommissioning_state: DecommissioningState::FactoryResettingBmcs {
+                            completed: HashSet::new(),
+                        },
+                    },
+                )),
                 DecommissioningState::FactoryResettingBmcs { completed } => {
                     decommissioning::handle_factory_resetting_bmcs(completed, mh_snapshot, ctx)
                         .await

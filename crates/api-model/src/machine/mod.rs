@@ -1641,10 +1641,12 @@ pub enum DecommissioningState {
     /// every interface has a current `AllocationType::Static` address, and no
     /// current address lies within any configured network prefix.
     WaitingForOobDhcpAcknowledgement,
-    /// BMC DHCP is suppressed before the BMC factory reset.
+    /// Resume point for predecessor records; new workflows enter
+    /// `FactoryResettingBmcs` directly and suppress DHCP per BMC.
     SuppressingBmcDhcp,
     /// Issues BMC factory resets for the host and its DPUs.
     FactoryResettingBmcs {
+        /// BMCs whose factory-reset requests returned successfully.
         completed: HashSet<MachineId>,
     },
     /// Waiting for the pre-reset BMC DHCP suppression to be acknowledged.
