@@ -32,6 +32,10 @@ spec:
         checksum/config: {{ include (print $.Template.BasePath "/configmap-v6.yaml") . | sha256sum }}
     spec:
       serviceAccountName: {{ include "nico-dhcp.name" . }}
+      {{- with .Values.podSecurityContext }}
+      securityContext:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
       {{- with .Values.global.imagePullSecrets }}
       imagePullSecrets:
         {{- toYaml . | nindent 8 }}
@@ -40,11 +44,25 @@ spec:
         - name: {{ include "nico-dhcp.name" . }}6
           image: "{{ include "nico-dhcp.image" . }}"
           imagePullPolicy: {{ .Values.global.image.pullPolicy }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            {{- with .Values.containerSecurityContext }}
+            {{- $ctxOverrides := omit . "allowPrivilegeEscalation" }}
+            {{- with $ctxOverrides }}
+            {{- toYaml $ctxOverrides | nindent 12 }}
+            {{- end }}
+            {{- end }}
           command:
             - sh
             - -ec
             - |
-              mkdir -p /var/run/kea /var/lib/kea
+              # /var/run/kea and /var/lib/kea are emptyDir mounts (see volumes
+              # below) so a non-root UID or a read-only root filesystem can
+              # still write the runtime config and PID file. The emptyDir
+              # survives container restarts, so clear any stale PID file —
+              # Kea restarts as PID 1, sees the recorded PID as live, and
+              # exits repeatedly otherwise.
+              rm -f /var/run/kea/*.pid
               # Interface-only Kea selectors bind link-local sockets; relay VIPs need the pod's routable IPv6.
               address="$(ip -6 -o addr show dev "$DHCP_INTERFACE" scope global | awk '{split($4, address, "/"); print address[1]; exit}')"
               test -n "$address" || { echo "DHCPv6 requires a routable IPv6 address on $DHCP_INTERFACE" >&2; exit 1; }
@@ -85,10 +103,18 @@ spec:
             - name: config
               mountPath: /tmp
               readOnly: true
+            - name: kea-run
+              mountPath: /var/run/kea
+            - name: kea-lib
+              mountPath: /var/lib/kea
       volumes:
         - name: spiffe
           secret:
             secretName: {{ include "nico-dhcp.name" . }}-certificate
+        - name: kea-run
+          emptyDir: {}
+        - name: kea-lib
+          emptyDir: {}
         - name: config
           configMap:
             name: {{ include "nico-dhcp.name" . }}6-config

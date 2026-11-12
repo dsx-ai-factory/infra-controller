@@ -1,0 +1,32 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 Red Hat, Inc. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# =============================================================================
+# OpenShift overlay for the nico-flow chart.
+#
+# Flow is installed separately from the Core umbrella (setup.sh phase 7h):
+# pass this file through the Flow values mechanism, e.g.
+#   ./helm-prereqs/setup.sh --flow-values helm-prereqs/values/nico-flow-openshift.yaml
+# or, for a manual install, layer it on your Flow values file:
+#   helm upgrade --install -n flow flow helm/nico-flow \
+#     -f <site-flow.yaml> -f this-file \
+#     --set global.image.repository=<your-registry> \
+#     --set global.image.tag=<tag>
+# (setup.sh passes the image flags; a manual install must supply them.)
+#
+# Values below are picked from Red Hat's tested OpenShift deployment
+# (github.com/rh-ecosystem-edge/dsx-ai-factory, charts/values/nico-core.yaml).
+#
+# Requires Helm >= 3.17.0 (see the note in nico-core-openshift.yaml).
+# =============================================================================
+
+database:
+  host: nico-site-pg-primary
+  port: 5432
+  # EDIT: your Crunchy PGO cluster. The pguser Secret exposes 'user' rather
+  # than the chart-default 'username' (Zalando); note the usernameKey lives
+  # at the .flow level.
+  flow:
+    name: flow
+    usernameKey: user
+    credentialsSecret: nico-site-pg-pguser-nico

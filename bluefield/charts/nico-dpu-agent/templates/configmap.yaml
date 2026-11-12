@@ -1,7 +1,7 @@
 {{- $supplementalCmName := default "" (get (default (dict) .Values.supplementalNetworkConfig) "name") -}}
 {{- $prometheusDisabled := eq (toString .Values.prometheusEnabled) "false" -}}
 {{- $fmdsNetworkingConfigured := ne .Values.fmds.networkingAddresses nil -}}
-{{- if or .Values.fmds.sign_proxy_url $supplementalCmName .Values.metricsPort $prometheusDisabled $fmdsNetworkingConfigured }}
+{{- if or .Values.forgeSystem.apiServer .Values.fmds.sign_proxy_url $supplementalCmName .Values.metricsPort $prometheusDisabled $fmdsNetworkingConfigured }}
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -10,6 +10,10 @@ metadata:
     {{- include "nico-dpu-agent.labels" . | nindent 4 }}
 data:
   config.toml: |
+    {{- with .Values.forgeSystem.apiServer }}
+    [forge-system]
+    api-server = {{ . | quote }}
+    {{- end }}
     {{- if $fmdsNetworkingConfigured }}
     [fmds-armos-networking.config]
     addresses = {{ .Values.fmds.networkingAddresses | toJson }}

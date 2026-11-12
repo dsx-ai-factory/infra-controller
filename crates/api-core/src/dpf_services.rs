@@ -60,6 +60,7 @@ pub(crate) const DOCA_HBN_SERVICE_HELM_NAME: &str = "doca-hbn";
 pub(crate) const DOCA_HBN_SERVICE_HELM_VERSION: &str = "3.4.0";
 pub(crate) const DOCA_HBN_SERVICE_IMAGE_NAME: &str = "doca_hbn";
 pub(crate) const DOCA_HBN_SERVICE_IMAGE_TAG: &str = "3.4.0-doca3.4.0";
+pub(crate) const DOCA_HBN_SERVICE_NAD_MTU: i64 = 9216;
 
 /// DHCP Service Definitions
 pub(crate) const DHCP_SERVER_SERVICE_HELM_NAME: &str = "nico-dhcp-server";
@@ -487,6 +488,18 @@ pub(crate) fn doca_hbn_service(
         service_daemon_set_annotations: Some(BTreeMap::new()),
 
         interfaces,
+
+        // NICo owns the HBN service configuration, so it must also own the
+        // network attachment definition referenced by those interfaces.
+        // DPF's standalone automation used to supply this NAD; external-DPF
+        // mode must not depend on that separate manifest being applied.
+        service_nads: vec![ServiceNAD {
+            name: DOCA_HBN_SERVICE_NETWORK.to_string(),
+            bridge: Some("br-hbn".to_string()),
+            ipam: Some(false),
+            resource_type: ServiceNADResourceType::Sf,
+            mtu: Some(DOCA_HBN_SERVICE_NAD_MTU),
+        }],
 
         ..ServiceDefinition::new(
             &cfg.name,
@@ -1090,13 +1103,13 @@ mod tests {
             assert!(startup_yaml.contains("pf0hpf_if:") && startup_yaml.contains("pf0vf4_if:"));
             assert_eq!(startup_yaml.contains("iface_svc_0:"), slot_count > 0);
 
-            // Render every assembled NAD so the zero-slot case pins exactly the two ordinary attachments.
+            // Render every assembled NAD, including the HBN attachment.
             let rendered_nads: BTreeMap<_, _> = services
                 .iter()
                 .flat_map(|service| &service.service_nads)
                 .map(|nad| (nad.name.clone(), build_service_nad(nad, TEST_NS, suffix)))
                 .collect();
-            let mut expected_nads = vec!["mybrsfc-dhcp", "mybrsfc-fmds"];
+            let mut expected_nads = vec!["mybrhbn", "mybrsfc-dhcp", "mybrsfc-fmds"];
             if slot_count > 0 {
                 expected_nads.push("service-vpc-dhcp-slot0");
             }
@@ -1112,15 +1125,18 @@ mod tests {
                 expected_nads
             );
             for (name, nad) in &rendered_nads {
-                let expected_bridge = if name == "service-vpc-dhcp-slot0" {
-                    "br-svc-0"
+                // Match each NAD to its service contract; HBN's network carries jumbo frames.
+                let (expected_bridge, expected_mtu) = if name == "mybrhbn" {
+                    ("br-hbn", DOCA_HBN_SERVICE_NAD_MTU)
+                } else if name == "service-vpc-dhcp-slot0" {
+                    ("br-svc-0", 1500)
                 } else {
-                    "br-sfc"
+                    ("br-sfc", 1500)
                 };
                 assert_eq!(nad.metadata.name.as_deref(), Some(name.as_str()));
                 assert_eq!(nad.spec.bridge.as_deref(), Some(expected_bridge));
                 assert_eq!(nad.spec.ipam, Some(false));
-                assert_eq!(nad.spec.service_mtu, Some(1500));
+                assert_eq!(nad.spec.service_mtu, Some(expected_mtu));
                 assert!(matches!(
                     nad.spec.resource_type,
                     carbide_dpf::crds::dpuservicenads_generated::DpuServiceNadResourceType::Sf
@@ -1137,6 +1153,21 @@ mod tests {
                     )
                 })
                 .collect();
+            let rendered_hbn = build_service_configuration(hbn, TEST_NS, suffix, &nad_rename);
+            let hbn_nad_name = rendered_nads["mybrhbn"]
+                .metadata
+                .name
+                .as_deref()
+                .expect("rendered HBN NAD name");
+            assert!(
+                rendered_hbn
+                    .spec
+                    .interfaces
+                    .as_ref()
+                    .expect("HBN interfaces")
+                    .iter()
+                    .all(|interface| interface.network == hbn_nad_name)
+            );
             let mut expected_dhcp = vec![
                 ("d_pf0hpf_if", "mybrsfc-dhcp"),
                 ("d_pf0vf4_if", "mybrsfc-dhcp"),

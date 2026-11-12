@@ -169,7 +169,9 @@ pub trait ResourceLabeler: Send + Sync {
     }
 
     /// Node selector labels for a specific deployment type.
-    /// Used by [`build_deployment`] to populate `dpuNodeSelector.matchLabels`.
+    /// Used by [`build_deployment`] to populate the deployment-specific part of
+    /// `dpuNodeSelector.matchLabels`. The DPU-capability label is added separately
+    /// as an `Exists` requirement because NFD emits it with an empty value.
     /// Returns `ConfigError` if no deployment is configured for the requested type.
     fn node_labels_for_deployment_type(
         &self,
@@ -1156,6 +1158,80 @@ pub fn build_service_nad(service_nad: &ServiceNAD, namespace: &str, suffix: &str
     }
 }
 
+/// Creates a service NAD when absent and leaves an existing NAD under its current owner's
+/// control. The bridge, resource type, and IPAM mode must still satisfy the service contract;
+/// a restrictive cluster selector cannot satisfy a service targeting all clusters.
+/// serviceMTU may be site-specific and is deliberately not rewritten or constrained here.
+pub(crate) async fn apply_or_validate_service_nad<R: DpuServiceNADRepository>(
+    repo: &R,
+    desired: &DPUServiceNAD,
+) -> Result<(), DpfError> {
+    let name = desired
+        .metadata
+        .name
+        .as_deref()
+        .ok_or_else(|| DpfError::InvalidState("DPUServiceNAD name is required".to_string()))?;
+    let namespace =
+        desired.metadata.namespace.as_deref().ok_or_else(|| {
+            DpfError::InvalidState("DPUServiceNAD namespace is required".to_string())
+        })?;
+
+    if let Some(existing) = repo.get(name, namespace).await? {
+        let same_resource_type = matches!(
+            (&existing.spec.resource_type, &desired.spec.resource_type),
+            (DpuServiceNadResourceType::Sf, DpuServiceNadResourceType::Sf)
+                | (DpuServiceNadResourceType::Vf, DpuServiceNadResourceType::Vf)
+                | (
+                    DpuServiceNadResourceType::Veth,
+                    DpuServiceNadResourceType::Veth
+                )
+        );
+        let compatible = existing.spec.bridge == desired.spec.bridge
+            && existing.spec.ipam.unwrap_or(false) == desired.spec.ipam.unwrap_or(false)
+            && same_resource_type;
+        if !compatible {
+            return Err(DpfError::InvalidState(format!(
+                "existing DPUServiceNAD {namespace}/{name} has incompatible bridge, resource type, or IPAM settings; resolve it before NICo initializes DPF services"
+            )));
+        }
+
+        if desired.spec.dpu_cluster_selector.is_none()
+            && existing
+                .spec
+                .dpu_cluster_selector
+                .as_ref()
+                .is_some_and(|selector| {
+                    selector
+                        .match_labels
+                        .as_ref()
+                        .is_some_and(|labels| !labels.is_empty())
+                        || selector
+                            .match_expressions
+                            .as_ref()
+                            .is_some_and(|expressions| !expressions.is_empty())
+                })
+        {
+            return Err(DpfError::InvalidState(format!(
+                "existing DPUServiceNAD {namespace}/{name} has a restrictive DPU cluster selector; NICo targets all clusters, so use an unscoped NAD or a different name"
+            )));
+        }
+
+        if existing.spec.service_mtu != desired.spec.service_mtu {
+            tracing::warn!(
+                namespace,
+                name,
+                existing_mtu = ?existing.spec.service_mtu,
+                desired_mtu = ?desired.spec.service_mtu,
+                "Preserving the existing DPUServiceNAD MTU; validate it for this site"
+            );
+        }
+        return Ok(());
+    }
+
+    repo.apply(desired).await?;
+    Ok(())
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn build_deployment(
     services: &[ServiceDefinition],
@@ -1260,9 +1336,7 @@ pub fn build_deployment(
         })
     };
 
-    let mut node_labels =
-        BTreeMap::from([(DPU_ENABLED_NODE_LABEL.to_string(), "true".to_string())]);
-    node_labels.extend(deployment_node_labels);
+    let dpu_node_selector = build_dpu_node_selector(deployment_node_labels);
 
     DPUDeployment {
         metadata: ObjectMeta {
@@ -1284,10 +1358,7 @@ pub fn build_deployment(
                     dpu_annotations: None,
                     dpu_selector: None,
                     name_suffix: "default".to_string(),
-                    dpu_node_selector: Some(DpuDeploymentDpusDpuSetsDpuNodeSelector {
-                        match_expressions: None,
-                        match_labels: Some(node_labels),
-                    }),
+                    dpu_node_selector: Some(dpu_node_selector),
                     dpu_cluster_selector: None,
                     dpu_device_selector: None,
                     node_selector: None,
@@ -1323,6 +1394,30 @@ pub fn build_deployment(
         },
         status: None,
     }
+}
+
+/// Build a selector that works with both NFD's empty-valued capability label
+/// and deployments whose DPU node label has a value. `matchLabels` requires an
+/// exact value, so `feature.node.kubernetes.io/dpu-enabled: "true"` does not
+/// match NFD's `feature.node.kubernetes.io/dpu-enabled: ""` label.
+pub(crate) fn build_dpu_node_selector(
+    mut deployment_node_labels: BTreeMap<String, String>,
+) -> DpuDeploymentDpusDpuSetsDpuNodeSelector {
+    // This key is a capability marker, not a deployment-specific selector. Keep
+    // it out of matchLabels even if an older caller still supplies it there.
+    deployment_node_labels.remove(DPU_ENABLED_NODE_LABEL);
+
+    let mut selector = json!({
+        "matchExpressions": [{
+            "key": DPU_ENABLED_NODE_LABEL,
+            "operator": "Exists",
+        }],
+    });
+    if !deployment_node_labels.is_empty() {
+        selector["matchLabels"] = json!(deployment_node_labels);
+    }
+
+    serde_json::from_value(selector).expect("static DPU node selector is valid")
 }
 
 // Pair each NIC's br-xplane patch with its Weave-managed brcx bridge patch on br-sfc.
@@ -2606,8 +2701,7 @@ async fn create_flavor_services_and_deployment<
         )
         .await?;
         for nad in &svc.service_nads {
-            DpuServiceNADRepository::apply(repo, &build_service_nad(nad, namespace, suffix))
-                .await?;
+            apply_or_validate_service_nad(repo, &build_service_nad(nad, namespace, suffix)).await?;
         }
     }
 
@@ -4286,8 +4380,9 @@ fn dpu_deployment_is_ready(d: &DPUDeployment) -> bool {
     cond.status == "True" && cond.observed_generation == Some(generation)
 }
 
-/// Returns true when one DPUSet in a deployment contains every required
-/// DPUNode selector label.
+/// Returns true when one DPUSet selects every required DPUNode label. The
+/// capability marker may be selected by presence because NFD gives it an empty
+/// value on OpenShift.
 fn dpu_deployment_selects_labels(
     deployment: &DPUDeployment,
     required_labels: &BTreeMap<String, String>,
@@ -4299,15 +4394,24 @@ fn dpu_deployment_selects_labels(
         .as_ref()
         .is_some_and(|dpu_sets| {
             dpu_sets.iter().any(|dpu_set| {
-                dpu_set
-                    .dpu_node_selector
-                    .as_ref()
-                    .and_then(|selector| selector.match_labels.as_ref())
-                    .is_some_and(|labels| {
-                        required_labels
-                            .iter()
-                            .all(|(key, value)| labels.get(key) == Some(value))
+                dpu_set.dpu_node_selector.as_ref().is_some_and(|selector| {
+                    required_labels.iter().all(|(key, value)| {
+                        selector
+                            .match_labels
+                            .as_ref()
+                            .is_some_and(|labels| labels.get(key) == Some(value))
+                            || (key == DPU_ENABLED_NODE_LABEL
+                                && selector
+                                    .match_expressions
+                                    .as_ref()
+                                    .is_some_and(|expressions| {
+                                        expressions.iter().any(|expression| {
+                                            expression.key == *key
+                                                && expression.operator == "Exists"
+                                        })
+                                    }))
                     })
+                })
             })
         })
 }
