@@ -15,6 +15,7 @@
  * limitations under the License.
  */
 use ::rpc::forge as rpc;
+use carbide_instrument::Instrumentation;
 use carbide_resource_pool::{
     ResourcePoolBackendError, ResourcePoolRegistryError, ResourcePoolWithBackend,
 };
@@ -32,6 +33,7 @@ use crate::CarbideError;
 use crate::api::{Api, log_request_data, log_tenant_organization_id};
 
 fn emit_and_map_dpa_vni_allocation_failure(
+    instrumentation: &Instrumentation,
     source_pool: &resource_pool::ResourcePool<i32>,
     owner_id: &str,
     requested_vni: Option<i32>,
@@ -44,7 +46,7 @@ fn emit_and_map_dpa_vni_allocation_failure(
             requested_vni,
         ) => {
             db::resource_pool::emit_allocation_failure(
-                &carbide_instrument::Instrumentation::global(),
+                instrumentation,
                 source_pool.value_type,
                 owner_id,
                 requested_vni.is_some(),
@@ -57,7 +59,7 @@ fn emit_and_map_dpa_vni_allocation_failure(
             if db::resource_pool::is_requested_value_unavailable(&error) =>
         {
             db::resource_pool::emit_requested_vni_unavailable(
-                &carbide_instrument::Instrumentation::global(),
+                instrumentation,
                 source_pool.value_type,
                 owner_id,
                 requested_vni,
@@ -69,7 +71,7 @@ fn emit_and_map_dpa_vni_allocation_failure(
         }
         (ResourcePoolDatabaseError::Database(error), Some(_)) => {
             db::resource_pool::emit_database_allocation_failure(
-                &carbide_instrument::Instrumentation::global(),
+                instrumentation,
                 source_pool.value_type,
                 owner_id,
                 true,
@@ -80,7 +82,7 @@ fn emit_and_map_dpa_vni_allocation_failure(
         }
         (error, requested_vni) => {
             db::resource_pool::emit_allocation_failure(
-                &carbide_instrument::Instrumentation::global(),
+                instrumentation,
                 source_pool.value_type,
                 owner_id,
                 requested_vni.is_some(),
@@ -105,6 +107,7 @@ async fn select_dpa_vni_pool<'a>(
     match api.resource_pool_registry.select(txn, source_pool).await {
         Ok(Some(selected)) => Ok(selected),
         Ok(None) => Err(emit_and_map_dpa_vni_allocation_failure(
+            &api.instrumentation,
             source_pool,
             owner_id,
             requested_vni,
@@ -116,6 +119,7 @@ async fn select_dpa_vni_pool<'a>(
         )),
         Err(ResourcePoolRegistryError::Database(error)) => {
             Err(emit_and_map_dpa_vni_allocation_failure(
+                &api.instrumentation,
                 source_pool,
                 owner_id,
                 requested_vni,
@@ -141,9 +145,13 @@ pub(crate) async fn create(
     // Remote failures return their status without an allocation-failure count
     // until remote failure events land with remote activation (v2.5, #7129).
     let map_error = |error| match error {
-        ResourcePoolBackendError::Integrated(error) => {
-            emit_and_map_dpa_vni_allocation_failure(source_pool, &owner_id, req.vni, error)
-        }
+        ResourcePoolBackendError::Integrated(error) => emit_and_map_dpa_vni_allocation_failure(
+            &api.instrumentation,
+            source_pool,
+            &owner_id,
+            req.vni,
+            error,
+        ),
         error => CarbideError::from(error),
     };
 
@@ -316,13 +324,14 @@ mod tests {
     use ::rpc::forge as rpc;
     use carbide_instrument::testing::{MetricsCapture, capture_logs};
     use carbide_test_support::{Check, check_values, value_scenarios};
+    use carbide_utils::test_support::test_meter::TestMeter;
     use db::resource_pool::ResourcePoolDatabaseError;
     use model::resource_pool::common::DPA_VNI;
     use model::resource_pool::{ResourcePool, ResourcePoolError, ValueType};
     use model::spx_partition::NewSpxPartition;
     use tonic::Code;
 
-    use super::emit_and_map_dpa_vni_allocation_failure;
+    use super::{Instrumentation, emit_and_map_dpa_vni_allocation_failure};
 
     const RESOURCE_POOL_LIFECYCLE_FAILURES_METRIC: &str =
         "carbide_resource_pool_lifecycle_failures_total";
@@ -552,10 +561,13 @@ mod tests {
             ],
             |input| {
                 let source_pool = ResourcePool::<i32>::new(DPA_VNI.to_string(), ValueType::Integer);
-                let metrics = MetricsCapture::start();
+                let test_meter = TestMeter::default();
+                let instrumentation = Instrumentation::new(test_meter.meter());
+                let metrics = MetricsCapture::for_registry(test_meter.registry());
                 let mut mapped_error = None;
                 let logs = capture_logs(|| {
                     mapped_error = Some(emit_and_map_dpa_vni_allocation_failure(
+                        &instrumentation,
                         &source_pool,
                         OWNER_ID,
                         input.requested_vni,
@@ -577,21 +589,7 @@ mod tests {
                         ("value_type", "integer"),
                     ],
                 );
-                match input.failure {
-                    DpaVniFailureInput::Exhausted
-                    | DpaVniFailureInput::MissingRange
-                    | DpaVniFailureInput::RequestedUnavailable => {
-                        // VPC tests emit these labels without a `MetricsCapture`.
-                        // The log capture above checks this mapper's event.
-                        assert!(
-                            observed >= 1.0,
-                            "expected at least one {input:?} allocation failure, observed {observed}"
-                        );
-                    }
-                    DpaVniFailureInput::RequestedDatabase | DpaVniFailureInput::Generic => {
-                        assert_eq!(observed, 1.0, "{input:?}");
-                    }
-                }
+                assert_eq!(observed, 1.0, "{input:?}");
 
                 DpaVniFailureObservation {
                     status_code: status.code(),

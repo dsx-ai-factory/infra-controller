@@ -350,7 +350,7 @@ async fn allocate_pkey(
             resource_pool::ResourcePoolError::Empty,
         )) => {
             db::resource_pool::emit_allocation_failure(
-                &carbide_instrument::Instrumentation::global(),
+                &api.instrumentation,
                 source_pool.value_type,
                 owner_id,
                 requested_pkey.is_some(),
@@ -363,7 +363,7 @@ async fn allocate_pkey(
         }
         Err(err) => {
             db::resource_pool::emit_allocation_failure(
-                &carbide_instrument::Instrumentation::global(),
+                &api.instrumentation,
                 source_pool.value_type,
                 owner_id,
                 requested_pkey.is_some(),
