@@ -88,7 +88,7 @@ async fn environment(pool: sqlx::PgPool) -> TestEnv {
     create_test_env_with_overrides(
         pool,
         TestEnvOverrides {
-            config: Some(config),
+            config: Some(Box::new(config)),
             ..Default::default()
         },
     )
