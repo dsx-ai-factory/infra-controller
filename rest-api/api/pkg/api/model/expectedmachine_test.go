@@ -28,10 +28,63 @@ func TestAPIExpectedMachineCreateRequest_Validate(t *testing.T) {
 	validPassword := "password123"
 
 	tests := []struct {
-		desc      string
-		obj       APIExpectedMachineCreateRequest
-		expectErr bool
+		desc          string
+		obj           APIExpectedMachineCreateRequest
+		expectErr     bool
+		expectedError string
 	}{
+		{
+			desc: "DefaultBmcUsername with 16 multibyte characters",
+			obj: APIExpectedMachineCreateRequest{
+				BmcMacAddress:       "00:11:22:33:44:55",
+				ChassisSerialNumber: "SERIAL123",
+				DefaultBmcUsername:  cutil.GetPtr(strings.Repeat("é", 16)),
+			},
+		},
+		{
+			desc: "DefaultBmcUsername with 17 multibyte characters",
+			obj: APIExpectedMachineCreateRequest{
+				BmcMacAddress:       "00:11:22:33:44:55",
+				ChassisSerialNumber: "SERIAL123",
+				DefaultBmcUsername:  cutil.GetPtr(strings.Repeat("é", 17)),
+			},
+			expectErr:     true,
+			expectedError: "defaultBmcUsername: BMC username must be 16 characters or less.",
+		},
+		{
+			desc: "DefaultBmcPassword with 20 multibyte characters",
+			obj: APIExpectedMachineCreateRequest{
+				BmcMacAddress:       "00:11:22:33:44:55",
+				ChassisSerialNumber: "SERIAL123",
+				DefaultBmcPassword:  cutil.GetPtr(strings.Repeat("é", 20)),
+			},
+		},
+		{
+			desc: "DefaultBmcPassword with 21 multibyte characters",
+			obj: APIExpectedMachineCreateRequest{
+				BmcMacAddress:       "00:11:22:33:44:55",
+				ChassisSerialNumber: "SERIAL123",
+				DefaultBmcPassword:  cutil.GetPtr(strings.Repeat("é", 21)),
+			},
+			expectErr:     true,
+			expectedError: "defaultBmcPassword: BMC password must be 20 characters or less.",
+		},
+		{
+			desc: "ChassisSerialNumber with 32 multibyte characters",
+			obj: APIExpectedMachineCreateRequest{
+				BmcMacAddress:       "00:11:22:33:44:55",
+				ChassisSerialNumber: strings.Repeat("é", 32),
+			},
+		},
+		{
+			desc: "ChassisSerialNumber with 33 multibyte characters",
+			obj: APIExpectedMachineCreateRequest{
+				BmcMacAddress:       "00:11:22:33:44:55",
+				ChassisSerialNumber: strings.Repeat("é", 33),
+			},
+			expectErr:     true,
+			expectedError: "chassisSerialNumber: Chassis serial number must be 32 characters or less.",
+		},
 		{
 			desc: "loopback replacement requires interfaces",
 			obj: APIExpectedMachineCreateRequest{
@@ -359,6 +412,9 @@ func TestAPIExpectedMachineCreateRequest_Validate(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.desc, func(t *testing.T) {
 			err := tc.obj.Validate()
+			if tc.expectedError != "" {
+				assert.EqualError(t, err, tc.expectedError)
+			}
 			assert.Equal(t, tc.expectErr, err != nil)
 			if err != nil {
 				fmt.Println(err.Error())
@@ -1007,10 +1063,53 @@ func TestAPIExpectedMachineUpdateRequest_Validate(t *testing.T) {
 	validPassword := "password123"
 
 	tests := []struct {
-		desc      string
-		obj       APIExpectedMachineUpdateRequest
-		expectErr bool
+		desc          string
+		obj           APIExpectedMachineUpdateRequest
+		expectErr     bool
+		expectedError string
 	}{
+		{
+			desc: "DefaultBmcUsername with 16 multibyte characters",
+			obj: APIExpectedMachineUpdateRequest{
+				DefaultBmcUsername: cutil.GetPtr(strings.Repeat("é", 16)),
+			},
+		},
+		{
+			desc: "DefaultBmcUsername with 17 multibyte characters",
+			obj: APIExpectedMachineUpdateRequest{
+				DefaultBmcUsername: cutil.GetPtr(strings.Repeat("é", 17)),
+			},
+			expectErr:     true,
+			expectedError: "defaultBmcUsername: BMC Username must be 1-16 characters.",
+		},
+		{
+			desc: "DefaultBmcPassword with 20 multibyte characters",
+			obj: APIExpectedMachineUpdateRequest{
+				DefaultBmcPassword: cutil.GetPtr(strings.Repeat("é", 20)),
+			},
+		},
+		{
+			desc: "DefaultBmcPassword with 21 multibyte characters",
+			obj: APIExpectedMachineUpdateRequest{
+				DefaultBmcPassword: cutil.GetPtr(strings.Repeat("é", 21)),
+			},
+			expectErr:     true,
+			expectedError: "defaultBmcPassword: BMC Password must be 1-20 characters.",
+		},
+		{
+			desc: "ChassisSerialNumber with 32 multibyte characters",
+			obj: APIExpectedMachineUpdateRequest{
+				ChassisSerialNumber: cutil.GetPtr(strings.Repeat("é", 32)),
+			},
+		},
+		{
+			desc: "ChassisSerialNumber with 33 multibyte characters",
+			obj: APIExpectedMachineUpdateRequest{
+				ChassisSerialNumber: cutil.GetPtr(strings.Repeat("é", 33)),
+			},
+			expectErr:     true,
+			expectedError: "chassisSerialNumber: Chassis Serial Number must be 1-32 characters.",
+		},
 		{
 			desc:      "loopback replacement requires interfaces",
 			obj:       APIExpectedMachineUpdateRequest{ReplaceDpuLoopbacks: cutil.GetPtr(true)},
@@ -1324,6 +1423,9 @@ func TestAPIExpectedMachineUpdateRequest_Validate(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.desc, func(t *testing.T) {
 			err := tc.obj.Validate()
+			if tc.expectedError != "" {
+				assert.EqualError(t, err, tc.expectedError)
+			}
 			assert.Equal(t, tc.expectErr, err != nil)
 			if err != nil {
 				fmt.Println(err.Error())
