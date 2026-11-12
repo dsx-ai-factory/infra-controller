@@ -26,11 +26,31 @@ use rpc::forge::forge_server::Forge;
 
 use crate::test_support::fixture_config::FixtureDefault as _;
 use crate::tests::common;
-use crate::tests::common::api_fixtures::{create_managed_host, create_managed_host_multi_dpu};
+use crate::tests::common::api_fixtures::{
+    TestEnv, TestEnvOverrides, create_managed_host, create_managed_host_multi_dpu,
+    create_test_env_with_overrides,
+};
+
+async fn maintenance_test_env(db_pool: sqlx::PgPool, recheck: bool) -> TestEnv {
+    let mut config = common::api_fixtures::get_config();
+    config.maintenance_end_boot_config_recheck_enabled = recheck;
+    create_test_env_with_overrides(db_pool, TestEnvOverrides::with_config(config)).await
+}
 
 #[crate::sqlx_test]
 async fn test_maintenance_multi_dpu(db_pool: sqlx::PgPool) -> Result<(), eyre::Report> {
-    let env = create_test_env(db_pool.clone()).await;
+    maintenance_multi_dpu(db_pool, false).await
+}
+
+#[crate::sqlx_test]
+async fn test_maintenance_multi_dpu_with_boot_config_recheck(
+    db_pool: sqlx::PgPool,
+) -> Result<(), eyre::Report> {
+    maintenance_multi_dpu(db_pool, true).await
+}
+
+async fn maintenance_multi_dpu(db_pool: sqlx::PgPool, recheck: bool) -> Result<(), eyre::Report> {
+    let env = maintenance_test_env(db_pool.clone(), recheck).await;
     let segment_id = env.create_vpc_and_tenant_segment().await;
     // Create a machine
     let mh = create_managed_host_multi_dpu(&env, 2).await;
@@ -139,6 +159,13 @@ async fn test_maintenance_multi_dpu(db_pool: sqlx::PgPool) -> Result<(), eyre::R
         allow_unhealthy_machine: false,
         external_validation_request_id: None,
     };
+
+    if !recheck {
+        env.api
+            .allocate_instance(tonic::Request::new(allocation()))
+            .await?;
+        return Ok(());
+    }
 
     match env
         .api
@@ -262,10 +289,24 @@ async fn test_maintenance_suppresses_state_machine_sla_alert(
 }
 
 #[crate::sqlx_test]
+async fn test_ending_maintenance_keeps_boot_configuration_by_default(
+    db_pool: sqlx::PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    ending_maintenance(db_pool, false).await
+}
+
+#[crate::sqlx_test]
 async fn test_ending_maintenance_reverifies_boot_configuration(
     db_pool: sqlx::PgPool,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let env = create_test_env(db_pool.clone()).await;
+    ending_maintenance(db_pool, true).await
+}
+
+async fn ending_maintenance(
+    db_pool: sqlx::PgPool,
+    recheck: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let env = maintenance_test_env(db_pool.clone(), recheck).await;
     let host = common::api_fixtures::site_explorer::new_host(
         &env,
         model::test_support::ManagedHostConfig::default(),
@@ -316,15 +357,27 @@ async fn test_ending_maintenance_reverifies_boot_configuration(
         .await?
         .expect("ending maintenance keeps the desired boot interface");
     assert_eq!(after.value, before.value);
-    assert_ne!(
-        after.version, before.version,
-        "ending maintenance must open a fresh boot configuration generation",
-    );
-    assert_eq!(
-        queued().await?,
-        1,
-        "an unassigned Ready host is woken to re-verify after maintenance",
-    );
+    if recheck {
+        assert_ne!(
+            after.version, before.version,
+            "ending maintenance must open a fresh boot configuration generation",
+        );
+        assert_eq!(
+            queued().await?,
+            1,
+            "an unassigned Ready host is woken to re-verify after maintenance",
+        );
+    } else {
+        assert_eq!(
+            after.version, before.version,
+            "with the recheck off, ending maintenance must not touch the boot configuration",
+        );
+        assert_eq!(
+            queued().await?,
+            0,
+            "with the recheck off, ending maintenance must not wake the host",
+        );
+    }
 
     env.api
         .set_maintenance(tonic::Request::new(maintenance(

@@ -4268,7 +4268,10 @@ async fn test_ready_boot_config_skips_unlock_when_already_correct(pool: sqlx::Pg
 
 #[crate::sqlx_test]
 async fn test_ending_maintenance_reverifies_a_correct_host_without_mutating_it(pool: sqlx::PgPool) {
-    let env = create_zero_dpu_test_env(pool).await;
+    let mut config = crate::tests::common::api_fixtures::get_config();
+    config.maintenance_end_boot_config_recheck_enabled = true;
+    let overrides = TestEnvOverrides::with_config(config);
+    let env = create_zero_dpu_test_env_with_overrides(pool, overrides).await;
     let mh = create_managed_host_with_config(&env, ManagedHostConfig::zero_dpu()).await;
     let maintenance = |operation: rpc::forge::MaintenanceOperation| {
         tonic::Request::new(rpc::forge::MaintenanceRequest {

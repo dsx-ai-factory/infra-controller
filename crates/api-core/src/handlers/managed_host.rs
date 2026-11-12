@@ -287,11 +287,17 @@ pub(crate) async fn set_maintenance(
                 Err(CarbideError::NotFoundError { .. }) => return Ok(Response::new(())),
                 Err(err) => return Err(err.into()),
             };
-            let reconciliation =
+            let recheck = api
+                .runtime_config
+                .maintenance_end_boot_config_recheck_enabled;
+            let reconciliation = if recheck {
                 crate::handlers::bmc_endpoint_explorer::reverify_host_boot_configuration(
                     &mut txn, machine_id,
                 )
-                .await?;
+                .await?
+            } else {
+                None
+            };
             txn.commit().await?;
             if let Some(eligible) = reconciliation {
                 tracing::info!(
