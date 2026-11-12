@@ -275,9 +275,27 @@ impl<B: Bmc> RedfishResourcesExt<B> for OpCx<'_, B> {
 
 #[cfg(test)]
 mod tests {
+    use bmc_platform::PlatformIdentity;
     use serde_json::json;
 
     use super::*;
+
+    /// Without an exploration report the identity names no system or
+    /// manager, so drivers act on the ones exploration would choose: the host
+    /// that reports a BIOS rather than a baseboard listed before it, and the
+    /// manager linked to that host.
+    #[tokio::test]
+    async fn an_unexplored_bmc_resolves_its_host_system_and_manager() {
+        let bmc = bmc_mock::test_support::dgx_gb300_bmc().await;
+        let identity = PlatformIdentity::default();
+        let cx = OpCx::new(bmc.bmc.as_ref(), bmc.service_root.as_ref(), &identity);
+
+        let system = cx.system().await.expect("the primary system resolves");
+        let manager = cx.manager().await.expect("its manager resolves");
+
+        assert_eq!(system.raw().id, "System_0");
+        assert_eq!(manager.raw().id, "BMC_0");
+    }
 
     #[test]
     fn attribute_updates_serialize_as_the_plain_json_values() {

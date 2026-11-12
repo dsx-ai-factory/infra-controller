@@ -486,6 +486,20 @@ mod tests {
         assert!(bmc.authenticated_only_as("root", "password"));
     }
 
+    /// Without an explored report the standard drivers run, acting on the
+    /// system exploration would have chosen.
+    #[tokio::test]
+    async fn an_unexplored_bmc_runs_the_standard_drivers_on_its_primary_system() {
+        let bmc = ExploredMock::serve();
+
+        let connected = connector(direct_pool(), &stored_root())
+            .connect(&bmc.access, None)
+            .await
+            .expect("the unexplored BMC connects");
+
+        assert_eq!(power_state(connected).await, Some(PowerState::On));
+    }
+
     /// Explicit credentials reach the BMC directly even when the stored ones
     /// route through nico-bmc-proxy, and the stored ones are never read.
     #[tokio::test]

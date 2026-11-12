@@ -24,7 +24,7 @@ use nv_redfish::{Bmc, Error as RedfishError, ServiceRoot};
 use serde::{Deserialize, Serialize};
 use tokio::sync::OnceCell;
 
-use super::{ClassifyBmcError, IpmiOps};
+use super::{ClassifyBmcError, IpmiOps, manager_index_for, primary_system_index};
 use crate::{DriverOutcome, PlatformError, PlatformIdentity, Quirk};
 
 /// Runtime-owned operation context supplied to a stateless driver.
@@ -109,17 +109,20 @@ impl<'a, B: Bmc> OpCx<'a, B> {
         self.identity
     }
 
-    /// Returns the ComputerSystem exploration selected; `Unsupported` when the
-    /// BMC manages no system (power shelves, switches).
+    /// Returns the ComputerSystem exploration selected, or the primary one
+    /// the BMC lists when the identity names none, as for a BMC without an
+    /// exploration report. `Unsupported` when the BMC manages no system
+    /// (power shelves, switches).
     ///
     /// Fails when the identity names a system the BMC no longer lists.
     pub async fn system(&self) -> Result<&ComputerSystem<B>, PlatformError> {
         self.system
             .get_or_try_init(|| async {
-                let Some(system) = &self.identity.system else {
+                let selected = self.identity.system.as_ref();
+                if selected.is_none() && self.service_root.root.systems.is_none() {
                     return Ok(None);
-                };
-                let systems = self
+                }
+                let mut systems = self
                     .service_root
                     .systems()
                     .await
@@ -128,29 +131,32 @@ impl<'a, B: Bmc> OpCx<'a, B> {
                     .members()
                     .await
                     .map_err(|error| self.map_redfish_error(error))?;
-                find_selected(
-                    systems,
-                    |member| member.raw().id.clone(),
-                    &system.id,
-                    "ComputerSystem",
-                )
-                .map(Some)
+                match selected {
+                    Some(system) => find_selected(
+                        systems,
+                        |member| member.raw().id.clone(),
+                        &system.id,
+                        "ComputerSystem",
+                    )
+                    .map(Some),
+                    None => {
+                        Ok(primary_system_index(&systems).map(|index| systems.swap_remove(index)))
+                    }
+                }
             })
             .await?
             .as_ref()
             .ok_or(PlatformError::Unsupported)
     }
 
-    /// Returns the Manager linked to the selected system.
+    /// Returns the Manager exploration selected, or the one linked to
+    /// [`Self::system`] when the identity names none.
     ///
     /// Fails when the identity names a manager the BMC no longer lists.
     pub async fn manager(&self) -> Result<&Manager<B>, PlatformError> {
         self.manager
             .get_or_try_init(|| async {
-                let Some(manager) = &self.identity.manager else {
-                    return Ok(None);
-                };
-                let managers = self
+                let mut managers = self
                     .service_root
                     .managers()
                     .await
@@ -159,13 +165,24 @@ impl<'a, B: Bmc> OpCx<'a, B> {
                     .members()
                     .await
                     .map_err(|error| self.map_redfish_error(error))?;
-                find_selected(
-                    managers,
-                    |member| member.raw().id.clone(),
-                    &manager.id,
-                    "Manager",
-                )
-                .map(Some)
+                match &self.identity.manager {
+                    Some(manager) => find_selected(
+                        managers,
+                        |member| member.raw().id.clone(),
+                        &manager.id,
+                        "Manager",
+                    )
+                    .map(Some),
+                    None => {
+                        let system = match self.system().await {
+                            Ok(system) => Some(system),
+                            Err(PlatformError::Unsupported) => None,
+                            Err(error) => return Err(error),
+                        };
+                        Ok(manager_index_for(&managers, system)
+                            .map(|index| managers.swap_remove(index)))
+                    }
+                }
             })
             .await?
             .as_ref()
