@@ -200,6 +200,12 @@ The local REST Dockerfiles inherit BuildKit's target operating system and archit
 
 DevSpace watches the Rust workspace, toolchain metadata, and the runtime Dockerfiles to decide when the shared Core artifacts need rebuilding. It always runs the selected second-stage Core runtime builds to guarantee their generated tags exist locally. On kind clusters, the pre-deploy hooks then load all Core and REST images into the cluster selected by the current kube context.
 
+The shared Core build runs one Cargo job per core by default. Peak memory arrives when several debug binaries link at once, so hosts with less than roughly 2 GiB of Docker memory per core can have the daemon OOM-killed partway through the build. Inside a Docker Desktop, Colima, or Lima VM the limit is whatever that VM was allocated, not the host total. Either raise the VM memory or cap the job count:
+
+```bash
+LOCAL_DEV_CARGO_JOBS=2 devspace deploy
+```
+
 The `nico-machine-a-tron` Helm subchart configuration is in [`values.base.yaml`](values.base.yaml). The post-deploy setup resolves the `nico-machine-a-tron-mat-0-bmc-mock` Service ClusterIP and sets Core's runtime BMC proxy to that literal address. After allowing earlier requests to drain, it clears cached lockout-protection errors and refreshes existing host and DPU BMC endpoint records reported by machine-a-tron; endpoints not yet recorded on a clean install are left for normal discovery. This avoids hostname connection failures on affected ARM64 hosts and works unchanged on AMD64.
 
 DevSpace's Core configuration explicitly sets `auth.allow_machineatron_scout_stream = true` so MAT can open simulated Scout streams. This optional boolean defaults to `false` when omitted, including when the entire `[auth]` section is absent. It permits only the authenticated `machine-a-tron` service identity to call `ScoutStream`; it does not change other RPC permissions or enable an RBAC bypass. It is independent of `auth.permissive_mode`, which applies to Casbin. Configuration changes require restarting Core. Keep this setting disabled outside isolated simulation environments: when enabled, MAT can claim any machine ID, including a real host's ID. Do not use it in mixed real/simulated deployments.

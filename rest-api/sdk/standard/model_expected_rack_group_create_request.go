@@ -33,7 +33,7 @@ type ExpectedRackGroupCreateRequest struct {
 	// Optional rack fabric protocol, non-blank and at most 128 characters when supplied. Omission or null leaves it unspecified and disables protocol-specific topology normalization. `NVLINK_V6` enables GB-to-VR profile topology normalization.
 	Protocol NullableString `json:"protocol,omitempty"`
 	// Ordered racks and their devices. Rack IDs and device identity tuples must be unique across the group, with case-sensitive comparison. A provided array replaces the complete list; on PATCH, omission or null preserves it and [] clears it. On create, omission or null supplies an empty list.
-	Racks []ExpectedRackGroupRack `json:"racks,omitempty"`
+	Racks []ExpectedRackGroupRackRequest `json:"racks,omitempty"`
 	// ASCII human-readable name, at most 256 characters. An empty string is allowed.
 	Name NullableString `json:"name,omitempty" validate:"regexp=^[\\x00-\\x7F]*$"`
 	// Human-readable description, at most 1024 UTF-8 bytes. An empty string is allowed.
@@ -180,9 +180,9 @@ func (o *ExpectedRackGroupCreateRequest) UnsetProtocol() {
 }
 
 // GetRacks returns the Racks field value if set, zero value otherwise (both if not set or set to explicit null).
-func (o *ExpectedRackGroupCreateRequest) GetRacks() []ExpectedRackGroupRack {
+func (o *ExpectedRackGroupCreateRequest) GetRacks() []ExpectedRackGroupRackRequest {
 	if o == nil {
-		var ret []ExpectedRackGroupRack
+		var ret []ExpectedRackGroupRackRequest
 		return ret
 	}
 	return o.Racks
@@ -190,7 +190,7 @@ func (o *ExpectedRackGroupCreateRequest) GetRacks() []ExpectedRackGroupRack {
 
 // GetRacksOk returns a tuple with the Racks field value if set, nil otherwise
 // and a boolean to check if the value has been set.
-func (o *ExpectedRackGroupCreateRequest) GetRacksOk() ([]ExpectedRackGroupRack, bool) {
+func (o *ExpectedRackGroupCreateRequest) GetRacksOk() ([]ExpectedRackGroupRackRequest, bool) {
 	if o == nil || IsNil(o.Racks) {
 		return nil, false
 	}
@@ -206,8 +206,8 @@ func (o *ExpectedRackGroupCreateRequest) HasRacks() bool {
 	return false
 }
 
-// SetRacks gets a reference to the given []ExpectedRackGroupRack and assigns it to the Racks field.
-func (o *ExpectedRackGroupCreateRequest) SetRacks(v []ExpectedRackGroupRack) {
+// SetRacks gets a reference to the given []ExpectedRackGroupRackRequest and assigns it to the Racks field.
+func (o *ExpectedRackGroupCreateRequest) SetRacks(v []ExpectedRackGroupRackRequest) {
 	o.Racks = v
 }
 

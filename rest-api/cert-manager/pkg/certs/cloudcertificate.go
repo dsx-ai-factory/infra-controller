@@ -6,9 +6,11 @@ package certs
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 
 	"github.com/NVIDIA/infra-controller/rest-api/cert-manager/pkg/core"
+	"github.com/NVIDIA/infra-controller/rest-api/cert-manager/pkg/types"
 )
 
 type pkiCloudCertificateHandler struct {
@@ -26,7 +28,7 @@ func (h *pkiCloudCertificateHandler) reply(ctx context.Context, cert, key string
 
 	respBytes, marshalErr := json.Marshal(resp)
 	if marshalErr != nil {
-		log.WithField("err", ErrorMarshalJSON.String()).Errorf("Failed to json.Marshal ClientCertificateResponse %+v, err: %s", resp, marshalErr.Error())
+		log.WithField("err", ErrorMarshalJSON.String()).WithError(marshalErr).Error("failed to marshal certificate response")
 		http.Error(w, ErrorMarshalJSON.Error(), ErrorMarshalJSON.Code())
 		return
 	}
@@ -54,6 +56,10 @@ func (h *pkiCloudCertificateHandler) ServeHTTP(w http.ResponseWriter, r *http.Re
 
 	cert, privKey, err := h.certificateIssuer.NewCertificate(ctx, req)
 
+	if errors.Is(err, types.ErrInvalidTTL) {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
 	if err != nil {
 		log.WithField("err", ErrorGetCertificate.String()).Errorf("failed certificateIssuer.NewCertificate, err: %s", err.Error())
 		h.reply(ctx, "", "", ErrorGetCertificate, w)

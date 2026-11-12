@@ -793,6 +793,8 @@ export NICO_TEST_TEMPLATE_DB="${NICO_TEST_TEMPLATE_DB-sqlx_ci_template_db}"
 cargo test --profile=ci-tests --no-run
 "${CARGO_TARGET_DIR:-target}/ci-tests/prepare-test-template"
 cargo test --profile=ci-tests
+# This test exhausts process-wide DPU admission, so run it in its own process.
+cargo test --profile=ci-tests tests::dpu_remote::remote_dpu_asn_post_preparation_admission_stops_retain_cleanup -- --exact --ignored --test-threads=1
 '''
 
 [tasks.build-and-test-release-container-services]

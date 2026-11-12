@@ -86,6 +86,7 @@ impl ControllerEnv {
             None,
             Some(pool.clone()),
             None,
+            None,
         )
         .await
         .expect("test component manager should build");
@@ -120,6 +121,7 @@ impl ControllerEnv {
                     switch_mtls_services: default_switch_mtls_services(),
                     per_object_metrics_registry: per_object_metrics_registry.clone(),
                     redfish_client_pool: redfish_sim.clone(),
+                    bmc_connector: bmc_backend::BmcConnector::Libredfish(redfish_sim.clone()),
                     bmc_credential_ops: redfish_sim.clone(),
                     bmc_rotation_gate: carbide_credential_rotation::RotationGate::new_for_family(
                         db::credential_rotation::CredentialRotationType::Bmc,

@@ -3165,6 +3165,12 @@ async fn test_machine_creator_retries_changed_loopback_reservation_set(
     use model::resource_pool::{OwnerType, ResourcePoolEntryState};
 
     let env = Env::new(pool).await;
+    // Four preparations plus the gate occupy the fixture's five connections.
+    // Keep lock observations and intent edits on a separate connection.
+    let control = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(1)
+        .connect_with(env.pool.connect_options().as_ref().clone())
+        .await?;
     let creator = machine_creator(&env, machine_creator_config());
     let common_pools = env.api().common_pools();
     let loopback_pool = common_pools.ethernet.pool_loopback_ip.as_ref();
@@ -3225,9 +3231,9 @@ async fn test_machine_creator_retries_changed_loopback_reservation_set(
             tokio::pin!(creation);
             tokio::select! {
                 result = &mut creation => panic!("creation bypassed the preparation gate: {result:?}"),
-                _ = wait_for_blocked_queries(&env.pool, gate_pid, "SELECT value FROM resource_pool", 2) => {},
+                _ = wait_for_blocked_queries(&control, gate_pid, "SELECT value FROM resource_pool", 2) => {},
             }
-            let mut writer = env.pool.begin().await?;
+            let mut writer = control.begin().await?;
             let mut updated = expected.clone();
             updated.data.interfaces = replacement
                 .iter()
@@ -3318,5 +3324,6 @@ async fn test_machine_creator_retries_changed_loopback_reservation_set(
             );
         }
     }
+    control.close().await;
     Ok(())
 }

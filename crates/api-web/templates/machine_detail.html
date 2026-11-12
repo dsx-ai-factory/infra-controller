@@ -541,7 +541,7 @@ Missing BMC Data
 
 <div class="section">
     <h2>Machine Validation</h2>
-    <table class="sortable detailsview">
+    <table class="sortable overview">
         <thead>
             <tr>
                 <th>Validation ID</th>
@@ -549,6 +549,8 @@ Missing BMC Data
                 <th>Start Time</th>
                 <th>End Time</th>
                 <th>State</th>
+                <th>Completed/Total</th>
+                <th>Current Work</th>
             </tr>
         </thead>
         <tbody>
@@ -559,6 +561,13 @@ Missing BMC Data
                 <td>{{ run.start_time }}</td>
                 <td>{{ run.end_time }}</td>
                 <td>{% if run.status == "Completed(Success)" %}<span class="bubble success">{% else %}<span class="bubble error">{% endif %}{{ run.status }}</span></td>
+                <td>{{ run.progress }}</td>
+                <td style="overflow-wrap: anywhere;">
+                    {% if run.current_tests != "" %}
+                    <div><strong>Test:</strong> {{ run.current_tests }}</div>
+                    <div><strong>Attempt:</strong> {{ run.current_attempts }}</div>
+                    {% endif %}
+                </td>
             </tr>
             {% endfor %}
         </tbody>

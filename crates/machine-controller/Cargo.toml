@@ -31,6 +31,8 @@ default = []
 test-support = ["dep:mockall"]
 
 [dependencies]
+bmc-backend = { path = "../bmc-backend" }
+bmc-runtime = { path = "../bmc-runtime" }
 bmc-vendor = { path = "../bmc-vendor" }
 carbide-api-db = { path = "../api-db", default-features = false }
 carbide-api-model = { path = "../api-model", default-features = false }

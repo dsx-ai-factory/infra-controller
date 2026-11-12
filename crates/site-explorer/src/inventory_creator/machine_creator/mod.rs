@@ -57,6 +57,7 @@ use super::Config;
 use crate::IdentifiedManagedHost;
 use crate::bmc_endpoint_explorer::record_machine_identity;
 use crate::boot_interfaces::{initial_selection_source, zero_dpu_primary_mac};
+use crate::dpu_asn::PreparedDpuAsn;
 use crate::dpu_loopback::{PreparedDpuLoopback, acquire_admin_admission};
 use crate::endpoint_exploration_report_ext::EndpointExplorationReportExt;
 use crate::errors::{SiteExplorerError, SiteExplorerResult};
@@ -86,17 +87,19 @@ pub struct MachineCreator {
     dpf_enabled_at_site: bool,
 }
 
-/// Retains the intent used for preparation so creation can recheck it under lock.
-struct HostLoopbacks<'a> {
+/// Keeps loopback reservations and prepared DPU allocations together so the
+/// creation transaction can recheck them under lock.
+struct HostDpuResources<'a> {
     existing_host: Option<HostMachineId>,
     reservations: Vec<DpuLoopbackReservation>,
     reservations_by_dpu: HashMap<DpuMachineId, usize>,
-    prepared: Vec<PreparedDpuLoopback<'a>>,
+    loopbacks: Vec<PreparedDpuLoopback<'a>>,
+    asns: Vec<PreparedDpuAsn<'a>>,
 }
 
 impl MachineCreator {
     /// Creates a machine creator with an optional machine-information provider.
-    /// The registry selects DPU IPv4 backends for preparation outside entity
+    /// The registry selects loopback and ASN backends for preparation outside entity
     /// transactions. Direct calls have an uncancelled owner token; Site Explorer
     /// installs its shutdown token before starting production creation work.
     pub fn new(
@@ -235,8 +238,9 @@ impl MachineCreator {
     ///
     /// Returns `true` only when new machines have been created.
     ///
-    /// Prepares missing DPU IPv4 loopbacks through the configured backend before
-    /// the machine transaction, then attaches them with the network config.
+    /// Prepares DPU IPv4 loopbacks and ASNs through the configured allocators
+    /// before the machine transaction, then attaches them after interface writes.
+    /// ASN allocation failures remain nonfatal; existing remote ownership is reused.
     ///
     /// Requires a matching `expected_machine` entry.
     pub async fn create_managed_host(
@@ -347,26 +351,43 @@ impl MachineCreator {
             let requested_loopback_v4 = reservations_by_dpu
                 .get(&machine_id)
                 .and_then(|&index| reservations[index].loopback_ipv4);
-            PreparedDpuLoopback::prepare(
-                pool,
-                &self.resource_pool_registry,
-                &self.common_pools,
-                machine_id.into(),
-                requested_loopback_v4,
-                &self.preparation_cancel_token,
-            )
+            async move {
+                tokio::join!(
+                    PreparedDpuLoopback::prepare(
+                        pool,
+                        &self.resource_pool_registry,
+                        &self.common_pools,
+                        machine_id.into(),
+                        requested_loopback_v4,
+                        &self.preparation_cancel_token,
+                    ),
+                    PreparedDpuAsn::prepare(
+                        pool,
+                        &self.resource_pool_registry,
+                        &self.common_pools,
+                        machine_id.into(),
+                        &self.preparation_cancel_token,
+                    ),
+                )
+            }
         }))
         .await;
-        let mut loopbacks = HostLoopbacks {
+        let mut resources = HostDpuResources {
             existing_host,
             reservations,
             reservations_by_dpu,
-            prepared: Vec::with_capacity(preparations.len()),
+            loopbacks: Vec::with_capacity(preparations.len()),
+            asns: Vec::with_capacity(preparations.len()),
         };
         let mut preparation_error = None;
-        for preparation in preparations {
-            match preparation {
-                Ok(prepared) => loopbacks.prepared.push(prepared),
+        for (loopback, asn) in preparations {
+            match loopback {
+                Ok(prepared) => resources.loopbacks.push(prepared),
+                Err(error) if preparation_error.is_none() => preparation_error = Some(error),
+                Err(_) => {}
+            }
+            match asn {
+                Ok(prepared) => resources.asns.push(prepared),
                 Err(error) if preparation_error.is_none() => preparation_error = Some(error),
                 Err(_) => {}
             }
@@ -377,12 +398,16 @@ impl MachineCreator {
                 return Err(error.into());
             }
             let admission_start = Instant::now();
-            let has_provider_reservation = loopbacks
-                .prepared
+            let needs_bounded_admission = resources
+                .loopbacks
                 .iter()
-                .any(PreparedDpuLoopback::has_provider_reservation);
+                .any(PreparedDpuLoopback::has_provider_reservation)
+                || resources
+                    .asns
+                    .iter()
+                    .any(PreparedDpuAsn::has_provider_reservation);
             let admission =
-                acquire_admin_admission(has_provider_reservation, &self.preparation_cancel_token)
+                acquire_admin_admission(needs_bounded_admission, &self.preparation_cancel_token)
                     .await;
             record_creation_stage(
                 ManagedHostCreationStage::AdmissionWait,
@@ -397,7 +422,7 @@ impl MachineCreator {
                     report,
                     expected_machine,
                     primary_interface_selection,
-                    &loopbacks,
+                    &resources,
                 )
                 .await;
             record_creation_stage(
@@ -409,9 +434,14 @@ impl MachineCreator {
         .await;
         // Attached requests ignore cancellation. This also abandons a
         // preparation a concurrent writer made unnecessary before commit.
-        for prepared in &loopbacks.prepared {
+        for prepared in &resources.loopbacks {
             if let Err(error) = prepared.cancel(pool).await {
                 tracing::error!(machine_id = %prepared.machine_id(), %error, "Could not save DPU loopback cancellation");
+            }
+        }
+        for prepared in &resources.asns {
+            if let Err(error) = prepared.cancel(pool).await {
+                tracing::error!(machine_id = %prepared.machine_id(), error = %error, "Could not save DPU ASN cancellation");
             }
         }
         let (creation, _admin_admission) = creation?;
@@ -470,7 +500,7 @@ impl MachineCreator {
         report: &mut EndpointExplorationReport,
         expected_machine: &ExpectedMachine,
         primary_interface_selection: Option<HostPrimaryInterfaceSelection>,
-        loopbacks: &HostLoopbacks<'_>,
+        resources: &HostDpuResources<'_>,
     ) -> SiteExplorerResult<ManagedHostCreation> {
         let machine_data = Some(&expected_machine.data);
         let mut managed_host = ManagedHost::init(explored_host);
@@ -479,7 +509,7 @@ impl MachineCreator {
             Some(expected_machine.data.dpu_policy),
             self.config.dpu_policy,
         );
-        if loopbacks.existing_host.is_none()
+        if resources.existing_host.is_none()
             && (!explored_host.dpus.is_empty() || host_dpu_policy.expects_managed_dpus())
         {
             // Preparation can call a provider outside this transaction. Fence
@@ -495,14 +525,17 @@ impl MachineCreator {
                 expected_machine.bmc_mac_address,
             )
             .await?;
-            if reservations != loopbacks.reservations {
+            if reservations != resources.reservations {
                 return Err(SiteExplorerError::internal(
                     "DPU loopback declarations changed during preparation; retry creation"
                         .to_string(),
                 ));
             }
         }
-        for prepared in &loopbacks.prepared {
+        for prepared in &resources.loopbacks {
+            prepared.check_identity(&mut txn).await?;
+        }
+        for prepared in &resources.asns {
             prepared.check_identity(&mut txn).await?;
         }
 
@@ -538,7 +571,7 @@ impl MachineCreator {
         let host_associations = db::machine::DpuHostAssociations::load(&mut txn, &dpu_ids).await?;
         let existing_host = host_associations.common_host_machine_id()?;
         // An attempt that skipped ingestion intent must not become a creation.
-        if loopbacks.existing_host.is_some() && loopbacks.existing_host != existing_host {
+        if resources.existing_host.is_some() && resources.existing_host != existing_host {
             return Err(SiteExplorerError::internal(
                 "DPU host attachments changed during preparation; retry creation".to_string(),
             ));
@@ -561,7 +594,10 @@ impl MachineCreator {
             // IPv4 allocation uses shared segment locks; force cleanup needs
             // them exclusively. Recheck after that fence and hold it through
             // creation, so an intervening create/delete cannot become absence.
-            for prepared in &loopbacks.prepared {
+            for prepared in &resources.loopbacks {
+                prepared.check_identity(&mut txn).await?;
+            }
+            for prepared in &resources.asns {
                 prepared.check_identity(&mut txn).await?;
             }
         }
@@ -569,10 +605,10 @@ impl MachineCreator {
         for (dpu_report, dpu_machine_id) in
             managed_host.explored_host.dpus.iter().zip(dpu_ids.iter())
         {
-            let requested_loopback_v6 = loopbacks
+            let requested_loopback_v6 = resources
                 .reservations_by_dpu
                 .get(dpu_machine_id)
-                .and_then(|&index| loopbacks.reservations[index].loopback_ipv6);
+                .and_then(|&index| resources.reservations[index].loopback_ipv6);
             self
                 .create_dpu(&mut txn, dpu_report, requested_loopback_v6)
                 .await?
@@ -590,8 +626,11 @@ impl MachineCreator {
         }
 
         // Every host link exists before the machine-group configuration updates.
-        for prepared in &loopbacks.prepared {
+        for prepared in &resources.loopbacks {
             prepared.attach(&mut txn, true).await?;
+        }
+        for prepared in &resources.asns {
+            prepared.attach(&mut txn).await?;
         }
 
         // Now since all DPUs are created, update host and DPUs state correctly.
@@ -892,8 +931,9 @@ impl MachineCreator {
     // configures it appropriately, returning the new `Machine`.
     // If the DPU already exists in the machines table, this is a no-op and returns `None`.
     //
-    // `db::machine::create` can persist pool-backed defaults on the new row.
-    // The full `network_config` reconciliation and version bump wait until
+    // Optional native IPv6 is reserved with the DPU row. Prepared IPv4 and ASN
+    // resources attach after all interfaces have been written. The full network
+    // configuration and its group version bump wait until
     // `attach_dpu_to_host` wires the host link in `machine_interfaces`; only
     // then can `try_update_network_config` observe both siblings and keep their
     // versions equal.
@@ -979,10 +1019,10 @@ impl MachineCreator {
         Ok(false)
     }
 
-    // create_dpu_machine creates a machine for the DPU as specified by dpu_machine_id. Returns an Optional Machine indicating whether the function created a new machine (returns None if a machine already existed for this DPU).
-    // if an entry exists in the machines table with a machine ID which matches dpu_machine_id, a machine has already been created for this DPU. Returns None.
-    // if an entry doesnt exist in the machine table, the site explorer will add an entry in the machines table for the DPU and update its network config appropriately (allocating a loop ip address etc). Return the newly created machine.
     #[tracing::instrument(skip_all, name = "ingest_dpu")]
+    // Create the DPU row and its optional native IPv6 reservation here. Prepared
+    // IPv4 and ASN resources attach after all host interfaces exist; an existing
+    // row needs no insertion.
     async fn create_dpu_machine(
         &self,
         txn: &mut PgConnection,
@@ -998,7 +1038,9 @@ impl MachineCreator {
             Some(_existing_machine) => Ok(None),
             None => match db::machine::create_with_requested_loopback(
                 txn,
-                Some(&self.common_pools),
+                Some(db::machine::MachineCreationPools::Ipv6Only(
+                    &self.common_pools,
+                )),
                 dpu_machine_id,
                 ManagedHostState::Created,
                 None,

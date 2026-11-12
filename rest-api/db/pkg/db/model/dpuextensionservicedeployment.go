@@ -127,12 +127,21 @@ type DpuExtensionServiceDeploymentFilterInput struct {
 	Versions                         []string
 	Statuses                         []string
 	SearchQuery                      *string
+	// IncludeDeleted returns soft-deleted rows in addition to active rows.
+	IncludeDeleted bool
 }
 
 // DpuExtensionServiceDeploymentUpdateInput is used to update a DpuExtensionServiceDeployment object
 type DpuExtensionServiceDeploymentUpdateInput struct {
 	DpuExtensionServiceDeploymentID uuid.UUID
 	Status                          *string
+}
+
+// DpuExtensionServiceDeploymentClearInput identifies nullable deployment fields to clear.
+type DpuExtensionServiceDeploymentClearInput struct {
+	DpuExtensionServiceDeploymentID uuid.UUID
+	// Deleted clears the soft-delete timestamp.
+	Deleted bool
 }
 
 // DpuExtensionServiceDeploymentDAO is an interface for interacting with the DpuExtensionServiceDeployment model
@@ -147,6 +156,8 @@ type DpuExtensionServiceDeploymentDAO interface {
 	GetAll(ctx context.Context, tx *db.Tx, filter DpuExtensionServiceDeploymentFilterInput, page paginator.PageInput, includeRelations []string) ([]DpuExtensionServiceDeployment, int, error)
 	//
 	Update(ctx context.Context, tx *db.Tx, input DpuExtensionServiceDeploymentUpdateInput) (*DpuExtensionServiceDeployment, error)
+	//
+	Clear(ctx context.Context, tx *db.Tx, input DpuExtensionServiceDeploymentClearInput) (*DpuExtensionServiceDeployment, error)
 	//
 	Delete(ctx context.Context, tx *db.Tx, id uuid.UUID) error
 }
@@ -214,6 +225,9 @@ func (desdsd DpuExtensionServiceDeploymentSQLDAO) GetAll(ctx context.Context, tx
 	}
 
 	query := db.GetIDB(tx, desdsd.dbSession).NewSelect().Model(&desds)
+	if filter.IncludeDeleted {
+		query = query.WhereAllWithDeleted()
+	}
 
 	if filter.DpuExtensionServiceDeploymentIDs != nil {
 		query = query.Where("desd.id IN (?)", bun.In(filter.DpuExtensionServiceDeploymentIDs))
@@ -312,6 +326,37 @@ func (desdsd DpuExtensionServiceDeploymentSQLDAO) Update(ctx context.Context, tx
 	}
 
 	return udesd, nil
+}
+
+// Clear clears selected nullable fields on a DpuExtensionServiceDeployment.
+func (desdsd DpuExtensionServiceDeploymentSQLDAO) Clear(ctx context.Context, tx *db.Tx, input DpuExtensionServiceDeploymentClearInput) (_ *DpuExtensionServiceDeployment, retErr error) {
+	ctx, desdDAOSpan := cotel.StartSpan(ctx, "DpuExtensionServiceDeploymentDAO.Clear")
+	defer func() { cotel.EndSpan(desdDAOSpan, retErr) }()
+	cotel.SetAttribute(desdDAOSpan, attribute.String("id", input.DpuExtensionServiceDeploymentID.String()))
+
+	desd := &DpuExtensionServiceDeployment{ID: input.DpuExtensionServiceDeploymentID}
+	updatedFields := []string{}
+	if input.Deleted {
+		desd.Deleted = nil
+		updatedFields = append(updatedFields, "deleted")
+	}
+	if len(updatedFields) > 0 {
+		updatedFields = append(updatedFields, "updated")
+		query := db.GetIDB(tx, desdsd.dbSession).NewUpdate().Model(desd).Column(updatedFields...).Where("id = ?", desd.ID)
+		if input.Deleted {
+			query = query.WhereAllWithDeleted()
+		}
+		_, err := query.Exec(ctx)
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	updated, err := desdsd.GetByID(ctx, tx, desd.ID, nil)
+	if err != nil {
+		return nil, err
+	}
+	return updated, nil
 }
 
 // Delete deletes a DpuExtensionServiceDeployment by ID

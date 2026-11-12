@@ -1961,18 +1961,43 @@ async fn change_vpc_routing_profile_rejects_unavailable_exact_vni_without_change
         },
     ] {
         let scenario = case.scenario;
-        let error = env
-            .api
-            .change_vpc_routing_profile(tonic::Request::new(
-                rpc::forge::VpcChangeRoutingProfileRequest {
-                    id: Some(vpc_id),
-                    if_version_match: Some(before.version.clone()),
-                    routing_profile_type: "EXTERNAL".to_string(),
-                    vni: Some(case.vni),
-                },
-            ))
-            .await
-            .expect_err(scenario);
+        let metrics = MetricsCapture::start();
+        let (result, logs) = capture_logs_async(env.api.change_vpc_routing_profile(
+            tonic::Request::new(rpc::forge::VpcChangeRoutingProfileRequest {
+                id: Some(vpc_id),
+                if_version_match: Some(before.version.clone()),
+                routing_profile_type: "EXTERNAL".to_string(),
+                vni: Some(case.vni),
+            }),
+        ))
+        .await;
+        let error = result.expect_err(scenario);
+        if case.vni == 50000 {
+            let metric = "carbide_resource_pool_lifecycle_failures_total";
+            let events: Vec<_> = logs
+                .iter()
+                .filter(|log| log.field("metric_name") == Some(metric))
+                .collect();
+            assert_eq!(events.len(), 1, "{scenario}: {logs:?}");
+            assert_eq!(
+                events[0].field("event_name"),
+                Some("resource_pool_requested_vni_unavailable")
+            );
+            assert_eq!(
+                metrics.counter_delta(
+                    metric,
+                    &[
+                        ("operation", "allocate"),
+                        ("failure", "requested_value_unavailable"),
+                        ("failure_policy", "required"),
+                        ("allocation_mode", "requested"),
+                        ("value_type", "integer"),
+                    ]
+                ),
+                1.0
+            );
+        }
+        drop(metrics);
         assert_eq!(
             error.code(),
             tonic::Code::FailedPrecondition,

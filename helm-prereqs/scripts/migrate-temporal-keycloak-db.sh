@@ -146,7 +146,8 @@ _require_target_db() {
     if ! kubectl exec -n postgres "${NICO_PG_POD}" -- \
         psql -U postgres -tAc "SELECT 1 FROM pg_database WHERE datname='${_db}'" 2>/dev/null | grep -q 1; then
         echo "ERROR: database '${_db}' does not exist on nico-pg-cluster yet." >&2
-        echo "  Set the matching useHaPostgres value to true in ${PREREQS_DIR}/values.yaml and run 'helmfile sync -l name=nico-prereqs' first." >&2
+        echo "  Set the matching useHaPostgres value to true in ${PREREQS_DIR}/values.yaml and rerun setup.sh with the site's flags first" >&2
+        echo "  (a plain 'helmfile sync -l name=nico-prereqs' renders the Vault resources on a site installed with --skip-vault)." >&2
         exit 1
     fi
 }

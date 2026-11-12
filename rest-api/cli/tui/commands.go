@@ -1525,7 +1525,7 @@ func promptTemplatedIPXEOperatingSystem(
 	if err != nil {
 		return err
 	}
-	templates, err := s.fetchIPXETemplatesForSite(site.ID)
+	templates, err := s.fetchIPXETemplatesForSite(context.Background(), site.ID)
 	if err != nil {
 		return fmt.Errorf("fetching ipxe-template: %w", err)
 	}
@@ -2072,7 +2072,7 @@ func operatingSystemIPXETemplate(s *Session, item *NamedItem) (*NamedItem, error
 	if templateID == "" {
 		return nil, fmt.Errorf("templated iPXE operating system %q has no ipxeTemplateId", item.Name)
 	}
-	templates, err := s.fetchIPXETemplatesForSite("")
+	templates, err := s.fetchIPXETemplatesForSite(context.Background(), "")
 	if err != nil {
 		return nil, fmt.Errorf("fetching ipxe-template: %w", err)
 	}
@@ -4092,7 +4092,7 @@ func fetchReadyInstanceNetworkResources(s *Session, networkConfig instanceNetwor
 		query["vpcId"] = s.Scope.VpcID
 	}
 
-	resources, err := s.fetchAll(apiPath(s, networkConfig.resourceType), query)
+	resources, err := s.fetchAll(context.Background(), apiPath(s, networkConfig.resourceType), query)
 	if err != nil {
 		return nil, err
 	}
@@ -4206,7 +4206,7 @@ func fetchReadyInstanceInfiniBandPartitions(s *Session) ([]NamedItem, error) {
 		query["siteId"] = s.Scope.SiteID
 	}
 
-	resources, err := s.fetchAll(apiPath(s, "infiniband-partition"), query)
+	resources, err := s.fetchAll(context.Background(), apiPath(s, "infiniband-partition"), query)
 	if err != nil {
 		return nil, err
 	}
