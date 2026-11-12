@@ -28,7 +28,7 @@ use std::collections::HashMap;
 use std::convert::Infallible;
 use std::default::Default;
 use std::io;
-use std::net::{IpAddr, Ipv4Addr};
+use std::net::IpAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -128,7 +128,7 @@ struct PreingestionManagerStatic {
     bfb_rshim_copier: Arc<BfbRshimCopier>,
     bfb_copy_state: Arc<BfbCopyManager>,
     bfb_copy_limiter: Arc<Semaphore>,
-    ntp_servers: Vec<Ipv4Addr>,
+    ntp_servers: Vec<IpAddr>,
     rack_firmware: Option<RackFirmwareDependencies>,
 
     // Bound individual requests; firmware jobs may outlive these deadlines.
@@ -159,7 +159,7 @@ impl PreingestionManager {
         upload_limiter: Option<Arc<Semaphore>>,
         credential_reader: Option<Arc<dyn CredentialReader>>,
         work_lock_manager_handle: WorkLockManagerHandle,
-        ntp_servers: Vec<Ipv4Addr>,
+        ntp_servers: Vec<IpAddr>,
     ) -> PreingestionManager {
         let hold_period = config
             .run_interval
@@ -1999,6 +1999,8 @@ impl PreingestionManagerStatic {
             }
         };
 
+        // Send servers in configured order: some BMCs keep only the first few
+        // entries, so the operator's ordering decides which ones survive.
         let ntp_servers: Vec<String> = self
             .ntp_servers
             .iter()
