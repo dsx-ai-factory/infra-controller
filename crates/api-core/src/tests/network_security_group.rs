@@ -96,6 +96,7 @@ async fn update_network_status_observation(
             astra_config_status: None,
             lldp: None,
             lldp_snapshot_fingerprint: None,
+            service_network_observation: None,
         }))
         .await
         .unwrap();

@@ -1730,6 +1730,54 @@ pub(super) async fn update_dhcp(
     Ok(true)
 }
 
+/// Builds an observation for every supplied service interface so shared HBN ports retain each
+/// stable interface identity without adding host-visible PF or VF entries.
+/// Reports the first tenant/service NSG version for each ID to match NVUE policy selection while
+/// retaining the service interface's selected-VPC source.
+///
+/// Callers must supply the still-current response after successful network reconciliation.
+pub(super) fn service_network_observation(
+    network_config: &rpc::ManagedHostNetworkConfigResponse,
+) -> rpc::ServiceNetworkStatusObservation {
+    if network_config.service_interfaces.is_empty() {
+        return rpc::ServiceNetworkStatusObservation::default();
+    }
+
+    // NVUE keeps the first policy for each ID, regardless of attachment source.
+    let mut applied_nsgs = HashMap::new();
+    for nsg in network_config
+        .tenant_interfaces
+        .iter()
+        .filter_map(|interface| interface.network_security_group.as_ref())
+        .chain(
+            network_config
+                .service_interfaces
+                .iter()
+                .filter_map(|interface| interface.network_security_group.as_ref()),
+        )
+    {
+        applied_nsgs.entry(nsg.id.as_str()).or_insert(nsg);
+    }
+
+    rpc::ServiceNetworkStatusObservation {
+        interfaces: network_config
+            .service_interfaces
+            .iter()
+            .map(|interface| rpc::ServiceInterfaceStatusObservation {
+                internal_uuid: interface.internal_uuid.clone(),
+                network_security_group: interface.network_security_group.as_ref().map(|nsg| {
+                    let applied_nsg = applied_nsgs.get(nsg.id.as_str()).copied().unwrap_or(nsg);
+                    rpc::NetworkSecurityGroupStatus {
+                        source: nsg.source,
+                        id: nsg.id.clone(),
+                        version: applied_nsg.version.clone(),
+                    }
+                }),
+            })
+            .collect(),
+    }
+}
+
 /// Interfaces to report back to server
 // The fetcher projects `addresses` into these compatibility fields before status reporting.
 #[allow(deprecated)]
@@ -5376,7 +5424,8 @@ esac
     }
 
     /// Verifies one NSG shared by instance and VPC attachments uses one ACL index because the NSG
-    /// ID is the sole rendered policy identity.
+    /// ID is the sole rendered policy identity. A newer service version leaves the first host
+    /// policy rendered and reported while preserving service identity and VPC attachment source.
     #[tokio::test]
     #[allow(deprecated)]
     async fn deduplicates_host_and_service_nsg_by_id() -> eyre::Result<()> {
@@ -5389,6 +5438,7 @@ esac
                 .clone()
                 .expect("host fixture has a security group");
             host_nsg.id = "shared-nsg".to_string();
+            host_nsg.version = "V1-T1".to_string(); // Identify the host policy rendered first.
             host_nsg.source = rpc::NetworkSecurityGroupSource::NsgSourceInstance.into();
             config.tenant_interfaces[1].network_security_group = Some(host_nsg.clone());
 
@@ -5431,6 +5481,35 @@ esac
         assert_eq!(host_acl.len(), 4);
         assert_eq!(host_acl, service_acl);
         assert_eq!(host_acl, globally_defined_nsg_acls);
+
+        // Model a newer attached-empty policy read after the host NSG was already loaded.
+        let newer_service_policy = config.service_interfaces[0]
+            .network_security_group
+            .as_mut()
+            .expect("service fixture has the shared security group");
+        newer_service_policy.version = "V2-T2".to_string();
+        newer_service_policy.rules.clear();
+
+        // Render the mixed response so the status assertion is tied to the selected HBN policy.
+        let mixed_output = render_startup_yaml(&config).await?;
+        let mixed_documents: serde_yaml::Value = serde_yaml::from_str(&mixed_output)?;
+
+        // ID-only deduplication keeps the host ACLs and reports their version with service provenance.
+        assert_eq!(
+            mixed_documents.as_sequence().expect("two YAML documents")[1]["set"]["acl"],
+            documents.as_sequence().expect("two YAML documents")[1]["set"]["acl"]
+        );
+        assert_eq!(
+            service_network_observation(&config).interfaces,
+            vec![rpc::ServiceInterfaceStatusObservation {
+                internal_uuid: config.service_interfaces[0].internal_uuid.clone(),
+                network_security_group: Some(rpc::NetworkSecurityGroupStatus {
+                    source: rpc::NetworkSecurityGroupSource::NsgSourceVpc.into(),
+                    id: "shared-nsg".to_string(),
+                    version: "V1-T1".to_string(),
+                }),
+            }]
+        );
         Ok(())
     }
 

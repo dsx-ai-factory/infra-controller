@@ -7131,6 +7131,30 @@ message DpuNetworkStatus {
   // Core validates it against the attached interfaces for UPDATED reports
   // and against its accepted fingerprint for UNCHANGED reports.
   optional bytes lldp_snapshot_fingerprint = 19;
+  // Service interfaces from a successfully reconciled network response, independent
+  // of instance_network_config_version. Omission supplies no service applied evidence.
+  // A present empty report acknowledges a configuration with no service interfaces.
+  // Missing or malformed identities, duplicate identities, or invalid NSG metadata
+  // discard the complete service report without rejecting host acknowledgement.
+  optional ServiceNetworkStatusObservation service_network_observation = 20;
+}
+
+// Reports every distinct service interface in one successfully reconciled response.
+// Entries carry no host function type or VF ID because services are hidden from the tenant OS.
+message ServiceNetworkStatusObservation {
+  option (carbide.codegen.v1.message_derive) = "serde::Serialize";
+  // Complete replacement of the reporting DPU's service-interface observations.
+  repeated ServiceInterfaceStatusObservation interfaces = 1;
+}
+
+// Identifies one applied service interface within the reporting DPU.
+message ServiceInterfaceStatusObservation {
+  option (carbide.codegen.v1.message_derive) = "serde::Serialize";
+  // Required stable service-interface UUID for correlation with persisted configuration, including its VPC and slot.
+  common.UUID internal_uuid = 1;
+  // Omitted when no NSG is attached. An attached empty NSG still reports its ID and
+  // version. Present values require NSG_SOURCE_VPC, a nonempty ID, and a valid ConfigVersion.
+  NetworkSecurityGroupStatus network_security_group = 2;
 }
 
 message LastDhcpRequest {

@@ -44,7 +44,7 @@ use ipnetwork::IpNetwork;
 use mac_address::MacAddress;
 use model::expected_machine::{ExpectedInterface, ExpectedInterfaceRole};
 use model::instance::config::network::InstanceServiceInterfaceConfig;
-use model::machine::network::ManagedHostQuarantineMode;
+use model::machine::network::{ManagedHostQuarantineMode, ServiceNetworkStatusObservation};
 use model::resource_pool::{OwnerType, ResourcePoolEntryState};
 use rpc::Metadata;
 use rpc::forge::forge_server::Forge;
@@ -200,6 +200,7 @@ async fn record_dpu_network_status(
             astra_config_status: None,
             lldp: None,
             lldp_snapshot_fingerprint: None,
+            service_network_observation: None,
         }))
         .await
         .unwrap();
@@ -2360,6 +2361,170 @@ async fn test_managed_host_network_config_does_not_clear_use_admin_network_chang
         use_admin_network_changed(&env, dpu_machine_id).await,
         Some(true)
     );
+}
+
+/// Persists service reports on a secondary Admin DPU without an instance version, and replaces
+/// their evidence on empty, legacy, or malformed reports without changing host-facing inventory.
+/// Reads committed observations directly because aggregate status omits service details.
+#[crate::sqlx_test]
+async fn service_network_status_persists_without_an_instance_version(pool: sqlx::PgPool) {
+    // Select a secondary Admin DPU so service reporting cannot depend on an instance version.
+    let env = api_fixtures::create_test_env(pool).await;
+    let managed_host = api_fixtures::create_managed_host_multi_dpu(&env, 2).await;
+    let dpu_machine_id = managed_host.dpu_ids[1];
+    let config = env
+        .api
+        .get_managed_host_network_config(tonic::Request::new(ManagedHostNetworkConfigRequest {
+            dpu_machine_id: Some(dpu_machine_id),
+        }))
+        .await
+        .expect("secondary network config")
+        .into_inner();
+    assert!(config.use_admin_network);
+    assert!(!config.is_primary_dpu);
+    assert!(config.instance_network_config_version.is_empty());
+    let find_request = rpc::forge::MachinesByIdsRequest {
+        machine_ids: vec![dpu_machine_id.into()],
+        include_history: false,
+    };
+    let inventory_before = env
+        .api
+        .find_machines_by_ids(tonic::Request::new(find_request.clone()))
+        .await
+        .expect("find secondary DPU")
+        .into_inner()
+        .machines
+        .remove(0)
+        .status
+        .expect("secondary DPU status")
+        .interfaces;
+
+    // Stable identity and VPC NSG metadata drive persistence; all other status fields provide
+    // the existing machine acknowledgement and health inputs required by the handler.
+    let applied = rpc::forge::ServiceNetworkStatusObservation {
+        interfaces: vec![rpc::forge::ServiceInterfaceStatusObservation {
+            internal_uuid: Some(uuid::uuid!("40000000-0000-0000-0000-000000000001").into()), // Keep UUID validation satisfied before replacement.
+            network_security_group: Some(rpc::forge::NetworkSecurityGroupStatus {
+                source: rpc::forge::NetworkSecurityGroupSource::NsgSourceVpc.into(), // Keep NSG source validation satisfied.
+                id: "service-vpc-nsg".to_string(), // Seed the NSG ID checked after readback.
+                version: "V1-T1".to_string(),      // Seed the NSG version checked after readback.
+            }),
+        }],
+    };
+    // Convert the submitted report for comparisons with the committed typed observation.
+    let expected_applied = ServiceNetworkStatusObservation::try_from(applied.clone())
+        .expect("valid applied service report");
+    let status = DpuNetworkStatus {
+        dpu_machine_id: Some(dpu_machine_id),
+        network_config_version: Some(config.managed_host_config_version.clone()), // Keep host ACK processing independent of service reporting.
+        instance_network_config_version: None, // Secondary Admin has no instance acknowledgement.
+        service_network_observation: Some(applied.clone()), // Make clearing observable by first persisting evidence.
+        dpu_health: Some(rpc::health::HealthReport {
+            source: health_report::HealthReport::DPU_AGENT_SOURCE.to_string(), // Satisfy required health validation.
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    // Read the stored observation directly because FindMachinesByIds exposes interface inventory,
+    // but does not expose the complete machine network observation. The aggregate status RPC
+    // also omits service observations to limit response size.
+    let persisted_status = || async {
+        let mut txn = env.db_txn().await;
+        db::machine::find_dpu_network_status_inputs(&mut *txn, &dpu_machine_id)
+            .await
+            .expect("read persisted network status")
+            .expect("secondary DPU exists")
+            .network_status_observation
+            .expect("persisted secondary DPU status")
+    };
+
+    // Each replacement starts with a populated report so clearing cannot pass on an already-empty fixture.
+    for (scenario, replacement, expected) in [
+        // Legacy omission must not claim successful reconciliation of an empty service set.
+        ("legacy omission", None, None),
+        // Explicit empty success must remove the previously reported service interface.
+        (
+            "present empty",
+            Some(rpc::forge::ServiceNetworkStatusObservation::default()),
+            Some(ServiceNetworkStatusObservation {
+                interfaces: vec![], // Distinguish successful empty evidence from omission.
+            }),
+        ),
+        // Malformed service metadata must not prevent the machine version from being acknowledged.
+        (
+            "malformed report",
+            Some(rpc::forge::ServiceNetworkStatusObservation {
+                interfaces: vec![rpc::forge::ServiceInterfaceStatusObservation::default()], // Isolate the required-UUID failure (no NSG is attached).
+            }),
+            None,
+        ),
+    ] {
+        // Persist and reread a populated report before exercising its replacement.
+        env.api
+            .record_dpu_network_status(tonic::Request::new(status.clone()))
+            .await
+            .expect("record applied service policy");
+        let initial = persisted_status().await;
+        assert_eq!(
+            initial.service_network_observation,
+            Some(expected_applied.clone()),
+            "{scenario}"
+        );
+        assert!(initial.instance_network_observation.is_none());
+
+        // Mark the existing host transition pending so a malformed service report must still clear it.
+        set_use_admin_network_changed(&env, dpu_machine_id, true).await;
+        let pending = env
+            .api
+            .get_managed_host_network_config(tonic::Request::new(ManagedHostNetworkConfigRequest {
+                dpu_machine_id: Some(dpu_machine_id),
+            }))
+            .await
+            .expect("pending Admin transition")
+            .into_inner();
+
+        // Report the selected service replacement with a matching host ACK to exercise
+        // acknowledgement processing independently of service validation.
+        env.api
+            .record_dpu_network_status(tonic::Request::new(DpuNetworkStatus {
+                network_config_version: Some(pending.managed_host_config_version.clone()), // Allow the matching host ACK to clear the pending flag.
+                service_network_observation: replacement, // Exercise service replacement alongside the host ACK.
+                ..status.clone()
+            }))
+            .await
+            .expect(scenario);
+
+        // Reread committed service evidence and the existing acknowledgement after handler completion.
+        let persisted = persisted_status().await;
+        assert_eq!(
+            persisted.service_network_observation, expected,
+            "{scenario}"
+        );
+        assert_eq!(
+            persisted
+                .network_config_version
+                .map(|version| version.version_string()),
+            Some(pending.managed_host_config_version),
+            "{scenario}"
+        );
+        assert_eq!(
+            use_admin_network_changed(&env, dpu_machine_id).await,
+            Some(false),
+            "{scenario}"
+        );
+        let inventory_after = env
+            .api
+            .find_machines_by_ids(tonic::Request::new(find_request.clone()))
+            .await
+            .expect("find secondary DPU after report")
+            .into_inner()
+            .machines
+            .remove(0)
+            .status
+            .expect("secondary DPU status")
+            .interfaces;
+        assert_eq!(inventory_after, inventory_before, "{scenario}");
+    }
 }
 
 #[crate::sqlx_test]
@@ -5545,6 +5710,7 @@ async fn test_dpu_health_is_required(pool: sqlx::PgPool) {
             astra_config_status: None,
             lldp: None,
             lldp_snapshot_fingerprint: None,
+            service_network_observation: None,
         }))
         .await
         .expect_err("Should fail");

@@ -610,6 +610,8 @@ struct CurrentNetworkVersion {
     managed_host_config_version: Option<String>,
     instance_network_config_version: Option<String>,
     rendered_inputs_hash: Option<u64>,
+    /// Retains the applied NSG winners because normalized service ordering can skip an HBN update.
+    service_network_observation: Option<rpc::ServiceNetworkStatusObservation>,
     /// Hash of the supplemental network config file's contents at the last
     /// successful reconciliation. The file path never changes between
     /// iterations, so only a content hash can detect an in-place edit.
@@ -666,6 +668,8 @@ impl CurrentNetworkVersion {
         self.rendered_inputs_hash
             .replace(Self::hash_rendered_inputs(conf));
         self.supplemental_config_hash = supplemental_config.map(Self::hash_supplemental_config);
+        self.service_network_observation =
+            Some(ethernet_virtualization::service_network_observation(conf));
     }
 
     /// Updates `CurrentNetworkVersion` after successful HBN and DHCP results only when cached
@@ -688,7 +692,11 @@ impl CurrentNetworkVersion {
             && dhcp_result.is_ok()
             && latest.is_some_and(|latest| Self::describes_same_desired_network(applied, latest))
         {
-            self.update_from(applied, supplemental_config);
+            // Retain the applied service report on skips because normalized member order can
+            // differ from the order that selected HBN's first policy for an NSG ID.
+            if hbn_attempted {
+                self.update_from(applied, supplemental_config);
+            }
             return true;
         }
 
@@ -1131,6 +1139,7 @@ impl MainLoop {
             astra_config_status: None,
             lldp: None,
             lldp_snapshot_fingerprint: None,
+            service_network_observation: None,
         };
 
         // `read` does not block
@@ -1391,6 +1400,9 @@ impl MainLoop {
                                 ) = ack_network_config_update(
                                     &conf,
                                     instance_data.as_deref(),
+                                    self.current_network_version
+                                        .service_network_observation
+                                        .as_ref(),
                                     &mut status_out,
                                 );
                             }
@@ -1841,14 +1853,20 @@ fn set_astra_config_status(
     });
 }
 
+/// Reports network versions and service NSG metadata alongside the existing instance acknowledgement.
+///
+/// Callers must supply the still-current response after successful network reconciliation and the
+/// service observation retained from the last successful HBN and DHCP reconciliation.
 fn ack_network_config_update(
     conf: &ManagedHostNetworkConfigResponse,
     instance_data: Option<&periodic_config_fetcher::InstanceMetadata>,
+    service_network_observation: Option<&rpc::ServiceNetworkStatusObservation>,
     status_out: &mut rpc::DpuNetworkStatus,
 ) -> (Option<String>, Option<String>) {
     // Updating network config succeeded.
     // Tell the server about the applied version.
     status_out.network_config_version = Some(conf.managed_host_config_version.clone());
+    status_out.service_network_observation = service_network_observation.cloned();
     status_out.instance_id = conf.instance_id;
     // On the admin network we don't have to report the instance network config version
     if !conf.instance_network_config_version.is_empty() {

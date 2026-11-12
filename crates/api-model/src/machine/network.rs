@@ -23,6 +23,24 @@ use health_report::HealthReport;
 use serde::{Deserialize, Serialize};
 
 use crate::instance::status::network::InstanceNetworkStatusObservation;
+use crate::network_security_group::NetworkSecurityGroupStatusObservation;
+
+/// Records every service interface from one successfully reconciled response so an empty report
+/// remains distinct from missing applied evidence.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ServiceNetworkStatusObservation {
+    /// Complete service-interface observations for the reporting DPU.
+    pub interfaces: Vec<ServiceInterfaceStatusObservation>,
+}
+
+/// Correlates an applied selected-VPC NSG with a stable service-interface identity on one DPU.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ServiceInterfaceStatusObservation {
+    /// Stable service-interface UUID used to resolve its persisted VPC and slot.
+    pub internal_uuid: uuid::Uuid,
+    /// Applied selected-VPC NSG, including attached empty groups; absent when no NSG is attached.
+    pub network_security_group: Option<NetworkSecurityGroupStatusObservation>,
+}
 
 /// The fabric interface status last reported by a DPU agent.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -53,6 +71,10 @@ pub struct MachineNetworkStatusObservation {
     pub client_certificate_expiry: Option<i64>,
     pub agent_version_superseded_at: Option<DateTime<Utc>>,
     pub instance_network_observation: Option<InstanceNetworkStatusObservation>,
+    /// Applied service interfaces independent of the instance network version.
+    /// None supplies no service evidence; Some with no interfaces acknowledges their absence.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub service_network_observation: Option<ServiceNetworkStatusObservation>,
     #[serde(default)]
     pub fabric_interfaces: Vec<DpuFabricInterfaceStatusObservation>,
     /// Fingerprint of the last complete LLDP snapshot committed by Core.
@@ -230,7 +252,29 @@ mod tests {
             instance_network_observation,
             fabric_interfaces: Vec::new(),
             accepted_lldp_snapshot_fingerprint: None,
+            service_network_observation: None,
         }
+    }
+
+    /// Reads machine JSON without service observations so rolling upgrades retain old reports
+    /// without inventing evidence that hidden service interfaces were reconciled.
+    #[test]
+    fn legacy_network_status_has_no_service_observation() {
+        // Remove the new field to construct the serialized predecessor contract explicitly.
+        let expected = network_status(None, None);
+        let mut legacy = serde_json::to_value(&expected).expect("serialize machine observation");
+        legacy
+            .as_object_mut()
+            .expect("machine JSON object")
+            .remove("service_network_observation");
+
+        // Deserialize the predecessor JSON through the type read from machine persistence.
+        let restored: MachineNetworkStatusObservation =
+            serde_json::from_value(legacy).expect("read legacy machine observation");
+
+        // Missing service metadata must leave every retained machine field readable and unchanged.
+        assert_eq!(restored, expected);
+        assert!(restored.service_network_observation.is_none());
     }
 
     fn network_observation(
