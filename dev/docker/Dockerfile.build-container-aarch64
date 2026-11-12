@@ -14,7 +14,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-FROM arm64v8/rust:1.97.1-slim-bookworm@sha256:b28e5606d830400fabf789f910f9ed2ea22cdd6d51d463c5d0baa30bb2bedb2d
+FROM arm64v8/rust:1.100.0-slim-bookworm@sha256:84fb9722598fd9f4851a3d8afa3f55cd8a9b1ccd35444a405f25b666a8b93963
 
 ARG KEA_VERSION
 
