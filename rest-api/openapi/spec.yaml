@@ -11206,9 +11206,13 @@ paths:
           name: siteId
           description: Filter Machines by Site ID
         - schema:
-            type: string
+            type: array
+            items:
+              type: string
           in: query
           name: id
+          style: form
+          explode: true
           description: Filter Machines by ID.  Can be specified multiple times to filter on more than one ID.
         - schema:
             type: boolean
@@ -11216,14 +11220,22 @@ paths:
           name: hasInstanceType
           description: Filter Machines that have been assigned an Instance Type.
         - schema:
-            type: string
+            type: array
+            items:
+              type: string
           in: query
           name: instanceTypeId
+          style: form
+          explode: true
           description: Filter Machines by Instance Type ID.  Can be specified multiple times to filter on more than one Instance Type ID.
         - schema:
-            type: string
+            type: array
+            items:
+              type: string
           in: query
           name: tenantId
+          style: form
+          explode: true
           description: Filter Machines by ID of tenant of assigned instance. Can be specified multiple times to filter on more than one Tenant ID.
         - schema:
             type: boolean
@@ -11241,9 +11253,13 @@ paths:
           name: includeMetadata
           description: 'Include Machine metadata e.g. BMC, DPU, GPU and Interface data. Can only be requested by Provider.'
         - schema:
-            type: string
+            type: array
+            items:
+              type: string
           in: query
           name: status
+          style: form
+          explode: true
           description: Filter Machines by Status.  Can be specified multiple times to filter on more than one Status.
         - schema:
             type: string
@@ -11251,15 +11267,23 @@ paths:
           name: capabilityType
           description: Filter Machines by Capability Type
         - schema:
-            type: string
+            type: array
+            items:
+              type: string
           in: query
           name: capabilityName
+          style: form
+          explode: true
           description: Filter Machines by Capability Name.  Can be specified multiple times to filter on more than one Capability Name.
         - schema:
-            type: string
+            type: array
+            items:
+              type: string
           in: query
           name: hwSkuDeviceType
-          description: 'Filter Machines by hardware SKU Device Type. Example values: "gpu", "cpu", "storage", "cache"'
+          style: form
+          explode: true
+          description: 'Filter Machines by hardware SKU Device Type. Can be specified multiple times to filter on more than one Device Type. Example values: "gpu", "cpu", "storage", "cache"'
         - schema:
             type: string
           in: query
