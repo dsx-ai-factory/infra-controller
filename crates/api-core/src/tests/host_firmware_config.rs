@@ -21,15 +21,16 @@ use carbide_uuid::machine::HostMachineId;
 use chrono::Utc;
 use db::desired_firmware::desired_firmware_rows;
 use db::host_machine_update::{find_update_gates, find_upgrade_needed};
-use model::firmware::{Firmware, FirmwareComponentType};
+use model::firmware::{DriveModel, Firmware, FirmwareComponentType};
 use model::host_machine_update::{
     HostUpdateGateRow, UpdateBlockingReason, host_update_eligibility,
 };
 use rpc::forge::forge_server::Forge;
 use rpc::forge::{
     DeleteHostFirmwareConfigRequest, GetDesiredFirmwareVersionsRequest, HostFirmwareArtifact,
-    HostFirmwareComponentConfigResponse, HostFirmwareComponentType, HostFirmwareVersionConfig,
-    UpsertHostFirmwareComponentConfig, UpsertHostFirmwareConfigRequest,
+    HostFirmwareComponentConfigResponse, HostFirmwareComponentRef, HostFirmwareComponentType,
+    HostFirmwareUpgradeScript, HostFirmwareVersionConfig, UpsertHostFirmwareComponentConfig,
+    UpsertHostFirmwareConfigRequest,
 };
 use tonic::{Code, Request};
 
@@ -80,7 +81,7 @@ async fn upsert_host_firmware_config_creates_and_merges_versions(
     assert!(response.explicit_start_needed);
     assert_eq!(
         response.ordering,
-        vec![HostFirmwareComponentType::Cx7 as i32]
+        vec![component_ref(HostFirmwareComponentType::Cx7)]
     );
 
     let cx7 = response_component(&response.components, HostFirmwareComponentType::Cx7);
@@ -201,6 +202,120 @@ async fn upsert_host_firmware_config_rejects_added_component_without_ordering_up
     assert_eq!(stored.ordering, vec![FirmwareComponentType::Cx7]);
     assert!(stored.components.contains_key(&FirmwareComponentType::Cx7));
     assert!(!stored.components.contains_key(&FirmwareComponentType::Uefi));
+
+    Ok(())
+}
+
+#[crate::sqlx_test]
+async fn upsert_host_firmware_config_requires_and_round_trips_drive_upgrade_script(
+    pool: sqlx::PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let env = create_test_env(pool).await;
+    let drive_ref = HostFirmwareComponentRef {
+        r#type: HostFirmwareComponentType::Drive as i32,
+        drive_model: Some("ST24000NM005H".to_string()),
+    };
+    let upgrade_script = HostFirmwareUpgradeScript {
+        url: "https://scripts.example.invalid/scsi_drive_upgrade.sh".to_string(),
+        sha256: "c60b4c1c2d46f7b9e50d7d2e2d77dbfbe7884030b0e9a86a4636b4bc85d8609e".to_string(),
+        execution_timeout_seconds: 3600,
+        artifact_download_timeout_seconds: 600,
+    };
+    let image_sha256 = "27925abb3edb48119579e8eaac1d15fbe7d2a3b12f277f1a13cdce1b8a6f8431";
+    let drive_request = |upgrade_script: Option<HostFirmwareUpgradeScript>,
+                         artifact_sha256: Option<&str>| {
+        let mut drive = component_config(
+            HostFirmwareComponentType::Drive,
+            vec![HostFirmwareVersionConfig {
+                power_drains_needed: Some(1),
+                upgrade_script,
+                artifacts: vec![HostFirmwareArtifact {
+                    url: "https://firmware.example.invalid/ET07/et07.lod".to_string(),
+                    sha256: artifact_sha256.map(str::to_string),
+                }],
+                ..version_config("ET07", true)
+            }],
+            None,
+        );
+        drive.drive_model = drive_ref.drive_model.clone();
+        let mut request = upsert_request_for(
+            "Lenovo",
+            "ThinkSystem HS350X V3",
+            vec![drive],
+            Vec::new(),
+            None,
+        );
+        request.ordering = vec![drive_ref.clone()];
+        request
+    };
+
+    // No packaged script exists for this drive, so a version without its own
+    // script is rejected: drives never fall back to a BMC upload. Scout also
+    // verifies every artifact, so one without a sha256 is rejected.
+    for (request, case) in [
+        (
+            drive_request(None, Some(image_sha256)),
+            "drive version without a script",
+        ),
+        (
+            drive_request(Some(upgrade_script.clone()), None),
+            "drive artifact without a sha256",
+        ),
+    ] {
+        let error = env
+            .api
+            .upsert_host_firmware_config(Request::new(request))
+            .await
+            .expect_err(case);
+        assert_eq!(error.code(), Code::InvalidArgument, "{case}");
+    }
+
+    let response = env
+        .api
+        .upsert_host_firmware_config(Request::new(drive_request(
+            Some(upgrade_script.clone()),
+            Some(image_sha256),
+        )))
+        .await?
+        .into_inner();
+
+    // Re-sending the version replaces it as a whole; without its script that
+    // is rejected too, and the stored script stays.
+    let error = env
+        .api
+        .upsert_host_firmware_config(Request::new(drive_request(None, Some(image_sha256))))
+        .await
+        .expect_err("replacing the drive version without its script");
+    assert_eq!(error.code(), Code::InvalidArgument);
+
+    assert_eq!(response.ordering, vec![drive_ref]);
+    let component = response_component(&response.components, HostFirmwareComponentType::Drive);
+    assert_eq!(component.drive_model.as_deref(), Some("ST24000NM005H"));
+    assert_eq!(
+        component.current_version_reported_as.as_deref(),
+        Some("^Drive_ST24000NM005H_")
+    );
+    assert_eq!(component.firmware[0].upgrade_script, Some(upgrade_script));
+
+    let mut txn = env.pool.begin().await?;
+    let stored = db::host_firmware_config::get(&mut txn, "Lenovo", "ThinkSystem HS350X V3")
+        .await?
+        .expect("stored host firmware config")
+        .into_config();
+    txn.commit().await?;
+
+    let drive_type = FirmwareComponentType::Drive {
+        model: DriveModel::new("ST24000NM005H").unwrap(),
+    };
+    assert_eq!(stored.ordering, vec![drive_type]);
+    let stored_scout = stored.components[&drive_type].known_firmware[0]
+        .scout
+        .as_ref()
+        .expect("stored scout config");
+    assert_eq!(
+        stored_scout.script_url().map(|(url, _)| url),
+        Some("https://scripts.example.invalid/scsi_drive_upgrade.sh")
+    );
 
     Ok(())
 }
@@ -754,10 +869,14 @@ fn upsert_request_for(
         model: model.to_string(),
         components,
         explicit_start_needed,
-        ordering: ordering
-            .into_iter()
-            .map(|component_type| component_type as i32)
-            .collect(),
+        ordering: ordering.into_iter().map(component_ref).collect(),
+    }
+}
+
+fn component_ref(component_type: HostFirmwareComponentType) -> HostFirmwareComponentRef {
+    HostFirmwareComponentRef {
+        r#type: component_type as i32,
+        drive_model: None,
     }
 }
 
@@ -770,6 +889,7 @@ fn component_config(
         r#type: component_type as i32,
         firmware,
         preingest_upgrade_when_below: preingest_upgrade_when_below.map(str::to_string),
+        drive_model: None,
     }
 }
 
@@ -793,6 +913,7 @@ fn version_config_with_preingestion_exclusive_config(
         power_drains_needed: None,
         pre_update_resets: false,
         preingestion_exclusive_config,
+        upgrade_script: None,
     }
 }
 

@@ -25,9 +25,11 @@ var _ MappedNullable = &HostFirmwareComponentConfig{}
 // HostFirmwareComponentConfig One component entry in a host firmware config upsert request.
 type HostFirmwareComponentConfig struct {
 	Type HostFirmwareComponentType `json:"type"`
+	// The drive's Redfish `Drive.Model` as Site Explorer records it, without leading or trailing whitespace, for example `ST24000NM005H`. Required for `Drive` and rejected for every other type. Each drive model is a separate component. Site Explorer records drives only when its `explore_drive_firmware` setting is enabled; it is disabled by default.
+	DriveModel *string `json:"driveModel,omitempty"`
 	// Known firmware versions for this component. Versions are merged by version string on update.
 	Firmware []HostFirmwareVersionConfig `json:"firmware"`
-	// Optional minimum firmware version required before BMC pre-ingestion can complete. Omitted on update preserves the stored value.
+	// Optional minimum firmware version required before BMC pre-ingestion can complete. Omitted on update preserves the stored value. Rejected for `Drive`, because pre-ingestion upgrades only through the BMC.
 	PreingestUpgradeWhenBelow *string `json:"preingestUpgradeWhenBelow,omitempty"`
 }
 
@@ -74,6 +76,38 @@ func (o *HostFirmwareComponentConfig) GetTypeOk() (*HostFirmwareComponentType, b
 // SetType sets field value
 func (o *HostFirmwareComponentConfig) SetType(v HostFirmwareComponentType) {
 	o.Type = v
+}
+
+// GetDriveModel returns the DriveModel field value if set, zero value otherwise.
+func (o *HostFirmwareComponentConfig) GetDriveModel() string {
+	if o == nil || IsNil(o.DriveModel) {
+		var ret string
+		return ret
+	}
+	return *o.DriveModel
+}
+
+// GetDriveModelOk returns a tuple with the DriveModel field value if set, nil otherwise
+// and a boolean to check if the value has been set.
+func (o *HostFirmwareComponentConfig) GetDriveModelOk() (*string, bool) {
+	if o == nil || IsNil(o.DriveModel) {
+		return nil, false
+	}
+	return o.DriveModel, true
+}
+
+// HasDriveModel returns a boolean if a field has been set.
+func (o *HostFirmwareComponentConfig) HasDriveModel() bool {
+	if o != nil && !IsNil(o.DriveModel) {
+		return true
+	}
+
+	return false
+}
+
+// SetDriveModel gets a reference to the given string and assigns it to the DriveModel field.
+func (o *HostFirmwareComponentConfig) SetDriveModel(v string) {
+	o.DriveModel = &v
 }
 
 // GetFirmware returns the Firmware field value
@@ -143,6 +177,9 @@ func (o HostFirmwareComponentConfig) MarshalJSON() ([]byte, error) {
 func (o HostFirmwareComponentConfig) ToMap() (map[string]interface{}, error) {
 	toSerialize := map[string]interface{}{}
 	toSerialize["type"] = o.Type
+	if !IsNil(o.DriveModel) {
+		toSerialize["driveModel"] = o.DriveModel
+	}
 	toSerialize["firmware"] = o.Firmware
 	if !IsNil(o.PreingestUpgradeWhenBelow) {
 		toSerialize["preingestUpgradeWhenBelow"] = o.PreingestUpgradeWhenBelow

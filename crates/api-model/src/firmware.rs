@@ -19,6 +19,7 @@ use std::collections::{BTreeSet, HashMap};
 use std::fmt;
 use std::fmt::{Debug, Display};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, PoisonError};
 
 use regex::Regex;
@@ -226,28 +227,82 @@ pub enum FirmwareComponentType {
 /// `Copy`.
 ///
 /// Each distinct model is stored once and kept for the life of the process.
-/// Models come only from firmware configuration and the machine state and
-/// reports derived from it, so the set stays as small as the number of drive
-/// models configured.
+/// Models come from firmware configuration, the Host Firmware Config API, and
+/// the machine state and reports derived from them. Because the API lets a
+/// caller name new models, the store is capped at
+/// [`DRIVE_MODEL_BUDGET_BYTES`]; real fleets use a few kilobytes.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct DriveModel(&'static str);
 
-impl DriveModel {
-    /// Returns the interned model, storing it on first use, or `None` when
-    /// `model` is empty or has leading or trailing whitespace: such a model
-    /// would not read back from its `drive-<model>` name.
-    pub fn new(model: &str) -> Option<Self> {
-        if model.is_empty() || model != model.trim() {
-            return None;
+/// Most bytes of distinct drive models a process stores. Once reached, new
+/// models are refused until restart; models already stored keep working.
+pub const DRIVE_MODEL_BUDGET_BYTES: usize = 1 << 20;
+
+/// Why a drive model was refused.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
+pub enum DriveModelError {
+    /// It would not read back from its `drive-<model>` name.
+    #[error("drive model must be non-empty without leading or trailing whitespace")]
+    Malformed,
+    /// Storing it would exceed [`DRIVE_MODEL_BUDGET_BYTES`].
+    #[error(
+        "drive model store is full ({DRIVE_MODEL_BUDGET_BYTES} bytes); new drive models are refused until restart"
+    )]
+    StoreFull,
+}
+
+/// Distinct drive models stored for the life of the process, with their total
+/// size.
+#[derive(Default)]
+struct DriveModelStore {
+    models: BTreeSet<&'static str>,
+    bytes: usize,
+}
+
+impl DriveModelStore {
+    /// Returns the stored copy of `model`, storing it first when it fits in
+    /// `budget_bytes`.
+    fn intern(
+        &mut self,
+        model: &str,
+        budget_bytes: usize,
+    ) -> Result<&'static str, DriveModelError> {
+        if let Some(&stored) = self.models.get(model) {
+            return Ok(stored);
         }
-        static MODELS: Mutex<BTreeSet<&'static str>> = Mutex::new(BTreeSet::new());
-        let mut models = MODELS.lock().unwrap_or_else(PoisonError::into_inner);
-        if let Some(&stored) = models.get(model) {
-            return Some(Self(stored));
+        if self.bytes + model.len() > budget_bytes {
+            return Err(DriveModelError::StoreFull);
         }
         let stored: &'static str = Box::leak(model.into());
-        models.insert(stored);
-        Some(Self(stored))
+        self.models.insert(stored);
+        self.bytes += stored.len();
+        Ok(stored)
+    }
+}
+
+impl DriveModel {
+    /// Returns the interned model, storing it on first use.
+    ///
+    /// Fails when `model` is empty or has leading or trailing whitespace, or
+    /// when a new model would exceed [`DRIVE_MODEL_BUDGET_BYTES`].
+    pub fn new(model: &str) -> Result<Self, DriveModelError> {
+        if model.is_empty() || model != model.trim() {
+            return Err(DriveModelError::Malformed);
+        }
+        static MODELS: Mutex<DriveModelStore> = Mutex::new(DriveModelStore {
+            models: BTreeSet::new(),
+            bytes: 0,
+        });
+        static WARNED_FULL: AtomicBool = AtomicBool::new(false);
+        let mut models = MODELS.lock().unwrap_or_else(PoisonError::into_inner);
+        models
+            .intern(model, DRIVE_MODEL_BUDGET_BYTES)
+            .map(Self)
+            .inspect_err(|error| {
+                if !WARNED_FULL.swap(true, Ordering::Relaxed) {
+                    tracing::warn!(%error, "refusing new drive models");
+                }
+            })
     }
 
     /// The model as the BMC reports it.
@@ -342,7 +397,7 @@ impl FirmwareComponentType {
             "cx7" => FirmwareComponentType::Cx7,
             _ => name
                 .strip_prefix(DRIVE_PREFIX)
-                .and_then(DriveModel::new)
+                .and_then(|model| DriveModel::new(model).ok())
                 .map_or(FirmwareComponentType::Unknown, |model| {
                     FirmwareComponentType::Drive { model }
                 }),
@@ -522,6 +577,29 @@ impl TryFrom<ScoutConfigWire> for ScoutConfig {
 }
 
 impl ScoutConfig {
+    /// A config whose script Scout downloads from `url`, checked as when read
+    /// from firmware metadata.
+    pub fn with_script_url(
+        url: &str,
+        sha256: &str,
+        execution_timeout_seconds: u32,
+        artifact_download_timeout_seconds: u32,
+    ) -> Result<Self, String> {
+        let url = url.trim();
+        if url.is_empty() {
+            return Err("scout script url is required".to_string());
+        }
+        Self::try_from(ScoutConfigWire {
+            script: Some(FirmwareFileArtifact {
+                filename: None,
+                url: Some(url.to_string()),
+                sha256: sha256.to_string(),
+            }),
+            execution_timeout_seconds,
+            artifact_download_timeout_seconds,
+        })
+    }
+
     /// Returns the URL and SHA-256 of the script Scout downloads directly, or
     /// `None` when NICo should use its packaged script.
     pub fn script_url(&self) -> Option<(&str, &str)> {
@@ -888,11 +966,26 @@ mod tests {
         );
     }
 
+    /// A store at its budget refuses new models but keeps returning the ones
+    /// it holds.
+    #[test]
+    fn drive_model_store_refuses_new_models_past_its_budget() {
+        let mut store = DriveModelStore::default();
+        let first = store.intern("ST24000NM005H", 20).unwrap();
+        assert_eq!(store.intern("ST24000NM005H", 20), Ok(first));
+        assert_eq!(
+            store.intern("KCD8DPUG15T3", 20),
+            Err(DriveModelError::StoreFull)
+        );
+        assert_eq!(store.intern("MZVL6960", 21), Ok("MZVL6960"));
+        assert_eq!(store.bytes, "ST24000NM005H".len() + "MZVL6960".len());
+    }
+
     /// A model that would not read back from its `drive-<model>` name is
     /// rejected.
     #[test]
     fn drive_model_must_be_trimmed_and_non_empty() {
-        let check = |model: &str| DriveModel::new(model).map(DriveModel::as_str);
+        let check = |model: &str| DriveModel::new(model).ok().map(DriveModel::as_str);
         value_scenarios!(run = check;
             "accepted" {
                 "KCD8DPUG15T3" => Some("KCD8DPUG15T3"),

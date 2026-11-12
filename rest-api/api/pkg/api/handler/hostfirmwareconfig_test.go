@@ -254,7 +254,7 @@ func validHostFirmwareUpsertRequest(siteID string) model.APIHostFirmwareConfigCr
 		Vendor:              "Nvidia",
 		Model:               "DGXH100",
 		ExplicitStartNeeded: &explicitStart,
-		Ordering:            []model.HostFirmwareComponentType{model.HostFirmwareComponentTypeCx7},
+		Ordering:            []model.APIHostFirmwareComponentRef{{Type: model.HostFirmwareComponentTypeCx7}},
 		Components: []model.APIHostFirmwareComponentConfig{{
 			Type: model.HostFirmwareComponentTypeCx7,
 			Firmware: []model.APIHostFirmwareVersionConfig{{
@@ -281,7 +281,7 @@ func hostFirmwareConfigProtoResponse(t *testing.T, created bool) *corev1.HostFir
 		Vendor:              "Nvidia",
 		Model:               "DGXH100",
 		ExplicitStartNeeded: true,
-		Ordering:            []corev1.HostFirmwareComponentType{corev1.HostFirmwareComponentType_HOST_FIRMWARE_COMPONENT_TYPE_CX7},
+		Ordering:            []*corev1.HostFirmwareComponentRef{{Type: corev1.HostFirmwareComponentType_HOST_FIRMWARE_COMPONENT_TYPE_CX7}},
 		CreatedAt:           timestamppb.New(createdAt),
 		UpdatedAt:           timestamppb.New(updatedAt),
 		Components: []*corev1.HostFirmwareComponentConfigResponse{{

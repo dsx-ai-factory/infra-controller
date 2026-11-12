@@ -5,6 +5,7 @@ package middleware
 
 import (
 	"encoding/json"
+	"net/url"
 	"strings"
 
 	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/metadata"
@@ -79,6 +80,14 @@ var obfuscateFields = map[string]struct{}{
 	"nvospassword":       {},
 }
 
+// urlSecretParents contains lowercase field names whose objects, or array
+// elements, carry a "url" that can embed credentials, such as user:password or a
+// signed query token. Those URLs keep only their scheme, host, and path.
+var urlSecretParents = map[string]struct{}{
+	"artifacts":     {},
+	"upgradescript": {},
+}
+
 const (
 	auditObfuscatedValue          = "*******************"
 	auditBodyValueField           = "value"
@@ -96,12 +105,52 @@ func obfuscateRequestBody(body interface{}) {
 				continue
 			}
 			obfuscateRequestBody(value)
+			if _, carriesURLs := urlSecretParents[normalizedKey]; carriesURLs {
+				redactNestedURLSecrets(value)
+			}
 		}
 	case []interface{}:
 		for _, value := range body {
 			obfuscateRequestBody(value)
 		}
 	}
+}
+
+// redactNestedURLSecrets redacts the "url" of an object, or of each object in
+// an array.
+func redactNestedURLSecrets(value interface{}) {
+	switch value := value.(type) {
+	case map[string]interface{}:
+		for key, field := range value {
+			if raw, ok := field.(string); ok && strings.EqualFold(key, "url") {
+				value[key] = redactURLSecrets(raw)
+			}
+		}
+	case []interface{}:
+		for _, element := range value {
+			redactNestedURLSecrets(element)
+		}
+	}
+}
+
+// redactURLSecrets hides a URL's user information, query, and fragment, which
+// can carry credentials, and keeps its scheme, host, and path for auditing. A
+// value that does not parse as a URL is hidden entirely.
+func redactURLSecrets(raw string) string {
+	parsed, err := url.Parse(raw)
+	if err != nil {
+		return auditObfuscatedValue
+	}
+	if parsed.User != nil {
+		// url.User escapes the obfuscation marker's asterisks, so use a word.
+		parsed.User = url.User("redacted")
+	}
+	if parsed.RawQuery != "" || parsed.ForceQuery {
+		parsed.RawQuery = auditObfuscatedValue
+		parsed.ForceQuery = false
+	}
+	parsed.Fragment, parsed.RawFragment = "", ""
+	return parsed.String()
 }
 
 func prepareAuditRequestBody(reqBody []byte) (map[string]interface{}, error) {
