@@ -45,12 +45,13 @@
 //! several DPUs -- distinct enough from the host flow to keep the two states
 //! separate rather than overloading this one.
 
+use bmc_platform::ResetType;
 use carbide_redfish::libredfish::CredentialOpError;
 use carbide_redfish::libredfish::error::state_handler_redfish_error as redfish_error;
 use carbide_secrets::credentials::{CredentialKey, CredentialReader, Credentials};
 use db::credential_rotation::NoStagedCredentialRotation;
 use eyre::eyre;
-use libredfish::{Redfish, SystemPowerControl};
+use libredfish::Redfish;
 use model::machine::{ManagedHostState, ManagedHostStateSnapshot, UefiSetupInfo, UefiSetupState};
 use state_controller::state_handler::{
     StateHandlerContext, StateHandlerError, StateHandlerOutcome,
@@ -250,7 +251,7 @@ pub(crate) async fn handle_rotating_host_uefi(
             ))
         }
         UefiSetupState::PowercycleHost => {
-            handler_host_power_control(state, ctx, SystemPowerControl::ForceRestart).await?;
+            handler_host_power_control(state, ctx, ResetType::ForceRestart).await?;
             Ok(rotating_host_uefi_step(
                 uefi_setup_info.uefi_password_jid.clone(),
                 UefiSetupState::WaitForPasswordJobCompletion,

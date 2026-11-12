@@ -17,7 +17,8 @@
 
 //! Handler for [`ManagedHostState::Maintenance`].
 
-use carbide_redfish::libredfish::error::state_handler_redfish_error as redfish_error;
+use bmc_platform::{PlatformError, ResetType};
+use carbide_redfish::state_handler::state_handler_platform_error as platform_error;
 use carbide_secrets::credentials::{
     BmcCredentialType, CredentialKey, CredentialManager, Credentials,
 };
@@ -176,15 +177,14 @@ async fn handle_chassis_reset(
         "Machine maintenance: ChassisReset",
     );
 
-    let redfish_client = ctx
-        .services
-        .create_redfish_client_from_machine(&mh_snapshot.host_snapshot)
-        .await?;
-
-    redfish_client
-        .chassis_reset(chassis_id, libredfish::SystemPowerControl::ForceRestart)
-        .await
-        .map_err(|error| redfish_error("chassis_reset", error))?;
+    let bmc = ctx.services.connect_bmc(&mh_snapshot.host_snapshot).await?;
+    async {
+        bmc.power()?
+            .chassis_reset(chassis_id, ResetType::ForceRestart)
+            .await
+    }
+    .await
+    .map_err(|error: PlatformError| platform_error("chassis_reset", error))?;
 
     tracing::info!(
         machine_id = %host_machine_id,

@@ -19,6 +19,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"reflect"
 	"strings"
 )
 
@@ -811,17 +812,17 @@ type ApiGetAllMachineRequest struct {
 	ApiService      *MachineAPIService
 	org             string
 	siteId          *string
-	id              *string
+	id              *[]string
 	hasInstanceType *bool
-	instanceTypeId  *string
-	tenantId        *string
+	instanceTypeId  *[]string
+	tenantId        *[]string
 	hasInstance     *bool
 	isMissingOnSite *bool
 	includeMetadata *bool
-	status          *string
+	status          *[]string
 	capabilityType  *string
-	capabilityName  *string
-	hwSkuDeviceType *string
+	capabilityName  *[]string
+	hwSkuDeviceType *[]string
 	query           *string
 	includeRelation *string
 	pageNumber      *int32
@@ -836,7 +837,7 @@ func (r ApiGetAllMachineRequest) SiteId(siteId string) ApiGetAllMachineRequest {
 }
 
 // Filter Machines by ID.  Can be specified multiple times to filter on more than one ID.
-func (r ApiGetAllMachineRequest) Id(id string) ApiGetAllMachineRequest {
+func (r ApiGetAllMachineRequest) Id(id []string) ApiGetAllMachineRequest {
 	r.id = &id
 	return r
 }
@@ -848,13 +849,13 @@ func (r ApiGetAllMachineRequest) HasInstanceType(hasInstanceType bool) ApiGetAll
 }
 
 // Filter Machines by Instance Type ID.  Can be specified multiple times to filter on more than one Instance Type ID.
-func (r ApiGetAllMachineRequest) InstanceTypeId(instanceTypeId string) ApiGetAllMachineRequest {
+func (r ApiGetAllMachineRequest) InstanceTypeId(instanceTypeId []string) ApiGetAllMachineRequest {
 	r.instanceTypeId = &instanceTypeId
 	return r
 }
 
 // Filter Machines by ID of tenant of assigned instance. Can be specified multiple times to filter on more than one Tenant ID.
-func (r ApiGetAllMachineRequest) TenantId(tenantId string) ApiGetAllMachineRequest {
+func (r ApiGetAllMachineRequest) TenantId(tenantId []string) ApiGetAllMachineRequest {
 	r.tenantId = &tenantId
 	return r
 }
@@ -878,7 +879,7 @@ func (r ApiGetAllMachineRequest) IncludeMetadata(includeMetadata bool) ApiGetAll
 }
 
 // Filter Machines by Status.  Can be specified multiple times to filter on more than one Status.
-func (r ApiGetAllMachineRequest) Status(status string) ApiGetAllMachineRequest {
+func (r ApiGetAllMachineRequest) Status(status []string) ApiGetAllMachineRequest {
 	r.status = &status
 	return r
 }
@@ -890,13 +891,13 @@ func (r ApiGetAllMachineRequest) CapabilityType(capabilityType string) ApiGetAll
 }
 
 // Filter Machines by Capability Name.  Can be specified multiple times to filter on more than one Capability Name.
-func (r ApiGetAllMachineRequest) CapabilityName(capabilityName string) ApiGetAllMachineRequest {
+func (r ApiGetAllMachineRequest) CapabilityName(capabilityName []string) ApiGetAllMachineRequest {
 	r.capabilityName = &capabilityName
 	return r
 }
 
-// Filter Machines by hardware SKU Device Type. Example values: \&quot;gpu\&quot;, \&quot;cpu\&quot;, \&quot;storage\&quot;, \&quot;cache\&quot;
-func (r ApiGetAllMachineRequest) HwSkuDeviceType(hwSkuDeviceType string) ApiGetAllMachineRequest {
+// Filter Machines by hardware SKU Device Type. Can be specified multiple times to filter on more than one Device Type. Example values: \&quot;gpu\&quot;, \&quot;cpu\&quot;, \&quot;storage\&quot;, \&quot;cache\&quot;
+func (r ApiGetAllMachineRequest) HwSkuDeviceType(hwSkuDeviceType []string) ApiGetAllMachineRequest {
 	r.hwSkuDeviceType = &hwSkuDeviceType
 	return r
 }
@@ -981,16 +982,40 @@ func (a *MachineAPIService) GetAllMachineExecute(r ApiGetAllMachineRequest) ([]M
 		parameterAddToHeaderOrQuery(localVarQueryParams, "siteId", r.siteId, "form", "")
 	}
 	if r.id != nil {
-		parameterAddToHeaderOrQuery(localVarQueryParams, "id", r.id, "form", "")
+		t := *r.id
+		if reflect.TypeOf(t).Kind() == reflect.Slice {
+			s := reflect.ValueOf(t)
+			for i := 0; i < s.Len(); i++ {
+				parameterAddToHeaderOrQuery(localVarQueryParams, "id", s.Index(i).Interface(), "form", "multi")
+			}
+		} else {
+			parameterAddToHeaderOrQuery(localVarQueryParams, "id", t, "form", "multi")
+		}
 	}
 	if r.hasInstanceType != nil {
 		parameterAddToHeaderOrQuery(localVarQueryParams, "hasInstanceType", r.hasInstanceType, "form", "")
 	}
 	if r.instanceTypeId != nil {
-		parameterAddToHeaderOrQuery(localVarQueryParams, "instanceTypeId", r.instanceTypeId, "form", "")
+		t := *r.instanceTypeId
+		if reflect.TypeOf(t).Kind() == reflect.Slice {
+			s := reflect.ValueOf(t)
+			for i := 0; i < s.Len(); i++ {
+				parameterAddToHeaderOrQuery(localVarQueryParams, "instanceTypeId", s.Index(i).Interface(), "form", "multi")
+			}
+		} else {
+			parameterAddToHeaderOrQuery(localVarQueryParams, "instanceTypeId", t, "form", "multi")
+		}
 	}
 	if r.tenantId != nil {
-		parameterAddToHeaderOrQuery(localVarQueryParams, "tenantId", r.tenantId, "form", "")
+		t := *r.tenantId
+		if reflect.TypeOf(t).Kind() == reflect.Slice {
+			s := reflect.ValueOf(t)
+			for i := 0; i < s.Len(); i++ {
+				parameterAddToHeaderOrQuery(localVarQueryParams, "tenantId", s.Index(i).Interface(), "form", "multi")
+			}
+		} else {
+			parameterAddToHeaderOrQuery(localVarQueryParams, "tenantId", t, "form", "multi")
+		}
 	}
 	if r.hasInstance != nil {
 		parameterAddToHeaderOrQuery(localVarQueryParams, "hasInstance", r.hasInstance, "form", "")
@@ -1002,16 +1027,40 @@ func (a *MachineAPIService) GetAllMachineExecute(r ApiGetAllMachineRequest) ([]M
 		parameterAddToHeaderOrQuery(localVarQueryParams, "includeMetadata", r.includeMetadata, "form", "")
 	}
 	if r.status != nil {
-		parameterAddToHeaderOrQuery(localVarQueryParams, "status", r.status, "form", "")
+		t := *r.status
+		if reflect.TypeOf(t).Kind() == reflect.Slice {
+			s := reflect.ValueOf(t)
+			for i := 0; i < s.Len(); i++ {
+				parameterAddToHeaderOrQuery(localVarQueryParams, "status", s.Index(i).Interface(), "form", "multi")
+			}
+		} else {
+			parameterAddToHeaderOrQuery(localVarQueryParams, "status", t, "form", "multi")
+		}
 	}
 	if r.capabilityType != nil {
 		parameterAddToHeaderOrQuery(localVarQueryParams, "capabilityType", r.capabilityType, "form", "")
 	}
 	if r.capabilityName != nil {
-		parameterAddToHeaderOrQuery(localVarQueryParams, "capabilityName", r.capabilityName, "form", "")
+		t := *r.capabilityName
+		if reflect.TypeOf(t).Kind() == reflect.Slice {
+			s := reflect.ValueOf(t)
+			for i := 0; i < s.Len(); i++ {
+				parameterAddToHeaderOrQuery(localVarQueryParams, "capabilityName", s.Index(i).Interface(), "form", "multi")
+			}
+		} else {
+			parameterAddToHeaderOrQuery(localVarQueryParams, "capabilityName", t, "form", "multi")
+		}
 	}
 	if r.hwSkuDeviceType != nil {
-		parameterAddToHeaderOrQuery(localVarQueryParams, "hwSkuDeviceType", r.hwSkuDeviceType, "form", "")
+		t := *r.hwSkuDeviceType
+		if reflect.TypeOf(t).Kind() == reflect.Slice {
+			s := reflect.ValueOf(t)
+			for i := 0; i < s.Len(); i++ {
+				parameterAddToHeaderOrQuery(localVarQueryParams, "hwSkuDeviceType", s.Index(i).Interface(), "form", "multi")
+			}
+		} else {
+			parameterAddToHeaderOrQuery(localVarQueryParams, "hwSkuDeviceType", t, "form", "multi")
+		}
 	}
 	if r.query != nil {
 		parameterAddToHeaderOrQuery(localVarQueryParams, "query", r.query, "form", "")

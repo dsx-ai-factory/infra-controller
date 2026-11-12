@@ -163,11 +163,13 @@ pub(in crate::tests) struct TestInstance<'a, 'b> {
 type Txn<'a> = sqlx::Transaction<'a, sqlx::Postgres>;
 
 impl<'a, 'b> TestInstance<'a, 'b> {
-    pub(in crate::tests) async fn db_instance(&self, txn: &mut Txn<'_>) -> InstanceSnapshot {
-        db::instance::find_by_id(txn.as_mut(), self.id)
-            .await
-            .unwrap()
-            .unwrap()
+    pub(in crate::tests) async fn db_instance(&self, txn: &mut Txn<'_>) -> Box<InstanceSnapshot> {
+        Box::new(
+            db::instance::find_by_id(txn.as_mut(), self.id)
+                .await
+                .unwrap()
+                .unwrap(),
+        )
     }
 
     pub(in crate::tests) async fn rpc_instance(&self) -> RpcInstance {

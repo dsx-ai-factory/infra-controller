@@ -26,7 +26,7 @@ use std::sync::{Arc, RwLock};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use forge_tls::default as tls_default;
+use carbide_tls::default as tls_default;
 use libc::c_char;
 use mac_address::MacAddress;
 use metrics_endpoint::HealthController;

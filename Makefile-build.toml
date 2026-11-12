@@ -66,6 +66,9 @@ case "${CARBIDE_ARCH}" in
     ;;
   "aarch64")
     IMAGE_NAME="build-artifacts-container-cross-aarch64:latest"
+    # Keep host build scripts and proc macros apart from native builds,
+    # which may link against a newer glibc than this container.
+    build_dir_env="--env CARGO_BUILD_BUILD_DIR=/carbide/target/cross-aarch64-build"
     ;;
   *)
     echo "Unknown architecture"
@@ -86,6 +89,7 @@ docker run \
     --user $(id -u):$(id -g) \
     --volume $REPO_ROOT:/carbide \
     --volume $CARGO_HOME:/cargo \
+    ${build_dir_env} \
     $IMAGE_NAME \
     cargo build ${profile_arg} --target=${CARBIDE_ARCH}-unknown-linux-gnu ${pkg_args} || exit $?
 

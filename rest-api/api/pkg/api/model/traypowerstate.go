@@ -114,6 +114,7 @@ var powerTaskOperationNames = map[flowv1.PowerControlOperation]APIPowerTaskOpera
 }
 
 var taskTypeNames = map[flowv1.TaskKind]APITaskType{
+	flowv1.TaskKind_TASK_KIND_COMPONENT_RESET:    "ComponentReset",
 	flowv1.TaskKind_TASK_KIND_POWER_CONTROL:      "PowerControl",
 	flowv1.TaskKind_TASK_KIND_FIRMWARE_CONTROL:   "FirmwareControl",
 	flowv1.TaskKind_TASK_KIND_BRING_UP:           "BringUp",

@@ -983,11 +983,11 @@ impl InternalRBACRules {
             "DeleteAllExpectedRacks",
             vec![ForgeAdminCLI, Machineatron, SiteAgent],
         );
-        x.perm("CreateExpectedNvLinkDomain", vec![ForgeAdminCLI, Flow]);
-        x.perm("DeleteExpectedNvLinkDomain", vec![ForgeAdminCLI, Flow]);
-        x.perm("GetExpectedNvLinkDomain", vec![ForgeAdminCLI, Flow]);
-        x.perm("FindExpectedNvLinkDomainIds", vec![ForgeAdminCLI, Flow]);
-        x.perm("FindExpectedNvLinkDomainsByIds", vec![ForgeAdminCLI, Flow]);
+        x.perm("CreateNvLinkDomain", vec![ForgeAdminCLI, Flow]);
+        x.perm("DeleteNvLinkDomain", vec![ForgeAdminCLI, Flow]);
+        x.perm("GetNvLinkDomain", vec![ForgeAdminCLI, Flow]);
+        x.perm("FindNvLinkDomainIds", vec![ForgeAdminCLI, Flow]);
+        x.perm("FindNvLinkDomainsByIds", vec![ForgeAdminCLI, Flow]);
         x.perm(
             "AddExpectedRackGroup",
             vec![ForgeAdminCLI, Machineatron, SiteAgent],
@@ -1758,7 +1758,7 @@ mod rbac_rule_tests {
     }
 
     #[test]
-    fn expected_nvlink_domain_inventory_allows_admin_and_flow() {
+    fn nvlink_domain_inventory_allows_admin_and_flow() {
         use carbide_test_support::{Check, check_values};
 
         let principals = [
@@ -1769,11 +1769,11 @@ mod rbac_rule_tests {
         ];
         check_values(
             [
-                "CreateExpectedNvLinkDomain",
-                "DeleteExpectedNvLinkDomain",
-                "GetExpectedNvLinkDomain",
-                "FindExpectedNvLinkDomainIds",
-                "FindExpectedNvLinkDomainsByIds",
+                "CreateNvLinkDomain",
+                "DeleteNvLinkDomain",
+                "GetNvLinkDomain",
+                "FindNvLinkDomainIds",
+                "FindNvLinkDomainsByIds",
             ]
             .map(|method| Check {
                 scenario: method,
