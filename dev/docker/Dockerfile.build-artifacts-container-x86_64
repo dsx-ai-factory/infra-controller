@@ -26,14 +26,14 @@
 # - `docker push urm.nvidia.com/swngc-ngcc-docker-local/forge/carbide/x86-64/build-container:{OUTPUT_OF_GIT_DESCRIBE_HERE}`
 
 # This should match rust-toolchain.toml
-FROM rust:1.97.1-slim-bullseye
+FROM rust:1.100.0-slim-bookworm@sha256:7c7d4eb4d05b7781187a327809466cfddf29753f6defdc3d19a0e291951b7a37
 
 # Set in gitlab-templates/scripts/build-push-container-image.sh
 ARG CI_COMMIT_SHORT_SHA
 ENV CI_COMMIT_SHORT_SHA $CI_COMMIT_SHORT_SHA
 
 # Bullseye security package downloads return 404 from deb.debian.org.
-# Use Debian's archive so Rust 1.97.1 builds can upgrade CA certificates
+# Use Debian's archive so Rust 1.100.0 builds can upgrade CA certificates
 # and install PostgreSQL 13 without changing the base image version.
 RUN sed -i \
     's|http://deb.debian.org/debian-security|https://archive.debian.org/debian-security|g' \
