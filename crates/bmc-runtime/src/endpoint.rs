@@ -91,19 +91,26 @@ impl BmcRef {
     }
 
     /// Builds a runtime reference from canonical access metadata, selecting
-    /// drivers by `rules` for the identity `report` recorded.
+    /// drivers by `rules` for the identity `report` recorded. Without a report
+    /// that recorded the service root, nothing tells vendors apart, so every
+    /// capability gets its standard driver.
     pub fn from_exploration(
         access: &BmcAccessInfo,
-        report: &EndpointExplorationReport,
+        report: Option<&EndpointExplorationReport>,
         rules: &Rules,
     ) -> Result<Self, ExploredBmcRefError> {
-        // A report without the service root cannot tell vendors apart.
-        if report.service_root.is_none() {
-            return Err(ExploredBmcRefError::NoServiceRoot);
-        }
         let ip = parse_uri_host_ip(&access.host)
             .ok_or_else(|| BmcRefError::InvalidIpAddress(access.host.clone()))?;
-        let identity = platform_identity(report);
+        let identity = match report.filter(|report| report.service_root.is_some()) {
+            Some(report) => platform_identity(report),
+            None => {
+                tracing::debug!(
+                    bmc_ip_address = %ip,
+                    "BMC has no explored service root; using the standard drivers"
+                );
+                PlatformIdentity::default()
+            }
+        };
         let selection = Drivers::select(rules, &identity)?;
         let credential_key = CredentialKey::BmcCredentials {
             credential_type: BmcCredentialType::BmcRoot {
@@ -185,9 +192,6 @@ pub enum BmcRefError {
 /// Failure to build a runtime reference from an exploration report.
 #[derive(Clone, Debug, Eq, Error, PartialEq)]
 pub enum ExploredBmcRefError {
-    /// Exploration has not recorded the service root drivers select by.
-    #[error("BMC has no drivers selected until site exploration records its service root")]
-    NoServiceRoot,
     #[error(transparent)]
     Select(#[from] SelectError),
     #[error(transparent)]
@@ -333,8 +337,33 @@ mod tests {
         );
     }
 
+    /// Without a recorded service root, the built-in rules match nothing, so
+    /// the reference carries the standard drivers and no quirks.
     #[test]
-    fn exploration_reference_selects_only_once_the_service_root_is_recorded() {
+    fn exploration_without_a_service_root_selects_the_standard_drivers() {
+        let access = BmcAccessInfo {
+            host: "192.0.2.14".to_string(),
+            port: None,
+            mac_address: MacAddress::new([2, 0, 0, 0, 0, 4]),
+        };
+        let standard = Drivers::select(
+            &Rules::new(Vec::new()).expect("empty rules are valid"),
+            &PlatformIdentity::default(),
+        )
+        .expect("no rules select the standard drivers");
+
+        for report in [None, Some(&EndpointExplorationReport::default())] {
+            let endpoint =
+                BmcRef::from_exploration(&access, report, &bmc_drivers::built_in_rules())
+                    .expect("a missing service root selects the standard drivers");
+            assert_eq!(endpoint.identity(), &PlatformIdentity::default());
+            assert_eq!(endpoint.selection().drivers, standard.drivers);
+            assert_eq!(endpoint.selection().quirks, standard.quirks);
+        }
+    }
+
+    #[test]
+    fn exploration_reference_selects_by_the_recorded_identity() {
         let mac_address = MacAddress::new([2, 0, 0, 0, 0, 4]);
         let access = BmcAccessInfo {
             host: "192.0.2.14".to_string(),
@@ -343,12 +372,7 @@ mod tests {
         };
         let rules = Rules::new(Vec::new()).expect("empty rules are valid");
 
-        assert_eq!(
-            BmcRef::from_exploration(&access, &EndpointExplorationReport::default(), &rules).err(),
-            Some(ExploredBmcRefError::NoServiceRoot)
-        );
-
-        let endpoint = BmcRef::from_exploration(&access, &report_with_service_root(), &rules)
+        let endpoint = BmcRef::from_exploration(&access, Some(&report_with_service_root()), &rules)
             .expect("a report with a service root selects drivers");
         assert_eq!(
             endpoint.address(),
@@ -377,7 +401,7 @@ mod tests {
                     port: None,
                     mac_address: MacAddress::new([2, 0, 0, 0, 0, 2]),
                 },
-                &report_with_service_root(),
+                Some(&report_with_service_root()),
                 &Rules::new(Vec::new()).expect("empty rules are valid"),
             ),
             Err(ExploredBmcRefError::Reference(BmcRefError::InvalidIpAddress(host)))

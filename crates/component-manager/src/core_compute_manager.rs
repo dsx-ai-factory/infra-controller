@@ -132,13 +132,7 @@ impl CoreComputeTrayManager {
             .map_err(|error| format!("failed to read the explored endpoint: {error}"))?
             .into_iter()
             .next()
-            .ok_or_else(|| {
-                format!(
-                    "BMC {} has no explored endpoint to select drivers from",
-                    endpoint.bmc_ip
-                )
-            })?
-            .report;
+            .map(|explored| explored.report);
         let access = BmcAccessInfo {
             host: endpoint.bmc_ip.to_string(),
             port: Some(443),
@@ -146,7 +140,7 @@ impl CoreComputeTrayManager {
         };
         drivers
             .connector
-            .connect_with_credentials(&access, &report, endpoint.bmc_credentials.clone())
+            .connect_with_credentials(&access, report.as_ref(), endpoint.bmc_credentials.clone())
             .await
             .map(BackendBmc::from)
             .map_err(|error| format!("failed to connect through drivers: {error}"))

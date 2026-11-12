@@ -111,7 +111,7 @@ impl RedfishClient {
         &self,
         bmc_ip_address: SocketAddr,
         bmc: EstablishedBmc,
-        report: &EndpointExplorationReport,
+        report: Option<&EndpointExplorationReport>,
     ) -> Result<BackendBmc, EndpointExplorationError> {
         let Some(connector) = &self.driver_connector else {
             return self
