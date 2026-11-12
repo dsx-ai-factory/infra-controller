@@ -95,6 +95,7 @@ async fn test_get_dpu_info_list(pool: PgPool) {
             astra_config_status: None,
             lldp: None,
             lldp_snapshot_fingerprint: None,
+            service_network_observation: None,
         }))
         .await
         .unwrap();

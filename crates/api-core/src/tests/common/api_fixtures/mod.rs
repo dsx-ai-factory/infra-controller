@@ -2622,6 +2622,7 @@ async fn report_network_status(
         astra_config_status: None,
         lldp,
         lldp_snapshot_fingerprint,
+        service_network_observation: None,
     };
     tracing::trace!(
         network_config_version = %status.network_config_version.as_ref().unwrap(),

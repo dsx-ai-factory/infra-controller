@@ -5295,6 +5295,7 @@ mod test {
                 }),
                 fabric_interfaces: Vec::new(),
                 accepted_lldp_snapshot_fingerprint: None,
+                service_network_observation: None,
             }),
             dpu_agent_health_report: Some(HealthReport {
                 source: HealthReport::DPU_AGENT_SOURCE.to_string(),
@@ -6999,6 +7000,7 @@ mod test {
             instance_network_observation: None,
             fabric_interfaces: Vec::new(),
             accepted_lldp_snapshot_fingerprint: None,
+            service_network_observation: None,
         };
         assert!(matches!(
             super::update_network_status_observation(writer.as_mut(), &dpu_id, &observation)
@@ -7594,6 +7596,7 @@ mod test {
                 instance_network_observation: None,
                 fabric_interfaces: Vec::new(),
                 accepted_lldp_snapshot_fingerprint: None,
+                service_network_observation: None,
             };
             let mut txn = pool.begin().await?;
             let result =
@@ -7650,6 +7653,7 @@ mod test {
             instance_network_observation: None,
             fabric_interfaces: Vec::new(),
             accepted_lldp_snapshot_fingerprint: None,
+            service_network_observation: None,
         };
         assert_eq!(
             update_network_status_observation(txn.as_mut(), &machine_id, &initial).await?,
@@ -7669,6 +7673,7 @@ mod test {
             instance_network_observation: None,
             fabric_interfaces: Vec::new(),
             accepted_lldp_snapshot_fingerprint: Some(fingerprint_b),
+            service_network_observation: None,
         };
         let mut txn = pool.begin().await?;
         assert_eq!(
