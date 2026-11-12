@@ -95,6 +95,7 @@ pub(crate) fn is_otlp_log_relevant(event: &CollectorEvent) -> bool {
             | CollectorEvent::MetricCollectionStart
             | CollectorEvent::MetricCollectionEnd
             | CollectorEvent::CollectorRemoved
+            | CollectorEvent::ResourceStatusObservation(_)
     )
 }
 
@@ -387,6 +388,15 @@ impl DataSink for OtlpSink {
             }
             CollectorEvent::Firmware(info) => {
                 let key = format!("{}|firmware|{}", context.endpoint_key, info.component);
+                (key, event.clone())
+            }
+            CollectorEvent::ResourceStatus(info) => {
+                let key = format!(
+                    "{}|resource_status|{}|{}",
+                    context.endpoint_key,
+                    info.resource_type.as_str(),
+                    info.id
+                );
                 (key, event.clone())
             }
             _ => return Ok(()),

@@ -36,16 +36,45 @@ mod tests;
 
 const SQL_VIOLATION_DUPLICATE_MAC: &str = "expected_machines_bmc_mac_address_key";
 
+/// Select every `expected_machines` column plus a JSON array of the row's DPU
+/// loopback reservations, hydrated from the child table in one round trip. The
+/// `$expected_machines_filter` fragment supplies the trailing `WHERE` /
+/// `ORDER BY` clause. Reads hydrate loopbacks into the interface list.
+///
+/// This is a macro rather than a helper function on purpose: the reservations
+/// live in the `expected_dpu_loopback_reservations` child table (one machine,
+/// many rows), but `ExpectedMachine`'s `FromRow` decodes a single row, so a
+/// correlated `json_agg` subquery collapses the child rows into one JSON column
+/// named `dpu_loopback_reservations` that `FromRow` reads directly. `host(..)`
+/// yields the bare address text so it parses into `Ipv4Addr` / `Ipv6Addr`. The
+/// `$expected_machines_filter:literal` bound keeps the trailing `WHERE` /
+/// `ORDER BY` clause a string literal, never caller input, so `concat!` can
+/// assemble the entire statement at compile time.
+macro_rules! select_expected_machine {
+    ($expected_machines_filter:literal) => {
+        concat!(
+            "SELECT id, bmc_mac_address, bmc_username, bmc_password, serial_number, ",
+            "fallback_dpu_serial_numbers, metadata_name, metadata_description, metadata_labels, ",
+            "sku_id, host_nics, rack_id, default_pause_ingestion_and_poweron, dpf_enabled, ",
+            "bmc_ip_address, bmc_retain_credentials, dpu_mode, bmc_ip_allocation, ",
+            "host_lifecycle_profile, server_name, ",
+            "(SELECT COALESCE(json_agg(json_build_object(",
+            "'dpu_oob_net0_mac_address', r.dpu_oob_net0_mac_address, ",
+            "'loopback_ipv4', host(r.loopback_ipv4), ",
+            "'loopback_ipv6', host(r.loopback_ipv6)) ORDER BY r.dpu_oob_net0_mac_address), '[]'::json) ",
+            "FROM expected_dpu_loopback_reservations r ",
+            "WHERE r.host_bmc_mac_address = expected_machines.bmc_mac_address) AS dpu_loopback_reservations ",
+            "FROM expected_machines ",
+            $expected_machines_filter,
+        )
+    };
+}
+
 pub async fn find_by_bmc_mac_address(
     txn: impl DbReader<'_>,
     bmc_mac_address: MacAddress,
 ) -> Result<Option<ExpectedMachine>, DatabaseError> {
-    let sql = "SELECT id, bmc_mac_address, bmc_username, bmc_password, serial_number,
-        fallback_dpu_serial_numbers, metadata_name, metadata_description, metadata_labels,
-        sku_id, host_nics, rack_id, default_pause_ingestion_and_poweron, dpf_enabled,
-        bmc_ip_address, bmc_retain_credentials, dpu_mode, bmc_ip_allocation,
-        host_lifecycle_profile, server_name
-        FROM expected_machines WHERE bmc_mac_address=$1";
+    let sql = select_expected_machine!("WHERE bmc_mac_address=$1");
     sqlx::query_as(sql)
         .bind(bmc_mac_address)
         .fetch_optional(txn)
@@ -57,12 +86,7 @@ pub async fn find_by_id(
     txn: impl DbReader<'_>,
     id: Uuid,
 ) -> Result<Option<ExpectedMachine>, DatabaseError> {
-    let sql = "SELECT id, bmc_mac_address, bmc_username, bmc_password, serial_number,
-        fallback_dpu_serial_numbers, metadata_name, metadata_description, metadata_labels,
-        sku_id, host_nics, rack_id, default_pause_ingestion_and_poweron, dpf_enabled,
-        bmc_ip_address, bmc_retain_credentials, dpu_mode, bmc_ip_allocation,
-        host_lifecycle_profile, server_name
-        FROM expected_machines WHERE id=$1";
+    let sql = select_expected_machine!("WHERE id=$1");
     sqlx::query_as(sql)
         .bind(id)
         .fetch_optional(txn)
@@ -74,12 +98,7 @@ pub async fn find_many_by_bmc_mac_address(
     txn: &mut PgConnection,
     bmc_mac_addresses: &[MacAddress],
 ) -> DatabaseResult<HashMap<MacAddress, ExpectedMachine>> {
-    let sql = "SELECT id, bmc_mac_address, bmc_username, bmc_password, serial_number,
-        fallback_dpu_serial_numbers, metadata_name, metadata_description, metadata_labels,
-        sku_id, host_nics, rack_id, default_pause_ingestion_and_poweron, dpf_enabled,
-        bmc_ip_address, bmc_retain_credentials, dpu_mode, bmc_ip_allocation,
-        host_lifecycle_profile, server_name
-        FROM expected_machines WHERE bmc_mac_address=ANY($1)";
+    let sql = select_expected_machine!("WHERE bmc_mac_address=ANY($1)");
     let v: Vec<ExpectedMachine> = sqlx::query_as(sql)
         .bind(bmc_mac_addresses)
         .fetch_all(txn)
@@ -156,12 +175,7 @@ pub async fn find_by_interface_mac_address(
     txn: &mut PgConnection,
     interface_mac_address: MacAddress,
 ) -> DatabaseResult<Option<ExpectedMachine>> {
-    let query = "SELECT id, bmc_mac_address, bmc_username, bmc_password, serial_number,
-        fallback_dpu_serial_numbers, metadata_name, metadata_description, metadata_labels,
-        sku_id, host_nics, rack_id, default_pause_ingestion_and_poweron, dpf_enabled,
-        bmc_ip_address, bmc_retain_credentials, dpu_mode, bmc_ip_allocation,
-        host_lifecycle_profile, server_name
-        FROM expected_machines WHERE host_nics @> $1::jsonb";
+    let query = select_expected_machine!("WHERE host_nics @> $1::jsonb");
     let mac_address = serde_json::json!([{ "mac_address": interface_mac_address.to_string() }]);
     sqlx::query_as(query)
         .bind(sqlx::types::Json(mac_address))
@@ -197,12 +211,7 @@ FROM expected_machines em
 }
 
 pub async fn find_all(txn: impl DbReader<'_>) -> DatabaseResult<Vec<ExpectedMachine>> {
-    let sql = "SELECT id, bmc_mac_address, bmc_username, bmc_password, serial_number,
-        fallback_dpu_serial_numbers, metadata_name, metadata_description, metadata_labels,
-        sku_id, host_nics, rack_id, default_pause_ingestion_and_poweron, dpf_enabled,
-        bmc_ip_address, bmc_retain_credentials, dpu_mode, bmc_ip_allocation,
-        host_lifecycle_profile, server_name
-        FROM expected_machines";
+    let sql = select_expected_machine!("");
     sqlx::query_as(sql)
         .fetch_all(txn)
         .await
@@ -223,12 +232,7 @@ pub async fn find_all_for_replace(txn: &mut PgConnection) -> DatabaseResult<Vec<
         .await
         .map_err(|error| DatabaseError::query(lock, error))?;
 
-    let query = "SELECT id, bmc_mac_address, bmc_username, bmc_password, serial_number,
-        fallback_dpu_serial_numbers, metadata_name, metadata_description, metadata_labels,
-        sku_id, host_nics, rack_id, default_pause_ingestion_and_poweron, dpf_enabled,
-        bmc_ip_address, bmc_retain_credentials, dpu_mode, bmc_ip_allocation,
-        host_lifecycle_profile, server_name
-        FROM expected_machines ORDER BY id";
+    let query = select_expected_machine!("ORDER BY id");
     sqlx::query_as(query)
         .fetch_all(txn)
         .await
@@ -240,12 +244,7 @@ pub async fn find_all_by_rack_id(
     txn: &mut PgConnection,
     rack_id: &RackId,
 ) -> DatabaseResult<Vec<ExpectedMachine>> {
-    let sql = "SELECT id, bmc_mac_address, bmc_username, bmc_password, serial_number,
-        fallback_dpu_serial_numbers, metadata_name, metadata_description, metadata_labels,
-        sku_id, host_nics, rack_id, default_pause_ingestion_and_poweron, dpf_enabled,
-        bmc_ip_address, bmc_retain_credentials, dpu_mode, bmc_ip_allocation,
-        host_lifecycle_profile, server_name
-        FROM expected_machines WHERE rack_id=$1";
+    let sql = select_expected_machine!("WHERE rack_id=$1");
     sqlx::query_as(sql)
         .bind(rack_id)
         .fetch_all(txn)
@@ -382,7 +381,7 @@ pub async fn create(
                 bmc_ip_address, bmc_retain_credentials, dpu_mode, bmc_ip_allocation,
                 host_lifecycle_profile, server_name";
 
-    sqlx::query_as(query)
+    let mut result: ExpectedMachine = sqlx::query_as(query)
         .bind(id)
         .bind(machine.bmc_mac_address)
         .bind(&machine.data.bmc_username)
@@ -393,7 +392,14 @@ pub async fn create(
         .bind(&machine.data.metadata.description)
         .bind(sqlx::types::Json(&machine.data.metadata.labels))
         .bind(&machine.data.sku_id)
-        .bind(sqlx::types::Json(&machine.data.interfaces))
+        .bind(sqlx::types::Json(
+            machine
+                .data
+                .interfaces
+                .iter()
+                .filter(|interface| !interface.role.is_dpu_loopback())
+                .collect::<Vec<_>>(),
+        ))
         .bind(&machine.data.rack_id)
         .bind(
             machine
@@ -408,14 +414,34 @@ pub async fn create(
         .bind(machine.data.bmc_ip_allocation)
         .bind(sqlx::types::Json(&machine.data.host_lifecycle_profile))
         .bind(&machine.data.server_name)
-        .fetch_one(txn)
+        .fetch_one(&mut *txn)
         .await
         .map_err(|err: sqlx::Error| match err {
             sqlx::Error::Database(e) if e.constraint() == Some(SQL_VIOLATION_DUPLICATE_MAC) => {
                 DatabaseError::ExpectedHostDuplicateMacAddress(machine.bmc_mac_address)
             }
             _ => DatabaseError::query(query, err),
-        })
+        })?;
+
+    // A new row has no reservations to preserve, so an omitted list resolves to
+    // none. `RETURNING *` does not select the reservation subquery column, so
+    // set the field explicitly to reflect what was persisted.
+    let reservations = machine
+        .data
+        .dpu_loopback_reservations()
+        .map_err(|message| DatabaseError::InvalidArgument(message.to_string()))?;
+    crate::expected_dpu_loopback_reservation::replace_for_machine(
+        &mut *txn,
+        machine.bmc_mac_address,
+        &reservations,
+    )
+    .await?;
+    result.data.interfaces.extend(
+        reservations
+            .iter()
+            .flat_map(model::expected_machine::DpuLoopbackReservation::interfaces),
+    );
+    Ok(result)
 }
 
 /// find returns an expected machine by id if provided, otherwise by bmc_mac_address.
@@ -466,7 +492,11 @@ pub async fn find_for_update(
         .await
         .map_err(|error| DatabaseError::query(lock, error))?;
 
-    match selector {
+    // Lock the parent row with a plain `FOR UPDATE`, then hydrate reservations
+    // in a second query. A row-locking clause and the reservation subquery do
+    // not compose in one statement, and the child rows do not need locking:
+    // reservations are only written while this row lock is held.
+    let mut machine: Option<ExpectedMachine> = match selector {
         Selector::Id(id) => {
             let query = "SELECT id, bmc_mac_address, bmc_username, bmc_password, serial_number,
                 fallback_dpu_serial_numbers, metadata_name, metadata_description, metadata_labels,
@@ -476,9 +506,9 @@ pub async fn find_for_update(
                 FROM expected_machines WHERE id=$1 FOR UPDATE";
             sqlx::query_as(query)
                 .bind(id)
-                .fetch_optional(txn)
+                .fetch_optional(&mut *txn)
                 .await
-                .map_err(|err| DatabaseError::query(query, err))
+                .map_err(|err| DatabaseError::query(query, err))?
         }
         Selector::BmcMacAddress(mac_address) => {
             let query = "SELECT id, bmc_mac_address, bmc_username, bmc_password, serial_number,
@@ -489,11 +519,26 @@ pub async fn find_for_update(
                 FROM expected_machines WHERE bmc_mac_address=$1 FOR UPDATE";
             sqlx::query_as(query)
                 .bind(mac_address)
-                .fetch_optional(txn)
+                .fetch_optional(&mut *txn)
                 .await
-                .map_err(|err| DatabaseError::query(query, err))
+                .map_err(|err| DatabaseError::query(query, err))?
         }
+    };
+
+    if let Some(machine) = machine.as_mut() {
+        let reservations = crate::expected_dpu_loopback_reservation::find_for_machine(
+            &mut *txn,
+            machine.bmc_mac_address,
+        )
+        .await?;
+        machine.data.interfaces.extend(
+            reservations
+                .iter()
+                .flat_map(model::expected_machine::DpuLoopbackReservation::interfaces),
+        );
     }
+
+    Ok(machine)
 }
 
 /// delete deletes an expected machine by id if provided, otherwise by bmc_mac_address.
@@ -589,6 +634,7 @@ pub async fn update(txn: &mut PgConnection, machine: &ExpectedMachine) -> Databa
                      server_name=$18 \
                  WHERE ",
                 $where_clause,
+                " RETURNING bmc_mac_address",
             )
         };
     }
@@ -604,7 +650,7 @@ pub async fn update(txn: &mut PgConnection, machine: &ExpectedMachine) -> Databa
         ),
     };
 
-    let result = sqlx::query(query)
+    let updated: Option<(MacAddress,)> = sqlx::query_as(query)
         .bind(&machine.data.bmc_username)
         .bind(&machine.data.bmc_password)
         .bind(&machine.data.serial_number)
@@ -613,7 +659,14 @@ pub async fn update(txn: &mut PgConnection, machine: &ExpectedMachine) -> Databa
         .bind(&machine.data.metadata.description)
         .bind(sqlx::types::Json(&machine.data.metadata.labels))
         .bind(&machine.data.sku_id)
-        .bind(sqlx::types::Json(&machine.data.interfaces))
+        .bind(sqlx::types::Json(
+            machine
+                .data
+                .interfaces
+                .iter()
+                .filter(|interface| !interface.role.is_dpu_loopback())
+                .collect::<Vec<_>>(),
+        ))
         .bind(&machine.data.rack_id)
         .bind(machine.data.default_pause_ingestion_and_poweron)
         .bind(machine.data.dpf_enabled)
@@ -627,15 +680,31 @@ pub async fn update(txn: &mut PgConnection, machine: &ExpectedMachine) -> Databa
         )
         .bind(&machine.data.server_name)
         .bind(&target_id)
-        .execute(&mut *txn)
+        .fetch_optional(&mut *txn)
         .await
         .map_err(|err| DatabaseError::query(query, err))?;
 
-    if result.rows_affected() == 0 {
+    let Some((bmc_mac_address,)) = updated else {
         return Err(DatabaseError::NotFoundError {
             kind: "expected_machine",
             id: target_id,
         });
+    };
+
+    // Only explicit loopback intent replaces child rows. Use the matched row's
+    // MAC, since an ID-based update need not supply that MAC as its selector.
+    if machine.data.replaces_dpu_loopbacks() {
+        let reservations = machine
+            .data
+            .dpu_loopback_reservations()
+            .map_err(|message| DatabaseError::InvalidArgument(message.to_string()))?;
+        crate::expected_dpu_loopback_reservation::replace_for_machine(
+            txn,
+            bmc_mac_address,
+            &reservations,
+        )
+        .await?;
     }
+
     Ok(())
 }

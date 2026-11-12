@@ -36,7 +36,7 @@ change something, you are touching one of these:
 |-------|---------------|------|
 | **1. Umbrella + subchart Helm values** | `helm/values.yaml` and `helm/charts/<chart>/values.yaml`, overridden by `helm-prereqs/values/nico-core.yaml` | Which subcharts are enabled, image references, replica counts, per-service LoadBalancer VIPs, ServiceMonitor toggles, certificate parameters. |
 | **2. `nico-api` siteConfig (TOML)** | `nico-api.siteConfig.nicoApiSiteConfig` block inside `helm-prereqs/values/nico-core.yaml`. Mounted into the `nico-api` pod as `nico-api-config.toml`. | All site-policy decisions: identity, pools, networks, tenant isolation, IB, NvLink, firmware updates, host health thresholds, state-controller timing, optional features (DSX, DPA, FNN, SPDM, attestation, ...). |
-| **3. Environment variables + secrets** | Container env in chart templates, Kubernetes Secrets, ConfigMaps. Injected by `setup.sh` (`NICO_IMAGE_REGISTRY`, `NICO_CORE_IMAGE_TAG`, `REGISTRY_PULL_SECRET`, ...) or ESO-synced from Vault. | Image registry/tag, registry pull credentials, database credentials, Vault tokens, SPIFFE trust domain overrides. |
+| **3. Environment variables + secrets** | Container env in chart templates, Kubernetes Secrets, ConfigMaps. Injected by `setup.sh` (`NICO_IMAGE_REGISTRY`, `NICO_CORE_IMAGE_TAG`, `REGISTRY_PULL_SECRET`, ...) or ESO-synced across namespaces. | Image registry/tag, registry pull credentials, database credentials, Vault tokens, SPIFFE trust domain overrides. |
 | **4. External-system config** | Vault PKI roles, Postgres-operator `postgresql` CRDs, MetalLB `IPAddressPool` / `BGPPeer` / `BGPAdvertisement` CRDs, MQTT brokers, Loki endpoints. | Anything outside NICo's own charts that NICo depends on. Wired by `helm-prereqs`, owned by the operator. |
 
 The rule of thumb: if you can change it with `helm upgrade`, it is layer 1
@@ -257,15 +257,13 @@ For product families other than `gb200` and `gb300`, the `GetRackProfile`
 `product_family` enum is `UNSPECIFIED`. The configured string remains available
 to descriptor-based RMS operations.
 
-Each `rack_capabilities.<role>` section also requires a `count` field. This
-field is independent of RMS: it tells the rack state machine how many devices
-with that role the rack must have before it can progress. A rack stays in
-`Created` until all three roles have at least `count` devices registered; it
-stays in `Discovering` until all three roles have at least `count` devices in
-`Ready` state. All three roles — `compute`, `switch`, and `power_shelf` —
-require a `count` regardless of which backends are set to `rms`. The third
-example below shows `count` on `compute` and `switch` even though those roles
-use non-RMS backends.
+Each `rack_capabilities.<role>` section requires a `count` field regardless
+of which backends are set to `rms`. Counts describe expected inventory for
+missing-component health alerts. Only the switch count gates ingestion:
+`Created` waits for that many registered switches and `Discovering` waits for
+that many ready switches. Compute and power shelf counts and readiness do not
+gate these transitions. See the [rack state machine](../../../docs/architecture/state_machines/rackstatemachine.md#discovering-r_discovering)
+for shipped defaults and transition details.
 
 The examples below only show the component-manager and rack-profile fields.
 Configure `[rms]` separately when NICo needs to call RMS.
@@ -869,22 +867,22 @@ values files.
 | `NICO_SITE_UUID` | Stable UUID for this site | UUIDv4. If unset, `setup.sh` tries to reuse the UUID from a prior install (site-agent ConfigMap). If that fails, it adopts an existing REST site with the same name, or mints a UUID and seeds the site record itself. |
 | `PREFLIGHT_CHECK_IMAGE` | Image for per-node preflight checks | Defaults to `busybox:1.36`. Override for air-gapped clusters. |
 
-Inside the cluster, `nico-api` discovers Vault, Postgres, and SPIFFE settings
-through Kubernetes Secrets and ConfigMaps wired by `helm-prereqs`:
+Inside the cluster, `nico-api` discovers Vault (when installed), Postgres, and
+SPIFFE settings through Kubernetes Secrets and ConfigMaps wired by `helm-prereqs`:
 
 | Secret / ConfigMap | Type | Provisioned by | Consumed by |
 |--------------------|------|----------------|-------------|
 | `nico-system.nico.nico-pg-cluster.credentials` | Secret | postgres-operator | `nico-api` (`DATASTORE_*` env) |
 | `nico-system-nico-database-config` | ConfigMap | `helm-prereqs` | `nico-api` (`DATASTORE_HOST/PORT/NAME` env) |
-| `nico-vault-token` | Secret | Vault unseal job | `nico-api` (`VAULT_TOKEN` env) |
-| `nico-vault-approle-tokens` | Secret | Vault unseal job | Long-running token refresher (`VAULT_ROLE_ID`, `VAULT_SECRET_ID`) |
-| `vault-cluster-info` | ConfigMap | `helm-prereqs` | `nico-api` (`VAULT_SERVICE`, `VAULT_MOUNT`) |
+| `nico-vault-token` | Secret | `nico-prereqs`, from `vaultroottoken` (with Vault) | `nico-api` (`VAULT_TOKEN` env) |
+| `nico-vault-approle-tokens` | Secret | `nico-prereqs`, filled by the `vault-pki-config` Job (with Vault) | Long-running token refresher (`VAULT_ROLE_ID`, `VAULT_SECRET_ID`) |
+| `vault-cluster-info` | ConfigMap | `nico-prereqs` (with Vault) | `nico-api` (`VAULT_SERVICE`, `VAULT_MOUNT`) |
 | `vault-cluster-keys` / `vaultunsealkeys` / `vaultroottoken` | Secret | Vault init job | Vault auto-unseal on pod restart |
-| `nico-roots` | Secret | ESO-synced from Vault PKI | Every workload that needs the SPIFFE root |
+| `nico-roots` | Secret | ESO-synced from the `site-root` Secret in `cert-manager` | Every workload that needs the SPIFFE root |
 | `imagepullsecret` / `nvcr-nico-dev` | dockerconfigjson | `setup.sh` (from `REGISTRY_PULL_SECRET`) | Every pod that pulls from authenticated registries |
 | `ssh-host-key` | Secret | `bootstrap_ssh_host_key.sh` during `setup.sh` prerequisite setup | `nico-ssh-console-rs` (mounted as `ssh_host_ed25519_key`) |
 | `azure-sso-nico-web-client-secret` | Secret | **operator-supplied** (manual, optional) | `nico-api` when `[auth.web].auth_type = "oauth2"` (`CARBIDE_WEB_OAUTH2_CLIENT_SECRET` env) |
-| `site-root` | cert-manager Certificate | `helm-prereqs` (self-signed bootstrap) | Vault PKI bootstrap chain |
+| `site-root` | cert-manager Certificate | `helm-prereqs` (self-signed bootstrap) | `site-issuer`; imported into Vault PKI on a Vault site |
 
 `setup.sh` provisions each chart-managed entry on first install. The OAuth2
 client secret is the only one operators must create manually — see
@@ -892,7 +890,7 @@ client secret is the only one operators must create manually — see
 for the `kubectl create secret` recipe.
 
 In steady state, all the auto-provisioned entries are reconciled by
-external-secrets-operator and the Vault PKI config job.
+external-secrets-operator and, on a Vault site, the Vault PKI config job.
 
 ---
 
@@ -900,8 +898,10 @@ external-secrets-operator and the Vault PKI config job.
 
 ### Vault PKI
 
-NICo issues every workload certificate through cert-manager backed by
-Vault PKI. Configurable surface:
+NICo issues its workload certificates through cert-manager, backed by Vault
+PKI (`vault-nico-issuer`) on a site with Vault, or by the `site-root` CA
+(`site-issuer`) on a site installed with `setup.sh --skip-vault`. Configurable
+surface:
 
 - `helm-prereqs/values.yaml` → `vault.nicoCliClientRole.{enabled,name,organization}` — adds an optional Vault role for short-lived `nico-cli` client certificates.
 - `helm/values.yaml` → `global.certificate.issuerRef.name` — change to point at a non-default ClusterIssuer.
@@ -990,7 +990,7 @@ rules.
 
 `nico-pxe` also needs egress to wherever PXE artifacts are stored
 (typically the same cluster's nico-api or an external HTTP boot artifact
-server). See [`helm/PREREQUISITES.md` → Network Requirements](../../../helm/PREREQUISITES.md#6-network-requirements)
+server). Refer to [`helm/PREREQUISITES.md` → Network Requirements](../../../helm/PREREQUISITES.md#7-network-requirements)
 for the layer-2 / broadcast-domain constraints on `nico-dhcp` /
 `nico-pxe`.
 
@@ -1149,6 +1149,10 @@ partition_monitor_max_concurrent_groups = 16 # racks or chassis reconciled in pa
 partition_monitor_full_check_interval = "10m" # racks and chassis whose inputs are unchanged and whose instances are synced are skipped between full checks, GPU health on them refreshes at this interval, "0s" checks every pass
 partition_monitor_unreachable_alert_after = 3 # consecutive passes a rack's NMX-C must be unusable before its NmxcUnreachable rack alert is raised; cleared by the first reachable pass
 nmxc_endpoint = "https://nmxc.example.com"
+
+[nvlink_config.switch_reachability]
+# enabled = false # TCP-probes ready switches each pass (NVOS on every switch, NMX-T on primaries); unset follows nvlink_config.enabled
+unreachable_alert_after = 3 # consecutive failed checks before the SwitchUnreachable or NmxtUnreachable switch alert is raised; the first successful check clears it
 # Plus auth + retry settings — see the canonical reference.
 ```
 
@@ -1375,7 +1379,7 @@ helm template nico ./helm -f helm-prereqs/values/nico-core.yaml --set global.ima
 - **`nico-api`**: stateless Deployment; scale replicas via `nico-api.replicas` (default 1). The state controllers use leader election when more than one replica runs.
 - **`nico-dns` / `nico-ntp`**: StatefulSets with per-pod LoadBalancer VIPs (default 3 replicas). Pod anti-affinity is enabled by default — replicas spread across nodes.
 - **PostgreSQL (NICo Core)**: Zalando HA Patroni cluster; `helm-prereqs/values.yaml` → `postgresql.instances` (default 3).
-- **Vault**: 3-node HA Raft (set in `helm-prereqs/operators/values/vault.yaml`).
+- **Vault** (when installed): 3-node HA Raft (set in `helm-prereqs/operators/values/vault.yaml`).
 - **PostgreSQL (NICo REST)**: single StatefulSet by default — not HA. For production, point `nico-site-agent.envConfig.DB_ADDR` at an external HA Postgres.
 
 ### Logging and observability
@@ -1389,9 +1393,9 @@ helm template nico ./helm -f helm-prereqs/values/nico-core.yaml --set global.ima
 ### Backup and restore
 
 - **NICo Core Postgres**: backed by Zalando postgres-operator's wal-g integration. Configure backup destinations in `helm-prereqs/operators/values/postgres-operator.yaml`. Operator docs are upstream.
-- **Vault**: 3-node HA Raft with disk persistence. Snapshots via `vault operator raft snapshot save`. For disaster recovery, the unseal keys are stored as the `vaultunsealkeys` Kubernetes Secret and the root token as `vaultroottoken` — preserve these out-of-band.
+- **Vault** (when installed): 3-node HA Raft with disk persistence. Snapshots via `vault operator raft snapshot save`. For disaster recovery, the unseal keys are stored as the `vaultunsealkeys` Kubernetes Secret and the root token as `vaultroottoken` — preserve these out-of-band.
 - **NICo REST Postgres**: single-replica StatefulSet — back up the underlying PVC or migrate to an external HA Postgres.
-- **Vault PKI roots**: cert-manager re-issues child certs automatically, but the Vault PKI mount's root CA must be backed up if you need to restore signing capability.
+- **CA roots**: the `site-root` Secret in `cert-manager` is the root that `site-issuer` and, on a Vault site, the Vault PKI mount sign with; cert-manager re-issues child certs automatically, but back up that Secret, and the PKI mount with it, if you need to restore signing capability.
 
 ### Helm hooks and pre-install Jobs
 

@@ -16,8 +16,8 @@ use carbide_uuid::switch::SwitchId;
 use db::DbSessionGuard;
 use mac_address::MacAddress;
 use model::firmware::HostFirmwareConfig;
-use model::machine::HostMachine;
 use model::machine::machine_search_config::MachineSearchConfig;
+use model::machine::{HostMachine, MachineInterfaceSnapshot};
 use model::machine_interface::InterfaceType;
 use model::power_shelf::PowerShelf;
 use model::rack::Rack;
@@ -34,11 +34,27 @@ mod tests;
 
 /// Maximum input slots per preparation, counting repeated IDs as separate slots.
 /// Admission is checked before catalog or database work.
-const MAX_TARGET_SLOTS: usize = 64;
+pub(super) const MAX_TARGET_SLOTS: usize = 64;
 // Includes acquisition, setup, all reads, and commit; a shorter caller deadline
 // wins. DbSessionGuard also caps each statement at this duration while preserving
 // any shorter operator timeout.
 const SNAPSHOT_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// `PreparationError` keeps expiry distinct without exposing stored payloads
+/// through a public error or making callers parse an internal display string.
+#[derive(Debug, thiserror::Error)]
+pub(super) enum PreparationError {
+    #[error("firmware details preparation deadline exceeded")]
+    DeadlineExceeded,
+    #[error(transparent)]
+    Load(Box<CarbideError>),
+}
+
+impl From<CarbideError> for PreparationError {
+    fn from(error: CarbideError) -> Self {
+        Self::Load(Box::new(error))
+    }
+}
 
 /// Borrows one homogeneous list of typed managed IDs from the caller. The loader
 /// preserves its input slots while owning the stored facts returned for them.
@@ -86,6 +102,9 @@ pub(super) struct FirmwareReadContext {
     /// Attached BMC MACs for found requested hosts, sorted by bytes and unique.
     /// A missing key can mean no BMCs; `entries` distinguishes that from no host.
     pub(super) bmc_aliases: HashMap<HostMachineId, Vec<MacAddress>>,
+    /// Interfaces currently holding the selected management IPs in this snapshot.
+    /// Reserved addresses without an interface are absent, not live endpoints.
+    pub(super) endpoint_owners: HashMap<IpAddr, MachineInterfaceSnapshot>,
 }
 
 /// Prepares up to [`MAX_TARGET_SLOTS`] original slots, preserving order, repeats
@@ -98,14 +117,14 @@ pub(super) struct FirmwareReadContext {
 /// interrupted here. Caller expiry is checked before/after it and before return.
 ///
 /// The session is released before catalog composition or profile resolution.
-/// Catalog loading retains existing fallback behavior. Expiry returns `Internal`;
+/// Catalog loading retains existing fallback behavior. Expiry is typed separately;
 /// DB errors retain typed internal details that public callers must map and redact.
 pub(super) async fn load(
     pool: &sqlx::PgPool,
     config: &CarbideConfig,
     targets: FirmwareTargets<'_>,
     caller_deadline: Option<Instant>,
-) -> Result<FirmwareReadContext, CarbideError> {
+) -> Result<FirmwareReadContext, PreparationError> {
     let slots = match targets {
         FirmwareTargets::Machines(ids) => ids.len(),
         FirmwareTargets::Switches(ids) => ids.len(),
@@ -117,7 +136,8 @@ pub(super) async fn load(
     if slots > MAX_TARGET_SLOTS {
         return Err(CarbideError::InvalidArgument(format!(
             "firmware details accepts at most {MAX_TARGET_SLOTS} input slots; received {slots}"
-        )));
+        ))
+        .into());
     }
     check_deadline(caller_deadline)?;
     // Metadata loading can block on the filesystem. Finish it before taking a
@@ -129,7 +149,7 @@ pub(super) async fn load(
     let deadline = caller_deadline.map_or(budget_deadline, |caller| caller.min(budget_deadline));
     let (mut context, overrides) = tokio::time::timeout_at(deadline, load_snapshot(pool, targets))
         .await
-        .map_err(|_| deadline_error())??;
+        .map_err(|_| PreparationError::DeadlineExceeded)??;
     check_deadline(Some(deadline))?;
     context.host_catalog = disk_catalog.map(|catalog| catalog.with_overrides(overrides));
     context.profiles = context
@@ -150,18 +170,11 @@ pub(super) async fn load(
 }
 
 /// Rejects late completion even when Tokio polls a ready operation before its timer.
-fn check_deadline(deadline: Option<Instant>) -> Result<(), CarbideError> {
+fn check_deadline(deadline: Option<Instant>) -> Result<(), PreparationError> {
     if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
-        return Err(deadline_error());
+        return Err(PreparationError::DeadlineExceeded);
     }
     Ok(())
-}
-
-/// Keeps deadline diagnostics independent of raw stored firmware requests.
-fn deadline_error() -> CarbideError {
-    CarbideError::Internal {
-        message: "firmware details preparation deadline exceeded".into(),
-    }
 }
 
 /// Only database operations run while [`DbSessionGuard`] is live. No connection or
@@ -307,6 +320,37 @@ async fn load_snapshot(
     if matches!(targets, FirmwareTargets::Machines(_)) {
         overrides = db::host_firmware_config::list_configs(txn.as_pgconn()).await?;
     }
+    // Collect all roles against the same ownership snapshot as the selected
+    // endpoints. In particular, a switch MAC lookup alone can find an interface
+    // owned by another component. The read adapter validates these facts before credentials.
+    let mut ips = HashSet::new();
+    for entry in &context.entries {
+        match entry {
+            FirmwareReadEntry::Machine {
+                machine: Some(machine),
+                ..
+            } => {
+                ips.extend(machine.status.bmc_info.ip);
+            }
+            FirmwareReadEntry::Switch {
+                endpoint: Some(endpoint),
+                ..
+            } => {
+                ips.insert(endpoint.bmc_ip);
+                ips.extend(endpoint.nvos_ip);
+            }
+            FirmwareReadEntry::Shelf {
+                endpoint: Some(endpoint),
+                ..
+            } => {
+                ips.insert(endpoint.pmc_ip);
+            }
+            _ => {}
+        }
+    }
+    context.endpoint_owners =
+        db::machine_interface::find_by_ips(txn.as_pgconn(), &ips.into_iter().collect::<Vec<_>>())
+            .await?;
     txn.commit().await?;
     connection.return_to_pool();
     Ok((context, overrides))

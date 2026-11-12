@@ -1,0 +1,22 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+suite: Site Manager least privilege
+templates:
+  - rbac.yaml
+tests:
+  - it: does not grant access to the CA signing key or other Secrets
+    documentIndex: 1
+    asserts:
+      - equal:
+          path: rules
+          value:
+            - apiGroups: [forge.nvidia.io]
+              resources: [sites]
+              verbs: [get, list, watch, create, update, patch, delete]
+            - apiGroups: [forge.nvidia.io]
+              resources: [sites/status]
+              verbs: [get, update, patch]
+            - apiGroups: [""]
+              resources: [configmaps]
+              verbs: [get, list, watch]

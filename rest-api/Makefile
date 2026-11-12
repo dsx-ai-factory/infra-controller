@@ -276,6 +276,10 @@ test-nvswitch-manager:
 test-sdk-simple:
 	go test ./sdk/simple -count=1
 
+.PHONY: test-sdk-standard
+test-sdk-standard:
+	cd sdk/standard && go test -p 1 $(TEST_PACKAGES) -count=1
+
 test-mcp:
 	cd mcp && go test -p 1 ./... -count=1
 

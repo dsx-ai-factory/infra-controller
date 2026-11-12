@@ -14,8 +14,8 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+use rpc::carbide_tls_client::{ApiConfig, CarbideTlsClient};
 use rpc::forge::{DhcpDiscovery, DhcpRecord};
-use rpc::forge_tls_client::{ApiConfig, ForgeTlsClient};
 
 use crate::Config;
 use crate::errors::DhcpError;
@@ -30,9 +30,9 @@ pub(crate) async fn discover_dhcp(
         ));
     };
 
-    let api_config = ApiConfig::new(carbide_api_url, &config.forge_client_config);
+    let api_config = ApiConfig::new(carbide_api_url, &config.carbide_client_config);
 
-    let mut client = ForgeTlsClient::retry_build(&api_config)
+    let mut client = CarbideTlsClient::retry_build(&api_config)
         .await
         .map_err(|x| DhcpError::GenericError(x.to_string()))?;
 

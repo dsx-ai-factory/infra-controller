@@ -1,7 +1,10 @@
 ## =============================================================================
-## ConfigMaps for Vault connection info and database config
-## Referenced by nico-api Deployment envFrom.
+## ConfigMaps referenced by the nico-api Deployment env:
+##   vault-cluster-info               — Vault connection info; vault.enabled only
+##   nico-system-nico-database-config — database host, port, and name; always
+##                                      rendered, with or without Vault
 ## =============================================================================
+{{- if .Values.vault.enabled }}
 ---
 apiVersion: v1
 kind: ConfigMap
@@ -15,6 +18,7 @@ data:
   {{- end }}
   NICO_VAULT_MOUNT: {{ .Values.vault.kvMount | quote }}
   NICO_VAULT_PKI_MOUNT: {{ .Values.vault.pkiMount | quote }}
+{{- end }}
 ---
 apiVersion: v1
 kind: ConfigMap

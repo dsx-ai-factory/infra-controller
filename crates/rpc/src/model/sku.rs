@@ -36,21 +36,26 @@ impl From<Sku> for rpc::forge::Sku {
             // filled in afterwards
             associated_machine_ids: Vec::default(),
             device_type: value.device_type,
+            updated: value.updated.map(Into::into),
         }
     }
 }
 
 impl From<rpc::forge::Sku> for Sku {
     fn from(value: rpc::forge::Sku) -> Self {
+        let created = value
+            .created
+            .and_then(|t| DateTime::<Utc>::try_from(t).ok())
+            .unwrap_or_else(Utc::now);
+        let updated = value
+            .updated
+            .and_then(|t| DateTime::<Utc>::try_from(t).ok());
         Sku {
             schema_version: value.schema_version,
             id: value.id,
             description: value.description.unwrap_or_default(),
-            // Handle optional created field - if not provided, use current time
-            created: value
-                .created
-                .and_then(|t| DateTime::<Utc>::try_from(t).ok())
-                .unwrap_or_else(Utc::now),
+            created,
+            updated,
             components: value.components.unwrap_or_default().into(),
             device_type: value.device_type,
         }

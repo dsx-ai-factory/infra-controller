@@ -730,6 +730,7 @@ func TestReplaceAllExpectedMachinesHandler_Handle(t *testing.T) {
 		run  func(*testing.T)
 	}{
 		{name: "Core failure rolls back replacement", run: testReplaceAllExpectedMachinesRollsBackOnCoreFailure},
+		{name: "retained machine loopback intent", run: testReplaceAllExpectedMachinesLoopbacks},
 		{name: "requested SKU among larger Site inventory", run: testReplaceAllExpectedMachinesFindsRequestedSKUAmongLargerSiteInventory},
 		{name: "SKU recreated on another Site before attachment", run: func(t *testing.T) {
 			testExpectedMachineRejectsRecreatedSKU(t, "replace all")
@@ -737,6 +738,105 @@ func TestReplaceAllExpectedMachinesHandler_Handle(t *testing.T) {
 	}
 	for _, test := range tests {
 		t.Run(test.name, test.run)
+	}
+}
+
+func testReplaceAllExpectedMachinesLoopbacks(t *testing.T) {
+	dbSession := testExpectedMachineInitDB(t)
+	t.Cleanup(func() { dbSession.Close() })
+	ctx := context.Background()
+	const org = "test-org"
+	_, site := testExpectedMachineSetupTestData(t, dbSession, org)
+	user := &cdbm.User{ID: uuid.New(), StarfleetID: cutil.GetPtr("loopback-user"), OrgData: cdbm.OrgData{org: cdbm.Org{Name: org, Roles: []string{"FORGE_PROVIDER_ADMIN"}}}}
+	_, err := dbSession.DB.NewInsert().Model(user).Exec(ctx)
+	require.NoError(t, err)
+	dao := cdbm.NewExpectedMachineDAO(dbSession)
+	loopback := cdbm.ExpectedMachineInterface{
+		MacAddress: cutil.GetPtr("02:00:00:00:00:20"), Role: cutil.GetPtr(cdbm.ExpectedInterfaceRoleDpuLoopback),
+		FixedIP: cutil.GetPtr("198.51.100.20"), IPAllocation: cutil.GetPtr(cdbm.ExpectedInterfaceIPAllocationFixed),
+	}
+	client := &tmocks.Client{}
+	run := &tmocks.WorkflowRun{}
+	var captured corev1.ExpectedMachineList
+	client.On("ExecuteWorkflow", mock.Anything, mock.Anything, grpcproxy.Core.WorkflowName, mock.Anything).
+		Run(func(args mock.Arguments) {
+			captured = corev1.ExpectedMachineList{}
+			testDecodeExpectedComponentPatch(t, args.Get(3), site.ID.String(), &captured)
+		}).Return(run, nil)
+	run.On("Get", mock.Anything, mock.Anything).Return(nil)
+	pool := sc.NewClientPool(nil)
+	pool.IDClientMap[site.ID.String()] = client
+	handler := NewReplaceAllExpectedMachinesHandler(dbSession, pool, common.GetTestConfig())
+	tests := []struct {
+		name          string
+		fields        string
+		wantLoopback  string
+		wantPhysical  bool
+		wantWireCount int
+		wantReplace   bool
+	}{
+		{
+			name:         "physical-only retained machine preserves reservations",
+			fields:       `,"interfaces":[{"macAddress":"02:00:00:00:00:20","role":"DpuOs"}]`,
+			wantLoopback: "198.51.100.20", wantPhysical: true, wantWireCount: 1,
+		},
+		{name: "omitted interfaces preserve loopbacks only", wantLoopback: "198.51.100.20"},
+		{name: "explicit empty replacement clears reservations", fields: `,"interfaces":[],"replaceDpuLoopbacks":true`, wantReplace: true},
+		{
+			name:         "supplied loopback replaces prior subset",
+			fields:       `,"interfaces":[{"macAddress":"02:00:00:00:00:20","role":"DpuLoopback","fixedIp":"198.51.100.21","ipAllocation":"Fixed"}]`,
+			wantLoopback: "198.51.100.21", wantWireCount: 1,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			require.NoError(t, dao.DeleteAll(ctx, nil, cdbm.ExpectedMachineFilterInput{SiteIDs: []uuid.UUID{site.ID}}))
+			retained, err := dao.Create(ctx, nil, cdbm.ExpectedMachineCreateInput{
+				ExpectedMachineID: uuid.New(), SiteID: site.ID, BmcMacAddress: "00:11:22:33:AA:BB",
+				ChassisSerialNumber: "retained", CreatedBy: user.ID,
+				Interfaces: []cdbm.ExpectedMachineInterface{
+					{MacAddress: loopback.MacAddress, Role: cutil.GetPtr(cdbm.ExpectedInterfaceRoleDpuOs), FixedIP: cutil.GetPtr("192.0.2.20")},
+					loopback,
+				},
+			})
+			require.NoError(t, err)
+			removed, err := dao.Create(ctx, nil, cdbm.ExpectedMachineCreateInput{
+				ExpectedMachineID: uuid.New(), SiteID: site.ID, BmcMacAddress: "00:11:22:33:AA:CC",
+				ChassisSerialNumber: "removed", CreatedBy: user.ID,
+			})
+			require.NoError(t, err)
+			body := fmt.Sprintf(`{"siteId":%q,"expectedMachines":[{"siteId":%q,"bmcMacAddress":"00-11-22-33-aa-bb","chassisSerialNumber":"retained"%s}]}`, site.ID.String(), site.ID.String(), test.fields)
+			recorder := invokeExpectedInventoryBatchHandler(t, user, org, http.MethodPut,
+				"/v2/org/test-org/nico/expected-machine/all", body, "", handler.Handle)
+			require.Equal(t, http.StatusOK, recorder.Code, recorder.Body.String())
+			require.Len(t, captured.ExpectedMachines, 1)
+			forwarded := captured.ExpectedMachines[0]
+			require.True(t, forwarded.ReplaceHostNics)
+			require.Equal(t, test.wantReplace, forwarded.ReplaceDpuLoopbacks)
+			require.Len(t, forwarded.HostNics, test.wantWireCount, "Core must only receive submitted declarations")
+			var response []model.APIExpectedMachine
+			require.NoError(t, json.Unmarshal(recorder.Body.Bytes(), &response))
+			require.Len(t, response, 1)
+			require.NotEqual(t, retained.ID, response[0].ID, "preservation must use the MAC, not replaced DB IDs")
+			stored, err := dao.Get(ctx, nil, response[0].ID, nil, false)
+			require.NoError(t, err)
+			want := []cdbm.ExpectedMachineInterface{}
+			if test.wantPhysical {
+				want = append(want, cdbm.ExpectedMachineInterface{MacAddress: loopback.MacAddress, Role: cutil.GetPtr(cdbm.ExpectedInterfaceRoleDpuOs)})
+			}
+			if test.wantLoopback != "" {
+				reservation := loopback
+				reservation.FixedIP = cutil.GetPtr(test.wantLoopback)
+				want = append(want, reservation)
+			}
+			require.Equal(t, want, stored.Interfaces)
+			require.Equal(t, model.NewAPIExpectedMachine(stored).Interfaces, response[0].Interfaces)
+			_, err = dao.Get(ctx, nil, removed.ID, nil, false)
+			require.ErrorIs(t, err, cdb.ErrDoesNotExist)
+			_, count, err := dao.GetAll(ctx, nil, cdbm.ExpectedMachineFilterInput{SiteIDs: []uuid.UUID{site.ID}}, paginator.PageInput{}, nil)
+			require.NoError(t, err)
+			require.Equal(t, 1, count)
+		})
 	}
 }
 
@@ -894,7 +994,7 @@ func TestExpectedInventoryBatchHandlers(t *testing.T) {
 	}{
 		{
 			name: "machine", path: "/v2/org/test-org/nico/expected-machine/all",
-			body:    fmt.Sprintf(`{"siteId":%q,"expectedMachines":[{"siteId":%q,"bmcMacAddress":"00:11:22:33:44:01","chassisSerialNumber":"machine-1","defaultBmcUsername":"machine-user","defaultBmcPassword":"machine-pass","interfaces":[{"macAddress":"02:00:00:00:00:09","nicType":"CX9","fixedIp":"192.0.2.9"}]},{"siteId":%q,"bmcMacAddress":"00:11:22:33:44:09","chassisSerialNumber":"machine-empty","interfaces":[]}]}`, site.ID.String(), site.ID.String(), site.ID.String()),
+			body:    fmt.Sprintf(`{"siteId":%q,"expectedMachines":[{"siteId":%q,"bmcMacAddress":"00:11:22:33:44:01","chassisSerialNumber":"machine-1","defaultBmcUsername":"machine-user","defaultBmcPassword":"machine-pass","interfaces":[{"macAddress":"02:00:00:00:00:09","nicType":"CX9","fixedIp":"192.0.2.9"}]},{"siteId":%q,"bmcMacAddress":"00:11:22:33:44:09","chassisSerialNumber":"machine-empty"}]}`, site.ID.String(), site.ID.String(), site.ID.String()),
 			handle:  NewReplaceAllExpectedMachinesHandler(dbSession, pool, cfg).Handle,
 			method:  corev1.Forge_ReplaceAllExpectedMachines_FullMethodName,
 			secrets: []string{"machine-user", "machine-pass"},
@@ -930,6 +1030,7 @@ func TestExpectedInventoryBatchHandlers(t *testing.T) {
 	require.Len(t, machineList.ExpectedMachines, 2)
 	for _, machine := range machineList.ExpectedMachines {
 		require.True(t, machine.ReplaceHostNics, "replace-all must explicitly remove interfaces omitted from each replacement")
+		require.False(t, machine.ReplaceDpuLoopbacks, "replace-all must preserve omitted loopbacks without explicit intent")
 	}
 	require.Empty(t, machineList.ExpectedMachines[1].HostNics)
 	require.Equal(t, "machine-pass", machineList.ExpectedMachines[0].BmcPassword)

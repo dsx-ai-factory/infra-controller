@@ -33,3 +33,4 @@ mod power_management;
 mod rack_firmware_upgrade;
 mod reboot_verification;
 mod spdm;
+mod task_progress;

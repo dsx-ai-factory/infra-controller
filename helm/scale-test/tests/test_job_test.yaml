@@ -37,6 +37,9 @@ tests:
           path: spec.template.spec.restartPolicy
           value: Never
       - equal:
+          path: spec.template.spec.enableServiceLinks
+          value: false
+      - equal:
           path: spec.template.spec.serviceAccountName
           value: run-scale-test
       - equal:

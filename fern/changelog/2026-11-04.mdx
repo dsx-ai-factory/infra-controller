@@ -1,0 +1,33 @@
+---
+tags: ["unreleased", "deployment", "nvlink", "security"]
+---
+
+## Upcoming: NMX-C client certificate and key validation
+
+Builds containing [PR #8619](https://github.com/dsx-ai-factory/infra-controller/pull/8619)
+reject an NMX-C client certificate configured without its private key, or a key
+configured without its certificate, during `nico-api` configuration loading.
+This also applies when `nvlink_config.enabled = false`.
+
+### Before upgrading
+
+Before upgrading to a build containing this change, check `[nvlink_config]`.
+Set both `nmx_c_tls_client_cert_path` and `nmx_c_tls_client_key_path` to the client
+certificate and key paths, or remove both settings. Disabling NVLink does not
+allow a configuration with only one path to start.
+
+The startup error has the context `invalid nvlink_config`. If only the
+certificate path is set, its cause is:
+
+```text
+nmx_c_tls_client_cert_path is set without nmx_c_tls_client_key_path; set both or neither
+```
+
+If only the key path is set, its cause is:
+
+```text
+nmx_c_tls_client_key_path is set without nmx_c_tls_client_cert_path; set both or neither
+```
+
+See [NVLink partitioning](../../docs/manuals/nvlink_partitioning.md) for the NMX-C
+TLS settings and their defaults.

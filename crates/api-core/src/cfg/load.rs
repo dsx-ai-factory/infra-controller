@@ -439,7 +439,11 @@ pub fn parse_carbide_config_with_deferred_diagnostics(
 
     config
         .nvlink_config
-        .get_or_insert_with(NvLinkConfig::default);
+        .get_or_insert_with(NvLinkConfig::default)
+        // Defaulting later fills the certificate, key, and authority together and only when no
+        // nmx_c_tls_* key is set, so a pair complete here stays complete.
+        .nmx_c_tls_config()
+        .wrap_err("invalid nvlink_config")?;
 
     // Publish the configured tool list so the admin-UI sidebar and per-machine
     // "Logs" deep link can read it back via `crate::configured_tools`. The list
@@ -578,6 +582,7 @@ mod tests {
     use tracing_subscriber::prelude::*;
 
     use super::*;
+    use crate::cfg::file::BmcBackend;
     use crate::logging::stream::{LogStream, LogStreamLayer};
 
     #[derive(Clone, Copy)]
@@ -823,6 +828,33 @@ selections = { power = "standard" }"#
         })
     }
 
+    /// Existing configurations keep libredfish, and only the two clients parse.
+    #[test]
+    #[allow(clippy::result_large_err)]
+    fn bmc_backend_defaults_to_libredfish() {
+        figment::Jail::expect_with(|jail| {
+            scenarios!(
+                run = |settings| {
+                    jail.create_file(
+                        "config.toml",
+                        &format!("{}\n{settings}\n", include_str!("test_data/min_config.toml")),
+                    ).unwrap();
+                    parse_carbide_config(Path::new("config.toml"), None)
+                        .map(|config| config.bmc_backend)
+                        .map_err(|error| format!("{error:#}"))
+                };
+                "BMC backend" {
+                    "" => Yields(BmcBackend::Libredfish),
+                    "bmc_backend = \"drivers\"" => Yields(BmcBackend::Drivers),
+                    "bmc_backend = \"redfish\"" => FailsWith(
+                        "failed to load configuration files: unknown variant: found `redfish`, expected ``libredfish` or `drivers`` for key \"default.bmc_backend\" in config.toml TOML file".to_string(),
+                    ),
+                }
+            );
+            Ok(())
+        })
+    }
+
     /// Validates the NIC cache budget through the production loader, including
     /// existing configurations that omit the new setting.
     #[test]
@@ -892,6 +924,14 @@ selections = { power = "standard" }"#
     #[allow(clippy::result_large_err)]
     fn route_targets_are_validated_during_startup_loading() {
         figment::Jail::expect_with(|jail| {
+            // Put 257 valid targets in one prefix rule to exercise configured-pair admission.
+            let oversized_targets = (0..=256)
+                .map(|vni| format!("{{ asn = 64512, vni = {vni} }}"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let oversized_conditional_exports = format!(
+                "[fnn.routing_profiles.OVERSIZED]\nroute_targets_on_exports_by_prefix = [{{ prefix = \"0.0.0.0/0\", route_targets = [{oversized_targets}] }}]"
+            );
             scenarios!(
                 run = |(name, settings)| {
                     // Parse each invalid profile through the same deferred loader used at startup.
@@ -924,6 +964,39 @@ route_target_imports = [{ asn = 429000000, vni = 0, vni_self = true }]"#,
             route_targets_on_exports = [{ asn = 429000000, vni = 0, vni_self = true }]"#,
                     ) => FailsWith(
                         "fnn.routing_profiles.INVALID.route_targets_on_exports[0] is invalid: route target cannot specify both vni and vni_self".to_string(),
+                    ),
+                    // Admin conditional rules must reject ineffective target lists at startup.
+                    (
+                        "admin-conditional-exports",
+                        r#"[fnn.admin_vpc]
+enabled = true
+[fnn.admin_vpc.routing_profile]
+route_targets_on_exports_by_prefix = [{ prefix = "::/0", route_targets = [] }]"#,
+                    ) => FailsWith(
+                        "fnn.admin_vpc.routing_profile.route_targets_on_exports_by_prefix is invalid: route_targets must contain at least one route target".to_string(),
+                    ),
+                    // Named profiles must validate the match mode as well as nested targets.
+                    (
+                        "named-conditional-exports",
+                        r#"[fnn.routing_profiles.INVALID]
+            route_targets_on_exports_by_prefix = [{ prefix = "0.0.0.0/0", match_type = "exact", max_prefix_length = 0, route_targets = [{ asn = 64512, vni = 100 }] }]"#,
+                    ) => FailsWith(
+                        "fnn.routing_profiles.INVALID.route_targets_on_exports_by_prefix is invalid: max_prefix_length is only accepted with match_type = le".to_string(),
+                    ),
+                    // A valid prefix rule must not bypass semantic validation of its nested target.
+                    (
+                        "named-conditional-target",
+                        r#"[fnn.routing_profiles.INVALID]
+            route_targets_on_exports_by_prefix = [{ prefix = "0.0.0.0/0", match_type = "exact", route_targets = [{ asn = 429000000, vni = 0, vni_self = true }] }]"#,
+                    ) => FailsWith(
+                        "fnn.routing_profiles.INVALID.route_targets_on_exports_by_prefix[0].route_targets[0] is invalid: route target cannot specify both vni and vni_self".to_string(),
+                    ),
+                    // Startup must count targets within a rule rather than only prefix entries.
+                    (
+                        "named-conditional-pair-limit",
+                        oversized_conditional_exports.as_str(),
+                    ) => FailsWith(
+                        "fnn.routing_profiles.OVERSIZED.route_targets_on_exports_by_prefix is invalid: route_targets_on_exports_by_prefix exceeds 256 prefix/route-target pairs".to_string(),
                     ),
                 }
             );
@@ -1057,6 +1130,32 @@ route_target_imports = [{ asn = 429000000, vni = 0, vni_self = true }]"#,
             assert_eq!(
                 warning.fields.get("tls_dir").map(String::as_str),
                 Some(NvLinkConfig::DEFAULT_NMX_C_CLIENT_TLS_DIR)
+            );
+            Ok(())
+        })
+    }
+
+    /// A client certificate without its key stops configuration loading, even with NVLink
+    /// partitioning disabled, and the error names the missing setting.
+    #[test]
+    #[allow(clippy::result_large_err)]
+    fn nmx_c_client_certificate_without_key_fails_configuration_loading() {
+        figment::Jail::expect_with(|jail| {
+            let config_text = format!(
+                "{}\n[nvlink_config]\nnmx_c_tls_client_cert_path = \"/etc/nico/nmxc/client.crt\"\n",
+                include_str!("test_data/min_config.toml")
+            );
+            jail.create_file("config.toml", &config_text)?;
+
+            let error = parse_carbide_config(Path::new("config.toml"), None)
+                .expect_err("a client certificate without its key must be rejected");
+            let message = format!("{error:#}");
+            assert!(message.contains("invalid nvlink_config"), "{message}");
+            assert!(
+                message.contains(
+                    "nmx_c_tls_client_cert_path is set without nmx_c_tls_client_key_path"
+                ),
+                "{message}"
             );
             Ok(())
         })

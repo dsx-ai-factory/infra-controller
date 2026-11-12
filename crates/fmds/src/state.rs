@@ -27,7 +27,7 @@ use governor::middleware::NoOpMiddleware;
 use governor::state::{InMemoryState, NotKeyed};
 use governor::{Quota, RateLimiter, clock};
 use nonzero_ext::nonzero;
-use rpc::forge_tls_client::ForgeClientConfig;
+use rpc::carbide_tls_client::CarbideClientConfig;
 
 const PHONE_HOME_RATE_LIMIT: Quota = Quota::per_minute(nonzero!(10u32));
 
@@ -36,7 +36,7 @@ pub struct FmdsState {
     pub config: ArcSwapOption<FmdsConfig>,
     pub machine_id: ArcSwapOption<MachineId>,
     pub forge_api: String,
-    pub forge_client_config: Option<Arc<ForgeClientConfig>>,
+    pub carbide_client_config: Option<Arc<CarbideClientConfig>>,
     pub outbound_governor:
         Arc<RateLimiter<NotKeyed, InMemoryState, clock::DefaultClock, NoOpMiddleware>>,
     pub machine_identity: ArcSwap<MachineIdentityServing>,
@@ -46,14 +46,14 @@ pub struct FmdsState {
 impl FmdsState {
     pub fn try_new(
         forge_api: String,
-        forge_client_config: Option<Arc<ForgeClientConfig>>,
+        carbide_client_config: Option<Arc<CarbideClientConfig>>,
     ) -> Result<Self, String> {
         let serving = Arc::new(MachineIdentityServing::try_default()?);
         Ok(Self {
             config: ArcSwapOption::new(None),
             machine_id: ArcSwapOption::new(None),
             forge_api,
-            forge_client_config,
+            carbide_client_config,
             outbound_governor: Arc::new(RateLimiter::direct(PHONE_HOME_RATE_LIMIT)),
             machine_identity: ArcSwap::new(serving),
             last_machine_identity_params: ArcSwapOption::new(None),

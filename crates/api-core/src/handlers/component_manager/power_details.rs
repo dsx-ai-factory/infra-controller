@@ -13,7 +13,6 @@ use component_manager::component_common::{ComponentPowerStateResult, PowerStateS
 use component_manager::compute_tray_manager::{
     ComputeTrayEndpoint, ComputeTrayManager, ComputeTrayVendor,
 };
-use component_manager::core_compute_manager::CoreComputeTrayManager;
 use component_manager::error::ComponentManagerError;
 use component_manager::nv_switch_manager::SwitchEndpoint;
 use component_manager::power_shelf_manager::{PowerShelfEndpoint, PowerShelfVendor};
@@ -372,9 +371,7 @@ async fn read_actual(
     // Standalone hosts use direct BMC authentication, including at sites where
     // the general Redfish pool is configured for a proxy. Rack-scale hosts use
     // their configured reader; the configured Core reader also uses this pool.
-    let direct_pool: std::sync::Arc<dyn carbide_redfish::libredfish::RedfishClientPool> =
-        api.bmc_credential_ops.clone();
-    let core = CoreComputeTrayManager::new(direct_pool);
+    let core = super::standalone_compute_tray_manager(api);
     let compute_reader: &dyn ComputeTrayManager = match &endpoint {
         PowerReadEndpoint::Compute {
             standalone: true, ..

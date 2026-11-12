@@ -47,6 +47,14 @@ has installed the cert-manager ClusterIssuer and the External Secrets Operator
   `machines.rack-machines: null`) still gets the bare `[machines]` table that
   machine-a-tron requires at startup.
 
+The chart issues its certificates through `global.certificate.issuerRef`, which
+defaults to the `vault-nico-issuer` ClusterIssuer. On a site installed without
+Vault (`setup.sh --skip-vault`), set it to the cert-manager `site-issuer` with
+`--set global.certificate.issuerRef.name=site-issuer`,
+`--set global.certificate.issuerRef.kind=ClusterIssuer`, and
+`--set global.certificate.issuerRef.group=cert-manager.io`. Refer to
+[Installing without Vault](../../../helm-prereqs/README.md#installing-without-vault).
+
 The chart does not write the NICo Core site configuration or the site
 credentials. `siteCredentials` in helm-prereqs renders the site-wide BMC root
 and the Unified Extensible Firmware Interface (UEFI) defaults. Refer to

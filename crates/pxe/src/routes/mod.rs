@@ -16,8 +16,8 @@
  */
 use std::net::IpAddr;
 
+use ::rpc::carbide_tls_client::{self, ApiConfig, CarbideClientConfig};
 use ::rpc::forge as rpc;
-use ::rpc::forge_tls_client::{self, ApiConfig, ForgeClientConfig};
 
 pub(crate) mod cloud_init;
 pub(crate) mod ipxe;
@@ -32,10 +32,10 @@ impl RpcContext {
         client_ip: IpAddr,
         product: Option<String>,
         url: &str,
-        client_config: &ForgeClientConfig,
+        client_config: &CarbideClientConfig,
     ) -> Result<rpc::PxeInstructions, String> {
         let api_config = ApiConfig::new(url, client_config);
-        let mut client = forge_tls_client::ForgeTlsClient::retry_build(&api_config)
+        let mut client = carbide_tls_client::CarbideTlsClient::retry_build(&api_config)
             .await
             .map_err(|err| err.to_string())?;
         let request = tonic::Request::new(rpc::PxeInstructionRequest {

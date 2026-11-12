@@ -79,6 +79,7 @@ pub use bmc_endpoint_explorer::{AuthenticatedBmcClient, BmcEndpointExplorer};
 pub use redfish::{BmcAccess, EstablishedBmc, ProxiedPools};
 mod boot_interfaces;
 mod host_interfaces;
+mod machine_interfaces;
 use boot_interfaces::NicBootInterfaces;
 mod host_dpu_matches;
 use host_dpu_matches::{HostDpuMatches, MatchedDpu};
@@ -86,6 +87,7 @@ mod host_reconciler;
 use host_reconciler::HostReconciler;
 mod boot_order_tracker;
 use boot_order_tracker::BootOrderTracker;
+pub mod dpu_asn;
 pub mod dpu_loopback;
 mod inventory_creator;
 pub use inventory_creator::{
@@ -607,8 +609,8 @@ impl SiteExplorer {
     #[allow(clippy::too_many_arguments)]
     /// Creates a site explorer.
     ///
-    /// The registry selects each DPU's IPv4 loopback backend. Creation prepares
-    /// provider allocations before the machine transaction; `start` supplies
+    /// The registry selects each DPU's IPv4 loopback backend. Creation and
+    /// reconciliation prepare provider allocations before the machine transaction; `start` supplies
     /// the shutdown token for that preparation.
     ///
     /// When `dpf_enabled_at_site` is true, eligible hosts are marked for DPF-managed ingestion.
@@ -632,7 +634,12 @@ impl SiteExplorer {
         let endpoint_explorer = endpoint_exploration_service.endpoint_explorer();
 
         SiteExplorer {
-            host_reconciler: HostReconciler::new(database_connection.clone()),
+            host_reconciler: HostReconciler::new(
+                database_connection.clone(),
+                explorer_config.retained_boot_interface_window,
+                resource_pool_registry.clone(),
+                common_pools.clone(),
+            ),
             machine_location_reconciler: MachineLocationReconciler::new(
                 database_connection.clone(),
                 rack_profiles.clone(),
@@ -669,6 +676,7 @@ impl SiteExplorer {
     ) -> io::Result<()> {
         self.inventory_creator
             .set_preparation_cancel_token(cancel_token.clone());
+        self.host_reconciler.preparation_cancel_token = cancel_token.clone();
         join_set
             .build_task()
             .name("site_explorer")
@@ -917,11 +925,13 @@ impl SiteExplorer {
     /// Also updates the Site Explorer Health Report for all explored endpoints based on the last exploration data.
     ///
     /// * `metrics`                   - A metrics collector for accumulating and later emitting metrics.
-    /// * `matched_expected_machines` - A map of expected machines that have been matched to interfaces, indexed by IP(s).
-    async fn audit_exploration_results(
+    /// * `expected_endpoint_index`  - Expected entities matched with explored endpoints.
+    /// * `explored_managed_hosts`   - The complete host/DPU associations persisted this iteration.
+    async fn audit_exploration_results<'a>(
         &self,
         metrics: &mut SiteExplorationMetrics,
         expected_endpoint_index: &ExploredEndpointIndex,
+        explored_managed_hosts: impl Iterator<Item = &'a ExploredManagedHost>,
     ) -> SiteExplorerResult<()> {
         let audit_load_start = Instant::now();
         let mut txn = self.txn_begin().await?;
@@ -929,7 +939,6 @@ impl SiteExplorer {
         // Grab them all because we care about everything,
         // not just the subset in the current run.
         let explored_endpoints = db::explored_endpoints::find_all(txn.as_pgconn()).await?;
-        let explored_managed_hosts = db::explored_managed_host::find_all(txn.as_pgconn()).await?;
 
         txn.rollback().await?;
         metrics.record_phase_latency("audit_load", audit_load_start.elapsed());
@@ -1189,12 +1198,10 @@ impl SiteExplorer {
         // physical card. BF4 does not expose that serial on the DPU system
         // object, so this uses `EndpointExplorationReport::dpu_pairing_serial_number`
         // rather than reading `systems[0].serial_number` directly.
-        let mut dpu_sn_to_endpoint = HashMap::new();
-        for (_, ep) in explored_dpus {
-            if let Some(sn) = ep.report.dpu_pairing_serial_number() {
-                dpu_sn_to_endpoint.insert(sn.to_string(), ep);
-            }
-        }
+        let dpu_sn_to_endpoint = explored_dpus
+            .values()
+            .filter_map(|ep| ep.report.dpu_pairing_serial_number().map(|sn| (sn, ep)))
+            .collect::<HashMap<_, _>>();
 
         let mut candidates = Vec::with_capacity(explored_hosts.len());
         for (_, ep) in explored_hosts {
@@ -1234,6 +1241,9 @@ impl SiteExplorer {
         }
 
         let mut configured_candidates = Vec::with_capacity(candidates.len());
+        // Retain fresh observations even when creation policy rejects their
+        // matching, so existing-host reconciliation can select its own work.
+        let mut unmatched_host_reports = Vec::new();
         for candidate in candidates {
             let dpus = match candidate.dpu_matches {
                 Some(dpu_matches) => {
@@ -1246,6 +1256,7 @@ impl SiteExplorer {
                         )
                         .await
                     else {
+                        unmatched_host_reports.push(candidate.endpoint);
                         continue;
                     };
                     dpus
@@ -1261,8 +1272,10 @@ impl SiteExplorer {
             });
         }
 
-        let (mut identified_hosts, boot_interfaces) =
+        let (mut identified_hosts, boot_interfaces, unmatched_reports) =
             MachineCreator::identify_managed_hosts(configured_candidates, metrics);
+
+        unmatched_host_reports.extend(unmatched_reports);
 
         let mut txn = self.txn_begin().await?;
         Self::persist_identified_managed_hosts(&mut txn, &identified_hosts).await?;
@@ -1276,29 +1289,43 @@ impl SiteExplorer {
         );
 
         self.inventory_creator
-            .create_or_reconcile_hosts(
+            .create_hosts(
                 metrics,
                 &mut identified_hosts,
                 &expected_endpoint_index,
                 &already_ingested_bmc_ips,
-                &explored_this_run,
                 &run_context.suppressed_bmc_macs,
             )
             .await;
 
-        let reconcile_desired_boot_interfaces_start = Instant::now();
-        let reconcile_desired_boot_interfaces_res =
-            self.host_reconciler.run_single_iteration().await;
-        metrics.record_phase_latency(
-            "reconcile_desired_boot_interfaces",
-            reconcile_desired_boot_interfaces_start.elapsed(),
-        );
-        if let Err(error) = reconcile_desired_boot_interfaces_res {
+        let reconcile_hosts_start = Instant::now();
+        let reconcile_hosts_res = self
+            .host_reconciler
+            .run_single_iteration(
+                identified_hosts.iter().map(|host| &host.explored_host),
+                identified_hosts
+                    .iter()
+                    .map(|host| (host.explored_host.host_bmc_ip, &host.report))
+                    .chain(
+                        unmatched_host_reports
+                            .iter()
+                            .map(|endpoint| (endpoint.address, &endpoint.report)),
+                    ),
+                &expected_endpoint_index,
+                &already_ingested_bmc_ips,
+                &explored_this_run,
+            )
+            .await;
+        metrics.record_phase_latency("reconcile_hosts", reconcile_hosts_start.elapsed());
+        if let Err(error) = reconcile_hosts_res {
             tracing::warn!(
                 %error,
                 "Desired boot-interface reconciliation pass failed; a later Site Explorer run will retry"
             );
         }
+        // Rejected reports are only retained for reconciliation; release them
+        // before audit loads the full endpoint set for health reporting.
+        drop(unmatched_host_reports);
 
         self.inventory_creator
             .create_switches_and_power_shelves(
@@ -1310,8 +1337,12 @@ impl SiteExplorer {
 
         // Audit after everything has been explored, identified, and created.
         let audit_exploration_results_start = Instant::now();
-        self.audit_exploration_results(metrics, &expected_endpoint_index)
-            .await?;
+        self.audit_exploration_results(
+            metrics,
+            &expected_endpoint_index,
+            identified_hosts.iter().map(|host| &host.explored_host),
+        )
+        .await?;
         metrics.record_phase_latency(
             "audit_exploration_results",
             audit_exploration_results_start.elapsed(),
@@ -1892,11 +1923,10 @@ impl SiteExplorer {
                 self.config.retained_boot_interface_window,
             )
             .await;
-            for nic in
-                expected_machine.data.interfaces.iter().filter(|interface| {
-                    interface.mac_address != Some(expected_machine.bmc_mac_address)
-                })
-            {
+            for nic in expected_machine.data.interfaces.iter().filter(|interface| {
+                !interface.role.is_dpu_loopback()
+                    && interface.mac_address != Some(expected_machine.bmc_mac_address)
+            }) {
                 try_apply_expected_interface(
                     &self.database_connection,
                     expected_machine,
@@ -2022,10 +2052,13 @@ impl SiteExplorer {
             .iter()
             .flat_map(|machine| &machine.data.interfaces)
             .filter(|interface| {
-                // A DpuOs interface terminates on the DPU operating system,
-                // not its management controller. Redfish is exposed through
-                // the separate DpuBmc interface.
-                interface.role == model::expected_machine::ExpectedInterfaceRole::DpuOs
+                // Both declarations identify the OS/admin MAC, including when
+                // only loopback intent is supplied. Redfish uses DpuBmc.
+                matches!(
+                    interface.role,
+                    model::expected_machine::ExpectedInterfaceRole::DpuOs
+                        | model::expected_machine::ExpectedInterfaceRole::DpuLoopback
+                )
             })
             .filter_map(|interface| interface.mac_address)
             .chain(
@@ -2389,11 +2422,8 @@ impl SiteExplorer {
                 .endpoint_exploration_duration
                 .push(exploration_duration);
             match &result {
-                Ok(report) => {
+                Ok(_) => {
                     metrics.endpoint_explorations_success += 1;
-                    if let Some(e) = &report.remediation_error {
-                        redfish_error = Some(e.clone());
-                    }
                 }
                 Err(e) => {
                     *metrics
@@ -2464,8 +2494,7 @@ impl SiteExplorer {
                                     refreshed_endpoints.insert(address);
                                 }
                                 ConditionalWrite::NotApplied(EndpointReportNotCurrent) => {
-                                    // Skip transient remediation: it would use
-                                    // the rejected report's stale endpoint snapshot.
+                                    // Undo topology changes from the rejected report.
                                     txn.rollback().await?;
                                     continue;
                                 }
@@ -2770,31 +2799,6 @@ impl SiteExplorer {
             %time_since_ipmitool_bmc_reset,
             "Site explorer captured an error"
         );
-
-        // If the endpoint is a DPU, and the error is that the BIOS attributes are coming up as empty for this DPU,
-        // reboot the DPU as our first course of action. This is the official workaround from the DPU redfish team to mitigate empty UEFI attributes
-        // until https://redmine.mellanox.com/issues/3746477 is fixed.
-        //
-        // If this fails, and we continue seeing the BIOS attributes come up as empty after twenty minutes (providing plenty of time)
-        // for the DPU to come back up after the reboot, lets try resetting the BMC to see if it helps.
-
-        if (error.is_dpu_redfish_bios_response_invalid())
-            && time_since_redfish_reboot > reset_rate_limit
-            && self
-                .redfish_power(endpoint, libredfish::SystemPowerControl::ForceRestart)
-                .await
-                .map_err(|err| {
-                    tracing::error!(
-                        bmc_ip_address = %endpoint.address,
-                        error = %err,
-                        "Site Explorer failed to reboot"
-                    )
-                })
-                .is_ok()
-        {
-            metrics.bmc_reboot_count += 1;
-            return;
-        }
 
         if self.is_viking_bmc(endpoint).await && time_since_redfish_reboot > reset_rate_limit {
             match self.clear_nvram(endpoint).await {
