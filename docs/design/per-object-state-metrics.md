@@ -11,8 +11,9 @@ State-controller metrics are aggregate-only (`carbide_machines_per_state`,
 
 1. **Which** machines are stuck beyond SLA (not just how many).
 1. Which need **manual operator action**, and why.
-1. What state a machine is in, **as a join key** (for example, suppress
-   "DPU not calling home" during DPU reprovision).
+1. What state a machine is in, **as a join key**. Suppressing an individual
+   DPU heartbeat alert during reprovision also needs per-DPU heartbeat data,
+   which Core does not export.
 1. Per-machine **custom SLAs** (hardware gen, tenant) without per-fleet rules.
 1. Slicing by **traits** (rack, SKU) and **associations** (host↔DPU,
    machine↔instance).
@@ -150,9 +151,11 @@ is also no `blocking_dpu_id` label on it; the host reports the
 least-progressed DPU's substate (matching the `metric_state_names`
 behavior). DPUs are **not** state-controller objects (the machine controller
 excludes them from its object list), so they get no state series of their
-own; the association join is for mapping DPU-level telemetry (which carries
-`dpu_id`, e.g. `carbide_forge_dpu_agent_last_call`) onto the host and its
-state series.
+own. The association can map DPU-level telemetry carrying `dpu_id` onto the
+host and its state series, but it does not contain heartbeat timestamps.
+Core does not export `carbide_forge_dpu_agent_last_call`. Its aggregate DPU
+health-check metric has no `dpu_id` and cannot use this association to
+identify the affected DPU.
 
 Instances get no state series of their own: they are machine substates
 (`Assigned { instance_state }`), not separate state-controller objects, so
@@ -210,16 +213,51 @@ count by (reason, rack_id) (
   * on(object_id) group_left(rack_id, sku) carbide_object_info)
 ```
 
-**Suppress DPU-not-calling-home during reprovision** (join use case;
-`DPUReprovision` maps to `state="reprovisioning"` today):
+**DPU heartbeat failures (aggregate alert):**
 
 ```text
-(time() - carbide_forge_dpu_agent_last_call > 900)
-and on(dpu_id) label_replace(carbide_machine_dpu_info, "dpu_id", "$1", "dpu_id", "(.*)")
-unless on(machine_id) label_replace(
-  carbide_object_state_entered_timestamp_seconds{state="reprovisioning"},
-  "machine_id", "$1", "object_id", "(.*)")
+carbide_dpu_health_check_failed_count{
+  probe_id="HeartbeatTimeout", probe_target="forge-dpu-agent"
+} > 0
 ```
+
+Core exports this metric on its main metrics endpoint as a gauge of active
+DPU health-check failures, not a cumulative counter. Do not use `increase()`
+for it. The count is rebuilt from DPU health reports each controller iteration;
+after recovery it can decrease, and the series can disappear when no matching
+failures remain. See the [gauge registration and aggregation](https://github.com/dsx-ai-factory/infra-controller/blob/main/crates/machine-controller/src/metrics.rs)
+and [DPU health-report collection](https://github.com/dsx-ai-factory/infra-controller/blob/main/crates/machine-controller/src/handler.rs).
+
+The [complete example rule](examples/dpu-heartbeat.rules.yml) uses `for: 5m`
+to require a sustained failure. This delay starts after Core reports a
+`HeartbeatTimeout`; it does not set Core's heartbeat timeout. The selector
+keeps all labels, including `failure` and any scrape-added labels such as
+`job`, `instance`, or `site`. Each distinct label set has its own alert and
+pending timer. Check actual labels and scope the selector to the intended
+Core scrape job and site before deployment.
+
+No matching series means **no reported heartbeat failure**, so this rule does
+not fire on absence. Do not add `absent()` for this failure-only series:
+healthy operation can remove it. Absence alone does not prove the fleet is
+healthy; monitor scrape failures and missing expected Core targets separately.
+
+This aggregate alert can include failures from a DPU being reprovisioned.
+It cannot identify that DPU or suppress only its alert. Joining the count to
+`carbide_machine_dpu_info` or host state cannot recover that information.
+Per-DPU heartbeat alerts and reprovision suppression need a separate change
+that exports per-DPU heartbeat data.
+
+Check rule syntax and test healthy, brief failure, sustained
+failure, recovery, missing-series, and label-isolation behavior from the repo root:
+
+```bash
+promtool check rules docs/design/examples/dpu-heartbeat.rules.yml
+promtool test rules docs/design/examples/dpu-heartbeat.test.yml
+```
+
+Then compare the metric name, type, labels, and values with a real Core scrape
+from the QA site. These unit tests do not verify live rule loading or
+Alertmanager notification delivery.
 
 **Stuck-and-unhealthy — is it hardware?** (join with the [#2168](https://github.com/dsx-ai-factory/infra-controller/pull/2168)metric):
 
