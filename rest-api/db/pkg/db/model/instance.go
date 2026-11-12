@@ -445,6 +445,8 @@ type InstanceDAO interface {
 	GetCountByStatus(ctx context.Context, tx *db.Tx, tenantID *uuid.UUID, siteID *uuid.UUID) (InstanceCountByStatus, error)
 	//
 	GetAll(ctx context.Context, tx *db.Tx, filter InstanceFilterInput, page paginator.PageInput, includeRelations []string) ([]Instance, int, error)
+	// GetAllIDs returns the IDs of all rows matching the filter
+	GetAllIDs(ctx context.Context, tx *db.Tx, filter InstanceFilterInput) ([]uuid.UUID, error)
 	//
 	Update(ctx context.Context, tx *db.Tx, input InstanceUpdateInput) (*Instance, error)
 	// UpdateMultiple applies a single shared update patch to every
@@ -706,6 +708,30 @@ func (isd InstanceSQLDAO) GetAll(ctx context.Context, tx *db.Tx, filter Instance
 	}
 
 	return instances, paginator.Total, nil
+}
+
+// GetAllIDs returns the IDs of all Instances matching the filter, ordered by ID
+// The returned slice is empty but not nil when no Instances match
+func (isd InstanceSQLDAO) GetAllIDs(ctx context.Context, tx *db.Tx, filter InstanceFilterInput) (_ []uuid.UUID, retErr error) {
+	// Create a child span and set the attributes for current request
+	ctx, instanceDAOSpan := cotel.StartSpan(ctx, "InstanceDAO.GetAllIDs")
+	defer func() { cotel.EndSpan(instanceDAOSpan, retErr) }()
+
+	ids := []uuid.UUID{}
+
+	query := db.GetIDB(tx, isd.dbSession).NewSelect().Model((*Instance)(nil)).Column("id")
+
+	query, err := isd.setQueryWithFilter(filter, query, instanceDAOSpan)
+	if err != nil {
+		return nil, err
+	}
+
+	err = query.Order("i.id").Scan(ctx, &ids)
+	if err != nil {
+		return nil, err
+	}
+
+	return ids, nil
 }
 
 // GetCount returns total count of rows for specified filter

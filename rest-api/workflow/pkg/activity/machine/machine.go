@@ -193,12 +193,22 @@ func (mm *ManageMachine) UpdateMachinesInDB(ctx context.Context, siteIDStr strin
 		}
 	}
 
-	// Get all machines for Site to allow faster lookups
 	mDAO := cdbm.NewMachineDAO(mm.dbSession)
 
+	// Look up only the Machines this page reports. Pages run concurrently, so loading the whole
+	// Site here would make each page's memory grow with the Site's Machine count.
+	pageMachineIDs := []string{}
+	for _, machineInfo := range machineInventory.Machines {
+		if machineInfo.GetMachine().GetId().GetId() != "" {
+			pageMachineIDs = append(pageMachineIDs, machineInfo.GetMachine().GetId().GetId())
+		}
+	}
+
 	filterInput := cdbm.MachineFilterInput{
-		SiteIDs:        []uuid.UUID{site.ID},
-		IncludeDeleted: true,
+		SiteIDs:         []uuid.UUID{site.ID},
+		MachineIDs:      pageMachineIDs,
+		IncludeDeleted:  true,
+		ExcludeMetadata: true,
 	}
 
 	existingMachines, _, err := mDAO.GetAll(ctx, nil, filterInput, cdbp.PageInput{Limit: cwutil.GetPtr(cdbp.TotalLimit)}, nil)
@@ -798,16 +808,26 @@ func (mm *ManageMachine) UpdateMachinesInDB(ctx context.Context, siteIDStr strin
 	// Set Machine status to error for any machines found in DB but not found in the Site Agent reported inventory
 	// If inventory paging is enabled, we only need to do this once and we do it on the last page
 	if util.ShouldReconcileDeletions(machineInventory.GetInventoryPage()) {
-		for _, existingMachine := range existingMachines {
-			if existingMachine.Deleted != nil {
-				continue
-			}
+		siteMachineIDs, merr := mDAO.GetAllIDs(ctx, nil, cdbm.MachineFilterInput{SiteIDs: []uuid.UUID{site.ID}})
+		if merr != nil {
+			logger.Error().Err(merr).Msg("failed to retrieve Machine IDs for Site from DB")
+			return merr
+		}
 
-			_, found := reportedMachineIDMap[existingMachine.ID]
-			if found {
-				continue
+		missingMachineIDs := []string{}
+		for _, machineID := range siteMachineIDs {
+			if !reportedMachineIDMap[machineID] {
+				missingMachineIDs = append(missingMachineIDs, machineID)
 			}
+		}
 
+		missingMachines, _, merr := mDAO.GetAll(ctx, nil, cdbm.MachineFilterInput{MachineIDs: missingMachineIDs, ExcludeMetadata: true}, cdbp.PageInput{Limit: cwutil.GetPtr(cdbp.TotalLimit)}, nil)
+		if merr != nil {
+			logger.Error().Err(merr).Msg("failed to retrieve missing Machines from DB")
+			return merr
+		}
+
+		for _, existingMachine := range missingMachines {
 			// Machine not found in reported inventory, set status to error and mark as missing
 			slogger := logger.With().Str("Machine ID", existingMachine.ID).Logger()
 

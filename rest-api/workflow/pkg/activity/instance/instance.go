@@ -112,11 +112,30 @@ func (mi ManageInstance) UpdateInstancesInDB(ctx context.Context, siteID uuid.UU
 
 	instanceDAO := cdbm.NewInstanceDAO(mi.dbSession)
 
-	// Get all Instances for Site
-	existingInstances, _, err := instanceDAO.GetAll(ctx, nil, cdbm.InstanceFilterInput{SiteIDs: []uuid.UUID{site.ID}}, cdbp.PageInput{Limit: cwutil.GetPtr(cdbp.TotalLimit)}, nil)
-	if err != nil {
-		logger.Error().Err(err).Msg("failed to get Instances for Site from DB")
-		return nil, err
+	// Look up only the Instances this page reports. Pages run concurrently, so loading the whole
+	// Site here would make each page's memory grow with the Site's Instance count.
+	// A reported ID matches either the controller Instance ID or the Instance ID.
+	pageInstanceIDs := []uuid.UUID{}
+	for _, controllerInstance := range instanceInventory.Instances {
+		id, serr := uuid.Parse(controllerInstance.GetId().GetValue())
+		if serr == nil {
+			pageInstanceIDs = append(pageInstanceIDs, id)
+		}
+	}
+
+	existingInstances := []cdbm.Instance{}
+	if len(pageInstanceIDs) > 0 {
+		for _, filter := range []cdbm.InstanceFilterInput{
+			{SiteIDs: []uuid.UUID{site.ID}, ControllerInstanceIDs: pageInstanceIDs},
+			{SiteIDs: []uuid.UUID{site.ID}, InstanceIDs: pageInstanceIDs},
+		} {
+			instances, _, serr := instanceDAO.GetAll(ctx, nil, filter, cdbp.PageInput{Limit: cwutil.GetPtr(cdbp.TotalLimit)}, nil)
+			if serr != nil {
+				logger.Error().Err(serr).Msg("failed to get Instances for Site from DB")
+				return nil, serr
+			}
+			existingInstances = append(existingInstances, instances...)
+		}
 	}
 
 	// Construct a map of Controller Instance ID to Instance
@@ -1231,16 +1250,35 @@ func (mi ManageInstance) UpdateInstancesInDB(ctx context.Context, siteID uuid.UU
 
 	// If inventory paging is enabled, we only need to do this once and we do it on the last page
 	if util.ShouldReconcileDeletions(instanceInventory.GetInventoryPage()) {
-		for _, instance := range existingInstanceIDMap {
-			found := false
+		siteInstanceIDs, serr := instanceDAO.GetAllIDs(ctx, nil, cdbm.InstanceFilterInput{SiteIDs: []uuid.UUID{site.ID}})
+		if serr != nil {
+			logger.Error().Err(serr).Msg("failed to get Instance IDs for Site from DB")
+			return nil, serr
+		}
 
-			_, found = reportedInstanceIDMap[instance.ID]
-			if !found && instance.ControllerInstanceID != nil {
-				// Additional check if controller Instance ID != Instance ID
-				_, found = reportedInstanceIDMap[*instance.ControllerInstanceID]
+		// REST sets the controller Instance ID to the Instance ID, so unreported IDs are normally
+		// the missing Instances. Only these are loaded in full, then checked by controller Instance ID.
+		unreportedInstanceIDs := []uuid.UUID{}
+		for _, instanceID := range siteInstanceIDs {
+			if !reportedInstanceIDMap[instanceID] {
+				unreportedInstanceIDs = append(unreportedInstanceIDs, instanceID)
+			}
+		}
+
+		if len(unreportedInstanceIDs) > 0 {
+			unreportedInstances, _, serr := instanceDAO.GetAll(ctx, nil, cdbm.InstanceFilterInput{InstanceIDs: unreportedInstanceIDs}, cdbp.PageInput{Limit: cwutil.GetPtr(cdbp.TotalLimit)}, nil)
+			if serr != nil {
+				logger.Error().Err(serr).Msg("failed to get unreported Instances from DB")
+				return nil, serr
 			}
 
-			if !found {
+			for i := range unreportedInstances {
+				instance := &unreportedInstances[i]
+				// Additional check if controller Instance ID != Instance ID
+				if instance.ControllerInstanceID != nil && reportedInstanceIDMap[*instance.ControllerInstanceID] {
+					continue
+				}
+
 				// The Instance was not found in the Instance Inventory, so add it to list of Instances to potentially terminate
 				instancesToTerminate = append(instancesToTerminate, instance)
 			}
