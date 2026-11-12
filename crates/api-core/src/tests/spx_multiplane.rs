@@ -27,7 +27,7 @@ async fn fixture_with_dpus(pool: sqlx::PgPool, count: usize) -> (TestEnv, TestMa
     let env = api_fixtures::create_test_env_with_overrides(
         pool,
         TestEnvOverrides {
-            config: Some(config),
+            config: Some(Box::new(config)),
             ..Default::default()
         },
     )

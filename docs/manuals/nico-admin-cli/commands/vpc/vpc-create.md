@@ -60,9 +60,9 @@ Network virtualization type
 >   underlay (zero-DPU hosts, or hosts with their DPU in NIC mode).
 >   Their interfaces are bound to `HostInband` network segments rather
 >   than a Carbide-managed overlay. Flat VPCs are still real tenant VPCs
->   with a VNI and NSGs, but Carbide doesnt drive their data plane --
+>   with a VNI and NSGs, but Carbide doesn't drive their data plane --
 >   routing and ACL enforcement between Flat VPCs and other VPCs is the
->   network operators responsibility
+>   network operator's responsibility
 
 `--slaac-enabled <SLAAC_ENABLED>`
 
@@ -98,7 +98,7 @@ Sort output by specified field
 
 `-h, --help`
 
-Print help (see a summary with -h)
+Print help (see a summary with '-h')
 
 ## Examples
 

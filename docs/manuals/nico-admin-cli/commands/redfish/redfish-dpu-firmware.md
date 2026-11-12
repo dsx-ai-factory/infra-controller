@@ -4,7 +4,7 @@
 
 ## NAME
 
-nico-admin-cli-redfish-dpu-firmware - BMCs FW Commands
+nico-admin-cli-redfish-dpu-firmware - BMC's FW Commands
 
 ## SYNOPSIS
 
@@ -15,7 +15,7 @@ nico-admin-cli redfish dpu firmware [--extended]
 
 ## DESCRIPTION
 
-BMCs FW Commands
+BMC's FW Commands
 
 ## OPTIONS
 
@@ -39,7 +39,7 @@ Sort output by specified field
 
 `-h, --help`
 
-Print help (see a summary with -h)
+Print help (see a summary with '-h')
 
 ## Examples
 

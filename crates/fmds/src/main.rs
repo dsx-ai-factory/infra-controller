@@ -19,6 +19,7 @@
 use std::net::SocketAddr;
 use std::sync::Arc;
 
+use carbide_tls::client_config::ClientCert;
 use clap::Parser;
 use eyre::WrapErr;
 use fmds::cfg::Options;
@@ -26,7 +27,6 @@ use fmds::grpc_server::FmdsGrpcServer;
 use fmds::rest_server::get_fmds_router;
 use fmds::state::FmdsState;
 use fmds::{http_request_metrics, nic_init};
-use forge_tls::client_config::ClientCert;
 use rpc::carbide_tls_client::CarbideClientConfig;
 use rpc::fmds::fmds_config_service_server::FmdsConfigServiceServer;
 use rpc::node_token_socket::SocketTokenSource;

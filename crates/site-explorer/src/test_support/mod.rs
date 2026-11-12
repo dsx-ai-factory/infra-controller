@@ -28,6 +28,31 @@ mod test_site_explorer;
 pub use mock_endpoint_explorer::{MockEndpointExplorationBlocker, MockEndpointExplorer};
 pub use test_site_explorer::TestSiteExplorer;
 
+/// Exports populated exploration gauges through the production callbacks.
+/// These per-iteration samples can disappear before a live catalogue scrape.
+pub fn exploration_metric_exposition() -> String {
+    use std::collections::HashMap;
+
+    use carbide_utils::test_support::test_meter::TestMeter;
+    use carbide_uuid::machine::MachineType;
+    use model::site_explorer::MachineExpectation;
+
+    use crate::config::SiteExplorerConfig;
+    use crate::metrics::{MetricHolder, SiteExplorationMetrics};
+
+    let meter = TestMeter::default();
+    let holder = MetricHolder::new(meter.meter(), &SiteExplorerConfig::default());
+    holder.update_metrics(SiteExplorationMetrics {
+        endpoint_explorations_failures_by_type: HashMap::from([("connection_refused".into(), 1)]),
+        endpoint_explorations_preingestions_incomplete_overall_count: HashMap::from([(
+            (MachineExpectation::Expected, MachineType::Host),
+            1,
+        )]),
+        ..Default::default()
+    });
+    meter.export_metrics()
+}
+
 #[cfg(test)]
 pub(super) fn load_bf2_ep_report() -> EndpointExplorationReport {
     let path = concat!(env!("CARGO_MANIFEST_DIR"), "/src/test_data/bf2_report.json");

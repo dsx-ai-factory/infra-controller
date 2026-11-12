@@ -8940,7 +8940,7 @@ func TestUpdateInstanceHandler_Handle(t *testing.T) {
 			var beforeSpectrumXSSHAssociations []cdbm.SSHKeyGroupInstanceAssociation
 			if len(tt.args.reqData.SpectrumXAttachments) > 0 && (tt.args.respCode == http.StatusOK || tt.args.expectSpectrumXUnchanged) {
 				var readErr error
-				beforeSpectrumXInstance, readErr = cdbm.NewInstanceDAO(dbSession).GetByID(ctx, nil, uuid.MustParse(tt.args.reqInstance), nil)
+				beforeSpectrumXInstance, readErr = cdbm.NewInstanceDAO(dbSession).GetByID(ctx, nil, uuid.MustParse(tt.args.reqInstance), nil, false)
 				require.NoError(t, readErr)
 				require.NotNil(t, beforeSpectrumXInstance.MachineID)
 				id := *beforeSpectrumXInstance.MachineID
@@ -8973,7 +8973,7 @@ func TestUpdateInstanceHandler_Handle(t *testing.T) {
 				}
 				require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &response))
 				assert.Equal(t, "nico", response.Source)
-				after, readErr := cdbm.NewInstanceDAO(dbSession).GetByID(ctx, nil, beforeSpectrumXInstance.ID, nil)
+				after, readErr := cdbm.NewInstanceDAO(dbSession).GetByID(ctx, nil, beforeSpectrumXInstance.ID, nil, false)
 				require.NoError(t, readErr)
 				assert.Equal(t, beforeSpectrumXInstance, after)
 				page := cdbp.PageInput{Limit: cutil.GetPtr(cdbp.TotalLimit)}
@@ -9095,7 +9095,7 @@ func TestUpdateInstanceHandler_Handle(t *testing.T) {
 				}
 			}
 
-			reqIns, _ := insDAO.GetByID(ec.Request().Context(), nil, uuid.MustParse(tt.args.reqInstance), nil)
+			reqIns, _ := insDAO.GetByID(ec.Request().Context(), nil, uuid.MustParse(tt.args.reqInstance), nil, false)
 
 			if len(tt.expectedControllerVpcIDs) > 0 && len(tt.args.reqData.Interfaces) > 0 {
 				require.Len(t, rst.Interfaces, len(tt.args.reqData.Interfaces))
@@ -12323,7 +12323,7 @@ func TestDeleteInstanceHandler_Handle(t *testing.T) {
 			// Verify Instance in terminating state
 			insDAO := cdbm.NewInstanceDAO(dbSession)
 			insID, _ := uuid.Parse(tt.args.reqInstance)
-			dinstance, terr := insDAO.GetByID(context.Background(), nil, insID, nil)
+			dinstance, terr := insDAO.GetByID(context.Background(), nil, insID, nil, false)
 			assert.Nil(t, terr)
 			assert.Equal(t, cdbm.InstanceStatusTerminating, dinstance.Status)
 

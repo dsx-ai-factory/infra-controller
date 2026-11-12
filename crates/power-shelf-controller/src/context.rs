@@ -17,6 +17,7 @@
 
 use std::sync::Arc;
 
+use bmc_backend::BmcConnector;
 use carbide_credential_rotation::RotationGate;
 use carbide_health_metrics::PerObjectMetricsRegistry;
 use carbide_redfish::libredfish::{BmcCredentialOps, RedfishClientPool};
@@ -44,6 +45,8 @@ pub struct PowerShelfStateHandlerServices {
     /// Libredfish pool used to converge the power shelf BMC (PMC) credential
     /// The same shared instance the machine- and switch-controllers use.
     pub redfish_client_pool: Arc<dyn RedfishClientPool>,
+    /// Connects moved BMC operations through the site's `bmc_backend`.
+    pub bmc_connector: BmcConnector,
     /// Credential-lifecycle operations (password set/rotate/clear,
     /// candidate validation). A sealed trait implemented only by the direct
     /// pool, so handing these to a wrapper pool is a compile error (a

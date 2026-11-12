@@ -669,6 +669,9 @@ async fn run_integration() -> eyre::Result<()> {
     metric_infos.extend(metrics::parse_metric_infos(
         &carbide_health::test_support::hardware_metric_exposition()?,
     ));
+    metric_infos.extend(metrics::parse_metric_infos(
+        &carbide_site_explorer::test_support::exploration_metric_exposition(),
+    ));
     for name in [
         "carbide_dpu_client_certificate_expiration_time",
         "carbide_dpu_client_certificate_expiration_time_seconds",
@@ -936,7 +939,7 @@ async fn exercise_dpf_exploration_suppression(
     let certs = &api_test_helper::utils::LOCALHOST_CERTS;
     let config = CarbideClientConfig::new(
         certs.ca_cert.to_string_lossy().into_owned(),
-        Some(forge_tls::client_config::ClientCert {
+        Some(carbide_tls::client_config::ClientCert {
             cert_path: certs.client_cert.to_string_lossy().into_owned(),
             key_path: certs.client_key.to_string_lossy().into_owned(),
         }),
@@ -1038,7 +1041,7 @@ async fn exercise_admin_address_reconcile_failures(
     let certs = &api_test_helper::utils::LOCALHOST_CERTS;
     let config = CarbideClientConfig::new(
         certs.ca_cert.to_string_lossy().into_owned(),
-        Some(forge_tls::client_config::ClientCert {
+        Some(carbide_tls::client_config::ClientCert {
             cert_path: certs.client_cert.to_string_lossy().into_owned(),
             key_path: certs.client_key.to_string_lossy().into_owned(),
         }),
@@ -1100,7 +1103,7 @@ async fn exercise_ib_partition_mtu_fallback(
     let certs = &api_test_helper::utils::LOCALHOST_CERTS;
     let config = CarbideClientConfig::new(
         certs.ca_cert.to_string_lossy().into_owned(),
-        Some(forge_tls::client_config::ClientCert {
+        Some(carbide_tls::client_config::ClientCert {
             cert_path: certs.client_cert.to_string_lossy().into_owned(),
             key_path: certs.client_key.to_string_lossy().into_owned(),
         }),

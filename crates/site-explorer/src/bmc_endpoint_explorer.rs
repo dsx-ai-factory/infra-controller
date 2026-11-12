@@ -21,6 +21,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use bmc_explorer::Product;
+use bmc_runtime::DriverConnector;
 use carbide_ipmi::IPMITool;
 use carbide_redfish::boot_interface::BootInterfaceTarget;
 use carbide_redfish::libredfish::BmcCredentialOps;
@@ -110,6 +111,13 @@ impl AuthenticatedBmcClient {
             ipmi_tool,
             credential_client: CredentialClient::new(credential_manager),
         }
+    }
+
+    /// Runs moved BMC operations through `driver_connector`; `None` keeps them on
+    /// libredfish.
+    pub fn with_driver_connector(mut self, driver_connector: Option<Arc<DriverConnector>>) -> Self {
+        self.redfish_client.driver_connector = driver_connector;
+        self
     }
 }
 

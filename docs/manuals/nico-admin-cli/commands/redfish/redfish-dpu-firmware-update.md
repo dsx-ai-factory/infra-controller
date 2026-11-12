@@ -4,8 +4,8 @@
 
 ## NAME
 
-nico-admin-cli-redfish-dpu-firmware-update - Update BMCs FW to the given
-FW package
+nico-admin-cli-redfish-dpu-firmware-update - Update BMC's FW to the
+given FW package
 
 ## SYNOPSIS
 
@@ -16,7 +16,7 @@ nico-admin-cli redfish dpu firmware update <-p|--package>
 
 ## DESCRIPTION
 
-Update BMCs FW to the given FW package
+Update BMC's FW to the given FW package
 
 ## OPTIONS
 
@@ -44,7 +44,7 @@ Sort output by specified field
 
 `-h, --help`
 
-Print help (see a summary with -h)
+Print help (see a summary with '-h')
 
 ## Examples
 

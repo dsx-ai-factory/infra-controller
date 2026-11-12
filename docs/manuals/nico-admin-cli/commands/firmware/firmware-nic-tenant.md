@@ -16,7 +16,7 @@ nico-admin-cli firmware nic tenant [OPTIONS] <COMMAND>
 ## DESCRIPTION
 
 Read or change the operator-selected NIC firmware profile for a tenant.
-The selection uses the tenants shared configuration version: ordinary
+The selection uses the tenant's shared configuration version: ordinary
 tenant updates and identity-configuration updates also invalidate an
 observed token. Every successful set or clear advances that version,
 including writes that leave the selection unchanged. Tenant selections
@@ -77,7 +77,7 @@ Sort output by specified field
 
 `-h, --help`
 
-Print help (see a summary with -h)
+Print help (see a summary with '-h')
 
 ## Examples
 
