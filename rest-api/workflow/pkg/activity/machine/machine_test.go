@@ -227,6 +227,11 @@ func testMachineBuildMachine(t *testing.T, dbSession *cdb.Session, ip uuid.UUID,
 
 	_, err := dbSession.DB.NewInsert().Model(m).Exec(context.Background())
 	assert.Nil(t, err)
+
+	// Fixture Machines predate the inventory under test, so the missing-Machine sweep considers them.
+	m.Created = time.Now().Add(-time.Duration(cutil.DefaultInventoryReceiptInterval) * 2)
+	_, err = dbSession.DB.NewUpdate().Model(m).Column("created").WherePK().Exec(context.Background())
+	assert.Nil(t, err)
 	return m
 }
 
@@ -1667,6 +1672,26 @@ func TestManageMachine_UpdateMachinesInDB(t *testing.T) {
 		assert.Equal(t, cdbm.MachineStatusError, got.Status)
 		assert.True(t, got.IsMissingOnSite)
 		assert.False(t, got.Updated.Before(externalWrite.Updated), "want the external write's staleness window kept")
+	})
+	t.Run("does not mark a Machine created within the inventory interval missing", func(t *testing.T) {
+		ctx := context.Background()
+		recentSite := testMachineBuildSite(t, dbSession, ip, "test-machine-recent-site", cdbm.SiteStatusRegistered)
+		machine := testMachineBuildMachine(t, dbSession, ip.ID, recentSite.ID, nil, nil, false, nil, false, nil, cutil.GetPtr(cdbm.MachineStatusReady))
+		_, err := dbSession.DB.NewUpdate().Model(machine).Set("created = ?", time.Now()).WherePK().Exec(ctx)
+		require.NoError(t, err)
+
+		manager := ManageMachine{dbSession: dbSession, siteClientPool: tSiteClientPool}
+		err = manager.UpdateMachinesInDB(ctx, recentSite.ID.String(), &corev1.MachineInventory{
+			Machines:        []*corev1.MachineInfo{},
+			Timestamp:       timestamppb.Now(),
+			InventoryStatus: corev1.InventoryStatus_INVENTORY_STATUS_SUCCESS,
+		})
+		require.NoError(t, err)
+
+		got, err := cdbm.NewMachineDAO(dbSession).GetByID(ctx, nil, machine.ID, nil, false)
+		require.NoError(t, err)
+		assert.Equal(t, cdbm.MachineStatusReady, got.Status)
+		assert.False(t, got.IsMissingOnSite)
 	})
 	t.Run("Ready inventory waits for REST assignment", func(t *testing.T) {
 		ctx := context.Background()

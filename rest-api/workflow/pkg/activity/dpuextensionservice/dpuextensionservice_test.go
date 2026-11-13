@@ -1111,6 +1111,45 @@ func TestManageDpuExtensionService_UpdateDpuExtensionServicesInDB(t *testing.T) 
 			})
 		}
 	})
+
+	t.Run("a service missing for one cycle returns to Ready when reported again", func(t *testing.T) {
+		site := util.TestBuildSite(t, dbSession, ip, uuid.NewString(), cdbm.SiteStatusRegistered, nil, user)
+		service := util.TestBuildDpuExtensionService(t, dbSession, uuid.NewString(), site, tenant,
+			cdbm.DpuExtensionServiceServiceTypeKubernetesPod, nil, nil, nil, cdbm.DpuExtensionServiceStatusReady, user)
+		manager := NewManageDpuExtensionService(dbSession, tSiteClientPool)
+
+		// Both the missing sweep and the reported path skip a service written within the interval.
+		age := func() {
+			t.Helper()
+			_, err := dbSession.DB.Exec("UPDATE dpu_extension_service SET updated = ? WHERE id = ?",
+				time.Now().Add(-time.Duration(cutil.DefaultInventoryReceiptInterval)*2), service.ID.String())
+			require.NoError(t, err)
+		}
+
+		age()
+		require.NoError(t, manager.UpdateDpuExtensionServicesInDB(ctx, site.ID, &corev1.DpuExtensionServiceInventory{
+			InventoryStatus: corev1.InventoryStatus_INVENTORY_STATUS_SUCCESS,
+		}))
+		missing, err := dpuExtensionServiceDAO.GetByID(ctx, nil, service.ID, nil)
+		require.NoError(t, err)
+		assert.Equal(t, cdbm.DpuExtensionServiceStatusError, missing.Status)
+		assert.True(t, missing.IsMissingOnSite)
+
+		age()
+		require.NoError(t, manager.UpdateDpuExtensionServicesInDB(ctx, site.ID, &corev1.DpuExtensionServiceInventory{
+			InventoryStatus: corev1.InventoryStatus_INVENTORY_STATUS_SUCCESS,
+			DpuExtensionServices: []*corev1.DpuExtensionService{{
+				ServiceId:            service.ID.String(),
+				ServiceType:          corev1.DpuExtensionServiceType_KUBERNETES_POD,
+				ServiceName:          service.Name,
+				TenantOrganizationId: tenant.Org,
+			}},
+		}))
+		redetected, err := dpuExtensionServiceDAO.GetByID(ctx, nil, service.ID, nil)
+		require.NoError(t, err)
+		assert.Equal(t, cdbm.DpuExtensionServiceStatusReady, redetected.Status)
+		assert.False(t, redetected.IsMissingOnSite)
+	})
 }
 
 // TestManageDpuExtensionService_CreateOrUpdateDpuExtensionServiceFromSite verifies
