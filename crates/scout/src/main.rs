@@ -1389,6 +1389,131 @@ mod tests {
 
     use super::*;
 
+    /// Capture the actual Scout poll so its advertised delivery support cannot drift.
+    #[tokio::test]
+    async fn control_poll_advertises_site_cache_support() {
+        use std::sync::{Arc, Mutex};
+
+        use axum::body::Body;
+        use axum::extract::{Request, State};
+        use axum::routing::post;
+        use rcgen::{CertificateParams, KeyPair, SanType};
+        use tokio_stream::wrappers::TcpListenerStream;
+        use tonic::transport::{Identity, Server, ServerTlsConfig};
+
+        struct Unary<F>(F);
+
+        impl<Req, Resp, F> tonic::server::UnaryService<Req> for Unary<F>
+        where
+            F: Fn(Req) -> Resp,
+            Req: Send + 'static,
+            Resp: Send + 'static,
+        {
+            type Response = Resp;
+            type Future = std::future::Ready<Result<tonic::Response<Resp>, tonic::Status>>;
+
+            fn call(&mut self, request: tonic::Request<Req>) -> Self::Future {
+                std::future::ready(Ok(tonic::Response::new((self.0)(request.into_inner()))))
+            }
+        }
+
+        tokio::time::timeout(Duration::from_secs(10), async {
+            rustls::crypto::aws_lc_rs::default_provider()
+                .install_default()
+                .ok();
+            let directory = tempfile::tempdir().expect("Scout control identity directory");
+            let key = KeyPair::generate().expect("Scout control identity key");
+            let mut params = CertificateParams::new(vec!["localhost".into()]).unwrap();
+            params.subject_alt_names.push(SanType::URI(
+                "spiffe://test/machine/firmware".try_into().unwrap(),
+            ));
+            let certificate = params.self_signed(&key).expect("Scout control certificate");
+            let write = |name: &str, contents: &str| {
+                let path = directory.path().join(name);
+                std::fs::write(&path, contents).expect("write Scout identity");
+                path.to_string_lossy().into_owned()
+            };
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            let mut options = Options::parse_from([
+                "forge-scout",
+                &format!("--api=https://localhost:{}", address.port()),
+            ]);
+            options.root_ca = write("ca.pem", &certificate.pem());
+            options.client_cert = write("client.pem", &certificate.pem());
+            options.client_key = write("key.pem", &key.serialize_pem());
+            let polls = Arc::new(Mutex::new(Vec::new()));
+            let routes = axum::Router::new()
+                .route(
+                    rpc::service_path!("Version"),
+                    post(|request: Request| async move {
+                        tonic::server::Grpc::new(tonic_prost::ProstCodec::default())
+                            .unary(
+                                Unary(|_: rpc_forge::VersionRequest| {
+                                    rpc_forge::BuildInfo::default()
+                                }),
+                                request,
+                            )
+                            .await
+                            .map(Body::new)
+                    }),
+                )
+                .route(
+                    rpc::service_path!("ForgeAgentControl"),
+                    post(
+                        |State(polls): State<
+                            Arc<Mutex<Vec<rpc_forge::ForgeAgentControlRequest>>>,
+                        >,
+                         request: Request| async move {
+                            tonic::server::Grpc::new(tonic_prost::ProstCodec::default())
+                                .unary(
+                                    Unary(move |poll: rpc_forge::ForgeAgentControlRequest| {
+                                        polls.lock().unwrap().push(poll);
+                                        rpc_forge::ForgeAgentControlResponse::default()
+                                    }),
+                                    request,
+                                )
+                                .await
+                                .map(Body::new)
+                        },
+                    ),
+                )
+                .with_state(polls.clone());
+            let cancel = CancellationToken::new();
+            let server = tokio::spawn(
+                Server::builder()
+                    .tls_config(
+                        ServerTlsConfig::new()
+                            .identity(Identity::from_pem(certificate.pem(), key.serialize_pem())),
+                    )
+                    .unwrap()
+                    .add_routes(routes.into())
+                    .serve_with_incoming_shutdown(
+                        TcpListenerStream::new(listener),
+                        cancel.clone().cancelled_owned(),
+                    ),
+            );
+            let machine_id = "fm100ht038bg3qsho433vkg684heguv282qaggmrsh2ugn1qk096n2c6hcg"
+                .parse()
+                .unwrap();
+            let response = query_api(&options, &machine_id, 0, 0)
+                .await
+                .expect("actual Scout control poll");
+            assert_eq!(response, rpc_forge::ForgeAgentControlResponse::default());
+            assert_eq!(
+                *polls.lock().unwrap(),
+                vec![rpc_forge::ForgeAgentControlRequest {
+                    machine_id: Some(machine_id),
+                    nic_firmware_site_cache_supported: true,
+                }]
+            );
+            cancel.cancel();
+            server.await.unwrap().unwrap();
+        })
+        .await
+        .expect("Scout capability advertisement is independently bounded");
+    }
+
     /// Invalid local configuration still produces a correlated error for every
     /// generic command. Legacy work defers without discovery, and neither
     /// response nor logs may expose a configuration value that could contain

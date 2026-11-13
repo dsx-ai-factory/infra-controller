@@ -98,6 +98,7 @@ pub(super) fn machine_creator_with_dpf(
         Arc::new(env.api().runtime_config.rack_profiles.clone()),
         None,
         dpf_enabled_at_site,
+        env.api().instrumentation().clone(),
     )
 }
 
@@ -113,6 +114,7 @@ pub(super) fn machine_creator_with_info_provider(
         Arc::new(machine_info_rack_profiles()),
         Some(provider),
         false,
+        env.api().instrumentation().clone(),
     )
 }
 

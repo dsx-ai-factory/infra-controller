@@ -18,6 +18,7 @@
 use std::collections::HashMap;
 
 use carbide_ib_fabric::config::IBFabricConfig;
+use carbide_instrument::testing::MetricsCapture;
 use carbide_uuid::infiniband::IBPartitionId;
 use db::db_read::PgPoolReader;
 use db::{self, ObjectColumnFilter};
@@ -326,6 +327,7 @@ async fn create_ib_partition_rejects_explicit_pkey_in_automatic_only_pool(
         .await?;
     let before = db::resource_pool::stats(&env.pool, pkey_pool.name()).await?;
     let id = IBPartitionId::new();
+    let metrics = MetricsCapture::for_registry(env.test_meter.registry());
 
     let error = env
         .api
@@ -345,6 +347,19 @@ async fn create_ib_partition_rejects_explicit_pkey_in_automatic_only_pool(
         .expect_err("automatic-only pools must reject explicit PKeys");
     assert_eq!(error.code(), tonic::Code::FailedPrecondition);
     assert!(error.message().contains("has no explicit allocation range"));
+    assert_eq!(
+        metrics.counter_delta(
+            "carbide_resource_pool_lifecycle_failures_total",
+            &[
+                ("operation", "allocate"),
+                ("failure", "configuration"),
+                ("failure_policy", "required"),
+                ("allocation_mode", "requested"),
+                ("value_type", "integer"),
+            ],
+        ),
+        1.0,
+    );
     assert_eq!(
         db::resource_pool::stats(&env.pool, pkey_pool.name()).await?,
         before

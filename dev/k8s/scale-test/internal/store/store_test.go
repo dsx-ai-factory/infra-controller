@@ -12,6 +12,7 @@ import (
 	"crypto/x509"
 	"encoding/pem"
 	"fmt"
+	"math"
 	"math/big"
 	"net"
 	"net/http"
@@ -19,6 +20,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -682,5 +684,63 @@ func TestCAFileIsTheOnlyTrust(t *testing.T) {
 		client.gate.spacing = time.Millisecond
 		_, err = client.raw(t.Context(), units, time.Now())
 		eq(t, err, c.want, c.ca != nil)
+	}
+}
+
+func TestPoolHealthWindow(t *testing.T) {
+	now := time.Date(2026, 11, 10, 16, 54, 15, 0, time.UTC)
+	good := func() []history.RawSeries {
+		row := history.RawSeries{Labels: map[string]string{"pod": "api-1"}}
+		for i, offset := range []int64{-86304, -56304, -26296} {
+			row.Samples = append(row.Samples, history.Sample{AtMs: now.Add(time.Duration(offset) * time.Millisecond).UnixMilli(), Value: []float64{510, 219, 822}[i]})
+		}
+		return []history.RawSeries{row}
+	}
+	for _, tc := range []struct {
+		name   string
+		change func([]history.RawSeries) []history.RawSeries
+		ok     bool
+	}{
+		{"healthy", func(r []history.RawSeries) []history.RawSeries { return r }, true},
+		{"one saturated replica", func(r []history.RawSeries) []history.RawSeries {
+			x := r[0]
+			x.Labels = map[string]string{"pod": "api-2"}
+			x.Samples = slices.Clone(x.Samples)
+			for i := range x.Samples {
+				x.Samples[i].Value = 0
+			}
+			return append(r, x)
+		}, false},
+		{"short window", func(r []history.RawSeries) []history.RawSeries { r[0].Samples = r[0].Samples[1:]; return r }, false},
+		{"stale", func(r []history.RawSeries) []history.RawSeries { r[0].Samples = r[0].Samples[:2]; return r }, false},
+		{"gap", func(r []history.RawSeries) []history.RawSeries {
+			for i, offset := range []int64{-90000, -60000, 0} {
+				r[0].Samples[i].AtMs = now.Add(time.Duration(offset) * time.Millisecond).UnixMilli()
+			}
+			return r
+		}, false},
+		{"latest jitter", func(r []history.RawSeries) []history.RawSeries {
+			for i := range r[0].Samples {
+				r[0].Samples[i].AtMs -= 3712
+			}
+			return r
+		}, true},
+		{"over jitter", func(r []history.RawSeries) []history.RawSeries {
+			for i := range r[0].Samples {
+				r[0].Samples[i].AtMs -= 4705
+			}
+			return r
+		}, false},
+		{"negative", func(r []history.RawSeries) []history.RawSeries { r[0].Samples[0].Value = -1; return r }, false},
+		{"NaN", func(r []history.RawSeries) []history.RawSeries { r[0].Samples[0].Value = math.NaN(); return r }, false},
+		{"duplicate", func(r []history.RawSeries) []history.RawSeries { return append(r, r[0]) }, false},
+		{"missing", func([]history.RawSeries) []history.RawSeries { return nil }, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := poolHealth(tc.change(good()), now)
+			if (err == nil) != tc.ok {
+				t.Fatalf("health=%v", err)
+			}
+		})
 	}
 }

@@ -366,7 +366,7 @@ async fn failed_firmware_upgrade_retries_until_the_budget_is_exhausted(pool: PgP
         config.firmware_global.host_firmware_upgrade_retry_interval = retry_interval;
     })
     .await;
-    let metrics = MetricsCapture::start();
+    let metrics = MetricsCapture::for_registry(env.test_harness.test_meter.registry());
 
     // Still inside the retry interval: the machine stays put and nothing is
     // counted.

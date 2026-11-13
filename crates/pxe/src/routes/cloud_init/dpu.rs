@@ -31,7 +31,6 @@ use axum_template::TemplateEngine;
 use base64::Engine as _;
 use carbide_host_support::agent_config;
 use carbide_host_support::bootstrap_ca::BootstrapCaSource;
-use carbide_instrument::emit;
 use carbide_libmlx_model::nvconfig::DpuNvConfigProfile;
 use carbide_uuid::machine::MachineInterfaceId;
 use rpc::forge;
@@ -198,7 +197,7 @@ async fn user_data(machine: Machine, state: State<AppState>) -> impl IntoRespons
         (Some(custom_cloud_init), _) => {
             let mut template_data: HashMap<String, String> = HashMap::new();
             template_data.insert("user_data".to_string(), custom_cloud_init);
-            emit(PxeBootOutcome {
+            state.instrumentation.emit(PxeBootOutcome {
                 endpoint: ENDPOINT,
                 reason: OutcomeReason::Ok,
             });
@@ -218,7 +217,7 @@ async fn user_data(machine: Machine, state: State<AppState>) -> impl IntoRespons
 
                         match (bootstrap_ca_source, dpu_nvconfig_profile) {
                             (Ok(bootstrap_ca_source), Ok(dpu_nvconfig_profile)) => {
-                                emit(PxeBootOutcome {
+                                state.instrumentation.emit(PxeBootOutcome {
                                     endpoint: ENDPOINT,
                                     reason: OutcomeReason::Ok,
                                 });
@@ -238,6 +237,7 @@ async fn user_data(machine: Machine, state: State<AppState>) -> impl IntoRespons
                                 )
                             }
                             (Err(error), _) | (_, Err(error)) => log_and_generate_generic_error(
+                                &state.instrumentation,
                                 error,
                                 OutcomeReason::InstructionsInvalid,
                                 ENDPOINT,
@@ -245,12 +245,14 @@ async fn user_data(machine: Machine, state: State<AppState>) -> impl IntoRespons
                         }
                     }
                     None => log_and_generate_generic_error(
+                        &state.instrumentation,
                         format!("The interface ID should not be null: {interface:?}"),
                         OutcomeReason::InterfaceNotFound,
                         ENDPOINT,
                     ),
                 },
                 (interface, domain) => log_and_generate_generic_error(
+                    &state.instrumentation,
                     format!("The interface and domain were not found: {interface:?}, {domain:?}"),
                     OutcomeReason::InterfaceNotFound,
                     ENDPOINT,
@@ -261,6 +263,7 @@ async fn user_data(machine: Machine, state: State<AppState>) -> impl IntoRespons
         // there is nothing sensible to serve without instructions -- unlike
         // the tenant path, an empty document would leave it unprovisioned.
         (None, None) => log_and_generate_generic_error(
+            &state.instrumentation,
             "No discovery instructions were found for this DPU".to_string(),
             OutcomeReason::InstructionsEmpty,
             ENDPOINT,
@@ -740,13 +743,14 @@ mod tests {
     /// expecting a kickstart.
     #[tokio::test]
     async fn user_data_without_instructions_counts_instructions_empty() {
-        let metrics = MetricsCapture::start();
+        let state = test_app_state();
+        let metrics = MetricsCapture::for_registry(&state.otel_metrics.registry);
 
         let _ = user_data(
             Machine {
                 instructions: Default::default(),
             },
-            State(test_app_state()),
+            State(state.clone()),
         )
         .await;
 

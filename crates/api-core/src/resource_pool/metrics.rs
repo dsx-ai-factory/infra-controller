@@ -12,7 +12,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use carbide_instrument::{Event, LabelValue, emit};
+use carbide_instrument::{Event, Instrumentation, LabelValue};
 use carbide_utils::metrics::SharedMetricsHolder;
 use futures::StreamExt;
 use model::resource_pool::common::CommonPools;
@@ -117,6 +117,7 @@ pub(crate) fn start_pool_stats(
     common_pools: &CommonPools,
     tasks: &mut JoinSet<()>,
     cancel: CancellationToken,
+    instrumentation: Instrumentation,
 ) -> std::io::Result<PoolStats> {
     let ethernet = &common_pools.ethernet;
     let mut common_names: Vec<String> = [
@@ -155,7 +156,7 @@ pub(crate) fn start_pool_stats(
             interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
             while cancel.run_until_cancelled(interval.tick()).await.is_some() {
                 if cancel
-                    .run_until_cancelled(poll(&monitor, &observed, &common_names))
+                    .run_until_cancelled(poll(&instrumentation, &monitor, &observed, &common_names))
                     .await
                     .is_none()
                 {
@@ -167,18 +168,27 @@ pub(crate) fn start_pool_stats(
 }
 
 /// `poll_resource_pool_stats` emits poll failure events for catalogue scrapes.
-/// The observations are discarded; running server gauges keep their own samples.
+/// Events use `instrumentation`. Observations are discarded; running server
+/// gauges keep their own samples.
 /// Saved remote bindings without an accepted definition produce an unavailable
 /// observation before any provider lookup. No remote clients are configured.
 #[cfg(any(test, feature = "test-support"))]
-pub async fn poll_resource_pool_stats(database: sqlx::PgPool) -> eyre::Result<()> {
+pub async fn poll_resource_pool_stats(
+    database: sqlx::PgPool,
+    instrumentation: &Instrumentation,
+) -> eyre::Result<()> {
     let monitor = ResourcePoolMonitor::new(database, &Default::default())?;
-    poll(&monitor, &Default::default(), &[]).await;
+    poll(instrumentation, &monitor, &Default::default(), &[]).await;
     Ok(())
 }
 
 /// `poll` publishes rows as they complete, retaining successful samples on error.
-async fn poll(monitor: &ResourcePoolMonitor, stats: &PoolStats, common_names: &[String]) {
+async fn poll(
+    instrumentation: &Instrumentation,
+    monitor: &ResourcePoolMonitor,
+    stats: &PoolStats,
+    common_names: &[String],
+) {
     let observations = tokio::time::timeout(SNAPSHOT_TIMEOUT, monitor.observe(common_names))
         .await
         .map_err(|error| (StatsFailure::Timeout, error.to_string()))
@@ -189,7 +199,7 @@ async fn poll(monitor: &ResourcePoolMonitor, stats: &PoolStats, common_names: &[
             for observation in stats.lock().unwrap().values_mut() {
                 observation.latest_status = rpc::ResourcePoolStatsStatus::Unavailable;
             }
-            emit(StatsPollFailed {
+            instrumentation.emit(StatsPollFailed {
                 backend: StatsBackend::Integrated,
                 failure,
                 pool_name: None,
@@ -209,7 +219,7 @@ async fn poll(monitor: &ResourcePoolMonitor, stats: &PoolStats, common_names: &[
             | rpc::ResourcePoolStatsStatus::Unspecified => Some(StatsFailure::Unavailable),
         };
         if let Some(failure) = failure {
-            emit(StatsPollFailed {
+            instrumentation.emit(StatsPollFailed {
                 backend: match sample.backend_kind() {
                     rpc::ResourcePoolBackendKind::Grpc => StatsBackend::Grpc,
                     rpc::ResourcePoolBackendKind::Integrated

@@ -740,7 +740,8 @@ impl ComponentManager {
 /// Unknown backend names are rejected at config-deserialization time by the
 /// backend enums. When any backend uses RMS, `rack_profiles` must contain the
 /// product-family and vendor data required to build RMS node descriptors before
-/// startup continues.
+/// startup continues. Both Core and RMS compute backends require a Redfish pool
+/// supporting direct authentication; RMS uses it to delegate compute AC cycles.
 pub async fn build_component_manager(
     config: &ComponentManagerConfig,
     rack_profiles: RackProfileConfig,
@@ -835,13 +836,24 @@ pub async fn build_component_manager(
                     "compute_tray_backend is 'rms' but database pool is not configured".into(),
                 )
             })?;
-            Arc::new(crate::rms::RmsBackend::new(
-                client,
-                rms_switch_system_image_client.clone(),
-                db,
-                rack_profiles.clone(),
-                config.nvos_password_rotation_enabled,
-            ))
+            let pool = redfish_pool.clone().ok_or_else(|| {
+                ComponentManagerError::InvalidArgument(
+                    "compute_tray_backend is 'rms' but Redfish client pool is not configured"
+                        .into(),
+                )
+            })?;
+            Arc::new(
+                crate::rms::RmsBackend::new(
+                    client,
+                    rms_switch_system_image_client.clone(),
+                    db,
+                    rack_profiles.clone(),
+                    config.nvos_password_rotation_enabled,
+                )
+                .with_core_compute_manager(
+                    crate::core_compute_manager::CoreComputeTrayManager::new(pool),
+                ),
+            )
         }
         ComputeBackend::Core => {
             let pool = redfish_pool.ok_or_else(|| {

@@ -532,6 +532,7 @@ mod tests {
             .connect_lazy("postgres://unused:unused@127.0.0.1:1/unused")
             .unwrap();
         MachineStateHandlerServices {
+            instrumentation: carbide_instrument::Instrumentation::global(),
             db_pool: db_pool.clone(),
             db_reader: db_pool.into(),
             redfish_client_pool: redfish_sim.clone(),

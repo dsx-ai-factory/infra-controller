@@ -69,6 +69,7 @@ pub struct TestApiBuilder {
     eth_data: Option<EthVirtData>,
     dpf_sdk: Option<Arc<dyn DpfOperations>>,
     metric_emitter: Option<ApiMetricsEmitter>,
+    instrumentation: carbide_instrument::Instrumentation,
     ib_fabric_manager: Option<Arc<dyn IBFabricManager>>,
     component_manager: Option<Arc<component_manager::component_manager::ComponentManager>>,
     secrets_context: Option<crate::secrets::SecretsContext>,
@@ -96,6 +97,7 @@ impl TestApiBuilder {
             eth_data: None,
             dpf_sdk: None,
             metric_emitter: None,
+            instrumentation: carbide_instrument::Instrumentation::global(),
             ib_fabric_manager: None,
             component_manager: None,
             secrets_context: None,
@@ -178,6 +180,18 @@ impl TestApiBuilder {
     pub fn with_metric_emitter(self, metric_emitter: ApiMetricsEmitter) -> Self {
         Self {
             metric_emitter: Some(metric_emitter),
+            ..self
+        }
+    }
+
+    /// Selects the Event destination for migrated handlers. Defaults to the
+    /// global compatibility handle; the caller retains the supplied provider.
+    pub fn with_instrumentation(
+        self,
+        instrumentation: carbide_instrument::Instrumentation,
+    ) -> Self {
+        Self {
+            instrumentation,
             ..self
         }
     }
@@ -277,6 +291,7 @@ impl TestApiBuilder {
             runtime_config.bmc_session_lockout_threshold,
             runtime_config.allow_bmc_basic_auth_fallback,
             runtime_config.bmc_max_sessions_per_caller,
+            self.instrumentation.clone(),
         ));
 
         // In tests a real explorer can't explore (nv-redfish has no `RedfishSim`
@@ -296,6 +311,7 @@ impl TestApiBuilder {
             Arc::new(std::sync::atomic::AtomicBool::new(false)),
             false,
             self.db_pool.clone(),
+            self.instrumentation.clone(),
         );
         // A mock supplies both narrow interfaces so tests asserting on BMC calls
         // still see them; production-like tests use the independently constructed
@@ -339,6 +355,7 @@ impl TestApiBuilder {
             .unwrap_or_else(|| Arc::new(NmxcSimClient::default()));
 
         Api {
+            instrumentation: self.instrumentation,
             dpf_sdk: self.dpf_sdk,
             runtime_config,
             credential_manager,

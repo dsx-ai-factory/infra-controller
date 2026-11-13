@@ -161,7 +161,7 @@ async fn admin_address_reconciliation_republishes_a_config_changed_under_it(
     let mut winning_config = network_config.value.clone();
     winning_config.use_admin_network = Some(!winning_config.use_admin_network.unwrap_or(true));
 
-    let metrics = MetricsCapture::start();
+    let metrics = MetricsCapture::for_registry(env.test_meter.registry());
     // Keep the exploration future on the heap so this test fits within
     // libtest's default thread stack.
     let reconcile = Box::pin(env.site_explorer.run_single_iteration());
@@ -364,6 +364,7 @@ async fn site_explorer_rechecks_absent_identity_after_the_allocation_fence(
         let creator = MachineCreator::new(
             env.pool.clone(), (&env.config.site_explorer).into(), env.api.resource_pool_registry.clone(),
             env.common_pools.clone(), Arc::new(env.config.rack_profiles.clone()), None, false,
+            env.api.instrumentation.clone(),
         );
         // Hold deletion's fence after preparation captured an absent DPU.
         // The create/delete below must invalidate that earlier absence.
@@ -1097,8 +1098,9 @@ async fn prepare_endpoint_exploration_case(
 async fn test_manual_exploration_respects_site_explorer_suppression(
     pool: PgPool,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let metrics = carbide_instrument::testing::MetricsCapture::start();
     let env = common::api_fixtures::create_test_env(pool.clone()).await;
+    let metrics =
+        carbide_instrument::testing::MetricsCapture::for_registry(env.test_meter.registry());
     let mh = common::api_fixtures::create_managed_host(&env).await;
     let bmc_ip = host_bmc_ip(&env, &mh).await?;
 

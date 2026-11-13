@@ -256,7 +256,7 @@ async fn counts_failed_state_handler_wakeup(pool: PgPool) {
         .await
         .unwrap();
 
-    let metrics = MetricsCapture::start();
+    let metrics = MetricsCapture::for_registry(env.test_meter.registry());
     env.api()
         .report_scout_firmware_upgrade_status(Request::new(status_request(&mh, UPGRADE_TASK_ID)))
         .await

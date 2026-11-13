@@ -22,6 +22,7 @@ use carbide_utils::none_if_empty::NoneIfEmpty;
 use carbide_uuid::machine::HostMachineId;
 use model::machine::machine_search_config::MachineSearchConfig;
 use model::machine::{MachineMaintenanceOperation, ManagedHostState};
+use nv_redfish::resource::ResetType;
 use tonic::{Request, Response, Status};
 
 use crate::api::{Api, log_request_data};
@@ -31,11 +32,11 @@ use crate::handlers::utils::convert_and_log_machine_id;
 ///
 /// v1 only supports `ForceRestart`; all other actions are rejected because
 /// Redfish `Chassis.Reset` allowable `ResetType` values are vendor-specific.
-fn map_chassis_reset_action(action: i32) -> Result<libredfish::SystemPowerControl, Status> {
+fn map_chassis_reset_action(action: i32) -> Result<ResetType, Status> {
     use rpc::admin_power_control_request::SystemPowerControl as Spc;
     let action = Spc::try_from(action).map_err(|_| Status::invalid_argument("unknown action"))?;
     match action {
-        Spc::ForceRestart => Ok(libredfish::SystemPowerControl::ForceRestart),
+        Spc::ForceRestart => Ok(ResetType::ForceRestart),
         Spc::On
         | Spc::GracefulRestart
         | Spc::AcPowercycle
@@ -125,16 +126,14 @@ pub(crate) async fn admin_chassis_reset(
 mod tests {
     use carbide_test_support::value_scenarios;
 
-    use super::map_chassis_reset_action;
+    use super::{ResetType, map_chassis_reset_action};
 
     #[test]
     fn chassis_reset_action_maps_force_restart_and_rejects_others() {
-        use libredfish::SystemPowerControl as L;
-
         use super::rpc::admin_power_control_request::SystemPowerControl as Spc;
         value_scenarios!(run = |a: i32| { map_chassis_reset_action(a).map_err(|_| ()) };
             "chassis reset action mapping" {
-                Spc::ForceRestart as i32 => Ok(L::ForceRestart),
+                Spc::ForceRestart as i32 => Ok(ResetType::ForceRestart),
                 Spc::On as i32 => Err(()),
                 0 => Err(()), // omitted action (proto3 default)
                 Spc::GracefulRestart as i32 => Err(()),

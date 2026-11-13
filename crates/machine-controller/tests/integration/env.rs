@@ -66,6 +66,14 @@ impl Env {
     pub(super) async fn run_single_iteration(&mut self) {
         self.machine_controller.run_single_iteration().boxed().await;
     }
+
+    /// Processes each host once so intermediate states remain observable.
+    pub(super) async fn run_single_iteration_without_requeue(&mut self) {
+        self.machine_controller
+            .run_single_iteration_ext(false)
+            .boxed()
+            .await;
+    }
 }
 
 impl EnvBuilder {
@@ -167,6 +175,7 @@ impl EnvBuilder {
             std::time::Duration::from_secs(60),
         );
         let services = MachineStateHandlerServices {
+            instrumentation: api.instrumentation().clone(),
             db_pool: pool.clone(),
             db_reader: pool.clone().into(),
             redfish_client_pool: controller_redfish_sim.clone(),

@@ -216,12 +216,6 @@ pub(crate) async fn batch_allocate(
             tracing::error!(error = ?e, "Failed to convert batch request");
         })?;
 
-    // Log all machine IDs and tenant organization IDs
-    for request in &requests {
-        log_machine_id(&request.machine_id);
-        log_tenant_organization_id(request.config.tenant.tenant_organization_id.as_str());
-    }
-
     // Call batch allocation logic
     let snapshots =
         crate::instance::batch_allocate_instances(api, requests, api.runtime_config.host_health)
@@ -307,6 +301,7 @@ pub(crate) async fn find_by_machine_id(
     log_request_data(&request);
 
     let machine_id = request.into_inner();
+    log_machine_id(&machine_id);
 
     let mut txn = api.txn_begin().await?;
 
@@ -322,6 +317,7 @@ pub(crate) async fn find_by_machine_id(
         Err(e) => return Err(CarbideError::from(e).into()),
     };
 
+    crate::api::log_managed_host_snapshot(&mh_snapshot, &machine_id);
     let maybe_instance = snapshot_to_optional_instance(mh_snapshot)?;
 
     let instances = if let Some(instance) = maybe_instance {

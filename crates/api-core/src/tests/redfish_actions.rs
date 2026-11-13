@@ -570,9 +570,11 @@ async fn redfish_browse_core_proxy_preserves_credential_ownership_and_diagnostic
         env.api.work_lock_manager_handle.clone(),
     )
     .with_runtime_config(env.config.clone())
+    .with_instrumentation(env.api.instrumentation.clone())
     .build();
     proxy_api.bmc_proxy_passthrough = Some(Arc::new(
-        PassthroughClient::new(&proxy_config).expect("build synthetic proxy client"),
+        PassthroughClient::new(&proxy_config, env.api.instrumentation.clone())
+            .expect("build synthetic proxy client"),
     ));
 
     // Exercise the public RPC while the server proves proxy routing headers

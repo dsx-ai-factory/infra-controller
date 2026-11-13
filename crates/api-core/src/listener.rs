@@ -23,6 +23,7 @@ use ::rpc::forge as rpc;
 use carbide_authn::SpiffeContext;
 use carbide_authn::middleware::{CertDescriptionMiddleware, ConnectionAttributes};
 use carbide_firmware::FirmwareArtifactCache;
+use carbide_instrument::Instrumentation;
 use hyper::server::conn::http2;
 use hyper_util::rt::{TokioExecutor, TokioIo, TokioTimer};
 use hyper_util::server::conn::auto;
@@ -340,9 +341,9 @@ impl TlsAcceptError {
         }
     }
 
-    fn record(self, peer_address: SocketAddr) {
+    fn record(self, instrumentation: &Instrumentation, peer_address: SocketAddr) {
         let reason = self.failure_reason();
-        carbide_instrument::emit(TlsConnectionFailed {
+        instrumentation.emit(TlsConnectionFailed {
             reason,
             error: self.to_string(),
             peer_address,
@@ -500,6 +501,7 @@ pub(crate) async fn start(
                 auth::CasbinAuthorizer::build_casbin(
                     casbin_policy_file,
                     auth_config.permissive_mode,
+                    api_service.instrumentation.clone(),
                 )
                 .await?,
             );
@@ -515,13 +517,21 @@ pub(crate) async fn start(
         None
     } else {
         Some(AsyncRequireAuthorizationLayer::new(
-            auth::middleware::InternalRBACHandler::new(auth_config.as_ref()),
+            auth::middleware::InternalRBACHandler::new(
+                auth_config.as_ref(),
+                api_service.instrumentation.clone(),
+            ),
         ))
     };
 
     let admission_config = &api_service.runtime_config.api_admission_control;
-    let admission_control =
-        ApiAdmissionControl::from_config(admission_config, &meter, cancel_token.clone(), join_set)?;
+    let admission_control = ApiAdmissionControl::from_config(
+        admission_config,
+        &meter,
+        api_service.instrumentation.clone(),
+        cancel_token.clone(),
+        join_set,
+    )?;
     if admission_control.is_none() {
         tracing::info!("API admission control disabled");
     }
@@ -586,6 +596,7 @@ pub(crate) async fn start(
     // Refreshed alongside the TLS acceptor below; both read the same client-CA
     // bundle, so they must not drift apart.
     let node_jwt_validator = api_service.node_jwt_validator.clone();
+    let instrumentation = api_service.instrumentation.clone();
 
     join_set
         .build_task()
@@ -594,11 +605,11 @@ pub(crate) async fn start(
             while let Some(incoming_connection) =
                 cancel_token.run_until_cancelled(listener.accept()).await
             {
-                carbide_instrument::emit(TlsConnectionAttempted);
+                instrumentation.emit(TlsConnectionAttempted);
                 let (conn, addr) = match incoming_connection {
                     Ok(incoming) => incoming,
                     Err(e) => {
-                        carbide_instrument::emit(TcpAcceptFailed {
+                        instrumentation.emit(TcpAcceptFailed {
                             reason: ConnectionFailReason::TcpConnectionFailure,
                             error: e.to_string(),
                         });
@@ -617,7 +628,7 @@ pub(crate) async fn start(
                     tls_config.as_ref(),
                     initialize_tls_acceptor || tls_acceptor_created.elapsed() > tls_refresh_after,
                 ) {
-                    carbide_instrument::emit(TlsCertsRefreshed);
+                    instrumentation.emit(TlsCertsRefreshed);
                     initialize_tls_acceptor = false;
                     tls_acceptor_created = Instant::now();
 
@@ -702,6 +713,7 @@ pub(crate) async fn start(
                 // Give the handler a child token of the global one, in case we want to cancel it
                 // independently.
                 let handler_cancel_token = cancel_token.child_token();
+                let connection_instrumentation = instrumentation.clone();
 
                 tokio::task::Builder::new()
                     .name("http conn handler")
@@ -712,7 +724,7 @@ pub(crate) async fn start(
                             {
                                 Ok(conn) => {
                                     let conn = TokioIo::new(conn);
-                                    carbide_instrument::emit(TlsConnectionSucceeded);
+                                    connection_instrumentation.emit(TlsConnectionSucceeded);
 
                                     let (_, session) = conn.inner().get_ref();
                                     let connection_attributes = {
@@ -743,12 +755,12 @@ pub(crate) async fn start(
                                     .await;
                                 }
                                 Err(error) => {
-                                    error.record(addr);
+                                    error.record(&connection_instrumentation, addr);
                                 }
                             }
                         } else {
                             // servicing without tls -- HTTP only
-                            carbide_instrument::emit(TlsConnectionSucceeded);
+                            connection_instrumentation.emit(TlsConnectionSucceeded);
 
                             let conn_attrs_extension_layer =
                                 AddExtensionLayer::new(Arc::new(ConnectionAttributes {
@@ -854,8 +866,8 @@ mod tests {
     use tokio_rustls::rustls::ServerConfig;
 
     use super::{
-        ApiTlsConfig, ConnectionFailReason, TcpAcceptFailed, TlsAcceptError, TlsCertsRefreshed,
-        accept_tls_connection, get_tls_acceptor,
+        ApiTlsConfig, ConnectionFailReason, Instrumentation, TcpAcceptFailed, TlsAcceptError,
+        TlsCertsRefreshed, accept_tls_connection, get_tls_acceptor,
     };
 
     const FAILURE_METRIC: &str = "carbide_api_tls_connection_fail_total";
@@ -863,7 +875,7 @@ mod tests {
 
     struct FailureInput {
         reason: &'static str,
-        emit: fn(),
+        emit: fn(&Instrumentation),
     }
 
     #[derive(Debug, PartialEq)]
@@ -884,26 +896,28 @@ mod tests {
         peer_address: Option<String>,
     }
 
-    fn emit_tcp_accept_failure() {
-        carbide_instrument::emit(TcpAcceptFailed {
+    fn emit_tcp_accept_failure(instrumentation: &Instrumentation) {
+        instrumentation.emit(TcpAcceptFailed {
             reason: ConnectionFailReason::TcpConnectionFailure,
             error: "accept failed".to_string(),
         });
     }
 
-    fn emit_tls_connection_failure() {
+    fn emit_tls_connection_failure(instrumentation: &Instrumentation) {
         TlsAcceptError::Handshake(std::io::Error::other("handshake failed")).record(
+            instrumentation,
             "192.0.2.10:443"
                 .parse::<SocketAddr>()
                 .expect("test peer address is valid"),
         );
     }
 
-    fn emit_tls_handshake_timeout() {
+    fn emit_tls_handshake_timeout(instrumentation: &Instrumentation) {
         TlsAcceptError::Timeout {
             timeout: Duration::from_secs(10),
         }
         .record(
+            instrumentation,
             "192.0.2.11:443"
                 .parse::<SocketAddr>()
                 .expect("test peer address is valid"),
@@ -911,8 +925,10 @@ mod tests {
     }
 
     fn observe_failure(input: FailureInput) -> FailureObservation {
-        let metrics = MetricsCapture::start();
-        let logs = capture_logs(input.emit)
+        let test_meter = carbide_utils::test_support::test_meter::TestMeter::default();
+        let instrumentation = Instrumentation::new(test_meter.meter());
+        let metrics = MetricsCapture::for_registry(test_meter.registry());
+        let logs = capture_logs(|| (input.emit)(&instrumentation))
             .into_iter()
             .map(|log| {
                 let event_name = log.field("event_name").map(str::to_owned);
@@ -1167,8 +1183,10 @@ mod tests {
     /// record operators use to see when the listener triggers a reload.
     #[test]
     fn tls_cert_refresh_emits_its_metric_and_info_log() {
-        let metrics = MetricsCapture::start();
-        let logs = capture_logs(|| carbide_instrument::emit(TlsCertsRefreshed));
+        let test_meter = carbide_utils::test_support::test_meter::TestMeter::default();
+        let instrumentation = Instrumentation::new(test_meter.meter());
+        let metrics = MetricsCapture::for_registry(test_meter.registry());
+        let logs = capture_logs(|| instrumentation.emit(TlsCertsRefreshed));
 
         assert_eq!(metrics.counter_delta(TLS_CERT_REFRESH_METRIC, &[]), 1.0);
         let [log] = logs.as_slice() else {

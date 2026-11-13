@@ -172,7 +172,7 @@ pub(super) async fn enqueue_boot_interface_reconciliation(
         .enqueue_object(&machine_id)
         .await
     {
-        carbide_instrument::emit(StateHandlerWakeupFailed {
+        api.instrumentation.emit(StateHandlerWakeupFailed {
             trigger: WakeupTrigger::BootInterfaceIntent,
             machine_id: machine_id.into(),
             err: err.to_string(),
