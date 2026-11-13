@@ -151,8 +151,9 @@ pub fn get() -> CarbideConfig {
     CarbideConfig {
         default_tenant_routing_profile_type: "EXTERNAL".to_string(),
         enable_admin_ui: true,
-        web_ui_sidebar_tools: vec![],
-        web_ui_logs_link_template: String::new(),
+        web_ui: Default::default(),
+        deprecated_web_ui_sidebar_tools: None,
+        deprecated_web_ui_logs_link_template: None,
         log_history: Default::default(),
         node_auth: Default::default(),
         observability: Default::default(),
