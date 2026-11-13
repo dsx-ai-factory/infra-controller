@@ -12,6 +12,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -70,6 +71,62 @@ func testTxSetupSchema(t *testing.T, dbSession *Session) {
 }
 
 func TestBeginTx(t *testing.T) {
+	t.Run("cancellation interrupts setup and releases the connection", func(t *testing.T) {
+		entered := make(chan struct{})
+		var notified sync.Once
+		matcher := sqlmock.QueryMatcherFunc(func(expected, actual string) error {
+			if !strings.HasPrefix(actual, expected) {
+				return errors.New("unexpected transaction setup query")
+			}
+			notified.Do(func() { close(entered) })
+			return nil
+		})
+		sqlDB, mock, err := sqlmock.New(sqlmock.QueryMatcherOption(matcher))
+		require.NoError(t, err)
+		sqlDB.SetMaxOpenConns(1)
+		bdb := bun.NewDB(sqlDB, pgdialect.New())
+		ctx, cancel := context.WithCancel(context.Background())
+		var workers sync.WaitGroup
+		defer func() {
+			cancel()
+			workers.Wait()
+			// Cancellation can discard the mock connection rather than reuse it.
+			// Either way, wait for rollback to release the pool's only connection.
+			assert.Eventually(t, func() bool { return sqlDB.Stats().InUse == 0 }, time.Second, time.Millisecond)
+			assert.NoError(t, bdb.Close())
+			assert.NoError(t, mock.ExpectationsWereMet())
+		}()
+		mock.ExpectBegin()
+		mock.ExpectExec("SET LOCAL lock_timeout").WillDelayFor(2 * time.Second).WillReturnResult(sqlmock.NewResult(0, 0))
+		mock.ExpectRollback()
+		mock.ExpectClose()
+		type result struct {
+			tx  *Tx
+			err error
+		}
+		done := make(chan result, 1)
+		workers.Go(func() {
+			tx, err := BeginTx(ctx, &Session{DB: bdb}, nil)
+			if tx != nil {
+				_ = tx.Rollback()
+			}
+			done <- result{tx: tx, err: err}
+		})
+		select {
+		case <-entered:
+		case <-time.After(5 * time.Second):
+			t.Fatal("transaction setup did not enter the driver")
+		}
+		cancel()
+		select {
+		case got := <-done:
+			require.Error(t, got.err)
+			require.Nil(t, got.tx)
+		case <-time.After(time.Second):
+			t.Fatal("transaction setup did not stop after cancellation")
+		}
+	})
+
 	t.Run("transaction lifecycle", func(t *testing.T) {
 		dbSession := testTxGetTestSession(t)
 		defer dbSession.Close()
