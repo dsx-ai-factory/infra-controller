@@ -51,7 +51,7 @@ itertools = { workspace = true }
 http = { workspace = true }
 libredfish = { workspace = true }
 mac_address = { workspace = true }
-nv-redfish = { workspace = true }
+nv-redfish = { workspace = true, features = ["computer-systems"] }
 opentelemetry = { workspace = true }
 opentelemetry_sdk = { workspace = true }
 rand = { workspace = true }

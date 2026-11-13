@@ -73,8 +73,9 @@ pub trait AuthenticatedBmc: Send + Sync + 'static {
     ) -> Result<(), EndpointExplorationError>;
 
     /// `report` is the BMC's explored endpoint, which selects its drivers.
-    /// Without one, or when exploration never recorded its service root,
-    /// drivers are selected for the identity the BMC serves live.
+    /// Without one that recorded the service root, as for BMCs exploration
+    /// could not identify, the drivers backend acts on the host system over
+    /// plain Redfish.
     async fn redfish_get_power_state(
         &self,
         address: SocketAddr,

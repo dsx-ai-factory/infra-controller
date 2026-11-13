@@ -58,7 +58,7 @@ use std::convert::identity;
 use std::sync::Arc;
 use std::time::Duration;
 
-use bmc_platform::{ServiceRootIdentity, manager_index_for, primary_system_index};
+use bmc_platform::ServiceRootIdentity;
 use chassis::ExploredChassisCollection;
 use component_integrity::ExploredComponentIntegrity;
 use computer_system::ExploredComputerSystem;
@@ -189,6 +189,26 @@ fn build_chassis_explore_config<B: Bmc>(root: &ServiceRoot<B>) -> chassis::Confi
     }
 }
 
+/// Index of the host system among a BMC's systems. BMCs that list a host
+/// beside baseboards report a BIOS only on the host, so the first system after
+/// the first that reports one wins, otherwise the first. `None` when the BMC
+/// lists no systems.
+pub fn primary_system_index<B: Bmc>(
+    systems: &[nv_redfish::computer_system::ComputerSystem<B>],
+) -> Option<usize> {
+    if systems.is_empty() {
+        return None;
+    }
+    Some(
+        systems
+            .iter()
+            .enumerate()
+            .skip(1)
+            .find(|(_, system)| system.raw().bios.is_some())
+            .map_or(0, |(index, _)| index),
+    )
+}
+
 /// Collects required resources, then converts them into an exploration report.
 #[tracing::instrument(name = "generate_exploration_report", skip_all)]
 pub async fn nv_generate_exploration_report<B: Bmc>(
@@ -278,9 +298,25 @@ pub async fn nv_generate_exploration_report<B: Bmc>(
         .await
         .map_err(Error::nv_redfish("managers members"))?;
 
-    let manager_index = manager_index_for(&managers, Some(&explored_system.system))
-        .ok_or_else(Error::bmc_not_provided("at least one manager"))?;
-    let manager = managers.swap_remove(manager_index);
+    // Prefer the manager whose ManagerForServers links the chosen system; fall
+    // back to the first manager for BMCs that don't populate the link.
+    let manager = match managers.iter().position(|m| {
+        m.raw()
+            .links
+            .as_ref()
+            .and_then(|l| l.manager_for_servers.as_ref())
+            .is_some_and(|servers| {
+                servers
+                    .iter()
+                    .any(|s| *s.id() == explored_system.system.raw().odata_id)
+            })
+    }) {
+        Some(i) => managers.swap_remove(i),
+        None => managers
+            .into_iter()
+            .next()
+            .ok_or_else(Error::bmc_not_provided("at least one manager"))?,
+    };
 
     let hw_type = hw_type(&root, explored_system, &explored_chassis);
     let explored_drives = if config.explore_drive_firmware {
@@ -547,22 +583,36 @@ async fn build_powershelf_report<B: Bmc>(
     })
 }
 
+/// The class recorded for an endpoint: the host system's reported identity,
+/// with the service root standing in for the fields it left empty.
 /// The service root fields the report records.
 fn service_root<B: Bmc>(root: &ServiceRoot<B>) -> ModelServiceRoot {
-    let ServiceRootIdentity {
-        vendor,
-        product,
-        oem_keys,
-    } = ServiceRootIdentity::from_service_root(root);
     ModelServiceRoot {
-        vendor,
-        product,
-        oem_keys,
+        vendor: root.vendor().map(|vendor| vendor.into_inner().to_string()),
+        product: root
+            .product()
+            .map(|product| product.into_inner().to_string()),
+        oem_keys: root
+            .root
+            .oem
+            .as_ref()
+            .and_then(|oem| oem.additional_properties.as_object())
+            .map(|oem| oem.keys().cloned().collect())
+            .unwrap_or_default(),
     }
 }
 
-/// The class recorded for an endpoint: the host system's reported identity,
-/// with the service root standing in for the fields it left empty.
+/// The service root part of the identity driver selection matches on, read
+/// from `root` directly. It is all a BMC in factory state serves.
+pub fn service_root_identity<B: Bmc>(root: &ServiceRoot<B>) -> ServiceRootIdentity {
+    let root = service_root(root);
+    ServiceRootIdentity {
+        vendor: root.vendor,
+        product: root.product,
+        oem_keys: root.oem_keys,
+    }
+}
+
 fn hardware_class<B: Bmc>(root: &ServiceRoot<B>, system: &ComputerSystem) -> String {
     derive_hardware_class(
         Some(system),

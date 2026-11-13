@@ -30,7 +30,6 @@ mod error;
 mod identity;
 mod matcher;
 mod operation;
-mod primary;
 mod quirk;
 mod selection;
 mod transport;
@@ -58,7 +57,6 @@ pub use nv_redfish::resource::{PowerState, ResetType};
 pub use operation::{
     DriverOutcome, OperationReference, OperationStatus, VendorJobId, VendorJobIdError,
 };
-pub use primary::{manager_index_for, primary_system_index};
 pub use quirk::Quirk;
 pub use selection::Capability;
 pub use transport::{ClassifyBmcError, Fetched, IpmiOps, OpCx};
