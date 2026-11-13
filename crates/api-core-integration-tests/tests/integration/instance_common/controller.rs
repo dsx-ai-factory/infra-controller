@@ -88,6 +88,7 @@ impl InstanceControllers {
                     .expect("NVLink configuration should exist"),
                 config.host_health,
                 api.work_lock_manager_handle(),
+                api.instrumentation().clone(),
             )),
             _cancel_token: cancel_token,
         }

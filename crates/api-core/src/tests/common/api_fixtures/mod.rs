@@ -1582,6 +1582,7 @@ async fn create_test_env_with_overrides_inner(
         config.nvlink_config.clone().unwrap(),
         config.host_health,
         api.work_lock_manager_handle.clone(),
+        api.instrumentation.clone(),
     );
 
     let switch_cert_monitor = SwitchCertificateMonitor::new(
@@ -1590,6 +1591,7 @@ async fn create_test_env_with_overrides_inner(
         config.nvlink_config.clone().unwrap(),
         test_component_manager.clone(),
         api.work_lock_manager_handle.clone(),
+        api.instrumentation.clone(),
     );
 
     let attestation_enabled = config.attestation_enabled;

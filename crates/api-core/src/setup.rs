@@ -2562,6 +2562,7 @@ async fn initialize_and_start_controllers<'a>(
         db_pool: db_pool.clone(),
         nmxc_client_pool: api_service.nmxc_client_pool.clone(),
         meter: meter.clone(),
+        instrumentation: api_service.instrumentation.clone(),
         config: carbide_config.nvlink_config.clone().unwrap_or_default(),
         host_health: carbide_config.host_health,
         component_manager: api_service.component_manager.clone().map(Arc::new),
