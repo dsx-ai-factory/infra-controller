@@ -17,6 +17,7 @@
 
 use std::sync::Arc;
 
+use tokio_util::sync::CancellationToken;
 use tonic::transport::Channel;
 
 use super::collector_metrics::ExportMetricsServiceRequest;
@@ -25,12 +26,15 @@ use super::convert::build_queued_metrics_export_request;
 use super::metrics::metric;
 use super::{OtlpExport, OtlpExportResponse, OtlpSignal, run_drain};
 use crate::config::OtlpTargetConfig;
+use crate::sink::DeliveryCounts;
 use crate::sink::otlp::{OtlpMetricsQueue, QueuedMetric};
 
 pub(crate) struct OtlpMetricsDrainTask {
     queue: Arc<OtlpMetricsQueue>,
     target: OtlpTargetConfig,
     metric_name_prefix: String,
+    flush_token: CancellationToken,
+    counts: DeliveryCounts,
 }
 
 impl OtlpMetricsDrainTask {
@@ -38,11 +42,15 @@ impl OtlpMetricsDrainTask {
         queue: Arc<OtlpMetricsQueue>,
         target: OtlpTargetConfig,
         metric_name_prefix: String,
+        flush_token: CancellationToken,
+        counts: DeliveryCounts,
     ) -> Self {
         Self {
             queue,
             target,
             metric_name_prefix,
+            flush_token,
+            counts,
         }
     }
 
@@ -52,6 +60,8 @@ impl OtlpMetricsDrainTask {
             self.queue,
             self.target,
             OtlpSignal::Metrics,
+            self.flush_token,
+            self.counts,
             move |channel| MetricsExport {
                 client: MetricsServiceClient::new(channel),
                 metric_name_prefix: metric_name_prefix.clone(),

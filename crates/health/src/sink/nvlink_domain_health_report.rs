@@ -28,6 +28,8 @@ use carbide_uuid::nvlink::NvLinkDomainId;
 use tokio_util::sync::CancellationToken;
 
 use super::dedup_queue::DedupQueue;
+use super::report_worker::run_report_worker;
+use super::shutdown::{DeliveryCounts, SinkWorkers};
 use super::{
     CollectorEvent, DataSink, EventContext, HealthReport, HealthReportSubmitted,
     HealthReportTarget, ReportSource,
@@ -42,6 +44,8 @@ struct NvLinkDomainHealthReportKey {
     source: ReportSource,
 }
 
+const SINK_TYPE: &str = "nvlink_domain_health_report_sink";
+
 /// Submits `NvLinkDomain`-target health reports to the NICo API.
 pub struct NvLinkDomainHealthReportSink {
     queue: Arc<DedupQueue<NvLinkDomainHealthReportKey, Arc<HealthReport>>>,
@@ -49,78 +53,93 @@ pub struct NvLinkDomainHealthReportSink {
 }
 
 impl NvLinkDomainHealthReportSink {
-    /// Creates the sink and its ordered submission worker.
+    /// Creates the sink and its ordered submission worker, registering the
+    /// worker with `sink_workers` for the shutdown flush.
     ///
     /// Returns an error when called without an active Tokio runtime.
-    pub fn new(config: &NvLinkDomainHealthReportSinkConfig) -> Result<Self, HealthError> {
+    pub(crate) fn new(
+        config: &NvLinkDomainHealthReportSinkConfig,
+        sink_workers: &mut SinkWorkers,
+    ) -> Result<Self, HealthError> {
         let handle = tokio::runtime::Handle::try_current().map_err(|error| {
             HealthError::GenericError(format!(
                 "NVLink domain health report sink requires active Tokio runtime: {error}"
             ))
         })?;
 
-        let client = ApiClientWrapper::new(
+        let client = Arc::new(ApiClientWrapper::new(
             config.connection.root_ca.clone(),
             config.connection.client_cert.clone(),
             config.connection.client_key.clone(),
             &config.connection.api_url,
-        );
+        ));
 
         let queue: Arc<DedupQueue<NvLinkDomainHealthReportKey, Arc<HealthReport>>> =
             Arc::new(DedupQueue::new());
 
         let cancel_token = CancellationToken::new();
         let worker_cancel_token = cancel_token.clone();
-        let worker_queue = Arc::clone(&queue);
 
         // A single worker preserves alert and recovery order for each domain.
         // Its cancellation token bounds the worker lifetime to the sink.
-        handle.spawn(async move {
-            loop {
-                let Some((key, report)) = worker_cancel_token
-                    .run_until_cancelled(worker_queue.next())
-                    .await
-                else {
-                    return;
-                };
+        let counts = DeliveryCounts::default();
 
-                match report.as_ref().try_into() {
-                    Ok(converted) => {
-                        let Some(result) = worker_cancel_token
-                            .run_until_cancelled(
-                                client.submit_nvlink_domain_health_report(&key.id, converted),
-                            )
-                            .await
-                        else {
-                            return;
-                        };
+        let worker = run_report_worker(
+            Arc::clone(&queue),
+            counts.clone(),
+            sink_workers.flush_token(),
+            move |key, report| submit_report(Arc::clone(&client), key, report),
+        );
 
-                        emit(HealthReportSubmitted {
-                            target: HealthReportTarget::NvLinkDomain,
-                            outcome: Outcome::from(&result),
-                            id: key.id.to_string(),
-                            worker_id: 0,
-                            error: result
-                                .err()
-                                .map(|error| error.to_string())
-                                .unwrap_or_default(),
-                        });
-                    }
-                    Err(error) => {
-                        tracing::warn!(
-                            ?error,
-                            nvlink_domain_id = %key.id,
-                            "Failed to convert NVLink domain health report"
-                        );
-                    }
-                }
-            }
+        let worker = handle.spawn(async move {
+            worker_cancel_token.run_until_cancelled(worker).await;
         });
+
+        let queued = Arc::clone(&queue);
+        sink_workers.register(SINK_TYPE, None, move || queued.len(), counts, vec![worker]);
 
         Ok(Self {
             queue,
             cancel_token,
         })
+    }
+}
+
+async fn submit_report(
+    client: Arc<ApiClientWrapper>,
+    key: NvLinkDomainHealthReportKey,
+    report: Arc<HealthReport>,
+) -> bool {
+    match report.as_ref().try_into() {
+        Ok(converted) => {
+            let result = client
+                .submit_nvlink_domain_health_report(&key.id, converted)
+                .await;
+
+            let delivered = result.is_ok();
+
+            emit(HealthReportSubmitted {
+                target: HealthReportTarget::NvLinkDomain,
+                outcome: Outcome::from(&result),
+                id: key.id.to_string(),
+                worker_id: 0,
+                error: result
+                    .err()
+                    .map(|error| error.to_string())
+                    .unwrap_or_default(),
+            });
+
+            delivered
+        }
+        Err(error) => {
+            tracing::warn!(
+                ?error,
+                nvlink_domain_id = %key.id,
+                "Failed to convert NVLink domain health report"
+            );
+
+            false
+        }
     }
 }
 
@@ -132,7 +151,7 @@ impl Drop for NvLinkDomainHealthReportSink {
 
 impl DataSink for NvLinkDomainHealthReportSink {
     fn sink_type(&self) -> &'static str {
-        "nvlink_domain_health_report_sink"
+        SINK_TYPE
     }
 
     fn try_handle_event(
@@ -261,8 +280,9 @@ mod tests {
 
     #[tokio::test]
     async fn dropping_sink_releases_submission_worker_queue() {
-        let sink = NvLinkDomainHealthReportSink::new(&Default::default())
-            .expect("sink should start inside a Tokio runtime");
+        let sink =
+            NvLinkDomainHealthReportSink::new(&Default::default(), &mut SinkWorkers::default())
+                .expect("sink should start inside a Tokio runtime");
 
         let queue = Arc::downgrade(&sink.queue);
 

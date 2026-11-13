@@ -431,7 +431,9 @@ mod tests {
 
         assert!(removal.is_err(), "the removal must outlast its iteration");
 
-        let shutdown = ctx.drain_collectors(Duration::from_secs(20)).await;
+        let shutdown = ctx
+            .drain_collectors(tokio::time::Instant::now() + Duration::from_secs(20))
+            .await;
 
         assert_eq!((shutdown.closed, shutdown.timed_out), (1, 0));
         assert!(cleaned_up.load(Ordering::SeqCst));

@@ -29,6 +29,8 @@ pub(crate) mod otlp;
 mod power_shelf_health_report;
 mod prometheus;
 mod rack_health_report;
+mod report_worker;
+mod shutdown;
 mod switch_health_report;
 mod tracing;
 
@@ -56,6 +58,7 @@ pub(crate) use self::dedup_queue::DedupQueue;
 pub(crate) use self::otlp::OtlpSink;
 #[cfg(feature = "bench-hooks")]
 pub use self::otlp::OtlpSink;
+pub(crate) use self::shutdown::{DeliveryCounts, SinkWorkers};
 use crate::HealthError;
 
 /// An immutable observation and metric identity shared within one composite fanout.

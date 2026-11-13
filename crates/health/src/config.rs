@@ -113,9 +113,16 @@ pub struct Config {
     #[serde(with = "humantime_serde")]
     pub endpoint_discovery_interval: Duration,
 
-    /// Budget for draining started collectors on SIGTERM or SIGINT; collectors
-    /// still running when it passes are abandoned. Defaults to 20 seconds and
-    /// must be greater than zero.
+    /// Budget for graceful shutdown, starting when the service observes SIGTERM
+    /// or SIGINT. Discovery completion, collector draining, and the sink flush
+    /// share one deadline: collectors that run up to it leave the sink flush no
+    /// time. The deadline stops waiting but does not guarantee that remaining
+    /// collectors and sink deliveries terminate immediately; records still
+    /// queued or in delivery at the deadline are logged as dropped, and records
+    /// an abandoned collector never queued are not counted. Counts are in
+    /// queued entries and are approximate for entries in transit at the
+    /// deadline and for partially rejected OTLP exports. Defaults to 20 seconds
+    /// and must be greater than zero.
     #[serde(with = "humantime_serde")]
     pub shutdown_timeout: Duration,
 

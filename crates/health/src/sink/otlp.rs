@@ -24,6 +24,7 @@ use prometheus::{Counter, CounterVec, Opts};
 
 use super::dedup_queue::{DedupQueue, SaveOutcome};
 use super::event_mapper::RedfishEventMapper;
+use super::shutdown::{DeliveryCounts, SinkWorkers};
 use super::{CollectorEvent, DataSink, EventContext, LogRecord, MetricSample, SharedMetric};
 use crate::HealthError;
 use crate::config::OtlpTargetConfig;
@@ -64,6 +65,8 @@ pub(crate) struct OtlpMetricQueueKey {
     metric_type: String,
     unit: String,
 }
+
+const SINK_TYPE: &str = "otlp_sink";
 
 #[cfg(not(feature = "bench-hooks"))]
 pub(crate) struct OtlpSink {
@@ -117,7 +120,8 @@ impl OtlpSink {
     /// Creates one independently queued sink for each configured OTLP target.
     ///
     /// The returned order matches `configs`. Each sink starts separate log and
-    /// metric drain tasks. Queue metrics identify the configured endpoint.
+    /// metric drain tasks, registered with `sink_workers` per target for the
+    /// shutdown flush. Queue metrics identify the configured endpoint.
     ///
     /// # Errors
     ///
@@ -128,6 +132,7 @@ impl OtlpSink {
         mapper: Arc<dyn RedfishEventMapper>,
         metrics_manager: &MetricsManager,
         prefix: &str,
+        sink_workers: &mut SinkWorkers,
     ) -> Result<Vec<Self>, HealthError> {
         let handle = tokio::runtime::Handle::try_current().map_err(|e| {
             HealthError::GenericError(format!("otlp sink requires active tokio runtime: {e}"))
@@ -191,8 +196,16 @@ impl OtlpSink {
             let metrics_replaced_total =
                 metrics_replaced_total.get_metric_with_label_values(&[&config.endpoint])?;
 
-            let drain = OtlpDrainTask::new(queue.clone(), config.clone());
-            handle.spawn(drain.run());
+            let counts = DeliveryCounts::default();
+
+            let drain = OtlpDrainTask::new(
+                queue.clone(),
+                config.clone(),
+                sink_workers.flush_token(),
+                counts.clone(),
+            );
+
+            let drain = handle.spawn(drain.run());
 
             // Each target and signal owns a drain so a slow collector cannot
             // block delivery to another target or signal.
@@ -200,9 +213,21 @@ impl OtlpSink {
                 metrics_queue.clone(),
                 config.clone(),
                 prefix.to_string(),
+                sink_workers.flush_token(),
+                counts.clone(),
             );
 
-            handle.spawn(metrics_drain.run());
+            let metrics_drain = handle.spawn(metrics_drain.run());
+
+            let (logs, metrics) = (queue.clone(), metrics_queue.clone());
+
+            sink_workers.register(
+                SINK_TYPE,
+                Some(config.endpoint.clone()),
+                move || logs.len() + metrics.len(),
+                counts,
+                vec![drain, metrics_drain],
+            );
 
             sinks.push(Self {
                 queue,
@@ -302,7 +327,7 @@ impl OtlpSink {
 
 impl DataSink for OtlpSink {
     fn sink_type(&self) -> &'static str {
-        "otlp_sink"
+        SINK_TYPE
     }
 
     fn accepts_shared_metric(&self) -> bool {
@@ -461,8 +486,9 @@ mod tests {
     use std::str::FromStr;
     use std::time::{Duration, SystemTime};
 
-    use carbide_instrument::testing::MetricsCapture;
+    use carbide_instrument::testing::{MetricsCapture, capture_logs_async};
     use mac_address::MacAddress;
+    use tokio_util::sync::CancellationToken;
 
     use super::*;
     use crate::otlp::collector_logs::logs_service_server::{LogsService, LogsServiceServer};
@@ -1269,6 +1295,7 @@ mod tests {
             Arc::new(OpenBmcEventMapper),
             &metrics_manager,
             "otlp_replacement_test",
+            &mut SinkWorkers::default(),
         )
         .expect("OTLP sinks should initialize");
 
@@ -1615,17 +1642,17 @@ mod tests {
         format!("http://{address}")
     }
 
-    /// Starts an OTLP sink whose drains export to `endpoint`.
+    /// Starts an OTLP sink whose drains export to `endpoint`, returning it with
+    /// the registry that flushes those drains.
     fn sink_exporting_to(
         endpoint: String,
         batch_size: usize,
         max_concurrent_exports: usize,
         flush_interval: std::time::Duration,
         name: &str,
-    ) -> OtlpSink {
-        let metrics_manager = MetricsManager::new(name).expect("metrics manager should initialize");
-        OtlpSink::new_many(
-            &[OtlpTargetConfig {
+    ) -> (OtlpSink, SinkWorkers) {
+        sink_exporting_with(
+            OtlpTargetConfig {
                 endpoint,
                 batch_size,
                 queue_capacity: OtlpTargetConfig::DEFAULT_QUEUE_CAPACITY,
@@ -1635,13 +1662,28 @@ mod tests {
                 include_diagnostics: false,
                 include_alert_details: false,
                 tls: None,
-            }],
+            },
+            name,
+        )
+    }
+
+    /// Starts an OTLP sink for `target`, returning it with the registry that
+    /// flushes its drains.
+    fn sink_exporting_with(target: OtlpTargetConfig, name: &str) -> (OtlpSink, SinkWorkers) {
+        let metrics_manager = MetricsManager::new(name).expect("metrics manager should initialize");
+        let mut sink_workers = SinkWorkers::default();
+
+        let sink = OtlpSink::new_many(
+            &[target],
             Arc::new(OpenBmcEventMapper),
             &metrics_manager,
             name,
+            &mut sink_workers,
         )
         .expect("OTLP sink should initialize")
-        .remove(0)
+        .remove(0);
+
+        (sink, sink_workers)
     }
 
     /// Waits up to ten seconds for `condition` to hold.
@@ -1672,7 +1714,7 @@ mod tests {
             )
             .await;
 
-            let sink = sink_exporting_to(
+            let (sink, _sink_workers) = sink_exporting_to(
                 endpoint.clone(),
                 2,
                 OtlpTargetConfig::DEFAULT_MAX_CONCURRENT_EXPORTS,
@@ -1832,6 +1874,8 @@ mod tests {
                 tls: None,
             },
             "staging".to_string(),
+            CancellationToken::new(),
+            DeliveryCounts::default(),
         )
         .run();
         tokio::pin!(drain);
@@ -1969,7 +2013,8 @@ mod tests {
     #[tokio::test]
     async fn drain_exports_every_full_batch_without_waiting_for_the_flush_interval() {
         let collector = Arc::new(GatedCollector::new(tokio::sync::Semaphore::MAX_PERMITS));
-        let sink = sink_exporting_to(
+
+        let (sink, _sink_workers) = sink_exporting_to(
             serve_gated_collector(&collector).await,
             2,
             1,
@@ -2009,6 +2054,8 @@ mod tests {
                 tls: None,
             },
             "otlp_concurrency_test".to_string(),
+            CancellationToken::new(),
+            DeliveryCounts::default(),
         )
         .run();
         tokio::pin!(drain);
@@ -2043,5 +2090,256 @@ mod tests {
         assert_eq!(sink.metrics_queue.len(), 0);
         assert_eq!(*collector.exported_points.lock().unwrap(), vec![1, 1, 1]);
         assert_eq!(collector.max_in_flight.load(SeqCst), 2);
+    }
+
+    /// Returns the flushed, dropped, and timed-out counts from the flush summary.
+    fn flush_summary(logs: &[carbide_instrument::testing::CapturedLog]) -> [Option<&str>; 3] {
+        let summary = logs
+            .iter()
+            .find(|log| log.message == "Sinks flushed")
+            .expect("flush logs its summary");
+
+        [
+            summary.field("flushed_record_count"),
+            summary.field("dropped_record_count"),
+            summary.field("timed_out_sink_count"),
+        ]
+    }
+
+    #[tokio::test]
+    async fn shutdown_flush_counts_exported_records_of_partial_batches() {
+        for (scenario, rounds, exported) in [
+            (
+                "partial batch is exported before the flush interval",
+                vec![3],
+                vec![3],
+            ),
+            (
+                "replaced staged readings flush as one record",
+                vec![1, 1, 1],
+                vec![1],
+            ),
+        ] {
+            let collector = Arc::new(GatedCollector::new(tokio::sync::Semaphore::MAX_PERMITS));
+
+            let (sink, sink_workers) = sink_exporting_to(
+                serve_gated_collector(&collector).await,
+                10,
+                1,
+                Duration::from_secs(60),
+                "otlp_flush_test",
+            );
+
+            // The drain's first interval tick fires at once; let it export a
+            // primer so later readings wait in the staged batch.
+            sink.handle_event(
+                &test_context(),
+                &metric_event_with("primer", "gauge", "celsius"),
+            );
+
+            wait_until(
+                || collector.exported_points.lock().unwrap().len() == 1,
+                "the first tick exports the primer",
+            )
+            .await;
+
+            // Each round reaches the drain's staged batch before the next one
+            // replaces it.
+            for count in rounds {
+                push_metrics(&sink, count);
+                wait_until(|| sink.metrics_queue.len() == 0, "readings reach staging").await;
+            }
+
+            let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+            let ((), logs) = capture_logs_async(sink_workers.flush(deadline)).await;
+
+            let flushed = exported.iter().sum::<usize>().to_string();
+
+            assert_eq!(
+                collector.exported_points.lock().unwrap()[1..],
+                exported,
+                "{scenario}"
+            );
+
+            assert_eq!(
+                flush_summary(&logs),
+                [Some(flushed.as_str()), Some("0"), Some("0")],
+                "{scenario}"
+            );
+        }
+    }
+
+    /// Rejects every metrics export with a non-retryable status.
+    struct RejectingCollector;
+
+    #[async_trait::async_trait]
+    impl MetricsService for RejectingCollector {
+        async fn export(
+            &self,
+            _request: tonic::Request<ExportMetricsServiceRequest>,
+        ) -> Result<tonic::Response<ExportMetricsServiceResponse>, tonic::Status> {
+            Err(tonic::Status::invalid_argument("collector rejects exports"))
+        }
+    }
+
+    #[tokio::test]
+    async fn shutdown_flush_counts_each_observation_once_by_outcome() {
+        enum Observations {
+            TwoGauges,
+            OneCounter,
+        }
+
+        struct Case {
+            scenario: &'static str,
+            endpoint: String,
+            max_request_bytes: usize,
+            observations: Observations,
+            summary: [&'static str; 3],
+        }
+
+        let flaky = Arc::new(FlakyCollector::default());
+        let stalled = Arc::new(GatedCollector::new(0));
+        let half_stalled = Arc::new(GatedCollector::new(1));
+
+        let rejecting = serve_collector(
+            tonic::transport::Server::builder()
+                .add_service(MetricsServiceServer::new(RejectingCollector)),
+        )
+        .await;
+
+        let cases = [
+            Case {
+                // Port zero cannot accept connections, so no listener can
+                // race the test.
+                scenario: "unreachable target",
+                endpoint: "http://127.0.0.1:0".to_string(),
+                max_request_bytes: OtlpTargetConfig::DEFAULT_MAX_REQUEST_BYTES,
+                observations: Observations::TwoGauges,
+                summary: ["0", "2", "0"],
+            },
+            Case {
+                scenario: "rejected export",
+                endpoint: rejecting.clone(),
+                max_request_bytes: OtlpTargetConfig::DEFAULT_MAX_REQUEST_BYTES,
+                observations: Observations::TwoGauges,
+                summary: ["0", "2", "0"],
+            },
+            Case {
+                scenario: "stalled export",
+                endpoint: serve_gated_collector(&stalled).await,
+                max_request_bytes: OtlpTargetConfig::DEFAULT_MAX_REQUEST_BYTES,
+                observations: Observations::TwoGauges,
+                summary: ["0", "2", "1"],
+            },
+            Case {
+                // Every request exceeds the size limit, so the batch splits
+                // into single observations; the gate admits only the first.
+                scenario: "split batch stalls after its first part",
+                endpoint: serve_gated_collector(&half_stalled).await,
+                max_request_bytes: 1,
+                observations: Observations::TwoGauges,
+                summary: ["1", "1", "1"],
+            },
+            Case {
+                scenario: "counter observation with two data points is flushed",
+                endpoint: serve_collector(
+                    tonic::transport::Server::builder()
+                        .add_service(MetricsServiceServer::from_arc(flaky.clone())),
+                )
+                .await,
+                max_request_bytes: OtlpTargetConfig::DEFAULT_MAX_REQUEST_BYTES,
+                observations: Observations::OneCounter,
+                summary: ["1", "0", "0"],
+            },
+            Case {
+                scenario: "counter observation with two data points is rejected",
+                endpoint: rejecting,
+                max_request_bytes: OtlpTargetConfig::DEFAULT_MAX_REQUEST_BYTES,
+                observations: Observations::OneCounter,
+                summary: ["0", "1", "0"],
+            },
+        ];
+
+        for case in cases {
+            let scenario = case.scenario;
+
+            let (sink, sink_workers) = sink_exporting_with(
+                OtlpTargetConfig {
+                    endpoint: case.endpoint.clone(),
+                    batch_size: 10,
+                    queue_capacity: OtlpTargetConfig::DEFAULT_QUEUE_CAPACITY,
+                    max_request_bytes: case.max_request_bytes,
+                    max_concurrent_exports: 1,
+                    flush_interval: Duration::from_secs(60),
+                    include_diagnostics: false,
+                    include_alert_details: false,
+                    tls: None,
+                },
+                "otlp_flush_outcome_test",
+            );
+
+            match case.observations {
+                Observations::TwoGauges => push_metrics(&sink, 2),
+                Observations::OneCounter => {
+                    let CollectorEvent::Metric(mut sample) = metric_event_with_name(
+                        "hw_metric",
+                        "memory1/errors",
+                        "lifetime_correctable_ecc_errors",
+                        "count",
+                    ) else {
+                        panic!("fixture must contain a metric");
+                    };
+
+                    sample.semantics = MetricSemantics::CumulativeCounter {
+                        description: "Number of correctable ECC errors over the memory lifetime",
+                        start_time: Some(SystemTime::UNIX_EPOCH),
+                    };
+
+                    sink.handle_event(&test_context(), &CollectorEvent::Metric(sample));
+                }
+            }
+
+            let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+            let ((), logs) = capture_logs_async(sink_workers.flush(deadline)).await;
+
+            let [flushed, dropped, timed_out] = case.summary;
+
+            assert_eq!(
+                flush_summary(&logs),
+                [Some(flushed), Some(dropped), Some(timed_out)],
+                "{scenario}"
+            );
+
+            let dropped_log = logs
+                .iter()
+                .find(|log| log.message == "Sink dropped records at shutdown");
+
+            assert_eq!(
+                dropped_log.and_then(|log| log.field("dropped_record_count")),
+                (dropped != "0").then_some(dropped),
+                "{scenario}"
+            );
+
+            if let Some(dropped_log) = dropped_log {
+                assert_eq!(
+                    dropped_log.field("endpoint_address"),
+                    Some(case.endpoint.as_str()),
+                    "{scenario}"
+                );
+            }
+        }
+
+        let exported = flaky.metrics.lock().unwrap();
+
+        let points = exported
+            .last()
+            .expect("the counter observation is exported")
+            .resource_metrics
+            .iter()
+            .flat_map(|rm| &rm.scope_metrics)
+            .flat_map(|sm| &sm.metrics)
+            .count();
+
+        assert_eq!(points, 2, "a counter observation encodes two data points");
     }
 }
