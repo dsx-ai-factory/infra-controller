@@ -76,6 +76,7 @@ impl InstanceControllers {
                 clients.ib.clone(),
                 config.host_health,
                 api.work_lock_manager_handle(),
+                api.instrumentation().clone(),
             ),
             nvl: Mutex::new(NvlPartitionMonitor::new(
                 api.database_connection.clone(),

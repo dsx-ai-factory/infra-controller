@@ -1572,6 +1572,7 @@ async fn create_test_env_with_overrides_inner(
         api.ib_fabric_manager.clone(),
         config.host_health,
         api.work_lock_manager_handle.clone(),
+        api.instrumentation.clone(),
     );
 
     let nvl_partition_monitor = NvlPartitionMonitor::new(

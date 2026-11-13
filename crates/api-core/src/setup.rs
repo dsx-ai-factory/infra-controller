@@ -2554,6 +2554,7 @@ async fn initialize_and_start_controllers<'a>(
         ib_fabric_manager.clone(),
         carbide_config.host_health,
         work_lock_manager_handle.clone(),
+        api_service.instrumentation.clone(),
     )
     .start(join_set, cancel_token.clone())?;
 
