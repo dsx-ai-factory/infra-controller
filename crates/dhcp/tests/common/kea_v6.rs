@@ -556,13 +556,13 @@ impl Kea6 {
                 self.process = None;
                 eyre::ensure!(
                     !status.success(),
-                    "storage failure must stop Kea with an error"
+                    "storage failure must stop kea with an error"
                 );
                 return Ok(());
             }
             eyre::ensure!(
                 Instant::now() < deadline,
-                "Kea did not stop after fatal storage failure"
+                "kea did not stop after fatal storage failure"
             );
             thread::sleep(KEA_SHUTDOWN_POLL);
         }
