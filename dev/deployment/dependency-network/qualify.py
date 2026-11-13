@@ -6,6 +6,7 @@
 import argparse
 import json
 from pathlib import Path
+import signal
 import socket
 import subprocess
 import sys
@@ -39,6 +40,11 @@ def authority(host):
     return f"[{host}]" if ":" in host else host
 
 
+def write_config(path, contents):
+    path.write_text(contents)
+    path.chmod(0o644)
+
+
 def certificate(directory):
     run("openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes",
         "-keyout", str(directory / "ca.key"), "-out", str(directory / "ca.crt"),
@@ -54,6 +60,8 @@ def certificate(directory):
         "-CA", str(directory / "ca.crt"), "-CAkey", str(directory / "ca.key"),
         "-CAcreateserial", "-out", str(directory / "server.crt"), "-days", "2",
         "-extfile", str(directory / "extensions"))
+    for name in ("ca.crt", "server.crt"):
+        (directory / name).chmod(0o644)
 
 
 def wait_for_listener(host, port):
@@ -117,6 +125,7 @@ def qualify(args):
             root = Path(temporary)
             certs = root / "certs"
             certs.mkdir()
+            certs.chmod(0o755)
             certificate(certs)
             for label, naming, listening, expected_family in cases:
                 print(f"Qualifying {label}", flush=True)
@@ -127,6 +136,7 @@ def qualify(args):
                 network_created = True
                 config = root / label
                 config.mkdir()
+                config.chmod(0o755)
                 names = []
                 case_output = output / label
                 case_output.mkdir()
@@ -149,14 +159,21 @@ def qualify(args):
 
                 try:
                     dns_families = (4, 6) if naming == "dual" else listening
-                    (config / "hosts").write_text("".join(
+                    write_config(config / "hosts", "".join(
                         f"{address(service, family)} {service}.dependency.test\n"
                         for service in ("postgres", "vault", "otel") for family in dns_families))
-                    (config / "Corefile").write_text(
+                    write_config(config / "Corefile",
                         "dependency.test:53 {\n log\n errors\n hosts /config/hosts {\n"
                         "  ttl 1\n  no_reverse\n }\n}\n")
-                    start("dns", DNS_IMAGE, "-conf", "/config/Corefile")
+                    dns = start("dns", DNS_IMAGE, "-conf", "/config/Corefile")
                     dns_address = address("dns", 6 if ipv6_only else 4)
+                    write_config(config / "resolv.conf",
+                                 f"nameserver {dns_address}\noptions timeout:1 attempts:1\n")
+                    if ipv6_only:
+                        resolver_args = ["--mount", f"type=bind,src={config / 'resolv.conf'},dst=/etc/resolv.conf,readonly"]
+                    else:
+                        resolver_args = ["--dns", dns_address, "--dns-option", "timeout:1",
+                                         "--dns-option", "attempts:1"]
                     wait_for_listener(dns_address, 53)
                     postgres_bind = ",".join(address("postgres", f) for f in listening)
                     pg_script = f"""
@@ -175,14 +192,14 @@ exec runuser -u postgres -- /usr/lib/postgresql/15/bin/postgres -D /tmp/qualific
                         "tls_cert_file": "/certs/server.crt", "tls_key_file": "/certs/server.key",
                     }} for family in listening]
                     vault_admin = "https://" + authority(address("vault", listening[0])) + ":8200"
-                    (config / "vault.json").write_text(json.dumps({
+                    write_config(config / "vault.json", json.dumps({
                         "api_addr": vault_admin, "listener": vault_listeners,
                     }))
                     vault = start("vault", args.test_image, "vault", "server", "-dev",
                                   "-dev-no-store-token", "-dev-root-token-id=" + TOKEN,
                                   "-dev-listen-address=127.0.0.1:0", "-config=/config/vault.json")
                     otel_bind = "[::]" if len(listening) == 2 else authority(address("otel", listening[0]))
-                    (config / "otel.yaml").write_text(f"""
+                    write_config(config / "otel.yaml", f"""
 receivers:
   otlp:
     protocols:
@@ -229,20 +246,35 @@ service:
                     for service, binary, test, extra in commands:
                         runner = network + "-test-" + service
                         docker("create", "--name", runner, "--network", network,
-                               "--dns", dns_address, "--dns-option", "timeout:1",
-                               "--dns-option", "attempts:1",
+                               *resolver_args,
                                "--mount", f"type=bind,src={certs},dst=/certs,readonly",
                                *env_args, args.test_image, binary, test,
                                "--exact", "--nocapture", *extra)
                         names.append(runner)
                         result = docker("start", "-a", runner, timeout=35, check=False)
-                        (case_output / (service + "-test.log")).write_text(result.stdout + result.stderr)
+                        test_log = result.stdout + result.stderr
+                        (case_output / (service + "-test.log")).write_text(test_log)
+                        resolver_output = case_output / (service + "-resolv.conf")
+                        docker("cp", runner + ":/etc/resolv.conf", str(resolver_output))
+                        if ipv6_only and resolver_output.read_text() != (config / "resolv.conf").read_text():
+                            raise RuntimeError(f"{service} did not use the direct IPv6 resolver")
                         if naming == "missing":
-                            if not result.returncode or "0 passed; 1 failed" not in result.stdout:
+                            if (not result.returncode or "0 passed; 1 failed" not in result.stdout
+                                    or "failed to lookup address information" not in test_log):
                                 raise RuntimeError(f"{service} did not reject an unresolvable name")
                             continue
                         if result.returncode or "1 passed" not in result.stdout:
                             raise RuntimeError(f"{service} qualification failed:\n{result.stdout}{result.stderr}")
+                        if (service == "postgres"
+                                and "PostgreSQL exchange succeeded over address family Some(" not in test_log):
+                            raise RuntimeError("PostgreSQL test did not complete a network query")
+                    if naming == "missing" or ipv6_only:
+                        dns_result = docker("logs", dns)
+                        dns_lines = (dns_result.stdout + dns_result.stderr).splitlines()
+                        for service, _, _, _ in commands:
+                            if not any(f" IN {endpoint(service)}. " in line
+                                       and (not ipv6_only or "fd00:5403::" in line) for line in dns_lines):
+                                raise RuntimeError(f"DNS did not record the expected {service} query")
                     collector_logs = docker("logs", collector).stderr
                     if (span in collector_logs) != (naming != "missing"):
                         raise RuntimeError("collector did not record the exported qualification span")
@@ -269,11 +301,22 @@ service:
                 network_created = False
     finally:
         if network_created:
-            docker("network", "rm", network)
+            active_error = sys.exc_info()[1]
+            try:
+                docker("network", "rm", network)
+            except Exception as error:
+                if active_error is None:
+                    raise
+                print(f"Could not remove qualification network: {error}", file=sys.stderr)
     print(f"Passed {len(results)} dependency network cases; evidence: {output}")
 
 
 def main():
+    def terminate(signum, _frame):
+        raise SystemExit(128 + signum)
+
+    for signum in (signal.SIGTERM, signal.SIGHUP):
+        signal.signal(signum, terminate)
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--test-image", default="nico-dependency-tests")
     parser.add_argument("--output", type=Path, required=True, help="new evidence directory")

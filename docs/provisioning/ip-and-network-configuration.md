@@ -817,9 +817,13 @@ literal IPv6 addresses; DNS names do not take brackets.
 
 For TLS endpoints, trust the issuing CA and include the configured DNS name or IP
 address in the server certificate's subject alternative names. Vault verifies
-the server certificate. Core's database startup uses `sslmode=require` when TLS
+the server certificate. Core's runtime database pool uses `sslmode=require` when TLS
 configuration is present and enforcement has not been disabled; this must not be
-interpreted as hostname verification. See [Tracing](../observability/tracing.md)
+interpreted as hostname verification. The Helm migration Job separately uses
+`migrationJob.sslMode`, which defaults to `require` and can be set to
+`verify-full` for certificate and hostname verification. The qualification's
+PostgreSQL exchange uses `verify-full`; it does not exercise the runtime pool's
+TLS policy. See [Tracing](../observability/tracing.md)
 for collector configuration and trace enablement.
 
 The repeatable `dev/deployment/dependency-network` qualification exercises real

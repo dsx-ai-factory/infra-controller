@@ -23,9 +23,9 @@ and literal-address exchanges in [#6604](https://github.com/dsx-ai-factory/infra
 
 The driver creates its own named networks and containers. It publishes no host
 ports, uses disposable credentials, and removes its containers and networks on
-completion or a handled failure. It leaves the test image and Cargo caches for
-reuse. SIGKILL or host failure can leave resources named `nico-dependency-*`;
-inspect their identities before removing them.
+completion, a handled failure, or SIGINT/SIGTERM/SIGHUP. It leaves the test image
+and Cargo caches for reuse. SIGKILL or host failure can leave resources named
+`nico-dependency-*`; inspect their identities before removing them.
 
 ## Build and run
 
@@ -64,7 +64,7 @@ the ordinary suites.
 | IPv4 literal | IPv4 listener; direct IPv4 endpoint. |
 | IPv6 literal | IPv6 listener; bracketed IPv6 URL. |
 | AAAA only | DNS name has only an AAAA answer; IPv6 listener. |
-| IPv6-only network | AAAA answers and an IPv6 DNS server; Docker IPv4 networking disabled. |
+| IPv6-only network | AAAA answers; clients query the IPv6 DNS server directly; Docker IPv4 networking disabled. |
 | Dual stack | A and AAAA answers; both listeners available. |
 | IPv4 refused | A and AAAA answers; only the IPv6 listener available. |
 | IPv6 refused | A and AAAA answers; only the IPv4 listener available. |
@@ -72,12 +72,21 @@ the ordinary suites.
 
 PostgreSQL uses the production URL parser, authenticates with SCRAM over verified
 TLS, and executes a query. Its server-reported connection family must match the
-case when only one family is usable. Vault uses the production client with TLS
-verification to create, read, delete, and verify absence of a test credential;
+case when only one family is usable; the driver also requires its query-completion
+marker, so a skipped test cannot pass qualification. Vault uses the production
+client with TLS verification to create, read, delete, and verify absence of a test credential;
 the server audit records establish the client address family. The production
 Core OTLP exporter sends a uniquely named span over gRPC, and the driver requires
-that span in the real collector's output. The missing-DNS case requires failed
-tests and no credential requests or exported span.
+that span in the real collector's output. The missing-DNS case requires a
+name-resolution error from each client, corresponding DNS queries, and no
+credential requests or exported span.
+
+The IPv6-only case mounts a resolver configuration naming the IPv6 DNS server,
+and verifies IPv6 query peers in CoreDNS logs. The other hostname cases use
+Docker's embedded DNS forwarder. Every case records each client's `resolv.conf`.
+PostgreSQL's verified TLS exchange qualifies the URL parser and a migration-style
+`verify-full` connection; Core's runtime pool instead enforces `require` when
+TLS is configured and enforcement has not been disabled.
 
 The evidence directory retains image identity, source revision, tool versions,
 per-case network configuration, test output, CoreDNS queries, Vault audit records,
