@@ -203,7 +203,10 @@ async fn routed_metadata() {
     // explicit IPv4 listener to check the unchanged IPv4 reply path below.
     crate::metadata_service::spawn_metadata_service(
         "0.0.0.0:7777".to_string(),
-        create_metrics(opentelemetry::global::meter("embedded-routing-test")),
+        create_metrics(
+            opentelemetry::global::meter("embedded-routing-test"),
+            carbide_instrument::Instrumentation::global(),
+        ),
         state.clone(),
         false,
         &mut tasks,
@@ -213,7 +216,10 @@ async fn routed_metadata() {
     .expect("embedded metadata listener");
     let mut pending = Some(PendingMetadataService {
         address: format!("[{FMDS_IPV6_ADDRESS}]:7777"),
-        metrics: create_metrics(opentelemetry::global::meter("embedded-routing-test")),
+        metrics: create_metrics(
+            opentelemetry::global::meter("embedded-routing-test"),
+            carbide_instrument::Instrumentation::global(),
+        ),
         state,
     });
     assert!(

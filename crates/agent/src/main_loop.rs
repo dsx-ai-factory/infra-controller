@@ -136,7 +136,8 @@ pub(super) async fn setup_and_run(
     );
 
     let agent_meter = get_dpu_agent_meter();
-    let metrics = create_metrics(agent_meter);
+    let instrumentation = crate::instrumentation::get_event_instrumentation();
+    let metrics = create_metrics(agent_meter, instrumentation.clone());
 
     // Containerized (DPF) mode starts not-ready: the pod should only become
     // Ready once the first GetManagedHostNetworkConfig iteration has actually
@@ -162,7 +163,7 @@ pub(super) async fn setup_and_run(
                 "Starting Prometheus /metrics endpoint"
             );
             let metrics_config = metrics_endpoint::MetricsEndpointConfig {
-                instrumentation: carbide_instrument::Instrumentation::global(),
+                instrumentation: instrumentation.clone(),
                 address: metrics_address,
                 registry: get_prometheus_registry(),
                 health_controller: Some(health_controller.clone()),
@@ -202,6 +203,7 @@ pub(super) async fn setup_and_run(
         );
         let last_connect_succeeded = register_external_connection_metric(&get_dpu_agent_meter());
         FmdsUpdater::External {
+            instrumentation: instrumentation.clone(),
             address: fmds_addr.clone(),
             machine_identity: agent_config.machine_identity.clone(),
             connect_timeout: Duration::from_secs(options.fmds_connect_timeout_secs),
@@ -330,6 +332,7 @@ pub(super) async fn setup_and_run(
             forge_api: forge_api_server.clone(),
             carbide_client_config: Arc::clone(&carbide_client_config),
         },
+        instrumentation.clone(),
     )
     .await;
 
@@ -360,7 +363,7 @@ pub(super) async fn setup_and_run(
     }
 
     if options.agent_platform_type.is_dpu_os() {
-        if let Err(e) = lldp::prepare_lldp().await {
+        if let Err(e) = lldp::prepare_lldp(&instrumentation).await {
             tracing::error!(error = %e, "Couldn't prepare LLDP configuration");
         }
         if let Err(e) = lldp::set_lldp_system_description(&machine_id).await {
@@ -377,6 +380,7 @@ pub(super) async fn setup_and_run(
     .await?;
 
     let inventory_updater_config = MachineInventoryUpdaterConfig {
+        instrumentation: instrumentation.clone(),
         dpu_agent_version: build_version.clone(),
         update_inventory_interval: Duration::from_secs(agent_config.period.inventory_update_secs),
         machine_id,
@@ -444,6 +448,7 @@ pub(super) async fn setup_and_run(
         .map(|prefix| InterfaceTranslationMode::Prepend(prefix.clone()));
 
     let lldp_platform_type = options.agent_platform_type.clone();
+    let lldp_instrumentation = instrumentation.clone();
     let latest_lldp = carbide_host_support::lldp_collector_task::start_lldp_collector(
         move || {
             // The clone must happen here, outside the future, so the future
@@ -451,17 +456,18 @@ pub(super) async fn setup_and_run(
             // closure instead, and a lending future implements only
             // `AsyncFnMut`, whose future cannot be bounded `Send` on stable.
             let platform_type = lldp_platform_type.clone();
+            let instrumentation = lldp_instrumentation.clone();
             async move {
                 let collected = crate::collect_lldp_neighbors(&platform_type).await;
                 // Emitted here rather than where the collection is reported, so
                 // the metric keeps counting collection attempts rather than the
                 // status loop's reads of them.
                 match &collected {
-                    Ok(_) => LldpCollection::Succeeded.emit(),
+                    Ok(_) => LldpCollection::Succeeded.emit(&instrumentation),
                     Err(error) => LldpCollection::Failed {
                         error: error.to_string(),
                     }
-                    .emit(),
+                    .emit(&instrumentation),
                 }
                 collected
             }
@@ -472,6 +478,7 @@ pub(super) async fn setup_and_run(
     );
 
     let mut main_loop = MainLoop {
+        instrumentation,
         carbide_client_config,
         build_version,
         machine_id,
@@ -554,6 +561,7 @@ async fn apply_fmds_interface(
 }
 
 struct MainLoop {
+    instrumentation: carbide_instrument::Instrumentation,
     carbide_client_config: Arc<CarbideClientConfig>,
     machine_id: DpuMachineId,
     factory_mac_address: MacAddress,
@@ -1052,11 +1060,11 @@ impl MainLoop {
                 managed_host_config_version = conf.managed_host_config_version.as_str(),
                 "Restart OVS because use_admin_network_changed is set to true"
             );
-            if let Err(err) = crate::ovs::restart_ovs()
+            if let Err(err) = crate::ovs::restart_ovs(&self.instrumentation)
                 .await
                 .wrap_err("restarting OVS after admin network change")
             {
-                carbide_instrument::emit(OvsRestart::Retrying {
+                self.instrumentation.emit(OvsRestart::Retrying {
                     error: format!("{err:#}"),
                     managed_host_config_version: conf.managed_host_config_version.clone(),
                 });
@@ -1597,6 +1605,7 @@ impl MainLoop {
                     status_out,
                     &self.forge_api_server,
                     &self.carbide_client_config,
+                    &self.instrumentation,
                 )
                 .await;
                 self.seen_blank = false;
@@ -2000,6 +2009,7 @@ async fn record_network_status(
     status: rpc::DpuNetworkStatus,
     forge_api: &str,
     carbide_client_config: &carbide_tls_client::CarbideClientConfig,
+    instrumentation: &carbide_instrument::Instrumentation,
 ) -> Result<(), eyre::Report> {
     let mut client = match carbide_tls_client::CarbideTlsClient::new(carbide_client_config)
         .build(forge_api)
@@ -2011,7 +2021,7 @@ async fn record_network_status(
                 forge_api: forge_api.to_string(),
                 error: format!("{err:#}"),
             }
-            .emit();
+            .emit(instrumentation);
             return Err(err.into());
         }
     };
@@ -2021,14 +2031,14 @@ async fn record_network_status(
         .await
     {
         Ok(_) => {
-            NetworkStatus::Succeeded.emit();
+            NetworkStatus::Succeeded.emit(instrumentation);
             Ok(())
         }
         Err(err) => {
             NetworkStatus::RpcFailed {
                 error: format!("{err:#}"),
             }
-            .emit();
+            .emit(instrumentation);
             Err(err.into())
         }
     }

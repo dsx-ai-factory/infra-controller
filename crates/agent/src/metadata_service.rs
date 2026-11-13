@@ -171,7 +171,10 @@ mod tests {
         let cancel = CancellationToken::new();
         let address = spawn_metadata_service(
             "[::]:0".to_string(),
-            create_metrics(opentelemetry::global::meter("metadata-listener-test")),
+            create_metrics(
+                opentelemetry::global::meter("metadata-listener-test"),
+                carbide_instrument::Instrumentation::global(),
+            ),
             metadata_state(),
             true,
             &mut tasks,
@@ -279,7 +282,10 @@ mod tests {
             let mut tasks = JoinSet::new();
             let error = spawn_metadata_service(
                 address,
-                create_metrics(opentelemetry::global::meter("metadata-listener-test")),
+                create_metrics(
+                    opentelemetry::global::meter("metadata-listener-test"),
+                    carbide_instrument::Instrumentation::global(),
+                ),
                 metadata_state(),
                 true,
                 &mut tasks,
@@ -302,7 +308,10 @@ mod tests {
         let mut tasks = JoinSet::new();
         let error = spawn_bound_metadata_service(
             listener,
-            create_metrics(opentelemetry::global::meter("metadata-listener-test")),
+            create_metrics(
+                opentelemetry::global::meter("metadata-listener-test"),
+                carbide_instrument::Instrumentation::global(),
+            ),
             metadata_state(),
             true,
             &mut tasks,
