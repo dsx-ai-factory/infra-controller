@@ -313,6 +313,7 @@ fn services_with_component_manager(
     component_manager: Option<Arc<component_manager::component_manager::ComponentManager>>,
 ) -> PowerShelfStateHandlerServices {
     PowerShelfStateHandlerServices {
+        instrumentation: env.harness.api().instrumentation().clone(),
         db_pool: env.pool.clone(),
         component_manager,
         // Force a credential manager that always resolves BMC creds via the

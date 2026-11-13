@@ -32,6 +32,8 @@ pub struct PowerShelfStateHandlerContextObjects {}
 
 #[derive(Clone)]
 pub struct PowerShelfStateHandlerServices {
+    /// Event metric destination shared by the controller and credential rotation engine.
+    pub instrumentation: carbide_instrument::Instrumentation,
     pub db_pool: PgPool,
     pub component_manager: Option<Arc<ComponentManager>>,
     pub credential_manager: Arc<dyn CredentialManager>,
