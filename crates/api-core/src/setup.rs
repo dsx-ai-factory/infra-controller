@@ -2616,12 +2616,12 @@ async fn initialize_and_start_controllers<'a>(
 
             DpaMonitor::new(
                 db_pool.clone(),
-                db_pool.clone().into(),
                 dpa_info,
                 meter.clone(),
                 carbide_config.ewethers_config.clone().unwrap_or_default(),
                 carbide_config.host_health,
                 work_lock_manager_handle.clone(),
+                api_service.instrumentation.clone(),
             )
             .start(join_set, cancel_token.clone())?;
 
