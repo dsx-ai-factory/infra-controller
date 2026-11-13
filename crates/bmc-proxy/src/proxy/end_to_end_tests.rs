@@ -41,10 +41,10 @@ use mac_address::MacAddress;
 use opentelemetry::trace::TracerProvider;
 use opentelemetry_sdk::trace::{InMemorySpanExporter, SdkTracerProvider};
 use rcgen::ExtendedKeyUsagePurpose;
+use rpc::carbide_api_client::CarbideApiClient;
+use rpc::carbide_tls_client::{ApiConfig, CarbideClientConfig};
 use rpc::forge;
 use rpc::forge::find_bmc_ips_request::LookupBy;
-use rpc::forge_api_client::ForgeApiClient;
-use rpc::forge_tls_client::{ApiConfig, ForgeClientConfig};
 use tokio_rustls::rustls;
 use tokio_rustls::rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use tracing_subscriber::layer::SubscriberExt;
@@ -632,12 +632,12 @@ where
 
 /// A client for a fake nico-api listening on a fresh local port, knowing no
 /// switch.
-async fn fake_nico_api() -> ForgeApiClient {
+async fn fake_nico_api() -> CarbideApiClient {
     fake_nico_api_answering_after(Duration::ZERO).await
 }
 
 /// [`fake_nico_api`], answering lookups after `lookup_delay`.
-async fn fake_nico_api_answering_after(lookup_delay: Duration) -> ForgeApiClient {
+async fn fake_nico_api_answering_after(lookup_delay: Duration) -> CarbideApiClient {
     fake_nico_api_with(lookup_delay, FakeInventory::NoSwitch)
         .await
         .0
@@ -648,7 +648,7 @@ async fn fake_nico_api_answering_after(lookup_delay: Duration) -> ForgeApiClient
 async fn fake_nico_api_with(
     lookup_delay: Duration,
     inventory: FakeInventory,
-) -> (ForgeApiClient, Lookups) {
+) -> (CarbideApiClient, Lookups) {
     fake_nico_api_storing(lookup_delay, inventory, stored_nvos()).await
 }
 
@@ -657,7 +657,7 @@ async fn fake_nico_api_storing(
     lookup_delay: Duration,
     inventory: FakeInventory,
     nvos: StoredNvos,
-) -> (ForgeApiClient, Lookups) {
+) -> (CarbideApiClient, Lookups) {
     let (client, lookups, _) = fake_nico_api_capturing_headers(lookup_delay, inventory, nvos).await;
     (client, lookups)
 }
@@ -667,7 +667,7 @@ async fn fake_nico_api_capturing_headers(
     lookup_delay: Duration,
     inventory: FakeInventory,
     nvos: StoredNvos,
-) -> (ForgeApiClient, Lookups, CapturedHeaders) {
+) -> (CarbideApiClient, Lookups, CapturedHeaders) {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
         .expect("bind fake nico-api");
@@ -688,9 +688,9 @@ async fn fake_nico_api_capturing_headers(
             .await
             .expect("fake nico-api serves");
     });
-    let client = ForgeApiClient::new(&ApiConfig::new(
+    let client = CarbideApiClient::new(&ApiConfig::new(
         &format!("http://{addr}"),
-        &ForgeClientConfig::default(),
+        &CarbideClientConfig::default(),
     ));
     (client, lookups, headers)
 }

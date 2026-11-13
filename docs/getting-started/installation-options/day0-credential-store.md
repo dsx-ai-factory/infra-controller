@@ -2,14 +2,14 @@
 
 This guide is the Day 0 reference for choosing where NICo keeps the credentials it manages: BMC and UEFI passwords, switch accounts, factory defaults, and similar material. Vault is the default. A new site can instead keep them in Postgres, encrypted per credential, from the first boot, which removes Vault from the credential path. This page covers what a new site configures once; [Secrets Storage](../../configuration/secrets-storage.md) is the full reference for the `[secrets]` section, the migration of an existing site, and key rotation.
 
-Vault remains installed either way. It issues certificates through the `vault-nico-issuer` ClusterIssuer and, with the chart's default certificate settings, the machine and UFM certificates that `nico-api` requests, so the Vault connection settings in the `nico-api` chart stay required. For the settings that make them required, refer to [How It Works](../../configuration/secrets-storage.md#how-it-works) in Secrets Storage.
+Vault remains installed unless the site is installed with `setup.sh --skip-vault`. When it is installed, it issues certificates through the `vault-nico-issuer` ClusterIssuer and, with the chart's default certificate settings, the machine and UFM certificates that `nico-api` requests, so the Vault connection settings in the `nico-api` chart stay required. For the settings that make them required, refer to [How It Works](../../configuration/secrets-storage.md#how-it-works) in Secrets Storage. A site installed with `--skip-vault` keeps its credentials in Postgres as this page describes, sets both cert-manager flags, and issues the Core, RMS, Flow, and site-agent service certificates from the `site-issuer` ClusterIssuer instead; refer to [Installing without Vault](https://github.com/dsx-ai-factory/infra-controller/blob/main/helm-prereqs/README.md#installing-without-vault).
 
 ---
 
 ## Prerequisites
 
-- The prerequisite stack from the [Reference Installation](reference-install.md), including Postgres and Vault.
-- A decision on the key encryption key (KEK) provider. This page uses the Integrated provider, which holds the key in a Kubernetes Secret and is production-supported only under the conditions in [Secrets Storage](../../configuration/secrets-storage.md). The Transit provider keeps the KEK in Vault; its setup is described on that page. A Vault/OpenBao Transit or [KMIP](../../configuration/kmip-kek-provider.md) provider keeps KEK material out of the NICo process; it is outside the cluster only when that server is deployed externally, which the reference installation's in-cluster Vault is not.
+- The prerequisite stack from the [Reference Installation](reference-install.md), including Postgres, and Vault unless the site is installed with `--skip-vault`.
+- A decision on the key encryption key (KEK) provider. This page uses the Integrated provider, which holds the key in a Kubernetes Secret and is production-supported only under the conditions in [Secrets Storage](../../configuration/secrets-storage.md). The Transit provider keeps the KEK in Vault; its setup is described on that page, and it is unavailable on a site installed with `--skip-vault`. A Vault/OpenBao Transit or [KMIP](../../configuration/kmip-kek-provider.md) provider keeps KEK material out of the NICo process; it is outside the cluster only when that server is deployed externally, which the reference installation's in-cluster Vault is not.
 - `nico-api` not yet deployed, or deployed without any credentials stored. A site that already holds credentials in Vault follows the migration walk in Secrets Storage instead.
 
 ---
@@ -20,7 +20,7 @@ Vault remains installed either way. It issues certificates through the `vault-ni
 |---|---|---|
 | Kubernetes Secret | The KEK, one 256-bit key per `kek_id`, in the namespace where `nico-api` runs | Wraps the per-credential data keys; the only material an operator must protect |
 | `nico-api` chart values | An `extraEnv` entry that exposes the KEK, and the `[secrets]` section in `siteConfig.nicoApiSiteConfig` | Postgres becomes the credential reader and writer |
-| `helm-prereqs` values | `vault.kvSeeds` | Decides whether factory-default credentials are seeded into Vault or added through the CLI |
+| `helm-prereqs` values | `vault.kvSeeds`, or `siteCredentials` with `--skip-vault` | Decides whether factory-default credentials are seeded into Vault or added through the CLI; without Vault, renders the site-wide BMC root and UEFI defaults as a credential-file Secret instead |
 
 ---
 
@@ -81,6 +81,8 @@ keys = { "site-kek-1" = { env = "NICO_SECRETS_KEK" } }
 - **Seed nothing.** Set `vault.kvSeeds: []` in the `helm-prereqs` values and add the credentials with `nico-admin-cli credential add-*` once the API is up, starting with the site-wide credentials in the [Quick Start Guide](../quick-start.md) and the factory defaults for your hardware.
 - **Import the seeds once.** List `vault` after `postgres` in `backends` and set `import_from = "vault"` for the first boot. When the log shows `Vault secret import completed`, remove `vault` from `backends` and drop `import_from`; later boots skip the import without contacting Vault.
 
+On a site installed with `--skip-vault`, neither option applies: the chart renders no Vault KV, so there are no seeds and nothing to import. Set `siteCredentials.enabled: true` in the `helm-prereqs` values to render the site-wide BMC root and UEFI defaults as a credential-file Secret, point `nico-api.credentials.file.existingSecret` at it, and add the factory defaults with `nico-admin-cli credential add-dpu-factory-default` and `credential add-host-factory-default` after the API is up. Refer to [Credentials without Vault](https://github.com/dsx-ai-factory/infra-controller/blob/main/helm-prereqs/README.md#credentials-without-vault).
+
 ## Deploy and Verify
 
 Run the installation as usual. At startup `nico-api` logs `Postgres secrets backend configured` with the active provider, backends, and writer:
@@ -94,7 +96,7 @@ After you add credentials, the counter `carbide_api_secrets_requests_total` rise
 ## Back Up the KEK
 
 <Warning>
-A database dump is unreadable without every KEK its rows reference, and losing the Integrated KEK loses every stored credential. Export the Secret and store it with the Vault unseal keys, as described in the pre-upgrade checklist of [Upgrading NICo](../../manuals/upgrade.md).
+A database dump is unreadable without every KEK its rows reference, and losing the Integrated KEK loses every stored credential. Export the Secret and store it offline with the Vault unseal keys, or in the same kind of location on a site without Vault, as described in the pre-upgrade checklist of [Upgrading NICo](../../manuals/upgrade.md).
 </Warning>
 
 ```bash

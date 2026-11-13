@@ -25,9 +25,6 @@ rules:
     resources: ["sites/status"]
     verbs: ["get", "update", "patch"]
   - apiGroups: [""]
-    resources: ["secrets"]
-    verbs: ["get", "list", "watch", "create", "update", "patch"]
-  - apiGroups: [""]
     resources: ["configmaps"]
     verbs: ["get", "list", "watch"]
 ---

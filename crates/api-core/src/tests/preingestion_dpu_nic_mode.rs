@@ -110,7 +110,6 @@ fn host_bmc_report() -> EndpointExplorationReport {
         lockdown_status: None,
         power_shelf_id: None,
         switch_id: None,
-        remediation_error: None,
         ..Default::default()
     }
 }

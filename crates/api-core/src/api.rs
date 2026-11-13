@@ -30,6 +30,7 @@ use ::rpc::protos::dns::{
     UpdateDomainRequest,
 };
 use ::rpc::protos::{measured_boot as measured_boot_pb, mlx_device as mlx_device_pb};
+use bmc_runtime::DriverConnector;
 use carbide_ib_fabric::ib::IBFabricManager;
 use carbide_machine_controller::dpf::DpfOperations;
 use carbide_machine_controller::io::MachineStateControllerIO;
@@ -70,7 +71,31 @@ use crate::resource_pool::ResourcePoolMonitor;
 use crate::scout_stream::ConnectionRegistry;
 use crate::{CarbideError, CarbideResult};
 
+/// `RequestReceivedAt` records ingress before authorization/admission waits.
+/// Handlers opt into it; it does not change other RPC timeout semantics.
+#[derive(Clone, Copy)]
+pub(crate) struct RequestReceivedAt(pub(crate) tokio::time::Instant);
+
+/// Records request arrival before authorization and business admission. The
+/// listener installs this outermost; firmware reads consume the extension.
+fn record_grpc_receipt<B>(mut request: axum::extract::Request<B>) -> axum::extract::Request<B> {
+    request
+        .extensions_mut()
+        .insert(RequestReceivedAt(tokio::time::Instant::now()));
+    request
+}
+
+/// Builds the listener's receipt layer independently of admission configuration.
+/// Firmware reads consume its stamp even when admission is disabled.
+pub(crate) fn grpc_receipt_layer<B>() -> tower::util::MapRequestLayer<
+    impl Fn(axum::extract::Request<B>) -> axum::extract::Request<B> + Clone,
+> {
+    tower::util::MapRequestLayer::new(record_grpc_receipt::<B>)
+}
+
 pub struct Api {
+    /// Event destination for migrated handlers; other paths retain global recording.
+    pub(crate) instrumentation: carbide_instrument::Instrumentation,
     // `pub` (not `pub(crate)`): read by the `carbide-api-web` admin UI (e.g. IPAM/DNS pages).
     pub database_connection: sqlx::PgPool,
     pub(crate) credential_manager: Arc<dyn CredentialManager>,
@@ -83,6 +108,9 @@ pub struct Api {
     /// handing these to a wrapper pool is a compile error (a wrong-pool
     /// guard, not a wire-path guarantee -- see [`BmcCredentialOps`]).
     pub(crate) bmc_credential_ops: Arc<dyn BmcCredentialOps>,
+    /// Connects moved BMC operations through their drivers when the site
+    /// sets `bmc_backend = "drivers"`; `None` runs them through libredfish.
+    pub(crate) driver_connector: Option<Arc<DriverConnector>>,
     /// HTTP client for the raw Redfish passthrough when `[bmc_proxy]` is
     /// enabled; `None` keeps the passthrough dialing BMCs directly.
     pub(crate) bmc_proxy_passthrough: Option<Arc<crate::bmc_proxy::PassthroughClient>>,
@@ -104,7 +132,6 @@ pub struct Api {
     pub(crate) bmc_client: Arc<dyn AuthenticatedBmc>,
     pub(crate) endpoint_exploration_service: Arc<EndpointExplorationService>,
     pub(crate) scout_stream_registry: ConnectionRegistry,
-    #[allow(unused)]
     pub(crate) rms_client: Option<Arc<dyn RmsApi>>,
     pub(crate) nmxc_client_pool: Arc<dyn NmxcPool>,
     pub(crate) work_lock_manager_handle: WorkLockManagerHandle,
@@ -2236,39 +2263,39 @@ impl Forge for Api {
         crate::handlers::expected_rack::delete_all_expected_racks(self, request).await
     }
 
-    async fn create_expected_nv_link_domain(
+    async fn create_nv_link_domain(
         &self,
-        request: Request<rpc::CreateExpectedNvLinkDomainRequest>,
-    ) -> Result<Response<rpc::ExpectedNvLinkDomain>, Status> {
-        crate::handlers::expected_nvlink_domain::create(self, request).await
+        request: Request<rpc::CreateNvLinkDomainRequest>,
+    ) -> Result<Response<rpc::NvLinkDomain>, Status> {
+        crate::handlers::nvlink_domain::create(self, request).await
     }
 
-    async fn delete_expected_nv_link_domain(
+    async fn delete_nv_link_domain(
         &self,
-        request: Request<rpc::ExpectedNvLinkDomainRequest>,
+        request: Request<rpc::NvLinkDomainRequest>,
     ) -> Result<Response<()>, Status> {
-        crate::handlers::expected_nvlink_domain::delete(self, request).await
+        crate::handlers::nvlink_domain::delete(self, request).await
     }
 
-    async fn get_expected_nv_link_domain(
+    async fn get_nv_link_domain(
         &self,
-        request: Request<rpc::ExpectedNvLinkDomainRequest>,
-    ) -> Result<Response<rpc::ExpectedNvLinkDomain>, Status> {
-        crate::handlers::expected_nvlink_domain::get(self, request).await
+        request: Request<rpc::NvLinkDomainRequest>,
+    ) -> Result<Response<rpc::NvLinkDomain>, Status> {
+        crate::handlers::nvlink_domain::get(self, request).await
     }
 
-    async fn find_expected_nv_link_domain_ids(
+    async fn find_nv_link_domain_ids(
         &self,
-        request: Request<rpc::ExpectedNvLinkDomainSearchFilter>,
-    ) -> Result<Response<rpc::ExpectedNvLinkDomainIdList>, Status> {
-        crate::handlers::expected_nvlink_domain::find_ids(self, request).await
+        request: Request<rpc::NvLinkDomainSearchFilter>,
+    ) -> Result<Response<rpc::NvLinkDomainIdList>, Status> {
+        crate::handlers::nvlink_domain::find_ids(self, request).await
     }
 
-    async fn find_expected_nv_link_domains_by_ids(
+    async fn find_nv_link_domains_by_ids(
         &self,
-        request: Request<rpc::ExpectedNvLinkDomainsByIdsRequest>,
-    ) -> Result<Response<rpc::ExpectedNvLinkDomainList>, Status> {
-        crate::handlers::expected_nvlink_domain::find_by_ids(self, request).await
+        request: Request<rpc::NvLinkDomainsByIdsRequest>,
+    ) -> Result<Response<rpc::NvLinkDomainList>, Status> {
+        crate::handlers::nvlink_domain::find_by_ids(self, request).await
     }
 
     async fn add_expected_rack_group(
@@ -4138,6 +4165,16 @@ impl Forge for Api {
         request: Request<rpc::GetComponentPowerDetailsRequest>,
     ) -> Result<Response<rpc::GetComponentPowerDetailsResponse>, Status> {
         crate::handlers::component_manager::power_details::get_component_power_details(
+            self, request,
+        )
+        .await
+    }
+
+    async fn get_component_firmware_details(
+        &self,
+        request: Request<rpc::GetComponentFirmwareDetailsRequest>,
+    ) -> Result<Response<rpc::GetComponentFirmwareDetailsResponse>, Status> {
+        crate::handlers::component_manager::firmware_details::get_component_firmware_details(
             self, request,
         )
         .await

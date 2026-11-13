@@ -20,6 +20,7 @@ use std::sync::atomic::Ordering;
 use carbide_utils::test_support::test_meter::TestMeter;
 use config_version::ConfigVersion;
 use tokio::sync::{Semaphore, mpsc, oneshot};
+use tracing_subscriber::prelude::*;
 
 use super::*;
 use crate::state_handler::NoopStateHandler;
@@ -50,6 +51,147 @@ fn processor(pool: sqlx::PgPool) -> StateProcessor<TestStateControllerIO> {
         processor_id: "deadline-test".to_string(),
         state_change_emitter: Arc::new(StateChangeEmitter::default()),
     }
+}
+
+#[tokio::test]
+async fn sql_accounting_adds_independent_spans_across_log_intervals() {
+    struct LogWriter(Arc<std::sync::Mutex<Vec<u8>>>);
+
+    impl std::io::Write for LogWriter {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    let pool = sqlx::postgres::PgPoolOptions::new()
+        .connect_lazy("postgresql://unused/unused")
+        .unwrap();
+    let mut processor = processor(pool);
+    let meter = TestMeter::default();
+    processor.metric_emitter = Some(ProcessorMetricsEmitter::new("test_objects", &meter.meter()));
+    let logs = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let log_writer = logs.clone();
+    let subscriber = tracing_subscriber::registry()
+        .with(sqlx_query_tracing::create_sqlx_query_tracing_layer())
+        .with(
+            tracing_subscriber::fmt::layer()
+                .without_time()
+                .with_ansi(false)
+                .with_writer(move || LogWriter(log_writer.clone())),
+        );
+    let _subscriber = tracing::subscriber::set_default(subscriber);
+
+    for (name, queries, report, expected_report_queries, total_queries, report_count) in [
+        ("first span", 2, true, 2, 2, 1),
+        ("equal independent span", 2, true, 2, 4, 2),
+        ("iteration before log is due", 1, false, 0, 4, 2),
+        ("log includes skipped iteration", 1, true, 2, 6, 3),
+        ("empty span does not recount prior work", 0, true, 0, 6, 4),
+    ] {
+        processor.iteration_config.processor_log_interval = if report {
+            Duration::ZERO
+        } else {
+            Duration::from_secs(3600)
+        };
+        tracing::info_span!(parent: None, "sql_accounting_iteration").in_scope(|| {
+            for _ in 0..queries {
+                tracing::event!(
+                    target: "sqlx::query",
+                    tracing::Level::INFO,
+                    db.statement = "SELECT 1",
+                    rows_affected = 2u64,
+                    rows_returned = 3u64,
+                    elapsed = ?Duration::from_millis(10),
+                );
+            }
+            processor.emit_periodic_log_if_necessary();
+        });
+
+        let labels = format!(
+            "{{operation=\"{}\"}}",
+            TestStateControllerIO::LOG_SPAN_CONTROLLER_NAME
+        );
+        for (metric, expected) in [
+            ("carbide_api_db_queries_total", total_queries),
+            (
+                "carbide_api_db_span_query_time_milliseconds_count",
+                report_count,
+            ),
+            (
+                "carbide_api_db_span_query_time_milliseconds_sum",
+                total_queries * 10,
+            ),
+        ] {
+            assert_eq!(
+                meter.formatted_metric(metric),
+                Some(format!("{labels} {expected}")),
+                "{name}: {metric}",
+            );
+        }
+
+        let output = String::from_utf8(std::mem::take(&mut *logs.lock().unwrap())).unwrap();
+        let reports: Vec<_> = output
+            .lines()
+            .filter(|line| line.contains("sql_query_count="))
+            .collect();
+        assert_eq!(reports.len(), usize::from(report), "{name}");
+        if report {
+            for (field, expected) in [
+                ("sql_query_count", expected_report_queries),
+                ("sql_affected_row_count", expected_report_queries * 2),
+                ("sql_returned_row_count", expected_report_queries * 3),
+                (
+                    "sql_total_query_duration_microseconds",
+                    expected_report_queries * 10_000,
+                ),
+            ] {
+                assert!(
+                    reports[0]
+                        .split_whitespace()
+                        .any(|value| value == format!("{field}={expected}")),
+                    "{name}: {}",
+                    reports[0]
+                );
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn sql_accounting_reports_pending_work_after_iteration_error() {
+    let _subscriber = tracing_subscriber::registry()
+        .with(sqlx_query_tracing::create_sqlx_query_tracing_layer())
+        .set_default();
+    let pool = sqlx::postgres::PgPoolOptions::new()
+        .connect_lazy("postgresql://unused/unused")
+        .unwrap();
+    pool.close().await;
+    let mut processor = processor(pool);
+    let meter = TestMeter::default();
+    processor.metric_emitter = Some(ProcessorMetricsEmitter::new("test_objects", &meter.meter()));
+    processor.iteration_config.processor_log_interval = Duration::ZERO;
+    processor.stats_since_last_log.db_query_metrics.num_queries = 2;
+
+    assert!(matches!(
+        processor.run_single_iteration(Duration::ZERO, true).await,
+        Err(IterationError::TransactionError(sqlx::Error::PoolClosed))
+    ));
+    assert_eq!(
+        processor.stats_since_last_log.db_query_metrics.num_queries,
+        0
+    );
+    assert_eq!(
+        meter.formatted_metric("carbide_api_db_queries_total"),
+        Some(format!(
+            "{{operation=\"{}\"}} 2",
+            TestStateControllerIO::LOG_SPAN_CONTROLLER_NAME
+        )),
+    );
 }
 
 #[tokio::test(start_paused = true)]

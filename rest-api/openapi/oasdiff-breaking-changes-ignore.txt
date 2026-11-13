@@ -334,6 +334,12 @@ API DELETE /v2/org/{org}/nico/vpc-prefix/{vpcPrefixId} removed the success respo
 
 # Expected switches require operator-declared NVOS ports; discovery no longer fills them.
 # Compatibility exception and migration: fern/changelog/2026-10-19.mdx.
+# Cartridge indexes are required for submitted rack-group members; clients and servers upgrade together.
+API POST /v2/org/{org}/nico/expected-rack-group added the new required request property `racks/items/members/items/cartridgeIndex`
+API PUT /v2/org/{org}/nico/expected-rack-group added the new required request property `expectedRackGroups/items/racks/items/members/items/cartridgeIndex`
+API PUT /v2/org/{org}/nico/expected-rack-group/all added the new required request property `expectedRackGroups/items/racks/items/members/items/cartridgeIndex`
+API PATCH /v2/org/{org}/nico/expected-rack-group/{id} added the new required request property `racks/items/members/items/cartridgeIndex`
+
 API POST /v2/org/{org}/nico/expected-switch added the new required request property `nvosInterfaces`
 API PUT /v2/org/{org}/nico/expected-switch/all added the new required request property `expectedSwitches/items/nvosInterfaces`
 
@@ -548,3 +554,4 @@ API GET /v2/org/{org}/nico/instance/{instanceId} added `#/components/schemas/Net
 API GET /v2/org/{org}/nico/instance/{instanceId} the `networkSecurityGroupPropagationDetails` response's property `type` changed from `object` to `any` for status `200`
 API PATCH /v2/org/{org}/nico/instance/{instanceId} added `#/components/schemas/NetworkSecurityGroupPropagationDetails, subschema #2` to the `networkSecurityGroupPropagationDetails` response property `oneOf` list for the response status `200`
 API PATCH /v2/org/{org}/nico/instance/{instanceId} the `networkSecurityGroupPropagationDetails` response's property `type` changed from `object` to `any` for status `200`
+GET /v2/org/{org}/nico/tray/{id}/power added the new `AcPowercycle` enum value to the `operations/actions/items/operation` response property for the response status `200`

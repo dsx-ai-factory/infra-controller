@@ -152,7 +152,7 @@ pub(super) async fn supervisor_stages_from_core(
         assert_eq!(rejected_record["mutation_started"], false);
         assert!(rejected_record["prepared_inputs"].is_null());
         assert!(!fixture.join("mutations").exists());
-        assert_eq!(origin.paths(), ["/image"], "TLS failure must not fall back to the source");
+        assert_eq!(origin.paths(), ["/image", "/configuration"], "TLS failure must not fall back to the source");
         timeout(WATCHDOG, async {
             while fixture.join("state/mutation.json").exists() {
                 sleep(Duration::from_millis(10)).await;
@@ -194,7 +194,7 @@ pub(super) async fn supervisor_stages_from_core(
             assert_eq!(fs::read(cache_namespace.join(digest(bytes))).expect("Core cached bytes"), bytes);
         }
         assert_eq!(fs::read_to_string(fixture.join("mutations")).expect("vendor mutations"), "configure\nburn\n");
-        assert_eq!(origin.paths(), ["/image", "/image", "/configuration"]);
+        assert_eq!(origin.paths(), ["/image", "/configuration", "/image"]);
 
         // The fetch address is Core's digest route, but the original source
         // remains part of the immutable request identity.

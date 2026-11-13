@@ -19,47 +19,50 @@ use std::future::Future;
 use std::net::SocketAddr;
 use std::time::Duration;
 
+use carbide_tls::client_config::ClientCert;
 use eyre::{Context, ContextCompat};
-use forge_tls::client_config::ClientCert;
 use rand::prelude::IndexedRandom;
-use rpc::forge_tls_client::{ForgeClientConfig, ForgeClientT, ForgeTlsClient};
+use rpc::carbide_tls_client::{CarbideClientConfig, CarbideClientT, CarbideTlsClient};
 use tonic::{Response, Status};
 
 use crate::utils::LOCALHOST_CERTS;
 
 const RPC_TIMEOUT: Duration = Duration::from_secs(60);
 
-pub(crate) async fn call<T, F, Fut>(
+pub(crate) fn call<T, F, Fut>(
     addrs: &[SocketAddr],
     rpc_name: &'static str,
     call_rpc: F,
-) -> eyre::Result<T>
+) -> impl Future<Output = eyre::Result<T>>
 where
-    F: FnOnce(ForgeClientT) -> Fut,
+    F: FnOnce(CarbideClientT) -> Fut,
     Fut: Future<Output = Result<Response<T>, Status>>,
 {
-    tokio::time::timeout(RPC_TIMEOUT, async {
-        let address = addrs
-            .choose(&mut rand::rng())
-            .context("no API servers configured")?;
-        let client_cert = ClientCert {
-            cert_path: LOCALHOST_CERTS.client_cert.to_string_lossy().into_owned(),
-            key_path: LOCALHOST_CERTS.client_key.to_string_lossy().into_owned(),
-        };
-        let config = ForgeClientConfig::new(
-            LOCALHOST_CERTS.ca_cert.to_string_lossy().into_owned(),
-            Some(client_cert),
-        );
-        let client = ForgeTlsClient::new(&config)
-            .build(format!("https://{address}"))
-            .await
-            .wrap_err_with(|| format!("building client for {rpc_name}"))?;
+    // Keep TLS connection and RPC futures out of every calling helper frame.
+    Box::pin(async move {
+        tokio::time::timeout(RPC_TIMEOUT, async {
+            let address = addrs
+                .choose(&mut rand::rng())
+                .context("no API servers configured")?;
+            let client_cert = ClientCert {
+                cert_path: LOCALHOST_CERTS.client_cert.to_string_lossy().into_owned(),
+                key_path: LOCALHOST_CERTS.client_key.to_string_lossy().into_owned(),
+            };
+            let config = CarbideClientConfig::new(
+                LOCALHOST_CERTS.ca_cert.to_string_lossy().into_owned(),
+                Some(client_cert),
+            );
+            let client = CarbideTlsClient::new(&config)
+                .build(format!("https://{address}"))
+                .await
+                .wrap_err_with(|| format!("building client for {rpc_name}"))?;
 
-        call_rpc(client)
-            .await
-            .map(Response::into_inner)
-            .wrap_err_with(|| format!("calling {rpc_name}"))
+            call_rpc(client)
+                .await
+                .map(Response::into_inner)
+                .wrap_err_with(|| format!("calling {rpc_name}"))
+        })
+        .await
+        .map_err(|_| eyre::eyre!("{rpc_name} timed out after {RPC_TIMEOUT:?}"))?
     })
-    .await
-    .map_err(|_| eyre::eyre!("{rpc_name} timed out after {RPC_TIMEOUT:?}"))?
 }

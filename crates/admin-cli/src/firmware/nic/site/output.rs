@@ -114,11 +114,11 @@ pub(super) async fn write_selections(
 #[cfg(test)]
 mod tests {
     use rpc::admin_cli::OutputFormat;
+    use rpc::carbide_api_client::CarbideApiClient;
+    use rpc::carbide_tls_client::{ApiConfig, CarbideClientConfig};
     use rpc::forge::{
         NicFirmwareHardware, NicFirmwareSiteSelection, NicFirmwareSiteSelectionResponse,
     };
-    use rpc::forge_api_client::ForgeApiClient;
-    use rpc::forge_tls_client::{ApiConfig, ForgeClientConfig};
 
     use super::write_mutation_result;
     use crate::cfg::cli_options::SortField;
@@ -145,9 +145,9 @@ mod tests {
         let (writer, reader) = tokio::io::duplex(64);
         drop(reader);
         let mut ctx = RuntimeContext {
-            api_client: ApiClient(ForgeApiClient::new(&ApiConfig::new(
+            api_client: ApiClient(CarbideApiClient::new(&ApiConfig::new(
                 "http://127.0.0.1:1",
-                &ForgeClientConfig::default(),
+                &CarbideClientConfig::default(),
             ))),
             config: RuntimeConfig {
                 format: OutputFormat::Json,

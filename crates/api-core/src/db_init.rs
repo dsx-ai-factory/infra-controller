@@ -77,11 +77,10 @@ enum InitialNetworkDomainSelection {
     Ambiguous(Vec<String>),
 }
 
-/// Select the infrastructure forward domain used by configured initial network segments.
+/// Select the forward domain used by configured initial network segments.
 ///
-/// Reverse-DNS and VPC-owned domains cannot be used for these segments.
-/// Exclude them before checking for multiple candidates so adding one cannot
-/// make the infrastructure domain selection ambiguous.
+/// Reverse-DNS zones share the domains table and must not make a sole forward
+/// domain appear ambiguous.
 fn select_initial_network_domain(
     domains: &[Domain],
     configured_domain_name: Option<&str>,
@@ -90,8 +89,7 @@ fn select_initial_network_domain(
         .iter()
         .filter(|domain| {
             let name = domain.name.trim_end_matches('.');
-            domain.vpc_id.is_none()
-                && !matches!(name, "in-addr.arpa" | "ip6.arpa")
+            !matches!(name, "in-addr.arpa" | "ip6.arpa")
                 && db::dns::normalize_reverse_zone_name(name).is_none()
         })
         .collect_vec();
@@ -631,7 +629,6 @@ mod tests {
             id: domain_id(id),
             name: name.to_string(),
             default_ttl: None,
-            vpc_id: None,
             created: timestamp,
             updated: timestamp,
             deleted: None,
@@ -653,20 +650,6 @@ mod tests {
                         configured_domain_name: None,
                     },
                     expect: InitialNetworkDomainSelection::NoForwardDomain,
-                },
-                Check {
-                    scenario: "a configured VPC domain cannot replace infrastructure scope",
-                    input: DomainSelectionCase {
-                        domains: vec![
-                            domain(1, "site.example"),
-                            Domain {
-                                vpc_id: Some(uuid::Uuid::from_u128(10).into()),
-                                ..domain(2, "vpc.example")
-                            },
-                        ],
-                        configured_domain_name: Some("vpc.example"),
-                    },
-                    expect: InitialNetworkDomainSelection::Selected(domain_id(1)),
                 },
                 Check {
                     scenario: "the configured domain wins among multiple forward domains",

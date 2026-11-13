@@ -165,31 +165,41 @@ async fn artifact_route_uses_tls_machine_identity(pool: sqlx::PgPool) {
     }
     assert!(!cache.namespace().exists());
     assert!(origin.paths().is_empty());
-    let response = tokio::time::timeout(Duration::from_secs(10), async {
-        loop {
-            let response = authenticated
-                .get(&url)
-                .header("x-artifact-request-secret", "do-not-forward")
-                .send()
-                .await
-                .expect("owned artifact response");
-            assert_eq!(response.version(), Version::HTTP_2);
-            if response.status() != StatusCode::ACCEPTED {
-                break response;
-            }
-            tokio::task::yield_now().await;
-        }
-    })
-    .await
-    .expect("owned artifact publication");
-    assert_eq!(response.status(), StatusCode::OK);
-    assert_eq!(response.bytes().await.expect("TLS artifact bytes"), IMAGE);
-    assert_eq!(
-        std::fs::read(cache.namespace().join(digest(IMAGE))).expect("published cache file"),
-        IMAGE
-    );
 
-    assert_eq!(origin.paths(), ["/image"]);
+    // Publish both inputs here so `supervisor_stages_from_core` only waits for
+    // cache readiness when it removes the image to exercise recovery.
+    for (role, bytes) in [("image", IMAGE), ("configuration", CONFIGURATION)] {
+        let artifact_url = format!(
+            "https://localhost:{}{}",
+            address.port(),
+            uri(&operation, &digest(bytes), role)
+        );
+        let response = tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                let response = authenticated
+                    .get(&artifact_url)
+                    .header("x-artifact-request-secret", "do-not-forward")
+                    .send()
+                    .await
+                    .expect("owned artifact response");
+                assert_eq!(response.version(), Version::HTTP_2);
+                if response.status() != StatusCode::ACCEPTED {
+                    break response;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap_or_else(|error| panic!("{role} artifact publication timed out: {error}"));
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.bytes().await.expect("TLS artifact bytes"), bytes);
+        assert_eq!(
+            std::fs::read(cache.namespace().join(digest(bytes))).expect("published cache file"),
+            bytes
+        );
+    }
+
+    assert_eq!(origin.paths(), ["/image", "/configuration"]);
 
     #[cfg(target_os = "linux")]
     {
@@ -223,9 +233,9 @@ async fn artifact_route_uses_tls_machine_identity(pool: sqlx::PgPool) {
     }
 
     #[cfg(target_os = "linux")]
-    let expected_source_paths = ["/image", "/image", "/configuration"];
+    let expected_source_paths = ["/image", "/configuration", "/image"];
     #[cfg(not(target_os = "linux"))]
-    let expected_source_paths = ["/image"];
+    let expected_source_paths = ["/image", "/configuration"];
 
     // Cached bytes confer no authority. Check both identities again, then
     // retire the owner's operation and require its previously valid URL to fail.

@@ -147,7 +147,7 @@ func AllUnits(ctx context.Context, p Probe, until time.Time, f probeapi.Filter, 
 // allUnits fails a read that does not move on (a cursor twice in one pass,
 // an empty page that asks for more) or needs more than maxPages and maxUnits
 // over both passes.
-func allUnits(ctx context.Context, p Probe, until time.Time, f probeapi.Filter, name *string, maxPages, maxUnits int) ([]probeapi.Unit, error) {
+func allUnits(ctx context.Context, p Probe, until time.Time, f probeapi.Filter, name *string, maxPages, maxUnits int, metadata ...*probeapi.SweepInfo) ([]probeapi.Unit, error) {
 	unavailable := func(format string, a ...any) error {
 		return &Error{Kind: Unavailable, Detail: fmt.Sprintf(format, a...)}
 	}
@@ -177,6 +177,12 @@ read:
 					reply.Family, reply.SweepAgeSeconds, reply.SweepIntervalSeconds)
 			case snapshot != nil && *snapshot != reply.SnapshotID: // an ID is reply text, so it is not named
 				return nil, unavailable("pages came from two snapshots")
+			}
+			if len(metadata) > 0 {
+				if reply.LastAttemptSucceeded == nil || !*reply.LastAttemptSucceeded {
+					return nil, unavailable("latest source attempt did not succeed")
+				}
+				*metadata[0] = reply.SweepInfo
 			}
 			snapshot, pages, total = &reply.SnapshotID, pages+1, total+len(reply.Units)
 			units = append(units, reply.Units...)
@@ -241,4 +247,12 @@ func bounded[T any](ctx context.Context, until time.Time, call func(context.Cont
 // fresh.
 func Fresh(s probeapi.SweepInfo) bool {
 	return s.SweepIntervalSeconds > 0 && s.SweepAgeSeconds >= 0 && s.SweepAgeSeconds <= 2*s.SweepIntervalSeconds
+}
+
+// SnapshotUnits preserves the complete source metadata and requires explicit
+// latest-attempt success on every page. Older probe contracts fail closed.
+func SnapshotUnits(ctx context.Context, p Probe, until time.Time, f probeapi.Filter) ([]probeapi.Unit, probeapi.SweepInfo, error) {
+	var metadata probeapi.SweepInfo
+	units, err := allUnits(ctx, p, until, f, nil, readPages, readUnits, &metadata)
+	return units, metadata, err
 }

@@ -59,3 +59,16 @@ resources:
 # the binary exports traces when OTEL_EXPORTER_OTLP_ENDPOINT (or the traces
 # specific endpoint) is set and otherwise only forwards trace context.
 extraEnv: {}
+
+# New settings are passed as environment variables so older images ignore them.
+authorization:
+  # -- AUDIT logs unauthorized issuance; ENFORCE rejects it after rollout verification.
+  mode: AUDIT
+  # -- Empty generates the default Site Manager URI in the release namespace.
+  # Override when Site Manager has a different name, namespace, or client URI.
+  allowedIdentities: []
+  # -- Secret containing ca.crt for a separate client issuer; mounted read-only.
+  # Mutually exclusive with clientCaFile. Empty trusts the effective signing CA.
+  clientCaSecretName: ""
+  # -- Path to a bundle in an existing mount; use clientCaSecretName for a separate CA.
+  clientCaFile: ""
