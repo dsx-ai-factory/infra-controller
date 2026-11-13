@@ -146,7 +146,7 @@ func getBody(t *testing.T, url string) (int, string) {
 	if err != nil {
 		return 0, ""
 	}
-	defer resp.Body.Close()
+	defer func() { assert.NoError(t, resp.Body.Close()) }()
 	body, err := io.ReadAll(resp.Body)
 	require.NoError(t, err)
 	return resp.StatusCode, string(body)
@@ -218,7 +218,7 @@ func TestRun_PublishesDiscoveredSourcesAndServesLiveness(t *testing.T) {
 func TestRun_FailsWhenAnEndpointCannotListen(t *testing.T) {
 	occupied, err := net.Listen("tcp", "127.0.0.1:0")
 	require.NoError(t, err)
-	defer occupied.Close()
+	defer func() { assert.NoError(t, occupied.Close()) }()
 
 	opts, err := parseOptions([]string{
 		"--sync-interval=1h",

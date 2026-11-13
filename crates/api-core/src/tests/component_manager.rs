@@ -36,6 +36,308 @@ use crate::tests::common::api_fixtures::site_explorer::create_expected_switch;
 use crate::tests::common::api_fixtures::{TestEnv, create_test_env};
 
 #[crate::sqlx_test]
+async fn compute_restart_and_ac_cycle_preserve_intent_and_routing(pool: sqlx::PgPool) {
+    use carbide_uuid::machine::{HostMachineId, MachineId, MachineIdSource, MachineType};
+    use component_manager::component_manager::ComponentManager;
+    use component_manager::mock::{MockComputeTrayManager, MockPowerShelfManager};
+    use model::expected_machine::ExpectedMachineData;
+    use model::machine::{
+        CURRENT_STATE_MODEL_VERSION, MachineMaintenanceOperation, ManagedHostState,
+    };
+
+    use crate::tests::common::api_fixtures::site_explorer::TestRackDbBuilder;
+
+    let env = create_test_env(pool.clone()).await;
+    let rack_id = RackId::new("queued-compute-restart");
+    let machine_id = MachineId::new(
+        MachineIdSource::ProductBoardChassisSerial,
+        [91; 32],
+        MachineType::Host,
+    );
+    let host_id = HostMachineId::try_from(machine_id).unwrap();
+    let mut txn = pool.begin().await.unwrap();
+    TestRackDbBuilder::new()
+        .with_rack_id(rack_id.clone())
+        .persist(&mut txn)
+        .await
+        .unwrap();
+    db::machine::create(
+        &mut txn,
+        None,
+        &machine_id,
+        ManagedHostState::Ready,
+        Some(&ExpectedMachineData {
+            rack_id: Some(rack_id),
+            ..Default::default()
+        }),
+        CURRENT_STATE_MODEL_VERSION,
+    )
+    .await
+    .unwrap();
+    let underlay = db::network_segment::find_by_name(&mut txn, "UNDERLAY")
+        .await
+        .unwrap();
+    let interface = db::machine_interface::create(
+        &mut txn,
+        std::slice::from_ref(&underlay),
+        &"02:00:00:00:00:91".parse().unwrap(),
+        false,
+        model::address_selection_strategy::AddressSelectionStrategy::NextAvailableIp,
+        None,
+    )
+    .await
+    .unwrap();
+    db::machine_interface::associate_bmc_interface(
+        &interface.id,
+        model::machine_interface_address::MachineInterfaceAssociation::Machine(machine_id),
+        &mut txn,
+    )
+    .await
+    .unwrap();
+    txn.commit().await.unwrap();
+
+    let manager = ComponentManager::new(
+        Arc::new(MockNvSwitchManager::default()),
+        Arc::new(MockPowerShelfManager),
+        Arc::new(MockComputeTrayManager),
+        false,
+        false,
+        true,
+    );
+    let api = TestApiBuilder::new(
+        pool.clone(),
+        env.common_pools.clone(),
+        env.api.work_lock_manager_handle.clone(),
+    )
+    .with_component_manager(Arc::new(manager))
+    .build();
+    let response = crate::handlers::component_manager::component_power_control(
+        &api,
+        Request::new(rpc::ComponentPowerControlRequest {
+            target: Some(rpc::component_power_control_request::Target::MachineIds(
+                ::rpc::common::HostMachineIdList {
+                    machine_ids: vec![host_id],
+                },
+            )),
+            action: ::rpc::common::SystemPowerControl::GracefulRestart as i32,
+            bypass_state_controller: false,
+            ..Default::default()
+        }),
+    )
+    .await
+    .unwrap()
+    .into_inner();
+    assert_eq!(response.results.len(), 1);
+    assert_eq!(
+        response.results[0].status,
+        rpc::ComponentManagerStatusCode::Success as i32
+    );
+
+    let mut txn = pool.begin().await.unwrap();
+    let machine = db::machine::find_one(txn.as_mut(), &host_id, Default::default())
+        .await
+        .unwrap()
+        .unwrap();
+    let request = machine.machine_maintenance_requested.unwrap();
+    assert_eq!(
+        request.operation,
+        MachineMaintenanceOperation::Reset { graceful: true }
+    );
+    assert_eq!(request.initiator, "component-manager");
+    assert_eq!(machine.state.value, ManagedHostState::Ready);
+
+    let power = db::power_options::get_by_ids(&[host_id], &mut txn)
+        .await
+        .unwrap()
+        .remove(0);
+    db::power_options::update_desired_state(
+        &host_id,
+        model::power_manager::PowerState::Off,
+        &power.desired_power_state_version,
+        &mut txn,
+    )
+    .await
+    .unwrap();
+    txn.commit().await.unwrap();
+
+    let mock = Arc::new(api_test_helper::mock_rms::MockRmsApi::new());
+    let backend = component_manager::component_manager::build_component_manager(
+        &component_manager::config::ComponentManagerConfig {
+            compute_tray_backend: component_manager::compute_tray_manager::Backend::Rms,
+            nv_switch_backend: component_manager::nv_switch_manager::Backend::Mock,
+            power_shelf_backend: component_manager::power_shelf_manager::Backend::Mock,
+            ..Default::default()
+        },
+        crate::tests::common::api_fixtures::get_config_with_rack_profiles().rack_profiles,
+        Some(mock.clone()),
+        None,
+        Some(pool.clone()),
+        Some(env.redfish_sim.clone()),
+        None,
+    )
+    .await
+    .unwrap()
+    .compute_tray;
+    let manager = ComponentManager::new(
+        Arc::new(MockNvSwitchManager::default()),
+        Arc::new(MockPowerShelfManager),
+        backend.clone(),
+        false,
+        false,
+        true,
+    );
+    let api = TestApiBuilder::new(
+        pool.clone(),
+        env.common_pools.clone(),
+        env.api.work_lock_manager_handle.clone(),
+    )
+    .with_component_manager(Arc::new(manager))
+    .build();
+    // Complete the previous request before queuing a different operation.
+    let mut txn = pool.begin().await.unwrap();
+    assert_eq!(
+        db::machine::clear_machine_maintenance_requested(&mut txn, host_id, &request)
+            .await
+            .unwrap(),
+        db::ConditionalWrite::Applied(())
+    );
+    txn.commit().await.unwrap();
+    let before = env.redfish_sim.timepoint();
+    let response = crate::handlers::component_manager::component_power_control(
+        &api,
+        Request::new(rpc::ComponentPowerControlRequest {
+            target: Some(rpc::component_power_control_request::Target::MachineIds(
+                ::rpc::common::HostMachineIdList {
+                    machine_ids: vec![host_id],
+                },
+            )),
+            action: ::rpc::common::SystemPowerControl::AcPowercycle as i32,
+            ..Default::default()
+        }),
+    )
+    .await
+    .unwrap()
+    .into_inner();
+    assert_eq!(response.results.len(), 1);
+    assert_eq!(
+        response.results[0].status,
+        rpc::ComponentManagerStatusCode::Success as i32
+    );
+    let mut txn = pool.begin().await.unwrap();
+    let machine = db::machine::find_one(txn.as_mut(), &host_id, Default::default())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        machine
+            .machine_maintenance_requested
+            .as_ref()
+            .unwrap()
+            .operation,
+        MachineMaintenanceOperation::AcPowercycle {
+            state: Default::default()
+        }
+    );
+    assert_eq!(machine.state.value, ManagedHostState::Ready);
+    let power = db::power_options::get_by_ids(&[host_id], &mut txn)
+        .await
+        .unwrap()
+        .remove(0);
+    assert_eq!(
+        power.desired_power_state,
+        model::power_manager::PowerState::On
+    );
+    assert!(mock.batch_set_power_state_calls().await.is_empty());
+    assert!(
+        env.redfish_sim
+            .actions_since(&before)
+            .all_hosts()
+            .is_empty()
+    );
+    txn.rollback().await.unwrap();
+
+    // Explicit direct routing retains its semantics even for Vera Rubin: no
+    // queued work is replaced and no post-cycle NIC sequence runs in the API.
+    env.redfish_sim
+        .set_service_root_vendor(Some("NVIDIA".into()));
+    env.redfish_sim
+        .set_service_root_product(Some("VR NVL72".into()));
+    for (scenario, use_controller, bypass) in [("direct", false, false), ("bypass", true, true)] {
+        let manager = ComponentManager::new(
+            Arc::new(MockNvSwitchManager::default()),
+            Arc::new(MockPowerShelfManager),
+            backend.clone(),
+            false,
+            false,
+            use_controller,
+        );
+        let api = TestApiBuilder::new(
+            pool.clone(),
+            env.common_pools.clone(),
+            env.api.work_lock_manager_handle.clone(),
+        )
+        .with_component_manager(Arc::new(manager))
+        .with_credential_manager(Arc::new(
+            carbide_secrets::test_support::credentials::TestCredentialManager::new(
+                carbide_secrets::credentials::Credentials::UsernamePassword {
+                    username: "root".into(),
+                    password: "password".into(),
+                },
+            ),
+        ))
+        .build();
+        let before = env.redfish_sim.timepoint();
+        let response = crate::handlers::component_manager::component_power_control(
+            &api,
+            Request::new(rpc::ComponentPowerControlRequest {
+                target: Some(rpc::component_power_control_request::Target::MachineIds(
+                    ::rpc::common::HostMachineIdList {
+                        machine_ids: vec![host_id],
+                    },
+                )),
+                action: ::rpc::common::SystemPowerControl::AcPowercycle as i32,
+                bypass_state_controller: bypass,
+                ..Default::default()
+            }),
+        )
+        .await
+        .unwrap()
+        .into_inner();
+        assert_eq!(response.results.len(), 1, "{scenario}");
+        assert_eq!(
+            response.results[0].status,
+            rpc::ComponentManagerStatusCode::Success as i32,
+            "{scenario}: {:?}",
+            response.results
+        );
+        assert_eq!(
+            env.redfish_sim
+                .actions_since(&before)
+                .for_host(&machine.status.bmc_info.ip.unwrap().to_string()),
+            vec![
+                carbide_redfish::libredfish::test_support::RedfishSimAction::Power(
+                    libredfish::SystemPowerControl::ACPowercycle
+                )
+            ],
+            "{scenario}"
+        );
+        let after = db::machine::find_one(&pool, &host_id, Default::default())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            after.machine_maintenance_requested, machine.machine_maintenance_requested,
+            "{scenario}"
+        );
+        assert_eq!(after.state.value, ManagedHostState::Ready, "{scenario}");
+        assert!(
+            mock.batch_set_power_state_calls().await.is_empty(),
+            "{scenario}"
+        );
+    }
+}
+
+#[crate::sqlx_test]
 async fn switch_firmware_status_uses_only_current_cycle_persistence(
     pool: sqlx::PgPool,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -520,4 +822,877 @@ async fn untracked_backend_switch_job_is_unknown_for_every_switch_target(
     }
 
     Ok(())
+}
+
+#[crate::sqlx_test]
+async fn component_reset_dispatches_valid_targets_and_polls_by_identity(pool: sqlx::PgPool) {
+    use ::rpc::forge::forge_server::Forge;
+    use api_test_helper::mock_rms::MockRmsApi;
+    use component_manager::rms::RmsBackend;
+    use librms::protos::rack_manager as rms;
+    use rpc::component_reset_request::Target;
+
+    let env = create_test_env(pool.clone()).await;
+    let mock = Arc::new(MockRmsApi::new());
+    let make_api = || {
+        let mut cm = env.test_component_manager.as_deref().unwrap().clone();
+        cm.nv_switch = Arc::new(RmsBackend::new(
+            mock.clone(),
+            None,
+            pool.clone(),
+            Arc::new(
+                crate::tests::common::api_fixtures::get_config_with_rack_profiles().rack_profiles,
+            ),
+            false,
+        ));
+        TestApiBuilder::new(
+            pool.clone(),
+            env.common_pools.clone(),
+            env.api.work_lock_manager_handle.clone(),
+        )
+        .with_credential_manager(env.api.credential_manager.clone())
+        .with_component_manager(Arc::new(cm))
+        .build()
+    };
+    let api = make_api();
+    let unknown_id = SwitchId::from(uuid::Uuid::new_v4());
+    let valid_structure = rpc::ComponentResetRequest {
+        target: Some(Target::SwitchIds(rpc::SwitchIdList {
+            ids: vec![unknown_id],
+        })),
+        action: rpc::ComponentResetAction::SdnFactoryReset as i32,
+        domain_name: None,
+    };
+    let cases = [
+        (
+            "absent target",
+            rpc::ComponentResetRequest {
+                target: None,
+                ..valid_structure.clone()
+            },
+            tonic::Code::InvalidArgument,
+        ),
+        (
+            "empty targets",
+            rpc::ComponentResetRequest {
+                target: Some(Target::SwitchIds(rpc::SwitchIdList { ids: vec![] })),
+                ..valid_structure.clone()
+            },
+            tonic::Code::InvalidArgument,
+        ),
+        (
+            "duplicate targets",
+            rpc::ComponentResetRequest {
+                target: Some(Target::SwitchIds(rpc::SwitchIdList {
+                    ids: vec![unknown_id, unknown_id],
+                })),
+                ..valid_structure.clone()
+            },
+            tonic::Code::InvalidArgument,
+        ),
+        (
+            "same MAC in different casing",
+            rpc::ComponentResetRequest {
+                target: Some(Target::SwitchBmcMacs(rpc::MacAddressList {
+                    mac_addresses: vec!["AA:BB:CC:00:00:01".into(), "aa:bb:cc:00:00:01".into()],
+                })),
+                ..valid_structure.clone()
+            },
+            tonic::Code::InvalidArgument,
+        ),
+        (
+            "unspecified action",
+            rpc::ComponentResetRequest {
+                action: 0,
+                ..valid_structure.clone()
+            },
+            tonic::Code::InvalidArgument,
+        ),
+        (
+            "unrecognized action",
+            rpc::ComponentResetRequest {
+                action: 99,
+                ..valid_structure.clone()
+            },
+            tonic::Code::InvalidArgument,
+        ),
+        (
+            "unsupported action",
+            rpc::ComponentResetRequest {
+                action: rpc::ComponentResetAction::BmcReset as i32,
+                ..valid_structure.clone()
+            },
+            tonic::Code::Unimplemented,
+        ),
+        (
+            "blank domain",
+            rpc::ComponentResetRequest {
+                domain_name: Some(" ".into()),
+                ..valid_structure.clone()
+            },
+            tonic::Code::InvalidArgument,
+        ),
+        (
+            "domain on BMC reset",
+            rpc::ComponentResetRequest {
+                action: rpc::ComponentResetAction::BmcReset as i32,
+                domain_name: Some("domain".into()),
+                ..valid_structure.clone()
+            },
+            tonic::Code::InvalidArgument,
+        ),
+        (
+            "domain on NVOS reset",
+            rpc::ComponentResetRequest {
+                action: rpc::ComponentResetAction::NvosFactoryReset as i32,
+                domain_name: Some("domain".into()),
+                ..valid_structure.clone()
+            },
+            tonic::Code::InvalidArgument,
+        ),
+        (
+            "SDN reset on compute",
+            rpc::ComponentResetRequest {
+                target: Some(Target::ComputeBmcMacs(rpc::MacAddressList {
+                    mac_addresses: vec!["aa:bb:cc:00:00:01".into()],
+                })),
+                ..valid_structure.clone()
+            },
+            tonic::Code::InvalidArgument,
+        ),
+        (
+            "NVOS reset on power shelf",
+            rpc::ComponentResetRequest {
+                target: Some(Target::PowerShelfPmcMacs(rpc::MacAddressList {
+                    mac_addresses: vec!["aa:bb:cc:00:00:01".into()],
+                })),
+                action: rpc::ComponentResetAction::NvosFactoryReset as i32,
+                ..valid_structure.clone()
+            },
+            tonic::Code::InvalidArgument,
+        ),
+    ];
+    for (label, request, code) in cases {
+        assert_eq!(
+            api.component_reset(Request::new(request))
+                .await
+                .unwrap_err()
+                .code(),
+            code,
+            "{label}"
+        );
+    }
+    assert!(
+        mock.batch_reset_switch_sdn_factory_default_calls()
+            .await
+            .is_empty()
+    );
+    assert!(
+        mock.batch_reset_switch_factory_default_calls()
+            .await
+            .is_empty()
+    );
+
+    let rack_id = RackId::new("sdn-reset-rack");
+    let mut txn = pool.begin().await.unwrap();
+    crate::tests::common::api_fixtures::site_explorer::TestRackDbBuilder::new()
+        .with_rack_id(rack_id.clone())
+        .persist(&mut txn)
+        .await
+        .unwrap();
+    let switch = db::test_support::switch::create_seeded_discovered(&mut txn, 61, "sdn-reset")
+        .await
+        .unwrap();
+    let second_switch =
+        db::test_support::switch::create_seeded_discovered(&mut txn, 63, "second-sdn-reset")
+            .await
+            .unwrap();
+    let rejected_switch =
+        db::test_support::switch::create_seeded_discovered(&mut txn, 64, "rejected-sdn-reset")
+            .await
+            .unwrap();
+    // Its endpoint resolves, but neither the switch nor its expected inventory
+    // has a rack. The RMS backend returns this failure before submitted switches, so
+    // the API must correlate backend results by MAC instead of their position.
+    let unresolved_switch =
+        db::test_support::switch::create_seeded_discovered(&mut txn, 65, "unresolved-sdn-reset")
+            .await
+            .unwrap();
+    for id in [switch.id, second_switch.id, rejected_switch.id] {
+        sqlx::query("UPDATE switches SET rack_id = $1 WHERE id = $2")
+            .bind(&rack_id)
+            .bind(id)
+            .execute(&mut *txn)
+            .await
+            .unwrap();
+    }
+    txn.commit().await.unwrap();
+    let bmc_mac_address = switch.bmc_mac_address.unwrap();
+    let second_mac = second_switch.bmc_mac_address.unwrap();
+    let rejected_mac = rejected_switch.bmc_mac_address.unwrap();
+    let unresolved_mac = unresolved_switch.bmc_mac_address.unwrap();
+    let credentials: Vec<_> = [bmc_mac_address, second_mac, rejected_mac, unresolved_mac]
+        .into_iter()
+        .flat_map(|bmc_mac_address| {
+            [
+                CredentialKey::BmcCredentials {
+                    credential_type: BmcCredentialType::BmcRoot { bmc_mac_address },
+                },
+                CredentialKey::SwitchNvosAdmin { bmc_mac_address },
+            ]
+        })
+        .collect();
+    for key in &credentials {
+        env.api
+            .credential_manager
+            .set_credentials(key, &Credentials::new("reset-operator", "test-password"))
+            .await
+            .unwrap();
+    }
+    mock.enqueue_batch_reset_switch_sdn_factory_default(Ok(
+        rms::BatchResetSwitchSdnFactoryDefaultResponse {
+            response: Some(rms::NodeBatchResponse {
+                job_id: "parent".into(),
+                status: rms::ReturnCode::Failure as i32,
+                stats: Some(rms::NodeOperationStats {
+                    total_nodes: 3,
+                    successful_nodes: 2,
+                    failed_nodes: 1,
+                }),
+                node_results: vec![rms::NodeOperationResult {
+                    node_id: rejected_switch.id.to_string(),
+                    status: rms::ReturnCode::Failure as i32,
+                    error_message: "certificate domain missing".into(),
+                }],
+                ..Default::default()
+            }),
+        },
+    ))
+    .await;
+    let submitted = api
+        .component_reset(Request::new(rpc::ComponentResetRequest {
+            target: Some(Target::SwitchIds(rpc::SwitchIdList {
+                ids: vec![
+                    switch.id,
+                    unknown_id,
+                    unresolved_switch.id,
+                    rejected_switch.id,
+                    second_switch.id,
+                ],
+            })),
+            domain_name: Some("certificate-domain".into()),
+            ..valid_structure
+        }))
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(submitted.results.len(), 5);
+    for (result, (id, mac, status)) in submitted.results.iter().zip([
+        (
+            switch.id,
+            Some(bmc_mac_address),
+            rpc::ComponentManagerStatusCode::Success,
+        ),
+        (unknown_id, None, rpc::ComponentManagerStatusCode::NotFound),
+        (
+            unresolved_switch.id,
+            Some(unresolved_mac),
+            rpc::ComponentManagerStatusCode::InvalidArgument,
+        ),
+        (
+            rejected_switch.id,
+            Some(rejected_mac),
+            rpc::ComponentManagerStatusCode::InvalidArgument,
+        ),
+        (
+            second_switch.id,
+            Some(second_mac),
+            rpc::ComponentManagerStatusCode::Success,
+        ),
+    ]) {
+        assert_eq!(result.component_id, Some(id.to_string()));
+        assert_eq!(result.mac_address, mac.map(|mac| mac.to_string()));
+        assert_eq!(result.status, status as i32, "{id}: {}", result.error);
+    }
+    assert_eq!(
+        submitted.results[3].error,
+        format!(
+            "RMS rejected switch SDN factory-reset for node {}: certificate domain missing",
+            rejected_switch.id
+        ),
+    );
+    for result in [&submitted.results[0], &submitted.results[4]] {
+        assert!(result.error.is_empty());
+    }
+    let calls = mock.batch_reset_switch_sdn_factory_default_calls().await;
+    assert_eq!(calls.len(), 1);
+    assert_eq!(calls[0].domain.as_deref(), Some("certificate-domain"));
+    assert_eq!(
+        calls[0]
+            .nodes
+            .as_ref()
+            .unwrap()
+            .nodes
+            .iter()
+            .map(|node| node.node_id.as_str())
+            .collect::<Vec<_>>(),
+        [
+            switch.id.to_string(),
+            rejected_switch.id.to_string(),
+            second_switch.id.to_string()
+        ]
+    );
+    for (mac, expected) in [
+        (bmc_mac_address, Some("parent")),
+        (second_mac, Some("parent")),
+        (rejected_mac, None),
+        (unresolved_mac, None),
+    ] {
+        assert_eq!(
+            db::direct_dispatch_rms_job::get(
+                &pool,
+                mac,
+                db::direct_dispatch_rms_job::RmsJobKind::SwitchSdnFactoryReset
+            )
+            .await
+            .unwrap()
+            .as_deref(),
+            expected,
+        );
+    }
+
+    mock.enqueue_batch_reset_switch_sdn_factory_default(Err(
+        librms::RackManagerError::ApiInvocationError(tonic::Status::unavailable("reply lost")),
+    ))
+    .await;
+    let uncertain = api
+        .component_reset(Request::new(rpc::ComponentResetRequest {
+            target: Some(Target::SwitchIds(rpc::SwitchIdList {
+                ids: vec![
+                    switch.id,
+                    unknown_id,
+                    unresolved_switch.id,
+                    second_switch.id,
+                ],
+            })),
+            action: rpc::ComponentResetAction::SdnFactoryReset as i32,
+            domain_name: None,
+        }))
+        .await
+        .unwrap()
+        .into_inner()
+        .results;
+    assert_eq!(
+        uncertain
+            .iter()
+            .map(|result| result.status)
+            .collect::<Vec<_>>(),
+        [
+            rpc::ComponentManagerStatusCode::OutcomeUnknown as i32,
+            rpc::ComponentManagerStatusCode::NotFound as i32,
+            rpc::ComponentManagerStatusCode::InvalidArgument as i32,
+            rpc::ComponentManagerStatusCode::OutcomeUnknown as i32,
+        ]
+    );
+    for (result, (id, mac)) in uncertain.iter().zip([
+        (switch.id, Some(bmc_mac_address)),
+        (unknown_id, None),
+        (unresolved_switch.id, Some(unresolved_mac)),
+        (second_switch.id, Some(second_mac)),
+    ]) {
+        assert_eq!(result.component_id, Some(id.to_string()));
+        assert_eq!(result.mac_address, mac.map(|mac| mac.to_string()));
+    }
+    // A batch transport failure must preserve the backend's earlier local rejection.
+    assert_eq!(uncertain[2].error, submitted.results[2].error);
+    for result in [&uncertain[0], &uncertain[3]] {
+        assert!(result.error.contains("reply lost"));
+    }
+    let calls = mock.batch_reset_switch_sdn_factory_default_calls().await;
+    assert_eq!(calls.len(), 2);
+    assert_eq!(calls[1].nodes.as_ref().unwrap().nodes.len(), 2);
+
+    for key in &credentials {
+        env.api
+            .credential_manager
+            .delete_credentials(key)
+            .await
+            .unwrap();
+    }
+    // MAC resolution retains the ingested ID when endpoint credentials are missing.
+    let rejected = api
+        .component_reset(Request::new(rpc::ComponentResetRequest {
+            target: Some(Target::SwitchBmcMacs(rpc::MacAddressList {
+                mac_addresses: vec![bmc_mac_address.to_string().to_uppercase()],
+            })),
+            action: rpc::ComponentResetAction::SdnFactoryReset as i32,
+            domain_name: None,
+        }))
+        .await
+        .unwrap()
+        .into_inner()
+        .results;
+    assert_eq!(rejected.len(), 1);
+    assert_eq!(rejected[0].component_id, Some(switch.id.to_string()));
+    assert_eq!(rejected[0].mac_address, Some(bmc_mac_address.to_string()));
+    assert_eq!(
+        rejected[0].status,
+        rpc::ComponentManagerStatusCode::NotFound as i32
+    );
+    assert_eq!(
+        mock.batch_reset_switch_sdn_factory_default_calls()
+            .await
+            .len(),
+        2
+    );
+
+    // A fresh backend retrieves persisted references without endpoint credentials
+    // or rack membership; status resolution needs only the switch's current ID.
+    sqlx::query("UPDATE switches SET rack_id = NULL WHERE id = $1")
+        .bind(switch.id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let restarted_api = make_api();
+    let parent_status = rms::GetJobStatusResponse {
+        job_states: vec![
+            rms::JobStatus {
+                job_id: "parent".into(),
+                child_job_ids: vec!["child-one".into(), "child-two".into()],
+                execution_state: rms::JobExecutionState::Completed as i32,
+                ..Default::default()
+            },
+            rms::JobStatus {
+                job_id: "child-two".into(),
+                parent_job_id: Some("parent".into()),
+                node_id: Some(second_switch.id.to_string()),
+                execution_state: rms::JobExecutionState::Failed as i32,
+                error_message: "reset failed".into(),
+                ..Default::default()
+            },
+            rms::JobStatus {
+                job_id: "child-one".into(),
+                parent_job_id: Some("parent".into()),
+                node_id: Some(switch.id.to_string()),
+                execution_state: rms::JobExecutionState::Completed as i32,
+                ..Default::default()
+            },
+        ],
+    };
+    for target in [
+        rpc::get_component_reset_status_request::Target::SwitchIds(rpc::SwitchIdList {
+            ids: vec![switch.id, rejected_switch.id, second_switch.id],
+        }),
+        rpc::get_component_reset_status_request::Target::SwitchBmcMacs(rpc::MacAddressList {
+            mac_addresses: vec![
+                bmc_mac_address.to_string(),
+                rejected_mac.to_string(),
+                second_mac.to_string(),
+            ],
+        }),
+    ] {
+        for _ in 0..2 {
+            mock.enqueue_get_job_status(Ok(parent_status.clone())).await;
+        }
+        let response = restarted_api
+            .get_component_reset_status(Request::new(rpc::GetComponentResetStatusRequest {
+                target: Some(target),
+                action: rpc::ComponentResetAction::SdnFactoryReset as i32,
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(response.statuses.len(), 3);
+        for (status, (id, mac, expected_state, expected_status)) in response.statuses.iter().zip([
+            (
+                switch.id,
+                bmc_mac_address,
+                rpc::ComponentResetState::Completed,
+                rpc::ComponentManagerStatusCode::Success,
+            ),
+            (
+                rejected_switch.id,
+                rejected_mac,
+                rpc::ComponentResetState::Unknown,
+                rpc::ComponentManagerStatusCode::NotFound,
+            ),
+            (
+                second_switch.id,
+                second_mac,
+                rpc::ComponentResetState::Failed,
+                rpc::ComponentManagerStatusCode::Success,
+            ),
+        ]) {
+            assert_eq!(status.state, expected_state as i32);
+            assert_eq!(
+                status.action,
+                rpc::ComponentResetAction::SdnFactoryReset as i32
+            );
+            let result = status.result.as_ref().unwrap();
+            assert_eq!(result.component_id, Some(id.to_string()));
+            assert_eq!(result.mac_address, Some(mac.to_string()));
+            assert_eq!(result.status, expected_status as i32);
+            if expected_state == rpc::ComponentResetState::Failed {
+                assert!(result.error.contains("reset failed"));
+            }
+        }
+    }
+    let calls = mock.get_job_status_calls().await;
+    assert_eq!(calls.len(), 4);
+    assert!(calls.iter().all(|call| call.job_id == "parent"));
+    mock.enqueue_get_job_status(Ok(Default::default())).await;
+    let statuses = restarted_api
+        .get_component_reset_status(Request::new(rpc::GetComponentResetStatusRequest {
+            target: Some(
+                rpc::get_component_reset_status_request::Target::SwitchBmcMacs(
+                    rpc::MacAddressList {
+                        mac_addresses: vec![
+                            bmc_mac_address.to_string(),
+                            "bad-mac".into(),
+                            "aa:bb:cc:00:00:02".into(),
+                        ],
+                    },
+                ),
+            ),
+            action: rpc::ComponentResetAction::SdnFactoryReset as i32,
+        }))
+        .await
+        .unwrap()
+        .into_inner()
+        .statuses;
+    assert_eq!(
+        statuses
+            .iter()
+            .map(|status| status.result.as_ref().unwrap().status)
+            .collect::<Vec<_>>(),
+        vec![
+            rpc::ComponentManagerStatusCode::OutcomeUnknown as i32,
+            rpc::ComponentManagerStatusCode::InvalidArgument as i32,
+            rpc::ComponentManagerStatusCode::NotFound as i32
+        ]
+    );
+    assert!(
+        statuses
+            .iter()
+            .all(|status| status.state == rpc::ComponentResetState::Unknown as i32)
+    );
+}
+
+#[crate::sqlx_test]
+async fn rms_job_status_preserves_standalone_and_child_records(pool: sqlx::PgPool) {
+    use ::rpc::forge::forge_server::Forge;
+    use api_test_helper::mock_rms::MockRmsApi;
+    use librms::protos::rack_manager as rms;
+
+    let env = create_test_env(pool.clone()).await;
+    let mock = Arc::new(MockRmsApi::new());
+    let api = TestApiBuilder::new(
+        pool,
+        env.common_pools.clone(),
+        env.api.work_lock_manager_handle.clone(),
+    )
+    .with_rms_client(mock.clone())
+    .build();
+    let invalid = api
+        .get_rms_job_status(Request::new(rpc::GetRmsJobStatusRequest {
+            job_id: " ".into(),
+            include_child_job_states: false,
+        }))
+        .await
+        .unwrap_err();
+    assert_eq!(invalid.code(), tonic::Code::InvalidArgument);
+    assert!(mock.get_job_status_calls().await.is_empty());
+
+    for include_children in [false, true] {
+        let job = rms::JobStatus {
+            job_id: "reset".into(),
+            parent_job_id: None,
+            child_job_ids: if include_children {
+                vec!["child".into()]
+            } else {
+                vec![]
+            },
+            execution_state: rms::JobExecutionState::Completed as i32,
+            error_message: String::new(),
+            error_code: rms::JobError::Unspecified as i32,
+            result_json: r#"{"reset":true}"#.into(),
+            state_description: "completed".into(),
+            rack_id: Some("rack".into()),
+            node_id: Some("switch".into()),
+            created_at: Some(std::time::SystemTime::UNIX_EPOCH.into()),
+            updated_at: Some(std::time::SystemTime::UNIX_EPOCH.into()),
+        };
+        let mut jobs = vec![job.clone()];
+        if include_children {
+            jobs.push(rms::JobStatus {
+                job_id: "child".into(),
+                parent_job_id: Some("reset".into()),
+                execution_state: rms::JobExecutionState::Failed as i32,
+                error_message: "failure details".into(),
+                error_code: rms::JobError::Timeout as i32,
+                ..Default::default()
+            });
+        }
+        mock.enqueue_get_job_status(Ok(rms::GetJobStatusResponse {
+            job_states: jobs.clone(),
+        }))
+        .await;
+        let response = api
+            .get_rms_job_status(Request::new(rpc::GetRmsJobStatusRequest {
+                job_id: "reset".into(),
+                include_child_job_states: include_children,
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(response.job_states.len(), jobs.len());
+        for (observed, expected) in response.job_states.iter().zip(jobs) {
+            assert_eq!(observed.job_id, expected.job_id);
+            assert_eq!(observed.parent_job_id, expected.parent_job_id);
+            assert_eq!(observed.child_job_ids, expected.child_job_ids);
+            assert_eq!(observed.execution_state, expected.execution_state);
+            assert_eq!(observed.error_message, expected.error_message);
+            assert_eq!(observed.error_code, expected.error_code);
+            assert_eq!(observed.result_json, expected.result_json);
+            assert_eq!(observed.state_description, expected.state_description);
+            assert_eq!(observed.rack_id, expected.rack_id);
+            assert_eq!(observed.node_id, expected.node_id);
+            assert_eq!(observed.created_at, expected.created_at.map(Into::into));
+            assert_eq!(observed.updated_at, expected.updated_at.map(Into::into));
+        }
+        let calls = mock.get_job_status_calls().await;
+        let last = calls.last().unwrap();
+        assert_eq!(last.job_id, "reset");
+        assert_eq!(last.include_child_job_states, include_children);
+    }
+}
+
+#[crate::sqlx_test]
+async fn component_reset_tracks_pre_ingestion_mac_after_ingestion(pool: sqlx::PgPool) {
+    use ::rpc::forge::forge_server::Forge;
+    use api_test_helper::mock_rms::MockRmsApi;
+    use component_manager::rms::RmsBackend;
+    use librms::protos::rack_manager as rms;
+
+    let env = create_test_env(pool.clone()).await;
+    let mock = Arc::new(MockRmsApi::new());
+    let mut cm = env.test_component_manager.as_deref().unwrap().clone();
+    cm.nv_switch = Arc::new(RmsBackend::new(
+        mock.clone(),
+        None,
+        pool.clone(),
+        Arc::new(crate::tests::common::api_fixtures::get_config_with_rack_profiles().rack_profiles),
+        false,
+    ));
+    let api = TestApiBuilder::new(
+        pool.clone(),
+        env.common_pools.clone(),
+        env.api.work_lock_manager_handle.clone(),
+    )
+    .with_credential_manager(env.api.credential_manager.clone())
+    .with_component_manager(Arc::new(cm))
+    .build();
+    let rack_id = RackId::new("pre-ingestion-reset-rack");
+    let mut txn = pool.begin().await.unwrap();
+    crate::tests::common::api_fixtures::site_explorer::TestRackDbBuilder::new()
+        .with_rack_id(rack_id.clone())
+        .persist(&mut txn)
+        .await
+        .unwrap();
+    let switch =
+        db::test_support::switch::create_seeded_discovered(&mut txn, 62, "pre-ingestion-reset")
+            .await
+            .unwrap();
+    let bmc_mac = switch.bmc_mac_address.unwrap();
+    sqlx::query("UPDATE expected_switches SET rack_id = $1 WHERE bmc_mac_address = $2")
+        .bind(&rack_id)
+        .bind(bmc_mac)
+        .execute(&mut *txn)
+        .await
+        .unwrap();
+    sqlx::query("DELETE FROM switches WHERE id = $1")
+        .bind(switch.id)
+        .execute(&mut *txn)
+        .await
+        .unwrap();
+    txn.commit().await.unwrap();
+    env.api
+        .credential_manager
+        .set_credentials(
+            &CredentialKey::SwitchNvosAdmin {
+                bmc_mac_address: bmc_mac,
+            },
+            &Credentials::new("reset-operator", "test-password"),
+        )
+        .await
+        .unwrap();
+    let reset_jobs = [
+        (
+            rpc::ComponentResetAction::SdnFactoryReset,
+            "pre-ingestion-sdn-job",
+        ),
+        (
+            rpc::ComponentResetAction::NvosFactoryReset,
+            "pre-ingestion-nvos-job",
+        ),
+    ];
+    for (action, job_id) in reset_jobs {
+        let response = Some(rms::NodeBatchResponse {
+            job_id: job_id.into(),
+            status: rms::ReturnCode::Success as i32,
+            node_results: if action == rpc::ComponentResetAction::NvosFactoryReset {
+                vec![rms::NodeOperationResult {
+                    node_id: bmc_mac.to_string(),
+                    status: rms::ReturnCode::Success as i32,
+                    ..Default::default()
+                }]
+            } else {
+                vec![]
+            },
+            stats: Some(rms::NodeOperationStats {
+                total_nodes: 1,
+                successful_nodes: 1,
+                failed_nodes: 0,
+            }),
+            ..Default::default()
+        });
+        match action {
+            rpc::ComponentResetAction::SdnFactoryReset => {
+                mock.enqueue_batch_reset_switch_sdn_factory_default(Ok(
+                    rms::BatchResetSwitchSdnFactoryDefaultResponse { response },
+                ))
+                .await;
+            }
+            rpc::ComponentResetAction::NvosFactoryReset => {
+                mock.enqueue_batch_reset_switch_factory_default(Ok(
+                    rms::BatchResetSwitchFactoryDefaultResponse { response },
+                ))
+                .await;
+            }
+            _ => unreachable!("test only submits SDN and NVOS resets"),
+        }
+        let results = api
+            .component_reset(Request::new(rpc::ComponentResetRequest {
+                target: Some(rpc::component_reset_request::Target::SwitchBmcMacs(
+                    rpc::MacAddressList {
+                        mac_addresses: vec!["invalid".into(), bmc_mac.to_string()],
+                    },
+                )),
+                action: action as i32,
+                domain_name: None,
+            }))
+            .await
+            .unwrap()
+            .into_inner()
+            .results;
+        assert_eq!(results.len(), 2);
+        assert_eq!(
+            results[0].status,
+            rpc::ComponentManagerStatusCode::InvalidArgument as i32,
+            "{action:?}",
+        );
+        assert_eq!(
+            results[1].status,
+            rpc::ComponentManagerStatusCode::Success as i32,
+            "{action:?}: {:?}",
+            results[1],
+        );
+        assert_eq!(results[1].component_id, None);
+        assert_eq!(results[1].mac_address, Some(bmc_mac.to_string()));
+    }
+    let sdn_calls = mock.batch_reset_switch_sdn_factory_default_calls().await;
+    let nvos_calls = mock.batch_reset_switch_factory_default_calls().await;
+    assert_eq!(sdn_calls.len(), 1);
+    assert_eq!(nvos_calls.len(), 1);
+    for (nodes, domain) in [
+        (&sdn_calls[0].nodes, &sdn_calls[0].domain),
+        (&nvos_calls[0].nodes, &nvos_calls[0].domain),
+    ] {
+        let nodes = &nodes.as_ref().unwrap().nodes;
+        assert_eq!(nodes.len(), 1);
+        assert_eq!(nodes[0].node_id, bmc_mac.to_string());
+        assert_eq!(*domain, None);
+    }
+
+    let mut txn = pool.begin().await.unwrap();
+    db::switch::create(
+        &mut txn,
+        &NewSwitch {
+            id: switch.id,
+            config: switch.config,
+            bmc_mac_address: Some(bmc_mac),
+            metadata: None,
+            rack_id: Some(rack_id),
+            slot_number: Some(0),
+            tray_index: Some(0),
+        },
+    )
+    .await
+    .unwrap();
+    txn.commit().await.unwrap();
+    env.api
+        .credential_manager
+        .delete_credentials(&CredentialKey::SwitchNvosAdmin {
+            bmc_mac_address: bmc_mac,
+        })
+        .await
+        .unwrap();
+    // Each action retains its own reference across ingestion, and neither lookup
+    // needs the credentials that the NVOS reset may have invalidated.
+    for (action, job_id) in reset_jobs {
+        mock.enqueue_get_job_status(Ok(rms::GetJobStatusResponse {
+            job_states: vec![
+                rms::JobStatus {
+                    job_id: job_id.into(),
+                    child_job_ids: vec!["child".into()],
+                    execution_state: rms::JobExecutionState::Completed as i32,
+                    ..Default::default()
+                },
+                rms::JobStatus {
+                    job_id: "child".into(),
+                    parent_job_id: Some(job_id.into()),
+                    node_id: Some(bmc_mac.to_string()),
+                    execution_state: rms::JobExecutionState::Completed as i32,
+                    ..Default::default()
+                },
+            ],
+        }))
+        .await;
+        let statuses = api
+            .get_component_reset_status(Request::new(rpc::GetComponentResetStatusRequest {
+                target: Some(rpc::get_component_reset_status_request::Target::SwitchIds(
+                    rpc::SwitchIdList {
+                        ids: vec![switch.id],
+                    },
+                )),
+                action: action as i32,
+            }))
+            .await
+            .unwrap()
+            .into_inner()
+            .statuses;
+        assert_eq!(statuses.len(), 1);
+        assert_eq!(statuses[0].action, action as i32);
+        assert_eq!(
+            statuses[0].state,
+            rpc::ComponentResetState::Completed as i32,
+            "{action:?}: {:?}",
+            statuses[0],
+        );
+        let result = statuses[0].result.as_ref().unwrap();
+        assert_eq!(
+            result.status,
+            rpc::ComponentManagerStatusCode::Success as i32
+        );
+        assert_eq!(result.component_id, Some(switch.id.to_string()));
+        assert_eq!(result.mac_address, Some(bmc_mac.to_string()));
+    }
+    let calls = mock.get_job_status_calls().await;
+    assert_eq!(
+        calls
+            .iter()
+            .map(|call| call.job_id.as_str())
+            .collect::<Vec<_>>(),
+        reset_jobs.map(|(_, job_id)| job_id),
+    );
 }

@@ -190,7 +190,6 @@ Add the following to the site explorer config in `nicoApiSiteConfig`:
 
 ```toml
 [site_explorer]
-explore_mode = "nv-redfish"
 bmc_proxy = "<host-ip-reachable-from-cluster>:10443"
 dpu_policy = "ignore"
 run_interval = "30s"

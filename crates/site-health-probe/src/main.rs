@@ -449,15 +449,30 @@ fn build_readers(
                 Arc::clone(&gates.rest),
             )?),
             Inventory {
-                provider_auth: Arc::new(Auth::new(&rest.provider.auth, http)),
+                provider_auth: Arc::new(Auth::new(&rest.provider.auth, http.clone())),
+                tenant: rest
+                    .tenant
+                    .as_ref()
+                    .map(|t| readers::rest_instances::Fixture {
+                        config: t.clone(),
+                        auth: Arc::new(Auth::new(&t.auth, http.clone())),
+                        previous: Default::default(),
+                    }),
                 provider_org: rest.provider.org.clone(),
                 site_id: state.site_id.clone(),
+                totals: !rest.skip_totals,
             },
             schedule.devices.enabled.then_some(census),
             Arc::clone(&sink) as _,
             process_start,
         )));
-        families.extend([Family::RestTotals, Family::RestSiteMatch]);
+        if !rest.skip_totals {
+            families.push(Family::RestTotals);
+        }
+        families.push(Family::RestSiteMatch);
+        if rest.tenant.is_some() {
+            families.extend(readers::rest_instances::FAMILIES);
+        }
     }
     sink.start_counters(&families);
     Ok((out, families))
@@ -892,6 +907,11 @@ mod tests {
                 .collect();
             want.sort();
             assert_eq!(sweeps, want, "two zero series per enabled family only");
+            assert_eq!(
+                families.contains(&Family::RestTotals),
+                cfg.state.readers.rest_inventory.enabled && !cfg.state.rest.skip_totals,
+                "readiness waits for the totals only while they are read"
+            );
             (names, families.len())
         };
         assert_eq!(names(&cfg), (vec!["devices", "rest_inventory"], 10));
@@ -900,6 +920,11 @@ mod tests {
         cfg.state.readers.rest_inventory.enabled = true;
         cfg.state.readers.devices.enabled = false;
         assert_eq!(names(&cfg), (vec!["rest_inventory"], 2));
+        cfg.state.rest.skip_totals = true;
+        assert_eq!(names(&cfg), (vec!["rest_inventory"], 1));
+        cfg.state.readers.devices.enabled = true;
+        assert_eq!(names(&cfg), (vec!["devices", "rest_inventory"], 9));
+        cfg.state.readers.devices.enabled = false;
         cfg.state.enabled = false;
         assert_eq!(names(&cfg), (vec![], 0));
     }

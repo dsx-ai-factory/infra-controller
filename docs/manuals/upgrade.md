@@ -13,9 +13,9 @@ After any required manual Flow overwrite, every installation phase is safe to re
 | **1 — local-path-provisioner** | Manifests applied using `kubectl apply` are idempotent. The StorageClass is **deleted and re-created** on every run (its `provisioner` field is immutable). Existing PVs and PVCs are unaffected, but new PVC provisioning fails during that brief window. |
 | **1b — postgres-operator** | `helmfile sync` issues `helm upgrade --install` — upgrades the release in place. Existing `PostgreSQL` CRs (including `nico-pg-cluster`) are untouched. |
 | **1c — MetalLB** | CRDs are applied server-side with `--force-conflicts`. Any Helm-owned CRDs from a prior install have their ownership labels stripped before sync, preventing deletion. `helmfile sync` upgrades the release. Existing `IPAddressPool`, `BGPPeer`, and `BGPAdvertisement` instances are preserved and re-applied (idempotent `kubectl apply`). Refer to [MetalLB CRD ownership](#20--21-metallb-crd-ownership-migration). |
-| **2 — cert-manager** | `helmfile sync` upgrades the release. Existing `ClusterIssuer`, `Certificate`, and `CertificateRequest` objects are untouched. The Vault TLS bootstrap certs are re-applied server-side; existing certs that are still valid are not reissued. |
-| **3 — Vault** | `helmfile sync` upgrades the release. The StatefulSet uses `updateStrategy: OnDelete`, so running Vault pods are left alone. A changed pod template, for example new probe settings, reaches a pod only when that pod is deleted, and `setup.sh` prints a warning naming such pods. |
-| **4 — Vault unseal** | `unseal_vault.sh` checks whether Vault is already initialized. If it is, it skips `vault operator init` and only unseals any pods that were restarted and became sealed again. The Vault cluster keys (`vault-cluster-keys` Secret) and root token (`vaultroottoken`) are preserved. |
+| **2 — cert-manager** | `helmfile sync` upgrades the release. Existing `ClusterIssuer`, `Certificate`, and `CertificateRequest` objects are untouched. The site CA bootstrap and, on a Vault site, the Vault TLS bootstrap certs are re-applied server-side; existing certs that are still valid are not reissued. The `site-issuer` ClusterIssuer is a hook that each `nico-prereqs` sync deletes and recreates. |
+| **3 — Vault** | `helmfile sync` upgrades the release. The StatefulSet uses `updateStrategy: OnDelete`, so running Vault pods are left alone. A changed pod template, for example new probe settings, reaches a pod only when that pod is deleted, and `setup.sh` prints a warning naming such pods. Skipped on a site installed with `--skip-vault`. |
+| **4 — Vault unseal** | `unseal_vault.sh` checks whether Vault is already initialized. If it is, it skips `vault operator init` and only unseals any pods that were restarted and became sealed again. The Vault cluster keys (`vault-cluster-keys` Secret) and root token (`vaultroottoken`) are preserved. With `--skip-vault`, this step is skipped and `setup.sh` creates and labels the `nico-system` namespace itself. |
 | **4 (SSH host key)** | `bootstrap_ssh_host_key.sh` detects an existing SSH host key Secret and skips re-generation. The cluster's SSH identity is preserved across upgrades. |
 | **5 — external-secrets + nico-prereqs** | `helmfile sync` upgrades both releases. Existing `ClusterSecretStore` and `ExternalSecret` objects are reconciled to their new definitions. The ESO controller re-syncs all secrets on the next poll cycle. |
 | **5b — DPF** | DPF components are upgraded via their Helm charts. The `DPFOperatorConfig`, `DPUCluster`, and `DPUService` objects are preserved. Refer to [DPF version update](#20--21-dpf-version-update). |
@@ -27,7 +27,7 @@ After any required manual Flow overwrite, every installation phase is safe to re
 
 ### What is preserved across upgrades
 
-- **Vault cluster**: init state, unseal keys, PKI chain, AppRole credentials, all secrets. Vault is never re-initialized on an upgrade run.
+- **Vault cluster** (when installed): init state, unseal keys, PKI chain, AppRole credentials, all secrets. Vault is never re-initialized on an upgrade run.
 - **PostgreSQL data**: all NICo Core and NICo REST database state, including host records, machine state, and site config in `nico-pg-cluster`. Keycloak realm data and Temporal workflow history are preserved too. They stay on `nico-pg-cluster`, or on the deprecated standalone `postgres` StatefulSet in the same namespace for a Site that still uses it. Upgrading with `auto` never moves a deployed database from one to the other. Refer to [Standalone Temporal/Keycloak PostgreSQL deprecated](#23--24-standalone-temporalkeycloak-postgresql-deprecated).
 - **MetalLB site config**: `IPAddressPool`, `BGPPeer`, `BGPAdvertisement`, and `L2Advertisement` instances. These are re-applied on every run so any manual changes outside `setup.sh` are reconciled back to the values in `values/metallb-config.yaml`.
 - **SSH host key**: the cluster SSH identity is preserved so BMC consoles do not require known-host updates.
@@ -57,6 +57,8 @@ If `flow/flow` or an active Flow Pod still contains a `psm` or `nsm` container, 
 
 ### Back up Vault unseal keys
 
+Skip this step only when no `vault` release is installed, as on a site installed with `--skip-vault`. A site that still runs Vault after moving off it keeps backing the keys up until the release is removed.
+
 Vault unseal keys are stored in the `vault-cluster-keys` Secret in the `vault` namespace. If this Secret is lost and all Vault pods restart simultaneously, the Vault data is unrecoverable — a Raft snapshot does **not** substitute for the unseal keys, because snapshots are encrypted with the same keyring the keys protect.
 
 ```bash
@@ -79,7 +81,7 @@ This file contains the plaintext Vault unseal keys **and the Vault root token**.
 
 If the site keeps credentials in Postgres (as detailed in [Secrets Storage](../configuration/secrets-storage.md)), the database dump below holds only ciphertext, and every key encryption key (KEK) its rows reference is needed to read it back.
 
-With an Integrated provider, export every Secret that holds key material your `[secrets.kms]` providers reference, including keys that are no longer routed but are still needed for older rows or older dumps, and store them with the Vault unseal keys. Copy a key supplied from a file or an inline value from its source instead.
+With an Integrated provider, export every Secret that holds key material your `[secrets.kms]` providers reference, including keys that are no longer routed but are still needed for older rows or older dumps, and store them with the Vault unseal keys, or in the same kind of offline location on a site without Vault. Copy a key supplied from a file or an inline value from its source instead.
 
 With a KMIP provider, the KEK lives only in the KMIP server. Back it up through that product's key backup procedure, and keep every key that retained dumps still reference until those dumps age out.
 
@@ -125,7 +127,7 @@ Do not upgrade a cluster that already has degraded components. Resolve any exist
 kubectl get pods -n nico-system
 kubectl get pods -n nico-rest
 kubectl get pods -n temporal
-kubectl get pods -n vault
+kubectl get pods -n vault                 # while a vault release is installed
 kubectl get pods -n postgres
 kubectl get pods -n metallb-system
 kubectl get pods -n dpf-operator-system   # if DPF is enabled — phase 5b upgrades it
@@ -140,7 +142,7 @@ kubectl get svc -A -o jsonpath='{range .items[?(@.spec.type=="LoadBalancer")]}{.
     > pre-upgrade-vips.txt
 ```
 
-Verify that Vault is fully unsealed — a sealed Vault blocks the upgrade at phase 4:
+On a site with Vault, verify that it is fully unsealed — a sealed Vault blocks the upgrade at phase 4. Skip this check only when no `vault` release is installed:
 
 ```bash
 kubectl exec -n vault vault-0 -c vault -- vault status -tls-skip-verify | grep -E "Sealed|Initialized"
@@ -264,7 +266,20 @@ credential rotation is tracked by
 [Credential Sources](../configuration/credential-sources.md#site-wide-bmc-root-version-0-ownership-policy).
 
 <Warning>
-`setup.sh -y` does **not** stop on preflight errors. With `-y` set, hard errors are printed and the run continues ("Things may fail"). The preflight gate is only enforced interactively, so genuinely resolve every error here rather than relying on the script to stop you. The one exception is the database checks for Temporal and Keycloak. When a value would repoint either one away from its data, or can't be honored, setup stops even with `-y`. That covers a move off the standalone `postgres` StatefulSet without a valid migration receipt, and `false` on a database already on `nico-pg-cluster`. It also covers an invalid value, a database host `setup.sh` doesn't manage, a `KEYCLOAK_NS` that differs from `keycloak.namespace`, and cluster state preflight can't read.
+`setup.sh -y` accepts routine prompts and preflight warnings, but stops on
+preflight errors with exit code `1`. Fix the reported errors before upgrading.
+The separate `--ignore-preflight-errors` option permits continuation despite
+ordinary errors reported in the preflight summary and prints an explicit
+continuation message. Temporal and Keycloak database safety errors still stop
+setup with that override. These include a move off the standalone `postgres`
+StatefulSet without a valid migration receipt, `false` on a database already on
+`nico-pg-cluster`, an invalid value, a database host `setup.sh` doesn't manage, a
+`KEYCLOAK_NS` that differs from `keycloak.namespace`, and cluster state preflight
+can't read.
+Under `--skip-vault`, the Vault-free Core values errors and the legacy
+PSM/NSM marker error described in
+[Installing without Vault](https://github.com/dsx-ai-factory/infra-controller/blob/main/helm-prereqs/README.md#installing-without-vault)
+also stop setup with that override.
 </Warning>
 
 </Steps>
@@ -292,6 +307,8 @@ If a phase fails, `setup.sh` prints `SETUP FAILED` and offers: `Run clean.sh to 
 | `--skip-rest` | Skip Phase 7 only. Prerequisites and NICo Core still upgrade; the REST stack is left untouched. |
 | `--skip-rms` | Skip the Rack Management Service upgrade (Phase 5c). RMS installs **by default** (like DPF); `NICO_RMS_IMAGE_TAG` is required unless this flag is passed. Skipping leaves an existing RMS release untouched. |
 | `--skip-dpf` | Use **only** if DPF is not enabled at this site. This is not a pure skip: it clears `INSTALL_DPF`, which drops phase 5b and redeploys NICo Core with the `[dpf]` block disabled — on a DPF-enabled site that is a config change, not a skip. |
+| `--skip-vault` | Use **only** on a site that was installed without Vault, or that has completed the migration off it. This is not a pure skip: it drops the Vault install and unseal phases, removes the Vault resources from the `nico-prereqs` release at the end of the run, after nothing references Vault, and redeploys Core, RMS, Flow, and the site-agent with `site-issuer` certificates and the Core Vault settings disabled — on a Vault site that is a config change that requires the credential migration first, and it never uninstalls Vault. Pass it on every upgrade of such a site, or keep `NICO_SKIP_VAULT=true` set; the choice is not stored. Refer to [Installing without Vault](https://github.com/dsx-ai-factory/infra-controller/blob/main/helm-prereqs/README.md#installing-without-vault). |
+| `--install-vault` | Roll a `--skip-vault` site back to Vault, or override `NICO_SKIP_VAULT=true` left in the environment. |
 | `--core-values <file>` | Use a per-site NICo Core values file (same as initial install). |
 | `--flow-values <file>` | Use a per-site NICo Flow values file (same as initial install). Flow overrides applied outside `setup.sh` are reset by the upgrade unless they are in this file. |
 | `--metallb-config <path>` | Use a site-specific MetalLB manifest or kustomize dir (same as initial install). |
@@ -301,7 +318,7 @@ If a phase fails, `setup.sh` prints `SETUP FAILED` and offers: `Run clean.sh to 
 | Phase | Typical duration |
 | ----- | ---------------- |
 | Phases 1–1c (storage, postgres-operator, MetalLB) | 2–5 min |
-| Phases 2–4 (cert-manager, Vault, unseal) | 1–3 min (Vault is already initialized and its pods are not restarted) |
+| Phases 2–4 (cert-manager, Vault, unseal) | 1–3 min (Vault is already initialized and its pods are not restarted; with `--skip-vault`, cert-manager only) |
 | Phase 5 (ESO + nico-prereqs) | 1–3 min |
 | Phase 5b (DPF) | 3–10 min (depends on DPF version delta) |
 | Phase 5c (RMS - unless `--skip-rms`) | 1-3 min (certificate issuance + rollout) |
@@ -318,7 +335,7 @@ Run the same checks as after initial installation:
 kubectl get pods -n nico-system
 kubectl get pods -n nico-rest
 kubectl get pods -n temporal
-kubectl get pods -n vault
+kubectl get pods -n vault                 # while a vault release is installed
 kubectl get pods -n postgres
 kubectl get pods -n metallb-system
 kubectl get pods -n dpf-operator-system   # if DPF enabled
@@ -357,7 +374,7 @@ kubectl run -i --rm --restart=Never --image=curlimages/curl upgrade-check \
   -sf http://nico-api-metrics.nico-system.svc.cluster.local:1080/ >/dev/null && echo "nico-api healthy"
 ```
 
-Then run the included health check, which covers the full stack (Vault, cert-manager, ESO, MetalLB, `.forge` DNS records):
+Then run the included health check, which covers the full stack (Vault when installed, cert-manager, ESO, MetalLB, `.forge` DNS records):
 
 ```bash
 cd helm-prereqs/
@@ -372,6 +389,8 @@ Migrating an existing site's credentials from Vault to Postgres is a configurati
 - The default rolling update also keeps the old pod running until the new one is ready, so finish each step's rollout before starting the next. Keep `bmc_rotation_enabled` and `uefi_rotation_enabled` at their default `false` until the whole fleet runs one config.
 
 Once the writer is Postgres, the KEK backup above belongs in every pre-upgrade checklist.
+
+Moving a site off Vault entirely, including certificate issuance and the Vault install itself, is a later step. Complete the credential migration on that page first, then follow [Installing without Vault](https://github.com/dsx-ai-factory/infra-controller/blob/main/helm-prereqs/README.md#installing-without-vault) for the certificate flags, the issuer switch, and the `--skip-vault` rerun.
 
 ## Version-specific upgrade notes
 
@@ -417,6 +436,22 @@ Do not roll back to an API that lacks this behavior. It deletes peerings without
 waiting for the DPUs, and restoring a database backup does not undo their network
 changes. For the network-version and migration details, refer to the
 [configuration reference](https://github.com/dsx-ai-factory/infra-controller/blob/main/crates/api-core/src/cfg/README.md#vpc-peering-deletion).
+
+### 2.4 → 2.5: Keycloak service account orgs are required
+
+**Impact:** A deployment with `keycloak.serviceAccount: true` fails to start unless it also lists `keycloak.serviceAccountOrgs`, with exactly one org in disconnected mode. The `helm-prereqs` values already list `ncx`. Before upgrading a deployment that uses its own values file, list each org whose client holds both `PROVIDER_ADMIN` and `TENANT_ADMIN`:
+
+```yaml
+nico-rest-api:
+  config:
+    keycloak:
+      serviceAccount: true
+      serviceAccountOrgs: [ncx]
+```
+
+Only a client in a listed org is a service account, and only for requests to that org. A client credentials token from any other client is now authorized by its roles in the requested org, like a user token. That includes `serviceAccount: false`, where it used to get `401`. A disconnected config with more than one `isServiceAccount: true` claim mapping across custom issuers also fails to start.
+
+In connected mode, `serviceAccountOrgs` can list more than one org. Custom issuer `isServiceAccount` mappings, which used to require disconnected mode, are now accepted in connected mode with no limit on their number.
 
 ### 2.3 → 2.4: Standalone Temporal/Keycloak PostgreSQL deprecated
 
@@ -572,7 +607,7 @@ For DPF, rolling back to a prior DPF version is not supported by NVIDIA. If DPF 
 
 ## Using setup.sh for individual component upgrades
 
-You can narrow an upgrade to particular components with the `--skip-*` flags. `--skip-core` and `--skip-rest` skip exactly the phase they name - **none of them skip the prerequisite stack**, and there is no `--skip-prereqs`. NICo Flow (Phase 7h) has no skip flag of its own; it upgrades together with REST and is skipped only by `--skip-rest`. (`--skip-dpf` is the exception: refer to its caveat in the flag table above. `--skip-core` also suppresses the `imagepullsecret` upsert that the Core migration Job uses.)
+You can narrow an upgrade to particular components with the `--skip-*` flags. `--skip-core` and `--skip-rest` skip exactly the phase they name - **none of them skip the prerequisite stack**, and there is no `--skip-prereqs`. NICo Flow (Phase 7h) has no skip flag of its own; it upgrades together with REST and is skipped only by `--skip-rest`. (`--skip-dpf` and `--skip-vault` are the exceptions: refer to their caveats in the flag table above. `--skip-core` also suppresses the `imagepullsecret` upsert that the Core migration Job uses.)
 
 ```bash
 # Prerequisites + NICo Core; leave the REST stack untouched (skips Phase 7)

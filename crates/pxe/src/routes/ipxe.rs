@@ -23,8 +23,8 @@ use axum::extract::State;
 use axum::response::IntoResponse;
 use axum::routing::get;
 use carbide_instrument::emit;
-use forge_tls::client_config::ClientCert;
-use rpc::forge_tls_client::ForgeClientConfig;
+use carbide_tls::client_config::ClientCert;
+use rpc::carbide_tls_client::CarbideClientConfig;
 
 use crate::common::{AppState, Machine, MachineInterface};
 use crate::metrics::{BootEndpoint, OutcomeReason, PxeBootOutcome, PxeCustomIpxeFetchFailed};
@@ -121,7 +121,7 @@ async fn boot(contents: MachineInterface, state: State<AppState>) -> impl IntoRe
                 contents.client_ip,
                 contents.product,
                 &state.runtime_config.internal_api_url,
-                &ForgeClientConfig::new(
+                &CarbideClientConfig::new(
                     state.runtime_config.forge_root_ca_path.clone(),
                     Some(ClientCert {
                         cert_path: state.runtime_config.server_cert_path.clone(),

@@ -300,6 +300,7 @@ async fn test_overlapping_prefix(pool: sqlx::PgPool) -> Result<(), eyre::Report>
             svi_ip: None,
             free_ip_count_v2: None,
             free_ip_count_saturated: false,
+            dhcpv6_link_address: None,
         }],
         subdomain_id: None,
         vpc_id: None,
@@ -580,6 +581,19 @@ async fn test_initial_network_reverse_zones_follow_persisted_config_drift(
         persist_initial_network_without_reverse_zone(&db_pool, "drifted-underlay", &original)
             .await?;
 
+    // A live addition is not part of the immutable seed. Startup must preserve
+    // it while repairing the original zone and rejecting the TOML CIDR drift.
+    let added_prefix = "2001:db8:55::/64";
+    let applied = env
+        .api
+        .add_network_segment_prefix(Request::new(rpc::forge::AddNetworkSegmentPrefixRequest {
+            network_segment_id: Some(original_segment.id),
+            prefix: added_prefix.to_string(),
+            ..Default::default()
+        }))
+        .await?
+        .into_inner();
+
     crate::db_init::create_initial_networks(
         &env.api,
         &env.pool,
@@ -590,8 +604,22 @@ async fn test_initial_network_reverse_zones_follow_persisted_config_drift(
     let mut txn = db_pool.begin().await?;
     let segment = db::network_segment::find_by_name(&mut txn, "drifted-underlay").await?;
     assert_eq!(segment.id, original_segment.id);
-    assert_eq!(segment.prefixes.len(), 1);
-    assert_eq!(segment.prefixes[0].prefix, original.prefix);
+    assert_eq!(segment.prefixes.len(), 2);
+    assert!(
+        segment
+            .prefixes
+            .iter()
+            .any(|prefix| prefix.id == original_segment.prefixes[0].id
+                && prefix.prefix == original.prefix)
+    );
+    assert!(
+        segment
+            .prefixes
+            .iter()
+            .any(|prefix| prefix.prefix.to_string() == added_prefix)
+    );
+    let persisted: rpc::forge::NetworkSegment = segment.clone().into();
+    assert_eq!(persisted.config, applied.config);
     assert_eq!(
         db::network_segment::stored_def(txn.as_mut(), "drifted-underlay").await?,
         Some(original.clone()),
@@ -605,6 +633,14 @@ async fn test_initial_network_reverse_zones_follow_persisted_config_drift(
         original_domains.len(),
         1,
         "startup should create the zone for the persisted prefix",
+    );
+    // Drift must retain the added prefix's zone as well as its stored metadata.
+    let added_zone = db::dns::cidr_to_reverse_zone(added_prefix.parse()?).expect("aligned prefix");
+    assert_eq!(
+        db::dns::domain::find_reverse_zone_by_normalized_name(txn.as_mut(), &added_zone)
+            .await?
+            .len(),
+        1
     );
 
     let drifted_zone = db::dns::cidr_to_reverse_zone(drifted.prefix).unwrap();
@@ -773,6 +809,87 @@ pub(in crate::tests) async fn test_create_initial_vpc_and_attached_network(
     Ok(())
 }
 
+#[crate::sqlx_test]
+async fn network_segment_allocation_failures_use_api_instrumentation(
+    db_pool: sqlx::PgPool,
+) -> Result<(), eyre::Report> {
+    let env =
+        create_test_env_with_overrides(db_pool, TestEnvOverrides::no_network_segments()).await;
+    for (pool_name, diagnostic) in [
+        (env.common_pools.ethernet.pool_vlan_id.name(), "vlan_id"),
+        (env.common_pools.ethernet.pool_vni.name(), "vni"),
+    ] {
+        let source_pool = ResourcePool::<i32>::new(pool_name.to_string(), ValueType::Integer);
+        let owner_type = model::resource_pool::OwnerType::NetworkSegment;
+        let owner_id = "reserved-for-metrics-test";
+        let mut txn = env.pool.begin().await?;
+        sqlx::query("DELETE FROM resource_pool WHERE name = $1")
+            .bind(pool_name)
+            .execute(&mut *txn)
+            .await?;
+        db::resource_pool::populate(&source_pool, &mut txn, vec![1], true).await?;
+        db::resource_pool::allocate(&source_pool, &mut txn, owner_type, owner_id, None).await?;
+        txn.commit().await?;
+
+        let before = (
+            db::resource_pool::stats(&env.pool, env.common_pools.ethernet.pool_vlan_id.name())
+                .await?,
+            db::resource_pool::stats(&env.pool, env.common_pools.ethernet.pool_vni.name()).await?,
+        );
+        let metrics = MetricsCapture::for_registry(env.test_meter.registry());
+        let error = env
+            .api
+            .create_network_segment(Request::new(rpc::forge::NetworkSegmentCreationRequest {
+                name: "allocation-metrics-test".to_string(),
+                mtu: Some(1500),
+                prefixes: vec![rpc::forge::NetworkPrefix {
+                    prefix: "198.51.100.0/24".to_string(),
+                    gateway: Some("198.51.100.1".to_string()),
+                    reserve_first: 1,
+                    ..Default::default()
+                }],
+                segment_type: rpc::forge::NetworkSegmentType::Admin as i32,
+                ..Default::default()
+            }))
+            .await
+            .expect_err("the exhausted pool must reject creation");
+        assert_eq!(error.code(), tonic::Code::ResourceExhausted, "{pool_name}");
+        assert_eq!(error.message(), format!("pool {diagnostic}"));
+        assert_eq!(
+            metrics.counter_delta(
+                "carbide_resource_pool_lifecycle_failures_total",
+                &[
+                    ("operation", "allocate"),
+                    ("failure", "exhausted"),
+                    ("failure_policy", "required"),
+                    ("allocation_mode", "automatic"),
+                    ("value_type", "integer"),
+                ],
+            ),
+            1.0,
+            "{pool_name}",
+        );
+        assert_eq!(
+            (
+                db::resource_pool::stats(&env.pool, env.common_pools.ethernet.pool_vlan_id.name())
+                    .await?,
+                db::resource_pool::stats(&env.pool, env.common_pools.ethernet.pool_vni.name())
+                    .await?,
+            ),
+            before,
+            "failed creation must roll back both allocations",
+        );
+
+        let mut txn = env.pool.begin().await?;
+        assert_eq!(
+            db::resource_pool::release(&source_pool, &mut txn, 1, owner_type, owner_id).await?,
+            db::ConditionalWrite::Applied(()),
+        );
+        txn.commit().await?;
+    }
+    Ok(())
+}
+
 #[derive(Debug, Clone, Copy)]
 enum InitialVpcAllocationFailure {
     Exhausted,
@@ -934,6 +1051,7 @@ async fn initial_vpc_allocation_failures_preserve_errors_and_emit(
             let db_pool = env.pool.clone();
             let manager = env.api.work_lock_manager_handle.clone();
             async move {
+                let test_meter = carbide_utils::test_support::test_meter::TestMeter::default();
                 let source_pool =
                     ResourcePool::<i32>::new(failure.pool_name().to_string(), ValueType::Integer);
                 let mut txn = db_pool.begin().await.expect("begin seed transaction");
@@ -1004,9 +1122,10 @@ async fn initial_vpc_allocation_failures_preserve_errors_and_emit(
                     .ethernet
                     .pool_vpc_vni = Arc::new(source_pool);
                 let api = TestApiBuilder::new(db_pool.clone(), common, manager)
+                    .with_instrumentation(carbide_instrument::Instrumentation::new(test_meter.meter()))
                     .with_resource_pool_registry(registry)
                     .build();
-                let metrics = MetricsCapture::start();
+                let metrics = MetricsCapture::for_registry(test_meter.registry());
                 let (result, logs) =
                     capture_logs_async(crate::db_init::create_initial_vpcs(&api, &vpcs)).await;
                 let returned_error = result.expect_err("initial VPC allocation must fail");
@@ -1026,13 +1145,10 @@ async fn initial_vpc_allocation_failures_preserve_errors_and_emit(
                 assert_eq!(event_logs.len(), 1);
                 let log = event_logs[0];
 
-                // Tests without a `MetricsCapture` can increment this shared
-                // counter. The log capture above checks this request's event.
-                let observed =
-                    metrics.counter_delta(LIFECYCLE_FAILURES_METRIC, &failure.metric_labels());
-                assert!(
-                    observed >= 1.0,
-                    "expected at least one {failure:?} allocation failure, observed {observed}"
+                assert_eq!(
+                    metrics.counter_delta(LIFECYCLE_FAILURES_METRIC, &failure.metric_labels()),
+                    1.0,
+                    "{failure:?}",
                 );
 
 
@@ -1179,6 +1295,7 @@ async fn test_31_prefix_not_allowed(pool: sqlx::PgPool) -> Result<(), eyre::Repo
             svi_ip: None,
             free_ip_count_v2: None,
             free_ip_count_saturated: false,
+            dhcpv6_link_address: None,
         }],
         subdomain_id: None,
         vpc_id: None,
@@ -1328,6 +1445,14 @@ async fn test_network_segment_metrics(
         );
     }
 
+    // A dropped lock only queues its release. Drain that release through the
+    // same manager and await the final unlock before shutting the manager down.
+    env.api
+        .work_lock_manager_handle
+        .try_acquire_lock("lock_iteration::network_segments_controller_iteration_ids".into())
+        .await?
+        .release()
+        .await?;
     drop(env);
 
     let env = create_test_env_with_overrides(pool.clone(), overrides).await;
@@ -2023,6 +2148,7 @@ async fn test_create_network_segment_with_ipv6_prefix(
             svi_ip: None,
             free_ip_count_v2: None,
             free_ip_count_saturated: false,
+            dhcpv6_link_address: None,
         }],
         subdomain_id: None,
         vpc_id: None,
@@ -2103,6 +2229,7 @@ async fn test_create_dual_stack_tenant_segment(pool: sqlx::PgPool) -> Result<(),
                 svi_ip: None,
                 free_ip_count_v2: None,
                 free_ip_count_saturated: false,
+                dhcpv6_link_address: None,
             },
             rpc::forge::NetworkPrefix {
                 id: None,
@@ -2113,6 +2240,7 @@ async fn test_create_dual_stack_tenant_segment(pool: sqlx::PgPool) -> Result<(),
                 svi_ip: None,
                 free_ip_count_v2: None,
                 free_ip_count_saturated: false,
+                dhcpv6_link_address: None,
             },
         ],
         subdomain_id: None,
@@ -2202,6 +2330,7 @@ async fn test_ipv6_tenant_prefix_rejected_when_not_in_site_fabric(
             svi_ip: None,
             free_ip_count_v2: None,
             free_ip_count_saturated: false,
+            dhcpv6_link_address: None,
         }],
         subdomain_id: None,
         vpc_id: vpc.id,
@@ -2376,6 +2505,7 @@ async fn flat_vpc_accepts_host_inband_segment(
             svi_ip: None,
             free_ip_count_v2: None,
             free_ip_count_saturated: false,
+            dhcpv6_link_address: None,
         }],
         subdomain_id: None,
         vpc_id: vpc.id,
@@ -2433,6 +2563,7 @@ async fn flat_vpc_rejects_tenant_segment(
             svi_ip: None,
             free_ip_count_v2: None,
             free_ip_count_saturated: false,
+            dhcpv6_link_address: None,
         }],
         subdomain_id: None,
         vpc_id: vpc.id,
@@ -2488,6 +2619,7 @@ async fn etv_vpc_rejects_host_inband_segment(
             svi_ip: None,
             free_ip_count_v2: None,
             free_ip_count_saturated: false,
+            dhcpv6_link_address: None,
         }],
         subdomain_id: None,
         vpc_id: vpc.id,
@@ -2697,6 +2829,7 @@ async fn create_unattached_segment(
                 svi_ip: None,
                 free_ip_count_v2: None,
                 free_ip_count_saturated: false,
+                dhcpv6_link_address: None,
             }],
             subdomain_id: None,
             vpc_id: None,

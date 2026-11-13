@@ -1,12 +1,12 @@
 use std::collections::HashMap;
 
 use carbide_uuid::machine::MachineId;
+use rpc::carbide_api_client::CarbideApiClient;
+use rpc::carbide_tls_client::ApiConfig;
 use rpc::forge::{
     GetRackRequest, Instance, InstanceAllocationRequest, InstanceConfig, Label,
     MachineMetadataUpdateRequest, MachinesByIdsRequest, Metadata,
 };
-use rpc::forge_api_client::ForgeApiClient;
-use rpc::forge_tls_client::ApiConfig;
 use rpc::protos::forge::{
     InstanceOperatingSystemConfig, InstancesByIdsRequest, MachineSearchConfig,
     instance_operating_system_config,
@@ -17,14 +17,14 @@ use crate::error::RvsError;
 
 /// NICo gRPC client wrapper -- translates gRPC responses into IR types.
 pub struct NicoClient {
-    inner: ForgeApiClient,
+    inner: CarbideApiClient,
 }
 
 impl NicoClient {
     /// Construct from API config.
     pub fn new(api_config: &ApiConfig<'_>) -> Self {
         Self {
-            inner: ForgeApiClient::new(api_config),
+            inner: CarbideApiClient::new(api_config),
         }
     }
 
@@ -118,6 +118,7 @@ impl NicoClient {
                 instance_type_id: None,
                 metadata: None,
                 allow_unhealthy_machine: false,
+                external_validation_request_id: None,
             })
             .await?;
         Ok(response.id.map(|id| id.to_string()).unwrap_or_default())

@@ -275,7 +275,7 @@ async fn run_as_service(config: &Options) -> Result<(), eyre::Report> {
     let mut lldp_reporter = lldp_report::LldpReporter::new(
         machine_id,
         config.api.clone(),
-        client::forge_client_config(config),
+        client::carbide_client_config(config),
     );
 
     // Spawn any further background task into this set and give it a clone of
@@ -573,7 +573,20 @@ async fn handle_firmware_upgrade_action(
         "[firmware_upgrade] received upgrade task",
     );
 
-    let result = firmware_upgrade::handle_firmware_upgrade(&http_client, &task).await;
+    let supervisor_config = SupervisorConfig::from_env().map_err(|error| {
+        let cause = match error {
+            SupervisorLaunchError::Environment(_) => {
+                "MLX_FIRMWARE_SUPERVISOR_LAUNCH must contain valid Unicode".to_string()
+            }
+            SupervisorLaunchError::Io { operation, source, .. } => format!("{operation}: {source}"),
+            error => error.to_string(),
+        };
+        CarbideClientError::GenericError(format!(
+            "{cause}; firmware script was not attempted; repair configuration while the task remains pending"
+        ))
+    })?;
+    let result =
+        firmware_upgrade::handle_firmware_upgrade(&http_client, &task, &supervisor_config).await;
 
     tracing::info!(
         success = result.success,
@@ -648,6 +661,7 @@ async fn handle_mlxreport_action(
         machine_id,
         mlx_action.device_actions,
         supervisor_config.as_ref(),
+        Some(config),
         |device| discover_device_with_settlement(device).map(Into::into),
         |request| mlx_device::publish_mlx_observation_report(config, request),
     )
@@ -658,6 +672,7 @@ async fn collect_and_publish_mlx_observations<PublishFuture>(
     machine_id: &MachineId,
     commands: Vec<fac::MlxDeviceAction>,
     supervisor_config: Result<&SupervisorConfig, &SupervisorLaunchError>,
+    core_options: Option<&Options>,
     discover: impl FnMut(&str) -> Result<rpc::protos::mlx_device::MlxDeviceInfo, DeviceDiscoveryError>,
     publish: impl FnOnce(PublishMlxObservationReportRequest) -> PublishFuture,
 ) where
@@ -665,7 +680,9 @@ async fn collect_and_publish_mlx_observations<PublishFuture>(
         std::future::Future<Output = CarbideClientResult<PublishMlxObservationReportResponse>>,
 {
     let report = match supervisor_config {
-        Ok(config) => collect_mlx_observations(machine_id, commands, config, discover).await,
+        Ok(config) => {
+            collect_mlx_observations(machine_id, commands, config, core_options, discover).await
+        }
         Err(_) => {
             tracing::error!(
                 failure_stage = "configuration",
@@ -759,6 +776,7 @@ async fn collect_mlx_observations(
     machine_id: &MachineId,
     commands: Vec<fac::MlxDeviceAction>,
     supervisor_config: &SupervisorConfig,
+    core_options: Option<&Options>,
     mut discover: impl FnMut(
         &str,
     )
@@ -779,7 +797,9 @@ async fn collect_mlx_observations(
         let pci_name = &device_action.pci_name;
         match device_action.command.as_ref() {
             Some(fac::mlx_device_action::Command::UpdateFirmware(task)) => {
-                let result = mlx_device::update_firmware(pci_name, task, supervisor_config).await;
+                let result =
+                    mlx_device::update_firmware(pci_name, task, supervisor_config, core_options)
+                        .await;
                 report
                     .observations
                     .extend(result.map(|result| MlxObservation {
@@ -1195,6 +1215,7 @@ async fn query_api(
     );
     let query = rpc_forge::ForgeAgentControlRequest {
         machine_id: Some(*machine_id),
+        nic_firmware_site_cache_supported: true,
     };
     let request = tonic::Request::new(query);
     let mut client = client::create_forge_client(config).await?;
@@ -1368,6 +1389,131 @@ mod tests {
 
     use super::*;
 
+    /// Capture the actual Scout poll so its advertised delivery support cannot drift.
+    #[tokio::test]
+    async fn control_poll_advertises_site_cache_support() {
+        use std::sync::{Arc, Mutex};
+
+        use axum::body::Body;
+        use axum::extract::{Request, State};
+        use axum::routing::post;
+        use rcgen::{CertificateParams, KeyPair, SanType};
+        use tokio_stream::wrappers::TcpListenerStream;
+        use tonic::transport::{Identity, Server, ServerTlsConfig};
+
+        struct Unary<F>(F);
+
+        impl<Req, Resp, F> tonic::server::UnaryService<Req> for Unary<F>
+        where
+            F: Fn(Req) -> Resp,
+            Req: Send + 'static,
+            Resp: Send + 'static,
+        {
+            type Response = Resp;
+            type Future = std::future::Ready<Result<tonic::Response<Resp>, tonic::Status>>;
+
+            fn call(&mut self, request: tonic::Request<Req>) -> Self::Future {
+                std::future::ready(Ok(tonic::Response::new((self.0)(request.into_inner()))))
+            }
+        }
+
+        tokio::time::timeout(Duration::from_secs(10), async {
+            rustls::crypto::aws_lc_rs::default_provider()
+                .install_default()
+                .ok();
+            let directory = tempfile::tempdir().expect("Scout control identity directory");
+            let key = KeyPair::generate().expect("Scout control identity key");
+            let mut params = CertificateParams::new(vec!["localhost".into()]).unwrap();
+            params.subject_alt_names.push(SanType::URI(
+                "spiffe://test/machine/firmware".try_into().unwrap(),
+            ));
+            let certificate = params.self_signed(&key).expect("Scout control certificate");
+            let write = |name: &str, contents: &str| {
+                let path = directory.path().join(name);
+                std::fs::write(&path, contents).expect("write Scout identity");
+                path.to_string_lossy().into_owned()
+            };
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            let mut options = Options::parse_from([
+                "forge-scout",
+                &format!("--api=https://localhost:{}", address.port()),
+            ]);
+            options.root_ca = write("ca.pem", &certificate.pem());
+            options.client_cert = write("client.pem", &certificate.pem());
+            options.client_key = write("key.pem", &key.serialize_pem());
+            let polls = Arc::new(Mutex::new(Vec::new()));
+            let routes = axum::Router::new()
+                .route(
+                    rpc::service_path!("Version"),
+                    post(|request: Request| async move {
+                        tonic::server::Grpc::new(tonic_prost::ProstCodec::default())
+                            .unary(
+                                Unary(|_: rpc_forge::VersionRequest| {
+                                    rpc_forge::BuildInfo::default()
+                                }),
+                                request,
+                            )
+                            .await
+                            .map(Body::new)
+                    }),
+                )
+                .route(
+                    rpc::service_path!("ForgeAgentControl"),
+                    post(
+                        |State(polls): State<
+                            Arc<Mutex<Vec<rpc_forge::ForgeAgentControlRequest>>>,
+                        >,
+                         request: Request| async move {
+                            tonic::server::Grpc::new(tonic_prost::ProstCodec::default())
+                                .unary(
+                                    Unary(move |poll: rpc_forge::ForgeAgentControlRequest| {
+                                        polls.lock().unwrap().push(poll);
+                                        rpc_forge::ForgeAgentControlResponse::default()
+                                    }),
+                                    request,
+                                )
+                                .await
+                                .map(Body::new)
+                        },
+                    ),
+                )
+                .with_state(polls.clone());
+            let cancel = CancellationToken::new();
+            let server = tokio::spawn(
+                Server::builder()
+                    .tls_config(
+                        ServerTlsConfig::new()
+                            .identity(Identity::from_pem(certificate.pem(), key.serialize_pem())),
+                    )
+                    .unwrap()
+                    .add_routes(routes.into())
+                    .serve_with_incoming_shutdown(
+                        TcpListenerStream::new(listener),
+                        cancel.clone().cancelled_owned(),
+                    ),
+            );
+            let machine_id = "fm100ht038bg3qsho433vkg684heguv282qaggmrsh2ugn1qk096n2c6hcg"
+                .parse()
+                .unwrap();
+            let response = query_api(&options, &machine_id, 0, 0)
+                .await
+                .expect("actual Scout control poll");
+            assert_eq!(response, rpc_forge::ForgeAgentControlResponse::default());
+            assert_eq!(
+                *polls.lock().unwrap(),
+                vec![rpc_forge::ForgeAgentControlRequest {
+                    machine_id: Some(machine_id),
+                    nic_firmware_site_cache_supported: true,
+                }]
+            );
+            cancel.cancel();
+            server.await.unwrap().unwrap();
+        })
+        .await
+        .expect("Scout capability advertisement is independently bounded");
+    }
+
     /// Invalid local configuration still produces a correlated error for every
     /// generic command. Legacy work defers without discovery, and neither
     /// response nor logs may expose a configuration value that could contain
@@ -1408,6 +1554,7 @@ mod tests {
             ..Default::default()
         };
         let observe_task = fac::MlxDeviceObserveFirmwareUpdate {
+            delivery_mode: Default::default(),
             operation_id: "nic-observe-config-failure".into(),
             phase_id: task.phase_id.clone(),
             profile: task.profile.clone(),
@@ -1468,6 +1615,7 @@ mod tests {
             &machine_id,
             commands,
             Err(&configuration_error),
+            None,
             |_| panic!("invalid configuration must not discover hardware"),
             |request| {
                 published = Some(request);

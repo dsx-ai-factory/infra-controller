@@ -672,6 +672,7 @@ async fn test_machine_creator_created_host_advances_through_dpu_discovery(
     let machine_creator = MachineCreator::new(
         env.pool.clone(),
         (&explorer_config).into(),
+        env.api.resource_pool_registry.clone(),
         env.common_pools.clone(),
         Arc::new(env.config.rack_profiles.clone()),
         None,
@@ -2722,9 +2723,9 @@ async fn test_measurement_host_init_failed_to_waiting_for_measurements_to_pendin
         nras_should_fail_parsing_flag,
         &mh,
         &mut txn,
-        ManagedHostState::HostInit {
+        |job_id| ManagedHostState::HostInit {
             machine_state: MachineState::SpdmMeasuring {
-                spdm_measuring_state: SpdmMeasuringState::PollResult,
+                spdm_measuring_state: SpdmMeasuringState::PollResult(job_id),
             },
         },
     )
@@ -3361,7 +3362,7 @@ async fn set_pending_boot_interface(
 async fn backdate_boot_interface_observation(
     env: &TestEnv,
     managed_host: &TestManagedHost,
-) -> model::machine::StableHostMachine {
+) -> Box<model::machine::StableHostMachine> {
     let mut txn = env.db_txn().await;
     let host_before = managed_host.host().db_machine(&mut txn).await;
     let desired_boot_interface = host_before
@@ -4542,7 +4543,7 @@ async fn test_assigned_periodic_boot_interface_drift_defers_convergence(pool: sq
 async fn load_test_host(
     env: &TestEnv,
     managed_host: &TestManagedHost,
-) -> model::machine::StableHostMachine {
+) -> Box<model::machine::StableHostMachine> {
     let mut txn = env.db_txn().await;
     managed_host.host().db_machine(&mut txn).await
 }
@@ -7590,6 +7591,7 @@ async fn test_scout_heartbeat_timeout_alert_cleared_on_instance_creation_transit
                 labels: vec![],
             }),
             allow_unhealthy_machine: true,
+            external_validation_request_id: None,
         }))
         .await
         .unwrap();
@@ -7673,6 +7675,7 @@ async fn test_scout_heartbeat_timeout_alert_not_cleared_when_unhealthy_allocatio
                 labels: vec![],
             }),
             allow_unhealthy_machine: false,
+            external_validation_request_id: None,
         }))
         .await
         .unwrap_err();

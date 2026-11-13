@@ -56,7 +56,7 @@ func UnwrapWorkflowError(err error) (code int, unwrappedError error) {
 			code = http.StatusServiceUnavailable
 		case codes.PermissionDenied:
 			code = http.StatusForbidden
-		case codes.AlreadyExists:
+		case codes.AlreadyExists, codes.Aborted:
 			code = http.StatusConflict
 		case codes.FailedPrecondition:
 			code = http.StatusPreconditionFailed
@@ -85,7 +85,7 @@ func UnwrapWorkflowError(err error) (code int, unwrappedError error) {
 		code = http.StatusForbidden
 	case swe.ErrTypeNICoUnavailable, swe.ErrTypeCarbideUnavailable:
 		code = http.StatusServiceUnavailable
-	case swe.ErrTypeNICoAlreadyExists, swe.ErrTypeCarbideAlreadyExists:
+	case swe.ErrTypeNICoAlreadyExists, swe.ErrTypeCarbideAlreadyExists, swe.ErrTypeNICoAborted:
 		code = http.StatusConflict
 	case swe.ErrTypeNICoFailedPrecondition, swe.ErrTypeCarbideFailedPrecondition:
 		code = http.StatusPreconditionFailed
@@ -115,7 +115,7 @@ func attemptFailure(resultErr error) (*cutil.APIError, bool) {
 		case swe.ErrTypeNICoObjectNotFound, swe.ErrTypeCarbideObjectNotFound,
 			swe.ErrTypeNICoUnimplemented, swe.ErrTypeCarbideUnimplemented,
 			swe.ErrTypeNICoDenied, swe.ErrTypeCarbideDenied,
-			swe.ErrTypeNICoAlreadyExists, swe.ErrTypeCarbideAlreadyExists,
+			swe.ErrTypeNICoAlreadyExists, swe.ErrTypeCarbideAlreadyExists, swe.ErrTypeNICoAborted,
 			swe.ErrTypeNICoFailedPrecondition, swe.ErrTypeCarbideFailedPrecondition,
 			swe.ErrTypeNICoInvalidArgument, swe.ErrTypeCarbideInvalidArgument:
 			coreResultObserved = true

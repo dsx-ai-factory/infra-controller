@@ -37,6 +37,8 @@ Manufacturer default password
 
 - lenovo-ami
 
+- giga-computing
+
 - dell
 
 - supermicro
@@ -48,6 +50,8 @@ Manufacturer default password
 - liteon
 
 - delta
+
+- sushy
 
 - unknown
 
@@ -71,7 +75,7 @@ Sort output by specified field
 
 `-h, --help`
 
-Print help (see a summary with -h)
+Print help (see a summary with '-h')
 
 ## Examples
 

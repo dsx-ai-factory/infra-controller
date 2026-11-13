@@ -47,6 +47,7 @@ carbide-uuid = { path = "../uuid" }
 
 chrono = { workspace = true }
 eyre = { workspace = true }
+opentelemetry = { workspace = true }
 serde = { features = ["derive"], workspace = true }
 serde_json = { workspace = true }
 serial_test = { workspace = true }
@@ -83,6 +84,10 @@ rand = { workspace = true }
 lazy_static = { workspace = true }
 uuid = { workspace = true }
 thiserror = { workspace = true }
+
+[dev-dependencies]
+carbide-test-support = { path = "../test-support" }
+tokio = { workspace = true, features = ["test-util"] }
 
 [build-dependencies]
 carbide-version = { path = "../version" }

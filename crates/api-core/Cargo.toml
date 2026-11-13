@@ -29,6 +29,10 @@ name = "carbide_api_core"
 [dependencies]
 cert-manager = { path = "../cert-manager" }
 # External dependencies. PLEASE KEEP ALPHABETIZED ORDER.
+bmc-drivers = { path = "../bmc-drivers" }
+bmc-backend = { path = "../bmc-backend" }
+bmc-runtime = { path = "../bmc-runtime" }
+bmc-explorer = { path = "../bmc-explorer" }
 bmc-vendor = { path = "../bmc-vendor" }
 carbide-api-model = { path = "../api-model", default-features = false }
 carbide-test-support = { path = "../test-support", optional = true }
@@ -218,6 +222,7 @@ carbide-api-db = { path = "../api-db", default-features = false, features = [
 carbide-api-model = { path = "../api-model", default-features = false, features = [
   "test-support",
 ] }
+carbide-api-test-helper = { path = "../api-test-helper" }
 carbide-firmware = { path = "../firmware", features = ["test-support"] }
 carbide-ib-fabric = { path = "../ib-fabric", features = ["test-support"] }
 carbide-instrument = { path = "../instrument", features = ["test-support"] }
@@ -252,6 +257,7 @@ mockito = { workspace = true }
 prost = { workspace = true }
 prost-types = { workspace = true }
 rcgen = { workspace = true }
+reqwest = { workspace = true, features = ["http2"] }
 strum = { workspace = true }
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["test-util"] }

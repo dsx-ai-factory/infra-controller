@@ -21,6 +21,12 @@ extend = [{ path = "Makefile-package.toml" }, { path = "Makefile-build.toml" }]
 # CI installs this exact version in setup-mkosi-environment. Newer local
 # versions remain allowed, but older versions fail before running tasks.
 min_version = "0.37.24"
+# Otherwise cargo-make exports CARGO_MAKE_GIT_BRANCH and the HEAD commit hash
+# to every rustc it runs. sccache hashes all CARGO_* variables into its cache
+# key, so each new commit or branch misses on every crate. pxe/, bluefield/
+# and Makefile-build.toml repeat this because cargo-make also runs them as
+# separate processes, which do not inherit this [config].
+skip_git_env_info = true
 
 [env]
 CARGO_MAKE_EXTEND_WORKSPACE_MAKEFILE = true
@@ -128,6 +134,7 @@ workspace = false
 # what is committed (regenerate locally with `cargo make gen-cli-docs`).
 script = '''
 cargo test -p nico-admin-cli cfg::cli_options::tests
+cargo test -p nico-admin-cli generate_docs::cmd::tests::man_conversion_preserves_apostrophes -- --ignored
 cargo run -p nico-admin-cli -- generate-cli-docs --out-dir docs/manuals/nico-admin-cli
 git diff --exit-code -- docs/manuals/nico-admin-cli
 '''
@@ -391,6 +398,7 @@ script = '''
 docker run --rm -v $REPO_ROOT:/carbide --user $(id -u):$(id -g) \
     --env CARGO_HOME=/cargo \
     -v $CARGO_HOME:/cargo \
+    --env CARGO_BUILD_BUILD_DIR=/carbide/target/cross-aarch64-build \
     build-artifacts-container-cross-aarch64:latest \
     "cargo" \
     "build" \
@@ -422,7 +430,10 @@ workspace = false
 script = '''
 #!/usr/bin/env bash
 
-docker build --load ${REPO_ROOT}/dev/docker -f ${REPO_ROOT}/dev/docker/Dockerfile.build-artifacts-container-cross-aarch64 -t build-artifacts-container-cross-aarch64
+# The legacy builder (Docker without buildx) rejects --load.
+load=
+docker build --help 2>/dev/null | grep -q -- --load && load=--load
+docker build $load ${REPO_ROOT}/dev/docker -f ${REPO_ROOT}/dev/docker/Dockerfile.build-artifacts-container-cross-aarch64 -t build-artifacts-container-cross-aarch64
 '''
 
 [tasks.build-x86-build-container]
@@ -436,18 +447,14 @@ condition_script = '''
 category = "Kind"
 description = "Build the x86 build container"
 workspace = false
-command = "docker"
-args = [
-  "build",
-  "--load",
-  "--build-arg",
-  "KEA_VERSION=${KEA_VERSION}",
-  "-t",
-  "${BUILD_CONTAINER_X86_URL}",
-  "-f",
-  "${REPO_ROOT}/dev/docker/Dockerfile.build-container-x86_64",
-  ".",
-]
+script = '''
+#!/usr/bin/env bash
+
+# The legacy builder (Docker without buildx) rejects --load.
+load=
+docker build --help 2>/dev/null | grep -q -- --load && load=--load
+docker build $load --build-arg "KEA_VERSION=${KEA_VERSION}" -t "${BUILD_CONTAINER_X86_URL}" -f "${REPO_ROOT}/dev/docker/Dockerfile.build-container-x86_64" .
+'''
 cwd = "${REPO_ROOT}/dev/docker"
 
 [tasks.build-arm-build-container]
@@ -788,6 +795,8 @@ export NICO_TEST_TEMPLATE_DB="${NICO_TEST_TEMPLATE_DB-sqlx_ci_template_db}"
 cargo test --profile=ci-tests --no-run
 "${CARGO_TARGET_DIR:-target}/ci-tests/prepare-test-template"
 cargo test --profile=ci-tests
+# This test exhausts process-wide DPU admission, so run it in its own process.
+cargo test --profile=ci-tests tests::dpu_remote::remote_dpu_asn_post_preparation_admission_stops_retain_cleanup -- --exact --ignored --test-threads=1
 '''
 
 [tasks.build-and-test-release-container-services]

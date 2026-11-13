@@ -257,7 +257,7 @@ func validateKnownTrayIDNamespace(resourceID, trayType string) error {
 		idType = "PowerShelf"
 	}
 	if idType != "" && idType != trayType {
-		return fmt.Errorf("Tray ID namespace %s does not match type %s", idType, trayType)
+		return fmt.Errorf("tray ID namespace %s does not match type %s", idType, trayType)
 	}
 	return nil
 }

@@ -126,6 +126,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             ServeDir::new(opts.static_dir.clone())
                 .with_buf_chunk_size(1024 * 1024 * 10 /* 10 MiB*/),
         )
+        .layer(axum::middleware::from_fn(
+            middleware::if_range::honor_if_range,
+        ))
         // .layer(
         //     axum_response_cache::CacheLayer::with_lifespan(60 * 5)
         //         .body_limit(1024 * 1024 * 1024 * 5 /* 5 GiB*/),

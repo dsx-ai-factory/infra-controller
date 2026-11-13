@@ -135,6 +135,7 @@ async fn create_test_env_inner(pool: PgPool, overrides: TestEnvOverrides) -> Tes
         None,
         Some(pool.clone()),
         None,
+        None,
     )
     .await
     .expect("test component manager should build");
@@ -221,6 +222,7 @@ async fn create_test_env_inner(pool: PgPool, overrides: TestEnvOverrides) -> Tes
             test_harness.test_meter.meter(),
             exploration_service,
             endpoint_explorer.clone(),
+            Default::default(),
             api.common_pools().clone(),
             api.work_lock_manager_handle(),
             profiles,
@@ -332,6 +334,15 @@ impl TestEnv {
     pub(super) async fn run_rack_controller_iteration(&self) {
         self.controller.lock().await.run_single_iteration().await;
     }
+
+    /// Processes each rack once so assertions can inspect the immediate transition.
+    pub(super) async fn run_rack_controller_iteration_no_requeue(&self) {
+        self.controller
+            .lock()
+            .await
+            .run_single_iteration_ext(false)
+            .await;
+    }
 }
 
 pub(super) async fn new_host(
@@ -362,13 +373,15 @@ pub(super) async fn new_host(
             )
             .await?;
     }
-    let (mut mh, _) = env
+    let builder = env
         .test_harness
         .managed_host_builder(&env.site_explorer, env.underlay_segment)
         .with_dpu_primary_interfaces(env.admin_segment)
-        .with_config(config)
-        .build()
-        .await;
+        .with_config(config);
+    // Box host ingestion so nested rack fixtures and the SQLx runner do not
+    // embed its large future. Inline storage can exhaust libtest's default
+    // thread stack during host setup.
+    let (mut mh, _) = Box::pin(builder.build()).await;
     for dpu in &mh.dpus {
         dpu.discover_oob_iface(env.admin_segment).await;
     }

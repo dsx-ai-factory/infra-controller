@@ -636,20 +636,30 @@ mod tests {
     use super::proto::subscribe_response::Response;
     use super::*;
     use crate::bmc::CredentialProvider;
+    use crate::collectors::nvue::gnmi::extended_processor::EXTENDED_GNMI_STREAM_ID;
+    use crate::collectors::nvue::gnmi::on_change_processor::ON_CHANGE_STREAM_ID_SYSTEM_EVENTS;
     use crate::collectors::nvue::gnmi::sample_processor::{
         GnmiSampleProcessor, NVUE_GNMI_SAMPLE_STREAM_ID,
     };
-    use crate::collectors::nvue::gnmi::subscriber::{GnmiStreamMetrics, spawn_gnmi_collector};
-    use crate::config::{
-        NvueGnmiConfig, NvueGnmiMetricConfig, NvueGnmiMetricOutput, NvueGnmiResponseKeyLabel,
-        NvueGnmiSubscriptionConfig, NvueGnmiSubscriptionMode,
+    use crate::collectors::nvue::gnmi::subscriber::{
+        GnmiCollectorSettings, GnmiStreamMetrics, spawn_gnmi_collector,
+        spawn_gnmi_collector_with_settings,
     };
+    use crate::config::{
+        Config, Configurable, NvueCollectorConfig, NvueGnmiConfig, NvueGnmiMetricConfig,
+        NvueGnmiMetricOutput, NvueGnmiResponseKeyLabel, NvueGnmiSubscriptionConfig,
+        NvueGnmiSubscriptionMode,
+    };
+    use crate::discovery::{DiscoveryLoopContext, run_discovery_iteration};
     use crate::endpoint::test_support::test_endpoint;
     use crate::endpoint::{
-        BmcAddr, BmcCredentials, EndpointMetadata, SwitchData, SwitchEndpointRole,
+        BmcAddr, BmcCredentials, EndpointMetadata, StaticEndpointSource, SwitchData,
+        SwitchEndpointRole,
     };
+    use crate::limiter::NoopLimiter;
     use crate::metrics::MetricsManager;
     use crate::otlp::convert::build_metrics_export_request;
+    use crate::sharding::ShardManager;
     use crate::sink::{
         CollectorEvent, CompositeDataSink, DataSink, EventContext, MetricSample, PrometheusSink,
     };
@@ -678,6 +688,7 @@ mod tests {
     struct RecordingMetricSink {
         samples: StdMutex<Vec<(EventContext, MetricSample)>>,
         pruned_keys: StdMutex<Vec<String>>,
+        removed: StdMutex<Vec<&'static str>>,
     }
 
     impl DataSink for RecordingMetricSink {
@@ -707,6 +718,42 @@ mod tests {
                     .push((context.clone(), (**sample).clone()));
             }
 
+            if matches!(event, CollectorEvent::CollectorRemoved) {
+                self.removed.lock().unwrap().push(context.collector_type);
+            }
+
+            Ok(())
+        }
+    }
+
+    // Panic on live or replayed late_scalar samples until the test clears the
+    // fault, exercising both stream failure and the replacement's cached replay.
+    struct PanicMetricSink {
+        recording: RecordingMetricSink,
+        enabled: AtomicBool,
+        panics: AtomicUsize,
+    }
+
+    impl DataSink for PanicMetricSink {
+        fn sink_type(&self) -> &'static str {
+            "panic_metric"
+        }
+
+        fn try_handle_event(
+            &self,
+            context: &EventContext,
+            event: &CollectorEvent,
+        ) -> Result<(), HealthError> {
+            self.recording.try_handle_event(context, event)?;
+
+            if let CollectorEvent::Metric(sample) = event
+                && sample.metric_type == "late_scalar"
+                && self.enabled.load(Ordering::SeqCst)
+            {
+                self.panics.fetch_add(1, Ordering::SeqCst);
+                panic!("injected late subscription sink panic");
+            }
+
             Ok(())
         }
     }
@@ -727,6 +774,26 @@ mod tests {
     }
 
     impl ControlledSubscription {
+        fn path_root(&self) -> &str {
+            let Some(proto::subscribe_request::Request::Subscribe(list)) = &self.request.request
+            else {
+                panic!("expected subscription list");
+            };
+
+            list.prefix
+                .as_ref()
+                .and_then(|path| path.elem.first())
+                .or_else(|| {
+                    list.subscription[0]
+                        .path
+                        .as_ref()
+                        .and_then(|path| path.elem.first())
+                })
+                .expect("subscription root")
+                .name
+                .as_str()
+        }
+
         async fn send(&self, response: proto::subscribe_response::Response) {
             self.responses
                 .send(Ok(proto::SubscribeResponse {
@@ -1415,6 +1482,7 @@ mod tests {
         subscriptions: &mut mpsc::Receiver<ControlledSubscription>,
         service: &TestGnmiService,
         sink: &RecordingMetricSink,
+        sockets: &AtomicUsize,
     ) {
         for stream_index in 0..3 {
             for retry in 0..2 {
@@ -1426,9 +1494,10 @@ mod tests {
                     tonic::Code::Unavailable
                 };
 
+                // The replacement may open before the server observes this RPC end.
+                // Check the count after receiving the replacement; `fail` still
+                // awaits this RPC's completion.
                 old.fail(code).await;
-
-                assert_eq!(service.active_requests.load(Ordering::SeqCst), 2);
 
                 if stream_index == 1 {
                     streams[0]
@@ -1447,11 +1516,31 @@ mod tests {
                     "reconnect must preserve requested paths and mode"
                 );
 
-                assert_eq!(service.active_requests.load(Ordering::SeqCst), 3);
+                assert_eq!(
+                    service.active_requests.load(Ordering::SeqCst),
+                    3,
+                    "active RPCs after reconnect for stream {stream_index}, retry {retry}"
+                );
 
                 replacement
                     .publish(sink, &format!("recovered-{stream_index}-{retry}"))
                     .await;
+
+                // Each stream uses a fresh client and one socket. Allow the old
+                // socket to close independently of the replacement opening.
+                tokio::time::timeout(Duration::from_secs(2), async {
+                    while sockets.load(Ordering::SeqCst) != 3 {
+                        tokio::time::sleep(Duration::from_millis(10)).await;
+                    }
+                })
+                .await
+                .unwrap_or_else(|_| {
+                    panic!(
+                        "expected 3 live sockets after stream {stream_index} recovery {retry}: sockets={}, active_requests={}",
+                        sockets.load(Ordering::SeqCst),
+                        service.active_requests.load(Ordering::SeqCst),
+                    )
+                });
 
                 streams.insert(stream_index, replacement);
             }
@@ -1494,9 +1583,12 @@ mod tests {
         config.paths.platform_general_enabled = false;
         config.paths.leak_sensors_enabled = true;
 
-        let collector = spawn_gnmi_collector(
+        let collector = spawn_gnmi_collector_with_settings(
             &endpoint,
-            &config,
+            GnmiCollectorSettings {
+                gnmi_config: &config,
+                initial_retry_delay: Duration::from_millis(10),
+            },
             credentials.clone(),
             registry,
             Some(sink.clone()),
@@ -1522,7 +1614,8 @@ mod tests {
 
         streams.sort_by_key(ControlledSubscription::stream_index);
 
-        assert_post_sync_reconnections(&mut streams, &mut subscriptions, service, &sink).await;
+        assert_post_sync_reconnections(&mut streams, &mut subscriptions, service, &sink, sockets)
+            .await;
 
         streams[2].fail(tonic::Code::Unauthenticated).await;
 
@@ -1725,9 +1818,12 @@ mod tests {
             })),
         );
 
-        let collector = spawn_gnmi_collector(
+        let collector = spawn_gnmi_collector_with_settings(
             &endpoint,
-            &config,
+            GnmiCollectorSettings {
+                gnmi_config: &config,
+                initial_retry_delay: Duration::from_millis(10),
+            },
             Arc::new(DelayedRefreshProvider::default()),
             registry,
             Some(sink),
@@ -1956,6 +2052,18 @@ mod tests {
 
             assert_eq!(context.switch_serial(), Some("new-serial"));
             assert_eq!(sample.value, 7.0);
+
+            let (_, event) = samples
+                .iter()
+                .find(|(context, sample)| {
+                    context.switch_serial() == Some("new-serial")
+                        && sample
+                            .labels
+                            .iter()
+                            .any(|(key, value)| key == "instance_id" && value == "retained-event")
+                })
+                .expect("retained event must replay before any replacement update");
+            assert_eq!(event.value, 4.0);
         }
 
         let event = live
@@ -2166,8 +2274,332 @@ mod tests {
         }
     }
 
+    async fn assert_stream_task_panic_recovers_on_discovery_iteration(
+        port: u16,
+        service: &TestGnmiService,
+        sockets: &AtomicUsize,
+    ) {
+        let (opened, mut subscriptions) = mpsc::channel(8);
+        *service.controlled_subscriptions.lock().unwrap() = Some(opened);
+        let mut endpoint = test_endpoint("55:66:77:88:99:d0".parse().unwrap());
+        endpoint.addr.ip = "127.0.0.1".parse().unwrap();
+        endpoint.metadata = Some(EndpointMetadata::Switch(SwitchData {
+            log_checkpoint_identity: None,
+            id: None,
+            serial: Some("task-recovery".into()),
+            slot_number: None,
+            tray_index: None,
+            nvlink_domain_uuid: None,
+            endpoint_role: SwitchEndpointRole::Host,
+            is_primary: true,
+            nmxc_enabled: false,
+            nmxt_enabled: false,
+        }));
+
+        let metrics = Arc::new(MetricsManager::new("task_recovery").unwrap());
+        let panic_sink = Arc::new(PanicMetricSink {
+            recording: RecordingMetricSink::default(),
+            enabled: AtomicBool::new(true),
+            panics: AtomicUsize::new(0),
+        });
+        let sink = Arc::new(CompositeDataSink::new(
+            vec![
+                panic_sink.clone(),
+                Arc::new(PrometheusSink::new(metrics.clone(), "task_recovery_sink").unwrap()),
+            ],
+            metrics.clone(),
+        ));
+
+        let mut gnmi = reconciliation_config(port);
+        gnmi.request_timeout = Duration::from_secs(5);
+        gnmi.reconcile_interval = None;
+        gnmi.paths.interfaces_enabled = true;
+        gnmi.system_events_enabled = true;
+        gnmi.additional_subscriptions = ["earlier", "late"]
+            .map(|name| NvueGnmiSubscriptionConfig {
+                name: name.into(),
+                mode: NvueGnmiSubscriptionMode::OnChange,
+                updates_only: true,
+                paths: vec![vec![name.into()]],
+                metrics: vec![NvueGnmiMetricConfig {
+                    path: vec![name.into()],
+                    metric_type: format!("{name}_scalar"),
+                    output: NvueGnmiMetricOutput::Gauge {
+                        unit: "count".into(),
+                    },
+                    ..Default::default()
+                }],
+                ..Default::default()
+            })
+            .into();
+
+        let mut config = Config::default();
+        config.collectors.nvue = Configurable::Enabled(NvueCollectorConfig {
+            rest: Configurable::Disabled,
+            gnmi: Configurable::Enabled(gnmi),
+        });
+        let mut context =
+            DiscoveryLoopContext::new(Arc::new(NoopLimiter), metrics.clone(), Arc::new(config))
+                .unwrap();
+        let source = Arc::new(StaticEndpointSource::new(vec![endpoint]));
+        let shard = ShardManager {
+            shard: 0,
+            shards_count: 1,
+        };
+
+        run_discovery_iteration(
+            source.clone(),
+            &shard,
+            &mut context,
+            Some(sink.clone()),
+            "task_recovery",
+        )
+        .await
+        .expect("first discovery pass");
+
+        let mut live = Vec::new();
+
+        for _ in 0..4 {
+            let subscription = tokio::time::timeout(Duration::from_secs(5), subscriptions.recv())
+                .await
+                .expect("initial stream must open")
+                .unwrap();
+            subscription.send(Response::SyncResponse(true)).await;
+            live.push(subscription);
+        }
+
+        live.iter()
+            .find(|subscription| subscription.path_root() == "interfaces")
+            .expect("primary subscription")
+            .publish(&panic_sink.recording, "primary-before-panic")
+            .await;
+
+        assert_eq!(service.active_requests.load(Ordering::SeqCst), 4);
+        assert_eq!(sockets.load(Ordering::SeqCst), 4);
+
+        assert!(
+            metrics
+                .export_metrics()
+                .unwrap()
+                .contains("nvue_gnmi_connection_state")
+        );
+        assert!(metrics.export_telemetry().unwrap().contains("nvue_gnmi"));
+        run_discovery_iteration(
+            source.clone(),
+            &shard,
+            &mut context,
+            Some(sink.clone()),
+            "task_recovery",
+        )
+        .await
+        .expect("healthy collector must survive discovery");
+        assert!(matches!(
+            subscriptions.try_recv(),
+            Err(mpsc::error::TryRecvError::Empty)
+        ));
+        assert_eq!(service.active_requests.load(Ordering::SeqCst), 4);
+
+        for subscription in &mut live {
+            assert!(matches!(
+                subscription.completed.try_recv(),
+                Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+            ));
+        }
+
+        // The final additional task panics while the primary and earlier
+        // subscriptions are still open. No caller cancels this collector.
+        live.iter()
+            .find(|subscription| subscription.path_root() == "late")
+            .expect("late subscription")
+            .send(Response::Update(proto::Notification {
+                update: vec![proto::Update {
+                    path: Some(Path {
+                        elem: vec![PathElem {
+                            name: "late".into(),
+                            ..Default::default()
+                        }],
+                        ..Default::default()
+                    }),
+                    val: Some(proto::TypedValue {
+                        value: Some(proto::typed_value::Value::IntVal(42)),
+                    }),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }))
+            .await;
+
+        for subscription in &mut live {
+            tokio::time::timeout(Duration::from_secs(5), &mut subscription.completed)
+                .await
+                .expect("supervision must close every old RPC")
+                .unwrap();
+        }
+
+        wait_for_transport_shutdown(service, sockets).await;
+
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while metrics.export_metrics().unwrap().contains("nvue_gnmi") {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("finished parent must release its runtime registry");
+
+        assert_eq!(panic_sink.panics.load(Ordering::SeqCst), 1);
+        assert!(!metrics.export_telemetry().unwrap().contains("nvue_gnmi"));
+        let mut removed = panic_sink.recording.removed.lock().unwrap().clone();
+        removed.sort_unstable();
+        let mut expected = vec![
+            NVUE_GNMI_SAMPLE_STREAM_ID,
+            ON_CHANGE_STREAM_ID_SYSTEM_EVENTS,
+            EXTENDED_GNMI_STREAM_ID,
+        ];
+        expected.sort_unstable();
+        assert_eq!(removed, expected);
+        // The same fault must stay within the collector when the replacement
+        // replays 42, before its source can send another update.
+        run_discovery_iteration(
+            source.clone(),
+            &shard,
+            &mut context,
+            Some(sink.clone()),
+            "task_recovery",
+        )
+        .await
+        .expect("persistent replay panic must not unwind discovery");
+
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while panic_sink.panics.load(Ordering::SeqCst) != 2
+                || metrics.export_metrics().unwrap().contains("nvue_gnmi")
+            {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("replay failure must finish collector cleanup");
+        wait_for_transport_shutdown(service, sockets).await;
+        while let Ok(mut subscription) = subscriptions.try_recv() {
+            tokio::time::timeout(Duration::from_secs(5), &mut subscription.completed)
+                .await
+                .expect("replay failure must close replacement RPCs")
+                .unwrap();
+        }
+        assert_eq!(panic_sink.recording.removed.lock().unwrap().len(), 6);
+
+        panic_sink.enabled.store(false, Ordering::SeqCst);
+        panic_sink.recording.samples.lock().unwrap().clear();
+
+        // Discovery reuses the endpoint's retained reading after the old parent
+        // has finished cleanup, before the replacement receives source updates.
+        run_discovery_iteration(
+            source,
+            &shard,
+            &mut context,
+            Some(sink.clone()),
+            "task_recovery",
+        )
+        .await
+        .expect("next discovery pass must replace the finished collector");
+
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !metrics
+                .export_telemetry()
+                .unwrap()
+                .contains("late_scalar_count")
+            {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("retained reading must be replayed without a source update");
+        {
+            let retained = panic_sink.recording.samples.lock().unwrap();
+            assert!(retained.iter().any(|(_, sample)| {
+                sample.metric_type == "late_scalar" && sample.value == 42.0
+            }));
+        }
+        let telemetry = metrics.export_telemetry().unwrap();
+        assert!(telemetry.contains("late_scalar_count"), "{telemetry}");
+
+        let mut replacement = Vec::new();
+
+        for _ in 0..4 {
+            let subscription = tokio::time::timeout(Duration::from_secs(5), subscriptions.recv())
+                .await
+                .expect("replacement stream must open")
+                .unwrap();
+            subscription.send(Response::SyncResponse(true)).await;
+            replacement.push(subscription);
+        }
+
+        replacement
+            .iter()
+            .find(|subscription| subscription.path_root() == "interfaces")
+            .expect("primary subscription")
+            .publish(&panic_sink.recording, "primary-after-recovery")
+            .await;
+        replacement
+            .iter()
+            .find(|subscription| subscription.path_root() == "late")
+            .expect("recovered late subscription")
+            .send(Response::Update(proto::Notification {
+                update: vec![proto::Update {
+                    path: Some(Path {
+                        elem: vec![PathElem {
+                            name: "late".into(),
+                            ..Default::default()
+                        }],
+                        ..Default::default()
+                    }),
+                    val: Some(proto::TypedValue {
+                        value: Some(proto::typed_value::Value::IntVal(43)),
+                    }),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }))
+            .await;
+
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !panic_sink
+                .recording
+                .samples
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|(_, sample)| sample.metric_type == "late_scalar" && sample.value == 43.0)
+            {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("previously failing stream must publish fresh telemetry");
+
+        assert_eq!(service.active_requests.load(Ordering::SeqCst), 4);
+        assert!(
+            metrics
+                .export_metrics()
+                .unwrap()
+                .contains("nvue_gnmi_connection_state")
+        );
+
+        run_discovery_iteration(
+            Arc::new(StaticEndpointSource::new(Vec::new())),
+            &shard,
+            &mut context,
+            Some(sink),
+            "task_recovery",
+        )
+        .await
+        .expect("endpoint removal must stop replacement");
+        wait_for_transport_shutdown(service, sockets).await;
+        assert!(!metrics.export_metrics().unwrap().contains("nvue_gnmi"));
+        assert_eq!(panic_sink.recording.removed.lock().unwrap().len(), 9);
+    }
+
     #[tokio::test]
-    async fn subscriptions_release_transport_and_recover_from_post_sync_errors() {
+    async fn subscriptions_release_transport_and_recover_from_stream_failures() {
         let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
 
         let certificate = rcgen::generate_simple_self_signed(vec!["localhost".to_string()])
@@ -2317,6 +2749,7 @@ mod tests {
         assert_event_reconciliation(port, &service, &sockets).await;
         assert_metric_reconciliation(port, &service, &sockets).await;
         assert_metadata_replacement_retains_readings(port, &service, &sockets).await;
+        assert_stream_task_panic_recovers_on_discovery_iteration(port, &service, &sockets).await;
 
         shutdown_sender.send(()).expect("stop server");
         server_task

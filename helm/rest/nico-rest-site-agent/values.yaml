@@ -97,7 +97,7 @@ bootstrap:
   # tag: 1.29.4
   image: alpine/k8s:1.29.4
   siteManager:
-    address: nico-rest-site-manager.nico-rest
+    address: nico-rest-site-manager.nico-rest:8100
     tlsSecret: site-manager-tls
 
 envConfig:

@@ -207,7 +207,8 @@ func (mnlp ManageNVLinkLogicalPartition) UpdateNVLinkLogicalPartitionsInDB(ctx c
 	for _, nvllp := range nvlinklogicalpartitionsToDelete {
 		slogger := logger.With().Str("NVLink Logical Partition ID", nvllp.ID.String()).Logger()
 
-		if site.IsTimeWithinStaleInventoryThreshold(nvllp.Updated) {
+		// Removal of a Partition in Deleting status is not affected by its Updated timestamp.
+		if nvllp.Status != cdbm.NVLinkLogicalPartitionStatusDeleting && site.IsTimeWithinStaleInventoryThreshold(nvllp.Updated) {
 			continue
 		}
 

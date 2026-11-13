@@ -22,6 +22,60 @@ use carbide_uuid::switch::SwitchId;
 use clap::{Args as ClapArgs, Subcommand, ValueEnum};
 use mac_address::MacAddress;
 
+#[derive(clap::Args, Debug)]
+pub(super) struct CredentialOverridesArgs {
+    #[arg(
+        long,
+        env = "NICO_BMC_USERNAME",
+        requires = "bmc_password",
+        value_parser = clap::builder::NonEmptyStringValueParser::new(),
+        help = "BMC username override for direct dispatch; requires a BMC password",
+        long_help = "BMC username override for direct dispatch. Uses NICO_BMC_USERNAME when the flag is omitted; requires a nonempty password via --bmc-password or NICO_BMC_PASSWORD. Also used for power-shelf PMCs. Supplied credential pairs apply to all directly dispatched targets and override Vault and expected inventory. Omitted pairs use stored credentials; authentication failures do not fall back. Requires a server supporting credential overrides. Ignored for queued operations, rack firmware updates, and standalone compute firmware reprovisioning; use --bypass-state-controller for direct dispatch where supported. Core does not save the overrides; NSM/PSM registration can persist them in Vault. Subsequent status/version requests use their existing credential lookup."
+    )]
+    bmc_username: Option<String>,
+
+    #[arg(
+        long,
+        env = "NICO_BMC_PASSWORD",
+        hide_env_values = true,
+        requires = "bmc_username",
+        value_parser = clap::builder::NonEmptyStringValueParser::new(),
+        help = "BMC password override; uses NICO_BMC_PASSWORD when omitted; requires a BMC username"
+    )]
+    bmc_password: Option<String>,
+
+    #[arg(
+        long,
+        env = "NICO_NVOS_USERNAME",
+        requires = "nvos_password",
+        value_parser = clap::builder::NonEmptyStringValueParser::new(),
+        help = "Switch NVOS username override for direct dispatch; requires an NVOS password",
+        long_help = "Switch NVOS username override for direct dispatch. Uses NICO_NVOS_USERNAME when the flag is omitted; requires a nonempty password via --nvos-password or NICO_NVOS_PASSWORD. Ignored for compute and power-shelf targets. Uses the same precedence, direct-dispatch scope, and backend persistence behavior as --bmc-username."
+    )]
+    nvos_username: Option<String>,
+
+    #[arg(
+        long,
+        env = "NICO_NVOS_PASSWORD",
+        hide_env_values = true,
+        requires = "nvos_username",
+        value_parser = clap::builder::NonEmptyStringValueParser::new(),
+        help = "Switch NVOS password override; uses NICO_NVOS_PASSWORD when omitted; requires an NVOS username"
+    )]
+    nvos_password: Option<String>,
+}
+
+impl CredentialOverridesArgs {
+    pub(super) fn into_overrides(self) -> Option<rpc::forge::ComponentCredentialOverrides> {
+        let pair = |(username, password)| rpc::forge::UsernamePassword { username, password };
+        let overrides = rpc::forge::ComponentCredentialOverrides {
+            bmc: self.bmc_username.zip(self.bmc_password).map(pair),
+            nvos: self.nvos_username.zip(self.nvos_password).map(pair),
+        };
+        (overrides.bmc.is_some() || overrides.nvos.is_some()).then_some(overrides)
+    }
+}
+
 const MAX_FAILURE_DETAILS: usize = 10;
 
 #[derive(Copy, Clone, Debug, ValueEnum)]
@@ -336,6 +390,7 @@ fn component_result_status_name(status: i32) -> &'static str {
         Ok(rpc::forge::ComponentManagerStatusCode::NotFound) => "not-found",
         Ok(rpc::forge::ComponentManagerStatusCode::AlreadyExists) => "already-exists",
         Ok(rpc::forge::ComponentManagerStatusCode::Unavailable) => "unavailable",
+        Ok(rpc::forge::ComponentManagerStatusCode::OutcomeUnknown) => "outcome-unknown",
         Err(_) => "unknown",
     }
 }
@@ -438,7 +493,7 @@ pub(super) fn component_result_json(
     }
 }
 
-pub(super) fn timestamp_string(timestamp: Option<&rpc::Timestamp>) -> String {
+pub(crate) fn timestamp_string(timestamp: Option<&rpc::Timestamp>) -> String {
     let Some(timestamp) = timestamp else {
         return "-".to_string();
     };
@@ -451,7 +506,7 @@ pub(super) fn timestamp_string(timestamp: Option<&rpc::Timestamp>) -> String {
         .unwrap_or_else(|| timestamp.seconds.to_string())
 }
 
-pub(super) fn timestamp_json(timestamp: Option<&rpc::Timestamp>) -> serde_json::Value {
+pub(crate) fn timestamp_json(timestamp: Option<&rpc::Timestamp>) -> serde_json::Value {
     match timestamp {
         Some(timestamp) => serde_json::json!({
             "seconds": timestamp.seconds,
@@ -488,5 +543,109 @@ pub(super) fn join_or_dash(values: &[String]) -> String {
         "-".to_string()
     } else {
         values.join(", ")
+    }
+}
+
+#[cfg(test)]
+mod credential_tests {
+    use carbide_test_support::{Check, check_values, scenarios};
+    use clap::Parser;
+    use clap::error::ErrorKind;
+
+    fn power_args(flags: &[&str]) -> Result<super::super::power_control::Args, clap::Error> {
+        super::super::power_control::Args::try_parse_from(
+            ["component-power-control", "--action", "on"]
+                .into_iter()
+                .chain(flags.iter().copied())
+                .chain(["switch", "--mac-address", "00:11:22:33:44:55"]),
+        )
+    }
+
+    #[test]
+    fn credential_flags_reach_power_and_firmware_requests() {
+        let pair = |name: &str| rpc::forge::UsernamePassword {
+            username: name.into(),
+            password: format!("{name}-password"),
+        };
+        let overrides = |bmc, nvos| Some(rpc::forge::ComponentCredentialOverrides { bmc, nvos });
+        let cases = [
+            ("omitted", &[][..], None),
+            (
+                "BMC only",
+                &["--bmc-username", "bmc", "--bmc-password", "bmc-password"],
+                overrides(Some(pair("bmc")), None),
+            ),
+            (
+                "NVOS only",
+                &[
+                    "--nvos-username",
+                    "nvos",
+                    "--nvos-password",
+                    "nvos-password",
+                ],
+                overrides(None, Some(pair("nvos"))),
+            ),
+            (
+                "both pairs",
+                &[
+                    "--bmc-username",
+                    "bmc",
+                    "--bmc-password",
+                    "bmc-password",
+                    "--nvos-username",
+                    "nvos",
+                    "--nvos-password",
+                    "nvos-password",
+                ],
+                overrides(Some(pair("bmc")), Some(pair("nvos"))),
+            ),
+        ];
+        check_values(
+            cases.into_iter().map(|(scenario, flags, expected)| Check {
+                scenario,
+                input: flags,
+                expect: [expected.clone(), expected],
+            }),
+            |flags| {
+                let power: rpc::forge::ComponentPowerControlRequest =
+                    power_args(flags).unwrap().into();
+                let firmware: rpc::forge::UpdateComponentFirmwareRequest =
+                    super::super::update_firmware::Args::try_parse_from(
+                        [
+                            "update-firmware",
+                            "switch",
+                            "--mac-address",
+                            "00:11:22:33:44:55",
+                            "--target-version",
+                            "fw-1",
+                        ]
+                        .into_iter()
+                        .chain(flags.iter().copied()),
+                    )
+                    .unwrap()
+                    .try_into()
+                    .unwrap();
+                [power.credential_overrides, firmware.credential_overrides]
+            },
+        );
+    }
+
+    #[test]
+    fn credential_flags_require_complete_nonempty_pairs() {
+        use carbide_test_support::Outcome::*;
+
+        let parse = |flags: &[&str]| power_args(flags).map(|_| ()).map_err(|error| error.kind());
+        scenarios!(parse:
+            "missing partner" {
+                &["--bmc-username", "admin"][..] => FailsWith(ErrorKind::MissingRequiredArgument),
+                &["--bmc-password", "mypassword"][..] => FailsWith(ErrorKind::MissingRequiredArgument),
+                &["--nvos-username", "admin"][..] => FailsWith(ErrorKind::MissingRequiredArgument),
+                &["--nvos-password", "mypassword"][..] => FailsWith(ErrorKind::MissingRequiredArgument),
+            }
+            "empty value" {
+                &["--bmc-username", "", "--bmc-password", "mypassword"][..] => FailsWith(ErrorKind::InvalidValue),
+                &["--nvos-username", "admin", "--nvos-password", ""][..] => FailsWith(ErrorKind::InvalidValue),
+            }
+        );
     }
 }

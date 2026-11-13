@@ -39,13 +39,14 @@ Sort output by specified field
 
 `-h, --help`
 
-Print help (see a summary with -h)
+Print help (see a summary with '-h')
 
 ## Subcommands
 
 | Subcommand | Description |
 |---|---|
 | [`show`](./domain-show.md) | Display Domain information |
+| [`create`](./domain-create.md) | Create a Domain, optionally owned by a VPC |
 | [`update`](./domain-update.md) | Update domain default TTL |
 
 ---

@@ -47,7 +47,7 @@ use state_controller::controller::StateController;
 use tokio::time::timeout;
 use tokio_util::sync::CancellationToken;
 
-use super::{dpf_config, expect_dpf_service_inventory, phase_observation};
+use super::{bf4_deployment_config, dpf_config, expect_dpf_service_inventory, phase_observation};
 use crate::cfg::file::CarbideConfig;
 use crate::machine_update_manager::dpu_nic_firmware::DpuNicFirmwareUpdate;
 use crate::machine_update_manager::machine_update_module::MachineUpdateModule;
@@ -170,6 +170,13 @@ async fn fixture_with_config(
     expect_dpf_service_inventory(&mut mock);
     let dpf: Arc<dyn DpfOperations> = Arc::new(mock);
     config.dpf = dpf_config();
+    // Configure both BF4 classes because preflight tests can add CX9 inventory after Generic provisioning.
+    if deployment == DpuDeploymentType::Bf4Generic {
+        // Enable deployment-scoped ServiceInterfaces because configuring bf4_astra requires them.
+        config.dpf.deployment_scoped_service_interfaces = true;
+        config.dpf.deployments.bf4_generic = Some(bf4_deployment_config("bf4-generic"));
+        config.dpf.deployments.bf4_astra = Some(bf4_deployment_config("bf4-astra"));
+    }
     let env = create_test_env_with_overrides(
         pool,
         TestEnvOverrides::with_config(config).with_dpf_sdk(dpf.clone()),
@@ -214,12 +221,19 @@ async fn fixture_with_config(
 #[crate::sqlx_test]
 async fn automatic_update_defers_incompatible_or_unavailable_dpf(pool: sqlx::PgPool) {
     let f = fixture(pool).await;
+    let work_lock = f
+        .env
+        .api
+        .work_lock_manager_handle
+        .try_acquire_lock("dpf-update-preflight-test".into())
+        .await
+        .expect("acquire update admission work lock");
     for observation in [LabelObservation::Stale, LabelObservation::Unavailable] {
         *f.labels.lock().unwrap() = observation;
         let snapshots = get_all_snapshots(&f.env).await;
         let started = f
             .updater
-            .start_updates(&f.env.pool, 1, &HashSet::new(), &snapshots)
+            .start_updates(&f.env.pool, &work_lock, 1, &HashSet::new(), &snapshots)
             .await
             .unwrap();
         assert!(started.is_empty(), "{observation:?}");
@@ -247,7 +261,7 @@ async fn automatic_update_defers_incompatible_or_unavailable_dpf(pool: sqlx::PgP
     let snapshots = get_all_snapshots(&f.env).await;
     assert_eq!(
         f.updater
-            .start_updates(&f.env.pool, 1, &HashSet::new(), &snapshots)
+            .start_updates(&f.env.pool, &work_lock, 1, &HashSet::new(), &snapshots)
             .await
             .unwrap(),
         HashSet::from([f.host.id.into()])
@@ -270,6 +284,13 @@ async fn automatic_update_defers_incompatible_or_unavailable_dpf(pool: sqlx::PgP
 #[crate::sqlx_test]
 async fn automatic_update_times_out_blocked_inventory_and_recovers(pool: sqlx::PgPool) {
     let f = fixture(pool).await;
+    let work_lock = f
+        .env
+        .api
+        .work_lock_manager_handle
+        .try_acquire_lock("dpf-update-preflight-test".into())
+        .await
+        .expect("acquire update admission work lock");
     let other_host = timeout(TEST_TIMEOUT, create_managed_host_with_dpf_bf4(&f.env))
         .await
         .expect("timed out provisioning the second deadline candidate");
@@ -309,9 +330,9 @@ async fn automatic_update_times_out_blocked_inventory_and_recovers(pool: sqlx::P
         .await
         .unwrap();
     let updating_hosts = HashSet::new();
-    let admission = f
-        .updater
-        .start_updates(&reader_pool, 1, &updating_hosts, &snapshots);
+    let admission =
+        f.updater
+            .start_updates(&reader_pool, &work_lock, 1, &updating_hosts, &snapshots);
     tokio::pin!(admission);
     let started_at = tokio::time::Instant::now();
     let blocked_pid = tokio::select! {
@@ -412,7 +433,7 @@ async fn automatic_update_times_out_blocked_inventory_and_recovers(pool: sqlx::P
     let admitted = timeout(
         TEST_TIMEOUT,
         f.updater
-            .start_updates(&reader_pool, 1, &HashSet::new(), &snapshots),
+            .start_updates(&reader_pool, &work_lock, 1, &HashSet::new(), &snapshots),
     )
     .await
     .expect("admission must recover after the inventory lock is released")
@@ -441,6 +462,13 @@ async fn automatic_update_times_out_blocked_inventory_and_recovers(pool: sqlx::P
 #[crate::sqlx_test]
 async fn automatic_update_skips_dpf_preflight_for_legacy_reprovision(pool: sqlx::PgPool) {
     let f = fixture_with_deployment(pool, DpuDeploymentType::Bf3, 1).await;
+    let work_lock = f
+        .env
+        .api
+        .work_lock_manager_handle
+        .try_acquire_lock("dpf-update-preflight-test".into())
+        .await
+        .expect("acquire update admission work lock");
     let mut txn = f.env.db_txn().await;
     db::machine_topology::update_firmware_version_by_machine_id(
         txn.as_mut(),
@@ -465,7 +493,7 @@ async fn automatic_update_skips_dpf_preflight_for_legacy_reprovision(pool: sqlx:
     );
     assert_eq!(
         f.updater
-            .start_updates(&f.env.pool, 1, &HashSet::new(), &snapshots)
+            .start_updates(&f.env.pool, &work_lock, 1, &HashSet::new(), &snapshots)
             .await
             .unwrap(),
         HashSet::from([f.host.id.into()])
@@ -505,6 +533,13 @@ async fn automatic_update_skips_dpf_preflight_for_legacy_reprovision(pool: sqlx:
 #[crate::sqlx_test]
 async fn runtime_dpf_disable_preserves_legacy_ready_reprovision(pool: sqlx::PgPool) {
     let f = fixture(pool).await;
+    let work_lock = f
+        .env
+        .api
+        .work_lock_manager_handle
+        .try_acquire_lock("dpf-update-preflight-test".into())
+        .await
+        .expect("acquire update admission work lock");
     let snapshots = get_all_snapshots(&f.env).await;
     assert!(
         snapshots[&f.host.id]
@@ -515,7 +550,7 @@ async fn runtime_dpf_disable_preserves_legacy_ready_reprovision(pool: sqlx::PgPo
     );
     assert_eq!(
         f.updater
-            .start_updates(&f.env.pool, 1, &HashSet::new(), &snapshots)
+            .start_updates(&f.env.pool, &work_lock, 1, &HashSet::new(), &snapshots)
             .await
             .unwrap(),
         HashSet::from([f.host.id.into()])
@@ -586,6 +621,13 @@ async fn runtime_dpf_disable_preserves_legacy_ready_reprovision(pool: sqlx::PgPo
 #[crate::sqlx_test]
 async fn automatic_update_preserves_concurrent_manual_request(pool: sqlx::PgPool) {
     let f = fixture(pool).await;
+    let work_lock = f
+        .env
+        .api
+        .work_lock_manager_handle
+        .try_acquire_lock("dpf-update-preflight-test".into())
+        .await
+        .expect("acquire update admission work lock");
     let snapshots = get_all_snapshots(&f.env).await;
     let mut manual = f.env.db_txn().await;
     db::machine::trigger_dpu_reprovisioning_request(
@@ -607,11 +649,13 @@ async fn automatic_update_preserves_concurrent_manual_request(pool: sqlx::PgPool
         .await
         .unwrap();
     let updating_hosts = HashSet::new();
-    let admission =
-        capture_logs_async(
-            f.updater
-                .start_updates(&f.env.pool, 1, &updating_hosts, &snapshots),
-        );
+    let admission = capture_logs_async(f.updater.start_updates(
+        &f.env.pool,
+        &work_lock,
+        1,
+        &updating_hosts,
+        &snapshots,
+    ));
     tokio::pin!(admission);
     tokio::select! {
         result = &mut admission => panic!("automatic request did not wait for the manual writer: {result:?}"),
@@ -643,6 +687,13 @@ async fn automatic_update_preserves_concurrent_manual_request(pool: sqlx::PgPool
 #[crate::sqlx_test]
 async fn incompatible_dpf_update_does_not_consume_capacity(pool: sqlx::PgPool) {
     let f = fixture(pool).await;
+    let work_lock = f
+        .env
+        .api
+        .work_lock_manager_handle
+        .try_acquire_lock("dpf-update-preflight-test".into())
+        .await
+        .expect("acquire update admission work lock");
     let mut other_hosts = Vec::new();
     for _ in 0..2 {
         let host = timeout(TEST_TIMEOUT, create_managed_host_with_dpf_bf4(&f.env))
@@ -659,7 +710,7 @@ async fn incompatible_dpf_update_does_not_consume_capacity(pool: sqlx::PgPool) {
     let snapshots = get_all_snapshots(&f.env).await;
     let started = f
         .updater
-        .start_updates(&f.env.pool, 1, &HashSet::new(), &snapshots)
+        .start_updates(&f.env.pool, &work_lock, 1, &HashSet::new(), &snapshots)
         .await
         .unwrap();
     assert_eq!(started.len(), 1);
@@ -682,6 +733,13 @@ async fn incompatible_dpf_update_does_not_consume_capacity(pool: sqlx::PgPool) {
 #[crate::sqlx_test]
 async fn queued_dpf_update_rechecks_before_restart(pool: sqlx::PgPool) {
     let f = fixture(pool).await;
+    let work_lock = f
+        .env
+        .api
+        .work_lock_manager_handle
+        .try_acquire_lock("dpf-update-preflight-test".into())
+        .await
+        .expect("acquire update admission work lock");
     let timepoint = f.env.redfish_sim.timepoint();
     let mut txn = f.env.db_txn().await;
     let reboot_before = f
@@ -704,7 +762,7 @@ async fn queued_dpf_update_rechecks_before_restart(pool: sqlx::PgPool) {
         let snapshots = get_all_snapshots(&f.env).await;
         assert_eq!(
             f.updater
-                .start_updates(&f.env.pool, 1, &HashSet::new(), &snapshots)
+                .start_updates(&f.env.pool, &work_lock, 1, &HashSet::new(), &snapshots)
                 .await
                 .unwrap(),
             HashSet::from([f.host.id.into()])
@@ -760,7 +818,7 @@ async fn queued_dpf_update_rechecks_before_restart(pool: sqlx::PgPool) {
     let snapshots = get_all_snapshots(&f.env).await;
     assert_eq!(
         f.updater
-            .start_updates(&f.env.pool, 1, &HashSet::new(), &snapshots)
+            .start_updates(&f.env.pool, &work_lock, 1, &HashSet::new(), &snapshots)
             .await
             .unwrap(),
         HashSet::from([f.host.id.into()])
@@ -806,6 +864,13 @@ async fn queued_dpf_update_rechecks_before_restart(pool: sqlx::PgPool) {
 #[crate::sqlx_test]
 async fn queued_dpf_update_preserves_concurrent_request_changes(pool: sqlx::PgPool) {
     let f = fixture(pool).await;
+    let work_lock = f
+        .env
+        .api
+        .work_lock_manager_handle
+        .try_acquire_lock("dpf-update-preflight-test".into())
+        .await
+        .expect("acquire update admission work lock");
     for (case, observation, replacement, expected_reason) in [
         (
             "clear before claim",
@@ -845,7 +910,7 @@ async fn queued_dpf_update_preserves_concurrent_request_changes(pool: sqlx::PgPo
         f.label_reads.store(0, Ordering::SeqCst);
         assert_eq!(
             f.updater
-                .start_updates(&f.env.pool, 1, &HashSet::new(), &snapshots)
+                .start_updates(&f.env.pool, &work_lock, 1, &HashSet::new(), &snapshots)
                 .await
                 .unwrap(),
             HashSet::from([f.host.id.into()])
@@ -949,6 +1014,13 @@ async fn queued_dpf_update_preserves_concurrent_request_changes(pool: sqlx::PgPo
 #[crate::sqlx_test]
 async fn queued_dpf_update_preserves_concurrent_allocation(pool: sqlx::PgPool) {
     let f = fixture(pool).await;
+    let work_lock = f
+        .env
+        .api
+        .work_lock_manager_handle
+        .try_acquire_lock("dpf-update-preflight-test".into())
+        .await
+        .expect("acquire update admission work lock");
     let segment_id = f.env.create_vpc_and_tenant_segment().await;
     let snapshots = get_all_snapshots(&f.env).await;
     let host_before = &snapshots[&f.host.id].host_snapshot;
@@ -957,7 +1029,7 @@ async fn queued_dpf_update_preserves_concurrent_allocation(pool: sqlx::PgPool) {
         .last_reboot_requested;
     assert_eq!(
         f.updater
-            .start_updates(&f.env.pool, 1, &HashSet::new(), &snapshots)
+            .start_updates(&f.env.pool, &work_lock, 1, &HashSet::new(), &snapshots)
             .await
             .unwrap(),
         HashSet::from([f.host.id.into()])
@@ -1053,10 +1125,17 @@ async fn queued_dpf_update_preserves_concurrent_allocation(pool: sqlx::PgPool) {
 #[crate::sqlx_test]
 async fn queued_dpf_update_defers_contended_dpu_locks(pool: sqlx::PgPool) {
     let f = fixture(pool).await;
+    let work_lock = f
+        .env
+        .api
+        .work_lock_manager_handle
+        .try_acquire_lock("dpf-update-preflight-test".into())
+        .await
+        .expect("acquire update admission work lock");
     let snapshots = get_all_snapshots(&f.env).await;
     assert_eq!(
         f.updater
-            .start_updates(&f.env.pool, 1, &HashSet::new(), &snapshots)
+            .start_updates(&f.env.pool, &work_lock, 1, &HashSet::new(), &snapshots)
             .await
             .unwrap(),
         HashSet::from([f.host.id.into()])
@@ -1181,6 +1260,13 @@ async fn queued_dpf_update_rechecks_pending_work_before_claim(pool: sqlx::PgPool
     let mut config = get_config();
     config.bom_validation.enabled = true;
     let f = fixture_with_config(pool, DpuDeploymentType::Bf4Generic, 1, config).await;
+    let work_lock = f
+        .env
+        .api
+        .work_lock_manager_handle
+        .try_acquire_lock("dpf-update-preflight-test".into())
+        .await
+        .expect("acquire update admission work lock");
 
     for (work, check_request) in cases {
         let snapshots = get_all_snapshots(&f.env).await;
@@ -1189,7 +1275,7 @@ async fn queued_dpf_update_rechecks_pending_work_before_claim(pool: sqlx::PgPool
         f.label_reads.store(0, Ordering::SeqCst);
         assert_eq!(
             f.updater
-                .start_updates(&f.env.pool, 1, &HashSet::new(), &snapshots)
+                .start_updates(&f.env.pool, &work_lock, 1, &HashSet::new(), &snapshots)
                 .await
                 .unwrap(),
             HashSet::from([f.host.id.into()]),
@@ -1480,10 +1566,17 @@ async fn automatic_dpf_update_rolls_back_rejected_batch(pool: sqlx::PgPool) {
 #[crate::sqlx_test]
 async fn started_dpf_update_retry_preserves_start_time(pool: sqlx::PgPool) {
     let f = fixture(pool).await;
+    let work_lock = f
+        .env
+        .api
+        .work_lock_manager_handle
+        .try_acquire_lock("dpf-update-preflight-test".into())
+        .await
+        .expect("acquire update admission work lock");
     let snapshots = get_all_snapshots(&f.env).await;
     assert_eq!(
         f.updater
-            .start_updates(&f.env.pool, 1, &HashSet::new(), &snapshots)
+            .start_updates(&f.env.pool, &work_lock, 1, &HashSet::new(), &snapshots)
             .await
             .unwrap(),
         HashSet::from([f.host.id.into()])
@@ -1593,6 +1686,13 @@ async fn dpf_update_compatibility_rejects_mixed_deployments(pool: sqlx::PgPool) 
 #[crate::sqlx_test]
 async fn dpf_update_compatibility_uses_expected_astra_inventory(pool: sqlx::PgPool) {
     let f = fixture(pool).await;
+    let work_lock = f
+        .env
+        .api
+        .work_lock_manager_handle
+        .try_acquire_lock("dpf-update-preflight-test".into())
+        .await
+        .expect("acquire update admission work lock");
     *f.labels.lock().unwrap() = LabelObservation::AstraOnly;
     let snapshots = get_all_snapshots(&f.env).await;
     let snapshot = &snapshots[&f.host.id];
@@ -1643,7 +1743,7 @@ async fn dpf_update_compatibility_uses_expected_astra_inventory(pool: sqlx::PgPo
     let snapshots = get_all_snapshots(&f.env).await;
     assert_eq!(
         f.updater
-            .start_updates(&f.env.pool, 1, &HashSet::new(), &snapshots)
+            .start_updates(&f.env.pool, &work_lock, 1, &HashSet::new(), &snapshots)
             .await
             .unwrap(),
         HashSet::from([f.host.id.into()])

@@ -97,14 +97,11 @@ func GeneratedPathResourceDescriptor(commandName, parameter string) GeneratedRes
 		descriptor.ParentParameter = "machineId"
 	}
 
-	if descriptor.ResourceType == "rule" || descriptor.ResourceType == "task-run" {
+	if descriptor.ResourceType == "rule" || descriptor.ResourceType == "task-run" || descriptor.ResourceType == "domain" {
 		descriptor.ScopeParameter = "siteId"
 	}
 	if descriptor.ResourceType == "task" {
 		descriptor.FreeFormReason = "task IDs come from prior lifecycle actions; no site-wide task list API exists"
-	}
-	if descriptor.ResourceType == "domain" && strings.Contains(commandName, "nvlink-domain") {
-		descriptor.FreeFormReason = "NVLink domain IDs come from prior lifecycle actions; no list API exists"
 	}
 	if strings.HasPrefix(commandName, "measured-boot") && strings.EqualFold(parameter, "id") {
 		descriptor.FreeFormReason = "measured-boot approvals and their selected machine or profile IDs share this parameter; enter the ID that matches --selector"
@@ -149,7 +146,7 @@ func (s *Session) ResolveGeneratedResource(
 		item, err = s.Resolver.SelectFromItems(label, items)
 		return item, true, err
 	}
-	matches := matchingGeneratedResourceItems(items, value)
+	matches := matchingGeneratedResourceItems(descriptor, items, value)
 	if len(matches) > 1 {
 		return nil, true, fmt.Errorf(
 			"ambiguous %s %q matches %d resources; use an exact ID",
@@ -165,13 +162,24 @@ func (s *Session) ResolveGeneratedResource(
 	return nil, true, fmt.Errorf("no %s matching %q found", descriptor.ResourceType, value)
 }
 
-func matchingGeneratedResourceItems(items []NamedItem, value string) []NamedItem {
+// matchingGeneratedResourceItems matches value against item IDs, then names.
+// NVLink domain IDs can differ only in case, so domains match exactly; other
+// resources match case-insensitively.
+func matchingGeneratedResourceItems(
+	descriptor GeneratedResourceDescriptor,
+	items []NamedItem,
+	value string,
+) []NamedItem {
+	equal := strings.EqualFold
+	if descriptor.ResourceType == "domain" {
+		equal = func(a, b string) bool { return a == b }
+	}
 	var idMatches []NamedItem
 	var nameMatches []NamedItem
 	for i := range items {
-		if strings.EqualFold(items[i].ID, value) {
+		if equal(items[i].ID, value) {
 			idMatches = append(idMatches, items[i])
-		} else if strings.EqualFold(items[i].Name, value) {
+		} else if equal(items[i].Name, value) {
 			nameMatches = append(nameMatches, items[i])
 		}
 	}
@@ -201,21 +209,21 @@ func (s *Session) GeneratedResourceItems(
 		if err != nil {
 			return nil, true, err
 		}
-		items, err := s.fetchAllocationConstraints(parent)
+		items, err := s.fetchAllocationConstraints(ctx, parent)
 		return items, true, err
 	case "dpu-extension-service-version":
 		parent, err := requiredResolvedValue(descriptor, resolvedValues)
 		if err != nil {
 			return nil, true, err
 		}
-		items, err := s.fetchDPUExtensionServiceVersions(parent)
+		items, err := s.fetchDPUExtensionServiceVersions(ctx, parent)
 		return items, true, err
 	case "health-report-source":
 		parent, err := requiredResolvedValue(descriptor, resolvedValues)
 		if err != nil {
 			return nil, true, err
 		}
-		items, err := s.fetchMachineHealthReportSources(parent)
+		items, err := s.fetchMachineHealthReportSources(ctx, parent)
 		return items, true, err
 	case "instance-type-machine":
 		parent, err := requiredResolvedValue(descriptor, resolvedValues)
@@ -229,7 +237,7 @@ func (s *Session) GeneratedResourceItems(
 		if err != nil {
 			return nil, true, err
 		}
-		items, err := s.fetchMachineChassis(parent)
+		items, err := s.fetchMachineChassis(ctx, parent)
 		return items, true, err
 	case "rule":
 		siteID := strings.TrimSpace(resolvedValues[descriptor.ScopeParameter])
@@ -251,6 +259,16 @@ func (s *Session) GeneratedResourceItems(
 		}
 		items, err := s.fetchRunsForSite(ctx, siteID)
 		return items, true, err
+	case "domain":
+		siteID := strings.TrimSpace(resolvedValues[descriptor.ScopeParameter])
+		if siteID == "" {
+			siteID = strings.TrimSpace(s.Scope.SiteID)
+		}
+		if siteID == "" {
+			return nil, true, fmt.Errorf("siteId must be resolved before NVLink domains")
+		}
+		items, err := s.fetchNVLinkDomainsForSite(ctx, siteID)
+		return items, true, err
 	default:
 		if s.Resolver == nil || !s.Resolver.HasFetcher(descriptor.ResourceType) {
 			return nil, false, nil
@@ -258,6 +276,58 @@ func (s *Session) GeneratedResourceItems(
 		items, err := s.Resolver.Fetch(ctx, descriptor.ResourceType)
 		return items, true, err
 	}
+}
+
+func (s *Session) fetchExpectedRackGroups(ctx context.Context) ([]NamedItem, error) {
+	query := map[string]string{}
+	if s.Scope.SiteID != "" {
+		query["siteId"] = s.Scope.SiteID
+	}
+	groups, err := s.fetchAll(ctx, apiPath(s, "expected-rack-group"), query)
+	if err != nil {
+		return nil, err
+	}
+	items := make([]NamedItem, len(groups))
+	for i, group := range groups {
+		name := strings.TrimSpace(str(group, "name"))
+		if name == "" {
+			name = str(group, "id")
+		}
+		items[i] = NamedItem{
+			Name: name, ID: str(group, "id"),
+			Extra: map[string]string{"siteId": str(group, "siteId")},
+			Raw:   group,
+		}
+	}
+	return items, nil
+}
+
+func (s *Session) fetchNVLinkDomains(ctx context.Context) ([]NamedItem, error) {
+	siteID := strings.TrimSpace(s.Scope.SiteID)
+	if siteID == "" {
+		return nil, fmt.Errorf("siteId must be resolved before NVLink domains")
+	}
+	return s.fetchNVLinkDomainsForSite(ctx, siteID)
+}
+
+func (s *Session) fetchNVLinkDomainsForSite(ctx context.Context, siteID string) ([]NamedItem, error) {
+	domains, err := s.fetchAll(ctx, apiPath(s, "domain/nvlink"), map[string]string{"siteId": siteID})
+	if err != nil {
+		return nil, err
+	}
+	items := make([]NamedItem, len(domains))
+	for i, domain := range domains {
+		name := strings.TrimSpace(str(domain, "name"))
+		if name == "" {
+			name = str(domain, "id")
+		}
+		items[i] = NamedItem{
+			Name: name, ID: str(domain, "id"),
+			Extra: map[string]string{"siteId": siteID},
+			Raw:   domain,
+		}
+	}
+	return items, nil
 }
 
 func requiredResolvedValue(descriptor GeneratedResourceDescriptor, resolvedValues map[string]string) (string, error) {
@@ -272,11 +342,11 @@ func requiredResolvedValue(descriptor GeneratedResourceDescriptor, resolvedValue
 	return value, nil
 }
 
-func (s *Session) fetchDPUMachines(_ context.Context) ([]NamedItem, error) {
+func (s *Session) fetchDPUMachines(ctx context.Context) ([]NamedItem, error) {
 	if s.Scope.SiteID == "" {
 		return nil, fmt.Errorf("siteId must be resolved before DPU machines")
 	}
-	machines, err := s.fetchAll(apiPath(s, "dpu"), map[string]string{"siteId": s.Scope.SiteID})
+	machines, err := s.fetchAll(ctx, apiPath(s, "dpu"), map[string]string{"siteId": s.Scope.SiteID})
 	if err != nil {
 		return nil, err
 	}
@@ -299,7 +369,7 @@ func (s *Session) fetchSpectrumXPartitions(ctx context.Context) ([]NamedItem, er
 	if s.Scope.SiteID != "" {
 		query["siteId"] = s.Scope.SiteID
 	}
-	partitions, err := s.fetchAll(apiPath(s, "spectrumx-partition"), query)
+	partitions, err := s.fetchAll(ctx, apiPath(s, "spectrumx-partition"), query)
 	if err != nil {
 		return nil, err
 	}
@@ -316,7 +386,7 @@ func (s *Session) fetchSpectrumXPartitions(ctx context.Context) ([]NamedItem, er
 	return items, nil
 }
 
-func (s *Session) fetchLabelKeys(resourceType string) ([]NamedItem, error) {
+func (s *Session) fetchLabelKeys(ctx context.Context, resourceType string) ([]NamedItem, error) {
 	query := map[string]string{"pageSize": "100"}
 	if s.Scope.SiteID != "" {
 		query["siteId"] = s.Scope.SiteID
@@ -324,7 +394,7 @@ func (s *Session) fetchLabelKeys(resourceType string) ([]NamedItem, error) {
 	items := make([]NamedItem, 0)
 	for page := 1; page <= 1000; page++ {
 		query["pageNumber"] = strconv.Itoa(page)
-		raw, _, err := s.Client.Do("GET", apiPath(s, resourceType+"/label/key"), nil, query, nil)
+		raw, _, err := s.Client.DoWithContext(ctx, "GET", apiPath(s, resourceType+"/label/key"), nil, query, nil)
 		if err != nil {
 			return nil, err
 		}
@@ -343,8 +413,8 @@ func (s *Session) fetchLabelKeys(resourceType string) ([]NamedItem, error) {
 	return nil, fmt.Errorf("%s label keys exceed 1000 pages", resourceType)
 }
 
-func (s *Session) fetchMachineChassis(machineID string) ([]NamedItem, error) {
-	machine, err := s.fetchResourceObject("machine/" + url.PathEscape(machineID))
+func (s *Session) fetchMachineChassis(ctx context.Context, machineID string) ([]NamedItem, error) {
+	machine, err := s.fetchResourceObject(ctx, "machine/"+url.PathEscape(machineID))
 	if err != nil {
 		return nil, err
 	}
@@ -352,13 +422,13 @@ func (s *Session) fetchMachineChassis(machineID string) ([]NamedItem, error) {
 	if siteID == "" {
 		return nil, fmt.Errorf("machine %s has no siteId", machineID)
 	}
-	endpoints, err := s.fetchAll(apiPath(s, "site-explorer/endpoint"), map[string]string{"siteId": siteID, "machineId": machineID})
+	endpoints, err := s.fetchAll(ctx, apiPath(s, "site-explorer/endpoint"), map[string]string{"siteId": siteID, "machineId": machineID})
 	// REST versions without `machineId` reject the query before listing.
 	// The report check below still selects the machine on those servers.
 	var apiErr *appcli.APIError
 	if errors.As(err, &apiErr) && apiErr.StatusCode == http.StatusBadRequest &&
 		apiErr.Message == "Unknown query parameter specified in request: machineId" {
-		endpoints, err = s.fetchAll(apiPath(s, "site-explorer/endpoint"), map[string]string{"siteId": siteID})
+		endpoints, err = s.fetchAll(ctx, apiPath(s, "site-explorer/endpoint"), map[string]string{"siteId": siteID})
 	}
 	if err != nil {
 		return nil, err
@@ -382,8 +452,8 @@ func (s *Session) fetchMachineChassis(machineID string) ([]NamedItem, error) {
 	return items, nil
 }
 
-func (s *Session) fetchAllocationConstraints(allocationID string) ([]NamedItem, error) {
-	resource, err := s.fetchResourceObject("allocation/" + url.PathEscape(allocationID))
+func (s *Session) fetchAllocationConstraints(ctx context.Context, allocationID string) ([]NamedItem, error) {
+	resource, err := s.fetchResourceObject(ctx, "allocation/"+url.PathEscape(allocationID))
 	if err != nil {
 		return nil, err
 	}
@@ -426,8 +496,8 @@ func (s *Session) fetchAllocationConstraints(allocationID string) ([]NamedItem, 
 	return items, nil
 }
 
-func (s *Session) fetchDPUExtensionServiceVersions(serviceID string) ([]NamedItem, error) {
-	resource, err := s.fetchResourceObject("dpu-extension-service/" + url.PathEscape(serviceID))
+func (s *Session) fetchDPUExtensionServiceVersions(ctx context.Context, serviceID string) ([]NamedItem, error) {
+	resource, err := s.fetchResourceObject(ctx, "dpu-extension-service/"+url.PathEscape(serviceID))
 	if err != nil {
 		return nil, err
 	}
@@ -457,8 +527,8 @@ func (s *Session) fetchDPUExtensionServiceVersions(serviceID string) ([]NamedIte
 	return items, nil
 }
 
-func (s *Session) fetchMachineHealthReportSources(machineID string) ([]NamedItem, error) {
-	raw, _, err := s.Client.Do(
+func (s *Session) fetchMachineHealthReportSources(ctx context.Context, machineID string) ([]NamedItem, error) {
+	raw, _, err := s.Client.DoWithContext(ctx,
 		"GET",
 		apiPath(s, "machine/"+url.PathEscape(machineID)+"/health-report"),
 		nil,
@@ -493,7 +563,7 @@ func (s *Session) fetchMachineHealthReportSources(machineID string) ([]NamedItem
 }
 
 func (s *Session) fetchInstanceTypeMachines(ctx context.Context, instanceTypeID string) ([]NamedItem, error) {
-	associations, err := s.fetchAll(
+	associations, err := s.fetchAll(ctx,
 		apiPath(s, "instance/type/"+url.PathEscape(instanceTypeID)+"/machine"),
 		nil,
 	)
@@ -531,8 +601,8 @@ func (s *Session) fetchInstanceTypeMachines(ctx context.Context, instanceTypeID 
 	return items, nil
 }
 
-func (s *Session) fetchResourceObject(resourcePath string) (map[string]interface{}, error) {
-	raw, _, err := s.Client.Do("GET", apiPath(s, resourcePath), nil, nil, nil)
+func (s *Session) fetchResourceObject(ctx context.Context, resourcePath string) (map[string]interface{}, error) {
+	raw, _, err := s.Client.DoWithContext(ctx, "GET", apiPath(s, resourcePath), nil, nil, nil)
 	if err != nil {
 		return nil, err
 	}

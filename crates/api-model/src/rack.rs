@@ -90,6 +90,10 @@ pub struct FirmwareUpgradeJob {
     pub status: Option<FirmwareProgressState>,
     pub started_at: Option<DateTime<Utc>>,
     pub completed_at: Option<DateTime<Utc>>,
+    /// Supplemental ingestion firmware started after all rack maintenance finished.
+    /// Resume Completed instead of repeating NVOS, rack reboots, and NMX setup.
+    #[serde(default)]
+    pub return_to_completed: bool,
     #[serde(default)]
     pub batch_job_ids: Vec<String>,
     #[serde(default)]
@@ -98,6 +102,11 @@ pub struct FirmwareUpgradeJob {
     pub switches: Vec<FirmwareUpgradeDeviceStatus>,
     #[serde(default)]
     pub power_shelves: Vec<FirmwareUpgradeDeviceStatus>,
+    /// Shelves admitted to this automatic ingestion cycle's controller requests.
+    /// Separate from RMS handles because the backend may not return shelf jobs.
+    /// Missing on predecessor jobs; polling recovers membership from rack-owned requests.
+    #[serde(default)]
+    pub ingestion_power_shelf_ids: Option<Vec<PowerShelfId>>,
 }
 
 impl FirmwareUpgradeJob {
@@ -345,10 +354,59 @@ pub fn derive_rack_aggregate_health(sources: &HealthReportSources) -> health_rep
     }
     let mut output = health_report::HealthReport::empty("rack-aggregate-health".to_string());
     for report in sources.merges.values() {
-        output.merge(report);
+        if report.source == health_report::HealthReport::RACK_FIRMWARE_SOURCE {
+            output.merge(&summarize_firmware_mismatches(report));
+        } else {
+            output.merge(report);
+        }
     }
     output.observed_at = Some(chrono::Utc::now());
     output
+}
+
+/// Summarizes component evidence without changing its persisted recovery state.
+/// The timestamp is the earliest outstanding mismatch; the target is the rack.
+fn summarize_firmware_mismatches(
+    report: &health_report::HealthReport,
+) -> health_report::HealthReport {
+    let probe_id = health_report::HealthProbeId::rack_firmware_mismatch();
+    let mut mismatches = report
+        .alerts
+        .iter()
+        .filter(|alert| alert.id == probe_id)
+        .collect::<Vec<_>>();
+    if mismatches.is_empty() {
+        return report.clone();
+    }
+    mismatches.sort_by(|first, second| first.target.cmp(&second.target));
+    let summary = health_report::HealthProbeAlert {
+        id: probe_id.clone(),
+        target: None,
+        in_alert_since: mismatches
+            .iter()
+            .filter_map(|alert| alert.in_alert_since)
+            .min(),
+        message: format!(
+            "Firmware version mismatch in {} rack component(s):\n{}",
+            mismatches.len(),
+            mismatches
+                .iter()
+                .map(|alert| alert.message.as_str())
+                .collect::<Vec<_>>()
+                .join("\n"),
+        ),
+        tenant_message: None,
+        classifications: mismatches
+            .iter()
+            .flat_map(|alert| alert.classifications.iter().cloned())
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
+            .collect(),
+    };
+    let mut report = report.clone();
+    report.alerts.retain(|alert| alert.id != probe_id);
+    report.alerts.push(summary);
+    report
 }
 
 /// SQL `NULL` maps to `None` for `controller_state_outcome`,
@@ -421,7 +479,8 @@ impl<'r> FromRow<'r, PgRow> for Rack {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RackErrorRecoveryPolicy {
-    /// The rack returns to Ready after all attached components become Ready.
+    /// The rack returns to Ready when no switch or power shelf is in Error
+    /// and no machine is Failed.
     /// Also applies when a persisted Error state has no recovery metadata.
     #[default]
     ComponentsReady,
@@ -452,8 +511,15 @@ pub enum RackErrorRecoveryPolicy {
 /// ### Maintenance Sub-states
 ///
 /// ```text
-/// FirmwareUpgrade -> NVOSUpdate -> ConfigureNmxCluster -> Completed -> Validating(Pending)
+/// FirmwareUpgrade -> NVOSUpdate -> [PowerSequence(PowerReset)]
+///   -> ConfigureNmxCluster -> Completed -> Validating(Pending)
+///
+/// Completed -> FirmwareUpgrade(WaitForComplete) -> Completed
+///   (supplemental compute firmware during automatic ingestion)
 /// ```
+///
+/// During automatic ingestion, Completed may re-enter FirmwareUpgrade for
+/// late compute hosts; supplemental completion returns directly to Completed.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "state", rename_all = "snake_case")]
 pub enum RackState {
@@ -463,8 +529,8 @@ pub enum RackState {
     #[serde(alias = "expected", alias = "unknown")]
     Created,
 
-    /// Discovery in progress - waiting for all expected devices to appear
-    /// and reach ManagedHostState::Ready.
+    /// Discovery waits for the rack profile's minimum number of ready switches.
+    /// Compute tray and power shelf counts and readiness do not gate this state.
     Discovering,
 
     /// Rack is in the validation phase. The sub-state tracks progress from
@@ -517,8 +583,12 @@ pub enum RackState {
 /// ## Sub-state Flow
 ///
 /// ```text
-/// FirmwareUpgrade -> NVOSUpdate -> ConfigureNmxCluster -> Completed -> Validation(Pending)
+/// FirmwareUpgrade -> NVOSUpdate -> [PowerSequence(PowerReset)]
+///   -> ConfigureNmxCluster -> Completed -> Validating(Pending)
 /// ```
+/// Ingestion resets compute hosts only after an actual NVOS update succeeds.
+/// On-demand maintenance resets only for an explicit PowerSequence activity,
+/// before NMX-C configuration. Submitted batches finish regardless of scope.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum RackMaintenanceState {
     FirmwareUpgrade {
@@ -532,6 +602,10 @@ pub enum RackMaintenanceState {
     },
     PowerSequence {
         rack_power: RackPowerState,
+        /// Hosts claimed by PowerReset. None means no batch has been submitted;
+        /// Some (including an empty list) resumes an already submitted batch.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        restart_machine_ids: Option<Vec<HostMachineId>>,
     },
     Completed,
 }
@@ -552,7 +626,7 @@ impl Display for RackMaintenanceState {
             } => {
                 write!(f, "ConfigureNmxCluster({})", configure_nmx_cluster)
             }
-            RackMaintenanceState::PowerSequence { rack_power } => {
+            RackMaintenanceState::PowerSequence { rack_power, .. } => {
                 write!(f, "PowerSequence({})", rack_power)
             }
             RackMaintenanceState::Completed => write!(f, "Completed"),
@@ -562,11 +636,12 @@ impl Display for RackMaintenanceState {
 
 /// Sub-states of `RackMaintenanceState::ConfigureNmxCluster`.
 ///
-/// `Start` rotates switch-local certificates before submitting the asynchronous
+/// Configuration rotates switch-local certificates before submitting the asynchronous
 /// RMS ScaleUpFabricManager workflow. `WaitForSwitchCertificateJob`,
 /// `WaitForScaleUpFabricManagerJob`, and the optional telemetry-only
 /// `WaitForPrimarySwitchCertificateJob` persist each asynchronous phase across
-/// controller restarts.
+/// controller restarts. `Start` validates prerequisites and submits certificates;
+/// it does not request compute-host resets.
 ///
 /// `ConfigureCertificates`, `DisableScaleUpFabricState`,
 /// `ConfigureScaleUpFabricManager`, and `WaitForFabricStatus` name sub-states of
@@ -575,6 +650,7 @@ impl Display for RackMaintenanceState {
 /// that load every rack. Maintenance cannot resume from them.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ConfigureNmxClusterState {
+    /// Checks prerequisites and submits the switch-certificate batch.
     Start,
 
     /// Waits for the RMS switch-certificate batch to complete.
@@ -669,6 +745,7 @@ impl Display for NvosUpdateState {
 pub enum RackPowerState {
     PoweringOn,
     PoweringOff,
+    /// Submits graceful compute-host reboots, or waits for the saved batch.
     PowerReset,
 }
 
@@ -799,7 +876,8 @@ impl MachineRvLabels {
 
 /// Individual maintenance activities that can be performed during on-demand
 /// rack maintenance. When the activities list on [`MaintenanceScope`] is
-/// empty, all activities are performed.
+/// empty, all non-power activities are performed. Compute resets require an
+/// explicit [`MaintenanceActivity::PowerSequence`] selection.
 ///
 /// Activity-specific configuration is carried inline on the variant
 /// (e.g. `FirmwareUpgrade` holds the optional target firmware version).
@@ -823,6 +901,8 @@ pub enum MaintenanceActivity {
         config_json: String,
     },
     ConfigureNmxCluster,
+    /// Explicitly requests compute-host resets before NMX-C configuration.
+    /// Unlike other activities, an empty activities list does not request resets.
     PowerSequence,
     /// Per-device power control, dispatched by the rack state controller to
     /// the listed devices on its next tick. Framed out here for the component
@@ -863,7 +943,8 @@ pub struct MaintenanceScope {
     pub switch_ids: Vec<SwitchId>,
     #[serde(default)]
     pub power_shelf_ids: Vec<PowerShelfId>,
-    /// Which maintenance activities to perform. Empty means all activities.
+    /// Activities to perform. Empty selects all non-power activities; compute
+    /// resets require an explicit PowerSequence entry for on-demand maintenance.
     #[serde(default)]
     pub activities: Vec<MaintenanceActivity>,
     /// When this request was accepted, stamped by the server rather than
@@ -881,8 +962,12 @@ impl MaintenanceScope {
         self.machine_ids.is_empty() && self.switch_ids.is_empty() && self.power_shelf_ids.is_empty()
     }
 
+    /// Selects an activity; PowerSequence requires explicit membership even
+    /// when the empty list selects every other activity.
     pub fn should_run(&self, activity: &MaintenanceActivity) -> bool {
-        self.activities.is_empty() || self.activities.iter().any(|a| a.same_kind(activity))
+        self.activities.iter().any(|a| a.same_kind(activity))
+            || (self.activities.is_empty()
+                && !matches!(activity, MaintenanceActivity::PowerSequence))
     }
 
     /// Returns `true` when `other` selects the same devices and activities as
@@ -911,6 +996,12 @@ impl MaintenanceScope {
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub struct RackConfig {
+    /// Discovery started this ingestion cycle. Cleared on completion or an
+    /// explicit reprovision; on-demand requests never enable automatic resets.
+    /// Absent in predecessor rows, which do not gain an implicit reset.
+    #[serde(default)]
+    pub ingestion_in_progress: bool,
+
     /// When set, the Ready state handler will transition back to Maintenance
     /// to re-provision the rack to a new version.
     #[serde(default)]
@@ -1013,6 +1104,112 @@ mod tests {
     use carbide_uuid::switch::{SwitchIdSource, SwitchType};
 
     use super::*;
+
+    #[test]
+    fn rack_firmware_summary_preserves_evidence_and_override_semantics() {
+        use health_report::{
+            HealthAlertClassification, HealthProbeAlert, HealthProbeId, HealthReport,
+        };
+
+        let started = Utc::now();
+        let mut report = HealthReport::empty(HealthReport::RACK_FIRMWARE_SOURCE.to_string());
+        report.alerts = [
+            ("switch/BMC", "switch BMC: 1 versus 2", started),
+            (
+                "compute/BIOS",
+                "compute BIOS: 3 versus 4",
+                started - chrono::Duration::seconds(1),
+            ),
+        ]
+        .into_iter()
+        .map(|(target, message, in_alert_since)| HealthProbeAlert {
+            id: HealthProbeId::rack_firmware_mismatch(),
+            target: Some(target.to_string()),
+            message: message.to_string(),
+            in_alert_since: Some(in_alert_since),
+            tenant_message: None,
+            classifications: vec![HealthAlertClassification::hardware()],
+        })
+        .collect();
+        let mut sources = HealthReportSources::default();
+        sources.merges.insert(report.source.clone(), report.clone());
+        let aggregate = derive_rack_aggregate_health(&sources);
+        let [alert] = aggregate.alerts.as_slice() else {
+            panic!("expected one rack firmware summary");
+        };
+        assert_eq!(alert.id, HealthProbeId::rack_firmware_mismatch());
+        assert_eq!(alert.target, None);
+        assert_eq!(
+            alert.in_alert_since,
+            Some(started - chrono::Duration::seconds(1))
+        );
+        assert_eq!(
+            alert.classifications,
+            vec![HealthAlertClassification::hardware()]
+        );
+        assert_eq!(
+            alert.message,
+            "Firmware version mismatch in 2 rack component(s):\ncompute BIOS: 3 versus 4\nswitch BMC: 1 versus 2"
+        );
+        assert_eq!(sources.merges[HealthReport::RACK_FIRMWARE_SOURCE], report);
+
+        let mut external_report = report;
+        external_report.source = "operator".to_string();
+        let mut external_sources = HealthReportSources::default();
+        external_sources
+            .merges
+            .insert(external_report.source.clone(), external_report.clone());
+        let mut expected_alerts = external_report.alerts.clone();
+        expected_alerts.sort_by(|first, second| first.target.cmp(&second.target));
+        assert_eq!(
+            derive_rack_aggregate_health(&external_sources).alerts,
+            expected_alerts
+        );
+        sources.replace = Some(external_report.clone());
+        assert_eq!(derive_rack_aggregate_health(&sources), external_report);
+    }
+
+    #[test]
+    fn power_sequence_preserves_legacy_states_and_submitted_targets() {
+        let host_id: HostMachineId = "fm100htes3rn1npvbtm5qd57dkilaag7ljugl1llmm7rfuq1ov50i0rpl30"
+            .parse()
+            .unwrap();
+        for (encoded, rack_power, restart_machine_ids) in [
+            (
+                serde_json::json!({"PowerSequence": {"rack_power": "PoweringOn"}}),
+                RackPowerState::PoweringOn,
+                None,
+            ),
+            (
+                serde_json::json!({"PowerSequence": {"rack_power": "PoweringOff"}}),
+                RackPowerState::PoweringOff,
+                None,
+            ),
+            (
+                serde_json::json!({"PowerSequence": {"rack_power": "PowerReset"}}),
+                RackPowerState::PowerReset,
+                None,
+            ),
+            (
+                serde_json::json!({"PowerSequence": {"rack_power": "PowerReset", "restart_machine_ids": []}}),
+                RackPowerState::PowerReset,
+                Some(vec![]),
+            ),
+            (
+                serde_json::json!({"PowerSequence": {"rack_power": "PowerReset", "restart_machine_ids": [host_id]}}),
+                RackPowerState::PowerReset,
+                Some(vec![host_id]),
+            ),
+        ] {
+            let expected = RackMaintenanceState::PowerSequence {
+                rack_power,
+                restart_machine_ids,
+            };
+            let decoded: RackMaintenanceState = serde_json::from_value(encoded.clone()).unwrap();
+            assert_eq!(decoded, expected);
+            assert_eq!(serde_json::to_value(decoded).unwrap(), encoded);
+        }
+    }
 
     // ConfigureNmxClusterState wire compatibility
 
@@ -1149,7 +1346,7 @@ mod tests {
     }
 
     #[test]
-    fn should_run_all_when_activities_empty() {
+    fn should_run_all_except_power_sequence_when_activities_empty() {
         let scope = MaintenanceScope::default();
         assert!(scope.should_run(&MaintenanceActivity::FirmwareUpgrade {
             firmware_version: None,
@@ -1160,7 +1357,7 @@ mod tests {
             config_json: String::new(),
         }));
         assert!(scope.should_run(&MaintenanceActivity::ConfigureNmxCluster));
-        assert!(scope.should_run(&MaintenanceActivity::PowerSequence));
+        assert!(!scope.should_run(&MaintenanceActivity::PowerSequence));
     }
 
     #[test]
@@ -1281,6 +1478,7 @@ mod tests {
     fn rack_config_defaults_missing_maintenance_termination_request_to_false() {
         let config: RackConfig = serde_json::from_str("{}").unwrap();
         assert!(!config.maintenance_termination_requested);
+        assert!(!config.ingestion_in_progress);
 
         let config: RackConfig =
             serde_json::from_str(r#"{"maintenance_termination_requested":true}"#).unwrap();
@@ -1417,6 +1615,52 @@ mod tests {
                 state
             );
         }
+    }
+
+    #[test]
+    fn firmware_upgrade_job_preserves_shelf_membership() {
+        for ids in [
+            None,
+            Some(Vec::new()),
+            Some(vec![PowerShelfId::from(uuid::Uuid::from_bytes([1; 16]))]),
+        ] {
+            let mut wire = serde_json::json!({ "job_id": null, "status": null, "started_at": null, "completed_at": null });
+            if let Some(ids) = &ids {
+                wire["ingestion_power_shelf_ids"] = serde_json::to_value(ids).unwrap();
+            }
+            let job: FirmwareUpgradeJob = serde_json::from_value(wire).unwrap();
+            let reloaded: FirmwareUpgradeJob =
+                serde_json::from_str(&serde_json::to_string(&job).unwrap()).unwrap();
+            assert_eq!(reloaded.ingestion_power_shelf_ids, ids);
+        }
+    }
+
+    #[test]
+    fn firmware_upgrade_job_preserves_completed_return_marker() {
+        scenarios!(
+            run = |marker: Option<bool>| -> Result<bool, String> {
+                // Predecessor job JSON has no return marker or device lists.
+                let mut wire = serde_json::json!({
+                    "job_id": "parent-job", "status": "in_progress",
+                    "started_at": null, "completed_at": null
+                });
+                if let Some(marker) = marker {
+                    wire["return_to_completed"] = serde_json::json!(marker);
+                }
+                let job: FirmwareUpgradeJob = serde_json::from_value(wire).map_err(|error| error.to_string())?;
+                let persisted = serde_json::to_string(&job).map_err(|error| error.to_string())?;
+                let resumed: FirmwareUpgradeJob =
+                    serde_json::from_str(&persisted).map_err(|error| error.to_string())?;
+                Ok(resumed.return_to_completed)
+            };
+            "legacy and normal jobs retain the normal maintenance continuation" {
+                None => Yields(false),
+                Some(false) => Yields(false),
+            }
+            "supplemental jobs retain their continuation after reload" {
+                Some(true) => Yields(true),
+            }
+        );
     }
 
     #[test]

@@ -1,0 +1,24 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+suite: shared Site Manager client identity
+templates:
+  - charts/nico-rest-site-manager/templates/client-certificate.yaml
+  - charts/nico-rest-cert-manager/templates/deployment.yaml
+release:
+  namespace: nico-rest
+tests:
+  - it: derives the certificate URI and allowlist from the shared trust domain
+    set:
+      global.spiffe.trustDomain: example.test
+    asserts:
+      - equal:
+          path: spec.uris
+          value: [spiffe://example.test/nico-rest/sa/nico-rest-site-manager]
+        template: charts/nico-rest-site-manager/templates/client-certificate.yaml
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: CERT_AUTH_ALLOWED_IDENTITIES
+            value: spiffe://example.test/nico-rest/sa/nico-rest-site-manager
+        template: charts/nico-rest-cert-manager/templates/deployment.yaml

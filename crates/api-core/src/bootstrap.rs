@@ -115,6 +115,8 @@ pub struct RuntimeInputs<'a> {
     pub carbide_config: Arc<CarbideConfig>,
     pub initial_objects: Option<InitialObjectsConfig>,
     pub meter: opentelemetry::metrics::Meter,
+    /// Explicit Event destination for migrated API handlers.
+    pub instrumentation: carbide_instrument::Instrumentation,
     pub per_object_metrics: Option<prometheus::Registry>,
     pub join_set: &'a mut JoinSet<()>,
     pub runtime_prelude: RuntimePrelude,

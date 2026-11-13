@@ -1126,6 +1126,7 @@ mod tests {
                     topology: "gb200_nvl72r1_c2g4".to_string(),
                     protocol: "NVLINK_V5".to_string(),
                     members: vec![MemberIntent {
+                        cartridge_index: 0,
                         r#type: "Compute".to_string(),
                         manufacturer: "WIWYNN".to_string(),
                         id: "rack-unit-11".to_string(),
@@ -1222,6 +1223,11 @@ mod tests {
         let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
         let status: serde_json::Value = serde_json::from_slice(&body).unwrap();
         let machines = status["machines"].as_array().unwrap();
+
+        for machine in machines {
+            assert!(machine.get("api_state").is_none());
+            assert!(machine.get("power_state").is_some());
+        }
 
         assert_eq!(machines[0]["bmc"]["ipmi"]["reachable_port"], 16_020);
         assert_eq!(machines[0]["bmc"]["ipmi"]["listen_port"], 16_020);

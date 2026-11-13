@@ -35,7 +35,7 @@ pub fn spawn_desired_firmware_refresher(app_context: Arc<MachineATronContext>) {
             loop {
                 interval.tick().await;
                 let fetched = app_context
-                    .forge_api_client
+                    .carbide_api_client
                     .get_desired_firmware_versions()
                     .await
                     .map(|response| response.entries);

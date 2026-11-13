@@ -86,11 +86,11 @@ func (s *Session) registerFetchers() {
 	s.Resolver.RegisterFetcher("operating-system", s.fetchOperatingSystems)
 	s.Resolver.RegisterFetcher("machine", s.fetchMachines)
 	s.Resolver.RegisterFetcher("dpu-machine", s.fetchDPUMachines)
-	s.Resolver.RegisterFetcher("machine-label-key", func(context.Context) ([]NamedItem, error) {
-		return s.fetchLabelKeys("machine")
+	s.Resolver.RegisterFetcher("machine-label-key", func(ctx context.Context) ([]NamedItem, error) {
+		return s.fetchLabelKeys(ctx, "machine")
 	})
-	s.Resolver.RegisterFetcher("expected-machine-label-key", func(context.Context) ([]NamedItem, error) {
-		return s.fetchLabelKeys("expected-machine")
+	s.Resolver.RegisterFetcher("expected-machine-label-key", func(ctx context.Context) ([]NamedItem, error) {
+		return s.fetchLabelKeys(ctx, "expected-machine")
 	})
 	s.Resolver.RegisterFetcher("ip-block", s.fetchIPBlocks)
 	s.Resolver.RegisterFetcher("network-security-group", s.fetchNSGs)
@@ -104,6 +104,7 @@ func (s *Session) registerFetchers() {
 	s.Resolver.RegisterFetcher("allocation", s.fetchAllocations)
 	s.Resolver.RegisterFetcher("expected-machine", s.fetchExpectedMachines)
 	s.Resolver.RegisterFetcher("expected-rack", s.fetchExpectedRacks)
+	s.Resolver.RegisterFetcher("expected-rack-group", s.fetchExpectedRackGroups)
 	s.Resolver.RegisterFetcher("expected-switch", s.fetchExpectedSwitches)
 	s.Resolver.RegisterFetcher("expected-power-shelf", s.fetchExpectedPowerShelves)
 	s.Resolver.RegisterFetcher("infiniband-partition", s.fetchInfiniBandPartitions)
@@ -118,10 +119,11 @@ func (s *Session) registerFetchers() {
 	s.Resolver.RegisterFetcher("vpc-peering", s.fetchVPCPeerings)
 	s.Resolver.RegisterFetcher("tenant", s.fetchTenants)
 	s.Resolver.RegisterFetcher("tray-component", s.fetchTrayComponents)
+	s.Resolver.RegisterFetcher("domain", s.fetchNVLinkDomains)
 }
 
-// fetchAll fetches all pages from a list endpoint and returns raw JSON objects.
-func (s *Session) fetchAll(path string, extraQuery map[string]string) ([]map[string]interface{}, error) {
+// fetchAll keeps every page under the fetch owner's context, including autocomplete deadlines.
+func (s *Session) fetchAll(ctx context.Context, path string, extraQuery map[string]string) ([]map[string]interface{}, error) {
 	q := map[string]string{"pageSize": "100"}
 	for k, v := range extraQuery {
 		q[k] = v
@@ -129,7 +131,7 @@ func (s *Session) fetchAll(path string, extraQuery map[string]string) ([]map[str
 	var all []map[string]interface{}
 	for page := 1; page <= 1000; page++ {
 		q["pageNumber"] = strconv.Itoa(page)
-		body, hdrs, err := s.Client.Do("GET", path, nil, q, nil)
+		body, hdrs, err := s.Client.DoWithContext(ctx, "GET", path, nil, q, nil)
 		if err != nil {
 			return nil, err
 		}
@@ -188,7 +190,7 @@ func (s *Session) buildMachineVPCNames(ctx context.Context) map[string]string {
 	if s.Scope.VpcID != "" {
 		q["vpcId"] = s.Scope.VpcID
 	}
-	instances, err := s.fetchAll(apiPath(s, "instance"), q)
+	instances, err := s.fetchAll(ctx, apiPath(s, "instance"), q)
 	if err != nil {
 		return map[string]string{}
 	}
@@ -222,11 +224,11 @@ func (s *Session) buildMachineVPCNames(ctx context.Context) map[string]string {
 }
 
 // getTenantID returns the current tenant ID, caching it for the session.
-func (s *Session) getTenantID(_ context.Context) (string, error) {
+func (s *Session) getTenantID(ctx context.Context) (string, error) {
 	if cached := s.Cache.LookupByName("_tenant", s.Org); cached != nil {
 		return cached.ID, nil
 	}
-	body, _, err := s.Client.Do("GET", apiPath(s, "tenant/current"), nil, nil, nil)
+	body, _, err := s.Client.DoWithContext(ctx, "GET", apiPath(s, "tenant/current"), nil, nil, nil)
 	if err != nil {
 		return "", fmt.Errorf("fetching tenant: %w", err)
 	}
@@ -262,7 +264,7 @@ func (s *Session) tenantHasTargetedInstanceCreationAtSite(ctx context.Context, s
 		return false, err
 	}
 
-	body, _, err := s.Client.Do(
+	body, _, err := s.Client.DoWithContext(ctx,
 		"GET",
 		apiPath(s, "site/{id}"),
 		map[string]string{
@@ -290,7 +292,7 @@ func (s *Session) tenantHasTargetedInstanceCreationAtSite(ctx context.Context, s
 		return false, fmt.Errorf("%s has no infrastructure provider ID", siteString)
 	}
 
-	accounts, err := s.fetchAll(
+	accounts, err := s.fetchAll(ctx,
 		apiPath(s, "tenant/account"),
 		map[string]string{
 			"infrastructureProviderId": providerID,
@@ -346,11 +348,11 @@ func (s *Session) tenantHasTargetedInstanceCreationAtSite(ctx context.Context, s
 }
 
 // getInfrastructureProviderID returns the current infrastructure provider ID, caching it for the session.
-func (s *Session) getInfrastructureProviderID(_ context.Context) (string, error) {
+func (s *Session) getInfrastructureProviderID(ctx context.Context) (string, error) {
 	if cached := s.Cache.LookupByName("_infra_provider", s.Org); cached != nil {
 		return cached.ID, nil
 	}
-	body, _, err := s.Client.Do("GET", apiPath(s, "infrastructure-provider/current"), nil, nil, nil)
+	body, _, err := s.Client.DoWithContext(ctx, "GET", apiPath(s, "infrastructure-provider/current"), nil, nil, nil)
 	if err != nil {
 		return "", fmt.Errorf("fetching infrastructure provider: %w", err)
 	}
@@ -397,8 +399,8 @@ func addOwnerScopeFilter(s *Session, ctx context.Context, q map[string]string) {
 
 // -- Fetchers --
 
-func (s *Session) fetchSites(_ context.Context) ([]NamedItem, error) {
-	items, err := s.fetchAll(apiPath(s, "site"), nil)
+func (s *Session) fetchSites(ctx context.Context) ([]NamedItem, error) {
+	items, err := s.fetchAll(ctx, apiPath(s, "site"), nil)
 	if err != nil {
 		return nil, err
 	}
@@ -409,12 +411,12 @@ func (s *Session) fetchSites(_ context.Context) ([]NamedItem, error) {
 	return result, nil
 }
 
-func (s *Session) fetchVPCs(_ context.Context) ([]NamedItem, error) {
+func (s *Session) fetchVPCs(ctx context.Context) ([]NamedItem, error) {
 	q := map[string]string{}
 	if s.Scope.SiteID != "" {
 		q["siteId"] = s.Scope.SiteID
 	}
-	items, err := s.fetchAll(apiPath(s, "vpc"), q)
+	items, err := s.fetchAll(ctx, apiPath(s, "vpc"), q)
 	if err != nil {
 		return nil, err
 	}
@@ -435,7 +437,7 @@ func (s *Session) fetchVPCs(_ context.Context) ([]NamedItem, error) {
 	return result, nil
 }
 
-func (s *Session) fetchSubnets(_ context.Context) ([]NamedItem, error) {
+func (s *Session) fetchSubnets(ctx context.Context) ([]NamedItem, error) {
 	q := map[string]string{}
 	if s.Scope.SiteID != "" {
 		q["siteId"] = s.Scope.SiteID
@@ -443,7 +445,7 @@ func (s *Session) fetchSubnets(_ context.Context) ([]NamedItem, error) {
 	if s.Scope.VpcID != "" {
 		q["vpcId"] = s.Scope.VpcID
 	}
-	items, err := s.fetchAll(apiPath(s, "subnet"), q)
+	items, err := s.fetchAll(ctx, apiPath(s, "subnet"), q)
 	if err != nil {
 		return nil, err
 	}
@@ -457,7 +459,7 @@ func (s *Session) fetchSubnets(_ context.Context) ([]NamedItem, error) {
 	return result, nil
 }
 
-func (s *Session) fetchInstances(_ context.Context) ([]NamedItem, error) {
+func (s *Session) fetchInstances(ctx context.Context) ([]NamedItem, error) {
 	q := map[string]string{}
 	if s.Scope.SiteID != "" {
 		q["siteId"] = s.Scope.SiteID
@@ -465,7 +467,7 @@ func (s *Session) fetchInstances(_ context.Context) ([]NamedItem, error) {
 	if s.Scope.VpcID != "" {
 		q["vpcId"] = s.Scope.VpcID
 	}
-	items, err := s.fetchAll(apiPath(s, "instance"), q)
+	items, err := s.fetchAll(ctx, apiPath(s, "instance"), q)
 	if err != nil {
 		return nil, err
 	}
@@ -480,12 +482,12 @@ func (s *Session) fetchInstances(_ context.Context) ([]NamedItem, error) {
 	return result, nil
 }
 
-func (s *Session) fetchMachines(_ context.Context) ([]NamedItem, error) {
+func (s *Session) fetchMachines(ctx context.Context) ([]NamedItem, error) {
 	q := map[string]string{}
 	if s.Scope.SiteID != "" {
 		q["siteId"] = s.Scope.SiteID
 	}
-	items, err := s.fetchAll(apiPath(s, "machine"), q)
+	items, err := s.fetchAll(ctx, apiPath(s, "machine"), q)
 	if err != nil {
 		return nil, err
 	}
@@ -494,7 +496,7 @@ func (s *Session) fetchMachines(_ context.Context) ([]NamedItem, error) {
 		if s.Scope.SiteID != "" {
 			instanceQuery["siteId"] = s.Scope.SiteID
 		}
-		instances, err := s.fetchAll(apiPath(s, "instance"), instanceQuery)
+		instances, err := s.fetchAll(ctx, apiPath(s, "instance"), instanceQuery)
 		if err != nil {
 			return nil, err
 		}
@@ -541,12 +543,12 @@ func machineDisplayName(m map[string]interface{}) string {
 	return "<unknown>"
 }
 
-func (s *Session) fetchOperatingSystems(_ context.Context) ([]NamedItem, error) {
+func (s *Session) fetchOperatingSystems(ctx context.Context) ([]NamedItem, error) {
 	q := map[string]string{}
 	if s.Scope.SiteID != "" {
 		q["siteId"] = s.Scope.SiteID
 	}
-	items, err := s.fetchAll(apiPath(s, "operating-system"), q)
+	items, err := s.fetchAll(ctx, apiPath(s, "operating-system"), q)
 	if err != nil {
 		return nil, err
 	}
@@ -562,12 +564,12 @@ func (s *Session) fetchOperatingSystems(_ context.Context) ([]NamedItem, error) 
 	return result, nil
 }
 
-func (s *Session) fetchSSHKeyGroups(_ context.Context) ([]NamedItem, error) {
+func (s *Session) fetchSSHKeyGroups(ctx context.Context) ([]NamedItem, error) {
 	q := map[string]string{}
 	if s.Scope.SiteID != "" {
 		q["siteId"] = s.Scope.SiteID
 	}
-	items, err := s.fetchAll(apiPath(s, "sshkeygroup"), q)
+	items, err := s.fetchAll(ctx, apiPath(s, "sshkeygroup"), q)
 	if err != nil {
 		return nil, err
 	}
@@ -584,7 +586,7 @@ func (s *Session) fetchAllocations(ctx context.Context) ([]NamedItem, error) {
 		q["siteId"] = s.Scope.SiteID
 	}
 	addOwnerScopeFilter(s, ctx, q)
-	items, err := s.fetchAll(apiPath(s, "allocation"), q)
+	items, err := s.fetchAll(ctx, apiPath(s, "allocation"), q)
 	if err != nil {
 		return nil, err
 	}
@@ -604,7 +606,7 @@ func (s *Session) fetchIPBlocks(ctx context.Context) ([]NamedItem, error) {
 		q["siteId"] = s.Scope.SiteID
 	}
 	addOwnerScopeFilter(s, ctx, q)
-	items, err := s.fetchAll(apiPath(s, "ipblock"), q)
+	items, err := s.fetchAll(ctx, apiPath(s, "ipblock"), q)
 	if err != nil {
 		return nil, err
 	}
@@ -627,7 +629,7 @@ func (s *Session) fetchTenantIPBlocks(ctx context.Context) ([]NamedItem, string,
 	if s.Scope.SiteID != "" {
 		q["siteId"] = s.Scope.SiteID
 	}
-	items, err := s.fetchAll(apiPath(s, "ipblock"), q)
+	items, err := s.fetchAll(ctx, apiPath(s, "ipblock"), q)
 	if err != nil {
 		return nil, "", err
 	}
@@ -646,12 +648,12 @@ func (s *Session) fetchTenantIPBlocks(ctx context.Context) ([]NamedItem, string,
 	return result, tenantID, nil
 }
 
-func (s *Session) fetchNSGs(_ context.Context) ([]NamedItem, error) {
+func (s *Session) fetchNSGs(ctx context.Context) ([]NamedItem, error) {
 	q := map[string]string{}
 	if s.Scope.SiteID != "" {
 		q["siteId"] = s.Scope.SiteID
 	}
-	items, err := s.fetchAll(apiPath(s, "network-security-group"), q)
+	items, err := s.fetchAll(ctx, apiPath(s, "network-security-group"), q)
 	if err != nil {
 		return nil, err
 	}
@@ -665,8 +667,8 @@ func (s *Session) fetchNSGs(_ context.Context) ([]NamedItem, error) {
 	return result, nil
 }
 
-func (s *Session) fetchAudits(_ context.Context) ([]NamedItem, error) {
-	items, err := s.fetchAll(apiPath(s, "audit"), nil)
+func (s *Session) fetchAudits(ctx context.Context) ([]NamedItem, error) {
+	items, err := s.fetchAll(ctx, apiPath(s, "audit"), nil)
 	if err != nil {
 		return nil, err
 	}
@@ -693,8 +695,8 @@ func (s *Session) fetchAudits(_ context.Context) ([]NamedItem, error) {
 	return result, nil
 }
 
-func (s *Session) fetchSSHKeys(_ context.Context) ([]NamedItem, error) {
-	items, err := s.fetchAll(apiPath(s, "sshkey"), nil)
+func (s *Session) fetchSSHKeys(ctx context.Context) ([]NamedItem, error) {
+	items, err := s.fetchAll(ctx, apiPath(s, "sshkey"), nil)
 	if err != nil {
 		return nil, err
 	}
@@ -710,12 +712,12 @@ func (s *Session) fetchSSHKeys(_ context.Context) ([]NamedItem, error) {
 	return result, nil
 }
 
-func (s *Session) fetchSKUs(_ context.Context) ([]NamedItem, error) {
+func (s *Session) fetchSKUs(ctx context.Context) ([]NamedItem, error) {
 	q := map[string]string{}
 	if s.Scope.SiteID != "" {
 		q["siteId"] = s.Scope.SiteID
 	}
-	items, err := s.fetchAll(apiPath(s, "sku"), q)
+	items, err := s.fetchAll(ctx, apiPath(s, "sku"), q)
 	if err != nil {
 		return nil, err
 	}
@@ -736,12 +738,12 @@ func (s *Session) fetchSKUs(_ context.Context) ([]NamedItem, error) {
 	return result, nil
 }
 
-func (s *Session) fetchRacks(_ context.Context) ([]NamedItem, error) {
+func (s *Session) fetchRacks(ctx context.Context) ([]NamedItem, error) {
 	q := map[string]string{}
 	if s.Scope.SiteID != "" {
 		q["siteId"] = s.Scope.SiteID
 	}
-	items, err := s.fetchAll(apiPath(s, "rack"), q)
+	items, err := s.fetchAll(ctx, apiPath(s, "rack"), q)
 	if err != nil {
 		return nil, err
 	}
@@ -756,7 +758,7 @@ func (s *Session) fetchRacks(_ context.Context) ([]NamedItem, error) {
 	return result, nil
 }
 
-func (s *Session) fetchVPCPrefixes(_ context.Context) ([]NamedItem, error) {
+func (s *Session) fetchVPCPrefixes(ctx context.Context) ([]NamedItem, error) {
 	q := map[string]string{}
 	if s.Scope.SiteID != "" {
 		q["siteId"] = s.Scope.SiteID
@@ -764,7 +766,7 @@ func (s *Session) fetchVPCPrefixes(_ context.Context) ([]NamedItem, error) {
 	if s.Scope.VpcID != "" {
 		q["vpcId"] = s.Scope.VpcID
 	}
-	items, err := s.fetchAll(apiPath(s, "vpc-prefix"), q)
+	items, err := s.fetchAll(ctx, apiPath(s, "vpc-prefix"), q)
 	if err != nil {
 		return nil, err
 	}
@@ -792,7 +794,7 @@ func (s *Session) fetchTenantAccounts(ctx context.Context) ([]NamedItem, error) 
 		}
 		q["tenantId"] = tenantID
 	}
-	items, err := s.fetchAll(apiPath(s, "tenant/account"), q)
+	items, err := s.fetchAll(ctx, apiPath(s, "tenant/account"), q)
 	if err != nil {
 		return nil, err
 	}
@@ -816,12 +818,12 @@ func (s *Session) fetchTenantAccounts(ctx context.Context) ([]NamedItem, error) 
 	return result, nil
 }
 
-func (s *Session) fetchExpectedMachines(_ context.Context) ([]NamedItem, error) {
+func (s *Session) fetchExpectedMachines(ctx context.Context) ([]NamedItem, error) {
 	q := map[string]string{}
 	if s.Scope.SiteID != "" {
 		q["siteId"] = s.Scope.SiteID
 	}
-	items, err := s.fetchAll(apiPath(s, "expected-machine"), q)
+	items, err := s.fetchAll(ctx, apiPath(s, "expected-machine"), q)
 	if err != nil {
 		return nil, err
 	}
@@ -848,12 +850,12 @@ func (s *Session) fetchExpectedMachines(_ context.Context) ([]NamedItem, error) 
 	return result, nil
 }
 
-func (s *Session) fetchExpectedRacks(_ context.Context) ([]NamedItem, error) {
+func (s *Session) fetchExpectedRacks(ctx context.Context) ([]NamedItem, error) {
 	q := map[string]string{}
 	if s.Scope.SiteID != "" {
 		q["siteId"] = s.Scope.SiteID
 	}
-	items, err := s.fetchAll(apiPath(s, "expected-rack"), q)
+	items, err := s.fetchAll(ctx, apiPath(s, "expected-rack"), q)
 	if err != nil {
 		return nil, err
 	}
@@ -880,12 +882,12 @@ func (s *Session) fetchExpectedRacks(_ context.Context) ([]NamedItem, error) {
 	return result, nil
 }
 
-func (s *Session) fetchExpectedSwitches(_ context.Context) ([]NamedItem, error) {
+func (s *Session) fetchExpectedSwitches(ctx context.Context) ([]NamedItem, error) {
 	q := map[string]string{}
 	if s.Scope.SiteID != "" {
 		q["siteId"] = s.Scope.SiteID
 	}
-	items, err := s.fetchAll(apiPath(s, "expected-switch"), q)
+	items, err := s.fetchAll(ctx, apiPath(s, "expected-switch"), q)
 	if err != nil {
 		return nil, err
 	}
@@ -917,12 +919,12 @@ func (s *Session) fetchExpectedSwitches(_ context.Context) ([]NamedItem, error) 
 	return result, nil
 }
 
-func (s *Session) fetchExpectedPowerShelves(_ context.Context) ([]NamedItem, error) {
+func (s *Session) fetchExpectedPowerShelves(ctx context.Context) ([]NamedItem, error) {
 	q := map[string]string{}
 	if s.Scope.SiteID != "" {
 		q["siteId"] = s.Scope.SiteID
 	}
-	items, err := s.fetchAll(apiPath(s, "expected-power-shelf"), q)
+	items, err := s.fetchAll(ctx, apiPath(s, "expected-power-shelf"), q)
 	if err != nil {
 		return nil, err
 	}
@@ -954,12 +956,12 @@ func (s *Session) fetchExpectedPowerShelves(_ context.Context) ([]NamedItem, err
 	return result, nil
 }
 
-func (s *Session) fetchInfiniBandPartitions(_ context.Context) ([]NamedItem, error) {
+func (s *Session) fetchInfiniBandPartitions(ctx context.Context) ([]NamedItem, error) {
 	q := map[string]string{}
 	if s.Scope.SiteID != "" {
 		q["siteId"] = s.Scope.SiteID
 	}
-	items, err := s.fetchAll(apiPath(s, "infiniband-partition"), q)
+	items, err := s.fetchAll(ctx, apiPath(s, "infiniband-partition"), q)
 	if err != nil {
 		return nil, err
 	}
@@ -974,12 +976,12 @@ func (s *Session) fetchInfiniBandPartitions(_ context.Context) ([]NamedItem, err
 	return result, nil
 }
 
-func (s *Session) fetchNVLinkLogicalPartitions(_ context.Context) ([]NamedItem, error) {
+func (s *Session) fetchNVLinkLogicalPartitions(ctx context.Context) ([]NamedItem, error) {
 	q := map[string]string{}
 	if s.Scope.SiteID != "" {
 		q["siteId"] = s.Scope.SiteID
 	}
-	items, err := s.fetchAll(apiPath(s, "nvlink-logical-partition"), q)
+	items, err := s.fetchAll(ctx, apiPath(s, "nvlink-logical-partition"), q)
 	if err != nil {
 		return nil, err
 	}
@@ -999,7 +1001,7 @@ func (s *Session) fetchInstanceTypes(ctx context.Context) ([]NamedItem, error) {
 		q["siteId"] = s.Scope.SiteID
 	}
 	addOwnerScopeFilter(s, ctx, q)
-	items, err := s.fetchAll(apiPath(s, "instance/type"), q)
+	items, err := s.fetchAll(ctx, apiPath(s, "instance/type"), q)
 	if err != nil {
 		return nil, err
 	}
@@ -1014,12 +1016,12 @@ func (s *Session) fetchInstanceTypes(ctx context.Context) ([]NamedItem, error) {
 	return result, nil
 }
 
-func (s *Session) fetchTrays(_ context.Context) ([]NamedItem, error) {
+func (s *Session) fetchTrays(ctx context.Context) ([]NamedItem, error) {
 	q := map[string]string{}
 	if s.Scope.SiteID != "" {
 		q["siteId"] = s.Scope.SiteID
 	}
-	items, err := s.fetchAll(apiPath(s, "tray"), q)
+	items, err := s.fetchAll(ctx, apiPath(s, "tray"), q)
 	if err != nil {
 		return nil, err
 	}
@@ -1049,12 +1051,12 @@ func (s *Session) fetchTrays(_ context.Context) ([]NamedItem, error) {
 	return result, nil
 }
 
-func (s *Session) fetchDPUExtensionServices(_ context.Context) ([]NamedItem, error) {
+func (s *Session) fetchDPUExtensionServices(ctx context.Context) ([]NamedItem, error) {
 	q := map[string]string{}
 	if s.Scope.SiteID != "" {
 		q["siteId"] = s.Scope.SiteID
 	}
-	items, err := s.fetchAll(apiPath(s, "dpu-extension-service"), q)
+	items, err := s.fetchAll(ctx, apiPath(s, "dpu-extension-service"), q)
 	if err != nil {
 		return nil, err
 	}
@@ -1069,16 +1071,16 @@ func (s *Session) fetchDPUExtensionServices(_ context.Context) ([]NamedItem, err
 	return result, nil
 }
 
-func (s *Session) fetchIPXETemplates(_ context.Context) ([]NamedItem, error) {
-	return s.fetchIPXETemplatesForSite(s.Scope.SiteID)
+func (s *Session) fetchIPXETemplates(ctx context.Context) ([]NamedItem, error) {
+	return s.fetchIPXETemplatesForSite(ctx, s.Scope.SiteID)
 }
 
-func (s *Session) fetchIPXETemplatesForSite(siteID string) ([]NamedItem, error) {
+func (s *Session) fetchIPXETemplatesForSite(ctx context.Context, siteID string) ([]NamedItem, error) {
 	q := map[string]string{}
 	if siteID != "" {
 		q["siteId"] = siteID
 	}
-	items, err := s.fetchAll(apiPath(s, "ipxe-template"), q)
+	items, err := s.fetchAll(ctx, apiPath(s, "ipxe-template"), q)
 	if err != nil {
 		return nil, err
 	}
@@ -1105,8 +1107,8 @@ func (s *Session) fetchRules(ctx context.Context) ([]NamedItem, error) {
 	return s.fetchRulesForSite(ctx, siteID)
 }
 
-func (s *Session) fetchRulesForSite(_ context.Context, siteID string) ([]NamedItem, error) {
-	items, err := s.fetchAll(apiPath(s, "task/rule"), map[string]string{"siteId": siteID})
+func (s *Session) fetchRulesForSite(ctx context.Context, siteID string) ([]NamedItem, error) {
+	items, err := s.fetchAll(ctx, apiPath(s, "task/rule"), map[string]string{"siteId": siteID})
 	if err != nil {
 		return nil, err
 	}
@@ -1140,8 +1142,8 @@ func (s *Session) fetchRuns(ctx context.Context) ([]NamedItem, error) {
 	return s.fetchRunsForSite(ctx, siteID)
 }
 
-func (s *Session) fetchRunsForSite(_ context.Context, siteID string) ([]NamedItem, error) {
-	items, err := s.fetchAll(apiPath(s, "task/run"), map[string]string{"siteId": siteID})
+func (s *Session) fetchRunsForSite(ctx context.Context, siteID string) ([]NamedItem, error) {
+	items, err := s.fetchAll(ctx, apiPath(s, "task/run"), map[string]string{"siteId": siteID})
 	if err != nil {
 		return nil, err
 	}
@@ -1175,7 +1177,7 @@ func (s *Session) fetchVPCPeerings(ctx context.Context) ([]NamedItem, error) {
 	if s.Scope.VpcID != "" {
 		q["vpcId"] = s.Scope.VpcID
 	}
-	items, err := s.fetchAll(apiPath(s, "vpc-peering"), q)
+	items, err := s.fetchAll(ctx, apiPath(s, "vpc-peering"), q)
 	if err != nil {
 		return nil, err
 	}

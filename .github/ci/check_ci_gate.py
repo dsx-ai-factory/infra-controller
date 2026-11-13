@@ -336,6 +336,7 @@ CORE_JOBS_BY_PREPARE_OUTPUT: Mapping[str, frozenset[str]] = {
             "build-machine-a-tron",
             "build-mat-k8s-controller",
             "build-site-health-probe",
+            "build-scale-test-acceptance",
             "test-mat-k8s-controller",
             "test-scale-test",
             "lint-police",
@@ -353,7 +354,9 @@ CORE_JOBS_BY_PREPARE_OUTPUT: Mapping[str, frozenset[str]] = {
     "core_rpc_proto_files_changed": frozenset({"check-rest-core-proto-sync"}),
 }
 
-CORE_PR_ONLY_JOBS = frozenset({"lint-police", "migration-police", "proto-police"})
+CORE_PR_ONLY_JOBS = frozenset(
+    {"lint-police", "migration-police", "proto-police", "test-dev-dhcp-image"}
+)
 CORE_UPSTREAM_ONLY_JOB = "promote-to-be-scanned-image"
 
 

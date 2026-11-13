@@ -52,7 +52,7 @@ use crate::framework::{ObservationRecorder, Probe};
 use crate::gate::{CallError, CallGate};
 use crate::nico::host_read::{HostDetail, HostRead, Known};
 use crate::nico::{NicoApi, NicoConnector};
-use crate::readers::{Attempt, Failure, incomplete};
+use crate::readers::{Attempt, Failure, Incomplete};
 use crate::snapshot::{Reader, SnapshotSink, SweepMeta, UnitsBuilder, UnitsData, unix_millis};
 
 /// Unlinked expected records get an explorer read for their reason only up
@@ -149,7 +149,15 @@ impl Probe for DevicesReader {
         let start = crate::clock::now();
         let seq = self.seq.fetch_add(1, Ordering::SeqCst) + 1;
         self.attempt.begin();
-        // Every RPC of the sweep happens here, before any family is built.
+        let base = SweepMeta {
+            process: self.process,
+            seq,
+            reader: Reader::Devices,
+            start,
+            end: start,
+        };
+        let mut failed = Incomplete::default();
+        // Publish complete fast families before reading unrelated devices.
         let reads = match self.nico.connect().await {
             Ok(nico) => Ok(Sweep {
                 nico,
@@ -160,11 +168,11 @@ impl Probe for DevicesReader {
                 host_compact: AtomicBool::new(self.host_read.begin_sweep()),
                 host_compact_read: AtomicBool::new(false),
             }
-            .read()
+            .read(self, &base, &mut failed)
             .await),
             Err(err) => Err(Failure::call("connect", &err)),
         };
-        // One time for every family: the sweep ended with its last read.
+        // Slow families retain the full sweep bounds, including their joins.
         let meta = SweepMeta {
             process: self.process,
             seq,
@@ -174,7 +182,6 @@ impl Probe for DevicesReader {
         };
         // Each family is built, delivered and dropped before the next, so
         // only one new family coexists with the published snapshots.
-        let mut failed = Vec::new();
         match reads {
             Ok((reads, links)) => self.build(reads, links, &meta, &mut failed),
             Err(failure) => {
@@ -183,7 +190,7 @@ impl Probe for DevicesReader {
                 }
             }
         }
-        incomplete(&failed)
+        failed.finish()
     }
 }
 
@@ -210,7 +217,6 @@ struct Reads {
     switches: Result<CensusRead<LifecycleRow>, Failure>,
     shelves: Result<CensusRead<LifecycleRow>, Failure>,
     racks: Result<CensusRead<LifecycleRow>, Failure>,
-    instances: Result<CensusRead<InstanceRow>, Failure>,
     firmware: Result<Vec<HostReprovisioningListItem>, Failure>,
     /// Whether every host batch was read compact.
     compact_host_read: bool,
@@ -306,8 +312,32 @@ impl Sweep<'_> {
         }
     }
 
-    async fn read_all(&self) -> (Reads, Result<ExpectedReads, Failure>) {
+    async fn read_all(
+        &self,
+        publisher: &DevicesReader,
+        base: &SweepMeta,
+        failed: &mut Incomplete,
+    ) -> (Reads, Result<ExpectedReads, Failure>) {
         let nico = &self.nico;
+        let instances = self
+            .census(
+                "instances",
+                ("find_instance_ids", move || nico.instance_ids()),
+                ("find_instances_by_ids", move |ids: Vec<_>| async move {
+                    let rows = nico.instances_by_ids(&ids).await?;
+                    Ok(rows.into_iter().map(InstanceRow::from).collect())
+                }),
+                |i: &InstanceRow| i.id.clone(),
+            )
+            .await;
+        let meta = SweepMeta {
+            end: crate::clock::now(),
+            ..base.clone()
+        };
+        publisher.deliver_built(&meta, Family::Instance, failed, |previous| {
+            instances.map(|r| instance_units(r.rows, previous))
+        });
+        let host_start = crate::clock::now();
         let machine_census = self
             .call("find_machine_ids", || nico.machine_ids())
             .await
@@ -327,6 +357,31 @@ impl Sweep<'_> {
             }
             Err(failure) => (Err(failure.clone()), Err(failure), Vec::new()),
         };
+        let firmware = self
+            .call("list_hosts_waiting_for_reprovisioning", || {
+                nico.hosts_waiting_for_reprovisioning()
+            })
+            .await
+            .map_err(|e| Failure::call("list_hosts_waiting_for_reprovisioning", &e));
+        let mut reads = Reads {
+            machines,
+            hosts,
+            dpus,
+            firmware,
+            compact_host_read: self.host_compact.load(Ordering::SeqCst),
+            switches: Err(Failure::unresolved("not read".into())),
+            shelves: Err(Failure::unresolved("not read".into())),
+            racks: Err(Failure::unresolved("not read".into())),
+        };
+        publisher.build_fast(
+            &reads,
+            &SweepMeta {
+                start: host_start,
+                end: crate::clock::now(),
+                ..base.clone()
+            },
+            failed,
+        );
         let switches = self
             .census(
                 "switches",
@@ -363,35 +418,10 @@ impl Sweep<'_> {
             )
             .await
             .map(drop_deleted(|r: &LifecycleRow| r.deleted));
-        let instances = self
-            .census(
-                "instances",
-                ("find_instance_ids", move || nico.instance_ids()),
-                ("find_instances_by_ids", move |ids: Vec<_>| async move {
-                    let rows = nico.instances_by_ids(&ids).await?;
-                    Ok(rows.into_iter().map(InstanceRow::from).collect())
-                }),
-                |i: &InstanceRow| i.id.clone(),
-            )
-            .await;
         let expected = self.read_expected().await;
-        let firmware = self
-            .call("list_hosts_waiting_for_reprovisioning", || {
-                nico.hosts_waiting_for_reprovisioning()
-            })
-            .await
-            .map_err(|e| Failure::call("list_hosts_waiting_for_reprovisioning", &e));
-        let reads = Reads {
-            machines,
-            hosts,
-            dpus,
-            switches,
-            shelves,
-            racks,
-            instances,
-            firmware,
-            compact_host_read: self.host_compact.load(Ordering::SeqCst),
-        };
+        reads.switches = switches;
+        reads.shelves = shelves;
+        reads.racks = racks;
         (reads, expected)
     }
 
@@ -539,8 +569,13 @@ impl Sweep<'_> {
 
     /// Every read of the sweep, the explorer reads for unlinked expected
     /// records included. Nothing after this calls nico-api.
-    async fn read(&self) -> (Reads, Result<ExpectedLinks, Failure>) {
-        let (reads, expected) = self.read_all().await;
+    async fn read(
+        &self,
+        publisher: &DevicesReader,
+        base: &SweepMeta,
+        failed: &mut Incomplete,
+    ) -> (Reads, Result<ExpectedLinks, Failure>) {
+        let (reads, expected) = self.read_all(publisher, base, failed).await;
         let links = match expected {
             Ok(expected) => self.expected_links(expected, &reads).await,
             Err(failure) => Err(failure),
@@ -647,7 +682,7 @@ impl DevicesReader {
         &self,
         meta: &SweepMeta,
         family: Family,
-        failed: &mut Vec<Family>,
+        failed: &mut Incomplete,
         build: impl FnOnce(&[Arc<Unit>]) -> Built,
     ) {
         // Copied, not taken, so a panicking build leaves the last units in
@@ -655,6 +690,7 @@ impl DevicesReader {
         let previous = self.previous().get(&family).cloned().unwrap_or_default();
         let built = build(&previous);
         let units = built.as_ref().ok().map(|data| data.units.clone());
+        let kind = built.as_ref().err().map(|f| f.kind);
         let delivered = self
             .attempt
             .deliver(self.sink.as_ref(), meta, family, built);
@@ -664,31 +700,20 @@ impl DevicesReader {
         };
         self.previous().insert(family, keep);
         if !delivered {
-            failed.push(family);
+            failed.record(family, kind);
         }
     }
 
-    /// Builds and delivers the families of one sweep's reads, one at a time.
-    /// Each family's rows are dropped once its snapshot is built.
-    fn build(
-        &self,
-        reads: Reads,
-        links: Result<ExpectedLinks, Failure>,
-        meta: &SweepMeta,
-        failed: &mut Vec<Family>,
-    ) {
+    fn build_fast(&self, reads: &Reads, meta: &SweepMeta, failed: &mut Incomplete) {
         let Reads {
             machines,
             hosts,
             dpus,
-            switches,
-            shelves,
-            racks,
-            instances,
             firmware,
             compact_host_read,
+            ..
         } = reads;
-
+        let compact_host_read = *compact_host_read;
         // Firmware requests join to this sweep's hosts. Host units carry
         // their open request, so without the request read a host snapshot
         // could not tell "no request" from "unknown": the host family then
@@ -696,13 +721,13 @@ impl DevicesReader {
         // only their open-request map waits for the hosts.
         let mut open = None;
         self.deliver_built(meta, Family::HostFirmwareRequests, failed, |previous| {
-            let joined = match (firmware, &hosts) {
+            let joined = match (firmware.as_ref(), hosts.as_ref()) {
                 (Err(failure), _) => {
                     open = Some(Err(failure.needed_by(Family::Host)));
-                    return Err(failure);
+                    return Err(failure.clone());
                 }
                 (_, Err(failure)) => return Err(failure.needed_by(Family::HostFirmwareRequests)),
-                (Ok(items), Ok(read)) => firmware_requests(&items, &read.rows, previous),
+                (Ok(items), Ok(read)) => firmware_requests(items, &read.rows, previous),
             };
             open = Some(Ok(joined.open));
             if joined.unjoinable > 0 {
@@ -715,37 +740,57 @@ impl DevicesReader {
         });
         self.deliver_built(meta, Family::Dpu, failed, |previous| {
             match (&machines, &hosts) {
-                (Ok(()), Ok(read)) => Ok(dpu_units(&dpus, &read.rows, previous)),
+                (Ok(()), Ok(read)) => Ok(dpu_units(dpus, &read.rows, previous)),
                 (Err(failure), _) | (_, Err(failure)) => Err(failure.needed_by(Family::Dpu)),
             }
         });
-        drop(dpus);
-        self.deliver_built(meta, Family::Host, failed, |previous| match (hosts, open) {
-            (Err(failure), _) => Err(failure),
-            (Ok(read), Some(Ok(open))) => {
-                let data = host_units(read.rows, &open, previous);
-                // Under the compact read, a host without an answer is a row
-                // nico-api sent incomplete.
-                let known = |known: fn(&HostFields) -> bool| {
-                    compact_host_read
-                        && data
-                            .units
-                            .iter()
-                            .filter_map(|unit| unit.host.as_ref())
-                            .all(known)
-                };
-                Ok(UnitsData {
-                    compact_host_read,
-                    allocatable_known: known(|host| host.allocatable.is_some()),
-                    update_eligible_known: known(|host| host.update_eligible.is_some()),
-                    ..data
-                })
+
+        self.deliver_built(meta, Family::Host, failed, |previous| {
+            match (hosts.as_ref(), open) {
+                (Err(failure), _) => Err(failure.clone()),
+                (Ok(read), Some(Ok(open))) => {
+                    let data = host_units(&read.rows, &open, previous);
+                    // Under the compact read, a host without an answer is a row
+                    // nico-api sent incomplete.
+                    let known = |known: fn(&HostFields) -> bool| {
+                        compact_host_read
+                            && data
+                                .units
+                                .iter()
+                                .filter_map(|unit| unit.host.as_ref())
+                                .all(known)
+                    };
+                    Ok(UnitsData {
+                        compact_host_read,
+                        allocatable_known: known(|host| host.allocatable.is_some()),
+                        update_eligible_known: known(|host| host.update_eligible.is_some()),
+                        ..data
+                    })
+                }
+                (Ok(_), Some(Err(failure))) => Err(failure),
+                (Ok(_), None) => Err(Failure::unresolved(
+                    "the firmware request join did not run".to_string(),
+                )),
             }
-            (Ok(_), Some(Err(failure))) => Err(failure),
-            (Ok(_), None) => Err(Failure::unresolved(
-                "the firmware request join did not run".to_string(),
-            )),
         });
+    }
+
+    /// Builds and delivers the families of one sweep's reads, one at a time.
+    /// Each family's rows are dropped once its snapshot is built.
+    fn build(
+        &self,
+        reads: Reads,
+        links: Result<ExpectedLinks, Failure>,
+        meta: &SweepMeta,
+        failed: &mut Incomplete,
+    ) {
+        let Reads {
+            switches,
+            shelves,
+            racks,
+            ..
+        } = reads;
+
         self.deliver_built(meta, Family::Expected, failed, |previous| {
             links.map(|links| expected_units(links, previous))
         });
@@ -757,9 +802,6 @@ impl DevicesReader {
         });
         self.deliver_built(meta, Family::Rack, failed, |previous| {
             racks.map(|r| lifecycle_units(UnitType::Rack, r.rows, previous))
-        });
-        self.deliver_built(meta, Family::Instance, failed, |previous| {
-            instances.map(|r| instance_units(r.rows, previous))
         });
     }
 }
@@ -888,6 +930,8 @@ fn firmware_requests(
         let mut fields = host_fields(host, None);
         fields.open_firmware_request = Some(request);
         units.push(Unit {
+            controller_instance_id: None,
+            rest_machine: None,
             id,
             unit_type: UnitType::HostFirmwareRequest,
             source: Source::NicoApi,
@@ -977,27 +1021,29 @@ fn not_done_reason(state: &str, message: Option<&str>) -> String {
 
 /// Host units, each with its open firmware request.
 fn host_units(
-    hosts: BTreeMap<String, HostDetail>,
+    hosts: &BTreeMap<String, HostDetail>,
     open: &BTreeMap<String, FirmwareRequest>,
     previous: &[Arc<Unit>],
 ) -> UnitsData {
     let mut unknown = 0;
-    let units = hosts.into_iter().map(|(id, host)| {
+    let units = hosts.iter().map(|(id, host)| {
         let (category, known) = host_state(&host.state);
         if !known {
             unknown += 1;
         }
         let done = category == "Ready";
-        let fields = host_fields(&host, open.get(&id));
+        let fields = host_fields(host, open.get(id));
         Unit {
-            id,
+            controller_instance_id: None,
+            rest_machine: None,
+            id: id.clone(),
             unit_type: UnitType::Host,
             source: Source::NicoApi,
             stage: stage(done, category == "Failed"),
             done,
             state: category.to_string(),
             reason: (!done).then(|| not_done_reason(&host.state, host.state_reason.as_deref())),
-            bmc_ip: host.bmc_ip,
+            bmc_ip: host.bmc_ip.clone(),
             host: Some(fields),
             dpu: None,
             instance: None,
@@ -1028,6 +1074,8 @@ fn dpu_units(
                 let (category, _) = host_state(&host.state);
                 let done = dpu_done_under(category);
                 Unit {
+                    controller_instance_id: None,
+                    rest_machine: None,
                     id: id.clone(),
                     unit_type: UnitType::Dpu,
                     source: Source::NicoApi,
@@ -1045,6 +1093,8 @@ fn dpu_units(
                 }
             }
             None => Unit {
+                controller_instance_id: None,
+                rest_machine: None,
                 id: id.clone(),
                 unit_type: UnitType::Dpu,
                 source: Source::NicoApi,
@@ -1126,6 +1176,8 @@ fn lifecycle_units(
             .and_then(|r| r.outcome_msg.as_deref())
             .filter(|m| !m.is_empty());
         Unit {
+            controller_instance_id: None,
+            rest_machine: None,
             id,
             unit_type,
             source: Source::NicoApi,
@@ -1187,6 +1239,8 @@ fn instance_units(rows: BTreeMap<String, InstanceRow>, previous: &[Arc<Unit>]) -
             .map(|t| t.state_details.as_str())
             .filter(|d| !d.is_empty());
         Unit {
+            controller_instance_id: None,
+            rest_machine: None,
             id,
             unit_type: UnitType::Instance,
             source: Source::NicoApi,
@@ -1276,6 +1330,8 @@ impl Record {
             },
         });
         Unit {
+            controller_instance_id: None,
+            rest_machine: None,
             id: self.id.clone(),
             unit_type: UnitType::ExpectedRecord,
             source: Source::NicoApi,
@@ -1342,6 +1398,8 @@ fn linked_devices(records: &[Record], record_type: RecordType) -> BTreeSet<Strin
 /// An expected rack or rack group record.
 fn plain_record(record_type: RecordType, id: String, linked: bool, device: Option<String>) -> Unit {
     Unit {
+        controller_instance_id: None,
+        rest_machine: None,
         id,
         unit_type: UnitType::ExpectedRecord,
         source: Source::NicoApi,
@@ -1376,6 +1434,8 @@ fn mismatch_unit(
         MismatchKind::NoExpectedRecord => "no_expected_record",
     };
     Unit {
+        controller_instance_id: None,
+        rest_machine: None,
         id,
         unit_type: UnitType::IdentityMismatch,
         source: Source::NicoApi,
@@ -1406,6 +1466,8 @@ mod tests {
     use carbide_site_health_probe_api::VersionSource;
 
     use super::*;
+    use crate::framework::Outcome;
+    use crate::gate::MAX_RETRIES;
     use crate::nico::fake::{self, FakeConnector, FakeNico, FakeSite};
     use crate::snapshot::FailureKind;
     use crate::snapshot::testing::FakeSink;
@@ -1484,6 +1546,42 @@ mod tests {
         site.expected_racks.push(fake::expected_rack(1));
         site.add_instance(fake::instance(1, 1, forge::TenantState::Ready));
         site
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn fast_families_publish_before_a_failed_slow_read() {
+        for failure in ["none", "instance", "host"] {
+            let h = harness(small_site());
+            for call in [
+                match failure {
+                    "instance" => "find_instance_ids",
+                    "host" => "find_machine_ids",
+                    _ => "find_switch_ids",
+                },
+                "find_switch_ids",
+            ] {
+                for _ in 0..=MAX_RETRIES {
+                    h.nico
+                        .fail_next(call, CallError::Status("unavailable".into()));
+                }
+            }
+            let sink = Arc::clone(&h.sink);
+            h.nico.after("find_switch_ids", move |_| {
+                assert_eq!(
+                    sink.count(Family::Instance),
+                    usize::from(failure != "instance")
+                );
+                assert_eq!(sink.count(Family::Host), usize::from(failure != "host"));
+                assert_eq!(sink.count(Family::Switch), 0);
+            });
+            assert!(h.sweep().await.is_err(), "slow family failed");
+            assert_eq!(
+                h.sink.count(Family::Instance),
+                usize::from(failure != "instance")
+            );
+            assert_eq!(h.sink.count(Family::Host), usize::from(failure != "host"));
+            assert_eq!(h.sink.count(Family::Switch), 0);
+        }
     }
 
     fn count_linked(units: &[Unit], record_type: RecordType) -> usize {
@@ -1577,6 +1675,56 @@ mod tests {
         );
     }
 
+    /// A census whose every retry times out before the sweep deadline keeps
+    /// its families' last snapshots and records them as timed out, and the
+    /// scheduler counts the run as a timeout, not a failure: a slow nico-api
+    /// is a different incident from a down one.
+    #[tokio::test(start_paused = true)]
+    async fn exhausted_census_timeouts_are_a_timeout_outcome() {
+        let nico = FakeNico::new(small_site());
+        let (sink, reader) = scheduled(
+            &nico,
+            Duration::from_secs(60),
+            Duration::from_secs(10),
+            1000.0,
+        );
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let (mut results, loops) = crate::framework::start(vec![reader], cancel.clone());
+
+        // The first sweep publishes every family.
+        let first = results.recv().await.expect("first result");
+        assert_eq!(first.outcome, Outcome::Success);
+        let host = sink.latest::<UnitsData>(Family::Host).expect("host units");
+
+        // Every attempt of the host census times out, exhausting its retries
+        // before the sweep deadline.
+        for _ in 0..1 + MAX_RETRIES {
+            nico.fail_next("find_machine_ids", CallError::Timeout);
+        }
+        tokio::time::sleep(Duration::from_secs(70)).await;
+        let second = results.recv().await.expect("second result");
+        assert_eq!(second.outcome, Outcome::Timeout);
+
+        assert_eq!(
+            sink.latest::<UnitsData>(Family::Host),
+            Some(host),
+            "the host snapshot and its read time are kept",
+        );
+        for family in [Family::Host, Family::Dpu, Family::HostFirmwareRequests] {
+            assert_eq!(
+                sink.failure_kinds(family),
+                vec![FailureKind::Timeout],
+                "{family:?}",
+            );
+        }
+        assert_eq!(sink.count(Family::Host), 1, "no second host publication");
+
+        cancel.cancel();
+        crate::framework::join_loops(loops)
+            .await
+            .expect("loops end");
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn watchdog_timeout_records_each_family_once() {
         let nico = FakeNico::new(small_site());
@@ -1629,9 +1777,19 @@ mod tests {
 
         assert_eq!(sink.count(Family::Host), 1, "the first snapshot stays");
         for family in DEVICE_FAMILIES {
+            let expected = if family == Family::Instance {
+                assert_eq!(
+                    sink.count(family),
+                    2,
+                    "instance publishes before host stalls"
+                );
+                vec![]
+            } else {
+                vec![FailureKind::Timeout]
+            };
             assert_eq!(
                 sink.failure_kinds(family),
-                vec![FailureKind::Timeout],
+                expected,
                 "{family:?}: one timeout from the watchdog, none from the late run"
             );
         }
@@ -1728,7 +1886,7 @@ mod tests {
         let kept = h.reader.previous().get(&Family::Switch).cloned();
         assert_eq!(kept.as_ref().map(Vec::len), Some(2));
         let meta = h.sink.latest::<UnitsData>(Family::Switch).expect("units").0;
-        let mut failed = Vec::new();
+        let mut failed = Incomplete::default();
         let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             h.reader
                 .deliver_built(&meta, Family::Switch, &mut failed, |_| {
@@ -1989,10 +2147,18 @@ mod tests {
                         );
                     }
                 }
-                // Every family of this sweep shares its times.
-                let this = published.last().unwrap().1.clone();
-                for (_, meta, _) in published.iter().filter(|(_, m, _)| m.seq == this.seq) {
-                    assert_eq!(meta, &this);
+                // Only families built from the same read phase share times.
+                let phase = |f| match f {
+                    Family::Host | Family::Dpu | Family::HostFirmwareRequests => 0,
+                    Family::Instance => 1,
+                    _ => 2,
+                };
+                let (family, this, _) = published.last().unwrap();
+                for (_, meta, _) in published
+                    .iter()
+                    .filter(|(f, m, _)| m.seq == this.seq && phase(*f) == phase(*family))
+                {
+                    assert_eq!(meta, this);
                 }
             }
 

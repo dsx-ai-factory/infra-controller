@@ -152,8 +152,10 @@ func TestMachine_NewAPIMachine(t *testing.T) {
 							Revision: "2CV1L028",
 						},
 						{
-							Model:    "DELLBOSS_VD",
-							Revision: "MV.R00-0",
+							Model:      "DELLBOSS_VD",
+							Revision:   "MV.R00-0",
+							Serial:     "BLOCK-SERIAL-1",
+							DeviceType: "disk",
 						},
 					},
 					DmiData: &corev1.DmiData{
@@ -171,6 +173,9 @@ func TestMachine_NewAPIMachine(t *testing.T) {
 						{
 							Model:       "Dell Ent NVMe CM6 RI 1.92TB",
 							FirmwareRev: "2.1.3",
+							Serial:      "NVME-SERIAL-1",
+							SizeMb:      cutil.GetPtr(uint32(1831420)),
+							PciPath:     cutil.GetPtr("/devices/pci0000:40/0000:40:01.1/0000:41:00.0"),
 						},
 						{
 							Model:       "Dell Ent NVMe CM6 RI 1.92TB",
@@ -487,6 +492,17 @@ func TestMachine_NewAPIMachine(t *testing.T) {
 			assert.Equal(t, *apimi.Metadata.GPUs[0].PciBusId, machineInfo1.Machine.GetStatus().GetDiscoveryInfo().Gpus[0].PciBusId)
 		}
 
+		// Three NVMe devices, then the DELLBOSS block device; the first NVMe disk carries every field.
+		require.Len(t, apimi.Metadata.Disks, 4)
+		assert.Equal(t, APIMachineDisk{
+			Type:    "nvme",
+			Model:   "Dell Ent NVMe CM6 RI 1.92TB",
+			Serial:  "NVME-SERIAL-1",
+			SizeMb:  cutil.GetPtr(uint32(1831420)),
+			PciPath: cutil.GetPtr("/devices/pci0000:40/0000:40:01.1/0000:41:00.0"),
+		}, apimi.Metadata.Disks[0])
+		assert.Equal(t, APIMachineDisk{Type: "disk", Model: "DELLBOSS_VD", Serial: "BLOCK-SERIAL-1"}, apimi.Metadata.Disks[3])
+
 		if apimi.Metadata.NetworkInterfaces != nil {
 			assert.Equal(t, len(apimi.Metadata.NetworkInterfaces), len(machineInfo1.Machine.GetStatus().GetDiscoveryInfo().NetworkInterfaces))
 		}
@@ -574,7 +590,7 @@ func TestMachine_NewAPIMachine(t *testing.T) {
 
 		var fields map[string]json.RawMessage
 		require.NoError(t, json.Unmarshal(payload, &fields))
-		for _, field := range []string{"gpus", "networkInterfaces", "infinibandInterfaces"} {
+		for _, field := range []string{"gpus", "disks", "networkInterfaces", "infinibandInterfaces"} {
 			value, found := fields[field]
 			require.True(t, found, "%s must be present", field)
 			assert.JSONEq(t, `[]`, string(value))
@@ -651,6 +667,7 @@ func TestAPIMachineMetadata_FromProto(t *testing.T) {
 				"dmiData": null,
 				"bmcInfo": null,
 				"gpus": [],
+				"disks": [],
 				"networkInterfaces": [],
 				"infinibandInterfaces": [],
 				"lifecycleState": null,
@@ -665,6 +682,7 @@ func TestAPIMachineMetadata_FromProto(t *testing.T) {
 				"dmiData": null,
 				"bmcInfo": null,
 				"gpus": [],
+				"disks": [],
 				"networkInterfaces": [],
 				"infinibandInterfaces": [],
 				"lifecycleState": {

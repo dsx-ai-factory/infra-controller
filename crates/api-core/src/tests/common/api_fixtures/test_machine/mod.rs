@@ -47,20 +47,22 @@ where
         Self { id, api }
     }
 
-    pub(in crate::tests) async fn rpc_machine(&self) -> rpc::Machine {
-        self.api
-            .find_machines_by_ids(tonic::Request::new(rpc::forge::MachinesByIdsRequest {
-                machine_ids: vec![self.id.into()],
-                include_history: true,
-            }))
-            .await
-            .unwrap()
-            .into_inner()
-            .machines
-            .remove(0)
+    pub(in crate::tests) async fn rpc_machine(&self) -> Box<rpc::Machine> {
+        Box::new(
+            self.api
+                .find_machines_by_ids(tonic::Request::new(rpc::forge::MachinesByIdsRequest {
+                    machine_ids: vec![self.id.into()],
+                    include_history: true,
+                }))
+                .await
+                .unwrap()
+                .into_inner()
+                .machines
+                .remove(0),
+        )
     }
 
-    pub(in crate::tests) async fn next_iteration_machine(&self, env: &TestEnv) -> Machine<ID> {
+    pub(in crate::tests) async fn next_iteration_machine(&self, env: &TestEnv) -> Box<Machine<ID>> {
         env.run_machine_state_controller_iteration().await;
         let mut txn = env.pool.begin().await.unwrap();
         let dpu = self.db_machine(&mut txn).await;
@@ -68,11 +70,15 @@ where
         dpu
     }
 
-    pub(in crate::tests) async fn db_machine(&self, txn: &mut Txn<'_>) -> Machine<ID> {
-        db::machine::find_one(txn.as_mut(), &self.id, Default::default())
-            .await
-            .unwrap()
-            .unwrap()
+    // A machine contains its inventory, status and configuration inline. Boxing
+    // here keeps each lookup result out of the calling test's async frame.
+    pub(in crate::tests) async fn db_machine(&self, txn: &mut Txn<'_>) -> Box<Machine<ID>> {
+        Box::new(
+            db::machine::find_one(txn.as_mut(), &self.id, Default::default())
+                .await
+                .unwrap()
+                .unwrap(),
+        )
     }
 
     pub(in crate::tests) async fn bmc_access(&self, txn: &mut Txn<'_>) -> BmcAccessInfo {
@@ -122,6 +128,7 @@ where
         self.api
             .forge_agent_control(Request::new(rpc::forge::ForgeAgentControlRequest {
                 machine_id: Some(self.id.into()),
+                nic_firmware_site_cache_supported: false,
             }))
             .await
             .unwrap()

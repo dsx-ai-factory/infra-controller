@@ -51,3 +51,44 @@ pub(crate) fn test_firmware_executor() -> FirmwareToolExecutor {
     );
     FirmwareToolExecutor::with_supervisor_path(helper)
 }
+
+/// `write_fixture_executables` writes named programs under `directory` with
+/// mode `0700`. A child writer keeps writable executable descriptors out of
+/// concurrent test forks, which could otherwise cause `ETXTBSY` on execution.
+/// Panics if the writer cannot start, fails, or exceeds its 10-second watchdog.
+#[cfg(all(test, target_os = "linux"))]
+pub(crate) async fn write_fixture_executables(
+    directory: &std::path::Path,
+    programs: &[(&str, &str)],
+) {
+    let mut writer = tokio::process::Command::new("/bin/sh");
+    writer
+        .args([
+            "-c",
+            "set -eu; umask 077; while [ \"$#\" -gt 0 ]; do printf '%s' \"$2\" > \"$1\"; chmod 700 \"$1\"; shift 2; done",
+            "fixture-writer",
+        ])
+        .kill_on_drop(true);
+    for (name, contents) in programs {
+        writer.arg(directory.join(name)).arg(contents);
+    }
+    let status = tokio::time::timeout(std::time::Duration::from_secs(10), writer.status())
+        .await
+        .unwrap_or_else(|_| {
+            panic!(
+                "fixture writer exceeded its 10-second watchdog in {}",
+                directory.display(),
+            )
+        })
+        .unwrap_or_else(|error| {
+            panic!(
+                "start isolated fixture writer in {}: {error}",
+                directory.display(),
+            )
+        });
+    assert!(
+        status.success(),
+        "fixture writer failed in {}: {status}",
+        directory.display(),
+    );
+}

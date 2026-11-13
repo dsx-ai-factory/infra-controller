@@ -4,13 +4,16 @@
 package protobuf
 
 import (
+	"encoding/json"
 	"net"
+	"os"
 	"testing"
 	"time"
 
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"google.golang.org/protobuf/encoding/protojson"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
 	dbquery "github.com/NVIDIA/infra-controller/rest-api/flow/internal/db/query"
@@ -1468,13 +1471,14 @@ func TestTargetSpecTo(t *testing.T) {
 	}
 }
 
-func TestTargetSpecFromNVLDomains(t *testing.T) {
+func TestTargetSpecFrom(t *testing.T) {
 	domainID := uuid.New()
-	testCases := map[string]struct {
+	type targetSpecCase struct {
 		input   *pb.OperationTargetSpec
 		want    operation.TargetSpec
 		wantErr string
-	}{
+	}
+	testCases := map[string]targetSpecCase{
 		"empty targets": {
 			input: &pb.OperationTargetSpec{
 				Targets: &pb.OperationTargetSpec_NvlDomains{
@@ -1509,6 +1513,26 @@ func TestTargetSpecFromNVLDomains(t *testing.T) {
 		},
 	}
 
+	// REST verifies its serialized output against the same fixture. Keeping the
+	// two generated descriptor packages in separate processes avoids collisions.
+	data, err := os.ReadFile("../../../../proto/flow/testdata/tray_batch_targets.json")
+	require.NoError(t, err)
+	var fixtures map[string]json.RawMessage
+	require.NoError(t, json.Unmarshal(data, &fixtures))
+	for name, wire := range fixtures {
+		var target pb.OperationTargetSpec
+		require.NoError(t, protojson.Unmarshal(wire, &target))
+		var components []operation.ComponentTarget
+		for _, component := range target.GetComponents().GetTargets() {
+			id, err := uuid.Parse(component.GetId().GetId())
+			require.NoError(t, err)
+			components = append(components, operation.ComponentTarget{UUID: id})
+		}
+		testCases["REST tray batch "+name] = targetSpecCase{
+			input: &target, want: operation.TargetSpec{Components: components},
+		}
+	}
+
 	for name, testCase := range testCases {
 		t.Run(name, func(t *testing.T) {
 			got, err := TargetSpecFrom(testCase.input)
@@ -1516,7 +1540,8 @@ func TestTargetSpecFromNVLDomains(t *testing.T) {
 				assert.ErrorContains(t, err, testCase.wantErr)
 				return
 			}
-			assert.NoError(t, err)
+			require.NoError(t, err)
+			require.NoError(t, got.Validate())
 			assert.Equal(t, testCase.want, got)
 		})
 	}
@@ -1780,6 +1805,7 @@ func TestTaskKindTo(t *testing.T) {
 		want pb.TaskKind
 	}{
 		// These are distinct wire values, not one shared "other task" category.
+		{taskcommon.TaskTypeComponentReset, pb.TaskKind_TASK_KIND_COMPONENT_RESET},
 		{taskcommon.TaskTypePowerControl, pb.TaskKind_TASK_KIND_POWER_CONTROL},
 		{taskcommon.TaskTypeFirmwareControl, pb.TaskKind_TASK_KIND_FIRMWARE_CONTROL},
 		{taskcommon.TaskTypeBringUp, pb.TaskKind_TASK_KIND_BRING_UP},

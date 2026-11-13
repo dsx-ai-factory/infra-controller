@@ -13,10 +13,10 @@ use component_manager::component_common::{ComponentPowerStateResult, PowerStateS
 use component_manager::compute_tray_manager::{
     ComputeTrayEndpoint, ComputeTrayManager, ComputeTrayVendor,
 };
-use component_manager::core_compute_manager::CoreComputeTrayManager;
 use component_manager::error::ComponentManagerError;
 use component_manager::nv_switch_manager::SwitchEndpoint;
 use component_manager::power_shelf_manager::{PowerShelfEndpoint, PowerShelfVendor};
+use db::DbSessionGuard;
 use futures_util::{StreamExt, stream};
 use mac_address::MacAddress;
 use model::machine::PowerState;
@@ -60,76 +60,6 @@ enum PowerReadEndpoint {
 struct PendingDetails {
     details: rpc::ComponentPowerDetails,
     endpoint: Option<PowerReadEndpoint>,
-}
-
-/// `DbSessionGuard` owns a pooled connection until successful work explicitly
-/// returns it through `return_to_pool`. Dropping the guard before that discards
-/// the connection and immediately releases the local pool slot.
-///
-/// SQLx's normal cleanup can wait for a blocked query before rollback, so the
-/// guard also covers setup and network stalls that the statement cap cannot.
-struct DbSessionGuard {
-    connection: Option<sqlx::pool::PoolConnection<sqlx::Postgres>>,
-}
-
-impl DbSessionGuard {
-    /// Wraps the pooled connection before `BEGIN`, so failed or cancelled
-    /// transaction startup still releases its pool slot.
-    async fn acquire(pool: &sqlx::PgPool) -> Result<Self, db::DatabaseError> {
-        Ok(Self {
-            connection: Some(pool.acquire().await.map_err(db::DatabaseError::acquire)?),
-        })
-    }
-
-    /// Starts a consistent, read-only snapshot with a transaction-local server
-    /// limit of at most `SNAPSHOT_TIMEOUT` per subsequent statement. A shorter
-    /// operator setting remains in effect. The separate client deadline covers
-    /// acquisition and setup; the server limit does not cover those stages.
-    async fn begin(&mut self) -> Result<db::Transaction<'_>, db::DatabaseError> {
-        let connection = self
-            .connection
-            .as_deref_mut()
-            .expect("the snapshot retains its connection until return_to_pool consumes it");
-        let mut txn = db::Transaction::begin_inner(connection).await?;
-        // Policy, identity and maintenance must share a snapshot, without row locks.
-        sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
-            .execute(txn.as_pgconn())
-            .await
-            .map_err(|error| db::DatabaseError::query("set power details snapshot", error))?;
-
-        // `pg_settings` reports milliseconds. `NULLIF` turns a disabled (zero)
-        // timeout into NULL, which `LEAST` ignores when applying our cap. A
-        // shorter limit remains unchanged. The `true` argument makes this
-        // transaction-local, so the setting resets when the txn ends.
-        sqlx::query(
-            "SELECT set_config('statement_timeout', \
-                LEAST(NULLIF(setting::bigint, 0), $1::text::bigint)::text, true) \
-             FROM pg_settings WHERE name = 'statement_timeout'",
-        )
-        .bind(SNAPSHOT_TIMEOUT.as_millis().to_string())
-        .execute(txn.as_pgconn())
-        .await
-        .map_err(|error| db::DatabaseError::query("set power details statement timeout", error))?;
-        Ok(txn)
-    }
-
-    /// Returns a healthy connection through SQLx after its transaction commits.
-    fn return_to_pool(mut self) {
-        drop(self.connection.take());
-    }
-}
-
-impl Drop for DbSessionGuard {
-    fn drop(&mut self) {
-        if let Some(connection) = self.connection.take() {
-            // Detaching frees the local pool slot immediately. Closing the
-            // socket does not guarantee that PostgreSQL stops immediately;
-            // after snapshot setup, its statement timeout separately bounds
-            // each subsequent SQL statement. Discarded server sessions may
-            // briefly remain alongside replacements and exceed the pool limit.
-            drop(connection.detach());
-        }
-    }
 }
 
 /// Loads identity, policy and tracked maintenance in one snapshot, then releases
@@ -238,7 +168,9 @@ fn validate_ids<Id: Eq + Hash>(ids: &[Id]) -> Result<(), CarbideError> {
 /// one read-only transaction, releasing it before credentials or hardware I/O.
 async fn load_snapshot(api: &Api, target: Target) -> Result<Vec<PendingDetails>, CarbideError> {
     let mut connection = DbSessionGuard::acquire(api.pg_pool()).await?;
-    let mut txn = connection.begin().await?;
+    let mut txn = connection
+        .begin_read_only_snapshot(SNAPSHOT_TIMEOUT)
+        .await?;
     let entries = match target {
         Target::MachineIds(list) => {
             let machines = db::machine::find(
@@ -439,9 +371,7 @@ async fn read_actual(
     // Standalone hosts use direct BMC authentication, including at sites where
     // the general Redfish pool is configured for a proxy. Rack-scale hosts use
     // their configured reader; the configured Core reader also uses this pool.
-    let direct_pool: std::sync::Arc<dyn carbide_redfish::libredfish::RedfishClientPool> =
-        api.bmc_credential_ops.clone();
-    let core = CoreComputeTrayManager::new(direct_pool);
+    let core = super::standalone_compute_tray_manager(api);
     let compute_reader: &dyn ComputeTrayManager = match &endpoint {
         PowerReadEndpoint::Compute {
             standalone: true, ..
@@ -676,66 +606,6 @@ mod tests {
     use carbide_uuid::switch::SwitchId;
 
     use super::*;
-
-    /// Snapshot setup must configure read-only, repeatable-read queries and the
-    /// server cap without extending a tighter operator limit or changing the
-    /// setting used by later pool borrowers.
-    #[crate::sqlx_test]
-    async fn snapshot_statement_timeout_is_capped_and_transaction_local(
-        pool: sqlx::PgPool,
-    ) -> Result<(), Box<dyn std::error::Error>> {
-        let mut connection = DbSessionGuard::acquire(&pool).await?;
-        for (configured_ms, expected_ms) in [
-            // A disabled server timeout still needs the snapshot's limit.
-            (0, 5000_i64),
-            // A broader site limit must not extend snapshot SQL work.
-            (60000, 5000),
-            // Preserve an operator's stricter limit.
-            (1000, 1000),
-        ] {
-            sqlx::query("SELECT set_config('statement_timeout', $1, false)")
-                .bind(configured_ms.to_string())
-                .execute(
-                    connection
-                        .connection
-                        .as_deref_mut()
-                        .expect("snapshot lease"),
-                )
-                .await?;
-
-            let mut txn = connection.begin().await?;
-            let effective_ms: i64 = sqlx::query_scalar(
-                "SELECT setting::bigint FROM pg_settings WHERE name = 'statement_timeout'",
-            )
-            .fetch_one(txn.as_pgconn())
-            .await?;
-            assert_eq!(effective_ms, expected_ms, "configured {configured_ms}ms");
-            let (read_only, isolation): (String, String) = sqlx::query_as(
-                "SELECT current_setting('transaction_read_only'), \
-                        current_setting('transaction_isolation')",
-            )
-            .fetch_one(txn.as_pgconn())
-            .await?;
-            assert_eq!(read_only, "on");
-            assert_eq!(isolation, "repeatable read");
-            txn.commit().await?;
-
-            let restored_ms: i64 = sqlx::query_scalar(
-                "SELECT setting::bigint FROM pg_settings WHERE name = 'statement_timeout'",
-            )
-            .fetch_one(
-                connection
-                    .connection
-                    .as_deref_mut()
-                    .expect("snapshot lease"),
-            )
-            .await?;
-            assert_eq!(restored_ms, configured_ms, "configured {configured_ms}ms");
-        }
-        connection.return_to_pool();
-
-        Ok(())
-    }
 
     /// Keep invalid batches out of snapshot acquisition while preserving each
     /// typed target arm and the inclusive request-size boundary.

@@ -26,6 +26,7 @@ use futures::StreamExt;
 use ipnetwork::IpNetwork;
 use model::address_selection_strategy::AddressSelectionStrategy;
 use model::controller_outcome::PersistentStateHandlerOutcome;
+use model::network_prefix::NewNetworkPrefix;
 use model::network_segment::{
     NetworkDefinition, NetworkSegment, NetworkSegmentControllerState, NetworkSegmentSearchConfig,
     NetworkSegmentType, NewNetworkSegment,
@@ -124,19 +125,6 @@ pub async fn persist(
     txn: &mut PgConnection,
     initial_state: NetworkSegmentControllerState,
 ) -> Result<NetworkSegment, DatabaseError> {
-    // The DNS views publish records under the segment's subdomain_id. VPC
-    // domains only record ownership, so reject them here even when the
-    // segment belongs to the same VPC.
-    if let Some(domain_id) = value.subdomain_id
-        && crate::dns::domain::find_by_uuid(&mut *txn, domain_id)
-            .await?
-            .is_some_and(|domain| domain.vpc_id.is_some())
-    {
-        return Err(DatabaseError::InvalidArgument(format!(
-            "domain {domain_id} is VPC-owned and cannot be used by a network segment"
-        )));
-    }
-
     let version = ConfigVersion::initial();
 
     let query = "INSERT INTO network_segments (
@@ -860,6 +848,54 @@ pub async fn set_vpc_id_and_can_stretch(
     Ok(())
 }
 
+/// Appends a validated prefix and advances its segment's config version and
+/// `updated` timestamp. A stale version or deleted row returns
+/// `ConcurrentModificationError`; the version-checked update locks the live row
+/// against deletion. The savepoint keeps that update and insertion together on
+/// failure. The caller holds `lock_checks` and commits reverse DNS in its outer
+/// transaction; controller state and the initial network definition are unchanged.
+pub async fn add_prefix(
+    value: &NetworkSegment,
+    prefix: &NewNetworkPrefix,
+    txn: &mut PgConnection,
+) -> Result<NetworkSegment, DatabaseError> {
+    let mut txn = crate::Transaction::begin_inner(txn).await?;
+    let query = "UPDATE network_segments SET version=$1, updated=NOW()
+                 WHERE id=$2 AND version=$3 AND deleted IS NULL RETURNING id";
+    let updated_id: NetworkSegmentId = sqlx::query_as(query)
+        .bind(value.version.increment())
+        .bind(value.id)
+        .bind(value.version)
+        .fetch_optional(txn.as_pgconn())
+        .await
+        .map_err(|error| DatabaseError::query(query, error))?
+        .ok_or_else(|| {
+            DatabaseError::ConcurrentModificationError("network_segment", value.version.to_string())
+        })?;
+    crate::network_prefix::create_for(
+        txn.as_mut(),
+        &updated_id,
+        std::slice::from_ref(prefix),
+        None,
+    )
+    .await?;
+    let segment = find_by(
+        &mut txn,
+        ObjectColumnFilter::One(IdColumn, &updated_id),
+        NetworkSegmentSearchConfig::default(),
+    )
+    .await?
+    .pop()
+    .ok_or_else(|| {
+        DatabaseError::new(
+            "finding network segment after adding prefix",
+            sqlx::Error::RowNotFound,
+        )
+    })?;
+    txn.commit().await?;
+    Ok(segment)
+}
+
 pub async fn attach_to_vpc(
     value: &NetworkSegment,
     txn: &mut PgConnection,
@@ -1129,47 +1165,6 @@ mod tests {
     use model::network_segment::NetworkDefinitionSegmentType;
 
     use super::*;
-
-    #[crate::sqlx_test]
-    async fn rejects_vpc_owned_subdomain_before_inserting_segment(pool: sqlx::PgPool) {
-        let mut txn = pool.begin().await.expect("begin fixture transaction");
-        let vpc_id = crate::test_support::vpc::insert_vpc(txn.as_mut(), "dns-owner").await;
-        let domain = crate::dns::domain::persist(
-            model::dns::NewDomain {
-                vpc_id: Some(vpc_id),
-                ..model::dns::NewDomain::new("tenant.example")
-            },
-            txn.as_mut(),
-        )
-        .await
-        .expect("create VPC-owned domain");
-        let segment = NewNetworkSegment {
-            subdomain_id: Some(domain.id),
-            vpc_id: Some(vpc_id),
-            segment_type: NetworkSegmentType::Tenant,
-            ..crate::test_support::network_segment::admin_segment(
-                "tenant-dns",
-                "192.0.2.0/24",
-                "192.0.2.1",
-                1,
-            )
-        };
-        let segment_id = segment.id;
-
-        let result = persist(segment, txn.as_mut(), NetworkSegmentControllerState::Ready).await;
-        assert!(
-            matches!(result, Err(DatabaseError::InvalidArgument(ref message)) if message.contains("VPC-owned")),
-            "{result:?}"
-        );
-        let segments = find_by(
-            txn.as_mut(),
-            ObjectColumnFilter::One(IdColumn, &segment_id),
-            NetworkSegmentSearchConfig::default(),
-        )
-        .await
-        .expect("the rejected creation leaves the transaction usable");
-        assert!(segments.is_empty(), "the rejected segment was not inserted");
-    }
 
     // Insert just enough into `network_segments` to make
     // `segment_exists(name)` return true;

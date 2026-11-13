@@ -28,7 +28,6 @@ use carbide_resource_pool::ResourcePoolRegistry;
 use carbide_secrets::credentials::CredentialManager;
 use carbide_secrets::test_support::certificates::TestCertificateProvider;
 use carbide_secrets::test_support::credentials::TestCredentialManager;
-use carbide_site_explorer::config::SiteExplorerExploreMode;
 use carbide_site_explorer::test_support::MockEndpointExplorer;
 use carbide_site_explorer::{
     AuthenticatedBmc, AuthenticatedBmcClient, EndpointExplorationService, EndpointExplorer,
@@ -70,6 +69,7 @@ pub struct TestApiBuilder {
     eth_data: Option<EthVirtData>,
     dpf_sdk: Option<Arc<dyn DpfOperations>>,
     metric_emitter: Option<ApiMetricsEmitter>,
+    instrumentation: carbide_instrument::Instrumentation,
     ib_fabric_manager: Option<Arc<dyn IBFabricManager>>,
     component_manager: Option<Arc<component_manager::component_manager::ComponentManager>>,
     secrets_context: Option<crate::secrets::SecretsContext>,
@@ -97,6 +97,7 @@ impl TestApiBuilder {
             eth_data: None,
             dpf_sdk: None,
             metric_emitter: None,
+            instrumentation: carbide_instrument::Instrumentation::global(),
             ib_fabric_manager: None,
             component_manager: None,
             secrets_context: None,
@@ -179,6 +180,18 @@ impl TestApiBuilder {
     pub fn with_metric_emitter(self, metric_emitter: ApiMetricsEmitter) -> Self {
         Self {
             metric_emitter: Some(metric_emitter),
+            ..self
+        }
+    }
+
+    /// Selects the Event destination for migrated handlers. Defaults to the
+    /// global compatibility handle; the caller retains the supplied provider.
+    pub fn with_instrumentation(
+        self,
+        instrumentation: carbide_instrument::Instrumentation,
+    ) -> Self {
+        Self {
+            instrumentation,
             ..self
         }
     }
@@ -295,7 +308,6 @@ impl TestApiBuilder {
         let real_endpoint_explorer = carbide_site_explorer::new_bmc_explorer(
             real_bmc_client.clone(),
             Arc::new(std::sync::atomic::AtomicBool::new(false)),
-            SiteExplorerExploreMode::NvRedfish,
             false,
             self.db_pool.clone(),
         );
@@ -341,6 +353,7 @@ impl TestApiBuilder {
             .unwrap_or_else(|| Arc::new(NmxcSimClient::default()));
 
         Api {
+            instrumentation: self.instrumentation,
             dpf_sdk: self.dpf_sdk,
             runtime_config,
             credential_manager,
@@ -349,6 +362,7 @@ impl TestApiBuilder {
             // dyn upcast: the ops handle is also the general pool in tests.
             redfish_pool: redfish_pool.clone(),
             bmc_credential_ops: redfish_pool,
+            driver_connector: None,
             bmc_proxy_passthrough: None,
             eth_data,
             common_pools: self.common_pools,

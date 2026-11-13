@@ -22,15 +22,15 @@ use std::num::NonZeroUsize;
 use std::str::FromStr;
 use std::sync::{Arc, Mutex};
 
+use carbide_tls::client_config::ClientCert;
 use carbide_uuid::nvlink::NvLinkDomainId;
 use carbide_uuid::rack::RackId;
 use carbide_uuid::switch::SwitchId;
-use forge_tls::client_config::ClientCert;
 use mac_address::MacAddress;
 use nv_redfish::bmc_http::reqwest::Client as ReqwestClient;
+use rpc::carbide_api_client::CarbideApiClient;
+use rpc::carbide_tls_client::{ApiConfig, CarbideClientConfig};
 use rpc::forge::MachineSearchConfig;
-use rpc::forge_api_client::ForgeApiClient;
-use rpc::forge_tls_client::{ApiConfig, ForgeClientConfig};
 use url::Url;
 
 use crate::HealthError;
@@ -48,12 +48,12 @@ use crate::metrics::BmcLatencyMetrics;
 /// [`ApiEndpointSource`].
 #[derive(Clone)]
 pub struct ApiClientWrapper {
-    client: ForgeApiClient,
+    client: CarbideApiClient,
 }
 
 impl ApiClientWrapper {
     pub fn new(root_ca: String, client_cert: String, client_key: String, api_url: &Url) -> Self {
-        let client_config = ForgeClientConfig::new(
+        let client_config = CarbideClientConfig::new(
             root_ca,
             Some(ClientCert {
                 cert_path: client_cert,
@@ -61,7 +61,7 @@ impl ApiClientWrapper {
             }),
         );
         let api_config = ApiConfig::new(api_url.as_str(), &client_config);
-        let client = ForgeApiClient::new(&api_config);
+        let client = CarbideApiClient::new(&api_config);
 
         Self { client }
     }
@@ -245,7 +245,7 @@ impl ApiCredentialKind {
 
 #[derive(Clone)]
 struct ApiCredentialProvider {
-    client: ForgeApiClient,
+    client: CarbideApiClient,
     kind: ApiCredentialKind,
     mac: MacAddress,
 }
@@ -1353,9 +1353,9 @@ mod tests {
         use crate::otlp::convert::build_metrics_export_request;
         use crate::sink::{EventContext, MetricSample};
 
-        let client = ForgeApiClient::new(&ApiConfig::new(
+        let client = CarbideApiClient::new(&ApiConfig::new(
             "http://127.0.0.1:1079",
-            &ForgeClientConfig::default(),
+            &CarbideClientConfig::default(),
         ));
 
         let source = ApiEndpointSource::new(
@@ -2135,7 +2135,7 @@ mod tests {
         let mut server = JoinSet::new();
         server.spawn(async move { axum::serve(listener, app).await });
 
-        let client = ForgeApiClient::new(&ApiConfig::new(&url, &ForgeClientConfig::default()));
+        let client = CarbideApiClient::new(&ApiConfig::new(&url, &CarbideClientConfig::default()));
 
         let source = ApiEndpointSource::new(
             Arc::new(ApiClientWrapper { client }),
@@ -2397,7 +2397,7 @@ mod tests {
         let mut server = JoinSet::new();
         let app = axum::Router::new().fallback(credentials_response);
         server.spawn(async move { axum::serve(listener, app).await });
-        let client = ForgeApiClient::new(&ApiConfig::new(&url, &ForgeClientConfig::default()));
+        let client = CarbideApiClient::new(&ApiConfig::new(&url, &CarbideClientConfig::default()));
 
         // A recorded Redfish BMC over HTTPS, reached through the proxy setting.
         let (_bmc, bmc_url) = bmc_mock::test_support::serve_https(

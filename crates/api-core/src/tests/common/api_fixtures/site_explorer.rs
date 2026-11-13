@@ -201,6 +201,7 @@ async fn complete_initial_discovery_cleanup_if_needed(
 /// MockExploredHost presents a fluent interface for declaring a mock host and running it through
 /// the site-explorer ingestion lifecycle. Its methods are intended to be chained together to
 /// script together a sequence of expected events to ingest a mock host.
+/// Ownership stays boxed across steps so their futures move one pointer instead of the full fixture.
 pub(in crate::tests) struct MockExploredHost<'a> {
     pub(in crate::tests) test_env: &'a TestEnv,
     pub(in crate::tests) managed_host: ManagedHostConfig,
@@ -220,8 +221,11 @@ impl MockExploredHost<'_> {
 }
 
 impl<'a> MockExploredHost<'a> {
-    pub(in crate::tests) fn new(test_env: &'a TestEnv, managed_host: ManagedHostConfig) -> Self {
-        Self {
+    pub(in crate::tests) fn new(
+        test_env: &'a TestEnv,
+        managed_host: ManagedHostConfig,
+    ) -> Box<Self> {
+        Box::new(Self {
             test_env,
             managed_host,
             host_bmc_ip: None,
@@ -229,7 +233,7 @@ impl<'a> MockExploredHost<'a> {
             host_dhcp_response: None,
             machine_discovery_response: None,
             dpu_machine_ids: HashMap::new(),
-        }
+        })
     }
 
     /// Simulate the host's BMC interface getting DHCP.
@@ -238,9 +242,9 @@ impl<'a> MockExploredHost<'a> {
     pub(in crate::tests) async fn discover_dhcp_host_bmc<
         F: FnOnce(tonic::Result<tonic::Response<forge::DhcpRecord>>, &mut Self) -> eyre::Result<()>,
     >(
-        self,
+        self: Box<Self>,
         f: F,
-    ) -> eyre::Result<Self> {
+    ) -> eyre::Result<Box<Self>> {
         self.discover_dhcp_host_bmc_from_relay(FIXTURE_UNDERLAY_NETWORK_SEGMENT_GATEWAY.ip(), f)
             .await
     }
@@ -251,10 +255,10 @@ impl<'a> MockExploredHost<'a> {
     pub(in crate::tests) async fn discover_dhcp_host_bmc_from_relay<
         F: FnOnce(tonic::Result<tonic::Response<forge::DhcpRecord>>, &mut Self) -> eyre::Result<()>,
     >(
-        mut self,
+        mut self: Box<Self>,
         relay_address: IpAddr,
         f: F,
-    ) -> eyre::Result<Self> {
+    ) -> eyre::Result<Box<Self>> {
         let result = self
             .test_env
             .api
@@ -280,10 +284,10 @@ impl<'a> MockExploredHost<'a> {
     pub(in crate::tests) async fn discover_dhcp_dpu_bmc<
         F: FnOnce(tonic::Result<tonic::Response<forge::DhcpRecord>>, &mut Self) -> eyre::Result<()>,
     >(
-        mut self,
+        mut self: Box<Self>,
         dpu_index: u8,
         f: F,
-    ) -> eyre::Result<Self> {
+    ) -> eyre::Result<Box<Self>> {
         let result = self
             .test_env
             .api
@@ -309,7 +313,9 @@ impl<'a> MockExploredHost<'a> {
     // Create EndpointExplorationReports for the host and DPUs, and seed them into the
     // MockEndpointExplorer in this test env. If any of the host BMC or DPU BMC's have not run DHCP
     // yet, they will be skipped (as we won't yet know their IP.)
-    pub(in crate::tests) fn insert_site_exploration_results(mut self) -> eyre::Result<Self> {
+    pub(in crate::tests) fn insert_site_exploration_results(
+        mut self: Box<Self>,
+    ) -> eyre::Result<Box<Self>> {
         let dpu_bmc_ips = self
             .dpu_bmc_ips
             .iter()
@@ -333,9 +339,9 @@ impl<'a> MockExploredHost<'a> {
     pub(in crate::tests) async fn discover_dhcp_host_primary_iface<
         F: FnOnce(tonic::Result<tonic::Response<forge::DhcpRecord>>, &mut Self) -> eyre::Result<()>,
     >(
-        mut self,
+        mut self: Box<Self>,
         f: F,
-    ) -> eyre::Result<Self> {
+    ) -> eyre::Result<Box<Self>> {
         let result = if self.managed_host.admin_dhcp_fallback && !self.managed_host.dpus.is_empty()
         {
             let mac = self.managed_host.dhcp_mac_address();
@@ -403,7 +409,10 @@ impl<'a> MockExploredHost<'a> {
         Ok(self)
     }
 
-    pub(in crate::tests) async fn discover_dhcp_dpu_primary_iface(self, dpu_index: u8) -> Self {
+    pub(in crate::tests) async fn discover_dhcp_dpu_primary_iface(
+        self: Box<Self>,
+        dpu_index: u8,
+    ) -> Box<Self> {
         let _ = self
             .test_env
             .api
@@ -424,11 +433,11 @@ impl<'a> MockExploredHost<'a> {
     pub(in crate::tests) async fn discover_dhcp_host_secondary_iface<
         F: FnOnce(tonic::Result<tonic::Response<forge::DhcpRecord>>, &mut Self) -> eyre::Result<()>,
     >(
-        mut self,
+        mut self: Box<Self>,
         iface_index: u8,
         relay_address: String,
         f: F,
-    ) -> eyre::Result<Self> {
+    ) -> eyre::Result<Box<Self>> {
         let mac_address = self.managed_host.non_dpu_macs[iface_index as usize].to_string();
         let result = self
             .test_env
@@ -455,9 +464,9 @@ impl<'a> MockExploredHost<'a> {
             &mut Self,
         ) -> eyre::Result<()>,
     >(
-        mut self,
+        mut self: Box<Self>,
         f: F,
-    ) -> eyre::Result<Self> {
+    ) -> eyre::Result<Box<Self>> {
         // Run scout discovery from the host
 
         let mut discovery_info =
@@ -497,13 +506,15 @@ impl<'a> MockExploredHost<'a> {
     }
 
     /// Runs one iteration of site explorer in the test env.
-    pub(in crate::tests) async fn run_site_explorer_iteration(self) -> Self {
+    pub(in crate::tests) async fn run_site_explorer_iteration(self: Box<Self>) -> Box<Self> {
         self.test_env.run_site_explorer_iteration().await;
         self
     }
 
     /// Runs dpu_state_controller with DPF.
-    pub(in crate::tests) async fn dpu_state_controller_iterations_with_dpf(self) -> Self {
+    pub(in crate::tests) async fn dpu_state_controller_iterations_with_dpf(
+        self: Box<Self>,
+    ) -> Box<Self> {
         if self.managed_host.dpus.is_empty() {
             return self;
         }
@@ -512,30 +523,31 @@ impl<'a> MockExploredHost<'a> {
 
         let dpu_machine_id = self.dpu_machine_ids[&0];
         let host_machine_id =
-            db::machine::lookup_host_machine_ids_by_dpu_ids(txn.as_mut(), &[dpu_machine_id])
+            db::machine::DpuHostAssociations::load(txn.as_mut(), &[dpu_machine_id])
                 .await
-                .unwrap()[&dpu_machine_id];
+                .unwrap()
+                .host_machine_id(&dpu_machine_id)
+                .unwrap();
 
+        // Scout discovery below needs this intermediate state. Requeued
+        // transitions can otherwise advance to network configuration first.
         self.test_env
-            .run_machine_state_controller_iteration_until_state_matches(
+            .run_machine_state_controller_iteration_until_state_condition_with_requeue(
                 &host_machine_id,
                 10 + (10 * self.dpu_machine_ids.len() as u32),
-                ManagedHostState::DPUInit {
-                    dpu_states: model::machine::DpuInitStates {
-                        states: self
-                            .dpu_machine_ids
-                            .clone()
-                            .into_values()
-                            .map(|machine_id| {
-                                (
-                                    machine_id,
-                                    DpuInitState::DpfStates {
-                                        state: DpfState::WaitingForReady { phase_detail: None },
-                                    },
-                                )
-                            })
-                            .collect::<HashMap<DpuMachineId, DpuInitState>>(),
-                    },
+                false,
+                |machine| match machine.current_state() {
+                    ManagedHostState::DPUInit { dpu_states } => {
+                        self.dpu_machine_ids.values().all(|machine_id| {
+                            matches!(
+                                dpu_states.states.get(machine_id),
+                                Some(DpuInitState::DpfStates {
+                                    state: DpfState::WaitingForReady { phase_detail: None },
+                                })
+                            )
+                        })
+                    }
+                    _ => false,
                 },
             )
             .await;
@@ -600,7 +612,7 @@ impl<'a> MockExploredHost<'a> {
         self
     }
     /// Runs dpu_state_controller
-    pub(in crate::tests) async fn dpu_state_controller_iterations(self) -> Self {
+    pub(in crate::tests) async fn dpu_state_controller_iterations(self: Box<Self>) -> Box<Self> {
         if self.managed_host.dpus.is_empty() {
             return self;
         }
@@ -609,9 +621,11 @@ impl<'a> MockExploredHost<'a> {
 
         let dpu_machine_id = self.dpu_machine_ids[&0];
         let host_machine_id =
-            db::machine::lookup_host_machine_ids_by_dpu_ids(txn.as_mut(), &[dpu_machine_id])
+            db::machine::DpuHostAssociations::load(txn.as_mut(), &[dpu_machine_id])
                 .await
-                .unwrap()[&dpu_machine_id];
+                .unwrap()
+                .host_machine_id(&dpu_machine_id)
+                .unwrap();
 
         for machine_id in self.dpu_machine_ids.values() {
             create_machine_inventory(self.test_env, *machine_id).await;
@@ -705,7 +719,9 @@ impl<'a> MockExploredHost<'a> {
         self
     }
 
-    pub(in crate::tests) async fn dpu_state_controller_iterations_to_network_install(self) -> Self {
+    pub(in crate::tests) async fn dpu_state_controller_iterations_to_network_install(
+        self: Box<Self>,
+    ) -> Box<Self> {
         if self.managed_host.dpus.is_empty() {
             return self;
         }
@@ -714,9 +730,11 @@ impl<'a> MockExploredHost<'a> {
 
         let dpu_machine_id = self.dpu_machine_ids[&0];
         let host_machine_id =
-            db::machine::lookup_host_machine_ids_by_dpu_ids(txn.as_mut(), &[dpu_machine_id])
+            db::machine::DpuHostAssociations::load(txn.as_mut(), &[dpu_machine_id])
                 .await
-                .unwrap()[&dpu_machine_id];
+                .unwrap()
+                .host_machine_id(&dpu_machine_id)
+                .unwrap();
 
         for machine_id in self.dpu_machine_ids.values() {
             create_machine_inventory(self.test_env, *machine_id).await;
@@ -788,7 +806,7 @@ impl<'a> MockExploredHost<'a> {
         self
     }
 
-    pub(in crate::tests) async fn host_state_controller_iterations(self) -> Self {
+    pub(in crate::tests) async fn host_state_controller_iterations(self: Box<Self>) -> Box<Self> {
         let host_machine_id: HostMachineId = self
             .machine_discovery_response
             .as_ref()
@@ -831,13 +849,18 @@ impl<'a> MockExploredHost<'a> {
         // if SPDM attestation is enabled, we need to drive it to completion
         if self.test_env.config.spdm.enabled {
             self.test_env
-                .run_machine_state_controller_iteration_until_state_matches(
+                .run_machine_state_controller_iteration_until_state_condition(
                     &host_machine_id,
                     10,
-                    ManagedHostState::HostInit {
-                        machine_state: MachineState::SpdmMeasuring {
-                            spdm_measuring_state: SpdmMeasuringState::PollResult,
-                        },
+                    |machine| {
+                        matches!(
+                            machine.current_state(),
+                            ManagedHostState::HostInit {
+                                machine_state: MachineState::SpdmMeasuring {
+                                    spdm_measuring_state: SpdmMeasuringState::PollResult(_),
+                                },
+                            }
+                        )
                     },
                 )
                 .await;
@@ -1062,7 +1085,9 @@ impl<'a> MockExploredHost<'a> {
         self
     }
     /// Marks all BMC IP's as having completed preingestion, manually using the database.
-    pub(in crate::tests) async fn mark_preingestion_complete(self) -> eyre::Result<Self> {
+    pub(in crate::tests) async fn mark_preingestion_complete(
+        self: Box<Self>,
+    ) -> eyre::Result<Box<Self>> {
         let ips = self
             .dpu_bmc_ips
             .values()
@@ -1078,10 +1103,10 @@ impl<'a> MockExploredHost<'a> {
     }
 
     pub(in crate::tests) async fn host_state_controller_iterations_with_machine_validation(
-        self,
+        self: Box<Self>,
         machine_validation_result_data: Option<rpc::forge::MachineValidationResult>,
         error: Option<String>,
-    ) -> Self {
+    ) -> Box<Self> {
         let host_machine_id: HostMachineId = self
             .machine_discovery_response
             .as_ref()
@@ -1314,9 +1339,9 @@ impl<'a> MockExploredHost<'a> {
     #[allow(dead_code)]
     /// Run the passed closure with a mutable referece to self
     pub(in crate::tests) async fn then<F, C: FnOnce(&mut Self) -> F>(
-        mut self,
+        mut self: Box<Self>,
         f: C,
-    ) -> eyre::Result<Self>
+    ) -> eyre::Result<Box<Self>>
     where
         F: Future<Output = eyre::Result<()>>,
     {
@@ -1326,7 +1351,10 @@ impl<'a> MockExploredHost<'a> {
 
     /// Move self to the passed closure and return the closure's result. Useful as the final step of
     /// a method chain to return a final result.
-    pub(in crate::tests) async fn finish<R, F, C: FnOnce(Self) -> F>(self, f: C) -> R
+    pub(in crate::tests) async fn finish<R, F, C: FnOnce(Box<Self>) -> F>(
+        self: Box<Self>,
+        f: C,
+    ) -> R
     where
         F: Future<Output = R>,
     {
@@ -1412,7 +1440,7 @@ impl<'a> MockExploredHost<'a> {
     ///
     /// Each step is awaited separately so the async state machine does not accumulate the full
     /// chain on the stack (see comment in [`new_mock_host_awaiting_discovery`]).
-    async fn ingest_until_host_discovery(mut self) -> eyre::Result<Self> {
+    async fn ingest_until_host_discovery(mut self: Box<Self>) -> eyre::Result<Box<Self>> {
         self = self.discover_dhcp_host_bmc(|_, _| Ok(())).boxed().await?;
         self = self.insert_site_exploration_results()?;
         self = self.run_site_explorer_iteration().boxed().await;
@@ -1427,7 +1455,7 @@ impl<'a> MockExploredHost<'a> {
     }
 
     /// Ingestion from the host's first discovery to a ready host.
-    async fn ingest_from_host_discovery(mut self) -> eyre::Result<Self> {
+    async fn ingest_from_host_discovery(mut self: Box<Self>) -> eyre::Result<Box<Self>> {
         self = self.discover_machine(|_, _| Ok(())).boxed().await?;
         self = self.run_site_explorer_iteration().boxed().await;
         self = self.host_state_controller_iterations().boxed().await;
@@ -1590,10 +1618,17 @@ pub(in crate::tests) async fn seed_bmc_root_credentials(
 /// NIC's first DHCP lease: the machine exists with predicted interfaces only,
 /// no real `machine_interfaces` rows. Registers the expected machine and
 /// seeds BMC credentials; the caller drives anything past this window.
-pub(in crate::tests) async fn ingest_zero_dpu_host_awaiting_first_lease<'a>(
+pub(in crate::tests) fn ingest_zero_dpu_host_awaiting_first_lease<'a>(
     env: &'a TestEnv,
     config: ManagedHostConfig,
-) -> eyre::Result<MockExploredHost<'a>> {
+) -> impl Future<Output = eyre::Result<Box<MockExploredHost<'a>>>> {
+    Box::pin(ingest_zero_dpu_host_awaiting_first_lease_inner(env, config))
+}
+
+async fn ingest_zero_dpu_host_awaiting_first_lease_inner<'a>(
+    env: &'a TestEnv,
+    config: ManagedHostConfig,
+) -> eyre::Result<Box<MockExploredHost<'a>>> {
     register_expected_machine(env, &config, None).await;
     seed_bmc_root_credentials(env, &config).await?;
 
@@ -1615,10 +1650,18 @@ pub(in crate::tests) async fn ingest_zero_dpu_host_awaiting_first_lease<'a>(
 /// Use this function to make a new managed host with a given number of DPUs, using site-explorer
 /// to ingest it into the database. Returns a MockExploredHost that you can call more methods on
 /// before finishing.
-pub(in crate::tests) async fn new_mock_host(
+/// Ingestion entry points return boxed futures so callers do not embed the full ingestion frame.
+pub(in crate::tests) fn new_mock_host(
     env: &'_ TestEnv,
     config: ManagedHostConfig,
-) -> eyre::Result<MockExploredHost<'_>> {
+) -> impl Future<Output = eyre::Result<Box<MockExploredHost<'_>>>> {
+    Box::pin(new_mock_host_inner(env, config))
+}
+
+async fn new_mock_host_inner(
+    env: &'_ TestEnv,
+    config: ManagedHostConfig,
+) -> eyre::Result<Box<MockExploredHost<'_>>> {
     new_mock_host_awaiting_discovery(env, config)
         .await?
         .ingest_from_host_discovery()
@@ -1628,10 +1671,17 @@ pub(in crate::tests) async fn new_mock_host(
 /// Ingests `config` up to the host's first discovery: the DPUs have
 /// registered and the host is a predicted machine whose primary admin link
 /// has leased.
-pub(in crate::tests) async fn new_mock_host_awaiting_discovery(
+pub(in crate::tests) fn new_mock_host_awaiting_discovery(
     env: &'_ TestEnv,
     config: ManagedHostConfig,
-) -> eyre::Result<MockExploredHost<'_>> {
+) -> impl Future<Output = eyre::Result<Box<MockExploredHost<'_>>>> {
+    Box::pin(new_mock_host_awaiting_discovery_inner(env, config))
+}
+
+async fn new_mock_host_awaiting_discovery_inner(
+    env: &'_ TestEnv,
+    config: ManagedHostConfig,
+) -> eyre::Result<Box<MockExploredHost<'_>>> {
     // Make the IB ports visible in Mock-UFM
     let mock_ib_fabric = env.ib_fabric_manager.get_mock_manager();
     for ib_guid in config.ib_guids.iter() {
@@ -1669,32 +1719,55 @@ pub(in crate::tests) async fn new_mock_host_awaiting_discovery(
 
 /// Use this function to make a new managed host with a given number of DPUs, using site-explorer
 /// to ingest it into the database. Returns the ManagedHostStateSnapshot of what was created
-pub(in crate::tests) async fn new_host(
+pub(in crate::tests) fn new_host(
     env: &TestEnv,
     config: ManagedHostConfig,
-) -> eyre::Result<ManagedHostStateSnapshot> {
+) -> impl Future<Output = eyre::Result<Box<ManagedHostStateSnapshot>>> {
+    Box::pin(new_host_inner(env, config))
+}
+
+async fn new_host_inner(
+    env: &TestEnv,
+    config: ManagedHostConfig,
+) -> eyre::Result<Box<ManagedHostStateSnapshot>> {
     new_mock_host(env, config)
         .await?
         .finish(|mock| async move {
             let machine_id = mock.discovered_machine_id().unwrap();
-            Ok(db::managed_host::load_snapshot(
-                &mut env.db_reader(),
-                &machine_id,
-                Default::default(),
-            )
-            .await
-            .transpose()
-            .unwrap()?)
+            Ok(Box::new(
+                db::managed_host::load_snapshot(
+                    &mut env.db_reader(),
+                    &machine_id,
+                    Default::default(),
+                )
+                .await
+                .transpose()
+                .unwrap()?,
+            ))
         })
         .await
 }
 
-pub(in crate::tests) async fn new_host_with_machine_validation(
+pub(in crate::tests) fn new_host_with_machine_validation(
     env: &TestEnv,
     dpu_count: u8,
     machine_validation_result_data: Option<rpc::forge::MachineValidationResult>,
     error: Option<String>,
-) -> eyre::Result<ManagedHostStateSnapshot> {
+) -> impl Future<Output = eyre::Result<Box<ManagedHostStateSnapshot>>> {
+    Box::pin(new_host_with_machine_validation_inner(
+        env,
+        dpu_count,
+        machine_validation_result_data,
+        error,
+    ))
+}
+
+async fn new_host_with_machine_validation_inner(
+    env: &TestEnv,
+    dpu_count: u8,
+    machine_validation_result_data: Option<rpc::forge::MachineValidationResult>,
+    error: Option<String>,
+) -> eyre::Result<Box<ManagedHostStateSnapshot>> {
     let managed_host = ManagedHostConfig::default().with_dpu_count(dpu_count.into());
     register_expected_machine(env, &managed_host, None).await;
     let mut mock_explored_host = MockExploredHost::new(env, managed_host);
@@ -1748,23 +1821,29 @@ pub(in crate::tests) async fn new_host_with_machine_validation(
         .await
         .finish(|mock| async move {
             let machine_id = mock.machine_discovery_response.unwrap().machine_id.unwrap();
-            Ok(db::managed_host::load_snapshot(
-                &mut env.db_reader(),
-                &machine_id,
-                Default::default(),
-            )
-            .await
-            .transpose()
-            .unwrap()?)
+            Ok(Box::new(
+                db::managed_host::load_snapshot(
+                    &mut env.db_reader(),
+                    &machine_id,
+                    Default::default(),
+                )
+                .await
+                .transpose()
+                .unwrap()?,
+            ))
         })
         .boxed()
         .await
 }
 
-pub(in crate::tests) async fn new_dpu(
+pub(in crate::tests) fn new_dpu(
     env: &TestEnv,
     config: ManagedHostConfig,
-) -> eyre::Result<DpuMachineId> {
+) -> impl Future<Output = eyre::Result<DpuMachineId>> {
+    Box::pin(new_dpu_inner(env, config))
+}
+
+async fn new_dpu_inner(env: &TestEnv, config: ManagedHostConfig) -> eyre::Result<DpuMachineId> {
     register_expected_machine(env, &config, None).await;
     let mut mock_explored_host = MockExploredHost::new(env, config);
 
@@ -1796,7 +1875,14 @@ pub(in crate::tests) async fn new_dpu(
     Ok(mock_explored_host.dpu_machine_ids[&0])
 }
 
-pub(in crate::tests) async fn new_dpu_in_network_install(
+pub(in crate::tests) fn new_dpu_in_network_install(
+    env: &TestEnv,
+    config: ManagedHostConfig,
+) -> impl Future<Output = eyre::Result<TestPredictedManagedHost>> {
+    Box::pin(new_dpu_in_network_install_inner(env, config))
+}
+
+async fn new_dpu_in_network_install_inner(
     env: &TestEnv,
     config: ManagedHostConfig,
 ) -> eyre::Result<TestPredictedManagedHost> {
@@ -2000,10 +2086,17 @@ pub(in crate::tests) async fn new_switch(
 }
 
 /// It is neccesary to start a tower_test server to simulate the kube environment and handle the DPF requests.
-pub(in crate::tests) async fn new_mock_host_with_dpf(
+pub(in crate::tests) fn new_mock_host_with_dpf(
     env: &'_ TestEnv,
     config: ManagedHostConfig,
-) -> eyre::Result<ManagedHostStateSnapshot> {
+) -> impl Future<Output = eyre::Result<Box<ManagedHostStateSnapshot>>> {
+    Box::pin(new_mock_host_with_dpf_inner(env, config))
+}
+
+async fn new_mock_host_with_dpf_inner(
+    env: &'_ TestEnv,
+    config: ManagedHostConfig,
+) -> eyre::Result<Box<ManagedHostStateSnapshot>> {
     // Make the IB ports visible in Mock-UFM
     let mock_ib_fabric = env.ib_fabric_manager.get_mock_manager();
     for ib_guid in config.ib_guids.iter() {
@@ -2082,15 +2175,17 @@ pub(in crate::tests) async fn new_mock_host_with_dpf(
     mock_explored_host
         .finish(|mock| async move {
             let machine_id = mock.machine_discovery_response.unwrap().machine_id.unwrap();
-            Ok(db::managed_host::load_snapshot(
-                &mut env.db_reader(),
-                &machine_id,
-                Default::default(),
-            )
-            .await
-            .transpose()
-            .unwrap()
-            .unwrap())
+            Ok(Box::new(
+                db::managed_host::load_snapshot(
+                    &mut env.db_reader(),
+                    &machine_id,
+                    Default::default(),
+                )
+                .await
+                .transpose()
+                .unwrap()
+                .unwrap(),
+            ))
         })
         .boxed()
         .await

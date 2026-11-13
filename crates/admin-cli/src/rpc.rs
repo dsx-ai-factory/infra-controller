@@ -18,6 +18,7 @@
 use std::collections::HashMap;
 use std::time::Duration;
 
+use ::rpc::carbide_api_client::CarbideApiClient;
 use ::rpc::forge::instance_interface_config::NetworkDetails;
 use ::rpc::forge::{
     self as rpc, BmcEndpointRequest, FindInstanceTypesByIdsRequest,
@@ -31,7 +32,6 @@ use ::rpc::forge::{
     SpxPartitionSearchFilter, UpdateMachineHardwareInfoRequest, UpdateNetworkSecurityGroupRequest,
     VpcCreationRequest, VpcSearchFilter, VpcVirtualizationType, VpcsByIdsRequest,
 };
-use ::rpc::forge_api_client::ForgeApiClient;
 use ::rpc::{Machine, NetworkSegment};
 use carbide_uuid::dpa_interface::DpaInterfaceId;
 use carbide_uuid::dpu_remediations::RemediationId;
@@ -58,10 +58,10 @@ use crate::expected_machines::common::{ExpectedMachineJson, HostDpuPolicy};
 use crate::instance::AllocateInstance;
 use crate::machine::MachineAutoupdate;
 
-/// [`ApiClient`] is a thin wrapper around [`ForgeApiClient`], which mainly adds some convenience
+/// [`ApiClient`] is a thin wrapper around [`CarbideApiClient`], which mainly adds some convenience
 /// methods.
 #[derive(Clone)]
-pub(crate) struct ApiClient(pub(crate) ForgeApiClient);
+pub(crate) struct ApiClient(pub(crate) CarbideApiClient);
 
 /// Returns `True` when `status` *can* mean the server does not implement
 /// the requested RPC, telling the caller to retry through the legacy operation.
@@ -202,7 +202,7 @@ fn legacy_bmc_patch_fields(
 }
 
 // Benchmarks showed 4 had better overall performance while still overlapping page fetch latency.
-const PAGED_LIST_FETCH_CONCURRENCY: usize = 4;
+pub(crate) const PAGED_LIST_FETCH_CONCURRENCY: usize = 4;
 
 /// Attempt cap for retrying a single `RESOURCE_EXHAUSTED`-rejected call inside
 /// [`ApiClient::get_all_instances`]'s paged fetch (the id listing and each id
@@ -213,12 +213,12 @@ const MAX_PAGED_FETCH_ATTEMPTS: usize = 8;
 const MAX_PAGED_FETCH_BACKOFF: Duration = Duration::from_secs(120);
 
 // Note: You do *not* need to add every gRPC method to this wrapper. Callers can use `.0` to get
-// access to the underlying ForgeApiClient, if they want to simply call the gRPC methods themselves.
+// access to the underlying CarbideApiClient, if they want to simply call the gRPC methods themselves.
 // Add methods here if there's some value to it, like constructing rpc request objects from simpler
 // primitives, or other data conversions.
 //
 // (this module used to have more logic around establishing a connection to carbide, but this is all
-// now done in ForgeApiClient itself, leaving these methods only concerned with data conversions and
+// now done in CarbideApiClient itself, leaving these methods only concerned with data conversions and
 // other conveniences. 90% of these methods no longer justify their existence... we probably don't
 // need to add more.)
 impl ApiClient {
@@ -857,14 +857,9 @@ impl ApiClient {
     pub(crate) async fn create_domain(
         &self,
         name: String,
-        vpc_id: Option<VpcId>,
         default_ttl: Option<u32>,
     ) -> CarbideCliResult<::rpc::protos::dns::Domain> {
-        let request = ::rpc::protos::dns::CreateDomainRequest {
-            name,
-            vpc_id,
-            default_ttl,
-        };
+        let request = ::rpc::protos::dns::CreateDomainRequest { name, default_ttl };
         Ok(self.0.create_domain(request).await?)
     }
 
@@ -1199,6 +1194,13 @@ impl ApiClient {
                     .is_some(),
                 "host_lifecycle_profile.disable_lockdown",
             ),
+            (
+                host_lifecycle_profile
+                    .as_ref()
+                    .and_then(|profile| profile.retain_hbn_config_on_boot)
+                    .is_some(),
+                "host_lifecycle_profile.retain_hbn_config_on_boot",
+            ),
             (parsed_interfaces.is_some(), "host_nics"),
         ]
         .into_iter()
@@ -1254,6 +1256,7 @@ impl ApiClient {
                     dpu_mode: dpu_policy.map(|policy| rpc::DpuMode::from(policy) as i32),
                     bmc_ip_allocation: bmc_ip_allocation.map(|allocation| allocation as i32),
                     host_lifecycle_profile,
+                    replace_dpu_loopbacks: parsed_interfaces.is_some(),
                     host_nics: parsed_interfaces.unwrap_or_default(),
                     ..Default::default()
                 }),
@@ -1269,6 +1272,20 @@ impl ApiClient {
                         .into());
                 }
             }
+        }
+
+        // An older site has no `retain_hbn_config_on_boot` field, so its update RPC drops the
+        // designation and still answers OK. That would report a designation the
+        // site never stored and never validated, so refuse instead. Reached for
+        // both an Unimplemented PATCH and a legacy record that has no ID.
+        if host_lifecycle_profile
+            .as_ref()
+            .is_some_and(|profile| profile.retain_hbn_config_on_boot.is_some())
+        {
+            return Err(CarbideCliError::UnsupportedOperation(
+                "this site cannot store a retain-hbn-config-on-boot designation. Upgrade the site, or retry \
+                 without --retain-hbn-config-on-boot",
+            ));
         }
 
         self.patch_expected_machine_legacy(
@@ -1375,6 +1392,22 @@ impl ApiClient {
                 expected_machine.metadata
             };
 
+        // Merge lifecycle fields individually. The legacy update replaces the
+        // stored profile, so a half-filled one clears every member this request
+        // did not supply.
+        let merged_host_lifecycle_profile = match host_lifecycle_profile {
+            Some(supplied) => {
+                let existing = expected_machine.host_lifecycle_profile.unwrap_or_default();
+                Some(::rpc::forge::HostLifecycleProfile {
+                    disable_lockdown: supplied.disable_lockdown.or(existing.disable_lockdown),
+                    retain_hbn_config_on_boot: supplied
+                        .retain_hbn_config_on_boot
+                        .or(existing.retain_hbn_config_on_boot),
+                })
+            }
+            None => expected_machine.host_lifecycle_profile,
+        };
+
         let request = rpc::ExpectedMachine {
             bmc_mac_address: mac_str,
             bmc_username: bmc_username.unwrap_or(expected_machine.bmc_username),
@@ -1400,9 +1433,9 @@ impl ApiClient {
                 .map(|policy| ::rpc::forge::DpuMode::from(policy) as i32)
                 .or(expected_machine.dpu_mode),
             bmc_ip_allocation: legacy_bmc_fields.bmc_ip_allocation,
+            replace_dpu_loopbacks: replace_interfaces,
             replace_host_nics: replace_interfaces,
-            host_lifecycle_profile: host_lifecycle_profile
-                .or(expected_machine.host_lifecycle_profile),
+            host_lifecycle_profile: merged_host_lifecycle_profile,
             server_name: expected_machine.server_name,
         };
 
@@ -1447,10 +1480,12 @@ impl ApiClient {
                     bmc_ip_allocation: machine.bmc_ip_allocation.map(|m| m as i32),
                     // replace-all is authoritative even when the JSON field is
                     // omitted and therefore resolves to an empty list.
+                    replace_dpu_loopbacks: true,
                     replace_host_nics: true,
                     host_lifecycle_profile: machine.host_lifecycle_profile.map(|hlp| {
                         ::rpc::forge::HostLifecycleProfile {
                             disable_lockdown: hlp.disable_lockdown,
+                            retain_hbn_config_on_boot: hlp.retain_hbn_config_on_boot,
                         }
                     }),
                     server_name: machine.server_name,
@@ -1666,6 +1701,7 @@ impl ApiClient {
                 svi_ip: None,
                 free_ip_count_v2: None,
                 free_ip_count_saturated: false,
+                dhcpv6_link_address: None,
             }],
             segment_type: NetworkSegmentType::Tenant as i32,
             id: Some(id),
@@ -1751,6 +1787,7 @@ impl ApiClient {
                 svi_ip: None,
                 free_ip_count_v2: None,
                 free_ip_count_saturated: false,
+                dhcpv6_link_address: None,
             }],
             segment_type: NetworkSegmentType::HostInband as i32,
             id: Some(id),
@@ -2386,6 +2423,7 @@ impl ApiClient {
                 labels,
             }),
             allow_unhealthy_machine: false,
+            external_validation_request_id: None,
         };
 
         tracing::trace!("{}", serde_json::to_string(&instance_request)?);
@@ -3331,14 +3369,14 @@ impl ApiClient {
 
 #[cfg(test)]
 mod tests {
-    use ::rpc::forge_tls_client::{ApiConfig, ForgeClientConfig};
+    use ::rpc::carbide_tls_client::{ApiConfig, CarbideClientConfig};
     use ::rpc::{DiscoveryInfo, NetworkInterface, PciDeviceProperties};
     use carbide_test_support::{Case, Check, Outcome, check_cases_async, check_values};
     use clap::Parser;
 
     use super::{
-        AllocateInstance, ApiClient, ForgeApiClient, LegacyBmcPatchFields, Machine, NetworkDetails,
-        cap_chunk_size, legacy_bmc_patch_fields, maybe_unimplemented, rpc,
+        AllocateInstance, ApiClient, CarbideApiClient, LegacyBmcPatchFields, Machine,
+        NetworkDetails, cap_chunk_size, legacy_bmc_patch_fields, maybe_unimplemented, rpc,
     };
 
     #[tokio::test]
@@ -3456,9 +3494,9 @@ mod tests {
                     }),
                     ..Default::default()
                 };
-                let client = ApiClient(ForgeApiClient::new(&ApiConfig::new(
+                let client = ApiClient(CarbideApiClient::new(&ApiConfig::new(
                     "invalid-unconnected-url",
-                    &ForgeClientConfig::default(),
+                    &CarbideClientConfig::default(),
                 )));
                 let request = client
                     .build_instance_request(machine, &args, "vf-test", None)

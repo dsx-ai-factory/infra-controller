@@ -44,12 +44,14 @@ type Forced = (StatusCode, Option<u64>);
 struct FakeState {
     requests: Mutex<Vec<(String, String, String)>>,
     totals: Mutex<BTreeMap<String, u64>>,
+    queued_totals: Mutex<BTreeMap<String, VecDeque<u64>>>,
     pages: Mutex<BTreeMap<String, Vec<Vec<Value>>>>,
     objects: Mutex<BTreeMap<String, Value>>,
     queued: Mutex<BTreeMap<String, VecDeque<Forced>>>,
     always: Mutex<BTreeMap<String, StatusCode>>,
     omit_header: AtomicBool,
     delay: Mutex<Duration>,
+    resource_delays: Mutex<BTreeMap<String, Duration>>,
     starts: Mutex<Vec<Instant>>,
     in_flight: AtomicUsize,
     max_in_flight: AtomicUsize,
@@ -105,13 +107,25 @@ impl FakeRest {
     }
 
     /// The `X-Pagination` total of `key`: a resource, or
-    /// `resource?status=<status>` for a status filter.
+    /// `resource?status=<status>` or `resource?pageNumber=<page>` for a scoped total.
     pub(crate) fn set_total(&self, key: &str, total: u64) {
         self.state
             .totals
             .lock()
             .unwrap()
             .insert(key.to_string(), total);
+    }
+
+    /// The next request that reads the `X-Pagination` total of `key` gets
+    /// `total` once, before the fixed total applies again.
+    pub(crate) fn queue_total(&self, key: &str, total: u64) {
+        self.state
+            .queued_totals
+            .lock()
+            .unwrap()
+            .entry(key.to_string())
+            .or_default()
+            .push_back(total);
     }
 
     /// The items of each page of `resource`, from page 1.
@@ -166,6 +180,14 @@ impl FakeRest {
         *self.state.delay.lock().unwrap() = delay;
     }
 
+    pub(crate) fn set_resource_delay(&self, resource: &str, delay: Duration) {
+        self.state
+            .resource_delays
+            .lock()
+            .unwrap()
+            .insert(resource.to_string(), delay);
+    }
+
     /// Every request so far: method, path and raw query.
     pub(crate) fn requests(&self) -> Vec<(String, String, String)> {
         self.state.requests.lock().unwrap().clone()
@@ -195,7 +217,13 @@ async fn serve(
     state.starts.lock().unwrap().push(Instant::now());
     let now = state.in_flight.fetch_add(1, Ordering::SeqCst) + 1;
     state.max_in_flight.fetch_max(now, Ordering::SeqCst);
-    let delay = *state.delay.lock().unwrap();
+    let delay = state
+        .resource_delays
+        .lock()
+        .unwrap()
+        .get(&resource)
+        .copied()
+        .unwrap_or(*state.delay.lock().unwrap());
     tokio::time::sleep(delay).await;
     let response = answer(&state, &resource, &query);
     state.in_flight.fetch_sub(1, Ordering::SeqCst);
@@ -242,12 +270,17 @@ fn answer(state: &FakeState, resource: &str, query: &str) -> Response {
         Some(status) => format!("{resource}?status={status}"),
         None => resource.to_string(),
     };
-    let total = state
-        .totals
+    let totals = state.totals.lock().unwrap();
+    let scoped = format!("{resource}?pageNumber={page_number}");
+    let queued = state
+        .queued_totals
         .lock()
         .unwrap()
-        .get(&key)
-        .copied()
+        .get_mut(&scoped)
+        .and_then(VecDeque::pop_front);
+    let total = queued
+        .or_else(|| totals.get(&scoped).copied())
+        .or_else(|| totals.get(&key).copied())
         .unwrap_or(items.len() as u64);
     let mut response = axum::Json(Value::Array(items)).into_response();
     if !state.omit_header.load(Ordering::SeqCst) {

@@ -62,13 +62,13 @@ const (
 
 var (
 	// ErrOrgInstrastructureProviderNotFound is returned when the org does not have an infrastructure provider
-	ErrOrgInstrastructureProviderNotFound = errors.New("Org does not have an Infrastructure Provider")
+	ErrOrgInstrastructureProviderNotFound = errors.New("org does not have an Infrastructure Provider")
 	// ErrOrgTenantNotFound is returned when the org does not have a tenant
-	ErrOrgTenantNotFound = errors.New("Org does not have a Tenant")
+	ErrOrgTenantNotFound = errors.New("org does not have a Tenant")
 	// ErrAllocationConstraintNotFound
-	ErrAllocationConstraintNotFound = errors.New("Allocation does not have an associated Constraint")
+	ErrAllocationConstraintNotFound = errors.New("allocation does not have an associated Constraint")
 	// ErrInstanceTypeMachineNotFound
-	ErrInstanceTypeMachineNotFound = errors.New("Instance Type does not have a Machine available for allocation")
+	ErrInstanceTypeMachineNotFound = errors.New("the Instance Type does not have a Machine available for allocation")
 	// ErrSpectrumXMachineSelection distinguishes incompatible selectors from an empty allocation pool.
 	ErrSpectrumXMachineSelection = errors.New("no Machines with the requested SpectrumX capabilities are available for specified Instance Type")
 	// ErrMachineUnavailable is returned when a candidate Machine, re-read under its lock, is no longer Ready, unassigned, or matching the label selector
@@ -199,7 +199,7 @@ func GetInstanceFromIDString(ctx context.Context, tx *cdb.Tx, instanceID string,
 	if err != nil {
 		return nil, ErrInvalidID
 	}
-	return cdbm.NewInstanceDAO(dbSession).GetByID(ctx, tx, instanceid, nil)
+	return cdbm.NewInstanceDAO(dbSession).GetByID(ctx, tx, instanceid, nil, false)
 }
 
 // GetVpcFromIDString gets the vpc DB model from the id string
@@ -745,14 +745,6 @@ func GetAllAllocationConstraintsForInstanceType(ctx context.Context, tx *cdb.Tx,
 	}
 
 	return acs, tot, nil
-}
-
-// RollbackTx is called deferred in functions that create a transaction
-// if transaction was committed, this will do nothing
-func RollbackTx(ctx context.Context, tx *cdb.Tx, committed *bool) {
-	if committed != nil && !*committed {
-		tx.Rollback()
-	}
 }
 
 // HandleTxError translates an error returned by cdb.WithTx / cdb.WithTxResult
@@ -1959,7 +1951,7 @@ func ValidateKnownQueryParams(rawParams url.Values, structs ...any) error {
 	}
 	for key := range rawParams {
 		if _, ok := allowed[key]; !ok {
-			return fmt.Errorf("Unknown query parameter specified in request: %s", key)
+			return fmt.Errorf("unknown query parameter specified in request: %s", key)
 		}
 	}
 	return nil

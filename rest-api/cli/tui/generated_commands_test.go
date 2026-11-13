@@ -741,8 +741,8 @@ func TestGeneratedPathResourcePolicy_CoversEveryParameter(t *testing.T) {
 		"measured-boot profile remove|id",
 		"measured-boot-trusted-machine delete|id",
 		"measured-boot-trusted-profile delete|id",
-		"domain firmware-update-nvlink-domain firmware-update-nvlink-domain|id",
-		"domain power-control-nvlink-domain|id",
+		"rack health-report delete|source",
+		"tray health-report delete|source",
 		"task cancel|id",
 		"task cancel cancel-task|id",
 		"task get|id",
@@ -797,11 +797,22 @@ func testResolveGeneratedPathParameters_UsesDependentListSurfaces(t *testing.T) 
 	tests := []struct {
 		name         string
 		command      string
+		site         string
 		cache        map[string][]NamedItem
 		listPath     string
 		listResponse string
 		want         []string
 	}{
+		{
+			name: "expected rack group", command: "expected-rack-group get", site: "site-1",
+			listPath: "/v2/org/acme/nico/expected-rack-group", listResponse: `[{"id":"group-1","name":"Group One","siteId":"site-1"}]`,
+			want: []string{"group-1"},
+		},
+		{
+			name: "NVLink domain", command: "domain get", site: "site-1",
+			listPath: "/v2/org/acme/nico/domain/nvlink", listResponse: `[{"id":"domain-1","name":"Domain One"}]`,
+			want: []string{"domain-1"},
+		},
 		{
 			name:    "allocation constraint",
 			command: "allocation constraint update",
@@ -872,6 +883,7 @@ func testResolveGeneratedPathParameters_UsesDependentListSurfaces(t *testing.T) 
 			requestPath := make(chan string, 1)
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				requestPath <- r.URL.Path
+				assert.Equal(t, test.site, r.URL.Query().Get("siteId"))
 				w.Header().Set("Content-Type", "application/json")
 				_, _ = io.WriteString(w, test.listResponse)
 			}))
@@ -882,6 +894,7 @@ func testResolveGeneratedPathParameters_UsesDependentListSurfaces(t *testing.T) 
 				"acme",
 				"",
 			)
+			session.Scope.SiteID = test.site
 			for resourceType, items := range test.cache {
 				session.Cache.Set(resourceType, items)
 			}
@@ -1085,7 +1098,7 @@ func TestFetchAllocationConstraints_UsesIDWhenDisplayPartsAreEmpty(t *testing.T)
 	defer server.Close()
 	session := &Session{Client: appcli.NewClient(server.URL, "acme", "token", nil, false)}
 
-	items, err := session.fetchAllocationConstraints("allocation-1")
+	items, err := session.fetchAllocationConstraints(context.Background(), "allocation-1")
 
 	require.NoError(t, err)
 	require.Len(t, items, 1)
@@ -1351,6 +1364,7 @@ func TestRunGeneratedTUICommand(t *testing.T) {
 		{name: "resource selectors", run: testRunGeneratedTUICommand_ResourceSelectors},
 		{name: "registered Sites", run: testRunGeneratedTUICommand_RegisteredSites},
 		{name: "expected machine SKU Site", run: testRunGeneratedTUICommandExpectedMachineSKU},
+		{name: "domain body Site", run: testRunGeneratedTUICommand_DomainBodyScope},
 	} {
 		t.Run(test.name, test.run)
 	}
@@ -1470,5 +1484,74 @@ func TestResolveGeneratedPathParameters(t *testing.T) {
 		{name: "explicit discovery values", run: testResolveGeneratedPathParameters_ExplicitDiscoveryValues},
 	} {
 		t.Run(test.name, test.run)
+	}
+}
+
+func TestResolveGeneratedResource_MatchesCaseByResourceType(t *testing.T) {
+	const domains = `[{"id":"domain-a"},{"id":"Domain-A"}]`
+	tests := []struct {
+		name         string
+		command      string
+		listResponse string
+		value        string
+		wantID       string
+		wantErr      string
+	}{
+		{
+			name: "NVLink domain lowercase ID", command: "domain get",
+			listResponse: domains, value: "domain-a", wantID: "domain-a",
+		},
+		{
+			name: "NVLink domain mixed-case ID", command: "domain get",
+			listResponse: domains, value: "Domain-A", wantID: "Domain-A",
+		},
+		{
+			name: "NVLink domain ID in another case", command: "domain get",
+			listResponse: domains, value: "DOMAIN-A", wantErr: `no domain matching "DOMAIN-A"`,
+		},
+		{
+			name: "expected rack group name in another case", command: "expected-rack-group get",
+			listResponse: `[{"id":"group-1","name":"Group One","siteId":"site-1"}]`,
+			value:        "group one", wantID: "group-1",
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = io.WriteString(w, test.listResponse)
+			}))
+			defer server.Close()
+
+			session := NewSession(appcli.NewClient(server.URL, "acme", "token", nil, false), "acme", "")
+			session.Scope.SiteID = "site-1"
+			info := requireGeneratedInfo(t, test.command)
+			descriptor := GeneratedPathResourceDescriptor(
+				info.Name,
+				info.PathParameters[len(info.PathParameters)-1],
+			)
+
+			var (
+				item *NamedItem
+				err  error
+			)
+			_ = captureStdout(func() {
+				item, _, err = session.ResolveGeneratedResource(
+					context.Background(),
+					descriptor,
+					map[string]string{"siteId": "site-1"},
+					"Resource",
+					test.value,
+				)
+			})
+			if test.wantErr != "" {
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), test.wantErr)
+				return
+			}
+			require.NoError(t, err)
+			assert.Equal(t, test.wantID, item.ID)
+		})
 	}
 }

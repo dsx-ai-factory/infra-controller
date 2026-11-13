@@ -197,7 +197,7 @@ func (s *RedfishStrategy) executePollCompletion(ctx context.Context, update *Fir
 		log.Infof("[%s] Redfish task completed successfully", update.ID)
 		return Transition(StateVerify)
 	case "Exception", "Killed", "Cancelled":
-		return Failed(fmt.Errorf("Redfish task failed with state: %s", state))
+		return Failed(fmt.Errorf("the Redfish task failed with state: %s", state))
 	default:
 		// Still running (Running, Starting, Pending, etc.) - wait and poll again
 		return Wait(execCtx)

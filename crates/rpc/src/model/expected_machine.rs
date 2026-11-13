@@ -76,6 +76,7 @@ impl From<ExpectedInterfaceRole> for rpc::forge::ExpectedInterfaceRole {
         match role {
             ExpectedInterfaceRole::Host => Self::Host,
             ExpectedInterfaceRole::DpuOs => Self::DpuOs,
+            ExpectedInterfaceRole::DpuLoopback => Self::DpuLoopback,
             ExpectedInterfaceRole::DpuBmc => Self::DpuBmc,
             ExpectedInterfaceRole::HostBmc => Self::HostBmc,
         }
@@ -91,6 +92,7 @@ impl From<rpc::forge::ExpectedInterfaceRole> for ExpectedInterfaceRole {
             rpc::forge::ExpectedInterfaceRole::Unspecified
             | rpc::forge::ExpectedInterfaceRole::Host => Self::Host,
             rpc::forge::ExpectedInterfaceRole::DpuOs => Self::DpuOs,
+            rpc::forge::ExpectedInterfaceRole::DpuLoopback => Self::DpuLoopback,
             rpc::forge::ExpectedInterfaceRole::DpuBmc => Self::DpuBmc,
             rpc::forge::ExpectedInterfaceRole::HostBmc => Self::HostBmc,
         }
@@ -270,6 +272,16 @@ impl TryFrom<rpc::forge::ExpectedInterface> for ExpectedInterface {
     type Error = RpcDataConversionError;
 
     fn try_from(expected_interface: rpc::forge::ExpectedInterface) -> Result<Self, Self::Error> {
+        if expected_interface.role == Some(rpc::forge::ExpectedInterfaceRole::DpuLoopback as i32)
+            && expected_interface
+                .fixed_gateway
+                .as_ref()
+                .is_some_and(|gateway| !gateway.is_empty())
+        {
+            return Err(RpcDataConversionError::InvalidArgument(
+                "dpu_loopback does not accept fixed_gateway".to_string(),
+            ));
+        }
         let mac_address = match expected_interface.mac_address.as_deref() {
             None | Some("") => None,
             Some(mac) => Some(
@@ -375,8 +387,13 @@ impl From<ExpectedMachine> for rpc::forge::ExpectedMachine {
                         .data
                         .host_lifecycle_profile
                         .disable_lockdown,
+                    retain_hbn_config_on_boot: expected_machine
+                        .data
+                        .host_lifecycle_profile
+                        .retain_hbn_config_on_boot,
                 }),
             server_name: expected_machine.data.server_name,
+            replace_dpu_loopbacks: false,
         }
     }
 }
@@ -509,9 +526,11 @@ impl TryFrom<rpc::forge::ExpectedMachine> for ExpectedMachineData {
                 .host_lifecycle_profile
                 .map(|hlp| HostLifecycleProfile {
                     disable_lockdown: hlp.disable_lockdown,
+                    retain_hbn_config_on_boot: hlp.retain_hbn_config_on_boot,
                 })
                 .unwrap_or_default(),
             server_name: em.server_name,
+            replace_dpu_loopbacks: em.replace_dpu_loopbacks,
         })
     }
 }
@@ -625,7 +644,7 @@ mod tests {
         let forge = descriptor_set
             .file
             .iter()
-            .find(|file| file.package.as_deref() == Some("forge"))
+            .find(|file| file.name.as_deref() == Some("forge.proto"))
             .unwrap();
         let expected_machine = forge
             .message_type
@@ -827,6 +846,29 @@ mod tests {
                 ..Default::default()
             })
             .is_err()
+        );
+    }
+
+    #[test]
+    fn loopback_gateway_accepts_only_absent_or_empty_values() {
+        scenarios!(
+            run = |gateway: Option<&str>| {
+                ExpectedInterface::try_from(rpc::forge::ExpectedInterface {
+                    mac_address: Some("02:00:00:00:00:20".into()),
+                    role: Some(rpc::forge::ExpectedInterfaceRole::DpuLoopback as i32),
+                    fixed_ip: Some("198.51.100.20".into()),
+                    fixed_gateway: gateway.map(str::to_string),
+                    ..Default::default()
+                }).map(|interface| interface.fixed_gateway).map_err(drop)
+            };
+            "absent gateway" {
+                None => Yields(None),
+                Some("") => Yields(None),
+            }
+            "non-empty gateway" {
+                Some("198.51.100.1") => Fails,
+                Some("not-an-ip") => Fails,
+            }
         );
     }
 
@@ -1247,7 +1289,7 @@ mod tests {
         let forge = descriptor_set
             .file
             .iter()
-            .find(|file| file.package.as_deref() == Some("forge"))
+            .find(|file| file.name.as_deref() == Some("forge.proto"))
             .unwrap();
         let expected_interface_message = forge
             .message_type
@@ -1359,6 +1401,7 @@ mod tests {
                 ..Default::default()
             }],
             replace_host_nics: true,
+            replace_dpu_loopbacks: true,
             ..Default::default()
         };
 
@@ -1366,6 +1409,7 @@ mod tests {
         assert_eq!(json["interfaces"][0]["mac_address"], "AA:BB:CC:DD:EE:FF");
         assert_eq!(json.get("host_nics"), None);
         assert_eq!(json.get("replace_host_nics"), None);
+        assert_eq!(json.get("replace_dpu_loopbacks"), None);
     }
 
     #[test]
@@ -1578,6 +1622,7 @@ mod tests {
             chassis_serial_number: "SN-1".into(),
             host_lifecycle_profile: disable_lockdown.map(|dl| rpc::forge::HostLifecycleProfile {
                 disable_lockdown: Some(dl),
+                retain_hbn_config_on_boot: None,
             }),
             ..Default::default()
         }
@@ -1603,6 +1648,53 @@ mod tests {
                 };
                 let back: rpc::forge::ExpectedMachine = em.into();
                 let back_side = back.host_lifecycle_profile.map(|p| p.disable_lockdown);
+
+                Ok::<_, ()>((data_side, back_side))
+            };
+            "true" {
+                Some(true) => Yields((Some(true), Some(Some(true)))),
+            }
+
+            "false" {
+                Some(false) => Yields((Some(false), Some(Some(false)))),
+            }
+
+            "none" {
+                None => Yields((None, None)),
+            }
+        );
+    }
+
+    /// `retain_hbn_config_on_boot` survives the rpc -> data -> rpc round trip independently
+    /// of `disable_lockdown`, so a machine carrying only the designation still
+    /// produces a profile on the way back.
+    #[test]
+    fn retain_hbn_config_on_boot_round_trips_through_proto() {
+        scenarios!(
+            run = |retain_hbn_config_on_boot| {
+                let rpc_machine = rpc::forge::ExpectedMachine {
+                    bmc_mac_address: "AA:BB:CC:DD:EE:FF".into(),
+                    bmc_username: "root".into(),
+                    bmc_password: "pass".into(),
+                    chassis_serial_number: "SN-1".into(),
+                    host_lifecycle_profile: retain_hbn_config_on_boot.map(|cp| {
+                        rpc::forge::HostLifecycleProfile {
+                            disable_lockdown: None,
+                            retain_hbn_config_on_boot: Some(cp),
+                        }
+                    }),
+                    ..Default::default()
+                };
+                let data = ExpectedMachineData::try_from(rpc_machine).map_err(drop)?;
+                let data_side = data.host_lifecycle_profile.retain_hbn_config_on_boot;
+
+                let em = ExpectedMachine {
+                    id: None,
+                    bmc_mac_address: "AA:BB:CC:DD:EE:FF".parse().map_err(drop)?,
+                    data,
+                };
+                let back: rpc::forge::ExpectedMachine = em.into();
+                let back_side = back.host_lifecycle_profile.map(|p| p.retain_hbn_config_on_boot);
 
                 Ok::<_, ()>((data_side, back_side))
             };

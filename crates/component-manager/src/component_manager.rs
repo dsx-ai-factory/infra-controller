@@ -5,6 +5,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
+use bmc_runtime::DriverConnector;
 use carbide_rack::firmware_object::rack_maintenance_access_token_key;
 use carbide_redfish::libredfish::RedfishClientPool;
 use carbide_secrets::credentials::{CredentialManager, Credentials};
@@ -530,18 +531,45 @@ impl ComponentManager {
     /// Submits a destructive, asynchronous switch factory-default reset through the
     /// selected backend.
     ///
-    /// This method returns as soon as the backend accepts the batch. It does not wait
-    /// for reboot or default-login recovery. Pass the returned opaque job ID to
-    /// [`Self::wait_for_switch_factory_reset_job`] to wait for the terminal result. An
-    /// ambiguous submission error does not prove that resubmission is safe.
+    /// Returns an available parent job ID when at least one target succeeded or
+    /// may have been dispatched, including when recording its reference failed.
+    /// If every target was rejected before dispatch, returns the submission error.
+    /// It does not wait for reboot or default-login recovery. Pass the returned job
+    /// ID to [`Self::wait_for_switch_factory_reset_job`] to wait for the terminal
+    /// result. An ambiguous submission error does not prove that resubmission is safe.
     pub async fn batch_reset_switch_factory_default(
         &self,
         endpoints: &[SwitchEndpoint],
         tls_server_domain: Option<&str>,
     ) -> Result<String, ComponentManagerError> {
-        self.nv_switch
+        let responses = self
+            .nv_switch
             .batch_reset_switch_factory_default(endpoints, tls_server_domain)
-            .await
+            .await?;
+        let mut submission_error = None;
+        for response in responses {
+            let may_have_dispatched = response.result.success
+                || matches!(
+                    &response.result.error,
+                    Some(ComponentManagerError::OperationOutcomeUnknown(_))
+                );
+            if may_have_dispatched
+                && let Some(job_id) = response.parent_job_id.filter(|id| !id.trim().is_empty())
+            {
+                return Ok(job_id);
+            }
+            if let Some(error) = response.result.error
+                && (submission_error.is_none()
+                    || matches!(error, ComponentManagerError::OperationOutcomeUnknown(_)))
+            {
+                submission_error = Some(error);
+            }
+        }
+        Err(submission_error.unwrap_or_else(|| {
+            ComponentManagerError::OperationOutcomeUnknown(
+                "switch factory-reset submission returned no job reference".into(),
+            )
+        }))
     }
 
     /// Waits for a submitted switch factory-reset operation and every target switch to
@@ -712,7 +740,8 @@ impl ComponentManager {
 /// Unknown backend names are rejected at config-deserialization time by the
 /// backend enums. When any backend uses RMS, `rack_profiles` must contain the
 /// product-family and vendor data required to build RMS node descriptors before
-/// startup continues.
+/// startup continues. Both Core and RMS compute backends require a Redfish pool
+/// supporting direct authentication; RMS uses it to delegate compute AC cycles.
 pub async fn build_component_manager(
     config: &ComponentManagerConfig,
     rack_profiles: RackProfileConfig,
@@ -720,6 +749,7 @@ pub async fn build_component_manager(
     rms_switch_system_image_client: Option<Arc<dyn RmsSwitchSystemImageStatusApi>>,
     db: Option<PgPool>,
     redfish_pool: Option<Arc<dyn RedfishClientPool>>,
+    driver_connector: Option<Arc<DriverConnector>>,
 ) -> Result<ComponentManager, ComponentManagerError> {
     validate_rms_backend_rack_profiles(config, &rack_profiles)?;
 
@@ -806,13 +836,24 @@ pub async fn build_component_manager(
                     "compute_tray_backend is 'rms' but database pool is not configured".into(),
                 )
             })?;
-            Arc::new(crate::rms::RmsBackend::new(
-                client,
-                rms_switch_system_image_client.clone(),
-                db,
-                rack_profiles.clone(),
-                config.nvos_password_rotation_enabled,
-            ))
+            let pool = redfish_pool.clone().ok_or_else(|| {
+                ComponentManagerError::InvalidArgument(
+                    "compute_tray_backend is 'rms' but Redfish client pool is not configured"
+                        .into(),
+                )
+            })?;
+            Arc::new(
+                crate::rms::RmsBackend::new(
+                    client,
+                    rms_switch_system_image_client.clone(),
+                    db,
+                    rack_profiles.clone(),
+                    config.nvos_password_rotation_enabled,
+                )
+                .with_core_compute_manager(
+                    crate::core_compute_manager::CoreComputeTrayManager::new(pool),
+                ),
+            )
         }
         ComputeBackend::Core => {
             let pool = redfish_pool.ok_or_else(|| {
@@ -821,9 +862,16 @@ pub async fn build_component_manager(
                         .into(),
                 )
             })?;
-            Arc::new(crate::core_compute_manager::CoreComputeTrayManager::new(
-                pool,
-            ))
+            let mut manager = crate::core_compute_manager::CoreComputeTrayManager::new(pool);
+            if driver_connector.is_some() {
+                let db = db.clone().ok_or_else(|| {
+                    ComponentManagerError::InvalidArgument(
+                        "bmc_backend is 'drivers' but database pool is not configured".into(),
+                    )
+                })?;
+                manager = manager.with_driver_connector(driver_connector, db);
+            }
+            Arc::new(manager)
         }
         ComputeBackend::Mock => Arc::new(crate::mock::MockComputeTrayManager),
     };
@@ -1472,7 +1520,7 @@ mod tests {
             ..Default::default()
         };
 
-        let cm = build_component_manager(&config, Default::default(), None, None, None, None)
+        let cm = build_component_manager(&config, Default::default(), None, None, None, None, None)
             .await
             .unwrap();
 
@@ -1501,6 +1549,7 @@ mod tests {
             Some(Arc::new(MockRmsApi::new())),
             None,
             Some(db),
+            None,
             None,
         )
         .await
@@ -1532,9 +1581,10 @@ mod tests {
             ..Default::default()
         };
 
-        let err = build_component_manager(&config, Default::default(), None, None, None, None)
-            .await
-            .unwrap_err();
+        let err =
+            build_component_manager(&config, Default::default(), None, None, None, None, None)
+                .await
+                .unwrap_err();
 
         assert!(matches!(err, ComponentManagerError::InvalidArgument(_)));
     }
@@ -1548,9 +1598,10 @@ mod tests {
             ..Default::default()
         };
 
-        let err = build_component_manager(&config, Default::default(), None, None, None, None)
-            .await
-            .unwrap_err();
+        let err =
+            build_component_manager(&config, Default::default(), None, None, None, None, None)
+                .await
+                .unwrap_err();
 
         assert!(matches!(err, ComponentManagerError::InvalidArgument(_)));
     }
@@ -1571,9 +1622,10 @@ mod tests {
 
         assert_eq!(config.compute_tray_backend, ComputeBackend::Rms);
 
-        let err = build_component_manager(&config, Default::default(), None, None, None, None)
-            .await
-            .unwrap_err();
+        let err =
+            build_component_manager(&config, Default::default(), None, None, None, None, None)
+                .await
+                .unwrap_err();
 
         assert!(matches!(
             err,
@@ -1592,7 +1644,8 @@ mod tests {
         };
 
         let result =
-            build_component_manager(&config, Default::default(), None, None, None, None).await;
+            build_component_manager(&config, Default::default(), None, None, None, None, None)
+                .await;
         let Err(error) = result else {
             panic!("missing RMS rack profiles should be rejected");
         };
@@ -1616,7 +1669,8 @@ mod tests {
             ..Default::default()
         };
 
-        let result = build_component_manager(&config, rack_profiles, None, None, None, None).await;
+        let result =
+            build_component_manager(&config, rack_profiles, None, None, None, None, None).await;
         let Err(error) = result else {
             panic!("missing RMS vendor should be rejected");
         };

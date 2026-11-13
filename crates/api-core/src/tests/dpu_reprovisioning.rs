@@ -139,7 +139,7 @@ async fn assert_dpu_reprovision_host_boot_repair<ID>(
     env: &TestEnv,
     machine: &TestMachine<ID>,
     expected_states: Vec<ManagedHostState>,
-) -> Machine<ID>
+) -> Box<Machine<ID>>
 where
     ID: MachineIdSubtypeTrait,
     db::DatabaseError: From<<ID as TryFrom<MachineId>>::Error>,
@@ -641,6 +641,7 @@ async fn test_dpu_agent_control_requires_requested_machine(pool: sqlx::PgPool) {
         .api
         .forge_agent_control(tonic::Request::new(rpc::forge::ForgeAgentControlRequest {
             machine_id: Some(dpu_id.into()),
+            nic_firmware_site_cache_supported: false,
         }))
         .await
         .unwrap_err();
@@ -661,6 +662,7 @@ async fn test_dpu_agent_control_preserves_database_error_details(pool: sqlx::PgP
         .api
         .forge_agent_control(tonic::Request::new(rpc::forge::ForgeAgentControlRequest {
             machine_id: Some(dpu_id.into()),
+            nic_firmware_site_cache_supported: false,
         }))
         .await
         .unwrap_err();
@@ -689,6 +691,7 @@ async fn test_dpu_agent_control_preserves_lookup_error(pool: sqlx::PgPool) {
         .api
         .forge_agent_control(tonic::Request::new(rpc::forge::ForgeAgentControlRequest {
             machine_id: Some(dpu_id.into()),
+            nic_firmware_site_cache_supported: false,
         }))
         .await;
 
@@ -750,6 +753,7 @@ async fn test_dpu_agent_control_preserves_host_state_decode_error(pool: sqlx::Pg
         .api
         .forge_agent_control(tonic::Request::new(rpc::forge::ForgeAgentControlRequest {
             machine_id: Some(mh.dpu_ids[0].into()),
+            nic_firmware_site_cache_supported: false,
         }))
         .await
         .unwrap_err();
@@ -809,6 +813,7 @@ async fn test_host_agent_control_preserves_scout_contact_write_error(pool: sqlx:
         .api
         .forge_agent_control(tonic::Request::new(rpc::forge::ForgeAgentControlRequest {
             machine_id: Some(mh.id.into()),
+            nic_firmware_site_cache_supported: false,
         }))
         .await
         .unwrap_err();
@@ -872,6 +877,7 @@ async fn test_dpu_agent_control_uses_host_state_and_requires_attachment(pool: sq
         .api
         .forge_agent_control(tonic::Request::new(rpc::forge::ForgeAgentControlRequest {
             machine_id: Some(dpu_id.into()),
+            nic_firmware_site_cache_supported: false,
         }))
         .await
         .unwrap()
@@ -894,6 +900,7 @@ async fn test_dpu_agent_control_uses_host_state_and_requires_attachment(pool: sq
         .api
         .forge_agent_control(tonic::Request::new(rpc::forge::ForgeAgentControlRequest {
             machine_id: Some(dpu_id.into()),
+            nic_firmware_site_cache_supported: false,
         }))
         .await
         .unwrap()
@@ -915,6 +922,7 @@ async fn test_dpu_agent_control_uses_host_state_and_requires_attachment(pool: sq
         .api
         .forge_agent_control(tonic::Request::new(rpc::forge::ForgeAgentControlRequest {
             machine_id: Some(dpu_id.into()),
+            nic_firmware_site_cache_supported: false,
         }))
         .await
         .unwrap_err();
@@ -951,6 +959,7 @@ async fn test_agent_control_updates_scout_contact_only_for_host_requests(pool: s
         env.api
             .forge_agent_control(tonic::Request::new(rpc::forge::ForgeAgentControlRequest {
                 machine_id: Some(machine_id),
+                nic_firmware_site_cache_supported: false,
             }))
             .await
             .unwrap();
@@ -1313,8 +1322,24 @@ async fn assert_reprov_tenant_state(
     );
 }
 
-#[crate::sqlx_test]
-async fn test_instance_reprov_without_firmware_upgrade(pool: sqlx::PgPool) {
+#[test]
+fn test_instance_reprov_without_firmware_upgrade() {
+    let args = sqlx::testing::TestArgs::new(concat!(
+        module_path!(),
+        "::test_instance_reprov_without_firmware_upgrade"
+    ));
+    let test_fn: fn(sqlx::PgPool) -> _ = instance_reprov_without_firmware_upgrade;
+    // Match Core's worker stack: driving the machine state handler through
+    // reprovisioning in a debug build exceeds libtest's default.
+    std::thread::Builder::new()
+        .stack_size(8 * 1024 * 1024)
+        .spawn(move || sqlx_testing::TestFn::run_test(test_fn, args))
+        .unwrap()
+        .join()
+        .expect("instance reprovisioning test panicked");
+}
+
+async fn instance_reprov_without_firmware_upgrade(pool: sqlx::PgPool) {
     let env = create_test_env(pool).await;
     let segment_id = env.create_vpc_and_tenant_segment().await;
     let mh = create_managed_host(&env).await;

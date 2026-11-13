@@ -124,6 +124,7 @@ impl InternalRBACRules {
             vec![ForgeAdminCLI, Machineatron, SiteAgent],
         );
         x.perm("AttachNetworkSegmentToVpc", vec![ForgeAdminCLI]);
+        x.perm("AddNetworkSegmentPrefix", vec![ForgeAdminCLI]);
         x.perm(
             "DeleteNetworkSegment",
             vec![ForgeAdminCLI, Machineatron, SiteAgent],
@@ -300,6 +301,7 @@ impl InternalRBACRules {
             ],
         );
         x.perm("FindHostStatesByIds", vec![ForgeAdminCLI, SiteHealthProbe]);
+        x.perm("FindMachineStatesByIds", vec![ForgeAdminCLI]);
         x.perm("FindConnectedDevicesByDpuMachineIds", vec![ForgeAdminCLI]);
         x.perm("FindMachineIdsByBmcIps", vec![ForgeAdminCLI, Flow]);
         x.perm("FindMachineHealthHistories", vec![ForgeAdminCLI, SiteAgent]);
@@ -332,6 +334,7 @@ impl InternalRBACRules {
         x.perm("GetSiteExplorerLastRun", vec![ForgeAdminCLI, Machineatron]);
         x.perm("ClearSiteExplorationError", vec![ForgeAdminCLI, SiteAgent]);
         x.perm("IsBmcInManagedHost", vec![ForgeAdminCLI]);
+        x.perm("FindBmcDriverSelection", vec![ForgeAdminCLI]);
         x.perm("Explore", vec![ForgeAdminCLI, Flow]);
         x.perm("ReExploreEndpoint", vec![ForgeAdminCLI, Flow, SiteAgent]);
         x.perm("RefreshEndpointReport", vec![ForgeAdminCLI, Flow]);
@@ -568,6 +571,14 @@ impl InternalRBACRules {
             vec![ForgeAdminCLI],
         );
         x.perm("ReWrapSecrets", vec![ForgeAdminCLI]);
+        // Register the contract RPCs without granting access before tenant/site
+        // authorization and the external-validation workflow are implemented.
+        x.perm("FindExternalValidationHoldIds", vec![]);
+        x.perm("FindExternalValidationHoldsByIds", vec![]);
+        x.perm("StartExternalValidation", vec![]);
+        x.perm("CancelExternalValidation", vec![]);
+        x.perm("CompleteExternalValidation", vec![]);
+        x.perm("RemoveExternalValidationHold", vec![]);
         x.perm("GetIpxeTemplate", vec![ForgeAdminCLI, SiteAgent]);
         x.perm("ListIpxeTemplates", vec![ForgeAdminCLI, SiteAgent]);
         x.perm("FindRackStateHistories", vec![ForgeAdminCLI, Machineatron]);
@@ -820,9 +831,14 @@ impl InternalRBACRules {
             vec![ForgeAdminCLI, SiteAgent],
         );
         x.perm("TriggerMachineAttestation", vec![ForgeAdminCLI, SiteAgent]);
-        x.perm("CancelMachineAttestation", vec![ForgeAdminCLI, SiteAgent]);
-        x.perm("ListAttestationMachines", vec![ForgeAdminCLI, SiteAgent]);
-        x.perm("GetAttestationMachine", vec![ForgeAdminCLI, SiteAgent]);
+        x.perm("WaiveAttestation", vec![ForgeAdminCLI, SiteAgent]);
+        x.perm("FailAttestation", vec![ForgeAdminCLI, SiteAgent]);
+        x.perm("ListAttestation", vec![ForgeAdminCLI, SiteAgent]);
+        x.perm("GetAttestation", vec![ForgeAdminCLI, SiteAgent]);
+        x.perm(
+            "ListMachineAttestationStatuses",
+            vec![ForgeAdminCLI, SiteAgent],
+        );
         x.perm("CreateAttestationProfile", vec![ForgeAdminCLI]);
         x.perm("UpdateAttestationProfile", vec![ForgeAdminCLI]);
         x.perm("DeleteAttestationProfile", vec![ForgeAdminCLI]);
@@ -967,11 +983,11 @@ impl InternalRBACRules {
             "DeleteAllExpectedRacks",
             vec![ForgeAdminCLI, Machineatron, SiteAgent],
         );
-        x.perm("CreateExpectedNvLinkDomain", vec![ForgeAdminCLI, Flow]);
-        x.perm("DeleteExpectedNvLinkDomain", vec![ForgeAdminCLI, Flow]);
-        x.perm("GetExpectedNvLinkDomain", vec![ForgeAdminCLI, Flow]);
-        x.perm("FindExpectedNvLinkDomainIds", vec![ForgeAdminCLI, Flow]);
-        x.perm("FindExpectedNvLinkDomainsByIds", vec![ForgeAdminCLI, Flow]);
+        x.perm("CreateNvLinkDomain", vec![ForgeAdminCLI, Flow]);
+        x.perm("DeleteNvLinkDomain", vec![ForgeAdminCLI, Flow]);
+        x.perm("GetNvLinkDomain", vec![ForgeAdminCLI, Flow]);
+        x.perm("FindNvLinkDomainIds", vec![ForgeAdminCLI, Flow]);
+        x.perm("FindNvLinkDomainsByIds", vec![ForgeAdminCLI, Flow]);
         x.perm(
             "AddExpectedRackGroup",
             vec![ForgeAdminCLI, Machineatron, SiteAgent],
@@ -1027,6 +1043,7 @@ impl InternalRBACRules {
         x.perm("ListRackProfiles", vec![ForgeAdminCLI]);
         x.perm("RackManagerCall", vec![ForgeAdminCLI]);
         x.perm("GetRmsVersion", vec![ForgeAdminCLI]);
+        x.perm("GetRmsJobStatus", vec![ForgeAdminCLI]);
         x.perm("ScoutStream", vec![Scout]);
         x.perm("ScoutStreamShowConnections", vec![ForgeAdminCLI]);
         x.perm("ScoutStreamDisconnect", vec![ForgeAdminCLI]);
@@ -1100,6 +1117,9 @@ impl InternalRBACRules {
         x.perm("DeleteComputeAllocation", vec![ForgeAdminCLI, SiteAgent]);
         x.perm("ComponentPowerControl", vec![ForgeAdminCLI, Flow]);
         x.perm("GetComponentPowerDetails", vec![ForgeAdminCLI, Flow]);
+        x.perm("GetComponentFirmwareDetails", vec![ForgeAdminCLI, Flow]);
+        x.perm("ComponentReset", vec![ForgeAdminCLI, Flow]);
+        x.perm("GetComponentResetStatus", vec![ForgeAdminCLI, Flow]);
         x.perm("GetComponentInventory", vec![ForgeAdminCLI, Flow]);
         x.perm("UpdateComponentFirmware", vec![ForgeAdminCLI, Flow]);
         x.perm(
@@ -1325,6 +1345,46 @@ mod rbac_rule_tests {
         );
     }
 
+    /// Prefix mutation is operator-only even though existing segment creation
+    /// also permits site-agent callers. Missing authentication never grants it.
+    #[test]
+    fn add_network_segment_prefix_operator_permissions() {
+        // Check the whole grant set, including the absence of Machineatron.
+        assert_eq!(
+            INTERNAL_RBAC_RULES.perms["AddNetworkSegmentPrefix"].principals,
+            RuleInfo::new(vec![ForgeAdminCLI]).principals,
+        );
+        check_values(
+            [
+                Check {
+                    scenario: "operator certificate",
+                    input: vec![Principal::ExternalUser(ExternalUserInfo::new(
+                        None,
+                        "nico-cli-client".to_string(),
+                        None,
+                    ))],
+                    expect: true,
+                },
+                // Do not inherit the broader CreateNetworkSegment permission list.
+                Check {
+                    scenario: "site agent cannot append infrastructure prefixes",
+                    input: vec![Principal::SpiffeServiceIdentifier(
+                        "elektra-site-agent".to_string(),
+                    )],
+                    expect: false,
+                },
+                Check {
+                    scenario: "unauthenticated",
+                    input: vec![],
+                    expect: false,
+                },
+            ],
+            |principals| {
+                InternalRBACRules::allowed_from_static("AddNetworkSegmentPrefix", &principals)
+            },
+        );
+    }
+
     #[test]
     fn vpc_allocation_operation_permissions() {
         // Operator certificates map to ExternalUser; its group label is not
@@ -1400,44 +1460,50 @@ mod rbac_rule_tests {
         }
     }
 
-    /// Power details belong to operator and Flow callers; unrelated device and
-    /// site services must not gain access through this additive RPC.
+    /// Component power/firmware details and reset operations belong to operator and
+    /// Flow callers; unrelated device and site services must remain denied.
     #[test]
-    fn component_power_details_operator_permissions() {
+    fn component_operator_permissions() {
         use carbide_test_support::{Check, check_values};
 
         check_values(
             [
                 Check {
-                    scenario: "admin CLI may read power details",
+                    scenario: "admin CLI may access component operations",
                     input: Principal::ExternalUser(ExternalUserInfo::new(
                         None,
                         "nico-cli-client".into(),
                         None,
                     )),
-                    expect: true,
+                    expect: [true; 5],
                 },
                 Check {
-                    scenario: "Flow may compose power details",
+                    scenario: "Flow may access component operations",
                     input: Principal::SpiffeServiceIdentifier("nico-flow".into()),
-                    expect: true,
+                    expect: [true, true, true, true, false],
                 },
                 Check {
                     scenario: "site agent has no operator access",
                     input: Principal::SpiffeServiceIdentifier("elektra-site-agent".into()),
-                    expect: false,
+                    expect: [false; 5],
                 },
                 Check {
                     scenario: "machine identity has no operator access",
                     input: Principal::SpiffeMachineIdentifier("host".into()),
-                    expect: false,
+                    expect: [false; 5],
                 },
             ],
             |principal| {
-                InternalRBACRules::allowed_from_static(
+                [
                     "GetComponentPowerDetails",
-                    std::slice::from_ref(&principal),
-                )
+                    "GetComponentFirmwareDetails",
+                    "ComponentReset",
+                    "GetComponentResetStatus",
+                    "GetRmsJobStatus",
+                ]
+                .map(|method| {
+                    InternalRBACRules::allowed_from_static(method, std::slice::from_ref(&principal))
+                })
             },
         );
     }
@@ -1530,6 +1596,34 @@ mod rbac_rule_tests {
             "SetMaintenance",
             std::slice::from_ref(&probe),
         ));
+    }
+
+    /// Compact machine states belong to the admin CLI, not MaT or the site probe.
+    #[test]
+    fn find_machine_states_by_ids_permissions() {
+        assert_eq!(
+            INTERNAL_RBAC_RULES.perms["FindMachineStatesByIds"].principals,
+            RuleInfo::new(vec![ForgeAdminCLI]).principals,
+        );
+        let service = |name: &str| vec![Principal::SpiffeServiceIdentifier(name.to_string())];
+        let admin_cli = vec![Principal::ExternalUser(ExternalUserInfo::new(
+            None,
+            "nico-cli-client".into(),
+            None,
+        ))];
+        value_scenarios!(
+            run = |principals: Vec<Principal>| {
+                InternalRBACRules::allowed_from_static("FindMachineStatesByIds", &principals)
+            };
+            "operator state reader" {
+                admin_cli => true,
+            }
+            "other services and no principal" {
+                service("machine-a-tron") => false,
+                service("nico-site-health-probe") => false,
+                vec![] => false,
+            }
+        );
     }
 
     /// The compact host read is for operators and the probe only.
@@ -1664,7 +1758,7 @@ mod rbac_rule_tests {
     }
 
     #[test]
-    fn expected_nvlink_domain_inventory_allows_admin_and_flow() {
+    fn nvlink_domain_inventory_allows_admin_and_flow() {
         use carbide_test_support::{Check, check_values};
 
         let principals = [
@@ -1675,11 +1769,11 @@ mod rbac_rule_tests {
         ];
         check_values(
             [
-                "CreateExpectedNvLinkDomain",
-                "DeleteExpectedNvLinkDomain",
-                "GetExpectedNvLinkDomain",
-                "FindExpectedNvLinkDomainIds",
-                "FindExpectedNvLinkDomainsByIds",
+                "CreateNvLinkDomain",
+                "DeleteNvLinkDomain",
+                "GetNvLinkDomain",
+                "FindNvLinkDomainIds",
+                "FindNvLinkDomainsByIds",
             ]
             .map(|method| Check {
                 scenario: method,
@@ -1999,6 +2093,22 @@ mod rbac_rule_tests {
         }
 
         Ok(())
+    }
+
+    /// Contract publication must not authorize any internal principal.
+    #[test]
+    fn external_validation_contract_has_no_static_grants() {
+        let rules = InternalRBACRules::new();
+        for method in [
+            "FindExternalValidationHoldIds",
+            "FindExternalValidationHoldsByIds",
+            "StartExternalValidation",
+            "CancelExternalValidation",
+            "CompleteExternalValidation",
+            "RemoveExternalValidationHold",
+        ] {
+            assert!(rules.perms[method].principals.is_empty(), "{method}");
+        }
     }
 
     #[test]

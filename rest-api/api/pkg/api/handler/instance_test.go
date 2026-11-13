@@ -1530,6 +1530,18 @@ func TestCreateInstanceHandler_Handle(t *testing.T) {
 		check                    func(t *testing.T)
 		checkResponse            func(t *testing.T, response *model.APIInstance)
 	}
+
+	// Baseline intent belongs to the registration and must block instance-scoped deployments.
+	baselineService, baselineErr := cdbm.NewDpuExtensionServiceDAO(dbSession).Create(context.Background(), nil, cdbm.DpuExtensionServiceCreateInput{
+		Name:           "baseline-attachment-test",
+		ServiceType:    cdbm.DpuExtensionServiceServiceTypeDpfHelmChart,
+		DeploymentType: cdbm.DpuExtensionServiceDeploymentTypeBaseline,
+		TenantID:       tn1.ID, SiteID: st1.ID, CreatedBy: tnu1.ID,
+		Status:         cdbm.DpuExtensionServiceStatusReady,
+		ActiveVersions: []string{"V1-T1761856992374052", "2.0.0"},
+	})
+	require.NoError(t, baselineErr)
+
 	tests := []testCase{
 		{
 			name: "test Instance create API endpoint rejects power profile when DPS power management is disabled",
@@ -2733,6 +2745,42 @@ func TestCreateInstanceHandler_Handle(t *testing.T) {
 			},
 			wantErr: false,
 		},
+		// Baseline placement cannot be activated through instance attachment.
+		{
+			name: "rejects baseline service attachment on create",
+			fields: fields{
+				dbSession: dbSession,
+				tc:        tc,
+				cfg:       cfg,
+			},
+			args: args{
+				reqData: &model.APIInstanceCreateRequest{
+					Name:       "Test Instance with DPU Extension Service specified for deployment belongs to a different Site",
+					TenantID:   tn1.ID.String(),
+					MachineID:  cutil.GetPtr(mcassigned.ID),
+					VpcID:      vpc1.ID.String(),
+					UserData:   cutil.GetPtr(""),
+					IpxeScript: cutil.GetPtr(common.DefaultIpxeScript),
+					Interfaces: []model.APIInterfaceCreateOrUpdateRequest{
+						{
+							SubnetID: cutil.GetPtr(subnet1.ID.String()),
+						},
+					},
+					DpuExtensionServiceDeployments: []model.APIDpuExtensionServiceDeploymentRequest{
+						{
+							DpuExtensionServiceID: baselineService.ID.String(),
+							Version:               "V1-T1761856992374052",
+						},
+					},
+					PhoneHomeEnabled: cutil.GetPtr(false),
+				},
+				reqOrg:      tnOrg,
+				reqUser:     tnu1,
+				respCode:    http.StatusBadRequest,
+				respMessage: "Baseline DPU Extension Services cannot be attached",
+			},
+			wantErr: false,
+		},
 		{
 			name: "test Instance create API endpoint failure, DPU Extension Service specified for deployment belongs to a different Site",
 			fields: fields{
@@ -3556,7 +3604,7 @@ func TestCreateInstanceHandler_Handle(t *testing.T) {
 				reqOrg:      tnOrg,
 				reqUser:     tnu1,
 				respCode:    http.StatusBadRequest,
-				respMessage: "Operating System specified in request does not allow overriding `userData`",
+				respMessage: "the Operating System specified in request does not allow overriding `userData`",
 			},
 			wantErr: false,
 		},
@@ -4108,7 +4156,7 @@ func TestCreateInstanceHandler_Handle(t *testing.T) {
 				reqOrg:      tnOrg,
 				reqUser:     tnu1,
 				respCode:    http.StatusBadRequest,
-				respMessage: "Duplicate Interface configuration specified for Device MT42822 BlueField-2 integrated ConnectX-6 Dx network controller",
+				respMessage: "duplicate Interface configuration specified for Device MT42822 BlueField-2 integrated ConnectX-6 Dx network controller",
 			},
 			wantErr:            false,
 			verifyChildSpanner: true,
@@ -5667,6 +5715,15 @@ func TestUpdateInstanceHandler_Handle(t *testing.T) {
 		t, dbSession, instNoIB.ID, nil, &vpcPrefixSite2.ID, nil, cdbm.InterfaceStatusDeleting,
 	)
 
+	// Reissues must retire active rows without restarting cleanup for older deletions.
+	retiringUpdated := time.Now().UTC().Add(-2 * time.Minute).Truncate(time.Microsecond)
+	instRetiringIB := testInstanceBuildInstance(t, dbSession, "test-instance-retiring-ib", tn1.ID, ip.ID, st1.ID, &ist1.ID, vpc1.ID, cutil.GetPtr(mcIbPartitionSwap.ID), &os2.ID, nil, cdbm.InstanceStatusReady)
+	retiringIB := testInstanceBuildIBInterface(t, dbSession, instRetiringIB, st1, ibp1, 0, true, nil, cutil.GetPtr(cdbm.InfiniBandInterfaceStatusDeleting), false)
+	activeIB := testInstanceBuildIBInterface(t, dbSession, instRetiringIB, st1, ibp2, 1, true, nil, cutil.GetPtr(cdbm.InfiniBandInterfaceStatusReady), false)
+	instRetiringNVLink := testInstanceBuildInstance(t, dbSession, "test-instance-retiring-nvlink", tn1.ID, ip.ID, st3.ID, &ist4.ID, vpc4.ID, cutil.GetPtr(mc5.ID), &os2.ID, nil, cdbm.InstanceStatusReady)
+	retiringNVLink := testInstanceBuildInstanceNVLinkInterface(t, dbSession, st3.ID, instRetiringNVLink.ID, nvllp1.ID, nil, nil, 0, cdbm.NVLinkInterfaceStatusDeleting)
+	activeNVLink := testInstanceBuildInstanceNVLinkInterface(t, dbSession, st3.ID, instRetiringNVLink.ID, nvllp2.ID, nil, nil, 1, cdbm.NVLinkInterfaceStatusReady)
+
 	type fields struct {
 		dbSession *cdb.Session
 		tc        temporalClient.Client
@@ -5718,6 +5775,17 @@ func TestUpdateInstanceHandler_Handle(t *testing.T) {
 		// respSecondaryVpcIDs overrides the expected response when a dropped Interface is still Deleting.
 		respSecondaryVpcIDs []string
 	}
+
+	// Baseline intent belongs to the registration and must block instance-scoped deployments.
+	baselineService, baselineErr := cdbm.NewDpuExtensionServiceDAO(dbSession).Create(context.Background(), nil, cdbm.DpuExtensionServiceCreateInput{
+		Name:           "baseline-attachment-test",
+		ServiceType:    cdbm.DpuExtensionServiceServiceTypeDpfHelmChart,
+		DeploymentType: cdbm.DpuExtensionServiceDeploymentTypeBaseline,
+		TenantID:       tn1.ID, SiteID: st1.ID, CreatedBy: tnu1.ID,
+		Status:         cdbm.DpuExtensionServiceStatusReady,
+		ActiveVersions: []string{"V1-T1761856992374052", "2.0.0"},
+	})
+	require.NoError(t, baselineErr)
 
 	tests := []struct {
 		name                        string
@@ -6496,6 +6564,35 @@ func TestUpdateInstanceHandler_Handle(t *testing.T) {
 			},
 			wantErr:                     false,
 			verifySiteControllerRequest: true,
+			verifyChildSpanner:          true,
+		},
+		// Baseline placement cannot be activated through instance attachment.
+		{
+			name: "rejects baseline service attachment on update",
+			fields: fields{
+				dbSession: dbSession,
+				tc:        tc,
+				scp:       scp,
+				cfg:       cfg,
+			},
+			args: args{
+				reqData: &model.APIInstanceUpdateRequest{
+					Name:        cutil.GetPtr("test-instance-des-update"),
+					Description: cutil.GetPtr("Test Instance updated description"),
+					IpxeScript:  os2.IpxeScript,
+					DpuExtensionServiceDeployments: []model.APIDpuExtensionServiceDeploymentRequest{{
+						DpuExtensionServiceID: baselineService.ID.String(), Version: "2.0.0",
+					}},
+				},
+				reqInstance:           inst15.ID.String(),
+				cleanInstanceToStatus: inst15.Status,
+				reqOrg:                tnOrg1,
+				reqUser:               tnu1,
+				respCode:              http.StatusBadRequest,
+				respMessage:           cutil.GetPtr("Baseline DPU Extension Services cannot be attached"),
+			},
+			wantErr:                     false,
+			verifySiteControllerRequest: false,
 			verifyChildSpanner:          true,
 		},
 		{
@@ -8743,6 +8840,71 @@ func TestUpdateInstanceHandler_Handle(t *testing.T) {
 			verifySiteControllerRequest: true,
 			verifyChildSpanner:          true,
 		},
+		{
+			name:   "InfiniBand reissue preserves already deleting interface timestamp",
+			fields: fields{dbSession: dbSession, tc: tc, scp: scp, cfg: cfg},
+			args: args{
+				reqData: &model.APIInstanceUpdateRequest{
+					IpxeScript: os2.IpxeScript,
+					InfiniBandInterfaces: []model.APIInfiniBandInterfaceCreateOrUpdateRequest{{
+						InfiniBandPartitionID: ibp1.ID.String(),
+						Device:                retiringIB.Device,
+						DeviceInstance:        retiringIB.DeviceInstance,
+						IsPhysical:            true,
+					}},
+				},
+				reqInstance:         instRetiringIB.ID.String(),
+				reqOrg:              tnOrg1,
+				reqUser:             tnu1,
+				respCode:            http.StatusOK,
+				ibInterfaceToDelete: []cdbm.InfiniBandInterface{*retiringIB, *activeIB},
+				beforeHandle: func(t *testing.T) {
+					_, err := dbSession.DB.Exec("UPDATE infiniband_interface SET updated = ? WHERE instance_id = ?", retiringUpdated, instRetiringIB.ID)
+					require.NoError(t, err)
+				},
+				afterHandle: func(t *testing.T) {
+					dao := cdbm.NewInfiniBandInterfaceDAO(dbSession)
+					retiring, err := dao.GetByID(ctx, nil, retiringIB.ID, nil)
+					require.NoError(t, err)
+					assert.True(t, retiring.Updated.Equal(retiringUpdated), "reissue must not refresh the deleting row")
+					active, err := dao.GetByID(ctx, nil, activeIB.ID, nil)
+					require.NoError(t, err)
+					assert.True(t, active.Updated.After(retiringUpdated), "new deletion must update the active row")
+				},
+			},
+			verifySiteControllerRequest: true,
+		},
+		{
+			name:   "NVLink reissue preserves already deleting interface timestamp",
+			fields: fields{dbSession: dbSession, tc: tc, scp: scp, cfg: cfg},
+			args: args{
+				reqData: &model.APIInstanceUpdateRequest{
+					IpxeScript: os2.IpxeScript,
+					NVLinkInterfaces: []model.APINVLinkInterfaceCreateOrUpdateRequest{{
+						NVLinkLogicalPartitionID: nvllp1.ID.String(), DeviceInstance: retiringNVLink.DeviceInstance,
+					}},
+				},
+				reqInstance:              instRetiringNVLink.ID.String(),
+				reqOrg:                   tnOrg1,
+				reqUser:                  tnu1,
+				respCode:                 http.StatusOK,
+				nvlinkInterfacesToDelete: []cdbm.NVLinkInterface{*retiringNVLink, *activeNVLink},
+				beforeHandle: func(t *testing.T) {
+					_, err := dbSession.DB.Exec("UPDATE nvlink_interface SET updated = ? WHERE instance_id = ?", retiringUpdated, instRetiringNVLink.ID)
+					require.NoError(t, err)
+				},
+				afterHandle: func(t *testing.T) {
+					dao := cdbm.NewNVLinkInterfaceDAO(dbSession)
+					retiring, err := dao.GetByID(ctx, nil, retiringNVLink.ID, nil)
+					require.NoError(t, err)
+					assert.True(t, retiring.Updated.Equal(retiringUpdated), "reissue must not refresh the deleting row")
+					active, err := dao.GetByID(ctx, nil, activeNVLink.ID, nil)
+					require.NoError(t, err)
+					assert.True(t, active.Updated.After(retiringUpdated), "new deletion must update the active row")
+				},
+			},
+			verifySiteControllerRequest: true,
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -8778,7 +8940,7 @@ func TestUpdateInstanceHandler_Handle(t *testing.T) {
 			var beforeSpectrumXSSHAssociations []cdbm.SSHKeyGroupInstanceAssociation
 			if len(tt.args.reqData.SpectrumXAttachments) > 0 && (tt.args.respCode == http.StatusOK || tt.args.expectSpectrumXUnchanged) {
 				var readErr error
-				beforeSpectrumXInstance, readErr = cdbm.NewInstanceDAO(dbSession).GetByID(ctx, nil, uuid.MustParse(tt.args.reqInstance), nil)
+				beforeSpectrumXInstance, readErr = cdbm.NewInstanceDAO(dbSession).GetByID(ctx, nil, uuid.MustParse(tt.args.reqInstance), nil, false)
 				require.NoError(t, readErr)
 				require.NotNil(t, beforeSpectrumXInstance.MachineID)
 				id := *beforeSpectrumXInstance.MachineID
@@ -8811,7 +8973,7 @@ func TestUpdateInstanceHandler_Handle(t *testing.T) {
 				}
 				require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &response))
 				assert.Equal(t, "nico", response.Source)
-				after, readErr := cdbm.NewInstanceDAO(dbSession).GetByID(ctx, nil, beforeSpectrumXInstance.ID, nil)
+				after, readErr := cdbm.NewInstanceDAO(dbSession).GetByID(ctx, nil, beforeSpectrumXInstance.ID, nil, false)
 				require.NoError(t, readErr)
 				assert.Equal(t, beforeSpectrumXInstance, after)
 				page := cdbp.PageInput{Limit: cutil.GetPtr(cdbp.TotalLimit)}
@@ -8933,7 +9095,7 @@ func TestUpdateInstanceHandler_Handle(t *testing.T) {
 				}
 			}
 
-			reqIns, _ := insDAO.GetByID(ec.Request().Context(), nil, uuid.MustParse(tt.args.reqInstance), nil)
+			reqIns, _ := insDAO.GetByID(ec.Request().Context(), nil, uuid.MustParse(tt.args.reqInstance), nil, false)
 
 			if len(tt.expectedControllerVpcIDs) > 0 && len(tt.args.reqData.Interfaces) > 0 {
 				require.Len(t, rst.Interfaces, len(tt.args.reqData.Interfaces))
@@ -12161,7 +12323,7 @@ func TestDeleteInstanceHandler_Handle(t *testing.T) {
 			// Verify Instance in terminating state
 			insDAO := cdbm.NewInstanceDAO(dbSession)
 			insID, _ := uuid.Parse(tt.args.reqInstance)
-			dinstance, terr := insDAO.GetByID(context.Background(), nil, insID, nil)
+			dinstance, terr := insDAO.GetByID(context.Background(), nil, insID, nil, false)
 			assert.Nil(t, terr)
 			assert.Equal(t, cdbm.InstanceStatusTerminating, dinstance.Status)
 

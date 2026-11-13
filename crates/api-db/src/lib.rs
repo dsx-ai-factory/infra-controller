@@ -29,17 +29,18 @@ mod conditional_write;
 mod config_drift;
 pub mod credential_rotation;
 pub mod db_read;
+mod db_session;
 pub mod desired_firmware;
 pub mod dhcp_entry;
 pub mod dhcp_record;
-pub mod direct_dispatch_firmware_job;
+pub mod direct_dispatch_rms_job;
 pub mod dns;
 pub mod dpa_interface;
 pub mod dpu_agent_upgrade_policy;
 pub mod dpu_machine_update;
 pub mod dpu_remediation;
+pub mod expected_dpu_loopback_reservation;
 pub mod expected_machine;
-pub mod expected_nvlink_domain;
 pub mod expected_power_shelf;
 pub mod expected_rack;
 pub mod expected_rack_group;
@@ -48,6 +49,7 @@ pub mod explored_endpoints;
 pub mod explored_managed_host;
 pub mod extension_service;
 pub mod hardware_class_attesters;
+pub mod hardware_dispatch;
 pub mod health_history;
 pub mod health_report;
 pub mod host_firmware_config;
@@ -80,8 +82,10 @@ pub mod network_prefix;
 pub mod network_security_group;
 pub mod network_segment;
 pub mod nic_firmware;
+pub mod nic_firmware_artifact;
 pub mod nvl_logical_partition;
 pub mod nvl_partition;
+pub mod nvlink_domain;
 pub mod nvlink_domain_health_report;
 pub mod nvlink_nmxc_endpoints;
 pub mod operating_system;
@@ -119,6 +123,7 @@ mod writable_pool;
 pub use conditional_write::{
     ConditionalWrite, ControllerStateNotCurrent, MaintenanceRequestNotCurrent,
 };
+pub use db_session::DbSessionGuard;
 pub use writable_pool::writable_pool_options;
 
 #[cfg(any(test, feature = "test-support"))]
@@ -487,6 +492,14 @@ impl From<InvalidMachineType> for DatabaseError {
 }
 
 impl DatabaseError {
+    /// Identifies PostgreSQL lock-unavailable errors (55P03), including NOWAIT rejection.
+    /// Roll back the failed transaction before retrying.
+    pub fn is_lock_not_available(&self) -> bool {
+        matches!(self, DatabaseError::Sqlx(error)
+            if error.source.as_database_error().and_then(|error| error.code()).as_deref()
+                == Some("55P03"))
+    }
+
     /// Returns true if the database error wrapps a sqlx::Error::RowNotFound, or if it's our own DatabaseError::NotFoundError
     pub fn is_not_found(&self) -> bool {
         match self {

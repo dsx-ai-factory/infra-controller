@@ -25,6 +25,7 @@ mod rack_firmware;
 pub mod test_support;
 
 use std::collections::HashMap;
+use std::convert::Infallible;
 use std::default::Default;
 use std::io;
 use std::net::{IpAddr, Ipv4Addr};
@@ -32,6 +33,8 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
+use bmc_backend::{BackendBmc, BmcConnectError, BmcConnector};
+use bmc_runtime::DriverConnector;
 use carbide_firmware::{
     ArtifactStatus, FirmwareConfigSnapshot, FirmwareDownloader, ResolvedFirmwareArtifactSource,
     resolve_files_firmware_artifact,
@@ -115,6 +118,8 @@ pub struct PreingestionManager {
 struct PreingestionManagerStatic {
     config: PreingestionManagerConfig,
     redfish_client_pool: Arc<dyn RedfishClientPool>,
+    /// Connects moved BMC operations through the site's `bmc_backend`.
+    bmc_connector: BmcConnector,
     downloader: FirmwareDownloader,
     upload_limiter: Arc<Semaphore>,
     upgrade_script_state: Arc<UpdateScriptManager>,
@@ -166,6 +171,7 @@ impl PreingestionManager {
 
         PreingestionManager {
             static_info: Arc::new(PreingestionManagerStatic {
+                bmc_connector: BmcConnector::Libredfish(redfish_client_pool.clone()),
                 redfish_client_pool,
                 downloader: downloader.unwrap_or_default(),
                 upload_limiter: upload_limiter.unwrap_or(Arc::new(Semaphore::new(5))),
@@ -184,6 +190,15 @@ impl PreingestionManager {
             metric_holder,
             database_connection,
         }
+    }
+
+    /// Runs moved BMC operations through `driver_connector`; `None` keeps them on
+    /// libredfish.
+    pub fn with_driver_connector(mut self, driver_connector: Option<Arc<DriverConnector>>) -> Self {
+        let static_info = Arc::make_mut(&mut self.static_info);
+        static_info.bmc_connector =
+            BmcConnector::new(static_info.redfish_client_pool.clone(), driver_connector);
+        self
     }
 
     /// Enable rack-profile firmware-object handling with an RMS compute-tray backend.
@@ -515,6 +530,7 @@ async fn one_endpoint(
             reason: _,
             host_bmc_ip,
             pre_copy_powercycle,
+            ..
         } => {
             static_info
                 .in_bfb_recovery_needed(db, endpoint, host_bmc_ip, *pre_copy_powercycle)
@@ -525,6 +541,7 @@ async fn one_endpoint(
             host_bmc_ip,
             phase,
             post_install,
+            ..
         } => {
             static_info
                 .in_bfb_platform_powercycle(db, endpoint, host_bmc_ip, phase, *post_install)
@@ -534,6 +551,7 @@ async fn one_endpoint(
         PreingestionState::BfbCopyInProgress {
             started_at,
             host_bmc_ip,
+            ..
         } => {
             static_info
                 .in_bfb_copy_in_progress(db, endpoint, started_at, host_bmc_ip)
@@ -543,6 +561,7 @@ async fn one_endpoint(
         PreingestionState::BfbInstallationWait {
             started_at,
             host_bmc_ip,
+            ..
         } => {
             static_info
                 .in_bfb_installation_wait(db, endpoint, started_at, host_bmc_ip)
@@ -567,6 +586,37 @@ async fn one_endpoint(
 }
 
 impl PreingestionManagerStatic {
+    /// Connects to `endpoint`'s BMC through the configured `bmc_backend`.
+    #[expect(
+        dead_code,
+        reason = "callers arrive as operations move to the driver system"
+    )]
+    async fn connect_bmc(
+        &self,
+        endpoint: &ExploredEndpoint,
+        db_pool: &PgPool,
+    ) -> PreingestionManagerResult<BackendBmc> {
+        let bmc_access_info =
+            db::machine_interface::lookup_bmc_access_info(db_pool, endpoint.address, None).await?;
+        self.bmc_connector
+            .connect(&bmc_access_info, || async {
+                Ok::<_, Infallible>(endpoint.report.clone())
+            })
+            .await
+            .map_err(|error| match error {
+                BmcConnectError::Report(never) => match never {},
+                BmcConnectError::Libredfish(RedfishClientCreationError::RedfishError(error)) => {
+                    PreingestionManagerError::RedfishError(error)
+                }
+                BmcConnectError::Libredfish(error) => {
+                    PreingestionManagerError::internal(format!("{error}"))
+                }
+                BmcConnectError::Drivers(error) => {
+                    PreingestionManagerError::internal(error.to_string())
+                }
+            })
+    }
+
     async fn firmware_config_snapshot(
         &self,
         db: &PgPool,
@@ -2941,6 +2991,7 @@ impl PreingestionManagerStatic {
                     *host_bmc_ip,
                     model::site_explorer::BfbPlatformPowercyclePhase::PowerOff,
                     false,
+                    endpoint.preingestion_state.bfb_target_mac(),
                     txn,
                 )
                 .boxed()
@@ -2966,6 +3017,13 @@ impl PreingestionManagerStatic {
 
         match phase {
             BfbPlatformPowercyclePhase::PowerOff => {
+                if self
+                    .validate_bfb_target(db, endpoint, *host_bmc_ip)
+                    .await?
+                    .is_none()
+                {
+                    return Ok(());
+                }
                 let redfish_client = match self
                     .redfish_client_pool
                     .create_client_for_ingested_host(*host_bmc_ip, db)
@@ -3011,6 +3069,7 @@ impl PreingestionManagerStatic {
                         *host_bmc_ip,
                         BfbPlatformPowercyclePhase::PowerOn,
                         post_install,
+                        endpoint.preingestion_state.bfb_target_mac(),
                         txn,
                     )
                     .boxed()
@@ -3018,6 +3077,8 @@ impl PreingestionManagerStatic {
                 .await??;
             }
             BfbPlatformPowercyclePhase::PowerOn => {
+                // Restore host power even if the DPU mapping changed after
+                // PowerOff. Validate the DPU again before resuming its recovery.
                 let redfish_client = match self
                     .redfish_client_pool
                     .create_client_for_ingested_host(*host_bmc_ip, db)
@@ -3063,6 +3124,7 @@ impl PreingestionManagerStatic {
                         *host_bmc_ip,
                         BfbPlatformPowercyclePhase::WaitingForDpuBmc,
                         post_install,
+                        endpoint.preingestion_state.bfb_target_mac(),
                         txn,
                     )
                     .boxed()
@@ -3077,6 +3139,14 @@ impl PreingestionManagerStatic {
                     .await
                 {
                     Ok(()) if post_install => {
+                        // Guard completion against a probe answered by a different device.
+                        if self
+                            .validate_bfb_target(db, endpoint, *host_bmc_ip)
+                            .await?
+                            .is_none()
+                        {
+                            return Ok(());
+                        }
                         tracing::info!(bmc_ip_address = %address, "DPU BMC online after post-install power-cycle, completing preingestion");
                         db.with_txn(|txn| {
                             async move {
@@ -3116,6 +3186,42 @@ impl PreingestionManagerStatic {
         Ok(())
     }
 
+    /// Check the persisted target before starting another external BFB action.
+    /// A legacy state has no identity to validate and must be explicitly requeued.
+    async fn validate_bfb_target(
+        &self,
+        db: &PgPool,
+        endpoint: &ExploredEndpoint,
+        host_bmc_ip: std::net::IpAddr,
+    ) -> Result<Option<mac_address::MacAddress>, DatabaseError> {
+        let expected = endpoint.preingestion_state.bfb_target_mac();
+        let current = db::machine_interface::find_by_ip(db, endpoint.address)
+            .await?
+            .map(|interface| interface.mac_address);
+        if let Some(mac) = expected
+            && current == Some(mac)
+        {
+            return Ok(Some(mac));
+        }
+
+        let reason = format!(
+            "BFB recovery target identity is missing or changed: expected {expected:?}, found {current:?}. \
+             Re-run `site-explorer copy-bfb-to-dpu-rshim` to validate the target and retry."
+        );
+        tracing::error!(bmc_ip_address = %endpoint.address, %reason, "BFB recovery target validation failed");
+        db.with_txn(|txn| {
+            async move {
+                db::explored_endpoints::set_preingestion_failed(endpoint.address, reason, txn)
+                    .await?;
+                db::explored_endpoints::set_pause_remediation(host_bmc_ip, false, txn).await?;
+                Ok::<(), DatabaseError>(())
+            }
+            .boxed()
+        })
+        .await??;
+        Ok(None)
+    }
+
     async fn start_bfb_copy(
         &self,
         db: &PgPool,
@@ -3129,34 +3235,24 @@ impl PreingestionManagerStatic {
             return Ok(());
         };
 
-        let interface = match db::machine_interface::find_by_ip(db, address).await? {
-            Some(interface) => interface,
-            None => {
-                tracing::error!(bmc_ip_address = %address, "no machine interface found for BFB copy, marking as failed");
-                db.with_txn(|txn| {
-                    db::explored_endpoints::set_preingestion_failed(
-                        address,
-                        "No machine interface found for this DPU. \
-                             Re-run `site-explorer copy-bfb-to-dpu-rshim` to retry."
-                            .to_string(),
-                        txn,
-                    )
-                    .boxed()
-                })
-                .await??;
-                return Ok(());
-            }
+        let Some(dpu_bmc_mac) = self.validate_bfb_target(db, endpoint, host_bmc_ip).await? else {
+            return Ok(());
         };
 
         let bmc_credential_key = CredentialKey::BmcCredentials {
             credential_type: BmcCredentialType::BmcRoot {
-                bmc_mac_address: interface.mac_address,
+                bmc_mac_address: dpu_bmc_mac,
             },
         };
 
         db.with_txn(|txn| {
-            db::explored_endpoints::set_preingestion_bfb_copy_in_progress(address, host_bmc_ip, txn)
-                .boxed()
+            db::explored_endpoints::set_preingestion_bfb_copy_in_progress(
+                address,
+                host_bmc_ip,
+                Some(dpu_bmc_mac),
+                txn,
+            )
+            .boxed()
         })
         .await??;
 
@@ -3232,6 +3328,7 @@ impl PreingestionManagerStatic {
                     db::explored_endpoints::set_preingestion_bfb_installation_wait(
                         endpoint.address,
                         *host_bmc_ip,
+                        endpoint.preingestion_state.bfb_target_mac(),
                         txn,
                     )
                     .boxed()
@@ -3289,6 +3386,7 @@ impl PreingestionManagerStatic {
                         "Restarting after orphaned copy state detected".to_string(),
                         *host_bmc_ip,
                         false,
+                        endpoint.preingestion_state.bfb_target_mac(),
                         txn,
                     )
                     .boxed()
@@ -3342,7 +3440,13 @@ impl PreingestionManagerStatic {
             return Ok(());
         }
 
-        if self.check_dpu_console_install_complete(db, endpoint).await {
+        let Some(dpu_bmc_mac) = self.validate_bfb_target(db, endpoint, *host_bmc_ip).await? else {
+            return Ok(());
+        };
+        if self
+            .check_dpu_console_install_complete(endpoint, dpu_bmc_mac)
+            .await
+        {
             tracing::info!(
                 bmc_ip_address = %endpoint.address,
                 "DPU installation complete, powercycling host"
@@ -3353,6 +3457,7 @@ impl PreingestionManagerStatic {
                     *host_bmc_ip,
                     model::site_explorer::BfbPlatformPowercyclePhase::PowerOff,
                     true,
+                    endpoint.preingestion_state.bfb_target_mac(),
                     txn,
                 )
                 .boxed()
@@ -3371,8 +3476,8 @@ impl PreingestionManagerStatic {
 
     async fn check_dpu_console_install_complete(
         &self,
-        db: &PgPool,
         endpoint: &ExploredEndpoint,
+        dpu_bmc_mac: mac_address::MacAddress,
     ) -> bool {
         const MARKERS: &[&str] = &[
             "login:",
@@ -3388,17 +3493,9 @@ impl PreingestionManagerStatic {
             return false;
         };
 
-        let interface = match db::machine_interface::find_by_ip(db, address).await {
-            Ok(Some(iface)) => iface,
-            _ => {
-                tracing::debug!(bmc_ip_address = %address, "no machine interface for console check");
-                return false;
-            }
-        };
-
         let key = CredentialKey::BmcCredentials {
             credential_type: BmcCredentialType::BmcRoot {
-                bmc_mac_address: interface.mac_address,
+                bmc_mac_address: dpu_bmc_mac,
             },
         };
 

@@ -191,6 +191,9 @@ pub struct EndpointExplorationReport {
     /// Vendor as reported by Redfish
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub vendor: Option<bmc_vendor::BMCVendor>,
+    /// The Redfish service root as the BMC reported it
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub service_root: Option<ServiceRoot>,
     /// The class [`derive_hardware_class`] derived from what the BMC reported.
     /// `None` if no exploration has recorded one for this endpoint.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -267,10 +270,6 @@ pub struct EndpointExplorationReport {
     #[deprecated(note = "use rack_position() instead")]
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub revision_id: Option<i32>,
-    /// Transient remediation error detected during an otherwise successful exploration.
-    /// Not persisted; used to trigger Site Explorer auto-remediation in the same run.
-    #[serde(skip, default)]
-    pub remediation_error: Option<EndpointExplorationError>,
 }
 
 impl EndpointExplorationReport {
@@ -640,11 +639,19 @@ pub enum PreingestionState {
     BfbRecoveryNeeded {
         reason: String,
         host_bmc_ip: IpAddr,
+        /// DPU BMC identity captured when recovery was queued. Missing in legacy
+        /// states, which must be requeued before another copy or power-off.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        dpu_bmc_mac: Option<MacAddress>,
         #[serde(default)]
         pre_copy_powercycle: bool,
     },
     BfbPlatformPowercycle {
         host_bmc_ip: IpAddr,
+        /// DPU BMC identity captured when recovery was queued. Missing in legacy
+        /// states, which must be requeued before another copy or power-off.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        dpu_bmc_mac: Option<MacAddress>,
         phase: BfbPlatformPowercyclePhase,
         #[serde(default)]
         post_install: bool,
@@ -652,10 +659,18 @@ pub enum PreingestionState {
     BfbCopyInProgress {
         started_at: DateTime<Utc>,
         host_bmc_ip: IpAddr,
+        /// DPU BMC identity captured when recovery was queued. Missing in legacy
+        /// states, which must be requeued before another copy or power-off.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        dpu_bmc_mac: Option<MacAddress>,
     },
     BfbInstallationWait {
         started_at: DateTime<Utc>,
         host_bmc_ip: IpAddr,
+        /// DPU BMC identity captured when recovery was queued. Missing in legacy
+        /// states, which must be requeued before another copy or power-off.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        dpu_bmc_mac: Option<MacAddress>,
     },
     InitialReset {
         phase: InitialResetPhase,
@@ -731,6 +746,18 @@ pub enum PreingestionState {
 }
 
 impl PreingestionState {
+    /// DPU BMC identity retained across BFB recovery phases and worker restarts.
+    /// `None` denotes a legacy unbound recovery or a state outside BFB recovery.
+    pub fn bfb_target_mac(&self) -> Option<MacAddress> {
+        match self {
+            Self::BfbRecoveryNeeded { dpu_bmc_mac, .. }
+            | Self::BfbPlatformPowercycle { dpu_bmc_mac, .. }
+            | Self::BfbCopyInProgress { dpu_bmc_mac, .. }
+            | Self::BfbInstallationWait { dpu_bmc_mac, .. } => *dpu_bmc_mac,
+            _ => None,
+        }
+    }
+
     /// Whether a `waiting_for_explorer_refresh` set in this state is a
     /// preingestion park that only a fresh exploration report can end. These
     /// are the states whose next step reads the report: the post-reset
@@ -868,6 +895,21 @@ pub struct ExploredDpu {
 }
 
 impl ExploredDpu {
+    /// OS/admin MACs reported by Redfish, also used for DPU interface association.
+    pub fn os_mac_addresses(&self) -> impl Iterator<Item = MacAddress> + '_ {
+        self.report
+            .systems
+            .iter()
+            .flat_map(|system| &system.ethernet_interfaces)
+            .filter(|interface| {
+                interface
+                    .id
+                    .as_ref()
+                    .is_some_and(|id| id.to_lowercase().contains("oob"))
+            })
+            .filter_map(|interface| interface.mac_address)
+    }
+
     pub fn machine_id_if_valid_report(&self) -> ModelResult<DpuMachineId> {
         let Some(machine_id) = self.report.machine_id else {
             return Err(ModelError::MissingArgument("Missing Machine ID"));
@@ -1106,7 +1148,6 @@ impl EndpointExplorationReport {
             lockdown_status: None,
             power_shelf_id: None,
             switch_id: None,
-            remediation_error: None,
             ..Default::default()
         }
     }
@@ -1180,7 +1221,8 @@ impl EndpointExplorationReport {
             .any(|c| c.id.to_lowercase().contains("mgx_nvswitch_0"))
     }
 
-    /// Return `DpuModel` if the explored endpoint is a DPU
+    /// Return `DpuModel` if the explored endpoint is a DPU.
+    /// Return `Unknown` if no DPU generation is recognized or recognized generations conflict.
     pub fn identify_dpu(&self) -> Option<DpuModel> {
         if !self
             .systems
@@ -1191,22 +1233,19 @@ impl EndpointExplorationReport {
             return None;
         }
 
-        let chassis_map = self
+        let mut models = self
             .chassis
             .iter()
-            .map(|x| (x.id.as_str(), x))
-            .collect::<HashMap<_, _>>();
-        let model = chassis_map
-            .get("Card1")
-            .and_then(|value| chassis_model(value))
-            .or_else(|| {
-                self.chassis
-                    .iter()
-                    .filter(|chassis| is_dpu_product_chassis_id(&chassis.id))
-                    .find_map(chassis_model)
-            })
-            .unwrap_or("");
-        Some(DpuModel::from(model))
+            .filter(|chassis| is_dpu_product_chassis_id(&chassis.id))
+            .filter_map(chassis_model)
+            .map(DpuModel::from)
+            .filter(|model| *model != DpuModel::Unknown);
+        let model = models.next().unwrap_or(DpuModel::Unknown);
+        Some(if models.all(|other| other == model) {
+            model
+        } else {
+            DpuModel::Unknown
+        })
     }
 
     pub fn create_temporary_dmi_data(
@@ -1665,6 +1704,7 @@ pub enum EndpointExplorationError {
         response_code: Option<u16>,
     },
 
+    /// Missing DPU BIOS attributes; retained for reading stored exploration errors.
     #[error("invalid redfish response for DPU BIOS: {details}")]
     #[serde(rename_all = "PascalCase")]
     InvalidDpuRedfishBiosResponse {
@@ -1691,9 +1731,9 @@ pub enum EndpointExplorationError {
 impl EndpointExplorationError {
     pub const INVALID_DPU_REDFISH_BIOS_RESPONSE_CODE: ErrorCode =
         ErrorCode::nico(ErrorSubsystem::Dpu, 134);
-    pub const INVALID_DPU_REDFISH_BIOS_RESPONSE_MITIGATION: &'static str = "No action needed: site explorer automatically force-restarts the DPU to clear this \
-         known UEFI/BMC race and re-explores on its next run (~2 min). It escalates to a BMC \
-         reset if the empty BIOS attributes persist.";
+    pub const INVALID_DPU_REDFISH_BIOS_RESPONSE_MITIGATION: &'static str = "During DPU initialization, the machine controller retries BIOS setup and may restart \
+         the DPU to recover missing BIOS attributes. If the error persists, check DPU firmware \
+         and BMC health.";
 
     pub fn is_unauthorized(&self) -> bool {
         matches!(self, EndpointExplorationError::Unauthorized { .. })
@@ -1715,13 +1755,6 @@ impl EndpointExplorationError {
                 self,
                 EndpointExplorationError::InvalidDpuRedfishBiosResponse { .. }
             )
-    }
-
-    pub fn is_dpu_redfish_bios_response_invalid(&self) -> bool {
-        matches!(
-            self,
-            EndpointExplorationError::InvalidDpuRedfishBiosResponse { .. }
-        )
     }
 
     /// Returns the consecutive count if this is an IntermittentUnauthorized error.
@@ -1868,6 +1901,8 @@ pub struct ComputerSystem {
     /// SSH port for the system's Redfish serial-console service.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub serial_console_ssh_port: Option<u16>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub part_number: Option<String>,
 }
 
 /// Minimal processor inventory with position normalized by the explorer.
@@ -1933,6 +1968,19 @@ pub enum PowerState {
     Unknown,
 }
 
+/// The Redfish `ServiceRoot` fields that identify a BMC.
+#[derive(Clone, Default, PartialEq, Eq, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "PascalCase")]
+pub struct ServiceRoot {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vendor: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub product: Option<String>,
+    /// Keys of the `Oem` object, for example `Ami` or `Dell`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub oem_keys: Vec<String>,
+}
+
 /// `Manager` definition. Matches redfish definition
 #[derive(Clone, Default, PartialEq, Eq, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "PascalCase")]
@@ -1942,6 +1990,10 @@ pub struct Manager {
     pub id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ipmi_port: Option<u16>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub firmware_version: Option<String>,
 }
 
 /// `EthernetInterface` definition. Matches redfish definition
@@ -2229,14 +2281,14 @@ pub fn is_bf4_dpu_part_number(part_number: &str) -> bool {
         || normalized_part_number.starts_with("900-9d4a4")
 }
 
-/// Whether a DPU BMC chassis member carries the card product identity
+/// Whether a DPU BMC chassis member can carry the card product identity
 /// (part/model/serial).
 ///
 /// Older Redfish reports publish this identity on `Card1`; newer BF4 firmware may
 /// instead publish it on the integrated BMC chassis (`Bluefield_BMC` or
-/// `BlueField_BMC_0`). These IDs are expected to be mutually exclusive as product
-/// identity sources in real reports, so callers can select the first matching
-/// chassis.
+/// `BlueField_BMC_0`). Reports can contain several of these chassis, including
+/// placeholders or BMC component models. Model identification requires the
+/// recognized DPU generations to agree.
 fn is_dpu_product_chassis_id(id: &str) -> bool {
     matches!(id, "Card1" | "Bluefield_BMC" | "BlueField_BMC_0")
 }
@@ -2259,7 +2311,12 @@ fn chassis_part_number(chassis: &Chassis) -> Option<&str> {
 }
 
 fn chassis_model(chassis: &Chassis) -> Option<&str> {
-    chassis.model.as_deref().map(str::trim).none_if_empty()
+    chassis
+        .model
+        .as_deref()
+        .map(str::trim)
+        .none_if_empty()
+        .filter(|model| !model.eq_ignore_ascii_case("n/a"))
 }
 
 // returns true if the passed in string is a BlueField part number
@@ -2966,6 +3023,49 @@ mod tests {
     use crate::firmware::FirmwareComponent;
     use crate::machine::machine_id::from_hardware_info;
 
+    #[test]
+    fn bfb_target_identity_survives_serialization() {
+        let mac: MacAddress = "02:00:00:00:84:76".parse().unwrap();
+        let cases = [
+            ("bfbrecoveryneeded", serde_json::json!({"reason": "test"})),
+            (
+                "bfbplatformpowercycle",
+                serde_json::json!({"phase": "poweroff"}),
+            ),
+            (
+                "bfbcopyinprogress",
+                serde_json::json!({"started_at": "2026-10-31T00:00:00Z"}),
+            ),
+            (
+                "bfbinstallationwait",
+                serde_json::json!({"started_at": "2026-10-31T00:00:00Z"}),
+            ),
+        ]
+        .into_iter()
+        .map(|(state, extra)| Check {
+            scenario: state,
+            input: (state, extra),
+            expect: (None, Some(mac), true),
+        });
+        check_values(cases, |(state, extra)| {
+            let mut stored = serde_json::json!({"state": state, "host_bmc_ip": "192.0.2.200"});
+            stored
+                .as_object_mut()
+                .unwrap()
+                .extend(extra.as_object().unwrap().clone());
+            let legacy: PreingestionState = serde_json::from_value(stored.clone()).unwrap();
+            stored["dpu_bmc_mac"] = serde_json::to_value(mac).unwrap();
+            let pinned: PreingestionState = serde_json::from_value(stored).unwrap();
+            let restored: PreingestionState =
+                serde_json::from_str(&serde_json::to_string(&pinned).unwrap()).unwrap();
+            (
+                legacy.bfb_target_mac(),
+                restored.bfb_target_mac(),
+                restored == pinned,
+            )
+        });
+    }
+
     /// Stored reports written before inventory entries carried drive data
     /// still load, and the drive data round-trips.
     #[test]
@@ -3338,6 +3438,108 @@ mod tests {
                 ("Bluefield", "BlueField-3 DPU") => Some(DpuModel::BlueField3),
                 ("Bluefield", "unrecognized DPU") => Some(DpuModel::Unknown),
                 ("System", "BlueField-3 DPU") => None,
+            }
+        );
+    }
+
+    #[test]
+    fn identify_dpu_requires_agreeing_recognized_chassis_models() {
+        value_scenarios!(
+            run = |models: Vec<(&str, Option<&str>)>| {
+                let mut report = EndpointExplorationReport {
+                    systems: vec![ComputerSystem {
+                        id: "Bluefield".to_string(),
+                        ..Default::default()
+                    }],
+                    chassis: models.into_iter().map(|(id, model)| Chassis {
+                        id: id.to_string(),
+                        model: model.map(str::to_string),
+                        ..Default::default()
+                    }).collect(),
+                    ..Default::default()
+                };
+                let identified = report.identify_dpu();
+                assert!(report.is_dpu());
+                report.chassis.reverse();
+                assert_eq!(report.identify_dpu(), identified, "chassis order must not affect identification");
+                identified
+            };
+            "placeholder Card1 model allows either product BMC chassis" {
+                vec![("Card1", Some("N/A")), ("Bluefield_BMC", Some("BlueField-3 DPU"))]
+                    => Some(DpuModel::BlueField3),
+                vec![("Card1", Some(" n/a ")), ("BlueField_BMC_0", Some("BlueField-3 DPU"))]
+                    => Some(DpuModel::BlueField3),
+                vec![("Card1", None), ("Bluefield_BMC", Some("BlueField-3 DPU"))]
+                    => Some(DpuModel::BlueField3),
+                vec![("Card1", Some(" \t ")), ("Bluefield_BMC", Some("BlueField-3 DPU"))]
+                    => Some(DpuModel::BlueField3),
+            }
+            "placeholder BMC model does not mask another product model" {
+                vec![("Card1", Some("BlueField-3 DPU")), ("Bluefield_BMC", Some("N/A"))]
+                    => Some(DpuModel::BlueField3),
+                vec![("Card1", Some("N/A")), ("Bluefield_BMC", Some("N/A")), ("BlueField_BMC_0", Some("BlueField-3 DPU"))]
+                    => Some(DpuModel::BlueField3),
+            }
+            "equivalent model spellings agree" {
+                vec![("Card1", Some("NVIDIA BlueField 3 DPU")), ("Bluefield_BMC", Some("BlueField-3 DPU"))]
+                    => Some(DpuModel::BlueField3),
+            }
+            "conflicting recognized product models remain unknown" {
+                vec![("Card1", Some("BlueField-3 DPU")), ("Bluefield_BMC", Some("BlueField-2 DPU"))]
+                    => Some(DpuModel::Unknown),
+                vec![("Card1", Some("N/A")), ("Bluefield_BMC", Some("BlueField-3 DPU")), ("BlueField_BMC_0", Some("BlueField-2 DPU"))]
+                    => Some(DpuModel::Unknown),
+            }
+            "unrecognized chassis models do not mask a recognized DPU generation" {
+                vec![("Card1", Some("BlueField-3 DPU")), ("Bluefield_BMC", Some("unrecognized DPU"))]
+                    => Some(DpuModel::BlueField3),
+                vec![("Card1", Some("unrecognized DPU")), ("Bluefield_BMC", Some("BlueField-3 DPU"))]
+                    => Some(DpuModel::BlueField3),
+            }
+            "no usable product model still identifies a DPU" {
+                vec![] => Some(DpuModel::Unknown),
+                vec![("Card1", Some("N/A"))] => Some(DpuModel::Unknown),
+                vec![("Card1", Some("N/A")), ("unrelated", Some("BlueField-3 DPU"))]
+                    => Some(DpuModel::Unknown),
+            }
+        );
+    }
+
+    #[test]
+    fn dpu_hardware_info_skips_placeholder_part_descriptions() {
+        value_scenarios!(
+            run = |bmc_model: Option<&str>| {
+                let dpu = ExploredDpu {
+                    bmc_ip: "192.0.2.1".parse().unwrap(),
+                    host_pf_mac_address: Some("00:11:22:33:44:55".parse().unwrap()),
+                    host_chassis_id: None,
+                    report: Arc::new(EndpointExplorationReport {
+                        systems: vec![ComputerSystem {
+                            id: "Bluefield".to_string(),
+                            serial_number: Some("test-dpu".to_string()),
+                            ..Default::default()
+                        }],
+                        chassis: vec![
+                            Chassis {
+                                id: "Card1".to_string(),
+                                model: Some("N/A".to_string()),
+                                ..Default::default()
+                            },
+                            Chassis {
+                                id: "Bluefield_BMC".to_string(),
+                                model: bmc_model.map(str::to_string),
+                                ..Default::default()
+                            },
+                        ],
+                        ..Default::default()
+                    }),
+                };
+                dpu.hardware_info().unwrap().dpu_info.unwrap().part_description
+            };
+            "part description uses the next meaningful model or stays empty" {
+                Some(" BlueField-3 DPU ") => "BlueField-3 DPU".to_string(),
+                Some(" n/a ") => String::new(),
+                None => String::new(),
             }
         );
     }
@@ -3906,9 +4108,7 @@ mod tests {
         fn from_mitigation(mitigation: Option<&str>) -> Self {
             match mitigation {
                 None => Self::NoMitigation,
-                Some(mitigation) if mitigation.contains("force-restarts the DPU") => {
-                    Self::DpuRecovery
-                }
+                Some(mitigation) if mitigation.contains("machine controller") => Self::DpuRecovery,
                 Some(mitigation)
                     if mitigation.contains("general DGX H100/H200 Redfish API information") =>
                 {
@@ -3937,7 +4137,6 @@ mod tests {
         unauthorized: bool,
         unreachable: bool,
         redfish: bool,
-        invalid_dpu_bios_response: bool,
         intermittent_unauthorized_count: Option<u32>,
         mitigation_group: MitigationGroup,
     }
@@ -3947,7 +4146,6 @@ mod tests {
         unauthorized: bool,
         unreachable: bool,
         redfish: bool,
-        invalid_dpu_bios_response: bool,
     }
 
     fn expected_error_behavior(
@@ -3960,14 +4158,12 @@ mod tests {
             unauthorized,
             unreachable,
             redfish,
-            invalid_dpu_bios_response,
         } = predicates;
         EndpointErrorBehavior {
             code,
             unauthorized,
             unreachable,
             redfish,
-            invalid_dpu_bios_response,
             intermittent_unauthorized_count,
             mitigation_group,
         }
@@ -4195,7 +4391,6 @@ mod tests {
                         ErrorCode::nico(ErrorSubsystem::Dpu, 134),
                         EndpointPredicates {
                             redfish: true,
-                            invalid_dpu_bios_response: true,
                             ..Default::default()
                         },
                         None,
@@ -4210,7 +4405,6 @@ mod tests {
                     unauthorized: error.is_unauthorized(),
                     unreachable: error.is_unreachable(),
                     redfish: error.is_redfish(),
-                    invalid_dpu_bios_response: error.is_dpu_redfish_bios_response_invalid(),
                     intermittent_unauthorized_count: error.intermittent_unauthorized_count(),
                     mitigation_group: MitigationGroup::from_mitigation(
                         schema.mitigation.as_deref(),
@@ -4222,11 +4416,13 @@ mod tests {
 
     #[test]
     fn dpu_bios_error_schema_contains_operator_action() {
-        let error = EndpointExplorationError::InvalidDpuRedfishBiosResponse {
-            details: "DPU BMC BIOS attributes not ready".to_string(),
-            response_body: None,
-            response_code: None,
-        };
+        let error: EndpointExplorationError = serde_json::from_value(serde_json::json!({
+            "Type": "InvalidDpuRedfishBiosResponse",
+            "Details": "DPU BMC BIOS attributes not ready",
+            "ResponseBody": null,
+            "ResponseCode": null,
+        }))
+        .expect("stored DPU BIOS errors remain readable");
 
         let schema = error.operator_error_schema();
         let mitigation = schema
@@ -4234,8 +4430,8 @@ mod tests {
             .as_deref()
             .expect("DPU BIOS errors have recovery guidance");
 
-        assert!(mitigation.contains("force-restarts the DPU"));
-        assert!(mitigation.contains("BMC reset"));
+        assert!(mitigation.contains("machine controller"));
+        assert!(mitigation.contains("firmware"));
         assert!(
             schema
                 .text
@@ -4613,6 +4809,8 @@ mod tests {
                 ethernet_interfaces: vec![],
                 id: "bmc".to_string(),
                 ipmi_port: None,
+                firmware_version: None,
+                model: None,
             }],
             systems: vec![ComputerSystem {
                 ethernet_interfaces: vec![],
@@ -4632,6 +4830,7 @@ mod tests {
                 bios_version: None,
                 serial_console_ssh_port: None,
                 processors: None,
+                part_number: None,
             }],
             chassis: vec![Chassis {
                 id: "NIC.Slot.1".to_string(),
@@ -4663,7 +4862,6 @@ mod tests {
             lockdown_status: None,
             power_shelf_id: None,
             switch_id: None,
-            remediation_error: None,
             ..Default::default()
         };
 
@@ -4777,6 +4975,8 @@ mod tests {
                 ethernet_interfaces: vec![],
                 id: "bmc".to_string(),
                 ipmi_port: None,
+                firmware_version: None,
+                model: None,
             }],
             systems: vec![ComputerSystem {
                 ethernet_interfaces: vec![],
@@ -4796,6 +4996,7 @@ mod tests {
                 bios_version: None,
                 serial_console_ssh_port: None,
                 processors: None,
+                part_number: None,
             }],
             chassis: vec![Chassis {
                 id: "NIC.Slot.1".to_string(),
@@ -4827,7 +5028,6 @@ mod tests {
             lockdown_status: None,
             power_shelf_id: None,
             switch_id: None,
-            remediation_error: None,
             ..Default::default()
         };
         report

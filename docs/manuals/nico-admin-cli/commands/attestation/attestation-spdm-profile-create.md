@@ -11,7 +11,7 @@ profile for a hardware class
 
 ```text
 nico-admin-cli attestation spdm profile create <--mode>
-[--exact] [--prefix] [--extended] [--sort-by]
+[--exact] [--prefix] [--sort-by]
 [-h|--help] <HARDWARE_CLASS>
 ```
 
@@ -45,14 +45,6 @@ Match one ComponentIntegrity ID in full. Repeatable
 
 Match every ComponentIntegrity ID starting with this. Repeatable
 
-`--extended`
-
-Extended result output.
-
-This is used by measured boot, where basic output contains just what you
-probably care about, and "extended" output also dumps out all the
-internal UUIDs that are used to associate instances.
-
 `--sort-by <SORT_BY> [default: primary-id]`
 
 Sort output by specified field
@@ -65,13 +57,13 @@ Sort output by specified field
 
 `-h, --help`
 
-Print help (see a summary with -h)
+Print help (see a summary with '-h')
 
 `<HARDWARE_CLASS>`
 
 Hardware class the profile is keyed to. One of the classes exploration
-records, or any for the fallback. Run attestation spdm coverage to see
-the classes this site has
+records, or 'any' for the fallback. Run 'attestation spdm coverage' to
+see the classes this site has
 
 ## Examples
 
