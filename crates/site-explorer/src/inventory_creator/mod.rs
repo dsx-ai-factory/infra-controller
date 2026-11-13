@@ -90,6 +90,7 @@ impl InventoryCreator {
         self.machine_creator.preparation_cancel_token = cancel_token;
     }
 
+    #[allow(clippy::too_many_arguments)] // The creator shares its parent's dependencies.
     pub(super) fn new(
         database_connection: PgPool,
         config: Config,
@@ -98,6 +99,7 @@ impl InventoryCreator {
         rack_profiles: Arc<RackProfileConfig>,
         machine_info_provider: Option<Arc<dyn MachineInfoProvider>>,
         dpf_enabled_at_site: bool,
+        instrumentation: carbide_instrument::Instrumentation,
     ) -> Self {
         Self {
             machine_creator: MachineCreator::new(
@@ -108,6 +110,7 @@ impl InventoryCreator {
                 rack_profiles,
                 machine_info_provider,
                 dpf_enabled_at_site,
+                instrumentation,
             ),
             power_shelf_creator: PowerShelfCreator::new(
                 database_connection.clone(),

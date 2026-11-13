@@ -16,7 +16,6 @@
  */
 
 use ::rpc::forge as rpc;
-use carbide_instrument::emit;
 use db::{DatabaseError, expected_power_shelf as db_expected_power_shelf};
 use mac_address::MacAddress;
 use model::expected_power_shelf::{ExpectedPowerShelf, ExpectedPowerShelfRequest};
@@ -133,7 +132,8 @@ pub(crate) async fn update_expected_power_shelf(
     })?;
 
     if let Some(outcome) = preallocation {
-        emit(StaticAddressPreallocationCompleted::from(outcome));
+        api.instrumentation
+            .emit(StaticAddressPreallocationCompleted::from(outcome));
     }
 
     Ok(Response::new(()))
@@ -203,7 +203,8 @@ pub(crate) async fn patch_expected_power_shelf(
     .await?;
     txn.commit().await?;
     if let Some(preallocation) = preallocation {
-        emit(StaticAddressPreallocationCompleted::from(preallocation));
+        api.instrumentation
+            .emit(StaticAddressPreallocationCompleted::from(preallocation));
     }
     Ok(Response::new(()))
 }

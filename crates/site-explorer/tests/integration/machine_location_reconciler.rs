@@ -50,6 +50,7 @@ async fn test_machine_location_reconciler_preserves_existing_values(
         Arc::new(machine_info_rack_profiles()),
         Some(provider.clone()),
         env.api().credential_manager().clone(),
+        env.api().instrumentation().clone(),
     );
     let rack_id = RackId::new(uuid::Uuid::new_v4().to_string());
     let expected_rack = ExpectedRack {
@@ -145,6 +146,7 @@ async fn test_machine_location_reconciler_retries_after_failure(
         Arc::new(machine_info_rack_profiles()),
         Some(provider.clone()),
         env.api().credential_manager().clone(),
+        env.api().instrumentation().clone(),
     );
     let rack_id = RackId::new(uuid::Uuid::new_v4().to_string());
     let expected_rack = ExpectedRack {
@@ -297,6 +299,7 @@ async fn test_site_explorer_retries_machine_location_after_request_deadline(
             Some(provider.clone()),
             env.api().credential_manager().clone(),
             false,
+            env.api().instrumentation().clone(),
         ),
         endpoint_explorer,
     );

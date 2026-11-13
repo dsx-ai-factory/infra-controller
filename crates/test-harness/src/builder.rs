@@ -113,6 +113,7 @@ impl TestHarnessBuilder {
 
         let api = f(
             TestApiBuilder::new(db_pool, common_pools, work_lock_manager_handle)
+                .with_instrumentation(carbide_instrument::Instrumentation::new(test_meter.meter()))
                 .with_resource_pool_registry(resource_pool_registry),
         )
         .with_metric_emitter(ApiMetricsEmitter::new(&test_meter.meter()))

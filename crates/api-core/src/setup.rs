@@ -40,6 +40,7 @@ use carbide_ib_partition_controller::context::IBPartitionStateHandlerServices;
 use carbide_ib_partition_controller::handler::IBPartitionStateHandler;
 use carbide_ib_partition_controller::io::IBPartitionStateControllerIO;
 use carbide_ipmi::IPMITool;
+use carbide_machine_controller::config::FirmwareGlobal;
 use carbide_machine_controller::context::MachineStateHandlerServices;
 use carbide_machine_controller::dpf::{
     CarbideBmcPasswordProvider, CarbideDPFLabeler, DpfOperations, DpfSdkOps,
@@ -173,6 +174,7 @@ fn create_bmc_proxy_pools(
     credential_manager: Arc<dyn CredentialManager>,
     direct_pool: &Arc<dyn RedfishClientPool>,
     direct_nv_redfish_pool: &Arc<NvRedfishClientPool>,
+    instrumentation: carbide_instrument::Instrumentation,
 ) -> eyre::Result<BmcProxyPools> {
     let Some(proxy_config) = enabled_bmc_proxy_config(carbide_config) else {
         return Ok(BmcProxyPools {
@@ -190,6 +192,7 @@ fn create_bmc_proxy_pools(
     let proxied: Arc<dyn RedfishClientPool> = Arc::new(crate::bmc_proxy::ProxiedRedfishPool::new(
         proxy_config,
         credential_manager,
+        instrumentation,
     )?);
     let proxied_nv_redfish = carbide_redfish::nv_redfish::new_proxied_pool(
         proxy,
@@ -310,6 +313,7 @@ pub async fn start_runtime(runtime_inputs: RuntimeInputs<'_>) -> eyre::Result<So
         carbide_config,
         initial_objects,
         meter,
+        instrumentation,
         per_object_metrics,
         join_set,
         runtime_prelude: RuntimePrelude { dynamic_settings },
@@ -356,6 +360,7 @@ pub async fn start_runtime(runtime_inputs: RuntimeInputs<'_>) -> eyre::Result<So
         credential_manager.clone(),
         &shared_redfish_pool,
         &shared_nv_redfish_pool,
+        instrumentation.clone(),
     )?;
 
     let ipmi_tool = create_ipmi_tool(
@@ -552,19 +557,8 @@ pub async fn start_runtime(runtime_inputs: RuntimeInputs<'_>) -> eyre::Result<So
         // ordering invariants), not seeded here.
     };
 
-    // Controllers and artifact serving share the same bounded transfer pool.
-    // The cache constructor leaves disk untouched until an authorized request.
-    let firmware_downloader =
-        FirmwareDownloader::with_config(carbide_config.firmware_global.downloads.clone())?;
-    let firmware_artifact_cache = FirmwareArtifactCache::new(
-        carbide_config
-            .firmware_global
-            .firmware_download_cache_directory
-            .clone(),
-        carbide_config
-            .firmware_global
-            .nic_firmware_cache_capacity_bytes,
-        firmware_downloader.clone(),
+    let (firmware_downloader, firmware_artifact_cache) = create_firmware_delivery(
+        &carbide_config.firmware_global,
         cancel_token.clone(),
         join_set,
     )?;
@@ -654,6 +648,7 @@ pub async fn start_runtime(runtime_inputs: RuntimeInputs<'_>) -> eyre::Result<So
         carbide_config.bmc_session_lockout_threshold,
         carbide_config.allow_bmc_basic_auth_fallback,
         carbide_config.bmc_max_sessions_per_caller,
+        instrumentation.clone(),
     ));
 
     let bmc_client = Arc::new(
@@ -676,6 +671,7 @@ pub async fn start_runtime(runtime_inputs: RuntimeInputs<'_>) -> eyre::Result<So
             .clone(),
         carbide_config.site_explorer.explore_drive_firmware,
         db_pool.clone(),
+        instrumentation.clone(),
     );
     let endpoint_exploration_service = Arc::new(EndpointExplorationService::new(
         db_pool.clone(),
@@ -827,7 +823,12 @@ pub async fn start_runtime(runtime_inputs: RuntimeInputs<'_>) -> eyre::Result<So
             .wrap_err("failed to build the firmware-object HTTP client")?,
     );
 
+    let bmc_proxy_passthrough = enabled_bmc_proxy_config(&carbide_config)
+        .map(|config| crate::bmc_proxy::PassthroughClient::new(config, instrumentation.clone()))
+        .transpose()?
+        .map(Arc::new);
     let api_service = Arc::new(Api {
+        instrumentation,
         certificate_provider,
         common_pools,
         resource_pool_registry: registry,
@@ -845,10 +846,7 @@ pub async fn start_runtime(runtime_inputs: RuntimeInputs<'_>) -> eyre::Result<So
         redfish_pool: general_redfish_pool,
         bmc_credential_ops: bmc_credential_ops.clone(),
         driver_connector: driver_connector.clone(),
-        bmc_proxy_passthrough: enabled_bmc_proxy_config(&carbide_config)
-            .map(crate::bmc_proxy::PassthroughClient::new)
-            .transpose()?
-            .map(Arc::new),
+        bmc_proxy_passthrough,
         bmc_session_manager,
         runtime_config: carbide_config.clone(),
         scout_stream_registry: ConnectionRegistry::new(),
@@ -909,6 +907,24 @@ pub async fn start_runtime(runtime_inputs: RuntimeInputs<'_>) -> eyre::Result<So
     .await?;
 
     Ok(listen_address)
+}
+
+/// Controllers and NIC artifact serving share this configured transfer pool.
+/// Cache construction leaves disk untouched until an authorized request.
+fn create_firmware_delivery(
+    config: &FirmwareGlobal,
+    cancel_token: CancellationToken,
+    join_set: &mut JoinSet<()>,
+) -> eyre::Result<(FirmwareDownloader, FirmwareArtifactCache)> {
+    let downloader = FirmwareDownloader::with_config(config.downloads.clone())?;
+    let cache = FirmwareArtifactCache::new(
+        config.firmware_download_cache_directory.clone(),
+        config.nic_firmware_cache_capacity_bytes,
+        downloader.clone(),
+        cancel_token,
+        join_set,
+    )?;
+    Ok((downloader, cache))
 }
 
 /// Normalizes and validates DPF-only intercept-bridging topology without retaining legacy map keys.
@@ -1915,6 +1931,7 @@ async fn initialize_and_start_controllers<'a>(
         common_pools,
         join_set,
         cancel_token.clone(),
+        api_service.instrumentation.clone(),
     )?;
     let health_pool = db_pool.clone();
     start_export_service_health_metrics(ServiceHealthContext {
@@ -2041,6 +2058,7 @@ async fn initialize_and_start_controllers<'a>(
                 config.queue_capacity,
                 &meter,
                 cancel_token.clone(),
+                api_service.instrumentation.clone(),
             )
             .await?;
 
@@ -2054,6 +2072,7 @@ async fn initialize_and_start_controllers<'a>(
             ManagedHostStateRepublisher::new(
                 client.clone(),
                 ManagedHostStateRepublisherParams {
+                    instrumentation: api_service.instrumentation.clone(),
                     db_pool: db_pool.clone(),
                     work_lock_manager_handle: work_lock_manager_handle.clone(),
                     topic_prefix: config.topic_prefix.clone(),
@@ -2072,6 +2091,7 @@ async fn initialize_and_start_controllers<'a>(
                 config.queue_capacity,
                 &meter,
                 cancel_token.clone(),
+                api_service.instrumentation.clone(),
             )));
         }
 
@@ -2189,6 +2209,7 @@ async fn initialize_and_start_controllers<'a>(
         .processor_id(state_controller_id.clone())
         .services(
             MachineStateHandlerServices {
+                instrumentation: api_service.instrumentation.clone(),
                 db_pool: db_pool.clone(),
                 db_reader: db_pool.clone().into(),
                 redfish_client_pool: shared_redfish_pool.clone(),
@@ -2637,6 +2658,7 @@ async fn initialize_and_start_controllers<'a>(
         site_explorer_machine_info_provider,
         credential_manager.clone(),
         carbide_config.dpf.enabled && dpf_sdk.is_some(),
+        api_service.instrumentation.clone(),
     )
     .start(join_set, cancel_token.clone())?;
 
@@ -2646,6 +2668,7 @@ async fn initialize_and_start_controllers<'a>(
         meter.clone(),
         work_lock_manager_handle.clone(),
         dpf_sdk.clone(),
+        api_service.instrumentation.clone(),
     )
     .start(join_set, cancel_token.clone())?;
 
@@ -2659,6 +2682,7 @@ async fn initialize_and_start_controllers<'a>(
         Some(api_service.credential_manager.clone()),
         work_lock_manager_handle.clone(),
         carbide_config.ntp_servers.clone(),
+        api_service.instrumentation.clone(),
     )
     .with_driver_connector(driver_connector.clone());
 
@@ -2682,6 +2706,7 @@ async fn initialize_and_start_controllers<'a>(
         db_pool.clone(),
         carbide_config.measured_boot_collector.clone(),
         meter.clone(),
+        api_service.instrumentation.clone(),
     )
     .start(join_set, cancel_token.clone())?;
 
@@ -2692,6 +2717,7 @@ async fn initialize_and_start_controllers<'a>(
         db_pool.clone(),
         carbide_config.machine_validation_config.clone(),
         meter.clone(),
+        api_service.instrumentation.clone(),
     )
     .start(join_set, cancel_token.clone())?;
 
@@ -2728,6 +2754,116 @@ mod tests {
         InitialObjectsConfig, VmaasConfig, default_hbn_bridge,
     };
     use crate::cfg::load::parse_carbide_config;
+
+    /// The startup factory shares configured capacity across legacy and NIC transfers.
+    #[tokio::test]
+    async fn firmware_delivery_factory_shares_the_configured_transfer_pool() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        use axum::routing::get;
+        use carbide_firmware::{ArtifactStatus, CacheLookup};
+        use sha2::{Digest, Sha256};
+        use tokio::io::AsyncReadExt;
+        use tokio::sync::Notify;
+
+        tokio::time::timeout(Duration::from_secs(10), async {
+            let directory = tempfile::tempdir().expect("firmware cache directory");
+            let mut config = FirmwareGlobal::test_default();
+            config.downloads.max_concurrent_downloads = 1;
+            // A default downloader's byte ceiling cannot fit this small cache.
+            config.downloads.max_download_bytes = 8;
+            config.nic_firmware_cache_capacity_bytes = 16;
+            config.firmware_download_cache_directory = directory.path().join("cache");
+            let cancel = CancellationToken::new();
+            let mut tasks = JoinSet::new();
+            let (downloader, cache) = create_firmware_delivery(&config, cancel.clone(), &mut tasks)
+                .expect("production firmware delivery composition");
+            let started = Arc::new(Notify::new());
+            let release = Arc::new(Notify::new());
+            let legacy_started = started.clone();
+            let legacy_release = release.clone();
+            let nic_requests = Arc::new(AtomicUsize::new(0));
+            let observed_nic_requests = nic_requests.clone();
+            let routes = axum::Router::new()
+                .route(
+                    "/legacy",
+                    get(move || {
+                        let started = legacy_started.clone();
+                        let release = legacy_release.clone();
+                        async move {
+                            started.notify_one();
+                            release.notified().await;
+                            "legacy"
+                        }
+                    }),
+                )
+                .route(
+                    "/nic",
+                    get(move || {
+                        observed_nic_requests.fetch_add(1, Ordering::SeqCst);
+                        async { "nic" }
+                    }),
+                );
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+                .await
+                .expect("firmware source listener");
+            let address = listener.local_addr().unwrap();
+            let server_cancel = cancel.clone();
+            let server = tokio::spawn(async move {
+                axum::serve(listener, routes)
+                    .with_graceful_shutdown(server_cancel.cancelled_owned())
+                    .await
+            });
+            let legacy_path = directory.path().join("legacy.bin");
+            let legacy_url = format!("http://{address}/legacy");
+            assert_eq!(
+                downloader.available(&legacy_path, &legacy_url, "").await,
+                ArtifactStatus::Downloading
+            );
+            started.notified().await;
+
+            // A separate NIC pool would reserve disk before returning Pending.
+            // The held legacy request must prevent even that physical work.
+            let source = format!("http://{address}/nic").parse().unwrap();
+            let digest = hex::encode(Sha256::digest(b"nic")).parse().unwrap();
+            let retained = HashSet::from([digest]);
+            assert!(matches!(
+                cache.open(&source, digest, &retained).await.unwrap(),
+                CacheLookup::Pending
+            ));
+            assert!(!config.firmware_download_cache_directory.exists());
+            assert_eq!(nic_requests.load(Ordering::SeqCst), 0);
+
+            release.notify_one();
+            loop {
+                match downloader.available(&legacy_path, &legacy_url, "").await {
+                    ArtifactStatus::Available => break,
+                    ArtifactStatus::Downloading => tokio::task::yield_now().await,
+                    ArtifactStatus::Failed { error } => panic!("legacy transfer failed: {error}"),
+                }
+            }
+            assert_eq!(tokio::fs::read(&legacy_path).await.unwrap(), b"legacy");
+            let mut artifact = loop {
+                match cache.open(&source, digest, &retained).await.unwrap() {
+                    CacheLookup::Ready(artifact) => break artifact,
+                    CacheLookup::Pending => tokio::task::yield_now().await,
+                }
+            };
+            let mut bytes = Vec::new();
+            artifact.read_to_end(&mut bytes).await.unwrap();
+            assert_eq!(bytes, b"nic");
+            assert!(config.firmware_download_cache_directory.is_dir());
+            assert_eq!(nic_requests.load(Ordering::SeqCst), 1);
+            drop(artifact);
+            cancel.cancel();
+            while let Some(result) = tasks.join_next().await {
+                result.expect("firmware cache owner stops");
+            }
+            server.await.unwrap().unwrap();
+        })
+        .await
+        .expect("firmware pool contention and recovery are independently bounded");
+    }
 
     /// Verifies disabled DPF bypasses malformed platform values, absent packaged chart metadata, and
     /// resource construction because these inputs are irrelevant until DPF management is enabled.
@@ -4285,15 +4421,21 @@ mod tests {
     /// pools, so disabled mode cannot change behavior.
     #[test]
     fn pools_are_direct_unless_bmc_proxy_is_enabled() {
+        let test_meter = carbide_utils::test_support::test_meter::TestMeter::default();
         let (mut config, credential_manager, direct, direct_nv) = selection_fixtures();
 
         assert!(
             config.bmc_proxy.is_none(),
             "default test config has no section"
         );
-        let pools =
-            create_bmc_proxy_pools(&config, credential_manager.clone(), &direct, &direct_nv)
-                .expect("absent section selects pools");
+        let pools = create_bmc_proxy_pools(
+            &config,
+            credential_manager.clone(),
+            &direct,
+            &direct_nv,
+            carbide_instrument::Instrumentation::new(test_meter.meter()),
+        )
+        .expect("absent section selects pools");
         assert!(
             Arc::ptr_eq(&pools.general, &direct),
             "an absent [bmc_proxy] must alias the direct pool"
@@ -4311,8 +4453,14 @@ mod tests {
             serde_json::from_value(serde_json::json!({ "enabled": false }))
                 .expect("a disabled section parses without a url"),
         );
-        let pools = create_bmc_proxy_pools(&config, credential_manager, &direct, &direct_nv)
-            .expect("disabled section selects pools");
+        let pools = create_bmc_proxy_pools(
+            &config,
+            credential_manager,
+            &direct,
+            &direct_nv,
+            carbide_instrument::Instrumentation::new(test_meter.meter()),
+        )
+        .expect("disabled section selects pools");
         assert!(
             Arc::ptr_eq(&pools.general, &direct),
             "a disabled [bmc_proxy] must alias the direct pool"
@@ -4333,12 +4481,19 @@ mod tests {
     /// which is left for credential-lifecycle work.
     #[test]
     fn pools_are_proxied_when_bmc_proxy_is_enabled() {
+        let test_meter = carbide_utils::test_support::test_meter::TestMeter::default();
         let (mut config, credential_manager, direct, direct_nv) = selection_fixtures();
         let dir = tempfile::tempdir().expect("tempdir");
         config.bmc_proxy = Some(crate::bmc_proxy::test_config_with_generated_pems(&dir));
 
-        let pools = create_bmc_proxy_pools(&config, credential_manager, &direct, &direct_nv)
-            .expect("an enabled section with readable certs builds the proxied pools");
+        let pools = create_bmc_proxy_pools(
+            &config,
+            credential_manager,
+            &direct,
+            &direct_nv,
+            carbide_instrument::Instrumentation::new(test_meter.meter()),
+        )
+        .expect("an enabled section with readable certs builds the proxied pools");
         assert!(
             !Arc::ptr_eq(&pools.general, &direct),
             "an enabled [bmc_proxy] must select a distinct proxied pool"
@@ -4380,14 +4535,20 @@ mod tests {
     /// that silently dials BMCs directly.
     #[test]
     fn enabled_bmc_proxy_without_url_fails_startup() {
+        let test_meter = carbide_utils::test_support::test_meter::TestMeter::default();
         let (mut config, credential_manager, direct, direct_nv) = selection_fixtures();
         config.bmc_proxy = Some(
             serde_json::from_value(serde_json::json!({ "enabled": true }))
                 .expect("the section parses; the empty default address is rejected later"),
         );
 
-        let Err(err) = create_bmc_proxy_pools(&config, credential_manager, &direct, &direct_nv)
-        else {
+        let Err(err) = create_bmc_proxy_pools(
+            &config,
+            credential_manager,
+            &direct,
+            &direct_nv,
+            carbide_instrument::Instrumentation::new(test_meter.meter()),
+        ) else {
             panic!("an enabled section with no address must fail startup");
         };
         assert!(

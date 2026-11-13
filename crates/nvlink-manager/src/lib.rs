@@ -528,6 +528,122 @@ pub enum GpuRemovalMode {
     Isolate,
 }
 
+/// Consecutive checked passes a physical partition row must be missing from
+/// its domain's NMX-C partition list before the monitor removes it. One pass
+/// is not trusted on its own: an NMX-C still restoring its fabric state after
+/// a restart may answer with an incomplete list.
+const STALE_PARTITION_MISSES_BEFORE_DELETE: u32 = 2;
+
+/// Consecutive iterations each physical partition row was missing from its
+/// domain's NMX-C partition list, held between iterations. A pass that lists
+/// the partition again resets its count; a pass that cannot reach NMX-C makes
+/// no observation. A domain is observed at most once per iteration: chassis
+/// groups that share an endpoint reconcile the same domain against the same
+/// listing, and their passes together count as one miss, not one each.
+#[derive(Debug, Default)]
+struct StalePartitionTracker {
+    misses: HashMap<NvLinkPartitionId, u32>,
+    /// Domains whose listing this iteration has already been counted.
+    observed_domains: HashSet<NvLinkDomainId>,
+}
+
+impl StalePartitionTracker {
+    /// Starts an iteration: drops counts of rows that no longer exist and
+    /// lets every domain be counted again.
+    fn begin_iteration(&mut self, existing: &[NvlPartition]) {
+        let existing: HashSet<NvLinkPartitionId> = existing.iter().map(|p| p.id).collect();
+        self.misses.retain(|id, _| existing.contains(id));
+        self.observed_domains.clear();
+    }
+
+    /// Records one checked pass of `domain_uuid`: `missing` rows were absent
+    /// from NMX-C's list and `present` rows were listed. Returns the rows
+    /// missing on `threshold` consecutive iterations, which stay counted until
+    /// [`Self::forget`] confirms their removal so a failed delete is retried.
+    /// A later pass of the same domain in the same iteration advances no
+    /// count; it only reports the rows already due.
+    fn observe(
+        &mut self,
+        domain_uuid: NvLinkDomainId,
+        missing: &[NvLinkPartitionId],
+        present: &[NvLinkPartitionId],
+        threshold: u32,
+    ) -> Vec<NvLinkPartitionId> {
+        let first_pass_this_iteration = self.observed_domains.insert(domain_uuid);
+        if first_pass_this_iteration {
+            for id in present {
+                self.misses.remove(id);
+            }
+        }
+        missing
+            .iter()
+            .filter(|id| {
+                let misses = self.misses.entry(**id).or_default();
+                if first_pass_this_iteration {
+                    *misses = misses.saturating_add(1);
+                }
+                *misses >= threshold
+            })
+            .copied()
+            .collect()
+    }
+
+    fn forget(&mut self, ids: &[NvLinkPartitionId]) {
+        for id in ids {
+            self.misses.remove(id);
+        }
+    }
+}
+
+/// Physical partition rows recorded under an NVLink domain that no managed
+/// host belongs to. A host's domain is the one its stored NVLink info names
+/// or, when that is absent or nil (as after scout discovery), the one this
+/// pass's Hello returned for its group. The monitor refreshes the stored
+/// domain from Hello, so when NMX-C comes back with a new domain uuid (for
+/// example after losing its fabric state) the rows under the old uuid stop
+/// matching any host and any group, and nothing else would ever remove them.
+///
+/// Nothing is selected while any host's domain is unknown this pass, since
+/// the rows of that host's domain cannot be told from orphans, and nothing is
+/// selected while no host names a domain at all, so an empty or undiscovered
+/// fleet cannot empty the table. Rows under a domain some host names are left
+/// to that domain's group, which compares them against NMX-C's partition
+/// list, including rows of a group that is unreachable or skipped this pass.
+fn partitions_of_unknown_domains(
+    db_nvl_partitions: impl IntoIterator<Item = (NvLinkPartitionId, NvLinkDomainId)>,
+    host_domains_before_pass: &HashMap<HostMachineId, Option<NvLinkDomainId>>,
+    host_groups: &HashMap<HostMachineId, String>,
+    hello_domains: &HashMap<&str, NvLinkDomainId>,
+) -> Vec<(NvLinkPartitionId, NvLinkDomainId)> {
+    let mut known_domains: HashSet<NvLinkDomainId> = hello_domains.values().copied().collect();
+    for (machine_id, domain) in host_domains_before_pass {
+        match domain {
+            Some(domain) => {
+                known_domains.insert(*domain);
+            }
+            None => {
+                let resolved = host_groups
+                    .get(machine_id)
+                    .is_some_and(|group_id| hello_domains.contains_key(group_id.as_str()));
+                if !resolved {
+                    tracing::debug!(
+                        %machine_id,
+                        "Host's NVLink domain is unknown this pass; keeping every physical partition row"
+                    );
+                    return Vec::new();
+                }
+            }
+        }
+    }
+    if known_domains.is_empty() {
+        return Vec::new();
+    }
+    db_nvl_partitions
+        .into_iter()
+        .filter(|(_, domain)| !known_domains.contains(domain))
+        .collect()
+}
+
 impl PartitionProcessingContext {
     fn new(
         nmx_c_partitions: Vec<PartitionInfo>,
@@ -696,6 +812,36 @@ impl PartitionProcessingContext {
                 false
             }
         }
+    }
+
+    /// Physical partition rows of `domain_uuid`, split into those whose NMX-C
+    /// partition is missing from the domain's current partition list, with the
+    /// NMX-C id to recheck them by, and those listed. NMX-C forgets its
+    /// partitions when it restarts without fabric state, and the row of a
+    /// forgotten partition is never removed through GPU membership, so the
+    /// monitor removes it once it stays missing. Rows recorded under another or
+    /// a nil domain are left to their owner.
+    fn partition_presence_in_domain(
+        &self,
+        domain_uuid: &NvLinkDomainId,
+    ) -> (Vec<(NvLinkPartitionId, u32)>, Vec<NvLinkPartitionId>) {
+        let (mut missing, mut present) = (Vec::new(), Vec::new());
+        for (nmx_c_partition_id, partition) in &self.db_nvl_partitions {
+            if partition.domain_uuid != *domain_uuid {
+                continue;
+            }
+            let listed = self
+                .nmx_c_partitions
+                .contains_key(&libnmxc::nmxc_model::PartitionId {
+                    partition_id: *nmx_c_partition_id,
+                });
+            if listed {
+                present.push(partition.id);
+            } else {
+                missing.push((partition.id, *nmx_c_partition_id));
+            }
+        }
+        (missing, present)
     }
 
     // Get partition information from the database for a given NMX-C partition ID (numeric key).
@@ -1155,6 +1301,9 @@ pub struct NvlPartitionMonitor {
     /// Consecutive passes each rack's NMX-C was unusable, for the rack's
     /// debounced `NmxcUnreachable` alert.
     rack_unreachable: Mutex<RackUnreachableTracker>,
+    /// Consecutive checked passes each physical partition row was missing
+    /// from NMX-C, for the debounced removal of stale rows.
+    stale_partitions: Mutex<StalePartitionTracker>,
 }
 
 pub struct NvLinkManager {
@@ -1292,6 +1441,9 @@ struct GroupResult {
     /// Why NMX-C could not be used for the group this pass, when the pass
     /// stopped before reconciling. Feeds the rack's `NmxcUnreachable` alert.
     unreachable_reason: Option<ChassisNmxCUnreachableReason>,
+    /// Domain UUID this pass's Hello returned for the group, for any group
+    /// type. `None` when the group was skipped or NMX-C was not reached.
+    hello_domain_uuid: Option<NvLinkDomainId>,
 }
 
 impl GroupResult {
@@ -1309,6 +1461,7 @@ impl GroupResult {
             check_ok: true,
             rack_domain_uuid: None,
             unreachable_reason: None,
+            hello_domain_uuid: None,
         }
     }
 }
@@ -1350,6 +1503,7 @@ impl NvlPartitionMonitor {
             work_lock_manager_handle,
             group_states: Mutex::new(HashMap::new()),
             rack_unreachable: Mutex::new(RackUnreachableTracker::default()),
+            stale_partitions: Mutex::new(StalePartitionTracker::default()),
         }
     }
 
@@ -1469,6 +1623,24 @@ impl NvlPartitionMonitor {
 
         let db_nvl_partitions =
             db::nvl_partition::find_by(&mut txn, ObjectColumnFilter::<IdColumn>::All).await?;
+        // Taken before the shards below consume the map, and resolved against
+        // this pass's Hello results once the groups have run.
+        let host_domains_before_pass: HashMap<HostMachineId, Option<NvLinkDomainId>> =
+            machine_nvlink_info
+                .iter()
+                .map(|(machine_id, info)| {
+                    let domain = info
+                        .as_ref()
+                        .map(|info| info.domain_uuid)
+                        .filter(|domain| *domain != NvLinkDomainId::nil());
+                    (*machine_id, domain)
+                })
+                .collect();
+        let mut host_groups: HashMap<HostMachineId, String> = HashMap::new();
+        self.stale_partitions
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .begin_iteration(&db_nvl_partitions);
 
         let db_nvl_logical_partitions =
             db::nvl_logical_partition::find_by(&mut txn, ObjectColumnFilter::<LpIdColumn>::All)
@@ -1603,6 +1775,9 @@ impl NvlPartitionMonitor {
                 .unwrap_or_else(PoisonError::into_inner);
             for input in all_group_inputs {
                 seen_group_ids.insert(input.group_id.clone());
+                for snapshot in input.snapshots {
+                    host_groups.insert(snapshot.host_snapshot.id, input.group_id.clone());
+                }
                 let fingerprint = if detect_changes {
                     group_fingerprint(&input)
                 } else {
@@ -1701,6 +1876,22 @@ impl NvlPartitionMonitor {
                 rack_outcomes.push((rack_id.clone(), result.unreachable_reason));
             }
         }
+        let hello_domains: HashMap<&str, NvLinkDomainId> = checked_group_results
+            .iter()
+            .filter_map(|(group_id, _, _, result)| {
+                result
+                    .hello_domain_uuid
+                    .map(|domain| (group_id.as_str(), domain))
+            })
+            .collect();
+        let orphaned_domain_partitions = partitions_of_unknown_domains(
+            db_nvl_partitions
+                .iter()
+                .map(|partition| (partition.id, partition.domain_uuid)),
+            &host_domains_before_pass,
+            &host_groups,
+            &hello_domains,
+        );
         all_group_results.extend(
             checked_group_results
                 .into_iter()
@@ -1739,6 +1930,12 @@ impl NvlPartitionMonitor {
             .await?;
 
         // Retried next iteration; the groups above have already been reconciled.
+        if let Err(error) = self
+            .delete_partitions_of_unknown_domains(&orphaned_domain_partitions, metrics)
+            .await
+        {
+            tracing::warn!(%error, "Failed to delete physical partitions of unknown domains");
+        }
         if let Err(error) = self
             .delete_marked_logical_partitions(&db_nvl_logical_partitions)
             .await
@@ -1929,6 +2126,7 @@ impl NvlPartitionMonitor {
                     check_ok: false,
                     rack_domain_uuid: None,
                     unreachable_reason: Some($reason),
+                    hello_domain_uuid: None,
                 };
             }};
         }
@@ -2147,6 +2345,7 @@ impl NvlPartitionMonitor {
             check_ok,
             rack_domain_uuid: rack_id.map(|_| domain_uuid),
             unreachable_reason: None,
+            hello_domain_uuid: Some(domain_uuid),
         }
     }
 
@@ -2445,6 +2644,30 @@ impl NvlPartitionMonitor {
             db_nvl_partitions,
             machine_nvlink_info,
         );
+        // Rows missing from this pass's listing, with the NMX-C id each is
+        // rechecked by against the listing taken after the operations, and
+        // those of them due for removal after this miss.
+        let (missing_partitions, stale_candidates) = {
+            let (missing, present) =
+                partition_processing_context.partition_presence_in_domain(&domain_uuid);
+            let missing_ids: Vec<NvLinkPartitionId> = missing.iter().map(|(id, _)| *id).collect();
+            let due = self
+                .stale_partitions
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .observe(
+                    domain_uuid,
+                    &missing_ids,
+                    &present,
+                    STALE_PARTITION_MISSES_BEFORE_DELETE,
+                );
+            let candidates: Vec<(NvLinkPartitionId, u32)> = missing
+                .iter()
+                .filter(|(id, _)| due.contains(id))
+                .copied()
+                .collect();
+            (missing, candidates)
+        };
 
         // Report isolation progress for marked hosts from this pass's partition membership. Like
         // the GPU health alerts, a failed write never blocks reconciliation.
@@ -2498,7 +2721,10 @@ impl NvlPartitionMonitor {
             .map(|ops| ops.len())
             .sum::<usize>();
 
-        if nvlink_info_db_updates.is_empty() && completed_nmx_c_operations.is_empty() {
+        if nvlink_info_db_updates.is_empty()
+            && completed_nmx_c_operations.is_empty()
+            && missing_partitions.is_empty()
+        {
             if had_operations {
                 record_stage(MonitorStage::GroupApply, apply_started);
             }
@@ -2509,9 +2735,12 @@ impl NvlPartitionMonitor {
         }
 
         // Created partitions are matched to their NMX-C ids through a fresh
-        // partition list; nothing else reads it.
+        // partition list, and rows missing from the first listing are
+        // rechecked against it: a partition that reappeared while the pass
+        // ran, as during fabric restoration, keeps its row and its miss count
+        // starts over.
         let nmx_c_partitions: HashMap<String, PartitionInfo> =
-            if completed_nmx_c_operations.is_empty() {
+            if completed_nmx_c_operations.is_empty() && missing_partitions.is_empty() {
                 HashMap::new()
             } else {
                 nmxc_client
@@ -2548,7 +2777,48 @@ impl NvlPartitionMonitor {
             &nmx_c_partitions,
         )
         .await?;
+        let listed_again: Vec<NvLinkPartitionId> = missing_partitions
+            .iter()
+            .filter(|(_, nmx_c_partition_id)| {
+                nmx_c_partitions.contains_key(&nmx_c_partition_id.to_string())
+            })
+            .map(|(id, _)| *id)
+            .collect();
+        let (reappeared, stale_partition_ids): (Vec<NvLinkPartitionId>, Vec<NvLinkPartitionId>) =
+            stale_candidates
+                .iter()
+                .map(|(id, _)| *id)
+                .partition(|id| listed_again.contains(id));
+        let stale_deleted = if stale_partition_ids.is_empty() {
+            Vec::new()
+        } else {
+            db::nvl_partition::final_delete_many(&stale_partition_ids, &mut txn).await?
+        };
         txn.commit().await?;
+        {
+            let mut tracker = self
+                .stale_partitions
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            tracker.forget(&stale_partition_ids);
+            // Listed again, whether or not already due: the miss streak starts over.
+            tracker.forget(&listed_again);
+        }
+        for partition_id in &reappeared {
+            tracing::info!(
+                %domain_uuid,
+                nvlink_partition_id = %partition_id,
+                "NMX-C lists the partition again; keeping its physical partition row"
+            );
+        }
+        for partition_id in &stale_deleted {
+            tracing::warn!(
+                %domain_uuid,
+                nvlink_partition_id = %partition_id,
+                "Deleted physical partition row whose NMX-C partition no longer exists"
+            );
+        }
+        metrics.num_stale_partitions_deleted += stale_deleted.len();
         record_stage(MonitorStage::GroupApply, apply_started);
 
         Ok(PartitionCheckOutcome {
@@ -3703,50 +3973,73 @@ impl NvlPartitionMonitor {
         Ok(())
     }
 
+    /// Deletes the physical partition rows that [`partitions_of_unknown_domains`]
+    /// selected, once per iteration after every group ran, and counts them as
+    /// stale partitions. Removing a row never touches NMX-C: a partition it
+    /// described is already gone with its domain, or is reconciled through the
+    /// domain's current group like any other partition NICo has no record of.
+    async fn delete_partitions_of_unknown_domains(
+        &self,
+        partitions: &[(NvLinkPartitionId, NvLinkDomainId)],
+        metrics: &mut NvlPartitionMonitorMetrics,
+    ) -> NvLinkManagerResult<()> {
+        if partitions.is_empty() {
+            return Ok(());
+        }
+        let ids: Vec<NvLinkPartitionId> = partitions.iter().map(|(id, _)| *id).collect();
+        let mut txn = self.db_pool.txn_begin().await?;
+        let deleted = db::nvl_partition::final_delete_many(&ids, &mut txn).await?;
+        txn.commit().await?;
+        for (partition_id, domain_uuid) in partitions {
+            if deleted.contains(partition_id) {
+                tracing::warn!(
+                    %domain_uuid,
+                    nvlink_partition_id = %partition_id,
+                    "Deleted physical partition row whose NVLink domain no managed host belongs to"
+                );
+            }
+        }
+        metrics.num_stale_partitions_deleted += deleted.len();
+        Ok(())
+    }
+
     /// Deletes the logical partitions marked as deleted once per iteration,
     /// after every group has removed its physical partitions. A logical
     /// partition spans domains, so this is not group work.
     ///
     /// A marked logical partition that an `nvlink_partitions` row still
     /// references (for example one NMX-C forgot, so no group removes it) is
-    /// skipped and logged rather than deleted: the foreign key would fail the
-    /// whole transaction and keep every other eligible partition from purging.
+    /// left in place and logged: the foreign key would fail the whole purge
+    /// and keep every other eligible partition from being removed. The
+    /// reference check and the delete are one statement, so a row removed or
+    /// added after the iteration's snapshot cannot make the purge fail.
     async fn delete_marked_logical_partitions(
         &self,
         db_nvl_logical_partitions: &[LogicalPartition],
     ) -> NvLinkManagerResult<()> {
-        let marked: Vec<&LogicalPartition> = db_nvl_logical_partitions
+        let marked: Vec<NvLinkLogicalPartitionId> = db_nvl_logical_partitions
             .iter()
             .filter(|lp| model::nvl_logical_partition::is_marked_as_deleted(lp))
+            .map(|lp| lp.id)
             .collect();
         if marked.is_empty() {
             return Ok(());
         }
 
         let mut txn = self.db_pool.txn_begin().await?;
-        // Reload inside the transaction: the groups above removed rows after
-        // the iteration's snapshot was taken.
-        let referenced_logical_partition_ids: HashSet<NvLinkLogicalPartitionId> =
-            db::nvl_partition::find_by(&mut txn, ObjectColumnFilter::<IdColumn>::All)
-                .await?
-                .into_iter()
-                .filter_map(|p| p.logical_partition_id)
-                .collect();
-        for lp in marked {
-            if referenced_logical_partition_ids.contains(&lp.id) {
-                tracing::warn!(
-                    nvlink_logical_partition_id = %lp.id,
-                    "Logical partition marked as deleted still has physical partition rows; skipping deletion"
-                );
-                continue;
-            }
-            tracing::info!(
-                nvlink_logical_partition_id = %lp.id,
-                "Deleting logical partition"
-            );
-            db::nvl_logical_partition::final_delete(lp.id, &mut txn).await?;
-        }
+        let deleted =
+            db::nvl_logical_partition::final_delete_unreferenced(&marked, &mut txn).await?;
         txn.commit().await?;
+
+        for id in &deleted {
+            tracing::info!(nvlink_logical_partition_id = %id, "Deleted logical partition");
+        }
+        for id in marked.iter().filter(|id| !deleted.contains(id)) {
+            tracing::warn!(
+                nvlink_logical_partition_id = %id,
+                "Logical partition marked as deleted still has physical partition rows; skipping deletion"
+            );
+        }
 
         Ok(())
     }
@@ -3883,6 +4176,108 @@ fn next_nvlink_unhealthy_alerts(
     }
 
     alerts.into_values().collect()
+}
+
+#[cfg(test)]
+mod stale_partition_tracker_tests {
+    use carbide_uuid::machine::{MachineIdSource, MachineType};
+
+    use super::*;
+
+    /// A row is due only after the threshold of consecutive iterations, a pass
+    /// that lists it resets the count, a confirmed delete forgets it, and a
+    /// second pass of the same domain in one iteration advances nothing.
+    #[test]
+    fn stale_partition_tracker_debounces_misses() {
+        let domain = NvLinkDomainId::new();
+        let row = |nmx_c_partition_id: i32| NvlPartition {
+            id: NvLinkPartitionId::new(),
+            nmx_c_partition_id,
+            domain_uuid: domain,
+            name: NvlPartitionName::try_from(format!("p{nmx_c_partition_id}")).unwrap(),
+            created: Utc::now(),
+            updated: Utc::now(),
+            deleted: None,
+            logical_partition_id: None,
+        };
+        let rows = [row(1), row(2)];
+        let (a, b) = (rows[0].id, rows[1].id);
+        let mut tracker = StalePartitionTracker::default();
+
+        tracker.begin_iteration(&rows);
+        assert!(tracker.observe(domain, &[a, b], &[], 2).is_empty());
+        // Another chassis sharing the endpoint and domain, same iteration.
+        assert!(tracker.observe(domain, &[a, b], &[], 2).is_empty());
+
+        tracker.begin_iteration(&rows);
+        // `b` is listed again before its second miss.
+        assert_eq!(tracker.observe(domain, &[a], &[b], 2), vec![a]);
+        // The sharing chassis only sees that `a` is due.
+        assert_eq!(tracker.observe(domain, &[a, b], &[], 2), vec![a]);
+
+        tracker.begin_iteration(&rows);
+        // `a` stays due until its delete is confirmed.
+        assert_eq!(tracker.observe(domain, &[a, b], &[], 2), vec![a]);
+        tracker.forget(&[a]);
+        tracker.begin_iteration(&rows);
+        assert_eq!(tracker.observe(domain, &[a, b], &[], 2), vec![b]);
+        // `b`'s count is dropped with its row at the next iteration start and
+        // restarts at one; `a` reaches its second miss since it was forgotten.
+        tracker.begin_iteration(&rows[..1]);
+        assert_eq!(tracker.observe(domain, &[a, b], &[], 2), vec![a]);
+    }
+
+    /// Which rows the iteration treats as orphans, given what the hosts' stored
+    /// NVLink info and this pass's Hello results say about domains.
+    #[test]
+    fn orphaned_rows_follow_known_host_domains() {
+        let (known, learned, stale) = (
+            NvLinkDomainId::new(),
+            NvLinkDomainId::new(),
+            NvLinkDomainId::new(),
+        );
+        let rows = [
+            (NvLinkPartitionId::new(), known),
+            (NvLinkPartitionId::new(), learned),
+            (NvLinkPartitionId::new(), stale),
+        ];
+        let stale_row = rows[2];
+        let host = |seed: u8| {
+            HostMachineId::try_from(MachineId::new(
+                MachineIdSource::Tpm,
+                [seed; 32],
+                MachineType::Host,
+            ))
+            .expect("host machine id")
+        };
+        let (a, b) = (host(1), host(2));
+        let groups = HashMap::from([(a, "rack-a".to_string()), (b, "rack-b".to_string())]);
+        let select = |hosts: &[(HostMachineId, Option<NvLinkDomainId>)],
+                      hellos: &[(&str, NvLinkDomainId)]| {
+            partitions_of_unknown_domains(
+                rows,
+                &hosts.iter().copied().collect(),
+                &groups,
+                &hellos.iter().copied().collect(),
+            )
+        };
+
+        // Every host names a domain: only the row under neither is an orphan.
+        assert_eq!(
+            select(&[(a, Some(known)), (b, Some(learned))], &[]),
+            vec![stale_row]
+        );
+        // A host without a stored domain whose group's Hello answered this
+        // pass: the Hello domain protects its rows.
+        assert_eq!(
+            select(&[(a, Some(known)), (b, None)], &[("rack-b", learned)]),
+            vec![stale_row]
+        );
+        // The same host while its group was skipped or unreachable: defer.
+        assert!(select(&[(a, Some(known)), (b, None)], &[]).is_empty());
+        // No host names any domain: defer.
+        assert!(select(&[(a, None), (b, None)], &[]).is_empty());
+    }
 }
 
 #[cfg(test)]
@@ -5560,6 +5955,7 @@ mod machine_group_tests {
                 check_ok: _,
                 rack_domain_uuid,
                 unreachable_reason: _,
+                hello_domain_uuid: _,
             } = monitor
                 .process_nmx_c_partition_monitor_group(ProcessMachineGroupInput {
                     group_id: "rack-1".to_string(),
@@ -6440,6 +6836,7 @@ mod machine_group_tests {
                 check_ok: true,
                 rack_domain_uuid: None,
                 unreachable_reason: None,
+                hello_domain_uuid: None,
             },
             GroupResult {
                 completed_operations: 1,
@@ -6448,6 +6845,7 @@ mod machine_group_tests {
                 check_ok: true,
                 rack_domain_uuid: None,
                 unreachable_reason: None,
+                hello_domain_uuid: None,
             },
             GroupResult {
                 completed_operations: 0,
@@ -6461,6 +6859,7 @@ mod machine_group_tests {
                 check_ok: false,
                 rack_domain_uuid: None,
                 unreachable_reason: Some(ChassisNmxCUnreachableReason::NoEndpoint),
+                hello_domain_uuid: None,
             },
             // A group skipped by change detection carries its last health forward.
             GroupResult::skipped(skipped_health),

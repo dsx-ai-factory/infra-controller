@@ -226,18 +226,39 @@ pub async fn update(
     })
 }
 
-pub async fn final_delete(
-    partition_id: NvLinkLogicalPartitionId,
+/// Hard-deletes the given logical partitions, except those an
+/// `nvlink_partitions` row still references, and returns the ids it deleted.
+/// Ids with no row are ignored.
+///
+/// The candidate rows are locked first. A concurrent insert of a referencing
+/// `nvlink_partitions` row takes a key-share lock on its parent, so an insert
+/// in flight commits before the lock is granted and is then visible to the
+/// reference check, and one that starts later waits for this transaction.
+/// Without the lock, the check could miss an uncommitted insert, the delete
+/// would block on it, and the foreign key would fail the whole statement,
+/// rolling back every other eligible deletion.
+pub async fn final_delete_unreferenced(
+    partition_ids: &[NvLinkLogicalPartitionId],
     txn: &mut PgConnection,
-) -> Result<NvLinkLogicalPartitionId, DatabaseError> {
-    let query = "DELETE FROM nvlink_logical_partitions WHERE id=$1::uuid RETURNING id";
-    let partition: NvLinkLogicalPartitionId = sqlx::query_as(query)
-        .bind(partition_id)
-        .fetch_one(txn)
+) -> Result<Vec<NvLinkLogicalPartitionId>, DatabaseError> {
+    let lock = "SELECT id FROM nvlink_logical_partitions WHERE id = ANY($1) FOR UPDATE";
+    sqlx::query(lock)
+        .bind(partition_ids)
+        .execute(&mut *txn)
         .await
-        .map_err(|e| DatabaseError::new(query, e))?;
+        .map_err(|e| DatabaseError::new(lock, e))?;
 
-    Ok(partition)
+    let query = "DELETE FROM nvlink_logical_partitions lp
+                 WHERE lp.id = ANY($1)
+                   AND NOT EXISTS (
+                       SELECT 1 FROM nvlink_partitions p WHERE p.logical_partition_id = lp.id
+                   )
+                 RETURNING lp.id";
+    sqlx::query_scalar(query)
+        .bind(partition_ids)
+        .fetch_all(txn)
+        .await
+        .map_err(|e| DatabaseError::new(query, e))
 }
 
 #[cfg(test)]
@@ -328,5 +349,139 @@ mod tests {
             persisted.config_version.version_nr(),
             partition.config_version.version_nr() + 1
         );
+    }
+
+    /// The purge deletes only the requested partitions that no
+    /// `nvlink_partitions` row references, in one statement, and reports
+    /// which ones it deleted.
+    #[crate::sqlx_test]
+    async fn final_delete_unreferenced_keeps_referenced_partitions(pool: sqlx::PgPool) {
+        async fn create_logical(txn: &mut PgConnection, name: &str) -> NvLinkLogicalPartitionId {
+            create(
+                &NewLogicalPartition {
+                    id: uuid::Uuid::new_v4().into(),
+                    config: LogicalPartitionConfig {
+                        metadata: Metadata {
+                            name: name.to_string(),
+                            ..Default::default()
+                        },
+                        tenant_organization_id: "example".parse().unwrap(),
+                    },
+                },
+                txn,
+            )
+            .await
+            .unwrap()
+            .id
+        }
+
+        let mut txn = pool.begin().await.unwrap();
+        let referenced = create_logical(&mut txn, "referenced").await;
+        let unreferenced = create_logical(&mut txn, "unreferenced").await;
+        let unrequested = create_logical(&mut txn, "unrequested").await;
+        crate::nvl_partition::create(
+            &model::nvl_partition::NewNvlPartition {
+                id: carbide_uuid::nvlink::NvLinkPartitionId::new(),
+                name: model::nvl_partition::NvlPartitionName::try_from("stale".to_string())
+                    .unwrap(),
+                logical_partition_id: referenced,
+                domain_uuid: carbide_uuid::nvlink::NvLinkDomainId::new(),
+                nmx_c_partition_id: 1,
+            },
+            &mut txn,
+        )
+        .await
+        .unwrap();
+        let missing: NvLinkLogicalPartitionId = uuid::Uuid::new_v4().into();
+
+        let deleted = final_delete_unreferenced(&[referenced, unreferenced, missing], &mut txn)
+            .await
+            .unwrap();
+        assert_eq!(deleted, vec![unreferenced]);
+
+        let mut remaining: Vec<_> = find_by(txn.as_mut(), ObjectColumnFilter::<IdColumn>::All)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|lp| lp.id)
+            .collect();
+        remaining.sort();
+        let mut expected = vec![referenced, unrequested];
+        expected.sort();
+        assert_eq!(remaining, expected);
+        txn.rollback().await.unwrap();
+    }
+
+    /// A physical partition row inserted but not yet committed when the purge
+    /// starts must not fail the purge: the purge waits for the insert, then
+    /// keeps the partition it references and deletes the other one.
+    #[crate::sqlx_test]
+    async fn final_delete_unreferenced_waits_for_in_flight_reference(pool: sqlx::PgPool) {
+        async fn create_logical(txn: &mut PgConnection, name: &str) -> NvLinkLogicalPartitionId {
+            create(
+                &NewLogicalPartition {
+                    id: uuid::Uuid::new_v4().into(),
+                    config: LogicalPartitionConfig {
+                        metadata: Metadata {
+                            name: name.to_string(),
+                            ..Default::default()
+                        },
+                        tenant_organization_id: "example".parse().unwrap(),
+                    },
+                },
+                txn,
+            )
+            .await
+            .unwrap()
+            .id
+        }
+
+        let mut setup = pool.begin().await.unwrap();
+        let referenced = create_logical(&mut setup, "referenced").await;
+        let unreferenced = create_logical(&mut setup, "unreferenced").await;
+        setup.commit().await.unwrap();
+
+        // The insert holds its transaction open until the purge is blocked on it.
+        let mut inserting = pool.begin().await.unwrap();
+        crate::nvl_partition::create(
+            &model::nvl_partition::NewNvlPartition {
+                id: carbide_uuid::nvlink::NvLinkPartitionId::new(),
+                name: model::nvl_partition::NvlPartitionName::try_from("in-flight".to_string())
+                    .unwrap(),
+                logical_partition_id: referenced,
+                domain_uuid: carbide_uuid::nvlink::NvLinkDomainId::new(),
+                nmx_c_partition_id: 1,
+            },
+            &mut inserting,
+        )
+        .await
+        .unwrap();
+
+        let purge = {
+            let pool = pool.clone();
+            tokio::spawn(async move {
+                let mut txn = pool.begin().await.unwrap();
+                let deleted = final_delete_unreferenced(&[referenced, unreferenced], &mut txn)
+                    .await
+                    .unwrap();
+                txn.commit().await.unwrap();
+                deleted
+            })
+        };
+        // The purge is waiting on the parent row lock the insert holds. Giving
+        // it time to reach that wait proves the ordering; a purge that did not
+        // wait would already have failed on the foreign key by now.
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        assert!(
+            !purge.is_finished(),
+            "purge must wait for the in-flight insert"
+        );
+        inserting.commit().await.unwrap();
+
+        let deleted = tokio::time::timeout(Duration::from_secs(10), purge)
+            .await
+            .expect("purge completes once the insert commits")
+            .unwrap();
+        assert_eq!(deleted, vec![unreferenced]);
     }
 }

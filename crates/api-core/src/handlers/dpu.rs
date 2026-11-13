@@ -537,6 +537,8 @@ async fn get_managed_host_network_config_inner(
         id: dpu_machine_id.to_string(),
     })?;
 
+    crate::api::log_managed_host_snapshot(&snapshot, &dpu_machine_id.into());
+
     let dpu_snapshot = match snapshot
         .dpu_snapshots
         .iter()
@@ -1323,6 +1325,10 @@ pub(crate) async fn update_agent_reported_inventory(
             .await?;
     txn.commit().await?;
 
+    if let Some(snapshot) = &host_snapshot {
+        crate::api::log_managed_host_snapshot(snapshot, &dpu_machine_id.into());
+    }
+
     if let Some(snapshot) = host_snapshot
         && snapshot.host_snapshot.config.dpf.used_for_ingestion
     {
@@ -1740,7 +1746,7 @@ async fn process_dpu_network_status(
     {
         // The host machine could not even be looked up, so the identity in
         // hand is the reporting DPU rather than the host that stays asleep.
-        carbide_instrument::emit(StateHandlerWakeupFailed {
+        api.instrumentation.emit(StateHandlerWakeupFailed {
             trigger: WakeupTrigger::DpuNetworkStatus,
             machine_id: dpu_machine_id.into(),
             err: err.to_string(),
@@ -1764,13 +1770,21 @@ async fn wakeup_host_state_handler_by_dpu_id(
     let host_machines_by_dpu_ids =
         db::machine::DpuHostAssociations::load(&mut api.db_reader(), &[*dpu_machine_id]).await?;
 
+    if let Some(host_machine_id) = host_machines_by_dpu_ids.host_machine_id(dpu_machine_id) {
+        trace_propagation::MachineTraceAttributes {
+            managed_host_id: Some(&host_machine_id.to_string()),
+            ..Default::default()
+        }
+        .record_on(&tracing::Span::current());
+    }
+
     if let Some(host_machine_id) = host_machines_by_dpu_ids.host_machine_id(dpu_machine_id)
         && let Err(err) = api
             .machine_state_handler_enqueuer
             .enqueue_object(&host_machine_id)
             .await
     {
-        carbide_instrument::emit(StateHandlerWakeupFailed {
+        api.instrumentation.emit(StateHandlerWakeupFailed {
             trigger: WakeupTrigger::DpuNetworkStatus,
             machine_id: host_machine_id.into(),
             err: err.to_string(),

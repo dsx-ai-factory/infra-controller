@@ -21,7 +21,7 @@ func TestFactoryResetHandler_Handle(t *testing.T) {
 	fixture := newNVLinkDomainHandlerTestFixture(t)
 	for _, tc := range []struct {
 		name         string
-		scope        resetScope
+		scope        factoryResetScope
 		resetTarget  string
 		invalidBody  bool
 		omitTarget   bool
@@ -32,16 +32,16 @@ func TestFactoryResetHandler_Handle(t *testing.T) {
 		siteStatus   string
 		status       int
 	}{
-		{name: "domain switches only", scope: resetDomain, status: http.StatusAccepted},
-		{name: "domain SDN scope forwarded", scope: resetDomain, resetTarget: "sdn", status: http.StatusAccepted},
-		{name: "tray external ID", scope: resetTray, status: http.StatusAccepted},
-		{name: "foreign provider site", scope: resetTray, foreignSite: true, status: http.StatusForbidden},
-		{name: "missing user", scope: resetTray, missingUser: true, status: http.StatusInternalServerError},
-		{name: "invalid task reference", scope: resetTray, invalidTasks: true, status: http.StatusBadGateway},
-		{name: "missing reset target", scope: resetTray, omitTarget: true, status: http.StatusBadRequest},
-		{name: "missing site", scope: resetTray, invalidBody: true, status: http.StatusBadRequest},
-		{name: "tenant forbidden", scope: resetDomain, tenant: true, status: http.StatusForbidden},
-		{name: "unregistered site", scope: resetDomain, siteStatus: cdbm.SiteStatusPending, status: http.StatusBadRequest},
+		{name: "domain switches only", scope: factoryResetDomain, status: http.StatusAccepted},
+		{name: "domain SDN scope forwarded", scope: factoryResetDomain, resetTarget: "sdn", status: http.StatusAccepted},
+		{name: "tray external ID", scope: factoryResetTray, status: http.StatusAccepted},
+		{name: "foreign provider site", scope: factoryResetTray, foreignSite: true, status: http.StatusForbidden},
+		{name: "missing user", scope: factoryResetTray, missingUser: true, status: http.StatusInternalServerError},
+		{name: "invalid task reference", scope: factoryResetTray, invalidTasks: true, status: http.StatusBadGateway},
+		{name: "missing reset target", scope: factoryResetTray, omitTarget: true, status: http.StatusBadRequest},
+		{name: "missing site", scope: factoryResetTray, invalidBody: true, status: http.StatusBadRequest},
+		{name: "tenant forbidden", scope: factoryResetDomain, tenant: true, status: http.StatusForbidden},
+		{name: "unregistered site", scope: factoryResetDomain, siteStatus: cdbm.SiteStatusPending, status: http.StatusBadRequest},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			fixture.setSiteStatus(t, cdbm.SiteStatusRegistered)
@@ -100,7 +100,7 @@ func TestFactoryResetHandler_Handle(t *testing.T) {
 			var request flowv1.FactoryResetSwitchesRequest
 			require.NoError(t, protojson.Unmarshal(captured.request.RequestJSON, &request))
 			require.Equal(t, resetTarget, request.GetResetTarget())
-			if tc.scope == resetDomain {
+			if tc.scope == factoryResetDomain {
 				require.Len(t, request.TargetSpec.GetNvlDomains().Targets[0].ComponentTypes, 1)
 			} else {
 				require.Equal(t, "target-1", request.TargetSpec.GetComponents().Targets[0].GetExternal().Id)

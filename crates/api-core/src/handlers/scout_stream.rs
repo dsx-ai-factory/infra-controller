@@ -22,6 +22,7 @@ use ::rpc::protos::{forge as rpc, mlx_device};
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Status, Streaming};
+use tracing::Instrument;
 
 use crate::CarbideError;
 use crate::api::{Api, ScoutStreamType, log_request_data};
@@ -94,7 +95,7 @@ pub(crate) async fn scout_stream(
     let registry_clone = api.scout_stream_registry.clone();
     let pool = api.database_connection.clone();
     let cancel_token = api.cancel_token.clone();
-    tokio::spawn(async move {
+    let receive_messages = async move {
         while let Some(Ok(Some(message))) = cancel_token.run_until_cancelled(stream.message()).await
         {
             // This is an observation from the authenticated host, not proof
@@ -153,7 +154,8 @@ pub(crate) async fn scout_stream(
             "Scout agent disconnected",
         );
         registry_clone.unregister(machine_id).await;
-    });
+    };
+    tokio::spawn(receive_messages.in_current_span());
 
     // Ok(Response::new(ReceiverStream::new(server_rx)))
     Ok(Response::new(Box::pin(ReceiverStream::new(server_rx))))
@@ -340,6 +342,7 @@ mod tests {
 
     async fn stalled_initial_message_test_body(pool: sqlx::PgPool) {
         let env = create_test_env(pool).await;
+        let test_meter = carbide_utils::test_support::test_meter::TestMeter::default();
         let mut join_set = JoinSet::new();
         let controller = ApiAdmissionControl::from_config(
             &ApiAdmissionControlConfig {
@@ -352,7 +355,8 @@ mod tests {
                 client_idle_timeout: Duration::from_secs(60),
                 service_limits: Default::default(),
             },
-            &opentelemetry::global::meter("scout-stream-init-timeout-test"),
+            &test_meter.meter(),
+            carbide_instrument::Instrumentation::new(test_meter.meter()),
             CancellationToken::new(),
             &mut join_set,
         )

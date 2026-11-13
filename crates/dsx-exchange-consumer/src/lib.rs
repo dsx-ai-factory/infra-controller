@@ -77,6 +77,9 @@ pub async fn run_service(config: Config) -> Result<(), DsxConsumerError> {
         metrics_endpoint::new_metrics_setup("carbide-dsx-exchange-consumer", "carbide", true)
             .map_err(|e| DsxConsumerError::Metrics(e.to_string()))?;
 
+    let instrumentation =
+        carbide_instrument::Instrumentation::from_meter_provider(&metrics_setup.meter_provider);
+    let _metrics_provider = metrics_setup.meter_provider;
     let registry = metrics_setup.registry;
     let meter = metrics_setup.meter;
     carbide_instrument::log_events::register(&meter);
@@ -96,7 +99,13 @@ pub async fn run_service(config: Config) -> Result<(), DsxConsumerError> {
     // Connect to MQTT and get the processing channel. mqttea tracks
     // subscriptions and replays them after reconnect when the broker reports
     // that the previous session was not resumed.
-    let (queue_tx, rx) = mqtt_consumer::connect(&config.mqtt, &meter, credential_reader).await?;
+    let (queue_tx, rx) = mqtt_consumer::connect(
+        &config.mqtt,
+        &meter,
+        instrumentation.clone(),
+        credential_reader,
+    )
+    .await?;
 
     // Expose the channel's pending depth so backpressure is visible before the
     // drop counter starts moving. Hand the sender over by value: the gauge keeps
@@ -111,14 +120,24 @@ pub async fn run_service(config: Config) -> Result<(), DsxConsumerError> {
             api_config.client_key,
             &api_config.api_url,
         ));
-        let health_updater =
-            HealthUpdater::new(config.mqtt.topic_prefix, config.cache, api_client, meter);
+        let health_updater = HealthUpdater::new(
+            config.mqtt.topic_prefix,
+            config.cache,
+            api_client,
+            meter,
+            instrumentation,
+        );
         tokio::spawn(async move { health_updater.run(rx).await })
     } else {
         tracing::warn!("Carbide API disabled, using console sink");
         let api_client = Arc::new(ConsoleRackHealthSink);
-        let health_updater =
-            HealthUpdater::new(config.mqtt.topic_prefix, config.cache, api_client, meter);
+        let health_updater = HealthUpdater::new(
+            config.mqtt.topic_prefix,
+            config.cache,
+            api_client,
+            meter,
+            instrumentation,
+        );
         tokio::spawn(async move { health_updater.run(rx).await })
     };
 

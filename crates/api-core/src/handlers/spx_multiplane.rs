@@ -69,9 +69,14 @@ pub(super) async fn load_configuration(
 }
 
 fn host_id(id: Option<MachineId>) -> Result<HostMachineId, CarbideError> {
-    id.ok_or(CarbideError::MissingArgument("machine_id"))?
+    let host_id: HostMachineId = id
+        .ok_or(CarbideError::MissingArgument("machine_id"))?
         .try_into()
-        .map_err(|_| CarbideError::InvalidArgument("machine_id must identify a host".to_string()))
+        .map_err(|_| {
+            CarbideError::InvalidArgument("machine_id must identify a host".to_string())
+        })?;
+    crate::api::log_machine_id(&host_id.into());
+    Ok(host_id)
 }
 
 /// A host's declared CX9 interfaces define Astra participation; only its BF4 DPUs

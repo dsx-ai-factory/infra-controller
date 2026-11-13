@@ -52,10 +52,10 @@ pub(crate) struct AppState {
     pub(super) static_dir: String,
     pub(super) runtime_config: RuntimeConfig,
     pub(super) prometheus_handle: PrometheusHandle,
-    /// The registry behind the global OTel meter, where the instrumentation
-    /// framework's events record; `/metrics` renders it alongside the
-    /// `metrics-exporter-prometheus` recorder above.
-    pub(super) otel_registry: prometheus::Registry,
+    /// Records boot events in the provider exported by `/metrics`.
+    pub(super) instrumentation: carbide_instrument::Instrumentation,
+    /// Retains the OTel provider and registry for the lifetime of the router.
+    pub(super) otel_metrics: metrics_endpoint::MetricsSetup,
 }
 
 /// An [`AppState`] whose template engine is loaded from the real
@@ -76,6 +76,10 @@ pub(crate) fn test_app_state_with_templates() -> AppState {
 pub(crate) fn test_app_state() -> AppState {
     use metrics_exporter_prometheus::PrometheusBuilder;
 
+    let otel_metrics = metrics_endpoint::new_metrics_setup("pxe-tests", "carbide", false)
+        .expect("test metrics setup");
+    let instrumentation =
+        carbide_instrument::Instrumentation::from_meter_provider(&otel_metrics.meter_provider);
     AppState {
         engine: Engine::from(Tera::default()),
         static_dir: String::new(),
@@ -93,6 +97,7 @@ pub(crate) fn test_app_state() -> AppState {
             template_directory: String::new(),
         },
         prometheus_handle: PrometheusBuilder::new().build_recorder().handle(),
-        otel_registry: prometheus::Registry::new(),
+        instrumentation,
+        otel_metrics,
     }
 }

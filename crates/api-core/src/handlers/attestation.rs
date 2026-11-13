@@ -112,6 +112,7 @@ pub(crate) async fn trigger_machine_attestation(
 
     let result = trigger_attestation(
         api.pg_pool(),
+        &api.instrumentation,
         connect,
         bmc_info,
         &machine_id,
@@ -703,11 +704,12 @@ pub(crate) async fn attest_quote(
         &request.signature,
     )
     .inspect_err(|e| {
-        carbide_instrument::emit(crate::attestation::MeasuredBootVerificationFailed {
-            cause: crate::attestation::MeasuredBootVerificationFailureCause::VerificationError,
-            event_log: crate::attestation::event_log_to_string(&request.event_log),
-            error: format!("PCR signature verification failed: {e}"),
-        });
+        api.instrumentation
+            .emit(crate::attestation::MeasuredBootVerificationFailed {
+                cause: crate::attestation::MeasuredBootVerificationFailureCause::VerificationError,
+                event_log: crate::attestation::event_log_to_string(&request.event_log),
+                error: format!("PCR signature verification failed: {e}"),
+            });
     })?;
 
     // Make sure we can verify the the PCR hash one way
@@ -715,7 +717,8 @@ pub(crate) async fn attest_quote(
     let pcr_hash_matches =
         crate::attestation::verify_pcr_hash(&request.attestation, &request.pcr_values)
             .inspect_err(|e| {
-                carbide_instrument::emit(crate::attestation::MeasuredBootVerificationFailed {
+                api.instrumentation
+                    .emit(crate::attestation::MeasuredBootVerificationFailed {
                     cause:
                         crate::attestation::MeasuredBootVerificationFailureCause::VerificationError,
                     event_log: crate::attestation::event_log_to_string(&request.event_log),
@@ -728,7 +731,12 @@ pub(crate) async fn attest_quote(
     // continue (the event log goes with, since it will be
     // logged in the event of an invalid signature or PCR
     // hash mismatch).
-    crate::attestation::verify_quote_state(signature_valid, pcr_hash_matches, &request.event_log)?;
+    crate::attestation::verify_quote_state(
+        &api.instrumentation,
+        signature_valid,
+        pcr_hash_matches,
+        &request.event_log,
+    )?;
 
     // If we've reached this point, we can now clean up
     // now ephemeral secret data from the database, and send

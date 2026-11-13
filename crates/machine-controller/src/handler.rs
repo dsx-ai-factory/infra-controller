@@ -154,6 +154,7 @@ mod machine_validation;
 mod maintenance;
 mod nic_firmware;
 mod nic_lockdown_rotation;
+mod onboard_nics;
 mod power;
 mod reset;
 mod rotation;
@@ -3469,6 +3470,20 @@ impl StateHandler for MachineStateHandler {
         _mh_state: &Self::ControllerState, // mh_snapshot above already contains it
         ctx: &mut StateHandlerContext<Self::ContextObjects>,
     ) -> Result<StateHandlerOutcome<ManagedHostState>, StateHandlerError> {
+        let id = host_machine_id.to_string();
+        let predicted = host_machine_id
+            .to_machine_id()
+            .machine_type()
+            .is_predicted_host();
+        trace_propagation::MachineTraceAttributes {
+            machine_id: (!predicted).then_some(id.as_str()),
+            predicted_id: predicted.then_some(id.as_str()),
+            bmc_ip: mh_snapshot.host_snapshot.status.bmc_info.ip,
+            managed_host_id: Some(&id),
+            managed_host_bmc_ip: mh_snapshot.host_snapshot.status.bmc_info.ip,
+        }
+        .record_on(&tracing::Span::current());
+
         let was_dpf_provisioning = mh_snapshot.managed_state.suppresses_exploration_for_dpf();
 
         // Refresh the per-object info/association series before any early
@@ -8612,54 +8627,24 @@ impl StateHandler for HostMachineStateHandler {
                 MachineState::DisableOnboardNics {
                     disable_onboard_nics_state,
                 } => {
-                    let next_state = match disable_onboard_nics_state {
-                        DisableOnboardNicsState::ConfigureOnboardNics { enable } => {
-                            let redfish_client = ctx
-                                .services
-                                .create_redfish_client_from_machine(&mh_snapshot.host_snapshot)
-                                .await?;
-                            let (operation, target) = if *enable {
-                                ("enable_onboard_nics", libredfish::EnabledDisabled::Enabled)
-                            } else {
-                                (
-                                    "disable_onboard_nics",
-                                    libredfish::EnabledDisabled::Disabled,
-                                )
-                            };
-                            redfish_client
-                                .set_enable_onboard_nics(target)
-                                .await
-                                .map_err(|e| redfish_error(operation, e))?;
-                            MachineState::DisableOnboardNics {
-                                disable_onboard_nics_state:
-                                    DisableOnboardNicsState::WaitForConfigToBeApplied {
-                                        onboard_nics_disabled: !enable,
-                                    },
-                            }
-                        }
-                        DisableOnboardNicsState::WaitForConfigToBeApplied {
-                            onboard_nics_disabled,
-                        } => {
-                            if mh_snapshot.host_snapshot.state.version.since_state_change()
-                                < Duration::seconds(10)
-                            {
+                    let next_state =
+                        match onboard_nics::advance(disable_onboard_nics_state, mh_snapshot, ctx)
+                            .await?
+                        {
+                            onboard_nics::Progress::Wait => {
                                 return Ok(StateHandlerOutcome::wait(
-                                    "Waiting for onboard NIC configuration to be applied"
-                                        .to_string(),
+                                    onboard_nics::WAIT_REASON.to_string(),
                                 ));
                             }
-                            if *onboard_nics_disabled {
-                                MachineState::WaitingForPlatformConfiguration { retry_count: 0 }
-                            } else {
+                            onboard_nics::Progress::Next(state) => {
                                 MachineState::DisableOnboardNics {
-                                    disable_onboard_nics_state:
-                                        DisableOnboardNicsState::ConfigureOnboardNics {
-                                            enable: false,
-                                        },
+                                    disable_onboard_nics_state: state,
                                 }
                             }
-                        }
-                    };
+                            onboard_nics::Progress::Complete => {
+                                MachineState::WaitingForPlatformConfiguration { retry_count: 0 }
+                            }
+                        };
                     Ok(StateHandlerOutcome::transition(
                         ManagedHostState::HostInit {
                             machine_state: next_state,
@@ -11533,11 +11518,13 @@ impl HostUpgradeState {
                         .host_firmware_upgrade_retry_interval;
 
                 if can_retry && waited_enough {
-                    carbide_instrument::emit(HostFirmwareUpgradeRetried {
-                        machine_id: *machine_id,
-                        attempt: retry_count + 1,
-                        error: reason.clone().unwrap_or_default(),
-                    });
+                    ctx.services
+                        .instrumentation
+                        .emit(HostFirmwareUpgradeRetried {
+                            machine_id: *machine_id,
+                            attempt: retry_count + 1,
+                            error: reason.clone().unwrap_or_default(),
+                        });
 
                     let reprovision_state = HostReprovisionState::CheckingFirmwareV2 {
                         firmware_type: None,
@@ -16229,9 +16216,11 @@ mod tests {
                 .try_into()
                 .unwrap();
 
-        let metrics = MetricsCapture::start();
+        let test_meter = carbide_utils::test_support::test_meter::TestMeter::default();
+        let instrumentation = carbide_instrument::Instrumentation::new(test_meter.meter());
+        let metrics = MetricsCapture::for_registry(test_meter.registry());
         let logs = capture_logs(|| {
-            carbide_instrument::emit(HostFirmwareUpgradeRetried {
+            instrumentation.emit(HostFirmwareUpgradeRetried {
                 machine_id,
                 attempt: 1,
                 error: "scout upgrade failed".to_string(),

@@ -33,6 +33,8 @@ const PHONE_HOME_RATE_LIMIT: Quota = Quota::per_minute(nonzero!(10u32));
 
 /// Shared state between the gRPC server (writer) and REST server (reader).
 pub struct FmdsState {
+    /// Records metadata-service Event metrics in the caller-selected provider.
+    pub(crate) instrumentation: carbide_instrument::Instrumentation,
     pub config: ArcSwapOption<FmdsConfig>,
     pub machine_id: ArcSwapOption<MachineId>,
     pub forge_api: String,
@@ -44,12 +46,16 @@ pub struct FmdsState {
 }
 
 impl FmdsState {
+    /// Creates shared service state with explicit Event instrumentation. Retain
+    /// its provider while REST and gRPC requests can use this state.
     pub fn try_new(
         forge_api: String,
         carbide_client_config: Option<Arc<CarbideClientConfig>>,
+        instrumentation: carbide_instrument::Instrumentation,
     ) -> Result<Self, String> {
         let serving = Arc::new(MachineIdentityServing::try_default()?);
         Ok(Self {
+            instrumentation,
             config: ArcSwapOption::new(None),
             machine_id: ArcSwapOption::new(None),
             forge_api,
@@ -141,7 +147,12 @@ mod tests {
 
     #[test]
     fn machine_identity_apply_skips_when_unchanged() {
-        let state = FmdsState::try_new("https://api.test".to_string(), None).unwrap();
+        let state = FmdsState::try_new(
+            "https://api.test".to_string(),
+            None,
+            carbide_instrument::Instrumentation::global(),
+        )
+        .unwrap();
         let mi = FmdsMachineIdentityConfig {
             requests_per_second: 5,
             burst: 10,
@@ -159,7 +170,12 @@ mod tests {
 
     #[test]
     fn machine_identity_apply_replaces_when_changed() {
-        let state = FmdsState::try_new("https://api.test".to_string(), None).unwrap();
+        let state = FmdsState::try_new(
+            "https://api.test".to_string(),
+            None,
+            carbide_instrument::Instrumentation::global(),
+        )
+        .unwrap();
         let mi1 = FmdsMachineIdentityConfig {
             requests_per_second: 5,
             burst: 10,
@@ -185,14 +201,24 @@ mod tests {
 
     #[test]
     fn test_new_state_starts_empty() {
-        let state = FmdsState::try_new("https://api.test".to_string(), None).unwrap();
+        let state = FmdsState::try_new(
+            "https://api.test".to_string(),
+            None,
+            carbide_instrument::Instrumentation::global(),
+        )
+        .unwrap();
         assert!(state.config.load_full().is_none());
         assert!(state.machine_id.load_full().is_none());
     }
 
     #[test]
     fn test_update_config_stores_config() {
-        let state = FmdsState::try_new("https://api.test".to_string(), None).unwrap();
+        let state = FmdsState::try_new(
+            "https://api.test".to_string(),
+            None,
+            carbide_instrument::Instrumentation::global(),
+        )
+        .unwrap();
         let config = make_test_config();
 
         state.update_config(config);
@@ -209,7 +235,12 @@ mod tests {
 
     #[test]
     fn test_update_config_extracts_machine_id() {
-        let state = FmdsState::try_new("https://api.test".to_string(), None).unwrap();
+        let state = FmdsState::try_new(
+            "https://api.test".to_string(),
+            None,
+            carbide_instrument::Instrumentation::global(),
+        )
+        .unwrap();
         let config = make_test_config();
         let expected_mid = config.machine_id.unwrap();
 
@@ -221,7 +252,12 @@ mod tests {
 
     #[test]
     fn test_update_config_without_machine_id() {
-        let state = FmdsState::try_new("https://api.test".to_string(), None).unwrap();
+        let state = FmdsState::try_new(
+            "https://api.test".to_string(),
+            None,
+            carbide_instrument::Instrumentation::global(),
+        )
+        .unwrap();
         let config = FmdsConfig {
             machine_id: None,
             ..make_test_config()
@@ -235,7 +271,12 @@ mod tests {
 
     #[test]
     fn test_update_config_replaces_previous() {
-        let state = FmdsState::try_new("https://api.test".to_string(), None).unwrap();
+        let state = FmdsState::try_new(
+            "https://api.test".to_string(),
+            None,
+            carbide_instrument::Instrumentation::global(),
+        )
+        .unwrap();
 
         state.update_config(make_test_config());
         assert_eq!(state.config.load_full().unwrap().hostname, "test-host");
