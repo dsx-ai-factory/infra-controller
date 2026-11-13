@@ -16,6 +16,7 @@
  */
 pub(in crate::tests) mod tests {
 
+    use carbide_instrument::testing::{MetricsCapture, capture_logs_async};
     use carbide_spdm_controller::io::SpdmStateControllerIO;
     use carbide_uuid::machine::MachineId;
     use chrono::{DateTime, Utc};
@@ -320,12 +321,15 @@ pub(in crate::tests) mod tests {
         Ok(())
     }
 
-    /// Reports the applied profile or manual selection and the exact job membership.
+    /// Reports and counts the applied selection alongside the exact job membership.
     #[crate::sqlx_test]
     async fn trigger_reports_the_selection_that_decided(
         pool: sqlx::PgPool,
     ) -> Result<(), eyre::Error> {
         const GPU_IDS: &[&str] = &["HGX_IRoT_GPU_0", "HGX_IRoT_GPU_1", "HGX_IRoT_GPU_2"];
+
+        // Install the test meter before host setup can cache the scheduling counter.
+        let metrics = MetricsCapture::start();
 
         struct Case {
             scenario: &'static str,
@@ -336,6 +340,8 @@ pub(in crate::tests) mod tests {
             expect_outcome: SpdmSchedulingOutcome,
             expect_attester_ids: &'static [&'static str],
             expect_fallback: bool,
+            expect_metric_outcome: &'static str,
+            expect_profile_source: &'static str,
         }
 
         let cases = [
@@ -346,6 +352,8 @@ pub(in crate::tests) mod tests {
                 expect_outcome: SpdmSchedulingOutcome::Scheduled,
                 expect_attester_ids: GPU_IDS,
                 expect_fallback: false,
+                expect_metric_outcome: "scheduled",
+                expect_profile_source: "class",
             },
             Case {
                 scenario: "the any profile covers a class nobody wrote one for",
@@ -354,6 +362,8 @@ pub(in crate::tests) mod tests {
                 expect_outcome: SpdmSchedulingOutcome::Scheduled,
                 expect_attester_ids: GPU_IDS,
                 expect_fallback: true,
+                expect_metric_outcome: "scheduled",
+                expect_profile_source: "any_fallback",
             },
             Case {
                 scenario: "NONE attests nothing without contacting the BMC",
@@ -370,6 +380,8 @@ pub(in crate::tests) mod tests {
                 expect_outcome: SpdmSchedulingOutcome::AttestationDisabled,
                 expect_attester_ids: &[],
                 expect_fallback: false,
+                expect_metric_outcome: "attestation_disabled",
+                expect_profile_source: "class",
             },
             Case {
                 scenario: "an unprofiled class names the missing profile",
@@ -378,6 +390,8 @@ pub(in crate::tests) mod tests {
                 expect_outcome: SpdmSchedulingOutcome::NoProfile,
                 expect_attester_ids: &[],
                 expect_fallback: false,
+                expect_metric_outcome: "no_profile",
+                expect_profile_source: "unprofiled",
             },
             Case {
                 scenario: "a profile naming absent attesters is not silent",
@@ -394,6 +408,8 @@ pub(in crate::tests) mod tests {
                 expect_outcome: SpdmSchedulingOutcome::PolicyMatchedNothing,
                 expect_attester_ids: &[],
                 expect_fallback: false,
+                expect_metric_outcome: "policy_matched_nothing",
+                expect_profile_source: "class",
             },
             Case {
                 // The absent pattern is reported without costing the GPUs the
@@ -416,6 +432,8 @@ pub(in crate::tests) mod tests {
                 expect_outcome: SpdmSchedulingOutcome::PartiallySatisfied,
                 expect_attester_ids: GPU_IDS,
                 expect_fallback: false,
+                expect_metric_outcome: "partially_satisfied",
+                expect_profile_source: "class",
             },
             Case {
                 scenario: "an exact regex overrides NONE and retains device eligibility",
@@ -433,6 +451,8 @@ pub(in crate::tests) mod tests {
                 expect_outcome: SpdmSchedulingOutcome::IndividualAttesterTriggerScheduled,
                 expect_attester_ids: &["HGX_IRoT_GPU_1"],
                 expect_fallback: false,
+                expect_metric_outcome: "individual_attester_trigger_scheduled",
+                expect_profile_source: "unprofiled",
             },
             Case {
                 scenario: "an unanchored regex selects multiple devices without a profile",
@@ -441,6 +461,8 @@ pub(in crate::tests) mod tests {
                 expect_outcome: SpdmSchedulingOutcome::IndividualAttesterTriggerScheduled,
                 expect_attester_ids: &["HGX_IRoT_GPU_0", "HGX_IRoT_GPU_2"],
                 expect_fallback: false,
+                expect_metric_outcome: "individual_attester_trigger_scheduled",
+                expect_profile_source: "unprofiled",
             },
             Case {
                 scenario: "an unmatched regex does not fall back to the profile",
@@ -449,6 +471,8 @@ pub(in crate::tests) mod tests {
                 expect_outcome: SpdmSchedulingOutcome::IndividualAttesterTriggerMatchedNothing,
                 expect_attester_ids: &[],
                 expect_fallback: false,
+                expect_metric_outcome: "individual_attester_trigger_matched_nothing",
+                expect_profile_source: "unprofiled",
             },
         ];
 
@@ -491,15 +515,58 @@ pub(in crate::tests) mod tests {
                 .await?;
             txn.commit().await?;
 
-            let response = env
-                .api
-                .trigger_machine_attestation(Request::new(SpdmMachineAttestationTriggerRequest {
+            let metric_labels = [
+                ("outcome", case.expect_metric_outcome),
+                ("profile_source", case.expect_profile_source),
+            ];
+            let count_before =
+                metrics.counter_delta("carbide_attestation_scheduling_total", &metric_labels);
+            let (response, logs) = capture_logs_async(env.api.trigger_machine_attestation(
+                Request::new(SpdmMachineAttestationTriggerRequest {
                     machine_id: Some(machine_id.into()),
                     redfish_timeout_secs: u32::MAX,
                     attester_id_regex: case.attester_id_regex.map(str::to_string),
-                }))
-                .await?
-                .into_inner();
+                }),
+            ))
+            .await;
+            let response = response?.into_inner();
+
+            // The request must emit exactly one event with its own labels, so an
+            // override cannot also be counted as a profile-driven outcome.
+            let scheduling_events = logs
+                .iter()
+                .filter(|log| log.field("event_name") == Some("attestation_scheduled"))
+                .collect::<Vec<_>>();
+            assert_eq!(scheduling_events.len(), 1, "{}", case.scenario);
+            let event = scheduling_events[0];
+            assert_eq!(
+                event.field("machine_id"),
+                Some(machine_id.to_string().as_str()),
+                "{}",
+                case.scenario
+            );
+            assert_eq!(
+                event.field("metric_name"),
+                Some("carbide_attestation_scheduling_total"),
+                "{}",
+                case.scenario
+            );
+            for (label, value) in metric_labels {
+                assert_eq!(
+                    event.field(label),
+                    Some(value),
+                    "{}: {label}",
+                    case.scenario
+                );
+            }
+            // Other tests can emit this counter concurrently; the captured event
+            // above ties these labels to this request without requiring a global delta of one.
+            assert!(
+                metrics.counter_delta("carbide_attestation_scheduling_total", &metric_labels)
+                    >= count_before + 1.0,
+                "{}: the scheduling counter must increase",
+                case.scenario
+            );
 
             assert_eq!(case.expect_outcome, response.outcome(), "{}", case.scenario);
             assert_eq!(

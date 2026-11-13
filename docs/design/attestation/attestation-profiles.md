@@ -1194,11 +1194,19 @@ none match. These values separate manual selection from profile-driven
 profile that supplied the selection, rather than whether a profile is stored
 for the machine. Manual overrides always report `unprofiled`, even when the
 machine has a valid profile, because the regex replaces that profile's selection.
-`NoAttestersFound` remains the outcome when discovery exposes no eligible
-devices, including for manual overrides; it reports an inventory limitation
-rather than an unsuccessful regex match. An override with that outcome is also
-`unprofiled`. Database and BMC errors propagate without emitting this settled
-scheduling event; an empty selection emits the event but creates no job.
+For manual overrides, an absent component-integrity collection or no eligible
+devices produces `NoAttestersFound` with `profile_source=unprofiled`. For profile
+selection, §5.3 applies: an advertised collection with no eligible devices
+produces `PolicyMatchedNothing` under an allowlist and `NoAttestersFound` under
+`ALL` or a denylist. An absent collection produces `NoAttestersFound` for every
+mode that contacts the BMC.
+
+Selection and work-row insertion errors propagate without emitting the
+scheduling event. An empty selection emits the event but creates no job. API
+triggers emit after committing any new job. Managed-host triggers emit before
+the controller persists and commits the transition with the job. A rejected
+transition or later database failure can therefore leave a counted attempt
+without a committed job.
 
 Both labels are bounded, and they are the only two. `profile_source`
 earns its place because a class re-keyed by changed BMC reporting (§5.2) drops
