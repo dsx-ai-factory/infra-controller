@@ -264,6 +264,7 @@ pub(crate) async fn sign_machine_identity(
             &subject_jwt,
             &audiences,
             delegation_creds.as_ref(),
+            &api.instrumentation,
         )
         .await?;
         return Ok(Response::new(response));
