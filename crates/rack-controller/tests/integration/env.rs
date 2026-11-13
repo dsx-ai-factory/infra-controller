@@ -45,7 +45,7 @@ use tokio_util::sync::CancellationToken;
 
 #[derive(Default)]
 pub(super) struct TestEnvOverrides {
-    pub(super) config: Option<CarbideConfig>,
+    pub(super) config: Option<Box<CarbideConfig>>,
     pub(super) firmware_object_fetcher: Option<Arc<dyn FirmwareObjectFetcher>>,
     pub(super) rack_component_manager_enabled: Option<bool>,
     pub(super) nv_switch_manager: Option<Arc<dyn NvSwitchManager>>,
@@ -54,7 +54,7 @@ pub(super) struct TestEnvOverrides {
 impl TestEnvOverrides {
     pub(super) fn with_config(config: CarbideConfig) -> Self {
         Self {
-            config: Some(config),
+            config: Some(Box::new(config)),
             ..Default::default()
         }
     }
@@ -93,7 +93,8 @@ pub(super) fn create_test_env_with_overrides(
 }
 
 async fn create_test_env_inner(pool: PgPool, overrides: TestEnvOverrides) -> TestEnv {
-    let config = Arc::new(overrides.config.unwrap_or_else(get_config));
+    let config: Arc<CarbideConfig> =
+        Arc::from(overrides.config.unwrap_or_else(|| Box::new(get_config())));
     let credentials = Arc::new(TestCredentialManager::default());
     let rms_sim = Arc::new(RmsSim::default());
     let firmware_object_fetcher = overrides
@@ -331,24 +332,37 @@ impl TestEnv {
             self.firmware_object_fetcher.clone(),
         )
     }
-    pub(super) async fn run_rack_controller_iteration(&self) {
-        self.controller.lock().await.run_single_iteration().await;
+    pub(super) fn run_rack_controller_iteration(&self) -> impl Future<Output = ()> {
+        // Rack workflows await many iterations; keep the controller future on
+        // the heap rather than embedding it in every workflow's async frame.
+        Box::pin(async move {
+            self.controller.lock().await.run_single_iteration().await;
+        })
     }
 
     /// Processes each rack once so assertions can inspect the immediate transition.
-    pub(super) async fn run_rack_controller_iteration_no_requeue(&self) {
-        self.controller
-            .lock()
-            .await
-            .run_single_iteration_ext(false)
-            .await;
+    pub(super) fn run_rack_controller_iteration_no_requeue(&self) -> impl Future<Output = ()> {
+        Box::pin(async move {
+            self.controller
+                .lock()
+                .await
+                .run_single_iteration_ext(false)
+                .await;
+        })
     }
 }
 
-pub(super) async fn new_host(
+pub(super) fn new_host(
+    env: &TestEnv,
+    config: ManagedHostConfig,
+) -> impl Future<Output = eyre::Result<Box<model::machine::ManagedHostStateSnapshot>>> {
+    Box::pin(new_host_inner(env, config))
+}
+
+async fn new_host_inner(
     env: &TestEnv,
     mut config: ManagedHostConfig,
-) -> eyre::Result<model::machine::ManagedHostStateSnapshot> {
+) -> eyre::Result<Box<model::machine::ManagedHostStateSnapshot>> {
     // Match the legacy ingestion fixture: an explicit rack assignment still
     // carries the host serial, and RMS inventory reads per-device credentials.
     config
@@ -395,14 +409,16 @@ pub(super) async fn new_host(
     // Rack tests require ingested hosts with the same converged Ready state;
     // machine-controller transitions are covered by its owning suite.
     mh.advance_to_converged_ready().await;
-    Ok(db::managed_host::load_snapshot(
-        &mut env.db_reader(),
-        &mh.host.id.into(),
-        Default::default(),
-    )
-    .await
-    .transpose()
-    .expect("managed host should exist")?)
+    Ok(Box::new(
+        db::managed_host::load_snapshot(
+            &mut env.db_reader(),
+            &mh.host.id.into(),
+            Default::default(),
+        )
+        .await
+        .transpose()
+        .expect("managed host should exist")?,
+    ))
 }
 pub(super) struct TestRackDbBuilder {
     rack_id: RackId,
@@ -450,4 +466,43 @@ impl TestRackDbBuilder {
 
         Ok(self.rack_id.clone())
     }
+}
+
+#[sqlx_test]
+async fn rack_fixture_inline_size_budgets(pool: PgPool) {
+    use std::mem::{size_of, size_of_val};
+
+    use carbide_test_harness::test_support::fixture_config::FixtureDefault as _;
+    use carbide_test_support::{Check, check_values};
+
+    let env = create_test_env(pool).await;
+    // Leave room for ordinary fields, but catch large child futures or config
+    // values being embedded in every rack workflow that uses these helpers.
+    check_values(
+        [
+            ("environment overrides", size_of::<TestEnvOverrides>()),
+            (
+                "host ingestion",
+                size_of_val(&new_host(&env, ManagedHostConfig::default())),
+            ),
+            (
+                "site explorer iteration",
+                size_of_val(&env.site_explorer.run_single_iteration()),
+            ),
+            (
+                "rack controller iteration",
+                size_of_val(&env.run_rack_controller_iteration()),
+            ),
+            (
+                "rack controller iteration without requeue",
+                size_of_val(&env.run_rack_controller_iteration_no_requeue()),
+            ),
+        ]
+        .map(|(scenario, bytes)| Check {
+            scenario,
+            input: bytes,
+            expect: true,
+        }),
+        |bytes| bytes <= 1024,
+    );
 }
