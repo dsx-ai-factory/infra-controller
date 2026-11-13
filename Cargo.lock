@@ -3642,6 +3642,7 @@ dependencies = [
  "bmc-vendor",
  "carbide-instrument",
  "carbide-test-support",
+ "carbide-utils",
  "carbide-uuid",
  "eyre",
  "figment",
