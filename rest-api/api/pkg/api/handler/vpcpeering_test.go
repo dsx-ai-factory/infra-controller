@@ -4,6 +4,7 @@
 package handler
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -252,7 +253,7 @@ func TestCreateVpcPeeringHandler_Handle(t *testing.T) {
 	tests := []struct {
 		name              string
 		reqOrgName        string
-		reqBody           string
+		reqBody           []byte
 		user              *cdbm.User
 		expectedErr       bool
 		expectedStatus    int
@@ -264,7 +265,7 @@ func TestCreateVpcPeeringHandler_Handle(t *testing.T) {
 		{
 			name:           "error when user not found in request context",
 			reqOrgName:     tnOrg1,
-			reqBody:        string(okBodyBytes),
+			reqBody:        okBodyBytes,
 			user:           nil,
 			expectedErr:    true,
 			expectedStatus: http.StatusInternalServerError,
@@ -272,7 +273,7 @@ func TestCreateVpcPeeringHandler_Handle(t *testing.T) {
 		{
 			name:           "error when org is not found",
 			reqOrgName:     "SomeOtherOrg",
-			reqBody:        string(okBodyBytes),
+			reqBody:        okBodyBytes,
 			user:           tnu1,
 			expectedErr:    true,
 			expectedStatus: http.StatusForbidden,
@@ -280,7 +281,7 @@ func TestCreateVpcPeeringHandler_Handle(t *testing.T) {
 		{
 			name:           "error when user does not belong to org",
 			reqOrgName:     tnOrg2,
-			reqBody:        string(okBodyBytes),
+			reqBody:        okBodyBytes,
 			user:           tnu1,
 			expectedErr:    true,
 			expectedStatus: http.StatusForbidden,
@@ -288,7 +289,7 @@ func TestCreateVpcPeeringHandler_Handle(t *testing.T) {
 		{
 			name:           "error when user role is forbidden",
 			reqOrgName:     tnOrg1,
-			reqBody:        string(okBodyBytes),
+			reqBody:        okBodyBytes,
 			user:           tnu1Forbidden,
 			expectedErr:    true,
 			expectedStatus: http.StatusForbidden,
@@ -296,7 +297,7 @@ func TestCreateVpcPeeringHandler_Handle(t *testing.T) {
 		{
 			name:           "error when request body is invalid",
 			reqOrgName:     tnOrg1,
-			reqBody:        string(invalidBodyBytes),
+			reqBody:        invalidBodyBytes,
 			user:           tnu1,
 			expectedErr:    true,
 			expectedStatus: http.StatusBadRequest,
@@ -304,7 +305,7 @@ func TestCreateVpcPeeringHandler_Handle(t *testing.T) {
 		{
 			name:           "error when site does not exist",
 			reqOrgName:     tnOrg1,
-			reqBody:        string(invalidSiteBodyBytes),
+			reqBody:        invalidSiteBodyBytes,
 			user:           tnu1,
 			expectedErr:    true,
 			expectedStatus: http.StatusBadRequest,
@@ -312,7 +313,7 @@ func TestCreateVpcPeeringHandler_Handle(t *testing.T) {
 		{
 			name:           "error when VPC ID in body is invalid",
 			reqOrgName:     tnOrg1,
-			reqBody:        string(invalidVpcIDBodyBytes),
+			reqBody:        invalidVpcIDBodyBytes,
 			user:           tnu1,
 			expectedErr:    true,
 			expectedStatus: http.StatusBadRequest,
@@ -320,7 +321,7 @@ func TestCreateVpcPeeringHandler_Handle(t *testing.T) {
 		{
 			name:           "error when peering VPC with self",
 			reqOrgName:     tnOrg1,
-			reqBody:        string(selfPeerBodyBytes),
+			reqBody:        selfPeerBodyBytes,
 			user:           tnu1,
 			expectedErr:    true,
 			expectedStatus: http.StatusBadRequest,
@@ -328,7 +329,7 @@ func TestCreateVpcPeeringHandler_Handle(t *testing.T) {
 		{
 			name:           "error when peering already exists",
 			reqOrgName:     tnOrg1,
-			reqBody:        string(dupBodyBytes),
+			reqBody:        dupBodyBytes,
 			user:           tnu1,
 			expectedErr:    true,
 			expectedStatus: http.StatusConflict,
@@ -336,7 +337,7 @@ func TestCreateVpcPeeringHandler_Handle(t *testing.T) {
 		{
 			name:           "error when Tenant Admin tries to create multi-tenant peering",
 			reqOrgName:     tnOrg1,
-			reqBody:        string(multiTenantBodyBytes),
+			reqBody:        multiTenantBodyBytes,
 			user:           tnu1,
 			expectedErr:    true,
 			expectedStatus: http.StatusForbidden,
@@ -344,7 +345,7 @@ func TestCreateVpcPeeringHandler_Handle(t *testing.T) {
 		{
 			name:           "error when Provider Admin tries to create single tenant peering",
 			reqOrgName:     ipOrg,
-			reqBody:        string(okBodyBytes),
+			reqBody:        okBodyBytes,
 			user:           ipu,
 			expectedErr:    true,
 			expectedStatus: http.StatusForbidden,
@@ -352,7 +353,7 @@ func TestCreateVpcPeeringHandler_Handle(t *testing.T) {
 		{
 			name:           "ok when Tenant Admin creates single tenant peering",
 			reqOrgName:     tnOrg1,
-			reqBody:        string(okBodyBytes),
+			reqBody:        okBodyBytes,
 			user:           tnu1,
 			expectedErr:    false,
 			expectedStatus: http.StatusCreated,
@@ -362,7 +363,7 @@ func TestCreateVpcPeeringHandler_Handle(t *testing.T) {
 		{
 			name:           "ok when Provider Admin creates multi-tenant peering",
 			reqOrgName:     ipOrg,
-			reqBody:        string(multiTenantBodyBytes),
+			reqBody:        multiTenantBodyBytes,
 			user:           ipu,
 			expectedErr:    false,
 			expectedStatus: http.StatusCreated,
@@ -372,7 +373,7 @@ func TestCreateVpcPeeringHandler_Handle(t *testing.T) {
 		{
 			name:           "ok when user has both provider and tenant admin roles and creates single-tenant peering",
 			reqOrgName:     ipOrg2,
-			reqBody:        string(dualRoleTenantBodyBytes),
+			reqBody:        dualRoleTenantBodyBytes,
 			user:           ipu2,
 			expectedErr:    false,
 			expectedStatus: http.StatusCreated,
@@ -382,7 +383,7 @@ func TestCreateVpcPeeringHandler_Handle(t *testing.T) {
 		{
 			name:           "ok when user has both provider and tenant admin roles and creates multi-tenant peering",
 			reqOrgName:     ipOrg2,
-			reqBody:        string(dualRoleProviderBodyBytes),
+			reqBody:        dualRoleProviderBodyBytes,
 			user:           ipu2,
 			expectedErr:    false,
 			expectedStatus: http.StatusCreated,
@@ -392,7 +393,7 @@ func TestCreateVpcPeeringHandler_Handle(t *testing.T) {
 		{
 			name:              "post-create Ready update preserves a committed deletion",
 			reqOrgName:        tnOrg1,
-			reqBody:           string(concurrentDeleteBody),
+			reqBody:           concurrentDeleteBody,
 			user:              tnu1,
 			expectedStatus:    http.StatusCreated,
 			expectedVpcIDs:    []string{vpc2.ID.String(), vpc3.ID.String()},
@@ -402,7 +403,7 @@ func TestCreateVpcPeeringHandler_Handle(t *testing.T) {
 		{
 			name:              "failed post-create status reload preserves successful creation",
 			reqOrgName:        ipOrg,
-			reqBody:           string(removedBeforeReadyBody),
+			reqBody:           removedBeforeReadyBody,
 			user:              ipu,
 			expectedStatus:    http.StatusCreated,
 			expectedVpcIDs:    []string{vpc2.ID.String(), vpc4.ID.String()},
@@ -441,7 +442,7 @@ func TestCreateVpcPeeringHandler_Handle(t *testing.T) {
 			}
 
 			e := echo.New()
-			req := httptest.NewRequest(http.MethodPost, "/", strings.NewReader(tt.reqBody))
+			req := httptest.NewRequest(http.MethodPost, "/", bytes.NewReader(tt.reqBody))
 			req.Header.Set(echo.HeaderContentType, echo.MIMEApplicationJSON)
 			rec := httptest.NewRecorder()
 

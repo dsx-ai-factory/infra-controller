@@ -170,7 +170,7 @@ func outputExpectedJSON(result *client.GetExpectedComponentsResult) {
 	if err != nil {
 		log.Fatal().Err(err).Msg("Failed to marshal JSON")
 	}
-	fmt.Println(string(data))
+	fmt.Printf("%s\n", data)
 }
 
 // outputExpectedTable prints the GetExpectedComponentsResult as a human-readable

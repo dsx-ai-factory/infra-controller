@@ -163,8 +163,8 @@ func (cskgh CreateSSHKeyGroupHandler) Handle(c echo.Context) error {
 		}
 
 		if site.Status != cdbm.SiteStatusRegistered {
-			logger.Warn().Msg(fmt.Sprintf("Unable to associate SSH Key Group to Site: %s. Site is not in Registered state", site.ID.String()))
-			return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, fmt.Sprintf("Failed to create SSH Key Group, Site: %s specified in request is not in Registered state", site.ID.String()), nil)
+			logger.Warn().Msgf("Unable to associate SSH Key Group to Site: %s. Site is not in Registered state", site.ID)
+			return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, fmt.Sprintf("Failed to create SSH Key Group, Site: %s specified in request is not in Registered state", site.ID), nil)
 		}
 
 		// Validate the current tenant has access to this site
@@ -585,8 +585,8 @@ func (uskgh UpdateSSHKeyGroupHandler) Handle(c echo.Context) error {
 				}
 
 				if site.Status != cdbm.SiteStatusRegistered {
-					logger.Warn().Msg(fmt.Sprintf("Unable to associate SSH Key Group to Site: %s. Site is not in Registered state", site.ID.String()))
-					return cutil.NewAPIError(http.StatusBadRequest, fmt.Sprintf("Failed to update SSH Key Group, The Site with ID: %s where this SSH Key Group is being created is not in Registered state", site.ID.String()), nil)
+					logger.Warn().Msgf("Unable to associate SSH Key Group to Site: %s. Site is not in Registered state", site.ID)
+					return cutil.NewAPIError(http.StatusBadRequest, fmt.Sprintf("Failed to update SSH Key Group, The Site with ID: %s where this SSH Key Group is being created is not in Registered state", site.ID), nil)
 				}
 
 				// Validate the current tenant has access to this site
@@ -1315,7 +1315,7 @@ func (gaskgh GetAllSSHKeyGroupHandler) Handle(c echo.Context) error {
 	if statusQuery != "" {
 		_, ok := cdbm.SSHKeyGroupMap[statusQuery]
 		if !ok {
-			logger.Warn().Msg(fmt.Sprintf("invalid value in status query: %v", statusQuery))
+			logger.Warn().Msgf("invalid value in status query: %v", statusQuery)
 			return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Invalid Status value in query", nil)
 		}
 		statuses = append(statuses, statusQuery)

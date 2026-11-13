@@ -156,7 +156,7 @@ func AuditBody(dbSession *cdb.Session) echo.MiddlewareFunc {
 			if c.Response().Status >= 400 {
 				responseError := ResponseError{}
 				if err := json.Unmarshal(resBody, &responseError); err != nil {
-					log.Error().Err(err).Msgf("failed to unmarshall error response %s for audit entry %s", string(resBody), auditEntryID)
+					log.Error().Err(err).Msgf("failed to unmarshall error response %s for audit entry %s", resBody, auditEntryID)
 				} else {
 					updateInput.StatusMessage = cutil.GetPtr(responseError.Message)
 				}

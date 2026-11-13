@@ -4,9 +4,9 @@
 package service
 
 import (
+	"bytes"
 	"context"
 	"slices"
-	"strings"
 	"sync"
 
 	"github.com/google/uuid"
@@ -64,7 +64,7 @@ func (rs *FlowServerImpl) GetRackPowerDetails(ctx context.Context, req *pb.GetRa
 		if a.Type != b.Type {
 			return int(a.Type) - int(b.Type)
 		}
-		return strings.Compare(a.Info.ID.String(), b.Info.ID.String())
+		return bytes.Compare(a.Info.ID[:], b.Info.ID[:])
 	})
 	details := &pb.RackPowerDetails{
 		RackId: protobuf.UUIDTo(rack.Info.ID), RackExternalId: rack.ExternalID,

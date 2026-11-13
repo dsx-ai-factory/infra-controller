@@ -607,9 +607,9 @@ func TestSSHKeyGroupInstanceAssociationSQLDAO_Update(t *testing.T) {
 			got, err := skgiasd.Update(ctx, nil, tc.input)
 			assert.Equal(t, tc.expectError, err != nil)
 			if err == nil {
-				assert.Equal(t, tc.expectedSSHKeyGroupID.String(), got.SSHKeyGroupID.String())
-				assert.Equal(t, tc.expectedSiteID.String(), got.SiteID.String())
-				assert.Equal(t, tc.expectedInstanceID.String(), got.InstanceID.String())
+				assert.Equal(t, *tc.expectedSSHKeyGroupID, got.SSHKeyGroupID)
+				assert.Equal(t, *tc.expectedSiteID, got.SiteID)
+				assert.Equal(t, *tc.expectedInstanceID, got.InstanceID)
 			}
 			if tc.verifyChildSpanner {
 				span := otrace.SpanFromContext(ctx)

@@ -130,7 +130,7 @@ func (cvh CreateVPCHandler) Handle(c echo.Context) error {
 
 	// Verify if site is ready
 	if site.Status != cdbm.SiteStatusRegistered {
-		logger.Warn().Msg(fmt.Sprintf("Site: %v specified in request data must be in Registered state in order to proceed", site.ID))
+		logger.Warn().Msgf("Site: %v specified in request data must be in Registered state in order to proceed", site.ID)
 		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Site specified in request data must be in Registered state in order to proceed", nil)
 	}
 	// Get Tenant for this org
@@ -235,7 +235,7 @@ func (cvh CreateVPCHandler) Handle(c echo.Context) error {
 	// Verify if site has been enabled for FNN type
 	if *networkVirtualizationType == cdbm.VpcFNN {
 		if !siteConfig.NativeNetworking {
-			logger.Warn().Msg(fmt.Sprintf("Site: %v specified in request data must have native networking enabled in order to create FNN VPCs", site.ID))
+			logger.Warn().Msgf("Site: %v specified in request data must have native networking enabled in order to create FNN VPCs", site.ID)
 			return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Site specified in request data must have native networking enabled in order to create FNN VPCs", nil)
 		}
 	}
@@ -297,7 +297,7 @@ func (cvh CreateVPCHandler) Handle(c echo.Context) error {
 	var defaultNvllPartitionId *uuid.UUID
 	if apiRequest.NVLinkLogicalPartitionID != nil {
 		if !siteConfig.NVLinkPartition {
-			logger.Warn().Msg(fmt.Sprintf("Site: %v specified in request data must have NVLink Partition enabled in order to create VPC with default NVLink Partition", site.ID))
+			logger.Warn().Msgf("Site: %v specified in request data must have NVLink Partition enabled in order to create VPC with default NVLink Partition", site.ID)
 			return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Site specified in request data must have NVLink Partition enabled in order to create VPC with default NVLink Partition", nil)
 		}
 
@@ -782,8 +782,8 @@ func (uvh UpdateVPCHandler) Handle(c echo.Context) error {
 	var defaultNvllPartitionId *uuid.UUID
 	if apiRequest.NVLinkLogicalPartitionID != nil {
 		if !siteConfig.NVLinkPartition {
-			logger.Warn().Msg(fmt.Sprintf("Site: %v specified in request data must have NVLink Partition enabled in order to update VPC with default NVLink Partition", vpc.SiteID.String()))
-			return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, fmt.Sprintf("Site: %v specified in request data must have NVLink Partition enabled in order to update VPC with default NVLink Partition", vpc.SiteID.String()), nil)
+			logger.Warn().Msgf("Site: %v specified in request data must have NVLink Partition enabled in order to update VPC with default NVLink Partition", vpc.SiteID)
+			return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, fmt.Sprintf("Site: %v specified in request data must have NVLink Partition enabled in order to update VPC with default NVLink Partition", vpc.SiteID), nil)
 		}
 
 		// Verify that the existing default NVLink Logical Partition is not being used by any Instance from the VPC
@@ -1227,7 +1227,7 @@ func (uvvh UpdateVPCVirtualizationHandler) Handle(c echo.Context) error {
 	// Verify if site has been enabled for FNN type
 	// No need to check for FNN type, as the request validator guarantees that
 	if !siteConfig.NativeNetworking {
-		logger.Warn().Msg(fmt.Sprintf("Site: %v that VPC belongs to does not have native networking enabled, unable to update virtualization type to FNN", vpc.SiteID))
+		logger.Warn().Msgf("Site: %v that VPC belongs to does not have native networking enabled, unable to update virtualization type to FNN", vpc.SiteID)
 		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Site that VPC belongs to does not have native networking enabled, unable to update virtualization type to FNN", nil)
 	}
 
@@ -1603,7 +1603,7 @@ func (gavh GetAllVPCHandler) Handle(c echo.Context) error {
 		// For each siteIDStr, check if the corresponding site exists
 		for _, siteID := range siteIDs {
 			if _, ok := sitesByID[siteID]; !ok {
-				return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, fmt.Sprintf("Could not find Site with ID specified in query: %s", siteID.String()), nil)
+				return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, fmt.Sprintf("Could not find Site with ID specified in query: %s", siteID), nil)
 			}
 		}
 	}
@@ -1621,7 +1621,7 @@ func (gavh GetAllVPCHandler) Handle(c echo.Context) error {
 		for _, status := range statusStrings {
 			_, ok := cdbm.VpcStatusMap[status]
 			if !ok {
-				logger.Warn().Msg(fmt.Sprintf("invalid value in status query: %v", status))
+				logger.Warn().Msgf("invalid value in status query: %v", status)
 				return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Invalid Status value in query", nil)
 			}
 			statuses = append(statuses, status)
@@ -1721,7 +1721,7 @@ func (gavh GetAllVPCHandler) Handle(c echo.Context) error {
 		}
 		for _, nvLinkLogicalPartitionID := range nvLinkLogicalPartitionIDs {
 			if _, ok := nvLinkLogicalPartitionIDsMap[nvLinkLogicalPartitionID]; !ok {
-				return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, fmt.Sprintf("NVLink Logical Partition ID: %s specified in query does not exist for current Tenant", nvLinkLogicalPartitionID.String()), nil)
+				return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, fmt.Sprintf("NVLink Logical Partition ID: %s specified in query does not exist for current Tenant", nvLinkLogicalPartitionID), nil)
 			}
 		}
 		vpcFilter.NVLinkLogicalPartitionIDs = nvLinkLogicalPartitionIDs

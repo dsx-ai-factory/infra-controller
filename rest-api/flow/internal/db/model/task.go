@@ -235,7 +235,7 @@ func (f taskComponentIDFilter) ApplyTo(q *bun.SelectQuery) *bun.SelectQuery {
 	// and hyphens, so it cannot close the SQL string literal or inject.
 	expr := fmt.Sprintf(
 		`attributes @? '$.components_by_type.*[*] ? (@ == "%s")'::jsonpath`,
-		f.componentID.String(),
+		f.componentID,
 	)
 	return q.Where("?", bun.Safe(expr))
 }

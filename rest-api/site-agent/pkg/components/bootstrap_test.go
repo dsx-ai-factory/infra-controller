@@ -155,7 +155,7 @@ func Test_Bootstrap(t *testing.T) {
 				if err != nil {
 					t.Log(err)
 				}
-				t.Log(string(body))
+				t.Logf("%s", body)
 			}
 		})
 	}

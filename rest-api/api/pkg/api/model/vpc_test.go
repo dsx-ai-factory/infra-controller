@@ -302,7 +302,7 @@ func TestAPIVpcCreateRequest_Validate(t *testing.T) {
 			err := vcr.Validate()
 			if (err != nil) != tt.wantErr {
 				marshalledErr, _ := json.Marshal(err)
-				t.Errorf("APIVpcCreateRequest.Validate() error = %v, wantErr %v", string(marshalledErr), tt.wantErr)
+				t.Errorf("APIVpcCreateRequest.Validate() error = %s, wantErr %v", marshalledErr, tt.wantErr)
 			}
 			if tt.wantErrContains != "" {
 				require.Error(t, err)
@@ -418,7 +418,7 @@ func TestAPIVpcUpdateRequest_Validate(t *testing.T) {
 
 			if err := vur.Validate(); (err != nil) != tt.wantErr {
 				marshalledErr, _ := json.Marshal(err)
-				t.Errorf("APIVpcUpdateRequest.Validate() error = %v, wantErr %v", string(marshalledErr), tt.wantErr)
+				t.Errorf("APIVpcUpdateRequest.Validate() error = %s, wantErr %v", marshalledErr, tt.wantErr)
 			}
 		})
 	}
@@ -628,7 +628,7 @@ func TestAPIVpcVirtualizationUpdateRequest_Validate(t *testing.T) {
 
 			if err := vvur.Validate(tt.fields.inputVpc); (err != nil) != tt.wantErr {
 				marshalledErr, _ := json.Marshal(err)
-				t.Errorf("APIVpcVirtualizationUpdateRequest.Validate() error = %v, wantErr %v", string(marshalledErr), tt.wantErr)
+				t.Errorf("APIVpcVirtualizationUpdateRequest.Validate() error = %s, wantErr %v", marshalledErr, tt.wantErr)
 			}
 		})
 	}

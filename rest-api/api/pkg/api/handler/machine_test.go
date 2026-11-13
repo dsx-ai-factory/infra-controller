@@ -4,6 +4,7 @@
 package handler
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -663,14 +664,14 @@ func TestMachineHandler_Get(t *testing.T) {
 			err := mh.Handle(ec)
 			assert.Nil(t, err)
 			if rec.Code != tc.expectedStatus {
-				fmt.Println(rec.Body.String())
+				fmt.Printf("%s\n", rec.Body.Bytes())
 			}
-			assert.Equal(t, tc.expectedErr, rec.Code != http.StatusOK, fmt.Sprintf("Response body: %v", rec.Body.String()))
+			assert.Equal(t, tc.expectedErr, rec.Code != http.StatusOK, "Response body: %s", rec.Body.Bytes())
 			assert.Equal(t, tc.expectedStatus, rec.Code)
 			if !tc.expectedErr {
 				rsp := &model.APIMachine{}
 				b := rec.Body.Bytes()
-				fmt.Println(string(b))
+				fmt.Printf("%s\n", b)
 				err := json.Unmarshal(b, rsp)
 				assert.Nil(t, err)
 				assert.Equal(t, tc.expectedID, rsp.ID)
@@ -1548,10 +1549,10 @@ func TestMachineHandler_GetAll(t *testing.T) {
 				q.Add("includeRelation", *tc.queryIncludeRelations3)
 			}
 			if tc.pageNumber != nil {
-				q.Set("pageNumber", fmt.Sprintf("%v", *tc.pageNumber))
+				q.Set("pageNumber", strconv.Itoa(*tc.pageNumber))
 			}
 			if tc.pageSize != nil {
-				q.Set("pageSize", fmt.Sprintf("%v", *tc.pageSize))
+				q.Set("pageSize", strconv.Itoa(*tc.pageSize))
 			}
 			if tc.orderBy != nil {
 				q.Set("orderBy", *tc.orderBy)
@@ -2743,7 +2744,7 @@ func TestMachineHandler_Update(t *testing.T) {
 			jsonData, _ := json.Marshal(tt.args.reqData)
 
 			// Setup echo server/context
-			req := httptest.NewRequest(http.MethodPatch, "/", strings.NewReader(string(jsonData)))
+			req := httptest.NewRequest(http.MethodPatch, "/", bytes.NewReader(jsonData))
 			req.Header.Set(echo.HeaderContentType, echo.MIMEApplicationJSON)
 			rec := httptest.NewRecorder()
 
@@ -2759,6 +2760,12 @@ func TestMachineHandler_Update(t *testing.T) {
 				tt.args.beforeHandle(t)
 			}
 
+			var previousUpdated time.Time
+			if tt.args.respCode == http.StatusOK && tt.args.reqMachine != nil && tt.args.verifyOnlineRepair == nil {
+				predecessor, getErr := cdbm.NewMachineDAO(dbSession).GetByID(ctx, nil, tt.args.reqMachine.ID, nil, false)
+				require.NoError(t, getErr)
+				previousUpdated = predecessor.Updated
+			}
 			err := umh.Handle(ec)
 			require.NoError(t, err)
 
@@ -2804,7 +2811,7 @@ func TestMachineHandler_Update(t *testing.T) {
 
 				// Online repair updates Instance (and Site workflow); Machine row may not be touched, so Updated can match.
 				if tt.args.verifyOnlineRepair == nil {
-					assert.NotEqual(t, rst.Updated.String(), tt.args.reqMachine.Updated.String())
+					assert.False(t, rst.Updated.Equal(previousUpdated), "updated timestamp did not change: previous=%v actual=%v", previousUpdated, rst.Updated)
 				}
 
 				mitDAO := cdbm.NewMachineInstanceTypeDAO(dbSession)
@@ -2817,8 +2824,9 @@ func TestMachineHandler_Update(t *testing.T) {
 					}, cdbp.PageInput{}, nil)
 					assert.Nil(t, err)
 					if tt.args.reqMachineInstanceTypeCount != nil {
-						assert.Equal(t, total, *tt.args.reqMachineInstanceTypeCount)
-						assert.Equal(t, emits[0].InstanceTypeID.String(), tt.args.reqInstanceType.ID.String())
+						assert.Equal(t, *tt.args.reqMachineInstanceTypeCount, total)
+						require.NotEmpty(t, emits)
+						assert.Equal(t, tt.args.reqInstanceType.ID, emits[0].InstanceTypeID)
 					}
 				}
 

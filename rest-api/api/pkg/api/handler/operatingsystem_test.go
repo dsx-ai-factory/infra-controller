@@ -4,6 +4,7 @@
 package handler
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -11,6 +12,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -19,6 +21,7 @@ import (
 	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/handler/util/common"
 	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/model"
 	cdmu "github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/model/util"
+	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/pagination"
 	sc "github.com/NVIDIA/infra-controller/rest-api/api/pkg/client/site"
 	authz "github.com/NVIDIA/infra-controller/rest-api/auth/pkg/authorization"
 	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
@@ -185,7 +188,7 @@ func TestOperatingSystemHandler_Create(t *testing.T) {
 	tests := []struct {
 		name                          string
 		reqOrgName                    string
-		reqBody                       string
+		reqBody                       []byte
 		reqBodyModel                  *model.APIOperatingSystemCreateRequest
 		user                          *cdbm.User
 		expectedErr                   bool
@@ -199,7 +202,7 @@ func TestOperatingSystemHandler_Create(t *testing.T) {
 		{
 			name:                  "malformed autoinstall user-data returns mapping detail without persistence",
 			reqOrgName:            tnOrg1,
-			reqBody:               `{"name":"invalid-autoinstall-os","ipxeScript":"ipxe","phoneHomeEnabled":true,"userData":"#cloud-config\nautoinstall:\n  user-data: private-value\n"}`,
+			reqBody:               []byte(`{"name":"invalid-autoinstall-os","ipxeScript":"ipxe","phoneHomeEnabled":true,"userData":"#cloud-config\nautoinstall:\n  user-data: private-value\n"}`),
 			user:                  tnu,
 			expectedErr:           true,
 			expectedStatus:        http.StatusBadRequest,
@@ -208,7 +211,7 @@ func TestOperatingSystemHandler_Create(t *testing.T) {
 		{
 			name:           "error when user not found in request context",
 			reqOrgName:     tnOrg1,
-			reqBody:        string(okBody),
+			reqBody:        okBody,
 			reqBodyModel:   &osObj,
 			user:           nil,
 			expectedErr:    true,
@@ -217,7 +220,7 @@ func TestOperatingSystemHandler_Create(t *testing.T) {
 		{
 			name:           "error when user not found in org",
 			reqOrgName:     "SomeOrg",
-			reqBody:        string(okBody),
+			reqBody:        okBody,
 			reqBodyModel:   &osObj,
 			user:           tnu,
 			expectedErr:    true,
@@ -226,7 +229,7 @@ func TestOperatingSystemHandler_Create(t *testing.T) {
 		{
 			name:           "error when request body doesnt bind",
 			reqOrgName:     tnOrg1,
-			reqBody:        "SomeNonJsonBody",
+			reqBody:        []byte("SomeNonJsonBody"),
 			user:           tnu,
 			expectedErr:    true,
 			expectedStatus: http.StatusBadRequest,
@@ -234,7 +237,7 @@ func TestOperatingSystemHandler_Create(t *testing.T) {
 		{
 			name:           "error when request doesnt validate",
 			reqOrgName:     tnOrg1,
-			reqBody:        string(errBodyDoesntValidate),
+			reqBody:        errBodyDoesntValidate,
 			user:           tnu,
 			expectedErr:    true,
 			expectedStatus: http.StatusBadRequest,
@@ -242,7 +245,7 @@ func TestOperatingSystemHandler_Create(t *testing.T) {
 		{
 			name:           "error when org does not have a tenant",
 			reqOrgName:     tnOrg3,
-			reqBody:        string(okBody),
+			reqBody:        okBody,
 			user:           tnu,
 			expectedErr:    true,
 			expectedStatus: http.StatusBadRequest,
@@ -250,7 +253,7 @@ func TestOperatingSystemHandler_Create(t *testing.T) {
 		{
 			name:           "error when both imageURL and idxScrip specified in request",
 			reqOrgName:     tnOrg1,
-			reqBody:        string(errIpxeImageUrlBody),
+			reqBody:        errIpxeImageUrlBody,
 			user:           tnu,
 			expectedErr:    true,
 			expectedStatus: http.StatusBadRequest,
@@ -259,14 +262,14 @@ func TestOperatingSystemHandler_Create(t *testing.T) {
 			name:           "error when bad disk path specified in request",
 			reqOrgName:     tnOrg1,
 			user:           tnu,
-			reqBody:        string(errDiskImageBody),
+			reqBody:        errDiskImageBody,
 			expectedErr:    true,
 			expectedStatus: http.StatusBadRequest,
 		},
 		{
 			name:           "error when bad imageURL specified in request",
 			reqOrgName:     tnOrg1,
-			reqBody:        string(badImageURLBody),
+			reqBody:        badImageURLBody,
 			user:           tnu,
 			expectedErr:    true,
 			expectedStatus: http.StatusBadRequest,
@@ -274,7 +277,7 @@ func TestOperatingSystemHandler_Create(t *testing.T) {
 		{
 			name:           "error when imageURL specified in request but imageSHA is nil",
 			reqOrgName:     tnOrg1,
-			reqBody:        string(errImageURLBody),
+			reqBody:        errImageURLBody,
 			user:           tnu,
 			expectedErr:    true,
 			expectedStatus: http.StatusBadRequest,
@@ -282,7 +285,7 @@ func TestOperatingSystemHandler_Create(t *testing.T) {
 		{
 			name:           "error when both rootFsID and rootFsLabel specified in request",
 			reqOrgName:     tnOrg1,
-			reqBody:        string(errRootFsBody),
+			reqBody:        errRootFsBody,
 			user:           tnu,
 			expectedErr:    true,
 			expectedStatus: http.StatusBadRequest,
@@ -290,7 +293,7 @@ func TestOperatingSystemHandler_Create(t *testing.T) {
 		{
 			name:               "imageURL specified in request (temporarily expect StatusBadRequest - Image based OS creation not allowed)",
 			reqOrgName:         tnOrg2,
-			reqBody:            string(validImageURLBody),
+			reqBody:            validImageURLBody,
 			reqBodyModel:       &osImageURLObj3,
 			user:               tnu,
 			expectedErr:        true,
@@ -300,7 +303,7 @@ func TestOperatingSystemHandler_Create(t *testing.T) {
 		{
 			name:           "imageURL specified in request, context deadline timeout (temporarily expect StatusBadRequest - Image based OS creation not allowed)",
 			reqOrgName:     tnOrg2,
-			reqBody:        string(terminateCreationImageURLBody),
+			reqBody:        terminateCreationImageURLBody,
 			reqBodyModel:   &osImageURLObj7,
 			user:           tnu,
 			expectedErr:    true,
@@ -309,7 +312,7 @@ func TestOperatingSystemHandler_Create(t *testing.T) {
 		{
 			name:                          "success case",
 			reqOrgName:                    tnOrg1,
-			reqBody:                       string(okBody),
+			reqBody:                       okBody,
 			reqBodyModel:                  &osObj,
 			user:                          tnu,
 			expectedErr:                   false,
@@ -321,7 +324,7 @@ func TestOperatingSystemHandler_Create(t *testing.T) {
 		{
 			name:           "error due to name clash",
 			reqOrgName:     tnOrg1,
-			reqBody:        string(errBodyNameClash),
+			reqBody:        errBodyNameClash,
 			user:           tnu,
 			expectedErr:    true,
 			expectedStatus: http.StatusConflict,
@@ -332,7 +335,7 @@ func TestOperatingSystemHandler_Create(t *testing.T) {
 			assert.NotEqual(t, tc.name, "")
 			// Setup echo server/context
 			e := echo.New()
-			req := httptest.NewRequest(http.MethodPost, "/", strings.NewReader(tc.reqBody))
+			req := httptest.NewRequest(http.MethodPost, "/", bytes.NewReader(tc.reqBody))
 			req.Header.Set(echo.HeaderContentType, echo.MIMEApplicationJSON)
 			rec := httptest.NewRecorder()
 
@@ -463,9 +466,10 @@ func TestOperatingSystemHandler_GetAll(t *testing.T) {
 	oss := []cdbm.OperatingSystem{}
 
 	for i := 0; i < totalCount; i++ {
-		os := &cdbm.OperatingSystem{}
+		var os *cdbm.OperatingSystem
+		var err error
 		if i == 0 || i == 1 {
-			os, err := osDAO.Create(
+			os, err = osDAO.Create(
 				ctx,
 				nil,
 				cdbm.OperatingSystemCreateInput{
@@ -493,7 +497,7 @@ func TestOperatingSystemHandler_GetAll(t *testing.T) {
 			common.TestBuildStatusDetail(t, dbSession, os.ID.String(), cdbm.OperatingSystemStatusSyncing, cutil.GetPtr("received Operating System creation request, syncing"))
 			common.TestBuildStatusDetail(t, dbSession, os.ID.String(), cdbm.OperatingSystemStatusReady, cutil.GetPtr("Operating System is now ready for use"))
 		} else {
-			os, err := osDAO.Create(
+			os, err = osDAO.Create(
 				ctx,
 				nil,
 				cdbm.OperatingSystemCreateInput{
@@ -677,7 +681,7 @@ func TestOperatingSystemHandler_GetAll(t *testing.T) {
 			expectedErr:        false,
 			expectedStatus:     http.StatusOK,
 			expectedCnt:        10,
-			expectedTotal:      cutil.GetPtr(totalCount / 2),
+			expectedTotal:      &totalCount,
 			expectedFirstEntry: &oss[29],
 		},
 		{
@@ -729,7 +733,7 @@ func TestOperatingSystemHandler_GetAll(t *testing.T) {
 			expectedErr:    false,
 			expectedStatus: http.StatusOK,
 			expectedCnt:    paginator.DefaultLimit,
-			expectedTotal:  cutil.GetPtr(totalCount),
+			expectedTotal:  cutil.GetPtr(totalCount - 2),
 		},
 		{
 			name:           "success when BadStatus status is specified",
@@ -801,10 +805,10 @@ func TestOperatingSystemHandler_GetAll(t *testing.T) {
 				q.Add("includeRelation", *tc.queryIncludeRelations2)
 			}
 			if tc.pageNumber != nil {
-				q.Set("pageNumber", fmt.Sprintf("%v", *tc.pageNumber))
+				q.Set("pageNumber", strconv.Itoa(*tc.pageNumber))
 			}
 			if tc.pageSize != nil {
-				q.Set("pageSize", fmt.Sprintf("%v", *tc.pageSize))
+				q.Set("pageSize", strconv.Itoa(*tc.pageSize))
 			}
 			if tc.orderBy != nil {
 				q.Set("orderBy", *tc.orderBy)
@@ -841,6 +845,29 @@ func TestOperatingSystemHandler_GetAll(t *testing.T) {
 				err := json.Unmarshal(rec.Body.Bytes(), &rsp)
 				assert.Nil(t, err)
 				assert.Equal(t, tc.expectedCnt, len(rsp))
+				header := rec.Header().Get(pagination.ResponseHeaderName)
+				require.NotEmpty(t, header)
+				page := &pagination.PageResponse{}
+				require.NoError(t, json.Unmarshal([]byte(header), page))
+				expectedPageNumber, expectedPageSize := 1, paginator.DefaultLimit
+				if tc.pageNumber != nil {
+					expectedPageNumber = *tc.pageNumber
+				}
+				if tc.pageSize != nil {
+					expectedPageSize = *tc.pageSize
+				}
+				assert.Equal(t, expectedPageNumber, page.PageNumber)
+				assert.Equal(t, expectedPageSize, page.PageSize)
+				assert.Equal(t, tc.orderBy, page.OrderBy)
+				if tc.expectedTotal != nil {
+					assert.Equal(t, *tc.expectedTotal, page.Total)
+				} else if tc.expectedCnt == 0 {
+					assert.Zero(t, page.Total)
+				}
+				if tc.expectedFirstEntry != nil {
+					require.NotEmpty(t, rsp)
+					assert.Equal(t, tc.expectedFirstEntry.Name, rsp[0].Name)
+				}
 
 				if tc.queryIncludeRelations1 != nil || tc.queryIncludeRelations2 != nil {
 					if tc.expectedInfrastructureProviderOrg != nil {
@@ -1600,7 +1627,7 @@ func TestOperatingSystemHandler_Update(t *testing.T) {
 		name                  string
 		reqOrgName            string
 		user                  *cdbm.User
-		reqBody               string
+		reqBody               []byte
 		reqUpdateModel        *model.APIOperatingSystemUpdateRequest
 		osID                  string
 		expectedErr           bool
@@ -1623,7 +1650,7 @@ func TestOperatingSystemHandler_Update(t *testing.T) {
 			name:                  "malformed autoinstall update returns mapping detail without mutation",
 			reqOrgName:            ipOrg1,
 			user:                  user,
-			reqBody:               `{"name":"rejected-rename","phoneHomeEnabled":true,"userData":"#cloud-config\nautoinstall: private-value\n"}`,
+			reqBody:               []byte(`{"name":"rejected-rename","phoneHomeEnabled":true,"userData":"#cloud-config\nautoinstall: private-value\n"}`),
 			osID:                  os1.ID.String(),
 			expectedErr:           true,
 			expectedStatus:        http.StatusBadRequest,
@@ -1670,7 +1697,7 @@ func TestOperatingSystemHandler_Update(t *testing.T) {
 			name:           "error when req body doesnt bind",
 			reqOrgName:     ipOrg1,
 			user:           user,
-			reqBody:        "bad-body",
+			reqBody:        []byte("bad-body"),
 			osID:           os1.ID.String(),
 			expectedErr:    true,
 			expectedStatus: http.StatusBadRequest,
@@ -1679,7 +1706,7 @@ func TestOperatingSystemHandler_Update(t *testing.T) {
 			name:           "error when req body doesnt validate",
 			reqOrgName:     ipOrg1,
 			user:           user,
-			reqBody:        string(errBodyDoesntValidate),
+			reqBody:        errBodyDoesntValidate,
 			osID:           os1.ID.String(),
 			expectedErr:    true,
 			expectedStatus: http.StatusBadRequest,
@@ -1688,7 +1715,7 @@ func TestOperatingSystemHandler_Update(t *testing.T) {
 			name:           "error when updated name clashes",
 			reqOrgName:     ipOrg1,
 			user:           user,
-			reqBody:        string(errBodyNameClash),
+			reqBody:        errBodyNameClash,
 			osID:           os1.ID.String(),
 			expectedErr:    true,
 			expectedStatus: http.StatusConflict,
@@ -1697,7 +1724,7 @@ func TestOperatingSystemHandler_Update(t *testing.T) {
 			name:           "error when os created with ipxe but request to update imageURL ",
 			reqOrgName:     ipOrg1,
 			user:           user,
-			reqBody:        string(errBodyImageUrlIpxe),
+			reqBody:        errBodyImageUrlIpxe,
 			osID:           os4.ID.String(),
 			expectedErr:    true,
 			expectedStatus: http.StatusBadRequest,
@@ -1706,7 +1733,7 @@ func TestOperatingSystemHandler_Update(t *testing.T) {
 			name:           "success when updated with same name",
 			reqOrgName:     ipOrg2,
 			user:           user,
-			reqBody:        string(okBody2),
+			reqBody:        okBody2,
 			osID:           os2.ID.String(),
 			expectedErr:    false,
 			expectedStatus: http.StatusOK,
@@ -1717,7 +1744,7 @@ func TestOperatingSystemHandler_Update(t *testing.T) {
 			name:           "success case - can update all fields",
 			reqOrgName:     ipOrg1,
 			user:           user,
-			reqBody:        string(okBody),
+			reqBody:        okBody,
 			osID:           os1.ID.String(),
 			expectedErr:    false,
 			expectedStatus: http.StatusOK,
@@ -1735,7 +1762,7 @@ func TestOperatingSystemHandler_Update(t *testing.T) {
 			name:           "should succeed to deactivate active OS",
 			reqOrgName:     ipOrg1,
 			user:           user,
-			reqBody:        string(okBodyDeactivate),
+			reqBody:        okBodyDeactivate,
 			osID:           os10.ID.String(),
 			expectedErr:    false,
 			expectedStatus: http.StatusOK,
@@ -1749,7 +1776,7 @@ func TestOperatingSystemHandler_Update(t *testing.T) {
 			name:           "should succeed to deactivate active OS without Deactivation Note",
 			reqOrgName:     ipOrg1,
 			user:           user,
-			reqBody:        string(okBodyDeactivateNoNote),
+			reqBody:        okBodyDeactivateNoNote,
 			osID:           os11.ID.String(),
 			expectedErr:    false,
 			expectedStatus: http.StatusOK,
@@ -1763,7 +1790,7 @@ func TestOperatingSystemHandler_Update(t *testing.T) {
 			name:           "should fail to change Deactivation Note for an active OS",
 			reqOrgName:     ipOrg1,
 			user:           user,
-			reqBody:        string(okBodyChangeNote),
+			reqBody:        okBodyChangeNote,
 			osID:           os1.ID.String(),
 			expectedErr:    true,
 			expectedStatus: http.StatusBadRequest,
@@ -1772,7 +1799,7 @@ func TestOperatingSystemHandler_Update(t *testing.T) {
 			name:           "should succeed to change Deactivation Note on deactivated OS",
 			reqOrgName:     ipOrg1,
 			user:           user,
-			reqBody:        string(okBodyChangeNote),
+			reqBody:        okBodyChangeNote,
 			osID:           os12.ID.String(),
 			expectedErr:    false,
 			expectedStatus: http.StatusOK,
@@ -1786,7 +1813,7 @@ func TestOperatingSystemHandler_Update(t *testing.T) {
 			name:           "should succeed to activate deactivated OS (3/4)",
 			reqOrgName:     ipOrg1,
 			user:           user,
-			reqBody:        string(okBodyActivate),
+			reqBody:        okBodyActivate,
 			osID:           os13.ID.String(),
 			expectedErr:    false,
 			expectedStatus: http.StatusOK,
@@ -1800,7 +1827,7 @@ func TestOperatingSystemHandler_Update(t *testing.T) {
 			name:             "success when image OS updated with unchanged imageURL and mutable attributes",
 			reqOrgName:       ipOrg1,
 			user:             user,
-			reqBody:          string(okBodyImageUrl),
+			reqBody:          okBodyImageUrl,
 			reqUpdateModel:   &updReqValidImageUrl,
 			osID:             os5.ID.String(),
 			expectedErr:      false,
@@ -1811,7 +1838,7 @@ func TestOperatingSystemHandler_Update(t *testing.T) {
 			name:           "error when image OS update tries to change imageURL",
 			reqOrgName:     ipOrg1,
 			user:           user,
-			reqBody:        string(errBodyChangeImageUrl),
+			reqBody:        errBodyChangeImageUrl,
 			osID:           os5.ID.String(),
 			expectedErr:    true,
 			expectedStatus: http.StatusBadRequest,
@@ -1820,7 +1847,7 @@ func TestOperatingSystemHandler_Update(t *testing.T) {
 			name:           "error when image OS update workflow fails with context deadline error",
 			reqOrgName:     ipOrg2,
 			user:           user,
-			reqBody:        string(okBodyImageUrl),
+			reqBody:        okBodyImageUrl,
 			reqUpdateModel: &updReqValidImageUrl,
 			osID:           os9.ID.String(),
 			expectedErr:    true,
@@ -1833,7 +1860,7 @@ func TestOperatingSystemHandler_Update(t *testing.T) {
 
 			// Setup echo server/context
 			e := echo.New()
-			req := httptest.NewRequest(http.MethodPost, "/", strings.NewReader(tc.reqBody))
+			req := httptest.NewRequest(http.MethodPost, "/", bytes.NewReader(tc.reqBody))
 
 			req.Header.Set(echo.HeaderContentType, echo.MIMEApplicationJSON)
 			rec := httptest.NewRecorder()
@@ -2034,7 +2061,7 @@ func TestOperatingSystemHandler_Delete(t *testing.T) {
 	acGoodIT := model.APIAllocationConstraintCreateRequest{ResourceType: cdbm.AllocationResourceTypeInstanceType, ResourceTypeID: it3.ID.String(), ConstraintType: cdbm.AllocationConstraintTypeReserved, ConstraintValue: 2}
 	okBodyIT, err := json.Marshal(model.APIAllocationCreateRequest{Name: "ok1", Description: cutil.GetPtr(""), TenantID: tenant3.ID.String(), SiteID: site.ID.String(), AllocationConstraints: []model.APIAllocationConstraintCreateRequest{acGoodIT}})
 	assert.Nil(t, err)
-	testCreateAllocation(t, dbSession, ipamStorage, ipu, ipOrg3, string(okBodyIT))
+	testCreateAllocation(t, dbSession, ipamStorage, ipu, ipOrg3, okBodyIT)
 	instanceDAO := cdbm.NewInstanceDAO(dbSession)
 	instance, err := instanceDAO.Create(
 		ctx, nil,
@@ -2512,7 +2539,7 @@ func TestOperatingSystemHandler_Create_Ownership(t *testing.T) {
 			require.NoError(t, err)
 
 			e := echo.New()
-			req := httptest.NewRequest(http.MethodPost, "/", strings.NewReader(string(body)))
+			req := httptest.NewRequest(http.MethodPost, "/", bytes.NewReader(body))
 			req.Header.Set(echo.HeaderContentType, echo.MIMEApplicationJSON)
 			rec := httptest.NewRecorder()
 
@@ -2593,7 +2620,7 @@ func TestOperatingSystemHandler_Update_Ownership(t *testing.T) {
 			require.NoError(t, err)
 
 			e := echo.New()
-			req := httptest.NewRequest(http.MethodPut, "/", strings.NewReader(string(body)))
+			req := httptest.NewRequest(http.MethodPut, "/", bytes.NewReader(body))
 			req.Header.Set(echo.HeaderContentType, echo.MIMEApplicationJSON)
 			rec := httptest.NewRecorder()
 

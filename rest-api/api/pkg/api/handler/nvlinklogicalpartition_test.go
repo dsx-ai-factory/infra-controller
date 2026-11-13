@@ -4,6 +4,7 @@
 package handler
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -11,12 +12,12 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"strconv"
-	"strings"
 	"testing"
 
 	"github.com/NVIDIA/infra-controller/rest-api/api/internal/config"
 	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/handler/util/common"
 	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/model"
+	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/pagination"
 	sc "github.com/NVIDIA/infra-controller/rest-api/api/pkg/client/site"
 	authz "github.com/NVIDIA/infra-controller/rest-api/auth/pkg/authorization"
 	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
@@ -187,7 +188,7 @@ func TestNVLinkLogicalPartitionHandler_Create(t *testing.T) {
 		fields             fields
 		name               string
 		reqOrgName         string
-		reqBody            string
+		reqBody            []byte
 		reqBodyModel       *model.APINVLinkLogicalPartitionCreateRequest
 		user               *cdbm.User
 		expectedStatus     int
@@ -202,7 +203,7 @@ func TestNVLinkLogicalPartitionHandler_Create(t *testing.T) {
 			},
 			name:           "error when user not found in request context",
 			reqOrgName:     tnOrg2,
-			reqBody:        string(okBody),
+			reqBody:        okBody,
 			reqBodyModel:   &nvllpObj,
 			user:           nil,
 			expectedStatus: http.StatusInternalServerError,
@@ -215,7 +216,7 @@ func TestNVLinkLogicalPartitionHandler_Create(t *testing.T) {
 			},
 			name:           "error when user not found in org",
 			reqOrgName:     "SomeOrg",
-			reqBody:        string(okBody),
+			reqBody:        okBody,
 			reqBodyModel:   &nvllpObj,
 			user:           tnu1,
 			expectedStatus: http.StatusForbidden,
@@ -228,7 +229,7 @@ func TestNVLinkLogicalPartitionHandler_Create(t *testing.T) {
 			},
 			name:           "error when org tenant is not admin",
 			reqOrgName:     tnOrg2,
-			reqBody:        string(okBody),
+			reqBody:        okBody,
 			reqBodyModel:   &nvllpObj,
 			user:           tnu2,
 			expectedStatus: http.StatusForbidden,
@@ -241,7 +242,7 @@ func TestNVLinkLogicalPartitionHandler_Create(t *testing.T) {
 			},
 			name:           "error when request body doesnt bind",
 			reqOrgName:     tnOrg1,
-			reqBody:        "SomeNonJsonBody",
+			reqBody:        []byte("SomeNonJsonBody"),
 			user:           tnu1,
 			expectedStatus: http.StatusBadRequest,
 		},
@@ -253,7 +254,7 @@ func TestNVLinkLogicalPartitionHandler_Create(t *testing.T) {
 			},
 			name:           "error when request doesnt validate",
 			reqOrgName:     tnOrg1,
-			reqBody:        string(errBodyDoesntValidate),
+			reqBody:        errBodyDoesntValidate,
 			user:           tnu1,
 			expectedStatus: http.StatusBadRequest,
 		},
@@ -265,7 +266,7 @@ func TestNVLinkLogicalPartitionHandler_Create(t *testing.T) {
 			},
 			name:           "error when tenant doesnt exist for org",
 			reqOrgName:     tnOrg3,
-			reqBody:        string(okBody),
+			reqBody:        okBody,
 			user:           tnu3,
 			expectedStatus: http.StatusBadRequest,
 		},
@@ -277,7 +278,7 @@ func TestNVLinkLogicalPartitionHandler_Create(t *testing.T) {
 			},
 			name:           "error when site id not specified in request",
 			reqOrgName:     tnOrg1,
-			reqBody:        string(errBodyMissingSite),
+			reqBody:        errBodyMissingSite,
 			user:           tnu1,
 			expectedStatus: http.StatusBadRequest,
 		},
@@ -289,7 +290,7 @@ func TestNVLinkLogicalPartitionHandler_Create(t *testing.T) {
 			},
 			name:           "error when site id is invalid specified in request",
 			reqOrgName:     tnOrg1,
-			reqBody:        string(errBodyInvalidSite),
+			reqBody:        errBodyInvalidSite,
 			user:           tnu1,
 			expectedStatus: http.StatusBadRequest,
 		},
@@ -301,7 +302,7 @@ func TestNVLinkLogicalPartitionHandler_Create(t *testing.T) {
 			},
 			name:               "success case with CreateNVLinkLogicalPartition workflow",
 			reqOrgName:         tnOrg1,
-			reqBody:            string(okBody),
+			reqBody:            okBody,
 			reqBodyModel:       &nvllpObj,
 			user:               tnu1,
 			expectedStatus:     http.StatusCreated,
@@ -315,7 +316,7 @@ func TestNVLinkLogicalPartitionHandler_Create(t *testing.T) {
 			},
 			name:               "timeout case with CreateNVLinkLogicalPartitionV2 workflow",
 			reqOrgName:         tnOrg1,
-			reqBody:            string(okBody2),
+			reqBody:            okBody2,
 			reqBodyModel:       &nvllpObj6,
 			user:               tnu1,
 			expectedStatus:     http.StatusInternalServerError,
@@ -329,7 +330,7 @@ func TestNVLinkLogicalPartitionHandler_Create(t *testing.T) {
 			},
 			name:           "error due to name clash",
 			reqOrgName:     tnOrg1,
-			reqBody:        string(errBodyNameClash),
+			reqBody:        errBodyNameClash,
 			user:           tnu1,
 			expectedStatus: http.StatusConflict,
 		},
@@ -339,7 +340,7 @@ func TestNVLinkLogicalPartitionHandler_Create(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			assert.NotEqual(t, tc.name, "")
 
-			req := httptest.NewRequest(http.MethodPost, "/", strings.NewReader(tc.reqBody))
+			req := httptest.NewRequest(http.MethodPost, "/", bytes.NewReader(tc.reqBody))
 			req.Header.Set(echo.HeaderContentType, echo.MIMEApplicationJSON)
 			rec := httptest.NewRecorder()
 
@@ -525,7 +526,7 @@ func TestNVLinkLogicalPartitionHandler_Update(t *testing.T) {
 		fields                          fields
 		name                            string
 		reqOrgName                      string
-		reqBody                         string
+		reqBody                         []byte
 		reqBodyModel                    *model.APINVLinkLogicalPartitionUpdateRequest
 		nvllpID                         string
 		user                            *cdbm.User
@@ -545,7 +546,7 @@ func TestNVLinkLogicalPartitionHandler_Update(t *testing.T) {
 			name:           "error when user not found in request context",
 			nvllpID:        nvllp1.ID.String(),
 			reqOrgName:     tnOrg2,
-			reqBody:        string(okBody),
+			reqBody:        okBody,
 			reqBodyModel:   &nvllpObj,
 			user:           nil,
 			expectedStatus: http.StatusInternalServerError,
@@ -559,7 +560,7 @@ func TestNVLinkLogicalPartitionHandler_Update(t *testing.T) {
 			name:           "error when user not found in org",
 			reqOrgName:     "SomeOrg",
 			nvllpID:        nvllp1.ID.String(),
-			reqBody:        string(okBody),
+			reqBody:        okBody,
 			reqBodyModel:   &nvllpObj,
 			user:           tnu1,
 			expectedStatus: http.StatusForbidden,
@@ -573,7 +574,7 @@ func TestNVLinkLogicalPartitionHandler_Update(t *testing.T) {
 			name:           "error when org tenant is not admin",
 			nvllpID:        nvllp1.ID.String(),
 			reqOrgName:     tnOrg2,
-			reqBody:        string(okBody),
+			reqBody:        okBody,
 			reqBodyModel:   &nvllpObj,
 			user:           tnu2,
 			expectedStatus: http.StatusForbidden,
@@ -587,7 +588,7 @@ func TestNVLinkLogicalPartitionHandler_Update(t *testing.T) {
 			name:           "error when request body doesnt bind",
 			nvllpID:        nvllp1.ID.String(),
 			reqOrgName:     tnOrg1,
-			reqBody:        "SomeNonJsonBody",
+			reqBody:        []byte("SomeNonJsonBody"),
 			user:           tnu1,
 			expectedStatus: http.StatusBadRequest,
 		},
@@ -600,7 +601,7 @@ func TestNVLinkLogicalPartitionHandler_Update(t *testing.T) {
 			name:           "error when request doesnt validate",
 			nvllpID:        nvllp1.ID.String(),
 			reqOrgName:     tnOrg1,
-			reqBody:        string(errBodyDoesntValidate),
+			reqBody:        errBodyDoesntValidate,
 			user:           tnu1,
 			expectedStatus: http.StatusBadRequest,
 		},
@@ -613,7 +614,7 @@ func TestNVLinkLogicalPartitionHandler_Update(t *testing.T) {
 			name:           "error when tenant doesnt exist for org",
 			nvllpID:        nvllp1.ID.String(),
 			reqOrgName:     tnOrg3,
-			reqBody:        string(okBody),
+			reqBody:        okBody,
 			user:           tnu3,
 			expectedStatus: http.StatusBadRequest,
 		},
@@ -626,7 +627,7 @@ func TestNVLinkLogicalPartitionHandler_Update(t *testing.T) {
 			name:           "error due to name clash",
 			nvllpID:        nvllp1.ID.String(),
 			reqOrgName:     tnOrg1,
-			reqBody:        string(errBodyNameClash),
+			reqBody:        errBodyNameClash,
 			user:           tnu1,
 			expectedStatus: http.StatusConflict,
 		},
@@ -639,7 +640,7 @@ func TestNVLinkLogicalPartitionHandler_Update(t *testing.T) {
 			name:               "success case with UpdateNVLinkLogicalPartition workflow when there is no change",
 			nvllpID:            nvllp1.ID.String(),
 			reqOrgName:         tnOrg1,
-			reqBody:            string(noupdateBody),
+			reqBody:            noupdateBody,
 			reqBodyModel:       &noupdateObj,
 			user:               tnu1,
 			expectedStatus:     http.StatusOK,
@@ -655,7 +656,7 @@ func TestNVLinkLogicalPartitionHandler_Update(t *testing.T) {
 			name:               "success case with UpdateNVLinkLogicalPartition workflow",
 			nvllpID:            nvllp1.ID.String(),
 			reqOrgName:         tnOrg1,
-			reqBody:            string(okBody),
+			reqBody:            okBody,
 			reqBodyModel:       &nvllpObj,
 			user:               tnu1,
 			expectedStatus:     http.StatusOK,
@@ -671,7 +672,7 @@ func TestNVLinkLogicalPartitionHandler_Update(t *testing.T) {
 			name:                            "success case description-only update request sends current name to NICo",
 			nvllpID:                         nvllp2.ID.String(),
 			reqOrgName:                      tnOrg1,
-			reqBody:                         string(descOnlyBody),
+			reqBody:                         descOnlyBody,
 			reqBodyModel:                    &descOnlyObj,
 			user:                            tnu1,
 			expectedStatus:                  http.StatusOK,
@@ -689,7 +690,7 @@ func TestNVLinkLogicalPartitionHandler_Update(t *testing.T) {
 			name:                            "success case name-only update request sends DB name and preserved description to NICo",
 			nvllpID:                         nvllp5.ID.String(),
 			reqOrgName:                      tnOrg1,
-			reqBody:                         string(nameOnlyBody),
+			reqBody:                         nameOnlyBody,
 			reqBodyModel:                    &nameOnlyObj,
 			user:                            tnu1,
 			expectedStatus:                  http.StatusOK,
@@ -707,7 +708,7 @@ func TestNVLinkLogicalPartitionHandler_Update(t *testing.T) {
 			name:               "timeout case with UpdateNVLinkLogicalPartition workflow",
 			nvllpID:            nvllp4.ID.String(),
 			reqOrgName:         tnOrg1,
-			reqBody:            string(okBody2),
+			reqBody:            okBody2,
 			reqBodyModel:       &nvllpObj6,
 			user:               tnu1,
 			expectedStatus:     http.StatusInternalServerError,
@@ -719,7 +720,7 @@ func TestNVLinkLogicalPartitionHandler_Update(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			// Setup echo server/context
 			e := echo.New()
-			req := httptest.NewRequest(http.MethodPost, "/", strings.NewReader(tc.reqBody))
+			req := httptest.NewRequest(http.MethodPost, "/", bytes.NewReader(tc.reqBody))
 
 			req.Header.Set(echo.HeaderContentType, echo.MIMEApplicationJSON)
 			rec := httptest.NewRecorder()
@@ -1055,7 +1056,7 @@ func TestNVLinkLogicalPartitionHandler_GetAll(t *testing.T) {
 			reqOrgName:             tnOrg1,
 			user:                   tnu1,
 			querySiteID:            cutil.GetPtr(site1.ID.String()),
-			queryIncludeRelations1: cutil.GetPtr(cdbm.SiteRelationName),
+			queryIncludeRelations3: cutil.GetPtr(cdbm.SiteRelationName),
 			expectedErr:            false,
 			expectedStatus:         http.StatusOK,
 			expectedCnt:            paginator.DefaultLimit,
@@ -1082,7 +1083,7 @@ func TestNVLinkLogicalPartitionHandler_GetAll(t *testing.T) {
 			expectedErr:        false,
 			expectedStatus:     http.StatusOK,
 			expectedCnt:        10,
-			expectedTotal:      cutil.GetPtr(totalCount / 2),
+			expectedTotal:      &totalCount,
 			expectedFirstEntry: &nvllps[29],
 		},
 		{
@@ -1170,10 +1171,10 @@ func TestNVLinkLogicalPartitionHandler_GetAll(t *testing.T) {
 				q.Add("status", *tc.queryStatus)
 			}
 			if tc.queryIncludeVpcs != nil {
-				q.Add("includeVpcs", fmt.Sprintf("%v", *tc.queryIncludeVpcs))
+				q.Add("includeVpcs", strconv.FormatBool(*tc.queryIncludeVpcs))
 			}
 			if tc.queryIncludeInterfaces != nil {
-				q.Add("includeInterfaces", fmt.Sprintf("%v", *tc.queryIncludeInterfaces))
+				q.Add("includeInterfaces", strconv.FormatBool(*tc.queryIncludeInterfaces))
 			}
 			if tc.queryIncludeRelations1 != nil {
 				q.Add("includeRelation", *tc.queryIncludeRelations1)
@@ -1181,14 +1182,14 @@ func TestNVLinkLogicalPartitionHandler_GetAll(t *testing.T) {
 			if tc.queryIncludeRelations2 != nil {
 				q.Add("includeRelation", *tc.queryIncludeRelations2)
 			}
-			if tc.queryIncludeRelations2 != nil {
+			if tc.queryIncludeRelations3 != nil {
 				q.Add("includeRelation", *tc.queryIncludeRelations3)
 			}
 			if tc.pageNumber != nil {
-				q.Set("pageNumber", fmt.Sprintf("%v", *tc.pageNumber))
+				q.Set("pageNumber", strconv.Itoa(*tc.pageNumber))
 			}
 			if tc.pageSize != nil {
-				q.Set("pageSize", fmt.Sprintf("%v", *tc.pageSize))
+				q.Set("pageSize", strconv.Itoa(*tc.pageSize))
 			}
 			if tc.orderBy != nil {
 				q.Set("orderBy", *tc.orderBy)
@@ -1230,6 +1231,30 @@ func TestNVLinkLogicalPartitionHandler_GetAll(t *testing.T) {
 				err := json.Unmarshal(rec.Body.Bytes(), &rsp)
 				assert.Nil(t, err)
 				assert.Equal(t, tc.expectedCnt, len(rsp))
+				header := rec.Header().Get(pagination.ResponseHeaderName)
+				require.NotEmpty(t, header)
+				page := &pagination.PageResponse{}
+				require.NoError(t, json.Unmarshal([]byte(header), page))
+				expectedPageNumber, expectedPageSize := 1, paginator.DefaultLimit
+				if tc.pageNumber != nil {
+					expectedPageNumber = *tc.pageNumber
+				}
+				if tc.pageSize != nil {
+					expectedPageSize = *tc.pageSize
+				}
+				assert.Equal(t, expectedPageNumber, page.PageNumber)
+				assert.Equal(t, expectedPageSize, page.PageSize)
+				assert.Equal(t, tc.orderBy, page.OrderBy)
+				if tc.expectedTotal != nil {
+					assert.Equal(t, *tc.expectedTotal, page.Total)
+				} else if tc.expectedCnt == 0 {
+					assert.Zero(t, page.Total)
+				}
+				if tc.expectedFirstEntry != nil {
+					require.NotEmpty(t, rsp)
+					assert.Equal(t, tc.expectedFirstEntry.Name, rsp[0].Name)
+				}
+
 				for i := 0; i < tc.expectedCnt; i++ {
 					assert.Equal(t, tn1.ID.String(), rsp[i].TenantID)
 				}
@@ -1239,6 +1264,7 @@ func TestNVLinkLogicalPartitionHandler_GetAll(t *testing.T) {
 						assert.Equal(t, *tc.expectedTenantOrg, rsp[0].Tenant.Org)
 					}
 					if tc.expectedSite != nil {
+						require.NotNil(t, rsp[0].Site)
 						assert.Equal(t, tc.expectedSite.Name, rsp[0].Site.Name)
 					}
 				} else {

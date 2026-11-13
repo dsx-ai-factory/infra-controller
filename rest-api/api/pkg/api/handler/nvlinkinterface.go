@@ -207,7 +207,7 @@ func (gaish GetAllNVLinkInterfaceHandler) Handle(c echo.Context) error {
 			// Check if Tenant has access to Site
 			err := common.ValidateTenantSiteAccess(ctx, nil, gaish.dbSession, &tenant, siteID)
 			if errors.Is(err, cdb.ErrDoesNotExist) {
-				return cutil.NewAPIErrorResponse(c, http.StatusForbidden, fmt.Sprintf("Site: %s specified in query doesn't exist or Tenant doesn't have access to it", siteID.String()), nil)
+				return cutil.NewAPIErrorResponse(c, http.StatusForbidden, fmt.Sprintf("Site: %s specified in query doesn't exist or Tenant doesn't have access to it", siteID), nil)
 			}
 			if err != nil {
 				logger.Error().Err(err).Msg("error checking Tenant access to Site")
@@ -259,12 +259,12 @@ func (gaish GetAllNVLinkInterfaceHandler) Handle(c echo.Context) error {
 			instance, ok := instanceIDMap[instanceID]
 			if !ok {
 				return cutil.NewAPIErrorResponse(c, http.StatusNotFound, fmt.Sprintf("Could not find Instance with ID: %s specified in %s",
-					instanceID.String(), lo.Ternary(instanceIDFromPath, "request", "query")), nil)
+					instanceID, lo.Ternary(instanceIDFromPath, "request", "query")), nil)
 			}
 
 			if instance.TenantID != tenant.ID {
 				return cutil.NewAPIErrorResponse(c, http.StatusForbidden, fmt.Sprintf("Instance: %s specified in %s doesn't belong to current Tenant",
-					instanceID.String(), lo.Ternary(instanceIDFromPath, "request", "query")), nil)
+					instanceID, lo.Ternary(instanceIDFromPath, "request", "query")), nil)
 			}
 		}
 	}
@@ -303,11 +303,11 @@ func (gaish GetAllNVLinkInterfaceHandler) Handle(c echo.Context) error {
 		for _, nvllpID := range nvlinkLogicalPartitionIDs {
 			nvllp, ok := nvllpIDMap[nvllpID]
 			if !ok {
-				return cutil.NewAPIErrorResponse(c, http.StatusNotFound, fmt.Sprintf("Could not find NVLink Logical Partition with ID: %s specified in query", nvllpID.String()), nil)
+				return cutil.NewAPIErrorResponse(c, http.StatusNotFound, fmt.Sprintf("Could not find NVLink Logical Partition with ID: %s specified in query", nvllpID), nil)
 			}
 
 			if nvllp.TenantID != tenant.ID {
-				return cutil.NewAPIErrorResponse(c, http.StatusForbidden, fmt.Sprintf("NVLink Logical Partition: %s specified in query doesn't belong to current Tenant", nvllpID.String()), nil)
+				return cutil.NewAPIErrorResponse(c, http.StatusForbidden, fmt.Sprintf("NVLink Logical Partition: %s specified in query doesn't belong to current Tenant", nvllpID), nil)
 			}
 		}
 	}
@@ -339,7 +339,7 @@ func (gaish GetAllNVLinkInterfaceHandler) Handle(c echo.Context) error {
 		cotel.SetAttribute(handlerSpan, attribute.String("status", status))
 		_, ok := cdbm.NVLinkInterfaceStatusMap[status]
 		if !ok {
-			logger.Warn().Msg(fmt.Sprintf("invalid value in status query: %v", status))
+			logger.Warn().Msgf("invalid value in status query: %v", status)
 			return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, fmt.Sprintf("Invalid Status value: %s in query", status), nil)
 		}
 		statuses = append(statuses, status)

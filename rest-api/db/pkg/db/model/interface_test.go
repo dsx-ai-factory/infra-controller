@@ -4,8 +4,10 @@
 package model
 
 import (
+	"bytes"
 	"context"
 	"testing"
+	"time"
 
 	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
 	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
@@ -914,7 +916,7 @@ func TestInterfaceSQLDAO_GetAll(t *testing.T) {
 
 		expectedFirstID := first.ID
 		expectedSecondID := second.ID
-		if expectedFirstID.String() > expectedSecondID.String() {
+		if bytes.Compare(expectedFirstID[:], expectedSecondID[:]) > 0 {
 			expectedFirstID, expectedSecondID = expectedSecondID, expectedFirstID
 		}
 		assert.Equal(t, expectedFirstID, pageOne[0].ID)
@@ -1908,6 +1910,12 @@ func TestInterfaceSQLDAO_Update(t *testing.T) {
 				IpAddresses:          tc.paramIPAddresses,
 				Status:               tc.paramStatus,
 			}
+			var previousUpdated time.Time
+			if !tc.expectError {
+				predecessor, getErr := ifcd.GetByID(ctx, nil, tc.id, nil)
+				require.NoError(t, getErr)
+				previousUpdated = predecessor.Updated
+			}
 			got, err := ifcd.Update(ctx, nil, input)
 			assert.Equal(t, tc.expectError, err != nil)
 			if err == nil {
@@ -1948,9 +1956,7 @@ func TestInterfaceSQLDAO_Update(t *testing.T) {
 					assert.Equal(t, *tc.expectedDeviceInstance, *got.DeviceInstance)
 				}
 
-				if got.Updated.String() == ifc.Updated.String() {
-					t.Errorf("got.Updated = %v, want different value", got.Updated)
-				}
+				assert.False(t, got.Updated.Equal(previousUpdated), "updated timestamp did not change: previous=%v actual=%v", previousUpdated, got.Updated)
 			}
 
 			if tc.verifyChildSpanner {

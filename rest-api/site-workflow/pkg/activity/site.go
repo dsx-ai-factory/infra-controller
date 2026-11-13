@@ -59,7 +59,7 @@ func (msi *ManageSiteConfigInventory) DiscoverSiteConfigInventory(ctx context.Co
 	}
 
 	workflowOptions := tClient.StartWorkflowOptions{
-		ID:        fmt.Sprintf("update-site-config-inventory-%s", msi.inventoryConfig.SiteID.String()),
+		ID:        fmt.Sprintf("update-site-config-inventory-%s", msi.inventoryConfig.SiteID),
 		TaskQueue: msi.inventoryConfig.TemporalPublishQueue,
 	}
 

@@ -5676,15 +5676,15 @@ func getAndPrint(s *Session, path, id string) error {
 func printDetailJSON(w io.Writer, data []byte) error {
 	var v interface{}
 	if err := json.Unmarshal(data, &v); err != nil {
-		fmt.Fprintln(w, string(data))
+		fmt.Fprintf(w, "%s\n", data)
 		return nil
 	}
 	pretty, err := json.MarshalIndent(v, "", "  ")
 	if err != nil {
-		fmt.Fprintln(w, string(data))
+		fmt.Fprintf(w, "%s\n", data)
 		return nil
 	}
-	fmt.Fprintln(w, string(pretty))
+	fmt.Fprintf(w, "%s\n", pretty)
 	return nil
 }
 
