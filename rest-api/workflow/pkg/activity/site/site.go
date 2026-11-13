@@ -314,7 +314,7 @@ func (mst ManageSite) DeleteSiteComponentsFromDB(ctx context.Context, siteID uui
 			_, serr := instanceDAO.Clear(ctx, nil, cdbm.InstanceClearInput{InstanceID: instanceID, MachineID: true})
 			if serr != nil && serr != cdb.ErrDoesNotExist {
 				logger.Error().Err(serr).Str("Instance ID", instanceID.String()).Msg("error clearing Machine ID for Instance in DB")
-				return err
+				return serr
 			}
 		}
 

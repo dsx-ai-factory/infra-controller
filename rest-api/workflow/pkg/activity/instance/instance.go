@@ -136,11 +136,26 @@ func (mi ManageInstance) UpdateInstancesInDB(ctx context.Context, siteID uuid.UU
 
 	existingInstances := []cdbm.Instance{}
 	if len(pageInstanceIDs) > 0 {
-		for _, filter := range []cdbm.InstanceFilterInput{
-			{SiteIDs: []uuid.UUID{site.ID}, ControllerInstanceIDs: pageInstanceIDs},
-			{SiteIDs: []uuid.UUID{site.ID}, InstanceIDs: pageInstanceIDs},
-		} {
-			instances, _, serr := instanceDAO.GetAll(ctx, nil, filter, cdbp.PageInput{Limit: cwutil.GetPtr(cdbp.TotalLimit)}, nil)
+		existingInstances, _, err = instanceDAO.GetAll(ctx, nil, cdbm.InstanceFilterInput{SiteIDs: []uuid.UUID{site.ID}, ControllerInstanceIDs: pageInstanceIDs}, cdbp.PageInput{Limit: cwutil.GetPtr(cdbp.TotalLimit)}, nil)
+		if err != nil {
+			logger.Error().Err(err).Msg("failed to get Instances for Site from DB")
+			return nil, err
+		}
+
+		// REST sets the controller Instance ID to the Instance ID, so the Instance ID lookup is normally skipped
+		matchedIDs := map[uuid.UUID]bool{}
+		for _, instance := range existingInstances {
+			matchedIDs[*instance.ControllerInstanceID] = true
+		}
+		unmatchedIDs := []uuid.UUID{}
+		for _, id := range pageInstanceIDs {
+			if !matchedIDs[id] {
+				unmatchedIDs = append(unmatchedIDs, id)
+			}
+		}
+
+		if len(unmatchedIDs) > 0 {
+			instances, _, serr := instanceDAO.GetAll(ctx, nil, cdbm.InstanceFilterInput{SiteIDs: []uuid.UUID{site.ID}, InstanceIDs: unmatchedIDs}, cdbp.PageInput{Limit: cwutil.GetPtr(cdbp.TotalLimit)}, nil)
 			if serr != nil {
 				logger.Error().Err(serr).Msg("failed to get Instances for Site from DB")
 				return nil, serr
