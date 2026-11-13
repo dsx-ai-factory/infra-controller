@@ -53,12 +53,6 @@ import (
 
 const MachineMissingDelayThreshold = 24 * time.Hour
 
-// Keep in sync with the messages Machine inventory records for the same states.
-const (
-	machineMissingOnSiteStatusMessage = "Machine is missing on Site"
-	machineForceDeletionStatusMessage = "Machine is being force deleted"
-)
-
 // ~~~~~ Utility for Gets ~~~~~ //
 func getAPIMachines(ctx context.Context, ms []cdbm.Machine, logger zerolog.Logger, tx *cdb.Tx, dbSession *cdb.Session, includeMetadata bool, isProviderOrPrivilegedTenant bool) ([]*model.APIMachine, *cutil.APIError) {
 	// Get status details
@@ -1964,7 +1958,7 @@ func (dmh DeleteMachineHandler) Handle(c echo.Context) error {
 				_, derr = mDAO.Update(ctx, tx, cdbm.MachineUpdateInput{MachineID: machine.ID, IsUsableByTenant: cutil.GetPtr(false)})
 				return derr
 			}
-			return dmh.setForceDeletionStatus(ctx, tx, machine, cdbm.MachineStatusInitializing, machineForceDeletionStatusMessage, false)
+			return dmh.setForceDeletionStatus(ctx, tx, machine, cdbm.MachineStatusInitializing, cdbm.MachineStatusForceDeletionMessage, false)
 		}
 
 		// Prevent deleting if seen on site
@@ -1989,7 +1983,7 @@ func (dmh DeleteMachineHandler) Handle(c echo.Context) error {
 
 		lastStatus := statuses[0]
 
-		if lastStatus.Message == nil || *lastStatus.Message != machineMissingOnSiteStatusMessage {
+		if lastStatus.Message == nil || *lastStatus.Message != cdbm.MachineStatusMissingOnSiteMessage {
 			lastStatusMessage := ""
 			if lastStatus.Message != nil {
 				lastStatusMessage = *lastStatus.Message
@@ -2146,7 +2140,7 @@ func (dmh DeleteMachineHandler) Handle(c echo.Context) error {
 			if retainRecords {
 				// Record what the next inventory would report for a Machine absent from Core.
 				// Owners clean up the retained records. Inventory restores a rediscovered Machine.
-				return dmh.setForceDeletionStatus(ctx, tx, machine, cdbm.MachineStatusError, machineMissingOnSiteStatusMessage, true)
+				return dmh.setForceDeletionStatus(ctx, tx, machine, cdbm.MachineStatusError, cdbm.MachineStatusMissingOnSiteMessage, true)
 			}
 			derr = deleteForceDeletedMachineRecords(ctx, tx, dmh.dbSession, mID)
 			if derr != nil {
