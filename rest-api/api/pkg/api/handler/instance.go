@@ -4139,8 +4139,11 @@ func (uih UpdateInstanceHandler) Handle(c echo.Context) error {
 			newOrExistingSxAs = existingSxAs
 		} else {
 			existingSxAByKey := make(map[string]cdbm.SpectrumXAttachment, len(existingSxAs))
+			deletingSxAsByKey := make(map[string][]cdbm.SpectrumXAttachment)
 			for i := range existingSxAs {
 				if existingSxAs[i].Status == cdbm.SpectrumXAttachmentStatusDeleting {
+					key := existingSxAs[i].Key()
+					deletingSxAsByKey[key] = append(deletingSxAsByKey[key], existingSxAs[i])
 					continue
 				}
 				existingSxAByKey[existingSxAs[i].Key()] = existingSxAs[i]
@@ -4165,45 +4168,70 @@ func (uih UpdateInstanceHandler) Handle(c echo.Context) error {
 					AttachmentType:       apiSxA.AttachmentType,
 				}
 
-				existing, reusable := existingSxAByKey[requestedSxA.Key()]
+				sxaKey := requestedSxA.Key()
+				existing, reusable := existingSxAByKey[sxaKey]
+				deletingMatches := deletingSxAsByKey[sxaKey]
+				if !reusable && len(deletingMatches) > 0 {
+					// The request is authoritative desired state. Reactivate the oldest
+					// matching row rather than creating a duplicate that inventory cannot
+					// distinguish from the retiring attachment.
+					existing = deletingMatches[0]
+					reusable = true
+				}
 				if reusable {
 					retainedSxAIDs[existing.ID] = true
+					// Redundant Deleting rows with this identity are omitted from the
+					// response. Inventory removes them once it observes the active row.
+					for i := range deletingMatches {
+						retainedSxAIDs[deletingMatches[i].ID] = true
+					}
 
 					// The reuse key covers partition, device, device instance and attachment
 					// type but not the OVS metadata, so a request that changes only its bridge
 					// name or OVN network name still reuses this row. Persist the new metadata
 					// and carry the updated row forward; otherwise the Site keeps the stale
 					// bridge and the response reports it too.
-					if !stringPtrEqual(existing.BridgeName, apiSxA.BridgeName) ||
-						!stringPtrEqual(existing.OvnNetworkName, apiSxA.OvnNetworkName) {
-						updated, uerr := sxaDAO.Update(ctx, tx, cdbm.SpectrumXAttachmentUpdateInput{
+					reactivating := existing.Status == cdbm.SpectrumXAttachmentStatusDeleting
+					metadataChanged := !stringPtrEqual(existing.BridgeName, apiSxA.BridgeName) ||
+						!stringPtrEqual(existing.OvnNetworkName, apiSxA.OvnNetworkName)
+					updated := &existing
+					if reactivating || metadataChanged {
+						updateInput := cdbm.SpectrumXAttachmentUpdateInput{
 							SpectrumXAttachmentID: existing.ID,
 							BridgeName:            apiSxA.BridgeName,
 							OvnNetworkName:        apiSxA.OvnNetworkName,
-						})
+						}
+						if reactivating {
+							updateInput.Status = cutil.GetPtr(cdbm.SpectrumXAttachmentStatusPending)
+							updateInput.IsMissingOnSite = cutil.GetPtr(false)
+						}
+						var uerr error
+						updated, uerr = sxaDAO.Update(ctx, tx, updateInput)
 						if uerr != nil {
 							logger.Error().Err(uerr).Msg("failed to update SpectrumX Attachment metadata in DB")
 							return cutil.NewAPIError(http.StatusInternalServerError, "Failed to update SpectrumX Attachment for Instance, DB error", nil)
 						}
-
-						// Update only writes provided values, so a dropped OVN network name is
-						// cleared explicitly.
-						if apiSxA.OvnNetworkName == nil && existing.OvnNetworkName != nil {
-							updated, uerr = sxaDAO.Clear(ctx, tx, cdbm.SpectrumXAttachmentClearInput{
-								SpectrumXAttachmentID: existing.ID,
-								OvnNetworkName:        true,
-							})
-							if uerr != nil {
-								logger.Error().Err(uerr).Msg("failed to clear SpectrumX Attachment OVN network name in DB")
-								return cutil.NewAPIError(http.StatusInternalServerError, "Failed to update SpectrumX Attachment for Instance, DB error", nil)
-							}
-						}
-
-						newOrExistingSxAs = append(newOrExistingSxAs, *updated)
-						continue
 					}
 
-					newOrExistingSxAs = append(newOrExistingSxAs, existing)
+					// A reactivated row must not expose stale Site allocations. Update only
+					// writes non-nil values, so optional fields are cleared explicitly.
+					clearInput := cdbm.SpectrumXAttachmentClearInput{
+						SpectrumXAttachmentID: existing.ID,
+						MacAddress:            reactivating,
+						IPAddress:             reactivating,
+						VirtualFunctionID:     reactivating && apiSxA.VirtualFunctionID == nil && existing.VirtualFunctionID != nil,
+						OvnNetworkName:        apiSxA.OvnNetworkName == nil && existing.OvnNetworkName != nil,
+					}
+					if clearInput.MacAddress || clearInput.IPAddress || clearInput.VirtualFunctionID || clearInput.OvnNetworkName {
+						var cerr error
+						updated, cerr = sxaDAO.Clear(ctx, tx, clearInput)
+						if cerr != nil {
+							logger.Error().Err(cerr).Msg("failed to clear SpectrumX Attachment fields in DB")
+							return cutil.NewAPIError(http.StatusInternalServerError, "Failed to update SpectrumX Attachment for Instance, DB error", nil)
+						}
+					}
+
+					newOrExistingSxAs = append(newOrExistingSxAs, *updated)
 					continue
 				}
 
