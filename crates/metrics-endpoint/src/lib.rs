@@ -20,7 +20,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{SyncSender, TrySendError, sync_channel};
 
 use bytes::Bytes;
-use carbide_instrument::{Event, LabelValue, emit};
+use carbide_instrument::{Event, Instrumentation, LabelValue};
 use carbide_metrics_utils::OtelView;
 use http_body_util::Full;
 use hyper::header::{CONTENT_LENGTH, CONTENT_TYPE};
@@ -83,6 +83,8 @@ impl HealthController {
 
 #[derive(Debug, Clone)]
 pub struct MetricsSetup {
+    /// Shared Event destination backed by this setup's provider and registry.
+    pub instrumentation: Instrumentation,
     pub registry: prometheus::Registry,
     pub meter: Meter,
     // Need to retain this, if it's dropped, metrics are not held
@@ -183,6 +185,7 @@ enum Item {
 
 /// The shared state between HTTP requests
 struct MetricsHandlerState {
+    instrumentation: Instrumentation,
     /// Bounded queue to the single dedicated encoder thread. Each `/metrics` scrape
     /// enqueues a reply channel and awaits the encoded exposition on it. The thread
     /// owns the registry and prefix, so those are not held here.
@@ -201,6 +204,10 @@ pub struct PrefixMigration {
 
 /// Configuration for the metrics endpoint
 pub struct MetricsEndpointConfig {
+    /// Destination for this endpoint's scrape-failure Event metrics.
+    /// Retain its provider while serving. It can target a shared service registry
+    /// when diagnostics should be separate from the scraped `registry`.
+    pub instrumentation: Instrumentation,
     pub address: SocketAddr,
     pub registry: prometheus::Registry,
     pub health_controller: Option<HealthController>,
@@ -249,6 +256,7 @@ pub fn new_metrics_setup(
     }
 
     Ok(MetricsSetup {
+        instrumentation: Instrumentation::from_meter_provider(&meter_provider),
         registry: prometheus_registry,
         meter: meter_provider.meter(service_name),
         meter_provider,
@@ -319,6 +327,7 @@ pub async fn run_metrics_endpoint_with_listener(
     let shutdown_tx = encoder_tx.clone();
 
     let handler_state = Arc::new(MetricsHandlerState {
+        instrumentation: config.instrumentation.clone(),
         encoder_tx,
         health_controller: config.health_controller.clone().unwrap_or_default(),
     });
@@ -501,14 +510,18 @@ async fn handle_metrics_request<B>(
                 Err(TrySendError::Full(_)) => {
                     // The single encoder is already busy with a backlog; shed this
                     // scrape rather than pile on more work.
-                    emit(MetricsScrapeFailed::EncoderBusy {});
+                    state
+                        .instrumentation
+                        .emit(MetricsScrapeFailed::EncoderBusy {});
                     return Ok(Response::builder()
                         .status(503)
                         .body(Full::new(Bytes::from("metrics encoder busy")))
                         .unwrap());
                 }
                 Err(TrySendError::Disconnected(_)) => {
-                    emit(MetricsScrapeFailed::EncoderGone {});
+                    state
+                        .instrumentation
+                        .emit(MetricsScrapeFailed::EncoderGone {});
                     return Ok(Response::builder()
                         .status(500)
                         .body(Full::new(Bytes::from("Failed to encode metrics")))
@@ -524,14 +537,18 @@ async fn handle_metrics_request<B>(
                     .body(Full::new(Bytes::from(buffer)))
                     .unwrap(),
                 Ok(Err(EncodeError::Encode(_err))) => {
-                    emit(MetricsScrapeFailed::EncodeFailed {});
+                    state
+                        .instrumentation
+                        .emit(MetricsScrapeFailed::EncodeFailed {});
                     Response::builder()
                         .status(500)
                         .body(Full::new(Bytes::from("Failed to encode metrics")))
                         .unwrap()
                 }
                 Ok(Err(EncodeError::Panicked)) => {
-                    emit(MetricsScrapeFailed::EncoderPanicked {});
+                    state
+                        .instrumentation
+                        .emit(MetricsScrapeFailed::EncoderPanicked {});
                     Response::builder()
                         .status(500)
                         .body(Full::new(Bytes::from("Failed to encode metrics")))
@@ -541,7 +558,9 @@ async fn handle_metrics_request<B>(
                     // The encoder thread dropped the reply without answering — it was told
                     // to stop (shutdown) or otherwise went away. Distinct from a busy or
                     // already-gone encoder above.
-                    emit(MetricsScrapeFailed::ReplyDropped {});
+                    state
+                        .instrumentation
+                        .emit(MetricsScrapeFailed::ReplyDropped {});
                     Response::builder()
                         .status(500)
                         .body(Full::new(Bytes::from("Failed to encode metrics")))
@@ -584,6 +603,7 @@ async fn handle_metrics_request<B>(
 mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
+    use carbide_instrument::emit;
     use carbide_instrument::testing::MetricsCapture;
     use opentelemetry::KeyValue;
     use opentelemetry_sdk::metrics;
@@ -796,6 +816,9 @@ mod tests {
     #[tokio::test]
     async fn test_cancellation_shuts_down_server() {
         let config = MetricsEndpointConfig {
+            instrumentation: Instrumentation::from_meter_provider(
+                &opentelemetry::metrics::noop::NoopMeterProvider::new(),
+            ),
             address: "127.0.0.1:0".parse().unwrap(),
             registry: prometheus::Registry::new(),
             health_controller: None,
@@ -834,6 +857,9 @@ mod tests {
         let addr = listener.local_addr().unwrap();
 
         let config = MetricsEndpointConfig {
+            instrumentation: Instrumentation::from_meter_provider(
+                &opentelemetry::metrics::noop::NoopMeterProvider::new(),
+            ),
             address: addr,
             registry,
             health_controller: None,
@@ -934,6 +960,9 @@ mod tests {
         let addr = listener.local_addr().unwrap();
 
         let config = MetricsEndpointConfig {
+            instrumentation: Instrumentation::from_meter_provider(
+                &opentelemetry::metrics::noop::NoopMeterProvider::new(),
+            ),
             address: addr,
             registry: sample_registry(),
             health_controller: None,
@@ -1067,6 +1096,7 @@ mod tests {
     /// provided for free.
     #[tokio::test]
     async fn test_encoder_survives_collector_panic() {
+        let setup = new_metrics_setup("metrics-endpoint-test", "test", false).unwrap();
         let registry = prometheus::Registry::new();
         registry
             .register(Box::new(PanicOnceCollector::new()))
@@ -1082,6 +1112,7 @@ mod tests {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let config = MetricsEndpointConfig {
+            instrumentation: setup.instrumentation.clone(),
             address: addr,
             registry,
             health_controller: None,
@@ -1094,7 +1125,7 @@ mod tests {
             run_metrics_endpoint_with_listener(&config, server_token, listener).await
         });
 
-        let metrics = MetricsCapture::start();
+        let metrics = MetricsCapture::for_registry(&setup.registry);
 
         // First scrape trips the collector panic. The encoder thread catches the unwind
         // and answers 500 instead of dying.
@@ -1139,6 +1170,7 @@ mod tests {
     /// `encode_failed_outcome_emits_counter`.)
     #[tokio::test]
     async fn test_handle_metrics_request_failure_outcomes() {
+        let setup = new_metrics_setup("metrics-endpoint-test", "test", false).unwrap();
         // The encoder sender under test, plus any receiver that must stay alive for the
         // call (`None` means it was dropped or handed to a drainer thread).
         type EncoderChannel = (SyncSender<Item>, Option<std::sync::mpsc::Receiver<Item>>);
@@ -1190,11 +1222,12 @@ mod tests {
             },
         ];
 
-        let metrics = MetricsCapture::start();
+        let metrics = MetricsCapture::for_registry(&setup.registry);
 
         for case in cases {
             let (encoder_tx, _rx_guard) = (case.setup)();
             let state = Arc::new(MetricsHandlerState {
+                instrumentation: setup.instrumentation.clone(),
                 encoder_tx,
                 health_controller: HealthController::new(),
             });

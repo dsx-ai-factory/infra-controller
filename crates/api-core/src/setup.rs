@@ -561,6 +561,7 @@ pub async fn start_runtime(runtime_inputs: RuntimeInputs<'_>) -> eyre::Result<So
         &carbide_config.firmware_global,
         cancel_token.clone(),
         join_set,
+        instrumentation.clone(),
     )?;
 
     // A listen-only replica trusts another instance to reconcile configuration,
@@ -915,8 +916,9 @@ fn create_firmware_delivery(
     config: &FirmwareGlobal,
     cancel_token: CancellationToken,
     join_set: &mut JoinSet<()>,
+    instrumentation: carbide_instrument::Instrumentation,
 ) -> eyre::Result<(FirmwareDownloader, FirmwareArtifactCache)> {
-    let downloader = FirmwareDownloader::with_config(config.downloads.clone())?;
+    let downloader = FirmwareDownloader::with_config(config.downloads.clone(), instrumentation)?;
     let cache = FirmwareArtifactCache::new(
         config.firmware_download_cache_directory.clone(),
         config.nic_firmware_cache_capacity_bytes,
@@ -2035,6 +2037,7 @@ async fn initialize_and_start_controllers<'a>(
                 config.mqtt_broker_port,
                 &client_id,
                 Some(options),
+                api_service.instrumentation.clone(),
             )
             .map_err(|e| eyre::eyre!("failed to create DSX exchange event bus MQTT client: {e}"))
             .await?;
@@ -2247,7 +2250,7 @@ async fn initialize_and_start_controllers<'a>(
         .per_object_state_metrics(machine_state_recorder)
         .iteration_config((&carbide_config.machine_state_controller.controller).into())
         .state_handler(Arc::new(
-            MachineStateHandlerBuilder::builder()
+            MachineStateHandlerBuilder::builder(api_service.instrumentation.clone())
                 .dpu_up_threshold(carbide_config.machine_state_controller.dpu_up_threshold)
                 .dpu_nic_firmware_reprovision_update_enabled(
                     carbide_config
@@ -2453,6 +2456,7 @@ async fn initialize_and_start_controllers<'a>(
         .processor_id(state_controller_id.clone())
         .services(
             PowerShelfStateHandlerServices {
+                instrumentation: api_service.instrumentation.clone(),
                 db_pool: db_pool.clone(),
                 component_manager: component_manager.clone().map(Arc::new),
                 credential_manager: credential_manager.clone(),
@@ -2517,6 +2521,7 @@ async fn initialize_and_start_controllers<'a>(
         .processor_id(state_controller_id.clone())
         .services(
             SwitchStateHandlerServices {
+                instrumentation: api_service.instrumentation.clone(),
                 db_pool: db_pool.clone(),
                 component_manager: component_manager.clone().map(Arc::new),
                 credential_manager: credential_manager.clone(),
@@ -2554,6 +2559,7 @@ async fn initialize_and_start_controllers<'a>(
         ib_fabric_manager.clone(),
         carbide_config.host_health,
         work_lock_manager_handle.clone(),
+        api_service.instrumentation.clone(),
     )
     .start(join_set, cancel_token.clone())?;
 
@@ -2561,6 +2567,7 @@ async fn initialize_and_start_controllers<'a>(
         db_pool: db_pool.clone(),
         nmxc_client_pool: api_service.nmxc_client_pool.clone(),
         meter: meter.clone(),
+        instrumentation: api_service.instrumentation.clone(),
         config: carbide_config.nvlink_config.clone().unwrap_or_default(),
         host_health: carbide_config.host_health,
         component_manager: api_service.component_manager.clone().map(Arc::new),
@@ -2771,8 +2778,15 @@ mod tests {
             config.firmware_download_cache_directory = directory.path().join("cache");
             let cancel = CancellationToken::new();
             let mut tasks = JoinSet::new();
-            let (downloader, cache) = create_firmware_delivery(&config, cancel.clone(), &mut tasks)
-                .expect("production firmware delivery composition");
+            let (downloader, cache) = create_firmware_delivery(
+                &config,
+                cancel.clone(),
+                &mut tasks,
+                carbide_instrument::Instrumentation::from_meter_provider(
+                    &opentelemetry::metrics::noop::NoopMeterProvider::new(),
+                ),
+            )
+            .expect("production firmware delivery composition");
             let started = Arc::new(Notify::new());
             let release = Arc::new(Notify::new());
             let legacy_started = started.clone();

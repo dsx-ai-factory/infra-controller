@@ -26,11 +26,13 @@ use carbide_dhcp_server::cache::CacheEntry;
 use carbide_dhcp_server::modes::DhcpMode;
 use carbide_dhcp_server::modes::dpu::Dpu;
 use carbide_dhcp_server::{Config, ReplyStatus, packet_handler};
+use carbide_instrument::Instrumentation;
 use carbide_instrument::testing::{MetricsCapture, capture_logs_async};
 use carbide_rpc_utils::dhcp::{
     HostConfig, InterfaceInfo, ServiceConfig, ServiceDhcpInterfaceReservations,
     ServiceDhcpReservation, ServiceLink, ServiceLinkV4, ServiceLinkV6,
 };
+use carbide_utils::test_support::test_meter::TestMeter;
 use common::{base_dhcp_config, machine_cache};
 use dhcproto::v4::{Decodable, Decoder, DhcpOption, Message, MessageType, OptionCode};
 use dhcproto::{Encodable, Encoder};
@@ -60,19 +62,26 @@ fn reservation(mac_address: &str, address: &str, internal_uuid: &str) -> Service
 
 /// Builds immutable DPU configuration without host data so service replies prove reservations are
 /// independently operational.
-fn service_config(groups: Vec<ServiceDhcpInterfaceReservations>) -> Config {
+fn service_config(
+    instrumentation: Instrumentation,
+    groups: Vec<ServiceDhcpInterfaceReservations>,
+) -> Config {
     Config::new(
         base_dhcp_config(None),
         None,
         67,
         CarbideClientConfig::new(String::new(), None),
+        instrumentation,
     )
     .with_service_config(ServiceConfig::try_new(groups).unwrap())
 }
 
 /// Builds immutable DPU configuration with valid host fallback so fail-closed tests detect
 /// accidental tenant-host routing.
-fn service_config_with_host_fallback(groups: Vec<ServiceDhcpInterfaceReservations>) -> Config {
+fn service_config_with_host_fallback(
+    instrumentation: Instrumentation,
+    groups: Vec<ServiceDhcpInterfaceReservations>,
+) -> Config {
     // Mirror every service interface into host configuration so erroneous fallback would produce an observable host response.
     let host_ip_addresses = groups
         .iter()
@@ -101,6 +110,7 @@ fn service_config_with_host_fallback(groups: Vec<ServiceDhcpInterfaceReservation
         }),
         67,
         CarbideClientConfig::new(String::new(), None),
+        instrumentation,
     )
     .with_service_config(ServiceConfig::try_new(groups).unwrap())
 }
@@ -185,6 +195,8 @@ fn decode(packet: &packet_handler::Packet) -> Message {
 /// tenant-host options, preventing leakage across service bindings.
 #[tokio::test]
 async fn service_clients_receive_exact_minimal_responses() {
+    let test_meter = TestMeter::default();
+    let instrumentation = Instrumentation::new(test_meter.meter());
     // Configure adjacent /31 reservations on one receiving interface to expose any lookup collision.
     let first = reservation(
         "02:00:00:00:00:01",
@@ -196,10 +208,13 @@ async fn service_clients_receive_exact_minimal_responses() {
         "192.0.2.13",
         "33333333-3333-3333-3333-333333333333",
     );
-    let config = service_config(vec![ServiceDhcpInterfaceReservations {
-        receiving_interface: "pf0sf1".to_string(),
-        reservations: vec![first, second],
-    }]);
+    let config = service_config(
+        instrumentation.clone(),
+        vec![ServiceDhcpInterfaceReservations {
+            receiving_interface: "pf0sf1".to_string(),
+            reservations: vec![first, second],
+        }],
+    );
 
     let cases = [
         // A conflicting option 61 must not redirect the first chaddr to another reservation.
@@ -306,16 +321,21 @@ async fn service_clients_receive_exact_minimal_responses() {
 /// accounting follows transport success.
 #[tokio::test]
 async fn sent_service_response_records_transport_success() {
+    let test_meter = TestMeter::default();
+    let instrumentation = Instrumentation::new(test_meter.meter());
     // Prepare an address-matched REQUEST for a service-only configuration.
     let service = reservation(
         "02:00:00:00:00:01",
         "192.0.2.11",
         "22222222-2222-2222-2222-222222222222",
     );
-    let config = service_config(vec![ServiceDhcpInterfaceReservations {
-        receiving_interface: "pf0sf1".to_string(),
-        reservations: vec![service.clone()],
-    }]);
+    let config = service_config(
+        instrumentation.clone(),
+        vec![ServiceDhcpInterfaceReservations {
+            receiving_interface: "pf0sf1".to_string(),
+            reservations: vec![service.clone()],
+        }],
+    );
     let response = process(
         &config,
         "pf0sf1",
@@ -337,7 +357,7 @@ async fn sent_service_response_records_transport_success() {
     };
 
     // Send through the guarded production transport while capturing its generated Event.
-    let metrics = MetricsCapture::start();
+    let metrics = MetricsCapture::for_registry(test_meter.registry());
     let (status, logs) = capture_logs_async(response.send(destination, sender)).await;
 
     // Successful transport produces the ACK datagram, log, and bounded metric exactly once.
@@ -365,21 +385,26 @@ async fn sent_service_response_records_transport_success() {
 /// falling back to host DHCP.
 #[tokio::test]
 async fn service_slots_reject_unknown_or_cross_slot_clients() {
+    let test_meter = TestMeter::default();
+    let instrumentation = Instrumentation::new(test_meter.meter());
     // Pair one populated slot with one explicit empty slot while valid host fallback exists on both interfaces.
-    let config = service_config_with_host_fallback(vec![
-        ServiceDhcpInterfaceReservations {
-            receiving_interface: "pf0sf1".to_string(),
-            reservations: vec![reservation(
-                "02:00:00:00:00:01",
-                "192.0.2.11",
-                "22222222-2222-2222-2222-222222222222",
-            )],
-        },
-        ServiceDhcpInterfaceReservations {
-            receiving_interface: "pf0sf2".to_string(),
-            reservations: vec![],
-        },
-    ]);
+    let config = service_config_with_host_fallback(
+        instrumentation.clone(),
+        vec![
+            ServiceDhcpInterfaceReservations {
+                receiving_interface: "pf0sf1".to_string(),
+                reservations: vec![reservation(
+                    "02:00:00:00:00:01",
+                    "192.0.2.11",
+                    "22222222-2222-2222-2222-222222222222",
+                )],
+            },
+            ServiceDhcpInterfaceReservations {
+                receiving_interface: "pf0sf2".to_string(),
+                reservations: vec![],
+            },
+        ],
+    );
     let discover = request(
         MessageType::Discover,
         [0x02, 0, 0, 0, 0, 1],
@@ -410,6 +435,8 @@ async fn service_slots_reject_unknown_or_cross_slot_clients() {
 /// rejected address is not a safe destination.
 #[tokio::test]
 async fn service_request_address_precedence_controls_ack_and_nak() {
+    let test_meter = TestMeter::default();
+    let instrumentation = Instrumentation::new(test_meter.meter());
     struct Case {
         name: &'static str,
         ciaddr: Ipv4Addr,
@@ -425,10 +452,13 @@ async fn service_request_address_precedence_controls_ack_and_nak() {
         "192.0.2.11",
         "22222222-2222-2222-2222-222222222222",
     );
-    let config = service_config(vec![ServiceDhcpInterfaceReservations {
-        receiving_interface: "pf0sf1".to_string(),
-        reservations: vec![service.clone()],
-    }]);
+    let config = service_config(
+        instrumentation.clone(),
+        vec![ServiceDhcpInterfaceReservations {
+            receiving_interface: "pf0sf1".to_string(),
+            reservations: vec![service.clone()],
+        }],
+    );
     let echoed_identifier = vec![0, 0xde, 0xad, 0xbe, 0xef];
     let cases = [
         // A bound client renews ciaddr, so a conflicting option 50 cannot override the active address.
@@ -534,6 +564,8 @@ async fn service_request_address_precedence_controls_ack_and_nak() {
 /// data.
 #[tokio::test]
 async fn ipv4_rejects_ipv6_service_reservation_without_host_fallback() {
+    let test_meter = TestMeter::default();
+    let instrumentation = Instrumentation::new(test_meter.meter());
     // Select one valid IPv6 reservation by its exact interface and chaddr key.
     let reservation = ServiceDhcpReservation {
         attachment_id: "11111111-1111-1111-1111-111111111111".parse().unwrap(),
@@ -546,10 +578,13 @@ async fn ipv4_rejects_ipv6_service_reservation_without_host_fallback() {
             hbn_peer: "2001:db8::10".parse().unwrap(),
         }),
     };
-    let config = service_config(vec![ServiceDhcpInterfaceReservations {
-        receiving_interface: "pf0sf1".to_string(),
-        reservations: vec![reservation.clone()],
-    }]);
+    let config = service_config(
+        instrumentation.clone(),
+        vec![ServiceDhcpInterfaceReservations {
+            receiving_interface: "pf0sf1".to_string(),
+            reservations: vec![reservation.clone()],
+        }],
+    );
 
     // Send DHCPv4 for the selected IPv6 binding.
     let result = process(
@@ -578,6 +613,8 @@ async fn ipv4_rejects_ipv6_service_reservation_without_host_fallback() {
 /// reservations intact, preventing prior packet history from affecting ownership.
 #[tokio::test]
 async fn service_replacement_and_lifecycle_are_stateless() {
+    let test_meter = TestMeter::default();
+    let instrumentation = Instrumentation::new(test_meter.meter());
     // Remove one of two original bindings while preserving the second reservation byte for byte.
     let first = reservation(
         "02:00:00:00:00:01",
@@ -589,14 +626,20 @@ async fn service_replacement_and_lifecycle_are_stateless() {
         "192.0.2.13",
         "33333333-3333-3333-3333-333333333333",
     );
-    let original = service_config(vec![ServiceDhcpInterfaceReservations {
-        receiving_interface: "pf0sf1".to_string(),
-        reservations: vec![first.clone(), survivor.clone()],
-    }]);
-    let replacement = service_config(vec![ServiceDhcpInterfaceReservations {
-        receiving_interface: "pf0sf1".to_string(),
-        reservations: vec![survivor.clone()],
-    }]);
+    let original = service_config(
+        instrumentation.clone(),
+        vec![ServiceDhcpInterfaceReservations {
+            receiving_interface: "pf0sf1".to_string(),
+            reservations: vec![first.clone(), survivor.clone()],
+        }],
+    );
+    let replacement = service_config(
+        instrumentation.clone(),
+        vec![ServiceDhcpInterfaceReservations {
+            receiving_interface: "pf0sf1".to_string(),
+            reservations: vec![survivor.clone()],
+        }],
+    );
     let mut cache = machine_cache();
 
     // Renewal and INIT-REBOOT are DHCPREQUEST exchanges whose ciaddr or option 50 must match the static reservation.
@@ -714,10 +757,13 @@ async fn service_replacement_and_lifecycle_are_stateless() {
         "192.0.2.15",
         "55555555-5555-5555-5555-555555555555",
     );
-    let rebound_config = service_config(vec![ServiceDhcpInterfaceReservations {
-        receiving_interface: "pf0sf1".to_string(),
-        reservations: vec![rebound.clone()],
-    }]);
+    let rebound_config = service_config(
+        instrumentation.clone(),
+        vec![ServiceDhcpInterfaceReservations {
+            receiving_interface: "pf0sf1".to_string(),
+            reservations: vec![rebound.clone()],
+        }],
+    );
 
     // Process a DISCOVER through the reassigned snapshot.
     let rebound_offer = process_with_cache(
@@ -764,7 +810,7 @@ async fn service_replacement_and_lifecycle_are_stateless() {
     let SocketAddr::V4(destination) = receiver.local_addr().unwrap() else {
         panic!("test receiver must bind an IPv4 address");
     };
-    let metrics = MetricsCapture::start();
+    let metrics = MetricsCapture::for_registry(test_meter.registry());
     let (status, logs) = capture_logs_async(release.send(destination, sender)).await;
     assert_eq!(status.unwrap(), ReplyStatus::NoReply);
     assert!(
@@ -837,16 +883,21 @@ async fn service_replacement_and_lifecycle_are_stateless() {
 /// generation is retired.
 #[tokio::test]
 async fn retired_service_response_is_suppressed_at_send() {
+    let test_meter = TestMeter::default();
+    let instrumentation = Instrumentation::new(test_meter.meter());
     // Tie one exact service reservation to a controllable listener-generation token.
     let cancellation = CancellationToken::new();
-    let config = service_config(vec![ServiceDhcpInterfaceReservations {
-        receiving_interface: "pf0sf1".to_string(),
-        reservations: vec![reservation(
-            "02:00:00:00:00:01",
-            "192.0.2.11",
-            "22222222-2222-2222-2222-222222222222",
-        )],
-    }])
+    let config = service_config(
+        instrumentation.clone(),
+        vec![ServiceDhcpInterfaceReservations {
+            receiving_interface: "pf0sf1".to_string(),
+            reservations: vec![reservation(
+                "02:00:00:00:00:01",
+                "192.0.2.11",
+                "22222222-2222-2222-2222-222222222222",
+            )],
+        }],
+    )
     .with_reply_retirement(cancellation.clone());
 
     // Prepare the service OFFER while the original generation is active, then retire it before transport.
@@ -873,7 +924,7 @@ async fn retired_service_response_is_suppressed_at_send() {
     cancellation.cancel();
 
     // The final send reports retirement without a datagram, sent-reply log, or metric increment.
-    let metrics = MetricsCapture::start();
+    let metrics = MetricsCapture::for_registry(test_meter.registry());
     let (status, logs) = capture_logs_async(response.send(destination, sender)).await;
     assert_eq!(status.unwrap(), ReplyStatus::Retired);
     assert!(

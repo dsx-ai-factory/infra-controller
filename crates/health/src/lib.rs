@@ -166,6 +166,7 @@ struct EndpointWiring {
 async fn build_endpoint_wiring(
     config: &Config,
     bmc_latency_metrics: Option<Arc<BmcLatencyMetrics>>,
+    instrumentation: carbide_instrument::Instrumentation,
 ) -> Result<EndpointWiring, HealthError> {
     let reqwest = ReqwestClient::with_params(ReqwestClientParams::new().accept_invalid_certs(true))
         .map_err(BmcError::ReqwestError)?;
@@ -183,7 +184,12 @@ async fn build_endpoint_wiring(
             })
             .collect();
         Some(Arc::new(
-            static_credentials::StaticCredentialProvider::new(path.clone(), targets).await?,
+            static_credentials::StaticCredentialProvider::new(
+                path.clone(),
+                targets,
+                instrumentation.clone(),
+            )
+            .await?,
         ))
     } else {
         None
@@ -506,7 +512,12 @@ pub async fn run_service(
 
     let EndpointWiring {
         source: endpoint_source,
-    } = build_endpoint_wiring(&config, bmc_latency_metrics).await?;
+    } = build_endpoint_wiring(
+        &config,
+        bmc_latency_metrics,
+        framework_metrics.instrumentation.clone(),
+    )
+    .await?;
 
     let data_sink = build_data_sink(&config, metrics_manager.clone())?;
 
@@ -648,9 +659,15 @@ switch = { serial = "switch-host" }
         config.endpoint_sources.static_credentials_file = Some(file.path().into());
         config.validate().expect("test config should be valid");
 
-        let wiring = build_endpoint_wiring(&config, None)
-            .await
-            .expect("endpoint wiring should build");
+        let wiring = build_endpoint_wiring(
+            &config,
+            None,
+            carbide_instrument::Instrumentation::from_meter_provider(
+                &opentelemetry::metrics::noop::NoopMeterProvider::new(),
+            ),
+        )
+        .await
+        .expect("endpoint wiring should build");
 
         let endpoints = wiring
             .source
@@ -715,7 +732,15 @@ mac = "aa:bb:cc:dd:ee:03"
             .unwrap();
         config.endpoint_sources.static_credentials_file = Some(path);
         config.validate().unwrap();
-        let wiring = build_endpoint_wiring(&config, None).await.unwrap();
+        let wiring = build_endpoint_wiring(
+            &config,
+            None,
+            carbide_instrument::Instrumentation::from_meter_provider(
+                &opentelemetry::metrics::noop::NoopMeterProvider::new(),
+            ),
+        )
+        .await
+        .unwrap();
         let endpoints = wiring.source.fetch_bmc_hosts().await.unwrap();
         assert_eq!(endpoints.len(), 3);
         let providers = endpoints
@@ -777,9 +802,15 @@ mac = "aa:bb:cc:dd:ee:03"
                 .join("../..")
                 .join(&*path);
             config.endpoint_sources.carbide_api = Configurable::Disabled;
-            let wiring = build_endpoint_wiring(&config, None)
-                .await
-                .unwrap_or_else(|error| panic!("{name}: {error}"));
+            let wiring = build_endpoint_wiring(
+                &config,
+                None,
+                carbide_instrument::Instrumentation::from_meter_provider(
+                    &opentelemetry::metrics::noop::NoopMeterProvider::new(),
+                ),
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{name}: {error}"));
             let endpoints = wiring.source.fetch_bmc_hosts().await.unwrap();
             assert_eq!(
                 endpoints.len(),
@@ -830,7 +861,14 @@ mac = "aa:bb:cc:dd:ee:03"
                     .unwrap()
                 })
                 .collect();
-            let (result, logs) = capture_logs_async(build_endpoint_wiring(&config, None)).await;
+            let (result, logs) = capture_logs_async(build_endpoint_wiring(
+                &config,
+                None,
+                carbide_instrument::Instrumentation::from_meter_provider(
+                    &opentelemetry::metrics::noop::NoopMeterProvider::new(),
+                ),
+            ))
+            .await;
             assert!(result.is_err(), "{scenario}");
             let errors = logs
                 .iter()

@@ -168,6 +168,7 @@ async fn run() -> eyre::Result<()> {
 
     let mut server = tokio::spawn({
         let endpoint_config = metrics_endpoint::MetricsEndpointConfig {
+            instrumentation: metrics_setup.instrumentation.clone(),
             address: listen_addr,
             registry: metrics_setup.registry.clone(),
             health_controller: Some(metrics_setup.health_controller.clone()),

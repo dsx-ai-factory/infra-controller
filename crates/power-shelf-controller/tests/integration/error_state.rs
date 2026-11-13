@@ -61,6 +61,7 @@ async fn services(env: &ControllerEnv) -> PowerShelfStateHandlerServices {
     let component_manager = Some(Arc::new(component_manager));
 
     PowerShelfStateHandlerServices {
+        instrumentation: env.harness.api().instrumentation().clone(),
         db_pool: env.pool.clone(),
         component_manager,
         credential_manager: Arc::new(TestCredentialManager::default()),

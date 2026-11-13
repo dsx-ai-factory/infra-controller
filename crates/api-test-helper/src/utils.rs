@@ -271,7 +271,7 @@ pub async fn start_api_server_with_config(
     // Dependencies: Postgres, Vault and a Redfish BMC
     db::migrations::migrate(&db_pool).await?;
 
-    populate_initial_vault_secrets(&credential_config).await?;
+    populate_initial_vault_secrets(&credential_config, metrics.instrumentation.clone()).await?;
 
     let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
     let join_handle = tokio::spawn({
@@ -343,10 +343,13 @@ impl ApiServerHandle {
     }
 }
 
+/// Seeds the test Vault using the supplied Event destination.
+/// Retain the instrumentation provider until the initialization requests finish.
 pub async fn populate_initial_vault_secrets(
     credential_config: &CredentialConfig,
+    instrumentation: carbide_instrument::Instrumentation,
 ) -> Result<(), Report> {
-    let credential_manager = create_credential_manager(credential_config).await?;
+    let credential_manager = create_credential_manager(credential_config, instrumentation).await?;
     credential_manager
         .set_credentials(
             &CredentialKey::BmcCredentials {

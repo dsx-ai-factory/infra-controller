@@ -1572,6 +1572,7 @@ async fn create_test_env_with_overrides_inner(
         api.ib_fabric_manager.clone(),
         config.host_health,
         api.work_lock_manager_handle.clone(),
+        api.instrumentation.clone(),
     );
 
     let nvl_partition_monitor = NvlPartitionMonitor::new(
@@ -1581,6 +1582,7 @@ async fn create_test_env_with_overrides_inner(
         config.nvlink_config.clone().unwrap(),
         config.host_health,
         api.work_lock_manager_handle.clone(),
+        api.instrumentation.clone(),
     );
 
     let switch_cert_monitor = SwitchCertificateMonitor::new(
@@ -1589,6 +1591,7 @@ async fn create_test_env_with_overrides_inner(
         config.nvlink_config.clone().unwrap(),
         test_component_manager.clone(),
         api.work_lock_manager_handle.clone(),
+        api.instrumentation.clone(),
     );
 
     let attestation_enabled = config.attestation_enabled;
@@ -1611,7 +1614,7 @@ async fn create_test_env_with_overrides_inner(
 
     let machine_swap = SwapHandler {
         inner: Arc::new(Mutex::new(
-            MachineStateHandlerBuilder::builder()
+            MachineStateHandlerBuilder::builder(api.instrumentation.clone())
                 .hardware_models(config.get_firmware_config())
                 .reachability_params(reachability_params)
                 .attestation_enabled(attestation_enabled)

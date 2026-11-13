@@ -160,8 +160,10 @@ async fn main() -> eyre::Result<()> {
 
     let metrics_address = options.metrics_address;
     let registry_for_metrics = prometheus_registry.clone();
+    let endpoint_instrumentation = http_request_metrics_state.instrumentation();
     tokio::spawn(async move {
         let config = metrics_endpoint::MetricsEndpointConfig {
+            instrumentation: endpoint_instrumentation,
             address: metrics_address,
             registry: registry_for_metrics,
             health_controller: None,

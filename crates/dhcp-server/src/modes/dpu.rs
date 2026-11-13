@@ -323,6 +323,9 @@ mod tests {
             None,
             67,
             rpc::carbide_tls_client::CarbideClientConfig::new(String::new(), None),
+            carbide_instrument::Instrumentation::from_meter_provider(
+                &opentelemetry::metrics::noop::NoopMeterProvider::new(),
+            ),
         )
         .with_service_config(service_config);
         let mode = Dpu {};

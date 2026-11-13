@@ -231,6 +231,7 @@ async fn run_as_service(config: &Options) -> Result<(), eyre::Report> {
                 metrics_endpoint::new_metrics_setup("nico-scout", "forge-system", true)?;
             carbide_instrument::log_events::register(&metrics_setup.meter);
             let metrics_config = metrics_endpoint::MetricsEndpointConfig {
+                instrumentation: metrics_setup.instrumentation.clone(),
                 address,
                 registry: metrics_setup.registry,
                 health_controller: Some(metrics_setup.health_controller),

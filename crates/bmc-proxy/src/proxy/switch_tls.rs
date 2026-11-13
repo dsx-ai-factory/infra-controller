@@ -28,7 +28,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use carbide_instrument::{Event, LabelValue, emit};
+use carbide_instrument::{Event, Instrumentation, LabelValue};
 use carbide_utils::reloading::{ReloadError, ReloadSchedule, Reloading};
 use tokio_rustls::rustls;
 use tokio_rustls::rustls::client::WebPkiServerVerifier;
@@ -54,6 +54,7 @@ pub(super) struct SwitchClient {
 /// them are valid.
 #[derive(Clone)]
 struct Loaded {
+    instrumentation: Instrumentation,
     client: reqwest_middleware::ClientWithMiddleware,
     certificates: Arc<[Validity]>,
 }
@@ -69,6 +70,7 @@ impl SwitchClient {
         + Send
         + Sync
         + 'static,
+        instrumentation: Instrumentation,
     ) -> Result<Self, BmcProxyError> {
         let files = [
             ("ca_cert_path", &config.ca_cert_path),
@@ -86,13 +88,14 @@ impl SwitchClient {
             move |[ca, certificate, key]: &[Vec<u8>; 3]| -> Result<Loaded, String> {
                 let (tls, certificates) = client_config(&config, ca, certificate, key)?;
                 Ok(Loaded {
+                    instrumentation: instrumentation.clone(),
                     client: client(tls).map_err(|error| error.to_string())?,
                     certificates: certificates.into(),
                 })
             },
             |loaded: &Loaded, failure: Option<&ReloadError>| {
                 if let Some(error) = failure {
-                    emit(SwitchTlsReloadFailed {
+                    loaded.instrumentation.emit(SwitchTlsReloadFailed {
                         error: error.to_string(),
                     });
                 }
@@ -136,11 +139,12 @@ impl Loaded {
             .iter()
             .filter(|certificate| now < certificate.not_before || now > certificate.not_after)
         {
-            emit(SwitchTlsCertificateOutOfValidity {
-                file: certificate.file,
-                not_before: certificate.not_before,
-                not_after: certificate.not_after,
-            });
+            self.instrumentation
+                .emit(SwitchTlsCertificateOutOfValidity {
+                    file: certificate.file,
+                    not_before: certificate.not_before,
+                    not_after: certificate.not_after,
+                });
         }
     }
 }
@@ -350,9 +354,17 @@ mod tests {
     use crate::proxy::upstream::build_switch_http_client;
 
     fn switch_client(config: &SwitchTlsConfig) -> Result<SwitchClient, String> {
-        SwitchClient::new(config, |tls| {
-            build_switch_http_client(RedirectMode::FollowSameOrigin, tls)
-        })
+        SwitchClient::new(
+            config,
+            |tls| {
+                build_switch_http_client(
+                    RedirectMode::FollowSameOrigin,
+                    tls,
+                    carbide_instrument::Instrumentation::global(),
+                )
+            },
+            carbide_instrument::Instrumentation::global(),
+        )
         .map_err(|error| error.to_string())
     }
 

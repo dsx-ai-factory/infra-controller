@@ -74,7 +74,7 @@ use axum::extract::State;
 use axum::middleware::from_fn_with_state;
 use axum::response::IntoResponse;
 use axum::routing::any;
-use carbide_instrument::emit;
+use carbide_instrument::Instrumentation;
 use carbide_tls::client_config::ClientCert;
 use http::{Method, Request, Response, StatusCode};
 use moka::future::Cache as MokaCache;
@@ -95,7 +95,7 @@ use crate::proxy::credentials::{
 };
 use crate::proxy::guard::{authorize_proxy_request, cert_description_layer, reject_ambiguous_path};
 use crate::proxy::ingress::{BmcProxy, RefreshableTlsAcceptor};
-use crate::proxy::response::{BmcOrigins, build_response, prepare_response_body};
+use crate::proxy::response::{BmcOrigins, ResponseContext, build_response, prepare_response_body};
 use crate::proxy::target::{
     IP_CACHE_TTL, LookupToIpCache, forwarded_header_value, ip_for_forwarded_target,
 };
@@ -123,11 +123,13 @@ pub(crate) enum BmcProxyError {
 }
 
 pub(crate) struct BmcProxyParams {
+    pub(crate) instrumentation: Instrumentation,
     pub(crate) config: Arc<crate::Config>,
 }
 
 #[derive(Clone)]
 struct BmcProxyState {
+    instrumentation: Instrumentation,
     config: Arc<crate::Config>,
     api_client: CarbideApiClient,
     credential_cache: CredentialCache,
@@ -180,7 +182,10 @@ pub(crate) async fn start(
     join_set: &mut JoinSet<()>,
 ) -> Result<(), BmcProxyError> {
     // Destructure params to save typing
-    let BmcProxyParams { config } = params;
+    let BmcProxyParams {
+        config,
+        instrumentation,
+    } = params;
 
     tracing::info!(
         listen_address = config.listen.to_string(),
@@ -210,25 +215,29 @@ pub(crate) async fn start(
         &config.admission,
         cancel_token.clone(),
         join_set,
+        instrumentation.clone(),
     );
     let state = BmcProxyState {
+        instrumentation: instrumentation.clone(),
         upstream_clients: Arc::new(UpstreamClients::new(
             config.redirects.mode,
             config.tls.switch.as_ref(),
+            instrumentation.clone(),
         )?),
         config,
         api_client,
         credential_cache: idle_bounded_cache(CREDENTIAL_CACHE_IDLE_TTL),
         ip_cache: bounded_cache(IP_CACHE_TTL),
         admission,
-        switch_probe: Arc::new(SwitchProbe::default()),
+        switch_probe: Arc::new(SwitchProbe::new(instrumentation.clone())),
     };
 
     let app = proxy_routes(state.clone())
         .layer(from_fn_with_state(state.clone(), authorize_proxy_request))
         .layer(cert_description_layer::<()>(&state.config.auth)?);
 
-    let tls_acceptor = RefreshableTlsAcceptor::new(state.config.tls.clone()).await?;
+    let tls_acceptor =
+        RefreshableTlsAcceptor::new(state.config.tls.clone(), instrumentation).await?;
 
     let bmc_proxy = BmcProxy {
         app,
@@ -352,7 +361,7 @@ async fn proxy_request_inner(
     request: Request<Body>,
 ) -> Result<Response<Body>, Response<Body>> {
     let arrived = tokio::time::Instant::now();
-    if let Some(response) = reject_ambiguous_path(&request) {
+    if let Some(response) = reject_ambiguous_path(&request, &state.instrumentation) {
         return Ok(response);
     }
 
@@ -483,7 +492,7 @@ async fn proxy_request_inner(
     let attempt = if stale && upstream_body.is_replayable() {
         evict_cached_credentials(target_ip, &state.credential_cache).await;
         if attempt.is_ok() {
-            emit(UpstreamAuthRetried {
+            state.instrumentation.emit(UpstreamAuthRetried {
                 method: MethodLabel::from(&parts.method),
                 bmc_ip_address: target_ip.to_string(),
             });
@@ -534,10 +543,13 @@ async fn proxy_request_inner(
         status,
         &headers,
         body,
-        &origins,
-        &parts.method,
-        state.config.redirects.mode,
-        &sensitive_values,
+        ResponseContext {
+            origins: &origins,
+            method: &parts.method,
+            redirect_mode: state.config.redirects.mode,
+            sensitive_values: &sensitive_values,
+            instrumentation: &state.instrumentation,
+        },
     )
     .map(|body| slot.hold_until_sent(body)))
 }

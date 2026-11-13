@@ -446,6 +446,7 @@ async fn test_configure_certificate_start_skips_without_component_manager(
         pool.clone(),
         env.api.work_lock_manager_handle(),
         SwitchStateHandlerServices {
+            instrumentation: env.api.instrumentation().clone(),
             db_pool: pool.clone(),
             component_manager: None,
             credential_manager: env.test_credential_manager.clone(),
@@ -521,6 +522,7 @@ async fn test_configure_certificate_start_transitions_to_wait_for_complete_with_
         pool.clone(),
         env.api.work_lock_manager_handle(),
         SwitchStateHandlerServices {
+            instrumentation: env.api.instrumentation().clone(),
             db_pool: pool.clone(),
             component_manager: Some(mock_component_manager(mock_switch_manager.clone())),
             credential_manager: env.test_credential_manager.clone(),
@@ -598,6 +600,7 @@ async fn test_non_primary_with_only_cluster_services_skips_certificate_job(
     let mock_switch_manager = Arc::new(MockNvSwitchManager::default());
 
     let services = SwitchStateHandlerServices {
+        instrumentation: env.api.instrumentation().clone(),
         db_pool: pool.clone(),
         component_manager: Some(mock_component_manager(mock_switch_manager.clone())),
         credential_manager: env.test_credential_manager.clone(),
@@ -709,6 +712,7 @@ async fn test_configure_certificate_start_seeds_expected_switch_credentials(
         pool.clone(),
         env.api.work_lock_manager_handle(),
         SwitchStateHandlerServices {
+            instrumentation: env.api.instrumentation().clone(),
             db_pool: pool.clone(),
             component_manager: Some(mock_component_manager(Arc::new(
                 MockNvSwitchManager::default(),
@@ -787,6 +791,7 @@ async fn test_configure_certificate_start_retries_after_credential_import(
     txn.commit().await?;
 
     let services = || SwitchStateHandlerServices {
+        instrumentation: env.api.instrumentation().clone(),
         db_pool: pool.clone(),
         component_manager: Some(mock_component_manager(Arc::new(
             MockNvSwitchManager::default(),
@@ -888,6 +893,7 @@ async fn test_configure_certificate_wait_for_complete_transitions_to_rotate_os_p
         pool.clone(),
         env.api.work_lock_manager_handle(),
         SwitchStateHandlerServices {
+            instrumentation: env.api.instrumentation().clone(),
             db_pool: pool.clone(),
             component_manager: Some(mock_component_manager(Arc::new(
                 MockNvSwitchManager::default(),
@@ -950,6 +956,7 @@ async fn test_configure_certificate_wait_for_complete_transitions_to_error_on_fa
         pool.clone(),
         env.api.work_lock_manager_handle(),
         SwitchStateHandlerServices {
+            instrumentation: env.api.instrumentation().clone(),
             db_pool: pool.clone(),
             component_manager: Some(mock_component_manager(Arc::new(failing_mock))),
             credential_manager: env.test_credential_manager.clone(),
@@ -1034,6 +1041,7 @@ async fn test_switch_deletion_with_state_controller(
     const ITERATION_TIME: Duration = Duration::from_millis(50);
 
     let handler_services = Arc::new(SwitchStateHandlerServices {
+        instrumentation: env.api.instrumentation().clone(),
         db_pool: pool.clone(),
         component_manager: None,
         credential_manager: Arc::new(TestCredentialManager::default()),
@@ -1150,6 +1158,7 @@ async fn test_switch_entire_state_transition_flow(
         .processor_id(uuid::Uuid::new_v4().to_string())
         .services(
             SwitchStateHandlerServices {
+                instrumentation: env.api.instrumentation().clone(),
                 db_pool: pool.clone(),
                 component_manager: build_test_component_manager(&env, env.rms_sim.as_rms_client())
                     .await,

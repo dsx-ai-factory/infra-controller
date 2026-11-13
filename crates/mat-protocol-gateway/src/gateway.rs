@@ -154,6 +154,7 @@ impl Gateway {
     fn start_metrics_endpoint(&self) -> Option<JoinHandle<()>> {
         let address = self.config.metrics_address?;
         let metrics_config = MetricsEndpointConfig {
+            instrumentation: self.metrics_setup.instrumentation.clone(),
             address,
             registry: self.metrics_setup.registry.clone(),
             health_controller: Some(self.metrics_setup.health_controller.clone()),
