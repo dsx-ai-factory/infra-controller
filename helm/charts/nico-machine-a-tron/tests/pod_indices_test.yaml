@@ -1,0 +1,258 @@
+suite: stable pod indices
+templates:
+  - configmap.yaml
+  - service.yaml
+set:
+  macAddressPool.enabled: true
+  hwMacAddressRanges.enabled: true
+tests:
+  - it: derives both MAC bases from a sparse numeric suffix
+    templates: [configmap.yaml]
+    set:
+      pods:
+        mat-0: null
+        mat-2: &machines
+          machines:
+            compute:
+              hwType: wiwynn_gb200_nvl
+              hostCount: 1
+    asserts:
+      - matchRegex:
+          path: data["mat.toml"]
+          pattern: '\[mac_address_pool\]\s+base = "02:00:02:00:00:00"'
+      - matchRegex:
+          path: data["mat.toml"]
+          pattern: '\[hw_mac_address_ranges\]\s+base = "02:01:02:00:00:00"'
+
+  - it: keeps existing bases when earlier and multi-digit pods are added
+    templates: [configmap.yaml]
+    set:
+      pods:
+        mat-2: *machines
+        mat-10: *machines
+    asserts:
+      - matchRegex:
+          path: data["mat.toml"]
+          pattern: '\[mac_address_pool\]\s+base = "02:00:02:00:00:00"'
+        documentIndex: 2
+      - matchRegex:
+          path: data["mat.toml"]
+          pattern: '\[hw_mac_address_ranges\]\s+base = "02:01:02:00:00:00"'
+        documentIndex: 2
+      - matchRegex:
+          path: data["mat.toml"]
+          pattern: '\[mac_address_pool\]\s+base = "02:00:0a:00:00:00"'
+        documentIndex: 1
+      - matchRegex:
+          path: data["mat.toml"]
+          pattern: '\[hw_mac_address_ranges\]\s+base = "02:01:0a:00:00:00"'
+        documentIndex: 1
+
+  - it: lets an explicit zero override a numeric suffix
+    templates: [configmap.yaml]
+    set:
+      pods:
+        mat-0: null
+        mat-10:
+          <<: *machines
+          podIndex: 0
+    asserts:
+      - matchRegex:
+          path: data["mat.toml"]
+          pattern: '\[mac_address_pool\]\s+base = "02:00:00:00:00:00"'
+      - matchRegex:
+          path: data["mat.toml"]
+          pattern: '\[hw_mac_address_ranges\]\s+base = "02:01:00:00:00:00"'
+
+  - it: uses explicit indices for MAC bases and relay IPs in both templates
+    set:
+      dhcpRelay.baseIP: "10.96.127.10"
+      pods:
+        mat-10:
+          <<: *machines
+          podIndex: 2
+        mat-2:
+          <<: *machines
+          podIndex: 3
+    asserts:
+      - matchRegex:
+          path: data["mat.toml"]
+          pattern: '\[mac_address_pool\]\s+base = "02:00:02:00:00:00"'
+        template: configmap.yaml
+        documentIndex: 1
+      - matchRegex:
+          path: data["mat.toml"]
+          pattern: '\[hw_mac_address_ranges\]\s+base = "02:01:03:00:00:00"'
+        template: configmap.yaml
+        documentIndex: 2
+      - matchRegex:
+          path: data["mat.toml"]
+          pattern: 'advertise_address = "10.96.127.13"'
+        template: configmap.yaml
+        documentIndex: 2
+      - equal:
+          path: spec.clusterIP
+          value: "10.96.127.13"
+        template: service.yaml
+        documentIndex: 5
+
+  - it: uses the numeric suffix for relay config and Service with MAC pools disabled
+    set:
+      macAddressPool.enabled: false
+      hwMacAddressRanges.enabled: false
+      dhcpRelay.baseIP: "10.96.127.10"
+      pods:
+        mat-0: null
+        mat-10: *machines
+    asserts:
+      - matchRegex:
+          path: data["mat.toml"]
+          pattern: 'advertise_address = "10.96.127.20"'
+        template: configmap.yaml
+      - equal:
+          path: spec.clusterIP
+          value: "10.96.127.20"
+        template: service.yaml
+        documentIndex: 1
+
+  - it: accepts a named rack-only pod with an explicit decimal string index
+    templates: [configmap.yaml]
+    set:
+      pods:
+        mat-0: null
+        racks:
+          podIndex: "0008"
+          racks:
+            gb200:
+              type: wiwynn_gb200_nvl72
+              rack_profile_id: NVL72
+              ids: [rack-001]
+    asserts:
+      - matchRegex:
+          path: data["mat.toml"]
+          pattern: '\[mac_address_pool\]\s+base = "02:00:08:00:00:00"'
+      - matchRegex:
+          path: data["mat.toml"]
+          pattern: '\[hw_mac_address_ranges\]\s+base = "02:01:08:00:00:00"'
+
+  - it: accepts the maximum index with only hardware MAC ranges enabled
+    templates: [configmap.yaml]
+    set:
+      macAddressPool.enabled: false
+      pods:
+        mat-0: null
+        mat-255: *machines
+    asserts:
+      - matchRegex:
+          path: data["mat.toml"]
+          pattern: '\[hw_mac_address_ranges\]\s+base = "02:01:ff:00:00:00"'
+
+  - it: reads a zero-padded decimal suffix without octal conversion
+    templates: [configmap.yaml]
+    set:
+      pods:
+        mat-0: null
+        mat-0008: *machines
+    asserts:
+      - matchRegex:
+          path: data["mat.toml"]
+          pattern: '\[mac_address_pool\]\s+base = "02:00:08:00:00:00"'
+
+  - it: ignores unconfigured pods during validation
+    templates: [configmap.yaml]
+    set:
+      pods:
+        unused: null
+        empty:
+          podIndex: invalid
+          machines: {}
+        unused-0:
+          machines: {}
+    asserts:
+      - hasDocuments:
+          count: 1
+
+  - it: allows arbitrary names when nothing uses an index
+    templates: [configmap.yaml, service.yaml]
+    set:
+      macAddressPool.enabled: false
+      hwMacAddressRanges.enabled: false
+      pods:
+        mat-0: null
+        custom: *machines
+    asserts:
+      - equal:
+          path: metadata.name
+          value: nico-machine-a-tron-custom-config-files
+        template: configmap.yaml
+      - equal:
+          path: metadata.name
+          value: nico-machine-a-tron-custom-bmc-mock
+        template: service.yaml
+
+  - it: rejects a name without a suffix or explicit index when a MAC pool is enabled
+    templates: [configmap.yaml]
+    set:
+      hwMacAddressRanges.enabled: false
+      pods:
+        mat-0: null
+        custom: *machines
+    asserts: &renderFailure
+      - failedTemplate: {}
+
+  - it: rejects a suffix above the byte range
+    templates: [configmap.yaml]
+    set:
+      pods:
+        mat-256: *machines
+    asserts: *renderFailure
+
+  - it: rejects a negative explicit index
+    templates: [configmap.yaml]
+    set:
+      pods.mat-0.podIndex: -1
+    asserts: *renderFailure
+
+  - it: rejects a fractional explicit index
+    templates: [configmap.yaml]
+    set:
+      pods.mat-0.podIndex: 1.5
+    asserts: *renderFailure
+
+  - it: rejects a nonnumeric explicit index
+    templates: [configmap.yaml]
+    set:
+      pods.mat-0.podIndex: invalid
+    asserts: *renderFailure
+
+  - it: rejects an explicit index that would overflow integer conversion
+    templates: [configmap.yaml]
+    set:
+      pods.mat-0.podIndex: "18446744073709551616"
+    asserts: *renderFailure
+
+  - it: rejects duplicate indices from different numeric suffixes
+    templates: [configmap.yaml]
+    set:
+      pods:
+        mat-1: *machines
+        other-01: *machines
+    asserts: *renderFailure
+
+  - it: rejects an explicit index that collides with an inferred index
+    templates: [service.yaml]
+    set:
+      dhcpRelay.baseIP: "10.96.127.10"
+      pods:
+        other:
+          <<: *machines
+          podIndex: 0
+    asserts: *renderFailure
+
+  - it: rejects a relay address overflowing the base IP's last octet
+    templates: [service.yaml]
+    set:
+      dhcpRelay.baseIP: "10.96.127.10"
+      pods:
+        mat-246: *machines
+    asserts: *renderFailure

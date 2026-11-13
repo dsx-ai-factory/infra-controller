@@ -81,6 +81,7 @@ pods:
   # mat-k8s-controller is enabled.
   mat-0: null
   default:
+    podIndex: 0  # Also applies if per-pod MAC pools or DHCP relay are enabled.
     machines:
       # disable the chart-default example group (deep-merge would keep it)
       rack-machines: null
