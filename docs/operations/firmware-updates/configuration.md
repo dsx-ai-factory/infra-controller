@@ -30,10 +30,10 @@ A definition contains model-level settings and one or more component entries:
 | `vendor` | Model | BMC vendor to which the definition applies. |
 | `model` | Model | Host model to which the definition applies. Together, `vendor` and `model` identify the definition. |
 | `components` | Model | Groups the component definitions, keyed by component type. |
-| `ordering` | Model | Lists the components in the order NICo should update them. |
+| `ordering` | Model | Lists the components in the order NICo should update them. In legacy TOML, each entry is a component key, such as `bmc` or `drive-<model>`; the API takes `type` and `driveModel` objects. |
 | `explicit_start_needed` | Model | When enabled, drift alone does not start the update. |
-| `type` | Component | Identifies the component as BMC, UEFI, CEC, NIC, CPLD, HGX BMC, GPU, CX7, or a combined BMC and UEFI package. In legacy TOML, the type is the key below `components`. |
-| `current_version_reported_as` | Component | Regular expression used to find the component in the firmware inventory reported by the BMC. The API derives this matcher from the vendor, model, and component type. |
+| `type` | Component | Identifies the component as BMC, UEFI, CEC, NIC, CPLD, HGX BMC, GPU, CX7, a combined BMC and UEFI package, or the firmware of one drive model. In legacy TOML, the type is the key below `components`, and a drive is keyed `drive-<model>`. The API names a drive with type `Drive` and a separate `driveModel`. |
+| `current_version_reported_as` | Component | Regular expression used to find the component in the firmware inventory reported by the BMC. The API derives this matcher from the vendor, model, and component type; for a drive it is `^Drive_<driveModel>_`, with the model's regex characters escaped. |
 | `preingest_upgrade_when_below` | Component | Sets the threshold for pre-ingestion firmware work. A lower reported version triggers an update when global automatic updates are enabled. |
 | `known_firmware` | Component | Lists the versions NICo can install and the artifacts used to install them. |
 | `version` | Firmware version | Version string NICo expects the firmware inventory to report after installation. |
@@ -44,7 +44,7 @@ A definition contains model-level settings and one or more component entries:
 | `power_drains_needed` | Firmware version | Number of full power-drain cycles required to activate the firmware after installation. |
 | `pre_update_resets` | Firmware version | Requests the platform-specific reset sequence before NICo starts a Redfish installation. Scout and Core-local script installations skip it. |
 | `script` | Firmware version | Legacy path that hands the update to a local script instead of using the normal Redfish upload path. |
-| `scout` | Firmware version | Names the Scout upgrade script by URL, with its timeouts. Without `scout.script.url`, NICo uses the script packaged in its image. You can set it only in a legacy `metadata.toml` or in `host_models`; the Host Firmware Config API does not accept it. Refer to [Scout script by URL](#scout-script-by-url). |
+| `scout` | Firmware version | Names the Scout upgrade script by URL, with its timeouts. Without `scout.script.url`, NICo uses the script packaged in its image. The API exposes it as `upgradeScript`. Refer to [Scout script by URL](#scout-script-by-url). |
 
 `current_version_reported_as` is matched against firmware inventory entry
 identifiers, not against version strings. For example,
@@ -59,8 +59,9 @@ setting here.
 
 ### Scout script by URL
 
-A firmware version in a legacy `metadata.toml` or in `host_models` can name the
-script Scout runs instead of using the script packaged in NICo:
+A firmware version can name the script Scout runs instead of using the script
+packaged in NICo. In a legacy `metadata.toml` or in `host_models`, set
+`scout.script`:
 
 ```toml
 [[components.cx7.known_firmware]]
@@ -96,6 +97,12 @@ sha256 = "<64 hexadecimal characters>"
   [Installation route](host-firmware.md#installation-route). A
   `script.filename`, written for NICo releases before 2.0, is accepted and
   ignored.
+- Through the API, set the version's `upgradeScript` with `url`, `sha256`,
+  `executionTimeoutSeconds`, and `artifactDownloadTimeoutSeconds`. The same
+  rules apply, except that the REST API accepts `sha256` only in lowercase. An
+  invalid script rejects the request. Re-sending a version replaces it, so a
+  request that omits `upgradeScript` removes a stored script; for a drive
+  version without a packaged script, that request is rejected instead.
 
 ### Minimum and default versions
 
@@ -144,7 +151,7 @@ curl -X PUT "https://<api-url>/v2/org/<org>/nico/firmware-config/host" \
     "siteId": "<site-id>",
     "vendor": "Dell",
     "model": "PowerEdge R760",
-    "ordering": ["BMC"],
+    "ordering": [{ "type": "BMC" }],
     "components": [
       {
         "type": "BMC",
@@ -177,6 +184,67 @@ mappings. The request is rejected when no mapping exists.
   by version string, and omitted components remain unchanged.
 - Marking a new version as the default clears the previous default for that
   component.
+
+#### Drive firmware through the API
+
+A drive component has type `Drive` and names the drive's Redfish `Drive.Model`
+in `driveModel`, as Site Explorer records it: without leading or trailing
+whitespace, and at most 96 bytes. Each drive model is a separate component.
+NICo finds a drive's version only when Site Explorer's
+`explore_drive_firmware` setting is enabled; it is disabled by default.
+
+In `ordering`, name a drive the same way, with `type` and `driveModel`. Each
+drive model is its own entry, and the list must include every configured
+component.
+
+The following request adds ET07 for the ST24000NM005H drives of a Lenovo
+ThinkSystem HS350X V3, with the script Scout runs to install it. `vendor` is the
+vendor the host's BMC reports: the HS350X V3 has an AMI BMC, so it is
+`LenovoAMI`, not `Lenovo`.
+
+```bash
+curl -X PUT "https://<api-url>/v2/org/<org>/nico/firmware-config/host" \
+  -H "Authorization: Bearer <token>" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "siteId": "<site-id>",
+    "vendor": "LenovoAMI",
+    "model": "ThinkSystem HS350X V3",
+    "ordering": [{ "type": "Drive", "driveModel": "ST24000NM005H" }],
+    "components": [
+      {
+        "type": "Drive",
+        "driveModel": "ST24000NM005H",
+        "firmware": [
+          {
+            "version": "ET07",
+            "default": true,
+            "powerDrainsNeeded": 1,
+            "artifacts": [
+              {
+                "url": "https://<firmware-repository>/et07.lod",
+                "sha256": "<64 lowercase hexadecimal characters>"
+              }
+            ],
+            "upgradeScript": {
+              "url": "https://<script-repository>/scsi_drive_upgrade.sh",
+              "sha256": "<64 lowercase hexadecimal characters>",
+              "executionTimeoutSeconds": 3600,
+              "artifactDownloadTimeoutSeconds": 600
+            }
+          }
+        ]
+      }
+    ]
+  }'
+```
+
+Drive firmware installs only through Scout, never through a BMC upload. Each
+drive version needs an `upgradeScript`, unless NICo's image packages a script
+for the host's vendor, model, and drive model; otherwise the request is
+rejected. Scout verifies every artifact it downloads, so any version that
+installs through Scout, drive or not, needs a `sha256` on each artifact. `preingestUpgradeWhenBelow` is rejected for a drive, because
+pre-ingestion upgrades only through the BMC.
 
 The
 [Delete Host Firmware Config](api:DELETE/v2/org/:org/nico/firmware-config/host)

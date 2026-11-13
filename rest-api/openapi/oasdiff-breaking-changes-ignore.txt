@@ -554,3 +554,12 @@ API GET /v2/org/{org}/nico/instance/{instanceId} added `#/components/schemas/Net
 API GET /v2/org/{org}/nico/instance/{instanceId} the `networkSecurityGroupPropagationDetails` response's property `type` changed from `object` to `any` for status `200`
 API PATCH /v2/org/{org}/nico/instance/{instanceId} added `#/components/schemas/NetworkSecurityGroupPropagationDetails, subschema #2` to the `networkSecurityGroupPropagationDetails` response property `oneOf` list for the response status `200`
 API PATCH /v2/org/{org}/nico/instance/{instanceId} the `networkSecurityGroupPropagationDetails` response's property `type` changed from `object` to `any` for status `200`
+# Host firmware config: ordering became a list of {type, driveModel} refs so it can name each drive model, and Drive became a component type. The API had no clients.
+API PUT /v2/org/{org}/nico/firmware-config/host added the new required request property `ordering/items/type`
+API PUT /v2/org/{org}/nico/firmware-config/host the `ordering/items` request property `type` changed from `string` to `object`
+API PUT /v2/org/{org}/nico/firmware-config/host removed the enum constraint from the `ordering/items` response property for the response status `200`
+API PUT /v2/org/{org}/nico/firmware-config/host removed the enum constraint from the `ordering/items` response property for the response status `201`
+API PUT /v2/org/{org}/nico/firmware-config/host added the new `Drive` enum value to the `components/items/type` response property for the response status `200`
+API PUT /v2/org/{org}/nico/firmware-config/host added the new `Drive` enum value to the `components/items/type` response property for the response status `201`
+API PUT /v2/org/{org}/nico/firmware-config/host the `ordering/items` response's property `type` changed from `string` to `object` for status `200`
+API PUT /v2/org/{org}/nico/firmware-config/host the `ordering/items` response's property `type` changed from `string` to `object` for status `201`

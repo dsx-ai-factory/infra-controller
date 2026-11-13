@@ -10016,7 +10016,7 @@ message UpsertHostFirmwareConfigRequest {
   string model = 2;
   repeated UpsertHostFirmwareComponentConfig components = 3;
   optional bool explicit_start_needed = 4;
-  repeated HostFirmwareComponentType ordering = 5;
+  repeated HostFirmwareComponentRef ordering = 5;
 }
 
 message DeleteHostFirmwareConfigRequest {
@@ -10036,12 +10036,25 @@ enum HostFirmwareComponentType {
   HOST_FIRMWARE_COMPONENT_TYPE_COMBINED_BMC_UEFI = 8;
   HOST_FIRMWARE_COMPONENT_TYPE_GPU = 9;
   HOST_FIRMWARE_COMPONENT_TYPE_CX7 = 10;
+  HOST_FIRMWARE_COMPONENT_TYPE_DRIVE = 11;
+}
+
+// One component in an upgrade ordering.
+message HostFirmwareComponentRef {
+  HostFirmwareComponentType type = 1;
+  // The drive's Redfish Drive.Model as site explorer records it: without
+  // surrounding whitespace, at most 96 bytes. Required for
+  // HOST_FIRMWARE_COMPONENT_TYPE_DRIVE and rejected for other types.
+  optional string drive_model = 2;
 }
 
 message UpsertHostFirmwareComponentConfig {
   HostFirmwareComponentType type = 1;
   repeated HostFirmwareVersionConfig firmware = 2;
   optional string preingest_upgrade_when_below = 3;
+  // Required for HOST_FIRMWARE_COMPONENT_TYPE_DRIVE and rejected for other
+  // types. See HostFirmwareComponentRef.drive_model.
+  optional string drive_model = 4;
 }
 
 message HostFirmwareComponentConfigResponse {
@@ -10049,6 +10062,8 @@ message HostFirmwareComponentConfigResponse {
   optional string current_version_reported_as = 2;
   repeated HostFirmwareVersionConfig firmware = 3;
   optional string preingest_upgrade_when_below = 4;
+  // Set only for HOST_FIRMWARE_COMPONENT_TYPE_DRIVE.
+  optional string drive_model = 5;
 }
 
 message HostFirmwareVersionConfig {
@@ -10059,10 +10074,33 @@ message HostFirmwareVersionConfig {
   optional uint32 power_drains_needed = 5;
   bool pre_update_resets = 6;
   optional bool preingestion_exclusive_config = 7;
+  // Script Scout downloads and runs on the host to apply this version. Without
+  // it, NICo uses the script packaged for the vendor, model and component, if
+  // any. A drive version is rejected when it has neither, since drives never
+  // fall back to a BMC upload. An upsert replaces a version as a whole, so
+  // omitting upgrade_script clears a stored one.
+  optional HostFirmwareUpgradeScript upgrade_script = 8;
+}
+
+message HostFirmwareUpgradeScript {
+  // HTTPS URL ending in the script's file name.
+  string url = 1;
+  // Hex SHA-256 of the script, in either case. Stored and returned in
+  // lowercase.
+  string sha256 = 2;
+  // Non-zero limit for running the script.
+  uint32 execution_timeout_seconds = 3;
+  // Non-zero limit, in seconds, for downloading each of the version's
+  // artifacts, applied to each artifact separately. The script itself always
+  // has a fixed 30-second download limit.
+  uint32 artifact_download_timeout_seconds = 4;
 }
 
 message HostFirmwareArtifact {
   string url = 1;
+  // Hex SHA-256 of the artifact. Required when the version installs through
+  // Scout, which verifies every artifact: a drive version, a version with
+  // upgrade_script, or a component with a packaged Scout script.
   optional string sha256 = 2;
 }
 
@@ -10074,7 +10112,8 @@ message HostFirmwareConfigResponse {
   string model = 2;
   repeated HostFirmwareComponentConfigResponse components = 3;
   bool explicit_start_needed = 4;
-  repeated HostFirmwareComponentType ordering = 5;
+  // Upgrade order, each drive model as its own entry.
+  repeated HostFirmwareComponentRef ordering = 5;
   google.protobuf.Timestamp created_at = 6;
   google.protobuf.Timestamp updated_at = 7;
 }

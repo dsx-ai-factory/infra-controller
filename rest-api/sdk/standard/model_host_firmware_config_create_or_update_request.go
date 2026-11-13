@@ -22,7 +22,7 @@ import (
 // checks if the HostFirmwareConfigCreateOrUpdateRequest type satisfies the MappedNullable interface at compile time
 var _ MappedNullable = &HostFirmwareConfigCreateOrUpdateRequest{}
 
-// HostFirmwareConfigCreateOrUpdateRequest Host firmware configuration upsert payload. Configurations are keyed by `(vendor, model)` on the Site's Core instance. On first create, `ordering` must list every component being configured. On update, newly added components must also appear in `ordering`.
+// HostFirmwareConfigCreateOrUpdateRequest Host firmware configuration upsert payload. Configurations are keyed by `(vendor, model)` on the Site's Core instance. On first create, `ordering` must list every component being configured. On update, newly added components must also appear in the new `ordering`.
 type HostFirmwareConfigCreateOrUpdateRequest struct {
 	// ID of the Site where the host firmware config is stored.
 	SiteId string `json:"siteId"`
@@ -34,8 +34,8 @@ type HostFirmwareConfigCreateOrUpdateRequest struct {
 	Components []HostFirmwareComponentConfig `json:"components"`
 	// Optional. When `true`, host firmware updates for this vendor/model require an explicit start. Omitted on update leaves the stored value unchanged.
 	ExplicitStartNeeded *bool `json:"explicitStartNeeded,omitempty"`
-	// Update order for configured components. Required on first create. Must include every configured component and must be updated when adding a new component on subsequent PUTs.
-	Ordering []HostFirmwareComponentType `json:"ordering,omitempty"`
+	// Update order for configured components, each drive model as its own entry. Required on first create. Must include every configured component and must be updated when adding a new component on subsequent PUTs. When omitted on update, the stored order is kept.
+	Ordering []HostFirmwareComponentRef `json:"ordering,omitempty"`
 }
 
 type _HostFirmwareConfigCreateOrUpdateRequest HostFirmwareConfigCreateOrUpdateRequest
@@ -190,9 +190,9 @@ func (o *HostFirmwareConfigCreateOrUpdateRequest) SetExplicitStartNeeded(v bool)
 }
 
 // GetOrdering returns the Ordering field value if set, zero value otherwise.
-func (o *HostFirmwareConfigCreateOrUpdateRequest) GetOrdering() []HostFirmwareComponentType {
+func (o *HostFirmwareConfigCreateOrUpdateRequest) GetOrdering() []HostFirmwareComponentRef {
 	if o == nil || IsNil(o.Ordering) {
-		var ret []HostFirmwareComponentType
+		var ret []HostFirmwareComponentRef
 		return ret
 	}
 	return o.Ordering
@@ -200,7 +200,7 @@ func (o *HostFirmwareConfigCreateOrUpdateRequest) GetOrdering() []HostFirmwareCo
 
 // GetOrderingOk returns a tuple with the Ordering field value if set, nil otherwise
 // and a boolean to check if the value has been set.
-func (o *HostFirmwareConfigCreateOrUpdateRequest) GetOrderingOk() ([]HostFirmwareComponentType, bool) {
+func (o *HostFirmwareConfigCreateOrUpdateRequest) GetOrderingOk() ([]HostFirmwareComponentRef, bool) {
 	if o == nil || IsNil(o.Ordering) {
 		return nil, false
 	}
@@ -216,8 +216,8 @@ func (o *HostFirmwareConfigCreateOrUpdateRequest) HasOrdering() bool {
 	return false
 }
 
-// SetOrdering gets a reference to the given []HostFirmwareComponentType and assigns it to the Ordering field.
-func (o *HostFirmwareConfigCreateOrUpdateRequest) SetOrdering(v []HostFirmwareComponentType) {
+// SetOrdering gets a reference to the given []HostFirmwareComponentRef and assigns it to the Ordering field.
+func (o *HostFirmwareConfigCreateOrUpdateRequest) SetOrdering(v []HostFirmwareComponentRef) {
 	o.Ordering = v
 }
 

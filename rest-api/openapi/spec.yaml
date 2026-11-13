@@ -20194,7 +20194,11 @@ components:
           description: URL from which the firmware artifact can be downloaded.
         sha256:
           type: string
-          description: Optional SHA-256 digest of the artifact, in lowercase hex.
+          description: |-
+            SHA-256 digest of the artifact, in lowercase hex. Required when the
+            version installs through Scout, which verifies every artifact: a
+            `Drive` version, a version with `upgradeScript`, or a component for
+            which Core packages a Scout script. Optional otherwise.
       example:
         url: https://firmware.example.invalid/28.47.2682/fw.bin
         sha256: a1b2c3d4e5f6789012345678901234567890abcdef1234567890abcdef123456
@@ -20239,6 +20243,17 @@ components:
             Optional. When `true`, this firmware version applies only during BMC
             pre-ingestion. Omitted on update preserves the stored value; set to
             `false` to clear a previously stored value.
+        upgradeScript:
+          oneOf:
+            - $ref: '#/components/schemas/HostFirmwareUpgradeScript'
+            - type: 'null'
+          description: |-
+            Optional script Scout downloads and runs on the host to install this
+            version. When omitted or null, Core uses the script packaged for the
+            vendor, model and component, if any. A `Drive` version with neither
+            is rejected, because drives never fall back to a BMC upload. On
+            update, the version is replaced as a whole, so omitting it clears a
+            stored script.
       example:
         version: '28.47.2682'
         default: true
@@ -20248,6 +20263,62 @@ components:
         installOnlySpecified: false
         preUpdateResets: false
         preingestionExclusiveConfig: false
+    HostFirmwareUpgradeScript:
+      type: object
+      title: HostFirmwareUpgradeScript
+      description: Script Scout downloads and runs on the host to install a firmware version.
+      required:
+        - url
+        - sha256
+        - executionTimeoutSeconds
+        - artifactDownloadTimeoutSeconds
+      properties:
+        url:
+          type: string
+          minLength: 1
+          description: HTTPS URL of the script. Its last path segment is the script's file name.
+        sha256:
+          type: string
+          pattern: '^[0-9a-f]{64}$'
+          description: SHA-256 digest of the script, in lowercase hex.
+        executionTimeoutSeconds:
+          type: integer
+          format: uint32
+          minimum: 1
+          description: Seconds Scout lets the script run.
+        artifactDownloadTimeoutSeconds:
+          type: integer
+          format: uint32
+          minimum: 1
+          description: |-
+            Seconds Scout allows for downloading each of the version's artifacts,
+            applied to each artifact separately. The script itself always has a
+            fixed 30-second download limit that this field does not change.
+      example:
+        url: https://scripts.example.invalid/scsi_drive_upgrade.sh
+        sha256: c60b4c1c2d46f7b9e50d7d2e2d77dbfbe7884030b0e9a86a4636b4bc85d8609e
+        executionTimeoutSeconds: 3600
+        artifactDownloadTimeoutSeconds: 600
+    HostFirmwareComponentRef:
+      type: object
+      title: HostFirmwareComponentRef
+      description: One component in a host firmware update ordering.
+      required:
+        - type
+      properties:
+        type:
+          $ref: '#/components/schemas/HostFirmwareComponentType'
+        driveModel:
+          type:
+            - string
+            - 'null'
+          minLength: 1
+          maxLength: 96
+          description: |-
+            The drive's Redfish `Drive.Model` as Site Explorer records it,
+            without leading or trailing whitespace, for example `ST24000NM005H`.
+            Required for `Drive` and must be absent or null for every other
+            type.
     HostFirmwareComponentConfig:
       type: object
       title: HostFirmwareComponentConfig
@@ -20258,6 +20329,17 @@ components:
       properties:
         type:
           $ref: '#/components/schemas/HostFirmwareComponentType'
+        driveModel:
+          type: string
+          minLength: 1
+          maxLength: 96
+          description: |-
+            The drive's Redfish `Drive.Model` as Site Explorer records it,
+            without leading or trailing whitespace, for example
+            `ST24000NM005H`. Required for `Drive` and rejected for every other
+            type. Each drive model is a separate component. Site Explorer
+            records drives only when its `explore_drive_firmware` setting is
+            enabled; it is disabled by default.
         firmware:
           type: array
           minItems: 1
@@ -20269,17 +20351,28 @@ components:
           minLength: 1
           description: |-
             Optional minimum firmware version required before BMC pre-ingestion can
-            complete. Omitted on update preserves the stored value.
+            complete. Omitted on update preserves the stored value. Rejected for
+            `Drive`, because pre-ingestion upgrades only through the BMC.
     HostFirmwareComponent:
       type: object
       title: HostFirmwareComponent
+      x-go-has-nullable-required-properties: true
+      x-go-nullable-required-properties:
+        - driveModel
       description: One component entry in a stored host firmware config response.
       required:
         - type
+        - driveModel
         - firmware
       properties:
         type:
           $ref: '#/components/schemas/HostFirmwareComponentType'
+        driveModel:
+          type:
+            - string
+            - 'null'
+          readOnly: true
+          description: The drive model of a `Drive` component; null for every other type.
         currentVersionDetectionRegEx:
           type: string
           readOnly: true
@@ -20300,7 +20393,7 @@ components:
         Host firmware configuration upsert payload. Configurations are keyed by
         `(vendor, model)` on the Site's Core instance. On first create,
         `ordering` must list every component being configured. On update,
-        newly added components must also appear in `ordering`.
+        newly added components must also appear in the new `ordering`.
       required:
         - siteId
         - vendor
@@ -20334,19 +20427,41 @@ components:
         ordering:
           type: array
           items:
-            $ref: '#/components/schemas/HostFirmwareComponentType'
+            $ref: '#/components/schemas/HostFirmwareComponentRef'
           description: |-
-            Update order for configured components. Required on first create.
-            Must include every configured component and must be updated when
-            adding a new component on subsequent PUTs.
+            Update order for configured components, each drive model as its own
+            entry. Required on first create. Must include every configured
+            component and must be updated when adding a new component on
+            subsequent PUTs. When omitted on update, the stored order is kept.
       examples:
+        - siteId: 00000000-0000-0000-0000-000000000001
+          vendor: LenovoAMI
+          model: ThinkSystem HS350X V3
+          ordering:
+            - type: Drive
+              driveModel: ST24000NM005H
+          components:
+            - type: Drive
+              driveModel: ST24000NM005H
+              firmware:
+                - version: ET07
+                  default: true
+                  powerDrainsNeeded: 1
+                  artifacts:
+                    - url: https://firmware.example.invalid/st24000nm005h/ET07/et07.lod
+                      sha256: 27925abb3edb48119579e8eaac1d15fbe7d2a3b12f277f1a13cdce1b8a6f8431
+                  upgradeScript:
+                    url: https://scripts.example.invalid/scsi_drive_upgrade.sh
+                    sha256: c60b4c1c2d46f7b9e50d7d2e2d77dbfbe7884030b0e9a86a4636b4bc85d8609e
+                    executionTimeoutSeconds: 3600
+                    artifactDownloadTimeoutSeconds: 600
         - siteId: 00000000-0000-0000-0000-000000000001
           vendor: Nvidia
           model: DGXH100
           explicitStartNeeded: true
           ordering:
-            - Cx7
-            - BMC
+            - type: Cx7
+            - type: BMC
           components:
             - type: Cx7
               firmware:
@@ -20416,9 +20531,9 @@ components:
         ordering:
           type: array
           items:
-            $ref: '#/components/schemas/HostFirmwareComponentType'
+            $ref: '#/components/schemas/HostFirmwareComponentRef'
           readOnly: true
-          description: Stored update order for configured components.
+          description: Stored update order for configured components, each drive model as its own entry.
         created:
           type: string
           format: date-time
@@ -20434,10 +20549,13 @@ components:
           model: DGXH100
           explicitStartNeeded: true
           ordering:
-            - Cx7
-            - BMC
+            - type: Cx7
+              driveModel: null
+            - type: BMC
+              driveModel: null
           components:
             - type: BMC
+              driveModel: null
               firmware:
               - version: '2.3.7'
                 default: true
@@ -20448,6 +20566,7 @@ components:
                   - url: https://firmware.example.invalid/2.3.7/fw.bin
                     sha256: a1b2c3d4e5f6789012345678901234567890abcdef1234567890abcdef123456
             - type: Cx7
+              driveModel: null
               firmware:
                 - version: '28.47.2682'
                   default: true
@@ -20462,7 +20581,9 @@ components:
     HostFirmwareComponentType:
       type: string
       title: HostFirmwareComponentType
-      description: Host firmware component type exposed by the REST API.
+      description: |-
+        Host firmware component type exposed by the REST API. `Drive` is the
+        firmware of one drive model, named by a separate `driveModel`.
       enum:
         - BMC
         - CEC
@@ -20474,6 +20595,7 @@ components:
         - CombinedBmcUefi
         - GPU
         - Cx7
+        - Drive
     SpectrumXMultiplaneRange:
       type: object
       description: Inclusive ascending bounds. Rail bounds are 0 through 3; plane bounds are 0 through 7.

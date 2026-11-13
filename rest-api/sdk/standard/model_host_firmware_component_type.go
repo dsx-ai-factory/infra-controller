@@ -18,7 +18,8 @@ import (
 	"fmt"
 )
 
-// HostFirmwareComponentType Host firmware component type exposed by the REST API.
+// HostFirmwareComponentType Host firmware component type exposed by the REST API. `Drive` is the
+// firmware of one drive model, named by a separate `driveModel`.
 type HostFirmwareComponentType string
 
 // List of HostFirmwareComponentType
@@ -33,6 +34,7 @@ const (
 	HOSTFIRMWARECOMPONENTTYPE_COMBINED_BMC_UEFI HostFirmwareComponentType = "CombinedBmcUefi"
 	HOSTFIRMWARECOMPONENTTYPE_GPU               HostFirmwareComponentType = "GPU"
 	HOSTFIRMWARECOMPONENTTYPE_CX7               HostFirmwareComponentType = "Cx7"
+	HOSTFIRMWARECOMPONENTTYPE_DRIVE             HostFirmwareComponentType = "Drive"
 )
 
 // All allowed values of HostFirmwareComponentType enum
@@ -47,6 +49,7 @@ var AllowedHostFirmwareComponentTypeEnumValues = []HostFirmwareComponentType{
 	"CombinedBmcUefi",
 	"GPU",
 	"Cx7",
+	"Drive",
 }
 
 func (v *HostFirmwareComponentType) UnmarshalJSON(src []byte) error {

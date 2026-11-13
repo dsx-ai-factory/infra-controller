@@ -45,6 +45,8 @@ pub(crate) mod rpc;
 pub(crate) mod scout_firmware_scripts;
 pub mod write_ops;
 
+pub use scout_firmware_scripts::has_packaged_scout_script;
+
 /// Fields of span that should be logged for each message.
 pub fn extra_logfmt_logging_fields() -> Vec<String> {
     vec!["object_id".to_string()]
