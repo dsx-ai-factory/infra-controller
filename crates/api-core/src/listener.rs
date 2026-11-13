@@ -500,6 +500,7 @@ pub(crate) async fn start(
                 auth::CasbinAuthorizer::build_casbin(
                     casbin_policy_file,
                     auth_config.permissive_mode,
+                    api_service.instrumentation.clone(),
                 )
                 .await?,
             );
@@ -515,7 +516,10 @@ pub(crate) async fn start(
         None
     } else {
         Some(AsyncRequireAuthorizationLayer::new(
-            auth::middleware::InternalRBACHandler::new(auth_config.as_ref()),
+            auth::middleware::InternalRBACHandler::new(
+                auth_config.as_ref(),
+                api_service.instrumentation.clone(),
+            ),
         ))
     };
 
