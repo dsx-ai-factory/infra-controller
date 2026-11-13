@@ -226,29 +226,6 @@ async fn full_and_compact(
 }
 
 #[crate::sqlx_test]
-async fn compact_snapshot_matches_full_snapshot(pool: sqlx::PgPool) {
-    let env = create_test_env(pool).await;
-    let hosts = fixture_hosts(&env).await;
-    let host_ids: Vec<_> = hosts.iter().map(|(_, id)| *id).collect();
-
-    // A batch and a single ID take different query forms.
-    let (full, compact) = full_and_compact(&env, &host_ids).await;
-    let (_, single) = full_and_compact(&env, &host_ids[..1]).await;
-    assert_eq!(compact.len(), hosts.len());
-    for (name, host_id) in &hosts {
-        assert_eq!(
-            rule_inputs(&compact[host_id]),
-            rule_inputs(&full[host_id]),
-            "{name}"
-        );
-    }
-    assert_eq!(
-        rule_inputs(&single[&host_ids[0]]),
-        rule_inputs(&full[&host_ids[0]])
-    );
-}
-
-#[crate::sqlx_test]
 async fn compact_decode_sorts_topology_free_dpus(pool: sqlx::PgPool) {
     let env = create_test_env(pool).await;
     let host_id = HostMachineId::from(&create_managed_host_multi_dpu(&env, 2).await.id);
@@ -385,10 +362,31 @@ fn sorted_alerts(
     alerts
 }
 
+/// Snapshot and API parity use the same populated host relationships.
+/// Both reads leave the fixture unchanged, so each comparison sees the same states.
 #[crate::sqlx_test]
 async fn compact_read_matches_full_read_and_explored_report(pool: sqlx::PgPool) {
     let env = create_test_env(pool).await;
     let hosts = fixture_hosts(&env).await;
+    let host_ids: Vec<_> = hosts.iter().map(|(_, id)| *id).collect();
+
+    // A batch and a single ID take different query forms.
+    let (full_snapshots, compact_snapshots) = full_and_compact(&env, &host_ids).await;
+    let (_, single) = full_and_compact(&env, &host_ids[..1]).await;
+    assert_eq!(compact_snapshots.len(), hosts.len());
+    for (name, host_id) in &hosts {
+        assert_eq!(
+            rule_inputs(&compact_snapshots[host_id]),
+            rule_inputs(&full_snapshots[host_id]),
+            "{name}"
+        );
+    }
+    assert_eq!(
+        rule_inputs(&single[&host_ids[0]]),
+        rule_inputs(&full_snapshots[&host_ids[0]])
+    );
+
+    // Check the RPC projections against the full machine and explored reads.
     let machine_ids: Vec<MachineId> = hosts.iter().map(|(_, id)| *id.as_machine_id()).collect();
     let mut compact: HashMap<_, _> = find_host_states(&env, machine_ids.clone())
         .await
