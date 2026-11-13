@@ -21,8 +21,8 @@ use std::str::FromStr;
 use ::rpc::errors::RpcDataConversionError;
 use ::rpc::forge::{self as rpc, AdminForceDeleteMachineResponse};
 use ::rpc::model::RpcTryFrom;
-use carbide_redfish::libredfish::RedfishAuth;
-use carbide_secrets::credentials::{BmcCredentialType, CredentialKey};
+use bmc_platform::{PlatformError, ResetType};
+use carbide_utils::redfish::BmcAccessInfo;
 use carbide_uuid::infiniband::IBPartitionId;
 use carbide_uuid::instance::InstanceId;
 use carbide_uuid::machine::{HostMachineId, MachineId};
@@ -1275,24 +1275,18 @@ pub(crate) async fn invoke_power(
     // TODO: The API call should maybe not directly trigger the reboot
     // but instead queue it for the state handler. That will avoid racing
     // with other internal reboot requests from the state handler.
-    let bmc_ip = bmc_ip.to_string();
-    let client = api
-        .redfish_pool
-        .create_client(
-            &bmc_ip,
-            snapshot.host_snapshot.status.bmc_info.port,
-            RedfishAuth::Key(CredentialKey::BmcCredentials {
-                credential_type: BmcCredentialType::BmcRoot { bmc_mac_address },
-            }),
-            None,
-        )
+    let bmc = api
+        .connect_bmc(&BmcAccessInfo {
+            host: bmc_ip.to_string(),
+            port: snapshot.host_snapshot.status.bmc_info.port,
+            mac_address: bmc_mac_address,
+        })
+        .await?;
+    async { bmc.power()?.set(ResetType::ForceRestart).await }
         .await
-        .map_err(|e| CarbideError::internal(e.to_string()))?;
-
-    client
-        .power(libredfish::SystemPowerControl::ForceRestart)
-        .await
-        .map_err(|e| CarbideError::internal(format!("failed redfish ForceRestart subtask: {e}")))?;
+        .map_err(|e: PlatformError| {
+            CarbideError::internal(format!("failed redfish ForceRestart subtask: {e}"))
+        })?;
 
     Ok(Response::new(rpc::InstancePowerResult {}))
 }

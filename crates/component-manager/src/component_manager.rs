@@ -846,12 +846,13 @@ pub async fn build_component_manager(
                 crate::rms::RmsBackend::new(
                     client,
                     rms_switch_system_image_client.clone(),
-                    db,
+                    db.clone(),
                     rack_profiles.clone(),
                     config.nvos_password_rotation_enabled,
                 )
                 .with_core_compute_manager(
-                    crate::core_compute_manager::CoreComputeTrayManager::new(pool),
+                    crate::core_compute_manager::CoreComputeTrayManager::new(pool)
+                        .with_driver_connector(driver_connector.clone(), db),
                 ),
             )
         }
