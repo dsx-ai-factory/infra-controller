@@ -250,6 +250,7 @@ fn resolve_targets(
 #[cfg(test)]
 mod tests {
     use std::net::{IpAddr, Ipv4Addr};
+    use std::time::Duration;
 
     use super::*;
     use crate::config::{
@@ -438,9 +439,14 @@ mod tests {
             .await
             .expect("test listener should bind");
 
-        let listener_address = listener
-            .local_addr()
-            .expect("test listener should have an address");
+        let listener_address = listener.local_addr().expect("test listener address");
+
+        // Keep both probe destinations owned until all collectors stop.
+        let replacement_listener = tokio::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
+            .await
+            .expect("replacement listener should bind");
+
+        let replacement_address = replacement_listener.local_addr().expect("bound address");
 
         let mut config = Config::default();
 
@@ -449,7 +455,13 @@ mod tests {
             ..Default::default()
         });
 
-        config.collectors.nmxt = Configurable::Enabled(Default::default());
+        config.collectors.nmxt = Configurable::Disabled;
+        config.collectors.nmxc = Configurable::Disabled;
+
+        config.collectors.nvue = Configurable::Enabled(NvueCollectorConfig {
+            rest: Configurable::Enabled(Default::default()),
+            gnmi: Configurable::Disabled,
+        });
 
         let mut ctx = DiscoveryLoopContext::new_with_tls_config(
             Arc::new(crate::limiter::BucketLimiter::new(
@@ -474,14 +486,14 @@ mod tests {
         let key = endpoint.key();
         let mut duplicate = switch_endpoint(SwitchEndpointRole::Host);
         duplicate.addr.mac = endpoint.addr.mac;
-        duplicate.addr.ip = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 9));
-        let duplicate_ip = duplicate.addr.ip;
+        duplicate.addr.ip = replacement_address.ip();
+        duplicate.addr.port = Some(replacement_address.port());
 
         let sink = Arc::new(NotifyingSink::default());
 
         reconcile_reachability_collectors(
             &mut ctx,
-            &[Arc::new(duplicate), endpoint.clone()],
+            &[endpoint.clone(), Arc::new(duplicate)],
             Some(sink.clone()),
             "test",
         )
@@ -514,15 +526,15 @@ mod tests {
                     address: listener_address,
                 },
                 ReachabilityTarget {
-                    service: ReachabilityService::Nmxt,
-                    address: (duplicate_ip, NMXT_PORT).into(),
+                    service: ReachabilityService::NvueRest,
+                    address: replacement_address,
                 },
             ],
             "merged targets use stable service order and effective collector addresses",
         );
 
         let mut changed = endpoint.as_ref().clone();
-        changed.addr.ip = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 8));
+        changed.addr.port = Some(replacement_address.port());
         changed
             .labels
             .insert("location".to_string(), "rack-b".to_string());
@@ -544,7 +556,15 @@ mod tests {
             .get(key.as_str())
             .expect("updated reachability spec");
 
-        assert_eq!(updated.event_context.addr.ip, changed.addr.ip);
+        assert_eq!(
+            updated.targets.values().cloned().collect::<Vec<_>>(),
+            vec![ReachabilityTarget {
+                service: ReachabilityService::Redfish,
+                address: replacement_address,
+            }],
+        );
+
+        assert_eq!(updated.event_context.addr.port, changed.addr.port);
 
         assert_eq!(
             updated
@@ -564,5 +584,9 @@ mod tests {
         assert_eq!(ctx.collectors.len(CollectorKind::Reachability), 0);
         assert!(ctx.collectors.reachability_specs.is_empty());
         assert!(ctx.collectors.contains(CollectorKind::Sensor, &key));
+
+        let shutdown = ctx.drain_collectors(Duration::from_secs(5)).await;
+
+        assert_eq!(shutdown.timed_out, 0);
     }
 }
