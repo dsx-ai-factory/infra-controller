@@ -252,7 +252,7 @@ tags:
     description: |-
       A DPU (Data Processing Unit) is a programmable network device installed in a Machine that runs its own operating system, so NICo tracks each DPU as a Machine of its own alongside the host Machine it is attached to. NICo provisions the DPU and uses it to enforce network isolation and Machine trust for the host, including when that host moves between Tenants.
 
-      These endpoints are read-only and Site-scoped, reporting the DPU Machines that NICo Core discovered at the Site. A host Machine lists the DPUs attached to it in `associatedDpuMachineIds`, and `dpuNetworkConfig` is only populated when retrieving a single DPU Machine with `includeNetworkConfig` set to `true`. To re-provision a Machine's DPUs, use the DPU reprovision operation under Machine.
+      These endpoints are Site-scoped and operate on the DPU Machines that NICo Core discovered at the Site. A host Machine lists the DPUs attached to it in `associatedDpuMachineIds`, and `dpuNetworkConfig` is only populated when retrieving a single DPU Machine with `includeNetworkConfig` set to `true`. DPU Machine health reports are read-only. Power control acts on the DPU itself and can disrupt the network of its host Machine. To re-provision a Machine's DPUs, use the DPU reprovision operation under Machine.
   - name: Rack
     description: |-
       Rack is a physical enclosure that contains a number of Machines. Racks are the physical building blocks of a Site.
@@ -13360,6 +13360,136 @@ paths:
           $ref: '#/components/responses/ForbiddenError'
         '404':
           $ref: '#/components/responses/NotFoundError'
+  '/v2/org/{org}/nico/dpu/{dpuMachineId}/health-report':
+    parameters:
+      - schema:
+          type: string
+        name: org
+        in: path
+        required: true
+        description: Name of the Org
+      - schema:
+          type: string
+        name: dpuMachineId
+        in: path
+        required: true
+        description: ID of the DPU Machine
+    get:
+      operationId: get-all-dpu-machine-health-report
+      summary: Retrieve all DPU Machine health reports
+      description: |
+        Retrieve the health reports of a DPU Machine, one entry per report source. The aggregate of these reports is the `health` attribute of the DPU Machine.
+
+        Health reports of a DPU Machine are read-only. Returns `404` when the ID does not identify a DPU Machine at the Site, including when it identifies a host Machine.
+
+        User must have authorization role with `PROVIDER_ADMIN` suffix on the org that owns the Site.
+      tags:
+        - DPU Machine
+      parameters:
+        - schema:
+            type: string
+            format: uuid
+          in: query
+          name: siteId
+          required: true
+          description: ID of the Site
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/MachineHealthReportEntry'
+              examples:
+                dpu-health-reports:
+                  value:
+                    - source: dpu-agent
+                      triggeredBy: ''
+                      observedAt: '2026-06-24T12:00:00Z'
+                      successes:
+                        - id: DpuDiskUtilizationCheck
+                          target: null
+                      alerts:
+                        - id: BgpPeeringTor
+                          target: null
+                          inAlertSince: '2026-06-24T11:58:30Z'
+                          message: BGP session with the top-of-rack switch is down
+                          tenantMessage: null
+                          classifications:
+                            - PreventAllocations
+                      mode: Replace
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '403':
+          $ref: '#/components/responses/ForbiddenError'
+        '404':
+          $ref: '#/components/responses/NotFoundError'
+        '500':
+          $ref: '#/components/responses/GenericHttpError'
+  '/v2/org/{org}/nico/dpu/{dpuMachineId}/power':
+    parameters:
+      - schema:
+          type: string
+        name: org
+        in: path
+        required: true
+        description: Name of the Org
+      - schema:
+          type: string
+        name: dpuMachineId
+        in: path
+        required: true
+        description: ID of the DPU Machine
+    patch:
+      operationId: update-dpu-machine-power
+      summary: DPU Machine power control
+      description: |
+        Execute a power control action on a DPU Machine. The action applies to the DPU itself, not to its host Machine, and can interrupt the network of the host Machine while the DPU restarts.
+
+        `acknowledgeAttachedInstance` must be `true` when an Instance is attached to the DPU's host Machine, and also when the host Machine reported for the DPU is not known for the Site, because an attached Instance cannot be ruled out. Otherwise the request is rejected with `400`.
+
+        Returns `404` when the ID does not identify a DPU Machine at the Site, including when it identifies a host Machine.
+
+        User must have authorization role with `PROVIDER_ADMIN` suffix on the org that owns the Site.
+      tags:
+        - DPU Machine
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/DpuMachinePowerUpdateRequest'
+            examples:
+              force-restart:
+                value:
+                  siteId: 5a0c3f0e-6b0e-4d7c-9a54-1f3b8d1c2e77
+                  action: ForceRestart
+              force-restart-with-attached-instance:
+                value:
+                  siteId: 5a0c3f0e-6b0e-4d7c-9a54-1f3b8d1c2e77
+                  action: ForceRestart
+                  acknowledgeAttachedInstance: true
+      responses:
+        '202':
+          description: DPU Machine power control request was accepted. The message is empty unless Core returns a power-manager warning.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MessageResponse'
+              examples:
+                example-1:
+                  value:
+                    message: ''
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '403':
+          $ref: '#/components/responses/ForbiddenError'
+        '404':
+          $ref: '#/components/responses/NotFoundError'
+        '500':
+          $ref: '#/components/responses/GenericHttpError'
   '/v2/org/{org}/nico/machine/{machineId}/dpu':
     parameters:
       - schema:
@@ -21617,6 +21747,35 @@ components:
           description: Acknowledges that an Instance is currently attached to the Machine and this action may disrupt Tenant workload on the Instance.
       examples:
         - action: ForceRestart
+          acknowledgeAttachedInstance: true
+    DpuMachinePowerUpdateRequest:
+      type: object
+      title: DpuMachinePowerUpdateRequest
+      description: Request to power control a DPU Machine
+      required:
+        - siteId
+        - action
+      properties:
+        siteId:
+          type: string
+          format: uuid
+          description: ID of the Site that the DPU Machine belongs to.
+        action:
+          type: string
+          description: Redfish power control action to apply to the DPU Machine.
+          enum:
+            - 'On'
+            - GracefulShutdown
+            - ForceOff
+            - GracefulRestart
+            - ForceRestart
+            - ACPowercycle
+        acknowledgeAttachedInstance:
+          type: boolean
+          description: Acknowledges that an Instance is, or may be, attached to the DPU's host Machine and this action may disrupt Tenant workload on the Instance.
+      examples:
+        - siteId: 5a0c3f0e-6b0e-4d7c-9a54-1f3b8d1c2e77
+          action: ForceRestart
           acknowledgeAttachedInstance: true
     MachineValidationRunCreateRequest:
       type: object

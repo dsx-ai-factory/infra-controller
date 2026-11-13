@@ -47,6 +47,23 @@ nicocli machine power-control-machine \
   "$MACHINE_ID"
 ```
 
+To reboot a DPU, use the DPU Machine power control operation with the DPU's
+Machine ID and the ID of its Site. The action applies to the DPU only, but the
+host Machine loses its network while the DPU restarts:
+
+```bash
+DPU_MACHINE_ID='dpu-machine-id'
+SITE_ID='site-id'
+nicocli dpu-machine power update \
+  --site-id "$SITE_ID" \
+  --action GracefulRestart \
+  "$DPU_MACHINE_ID"
+```
+
+If an Instance is attached to the DPU's host Machine, or NICo has no record of
+that host Machine at the Site, add `--acknowledge-attached-instance true`.
+Without it, the request is rejected.
+
 A successful request returns HTTP 202 after NICo accepts the power-control
 request. The API does not expose a reboot task or terminal reboot status, and
 `nicocli machine get "$MACHINE_ID"` can return the same REST lifecycle state
