@@ -516,10 +516,6 @@ impl From<ExploredEndpointInfo> for ExploredEndpointDetail<'_> {
 
 /// Fetch a single explored endpoint
 /// TODO: The API is rather inefficient since it loads all of them and filters client side
-#[expect(
-    clippy::result_large_err,
-    reason = "page-loading failures carry HTTP responses returned directly to Axum"
-)]
 async fn fetch_explored_endpoint(
     api: &Api,
     endpoint_ip: String,

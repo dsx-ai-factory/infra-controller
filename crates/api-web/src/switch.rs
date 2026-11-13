@@ -329,10 +329,6 @@ pub(super) async fn detail(
     (StatusCode::OK, Html(detail.render().unwrap())).into_response()
 }
 
-#[expect(
-    clippy::result_large_err,
-    reason = "page-loading failures carry HTTP responses returned directly to Axum"
-)]
 async fn fetch_switch(api: &Api, switch_id: &str) -> Result<Option<rpc::forge::Switch>, Response> {
     let switch_id_parsed = match SwitchId::from_str(switch_id) {
         Ok(id) => id,

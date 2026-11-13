@@ -127,10 +127,6 @@ async fn fetch_racks(api: &Api) -> Result<rpc::forge::RackList, tonic::Status> {
     Ok(rpc::forge::RackList { racks })
 }
 
-#[expect(
-    clippy::result_large_err,
-    reason = "page-loading failures carry HTTP responses returned directly to Axum"
-)]
 async fn fetch_rack(api: &Api, rack_id: &RackId) -> Result<Option<::rpc::forge::Rack>, Response> {
     let request = tonic::Request::new(rpc::forge::RacksByIdsRequest {
         rack_ids: vec![rack_id.clone()],

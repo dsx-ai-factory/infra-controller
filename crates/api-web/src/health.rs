@@ -311,10 +311,6 @@ fn not_found_response(kind: &str, id: &impl fmt::Display) -> Response {
     (StatusCode::NOT_FOUND, format!("{kind} not found: {id}")).into_response()
 }
 
-#[expect(
-    clippy::result_large_err,
-    reason = "page-loading failures carry HTTP responses returned directly to Axum"
-)]
 async fn fetch_machine_health_page_data(
     api: &Api,
     machine_id: &MachineId,
@@ -346,10 +342,6 @@ async fn fetch_machine_health_page_data(
     })
 }
 
-#[expect(
-    clippy::result_large_err,
-    reason = "page-loading failures carry HTTP responses returned directly to Axum"
-)]
 async fn fetch_rack_health_page_data(
     api: &Api,
     rack_id: &RackId,
@@ -379,10 +371,6 @@ async fn fetch_rack_health_page_data(
     })
 }
 
-#[expect(
-    clippy::result_large_err,
-    reason = "page-loading failures carry HTTP responses returned directly to Axum"
-)]
 async fn fetch_power_shelf_health_page_data(
     api: &Api,
     power_shelf_id: &PowerShelfId,
@@ -412,10 +400,6 @@ async fn fetch_power_shelf_health_page_data(
     })
 }
 
-#[expect(
-    clippy::result_large_err,
-    reason = "page-loading failures carry HTTP responses returned directly to Axum"
-)]
 async fn fetch_switch_health_page_data(
     api: &Api,
     switch_id: &SwitchId,
@@ -445,10 +429,6 @@ async fn fetch_switch_health_page_data(
     })
 }
 
-#[expect(
-    clippy::result_large_err,
-    reason = "page-loading failures carry HTTP responses returned directly to Axum"
-)]
 async fn fetch_nvlink_domain_health_page_data(
     api: &Api,
     domain_id: &NvLinkDomainId,
@@ -482,10 +462,6 @@ async fn fetch_nvlink_domain_health_page_data(
     })
 }
 
-#[expect(
-    clippy::result_large_err,
-    reason = "page-loading failures carry HTTP responses returned directly to Axum"
-)]
 async fn fetch_dpu_health_contributors(
     api: &Api,
     host_machine_id: &MachineId,
@@ -593,10 +569,6 @@ async fn list_nvlink_domain_health_report_entries(
         .health_report_entries)
 }
 
-#[expect(
-    clippy::result_large_err,
-    reason = "page-loading failures carry HTTP responses returned directly to Axum"
-)]
 async fn fetch_machine_health_snapshot(
     api: &Api,
     machine_id: &MachineId,
@@ -644,10 +616,6 @@ async fn fetch_machine_health_snapshot(
     })
 }
 
-#[expect(
-    clippy::result_large_err,
-    reason = "page-loading failures carry HTTP responses returned directly to Axum"
-)]
 async fn fetch_rack_aggregate_health(
     api: &Api,
     rack_id: &RackId,
@@ -684,10 +652,6 @@ async fn fetch_rack_aggregate_health(
         .map(|health| health_report_from_rpc_convert_invalid(health.clone())))
 }
 
-#[expect(
-    clippy::result_large_err,
-    reason = "page-loading failures carry HTTP responses returned directly to Axum"
-)]
 async fn fetch_power_shelf_aggregate_health(
     api: &Api,
     power_shelf_id: &PowerShelfId,
@@ -729,10 +693,6 @@ async fn fetch_power_shelf_aggregate_health(
         .map(|health| health_report_from_rpc_convert_invalid(health.clone())))
 }
 
-#[expect(
-    clippy::result_large_err,
-    reason = "page-loading failures carry HTTP responses returned directly to Axum"
-)]
 async fn fetch_switch_aggregate_health(
     api: &Api,
     switch_id: &SwitchId,

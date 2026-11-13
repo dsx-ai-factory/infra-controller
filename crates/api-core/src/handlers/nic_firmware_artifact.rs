@@ -242,10 +242,6 @@ async fn open_authorized(
 // A single read-committed statement follows the shared lock. Repeatable-read
 // could establish its snapshot before a writer finishes, then evict using stale
 // membership. An abandoned SQL wait discards the connection through the guard.
-#[expect(
-    clippy::result_large_err,
-    reason = "snapshot failures are HTTP responses returned directly to Axum"
-)]
 async fn load_snapshot(
     pool: &PgPool,
     host_machine_id: HostMachineId,
