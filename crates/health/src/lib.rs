@@ -591,6 +591,7 @@ pub async fn run_service(
             collector_transition_notify,
             cancel_token.clone(),
             iteration,
+            framework_metrics.instrumentation,
         )
     });
 
