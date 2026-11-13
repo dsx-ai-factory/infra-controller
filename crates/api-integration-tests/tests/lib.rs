@@ -1183,6 +1183,7 @@ async fn exercise_nvlink_partition_monitor(
         },
         HostHealthConfig::default(),
         work_lock_manager_handle,
+        test_env.metrics.instrumentation.clone(),
     );
     monitor.run_single_iteration().await?;
     for line in [
