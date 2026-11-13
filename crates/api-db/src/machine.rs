@@ -7870,6 +7870,7 @@ mod test {
                     pci_name: "5e:00.0".to_string(),
                     device_description: None,
                     interface_type: DpaInterfaceType::Svpc,
+                    interface_name: None,
                 },
                 &mut txn,
             )

@@ -110,6 +110,7 @@ async fn firmware_test_card(
             pci_name: pci_name.into(),
             device_description: None,
             interface_type: DpaInterfaceType::Svpc,
+            interface_name: None,
         },
         &mut txn,
     )
@@ -499,6 +500,7 @@ async fn firmware_operation_reports_only_complete_the_matching_attempt(pool: sql
             pci_name: "0000:cc:00.0".into(),
             device_description: None,
             interface_type: DpaInterfaceType::Svpc,
+            interface_name: None,
         },
         &mut txn,
     )

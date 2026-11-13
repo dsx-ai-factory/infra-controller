@@ -46,7 +46,7 @@ use super::{
 };
 use crate::config::{MachineStateControllerConfig, MachineStateHandlerSiteConfig};
 use crate::context::MachineStateHandlerContextObjects;
-use crate::redfish::power_state_name;
+use crate::redfish::{power_state_name, reset_bmc};
 use crate::write_ops::MachineWriteOp;
 
 const BIOS_PROFILE_LABEL: &str = "bios-profile";
@@ -479,10 +479,9 @@ pub(super) async fn advance_bios_config_job(
                         reason = %failure,
                         "HandleBiosJobFailure: resetting BMC after BIOS job failure"
                     );
-                    redfish_client
-                        .bmc_reset(None)
+                    reset_bmc(&bmc)
                         .await
-                        .map_err(|e| redfish_error("bmc_reset", e))?;
+                        .map_err(|e| platform_error("bmc_reset", e))?;
                     Ok(BiosConfigJobAdvanceOutcome::Continue(BiosConfigInfo {
                         bios_job_id: info.bios_job_id,
                         bios_config_state: BiosConfigState::HandleBiosJobFailure {
