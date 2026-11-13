@@ -53,7 +53,7 @@ pub(crate) async fn handle_delete_measurement_journal(
     .map_err(|e| CarbideError::Internal {
         message: format!("failed to delete journal: {e}"),
     })?
-    .ok_or(CarbideError::NotFoundError {
+    .ok_or_else(|| CarbideError::NotFoundError {
         kind: "journal",
         id: "unknown".into(),
     })?;

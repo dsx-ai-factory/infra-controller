@@ -119,7 +119,9 @@ impl prost::Message for RackId {
     where
         Self: Sized,
     {
-        legacy_rpc::RackId::from(self.clone()).encode_raw(buf);
+        if !self.0.is_empty() {
+            prost::encoding::string::encode(1, &self.0, buf);
+        }
     }
 
     fn merge_field(
@@ -139,7 +141,7 @@ impl prost::Message for RackId {
     }
 
     fn encoded_len(&self) -> usize {
-        legacy_rpc::RackId::from(self.clone()).encoded_len()
+        crate::string_field_len(self.0.len())
     }
 
     fn clear(&mut self) {
@@ -237,7 +239,9 @@ impl prost::Message for RackGroupId {
     where
         Self: Sized,
     {
-        rack_group_id_rpc::RackGroupId::from(self.clone()).encode_raw(buf);
+        if !self.0.is_empty() {
+            prost::encoding::string::encode(1, &self.0, buf);
+        }
     }
 
     fn merge_field(
@@ -257,7 +261,7 @@ impl prost::Message for RackGroupId {
     }
 
     fn encoded_len(&self) -> usize {
-        rack_group_id_rpc::RackGroupId::from(self.clone()).encoded_len()
+        crate::string_field_len(self.0.len())
     }
 
     fn clear(&mut self) {
@@ -347,7 +351,9 @@ impl prost::Message for RackProfileId {
     where
         Self: Sized,
     {
-        rack_profile_id_rpc::RackProfileId::from(self.clone()).encode_raw(buf);
+        if !self.0.is_empty() {
+            prost::encoding::string::encode(1, &self.0, buf);
+        }
     }
 
     fn merge_field(
@@ -367,7 +373,7 @@ impl prost::Message for RackProfileId {
     }
 
     fn encoded_len(&self) -> usize {
-        rack_profile_id_rpc::RackProfileId::from(self.clone()).encoded_len()
+        crate::string_field_len(self.0.len())
     }
 
     fn clear(&mut self) {

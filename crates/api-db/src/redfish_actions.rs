@@ -163,8 +163,8 @@ pub async fn insert_request(
     "#;
     let machine_count = machine_ips.len();
     let request_id: i64 = sqlx::query_scalar(query)
-        .bind(authored_by.clone())
-        .bind(vec![authored_by])
+        .bind(&authored_by)
+        .bind(vec![authored_by.as_str()])
         .bind(machine_ips)
         .bind(serials)
         .bind(request.target)

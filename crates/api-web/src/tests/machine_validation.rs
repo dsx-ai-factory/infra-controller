@@ -86,9 +86,10 @@ async fn validation_run_pages_display_optional_end_time(pool: sqlx::PgPool) {
             assert_eq!(response.status(), StatusCode::OK, "{scenario}: {route}");
             let body = response.into_body().collect().await.unwrap().to_bytes();
             let html = std::str::from_utf8(&body).unwrap();
+            let expected_run_id = run.id.to_string();
             let row = html
                 .split("<tr>")
-                .find(|row| row.contains(&run.id.to_string()))
+                .find(|row| row.contains(&expected_run_id))
                 .expect("validation run row")
                 .split("</tr>")
                 .next()
@@ -281,11 +282,10 @@ async fn validation_run_pages_show_progress_current_work_and_logs(pool: sqlx::Pg
         assert!(results_table.contains("title=\"2026-10-09T13:00:00Z\">13:00:00</time>"));
         assert!(results_table.contains("title=\"Ended 2026-10-09T13:01:00Z\""));
         for (index, attempt_id) in attempt_ids.iter().take(3).enumerate() {
+            let expected_test_name = format!("live_test_{index}");
             let row = results_table
                 .split("<tr>")
-                .find(|row| {
-                    row.contains(&format!("live_test_{index}")) && !row.contains("In Progress")
-                })
+                .find(|row| row.contains(&expected_test_name) && !row.contains("In Progress"))
                 .unwrap()
                 .split("</tr>")
                 .next()
@@ -325,9 +325,10 @@ async fn validation_run_pages_show_progress_current_work_and_logs(pool: sqlx::Pg
             let body = response.into_body().collect().await.unwrap().to_bytes();
             let html = std::str::from_utf8(&body).unwrap();
             assert!(html.contains("<th>Completed/Total</th>"));
+            let expected_run_id = run.id.to_string();
             let row = html
                 .split("<tr>")
-                .find(|row| row.contains(&run.id.to_string()))
+                .find(|row| row.contains(&expected_run_id))
                 .unwrap()
                 .split("</tr>")
                 .next()

@@ -1154,7 +1154,7 @@ async fn test_component_health_waits_for_successful_handler(
         );
         let history_count: i64 =
             sqlx::query_scalar("SELECT COUNT(*) FROM rack_health_history WHERE object_id = $1")
-                .bind(rack_id.to_string())
+                .bind(rack_id.as_str())
                 .fetch_one(&pool)
                 .await?;
         assert_eq!(history_count, iteration as i64);
@@ -8528,10 +8528,11 @@ async fn test_ready_with_failed_switch_transitions_to_error(
                 cause,
                 recovery_policy: RackErrorRecoveryPolicy::ComponentsReady,
             } => {
-                assert!(
-                    cause.contains("switch"),
-                    "Error cause should mention failing switch, got: {}",
-                    cause
+                assert_eq!(
+                    cause,
+                    format!(
+                        "component(s) reported terminal failure: 1 switch(es) in Error: [{switch_id}]"
+                    )
                 );
             }
             other => panic!("Expected Transition to Error, got {:?}", other),
@@ -8553,6 +8554,7 @@ async fn test_ready_with_failed_power_shelf_transitions_to_error(
     let env = create_test_env_with_overrides(pool.clone(), TestEnvOverrides::default()).await;
 
     let rack_id = new_rack_id();
+    let power_shelf_id;
     {
         let mut txn = pool.txn_begin().await?;
         db_rack::create(
@@ -8563,7 +8565,7 @@ async fn test_ready_with_failed_power_shelf_transitions_to_error(
             None,
         )
         .await?;
-        let power_shelf_id = create_test_power_shelf(txn.as_mut(), &rack_id, 0xa1).await;
+        power_shelf_id = create_test_power_shelf(txn.as_mut(), &rack_id, 0xa1).await;
         set_power_shelf_state(
             txn.as_mut(),
             &power_shelf_id,
@@ -8608,10 +8610,11 @@ async fn test_ready_with_failed_power_shelf_transitions_to_error(
                 cause,
                 recovery_policy: RackErrorRecoveryPolicy::ComponentsReady,
             } => {
-                assert!(
-                    cause.contains("power shelf"),
-                    "Error cause should mention failing power shelf, got: {}",
-                    cause
+                assert_eq!(
+                    cause,
+                    format!(
+                        "component(s) reported terminal failure: 1 power shelf/shelves in Error: [{power_shelf_id}]"
+                    )
                 );
             }
             other => panic!("Expected Transition to Error, got {:?}", other),

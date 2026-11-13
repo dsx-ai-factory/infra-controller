@@ -6288,21 +6288,21 @@ mod tests {
             .services
             .get(OTEL_COLLECTOR_SERVICE_NAME)
             .expect("otelcol service present");
-        let deps: Vec<String> = otel
+        let deps: Vec<&str> = otel
             .depends_on
             .as_ref()
             .expect("otelcol should declare dependencies")
             .iter()
-            .map(|d| d.name.clone())
+            .map(|d| d.name.as_str())
             .collect();
 
         assert!(
-            deps.contains(&DTS_SERVICE_NAME.to_string()),
+            deps.contains(&DTS_SERVICE_NAME),
             "otelcol must depend on dts so its scrape target resolves; got {deps:?}"
         );
         // The previously-working dependencies must remain.
-        assert!(deps.contains(&DPU_AGENT_SERVICE_NAME.to_string()));
-        assert!(deps.contains(&FMDS_SERVICE_NAME.to_string()));
+        assert!(deps.contains(&DPU_AGENT_SERVICE_NAME));
+        assert!(deps.contains(&FMDS_SERVICE_NAME));
     }
 
     /// Service/NAD CR names are suffixed per deployment so BF3 and BF4 don't
@@ -8378,14 +8378,14 @@ mod tests {
         let device = &devices[0];
         let labels = device.metadata.labels.as_ref().unwrap();
 
-        assert_eq!(labels.get("test/device"), Some(&"true".to_string()));
+        assert_eq!(labels.get("test/device").map(String::as_str), Some("true"));
         assert_eq!(
-            labels.get("test/host-bmc-ip"),
-            Some(&"10.0.0.1".to_string())
+            labels.get("test/host-bmc-ip").map(String::as_str),
+            Some("10.0.0.1")
         );
         assert_eq!(
-            labels.get("test/dpu-machine-id"),
-            Some(&"dpu-bbb".to_string())
+            labels.get("test/dpu-machine-id").map(String::as_str),
+            Some("dpu-bbb")
         );
     }
 
@@ -8439,7 +8439,7 @@ mod tests {
         let node = &nodes[0];
         let labels = node.metadata.labels.as_ref().unwrap();
 
-        assert_eq!(labels.get("test/node"), Some(&"true".to_string()));
+        assert_eq!(labels.get("test/node").map(String::as_str), Some("true"));
     }
 
     #[tokio::test]

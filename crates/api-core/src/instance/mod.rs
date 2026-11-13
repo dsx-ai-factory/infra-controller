@@ -126,7 +126,7 @@ async fn validate_zero_dpu_auto_vpc(
     .next()
     .ok_or_else(|| CarbideError::FailedPrecondition(format!("VPC `{vpc_id}` does not exist")))?;
 
-    if vpc.config.tenant_organization_id != tenant_organization_id.to_string() {
+    if vpc.config.tenant_organization_id != tenant_organization_id.as_str() {
         return Err(CarbideError::FailedPrecondition(format!(
             "VPC `{}` is not owned by tenant `{}`",
             vpc.id, tenant_organization_id
@@ -2233,12 +2233,13 @@ pub(crate) async fn batch_allocate_instances(
     // Verify all snapshots were loaded and validate usability
     for request in &requests {
         let machine_id = request.machine_id;
-        let mh_snapshot = snapshot_map
-            .get(&machine_id)
-            .ok_or(CarbideError::NotFoundError {
-                kind: "machine",
-                id: machine_id.to_string(),
-            })?;
+        let mh_snapshot =
+            snapshot_map
+                .get(&machine_id)
+                .ok_or_else(|| CarbideError::NotFoundError {
+                    kind: "machine",
+                    id: machine_id.to_string(),
+                })?;
 
         if let Err(e) = mh_snapshot.is_usable_as_instance(request.allow_unhealthy_machine) {
             if matches!(
@@ -2465,12 +2466,13 @@ pub(crate) async fn batch_allocate_instances(
 
     for mut request in requests {
         let machine_id = request.machine_id;
-        let mh_snapshot = snapshot_map
-            .remove(&machine_id)
-            .ok_or(CarbideError::NotFoundError {
-                kind: "machine",
-                id: machine_id.to_string(),
-            })?;
+        let mh_snapshot =
+            snapshot_map
+                .remove(&machine_id)
+                .ok_or_else(|| CarbideError::NotFoundError {
+                    kind: "machine",
+                    id: machine_id.to_string(),
+                })?;
         let expected_machine = mh_snapshot
             .host_snapshot
             .status

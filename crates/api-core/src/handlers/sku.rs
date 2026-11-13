@@ -70,10 +70,7 @@ pub(crate) async fn delete(api: &Api, request: Request<SkuIdList>) -> Result<Res
         }
         return Err(CarbideError::InvalidArgument(format!(
             "the SKU {} does not exist",
-            sku_id_list
-                .first()
-                .map(|id| id.to_string())
-                .unwrap_or_default()
+            sku_id_list.first().map(String::as_str).unwrap_or_default()
         ))
         .into());
     };
@@ -126,7 +123,7 @@ pub(crate) async fn assign_to_machine(
     let machine =
         db::machine::find_one(&mut txn, &machine_id, MachineSearchConfig::default()).await?;
 
-    let machine = machine.ok_or(CarbideError::NotFoundError {
+    let machine = machine.ok_or_else(|| CarbideError::NotFoundError {
         kind: "machine",
         id: machine_id.to_string(),
     })?;
@@ -161,7 +158,7 @@ pub(crate) async fn assign_to_machine(
 
     let mut skus = db::sku::find(&mut txn, std::slice::from_ref(&sku_machine_pair.sku_id)).await?;
 
-    let sku = skus.pop().ok_or(CarbideError::NotFoundError {
+    let sku = skus.pop().ok_or_else(|| CarbideError::NotFoundError {
         kind: "SKU ID",
         id: sku_machine_pair.sku_id.clone(),
     })?;
@@ -169,7 +166,7 @@ pub(crate) async fn assign_to_machine(
     if !skus.is_empty() {
         return Err(CarbideError::internal(format!(
             "unexpected additional SKUs found for ID: {}",
-            sku_machine_pair.sku_id.clone()
+            sku_machine_pair.sku_id
         ))
         .into());
     }
@@ -195,7 +192,7 @@ pub(crate) async fn verify_for_machine(
     let machine =
         db::machine::find_one(&mut txn, &machine_id, MachineSearchConfig::default()).await?;
 
-    let machine = machine.ok_or(CarbideError::NotFoundError {
+    let machine = machine.ok_or_else(|| CarbideError::NotFoundError {
         kind: "machine",
         id: machine_id.to_string(),
     })?;
@@ -234,7 +231,7 @@ pub(crate) async fn remove_sku_association(
     let machine =
         db::machine::find_one(&mut txn, &machine_id, MachineSearchConfig::default()).await?;
 
-    let machine = machine.ok_or(CarbideError::NotFoundError {
+    let machine = machine.ok_or_else(|| CarbideError::NotFoundError {
         kind: "machine",
         id: machine_id.to_string(),
     })?;

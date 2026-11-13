@@ -26,6 +26,7 @@ mod rack_alert;
 mod switch_cert_monitor;
 mod switch_reachability;
 
+use std::fmt::Write;
 use std::io;
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
@@ -1142,7 +1143,7 @@ impl PartitionProcessingContext {
                         ops.push(operation.clone());
                     }
                 })
-                .or_insert(vec![operation.clone()]);
+                .or_insert_with(|| vec![operation.clone()]);
         } else {
             let operation = NmxcPartitionOperation {
                 domain_uuid: None,
@@ -1162,7 +1163,7 @@ impl PartitionProcessingContext {
                         ops.push(operation.clone());
                     }
                 })
-                .or_insert(vec![operation.clone()]);
+                .or_insert_with(|| vec![operation.clone()]);
         }
         Ok(())
     }
@@ -2234,12 +2235,15 @@ impl NvlPartitionMonitor {
 
         // Endpoint + component versions for this group, so the metric-read failures below log them.
         group_metrics.nmxc.endpoint = endpoint_url.to_string();
-        group_metrics.nmxc.version = hello
-            .components_ver
-            .iter()
-            .map(|kv| format!("{}={}", kv.key, kv.value))
-            .collect::<Vec<_>>()
-            .join(", ");
+        let mut version = String::new();
+        for (index, component) in hello.components_ver.iter().enumerate() {
+            if index != 0 {
+                version.push_str(", ");
+            }
+            write!(version, "{}={}", component.key, component.value)
+                .expect("writing to a String cannot fail");
+        }
+        group_metrics.nmxc.version = version;
 
         // Filter managed host snapshots, nvlink info, and DB partitions for this group.
         let mut managed_host_snapshots_domain: HashMap<HostMachineId, ManagedHostStateSnapshot> =
@@ -3421,7 +3425,7 @@ impl NvlPartitionMonitor {
                     .and_modify(|ops| {
                         ops.push(operation.clone());
                     })
-                    .or_insert(vec![operation.clone()]);
+                    .or_insert_with(|| vec![operation.clone()]);
             }
         }
         for operation in partition_ctx.unknown_partition_addition_operations.values() {
@@ -3431,7 +3435,7 @@ impl NvlPartitionMonitor {
                 .and_modify(|ops| {
                     ops.push(operation.clone());
                 })
-                .or_insert(vec![operation.clone()]);
+                .or_insert_with(|| vec![operation.clone()]);
         }
         for (_, operation) in
             std::mem::take(&mut partition_ctx.pending_tray_partition_creates_by_slot)
@@ -3733,17 +3737,15 @@ impl NvlPartitionMonitor {
                         let name = if is_tray_partition {
                             operation.name.chars().take(240).collect::<String>()
                         } else {
-                            let name = format!(
-                                "{}{}",
-                                logical_partition_id,
-                                operation
-                                    .gpu_uids
-                                    .iter()
-                                    .map(|u| u.to_string())
-                                    .collect::<Vec<_>>()
-                                    .join(",")
-                            );
-                            name.chars().take(240).collect::<String>()
+                            let mut name = logical_partition_id.to_string();
+                            for (index, gpu_uid) in operation.gpu_uids.iter().enumerate() {
+                                if index != 0 {
+                                    name.push(',');
+                                }
+                                write!(name, "{gpu_uid}").expect("writing to a String cannot fail");
+                            }
+                            name.truncate(240);
+                            name
                         };
                         let request = nmx_c_create_partition_request(
                             name.clone(),

@@ -133,7 +133,7 @@ async fn queued(env: &TestEnv, host_id: HostMachineId) -> bool {
     sqlx::query_scalar(
         "SELECT EXISTS (SELECT 1 FROM machine_state_controller_queued_objects WHERE object_id = $1)",
     )
-    .bind(host_id.to_string())
+    .bind(host_id)
     .fetch_one(&env.pool)
     .await
     .expect("read machine queue")
@@ -619,7 +619,7 @@ async fn generic_delivery_freezes_helper_before_submission_and_never_replaces_it
     };
 
     sqlx::query("DELETE FROM machine_state_controller_queued_objects WHERE object_id = $1")
-        .bind(host_id.to_string())
+        .bind(host_id)
         .execute(&env.pool)
         .await
         .unwrap();
@@ -966,7 +966,7 @@ async fn retried_firmware_report_commits_before_queueing(pool: sqlx::PgPool) {
     admitted.targets[0].supervisor_instance_id = Some("observed-helper".into());
     seed(&env, host_id, admitted.clone()).await;
     sqlx::query("DELETE FROM machine_state_controller_queued_objects WHERE object_id = $1")
-        .bind(host_id.to_string())
+        .bind(host_id)
         .execute(&env.pool)
         .await
         .expect("clear this host's queued work");
@@ -1132,7 +1132,7 @@ async fn generic_reports_reject_foreign_or_contradictory_evidence_without_state_
     ];
     let before = machine(&env, host_id).await;
     sqlx::query("DELETE FROM machine_state_controller_queued_objects WHERE object_id = $1")
-        .bind(host_id.to_string())
+        .bind(host_id)
         .execute(&env.pool)
         .await
         .unwrap();
@@ -3231,7 +3231,7 @@ async fn firmware_report_deadline_rolls_back_before_retry(pool: sqlx::PgPool) {
     admitted.targets[0].supervisor_instance_id = Some("helper".into());
     seed(&env, host_id, admitted.clone()).await;
     sqlx::query("DELETE FROM machine_state_controller_queued_objects WHERE object_id = $1")
-        .bind(host_id.to_string())
+        .bind(host_id)
         .execute(&env.pool)
         .await
         .unwrap();

@@ -161,7 +161,7 @@ pub async fn host_power_control_with_location(
         if power_state == Some(PowerState::Off) {
             tracing::info!(
                 machine_id = machine.id.to_string(),
-                action = "Manual intervention required to initiate power-on".to_string(),
+                action = "Manual intervention required to initiate power-on",
                 "Host Power Action"
             );
             return Ok(());

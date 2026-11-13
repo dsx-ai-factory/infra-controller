@@ -3045,7 +3045,7 @@ pub(in crate::tests) async fn update_time_params(
     let query = "UPDATE machines SET last_reboot_requested=$1, controller_state_version=$3, last_reboot_time=$4, last_discovery_time=$5 WHERE id=$2 RETURNING *";
     sqlx::query(query)
         .bind(sqlx::types::Json(&data))
-        .bind(machine.id.to_string())
+        .bind(machine.id)
         .bind(version)
         .bind(last_reboot_time)
         .bind(last_discovery_time)

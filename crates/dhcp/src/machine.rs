@@ -315,11 +315,7 @@ pub extern "C" fn machine_get_next_server(ctx: *mut Machine) -> u32 {
     {
         next_server.octets()
     } else {
-        "127.0.0.1"
-            .to_string()
-            .parse::<Ipv4Addr>()
-            .unwrap()
-            .octets()
+        Ipv4Addr::LOCALHOST.octets()
     };
 
     u32::from_be_bytes(ip_addr)

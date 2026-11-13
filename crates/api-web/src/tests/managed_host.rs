@@ -444,14 +444,10 @@ async fn test_multi_dpu(pool: sqlx::PgPool) {
         !hosts.is_empty(),
         "At least one host should have been returned"
     );
+    let expected_host_machine_id = host_machine_id.to_string();
     let host = hosts
         .into_iter()
-        .find(|h| {
-            h.machine_id
-                .as_ref()
-                .map(|m| m == &host_machine_id.to_string())
-                .unwrap_or(false)
-        })
+        .find(|h| h.machine_id.as_deref() == Some(expected_host_machine_id.as_str()))
         .unwrap_or_else(|| {
             panic!("Could not find expected host {host_machine_id} in managed_hosts output")
         });

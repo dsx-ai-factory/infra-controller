@@ -21,6 +21,7 @@
  */
 
 use std::collections::{BTreeMap, HashMap};
+use std::fmt::Write;
 
 use carbide_uuid::machine::MachineId;
 use carbide_uuid::measured_boot::{MeasurementBundleId, MeasurementSystemProfileId};
@@ -85,8 +86,7 @@ pub async fn new(
                     },
                     sqlx::error::ErrorKind::NotNullViolation => DatabaseError::internal(format!(
                         "bundle missing not null value: {} (msg: {})",
-                        bundle_name.clone(),
-                        db_err
+                        bundle_name, db_err
                     )),
                     _ => DatabaseError::new("MeasurementBundle.new db_err", sqlx_err),
                 },
@@ -522,16 +522,13 @@ pub async fn set_state_for_bundle_id(
 /// register index, as a k:v (pcr_index:pcr_value), separated
 /// by commas.
 fn pcr_values_to_string(pcr_values: &[PcrRegisterValue]) -> String {
-    let sorted_values = pcr_values
+    pcr_values
         .iter()
         .sorted_by_key(|value| value.pcr_register)
-        .collect::<Vec<_>>();
-
-    sorted_values
-        .into_iter()
-        .map(|value| format!("{}:{}", value.pcr_register, value.sha_any))
-        .collect::<Vec<_>>()
-        .join(",")
+        .format_with(",", |value, f| {
+            f(&format_args!("{}:{}", value.pcr_register, value.sha_any))
+        })
+        .to_string()
 }
 
 pub async fn find_closest_match<DB>(
@@ -577,9 +574,10 @@ where
 
     let matching = get_matching_bundles(&all_bundles, values)?;
     if !matching.is_empty() {
-        let matching_bundle_ids = matching.iter().fold(String::new(), |acc, bundle| {
-            acc + " " + bundle.bundle_id.to_string().as_str()
-        });
+        let mut matching_bundle_ids = String::new();
+        for bundle in &matching {
+            write!(matching_bundle_ids, " {}", bundle.bundle_id).unwrap();
+        }
         return Err(DatabaseError::InvalidArgument(format!(
             "Fully matching bundle(s) found: {matching_bundle_ids}"
         )));

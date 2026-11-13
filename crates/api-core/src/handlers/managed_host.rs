@@ -228,7 +228,7 @@ pub(crate) async fn set_maintenance(
                 );
             };
 
-            let reference = reference.trim().to_string();
+            let reference = reference.trim();
             if reference.len() < 5 {
                 return Err(CarbideError::InvalidArgument(
                     "provide some valid reference. minimum expected length is 5".into(),
@@ -251,7 +251,7 @@ pub(crate) async fn set_maintenance(
                                 id: "Maintenance".parse().unwrap(),
                                 target: None,
                                 in_alert_since: Some(chrono::Utc::now()),
-                                message: reference.clone(),
+                                message: reference.to_string(),
                                 tenant_message: None,
                                 classifications: vec![
                                     health_report::HealthAlertClassification::prevent_allocations(),

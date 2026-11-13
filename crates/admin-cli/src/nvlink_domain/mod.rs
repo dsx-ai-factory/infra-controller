@@ -3,6 +3,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+use std::fmt::Write;
+
 use carbide_uuid::rack::RackGroupId;
 use clap::Parser;
 use color_eyre::eyre::WrapErr;
@@ -203,6 +205,20 @@ async fn render(
                 "Member Positions"
             ]);
             for domain in domains.domains {
+                let mut member_positions = String::new();
+                for (index, member) in domain.members.iter().enumerate() {
+                    if index != 0 {
+                        member_positions.push_str(", ");
+                    }
+                    if let Some(rack_index) = member.rack_index {
+                        write!(member_positions, "{rack_index}")?;
+                    }
+                    member_positions.push(':');
+                    if let Some(slot_index) = member.slot_index {
+                        write!(member_positions, "{slot_index}")?;
+                    }
+                    write!(member_positions, ":{}", member.component_type)?;
+                }
                 table.add_row(row![
                     domain.id.map(|id| id.value).unwrap_or_default(),
                     domain
@@ -210,17 +226,7 @@ async fn render(
                         .map(|id| id.to_string())
                         .unwrap_or_default(),
                     domain.name.unwrap_or_default(),
-                    domain
-                        .members
-                        .iter()
-                        .map(|m| format!(
-                            "{}:{}:{}",
-                            m.rack_index.map(|v| v.to_string()).unwrap_or_default(),
-                            m.slot_index.map(|v| v.to_string()).unwrap_or_default(),
-                            m.component_type,
-                        ))
-                        .collect::<Vec<_>>()
-                        .join(", "),
+                    member_positions,
                 ]);
             }
             if ctx.config.format == OutputFormat::Csv {

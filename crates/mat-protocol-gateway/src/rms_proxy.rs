@@ -48,6 +48,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::fmt;
+use std::fmt::Write as _;
 use std::future::Future;
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
@@ -520,15 +521,19 @@ impl fmt::Display for Unroutable {
                 formatter,
                 "machine-a-tron {source} owns rack {rack_id:?} but has not answered its status polls for ownership.stale_after; retry once it answers"
             ),
-            Self::Ambiguous { sources, rack_id } => write!(
-                formatter,
-                "rack {rack_id:?} is reported by machine-a-tron instances {}",
-                sources
-                    .iter()
-                    .map(ToString::to_string)
-                    .collect::<Vec<_>>()
-                    .join(" and ")
-            ),
+            Self::Ambiguous { sources, rack_id } => {
+                write!(
+                    formatter,
+                    "rack {rack_id:?} is reported by machine-a-tron instances "
+                )?;
+                for (index, source) in sources.iter().enumerate() {
+                    if index != 0 {
+                        formatter.write_str(" and ")?;
+                    }
+                    write!(formatter, "{source}")?;
+                }
+                Ok(())
+            }
             Self::Unknown { rack_id } => {
                 write!(
                     formatter,
@@ -706,12 +711,19 @@ fn job_not_found(job_id: &str) -> String {
 
 /// The non-empty error messages of an aggregate's parts, each attributed to its instance.
 fn join_errors<'a, M: AsRef<str>>(errors: impl IntoIterator<Item = (&'a SourceId, M)>) -> String {
-    errors
+    let mut joined = String::new();
+    for (index, (source, message)) in errors
         .into_iter()
         .filter(|(_, message)| !message.as_ref().is_empty())
-        .map(|(source, message)| format!("machine-a-tron {source}: {}", message.as_ref()))
-        .collect::<Vec<_>>()
-        .join("; ")
+        .enumerate()
+    {
+        if index > 0 {
+            joined.push_str("; ");
+        }
+        write!(joined, "machine-a-tron {source}: {}", message.as_ref())
+            .expect("writing to String cannot fail");
+    }
+    joined
 }
 
 /// Builds the whole `RackManager` impl.

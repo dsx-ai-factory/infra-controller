@@ -247,7 +247,7 @@ async fn test_old_machine_state_history(
 
     let query = "INSERT INTO machine_state_history (object_id, state, state_version) VALUES ($1, $2::jsonb, $3)";
     sqlx::query(query)
-        .bind(host_machine_id.to_string())
+        .bind(host_machine_id)
         .bind(r#"{"state": "hostinit", "machine_state": {"state": "nolongerarealstate"}}"#)
         .bind(ConfigVersion::initial())
         .execute(&mut *txn)

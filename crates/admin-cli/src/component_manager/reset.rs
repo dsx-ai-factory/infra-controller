@@ -245,9 +245,9 @@ impl Run for ResetArgs {
             for result in &response.results {
                 let (id, status, error) = common::component_result_fields(Some(result));
                 table.add_row(Row::new(vec![
-                    Cell::new(&id),
-                    Cell::new(&status),
-                    Cell::new(&error),
+                    Cell::new(id),
+                    Cell::new(status),
+                    Cell::new(error),
                 ]));
             }
             async_writeln!(ctx.output_file, "{table}").context("write component reset results")?;
@@ -305,11 +305,11 @@ impl Run for StatusArgs {
             for status in &response.statuses {
                 let (id, result, error) = common::component_result_fields(status.result.as_ref());
                 table.add_row(Row::new(vec![
-                    Cell::new(&id),
+                    Cell::new(id),
                     Cell::new(reset_action_name(status.action)),
-                    Cell::new(&result),
+                    Cell::new(result),
                     Cell::new(reset_state_name(status.state)),
-                    Cell::new(&error),
+                    Cell::new(error),
                 ]));
             }
             async_writeln!(ctx.output_file, "{table}").context("write component reset status")?;

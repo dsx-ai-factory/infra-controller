@@ -147,7 +147,7 @@ pub(crate) async fn handle_delete_measurement_system_profile(
         }
     };
 
-    let system_profile = profile.ok_or(CarbideError::NotFoundError {
+    let system_profile = profile.ok_or_else(|| CarbideError::NotFoundError {
         kind: "profile",
         id: "provided selector".to_string(),
     })?;

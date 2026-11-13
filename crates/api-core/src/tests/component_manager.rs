@@ -1224,7 +1224,7 @@ async fn component_reset_dispatches_valid_targets_and_polls_by_identity(pool: sq
     let rejected = api
         .component_reset(Request::new(rpc::ComponentResetRequest {
             target: Some(Target::SwitchBmcMacs(rpc::MacAddressList {
-                mac_addresses: vec![bmc_mac_address.to_string().to_uppercase()],
+                mac_addresses: vec![bmc_mac_address.to_string()],
             })),
             action: rpc::ComponentResetAction::SdnFactoryReset as i32,
             domain_name: None,

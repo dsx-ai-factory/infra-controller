@@ -2449,12 +2449,18 @@ async fn test_unpartitioned_instance_gpus_are_parked_in_tray_partition(pool: sql
         .iter()
         .find(|partition| partition.name != "tray_partition_0")
         .expect("tenant partition should be created");
-
     let mut expected_tenant_uids: Vec<_> = gpus[..2].iter().map(gpu_uid).collect();
     let mut actual_tenant_uids = tenant_partition.gpu_uid_list.clone();
     expected_tenant_uids.sort_unstable();
     actual_tenant_uids.sort_unstable();
     assert_eq!(actual_tenant_uids, expected_tenant_uids);
+    assert_eq!(
+        tenant_partition.name,
+        format!(
+            "{logical_partition_id}{},{}",
+            tenant_partition.gpu_uid_list[0], tenant_partition.gpu_uid_list[1]
+        )
+    );
 
     let mut expected_tray_uids: Vec<_> = gpus[2..].iter().map(gpu_uid).collect();
     let mut actual_tray_uids = tray_partition.gpu_uid_list.clone();

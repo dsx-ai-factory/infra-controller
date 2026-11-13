@@ -798,7 +798,7 @@ async fn test_machine_creator_created_host_advances_through_dpu_discovery(
                 .status
                 .bmc_info
                 .firmware_version
-                .clone()
+                .as_deref()
                 .unwrap()
         ),
         InitialDpuConfig::default()
@@ -6151,6 +6151,7 @@ async fn test_set_boot_order_sets_order_without_reasserting_when_device_configur
     let mh = create_managed_host_with_config(&env, ManagedHostConfig::zero_dpu()).await;
     let host_id = mh.host().id;
     let boot_nic_mac = host_inband_nic_mac(&env, host_id).await;
+    let expected_boot_nic_mac = boot_nic_mac.to_string();
 
     // Device configured (is_bios_setup true, the sim default), but the boot order
     // not yet set.
@@ -6173,7 +6174,7 @@ async fn test_set_boot_order_sets_order_without_reasserting_when_device_configur
         actions.iter().any(|a| matches!(
             a,
             RedfishSimAction::SetBootOrderDpuFirst { boot_interface_mac }
-                if *boot_interface_mac == boot_nic_mac.to_string()
+                if *boot_interface_mac == expected_boot_nic_mac
         )),
         "the boot order should be set for the boot NIC, got: {actions:?}"
     );
@@ -7004,6 +7005,7 @@ async fn test_machine_validation_repairs_drifted_boot_order(pool: sqlx::PgPool) 
     let mh = create_managed_host_with_config(&env, ManagedHostConfig::zero_dpu()).await;
     let host_id = mh.host().id;
     let boot_nic_mac = host_inband_nic_mac(&env, host_id).await;
+    let expected_boot_nic_mac = boot_nic_mac.to_string();
 
     // The HTTP boot device is intact; only the order drifted. Set the BIOS
     // status explicitly so this regression does not rely on simulator defaults.
@@ -7071,7 +7073,7 @@ async fn test_machine_validation_repairs_drifted_boot_order(pool: sqlx::PgPool) 
         actions.iter().any(|a| matches!(
             a,
             RedfishSimAction::IsBootOrderSetup { boot_interface_mac }
-                if *boot_interface_mac == boot_nic_mac.to_string()
+                if *boot_interface_mac == expected_boot_nic_mac
         )),
         "validation should check the boot order for the boot NIC, got: {actions:?}"
     );
@@ -7079,7 +7081,7 @@ async fn test_machine_validation_repairs_drifted_boot_order(pool: sqlx::PgPool) 
         actions.iter().any(|a| matches!(
             a,
             RedfishSimAction::SetBootOrderDpuFirst { boot_interface_mac }
-                if *boot_interface_mac == boot_nic_mac.to_string()
+                if *boot_interface_mac == expected_boot_nic_mac
         )),
         "the drifted boot order should be restored for the boot NIC, got: {actions:?}"
     );

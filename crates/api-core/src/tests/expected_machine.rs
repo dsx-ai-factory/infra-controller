@@ -3090,13 +3090,13 @@ async fn test_site_explorer_skips_superseded_expected_interface_allocations(
         match change {
             Change::Dynamic | Change::RemoveInterface => {
                 let mut update: rpc::forge::ExpectedMachine = captured.clone().into();
+                let mac_address = declaration.mac_address.unwrap().to_string();
                 if matches!(change, Change::Dynamic) {
                     let interface = update
                         .host_nics
                         .iter_mut()
                         .find(|interface| {
-                            interface.mac_address
-                                == Some(declaration.mac_address.unwrap().to_string())
+                            interface.mac_address.as_deref() == Some(mac_address.as_str())
                         })
                         .expect("the update should contain the expected interface");
                     interface.ip_allocation =
@@ -3104,7 +3104,7 @@ async fn test_site_explorer_skips_superseded_expected_interface_allocations(
                     interface.fixed_ip = None;
                 } else {
                     update.host_nics.retain(|interface| {
-                        interface.mac_address != Some(declaration.mac_address.unwrap().to_string())
+                        interface.mac_address.as_deref() != Some(mac_address.as_str())
                     });
                     update.replace_host_nics = true;
                 }
@@ -3248,10 +3248,13 @@ async fn test_site_explorer_holds_expected_machine_lock_through_address_applicat
         .await;
 
         let mut update: rpc::forge::ExpectedMachine = captured.into();
+        let expected_mac_address = mac_address.to_string();
         let interface = update
             .host_nics
             .iter_mut()
-            .find(|interface| interface.mac_address == Some(mac_address.to_string()))
+            .find(|interface| {
+                interface.mac_address.as_deref() == Some(expected_mac_address.as_str())
+            })
             .expect("the update should contain the host interface");
         interface.ip_allocation = Some(rpc::forge::ExpectedInterfaceIpAllocation::Dynamic as i32);
         interface.fixed_ip = None;

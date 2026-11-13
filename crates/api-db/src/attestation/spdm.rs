@@ -799,7 +799,7 @@ pub async fn persist_outcome(
     sqlx::query(query_device)
         .bind(sqlx::types::Json(outcome))
         .bind(object_id.0)
-        .bind(object_id.1.clone())
+        .bind(&object_id.1)
         .bind(object_id.2)
         .execute(txn)
         .await
@@ -833,7 +833,7 @@ pub async fn persist_controller_state(
         .bind(sqlx::types::Json(new_state))
         .bind(new_version)
         .bind(object_id.0)
-        .bind(object_id.1.clone())
+        .bind(&object_id.1)
         .bind(object_id.2)
         .bind(old_version)
         .execute(&mut *txn)
@@ -859,7 +859,7 @@ pub async fn update_history(
 
     sqlx::query(query)
         .bind(object_id.0)
-        .bind(object_id.1.clone())
+        .bind(&object_id.1)
         .bind(sqlx::types::Json(state_snapshot))
         .execute(&mut *txn)
         .await

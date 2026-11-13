@@ -2206,10 +2206,9 @@ mod rbac_rule_tests {
             let line = line?;
             let line = line.trim();
             if line.starts_with("rpc") {
-                let mut name = line.strip_prefix("rpc").unwrap_or("why").trim().to_string();
+                let name = line.strip_prefix("rpc").unwrap_or("why").trim();
                 let offset = name.find("(").unwrap_or(name.len());
-                name.replace_range(offset.., "");
-                messages.push(name.trim().to_string());
+                messages.push(name[..offset].trim().to_string());
             }
         }
         if messages.is_empty() {

@@ -429,7 +429,7 @@ async fn test_can_retrieve_rack_state_history_with_real_handler(
         .await?;
     let mut histories = result.into_inner().histories;
     let records = histories
-        .remove(&rack_id.to_string())
+        .remove(rack_id.as_str())
         .unwrap_or_default()
         .records;
 

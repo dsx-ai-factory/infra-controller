@@ -145,13 +145,30 @@ impl<'de> Deserialize<'de> for BmcVendor {
     where
         D: Deserializer<'de>,
     {
-        use serde::de::Error;
+        struct BmcVendorVisitor;
 
-        let str_value = String::deserialize(deserializer)?;
-        let Some(bmc_vendor) = Self::from_config_string(&str_value) else {
-            return Err(Error::custom(format!("Invalid BMC vendor: {str_value}")));
-        };
-        Ok(bmc_vendor)
+        impl<'de> serde::de::Visitor<'de> for BmcVendorVisitor {
+            type Value = Result<BmcVendor, String>;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                formatter.write_str("a string")
+            }
+
+            fn visit_str<E: serde::de::Error>(self, value: &str) -> Result<Self::Value, E> {
+                Ok(BmcVendor::from_config_string(value)
+                    .ok_or_else(|| format!("Invalid BMC vendor: {value}")))
+            }
+
+            fn visit_bytes<E: serde::de::Error>(self, value: &[u8]) -> Result<Self::Value, E> {
+                let value = std::str::from_utf8(value)
+                    .map_err(|_| E::invalid_value(serde::de::Unexpected::Bytes(value), &self))?;
+                self.visit_str(value)
+            }
+        }
+
+        deserializer
+            .deserialize_string(BmcVendorVisitor)?
+            .map_err(serde::de::Error::custom)
     }
 }
 
@@ -362,6 +379,44 @@ mod tests {
     use carbide_uuid::machine::{MachineIdSource, MachineType};
 
     use super::*;
+
+    #[test]
+    fn bmc_vendor_accepts_string_and_byte_inputs() {
+        use serde::de::value::{
+            BorrowedStrDeserializer, BytesDeserializer, Error, StrDeserializer, StringDeserializer,
+        };
+
+        let input = "dell";
+        let cases = [
+            (
+                "borrowed string",
+                BmcVendor::deserialize(BorrowedStrDeserializer::<Error>::new(input)),
+            ),
+            (
+                "transient string",
+                BmcVendor::deserialize(StrDeserializer::<Error>::new(input)),
+            ),
+            (
+                "owned string",
+                BmcVendor::deserialize(StringDeserializer::<Error>::new(input.to_string())),
+            ),
+            (
+                "bytes",
+                BmcVendor::deserialize(BytesDeserializer::<Error>::new(input.as_bytes())),
+            ),
+        ];
+        for (scenario, result) in cases {
+            let value = result.expect(scenario);
+            assert_eq!(value, BmcVendor::Ssh(SshBmcVendor::Dell), "{scenario}");
+        }
+
+        let error = BmcVendor::deserialize(BytesDeserializer::<Error>::new(&[0xff]))
+            .expect_err("invalid UTF-8 is rejected");
+        assert_eq!(
+            error.to_string(),
+            "invalid value: byte array, expected a string",
+        );
+    }
 
     /// One row of the escape-sequence filtering table: which vendor escape to
     /// apply, the input bytes, and whether the previous slice ended mid-escape.

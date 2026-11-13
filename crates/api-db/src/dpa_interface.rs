@@ -49,7 +49,7 @@ pub async fn persist(
             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11) RETURNING row_to_json(dpa_interfaces.*)";
 
     sqlx::query_as(query)
-        .bind(value.machine_id.to_string())
+        .bind(value.machine_id)
         .bind(value.mac_address)
         .bind(network_config_version)
         .bind(sqlx::types::Json(&network_config))
@@ -96,7 +96,7 @@ pub async fn ensure(
             RETURNING row_to_json(dpa_interfaces.*)";
 
     let result: Option<DpaInterface> = sqlx::query_as(insert_query)
-        .bind(value.machine_id.to_string())
+        .bind(value.machine_id)
         .bind(value.mac_address)
         .bind(network_config_version)
         .bind(sqlx::types::Json(&network_config))
@@ -289,7 +289,7 @@ pub async fn update_card_state(
 
     sqlx::query_as(query)
         .bind(sqlx::types::Json(&value.card_state))
-        .bind(value.id.to_string())
+        .bind(value.id)
         .fetch_one(&mut *txn)
         .await
         .map_err(|e| DatabaseError::query(query, e))

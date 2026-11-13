@@ -20,6 +20,7 @@ use std::sync::Arc;
 use carbide_authn::middleware::{ExternalUserInfo, Principal};
 use carbide_instrument::Instrumentation;
 use carbide_uuid::machine::MachineId;
+use itertools::Itertools;
 
 use crate::{CarbideError, CarbideResult};
 
@@ -284,11 +285,7 @@ impl PolicyEngine for PermissiveWrapper {
         result.or_else(|e| {
             self.instrumentation.emit(AuthorizationPermissiveOverride {
                 principal_class: PrincipalClass::classify(principals),
-                principals: principals
-                    .iter()
-                    .map(Principal::audit_identity)
-                    .collect::<Vec<_>>()
-                    .join(","),
+                principals: principals.iter().map(Principal::audit_identity).join(","),
                 predicate: format!("{predicate:?}"),
                 error: e.to_string(),
             });
@@ -470,7 +467,7 @@ mod tests {
             let certificate = certs.first().unwrap();
             assert_eq!(
                 Principal::try_from_client_certificate(certificate, &context)
-                    .wrap_err(format!("Bad certificate {}", test.cert))?,
+                    .wrap_err_with(|| format!("Bad certificate {}", test.cert))?,
                 test.desired
             );
         }

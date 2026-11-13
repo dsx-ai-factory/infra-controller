@@ -63,7 +63,7 @@ impl TestSwitch {
         slot_number: i32,
         tray_index: i32,
     ) -> Self {
-        let name = format!("Test Switch {}", &uuid::Uuid::new_v4().to_string()[..8]);
+        let name = format!("Test Switch {:08x}", uuid::Uuid::new_v4().as_fields().0);
         let id = switch_id::from_hardware_info(
             &name,
             "NVIDIA",

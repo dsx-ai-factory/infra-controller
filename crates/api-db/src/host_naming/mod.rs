@@ -489,20 +489,22 @@ fn ip_or_dormant(ctx: &NamingContext<'_>) -> DatabaseResult<String> {
 /// dashes. It validates the result as a legal DNS name before returning it.
 pub fn address_to_hostname(address: &IpAddr) -> DatabaseResult<String> {
     let hostname = match address {
-        IpAddr::V4(_) => address.to_string().replace('.', "-"),
-        IpAddr::V6(v6) => v6
-            .segments()
-            .iter()
-            .map(|s| format!("{s:04x}"))
-            .collect::<Vec<_>>()
-            .join("-"),
+        IpAddr::V4(v4) => {
+            let [a, b, c, d] = v4.octets();
+            format!("{a}-{b}-{c}-{d}")
+        }
+        IpAddr::V6(v6) => {
+            let [a, b, c, d, e, f, g, h] = v6.segments();
+            format!("{a:04x}-{b:04x}-{c:04x}-{d:04x}-{e:04x}-{f:04x}-{g:04x}-{h:04x}")
+        }
     };
     validate_dns_name(hostname)
 }
 
-/// Builds the deterministic placeholder for an addressless (dormant) interface.
+/// Builds the deterministic uppercase MAC placeholder for an addressless interface.
 fn dormant_admin_hostname(mac_address: MacAddress) -> String {
-    format!("noip-{}", mac_address.to_string().replace(':', "-"))
+    let [a, b, c, d, e, f] = mac_address.bytes();
+    format!("noip-{a:02X}-{b:02X}-{c:02X}-{d:02X}-{e:02X}-{f:02X}")
 }
 
 /// True if a hostname is a non-identifying placeholder (empty, or the `noip-...`
@@ -590,12 +592,14 @@ fn serial_with_mac_hostname(serial: &str, mac: MacAddress) -> DatabaseResult<Str
 /// The MAC as a compact lower-case hex label (`aabbccddeeff`) -- the suffix
 /// form used by `serial-<mac>` names.
 fn compact_mac_label(mac: MacAddress) -> String {
-    mac.to_string().to_ascii_lowercase().replace(':', "")
+    let [a, b, c, d, e, f] = mac.bytes();
+    format!("{a:02x}{b:02x}{c:02x}{d:02x}{e:02x}{f:02x}")
 }
 
 /// The MAC-derived hostname (`0a-1b-2c-3d-4e-5f`), always a valid DNS label.
 fn mac_hostname(mac: MacAddress) -> String {
-    mac.to_string().to_ascii_lowercase().replace(':', "-")
+    let [a, b, c, d, e, f] = mac.bytes();
+    format!("{a:02x}-{b:02x}-{c:02x}-{d:02x}-{e:02x}-{f:02x}")
 }
 
 fn validate_dns_name(hostname: String) -> DatabaseResult<String> {
@@ -880,9 +884,13 @@ mod tests {
     }
 
     #[test]
-    fn dormant_hostname_is_mac_derived() {
-        // `mac_address::MacAddress` renders hex in upper-case; preserved verbatim.
+    fn dormant_hostname_preserves_uppercase_padded_mac() {
+        // Dormant placeholders preserve the historical uppercase MAC spelling.
         assert_eq!("noip-AA-BB-CC-DD-EE-FF", dormant_admin_hostname(mac()));
+        assert_eq!(
+            "noip-00-01-0A-10-A0-FF",
+            dormant_admin_hostname(MacAddress::new([0, 1, 10, 16, 160, 255]))
+        );
     }
 
     #[test]
@@ -999,6 +1007,9 @@ mod tests {
     fn mac_hostname_is_dashed_lowercase() {
         assert_eq!("aa-bb-cc-dd-ee-ff", mac_hostname(mac()));
         validate_dns_name(mac_hostname(mac())).unwrap();
+        let padded_mac = MacAddress::new([0, 1, 10, 16, 160, 255]);
+        assert_eq!("00-01-0a-10-a0-ff", mac_hostname(padded_mac));
+        assert_eq!("00010a10a0ff", compact_mac_label(padded_mac));
     }
 
     #[test]

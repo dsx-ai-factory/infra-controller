@@ -1308,7 +1308,7 @@ mod tests {
         if let Some(length) = declared_length {
             headers.insert(
                 axum::http::header::CONTENT_LENGTH,
-                HeaderValue::from_str(&length.to_string()).expect("valid header value"),
+                HeaderValue::from(length),
             );
         }
 
@@ -1409,8 +1409,7 @@ mod tests {
                 let mut headers = HeaderMap::new();
                 headers.insert(
                     axum::http::header::CONTENT_LENGTH,
-                    HeaderValue::from_str(&declared_length.to_string())
-                        .expect("valid header value"),
+                    HeaderValue::from(declared_length),
                 );
                 let body = UpstreamBody::prepare(&headers, Body::from("payload"))
                     .await
@@ -1479,7 +1478,7 @@ mod tests {
         let mut headers = HeaderMap::new();
         headers.insert(
             axum::http::header::CONTENT_LENGTH,
-            HeaderValue::from_str(&(MAX_BUFFERED_BODY_SIZE as u64 + 1).to_string()).unwrap(),
+            HeaderValue::from(MAX_BUFFERED_BODY_SIZE as u64 + 1),
         );
         let mut streamed = UpstreamBody::prepare(&headers, Body::from("payload"))
             .await

@@ -126,7 +126,7 @@ async fn http_option<B: Bmc>(
             name.contains("HTTP") && name.contains("IPV4") && name.contains(&mac)
         })
         .map(|option| reference(option).to_string())
-        .ok_or(PlatformError::MissingBootOption {
+        .ok_or_else(|| PlatformError::MissingBootOption {
             description: format!("HTTP IPv4 {mac}"),
         })
 }

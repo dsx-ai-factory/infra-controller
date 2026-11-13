@@ -103,7 +103,7 @@ pub(crate) async fn tpm_show_ca_certs(
             not_valid_after: entry.not_valid_after.to_rfc2822(),
             ca_cert_subject: X509Name::from_der(&entry.cert_subject)
                 .map(|x| x.1.to_string())
-                .unwrap_or("Could not parse CA subject name".to_string()),
+                .unwrap_or_else(|_| "Could not parse CA subject name".to_string()),
         })
         .collect();
 
@@ -128,7 +128,7 @@ pub(crate) async fn tpm_show_unmatched_ek_certs(
             machine_id: entry.machine_id.into(),
             issuer: X509Name::from_der(&entry.issuer)
                 .map(|x| x.1.to_string())
-                .unwrap_or("Could not parse issuer".to_string()),
+                .unwrap_or_else(|_| "Could not parse issuer".to_string()),
             issuer_ca_url: entry.issuer_access_info.clone(),
         })
         .collect();

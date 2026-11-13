@@ -98,7 +98,7 @@ impl sqlx::Encode<'_, sqlx::Postgres> for TrustedMachineId {
         &self,
         buf: &mut <Postgres as Database>::ArgumentBuffer,
     ) -> Result<IsNull, BoxDynError> {
-        buf.extend(self.to_string().as_bytes());
+        std::io::Write::write_fmt(&mut **buf, format_args!("{self}"))?;
         Ok(sqlx::encode::IsNull::No)
     }
 }

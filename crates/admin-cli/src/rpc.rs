@@ -388,11 +388,11 @@ impl ApiClient {
             }
         };
 
-        serial_details
-            .machine_id
-            .ok_or(CarbideCliError::GenericError(
+        serial_details.machine_id.ok_or_else(|| {
+            CarbideCliError::GenericError(
                 "Serial number found without associated machine ID".to_string(),
-            ))
+            )
+        })
     }
 
     /// Resolves the full instance list matching a filter, via one id-listing
@@ -693,7 +693,7 @@ impl ApiClient {
 
         Ok(result
             .histories
-            .remove(&rack_id.to_string())
+            .remove(rack_id.as_str())
             .map(|h| h.records)
             .unwrap_or_default())
     }
@@ -753,7 +753,7 @@ impl ApiClient {
 
         Ok(result
             .histories
-            .remove(&rack_id.to_string())
+            .remove(rack_id.as_str())
             .map(|h| h.records)
             .unwrap_or_default())
     }
@@ -1362,7 +1362,7 @@ impl ApiClient {
             .wrap_err("failed to get expected machine for legacy update")?;
         let mac_str = bmc_mac_address
             .map(|m| m.to_string())
-            .unwrap_or(expected_machine.bmc_mac_address.clone());
+            .unwrap_or_else(|| expected_machine.bmc_mac_address.clone());
         let parsed_interfaces = interfaces
             .map(|s| serde_json::from_str::<Vec<rpc::ExpectedInterface>>(&s))
             .transpose()?;
@@ -2163,9 +2163,11 @@ impl ApiClient {
             for network_segment_id in pf_network_segment_ids {
                 let device = interface_iter
                     .next()
-                    .ok_or(CarbideCliError::GenericError(
-                        "Insufficient interfaces for selected machine".to_string(),
-                    ))?
+                    .ok_or_else(|| {
+                        CarbideCliError::GenericError(
+                            "Insufficient interfaces for selected machine".to_string(),
+                        )
+                    })?
                     .pci_properties
                     .as_ref()
                     .map(|pci| pci.device.as_str());

@@ -17,6 +17,8 @@
 
 //! Handler for RackState::Ready.
 
+use std::fmt::Write;
+
 use carbide_rack_controller::context::RackStateHandlerContextObjects;
 use carbide_rack_controller::maintenance::first_maintenance_state;
 use carbide_uuid::machine::MachineId;
@@ -91,12 +93,14 @@ pub async fn handle_ready(
         let activities_desc = if scope.activities.is_empty() {
             "all non-power activities".to_string()
         } else {
-            scope
-                .activities
-                .iter()
-                .map(ToString::to_string)
-                .collect::<Vec<_>>()
-                .join(", ")
+            let mut description = String::new();
+            for (index, activity) in scope.activities.iter().enumerate() {
+                if index > 0 {
+                    description.push_str(", ");
+                }
+                write!(description, "{activity}").expect("writing to a String cannot fail");
+            }
+            description
         };
         if scope.is_full_rack() {
             tracing::info!(
@@ -186,43 +190,50 @@ pub(super) async fn detect_component_failure(
     failed_power_shelves.sort_unstable();
     failed_machines.sort_unstable();
 
-    let mut parts = Vec::new();
+    let mut cause = String::from("component(s) reported terminal failure: ");
     if !failed_switches.is_empty() {
-        parts.push(format!(
-            "{} switch(es) in Error: [{}]",
-            failed_switches.len(),
-            failed_switches
-                .iter()
-                .map(ToString::to_string)
-                .collect::<Vec<_>>()
-                .join(", "),
-        ));
+        write!(cause, "{} switch(es) in Error: [", failed_switches.len())
+            .expect("writing to a String cannot fail");
+        for (index, id) in failed_switches.iter().enumerate() {
+            if index > 0 {
+                cause.push_str(", ");
+            }
+            write!(cause, "{id}").expect("writing to a String cannot fail");
+        }
+        cause.push(']');
     }
     if !failed_power_shelves.is_empty() {
-        parts.push(format!(
-            "{} power shelf/shelves in Error: [{}]",
-            failed_power_shelves.len(),
-            failed_power_shelves
-                .iter()
-                .map(ToString::to_string)
-                .collect::<Vec<_>>()
-                .join(", "),
-        ));
+        if !failed_switches.is_empty() {
+            cause.push_str("; ");
+        }
+        write!(
+            cause,
+            "{} power shelf/shelves in Error: [",
+            failed_power_shelves.len()
+        )
+        .expect("writing to a String cannot fail");
+        for (index, id) in failed_power_shelves.iter().enumerate() {
+            if index > 0 {
+                cause.push_str(", ");
+            }
+            write!(cause, "{id}").expect("writing to a String cannot fail");
+        }
+        cause.push(']');
     }
     if !failed_machines.is_empty() {
-        parts.push(format!(
-            "{} machine(s) in Failed: [{}]",
-            failed_machines.len(),
-            failed_machines
-                .iter()
-                .map(ToString::to_string)
-                .collect::<Vec<_>>()
-                .join(", "),
-        ));
+        if !failed_switches.is_empty() || !failed_power_shelves.is_empty() {
+            cause.push_str("; ");
+        }
+        write!(cause, "{} machine(s) in Failed: [", failed_machines.len())
+            .expect("writing to a String cannot fail");
+        for (index, id) in failed_machines.iter().enumerate() {
+            if index > 0 {
+                cause.push_str(", ");
+            }
+            write!(cause, "{id}").expect("writing to a String cannot fail");
+        }
+        cause.push(']');
     }
 
-    Ok(Some(format!(
-        "component(s) reported terminal failure: {}",
-        parts.join("; ")
-    )))
+    Ok(Some(cause))
 }

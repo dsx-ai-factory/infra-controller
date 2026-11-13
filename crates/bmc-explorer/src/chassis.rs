@@ -233,7 +233,7 @@ impl<B: Bmc> ExploredChassisCollection<B> {
                     hw_id.model.map(|v| v.to_string()),
                     hw_id
                         .serial_number
-                        .map(|v| v.to_string().trim().to_string()),
+                        .map(|v| v.into_inner().trim().to_string()),
                 )
             })
             .unwrap_or_default();
@@ -488,9 +488,9 @@ impl<B: Bmc> ExploredChassis<B> {
         let hw_id = self.chassis.hardware_id();
         let serial_number = self
             .assembly_sn
-            .clone()
-            .or(hw_id.serial_number.map(|v| v.to_string()))
-            .map(|s| s.trim().to_string());
+            .as_deref()
+            .or_else(|| hw_id.serial_number.map(|v| v.into_inner()))
+            .map(|s| s.trim().to_owned());
 
         let nvidia_oem = self.chassis.oem_nvidia_cbc().ok().and_then(identity);
         Chassis {

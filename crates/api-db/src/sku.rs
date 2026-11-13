@@ -88,7 +88,7 @@ async fn find_matching_sku(
         builder.push_bind(excluded_sku_id);
     }
 
-    let sql = builder.sql().as_str().to_string();
+    let sql = builder.sql();
     let mut sku_stream = builder.build_query_as::<Sku>().fetch(conn);
 
     while let Some(result) = sku_stream.next().await {
@@ -106,7 +106,7 @@ async fn find_matching_sku(
                 }
             }
             Err(sqlx::Error::RowNotFound) => {}
-            Err(e) => return Err(DatabaseError::query(&sql, e)),
+            Err(e) => return Err(DatabaseError::query(sql.as_str(), e)),
         }
     }
 
@@ -282,7 +282,7 @@ pub async fn update_metadata(
         ));
     }
 
-    let mut builder = sqlx::QueryBuilder::new("UPDATE machine_skus SET ".to_string());
+    let mut builder = sqlx::QueryBuilder::new("UPDATE machine_skus SET ");
     if let Some(description) = description {
         builder.push(" description = ");
         builder.push_bind(description);
@@ -482,11 +482,11 @@ fn memory_components_from_hardware_info(
             total_mem = total_mem.saturating_add((cap as u64).saturating_mul(mem.count as u64));
             let key = (mem.mem_type.clone().unwrap_or_default(), cap);
             mem_components
-                .entry(key.clone())
+                .entry(key)
                 .and_modify(|entry| entry.count = entry.count.saturating_add(mem.count))
-                .or_insert(SkuComponentMemory {
+                .or_insert_with_key(|key| SkuComponentMemory {
                     capacity_mb: key.1,
-                    memory_type: key.0,
+                    memory_type: key.0.clone(),
                     count: mem.count,
                 });
         }
@@ -541,13 +541,12 @@ pub async fn generate_sku_from_machine_at_version_0_or_1(
 
     let mut gpu_components: BTreeMap<(String, String), SkuComponentGpu> = BTreeMap::default();
     for gpu in &hardware_info.gpus {
-        let vendor = "NVIDIA".to_string();
         let key = (gpu.name.clone(), gpu.total_memory.clone());
         gpu_components
             .entry(key)
             .and_modify(|entry| entry.count = entry.count.saturating_add(1))
-            .or_insert(SkuComponentGpu {
-                vendor,
+            .or_insert_with(|| SkuComponentGpu {
+                vendor: "NVIDIA".to_string(),
                 model: gpu.name.clone(),
                 count: 1,
                 total_memory: gpu.total_memory.clone(),
@@ -592,7 +591,7 @@ pub async fn generate_sku_from_machine_at_version_0_or_1(
             storage
                 .entry(block_device.model.clone())
                 .and_modify(|s| s.count += 1)
-                .or_insert(SkuComponentStorage {
+                .or_insert_with(|| SkuComponentStorage {
                     model: block_device.model.clone(),
                     count: 1,
                     min_size_mb: None,
@@ -672,7 +671,7 @@ pub fn generate_base_sku_from_hardware(
         .gpu
         .into_iter()
         .map(|g| SkuComponentGpu {
-            vendor: g.vendor.unwrap_or("NVIDIA".to_owned()),
+            vendor: g.vendor.unwrap_or_else(|| "NVIDIA".to_owned()),
             model: g.name,
             total_memory: g.memory_capacity.unwrap_or_default(),
             count: g.count,
@@ -767,7 +766,7 @@ pub async fn generate_sku_from_machine_at_version_2(
         storage
             .entry(s.model.clone())
             .and_modify(|s| s.count += 1)
-            .or_insert(SkuComponentStorage {
+            .or_insert_with(|| SkuComponentStorage {
                 model: s.model.clone(),
                 count: 1,
                 min_size_mb: None,
@@ -820,7 +819,7 @@ pub async fn generate_sku_from_machine_at_version_3(
         storage
             .entry(nvme.model.clone())
             .and_modify(|s| s.count += 1)
-            .or_insert(SkuComponentStorage {
+            .or_insert_with(|| SkuComponentStorage {
                 model: nvme.model.clone(),
                 count: 1,
                 min_size_mb: None,
@@ -872,7 +871,7 @@ pub async fn generate_sku_from_machine_at_version_4(
         storage
             .entry(nvme.model.clone())
             .and_modify(|s| s.count += 1)
-            .or_insert(SkuComponentStorage {
+            .or_insert_with(|| SkuComponentStorage {
                 model: nvme.model.clone(),
                 count: 1,
                 min_size_mb: None,

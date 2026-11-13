@@ -190,6 +190,6 @@ mod duration_str_serde {
     }
 
     pub(super) fn serialize<S: Serializer>(d: &Duration, s: S) -> Result<S::Ok, S::Error> {
-        s.serialize_str(&format!("{}ms", d.as_millis()))
+        s.collect_str(&format_args!("{}ms", d.as_millis()))
     }
 }

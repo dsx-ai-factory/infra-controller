@@ -107,12 +107,12 @@ fn class_field(preferred: Option<&str>, fallback: Option<&str>, absent: &str) ->
 /// Lowercases and joins the alphanumeric runs with `-`, which collapses every
 /// other character and drops leading and trailing separators.
 fn normalize_class_field(value: &str) -> String {
-    value
+    let mut normalized = value
         .split(|character: char| !character.is_ascii_alphanumeric())
         .filter(|run| !run.is_empty())
-        .map(str::to_ascii_lowercase)
-        .collect::<Vec<_>>()
-        .join("-")
+        .join("-");
+    normalized.make_ascii_lowercase();
+    normalized
 }
 
 /// How many explored endpoints carry one hardware class, or carry none.
@@ -323,7 +323,7 @@ impl EndpointExplorationReport {
             None if self.is_dpu() => self
                 .identify_dpu()
                 .map(|d| d.to_string())
-                .unwrap_or("unknown model".to_string()),
+                .unwrap_or_else(|| "unknown model".to_string()),
             None => match self.chassis.iter().find(|&x| x.model.is_some()) {
                 Some(chassis) => chassis.model.as_ref().unwrap().to_string(),
                 None => {
@@ -997,13 +997,13 @@ impl ExploredDpu {
                 .to_string(),
             firmware_version: inventory_map
                 .get("DPU_NIC")
-                .and_then(|value| value.version.as_ref())
-                .unwrap_or(&"".to_string())
+                .and_then(|value| value.version.as_deref())
+                .unwrap_or_default()
                 .to_string(),
             firmware_date: inventory_map
                 .get("DPU_NIC")
-                .and_then(|value| value.release_date.as_ref())
-                .unwrap_or(&"".to_string())
+                .and_then(|value| value.release_date.as_deref())
+                .unwrap_or_default()
                 .to_string(),
             ..Default::default()
         };
@@ -1059,7 +1059,7 @@ mod serialize_option_display {
     use std::fmt::Display;
     use std::str::FromStr;
 
-    use serde::{Deserialize, Deserializer, Serializer, de};
+    use serde::{Deserializer, Serializer, de};
 
     pub(super) fn serialize<T, S>(value: &Option<T>, serializer: S) -> Result<S::Ok, S::Error>
     where
@@ -1067,6 +1067,8 @@ mod serialize_option_display {
         S: Serializer,
     {
         match value {
+            // MacAddress's Display ignores formatter errors; preformat so
+            // serializer write failures are still returned to the caller.
             Some(value) => serializer.serialize_str(&value.to_string()),
             None => serializer.serialize_none(),
         }
@@ -1078,11 +1080,36 @@ mod serialize_option_display {
         T::Err: Display,
         D: Deserializer<'de>,
     {
-        let value: Option<String> = Option::deserialize(deserializer)?;
-        match value {
-            None => Ok(None),
-            Some(value) => Ok(Some(T::from_str(&value).map_err(de::Error::custom)?)),
+        struct OptionVisitor<T>(std::marker::PhantomData<T>);
+
+        impl<'de, T> de::Visitor<'de> for OptionVisitor<T>
+        where
+            T: FromStr,
+            T::Err: Display,
+        {
+            type Value = Option<T>;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                formatter.write_str("option")
+            }
+
+            fn visit_none<E: de::Error>(self) -> Result<Self::Value, E> {
+                Ok(None)
+            }
+
+            fn visit_unit<E: de::Error>(self) -> Result<Self::Value, E> {
+                Ok(None)
+            }
+
+            fn visit_some<D: Deserializer<'de>>(
+                self,
+                deserializer: D,
+            ) -> Result<Self::Value, D::Error> {
+                crate::deserialize_from_str(deserializer).map(Some)
+            }
         }
+
+        deserializer.deserialize_option(OptionVisitor(std::marker::PhantomData))
     }
 }
 
@@ -1371,17 +1398,17 @@ impl EndpointExplorationReport {
     /// enough data for generation is available
     pub fn generate_power_shelf_id(&mut self) -> ModelResult<Option<&PowerShelfId>> {
         let chassis = self.chassis.first().unwrap();
-        let serial_number = chassis.serial_number.clone().unwrap_or("".to_string());
-        let manufacturer = chassis.manufacturer.clone().unwrap_or("".to_string());
-        let model = chassis.model.clone().unwrap_or("".to_string());
+        let serial_number = chassis.serial_number.as_deref().unwrap_or_default();
+        let manufacturer = chassis.manufacturer.as_deref().unwrap_or_default();
+        let model = chassis.model.as_deref().unwrap_or_default();
 
         let power_shelf_type = PowerShelfType::Rack; //TODO Check later if we need to support other types
         let power_shelf_source = PowerShelfIdSource::ProductBoardChassisSerial;
 
         let power_shelf_id = power_shelf_id::from_hardware_info_with_type(
-            serial_number.as_str(),
-            manufacturer.as_str(),
-            model.as_str(),
+            serial_number,
+            manufacturer,
+            model,
             power_shelf_source,
             power_shelf_type,
         )
@@ -1439,18 +1466,18 @@ impl EndpointExplorationReport {
             HardwareInfoError::MissingHardwareInfo(MissingHardwareInfo::Serial),
         ))?;
 
-        let serial_number = chassis.serial_number.clone();
-        let manufacturer = chassis.manufacturer.clone().unwrap_or("NVIDIA".to_string());
-        let model = "Switch".to_string();
+        let serial_number = chassis.serial_number.as_deref();
+        let manufacturer = chassis.manufacturer.as_deref().unwrap_or("NVIDIA");
+        let model = "Switch";
 
-        if let Some(serial_number) = serial_number.as_ref() {
+        if let Some(serial_number) = serial_number {
             let switch_type = SwitchType::NvLink;
             let switch_source = SwitchIdSource::ProductBoardChassisSerial;
 
             let switch_id = switch_id::from_hardware_info_with_type(
-                serial_number.as_str(),
-                manufacturer.as_str(),
-                model.as_str(),
+                serial_number,
+                manufacturer,
+                model,
                 switch_source,
                 switch_type,
             )
@@ -1538,8 +1565,8 @@ impl EndpointExplorationReport {
                 // "FW_BMC_0". Both ids are unique per report, so `find` selects
                 // the single BMC firmware entry unambiguously.
                 .find(|s| s.0.contains("BMC_Firmware") || s.0.ends_with("BlueField_FW_BMC_0"))
-                .and_then(|value| value.1.version.as_ref())
-                .unwrap_or(&"0".to_string())
+                .and_then(|value| value.1.version.as_deref())
+                .unwrap_or("0")
                 .to_lowercase()
                 .replace("bf-", "")
                 .replace("bf4-", ""),
@@ -4822,6 +4849,13 @@ mod tests {
             serde_json::from_str::<ExploredManagedHost>(&serialized).unwrap(),
             host
         );
+        assert_eq!(
+            serde_json::from_str::<ExploredManagedHost>(
+                r#"{"HostBmcIp":"1.2.3.4","Dpus":[{"BmcIp":"1.2.3.5"}]}"#,
+            )
+            .unwrap(),
+            host
+        );
     }
 
     #[test]
@@ -5149,7 +5183,7 @@ mod tests {
         ));
         let info = serde_json::from_slice::<HardwareInfo>(data).unwrap();
         let hardware_info_machine_id = from_hardware_info(&info).unwrap();
-        assert_eq!(hardware_info_machine_id.to_string(), machine_id.to_string());
+        assert_eq!(hardware_info_machine_id, machine_id);
 
         // Check the MachineId serialization and deserialization
         let serialized = serde_json::to_string(&report).unwrap();

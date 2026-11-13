@@ -98,7 +98,7 @@ pub async fn find_by_object_ids(
     qb.push(" (");
     let mut separated = qb.separated(", ");
     for id in ids {
-        separated.push_bind(id.to_string());
+        separated.push_bind(sqlx::types::Text(id));
     }
     qb.push(")");
 
@@ -183,7 +183,7 @@ pub async fn persist(
         HealthHistoryTableId::Rack => persist_query!("rack_health_history"),
     };
     let _query_result = sqlx::query(query)
-        .bind(object_id.to_string())
+        .bind(sqlx::types::Text(object_id))
         .bind(sqlx::types::Json(health))
         .bind(health_hash)
         .bind(chrono::Utc::now())
@@ -216,8 +216,8 @@ pub async fn update_object_ids(
         HealthHistoryTableId::Rack => update_object_ids_query!("rack_health_history"),
     };
     sqlx::query(query)
-        .bind(new_object_id.to_string())
-        .bind(old_object_id.to_string())
+        .bind(sqlx::types::Text(new_object_id))
+        .bind(sqlx::types::Text(old_object_id))
         .execute(txn)
         .await
         .map_err(|e| DatabaseError::query(query, e))?;

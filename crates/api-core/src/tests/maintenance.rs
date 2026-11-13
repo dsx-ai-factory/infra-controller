@@ -323,7 +323,7 @@ async fn ending_maintenance(
         sqlx::query_scalar::<_, i64>(
             "SELECT count(*) FROM machine_state_controller_queued_objects WHERE object_id = $1",
         )
-        .bind(host_id.to_string())
+        .bind(host_id)
         .fetch_one(&env.pool)
         .await
     };
@@ -344,7 +344,7 @@ async fn ending_maintenance(
         "starting maintenance must not touch the boot configuration",
     );
     sqlx::query("DELETE FROM machine_state_controller_queued_objects WHERE object_id = $1")
-        .bind(host_id.to_string())
+        .bind(host_id)
         .execute(&env.pool)
         .await?;
 

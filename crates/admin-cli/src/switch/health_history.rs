@@ -42,6 +42,6 @@ impl Run for Args {
             .api_client
             .get_switch_health_history(self.switch_id)
             .await?;
-        display_health_history(&self.switch_id.to_string(), history, ctx.config.format)
+        display_health_history(self.switch_id, history, ctx.config.format)
     }
 }

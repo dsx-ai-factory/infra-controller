@@ -262,7 +262,7 @@ async fn clear_scout_test_queue(
     host_machine_id: StableHostMachineId,
 ) -> Result<(), sqlx::Error> {
     sqlx::query("DELETE FROM machine_state_controller_queued_objects WHERE object_id = $1")
-        .bind(host_machine_id.to_string())
+        .bind(host_machine_id)
         .execute(pool)
         .await?;
     Ok(())
@@ -2221,7 +2221,7 @@ async fn test_dpu_discovery_rolls_back_when_a_new_group_member_is_busy(
             "SELECT count(*) FROM resource_pool_allocations WHERE pool_name = $1 AND owner_id = $2",
         )
         .bind(LOOPBACK_IP_V6)
-        .bind(target_id.to_string())
+        .bind(target_id)
         .fetch_one(&env.pool)
         .await?;
         let mut probe = env.pool.txn_begin().await?;

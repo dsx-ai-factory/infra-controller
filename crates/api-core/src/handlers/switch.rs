@@ -25,6 +25,7 @@ use carbide_uuid::switch::SwitchId;
 use db::db_read::DbReader;
 use db::{ObjectColumnFilter, switch as db_switch};
 use health_report::HealthReportApplyMode;
+use itertools::Itertools;
 use mac_address::MacAddress;
 use model::bmc_suppression::BmcSuppressionSubsystem;
 use model::metadata::Metadata;
@@ -418,9 +419,9 @@ pub(crate) async fn decommission_switch(
         if !assigned_hosts.is_empty() {
             let assignments = assigned_hosts
                 .iter()
-                .map(|(machine_id, instance_id)| format!("{machine_id} ({instance_id})"))
-                .collect::<Vec<_>>()
-                .join(", ");
+                .format_with(", ", |(machine_id, instance_id), f| {
+                    f(&format_args!("{machine_id} ({instance_id})"))
+                });
             return Err(CarbideError::FailedPrecondition(format!(
                 "switch {switch_id} cannot be decommissioned while managed hosts in rack {rack_id} are assigned to instances: {assignments}"
             ))

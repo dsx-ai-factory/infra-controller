@@ -1602,7 +1602,13 @@ fn guids_by_device(machine: &rpc::forge::Machine) -> HashMap<String, Vec<String>
         .unwrap()
         .infiniband_interfaces
         .clone();
-    ib_ifaces.sort_by_key(|iface| iface.pci_properties.as_ref().unwrap().slot().to_string());
+    ib_ifaces.sort_by(|left, right| {
+        left.pci_properties
+            .as_ref()
+            .unwrap()
+            .slot()
+            .cmp(right.pci_properties.as_ref().unwrap().slot())
+    });
 
     let mut guids: HashMap<String, Vec<String>> = HashMap::new();
     for iface in ib_ifaces.iter() {

@@ -24,6 +24,7 @@ use std::collections::HashMap;
 
 use carbide_uuid::machine::MachineId;
 use carbide_uuid::measured_boot::MeasurementSystemProfileId;
+use itertools::Itertools;
 use measured_boot::profile::MeasurementSystemProfile;
 use measured_boot::records::{MeasurementSystemProfileAttrRecord, MeasurementSystemProfileRecord};
 use sqlx::PgConnection;
@@ -295,8 +296,7 @@ pub async fn create_measurement_profile(
                     },
                     sqlx::error::ErrorKind::NotNullViolation => DatabaseError::internal(format!(
                         "system profile missing not null value: {} (msg: {})",
-                        profile_name.clone(),
-                        db_err
+                        profile_name, db_err
                     )),
                     _ => DatabaseError::new("MeasurementSystemProfile.new db_err", sqlx_err),
                 },
@@ -420,9 +420,8 @@ fn attr_map_to_string(attr_map: &HashMap<String, String>) -> String {
     attr_tuples.sort_by_key(|&(key, _)| key);
     attr_tuples
         .into_iter()
-        .map(|(key, val)| format!("{key}:{val}"))
-        .collect::<Vec<_>>()
-        .join(",")
+        .format_with(",", |(key, val), f| f(&format_args!("{key}:{val}")))
+        .to_string()
 }
 
 /// attr_records_to_string returns a consistent (sorted by key)

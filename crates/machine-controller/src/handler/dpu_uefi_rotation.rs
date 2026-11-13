@@ -221,7 +221,7 @@ pub(crate) async fn handle_rotating_dpu_uefi(
         .status
         .bmc_info
         .mac
-        .ok_or(StateHandlerError::MissingData {
+        .ok_or_else(|| StateHandlerError::MissingData {
             object_id: dpu.id.to_string(),
             missing: "bmc_mac",
         })?;

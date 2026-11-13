@@ -195,31 +195,29 @@ pub(super) fn component_manager_error_to_status(err: ComponentManagerError) -> S
 }
 
 fn make_result(
-    id: &str,
+    id: impl Into<String>,
     status: rpc::ComponentManagerStatusCode,
     error: Option<String>,
 ) -> rpc::ComponentResult {
     rpc::ComponentResult {
-        component_id: Some(id.to_owned()),
+        component_id: Some(id.into()),
         status: status as i32,
         error: error.unwrap_or_default(),
         mac_address: None,
     }
 }
 
-fn success_result(id: &str) -> rpc::ComponentResult {
+fn success_result(id: impl Into<String>) -> rpc::ComponentResult {
     make_result(id, rpc::ComponentManagerStatusCode::Success, None)
 }
 
-fn not_found_result(id: &str) -> rpc::ComponentResult {
-    make_result(
-        id,
-        rpc::ComponentManagerStatusCode::NotFound,
-        Some(format!("no explored endpoint found for {id}")),
-    )
+fn not_found_result(id: impl Into<String>) -> rpc::ComponentResult {
+    let id = id.into();
+    let error = format!("no explored endpoint found for {id}");
+    make_result(id, rpc::ComponentManagerStatusCode::NotFound, Some(error))
 }
 
-fn error_result(id: &str, error: String) -> rpc::ComponentResult {
+fn error_result(id: impl Into<String>, error: String) -> rpc::ComponentResult {
     make_result(
         id,
         rpc::ComponentManagerStatusCode::InternalError,
@@ -242,7 +240,7 @@ fn component_status_code_for(code: Code) -> rpc::ComponentManagerStatusCode {
     }
 }
 
-fn status_result(id: &str, status: Status) -> rpc::ComponentResult {
+fn status_result(id: impl Into<String>, status: Status) -> rpc::ComponentResult {
     make_result(
         id,
         component_status_code_for(status.code()),
@@ -266,7 +264,10 @@ fn component_manager_error_to_result(
     result
 }
 
-fn not_found_component_result(id: &str, message: impl Into<String>) -> rpc::ComponentResult {
+fn not_found_component_result(
+    id: impl Into<String>,
+    message: impl Into<String>,
+) -> rpc::ComponentResult {
     make_result(
         id,
         rpc::ComponentManagerStatusCode::NotFound,
@@ -455,9 +456,9 @@ fn rack_firmware_status(rack: &model::rack::Rack) -> rpc::FirmwareUpdateStatus {
             || "firmware upgrade failed".to_owned(),
             |job| rack_firmware_failure_summary(rack, job),
         );
-        error_result(rack.id.as_ref(), summary)
+        error_result(rack.id.as_str(), summary)
     } else {
-        success_result(rack.id.as_ref())
+        success_result(rack.id.as_str())
     };
 
     rpc::FirmwareUpdateStatus {
@@ -476,19 +477,19 @@ fn persisted_firmware_status(
     let (state, result) = match &status.status {
         model::rack::RackFirmwareUpgradeState::Started => (
             rpc::FirmwareUpdateState::FwStateQueued,
-            success_result(&component_id),
+            success_result(component_id),
         ),
         model::rack::RackFirmwareUpgradeState::InProgress => (
             rpc::FirmwareUpdateState::FwStateInProgress,
-            success_result(&component_id),
+            success_result(component_id),
         ),
         model::rack::RackFirmwareUpgradeState::Completed => (
             rpc::FirmwareUpdateState::FwStateCompleted,
-            success_result(&component_id),
+            success_result(component_id),
         ),
         model::rack::RackFirmwareUpgradeState::Failed { cause } => (
             rpc::FirmwareUpdateState::FwStateFailed,
-            error_result(&component_id, cause.clone()),
+            error_result(component_id, cause.clone()),
         ),
     };
 
@@ -512,7 +513,7 @@ fn queued_firmware_status(
     requested_at: Option<chrono::DateTime<chrono::Utc>>,
 ) -> rpc::FirmwareUpdateStatus {
     rpc::FirmwareUpdateStatus {
-        result: Some(success_result(&switch_id.to_string())),
+        result: Some(success_result(switch_id.to_string())),
         state: rpc::FirmwareUpdateState::FwStateQueued as i32,
         target_version: String::new(),
         updated_at: requested_at.map(Into::into),
@@ -628,19 +629,19 @@ fn select_persisted_switch_firmware_status(
                         let (state, result) = match &s.status {
                             NvosState::Started => (
                                 rpc::FirmwareUpdateState::FwStateQueued,
-                                success_result(&switch_id.to_string()),
+                                success_result(switch_id.to_string()),
                             ),
                             NvosState::InProgress => (
                                 rpc::FirmwareUpdateState::FwStateInProgress,
-                                success_result(&switch_id.to_string()),
+                                success_result(switch_id.to_string()),
                             ),
                             NvosState::Completed => (
                                 rpc::FirmwareUpdateState::FwStateCompleted,
-                                success_result(&switch_id.to_string()),
+                                success_result(switch_id.to_string()),
                             ),
                             NvosState::Failed { cause } => (
                                 rpc::FirmwareUpdateState::FwStateFailed,
-                                error_result(&switch_id.to_string(), cause.clone()),
+                                error_result(switch_id.to_string(), cause.clone()),
                             ),
                         };
                         rpc::FirmwareUpdateStatus {
@@ -697,7 +698,7 @@ fn select_persisted_switch_firmware_status(
             .map(|r| r.error.as_str())
             .collect::<Vec<_>>()
             .join("; ");
-        status.result = Some(error_result(&switch_id.to_string(), error));
+        status.result = Some(error_result(switch_id.to_string(), error));
     }
     if let Some(version) = &request.target_version {
         status.target_version.clone_from(version);
@@ -744,7 +745,7 @@ fn retained_rack_switch_firmware_status(
 fn untracked_switch_firmware_status(switch_id: SwitchId) -> rpc::FirmwareUpdateStatus {
     rpc::FirmwareUpdateStatus {
         result: Some(error_result(
-            &switch_id.to_string(),
+            switch_id.to_string(),
             UNTRACKED_SWITCH_FIRMWARE_ERROR.into(),
         )),
         state: rpc::FirmwareUpdateState::FwStateUnknown as i32,
@@ -834,7 +835,7 @@ async fn switch_firmware_statuses(
                 .remove(&unresolved.id)
                 .unwrap_or_else(|| rpc::FirmwareUpdateStatus {
                     result: Some(error_result(
-                        &unresolved.id.to_string(),
+                        unresolved.id.to_string(),
                         unresolved.reason.clone(),
                     )),
                     state: rpc::FirmwareUpdateState::FwStateUnknown as i32,
@@ -862,9 +863,9 @@ async fn switch_firmware_statuses(
             let id = switch_mac_to_id_str(&s.bmc_mac, &endpoints.resolved.mac_to_id);
             rpc::FirmwareUpdateStatus {
                 result: Some(if s.error.is_none() {
-                    success_result(&id)
+                    success_result(id)
                 } else {
-                    error_result(&id, s.error.unwrap_or_default())
+                    error_result(id, s.error.unwrap_or_default())
                 }),
                 state: map_fw_state(s.state),
                 target_version: s.target_version,
@@ -979,7 +980,7 @@ async fn queue_switch_power_control_via_state_controller(
         Err(reason) => {
             return Ok(switch_ids
                 .iter()
-                .map(|id| error_result(&id.to_string(), reason.to_string()))
+                .map(|id| error_result(id.to_string(), reason.to_string()))
                 .collect());
         }
     };
@@ -1012,8 +1013,8 @@ fn switch_maintenance_request_result_to_component_result(
     result: &SwitchMaintenanceRequestResult,
 ) -> rpc::ComponentResult {
     match &result.error {
-        Some(error) => error_result(&result.switch_id.to_string(), error.clone()),
-        None => success_result(&result.switch_id.to_string()),
+        Some(error) => error_result(result.switch_id.to_string(), error.clone()),
+        None => success_result(result.switch_id.to_string()),
     }
 }
 
@@ -1053,8 +1054,8 @@ fn machine_maintenance_request_result_to_component_result(
     result: &component_manager::component_manager::MachineMaintenanceRequestResult,
 ) -> rpc::ComponentResult {
     match &result.error {
-        Some(error) => error_result(&result.machine_id.to_string(), error.clone()),
-        None => success_result(&result.machine_id.to_string()),
+        Some(error) => error_result(result.machine_id.to_string(), error.clone()),
+        None => success_result(result.machine_id.to_string()),
     }
 }
 
@@ -1068,7 +1069,7 @@ async fn queue_power_shelf_power_control_via_state_controller(
         Err(reason) => {
             return Ok(power_shelf_ids
                 .iter()
-                .map(|id| error_result(&id.to_string(), reason.to_string()))
+                .map(|id| error_result(id.to_string(), reason.to_string()))
                 .collect());
         }
     };
@@ -1094,13 +1095,13 @@ async fn queue_power_shelf_maintenance_via_state_controller(
 
     for power_shelf_id in power_shelf_ids {
         let Some(power_shelf) = by_id.get(power_shelf_id) else {
-            results.push(not_found_result(&power_shelf_id.to_string()));
+            results.push(not_found_result(power_shelf_id.to_string()));
             continue;
         };
 
         if power_shelf.is_marked_as_deleted() {
             results.push(error_result(
-                &power_shelf_id.to_string(),
+                power_shelf_id.to_string(),
                 format!("power shelf {power_shelf_id} is marked for deletion"),
             ));
             continue;
@@ -1115,7 +1116,7 @@ async fn queue_power_shelf_maintenance_via_state_controller(
         .await
         .map_err(CarbideError::from)?;
 
-        results.push(success_result(&power_shelf_id.to_string()));
+        results.push(success_result(power_shelf_id.to_string()));
     }
 
     txn.commit().await?;
@@ -1435,8 +1436,8 @@ async fn schedule_host_reprovisioning_firmware_update(
     let mut results = Vec::with_capacity(machine_ids.len());
     for machine_id in machine_ids {
         match schedule_one_host_reprovisioning_firmware_update(api, machine_id).await {
-            Ok(()) => results.push(success_result(&machine_id.to_string())),
-            Err(error) => results.push(error_result(&machine_id.to_string(), error)),
+            Ok(()) => results.push(success_result(machine_id.to_string())),
+            Err(error) => results.push(error_result(machine_id.to_string(), error)),
         }
     }
     results
@@ -1653,10 +1654,10 @@ async fn submit_rack_firmware_maintenance_requests(
         });
 
         match crate::handlers::rack::on_demand_rack_maintenance(api, maintenance_req).await {
-            Ok(_) => results.extend(affected_ids.iter().map(|id| success_result(id))),
+            Ok(_) => results.extend(affected_ids.into_iter().map(success_result)),
             Err(status) => results.extend(
                 affected_ids
-                    .iter()
+                    .into_iter()
                     .map(|id| status_result(id, status.clone())),
             ),
         }
@@ -1740,7 +1741,7 @@ fn unresolved_firmware_statuses<Id: std::fmt::Display>(
     unresolved: &[UnresolvedDevice<Id>],
 ) -> impl Iterator<Item = rpc::FirmwareUpdateStatus> + '_ {
     unresolved.iter().map(|u| rpc::FirmwareUpdateStatus {
-        result: Some(error_result(&u.id.to_string(), u.reason.clone())),
+        result: Some(error_result(u.id.to_string(), u.reason.clone())),
         state: rpc::FirmwareUpdateState::FwStateUnknown as i32,
         target_version: String::new(),
         updated_at: None,
@@ -2961,11 +2962,12 @@ fn machine_firmware_failure_reason(machine: &HostMachine) -> Option<String> {
 /// (or still verifying while the host reprovisions). Otherwise status is
 /// inferred from `update_complete` and the machine's reprovision state.
 fn derive_machine_firmware_update_status(
-    machine_id: &str,
+    machine_id: impl Into<String>,
     machine: Option<&HostMachine>,
     actual_firmware: Option<&HashMap<String, String>>,
     desired_entries: &[rpc::DesiredFirmwareVersionEntry],
 ) -> rpc::FirmwareUpdateStatus {
+    let machine_id = machine_id.into();
     let Some(machine) = machine else {
         return rpc::FirmwareUpdateStatus {
             result: Some(error_result(
@@ -3099,7 +3101,7 @@ async fn machine_firmware_statuses(
         .iter()
         .map(|machine_id| {
             derive_machine_firmware_update_status(
-                &machine_id.to_string(),
+                machine_id.to_string(),
                 machine_by_id.get(machine_id),
                 actual_firmware_by_machine.get(machine_id),
                 &desired_entries,
@@ -3124,9 +3126,9 @@ fn map_compute_tray_firmware_status(
         .unwrap_or_else(|| s.bmc_ip.to_string());
     rpc::FirmwareUpdateStatus {
         result: Some(if s.error.is_none() {
-            success_result(&id)
+            success_result(id)
         } else {
-            error_result(&id, s.error.unwrap_or_default())
+            error_result(id, s.error.unwrap_or_default())
         }),
         state: map_fw_state(s.state),
         target_version: s.target_version,
@@ -3269,7 +3271,7 @@ async fn power_control_ingested_machine_ids(
                 // Preserve the tonic status code (NotFound for an unknown
                 // id) in the per-machine result instead of flattening it to
                 // InternalError.
-                results.push(status_result(&machine_id.to_string(), status));
+                results.push(status_result(machine_id.to_string(), status));
                 continue;
             }
         };
@@ -3298,7 +3300,7 @@ async fn power_control_ingested_machine_ids(
                 }
                 Err(e) => {
                     results.push(error_result(
-                        &machine_id.to_string(),
+                        machine_id.to_string(),
                         format!("failed to update power option: {e}"),
                     ));
                     false
@@ -3403,7 +3405,7 @@ async fn power_control_switch_ids(
         let mut results: Vec<_> = endpoints
             .unresolved
             .iter()
-            .map(|u| error_result(&u.id.to_string(), u.reason.clone()))
+            .map(|u| error_result(u.id.to_string(), u.reason.clone()))
             .collect();
 
         tracing::info!(
@@ -3420,10 +3422,10 @@ async fn power_control_switch_ids(
         results.extend(backend_results.into_iter().map(|r| {
             let id = switch_mac_to_id_str(&r.bmc_mac, &endpoints.resolved.mac_to_id);
             if r.success {
-                success_result(&id)
+                success_result(id)
             } else {
                 error_result(
-                    &id,
+                    id,
                     r.error.map(|error| error.to_string()).unwrap_or_default(),
                 )
             }
@@ -3462,7 +3464,7 @@ async fn power_control_power_shelf_ids(
         let mut results: Vec<_> = endpoints
             .unresolved
             .iter()
-            .map(|u| error_result(&u.id.to_string(), u.reason.clone()))
+            .map(|u| error_result(u.id.to_string(), u.reason.clone()))
             .collect();
 
         tracing::info!(
@@ -3479,9 +3481,9 @@ async fn power_control_power_shelf_ids(
         results.extend(backend_results.into_iter().map(|r| {
             let id = ps_mac_to_id_str(&r.pmc_mac, &endpoints.resolved.mac_to_id);
             if r.success {
-                success_result(&id)
+                success_result(id)
             } else {
-                error_result(&id, r.error.unwrap_or_default())
+                error_result(id, r.error.unwrap_or_default())
             }
         }));
 
@@ -3826,7 +3828,7 @@ fn partition_error_results(
 ) -> Vec<rpc::ComponentResult> {
     machine_ids
         .iter()
-        .map(|id| status_result(&id.to_string(), status.clone()))
+        .map(|id| status_result(id.to_string(), status.clone()))
         .collect()
 }
 
@@ -3852,7 +3854,7 @@ async fn dispatch_compute_tray_power_control(
     let mut results: Vec<rpc::ComponentResult> = resolved
         .unresolved
         .iter()
-        .map(|u| error_result(&u.id.to_string(), u.reason.clone()))
+        .map(|u| error_result(u.id.to_string(), u.reason.clone()))
         .collect();
 
     tracing::info!(
@@ -3881,9 +3883,9 @@ async fn dispatch_compute_tray_power_control(
             .map(|id| id.to_string())
             .unwrap_or_else(|| r.bmc_ip.to_string());
         if r.success {
-            success_result(&id)
+            success_result(id)
         } else {
-            error_result(&id, r.error.unwrap_or_default())
+            error_result(id, r.error.unwrap_or_default())
         }
     }));
 
@@ -4168,7 +4170,7 @@ async fn component_reset_inner(
                         endpoints.push(endpoint);
                     }
                     Err(error) => {
-                        target_resolutions.push(Err(status_result(&id.to_string(), error)))
+                        target_resolutions.push(Err(status_result(id.to_string(), error)))
                     }
                 }
             }
@@ -4333,7 +4335,7 @@ pub(crate) async fn get_component_reset_status(
                     component_reset_status_identity_by_id(api, id)
                         .await
                         .map(|mac| (mac, Some(id)))
-                        .map_err(|error| status_result(&id.to_string(), error)),
+                        .map_err(|error| status_result(id.to_string(), error)),
                 );
             }
         }
@@ -4437,7 +4439,7 @@ async fn component_configure_switch_certificate_inner(
     let mut results: Vec<_> = endpoints
         .unresolved
         .iter()
-        .map(|u| error_result(&u.id.to_string(), u.reason.clone()))
+        .map(|u| error_result(u.id.to_string(), u.reason.clone()))
         .collect();
 
     tracing::info!(
@@ -4463,10 +4465,10 @@ async fn component_configure_switch_certificate_inner(
         {
             Ok(job_id) => {
                 tracing::info!(switch_id = %id, %job_id, "started switch certificate configuration");
-                results.push(success_result(&id));
+                results.push(success_result(id));
             }
             Err(status) => {
-                results.push(error_result(&id, status.message().to_string()));
+                results.push(error_result(id, status.message().to_string()));
             }
         }
     }
@@ -4910,7 +4912,7 @@ async fn update_switch_firmware_by_ids(
         let mut results: Vec<_> = endpoints
             .unresolved
             .iter()
-            .map(|u| error_result(&u.id.to_string(), u.reason.clone()))
+            .map(|u| error_result(u.id.to_string(), u.reason.clone()))
             .collect();
 
         let backend_results = cm
@@ -4926,10 +4928,10 @@ async fn update_switch_firmware_by_ids(
         results.extend(backend_results.into_iter().map(|r| {
             let id = switch_mac_to_id_str(&r.bmc_mac, &endpoints.resolved.mac_to_id);
             if r.success {
-                success_result(&id)
+                success_result(id)
             } else {
                 error_result(
-                    &id,
+                    id,
                     r.error.map(|error| error.to_string()).unwrap_or_default(),
                 )
             }
@@ -5216,7 +5218,7 @@ async fn update_power_shelf_firmware_by_ids(
         let mut results: Vec<_> = endpoints
             .unresolved
             .iter()
-            .map(|u| error_result(&u.id.to_string(), u.reason.clone()))
+            .map(|u| error_result(u.id.to_string(), u.reason.clone()))
             .collect();
 
         let backend_results = cm
@@ -5232,9 +5234,9 @@ async fn update_power_shelf_firmware_by_ids(
         results.extend(backend_results.into_iter().map(|r| {
             let id = ps_mac_to_id_str(&r.pmc_mac, &endpoints.resolved.mac_to_id);
             if r.success {
-                success_result(&id)
+                success_result(id)
             } else {
-                error_result(&id, r.error.unwrap_or_default())
+                error_result(id, r.error.unwrap_or_default())
             }
         }));
         Ok(results)
@@ -5672,8 +5674,8 @@ async fn update_component_firmware_inner(
 
                 match crate::handlers::rack::on_demand_rack_maintenance(api, maintenance_req).await
                 {
-                    Ok(_) => results.push(success_result(&rack_id_string)),
-                    Err(status) => results.push(status_result(&rack_id_string, status)),
+                    Ok(_) => results.push(success_result(rack_id_string)),
+                    Err(status) => results.push(status_result(rack_id_string, status)),
                 }
             }
             return Ok(Response::new(rpc::UpdateComponentFirmwareResponse {
@@ -5945,7 +5947,7 @@ async fn update_compute_tray_firmware_by_machine_ids(
                 resolved
                     .unresolved
                     .iter()
-                    .map(|u| error_result(&u.id.to_string(), u.reason.clone())),
+                    .map(|u| error_result(u.id.to_string(), u.reason.clone())),
             );
 
             let backend_results = cm
@@ -5966,9 +5968,9 @@ async fn update_compute_tray_firmware_by_machine_ids(
                     .map(|id| id.to_string())
                     .unwrap_or_else(|| r.bmc_ip.to_string());
                 if r.success {
-                    success_result(&id)
+                    success_result(id)
                 } else {
-                    error_result(&id, r.error.unwrap_or_default())
+                    error_result(id, r.error.unwrap_or_default())
                 }
             }));
         }
@@ -6196,9 +6198,9 @@ async fn power_shelf_firmware_statuses(
         let id = ps_mac_to_id_str(&s.pmc_mac, &endpoints.resolved.mac_to_id);
         rpc::FirmwareUpdateStatus {
             result: Some(if s.error.is_none() {
-                success_result(&id)
+                success_result(id)
             } else {
-                error_result(&id, s.error.unwrap_or_default())
+                error_result(id, s.error.unwrap_or_default())
             }),
             state: map_fw_state(s.state),
             target_version: s.target_version,
@@ -6306,7 +6308,7 @@ async fn rack_firmware_statuses(
             rack_by_id
                 .get(rack_id)
                 .map(rack_firmware_status)
-                .unwrap_or(rpc::FirmwareUpdateStatus {
+                .unwrap_or_else(|| rpc::FirmwareUpdateStatus {
                     result: Some(not_found_component_result(
                         rack_id.as_ref(),
                         format!("rack {rack_id} not found"),
@@ -6595,7 +6597,7 @@ async fn compute_tray_firmware_versions_by_machine_ids(
         .unresolved
         .iter()
         .map(|u| rpc::DeviceFirmwareVersions {
-            result: Some(error_result(&u.id.to_string(), u.reason.clone())),
+            result: Some(error_result(u.id.to_string(), u.reason.clone())),
             ..Default::default()
         })
         .collect();
@@ -6614,7 +6616,7 @@ async fn compute_tray_firmware_versions_by_machine_ids(
             .map(|id| id.to_string())
             .unwrap_or_else(|| ep.bmc_ip.to_string());
         devices.push(rpc::DeviceFirmwareVersions {
-            result: Some(success_result(&id)),
+            result: Some(success_result(id)),
             versions: versions.clone(),
             ..Default::default()
         });
@@ -6640,7 +6642,7 @@ async fn firmware_versions_switch_ids(
         .unresolved
         .iter()
         .map(|u| rpc::DeviceFirmwareVersions {
-            result: Some(error_result(&u.id.to_string(), u.reason.clone())),
+            result: Some(error_result(u.id.to_string(), u.reason.clone())),
             ..Default::default()
         })
         .collect();
@@ -6659,7 +6661,7 @@ async fn firmware_versions_switch_ids(
             .map(|id| id.to_string())
             .unwrap_or_default();
         devices.push(rpc::DeviceFirmwareVersions {
-            result: Some(success_result(&id)),
+            result: Some(success_result(id)),
             versions: versions.clone(),
             ..Default::default()
         });
@@ -6681,7 +6683,7 @@ async fn firmware_versions_power_shelf_ids(
         .unresolved
         .iter()
         .map(|u| rpc::DeviceFirmwareVersions {
-            result: Some(error_result(&u.id.to_string(), u.reason.clone())),
+            result: Some(error_result(u.id.to_string(), u.reason.clone())),
             ..Default::default()
         })
         .collect();
@@ -6700,9 +6702,9 @@ async fn firmware_versions_power_shelf_ids(
             .map(|id| id.to_string())
             .unwrap_or_default();
         let result = if let Some(err) = fv.error {
-            error_result(&id, err)
+            error_result(id, err)
         } else {
-            success_result(&id)
+            success_result(id)
         };
         devices.push(rpc::DeviceFirmwareVersions {
             result: Some(result),
@@ -7221,7 +7223,7 @@ mod tests {
             activities[0].activity.as_ref(),
             Some(rpc::maintenance_activity_config::Activity::FirmwareUpgrade(
                 activity
-            )) if activity.components == vec!["BMC".to_string()] && activity.force_update
+            )) if activity.components == ["BMC"] && activity.force_update
         ));
         assert!(matches!(
             activities[1].activity.as_ref(),
@@ -8464,7 +8466,7 @@ mod tests {
             id,
             reason: "BMC credentials unavailable: no BMC credentials found".into(),
         };
-        let r = error_result(&u.id.to_string(), u.reason);
+        let r = error_result(u.id.to_string(), u.reason);
         assert_eq!(r.component_id, Some(id.to_string()));
         assert_eq!(
             r.status,
@@ -8480,7 +8482,7 @@ mod tests {
             id,
             reason: "PMC credentials unavailable: no PMC credentials found".into(),
         };
-        let r = error_result(&u.id.to_string(), u.reason);
+        let r = error_result(u.id.to_string(), u.reason);
         assert_eq!(r.component_id, Some(id.to_string()));
         assert_eq!(
             r.status,
@@ -8842,14 +8844,14 @@ mod tests {
             let is_rack_scale = match machine_is_rack_scale(machines_by_id, machine_id) {
                 Ok(v) => v,
                 Err(status) => {
-                    results.push(status_result(&machine_id.to_string(), status));
+                    results.push(status_result(machine_id.to_string(), status));
                     continue;
                 }
             };
             let ok = power_option_ok.get(&machine_id).copied().unwrap_or(true);
             if !ok {
                 results.push(error_result(
-                    &machine_id.to_string(),
+                    machine_id.to_string(),
                     "failed to update power option: precondition".into(),
                 ));
                 continue;

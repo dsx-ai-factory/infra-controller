@@ -1429,7 +1429,7 @@ async fn resolve_dispatch_vendor(
             }
             Err(format!(
                 "probe BMC dispatch vendor: {}",
-                last_err.unwrap_or_else(|| "no credential candidates".to_string())
+                last_err.as_deref().unwrap_or("no credential candidates")
             ))
         }
     }

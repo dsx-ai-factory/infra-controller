@@ -318,7 +318,7 @@ pub trait BmcCredentialOps: RedfishClientPool + sealed::Sealed {
                 // A store read failure is the transient class: the
                 // operation never reached the device.
                 .map_err(|err| CredentialOpError::ClientCreation(err.into()))?
-                .unwrap_or(Credentials::UsernamePassword {
+                .unwrap_or_else(|| Credentials::UsernamePassword {
                     username: "".to_string(),
                     password: "bluefield".to_string(),
                 });
