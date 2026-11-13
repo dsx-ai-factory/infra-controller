@@ -2654,6 +2654,7 @@ async fn initialize_and_start_controllers<'a>(
         meter.clone(),
         work_lock_manager_handle.clone(),
         dpf_sdk.clone(),
+        api_service.instrumentation.clone(),
     )
     .start(join_set, cancel_token.clone())?;
 
