@@ -323,6 +323,10 @@ async fn show(
     (StatusCode::OK, Html(tmpl.render().unwrap())).into_response()
 }
 
+#[expect(
+    clippy::result_large_err,
+    reason = "page-loading failures carry HTTP responses returned directly to Axum"
+)]
 async fn fetch_machine(
     api: &Api,
     machine_id: MachineId,
@@ -366,6 +370,10 @@ async fn fetch_machine(
 }
 
 /// Fetches Instance Type Names for the given Instance Type IDs
+#[expect(
+    clippy::result_large_err,
+    reason = "page-loading failures carry HTTP responses returned directly to Axum"
+)]
 async fn fetch_instance_type_names(
     api: &Api,
     instance_type_ids: Vec<String>,
