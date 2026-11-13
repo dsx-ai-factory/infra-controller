@@ -229,7 +229,7 @@ func testMachineBuildMachine(t *testing.T, dbSession *cdb.Session, ip uuid.UUID,
 	assert.Nil(t, err)
 
 	// Fixture Machines predate the inventory under test, so the missing-Machine sweep considers them.
-	m.Created = time.Now().Add(-time.Duration(cutil.DefaultInventoryReceiptInterval) * 2)
+	m.Created = cdb.GetCurTime().Add(-time.Duration(cutil.DefaultInventoryReceiptInterval) * 2)
 	_, err = dbSession.DB.NewUpdate().Model(m).Column("created").WherePK().Exec(context.Background())
 	assert.Nil(t, err)
 	return m
