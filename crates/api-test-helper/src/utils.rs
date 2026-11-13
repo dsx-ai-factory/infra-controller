@@ -73,6 +73,7 @@ pub struct IntegrationTestEnvironment {
     pub carbide_metrics_addrs: Vec<SocketAddr>,
     pub db_url: String,
     pub db_pool: Pool<Postgres>,
+    /// Metrics setup retained by the fixture and shared with each API server.
     pub metrics: MetricsSetup,
     pub credential_config: CredentialConfig,
     /// Enable the SPDM controller and the machine controller's SPDM measuring paths.
@@ -105,6 +106,9 @@ impl IntegrationTestEnvironment {
             return Ok(None);
         };
         let root_dir = PathBuf::from(repo_root.clone());
+
+        let metrics = carbide::setup_metrics()?;
+        opentelemetry::global::set_meter_provider(metrics.meter_provider.clone());
 
         let unbound_address = SocketAddr::from((Ipv4Addr::LOCALHOST, 0));
         let carbide_api_addrs = vec![unbound_address; usize::from(api_server_count)];
@@ -140,15 +144,7 @@ impl IntegrationTestEnvironment {
             spdm_enabled: false,
             db_url,
             db_pool,
-            metrics: {
-                let metrics =
-                    metrics_endpoint::new_metrics_setup("carbide-api", "forge-system", true)?; // unique to each test
-                // Counts are process-wide; registering here puts
-                // carbide_log_events_total on the in-process API's /metrics
-                // (and, via the catalogue regeneration, in core_metrics.md).
-                carbide_instrument::log_events::register(&metrics.meter);
-                metrics
-            },
+            metrics,
             _vault_handle: Arc::new(vault),
         }))
     }
@@ -236,6 +232,7 @@ pub async fn start_api_server_with_config(
     let db_url = test_env.db_url.clone();
     let root_dir = test_env.root_dir.clone();
     let credential_config = test_env.credential_config.clone();
+    let metrics = test_env.metrics.clone();
     let spdm_enabled = test_env.spdm_enabled;
 
     // SAFETY: Initial lint enablement: these test settings are installed before the API
@@ -292,6 +289,7 @@ pub async fn start_api_server_with_config(
                     cancel_token,
                     ready_channel: ready_tx,
                     credential_config,
+                    metrics,
                     insecure_discovery,
                     spdm_enabled,
                 },

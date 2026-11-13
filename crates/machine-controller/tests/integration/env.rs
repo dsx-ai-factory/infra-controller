@@ -66,6 +66,14 @@ impl Env {
     pub(super) async fn run_single_iteration(&mut self) {
         self.machine_controller.run_single_iteration().boxed().await;
     }
+
+    /// Processes each host once so intermediate states remain observable.
+    pub(super) async fn run_single_iteration_without_requeue(&mut self) {
+        self.machine_controller
+            .run_single_iteration_ext(false)
+            .boxed()
+            .await;
+    }
 }
 
 impl EnvBuilder {
@@ -170,6 +178,7 @@ impl EnvBuilder {
             db_pool: pool.clone(),
             db_reader: pool.clone().into(),
             redfish_client_pool: controller_redfish_sim.clone(),
+            bmc_connector: bmc_backend::BmcConnector::Libredfish(controller_redfish_sim.clone()),
             bmc_credential_ops: controller_redfish_sim,
             ipmi_tool: carbide_ipmi::test_support(),
             site_config: runtime_config.machine_state_handler_site_config().into(),

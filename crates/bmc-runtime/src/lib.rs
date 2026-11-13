@@ -32,12 +32,12 @@ mod status;
 mod test_support;
 
 pub use capabilities::BoundDriver;
-pub use connection::{AuthRetryError, ConnectionManager};
+pub use connection::{AuthRetryError, ConnectionManager, DriverConnector, DriverPools};
 pub use credentials::{
     CredentialLease, CredentialRequest, CredentialRequestError, RuntimeAuthMode,
-    RuntimeCredentialProvider,
+    RuntimeCredentialProvider, StoredRootCredentials,
 };
-pub use endpoint::{BmcRef, BmcRefError, ConnectedBmc};
-pub use error::ConnectError;
+pub use endpoint::{BmcRef, BmcRefError, ConnectedBmc, ExploredBmcRefError};
+pub use error::{ConnectError, DriverConnectorError, ExploredConnectError};
 pub use identity::platform_identity;
 pub use ipmi::EndpointIpmiOps;

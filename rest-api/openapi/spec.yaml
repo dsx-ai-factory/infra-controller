@@ -11206,9 +11206,13 @@ paths:
           name: siteId
           description: Filter Machines by Site ID
         - schema:
-            type: string
+            type: array
+            items:
+              type: string
           in: query
           name: id
+          style: form
+          explode: true
           description: Filter Machines by ID.  Can be specified multiple times to filter on more than one ID.
         - schema:
             type: boolean
@@ -11216,14 +11220,22 @@ paths:
           name: hasInstanceType
           description: Filter Machines that have been assigned an Instance Type.
         - schema:
-            type: string
+            type: array
+            items:
+              type: string
           in: query
           name: instanceTypeId
+          style: form
+          explode: true
           description: Filter Machines by Instance Type ID.  Can be specified multiple times to filter on more than one Instance Type ID.
         - schema:
-            type: string
+            type: array
+            items:
+              type: string
           in: query
           name: tenantId
+          style: form
+          explode: true
           description: Filter Machines by ID of tenant of assigned instance. Can be specified multiple times to filter on more than one Tenant ID.
         - schema:
             type: boolean
@@ -11241,9 +11253,13 @@ paths:
           name: includeMetadata
           description: 'Include Machine metadata e.g. BMC, DPU, GPU and Interface data. Can only be requested by Provider.'
         - schema:
-            type: string
+            type: array
+            items:
+              type: string
           in: query
           name: status
+          style: form
+          explode: true
           description: Filter Machines by Status.  Can be specified multiple times to filter on more than one Status.
         - schema:
             type: string
@@ -11251,15 +11267,23 @@ paths:
           name: capabilityType
           description: Filter Machines by Capability Type
         - schema:
-            type: string
+            type: array
+            items:
+              type: string
           in: query
           name: capabilityName
+          style: form
+          explode: true
           description: Filter Machines by Capability Name.  Can be specified multiple times to filter on more than one Capability Name.
         - schema:
-            type: string
+            type: array
+            items:
+              type: string
           in: query
           name: hwSkuDeviceType
-          description: 'Filter Machines by hardware SKU Device Type. Example values: "gpu", "cpu", "storage", "cache"'
+          style: form
+          explode: true
+          description: 'Filter Machines by hardware SKU Device Type. Can be specified multiple times to filter on more than one Device Type. Example values: "gpu", "cpu", "storage", "cache"'
         - schema:
             type: string
           in: query
@@ -14137,7 +14161,70 @@ paths:
         name: id
         in: path
         required: true
-        description: ID of the Rack
+        description: External inventory Rack ID
+    get:
+      summary: Get Rack power state
+      operationId: get-rack-power-state
+      description: |-
+        Read synthesized rack power summaries, each current inventory member's power details, tracked Core actions and outstanding Flow power tasks. Accepts an external inventory rack ID, not a rack name or internal hardware UUID. This passive read does not issue power commands.
+
+        Org must have an Infrastructure Provider entity. User must have authorization role with `PROVIDER_ADMIN` suffix in that Org. The Site must belong to that Provider and have the `flow` capability enabled.
+
+        Actual and desired summaries preserve the counts supplied by Flow in `coverage`. REST does not recompute these categories from member read errors: for example, a newer state that REST represents as `Unsupported` can count as unavailable in Flow's coverage. Two disagreeing known states produce `Mixed`, even when other members are unavailable. Otherwise unknown or unavailable supported evidence produces `Unknown`. Desired votes come only from enabled `On` and `Off` policies: missing policies, disabled policies and inapplicable policies never vote as `Off`. Unsupported members remain visible in coverage but do not make a summary incomplete. `complete` does not imply that every physical device supports a power read.
+
+        Every current, non-deleted inventory member appears in `components`, including unlinked and unsupported types. Known member types follow the order `Unknown`, `Compute`, `NVSwitch`, `PowerShelf`, `TORSwitch`, `UMS`, `CDU`, with deterministic inventory order within each type rather than sorting by external inventory ID. Future service types displayed as `Unknown` retain their service position. An unlinked component's position is not a stable identity across reads. Each component includes its Core actions and their read error under `operations`. An empty action list with a null error means no tracked maintenance actions.
+
+        Root `operations.tasks` contains each outstanding power task once, ordered by creation time then task UUID. Each component's compact task references follow that root ordering and supply its relevance. Root task `relevance` is `Unknown`. Full recorded target selections remain on root tasks, including moved or removed members and empty selections. Unavailable target identities set that task's `rackId` and `targets` to null with `targetsError`, preserving its other metadata. Internal hardware UUIDs are never substituted for external inventory IDs.
+
+        All response fields are present. Null indicates unavailable or inapplicable data as documented on each field; successful empty lists are arrays with a null corresponding read error. Missing service sections report `Unsupported`. Hardware, stored policies, Core actions and Flow tasks are collected separately and can reflect different instants. A `Running` task does not establish hardware dispatch or correlate to an `Active` Core action.
+
+        More than 256 outstanding power tasks across the rack reports `operations.tasksError: LimitExceeded`. The separate waiting-context limit is 256 nonterminal tasks of all types; exceeding it reports `waitingContext.error: LimitExceeded` while retaining power tasks. Flow also limits the encoded proxy response to 1,991,680 bytes, independently of the HTTP response size. It first replaces nonempty successful waiting-context lists with `LimitExceeded`. Empty contexts and existing context errors remain unchanged. If the result still exceeds this allowance, the request fails with HTTP 429; members, tasks, actions and recorded selections are never truncated to fit.
+      parameters:
+        - name: siteId
+          in: query
+          required: true
+          description: ID of the Site that owns the rack.
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Rack summaries and independently available member and operation details.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RackPowerState'
+        '400':
+          description: Missing or invalid site selector, unknown Site, uninitialized Provider, or empty or invalid rack identifier.
+          $ref: '#/components/responses/ValidationError'
+        '403':
+          $ref: '#/components/responses/ForbiddenError'
+        '404':
+          description: No current rack matches the external inventory ID.
+          $ref: '#/components/responses/GenericHttpError'
+        '412':
+          description: Flow is disabled for the Site.
+          $ref: '#/components/responses/GenericHttpError'
+        '429':
+          description: Flow rate limited the request, or the encoded proxy response still exceeds 1,991,680 bytes after nonempty successful waiting context lists were replaced with `LimitExceeded`. Members, tasks, actions and recorded selections are never truncated to fit.
+          $ref: '#/components/responses/GenericHttpError'
+        '500':
+          description: Internal or dependency failure, including a disconnected local Flow client or an inventory read deadline reported by Flow.
+          $ref: '#/components/responses/GenericHttpError'
+        '501':
+          description: The Site's Flow service or site-agent proxy does not implement this read.
+          $ref: '#/components/responses/GenericHttpError'
+        '502':
+          description: Flow returned a response without rack power state.
+          $ref: '#/components/responses/GenericHttpError'
+        '503':
+          description: Flow returned gRPC `Unavailable`. A disconnected local Flow client instead returns HTTP 500.
+          $ref: '#/components/responses/GenericHttpError'
+        '504':
+          description: The proxy execution timed out or the REST caller stopped waiting. A deadline reported by Flow itself can instead return HTTP 500.
+          $ref: '#/components/responses/GatewayTimeoutError'
+      tags:
+        - Rack
     patch:
       summary: Power control a Rack
       operationId: power-control-rack
@@ -18982,8 +19069,194 @@ paths:
         '503':
           description: Core gRPC API is unavailable.
           $ref: '#/components/responses/GenericHttpError'
+  '/v2/org/{org}/nico/tray/{id}/factory-reset':
+    post:
+      tags: [Tray]
+      operationId: factory-reset-tray
+      summary: Restore factory defaults on a switch tray
+      description: |-
+        Restores factory defaults on a switch tray. Only Provider Admins can call this endpoint. The Site must be Registered and belong to the current organization's provider.
+
+        `target` is required, case-sensitive, and has no default:
+
+        - `nvos` clears the NVOS configuration and reboots the switch.
+        - `sdn` restores the SDN configuration to factory defaults.
+
+        Only an ingested switch can be reset. The request returns `409` if a conflicting task is Pending or Running on the switch's rack. The reset task fails without resetting the switch if a host in that rack does not become ready for a disruptive operation, for example because a Tenant is using it. This check cannot be overridden.
+
+        The reset runs in the background. A `202` response returns the reset task ID in `taskIds`; it means the task was created, not that the switch accepted or completed the reset. Use the Task APIs to see whether the task completed, failed, or was terminated. If the task fails before any reset is submitted, read the task message for the reason. When available, the task report provides additional details. A completed task means the Site reported the reset as finished, not that the switch is back in service. NICo does not restore the switch configuration or re-ingest the switch afterwards.
+
+        If the Site does not support the selected reset, the task fails.
+
+        Failed or uncertain reset submissions are not retried automatically. After a timeout or a lost response, check existing tasks and the switch before submitting again, since the first reset may already be running. Avoid starting another reset of the same type on the switch outside this API while its task is running, as the task may report that reset's outcome instead.
+      security:
+        - JWTBearerToken: []
+      parameters:
+        - name: org
+          in: path
+          required: true
+          description: Name of the organization whose provider owns the Site.
+          schema: {type: string}
+        - name: id
+          in: path
+          required: true
+          description: Switch inventory identifier
+          schema: {type: string}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/FactoryResetRequest'
+            example:
+              siteId: 60189e9c-7d12-438c-b9ca-6998d9c364b1
+              target: nvos
+      responses:
+        '202':
+          description: Reset tasks created; hardware work is asynchronous.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/FactoryResetResponse'
+              example:
+                taskIds: [497f6eca-6276-4993-bfeb-53cbbbba6f08]
+        '400':
+          description: Invalid request, unregistered site, or unsupported target type.
+          $ref: '#/components/responses/ValidationError'
+        '403':
+          description: Provider Admin membership is required; site must belong to the provider.
+          $ref: '#/components/responses/ForbiddenError'
+        '404':
+          description: Target does not exist at the selected site.
+          $ref: '#/components/responses/NotFoundError'
+        '409':
+          description: A conflicting rack task prevents reset admission.
+          $ref: '#/components/responses/ConflictError'
+        '412':
+          description: Selected switches are not linked to actual inventory.
+          $ref: '#/components/responses/GenericHttpError'
+        '500':
+          description: Internal failure.
+          $ref: '#/components/responses/GenericHttpError'
+        '502':
+          description: Flow returned missing or invalid task references.
+          $ref: '#/components/responses/GenericHttpError'
+        '503':
+          description: Flow service is unavailable.
+          $ref: '#/components/responses/GenericHttpError'
+        '504':
+          description: Submission outcome is unknown; do not automatically resubmit.
+          $ref: '#/components/responses/GenericHttpError'
+  '/v2/org/{org}/nico/domain/nvlink/{id}/factory-reset':
+    post:
+      tags: [Domain]
+      operationId: factory-reset-nvlink-domain
+      summary: Restore factory defaults on an NVLink Domain’s switches
+      description: |-
+        Restores factory defaults on every switch in an NVLink Domain. Only Provider Admins can call this endpoint. The Site must be Registered and belong to the current organization's provider.
+
+        `target` is required, case-sensitive, and has no default:
+
+        - `nvos` clears the NVOS configuration and reboots the switches.
+        - `sdn` restores the SDN configuration to factory defaults.
+
+        Every switch in the Domain must be ingested. The request returns `409` if a conflicting task is Pending or Running on any of the Domain's racks. A rack's task fails without resetting any of its switches if a host in that rack does not become ready for a disruptive operation, for example because a Tenant is using it. If a host goes into use while the task is running, remaining switches whose resets have not been submitted are skipped and the task fails. Resets already accepted may still complete. This check cannot be overridden.
+
+        The reset runs in the background. A `202` response returns one task ID for each rack the Domain's switches belong to, in no particular order. It means the tasks were created, not that the switches accepted or completed the resets. Use the Task APIs to see whether each task completed, failed, or was terminated. If a rack's task fails before any reset is submitted, read its task message for the reason. When available, its task report provides additional details. A completed task means the Site reported the resets as finished, not that the Domain is operational. NICo does not restore the switch configurations or re-ingest the switches afterwards.
+
+        If the Site does not support the selected reset, the task fails.
+
+        Failed or uncertain reset submissions are not retried automatically. After a timeout or a lost response, check existing tasks and the switches before submitting again, since resets may already be running. Avoid starting another reset of the same type on these switches outside this API while their tasks are running, as a task may report that reset's outcome instead.
+      security:
+        - JWTBearerToken: []
+      parameters:
+        - name: org
+          in: path
+          required: true
+          description: Name of the organization whose provider owns the Site.
+          schema: {type: string}
+        - name: id
+          in: path
+          required: true
+          description: Core NVLink Domain ID
+          schema: {type: string}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/FactoryResetRequest'
+            example:
+              siteId: 60189e9c-7d12-438c-b9ca-6998d9c364b1
+              target: sdn
+      responses:
+        '202':
+          description: Reset tasks created; hardware work is asynchronous.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/FactoryResetResponse'
+              example:
+                taskIds: [497f6eca-6276-4993-bfeb-53cbbbba6f08]
+        '400':
+          description: Invalid request, unregistered site, or unsupported target type.
+          $ref: '#/components/responses/ValidationError'
+        '403':
+          description: Provider Admin membership is required; site must belong to the provider.
+          $ref: '#/components/responses/ForbiddenError'
+        '404':
+          description: Target does not exist at the selected site.
+          $ref: '#/components/responses/NotFoundError'
+        '409':
+          description: A conflicting rack task prevents reset admission.
+          $ref: '#/components/responses/ConflictError'
+        '412':
+          description: Selected switches are not linked to actual inventory.
+          $ref: '#/components/responses/GenericHttpError'
+        '500':
+          description: Internal failure.
+          $ref: '#/components/responses/GenericHttpError'
+        '502':
+          description: Flow returned missing or invalid task references.
+          $ref: '#/components/responses/GenericHttpError'
+        '503':
+          description: Flow service is unavailable.
+          $ref: '#/components/responses/GenericHttpError'
+        '504':
+          description: Submission outcome is unknown; do not automatically resubmit.
+          $ref: '#/components/responses/GenericHttpError'
+
+
 components:
   schemas:
+    FactoryResetRequest:
+      type: object
+      example:
+        siteId: 60189e9c-7d12-438c-b9ca-6998d9c364b1
+        target: nvos
+      required: [siteId, target]
+      properties:
+        siteId:
+          type: string
+          format: uuid
+          description: Registered site owned by the current organization’s provider.
+        target:
+          type: string
+          enum: [nvos, sdn]
+          description: Required reset scope. Accepted values are `nvos` and `sdn`; case-sensitive, with no default.
+    FactoryResetResponse:
+      type: object
+      example:
+        taskIds: [497f6eca-6276-4993-bfeb-53cbbbba6f08]
+      required: [taskIds]
+      properties:
+        taskIds:
+          type: array
+          minItems: 1
+          items:
+            type: string
+            format: uuid
+          description: Asynchronous reset task IDs, one per owning rack; ordering is unspecified.
     PageNumber:
       title: PageNumber
       type: integer
@@ -27976,6 +28249,320 @@ components:
             on the owning rack for rack-scoped components) are reported as not
             ready by their persisted status. Intended for operator-supervised
             maintenance.
+    RackPowerState:
+      title: RackPowerState
+      type: object
+      x-go-has-nullable-required-properties: true
+      x-go-nullable-required-properties: [id]
+      description: Synthesized rack summaries with every current inventory member and independently available work.
+        Actual can use every state listed in `RackPowerSummary`; desired uses only `On`, `Off`, `Unknown`, and `Mixed`.
+      required: [id, actual, desired, operations, components]
+      properties:
+        id:
+          type: [string, 'null']
+          description: External inventory rack ID, or null when the service omits it; never an internal UUID fallback.
+        actual:
+          $ref: '#/components/schemas/RackPowerSummary'
+        desired:
+          $ref: '#/components/schemas/RackPowerSummary'
+        operations:
+          $ref: '#/components/schemas/RackPowerOperations'
+        components:
+          type: array
+          description: Every current non-deleted inventory member, including unsupported and unlinked members.
+            Known types follow `Unknown`, `Compute`, `NVSwitch`, `PowerShelf`, `TORSwitch`, `UMS`, `CDU`, with
+            deterministic inventory order within each type rather than sorting by external inventory ID. Future service
+            types displayed as `Unknown` retain their service position. Internal hardware UUIDs are not exposed.
+          items:
+            $ref: '#/components/schemas/RackComponentPowerState'
+      example:
+        id: rack-01
+        actual:
+          state: Mixed
+          coverage:
+            total: 4
+            known: 4
+            unknown: 0
+            unavailable: 0
+            notApplicable: 0
+            noPolicy: 0
+            disabledPolicy: 0
+            unsupported: 0
+          complete: true
+        desired:
+          state: 'On'
+          coverage:
+            total: 4
+            known: 2
+            unknown: 0
+            unavailable: 0
+            notApplicable: 2
+            noPolicy: 0
+            disabledPolicy: 0
+            unsupported: 0
+          complete: true
+        operations:
+          tasks:
+          - id: 550e8400-e29b-41d4-a716-446655440000
+            rackId: rack-01
+            operation: PowerOn
+            overrideReadinessCheck: false
+            targets:
+            - type: Compute
+              componentIds:
+              - compute-01
+            targetsError: null
+            status: Running
+            created: '2026-11-09T17:59:58Z'
+            updated: '2026-11-09T18:00:00Z'
+            started: '2026-11-09T17:59:59Z'
+            relevance: Unknown
+            waitingContext: null
+          tasksError: null
+        components:
+        - id: compute-01
+          type: Compute
+          actual:
+            state: 'Off'
+            source: RMS
+            observed: '2026-11-09T18:00:02Z'
+            error: null
+          desired:
+            status: Available
+            state: 'On'
+            error: null
+          operations:
+            actions:
+            - status: Active
+              operation: PowerOn
+              requested: '2026-11-09T18:00:00Z'
+              initiator: admin
+              graceful: null
+              chassisId: null
+            actionsError: null
+            tasks:
+            - id: 550e8400-e29b-41d4-a716-446655440000
+              relevance: Selected
+            tasksError: null
+        - id: compute-02
+          type: Compute
+          actual:
+            state: 'On'
+            source: RMS
+            observed: '2026-11-09T18:00:02Z'
+            error: null
+          desired:
+            status: Available
+            state: 'On'
+            error: null
+          operations:
+            actions: []
+            actionsError: null
+            tasks: []
+            tasksError: null
+        - id: switch-01
+          type: NVSwitch
+          actual:
+            state: 'On'
+            source: RMS
+            observed: '2026-11-09T18:00:02Z'
+            error: null
+          desired:
+            status: NotApplicable
+            state: null
+            error: null
+          operations:
+            actions: []
+            actionsError: null
+            tasks: []
+            tasksError: null
+        - id: shelf-01
+          type: PowerShelf
+          actual:
+            state: 'On'
+            source: RMS
+            observed: '2026-11-09T18:00:02Z'
+            error: null
+          desired:
+            status: NotApplicable
+            state: null
+            error: null
+          operations:
+            actions: []
+            actionsError: null
+            tasks: []
+            tasksError: null
+    RackPowerSummary:
+      title: RackPowerSummary
+      type: object
+      description: A state derived from member evidence, not a rack hardware observation or a stored rack policy.
+        Known disagreement takes precedence over incomplete evidence. Without disagreement, unknown or unavailable supported evidence
+        makes the state `Unknown`. No applicable votes also gives `Unknown`. An unrecognized service state maps to
+        `Unknown` while preserving the supplied coverage and complete flag. An omitted service summary is `Unknown`
+        with zero counts and complete false.
+      required: [state, coverage, complete]
+      properties:
+        state:
+          type: string
+          description: Shared known state, `Mixed` for known disagreement, or `Unknown` when evidence cannot establish
+            either or the service supplies an unrecognized state.
+          enum: [Unknown, 'On', 'Off', PoweringOn, PoweringOff, Paused, Reset, Mixed]
+        coverage:
+          $ref: '#/components/schemas/RackPowerCoverage'
+        complete:
+          type: boolean
+          description: For a summary supplied by the service, true when unknown and unavailable are zero.
+            Unsupported members do not prevent completeness; true does not imply that every physical device supports
+            power reads or that any member voted. An omitted service summary reports false.
+      example:
+        state: Mixed
+        coverage: {total: 4, known: 2, unknown: 0, unavailable: 1, notApplicable: 0, noPolicy: 0, disabledPolicy: 0, unsupported: 1}
+        complete: false
+    RackPowerCoverage:
+      title: RackPowerCoverage
+      type: object
+      description: Mutually exclusive member counts supplied by Flow whose sum is total. REST preserves these counts
+        without deriving them from member read errors. A REST `Unsupported` leaf error can still count as unavailable,
+        such as when a newer observed state cannot be represented. Unsupported and unavailable are distinct;
+        disabled, absent and inapplicable policies never become `Off` votes.
+      required: [total, known, unknown, unavailable, notApplicable, noPolicy, disabledPolicy, unsupported]
+      properties:
+        total:
+          type: integer
+          format: uint32
+          minimum: 0
+          description: Total current inventory members included in this summary.
+        known:
+          type: integer
+          format: uint32
+          minimum: 0
+          description: Members contributing a known observed state or enabled `On` or `Off` desired policy.
+        unknown:
+          type: integer
+          format: uint32
+          minimum: 0
+          description: Explicit `Unknown` hardware observations; zero for desired policy.
+        unavailable:
+          type: integer
+          format: uint32
+          minimum: 0
+          description: Failed, unlinked or malformed reads, including a managed Core target that no longer exists.
+        notApplicable:
+          type: integer
+          format: uint32
+          minimum: 0
+          description: Members for which stored desired policy does not apply; zero for actual power.
+        noPolicy:
+          type: integer
+          format: uint32
+          minimum: 0
+          description: Members with no stored policy, excluding missing managed targets; zero for actual power.
+        disabledPolicy:
+          type: integer
+          format: uint32
+          minimum: 0
+          description: Stored `PowerManagerDisabled` policies; zero for actual power.
+        unsupported:
+          type: integer
+          format: uint32
+          minimum: 0
+          description: Inventory types without power reads or explicit unsupported backend observations. These do
+            not prevent completeness. An unavailable or unimplemented Core RPC for a supported type is unavailable instead.
+      example: {total: 4, known: 2, unknown: 0, unavailable: 1, notApplicable: 0, noPolicy: 0, disabledPolicy: 0, unsupported: 1}
+    RackPowerOperations:
+      title: RackPowerOperations
+      type: object
+      x-go-has-nullable-required-properties: true
+      x-go-nullable-required-properties: [tasksError]
+      description: Each outstanding Flow power task once. Components include their own Core actions and references
+        to these full task records. Core and Flow are separate observations; an action does not establish a task link.
+      required: [tasks, tasksError]
+      properties:
+        tasks:
+          type: array
+          description: Each outstanding power task once, ordered by creation time then task UUID. Full recorded
+            selections remain on these rows; relevance is `Unknown` here and supplied by each member's task references.
+          items:
+            $ref: '#/components/schemas/PowerTask'
+        tasksError:
+          $ref: '#/components/schemas/PowerReadError'
+          description: Failure to read the task list, not failure of a power operation. Null on success; a non-null
+            error accompanies an empty task list. A missing service task section reports `Unsupported`.
+      example: {tasks: [], tasksError: null}
+    RackComponentPowerState:
+      title: RackComponentPowerState
+      type: object
+      x-go-has-nullable-required-properties: true
+      x-go-nullable-required-properties: [id]
+      description: One current rack inventory member, including unsupported types and members without managed Core identity.
+      required: [id, type, actual, desired, operations]
+      properties:
+        id:
+          type: [string, 'null']
+          description: External inventory component ID, or null until linked or when omitted by the service.
+        type:
+          type: string
+          enum: [Compute, NVSwitch, PowerShelf, TORSwitch, UMS, CDU, Unknown]
+          description: Inventory component type; `Unknown` includes an unknown inventory type and future or unrecognized
+            service values. Unsupported power-read types retain their known type names.
+        actual:
+          $ref: '#/components/schemas/PowerObservation'
+        desired:
+          $ref: '#/components/schemas/PowerPolicy'
+        operations:
+          $ref: '#/components/schemas/RackComponentPowerOperations'
+      example:
+        id: null
+        type: Compute
+        actual: {state: null, source: null, observed: null, error: NotLinked}
+        desired: {status: Unavailable, state: null, error: NotLinked}
+        operations: {actions: [], actionsError: NotLinked, tasks: [], tasksError: null}
+    RackComponentPowerOperations:
+      title: RackComponentPowerOperations
+      type: object
+      x-go-has-nullable-required-properties: true
+      x-go-nullable-required-properties: [actionsError, tasksError]
+      description: Independently available Core actions and compact references to the rack's full Flow tasks.
+      required: [actions, actionsError, tasks, tasksError]
+      properties:
+        actions:
+          type: array
+          description: Tracked Core actions, `Active` before `Pending`; empty when `actionsError` is set.
+          items:
+            $ref: '#/components/schemas/PowerAction'
+        actionsError:
+          $ref: '#/components/schemas/PowerReadError'
+          description: Failure to read this member's Core actions, not a failed action. Null on success, including
+            an empty list; missing service data reports `Unsupported`.
+        tasks:
+          type: array
+          description: References to root tasks selecting or affecting this member, in root task order.
+            Unsupported component types have an empty list and `Unsupported` `tasksError`.
+            A task selecting both supported and unsupported members may still list the unsupported selections in root
+            `operations.tasks[].targets` when that task's `targetsError` is null.
+          items:
+            $ref: '#/components/schemas/PowerTaskReference'
+        tasksError:
+          $ref: '#/components/schemas/PowerReadError'
+          description: Failure to read references, not a failed task. Supported members mirror a failed rack task
+            read. Null on successful empty references; missing service data reports `Unsupported`.
+      example: {actions: [], actionsError: null, tasks: [], tasksError: null}
+    PowerTaskReference:
+      title: PowerTaskReference
+      type: object
+      description: A reference to a full task in the rack's operations.tasks list, with its relevance to this member.
+      required: [id, relevance]
+      properties:
+        id:
+          type: string
+          format: uuid
+          description: Public Flow task UUID matching a root task ID.
+        relevance:
+          type: string
+          enum: [Selected, RackAffected, Unknown]
+          description: Relevance is `Selected` for a recorded target, `RackAffected` when a shelf selection affects
+            this member's rack, or `Unknown` for an unrecognized service value.
+      example: {id: 550e8400-e29b-41d4-a716-446655440000, relevance: Selected}
     TrayPowerState:
       title: TrayPowerState
       type: object
@@ -28215,6 +28802,7 @@ components:
           - PowerOff
           - Reset
           - ChassisReset
+          - AcPowercycle
           - Unknown
         requested:
           type:
@@ -28314,7 +28902,9 @@ components:
           description: Null when rackId and the complete target selection are available. Missing metadata reports
             `Unsupported`; missing, empty, or purged inventory identities report `NotLinked`. Malformed metadata reports
             `InvalidResponse`; lookup failures retain their error category. `LimitExceeded` means the recorded target
-            identifiers alone exceed the proxy response allowance, or external metadata was removed to meet that allowance.
+            identifiers alone exceed the proxy response allowance, or the tray endpoint removed external metadata to
+            meet that allowance. The rack endpoint preserves metadata and fails the whole request if replacing nonempty
+            successful waiting context lists with `LimitExceeded` cannot make the response fit.
             Any error makes rackId and targets null, without removing the task or returning a partial selection.
         status:
           type: string
@@ -28348,7 +28938,8 @@ components:
         relevance:
           type: string
           description: '`Selected` means a recorded target; `RackAffected` means the task selects a shelf in this tray''s
-            current rack and can affect this tray without selecting it.'
+            current rack and can affect this tray without selecting it. `Unknown` represents an unrecognized or
+            unspecified service value, including root rack task records; their per-member task references supply relevance.'
           enum:
           - Selected
           - RackAffected
@@ -28478,6 +29069,7 @@ components:
           - BringUp
           - Decommission
           - InjectExpectation
+          - ComponentReset
           - Unknown
         status:
           type: string
@@ -30721,6 +31313,7 @@ components:
         - dmiData
         - bmcInfo
         - gpus
+        - disks
         - networkInterfaces
         - infinibandInterfaces
         - lifecycleState
@@ -30748,6 +31341,12 @@ components:
               totalMemory: 81559 MiB
               frequency: 1755 MHz
               pciBusId: '00000000:17:00.0'
+          disks:
+            - type: nvme
+              model: Dell BOSS-N1
+              serial: CN0WW56VFCP0042T04MQ
+              sizeMb: null
+              pciPath: /devices/pci0000:00/0000:00:0a.0/0000:01:00.0/nvme/nvme2
           networkInterfaces:
             - macAddress: 'c8:4b:d6:7b:ac:a8'
               vendor: Broadcom Inc. and subsidiaries
@@ -30800,6 +31399,11 @@ components:
           items:
             $ref: '#/components/schemas/MachineGPUInfo'
           description: 'GPU inventory reported for the Machine'
+        disks:
+          type: array
+          items:
+            $ref: '#/components/schemas/MachineDisk'
+          description: 'Disks reported by the Machine. Use model and serial to pick the disk for imageDisk when creating an image-based Operating System'
         networkInterfaces:
           type: array
           items:
@@ -31022,6 +31626,50 @@ components:
             - string
             - 'null'
           description: 'DMI system vendor reported by the Machine'
+    MachineDisk:
+      title: MachineDisk
+      type: object
+      x-go-has-nullable-required-properties: true
+      x-go-nullable-required-properties:
+        - sizeMb
+        - pciPath
+      description: Describes a disk of a Machine
+      required:
+        - type
+        - model
+        - serial
+        - sizeMb
+        - pciPath
+      examples:
+        - type: nvme
+          model: Dell BOSS-N1
+          serial: CN0WW56VFCP0042T04MQ
+          sizeMb: null
+          pciPath: /devices/pci0000:00/0000:00:0a.0/0000:01:00.0/nvme/nvme2
+      properties:
+        type:
+          type: string
+          enum:
+            - nvme
+            - disk
+          description: 'Kind of disk reported by the Machine'
+        model:
+          type: string
+          description: 'Model of the disk'
+        serial:
+          type: string
+          description: 'Serial number of the disk'
+        sizeMb:
+          type:
+            - integer
+            - 'null'
+          format: uint32
+          description: 'Size of the disk in megabytes, when the Machine reports it'
+        pciPath:
+          type:
+            - string
+            - 'null'
+          description: 'PCI sysfs path of the disk, when the Machine reports it'
     MachineGPUInfo:
       title: MachineGPUInfo
       type: object

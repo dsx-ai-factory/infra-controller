@@ -851,6 +851,9 @@ pub(crate) async fn renew_machine_certificate(
         .get::<crate::auth::AuthContext>()
         .and_then(|auth_context| auth_context.get_spiffe_machine_id())
     {
+        if let Ok(machine_id) = machine_identity.parse::<MachineId>() {
+            crate::api::log_machine_id(&machine_id);
+        }
         let certificate = api
             .certificate_provider
             .get_certificate(machine_identity, None, None)

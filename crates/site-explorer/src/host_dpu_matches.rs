@@ -42,7 +42,7 @@ impl<'a> HostDpuMatches<'a> {
     /// They can replace unmatched inventory serials without adding another slot.
     pub(super) fn new(
         ep: &ExploredEndpoint,
-        dpu_sn_to_endpoint: &'a HashMap<String, ExploredEndpoint>,
+        dpu_sn_to_endpoint: &HashMap<&str, &'a ExploredEndpoint>,
         expected_machine: Option<&'a ExpectedMachine>,
         host_dpu_policy: HostDpuPolicy,
     ) -> Self {
@@ -123,11 +123,11 @@ impl<'a> InventorySerial<'a> {
         device.serial_number().map(Self)
     }
 
-    fn find_explored_dpu(
+    fn find_explored_dpu<'e>(
         self,
-        endpoints: &HashMap<String, ExploredEndpoint>,
-    ) -> Option<&ExploredEndpoint> {
-        endpoints.get(self.0)
+        endpoints: &HashMap<&str, &'e ExploredEndpoint>,
+    ) -> Option<&'e ExploredEndpoint> {
+        endpoints.get(self.0).copied()
     }
 }
 
@@ -149,11 +149,11 @@ impl<'a> ConfiguredDpuSerial<'a> {
         inventory.contains(&InventorySerial(self.0))
     }
 
-    fn find_explored_dpu(
+    fn find_explored_dpu<'e>(
         self,
-        endpoints: &HashMap<String, ExploredEndpoint>,
-    ) -> Option<&ExploredEndpoint> {
-        endpoints.get(self.0)
+        endpoints: &HashMap<&str, &'e ExploredEndpoint>,
+    ) -> Option<&'e ExploredEndpoint> {
+        endpoints.get(self.0).copied()
     }
 }
 
@@ -179,7 +179,7 @@ enum DpuMatchSource<'a> {
 impl<'a> MatchedDpu<'a> {
     fn from_inventory(
         device: DeviceIdentifiers<'_>,
-        endpoints: &'a HashMap<String, ExploredEndpoint>,
+        endpoints: &HashMap<&str, &'a ExploredEndpoint>,
         policy: HostDpuPolicy,
     ) -> Option<Self> {
         let serial = InventorySerial::from_device(&device)?;
@@ -197,7 +197,7 @@ impl<'a> MatchedDpu<'a> {
 
     fn from_configured(
         serial: ConfiguredDpuSerial<'a>,
-        endpoints: &'a HashMap<String, ExploredEndpoint>,
+        endpoints: &HashMap<&str, &'a ExploredEndpoint>,
         policy: HostDpuPolicy,
     ) -> Option<Self> {
         let endpoint = serial.find_explored_dpu(endpoints)?;
@@ -266,14 +266,18 @@ mod tests {
         let host_report: EndpointExplorationReport = ManagedHostConfig::default()
             .with_dpus(vec![dpu.clone(), serial_only_dpu.clone()])
             .into();
-        let endpoints = HashMap::from([
+        let endpoint_rows = [
             (serial.clone(), explored_endpoint(dpu.into())),
             (serial_only, explored_endpoint(serial_only_dpu.into())),
             (
                 expected_serial.clone(),
                 explored_endpoint(expected_dpu.into()),
             ),
-        ]);
+        ];
+        let endpoints = endpoint_rows
+            .iter()
+            .map(|(serial, endpoint)| (serial.as_str(), endpoint))
+            .collect();
         let expected_machine = ExpectedMachine {
             id: None,
             bmc_mac_address: "00:11:22:33:44:55".parse().unwrap(),
@@ -317,10 +321,14 @@ mod tests {
 
     #[test]
     fn chassis_matches_keep_part_numbers_and_unmatched_pcie_inventory() {
-        let endpoints = HashMap::from([(
+        let endpoint_rows = [(
             "known-dpu".to_string(),
             bf2_dpu(Some(BlueFieldOperatingMode::Dpu)),
-        )]);
+        )];
+        let endpoints = endpoint_rows
+            .iter()
+            .map(|(serial, endpoint)| (serial.as_str(), endpoint))
+            .collect();
         let matches = {
             let host_report: EndpointExplorationReport = ManagedHostConfig::default()
                 .with_dpus(vec![DpuConfig {
@@ -372,7 +380,7 @@ mod tests {
     #[test]
     fn combines_all_matching_sources() {
         const BLUEFIELD: &str = "900-9D3B6-00SV-AA0";
-        let endpoints = HashMap::from([
+        let endpoint_rows = [
             (
                 "pcie-dpu".to_string(),
                 bf2_dpu(Some(BlueFieldOperatingMode::Dpu)),
@@ -385,7 +393,11 @@ mod tests {
                 "expected-only-dpu".to_string(),
                 bf2_dpu(Some(BlueFieldOperatingMode::Dpu)),
             ),
-        ]);
+        ];
+        let endpoints = endpoint_rows
+            .iter()
+            .map(|(serial, endpoint)| (serial.as_str(), endpoint))
+            .collect();
         let expected_machine = ExpectedMachine {
             id: None,
             bmc_mac_address: "00:11:22:33:44:55".parse().unwrap(),
@@ -441,10 +453,14 @@ mod tests {
 
     #[test]
     fn expected_serials_are_merged_and_normalized() {
-        let endpoints = HashMap::from([(
+        let endpoint_rows = [(
             "known-dpu".to_string(),
             bf2_dpu(Some(BlueFieldOperatingMode::Dpu)),
-        )]);
+        )];
+        let endpoints = endpoint_rows
+            .iter()
+            .map(|(serial, endpoint)| (serial.as_str(), endpoint))
+            .collect();
         let expected_machine = ExpectedMachine {
             id: None,
             bmc_mac_address: "00:11:22:33:44:55".parse().unwrap(),
@@ -545,7 +561,7 @@ mod tests {
 
     #[test]
     fn fallback_serials_fill_unmatched_reported_slots() {
-        let endpoints = HashMap::from([
+        let endpoint_rows = [
             (
                 "inventory-dpu".to_string(),
                 bf2_dpu(Some(BlueFieldOperatingMode::Dpu)),
@@ -554,7 +570,11 @@ mod tests {
                 "fallback-dpu".to_string(),
                 bf2_dpu(Some(BlueFieldOperatingMode::Dpu)),
             ),
-        ]);
+        ];
+        let endpoints = endpoint_rows
+            .iter()
+            .map(|(serial, endpoint)| (serial.as_str(), endpoint))
+            .collect();
         check_values(
             [
                 Check {

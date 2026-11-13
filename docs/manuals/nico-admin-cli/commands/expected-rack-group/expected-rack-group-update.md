@@ -20,10 +20,10 @@ nico-admin-cli expected-rack-group update <--protocol>
 
 Replace all fields of an existing expected rack group
 
-While the group has expected NVLink domain declarations, its racks field
-must remain unchanged. Topology, protocol, and metadata updates are
-still allowed. Delete its declarations with expected-nvlink-domain
-delete before changing racks.
+While the group has NVLink domain declarations, its racks field must
+remain unchanged. Topology, protocol, and metadata updates are still
+allowed. Delete its declarations with nvlink-domain delete before
+changing racks.
 
 ## OPTIONS
 
@@ -76,7 +76,7 @@ Sort output by specified field
 
 `-h, --help`
 
-Print help (see a summary with -h)
+Print help (see a summary with '-h')
 
 `<RACK_GROUP_ID>`
 

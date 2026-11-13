@@ -61,10 +61,10 @@ async fn async_main() -> eyre::Result<()> {
             db::migrations::migrate(&pool).await?;
         }
         Command::Run(run) => {
-            // THIS SECTION HAS BEEN INTENTIONALLY KEPT SMALL.
-            // carbide::run does all the work, the only parameters it should take are things where
-            // we *must* have overridden values for integration tests. Any other behavior that needs
-            // to be overridden in tests should be expressed via the config files.
+            // The process owns metrics setup; in-process callers supply their own
+            // setup so recording and scrapes use the same provider.
+            let metrics = carbide::setup_metrics()?;
+            opentelemetry::global::set_meter_provider(metrics.meter_provider.clone());
 
             // production cancel_token is driven by SIGTERM/SIGINT
             let cancel_token = carbide_utils::shutdown_handler::start()?;
@@ -77,6 +77,7 @@ async fn async_main() -> eyre::Result<()> {
                 run.config_path,
                 run.site_config_path,
                 CredentialConfig::default(),
+                metrics,
                 false,
                 cancel_token,
                 ready_tx,

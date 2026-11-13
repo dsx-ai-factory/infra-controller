@@ -38,7 +38,7 @@ ID of the existing Underlay network segment
 `--prefix <CIDR-prefix>`
 
 Network CIDR with an explicit numeric prefix length and no host bits;
-IPv4 must be shorter than /32. Adds the segments missing family or
+IPv4 must be shorter than /32. Adds the segment's missing family or
 matches existing settings without a write
 
 `--gateway <IPv4-address>`
@@ -56,7 +56,7 @@ allocation in the new prefix
 Optional IPv6 DHCP relay link-address selector for an IPv6 prefix; it
 can be outside the prefix. Omit for prefix-based selection. Exact
 matches take precedence: choose a selector that does not redirect
-another networks requests
+another network's requests
 
 `--extended`
 
@@ -78,7 +78,7 @@ Sort output by specified field
 
 `-h, --help`
 
-Print help (see a summary with -h)
+Print help (see a summary with '-h')
 
 ## Examples
 

@@ -569,4 +569,158 @@ tests:
     template: runner-config.yaml
     asserts:
       - failedTemplate:
-          errorMessage: runner.command must be fleet-up or ingestion
+          errorMessage: runner.command must be fleet-up, ingestion, instance-create or instance-delete
+
+  - it: renders a five-host instance create with one runner Job and referenced credentials
+    template: runner-config.yaml
+    set: &instanceValues
+      runner.enabled: true
+      runner.command: instance-create
+      runner.dryRun: false
+      runner.runId: create-five
+      runner.rest.url: https://rest.example
+      runner.rest.org: tenant-org
+      runner.rest.providerOrg: provider-org
+      runner.rest.tokenSecret: rest-write-token
+      runner.instance.tenantId: 00000000-0000-4000-8000-000000000001
+      runner.instance.instanceTypeId: 00000000-0000-4000-8000-000000000002
+      runner.instance.vpcId: 00000000-0000-4000-8000-000000000003
+      runner.instance.subnetId: 00000000-0000-4000-8000-000000000004
+      runner.instance.ipxeSecret: fixture-ipxe
+      runner.instance.apiPoolReplicas: 1
+      runner.instance.apiPoolSelector: {job: api, namespace: core}
+    asserts:
+      - matchRegex:
+          path: data["config.yaml"]
+          pattern: 'command: instance-create'
+      - matchRegex: {path: 'data["config.yaml"]', pattern: 'topologyOptimized: false'}
+      - matchRegex:
+          path: data["config.yaml"]
+          pattern: 'tokenFile: /var/run/secrets/rest-token/token'
+      - matchRegex:
+          path: data["config.yaml"]
+          pattern: 'n: 5'
+      - matchRegex:
+          path: data["config.yaml"]
+          pattern: 'ipxeFile: /var/run/secrets/instance-ipxe/script.ipxe'
+      - notMatchRegex:
+          path: data["config.yaml"]
+          pattern: 'caFile: /var/run/secrets/rest-ca/ca.crt'
+
+  - it: renders instance delete from the owned manifest on the same PVC
+    template: runner-config.yaml
+    set:
+      <<: *instanceValues
+      runner.command: instance-delete
+      runner.runId: delete-five
+      runner.instance.ownedManifest: create-five.owned.json
+    asserts:
+      - matchRegex:
+          path: data["config.yaml"]
+          pattern: 'command: instance-delete'
+      - matchRegex:
+          path: data["config.yaml"]
+          pattern: 'ownedManifest: "create-five.owned.json"'
+      - notMatchRegex:
+          path: data["config.yaml"]
+          pattern: 'ipxeFile:'
+
+  - it: mounts the instance write token and iPXE fixture without another Job
+    template: runner-job.yaml
+    set:
+      <<: *instanceValues
+      inventory.clientSecret: ""
+    asserts:
+      - notContains:
+          path: spec.template.spec.volumes
+          content: {name: nico-client-cert}
+          any: true
+      - notContains:
+          path: spec.template.spec.containers[0].volumeMounts
+          content: {name: nico-client-cert}
+          any: true
+      - hasDocuments: {count: 1}
+      - equal:
+          path: spec.template.spec.containers[0].command
+          value: [/scale-test, instance-create, --config, /etc/scale-test/config.yaml]
+      - notContains:
+          path: spec.template.spec.volumes
+          content: {name: rest-ca}
+          any: true
+      - contains:
+          path: spec.template.spec.volumes
+          content: {name: rest-token, secret: {secretName: rest-write-token}}
+      - contains:
+          path: spec.template.spec.volumes
+          content: {name: instance-ipxe, secret: {secretName: fixture-ipxe}}
+
+  - it: renders instance delete without a NICo client certificate
+    template: runner-job.yaml
+    set:
+      <<: *instanceValues
+      runner.command: instance-delete
+      runner.instance.ownedManifest: create-five.owned.json
+      inventory.clientSecret: ""
+    asserts:
+      - notContains:
+          path: spec.template.spec.volumes
+          content: {name: nico-client-cert}
+          any: true
+      - notContains:
+          path: spec.template.spec.containers[0].volumeMounts
+          content: {name: nico-client-cert}
+          any: true
+
+  - it: mounts a private REST CA key read-only
+    template: runner-job.yaml
+    set:
+      <<: *instanceValues
+      runner.rest.caSecret: {name: private-rest-ca, key: root.pem}
+    asserts:
+      - contains:
+          path: spec.template.spec.volumes
+          content:
+            name: rest-ca
+            secret:
+              secretName: private-rest-ca
+              items: [{key: root.pem, path: ca.crt}]
+      - contains:
+          path: spec.template.spec.containers[0].volumeMounts
+          content: {name: rest-ca, mountPath: /var/run/secrets/rest-ca, readOnly: true}
+
+  - it: configures the mounted REST CA file
+    template: runner-config.yaml
+    set:
+      <<: *instanceValues
+      runner.rest.caSecret: {name: private-rest-ca, key: root.pem}
+      runner.instance.topologyOptimized: true
+    asserts:
+      - matchRegex: {path: 'data["config.yaml"]', pattern: 'topologyOptimized: true'}
+      - matchRegex:
+          path: data["config.yaml"]
+          pattern: 'caFile: /var/run/secrets/rest-ca/ca.crt'
+
+  - it: rejects a REST CA Secret without a key
+    template: runner-job.yaml
+    set:
+      <<: *instanceValues
+      runner.rest.caSecret: {name: private-rest-ca, key: ""}
+    asserts:
+      - failedTemplate:
+          errorMessage: runner.rest.caSecret.key is required with a CA Secret
+
+  - it: configures a bounded label read-back window
+    template: runner-config.yaml
+    set:
+      <<: *instanceValues
+      runner.observation.labelReadbackSeconds: 1200
+    asserts:
+      - matchRegex:
+          path: data["config.yaml"]
+          pattern: 'labelReadbackSeconds: 1200'
+
+  - it: rejects a non-boolean instance topology option
+    template: runner-config.yaml
+    set: {<<: *instanceValues, runner.instance.topologyOptimized: invalid}
+    asserts:
+      - failedTemplate: {errorMessage: runner.instance.topologyOptimized must be a boolean}
