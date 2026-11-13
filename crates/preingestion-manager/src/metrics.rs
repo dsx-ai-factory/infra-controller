@@ -21,7 +21,7 @@ use std::time::Duration;
 
 use ::carbide_utils::metrics::SharedMetricsHolder;
 use carbide_instrument::{
-    DynamicLog, DynamicMessage, Event, LabelValue, LogAt, MetricFamily, Outcome, emit,
+    DynamicLog, DynamicMessage, Event, Instrumentation, LabelValue, LogAt, MetricFamily, Outcome,
 };
 use libredfish::model::task::TaskState;
 use libredfish::{RedfishError, SystemPowerControl};
@@ -658,6 +658,7 @@ pub(crate) async fn instrument_power_op<T>(
     operation: PowerOperation,
     call: impl Future<Output = Result<T, RedfishError>>,
     log: PowerControlLog,
+    instrumentation: &Instrumentation,
 ) -> Result<T, RedfishError> {
     let result = call.await;
     let outcome = match &result {
@@ -681,7 +682,7 @@ pub(crate) async fn instrument_power_op<T>(
             if step == PowerControlStep::CecChassisReset && error.contains("is not supported") {
                 step = PowerControlStep::CecChassisResetUnsupported;
             }
-            emit(PowerControlFinished {
+            instrumentation.emit(PowerControlFinished {
                 operation,
                 outcome,
                 bmc_ip_address,
@@ -693,7 +694,7 @@ pub(crate) async fn instrument_power_op<T>(
             bmc_ip_address,
             attempt,
             max_attempts,
-        } => emit(InitialBmcResetFinished {
+        } => instrumentation.emit(InitialBmcResetFinished {
             operation,
             outcome,
             bmc_ip_address,
@@ -714,7 +715,7 @@ pub(crate) async fn instrument_power_op<T>(
                 (PowerOperation::On, _) => PowerControlStep::RecoveryPowerOn,
                 _ => PowerControlStep::RecoveryPowerControl,
             };
-            emit(PowerControlFinished {
+            instrumentation.emit(PowerControlFinished {
                 operation,
                 outcome,
                 bmc_ip_address,
@@ -726,7 +727,7 @@ pub(crate) async fn instrument_power_op<T>(
             dpu_bmc_ip_address,
             host_bmc_ip_address,
             post_install,
-        } => emit(match (outcome, operation) {
+        } => instrumentation.emit(match (outcome, operation) {
             (Outcome::Ok, _) => BfbPlatformPowerControlFinished::Succeeded { operation },
             (Outcome::Error, PowerOperation::On) => BfbPlatformPowerControlFinished::OnFailed {
                 dpu_bmc_ip_address,
@@ -751,6 +752,7 @@ mod tests {
     use std::sync::Arc;
     use std::time::Duration;
 
+    use carbide_instrument::emit;
     use carbide_instrument::testing::{ApproxHistogramSum, MetricsCapture, capture_logs};
     use carbide_test_support::{Check, check_values, value_scenarios};
     use carbide_utils::test_support::test_meter::TestMeter;
@@ -1296,7 +1298,9 @@ mod tests {
     fn observe_power_control(input: PowerControlInput) -> PowerControlObservation {
         use futures_util::FutureExt as _;
 
-        let metrics = MetricsCapture::start();
+        let test_meter = carbide_utils::test_support::test_meter::TestMeter::default();
+        let instrumentation = Instrumentation::new(test_meter.meter());
+        let metrics = MetricsCapture::for_registry(test_meter.registry());
         let metric_outcome = input.call.metric_outcome(input.operation);
         let operation_label = input.operation.label_value();
         let outcome_label = metric_outcome.label_value();
@@ -1306,6 +1310,7 @@ mod tests {
                 input.operation,
                 std::future::ready(input.call.result()),
                 input.log,
+                &instrumentation,
             )
             .now_or_never()
             .expect("ready future")

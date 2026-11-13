@@ -183,7 +183,7 @@ impl BmcClient {
             if retries == 0 {
                 self.connection_state.store(connection::State::Connecting);
             } else {
-                carbide_instrument::emit(BmcRecoveryAttempted);
+                self.metrics.instrumentation.emit(BmcRecoveryAttempted);
                 self.connection_state
                     .store(connection::State::ConnectionError);
             }
@@ -697,7 +697,6 @@ mod tests {
     use prometheus::proto::MetricType;
     use tokio::io::AsyncReadExt;
     use tokio::net::TcpListener;
-    use tokio::process::Command;
 
     use super::*;
     use crate::bmc::connection_impl::{ipmi, ssh};
@@ -706,54 +705,6 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn recovery_counter_survives_client_recreation() {
-        const CHILD_PROCESS_ENV: &str = "CARBIDE_SSH_RECOVERY_METRICS_TEST_CHILD";
-
-        if std::env::var_os(CHILD_PROCESS_ENV).is_none() {
-            // A fresh process prevents other tests from replacing the provider,
-            // initializing the cached Event first, or changing its shared total.
-            let output_dir = temp_dir::TempDir::with_prefix("ssh-recovery-metrics")
-                .expect("create recovery test output directory");
-            let stdout_path = output_dir.path().join("stdout");
-            let stderr_path = output_dir.path().join("stderr");
-            let mut child = Command::new(std::env::current_exe().expect("current test executable"))
-                .args([
-                    "--exact",
-                    "bmc::client::tests::recovery_counter_survives_client_recreation",
-                    "--nocapture",
-                ])
-                .env(CHILD_PROCESS_ENV, "1")
-                .stdout(std::fs::File::create(&stdout_path).expect("create child stdout file"))
-                .stderr(std::fs::File::create(&stderr_path).expect("create child stderr file"))
-                .kill_on_drop(true)
-                .spawn()
-                .expect("run recovery metrics test child");
-            // Bound the whole child even if its runtime cannot poll the inner
-            // ten-second deadline. Files keep output from filling a pipe.
-            let wait_result = tokio::time::timeout(Duration::from_secs(30), child.wait()).await;
-            let timed_out = wait_result.is_err();
-            let status = match wait_result {
-                Ok(status) => status.expect("wait for recovery metrics test child"),
-                Err(_) => {
-                    child
-                        .start_kill()
-                        .expect("terminate recovery metrics test child");
-                    child
-                        .wait()
-                        .await
-                        .expect("reap recovery metrics test child")
-                }
-            };
-            let stdout = std::fs::read(stdout_path).expect("read child stdout");
-            let stderr = std::fs::read(stderr_path).expect("read child stderr");
-            let stdout = String::from_utf8_lossy(&stdout);
-            let stderr = String::from_utf8_lossy(&stderr);
-            assert!(
-                !timed_out && status.success() && stdout.contains("1 passed; 0 failed"),
-                "recovery metrics child failed (timed out: {timed_out}, status: {status})\nstdout:\n{stdout}\nstderr:\n{stderr}",
-            );
-            return;
-        }
-
         tokio::time::timeout(Duration::from_secs(10), assert_recovery_metrics_lifecycle())
             .await
             .expect("recovery metrics lifecycle timed out");
@@ -761,7 +712,14 @@ mod tests {
 
     async fn assert_recovery_metrics_lifecycle() {
         let state = MetricsState::new();
-        let metrics = Arc::new(BmcPoolMetrics::for_test());
+        let metrics = Arc::new(BmcPoolMetrics::for_test(
+            &state.meter,
+            state.instrumentation.clone(),
+        ));
+        // Replacing the global provider must not redirect this pool's recovery counter.
+        let other_state = MetricsState::new();
+        let _other_pool =
+            BmcPoolMetrics::for_test(&other_state.meter, other_state.instrumentation.clone());
         let machine_id = MachineId::new(MachineIdSource::Tpm, [0; 32], MachineType::Host);
         assert_recovery_metrics(&state, machine_id, 0.0, None);
         let config = Arc::new(Config {
@@ -855,6 +813,7 @@ mod tests {
         assert_recovery_metrics(&state, machine_id, 3.0, Some(1.0));
         handle.shutdown_and_wait().await;
         assert_recovery_metrics(&state, machine_id, 3.0, Some(1.0));
+        assert_recovery_metrics(&other_state, machine_id, 0.0, None);
     }
 
     #[derive(Debug)]

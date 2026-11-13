@@ -1746,7 +1746,7 @@ async fn process_dpu_network_status(
     {
         // The host machine could not even be looked up, so the identity in
         // hand is the reporting DPU rather than the host that stays asleep.
-        carbide_instrument::emit(StateHandlerWakeupFailed {
+        api.instrumentation.emit(StateHandlerWakeupFailed {
             trigger: WakeupTrigger::DpuNetworkStatus,
             machine_id: dpu_machine_id.into(),
             err: err.to_string(),
@@ -1784,7 +1784,7 @@ async fn wakeup_host_state_handler_by_dpu_id(
             .enqueue_object(&host_machine_id)
             .await
     {
-        carbide_instrument::emit(StateHandlerWakeupFailed {
+        api.instrumentation.emit(StateHandlerWakeupFailed {
             trigger: WakeupTrigger::DpuNetworkStatus,
             machine_id: host_machine_id.into(),
             err: err.to_string(),

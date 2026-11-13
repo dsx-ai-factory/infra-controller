@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use carbide_instrument::testing::{MetricsCapture, capture_logs};
+use carbide_instrument::testing::capture_logs;
 use carbide_test_support::{Check, check_values};
 use component_manager::firmware_inventory::{FirmwareComponent, FirmwareInventoryEntry};
 use component_manager::firmware_jobs::FirmwareJobObservation;
@@ -63,9 +63,7 @@ async fn admission_queue_time_consumes_the_original_rpc_budget() {
 
     use crate::admission::{ApiAdmissionControl, enforce_grpc};
     use crate::cfg::file::ApiAdmissionControlConfig;
-    // Admission records global histograms; serialize its exact-delta window
-    // with the existing admission metrics tests.
-    let _metrics = MetricsCapture::start();
+    let test_meter = carbide_utils::test_support::test_meter::TestMeter::default();
     let shutdown = tokio_util::sync::CancellationToken::new();
     let mut tasks = tokio::task::JoinSet::new();
     let control = ApiAdmissionControl::from_config(
@@ -77,7 +75,8 @@ async fn admission_queue_time_consumes_the_original_rpc_budget() {
             pending_timeout: Duration::from_secs(5),
             ..Default::default()
         },
-        &opentelemetry::global::meter("firmware-deadline-tests"),
+        &test_meter.meter(),
+        carbide_instrument::Instrumentation::new(test_meter.meter()),
         shutdown.clone(),
         &mut tasks,
     )

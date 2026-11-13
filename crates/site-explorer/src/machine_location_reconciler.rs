@@ -19,7 +19,7 @@ use std::net::IpAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
-use carbide_instrument::emit;
+use carbide_instrument::Instrumentation;
 use carbide_secrets::credentials::{BmcCredentialType, CredentialKey, CredentialManager};
 use carbide_uuid::machine::MachineId;
 use component_manager::{MachineInfoProvider, MachineLocationTarget};
@@ -38,6 +38,7 @@ const RMS_MACHINE_LOCATION_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Fills missing machine slot and tray data from RMS.
 pub struct MachineLocationReconciler {
+    instrumentation: Instrumentation,
     database_connection: PgPool,
     rack_profiles: Arc<RackProfileConfig>,
     machine_info_provider: Option<Arc<dyn MachineInfoProvider>>,
@@ -45,14 +46,17 @@ pub struct MachineLocationReconciler {
 }
 
 impl MachineLocationReconciler {
-    /// Creates a reconciler with an optional machine-information provider.
+    /// Creates a reconciler with an optional machine-information provider and
+    /// explicit Event instrumentation. Retain its provider while the reconciler runs.
     pub fn new(
         database_connection: PgPool,
         rack_profiles: Arc<RackProfileConfig>,
         machine_info_provider: Option<Arc<dyn MachineInfoProvider>>,
         credential_manager: Arc<dyn CredentialManager>,
+        instrumentation: Instrumentation,
     ) -> Self {
         Self {
+            instrumentation,
             database_connection,
             rack_profiles,
             machine_info_provider,
@@ -166,15 +170,17 @@ impl MachineLocationReconciler {
         {
             Ok(Ok(response)) => response,
             Ok(Err(error)) => {
-                emit(SiteExplorerMachineSlotTrayFetchFailed::new(
-                    error.to_string(),
-                ));
+                self.instrumentation
+                    .emit(SiteExplorerMachineSlotTrayFetchFailed::new(
+                        error.to_string(),
+                    ));
                 return Ok(());
             }
             Err(_) => {
-                emit(SiteExplorerMachineSlotTrayFetchFailed::new(format!(
-                    "RMS slot and tray lookup timed out after {RMS_MACHINE_LOCATION_TIMEOUT:?}"
-                )));
+                self.instrumentation
+                    .emit(SiteExplorerMachineSlotTrayFetchFailed::new(format!(
+                        "RMS slot and tray lookup timed out after {RMS_MACHINE_LOCATION_TIMEOUT:?}"
+                    )));
                 return Ok(());
             }
         };
@@ -188,20 +194,25 @@ impl MachineLocationReconciler {
                 continue;
             };
 
-            let (slot_number, tray_index) =
-                machine_location_values(details.slot_number, details.tray_index);
+            let (slot_number, tray_index) = machine_location_values(
+                details.slot_number,
+                details.tray_index,
+                &self.instrumentation,
+            );
 
             persist_machine_slot_and_tray(
                 &self.database_connection,
                 host_machine_id,
                 slot_number,
                 tray_index,
+                &self.instrumentation,
             )
             .await;
         }
 
         for _ in machine_ids_by_node_id {
-            emit(SiteExplorerMachineSlotTrayResponseMissing::new());
+            self.instrumentation
+                .emit(SiteExplorerMachineSlotTrayResponseMissing::new());
         }
 
         Ok(())
@@ -211,14 +222,15 @@ impl MachineLocationReconciler {
 fn machine_location_values(
     slot_number: Option<u32>,
     tray_index: Option<u32>,
+    instrumentation: &Instrumentation,
 ) -> (Option<i32>, Option<i32>) {
     let slot_number = crate::rms_location_value(slot_number).unwrap_or_else(|value| {
-        emit(SiteExplorerMachineSlotTrayValueInvalid::SlotNumber { value });
+        instrumentation.emit(SiteExplorerMachineSlotTrayValueInvalid::SlotNumber { value });
         None
     });
 
     let tray_index = crate::rms_location_value(tray_index).unwrap_or_else(|value| {
-        emit(SiteExplorerMachineSlotTrayValueInvalid::TrayIndex { value });
+        instrumentation.emit(SiteExplorerMachineSlotTrayValueInvalid::TrayIndex { value });
         None
     });
 
@@ -231,11 +243,12 @@ async fn persist_machine_slot_and_tray(
     host_machine_id: MachineId,
     slot_number: Option<i32>,
     tray_index: Option<i32>,
+    instrumentation: &Instrumentation,
 ) {
     let mut txn = match Transaction::begin(pool).await {
         Ok(txn) => txn,
         Err(error) => {
-            emit(SiteExplorerMachineSlotTrayPersistenceFailed::new(
+            instrumentation.emit(SiteExplorerMachineSlotTrayPersistenceFailed::new(
                 error.to_string(),
                 host_machine_id.to_string(),
             ));
@@ -246,14 +259,14 @@ async fn persist_machine_slot_and_tray(
     if let Err(error) =
         db::machine::update_slot_and_tray(&mut txn, &host_machine_id, slot_number, tray_index).await
     {
-        emit(SiteExplorerMachineSlotTrayPersistenceFailed::new(
+        instrumentation.emit(SiteExplorerMachineSlotTrayPersistenceFailed::new(
             error.to_string(),
             host_machine_id.to_string(),
         ));
         txn.rollback_or_log("site-explorer slot and tray update after operation failure")
             .await;
     } else if let Err(error) = txn.commit().await {
-        emit(SiteExplorerMachineSlotTrayPersistenceFailed::new(
+        instrumentation.emit(SiteExplorerMachineSlotTrayPersistenceFailed::new(
             error.to_string(),
             host_machine_id.to_string(),
         ));
