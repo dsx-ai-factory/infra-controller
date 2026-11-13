@@ -798,9 +798,11 @@ process listens on that family.
   postgres://USER:PASSWORD@[2001:db8::10]:5432/DB
   ```
 
-- **Vault:** The Core Helm chart populates `VAULT_ADDR` from the shared
-  configuration's `VAULT_SERVICE`. An explicitly configured Vault address takes
-  precedence over `VAULT_ADDR`. Use a bracketed URL such as
+- **Vault:** For credentials, Core uses `VAULT_ADDR`, populated from the shared
+  configuration's `VAULT_SERVICE` by the Core Helm chart. Selecting
+  `backend = "dedicated_vault"` in `[certificates]` uses the `address` from
+  `[certificates.dedicated_vault]` for a separate certificate Vault, without
+  falling back to `VAULT_ADDR`. Use bracketed URLs for either endpoint, such as
   `https://[2001:db8::11]:8200`.
 - **OpenTelemetry:** `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` overrides Core's
   `[tracing].otlp_endpoint`. For an OTLP/gRPC listener without TLS, use a
