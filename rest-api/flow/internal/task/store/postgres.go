@@ -439,9 +439,9 @@ func (s *PostgresStore) UpdateScheduledTask(
 func (s *PostgresStore) UpdateTaskStatus(
 	ctx context.Context,
 	arg *taskdef.TaskStatusUpdate,
-) error {
+) (bool, error) {
 	taskDao := &model.Task{ID: arg.ID}
-	err := taskDao.UpdateTaskStatus(
+	updated, err := taskDao.UpdateTaskStatus(
 		ctx,
 		s.idb(ctx),
 		arg.Status,
@@ -450,10 +450,10 @@ func (s *PostgresStore) UpdateTaskStatus(
 		arg.QueueExpiresAt,
 	)
 	if err != nil {
-		return errors.GRPCErrorInternal(err.Error())
+		return false, errors.GRPCErrorInternal(err.Error())
 	}
 
-	return nil
+	return updated, nil
 }
 
 // UpdateTaskReport replaces the stored report with the snapshot in arg.

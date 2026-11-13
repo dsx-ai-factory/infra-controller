@@ -1474,6 +1474,7 @@ type managerTaskStore struct {
 	updateScheduledErr             error
 	updatedScheduledTask           *taskdef.Task
 	statusUpdates                  []*taskdef.TaskStatusUpdate
+	skipStatusUpdate               bool
 	statusUpdateContextErr         error
 	statusUpdateContextHasDeadline bool
 	runTransactionCalls            int
@@ -1603,11 +1604,11 @@ func (s *managerTaskStore) UpdateScheduledTask(_ context.Context, task *taskdef.
 func (s *managerTaskStore) UpdateTaskStatus(
 	ctx context.Context,
 	update *taskdef.TaskStatusUpdate,
-) error {
+) (bool, error) {
 	s.statusUpdateContextErr = ctx.Err()
 	_, s.statusUpdateContextHasDeadline = ctx.Deadline()
 	s.statusUpdates = append(s.statusUpdates, update)
-	return nil
+	return !s.skipStatusUpdate, nil
 }
 
 func (s *managerTaskStore) UpdateTaskReport(
@@ -1810,7 +1811,7 @@ func (e *managerExecutor) Execute(
 func (e *managerExecutor) CheckStatus(
 	context.Context,
 	string,
-) (taskcommon.TaskStatus, error) {
+) (*taskdef.ExecutionStatus, error) {
 	panic("managerExecutor.CheckStatus: not implemented")
 }
 
@@ -1833,6 +1834,13 @@ func (e *managerExecutor) TerminateTask(
 // ListTaskContextForRack fails unexpected context reads in task-manager tests.
 func (s *managerTaskStore) ListTaskContextForRack(_ context.Context, _ uuid.UUID) ([]taskdef.TaskContextMetadata, error) {
 	panic("unexpected task context read")
+}
+
+func (s *managerTaskStore) ListTasksForReconciliation(context.Context, taskcommon.ExecutorType, uuid.UUID, int) ([]*taskdef.Task, error) {
+	panic("unexpected ListTasksForReconciliation")
+}
+func (s *managerTaskStore) FinishTaskExecution(context.Context, *taskdef.Task, *taskdef.ExecutionStatus) (bool, error) {
+	panic("unexpected FinishTaskExecution")
 }
 
 func TestValidateResolvedRackTargets_ComponentReset(t *testing.T) {
@@ -1918,4 +1926,16 @@ func TestManagerImpl_CreateResetTasks(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestNotifyingTaskStore_UpdateTaskStatus(t *testing.T) {
+	t.Run("skips lookup and notification when a terminal callback changes no row", func(t *testing.T) {
+		// This fake's GetTasks is deliberately unimplemented: a skipped write
+		// must not continue into the lookup/notification path.
+		store := &managerTaskStore{skipStatusUpdate: true}
+		wrapped := newNotifyingTaskStore(store, nil)
+		updated, err := wrapped.UpdateTaskStatus(t.Context(), &taskdef.TaskStatusUpdate{ID: uuid.New(), Status: taskcommon.TaskStatusCompleted})
+		require.NoError(t, err)
+		require.False(t, updated)
+	})
 }
