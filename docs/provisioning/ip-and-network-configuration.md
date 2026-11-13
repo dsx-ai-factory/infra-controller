@@ -784,6 +784,56 @@ A successful external recursion via `unbound.nico` confirms both DHCP option 6 (
 
 ---
 
+### 3.5 IPv6 Connections from Core to Dependencies
+
+Core's PostgreSQL, Vault, and OpenTelemetry endpoints can use DNS names or IPv6
+literals. Publish AAAA records only for reachable IPv6 listeners. For a
+dual-stack name, configure the dependency and network policy for both advertised
+families; a Kubernetes Service address alone does not establish that the backend
+process listens on that family.
+
+- **PostgreSQL:** Set the Core database ConfigMap's `DB_HOST` to a bare address,
+  such as `2001:db8::10`. When configuring the binary directly with a complete
+  `database_url`, bracket the IPv6 host:
+
+  ```text
+  postgres://USER:PASSWORD@[2001:db8::10]:5432/DB
+  ```
+
+- **Vault:** The Core Helm chart populates `VAULT_ADDR` from the shared
+  configuration's `VAULT_SERVICE`. An explicitly configured Vault address takes
+  precedence over `VAULT_ADDR`. Use a bracketed URL such as
+  `https://[2001:db8::11]:8200`.
+- **OpenTelemetry:** `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` overrides Core's
+  `[tracing].otlp_endpoint`. For an OTLP/gRPC listener without TLS, use a
+  bracketed URL such as `http://[2001:db8::12]:4317`.
+
+The Core deployment and migration startup commands bracket IPv6 database hosts
+when constructing PostgreSQL URLs. Core then normalizes SQLx's parsed host for
+the socket connection. Keep the chart/manifests and binary together when using
+these [IPv6 database URL changes](https://github.com/dsx-ai-factory/infra-controller/pull/6071).
+Full URLs for Vault and the collector must already contain brackets around
+literal IPv6 addresses; DNS names do not take brackets.
+
+For TLS endpoints, trust the issuing CA and include the configured DNS name or IP
+address in the server certificate's subject alternative names. Vault verifies
+the server certificate. Core's database startup uses `sslmode=require` when TLS
+configuration is present and enforcement has not been disabled; this must not be
+interpreted as hostname verification. See [Tracing](../observability/tracing.md)
+for collector configuration and trace enablement.
+
+The repeatable `dev/deployment/dependency-network` qualification exercises real
+PostgreSQL, Vault, and collector exchanges through Core's production client
+helpers. It covers IPv6 literals, AAAA-only names, an IPv6-only client network,
+dual-stack names with either family refusing connections, and missing DNS. It
+complements the [literal-address regression tests](https://github.com/dsx-ai-factory/infra-controller/pull/6604)
+under [dependency connectivity qualification](https://github.com/dsx-ai-factory/infra-controller/issues/5403).
+It does not establish family preference, fallback time through silent packet
+drops, or a site's Kubernetes routing and authentication configuration. Check
+resolution and real service operations from the consuming workload during
+rollout; DNS lookup success alone does not prove authentication, a database
+query, or collector receipt of a trace.
+
 ## 4. End-to-end Day 0 Checklist
 
 Use this checklist across the Day 0 rollout. Complete the configuration and
