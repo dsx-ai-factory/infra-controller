@@ -21,7 +21,6 @@ members = ["crates/*", "crates/libnmxc/tests"]
 [workspace.package]
 edition = "2024"
 license = "Apache-2.0"
-license-file = "LICENSE"
 authors = ["NVIDIA Carbide Engineering <carbide-dev@exchange.nvidia.com>"]
 repository = "https://github.com/dsx-ai-factory/infra-controller"
 
