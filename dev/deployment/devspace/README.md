@@ -7,6 +7,8 @@ The process is broken into two steps:
 1. Bootstrap Kubernetes prerequisites. (This only needs to be done once per cluster.)
 2. Run `devspace deploy -n nico-system --profile full` to deploy code from this repo
 
+Deployment hooks require Python 3 as well as Bash, jq, Helm, and kubectl. The DHCP service-address rewrite uses Python's JSON serialization to preserve floating-point values required by Kea.
+
 The intent is that the app deploy path stays the same whether the prerequisites are:
 
 - installed by the provided bootstrap script, or
