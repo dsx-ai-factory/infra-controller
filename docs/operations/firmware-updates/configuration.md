@@ -373,7 +373,8 @@ configuration.
 ## Operational controls
 
 The settings in this section are fields in NICo Core's site configuration. They
-control the automatic paths; they do not define component target versions.
+control automatic scheduling, execution, and delivery; they do not define
+component target versions.
 
 ### Managed-machine scheduling
 
@@ -417,6 +418,8 @@ pre-ingestion manager:
 | `firmware_global.concurrency_limit` | `16` | Maximum number of pre-ingestion endpoints processed concurrently. This is separate from Machine Update Manager capacity. |
 | `firmware_global.firmware_directory` | `/opt/nico/firmware`, otherwise `/opt/carbide/firmware` | Directory containing legacy metadata and local firmware artifacts. |
 | `firmware_global.firmware_download_cache_directory` | `/mnt/persistence/fw/download-cache` | Writable cache for downloaded firmware artifacts. |
+| `firmware_global.nic_firmware_delivery_mode` | `site_cache` | Policy for new NIC firmware operations: `site_cache` or `direct`. Requires [NIC admission support](#scout-nic-firmware-delivery) in the Core build. |
+| `firmware_global.nic_firmware_cache_capacity_bytes` | `17179869184` (16 GiB) | Managed NIC cache budget, including partial files and active reservations. Accepts `1` to `1099511627776` (1 TiB), at least `downloads.max_download_bytes`. Changes require a Core restart. |
 | `firmware_global.host_firmware_upgrade_retry_interval` | `60m` | Delay before the managed-host state machine retries a failed host firmware upgrade. |
 | `firmware_global.instance_updates_manual_tagging` | See below | When `true`, automatic host selection is limited to unassigned hosts in top-level `Ready`. When `false`, assigned hosts can also receive a pending request. |
 | `firmware_global.no_reset_retries` | `false` | Disables the normal retry handling for BMC reset failures during pre-ingestion and managed-host firmware work. |
@@ -448,6 +451,100 @@ provide a reliable model allowlist. Use the
 [per-machine automatic-update policy](host-firmware.md#enable-or-disable-one-host)
 instead.
 
+### Scout NIC firmware delivery
+
+Scout's `mlx-firmware-supervisor` can download NIC firmware through Core's
+cache or directly from the original source. These modes apply to operations
+where Core supplies an expected SHA-256 digest for the image and every
+configuration artifact. They require builds containing the
+[Scout NIC delivery implementation](https://github.com/dsx-ai-factory/infra-controller/issues/6679).
+
+The optional `firmware_global.nic_firmware_delivery_mode` setting defaults to
+`site_cache` and accepts the following values:
+
+**NIC Firmware Delivery Modes**
+
+| Value | Delivery Path | Requirements |
+|---|---|---|
+| `site_cache` | The supervisor downloads through Core's authenticated HTTPS endpoint. Core fetches the original source into its local cache. | Scout needs its configured Core origin, trusted CA, and host identity. Core must reach the original source without credentials. |
+| `direct` | The supervisor downloads anonymously from the original HTTP or HTTPS source, without sending Core credentials. | The source must be reachable from the discovery environment without credentials. |
+
+Both modes require unauthenticated original HTTP or HTTPS sources without user
+information, queries, fragments, or redirects. The supervisor stages every
+required artifact and checks its digest before applying NIC configuration or
+burning the image. Cache errors, authentication failures, and redirects never
+switch `site_cache` to `direct`.
+
+Core loads the setting at startup; changes require a restart, and invalid
+values prevent startup. Unknown keys follow the
+[shared configuration loading policy](#firmware-downloads), including its
+`deny_unknown_fields` option. A Core build needs
+[production baseline admission](https://github.com/dsx-ai-factory/infra-controller/issues/6680)
+before this site policy can be copied into new operations. Changing delivery
+alone does not start an update or change a saved operation. A saved operation
+without a mode uses `direct`, independently of the site's `site_cache` default.
+Legacy Scout scripts, Scout DPA provisioning firmware, and DPU BFB updates do
+not use this policy.
+
+The `site_cache` mode reuses Scout's Core client settings, including TLS
+identity, node-auth JWTs, proxy, DNS, and management VRF handling. The Core
+address must be a verified HTTPS origin without a path prefix, user
+information, query, or fragment. Scout resolves CA, client-certificate, and
+private-key paths to absolute UTF-8 paths of at most 4,096 bytes each before
+submission. Invalid local transport
+settings prevent submission and produce a local configuration delivery error.
+Core serves only the artifacts named by the authenticated host's current saved
+NIC operation. Core credentials stay at that configured origin.
+
+Accepted work keeps its submitted transport settings after Scout exits;
+reconnecting does not replace them. Those settings and identity paths are not
+saved in the operation journal. Refer to the
+[supervised delivery contract](https://github.com/dsx-ai-factory/infra-controller/blob/main/crates/libmlx/README.md#supervised-firmware-operations)
+for the detailed transport and recovery contract.
+
+Each artifact has a 30-minute client network deadline. For `site_cache`, that
+budget covers cache readiness, authentication, retries, and the complete
+response. Artifact-level transport failures get at most three retries, after
+one, two, and four seconds. HTTP `202`, `502`, and `503` responses wait for
+`Retry-After`, clamped to one through 30 seconds, within the same deadline.
+Other statuses, including `401`, `403`, and `404`, fail immediately. Scout's
+existing connector retries also remain within that deadline. The `direct` mode
+has no artifact transfer retries. Neither deadline interrupts a filesystem
+write already in progress; blocked storage can keep staging running longer.
+
+Core's [download size and time limits](#firmware-downloads) independently apply
+to a `site_cache` origin fetch. Its default HTTP size limit is 4 GiB; the
+supervisor accepts at most 16 GiB per artifact in either mode. Each active cache
+transfer reserves `downloads.max_download_bytes` against
+`nic_firmware_cache_capacity_bytes`. A busy shared worker pool delays even
+cached artifacts: Core returns HTTP `202` with `Retry-After: 5`. That wait, or a
+cold cache fill, can exhaust Scout's deadline before configuration or image
+burn. An accepted Core transfer can continue filling its cache after the client
+stops waiting; a later attempt can find it ready.
+
+Each Core process needs its own `firmware_global.firmware_download_cache_directory`;
+sharing one between processes is unsupported. Managed NIC content uses its
+`digest-v1` namespace and the cache budget listed above. Retained operations and
+readers prevent eviction; verified content already present remains readable
+after a budget reduction, while new transfers need free capacity. Legacy URL
+cache files are outside that budget. Eviction can remove later offline access.
+The default Helm chart uses per-pod `emptyDir` storage, so replacing the Core
+pod also removes its cache. Refer to the
+[managed cache contract](https://github.com/dsx-ai-factory/infra-controller/blob/main/crates/firmware/README.md#managed-artifact-cache)
+for ownership and retention.
+
+Use matching Core, Scout, and supervisor builds before enabling `site_cache`
+operations. Scout advertises code support; that does not certify its transport
+configuration. Core rejects unsupported Scout control polls with
+`FAILED_PRECONDITION`, preserving saved progress. The `Reobserving` and
+`RestoringLockdown` recovery phases remain available. Refer to
+[NIC Firmware Recovery](../../architecture/state_machines/managedhost.md#nic-firmware-recovery)
+and [Scout's integration boundary](https://github.com/dsx-ai-factory/infra-controller/blob/main/crates/scout/README.md#supervised-nic-firmware-updates).
+Downgrading while saved `site_cache` operations or journals remain is
+unsupported. These delivery checks do not qualify deployed transfers, storage,
+or hardware; refer to
+[release and operator qualification](https://github.com/dsx-ai-factory/infra-controller/issues/6688).
+
 ### Firmware downloads
 
 These settings are planned for NICo v2.4. They require a Core build containing
@@ -457,9 +554,11 @@ with this reference tracked in the
 Earlier builds do not enforce these limits.
 
 The optional `[firmware_global.downloads]` section limits URL artifacts fetched
-by Core for managed-host Redfish upgrades and non-BFB pre-ingestion upgrades.
-Both paths share one worker pool per Core process. Scout, Core-local scripts,
-filename-only artifacts, and pre-ingestion BFB delivery bypass this downloader.
+by Core for managed-host Redfish upgrades, non-BFB pre-ingestion upgrades, and
+[`site_cache` NIC origin fetches](#scout-nic-firmware-delivery). These paths and
+NIC cache checks share one worker pool per Core process. Scout scripts, Scout
+DPA provisioning firmware, `direct` NIC delivery, Core-local scripts,
+filename-only artifacts, and BFB delivery bypass this downloader.
 
 Omit the section or individual fields to use their defaults. This also applies
 to existing configurations: with defaults, HTTP responses over 4 GiB fail, and
@@ -524,7 +623,8 @@ When all workers are busy, Core defers the artifact check to the next poll. This
 applies even when the artifact is already cached or a recorded download failure
 is waiting to be reported. Core does not queue the check, and it does not count
 saturation as a firmware failure.
-The workflow remains waiting for artifact availability; the debug message
+Managed-host and pre-ingestion workflows remain waiting for artifact
+availability; the debug message
 "Firmware download workers are busy; deferring artifact check" identifies
 saturation. A slot remains occupied until verification and cleanup finish, even
 after the requesting controller iteration stops waiting. HTTP deadlines do not
@@ -540,12 +640,15 @@ start rather than resume. The
 `carbide_firmware_download_duration_seconds_count` metric records finished
 attempts by `outcome`; HTTP deadlines appear as `fetch` or `transfer` failures.
 
-For these downloads, Core verifies a configured SHA-256 digest but does not
-require one. `file://` URL artifacts share worker capacity but do not use the
+For managed-host Redfish and pre-ingestion downloads, Core verifies a configured
+SHA-256 digest but does not require one. The `site_cache` NIC path requires a
+digest for every artifact. `file://` URL artifacts share worker capacity but do not use the
 HTTP size or timeout limits.
 
 Download limits are separate from firmware upload limits, BFB copy limits, and
-firmware execution concurrency. They do not limit retained cache storage.
+firmware execution concurrency. They do not limit retained legacy cache
+storage; the separate NIC cache budget includes its retained content and active
+reservations.
 
 ## Roll out a new baseline
 
