@@ -311,6 +311,7 @@ impl TestApiBuilder {
             Arc::new(std::sync::atomic::AtomicBool::new(false)),
             false,
             self.db_pool.clone(),
+            self.instrumentation.clone(),
         );
         // A mock supplies both narrow interfaces so tests asserting on BMC calls
         // still see them; production-like tests use the independently constructed

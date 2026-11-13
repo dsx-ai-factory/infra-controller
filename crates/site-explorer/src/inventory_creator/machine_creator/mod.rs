@@ -20,7 +20,7 @@ use std::net::IpAddr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use carbide_instrument::emit;
+use carbide_instrument::Instrumentation;
 use carbide_resource_pool::ResourcePoolRegistry;
 use carbide_uuid::machine::{DpuMachineId, HostMachineId, MachineId, PredictedHostMachineId};
 use carbide_uuid::rack::RackId;
@@ -73,6 +73,7 @@ pub(crate) use host_identification::ConfiguredIngestionCandidate;
 
 /// Creates machines from site-explorer managed-host reports.
 pub struct MachineCreator {
+    instrumentation: Instrumentation,
     database_connection: PgPool,
     config: Config,
     /// In-flight creations per `create_machines` call: the configured value,
@@ -98,9 +99,11 @@ struct HostDpuResources<'a> {
 
 impl MachineCreator {
     /// Creates a machine creator with an optional machine-information provider.
+    /// Events use `instrumentation`; retain its provider while the creator runs.
     /// The registry selects loopback and ASN backends for preparation outside entity
     /// transactions. Direct calls have an uncancelled owner token; Site Explorer
     /// installs its shutdown token before starting production creation work.
+    #[allow(clippy::too_many_arguments)] // Creation dependencies and site policy are supplied together.
     pub fn new(
         database_connection: PgPool,
         config: Config,
@@ -109,12 +112,14 @@ impl MachineCreator {
         rack_profiles: Arc<RackProfileConfig>,
         machine_info_provider: Option<Arc<dyn MachineInfoProvider>>,
         dpf_enabled_at_site: bool,
+        instrumentation: Instrumentation,
     ) -> Self {
         let creation_concurrency = creation_concurrency(
             config.machine_creation_concurrency,
             db::machine_interface::admin_lock_admission_permits(),
         );
         Self {
+            instrumentation,
             database_connection,
             config,
             creation_concurrency,
@@ -352,6 +357,7 @@ impl MachineCreator {
                         machine_id.into(),
                         requested_loopback_v4,
                         &self.preparation_cancel_token,
+                        self.instrumentation.clone(),
                     ),
                     PreparedDpuAsn::prepare(
                         pool,
@@ -404,6 +410,7 @@ impl MachineCreator {
             record_creation_stage(
                 ManagedHostCreationStage::AdmissionWait,
                 admission_start.elapsed(),
+                &self.instrumentation,
             );
             let admission = admission?;
             let transaction_start = Instant::now();
@@ -420,6 +427,7 @@ impl MachineCreator {
             record_creation_stage(
                 ManagedHostCreationStage::Transaction,
                 transaction_start.elapsed(),
+                &self.instrumentation,
             );
             Ok::<_, SiteExplorerError>((creation?, admission))
         }
@@ -442,10 +450,16 @@ impl MachineCreator {
             // Normalize host admin address ownership now that every DPU-backed
             // host interface is attached and the primary flags are committed.
             let repair_start = Instant::now();
-            reconcile_host_admin_addresses_after_commit(pool, &host_machine_id).await;
+            reconcile_host_admin_addresses_after_commit(
+                pool,
+                &host_machine_id,
+                &self.instrumentation,
+            )
+            .await;
             record_creation_stage(
                 ManagedHostCreationStage::AfterCommitRepair,
                 repair_start.elapsed(),
+                &self.instrumentation,
             );
         }
 
@@ -1305,7 +1319,7 @@ impl<'a> CreationRun<'a> {
             if attempt.created {
                 metrics.created_machines += 1;
             }
-            emit(attempt.event);
+            self.creator.instrumentation.emit(attempt.event);
             if !self.pass_interval.is_zero() && self.last_pass.elapsed() >= self.pass_interval {
                 pass_due = true;
             }
@@ -1423,8 +1437,12 @@ fn creation_finished_event(
     }
 }
 
-fn record_creation_stage(stage: ManagedHostCreationStage, latency: Duration) {
-    emit(ManagedHostCreationStageFinished { stage, latency });
+fn record_creation_stage(
+    stage: ManagedHostCreationStage,
+    latency: Duration,
+    instrumentation: &Instrumentation,
+) {
+    instrumentation.emit(ManagedHostCreationStageFinished { stage, latency });
 }
 
 /// Initializes host admin address ownership in its own transaction after
@@ -1437,11 +1455,12 @@ fn record_creation_stage(stage: ManagedHostCreationStage, latency: Duration) {
 async fn reconcile_host_admin_addresses_after_commit(
     pool: &PgPool,
     host_machine_id: &HostMachineId,
+    instrumentation: &Instrumentation,
 ) {
     if let Err(error) =
         db::machine_interface::reconcile_admin_addresses_after_commit(pool, host_machine_id).await
     {
-        emit(SiteExplorerHostAdminAddressReconcileFailed {
+        instrumentation.emit(SiteExplorerHostAdminAddressReconcileFailed {
             host_machine_id: *host_machine_id,
             error: error.to_string(),
         });

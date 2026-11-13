@@ -677,6 +677,7 @@ async fn test_machine_creator_created_host_advances_through_dpu_discovery(
         Arc::new(env.config.rack_profiles.clone()),
         None,
         false,
+        env.api.instrumentation.clone(),
     );
 
     // Use a known DPU serial so we can assert on the generated MachineId.

@@ -256,6 +256,7 @@ pub(crate) async fn discover_machine(
                 stable_machine_id,
                 reservation.as_ref().and_then(|r| r.loopback_ipv4),
                 &api.cancel_token,
+                api.instrumentation.clone(),
             ),
             PreparedDpuAsn::prepare(
                 api.pg_pool(),

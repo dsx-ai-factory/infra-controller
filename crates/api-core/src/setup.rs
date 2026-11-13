@@ -671,6 +671,7 @@ pub async fn start_runtime(runtime_inputs: RuntimeInputs<'_>) -> eyre::Result<So
             .clone(),
         carbide_config.site_explorer.explore_drive_firmware,
         db_pool.clone(),
+        instrumentation.clone(),
     );
     let endpoint_exploration_service = Arc::new(EndpointExplorationService::new(
         db_pool.clone(),
@@ -2652,6 +2653,7 @@ async fn initialize_and_start_controllers<'a>(
         site_explorer_machine_info_provider,
         credential_manager.clone(),
         carbide_config.dpf.enabled && dpf_sdk.is_some(),
+        api_service.instrumentation.clone(),
     )
     .start(join_set, cancel_token.clone())?;
 

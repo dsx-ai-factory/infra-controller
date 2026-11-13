@@ -1919,6 +1919,7 @@ async fn create_test_env_with_overrides_inner(
         test_machine_info_provider(&rms_sim),
         credential_manager.clone(),
         api.runtime_config.dpf.enabled && api.dpf_sdk.is_some(),
+        api.instrumentation.clone(),
     );
 
     // Create some instance types

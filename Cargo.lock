@@ -883,6 +883,7 @@ name = "bmc-explorer-cli"
 version = "0.1.0"
 dependencies = [
  "arc-swap",
+ "carbide-instrument",
  "carbide-ipmi",
  "carbide-redfish",
  "carbide-secrets",
@@ -890,6 +891,7 @@ dependencies = [
  "clap",
  "libredfish",
  "mac_address",
+ "opentelemetry",
  "serde_json",
  "tokio",
  "tracing-subscriber",

@@ -231,6 +231,7 @@ async fn create_test_env_inner(pool: PgPool, overrides: TestEnvOverrides) -> Tes
             }),
             credentials.clone(),
             false,
+            api.instrumentation().clone(),
         ),
         endpoint_explorer,
     );
