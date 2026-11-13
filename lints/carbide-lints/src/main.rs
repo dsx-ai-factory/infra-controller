@@ -16,6 +16,7 @@
  */
 #![deny(warnings)]
 #![feature(rustc_private)]
+#![feature(default_field_values)]
 
 mod borrowck_shim;
 mod txn_held_across_await;
@@ -154,10 +155,10 @@ fn main() -> std::process::ExitCode {
         // set, we're checking a package in this repo, otherwise just run rustc as-is.
         if std::env::var("CARGO_PRIMARY_PACKAGE").is_ok() {
             let mut driver = CarbideLints;
-            rustc_driver::run_compiler(&args, &mut driver);
+            rustc_driver::compiler_entrypoint(&args, &mut driver);
         } else {
             let mut driver = DefaultCallbacks;
-            rustc_driver::run_compiler(&args, &mut driver);
+            rustc_driver::compiler_entrypoint(&args, &mut driver);
         }
     })
 }

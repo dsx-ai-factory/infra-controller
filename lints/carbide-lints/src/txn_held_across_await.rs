@@ -27,14 +27,15 @@ use rustc_hir::{
 use rustc_lint_defs::{Lint, LintPass, LintVec};
 use rustc_middle::hir::nested_filter;
 use rustc_middle::hir::place::{Place as HirPlace, PlaceBase};
+use rustc_middle::mir;
 use rustc_middle::mir::{Location, ProjectionElem};
 use rustc_middle::ty::{Adt, ParamEnv, Ty as MiddleTy, TyCtxt, TypeckResults, UpvarId, UpvarPath};
-use rustc_middle::{bug, mir};
 use rustc_mir_dataflow::Analysis;
 use rustc_mir_dataflow::impls::{MaybeInitializedPlaces, MaybeUninitializedPlaces};
 use rustc_mir_dataflow::move_paths::{LookupResult, MoveData};
 use rustc_span::def_id::DefId;
-use rustc_span::{Span, Symbol};
+use rustc_span::{Span, Symbol, bug};
+use rustc_type_ir::CallerBoundsIterator;
 use rustc_type_ir::inherent::SliceLike;
 
 ///  ### What it does
@@ -108,7 +109,7 @@ pub(crate) static TXN_HELD_ACROSS_AWAIT: &Lint = &Lint {
     default_level: ::rustc_lint_defs::Warn,
     desc: "Do not do expensive non-database work while holding open a database transaction",
     is_externally_loaded: false,
-    ..Lint::default_fields_for_macro()
+    ..
 };
 
 #[derive(Clone)]
@@ -458,17 +459,21 @@ impl TxnHeldAcrossAwait {
         param_env: ParamEnv<'tcx>,
         ty: MiddleTy<'tcx>,
     ) -> bool {
-        param_env.caller_bounds().iter().any(|predicate| {
-            let Some(trait_pred) = predicate.as_trait_clause() else {
-                return false;
-            };
-            if !self.is_sqlx_transaction(tcx, trait_pred.def_id()) {
-                return false;
-            }
+        param_env
+            .caller_bounds()
+            .all_clauses(tcx)
+            .iter()
+            .any(|predicate| {
+                let Some(trait_pred) = predicate.as_trait_clause() else {
+                    return false;
+                };
+                if !self.is_sqlx_transaction(tcx, trait_pred.def_id()) {
+                    return false;
+                }
 
-            let self_ty = trait_pred.skip_binder().trait_ref.self_ty().peel_refs();
-            self_ty == ty.peel_refs()
-        })
+                let self_ty = trait_pred.skip_binder().trait_ref.self_ty().peel_refs();
+                self_ty == ty.peel_refs()
+            })
     }
 
     /// Given a function Node, get any input parameters of type sqlx::Transaction
@@ -631,10 +636,9 @@ impl TxnHeldAcrossAwait {
         txn_local_span: Span,
     ) -> Option<(mir::Local, &'a mir::LocalDecl<'tcx>)> {
         for (local, decl) in mir_body.local_decls.iter_enumerated() {
-            // NOTE: We need to use source_equal here (and other places in this file) because we're
-            // comparing HIR vs MIR representations of the code, and spans there don't always
-            // compare equal, even if they're the same source location.
-            if txn_local_span.source_equal(decl.source_info.span) {
+            // Compare source positions because HIR and MIR spans can have different hygiene
+            // contexts even when they refer to the same source location.
+            if txn_local_span.lo_hi() == decl.source_info.span.lo_hi() {
                 return Some((local, decl));
             }
         }
@@ -692,7 +696,7 @@ impl<'tcx> Visitor<'tcx> for TxnLineageFinder<'_, 'tcx> {
     // TypeckResults is scoped to one HIR owner. Nested items and closures have their own results
     // and are checked independently, so crossing into them would query this owner's table with
     // foreign HirIds and trigger an internal compiler error.
-    type NestedFilter = rustc_hir::intravisit::nested_filter::None;
+    type NestedFilter = rustc_hir::intravisit::IgnoreNested;
 
     fn visit_local(&mut self, let_stmt: &'tcx LetStmt<'tcx>) {
         if let Some(init) = let_stmt.init
@@ -876,11 +880,11 @@ impl<'a, 'tcx> Visitor<'tcx> for DbAwaitFinder<'tcx> {
             if let PatKind::Tuple(tuple_vars, _dotdot_position) = let_stmt.pat.kind {
                 // Statement is a tuple... e.g. `let (txn, stuff) = make_transaction_and_stuff()`;
                 for v in tuple_vars.iter() {
-                    if v.span.source_equal(txn_local_span) {
+                    if v.span.lo_hi() == txn_local_span.lo_hi() {
                         self.found_txn_local_hir_id = Some(v.hir_id);
                     }
                 }
-            } else if let_stmt.pat.span.source_equal(txn_local_span) {
+            } else if let_stmt.pat.span.lo_hi() == txn_local_span.lo_hi() {
                 // Statement's `pat` (the place to the left of the equals sign) equals the span we're
                 // looking for.
                 self.found_txn_local_hir_id = Some(let_stmt.pat.hir_id);
@@ -905,7 +909,7 @@ impl<'a, 'tcx> Visitor<'tcx> for DbAwaitFinder<'tcx> {
         ) = expr.kind
         {
             // ... particularly the one that equals `await_span`
-            if expr.span.source_equal(self.params.await_span) {
+            if expr.span.lo_hi() == self.params.await_span.lo_hi() {
                 self.awaited_expr_hir_id = Some(awaited);
             }
         }
@@ -1044,7 +1048,7 @@ fn is_local_dead_at_span<'a, 'tcx>(
             };
 
             // We got to the span we're looking for, we're done, and we can return `is_dead`.
-            if statement.source_info.span.source_equal(span) {
+            if statement.source_info.span.lo_hi() == span.lo_hi() {
                 break 'outer;
             }
 
@@ -1112,7 +1116,7 @@ fn is_local_dead_at_place<'a, 'tcx>(
             };
 
             // We got to the span we're looking for, we're done, and we can return `is_dead`.
-            if statement.source_info.span.source_equal(span) {
+            if statement.source_info.span.lo_hi() == span.lo_hi() {
                 break 'outer;
             }
 
