@@ -32,6 +32,42 @@ mod test_certs;
 
 pub type AuthContext = carbide_authn::middleware::AuthContext<Authorization>;
 
+/// Requires an authenticated caller explicitly granted this external-validation method.
+/// This remains enforced when global RBAC is bypassed; request payloads never establish identity.
+pub(crate) fn external_validation_actor<T>(
+    request: &tonic::Request<T>,
+    method: &str,
+) -> CarbideResult<String> {
+    let context = request.extensions().get::<AuthContext>().ok_or_else(|| {
+        CarbideError::ClientCertificateMissingInformation("external-validation caller".to_string())
+    })?;
+    let principal = context
+        .principals
+        .iter()
+        .find(|principal| {
+            internal_rbac_rules::InternalRBACRules::allowed_from_static(
+                method,
+                std::slice::from_ref(*principal),
+            )
+        })
+        .ok_or_else(|| {
+            CarbideError::PermissionDeniedError(
+                "external-validation method is not authorized".to_string(),
+            )
+        })?;
+    let actor = match principal {
+        Principal::ExternalUser(info) => info
+            .user
+            .as_ref()
+            .filter(|user| !user.is_empty())
+            .map(|user| format!("external-user/{user}"))
+            .unwrap_or_else(|| principal.audit_identity()),
+        _ => principal.audit_identity(),
+    };
+    tracing::debug!(%actor, method, "external validation caller authorized");
+    Ok(actor)
+}
+
 /// `PrincipalClass` keeps the identity labels on authorization decisions
 /// bounded. Both a normal denial and a permissive-mode override use the
 /// strongest principal, so the two counters group callers the same way.

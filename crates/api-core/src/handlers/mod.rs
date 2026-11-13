@@ -44,6 +44,7 @@ pub(super) mod expected_rack;
 pub(super) mod expected_rack_group;
 pub(super) mod expected_switch;
 pub(super) mod extension_service;
+pub(super) mod external_validation;
 pub(super) mod finder;
 pub(super) mod firmware;
 pub(super) mod health;

@@ -571,13 +571,19 @@ impl InternalRBACRules {
             vec![ForgeAdminCLI],
         );
         x.perm("ReWrapSecrets", vec![ForgeAdminCLI]);
-        // Register the contract RPCs without granting access before tenant/site
-        // authorization and the external-validation workflow are implemented.
-        x.perm("FindExternalValidationHoldIds", vec![]);
-        x.perm("FindExternalValidationHoldsByIds", vec![]);
-        x.perm("StartExternalValidation", vec![]);
-        x.perm("CancelExternalValidation", vec![]);
-        x.perm("CompleteExternalValidation", vec![]);
+        // Durable workflow handlers authorize the Core caller and persisted resource bindings.
+        // Removal stays denied until lifecycle recovery is implemented.
+        x.perm(
+            "FindExternalValidationHoldIds",
+            vec![ForgeAdminCLI, SiteAgent],
+        );
+        x.perm(
+            "FindExternalValidationHoldsByIds",
+            vec![ForgeAdminCLI, SiteAgent],
+        );
+        x.perm("StartExternalValidation", vec![ForgeAdminCLI, SiteAgent]);
+        x.perm("CancelExternalValidation", vec![ForgeAdminCLI, SiteAgent]);
+        x.perm("CompleteExternalValidation", vec![ForgeAdminCLI, SiteAgent]);
         x.perm("RemoveExternalValidationHold", vec![]);
         x.perm("GetIpxeTemplate", vec![ForgeAdminCLI, SiteAgent]);
         x.perm("ListIpxeTemplates", vec![ForgeAdminCLI, SiteAgent]);
@@ -2118,9 +2124,9 @@ mod rbac_rule_tests {
         Ok(())
     }
 
-    /// Contract publication must not authorize any internal principal.
+    /// Workflow methods admit only the Site Agent or privileged Core callers; removal remains denied.
     #[test]
-    fn external_validation_contract_has_no_static_grants() {
+    fn external_validation_method_grants() {
         let rules = InternalRBACRules::new();
         for method in [
             "FindExternalValidationHoldIds",
@@ -2128,10 +2134,41 @@ mod rbac_rule_tests {
             "StartExternalValidation",
             "CancelExternalValidation",
             "CompleteExternalValidation",
-            "RemoveExternalValidationHold",
         ] {
-            assert!(rules.perms[method].principals.is_empty(), "{method}");
+            assert!(
+                rules.allowed(
+                    method,
+                    &[Principal::SpiffeServiceIdentifier(
+                        "elektra-site-agent".into()
+                    )]
+                ),
+                "{method}"
+            );
+            assert!(
+                rules.allowed(
+                    method,
+                    &[Principal::ExternalUser(ExternalUserInfo::new(
+                        None,
+                        "nico-cli-client".into(),
+                        Some("operator".into())
+                    ))]
+                ),
+                "{method}"
+            );
+            for principal in [
+                Principal::Anonymous,
+                Principal::TrustedCertificate,
+                Principal::SpiffeMachineIdentifier("host".into()),
+                Principal::SpiffeServiceIdentifier("unrelated-service".into()),
+            ] {
+                assert!(!rules.allowed(method, &[principal]), "{method}");
+            }
         }
+        assert!(
+            rules.perms["RemoveExternalValidationHold"]
+                .principals
+                .is_empty()
+        );
     }
 
     #[test]

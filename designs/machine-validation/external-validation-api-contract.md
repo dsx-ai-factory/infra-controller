@@ -25,19 +25,32 @@ these sources.
 
 ## Availability
 
-Milestone 1 publishes protobuf contracts and generated Rust interfaces. The six
-new RPC handlers return `UNIMPLEMENTED`; existing method authorization may reject
-calls before they reach a handler. Publishing declarations grants no additional
-permissions and does not create holds or attempts.
+Milestone 1 published the protobuf contracts in [PR #7778](https://github.com/dsx-ai-factory/infra-controller/pull/7778).
+Milestone 2 implements durable hold/attempt storage, both discovery RPCs, and
+Start, Cancel, and Complete. These five methods grant `SiteAgent` and privileged
+Core operator access. Their handlers also require an authenticated, explicitly
+granted Core identity when global RBAC is bypassed. Middleware may reject a
+request before it reaches these checks.
 
-All six methods have explicit empty static RBAC grants. With internal RBAC
-enabled, callers with an `AuthContext` receive `PERMISSION_DENIED` before a
-handler runs. Missing `AuthContext` is also rejected before dispatch; this
-contract does not promise a gRPC wire status for that branch. With RBAC bypassed,
-the stubs return `UNIMPLEMENTED`. Runtime resource/policy checks and service
-grants belong to the implementation milestones. That implementation must grant
-`SiteAgent` all six RPCs, including `RemoveExternalValidationHold`, for REST
-proxy calls; Milestone 1 deliberately grants none.
+NICo's persisted hold captures its tenant organization, cycle, and health-report
+source. Mutations check those resource bindings rather than trusting a submitted
+tenant or request UUID. New attempts acquire the machine and hold locks; a
+transaction-level tenant/key lock prevents the same Start key from being bound
+on two machines. State changes and the authenticated Core caller's audit record
+commit together. Reads and replays log the Core caller without changing the
+original operation's timestamps or mutation audit entries. Result text is
+redacted from request logs.
+
+There is no public hold-creation API. Automatic hold creation, policy configuration,
+health projection, and cleanup/recovery integration arrive in Milestone 4.
+Until then, these handlers have no production lifecycle creating holds.
+`CompleteExternalValidation` requires an existing committed instance binding;
+Milestone 3 supplies the allocation path that creates that binding. Tests seed
+bound records to verify completion without enabling request-bound allocation.
+The persisted removal marker excludes removed holds from inventory and new work;
+the removal RPC itself remains `UNIMPLEMENTED` with empty grants until Milestone 4.
+That implementation must also grant `SiteAgent` removal access after adding its
+resource and cleanup checks.
 
 A present `InstanceAllocationRequest.external_validation_request_id` returns
 `FAILED_PRECONDITION` until request-bound allocation is implemented, including
@@ -45,11 +58,12 @@ a present default UUID and requests within `AllocateInstances`. Omission preserv
 existing allocation behavior. The guard prevents ordinary allocation from
 silently accepting a request that expects a durable validation binding.
 
-Durable records and workflow handlers arrive in Milestone 2, request-bound
-`AllocateInstance` in Milestone 3, lifecycle and recovery in Milestone 4, and
+Request-bound `AllocateInstance` arrives in Milestone 3, lifecycle and recovery
+in Milestone 4, and
 repair coexistence in Milestone 5. Enable the site policy only after the complete
 Phase 1 workflow passes integration testing. DSX Exchange event enrichment
-belongs to Phase 2. The following sections define the later handlers' contracts.
+belongs to Phase 2. The following sections define the complete Phase 1 contract,
+including behavior deferred to later milestones.
 
 ## Scope and authorization
 
@@ -93,7 +107,7 @@ tenant organization IDs through `RuntimeConfig` alongside policy configuration.
 REST Site inventory must retain them for an early validation-Tenant check.
 That check supplements REST authorization and Core binding checks. Missing
 policy advertisement from an older build is unknown, not proof of authorization
-or an authoritative empty policy. This contract milestone adds no policy field
+or an authoritative empty policy. Milestone 2 adds no policy field
 or runtime advertisement before policy configuration exists.
 
 ## RPC surface
@@ -441,7 +455,7 @@ calls by privileged tenants or administrators. Reject explicit modifications
 with `PERMISSION_DENIED`; normal workflow reconciliation and the audited
 break-glass RPC own its changes. Match the configured source rather than a
 hard-coded alert ID. These protections and runtime removal arrive with lifecycle
-integration, before enabling the policy; Milestone 1 adds only the removal stub.
+integration, before enabling the policy; removal remains a stub through Milestone 2.
 
 This Core contract adds no access to local Machine Validation run/results or
 unredacted stdout/stderr. The separate REST change in
@@ -460,10 +474,10 @@ this milestone does not change the existing Core result RPCs or their grants.
 | `PERMISSION_DENIED` | Caller lacks method or tenant/site authorization. Request identity is not sufficient. |
 | `NOT_FOUND` | Machine or request does not exist in the authorized scope, or Cancel/Complete's supplied machine does not match the attempt, including replay. Verify identity; absence of a hold instead returns `NoActiveHold`. |
 | `ALREADY_EXISTS` | Idempotency key targets another machine, allocation inputs changed, a stale request or terminal result conflicts, or a break-glass identity/reason conflicts. Preserve the original operation identity and resolve the conflict. |
-| `FAILED_PRECONDITION` | Allocation, cleanup, recovery, or attempt state blocks the requested mutation. Reconcile the existing work first. Milestone 1 also uses this code for unsupported request-bound allocation. |
+| `FAILED_PRECONDITION` | Allocation, cleanup, recovery, or attempt state blocks the requested mutation. Reconcile the existing work first. Until Milestone 3, this also rejects unsupported request-bound allocation. |
 | `UNAVAILABLE` | Site operation is transiently unavailable. With trailing metadata `external-validation-allocation-state: creating`, allocation is accepted and in progress. Replay only the same mutation identity and inputs. |
 | `DEADLINE_EXCEEDED` | The call timed out; a mutation may have committed. Reconcile or replay the same identity. |
-| `UNIMPLEMENTED` | The workflow handlers are contract declarations in Milestone 1. |
+| `UNIMPLEMENTED` | Removal remains unimplemented until Milestone 4. |
 
 Do not infer that a timed-out allocation failed or that an empty inventory proves
 no instance was committed. Resolve allocation and cleanup, then fence or close

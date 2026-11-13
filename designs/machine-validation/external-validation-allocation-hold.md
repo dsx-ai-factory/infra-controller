@@ -408,8 +408,9 @@ Tenant/site access, requires Provider Admin authority for
 `SiteAgent`; runtime Core grants must include that principal for all six RPCs.
 Core authorizes/audits the service caller and checks resource/policy bindings;
 it cannot infer the original user's role from a Site Agent identity. Direct
-Core callers require explicit method/site permissions. Milestone 1 retains
-empty grants until runtime checks are implemented.
+Core callers require explicit method/site permissions. Milestone 2 grants access
+to discovery and Start/Cancel/Complete with persisted tenant/machine/cycle checks;
+removal retains empty grants until lifecycle recovery is implemented in Milestone 4.
 
 All hold and attempt mutations are persisted and auditable. The API responses
 below are the external service's durable contract; DSX Exchange events are not

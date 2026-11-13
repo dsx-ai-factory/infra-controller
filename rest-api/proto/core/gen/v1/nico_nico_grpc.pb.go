@@ -1798,15 +1798,14 @@ type ForgeClient interface {
 	// Each call reads this server's loaded configuration, without a snapshot
 	// guarantee across list and fetch calls or between server replicas.
 	FindRoutingProfilesByNames(ctx context.Context, in *RoutingProfilesByNamesRequest, opts ...grpc.CallOption) (*NamedRoutingProfileList, error)
-	// External-validation contract only: these methods are not implemented until
-	// durable holds and attempts are delivered. With internal RBAC enabled, the
-	// explicit empty grants deny callers with an AuthContext before dispatch
-	// (PERMISSION_DENIED). Missing AuthContext is also rejected before dispatch;
-	// no gRPC wire status for that branch is promised here. With RBAC bypassed,
-	// the stubs return UNIMPLEMENTED. Runtime implementation must grant SiteAgent
-	// all six RPCs, including removal: REST calls Core as that service. REST
-	// authorizes the end user's role and Tenant scope, and audits the end user;
-	// Core authorizes/audits the service caller and checks resource/policy bindings.
+	// External-validation discovery and Start/Cancel/Complete require an
+	// AuthContext and explicit method/site grants, including when RBAC is bypassed.
+	// SiteAgent and privileged Core operator callers are supported. Lifecycle hold
+	// creation, policy configuration, and request-bound allocation arrive later.
+	// Removal remains UNIMPLEMENTED without grants until lifecycle recovery is
+	// implemented; that implementation must grant SiteAgent all six RPCs.
+	// REST authorizes the end user's role and Tenant scope, and audits the user;
+	// Core authorizes/audits the service caller and checks persisted resource bindings.
 	// Core cannot infer a Provider Admin role from the SiteAgent identity. Direct
 	// Core callers need explicit method/site permissions. Request IDs grant none.
 	// Returns all matching hold IDs (active by default) in (created_at, hold_id)
@@ -1820,6 +1819,7 @@ type ForgeClient interface {
 	CancelExternalValidation(ctx context.Context, in *CancelExternalValidationRequest, opts ...grpc.CallOption) (*ExternalValidationAttempt, error)
 	// Records a result for the bound instance; never clears the hold immediately.
 	CompleteExternalValidation(ctx context.Context, in *CompleteExternalValidationRequest, opts ...grpc.CallOption) (*ExternalValidationAttempt, error)
+	// Lifecycle integration implements this RPC; it remains UNIMPLEMENTED without grants.
 	// Privileged audited recovery, fenced by the expected hold ID. For REST calls,
 	// REST enforces Provider Admin authorization; Core sees the SiteAgent caller.
 	// Unresolved allocation or cleanup returns FAILED_PRECONDITION. Successful
@@ -8703,15 +8703,14 @@ type ForgeServer interface {
 	// Each call reads this server's loaded configuration, without a snapshot
 	// guarantee across list and fetch calls or between server replicas.
 	FindRoutingProfilesByNames(context.Context, *RoutingProfilesByNamesRequest) (*NamedRoutingProfileList, error)
-	// External-validation contract only: these methods are not implemented until
-	// durable holds and attempts are delivered. With internal RBAC enabled, the
-	// explicit empty grants deny callers with an AuthContext before dispatch
-	// (PERMISSION_DENIED). Missing AuthContext is also rejected before dispatch;
-	// no gRPC wire status for that branch is promised here. With RBAC bypassed,
-	// the stubs return UNIMPLEMENTED. Runtime implementation must grant SiteAgent
-	// all six RPCs, including removal: REST calls Core as that service. REST
-	// authorizes the end user's role and Tenant scope, and audits the end user;
-	// Core authorizes/audits the service caller and checks resource/policy bindings.
+	// External-validation discovery and Start/Cancel/Complete require an
+	// AuthContext and explicit method/site grants, including when RBAC is bypassed.
+	// SiteAgent and privileged Core operator callers are supported. Lifecycle hold
+	// creation, policy configuration, and request-bound allocation arrive later.
+	// Removal remains UNIMPLEMENTED without grants until lifecycle recovery is
+	// implemented; that implementation must grant SiteAgent all six RPCs.
+	// REST authorizes the end user's role and Tenant scope, and audits the user;
+	// Core authorizes/audits the service caller and checks persisted resource bindings.
 	// Core cannot infer a Provider Admin role from the SiteAgent identity. Direct
 	// Core callers need explicit method/site permissions. Request IDs grant none.
 	// Returns all matching hold IDs (active by default) in (created_at, hold_id)
@@ -8725,6 +8724,7 @@ type ForgeServer interface {
 	CancelExternalValidation(context.Context, *CancelExternalValidationRequest) (*ExternalValidationAttempt, error)
 	// Records a result for the bound instance; never clears the hold immediately.
 	CompleteExternalValidation(context.Context, *CompleteExternalValidationRequest) (*ExternalValidationAttempt, error)
+	// Lifecycle integration implements this RPC; it remains UNIMPLEMENTED without grants.
 	// Privileged audited recovery, fenced by the expected hold ID. For REST calls,
 	// REST enforces Provider Admin authorization; Core sees the SiteAgent caller.
 	// Unresolved allocation or cleanup returns FAILED_PRECONDITION. Successful

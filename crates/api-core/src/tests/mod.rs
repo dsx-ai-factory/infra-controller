@@ -39,6 +39,7 @@ mod expected_rack_group;
 mod expected_switch;
 mod explored_endpoint_find;
 mod extension_service;
+mod external_validation;
 mod finder;
 mod firmware_component_manager;
 mod host_bmc_firmware_test;
