@@ -16,6 +16,7 @@
  */
 use std::default::Default;
 
+use carbide_instrument::testing::MetricsCapture;
 use common::api_fixtures::create_test_env;
 use db::{self};
 use mac_address::MacAddress;
@@ -1408,8 +1409,8 @@ async fn test_batch_create_missing_id(pool: sqlx::PgPool) {
 async fn test_batch_update_expected_machines_all_or_nothing_failure(pool: sqlx::PgPool) {
     let env = create_test_env(pool).await;
 
-    let id1 = Uuid::new_v4();
-    let id2 = Uuid::new_v4();
+    let id1 = Uuid::from_u128(1);
+    let id2 = Uuid::from_u128(2);
 
     // Create initial machines
     let create_req = rpc::forge::BatchExpectedMachineOperationRequest {
@@ -1444,6 +1445,7 @@ async fn test_batch_update_expected_machines_all_or_nothing_failure(pool: sqlx::
                     }),
                     bmc_mac_address: "AA:BB:CC:DD:EE:12".to_string(),
                     bmc_username: "admin1_updated".to_string(),
+                    bmc_ip_address: Some("192.0.2.240".to_string()),
                     bmc_password: "pass1_updated".to_string(),
                     chassis_serial_number: "SERIAL-012".to_string(),
                     metadata: Some(rpc::forge::Metadata::default()),
@@ -1465,6 +1467,7 @@ async fn test_batch_update_expected_machines_all_or_nothing_failure(pool: sqlx::
         accept_partial_results: false,
     };
 
+    let metrics = MetricsCapture::for_registry(env.test_meter.registry());
     let result = env
         .api
         .update_expected_machines(tonic::Request::new(update_req))
@@ -1472,6 +1475,22 @@ async fn test_batch_update_expected_machines_all_or_nothing_failure(pool: sqlx::
 
     // Should fail
     assert!(result.is_err());
+    assert_eq!(
+        metrics.counter_delta(
+            "carbide_static_address_preallocations_total",
+            &[("outcome", "created")]
+        ),
+        0.0,
+        "the earlier preallocation must not be counted when the batch rolls back",
+    );
+    let interfaces =
+        db::machine_interface::find_by_mac_address(&env.pool, "AA:BB:CC:DD:EE:12".parse().unwrap())
+            .await
+            .unwrap();
+    assert!(
+        interfaces.is_empty(),
+        "the earlier preallocation must roll back"
+    );
 
     // Verify first machine was NOT updated (transaction rollback)
     let get_req1 = rpc::forge::ExpectedMachineRequest {
@@ -1546,6 +1565,7 @@ async fn test_batch_update_expected_machines_partial_results(pool: sqlx::PgPool)
                     }),
                     bmc_mac_address: "AA:BB:CC:DD:EE:14".to_string(),
                     bmc_username: "admin1_updated".to_string(),
+                    bmc_ip_address: Some("192.0.2.240".to_string()),
                     bmc_password: "pass1_updated".to_string(),
                     chassis_serial_number: "SERIAL-014".to_string(),
                     metadata: Some(rpc::forge::Metadata::default()),
@@ -1578,6 +1598,7 @@ async fn test_batch_update_expected_machines_partial_results(pool: sqlx::PgPool)
         accept_partial_results: true,
     };
 
+    let metrics = MetricsCapture::for_registry(env.test_meter.registry());
     let response = env
         .api
         .update_expected_machines(tonic::Request::new(update_req))
@@ -1589,6 +1610,23 @@ async fn test_batch_update_expected_machines_partial_results(pool: sqlx::PgPool)
     assert!(results[0].success, "First update should succeed");
     assert!(!results[1].success, "Second update should fail");
     assert!(results[2].success, "Third update should succeed");
+    assert_eq!(
+        metrics.counter_delta(
+            "carbide_static_address_preallocations_total",
+            &[("outcome", "created")]
+        ),
+        1.0,
+        "the committed preallocation must be counted once despite a later failed item",
+    );
+    let interfaces =
+        db::machine_interface::find_by_mac_address(&env.pool, "AA:BB:CC:DD:EE:14".parse().unwrap())
+            .await
+            .unwrap();
+    assert_eq!(interfaces.len(), 1);
+    assert_eq!(
+        interfaces[0].addresses,
+        vec!["192.0.2.240".parse::<std::net::IpAddr>().unwrap()]
+    );
 
     // Verify first machine was updated
     let get_req1 = rpc::forge::ExpectedMachineRequest {
@@ -2546,6 +2584,7 @@ async fn test_expected_machine_update_fixed_interface_requires_managed_prefix(
             ..Default::default()
         };
 
+        let metrics = MetricsCapture::for_registry(env.test_meter.registry());
         let result = if case.use_batch {
             env.api
                 .update_expected_machines(tonic::Request::new(
@@ -2582,6 +2621,21 @@ async fn test_expected_machine_update_fixed_interface_requires_managed_prefix(
             );
         } else {
             result?;
+        }
+
+        for (outcome, expected) in [
+            ("error", if case.explicit_policy { 1.0 } else { 0.0 }),
+            ("created", if case.explicit_policy { 0.0 } else { 1.0 }),
+        ] {
+            assert_eq!(
+                metrics.counter_delta(
+                    "carbide_static_address_preallocations_total",
+                    &[("outcome", outcome)]
+                ),
+                expected,
+                "case: {}, outcome: {outcome}",
+                case.name,
+            );
         }
 
         let expected_interface_count = if case.explicit_policy { 0 } else { 1 };
