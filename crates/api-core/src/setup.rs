@@ -2698,6 +2698,7 @@ async fn initialize_and_start_controllers<'a>(
         db_pool.clone(),
         carbide_config.machine_validation_config.clone(),
         meter.clone(),
+        api_service.instrumentation.clone(),
     )
     .start(join_set, cancel_token.clone())?;
 
