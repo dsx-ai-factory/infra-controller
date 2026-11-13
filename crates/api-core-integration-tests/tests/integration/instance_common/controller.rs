@@ -76,6 +76,7 @@ impl InstanceControllers {
                 clients.ib.clone(),
                 config.host_health,
                 api.work_lock_manager_handle(),
+                api.instrumentation().clone(),
             ),
             nvl: Mutex::new(NvlPartitionMonitor::new(
                 api.database_connection.clone(),
@@ -87,6 +88,7 @@ impl InstanceControllers {
                     .expect("NVLink configuration should exist"),
                 config.host_health,
                 api.work_lock_manager_handle(),
+                api.instrumentation().clone(),
             )),
             _cancel_token: cancel_token,
         }
@@ -219,7 +221,7 @@ fn machine_state_controller(
         uefi_boot_wait: chrono::Duration::zero(),
     };
     let power_options: PowerOptionConfig = config.power_manager_options.clone().into();
-    let handler = MachineStateHandlerBuilder::builder()
+    let handler = MachineStateHandlerBuilder::builder(api.instrumentation().clone())
         .hardware_models(config.get_firmware_config())
         .reachability_params(reachability_params)
         .attestation_enabled(config.attestation_enabled)

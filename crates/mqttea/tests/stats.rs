@@ -594,9 +594,15 @@ fn test_connection_state_register_metrics_tracks_transitions() {
 #[tokio::test]
 async fn test_client_register_metrics_registers_all_instruments() {
     let (_provider, registry, meter) = test_meter();
-    let client = mqttea::MqtteaClient::new("localhost", 1883, "test-metrics-client", None)
-        .await
-        .expect("create client");
+    let client = mqttea::MqtteaClient::new(
+        "localhost",
+        1883,
+        "test-metrics-client",
+        None,
+        carbide_instrument::Instrumentation::from_meter_provider(&_provider),
+    )
+    .await
+    .expect("create client");
     client.register_metrics(&meter, "test_client");
 
     let labels = [("client", "test_client")];

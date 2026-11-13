@@ -17,14 +17,18 @@
 
 use std::sync::Arc;
 
-use bmc_backend::BmcConnector;
+use bmc_backend::{BackendBmc, BmcConnectError, BmcConnector};
 use carbide_credential_rotation::RotationGate;
 use carbide_health_metrics::PerObjectMetricsRegistry;
 use carbide_redfish::libredfish::{BmcCredentialOps, RedfishClientPool};
 use carbide_secrets::credentials::CredentialManager;
+use carbide_utils::redfish::BmcAccessInfo;
 use component_manager::component_manager::ComponentManager;
+use model::switch::Switch;
 use sqlx::PgPool;
-use state_controller::state_handler::StateHandlerContextObjects;
+use state_controller::state_handler::{
+    ExternalServiceError, StateHandlerContextObjects, StateHandlerError,
+};
 
 use crate::metrics::SwitchMetrics;
 
@@ -32,6 +36,8 @@ pub struct SwitchStateHandlerContextObjects {}
 
 #[derive(Clone)]
 pub struct SwitchStateHandlerServices {
+    /// Event metric destination shared by the controller and credential rotation engine.
+    pub instrumentation: carbide_instrument::Instrumentation,
     pub db_pool: PgPool,
     pub component_manager: Option<Arc<ComponentManager>>,
     pub credential_manager: Arc<dyn CredentialManager>,
@@ -58,6 +64,52 @@ pub struct SwitchStateHandlerServices {
     /// a Ready switch never enters `RotatingBmc` on its own; the operator
     /// force-converge escape hatch still works regardless.
     pub bmc_rotation_enabled: bool,
+}
+
+impl SwitchStateHandlerServices {
+    /// Connects to `switch`'s BMC through the configured `bmc_backend`.
+    pub(crate) async fn connect_bmc(
+        &self,
+        switch: &Switch,
+    ) -> Result<BackendBmc, StateHandlerError> {
+        let missing = |missing| StateHandlerError::MissingData {
+            object_id: switch.id.to_string(),
+            missing,
+        };
+        let bmc_info = switch
+            .bmc_info
+            .as_ref()
+            .ok_or_else(|| missing("bmc_info"))?;
+        let ip = bmc_info.ip.ok_or_else(|| missing("bmc_ip"))?;
+        let access = BmcAccessInfo {
+            host: ip.to_string(),
+            port: bmc_info.port,
+            mac_address: bmc_info.mac.ok_or_else(|| missing("bmc_mac"))?,
+        };
+        let report = || async {
+            db::explored_endpoints::find_by_ips(&self.db_pool, vec![ip])
+                .await?
+                .into_iter()
+                .next()
+                .map(|explored| explored.report)
+                .ok_or_else(|| missing("explored endpoint of the BMC"))
+        };
+        self.bmc_connector
+            .connect(&access, report)
+            .await
+            .map_err(|error| match error {
+                BmcConnectError::Report(error) => error,
+                BmcConnectError::Libredfish(error) => error.into(),
+                BmcConnectError::Drivers(error) => ExternalServiceError::with_source(
+                    "redfish",
+                    "create_client",
+                    error.to_string(),
+                    "redfish_client_creation_error",
+                    error,
+                )
+                .into(),
+            })
+    }
 }
 
 impl StateHandlerContextObjects for SwitchStateHandlerContextObjects {

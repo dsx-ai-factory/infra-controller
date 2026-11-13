@@ -58,15 +58,19 @@ pub enum DsxConsumerError {
 /// chain only when a Vault setting names it (`VAULT_ADDR`).
 async fn build_credential_reader(
     mqtt: &config::MqttConfig,
+    instrumentation: carbide_instrument::Instrumentation,
 ) -> Result<Arc<dyn carbide_secrets::credentials::CredentialReader>, DsxConsumerError> {
     if mqtt.auth.auth_mode == config::MqttAuthMode::None {
         return Ok(Arc::new(carbide_secrets::ChainedCredentialReader::from(
             Vec::new(),
         )));
     }
-    carbide_secrets::create_credential_reader(&carbide_secrets::CredentialConfig::default())
-        .await
-        .map_err(|e| DsxConsumerError::Secrets(e.to_string()))
+    carbide_secrets::create_credential_reader(
+        &carbide_secrets::CredentialConfig::default(),
+        instrumentation,
+    )
+    .await
+    .map_err(|e| DsxConsumerError::Secrets(e.to_string()))
 }
 
 pub async fn run_service(config: Config) -> Result<(), DsxConsumerError> {
@@ -77,8 +81,7 @@ pub async fn run_service(config: Config) -> Result<(), DsxConsumerError> {
         metrics_endpoint::new_metrics_setup("carbide-dsx-exchange-consumer", "carbide", true)
             .map_err(|e| DsxConsumerError::Metrics(e.to_string()))?;
 
-    let instrumentation =
-        carbide_instrument::Instrumentation::from_meter_provider(&metrics_setup.meter_provider);
+    let instrumentation = metrics_setup.instrumentation.clone();
     let _metrics_provider = metrics_setup.meter_provider;
     let registry = metrics_setup.registry;
     let meter = metrics_setup.meter;
@@ -86,6 +89,7 @@ pub async fn run_service(config: Config) -> Result<(), DsxConsumerError> {
 
     // Spawn metrics server
     let metrics_config = metrics_endpoint::MetricsEndpointConfig {
+        instrumentation: instrumentation.clone(),
         address: metrics_endpoint,
         registry,
         health_controller: Some(metrics_setup.health_controller),
@@ -94,7 +98,7 @@ pub async fn run_service(config: Config) -> Result<(), DsxConsumerError> {
     let join_listener =
         tokio::spawn(async move { metrics_endpoint::run_metrics_endpoint(&metrics_config).await });
 
-    let credential_reader = build_credential_reader(&config.mqtt).await?;
+    let credential_reader = build_credential_reader(&config.mqtt, instrumentation.clone()).await?;
 
     // Connect to MQTT and get the processing channel. mqttea tracks
     // subscriptions and replays them after reconnect when the broker reports
@@ -171,7 +175,14 @@ mod tests {
         // No Vault, file, or environment access happens; the chain is empty.
         let mqtt = config::MqttConfig::default();
         assert_eq!(mqtt.auth.auth_mode, config::MqttAuthMode::None);
-        let reader = build_credential_reader(&mqtt).await.expect("empty chain");
+        let reader = build_credential_reader(
+            &mqtt,
+            carbide_instrument::Instrumentation::from_meter_provider(
+                &opentelemetry::metrics::noop::NoopMeterProvider::new(),
+            ),
+        )
+        .await
+        .expect("empty chain");
         let key = CredentialKey::MqttAuth {
             credential_type: MqttCredentialType::DsxExchangeConsumer,
         };

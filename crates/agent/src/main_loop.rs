@@ -162,6 +162,7 @@ pub(super) async fn setup_and_run(
                 "Starting Prometheus /metrics endpoint"
             );
             let metrics_config = metrics_endpoint::MetricsEndpointConfig {
+                instrumentation: carbide_instrument::Instrumentation::global(),
                 address: metrics_address,
                 registry: get_prometheus_registry(),
                 health_controller: Some(health_controller.clone()),

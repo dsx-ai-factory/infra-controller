@@ -20,6 +20,15 @@ PHASE_DWELL   ?= 3s
 # waits for the task, as the real operator does. Needs the pod to reach the DPU
 # BMCs (see README). false: the phase only dwells.
 REDFISH_OS_INSTALL ?= false
+# Pod resources and parallel reconcile workers. The defaults equal
+# config/manager/manager.yaml, so a plain `make deploy` applies the checked-in
+# manifest unchanged. Pass bare quantities (CPU_LIMIT=8 MEM_LIMIT=8Gi); the
+# render quotes them. Sizing for large fleets is in README.md.
+CPU_REQUEST   ?= 500m
+MEM_REQUEST   ?= 1Gi
+CPU_LIMIT     ?= 2
+MEM_LIMIT     ?= 4Gi
+RECONCILE_CONCURRENCY ?= 16
 # Image platforms for docker-build. Simulation clusters in this repo are
 # amd64; override (e.g. PLATFORMS=linux/amd64,linux/arm64) for mixed fleets.
 PLATFORMS     ?= linux/amd64
@@ -30,13 +39,21 @@ PULL_SECRET   ?=
 # Shipped in the NICo repo, so no DPF operator install is required.
 CRD_DIR       ?= ../../../crates/dpf/crds
 
-# Render config/ with namespace, image and phase-dwell substituted. `|` is the
-# sed delimiter on purpose — `#` would be read as a comment inside a Makefile.
+# Render config/ with namespace, image, flags and resources substituted. `|` is
+# the sed delimiter on purpose, since `#` would be read as a comment inside a
+# Makefile. Resources are matched by block (`requests:` precedes `limits:` in
+# the manifest), not by value, so a request set to the limit's default is not
+# rewritten a second time by the limit expression.
 RENDER_RBAC = sed -e 's|dpf-operator-system|$(DPF_NAMESPACE)|g' config/rbac/role.yaml
 RENDER_MGR  = sed -e 's|dpf-operator-system|$(DPF_NAMESPACE)|g' \
                   -e 's|image: dpf-sim-controller:dev|image: $(IMG)|' \
                   -e 's|--phase-dwell=3s|--phase-dwell=$(PHASE_DWELL)|' \
                   -e 's|--redfish-os-install=false|--redfish-os-install=$(REDFISH_OS_INSTALL)|' \
+                  -e 's|--reconcile-concurrency=16|--reconcile-concurrency=$(RECONCILE_CONCURRENCY)|' \
+                  -e '/requests:/,/limits:/ s|cpu: .*|cpu: "$(CPU_REQUEST)"|' \
+                  -e '/requests:/,/limits:/ s|memory: .*|memory: "$(MEM_REQUEST)"|' \
+                  -e '/limits:/,$$ s|cpu: .*|cpu: "$(CPU_LIMIT)"|' \
+                  -e '/limits:/,$$ s|memory: .*|memory: "$(MEM_LIMIT)"|' \
                   config/manager/manager.yaml
 
 .PHONY: help
@@ -54,7 +71,7 @@ build: ## Build the binary
 
 .PHONY: run
 run: ## Run out-of-cluster against $KUBECONFIG
-	go run ./cmd --dpf-namespace=$(DPF_NAMESPACE) --phase-dwell=$(PHASE_DWELL) --redfish-os-install=$(REDFISH_OS_INSTALL)
+	go run ./cmd --dpf-namespace=$(DPF_NAMESPACE) --phase-dwell=$(PHASE_DWELL) --redfish-os-install=$(REDFISH_OS_INSTALL) --reconcile-concurrency=$(RECONCILE_CONCURRENCY)
 
 .PHONY: test
 test: ## Run unit tests (phase walker, name derivation)
@@ -80,8 +97,14 @@ install-crds: ## Install ONLY the DPF CRDs the simulator drives (never the opera
 	# enough that already-established CRDs miss a 60s wait window.
 	kubectl wait --for condition=established --timeout=300s -f $(CRD_DIR)
 
+.PHONY: render
+render: ## Print the RBAC and Deployment manifests as deploy applies them
+	@$(RENDER_RBAC)
+	@echo '---'
+	@$(RENDER_MGR)
+
 .PHONY: deploy
-deploy: install-crds ## One-command deploy: CRDs + RBAC + Deployment (override IMG=, DPF_NAMESPACE=, PULL_SECRET=)
+deploy: install-crds ## One-command deploy: CRDs + RBAC + Deployment (override IMG=, DPF_NAMESPACE=, PULL_SECRET= and the sizing variables)
 	kubectl get namespace $(DPF_NAMESPACE) >/dev/null 2>&1 || kubectl create namespace $(DPF_NAMESPACE)
 	$(RENDER_RBAC) | kubectl apply -f -
 	$(RENDER_MGR) | kubectl apply -f -

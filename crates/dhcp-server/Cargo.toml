@@ -70,8 +70,10 @@ carbide-instrument = { path = "../instrument", features = [
   "test-support",
 ] }
 carbide-test-support = { path = "../test-support" }
+carbide-utils = { path = "../utils", features = ["test-support"] }
 tokio = { workspace = true, features = ["test-util"] }
 futures = { workspace = true }
+opentelemetry = { workspace = true }
 http-body-util = { workspace = true }
 hyper = { workspace = true, features = ["http2"] }
 hyper-util = { workspace = true, features = ["tokio"] }

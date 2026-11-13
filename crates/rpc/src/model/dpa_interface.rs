@@ -67,6 +67,8 @@ impl TryFrom<rpc::forge::DpaInterfaceCreationRequest> for NewDpaInterface {
                     )
                 })?
                 .into(),
+            // The creation request carries no declared lane name.
+            interface_name: None,
         })
     }
 }

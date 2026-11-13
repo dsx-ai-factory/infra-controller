@@ -99,6 +99,7 @@ fn switch_services(
     bmc_rotation_enabled: bool,
 ) -> SwitchStateHandlerServices {
     SwitchStateHandlerServices {
+        instrumentation: env.api.instrumentation().clone(),
         db_pool: pool.clone(),
         component_manager: None,
         credential_manager: env.test_credential_manager.clone(),

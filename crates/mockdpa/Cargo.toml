@@ -27,6 +27,7 @@ name = "mockdpa"
 path = "src/main.rs"
 
 [dependencies]
+carbide-instrument = { path = "../instrument" }
 chrono = { features = ["serde"], workspace = true }
 clap = { features = ["derive"], workspace = true }
 rumqttc = { workspace = true }

@@ -1521,6 +1521,16 @@ mod tests {
 
     #[tokio::test]
     async fn test_switch_host_primary_starts_collectors_and_reuses_gnmi_cache() {
+        // Hold the gNMI destination open until its collectors stop.
+        let listener = tokio::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
+            .await
+            .expect("gNMI listener should bind");
+
+        let gnmi_port = listener
+            .local_addr()
+            .expect("gNMI listener should have an address")
+            .port();
+
         let mut config = Config::default();
         config.collectors.sensors = Configurable::Disabled;
         config.collectors.logs = Configurable::Disabled;
@@ -1532,6 +1542,7 @@ mod tests {
         config.collectors.nvue = Configurable::Enabled(NvueCollectorConfig {
             rest: Configurable::Enabled(Default::default()),
             gnmi: Configurable::Enabled(NvueGnmiConfig {
+                gnmi_port,
                 additional_subscriptions: vec![NvueGnmiSubscriptionConfig {
                     name: "retained".into(),
                     paths: vec![vec!["value".into()]],
@@ -1551,8 +1562,15 @@ mod tests {
 
         let mut ctx = context_with_config(config, "test_switch_host_nmxt_nvue_enabled");
 
+        // Register periodic collectors without allowing NMX-T or REST iterations.
+        ctx.limiter = Arc::new(crate::limiter::BucketLimiter::new(
+            0,
+            Duration::from_secs(1),
+            Duration::ZERO,
+        ));
+
         let mut endpoint = test_endpoint(
-            Ipv4Addr::new(10, 0, 0, 9),
+            Ipv4Addr::LOCALHOST,
             "55:66:77:88:99:cc",
             Some(switch_metadata_with_role(
                 SwitchEndpointRole::Host,
@@ -1626,6 +1644,10 @@ mod tests {
         assert!(reading.contains("serial_number=\"MT2515600ZYB\""));
         assert!(reading.ends_with(" 42"));
         assert!(!exported.contains("serial_number=\"switch-host\""));
+
+        let shutdown = ctx.drain_collectors(Duration::from_secs(5)).await;
+
+        assert_eq!(shutdown.timed_out, 0);
     }
 
     #[tokio::test]

@@ -57,11 +57,16 @@ impl CacheFixture {
 }
 
 fn cache(root: &Path, capacity: u64, workers: usize) -> CacheFixture {
-    let downloader = FirmwareDownloader::with_config(FirmwareDownloadConfig {
-        max_concurrent_downloads: workers,
-        max_download_bytes: 8,
-        ..FirmwareDownloadConfig::default()
-    })
+    let downloader = FirmwareDownloader::with_config(
+        FirmwareDownloadConfig {
+            max_concurrent_downloads: workers,
+            max_download_bytes: 8,
+            ..FirmwareDownloadConfig::default()
+        },
+        carbide_instrument::Instrumentation::from_meter_provider(
+            &opentelemetry::metrics::noop::NoopMeterProvider::new(),
+        ),
+    )
     .unwrap();
     let mut owners = JoinSet::new();
     let cache = FirmwareArtifactCache::new(
@@ -162,10 +167,15 @@ async fn construction_and_invalid_sources_do_not_touch_storage() {
         ("below maximum artifact size", 7),
         ("above hard capacity ceiling", MAX_CAPACITY_BYTES + 1),
     ] {
-        let downloader = FirmwareDownloader::with_config(FirmwareDownloadConfig {
-            max_download_bytes: 8,
-            ..FirmwareDownloadConfig::default()
-        })
+        let downloader = FirmwareDownloader::with_config(
+            FirmwareDownloadConfig {
+                max_download_bytes: 8,
+                ..FirmwareDownloadConfig::default()
+            },
+            carbide_instrument::Instrumentation::from_meter_provider(
+                &opentelemetry::metrics::noop::NoopMeterProvider::new(),
+            ),
+        )
         .unwrap();
         let mut owners = JoinSet::new();
         assert!(

@@ -470,6 +470,11 @@ Indicates that an update for host firmware was scheduled on the host
 
 ### `IbCleanupPending`
 
-Indicates that the host was released back to the admin pool without the system being able to fully clean up all port to partition key associations for all InfiniBand interfaces.
-This means the host might still be bound to a tenants partition.
-Once the IB subsystem can communicate with UFM and detects that the port is not bound to a partition anymore, the alert will automatically clear.
+Indicates that termination deferred InfiniBand membership cleanup because
+configured-port entries were missing or incomplete within an existing IB
+observation. The host can still be bound to a tenant partition. While present,
+the alert prevents new allocations on the host by default.
+Clearing it alone does not confirm UFM membership removal. Refer to
+[Force-Delete and Cleanup](../../manuals/networking/infiniband_partitioning.md#force-delete-and-cleanup)
+for the trigger, override for targeted allocation, monitor clearance condition, and
+verification limits.

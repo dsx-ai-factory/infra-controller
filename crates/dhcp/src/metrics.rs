@@ -509,6 +509,7 @@ pub(super) fn metrics_server() {
                 // start metrics server
                 runtime.block_on(async move {
                     if let Err(e) = run_metrics_endpoint(&MetricsEndpointConfig {
+                        instrumentation: mconf.instrumentation.clone(),
                         address: metrics_endpoint,
                         registry: mconf.registry,
                         health_controller: Some(health_controller),

@@ -148,6 +148,7 @@ async fn commit_and_extract_transition(
 
 fn services_without_component_manager(env: &ControllerEnv) -> SwitchStateHandlerServices {
     SwitchStateHandlerServices {
+        instrumentation: env.api.instrumentation().clone(),
         db_pool: env.pool.clone(),
         component_manager: None,
         credential_manager: env.test_credential_manager.clone(),
@@ -165,6 +166,7 @@ fn services_without_component_manager(env: &ControllerEnv) -> SwitchStateHandler
 
 async fn services_with_component_manager(env: &ControllerEnv) -> SwitchStateHandlerServices {
     SwitchStateHandlerServices {
+        instrumentation: env.api.instrumentation().clone(),
         db_pool: env.pool.clone(),
         component_manager: build_test_component_manager(env, env.rms_sim.as_rms_client()).await,
         credential_manager: env.test_credential_manager.clone(),

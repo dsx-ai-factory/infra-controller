@@ -1275,6 +1275,7 @@ dependencies = [
  "bmc-backend",
  "bmc-drivers",
  "bmc-explorer",
+ "bmc-platform",
  "bmc-runtime",
  "bmc-vendor",
  "byteorder",
@@ -1868,6 +1869,7 @@ dependencies = [
  "carbide-secrets",
  "carbide-sqlx-testing",
  "carbide-test-support",
+ "carbide-utils",
  "carbide-uuid",
  "chrono",
  "libredfish",
@@ -1939,6 +1941,7 @@ dependencies = [
  "carbide-rpc-utils",
  "carbide-test-support",
  "carbide-tls",
+ "carbide-utils",
  "carbide-uuid",
  "chrono",
  "clap",
@@ -1952,6 +1955,7 @@ dependencies = [
  "logfmt",
  "lru",
  "metrics-endpoint",
+ "opentelemetry",
  "prost",
  "serde",
  "serde_yaml",
@@ -2261,11 +2265,13 @@ dependencies = [
  "carbide-macros",
  "carbide-sqlx-testing",
  "carbide-test-support",
+ "carbide-utils",
  "eyre",
  "futures-util",
  "hex",
  "http",
  "mockito",
+ "opentelemetry",
  "regex",
  "reqwest 0.13.4",
  "reqwest-middleware",
@@ -2958,6 +2964,7 @@ name = "carbide-mockdpa"
 version = "0.0.1"
 dependencies = [
  "carbide-dpa",
+ "carbide-instrument",
  "chrono",
  "clap",
  "mqttea",
@@ -3102,6 +3109,7 @@ dependencies = [
  "carbide-credential-rotation",
  "carbide-health-metrics",
  "carbide-health-report",
+ "carbide-instrument",
  "carbide-rack",
  "carbide-redfish",
  "carbide-secrets",
@@ -3131,6 +3139,7 @@ version = "0.0.1"
 dependencies = [
  "async-trait",
  "bmc-backend",
+ "bmc-platform",
  "bmc-runtime",
  "bmc-vendor",
  "carbide-api-db",
@@ -3635,6 +3644,7 @@ dependencies = [
  "bmc-vendor",
  "carbide-instrument",
  "carbide-test-support",
+ "carbide-utils",
  "carbide-uuid",
  "eyre",
  "figment",
@@ -3922,6 +3932,7 @@ version = "0.0.0"
 dependencies = [
  "async-trait",
  "bmc-backend",
+ "bmc-platform",
  "carbide-api-db",
  "carbide-api-model",
  "carbide-credential-rotation",
@@ -4474,6 +4485,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "bmc-backend",
+ "bmc-platform",
  "bmc-runtime",
  "bmc-vendor",
  "carbide-api-db",
@@ -7932,6 +7944,7 @@ dependencies = [
 name = "mqttea-example"
 version = "0.1.0"
 dependencies = [
+ "carbide-instrument",
  "chrono",
  "clap",
  "mqttea",

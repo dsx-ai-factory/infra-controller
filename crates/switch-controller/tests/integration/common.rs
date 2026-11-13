@@ -115,6 +115,7 @@ impl ControllerEnv {
             .processor_id(uuid::Uuid::new_v4().to_string())
             .services(
                 SwitchStateHandlerServices {
+                    instrumentation: api.instrumentation().clone(),
                     db_pool: pool.clone(),
                     component_manager: Some(component_manager),
                     credential_manager: test_credential_manager.clone(),

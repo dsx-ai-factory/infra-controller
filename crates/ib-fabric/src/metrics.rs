@@ -20,7 +20,7 @@ use std::fmt::Display;
 use std::time::Duration;
 
 use ::carbide_utils::metrics::SharedMetricsHolder;
-use carbide_instrument::{Event, LabelValue, emit, initialize_counter_series};
+use carbide_instrument::{Event, Instrumentation, LabelValue};
 use model::ib_partition::PartitionKey;
 use opentelemetry::metrics::Meter;
 use opentelemetry::{KeyValue, StringValue};
@@ -773,6 +773,7 @@ impl UfmGuidPkeyChangeFinished {
         guid: &str,
         pkey: PartitionKey,
         result: &IbResult<()>,
+        instrumentation: &Instrumentation,
     ) {
         let fabric = ConfiguredFabric(fabric.to_string());
         let event = match result.as_ref().err() {
@@ -795,10 +796,10 @@ impl UfmGuidPkeyChangeFinished {
                 }
             }
         };
-        emit(event);
+        instrumentation.emit(event);
     }
 
-    fn initialize_counter_series(fabric_ids: &[&str]) {
+    fn initialize_counter_series(fabric_ids: &[&str], instrumentation: &Instrumentation) {
         for &fabric in fabric_ids {
             for operation in UfmOperation::values() {
                 let fabric = ConfiguredFabric(fabric.to_string());
@@ -825,7 +826,7 @@ impl UfmGuidPkeyChangeFinished {
                     },
                 ];
                 for event in cases {
-                    let initialized = initialize_counter_series(&event);
+                    let initialized = instrumentation.initialize_counter_series(&event);
                     debug_assert!(initialized, "UFM change Event must remain a counter");
                 }
             }
@@ -840,10 +841,15 @@ pub(super) struct MetricHolder {
 }
 
 impl MetricHolder {
-    pub(super) fn new(meter: Meter, hold_period: Duration, fabric_ids: &[&str]) -> Self {
+    pub(super) fn new(
+        meter: Meter,
+        hold_period: Duration,
+        fabric_ids: &[&str],
+        instrumentation: &Instrumentation,
+    ) -> Self {
         let last_iteration_metrics = SharedMetricsHolder::with_hold_period(hold_period);
         let instruments = IbFabricMonitorInstruments::new(meter, last_iteration_metrics.clone());
-        UfmGuidPkeyChangeFinished::initialize_counter_series(fabric_ids);
+        UfmGuidPkeyChangeFinished::initialize_counter_series(fabric_ids, instrumentation);
         Self {
             _instruments: instruments,
             last_iteration_metrics,
@@ -1525,9 +1531,18 @@ mod tests {
                     UfmOperation::UnbindGuidFromPkey => "unbind_guid_from_pkey",
                 };
                 let status_label = if result.is_ok() { "ok" } else { "error" };
-                let metrics = MetricsCapture::start();
+                let test_meter = carbide_utils::test_support::test_meter::TestMeter::default();
+                let instrumentation = Instrumentation::new(test_meter.meter());
+                let metrics = MetricsCapture::for_registry(test_meter.registry());
                 let logs = capture_logs(|| {
-                    UfmGuidPkeyChangeFinished::emit(FABRIC, operation, GUID, pkey, &result);
+                    UfmGuidPkeyChangeFinished::emit(
+                        FABRIC,
+                        operation,
+                        GUID,
+                        pkey,
+                        &result,
+                        &instrumentation,
+                    );
                 });
                 let log = logs.first().map(|log| LogObservation {
                     level: log.level,
@@ -1564,9 +1579,11 @@ mod tests {
         const EXPOSED_METRIC: &str = "carbide_ib_monitor_ufm_changes_applied_total";
         const FABRIC: &str = "zero-series-fabric";
 
-        let metrics = MetricsCapture::start();
+        let test_meter = carbide_utils::test_support::test_meter::TestMeter::default();
+        let instrumentation = Instrumentation::new(test_meter.meter());
+        let metrics = MetricsCapture::for_registry(test_meter.registry());
         let logs = capture_logs(|| {
-            UfmGuidPkeyChangeFinished::initialize_counter_series(&[FABRIC]);
+            UfmGuidPkeyChangeFinished::initialize_counter_series(&[FABRIC], &instrumentation);
         });
 
         assert!(logs.is_empty());

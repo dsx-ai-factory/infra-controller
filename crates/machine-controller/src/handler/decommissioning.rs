@@ -39,7 +39,10 @@ use state_controller::state_handler::{
 
 use crate::context::MachineStateHandlerContextObjects;
 use crate::dpf::{DpfOperations, dpf_dpudevices_and_dpunode_crs_noexist};
-use crate::redfish::{did_dpu_finish_booting, host_power_control, power_state, power_state_name};
+use crate::redfish::{
+    did_dpu_finish_booting, host_power_control, power_state, power_state_name,
+    reset_bmc_to_factory_defaults,
+};
 
 fn deconfiguring_dpus_after_host_reset(state: &ManagedHostStateSnapshot) -> ManagedHostState {
     ManagedHostState::Decommissioning {
@@ -879,11 +882,8 @@ async fn factory_reset_bmc(
         ))
         .with_txn(txn));
     }
-    // Create client first to ensure BMC is reachable before suppressing DHCP.
-    let client = ctx
-        .services
-        .create_redfish_client_from_machine(machine)
-        .await?;
+    // Connect first to ensure BMC is reachable before suppressing DHCP.
+    let bmc = ctx.services.connect_bmc(machine).await?;
     let mut txn = ctx.services.db_pool.begin().await?;
     db::bmc_suppression::upsert(
         &mut txn,
@@ -899,10 +899,9 @@ async fn factory_reset_bmc(
     db::machine_interface::record_deletion(&mut txn).await?;
     txn.commit().await?;
 
-    client
-        .bmc_reset_to_defaults()
+    reset_bmc_to_factory_defaults(&bmc)
         .await
-        .map_err(|error| super::redfish_error("bmc_reset_to_defaults", error))?;
+        .map_err(|error| super::platform_error("bmc_reset_to_defaults", error))?;
 
     let mut completed = completed.clone();
     completed.insert(machine.id.into());

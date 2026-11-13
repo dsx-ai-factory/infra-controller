@@ -155,6 +155,7 @@ fn new_ib_monitor(env: &TestEnv) -> IbFabricMonitor {
         env.ib_fabric_manager.clone(),
         env.config.host_health,
         env.api.work_lock_manager_handle.clone(),
+        env.api.instrumentation.clone(),
     )
 }
 
@@ -210,7 +211,7 @@ async fn live_ib_instance(
 async fn test_ib_fabric_monitor(pool: sqlx::PgPool) -> Result<(), Box<dyn std::error::Error>> {
     let env = ib_monitor_test_env(pool.clone()).await;
 
-    let iteration_metrics = MetricsCapture::start();
+    let iteration_metrics = MetricsCapture::for_registry(env.test_meter.registry());
     env.run_ib_fabric_monitor_iteration().await;
     let iteration_count = iteration_metrics
         .histogram_count_delta("carbide_ib_monitor_iteration_latency_milliseconds", &[]);
@@ -397,7 +398,7 @@ async fn duplicate_fabric_ownership_leaves_retired_membership_alone(pool: sqlx::
         .unwrap();
     insert_retired_membership(&pool, &retired).await;
 
-    let duplicate_ownership_metrics = MetricsCapture::start();
+    let duplicate_ownership_metrics = MetricsCapture::for_registry(env.test_meter.registry());
     assert_eq!(
         new_ib_monitor(&env).run_single_iteration().await.unwrap(),
         0
@@ -470,7 +471,7 @@ async fn duplicate_machine_ownership_leaves_retired_membership_alone(pool: sqlx:
         .unwrap();
     insert_retired_membership(&pool, &retired).await;
 
-    let duplicate_ownership_metrics = MetricsCapture::start();
+    let duplicate_ownership_metrics = MetricsCapture::for_registry(env.test_meter.registry());
     assert_eq!(
         new_ib_monitor(&env).run_single_iteration().await.unwrap(),
         0
@@ -510,7 +511,7 @@ async fn retired_membership_retries_after_ufm_failure(pool: sqlx::PgPool) {
     insert_retired_membership(&pool, &retired).await;
     mock.set_unbind_failure(true);
 
-    let failure_metrics = MetricsCapture::start();
+    let failure_metrics = MetricsCapture::for_registry(env.test_meter.registry());
     assert_eq!(
         new_ib_monitor(&env).run_single_iteration().await.unwrap(),
         0
@@ -585,7 +586,7 @@ async fn membership_state_lookup_failure_defers_only_failed_membership(pool: sql
         .await
         .unwrap();
 
-    let lookup_failure_metrics = MetricsCapture::start();
+    let lookup_failure_metrics = MetricsCapture::for_registry(env.test_meter.registry());
     let monitor = new_ib_monitor(&env);
     let monitor_iteration = tokio::spawn(async move { monitor.run_single_iteration().await });
     wait_for_blocked_query(&pool, retired_membership_gate_pid, "retired_ib_memberships").await;

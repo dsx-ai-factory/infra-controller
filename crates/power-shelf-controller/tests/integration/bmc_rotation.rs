@@ -111,6 +111,7 @@ fn power_shelf_services(
     bmc_rotation_enabled: bool,
 ) -> PowerShelfStateHandlerServices {
     PowerShelfStateHandlerServices {
+        instrumentation: env.harness.api().instrumentation().clone(),
         db_pool: pool.clone(),
         component_manager: None,
         credential_manager: env.credential_manager.clone(),
