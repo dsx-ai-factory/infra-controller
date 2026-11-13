@@ -108,6 +108,13 @@ use crate::proxy::upstream::{
 pub(crate) enum BmcProxyError {
     #[error("error resolving BMC information through carbide API: {0}")]
     Api(String),
+    /// nico-api reported that the BMC rejected its stored root credential (HTTP 401/403).
+    /// Callers get HTTP 401 for this, not 502, so Site Explorer can tell a wrong password from
+    /// a credential-store or transport failure and run its stale-credential recovery.
+    #[error(
+        "the BMC at {ip} rejected the stored root credential (HTTP {http_status}); update the BMC root credentials to recover"
+    )]
+    BmcCredentialRejected { ip: IpAddr, http_status: u16 },
     #[error("invalid configuration: {0}")]
     InvalidConfiguration(String),
     #[error("internal error proxying request: {0}")]
@@ -441,7 +448,7 @@ async fn proxy_request_inner(
                 .into(),
         )
     })?
-    .map_err(|e| error_response((StatusCode::BAD_GATEWAY, e.to_string()).into()))?;
+    .map_err(|error| credential_resolution_error_response(target_ip, error))?;
     tracing::Span::current().record("bmc_proxy.target", target.as_str());
     let streamed = !upstream_body.is_replayable();
     let mut slot = state
@@ -582,6 +589,24 @@ fn report(slot: &mut Slot, class: &RequestClass, ended: Trip) {
         .is_some_and(|breaker| breaker.trips_on(ended))
     {
         slot.bmc_failed();
+    }
+}
+
+/// Maps credential-resolution errors to the caller-facing status while preserving the
+/// distinction between a rejected BMC credential and failures inside the proxy or nico-api.
+fn credential_resolution_error_response(target_ip: IpAddr, error: BmcProxyError) -> Response<Body> {
+    match error {
+        error @ BmcProxyError::BmcCredentialRejected { http_status, .. } => {
+            tracing::warn!(
+                bmc_ip_address = %target_ip,
+                http_status,
+                "BMC rejected the stored root credential; answering the caller with 401"
+            );
+            // A 401 is what the caller would have seen in direct mode, and the
+            // proxy already passes through a BMC 401 after a failed replay.
+            error_response((StatusCode::UNAUTHORIZED, error.to_string()).into())
+        }
+        error => error_response((StatusCode::BAD_GATEWAY, error.to_string()).into()),
     }
 }
 

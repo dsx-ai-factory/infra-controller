@@ -104,6 +104,12 @@ pub mod nmx_c_client;
 pub const REFLECTION_API_SERVICE_DESCRIPTOR: &[u8] = tonic::include_file_descriptor_set!("forge");
 pub const MAX_ERR_MSG_SIZE: i32 = 1500;
 
+/// gRPC metadata key set on a GetBmcCredentials error when the BMC itself rejected the
+/// stored credential (HTTP 401/403), as opposed to a credential-store or transport failure.
+/// The value is the HTTP status the BMC returned. bmc-proxy uses it to answer callers with
+/// HTTP 401 instead of a generic 502, so Site Explorer can run its stale-credential recovery.
+pub const BMC_CREDENTIAL_REJECTED_METADATA_KEY: &str = "nico-bmc-credential-rejected";
+
 impl forge::BootInterfaceSelectionSource {
     /// Returns the concise name shown in views for operators.
     pub const fn as_str(&self) -> &'static str {

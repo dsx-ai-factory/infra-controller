@@ -19,6 +19,7 @@ use std::fs::File;
 use std::io::Write;
 use std::net::{IpAddr, SocketAddr};
 
+use ::rpc::BMC_CREDENTIAL_REJECTED_METADATA_KEY;
 use ::rpc::errors::RpcDataConversionError;
 use ::rpc::forge::{self as rpc};
 use carbide_nvlink_manager::DEFAULT_NMX_M_NAME;
@@ -35,7 +36,8 @@ use tonic::{Request, Response, Status};
 
 use crate::CarbideError;
 use crate::api::Api;
-use crate::credentials::UpdateCredentials;
+use crate::credentials::{BmcSessionError, UpdateCredentials};
+use crate::errors::insert_ascii_metadata;
 use crate::handlers::utils::convert_and_log_machine_id;
 
 /// We assume that all BMCs speak Redfish on the standard port
@@ -578,20 +580,7 @@ pub(crate) async fn get_bmc_credentals(
         .bmc_session_manager
         .issue_credentials(&spiffe_service_id, bmc_mac_address, bmc_addr)
         .await
-        .map_err(|err| match err {
-            crate::credentials::BmcSessionError::AvoidLockout { .. }
-            | crate::credentials::BmcSessionError::NoSessionService { .. }
-            | crate::credentials::BmcSessionError::MissingRootCredentials(_) => {
-                // These are "we refuse to attempt session creation" outcomes
-                // that the operator can resolve (configure/rotate creds, or
-                // flip the basic-auth-fallback flag). FailedPrecondition
-                // matches the gRPC semantics: the request is well-formed but
-                // the server-side state forbids it.
-                Status::failed_precondition(err.to_string())
-            }
-            crate::credentials::BmcSessionError::Store(_) => Status::internal(err.to_string()),
-            other => CarbideError::internal(other.to_string()).into(),
-        })?;
+        .map_err(bmc_session_error_to_status)?;
 
     let credentials_type = match material {
         crate::credentials::BmcAuthMaterial::Session(entry) => {
@@ -611,6 +600,46 @@ pub(crate) async fn get_bmc_credentals(
             r#type: Some(credentials_type),
         }),
     }))
+}
+
+/// Maps BMC session failures to their existing gRPC codes and marks only errors that prove
+/// the BMC rejected the stored credential so proxy callers can preserve that distinction.
+fn bmc_session_error_to_status(err: BmcSessionError) -> Status {
+    match err {
+        err @ BmcSessionError::AvoidLockout { last_status, .. } => {
+            // Preserve FailedPrecondition for the tripped breaker while exposing
+            // the BMC status that caused it.
+            let mut status = Status::failed_precondition(err.to_string());
+            insert_ascii_metadata(
+                &mut status,
+                BMC_CREDENTIAL_REJECTED_METADATA_KEY,
+                &last_status.to_string(),
+            );
+            status
+        }
+        err @ BmcSessionError::CredentialRejected { http_status, .. } => {
+            // Preserve Internal for a below-threshold rejection; the marker is
+            // the only wire-contract change.
+            let mut status = Status::internal(err.to_string());
+            insert_ascii_metadata(
+                &mut status,
+                BMC_CREDENTIAL_REJECTED_METADATA_KEY,
+                &http_status.to_string(),
+            );
+            status
+        }
+        err @ (BmcSessionError::NoSessionService { .. }
+        | BmcSessionError::MissingRootCredentials(_)) => {
+            // These are "we refuse to attempt session creation" outcomes
+            // that the operator can resolve (configure/rotate creds, or
+            // flip the basic-auth-fallback flag). FailedPrecondition
+            // matches the gRPC semantics: the request is well-formed but
+            // the server-side state forbids it.
+            Status::failed_precondition(err.to_string())
+        }
+        err @ BmcSessionError::Store(_) => Status::internal(err.to_string()),
+        other => CarbideError::internal(other.to_string()).into(),
+    }
 }
 
 pub(crate) async fn get_switch_nvos_credentials(
@@ -922,4 +951,74 @@ pub(crate) async fn set_container_registry_credential(
         .await
         .map_err(|e| CarbideError::internal(format!("set registry credential: {e:?}")))?;
     Ok(Response::new(()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Verifies only BMC credential rejections carry the shared marker while every
+    /// session failure retains its established gRPC status code.
+    #[test]
+    fn bmc_session_error_to_status_marks_only_bmc_rejections() {
+        struct Case {
+            scenario: &'static str,
+            error: BmcSessionError,
+            expected_code: tonic::Code,
+            expected_marker: Option<&'static str>,
+        }
+
+        let bmc_mac = MacAddress::from([0x02, 0, 0, 0, 0, 1]);
+        let bmc_addr = "192.0.2.1:443".parse().expect("valid BMC address");
+        let cases = [
+            // A tripped breaker is still a rejection and carries its final BMC status.
+            Case {
+                scenario: "lockout breaker rejection",
+                error: BmcSessionError::AvoidLockout {
+                    bmc_mac,
+                    consecutive_unauthorized: 3,
+                    last_status: 401,
+                },
+                expected_code: tonic::Code::FailedPrecondition,
+                expected_marker: Some("401"),
+            },
+            // A below-threshold rejection keeps Internal but exposes the rejected status.
+            Case {
+                scenario: "below-threshold credential rejection",
+                error: BmcSessionError::CredentialRejected {
+                    bmc_addr,
+                    http_status: 403,
+                },
+                expected_code: tonic::Code::Internal,
+                expected_marker: Some("403"),
+            },
+            // Missing credentials are resolvable server state, not proof of BMC rejection.
+            Case {
+                scenario: "missing root credentials",
+                error: BmcSessionError::MissingRootCredentials(bmc_mac),
+                expected_code: tonic::Code::FailedPrecondition,
+                expected_marker: None,
+            },
+            // A session-store failure remains an unmarked internal service failure.
+            Case {
+                scenario: "session store failure",
+                error: BmcSessionError::Store("test store unavailable".to_string()),
+                expected_code: tonic::Code::Internal,
+                expected_marker: None,
+            },
+        ];
+
+        for case in cases {
+            // Convert through the production helper and inspect the public status contract.
+            let status = bmc_session_error_to_status(case.error);
+            let marker = status
+                .metadata()
+                .get(BMC_CREDENTIAL_REJECTED_METADATA_KEY)
+                .map(|value| value.to_str().expect("marker is ASCII"));
+
+            // Code and marker together distinguish compatibility behavior from the new signal.
+            assert_eq!(status.code(), case.expected_code, "{}", case.scenario);
+            assert_eq!(marker, case.expected_marker, "{}", case.scenario);
+        }
+    }
 }

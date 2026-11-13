@@ -1725,6 +1725,12 @@ pub enum EndpointExplorationError {
         response_code: Option<u16>,
         #[serde(default)]
         consecutive_count: u32,
+        /// Whether the site-wide credential fallback has already been attempted for this
+        /// unauthorized sequence. Kept separate from `consecutive_count` so a failed lookup or
+        /// store write can be retried without resetting the lockout budget, and a completed
+        /// attempt is not repeated. Defaults to false for reports written before this field.
+        #[serde(default)]
+        sitewide_fallback_attempted: bool,
     },
 }
 
@@ -1764,6 +1770,17 @@ impl EndpointExplorationError {
                 consecutive_count, ..
             } => Some(*consecutive_count),
             _ => None,
+        }
+    }
+
+    /// Returns whether site-wide fallback was attempted for this unauthorized sequence.
+    pub fn sitewide_fallback_attempted(&self) -> bool {
+        match self {
+            EndpointExplorationError::IntermittentUnauthorized {
+                sitewide_fallback_attempted,
+                ..
+            } => *sitewide_fallback_attempted,
+            _ => false,
         }
     }
 }
@@ -2654,6 +2671,18 @@ mod explored_mlx_device_tests {
             ],
             ..Default::default()
         }
+    }
+
+    /// Reports written before the fallback-attempt flag remain retryable after deserialization.
+    #[test]
+    fn intermittent_unauthorized_defaults_missing_fallback_attempt_to_false() {
+        let legacy: EndpointExplorationError = serde_json::from_str(
+            r#"{"Type":"IntermittentUnauthorized","Details":"temporary unauthorized response","ResponseBody":null,"ResponseCode":401,"ConsecutiveCount":2}"#,
+        )
+        .expect("legacy intermittent unauthorized error must decode");
+
+        assert_eq!(legacy.intermittent_unauthorized_count(), Some(2));
+        assert!(!legacy.sitewide_fallback_attempted());
     }
 
     #[test]
@@ -4360,6 +4389,7 @@ mod tests {
                         response_body: None,
                         response_code: Some(401),
                         consecutive_count: 3,
+                        sitewide_fallback_attempted: false,
                     },
                     expect: expected_error_behavior(
                         ErrorCode::nico(SiteExplorer, 145),
@@ -4473,6 +4503,7 @@ mod tests {
                     response_body: None,
                     response_code: Some(401),
                     consecutive_count: 1,
+                    sitewide_fallback_attempted: false,
                 } => true,
             }
         );
@@ -4485,6 +4516,7 @@ mod tests {
             response_body: None,
             response_code: Some(401),
             consecutive_count: 1,
+            sitewide_fallback_attempted: false,
         };
 
         let schema = error.operator_error_schema();

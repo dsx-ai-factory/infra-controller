@@ -43,7 +43,9 @@ use crate::proxy::credentials::{
     TargetKind, resolve_credentials,
 };
 use crate::proxy::switch_tls::SwitchClient;
-use crate::proxy::{BmcProxyError, BmcProxyState, ProxyError, error_response};
+use crate::proxy::{
+    BmcProxyError, BmcProxyState, ProxyError, credential_resolution_error_response, error_response,
+};
 use crate::span_isolation::SpanIsolationMiddleware;
 
 /// Request bodies up to this size are buffered and forwarded with the exact framing
@@ -220,7 +222,7 @@ pub(super) async fn send_upstream(
                 .into(),
         )
     })?
-    .map_err(|e| error_response((StatusCode::BAD_GATEWAY, e.to_string()).into()))?;
+    .map_err(|error| credential_resolution_error_response(target_ip, error))?;
 
     copy_request_headers(&parts.headers, &mut bmc_client_info.header_map);
 

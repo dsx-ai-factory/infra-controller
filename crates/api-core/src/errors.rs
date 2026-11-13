@@ -888,7 +888,7 @@ impl Display for CarbideErrorWithLocation {
 
 impl std::error::Error for CarbideErrorWithLocation {}
 
-fn insert_ascii_metadata(status: &mut Status, key: &'static str, value: &str) {
+pub(crate) fn insert_ascii_metadata(status: &mut Status, key: &'static str, value: &str) {
     match MetadataValue::try_from(value) {
         Ok(value) => {
             status.metadata_mut().insert(key, value);

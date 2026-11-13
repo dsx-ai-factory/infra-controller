@@ -417,7 +417,8 @@ fn refusing_port() -> (tokio::net::TcpSocket, u16) {
 /// stores for that switch's NVOS administrator. It also answers `Version`,
 /// which the client calls to check its connection, at once. The switch and
 /// credential lookups it receives are recorded in `lookups`, each as the
-/// method name with its argument.
+/// method name with its argument. `bmc_credentials_error`, when present,
+/// replaces the normal BMC credential response.
 #[derive(Clone)]
 struct FakeNicoApi {
     lookup_delay: Duration,
@@ -425,6 +426,7 @@ struct FakeNicoApi {
     nvos: StoredNvos,
     lookups: Lookups,
     headers: CapturedHeaders,
+    bmc_credentials_error: Option<tonic::Status>,
 }
 
 /// The switch and credential lookups a fake nico-api received, in order.
@@ -503,6 +505,7 @@ impl tower::Service<http::Request<tonic::body::Body>> for FakeNicoApi {
         let inventory = self.inventory;
         let nvos = self.nvos.clone();
         let lookups = self.lookups.clone();
+        let bmc_credentials_error = self.bmc_credentials_error.clone();
         let record = move |lookup: String| lookups.lock().unwrap().push(lookup);
         Box::pin(async move {
             if request.uri().path() != "/forge.Forge/Version" {
@@ -586,7 +589,10 @@ impl tower::Service<http::Request<tonic::body::Body>> for FakeNicoApi {
                         .unary(
                             Unary(move |bmc: forge::GetBmcCredentialsRequest| {
                                 record(format!("GetBmcCredentials({})", bmc.mac_addr));
-                                Ok(username_password("root", FRESH_PASSWORD))
+                                match &bmc_credentials_error {
+                                    Some(status) => Err(status.clone()),
+                                    None => Ok(username_password("root", FRESH_PASSWORD)),
+                                }
                             }),
                             request,
                         )
@@ -668,6 +674,29 @@ async fn fake_nico_api_capturing_headers(
     inventory: FakeInventory,
     nvos: StoredNvos,
 ) -> (CarbideApiClient, Lookups, CapturedHeaders) {
+    start_fake_nico_api(lookup_delay, inventory, nvos, None).await
+}
+
+/// [`fake_nico_api_storing`], returning `bmc_credentials_error` from
+/// `GetBmcCredentials` when supplied so callers can exercise gRPC failure contracts.
+async fn fake_nico_api_storing_with_bmc_error(
+    lookup_delay: Duration,
+    inventory: FakeInventory,
+    nvos: StoredNvos,
+    bmc_credentials_error: tonic::Status,
+) -> (CarbideApiClient, Lookups) {
+    let (client, lookups, _) =
+        start_fake_nico_api(lookup_delay, inventory, nvos, Some(bmc_credentials_error)).await;
+    (client, lookups)
+}
+
+/// Binds the listener and builds the fake nico-api in the single shared construction path.
+async fn start_fake_nico_api(
+    lookup_delay: Duration,
+    inventory: FakeInventory,
+    nvos: StoredNvos,
+    bmc_credentials_error: Option<tonic::Status>,
+) -> (CarbideApiClient, Lookups, CapturedHeaders) {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
         .expect("bind fake nico-api");
@@ -680,6 +709,7 @@ async fn fake_nico_api_capturing_headers(
         nvos,
         lookups: lookups.clone(),
         headers: headers.clone(),
+        bmc_credentials_error,
     };
     tokio::spawn(async move {
         tonic::transport::Server::builder()
@@ -1374,6 +1404,97 @@ async fn outbound_requests_follow_parent_sampling_with_unsampled_roots() {
                     .all(|span| span.span_context.trace_id() == opentelemetry::TraceId::from(0x42))
             );
         }
+    }
+}
+
+/// Verifies only credential lookups marked as BMC rejections become HTTP 401,
+/// while ordinary nico-api failures remain HTTP 502 and never reach the BMC.
+#[tokio::test]
+async fn credential_resolution_failures_map_to_http_status() {
+    struct CredentialFailureCase {
+        scenario: &'static str,
+        status: tonic::Status,
+        expected_status: u16,
+        expected_body: Option<&'static str>,
+    }
+
+    let marked = |mut status: tonic::Status, value: &'static str| {
+        status.metadata_mut().insert(
+            rpc::BMC_CREDENTIAL_REJECTED_METADATA_KEY,
+            value.parse().expect("marker is valid gRPC metadata"),
+        );
+        status
+    };
+    let cases = [
+        // A tripped lockout breaker carries the final rejection and must look like a direct 401.
+        CredentialFailureCase {
+            scenario: "failed precondition marked with 401",
+            status: marked(
+                tonic::Status::failed_precondition("BMC credential lockout breaker tripped"),
+                "401",
+            ),
+            expected_status: 401,
+            expected_body: Some("rejected the stored root credential"),
+        },
+        // A below-threshold rejection keeps gRPC Internal but has the same HTTP meaning.
+        CredentialFailureCase {
+            scenario: "internal marked with 403",
+            status: marked(
+                tonic::Status::internal("BMC rejected the stored root credential"),
+                "403",
+            ),
+            expected_status: 401,
+            expected_body: Some("rejected the stored root credential"),
+        },
+        // FailedPrecondition without the marker describes server state, not a rejected password.
+        CredentialFailureCase {
+            scenario: "unmarked failed precondition",
+            status: tonic::Status::failed_precondition("BMC root credentials are not configured"),
+            expected_status: 502,
+            expected_body: None,
+        },
+        // Internal without the marker remains an opaque nico-api or credential-store failure.
+        CredentialFailureCase {
+            scenario: "unmarked internal",
+            status: tonic::Status::internal("credential store unavailable"),
+            expected_status: 502,
+            expected_body: None,
+        },
+    ];
+
+    let metrics = MetricsCapture::start();
+    for case in cases {
+        // Start with an empty credential cache so this request must use the
+        // configured fake GetBmcCredentials failure.
+        let (addr, bmc) = spawn_fake_bmc();
+        let mut state = proxy_reaching(addr, root_password()).await;
+        state
+            .credential_cache
+            .remove(&FAKE_BMC_IP.parse::<IpAddr>().unwrap())
+            .await;
+        let (api_client, _lookups) = fake_nico_api_storing_with_bmc_error(
+            Duration::ZERO,
+            FakeInventory::NoSwitch,
+            stored_nvos(),
+            case.status,
+        )
+        .await;
+        state.api_client = api_client;
+
+        // Exercise the complete proxy handler and inspect what its caller receives.
+        let answer = exchange(&metrics, &state, get(SYSTEM_PATH)).await;
+        let body = String::from_utf8_lossy(&answer.body);
+
+        // Credential resolution must finish before any request can reach the BMC.
+        assert_eq!(answer.status, case.expected_status, "{}", case.scenario);
+        if let Some(expected_body) = case.expected_body {
+            assert!(body.contains(expected_body), "{}: {body}", case.scenario);
+        }
+        assert!(
+            bmc.received().is_empty(),
+            "{}: credential failure must prevent an upstream BMC request",
+            case.scenario
+        );
     }
 }
 
