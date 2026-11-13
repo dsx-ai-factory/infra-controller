@@ -34,7 +34,7 @@ use std::time::{Duration, SystemTime};
 
 use bmc_backend::{BackendBmc, BmcConnectError, BmcConnector};
 use bmc_platform::{PlatformError, PowerState, ResetType};
-use bmc_runtime::DriverConnector;
+use bmc_runtime::{ConnectError, DriverConnector, ExploredConnectError};
 use carbide_firmware::{
     ArtifactStatus, FirmwareConfigSnapshot, FirmwareDownloader, ResolvedFirmwareArtifactSource,
     resolve_files_firmware_artifact,
@@ -623,6 +623,9 @@ impl PreingestionManagerStatic {
                 BmcConnectError::Libredfish(error) => {
                     PreingestionManagerError::internal(format!("{error}"))
                 }
+                BmcConnectError::Drivers(ExploredConnectError::Connect(
+                    ConnectError::Transport(error),
+                )) => PreingestionManagerError::PlatformError(error),
                 BmcConnectError::Drivers(error) => {
                     PreingestionManagerError::internal(error.to_string())
                 }

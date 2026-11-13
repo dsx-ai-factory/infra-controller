@@ -209,6 +209,34 @@ pub fn primary_system_index<B: Bmc>(
     )
 }
 
+/// Index of the manager for `system` among a BMC's managers: the one whose
+/// `ManagerForServers` links `system`, otherwise the first, as for BMCs that
+/// don't populate the link or list no systems. `None` when the BMC lists no
+/// managers.
+pub fn primary_manager_index<B: Bmc>(
+    managers: &[nv_redfish::manager::Manager<B>],
+    system: Option<&nv_redfish::computer_system::ComputerSystem<B>>,
+) -> Option<usize> {
+    if managers.is_empty() {
+        return None;
+    }
+    let linked = system.and_then(|system| {
+        managers.iter().position(|manager| {
+            manager
+                .raw()
+                .links
+                .as_ref()
+                .and_then(|links| links.manager_for_servers.as_ref())
+                .is_some_and(|servers| {
+                    servers
+                        .iter()
+                        .any(|server| *server.id() == system.raw().odata_id)
+                })
+        })
+    });
+    Some(linked.unwrap_or(0))
+}
+
 /// Collects required resources, then converts them into an exploration report.
 #[tracing::instrument(name = "generate_exploration_report", skip_all)]
 pub async fn nv_generate_exploration_report<B: Bmc>(
@@ -298,25 +326,9 @@ pub async fn nv_generate_exploration_report<B: Bmc>(
         .await
         .map_err(Error::nv_redfish("managers members"))?;
 
-    // Prefer the manager whose ManagerForServers links the chosen system; fall
-    // back to the first manager for BMCs that don't populate the link.
-    let manager = match managers.iter().position(|m| {
-        m.raw()
-            .links
-            .as_ref()
-            .and_then(|l| l.manager_for_servers.as_ref())
-            .is_some_and(|servers| {
-                servers
-                    .iter()
-                    .any(|s| *s.id() == explored_system.system.raw().odata_id)
-            })
-    }) {
-        Some(i) => managers.swap_remove(i),
-        None => managers
-            .into_iter()
-            .next()
-            .ok_or_else(Error::bmc_not_provided("at least one manager"))?,
-    };
+    let manager_index = primary_manager_index(&managers, Some(&explored_system.system))
+        .ok_or_else(Error::bmc_not_provided("at least one manager"))?;
+    let manager = managers.swap_remove(manager_index);
 
     let hw_type = hw_type(&root, explored_system, &explored_chassis);
     let explored_drives = if config.explore_drive_firmware {
