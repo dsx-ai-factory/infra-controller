@@ -186,6 +186,7 @@ pub(crate) async fn setup_resources(
         join_set,
         db_pool.clone(),
         work_lock_manager::KeepaliveConfig::default(),
+        instrumentation.clone(),
     )
     .await?;
 
@@ -221,6 +222,7 @@ pub(crate) async fn setup_resources(
             &routing,
             join_set,
             cancel_token,
+            instrumentation,
         )
         .await?;
         let pg_manager = Arc::new(PostgresCredentialManager::new(
@@ -688,6 +690,7 @@ async fn build_kms_backend(
     routing: &SecretRouting,
     join_set: &mut JoinSet<()>,
     cancel_token: &CancellationToken,
+    instrumentation: &carbide_instrument::Instrumentation,
 ) -> eyre::Result<Arc<dyn KmsBackend>> {
     // BTreeMap so the provider list below has a stable order -- with
     // duplicate kek_ids rejected, order never decides which provider
@@ -728,7 +731,9 @@ async fn build_kms_backend(
                 join_set
                     .build_task()
                     .name("transit_kms_token_renewal")
-                    .spawn(provider.run_token_renewal(cancel_token.clone()))?;
+                    .spawn(
+                        provider.run_token_renewal(cancel_token.clone(), instrumentation.clone()),
+                    )?;
                 Arc::new(provider)
             }
             ProviderConfig::Kmip {

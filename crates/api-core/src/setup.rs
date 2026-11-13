@@ -134,6 +134,7 @@ fn create_ipmi_tool(
     credential_reader: Arc<dyn CredentialReader>,
     carbide_config: &CarbideConfig,
     bmc_proxy: Arc<ArcSwap<Option<HostPortPair>>>,
+    instrumentation: carbide_instrument::Instrumentation,
 ) -> Arc<dyn IPMITool> {
     match carbide_config.dpu_ipmi_tool_impl.as_deref() {
         Some("test") => {
@@ -142,11 +143,15 @@ fn create_ipmi_tool(
         }
         Some("bmc-mock") => {
             tracing::info!("Using HTTP IPMI transport via bmc_proxy");
-            carbide_ipmi::bmc_mock(bmc_proxy, credential_reader)
+            carbide_ipmi::bmc_mock(bmc_proxy, credential_reader, instrumentation)
         }
         _ => {
             tracing::info!("Using lanplus IPMI transport (/usr/bin/ipmitool)");
-            carbide_ipmi::tool(credential_reader, carbide_config.dpu_ipmi_reboot_attempts)
+            carbide_ipmi::tool(
+                credential_reader,
+                carbide_config.dpu_ipmi_reboot_attempts,
+                instrumentation,
+            )
         }
     }
 }
@@ -367,6 +372,7 @@ pub async fn start_runtime(runtime_inputs: RuntimeInputs<'_>) -> eyre::Result<So
         credential_manager.clone(),
         &carbide_config,
         dynamic_settings.bmc_proxy.clone(),
+        instrumentation.clone(),
     );
 
     let driver_connector = create_driver_connector(
@@ -488,7 +494,12 @@ pub async fn start_runtime(runtime_inputs: RuntimeInputs<'_>) -> eyre::Result<So
         // and accepted definitions for remote pools, before it builds the handles
         // used by the API and controllers. Route servers and site prefixes also
         // need to reflect the config before the API starts serving requests.
-        db::resource_pool::reconcile_pool_defs(&mut txn, &seed_data.initial_pools).await?;
+        db::resource_pool::reconcile_pool_defs(
+            &mut txn,
+            &seed_data.initial_pools,
+            &instrumentation,
+        )
+        .await?;
         // We'll always update whatever route servers are in the config
         // to the database, and then leverage the enable_route_servers
         // flag where needed to determine if we actually want to use
@@ -762,6 +773,7 @@ pub async fn start_runtime(runtime_inputs: RuntimeInputs<'_>) -> eyre::Result<So
             // until it moves to credential-key auth.
             Some(shared_redfish_pool.clone()),
             driver_connector.clone(),
+            instrumentation.clone(),
         )
         .await
         {
@@ -2412,6 +2424,7 @@ async fn initialize_and_start_controllers<'a>(
             .processor_id(state_controller_id.clone())
             .services(
                 SpdmStateHandlerServices {
+                    instrumentation: api_service.instrumentation.clone(),
                     db_pool: db_pool.clone(),
                     redfish_client_pool: shared_redfish_pool.clone(),
                     bmc_connector: BmcConnector::new(
@@ -2438,6 +2451,7 @@ async fn initialize_and_start_controllers<'a>(
         .processor_id(state_controller_id.clone())
         .services(
             IBPartitionStateHandlerServices {
+                instrumentation: api_service.instrumentation.clone(),
                 db_pool: db_pool.clone(),
                 ib_fabric_manager: ib_fabric_manager.clone(),
                 ib_pools: common_pools.infiniband.clone(),
@@ -2489,6 +2503,7 @@ async fn initialize_and_start_controllers<'a>(
         .processor_id(state_controller_id.clone())
         .services(
             RackStateHandlerServices {
+                instrumentation: api_service.instrumentation.clone(),
                 db_pool: db_pool.clone(),
                 site_config: RackConfig {
                     rms: carbide_config.rms.clone(),
@@ -2607,12 +2622,12 @@ async fn initialize_and_start_controllers<'a>(
 
             DpaMonitor::new(
                 db_pool.clone(),
-                db_pool.clone().into(),
                 dpa_info,
                 meter.clone(),
                 carbide_config.ewethers_config.clone().unwrap_or_default(),
                 carbide_config.host_health,
                 work_lock_manager_handle.clone(),
+                api_service.instrumentation.clone(),
             )
             .start(join_set, cancel_token.clone())?;
 

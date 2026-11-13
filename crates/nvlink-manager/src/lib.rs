@@ -5581,8 +5581,13 @@ mod machine_group_tests {
         txn.commit().await?;
 
         let mut join_set = JoinSet::new();
-        let work_lock_manager =
-            db::work_lock_manager::start(&mut join_set, pool.clone(), Default::default()).await?;
+        let work_lock_manager = db::work_lock_manager::start(
+            &mut join_set,
+            pool.clone(),
+            Default::default(),
+            carbide_instrument::Instrumentation::global(),
+        )
+        .await?;
         let test_meter = TestMeter::default();
         let monitor = NvlPartitionMonitor::new(
             pool.clone(),
@@ -5755,8 +5760,13 @@ mod machine_group_tests {
         txn.commit().await?;
 
         let mut join_set = JoinSet::new();
-        let work_lock_manager =
-            db::work_lock_manager::start(&mut join_set, pool.clone(), Default::default()).await?;
+        let work_lock_manager = db::work_lock_manager::start(
+            &mut join_set,
+            pool.clone(),
+            Default::default(),
+            carbide_instrument::Instrumentation::global(),
+        )
+        .await?;
         let test_meter = TestMeter::default();
         let monitor = NvlPartitionMonitor::new(
             pool.clone(),
@@ -5868,8 +5878,13 @@ mod machine_group_tests {
         txn.commit().await?;
 
         let mut join_set = JoinSet::new();
-        let work_lock_manager =
-            db::work_lock_manager::start(&mut join_set, pool.clone(), Default::default()).await?;
+        let work_lock_manager = db::work_lock_manager::start(
+            &mut join_set,
+            pool.clone(),
+            Default::default(),
+            carbide_instrument::Instrumentation::global(),
+        )
+        .await?;
         let test_meter = TestMeter::default();
         let monitor = NvlPartitionMonitor::new(
             pool.clone(),
@@ -5944,8 +5959,13 @@ mod machine_group_tests {
         txn.commit().await?;
 
         let mut join_set = JoinSet::new();
-        let work_lock_manager =
-            db::work_lock_manager::start(&mut join_set, pool.clone(), Default::default()).await?;
+        let work_lock_manager = db::work_lock_manager::start(
+            &mut join_set,
+            pool.clone(),
+            Default::default(),
+            carbide_instrument::Instrumentation::global(),
+        )
+        .await?;
 
         let test_meter = TestMeter::default();
 
@@ -6404,8 +6424,13 @@ mod machine_group_tests {
         pool: sqlx::PgPool,
     ) -> Result<(), Box<dyn std::error::Error>> {
         let mut join_set = JoinSet::new();
-        let work_lock_manager =
-            db::work_lock_manager::start(&mut join_set, pool.clone(), Default::default()).await?;
+        let work_lock_manager = db::work_lock_manager::start(
+            &mut join_set,
+            pool.clone(),
+            Default::default(),
+            carbide_instrument::Instrumentation::global(),
+        )
+        .await?;
         let test_meter = TestMeter::default();
 
         let domain_uuid: NvLinkDomainId = "ffffffff-ffff-ffff-ffff-ffffffffffff".parse()?;
@@ -6518,8 +6543,13 @@ mod machine_group_tests {
         const OTHER_TRAY_GPU: u64 = 0x2000;
 
         let mut join_set = JoinSet::new();
-        let work_lock_manager =
-            db::work_lock_manager::start(&mut join_set, pool.clone(), Default::default()).await?;
+        let work_lock_manager = db::work_lock_manager::start(
+            &mut join_set,
+            pool.clone(),
+            Default::default(),
+            carbide_instrument::Instrumentation::global(),
+        )
+        .await?;
         let test_meter = TestMeter::default();
         let domain_uuid: NvLinkDomainId = "ffffffff-ffff-ffff-ffff-ffffffffffff".parse()?;
 
@@ -6694,8 +6724,13 @@ mod machine_group_tests {
         txn.commit().await?;
 
         let mut join_set = JoinSet::new();
-        let work_lock_manager =
-            db::work_lock_manager::start(&mut join_set, pool.clone(), Default::default()).await?;
+        let work_lock_manager = db::work_lock_manager::start(
+            &mut join_set,
+            pool.clone(),
+            Default::default(),
+            carbide_instrument::Instrumentation::global(),
+        )
+        .await?;
         let nmxc = Arc::new(NmxcSimClient::with_partition(
             9,
             "tray_partition_1",
@@ -6805,8 +6840,13 @@ mod machine_group_tests {
         const METRIC_NAME: &str = "carbide_nvlink_partition_monitor_iteration_overruns_total";
 
         let mut join_set = JoinSet::new();
-        let work_lock_manager =
-            db::work_lock_manager::start(&mut join_set, pool.clone(), Default::default()).await?;
+        let work_lock_manager = db::work_lock_manager::start(
+            &mut join_set,
+            pool.clone(),
+            Default::default(),
+            carbide_instrument::Instrumentation::global(),
+        )
+        .await?;
         let test_meter = TestMeter::default();
         let monitor = NvlPartitionMonitor::new(
             pool.clone(),

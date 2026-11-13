@@ -27,16 +27,13 @@ use nv_redfish::bmc_http::reqwest::Client as ReqwestClient;
 use url::Url;
 
 use crate::HealthError;
-use crate::bmc::{
-    BmcClient, BmcLatencyInstrumentation, CredentialProvider, bmc_latency_endpoint_labels,
-};
+use crate::bmc::{BmcClient, BmcInstrumentation, CredentialProvider, bmc_latency_endpoint_labels};
 use crate::config::{StaticBmcEndpoint, StaticSwitchEndpointRole};
 use crate::endpoint::{
     BmcAddr, BmcEndpoint, BoxFuture, EndpointMetadata, EndpointSnapshot, EndpointSource,
     InventorySnapshot, MachineData, PowerShelfData, SharedSystemUuid, SwitchData,
     SwitchEndpointRole,
 };
-use crate::metrics::BmcLatencyMetrics;
 
 fn parse_static_nvlink_domain_uuid(
     value: Option<&str>,
@@ -70,12 +67,14 @@ impl StaticEndpointSource {
     }
 
     /// Builds static endpoints using the supplied shared credential provider.
+    /// Builds clients using the supplied Event and optional latency destinations.
+    /// Retain their providers until the source and its clients stop.
     pub fn from_config(
         configs: &[StaticBmcEndpoint],
         reqwest: &ReqwestClient,
         proxy_url: Option<&Url>,
         cache_size: usize,
-        bmc_latency_metrics: Option<Arc<BmcLatencyMetrics>>,
+        instrumentation: BmcInstrumentation,
         credential_provider: Arc<dyn CredentialProvider>,
     ) -> Self {
         Self::from_config_with_request_concurrency(
@@ -84,7 +83,7 @@ impl StaticEndpointSource {
             proxy_url,
             cache_size,
             NonZeroUsize::MIN,
-            bmc_latency_metrics,
+            instrumentation,
             credential_provider,
         )
     }
@@ -95,7 +94,7 @@ impl StaticEndpointSource {
         proxy_url: Option<&Url>,
         cache_size: usize,
         bmc_request_concurrency: NonZeroUsize,
-        bmc_latency_metrics: Option<Arc<BmcLatencyMetrics>>,
+        instrumentation: BmcInstrumentation,
         credential_provider: Arc<dyn CredentialProvider>,
     ) -> Self {
         let mut endpoints = Vec::with_capacity(configs.len());
@@ -232,12 +231,10 @@ impl StaticEndpointSource {
                 mac: Some(mac),
             };
             let rack_id = cfg.rack_id.as_ref().map(|id| RackId::new(id.as_str()));
-            let bmc_latency_instrumentation = bmc_latency_metrics.clone().map(|metrics| {
-                BmcLatencyInstrumentation::new(
-                    metrics,
-                    bmc_latency_endpoint_labels(metadata.as_ref(), rack_id.as_ref()),
-                )
-            });
+            let bmc_instrumentation = instrumentation.for_endpoint(bmc_latency_endpoint_labels(
+                metadata.as_ref(),
+                rack_id.as_ref(),
+            ));
             let bmc = match BmcClient::new(
                 reqwest.clone(),
                 addr.clone(),
@@ -245,7 +242,7 @@ impl StaticEndpointSource {
                 proxy_url.cloned(),
                 cache_size,
                 bmc_request_concurrency,
-                bmc_latency_instrumentation,
+                bmc_instrumentation,
             ) {
                 Ok(client) => Arc::new(client),
                 Err(error) => {
@@ -430,7 +427,10 @@ mod tests {
             &reqwest(),
             None,
             10,
-            None,
+            crate::bmc::BmcInstrumentation::new(
+                carbide_instrument::Instrumentation::global(),
+                None,
+            ),
             test_credentials(),
         );
         let endpoints = source.fetch_bmc_hosts().await.expect("fetch should work");
@@ -474,7 +474,10 @@ mod tests {
             &reqwest(),
             None,
             10,
-            None,
+            crate::bmc::BmcInstrumentation::new(
+                carbide_instrument::Instrumentation::global(),
+                None,
+            ),
             test_credentials(),
         );
         let endpoints = source.fetch_bmc_hosts().await.unwrap();
@@ -536,7 +539,10 @@ mod tests {
             &reqwest(),
             None,
             10,
-            None,
+            crate::bmc::BmcInstrumentation::new(
+                carbide_instrument::Instrumentation::global(),
+                None,
+            ),
             test_credentials(),
         );
         let endpoints = source.fetch_bmc_hosts().await.unwrap();
@@ -575,7 +581,10 @@ mod tests {
             &reqwest(),
             None,
             10,
-            None,
+            crate::bmc::BmcInstrumentation::new(
+                carbide_instrument::Instrumentation::global(),
+                None,
+            ),
             test_credentials(),
         );
         let endpoints = source.fetch_bmc_hosts().await.unwrap();
@@ -615,7 +624,10 @@ mod tests {
             &reqwest(),
             None,
             10,
-            None,
+            crate::bmc::BmcInstrumentation::new(
+                carbide_instrument::Instrumentation::global(),
+                None,
+            ),
             test_credentials(),
         );
         let endpoints = source.fetch_bmc_hosts().await.unwrap();
@@ -663,7 +675,10 @@ mod tests {
             &reqwest(),
             None,
             10,
-            None,
+            crate::bmc::BmcInstrumentation::new(
+                carbide_instrument::Instrumentation::global(),
+                None,
+            ),
             test_credentials(),
         );
         let endpoints = source.fetch_bmc_hosts().await.unwrap();
@@ -719,7 +734,10 @@ mod tests {
             &reqwest(),
             None,
             10,
-            None,
+            crate::bmc::BmcInstrumentation::new(
+                carbide_instrument::Instrumentation::global(),
+                None,
+            ),
             test_credentials(),
         );
         let endpoints = source.fetch_bmc_hosts().await.unwrap();
@@ -752,7 +770,10 @@ mod tests {
             &reqwest(),
             None,
             10,
-            None,
+            crate::bmc::BmcInstrumentation::new(
+                carbide_instrument::Instrumentation::global(),
+                None,
+            ),
             test_credentials(),
         );
         let endpoints = source.fetch_bmc_hosts().await.unwrap();

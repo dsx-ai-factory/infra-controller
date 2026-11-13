@@ -71,7 +71,11 @@ fn config_fetch_waits_after_success_failure_and_slow_response() {
                 third_response_gate: Some(third_response_gate.clone()),
             });
             let (address, server) = run_server(state).await;
-            let fetcher = PeriodicConfigFetcher::new(fetcher_config(address, FETCH_INTERVAL)).await;
+            let fetcher = PeriodicConfigFetcher::new(
+                fetcher_config(address, FETCH_INTERVAL),
+                carbide_instrument::Instrumentation::global(),
+            )
+            .await;
             let reader = fetcher.reader();
             assert_eq!(
                 reader.net_conf_read().unwrap().managed_host_config_version,
@@ -164,7 +168,11 @@ async fn malformed_service_response_preserves_last_accepted_configuration() {
     let (address, server) = run_server(state).await;
 
     // Accept the first valid service response before the second malformed response.
-    let fetcher = PeriodicConfigFetcher::new(fetcher_config(address, FETCH_INTERVAL)).await;
+    let fetcher = PeriodicConfigFetcher::new(
+        fetcher_config(address, FETCH_INTERVAL),
+        carbide_instrument::Instrumentation::global(),
+    )
+    .await;
     let reader = fetcher.reader();
     request_times
         .try_recv()
@@ -210,7 +218,8 @@ async fn dropping_config_fetcher_releases_state_before_next_interval() {
     let (address, server) = run_server(state).await;
     let config = fetcher_config(address, Duration::from_secs(30));
     let client_config = Arc::downgrade(&config.carbide_client_config);
-    let fetcher = PeriodicConfigFetcher::new(config).await;
+    let fetcher =
+        PeriodicConfigFetcher::new(config, carbide_instrument::Instrumentation::global()).await;
     // Allow the background task to enter its first wait. Keep no reader, which
     // would independently retain the shared state after the owner is dropped.
     tokio::task::yield_now().await;
@@ -247,7 +256,10 @@ async fn failed_initial_fetch_retries_before_host_id_lookup_expires() {
     assert!(agent_config.machine.interface_id.is_none());
     let (fetcher, logs) = tokio::time::timeout(
         Duration::from_secs(5),
-        capture_logs_async(PeriodicConfigFetcher::new(config)),
+        capture_logs_async(PeriodicConfigFetcher::new(
+            config,
+            carbide_instrument::Instrumentation::global(),
+        )),
     )
     .await
     .expect("startup must not wait for the 30-second polling interval");
@@ -288,7 +300,11 @@ async fn failed_startup_retry_returns_to_periodic_waits() {
         third_response_gate: None,
     });
     let (address, server) = run_server(state).await;
-    let fetcher = PeriodicConfigFetcher::new(fetcher_config(address, FETCH_INTERVAL)).await;
+    let fetcher = PeriodicConfigFetcher::new(
+        fetcher_config(address, FETCH_INTERVAL),
+        carbide_instrument::Instrumentation::global(),
+    )
+    .await;
     request_times.try_recv().expect("initial request completed");
     let retry = next_request(&mut request_times).await;
     let recurring = next_request(&mut request_times).await;
@@ -322,7 +338,11 @@ fn failed_initial_metadata_conversion_retries_once_before_periodic_waits() {
                 third_response_gate: Some(third_response_gate.clone()),
             });
             let (address, server) = run_server(state).await;
-            let fetcher = PeriodicConfigFetcher::new(fetcher_config(address, FETCH_INTERVAL)).await;
+            let fetcher = PeriodicConfigFetcher::new(
+                fetcher_config(address, FETCH_INTERVAL),
+                carbide_instrument::Instrumentation::global(),
+            )
+            .await;
             let reader = fetcher.reader();
             request_times.try_recv().expect("initial request completed");
             let retry = next_request(&mut request_times).await;

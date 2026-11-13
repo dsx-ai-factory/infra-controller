@@ -344,10 +344,14 @@ fn test_start(pool: sqlx::PgPool) {
     let test_module = Box::new(TestUpdateModule::new(vec![], HashSet::default()));
     let mut join_set = JoinSet::new();
     let cancel_token = CancellationToken::new();
-    let work_lock_manager_handle =
-        db::work_lock_manager::start(&mut join_set, pool.clone(), Default::default())
-            .await
-            .unwrap();
+    let work_lock_manager_handle = db::work_lock_manager::start(
+        &mut join_set,
+        pool.clone(),
+        Default::default(),
+        carbide_instrument::Instrumentation::global(),
+    )
+    .await
+    .unwrap();
 
     let mut config: Arc<CarbideConfig> = Arc::new(
         Figment::new()
@@ -394,10 +398,14 @@ fn test_start(pool: sqlx::PgPool) {
 fn test_run_single_iteration_propagates_lock_infrastructure_failure(pool: sqlx::PgPool) {
     let test_module = Box::new(TestUpdateModule::new(vec![], HashSet::default()));
     let mut join_set = JoinSet::new();
-    let work_lock_manager_handle =
-        db::work_lock_manager::start(&mut join_set, pool.clone(), Default::default())
-            .await
-            .unwrap();
+    let work_lock_manager_handle = db::work_lock_manager::start(
+        &mut join_set,
+        pool.clone(),
+        Default::default(),
+        carbide_instrument::Instrumentation::global(),
+    )
+    .await
+    .unwrap();
     join_set.shutdown().await;
 
     let config: Arc<CarbideConfig> = Arc::new(
@@ -434,10 +442,14 @@ fn test_run_single_iteration_propagates_lock_infrastructure_failure(pool: sqlx::
 #[crate::sqlx_test()]
 fn update_manager_uses_policy_interval(pool: sqlx::PgPool) {
     let mut join_set = JoinSet::new();
-    let work_lock_manager_handle =
-        db::work_lock_manager::start(&mut join_set, pool.clone(), Default::default())
-            .await
-            .unwrap();
+    let work_lock_manager_handle = db::work_lock_manager::start(
+        &mut join_set,
+        pool.clone(),
+        Default::default(),
+        carbide_instrument::Instrumentation::global(),
+    )
+    .await
+    .unwrap();
 
     for configured in [None, Some(0), Some(7)] {
         let mut config = crate::test_support::default_config::get();

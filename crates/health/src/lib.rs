@@ -168,6 +168,8 @@ async fn build_endpoint_wiring(
     bmc_latency_metrics: Option<Arc<BmcLatencyMetrics>>,
     instrumentation: carbide_instrument::Instrumentation,
 ) -> Result<EndpointWiring, HealthError> {
+    let bmc_instrumentation =
+        crate::bmc::BmcInstrumentation::new(instrumentation.clone(), bmc_latency_metrics);
     let reqwest = ReqwestClient::with_params(ReqwestClientParams::new().accept_invalid_certs(true))
         .map_err(BmcError::ReqwestError)?;
     let mut sources: Vec<Arc<dyn EndpointSource>> = Vec::new();
@@ -211,7 +213,7 @@ async fn build_endpoint_wiring(
             config.bmc_proxy_url.as_ref(),
             config.cache_size,
             config.bmc_request_concurrency,
-            bmc_latency_metrics.clone(),
+            bmc_instrumentation.clone(),
             file_provider.clone().ok_or_else(|| {
                 HealthError::GenericError(
                     "static endpoints require endpoint_sources.static_credentials_file".into(),
@@ -234,7 +236,7 @@ async fn build_endpoint_wiring(
             config.bmc_proxy_url.clone(),
             config.cache_size,
             config.bmc_request_concurrency,
-            bmc_latency_metrics.clone(),
+            bmc_instrumentation.clone(),
         ));
         sources.push(endpoint_source as Arc<dyn EndpointSource>);
     }
@@ -246,7 +248,7 @@ async fn build_endpoint_wiring(
             config.bmc_proxy_url.as_ref(),
             config.cache_size,
             config.bmc_request_concurrency,
-            bmc_latency_metrics,
+            bmc_instrumentation.clone(),
         );
         sources.push(Arc::new(cluster_source));
     }
@@ -267,6 +269,7 @@ async fn build_endpoint_wiring(
 fn build_data_sink(
     config: &Config,
     metrics_manager: Arc<MetricsManager>,
+    instrumentation: &carbide_instrument::Instrumentation,
 ) -> Result<Option<Arc<dyn DataSink>>, HealthError> {
     let mut sinks: Vec<Arc<dyn DataSink>> = Vec::new();
     let mut processors: Vec<Arc<dyn EventProcessor>> = Vec::new();
@@ -322,23 +325,38 @@ fn build_data_sink(
     }
 
     if let Configurable::Enabled(ref sink_cfg) = config.sinks.health_report {
-        sinks.push(Arc::new(HealthReportSink::new(sink_cfg)?));
+        sinks.push(Arc::new(HealthReportSink::new(
+            sink_cfg,
+            instrumentation.clone(),
+        )?));
     }
 
     if let Configurable::Enabled(ref sink_cfg) = config.sinks.rack_health_report {
-        sinks.push(Arc::new(RackHealthReportSink::new(sink_cfg)?));
+        sinks.push(Arc::new(RackHealthReportSink::new(
+            sink_cfg,
+            instrumentation.clone(),
+        )?));
     }
 
     if let Configurable::Enabled(ref sink_cfg) = config.sinks.switch_health_report {
-        sinks.push(Arc::new(SwitchHealthReportSink::new(sink_cfg)?));
+        sinks.push(Arc::new(SwitchHealthReportSink::new(
+            sink_cfg,
+            instrumentation.clone(),
+        )?));
     }
 
     if let Configurable::Enabled(ref sink_cfg) = config.sinks.nvlink_domain_health_report {
-        sinks.push(Arc::new(NvLinkDomainHealthReportSink::new(sink_cfg)?));
+        sinks.push(Arc::new(NvLinkDomainHealthReportSink::new(
+            sink_cfg,
+            instrumentation.clone(),
+        )?));
     }
 
     if let Configurable::Enabled(ref sink_cfg) = config.sinks.power_shelf_health_report {
-        sinks.push(Arc::new(PowerShelfHealthReportSink::new(sink_cfg)?));
+        sinks.push(Arc::new(PowerShelfHealthReportSink::new(
+            sink_cfg,
+            instrumentation.clone(),
+        )?));
     }
 
     if let Configurable::Enabled(ref otlp_cfg) = config.sinks.otlp {
@@ -349,6 +367,7 @@ fn build_data_sink(
             mapper,
             &metrics_manager,
             &config.metrics.prefix,
+            instrumentation,
         )?;
 
         for sink in otlp_sinks {
@@ -519,7 +538,11 @@ pub async fn run_service(
     )
     .await?;
 
-    let data_sink = build_data_sink(&config, metrics_manager.clone())?;
+    let data_sink = build_data_sink(
+        &config,
+        metrics_manager.clone(),
+        &framework_metrics.instrumentation,
+    )?;
 
     let config_arc = Arc::new(config);
 
@@ -546,6 +569,7 @@ pub async fn run_service(
             config.clone(),
             tls_config,
             nmxc_schema_override,
+            framework_metrics.instrumentation.clone(),
         )?;
 
         let collector_transition_notify = ctx.collector_transition_notify.clone();
@@ -567,6 +591,7 @@ pub async fn run_service(
             collector_transition_notify,
             cancel_token.clone(),
             iteration,
+            framework_metrics.instrumentation,
         )
     });
 

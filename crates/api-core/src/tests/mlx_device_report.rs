@@ -552,7 +552,6 @@ async fn firmware_operation_reports_only_complete_the_matching_attempt(pool: sql
     let config = env.config.ewethers_config.clone().unwrap();
     let mut monitor = DpaMonitor::new(
         env.pool.clone(),
-        env.pool.clone().into(),
         Arc::new(DpaInfo {
             subnet_ip: config.subnet_ip,
             subnet_mask: config.subnet_mask,
@@ -563,6 +562,7 @@ async fn firmware_operation_reports_only_complete_the_matching_attempt(pool: sql
         config,
         env.config.host_health,
         env.api.work_lock_manager_handle.clone(),
+        env.api.instrumentation.clone(),
     );
     monitor.run_single_iteration().await.unwrap();
     let cards =

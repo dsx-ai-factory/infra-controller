@@ -136,9 +136,14 @@ fn manager(
 
 async fn start_test_work_lock_manager(pool: &sqlx::PgPool) -> (WorkLockManagerHandle, JoinSet<()>) {
     let mut tasks = JoinSet::new();
-    let handle = work_lock_manager::start(&mut tasks, pool.clone(), Default::default())
-        .await
-        .expect("start work lock manager");
+    let handle = work_lock_manager::start(
+        &mut tasks,
+        pool.clone(),
+        Default::default(),
+        carbide_instrument::Instrumentation::global(),
+    )
+    .await
+    .expect("start work lock manager");
     (handle, tasks)
 }
 
@@ -908,14 +913,22 @@ async fn stale_vault_import_owner_cannot_write_or_mark_after_takeover(pool: sqlx
         timeout: Duration::from_millis(100),
     };
     let mut work_lock_tasks = JoinSet::new();
-    let owner_manager =
-        work_lock_manager::start(&mut work_lock_tasks, pool.clone(), keepalive_config)
-            .await
-            .expect("start owner work lock manager");
-    let replacement_manager =
-        work_lock_manager::start(&mut work_lock_tasks, pool.clone(), keepalive_config)
-            .await
-            .expect("start replacement work lock manager");
+    let owner_manager = work_lock_manager::start(
+        &mut work_lock_tasks,
+        pool.clone(),
+        keepalive_config,
+        carbide_instrument::Instrumentation::global(),
+    )
+    .await
+    .expect("start owner work lock manager");
+    let replacement_manager = work_lock_manager::start(
+        &mut work_lock_tasks,
+        pool.clone(),
+        keepalive_config,
+        carbide_instrument::Instrumentation::global(),
+    )
+    .await
+    .expect("start replacement work lock manager");
     let work_key = "vault-import-takeover".to_string();
     let owner_lock = owner_manager
         .try_acquire_lock(work_key.clone())

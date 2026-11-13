@@ -399,8 +399,13 @@ mod tests {
         let metrics_manager =
             Arc::new(MetricsManager::new(metrics_name).expect("metrics manager should initialize"));
 
-        DiscoveryLoopContext::new(limiter, metrics_manager, Arc::new(Config::default()))
-            .expect("context should initialize")
+        DiscoveryLoopContext::new(
+            limiter,
+            metrics_manager,
+            Arc::new(Config::default()),
+            carbide_instrument::Instrumentation::global(),
+        )
+        .expect("context should initialize")
     }
 
     fn noop_collector() -> Collector {

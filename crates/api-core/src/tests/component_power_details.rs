@@ -158,6 +158,7 @@ fn api_with_rms(
         pool.clone(),
         Arc::new(profiles),
         false,
+        carbide_instrument::Instrumentation::global(),
     ));
     // Only the requested role supports passive reads, so querying another
     // manager's capability cannot accidentally pass a successful read test.

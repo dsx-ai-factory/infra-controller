@@ -3852,10 +3852,12 @@ pub async fn allocate_loopback_ip_v6(
 /// Allocate a value from the loopback IP resource pool.
 ///
 /// If the pool exists but is empty or has en error, return that.
+/// Allocation failure events use the caller's `instrumentation`.
 pub async fn allocate_vpc_dpu_loopback(
     common_pools: &CommonPools,
     txn: &mut PgConnection,
     owner_id: &str,
+    instrumentation: &carbide_instrument::Instrumentation,
 ) -> Result<IpAddr, DatabaseError> {
     match crate::resource_pool::allocate(
         &common_pools.ethernet.pool_vpc_dpu_loopback_ip,
@@ -3873,7 +3875,7 @@ pub async fn allocate_vpc_dpu_loopback(
             ),
         ) => {
             crate::resource_pool::emit_allocation_failure(
-                &carbide_instrument::Instrumentation::global(),
+                instrumentation,
                 common_pools.ethernet.pool_vpc_dpu_loopback_ip.value_type,
                 owner_id,
                 false,
@@ -3886,7 +3888,7 @@ pub async fn allocate_vpc_dpu_loopback(
         }
         Err(err) => {
             crate::resource_pool::emit_allocation_failure(
-                &carbide_instrument::Instrumentation::global(),
+                instrumentation,
                 common_pools.ethernet.pool_vpc_dpu_loopback_ip.value_type,
                 owner_id,
                 false,

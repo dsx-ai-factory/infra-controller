@@ -26,6 +26,9 @@ pub struct IBPartitionStateHandlerContextObjects {}
 
 #[derive(Clone)]
 pub struct IBPartitionStateHandlerServices {
+    /// Event destination shared by controller operations.
+    /// Retain its provider until the controller stops.
+    pub instrumentation: carbide_instrument::Instrumentation,
     pub db_pool: PgPool,
     /// API for interaction with Forge IBFabricManager
     pub ib_fabric_manager: Arc<dyn IBFabricManager>,

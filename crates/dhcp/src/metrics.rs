@@ -33,7 +33,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::time::Duration;
 
-use carbide_instrument::{Event, LabelValue, emit};
+use carbide_instrument::{Event, LabelValue};
 use metrics_endpoint::{
     HealthController, MetricsEndpointConfig, MetricsSetup, new_metrics_setup, run_metrics_endpoint,
 };
@@ -436,6 +436,7 @@ async fn certificate_loop() {
 fn initialize_metrics(mconf: &MetricsSetup) -> CarbideDhcpMetrics {
     let certificate_expiration_value = Arc::new(AtomicI64::new(0));
     let metrics = CarbideDhcpMetrics {
+        instrumentation: mconf.instrumentation.clone(),
         carbide_client_config: tls::build_carbide_client_config(),
         certificate_expiration_value: certificate_expiration_value.clone(),
     };
@@ -579,57 +580,52 @@ async fn start_readiness_monitoring() {
     }
 }
 
-/// True once [`metrics_server`] has installed the global meter provider and
-/// stored the initialized metrics state.
-///
-/// Event instruments resolve from the global meter once per event type on
-/// first emit, so emitting before the provider install would bind that event
-/// type to the no-op meter for the process lifetime. The gate also keeps an
-/// endpointless configuration recording nothing, as before.
-fn metrics_initialized() -> bool {
+/// Returns the initialized Event destination, preserving the endpointless gate.
+fn event_instrumentation() -> Option<carbide_instrument::Instrumentation> {
     CONFIG
         .read()
         .expect("config lock poisoned")
         .metrics
-        .is_some()
+        .as_ref()
+        .map(|metrics| metrics.instrumentation.clone())
 }
 
 pub(super) fn increment_total_requests() {
-    if metrics_initialized() {
-        emit(DhcpRequestReceived);
+    if let Some(instrumentation) = event_instrumentation() {
+        instrumentation.emit(DhcpRequestReceived);
     }
 }
 
 /// Increment the DHCPv6 request counter for an incoming message type.
 pub(super) fn increment_v6_requests(message_type: V6RequestMessageType) {
-    if metrics_initialized() {
-        emit(DhcpV6RequestReceived { message_type });
+    if let Some(instrumentation) = event_instrumentation() {
+        instrumentation.emit(DhcpV6RequestReceived { message_type });
     }
 }
 
 pub(super) fn increment_dropped_requests(reason: DropReason) {
-    if metrics_initialized() {
-        emit(DhcpRequestDropped { reason });
+    if let Some(instrumentation) = event_instrumentation() {
+        instrumentation.emit(DhcpRequestDropped { reason });
     }
 }
 
 pub(super) fn increment_reply_sent(message_type: ReplyMessageType) {
-    if metrics_initialized() {
-        emit(DhcpReplySent { message_type });
+    if let Some(instrumentation) = event_instrumentation() {
+        instrumentation.emit(DhcpReplySent { message_type });
     }
 }
 
 /// Increment the DHCPv6 reply-sent counter for an outgoing response type.
 pub(super) fn increment_v6_reply_sent(message_type: V6ReplyMessageType) {
-    if metrics_initialized() {
-        emit(DhcpV6ReplySent { message_type });
+    if let Some(instrumentation) = event_instrumentation() {
+        instrumentation.emit(DhcpV6ReplySent { message_type });
     }
 }
 
 /// Increment the DHCPv6-specific dropped-request counter for a reason label.
 pub(super) fn increment_dropped_v6_requests(reason: V6DropReason) {
-    if metrics_initialized() {
-        emit(DhcpV6RequestDropped { reason });
+    if let Some(instrumentation) = event_instrumentation() {
+        instrumentation.emit(DhcpV6RequestDropped { reason });
     }
 }
 
@@ -659,6 +655,7 @@ pub(super) fn set_service_healthy(healthy: bool) {
 mod tests {
     use std::ffi::CStr;
 
+    use carbide_instrument::emit;
     use carbide_instrument::testing::{MetricsCapture, capture_logs};
     use carbide_test_support::{Check, check_values};
     use prometheus::{Encoder, TextEncoder};
@@ -1156,11 +1153,11 @@ mod tests {
     /// strings map onto the bounded taxonomy (unknown ones bucket), the raw
     /// Kea message-type codes map onto their family-specific reply labels,
     /// and nothing records until `metrics_server` has initialized metrics --
-    /// the gate that also guarantees the global meter provider is installed
-    /// before the first emit.
+    /// the gate that selects the initialized service instrumentation.
     #[test]
     fn ffi_increments_gate_on_initialization_and_map_their_arguments() {
-        let metrics = MetricsCapture::start();
+        let mconf = new_metrics_setup("carbide-dhcp", "forge-system", false).unwrap();
+        let metrics = MetricsCapture::for_registry(&mconf.registry);
 
         // Before initialization the gate keeps every counter still. (Nothing
         // else in this test binary sets `CONFIG.metrics`, so this phase is
@@ -1208,9 +1205,7 @@ mod tests {
             0.0
         );
 
-        // Initialize the way `metrics_server` does (a local registry carries
-        // the gauge; the counters resolve from the global test meter).
-        let mconf = new_metrics_setup("carbide-dhcp", "forge-system", false).unwrap();
+        // Initialize the same owned metric destination as `metrics_server`.
         let initialized = initialize_metrics(&mconf);
         CONFIG.write().expect("config lock poisoned").metrics = Some(initialized);
 

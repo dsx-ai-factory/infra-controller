@@ -23,7 +23,7 @@ use std::time::Duration;
 
 use carbide_host_support::dpa_cmds::{DpaCommand, OpCode};
 use carbide_host_support::registration;
-use carbide_instrument::emit;
+use carbide_instrument::Instrumentation;
 use carbide_uuid::machine::MachineId;
 use cfg::{AutoDetect, Command, MlxAction, Mode, Options};
 use chrono::{DateTime, Days, TimeDelta, Utc};
@@ -225,7 +225,7 @@ async fn run_as_service(config: &Options) -> Result<(), eyre::Report> {
     // shuts down the Prometheus exporter. The endpoint is opt-in -- without
     // --metrics-listen-addr scout installs no meter and the counters below are
     // no-ops.
-    let _metrics_guard = match config.metrics_listen_addr {
+    let (_metrics_guard, instrumentation) = match config.metrics_listen_addr {
         Some(address) => {
             let metrics_setup =
                 metrics_endpoint::new_metrics_setup("nico-scout", "forge-system", true)?;
@@ -245,9 +245,12 @@ async fn run_as_service(config: &Options) -> Result<(), eyre::Report> {
                     tracing::error!("Metrics endpoint error: {e}");
                 }
             });
-            Some(metrics_setup.meter_provider)
+            (
+                Some(metrics_setup.meter_provider),
+                metrics_setup.instrumentation,
+            )
         }
-        None => None,
+        None => (None, Instrumentation::global()),
     };
 
     // Blocks: scout must not describe a machine that is still being set up.
@@ -268,8 +271,13 @@ async fn run_as_service(config: &Options) -> Result<(), eyre::Report> {
     // Registration must finish before inventory is published. Keep the report
     // pending if an operation from an earlier Scout process still owns hardware.
     let mut device_report_pending = true;
-    mlx_device::publish_device_report_if_pending(config, machine_id, &mut device_report_pending)
-        .await;
+    mlx_device::publish_device_report_if_pending(
+        config,
+        machine_id,
+        &mut device_report_pending,
+        &instrumentation,
+    )
+    .await;
 
     // Report LLDP neighbors on each poll, re-sending only when the snapshot
     // changes. The reporter's cache must live across loop iterations.
@@ -320,8 +328,15 @@ async fn run_as_service(config: &Options) -> Result<(), eyre::Report> {
                 let action_name = action.as_str_name();
                 // Capture the action label before handle_action consumes `action`.
                 let scout_action = metrics::ScoutAction::from(&action);
-                let result = handle_action(action, &machine_id, machine_interface_id, config).await;
-                emit(match result {
+                let result = handle_action(
+                    action,
+                    &machine_id,
+                    machine_interface_id,
+                    config,
+                    &instrumentation,
+                )
+                .await;
+                instrumentation.emit(match result {
                     Ok(()) => metrics::ScoutActionHandled::Ok {
                         action: scout_action,
                         action_name,
@@ -342,6 +357,7 @@ async fn run_as_service(config: &Options) -> Result<(), eyre::Report> {
                 config,
                 machine_id,
                 &mut device_report_pending,
+                &instrumentation,
             )
             .await;
 
@@ -352,7 +368,7 @@ async fn run_as_service(config: &Options) -> Result<(), eyre::Report> {
             // scaffolding.
             if !scout_stream_started {
                 scout_stream_started = true;
-                stream::start_scout_stream(machine_id, config);
+                stream::start_scout_stream(machine_id, config, instrumentation.clone());
             }
             tokio::time::sleep(POLL_INTERVAL).await;
         }
@@ -366,6 +382,7 @@ async fn run_as_service(config: &Options) -> Result<(), eyre::Report> {
 }
 
 async fn run_standalone(config: &Options) -> Result<(), eyre::Report> {
+    let instrumentation = Instrumentation::global();
     // Implement the logic for standalone mode here
     let subcmd: &Command = match &config.subcmd {
         None => {
@@ -397,7 +414,7 @@ async fn run_standalone(config: &Options) -> Result<(), eyre::Report> {
                     return Ok(());
                 }
                 MlxAction::Firmware(mlx_firmware) => {
-                    mlx_firmware.action.run().await?;
+                    mlx_firmware.action.run(&instrumentation).await?;
                     return Ok(());
                 }
             },
@@ -449,7 +466,14 @@ async fn run_standalone(config: &Options) -> Result<(), eyre::Report> {
         Command::LldpNeighbors => return Ok(()),
     };
 
-    handle_action(action, &machine_id, machine_interface_id, config).await?;
+    handle_action(
+        action,
+        &machine_id,
+        machine_interface_id,
+        config,
+        &instrumentation,
+    )
+    .await?;
     Ok(())
 }
 
@@ -458,6 +482,7 @@ async fn handle_action(
     machine_id: &MachineId,
     machine_interface_id: uuid::Uuid,
     config: &Options,
+    instrumentation: &Instrumentation,
 ) -> Result<(), CarbideClientError> {
     match action {
         fac::Action::Discovery(_) => {
@@ -481,7 +506,7 @@ async fn handle_action(
             discovery::completed(config, machine_id).await?;
         }
         fac::Action::Reset(_) => {
-            deprovision::run(config, machine_id).await?;
+            deprovision::run(config, machine_id, instrumentation).await?;
         }
         fac::Action::Rebuild(_) => {
             unimplemented!("Rebuild not written yet");
@@ -524,6 +549,7 @@ async fn handle_action(
                     id,
                     machine_validation.context,
                     machine_validation_filter,
+                    instrumentation,
                 )
                 .await
                 {
@@ -542,14 +568,20 @@ async fn handle_action(
             return ret;
         }
         fac::Action::MlxAction(mlx_action) => {
-            handle_mlxreport_action(config, machine_id, mlx_action).await;
+            handle_mlxreport_action(config, machine_id, mlx_action, instrumentation).await;
             return Ok(());
         }
         fac::Action::MlxDeviceInfoReport(_) => {
             mlx_device::publish_requested_device_report(config, *machine_id).await?;
         }
         fac::Action::FirmwareUpgrade(firmware_upgrade) => {
-            handle_firmware_upgrade_action(config, machine_id, firmware_upgrade.task).await?;
+            handle_firmware_upgrade_action(
+                config,
+                machine_id,
+                firmware_upgrade.task,
+                instrumentation,
+            )
+            .await?;
         }
     }
     Ok(())
@@ -559,6 +591,7 @@ async fn handle_firmware_upgrade_action(
     config: &Options,
     machine_id: &MachineId,
     task: Option<sfu::ScoutFirmwareUpgradeTask>,
+    instrumentation: &Instrumentation,
 ) -> Result<(), CarbideClientError> {
     let task = task.ok_or_else(|| {
         CarbideClientError::GenericError("firmware upgrade action missing task".to_string())
@@ -586,8 +619,13 @@ async fn handle_firmware_upgrade_action(
             "{cause}; firmware script was not attempted; repair configuration while the task remains pending"
         ))
     })?;
-    let result =
-        firmware_upgrade::handle_firmware_upgrade(&http_client, &task, &supervisor_config).await;
+    let result = firmware_upgrade::handle_firmware_upgrade(
+        &http_client,
+        &task,
+        &supervisor_config,
+        instrumentation,
+    )
+    .await;
 
     tracing::info!(
         success = result.success,
@@ -656,6 +694,7 @@ async fn handle_mlxreport_action(
     config: &Options,
     machine_id: &MachineId,
     mlx_action: fac::MlxAction,
+    instrumentation: &Instrumentation,
 ) {
     let supervisor_config = SupervisorConfig::from_env();
     collect_and_publish_mlx_observations(
@@ -665,6 +704,7 @@ async fn handle_mlxreport_action(
         Some(config),
         |device| discover_device_with_settlement(device).map(Into::into),
         |request| mlx_device::publish_mlx_observation_report(config, request),
+        instrumentation,
     )
     .await;
 }
@@ -676,13 +716,22 @@ async fn collect_and_publish_mlx_observations<PublishFuture>(
     core_options: Option<&Options>,
     discover: impl FnMut(&str) -> Result<rpc::protos::mlx_device::MlxDeviceInfo, DeviceDiscoveryError>,
     publish: impl FnOnce(PublishMlxObservationReportRequest) -> PublishFuture,
+    instrumentation: &Instrumentation,
 ) where
     PublishFuture:
         std::future::Future<Output = CarbideClientResult<PublishMlxObservationReportResponse>>,
 {
     let report = match supervisor_config {
         Ok(config) => {
-            collect_mlx_observations(machine_id, commands, config, core_options, discover).await
+            collect_mlx_observations(
+                machine_id,
+                commands,
+                config,
+                core_options,
+                discover,
+                instrumentation,
+            )
+            .await
         }
         Err(_) => {
             tracing::error!(
@@ -737,7 +786,7 @@ async fn collect_and_publish_mlx_observations<PublishFuture>(
         report: Some(report),
     };
     if let Err(error) = publish(req).await {
-        emit(metrics::ScoutMlxOperationFailed::ObservationReportPublish {
+        instrumentation.emit(metrics::ScoutMlxOperationFailed::ObservationReportPublish {
             error: error.to_string(),
         });
     }
@@ -782,6 +831,7 @@ async fn collect_mlx_observations(
         &str,
     )
         -> Result<rpc::protos::mlx_device::MlxDeviceInfo, DeviceDiscoveryError>,
+    instrumentation: &Instrumentation,
 ) -> MlxObservationReport {
     let mut report = MlxObservationReport {
         machine_id: Some(*machine_id),
@@ -831,7 +881,7 @@ async fn collect_mlx_observations(
         let dpa_cmd = match DpaCommand::try_from(&device_action) {
             Ok(command) => command,
             Err(error) => {
-                emit(metrics::ScoutMlxReconciliationFailed::Decode {
+                instrumentation.emit(metrics::ScoutMlxReconciliationFailed::Decode {
                     pci_name: device_action.pci_name,
                     error,
                 });
@@ -840,7 +890,7 @@ async fn collect_mlx_observations(
         };
         let dev_pci_name = device_action.pci_name;
         if dev_pci_name.is_empty() {
-            emit(metrics::ScoutMlxRequestRejected::Reconciliation {});
+            instrumentation.emit(metrics::ScoutMlxRequestRejected::Reconciliation {});
             continue;
         }
 
@@ -858,13 +908,14 @@ async fn collect_mlx_observations(
                     }),
                     Err(e) => {
                         access.observe_error(&e);
-                        emit(metrics::ScoutMlxReconciliationFailed::Lock {
+                        instrumentation.emit(metrics::ScoutMlxReconciliationFailed::Lock {
                             pci_name: dev_pci_name.clone(),
                             error: e.to_string(),
                         });
                         None
                     }
                 },
+                instrumentation,
             ),
             OpCode::ApplyFirmware {
                 profile,
@@ -875,6 +926,7 @@ async fn collect_mlx_observations(
                     &operation_id,
                     profile.as_deref().map(|profile| profile.as_ref()),
                     supervisor_config,
+                    instrumentation,
                 )
                 .await
                 {
@@ -889,11 +941,13 @@ async fn collect_mlx_observations(
                     }
                     Ok(None) => None,
                     Err(error) => {
-                        emit(metrics::ScoutMlxFirmwareSupervisorRequestFailed::failed(
-                            dev_pci_name,
-                            operation_id,
-                            error,
-                        ));
+                        instrumentation.emit(
+                            metrics::ScoutMlxFirmwareSupervisorRequestFailed::failed(
+                                dev_pci_name,
+                                operation_id,
+                                error,
+                            ),
+                        );
                         None
                     }
                 }
@@ -903,8 +957,12 @@ async fn collect_mlx_observations(
                 &dev_pci_name,
                 &mut discover,
                 |dev, access| {
-                    let (profile_name, profile_synced) =
-                        mlx_device::apply_profile(&dev_pci_name, serialized_profile, access);
+                    let (profile_name, profile_synced) = mlx_device::apply_profile(
+                        &dev_pci_name,
+                        serialized_profile,
+                        access,
+                        instrumentation,
+                    );
 
                     Some(MlxObservation {
                         device_info: Some(dev),
@@ -913,6 +971,7 @@ async fn collect_mlx_observations(
                         ..Default::default()
                     })
                 },
+                instrumentation,
             ),
             OpCode::Unlock { key } => with_direct_mlx_device(
                 supervisor_config,
@@ -926,13 +985,14 @@ async fn collect_mlx_observations(
                     }),
                     Err(e) => {
                         access.observe_error(&e);
-                        emit(metrics::ScoutMlxReconciliationFailed::Unlock {
+                        instrumentation.emit(metrics::ScoutMlxReconciliationFailed::Unlock {
                             pci_name: dev_pci_name.clone(),
                             error: e.to_string(),
                         });
                         None
                     }
                 },
+                instrumentation,
             ),
         };
         if let Some(observation) = observation {
@@ -957,13 +1017,14 @@ fn with_direct_mlx_device(
         rpc::protos::mlx_device::MlxDeviceInfo,
         &mut mlx_access::DirectMlxAccess,
     ) -> Option<MlxObservation>,
+    instrumentation: &Instrumentation,
 ) -> Option<MlxObservation> {
     let mut access = mlx_access::DirectMlxAccess::acquire_or_defer(config, device)?;
     let observation = match discover(device) {
         Ok(device_info) => execute(device_info, &mut access),
         Err(error) => {
             access.observe_error(&error);
-            emit(metrics::ScoutMlxReconciliationFailed::Discover {
+            instrumentation.emit(metrics::ScoutMlxReconciliationFailed::Discover {
                 pci_name: device.to_string(),
                 error: error.to_string(),
             });
@@ -1622,6 +1683,7 @@ mod tests {
                 published = Some(request);
                 std::future::ready(Ok(PublishMlxObservationReportResponse::default()))
             },
+            &carbide_instrument::Instrumentation::global(),
         ))
         .await;
 

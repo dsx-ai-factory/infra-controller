@@ -446,8 +446,12 @@ pub(crate) async fn start(
                  accepted as node identity; nodes must present bearer tokens"
             );
         }
-        let layer = CertDescriptionMiddleware::new(extra_cli_certs, spiffe_context)
-            .with_machine_certs_enabled(machine_certs_enabled);
+        let layer = CertDescriptionMiddleware::new(
+            extra_cli_certs,
+            spiffe_context,
+            api_service.instrumentation.clone(),
+        )
+        .with_machine_certs_enabled(machine_certs_enabled);
         // When node-auth is enabled, accept bearer JWTs in addition to mTLS
         // client certs (dual-support during the mTLS→JWT migration). Bearer
         // tokens must only be accepted over TLS — never plaintext — so guard the

@@ -175,6 +175,7 @@ fn request_principal_ids(auth_context: &AuthContext<()>) -> Vec<String> {
 
 pub(super) fn cert_description_layer<AZ: Authorization>(
     auth_config: &AuthConfig,
+    instrumentation: &carbide_instrument::Instrumentation,
 ) -> Result<CertDescriptionMiddleware<AZ>, BmcProxyError> {
     tracing::info!(trust_config = ?auth_config.trust, "TrustConfig rendered from config");
     let spiffe_context = SpiffeContext::try_from(auth_config.trust.clone()).map_err(|e| {
@@ -186,6 +187,7 @@ pub(super) fn cert_description_layer<AZ: Authorization>(
     Ok(CertDescriptionMiddleware::new(
         auth_config.cli_certs.clone(),
         spiffe_context,
+        instrumentation.clone(),
     ))
 }
 

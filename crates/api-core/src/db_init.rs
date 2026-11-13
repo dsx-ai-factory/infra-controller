@@ -147,7 +147,7 @@ pub(crate) async fn create_initial_networks(
             return Ok(());
         }
     };
-    let to_create = reconcile_network_defs(&mut txn, networks).await?;
+    let to_create = reconcile_network_defs(&mut txn, networks, &api.instrumentation).await?;
 
     for (name, def) in &to_create {
         let mut ns = NewNetworkSegment::build_from(name, domain_id, def)?;

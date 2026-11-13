@@ -325,6 +325,7 @@ mod tests {
             Arc::new(NoopLimiter),
             Arc::new(MetricsManager::new("reachability_targets").expect("metrics manager")),
             Arc::new(config.clone()),
+            carbide_instrument::Instrumentation::global(),
         )
         .expect("discovery context");
 
@@ -476,6 +477,7 @@ mod tests {
             Arc::new(config),
             None,
             None,
+            carbide_instrument::Instrumentation::global(),
         )
         .expect("discovery context should start");
 

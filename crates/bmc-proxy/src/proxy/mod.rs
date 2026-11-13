@@ -234,7 +234,10 @@ pub(crate) async fn start(
 
     let app = proxy_routes(state.clone())
         .layer(from_fn_with_state(state.clone(), authorize_proxy_request))
-        .layer(cert_description_layer::<()>(&state.config.auth)?);
+        .layer(cert_description_layer::<()>(
+            &state.config.auth,
+            &state.instrumentation,
+        )?);
 
     let tls_acceptor =
         RefreshableTlsAcceptor::new(state.config.tls.clone(), instrumentation).await?;

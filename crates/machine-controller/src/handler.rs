@@ -5541,7 +5541,12 @@ impl DpuMachineStateHandler {
                 let credentials_updated = match ctx
                     .services
                     .bmc_credential_ops
-                    .uefi_setup(&dpu_bmc_access, true, dpu_uefi_credentials)
+                    .uefi_setup(
+                        &dpu_bmc_access,
+                        true,
+                        dpu_uefi_credentials,
+                        &ctx.services.instrumentation,
+                    )
                     .await
                 {
                     Err(e) => {
@@ -8332,7 +8337,12 @@ async fn handle_host_uefi_setup(
             match ctx
                 .services
                 .bmc_credential_ops
-                .uefi_setup(&host_bmc_access, false, host_uefi_credentials)
+                .uefi_setup(
+                    &host_bmc_access,
+                    false,
+                    host_uefi_credentials,
+                    &ctx.services.instrumentation,
+                )
                 .await
             {
                 Ok(job_id) => Ok(StateHandlerOutcome::transition(

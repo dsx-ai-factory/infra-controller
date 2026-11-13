@@ -186,7 +186,8 @@ pub async fn run(
     let shutdown_timeout = carbide_config.shutdown_timeout;
     let panic_on_early_task_return = carbide_config.panic_on_early_task_return;
 
-    let database_readiness_probe = crate::readiness::DatabaseReadinessProbe::new(&db_pool);
+    let database_readiness_probe =
+        crate::readiness::DatabaseReadinessProbe::new(&db_pool, instrumentation.clone());
     let listen_address = await_api_runtime_and_database_before_marking_ready(
         &health_controller,
         start_runtime(RuntimeInputs {

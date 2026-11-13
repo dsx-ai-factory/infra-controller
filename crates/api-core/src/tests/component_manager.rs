@@ -174,6 +174,7 @@ async fn compute_restart_and_ac_cycle_preserve_intent_and_routing(pool: sqlx::Pg
         Some(pool.clone()),
         Some(env.redfish_sim.clone()),
         None,
+        carbide_instrument::Instrumentation::global(),
     )
     .await
     .unwrap()
@@ -844,6 +845,7 @@ async fn component_reset_dispatches_valid_targets_and_polls_by_identity(pool: sq
                 crate::tests::common::api_fixtures::get_config_with_rack_profiles().rack_profiles,
             ),
             false,
+            carbide_instrument::Instrumentation::global(),
         ));
         TestApiBuilder::new(
             pool.clone(),
@@ -1483,6 +1485,7 @@ async fn component_reset_tracks_pre_ingestion_mac_after_ingestion(pool: sqlx::Pg
         pool.clone(),
         Arc::new(crate::tests::common::api_fixtures::get_config_with_rack_profiles().rack_profiles),
         false,
+        carbide_instrument::Instrumentation::global(),
     ));
     let api = TestApiBuilder::new(
         pool.clone(),

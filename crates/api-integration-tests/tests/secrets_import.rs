@@ -278,9 +278,13 @@ async fn exercise_import(test_pool: &PgPool) -> eyre::Result<()> {
     let encryption_key = make_test_key(42);
     let (routing, kms) = make_routing_and_kms(encryption_key);
     let mut work_lock_tasks = JoinSet::new();
-    let work_lock_manager =
-        db::work_lock_manager::start(&mut work_lock_tasks, test_pool.clone(), Default::default())
-            .await?;
+    let work_lock_manager = db::work_lock_manager::start(
+        &mut work_lock_tasks,
+        test_pool.clone(),
+        Default::default(),
+        carbide_instrument::Instrumentation::global(),
+    )
+    .await?;
     let work_lock = work_lock_manager
         .try_acquire_lock("secrets-import-integration-test".to_string())
         .await?;
