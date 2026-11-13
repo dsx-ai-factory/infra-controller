@@ -1010,8 +1010,12 @@ mod tests {
     #[crate::sqlx_test]
     async fn passthrough_via_core_proxy_rejects_uninventoried_targets(pool: sqlx::PgPool) {
         let dir = tempfile::tempdir().expect("tempdir");
-        let passthrough = PassthroughClient::new(&test_config_with_generated_pems(&dir))
-            .expect("passthrough client builds from generated PEMs");
+        let test_meter = carbide_utils::test_support::test_meter::TestMeter::default();
+        let passthrough = PassthroughClient::new(
+            &test_config_with_generated_pems(&dir),
+            carbide_instrument::Instrumentation::new(test_meter.meter()),
+        )
+        .expect("passthrough client builds from generated PEMs");
         let reader = TestCredentialManager::default();
         let dynamic = ArcSwap::from_pointee(None);
 
@@ -1077,8 +1081,12 @@ mod tests {
         .expect("address seeds");
 
         let dir = tempfile::tempdir().expect("tempdir");
-        let passthrough = PassthroughClient::new(&test_config_with_generated_pems(&dir))
-            .expect("passthrough client builds from generated PEMs");
+        let test_meter = carbide_utils::test_support::test_meter::TestMeter::default();
+        let passthrough = PassthroughClient::new(
+            &test_config_with_generated_pems(&dir),
+            carbide_instrument::Instrumentation::new(test_meter.meter()),
+        )
+        .expect("passthrough client builds from generated PEMs");
         let reader = TestCredentialManager::default();
         // The dynamic dev redirect is set; the static proxy must still win.
         let dynamic = ArcSwap::from_pointee(Some(HostPortPair::HostAndPort(
