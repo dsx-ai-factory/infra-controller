@@ -20,6 +20,7 @@ use std::time::Duration;
 use ::rpc::errors::RpcDataConversionError;
 use ::rpc::forge as rpc;
 use ::rpc::network::vpc_virtualization_type_try_from_rpc;
+use carbide_instrument::Instrumentation;
 use carbide_network::virtualization::{DEFAULT_NETWORK_VIRTUALIZATION_TYPE, VpcVirtualizationType};
 use carbide_resource_pool::remote::RemoteResourcePoolError;
 use carbide_resource_pool::{
@@ -94,17 +95,21 @@ impl VpcCreation {
 
     fn allocation_error(
         &self,
+        instrumentation: &Instrumentation,
         pool: &resource_pool::ResourcePool<i32>,
         owner_id: &str,
         requested: Option<i32>,
         error: ResourcePoolDatabaseError,
     ) -> CarbideError {
         match self {
-            Self::Api(_) => map_vpc_allocation_error(pool, owner_id, requested, error),
+            Self::Api(_) => {
+                map_vpc_allocation_error(instrumentation, pool, owner_id, requested, error)
+            }
             Self::Configured(_) => {
                 // Keep startup's existing error variants and allocation-failure
                 // event; API requests use their own status and event mapping.
                 db::resource_pool::emit_allocation_failure(
+                    instrumentation,
                     pool.value_type,
                     owner_id,
                     requested.is_some(),
@@ -140,7 +145,7 @@ async fn create_vpc(
     }
     let map_error = |error| match error {
         ResourcePoolBackendError::Integrated(error) => {
-            creation.allocation_error(pool, &owner_id, requested_vni, error)
+            creation.allocation_error(&api.instrumentation, pool, &owner_id, requested_vni, error)
         }
         error => CarbideError::from(error),
     };
@@ -149,6 +154,7 @@ async fn create_vpc(
         Ok(Some(selected)) => selected,
         Ok(None) => {
             return Err(creation.allocation_error(
+                &api.instrumentation,
                 pool,
                 &owner_id,
                 requested_vni,
@@ -160,7 +166,13 @@ async fn create_vpc(
             ));
         }
         Err(ResourcePoolRegistryError::Database(error)) => {
-            return Err(creation.allocation_error(pool, &owner_id, requested_vni, error.into()));
+            return Err(creation.allocation_error(
+                &api.instrumentation,
+                pool,
+                &owner_id,
+                requested_vni,
+                error.into(),
+            ));
         }
         Err(error) => return Err(error.into()),
     };
@@ -704,6 +716,7 @@ pub(crate) async fn change_routing_profile(
                         Ok(Some(selected)) => selected,
                         Ok(None) => {
                             return Err(map_vpc_allocation_error(
+                                &api.instrumentation,
                                 destination_pool,
                                 &change_request.id.to_string(),
                                 change_request.vni,
@@ -717,6 +730,7 @@ pub(crate) async fn change_routing_profile(
                         }
                         Err(ResourcePoolRegistryError::Database(error)) => {
                             return Err(map_vpc_allocation_error(
+                                &api.instrumentation,
                                 destination_pool,
                                 &change_request.id.to_string(),
                                 change_request.vni,
@@ -743,6 +757,7 @@ pub(crate) async fn change_routing_profile(
             // Preserve exact VNI selection's native pool/value diagnostic.
             // These events count failures from the Integrated allocator.
             db::resource_pool::emit_requested_vni_unavailable(
+                &api.instrumentation,
                 destination_pool.value_type,
                 &owner_id,
                 vni,
@@ -750,9 +765,13 @@ pub(crate) async fn change_routing_profile(
             );
             (*error).into()
         }
-        (ResourcePoolBackendError::Integrated(error), requested) => {
-            map_vpc_allocation_error(destination_pool, &owner_id, requested, error)
-        }
+        (ResourcePoolBackendError::Integrated(error), requested) => map_vpc_allocation_error(
+            &api.instrumentation,
+            destination_pool,
+            &owner_id,
+            requested,
+            error,
+        ),
         (error, _) => CarbideError::from(error),
     };
     let allocation = match selected {
@@ -997,6 +1016,7 @@ async fn routing_change_admission<'a>(
         .await
     {
         return Err(map_vpc_allocation_error(
+            &api.instrumentation,
             destination_pool,
             &vpc.id.to_string(),
             change.vni,
@@ -1906,6 +1926,7 @@ fn vpc_to_rpc(
 /// return their status without a count until remote allocation-failure events
 /// land with remote activation (v2.5, #7129).
 fn map_vpc_allocation_error(
+    instrumentation: &Instrumentation,
     pool: &resource_pool::ResourcePool<i32>,
     owner_id: &str,
     requested_vni: Option<i32>,
@@ -1918,6 +1939,7 @@ fn map_vpc_allocation_error(
             requested_vni,
         ) => {
             db::resource_pool::emit_allocation_failure(
+                instrumentation,
                 pool.value_type,
                 owner_id,
                 requested_vni.is_some(),
@@ -1930,6 +1952,7 @@ fn map_vpc_allocation_error(
             if db::resource_pool::is_requested_value_unavailable(&error) =>
         {
             db::resource_pool::emit_requested_vni_unavailable(
+                instrumentation,
                 pool.value_type,
                 owner_id,
                 requested_vni,
@@ -1942,6 +1965,7 @@ fn map_vpc_allocation_error(
         }
         (ResourcePoolDatabaseError::Database(error), Some(_)) => {
             db::resource_pool::emit_database_allocation_failure(
+                instrumentation,
                 pool.value_type,
                 owner_id,
                 true,
@@ -1952,6 +1976,7 @@ fn map_vpc_allocation_error(
         }
         (error, requested_vni) => {
             db::resource_pool::emit_allocation_failure(
+                instrumentation,
                 pool.value_type,
                 owner_id,
                 requested_vni.is_some(),

@@ -1544,6 +1544,7 @@ async fn create_test_env_with_overrides_inner(
     .with_eth_data(eth_virt_data)
     .with_nmxc_client_pool(nmxc_sim.clone())
     .with_metric_emitter(ApiMetricsEmitter::new(&test_meter.meter()))
+    .with_instrumentation(carbide_instrument::Instrumentation::new(test_meter.meter()))
     .with_redfish_pool(redfish_sim.clone())
     .with_ib_fabric_manager(ib_fabric_manager.clone())
     .with_firmware_object_fetcher(firmware_object_fetcher.clone())

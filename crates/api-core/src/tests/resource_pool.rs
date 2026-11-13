@@ -817,6 +817,7 @@ async fn startup_rejects_remote_selection_before_pool_effects(
             carbide_config: Arc::new(config),
             initial_objects: None,
             meter: env.test_meter.meter(),
+            instrumentation: env.api.instrumentation.clone(),
             per_object_metrics: None,
             join_set: &mut join_set,
             runtime_prelude: crate::bootstrap::RuntimePrelude {
@@ -1484,6 +1485,7 @@ async fn start_and_stop_runtime(env: &TestEnv, config: CarbideConfig) -> eyre::R
         carbide_config: Arc::new(config),
         initial_objects: None,
         meter: env.test_meter.meter(),
+        instrumentation: env.api.instrumentation.clone(),
         per_object_metrics: None,
         join_set: &mut join_set,
         runtime_prelude: crate::bootstrap::RuntimePrelude {
