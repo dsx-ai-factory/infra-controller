@@ -549,6 +549,7 @@ async fn handle_action(
                     id,
                     machine_validation.context,
                     machine_validation_filter,
+                    instrumentation,
                 )
                 .await
                 {
