@@ -134,6 +134,7 @@ fn create_ipmi_tool(
     credential_reader: Arc<dyn CredentialReader>,
     carbide_config: &CarbideConfig,
     bmc_proxy: Arc<ArcSwap<Option<HostPortPair>>>,
+    instrumentation: carbide_instrument::Instrumentation,
 ) -> Arc<dyn IPMITool> {
     match carbide_config.dpu_ipmi_tool_impl.as_deref() {
         Some("test") => {
@@ -142,11 +143,15 @@ fn create_ipmi_tool(
         }
         Some("bmc-mock") => {
             tracing::info!("Using HTTP IPMI transport via bmc_proxy");
-            carbide_ipmi::bmc_mock(bmc_proxy, credential_reader)
+            carbide_ipmi::bmc_mock(bmc_proxy, credential_reader, instrumentation)
         }
         _ => {
             tracing::info!("Using lanplus IPMI transport (/usr/bin/ipmitool)");
-            carbide_ipmi::tool(credential_reader, carbide_config.dpu_ipmi_reboot_attempts)
+            carbide_ipmi::tool(
+                credential_reader,
+                carbide_config.dpu_ipmi_reboot_attempts,
+                instrumentation,
+            )
         }
     }
 }
@@ -367,6 +372,7 @@ pub async fn start_runtime(runtime_inputs: RuntimeInputs<'_>) -> eyre::Result<So
         credential_manager.clone(),
         &carbide_config,
         dynamic_settings.bmc_proxy.clone(),
+        instrumentation.clone(),
     );
 
     let driver_connector = create_driver_connector(

@@ -815,6 +815,7 @@ dependencies = [
  "bmc-explorer",
  "bmc-platform",
  "bmc-runtime",
+ "carbide-instrument",
  "carbide-ipmi",
  "carbide-redfish",
  "carbide-secrets",
