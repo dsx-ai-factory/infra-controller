@@ -1514,6 +1514,7 @@ async fn create_test_env_with_overrides_inner(
         Some(db_pool.clone()),
         None,
         None,
+        instrumentation.clone(),
     )
     .await
     .expect("test component manager should build");

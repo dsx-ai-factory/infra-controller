@@ -773,6 +773,7 @@ pub async fn start_runtime(runtime_inputs: RuntimeInputs<'_>) -> eyre::Result<So
             // until it moves to credential-key auth.
             Some(shared_redfish_pool.clone()),
             driver_connector.clone(),
+            instrumentation.clone(),
         )
         .await
         {
