@@ -1614,7 +1614,7 @@ async fn create_test_env_with_overrides_inner(
 
     let machine_swap = SwapHandler {
         inner: Arc::new(Mutex::new(
-            MachineStateHandlerBuilder::builder()
+            MachineStateHandlerBuilder::builder(api.instrumentation.clone())
                 .hardware_models(config.get_firmware_config())
                 .reachability_params(reachability_params)
                 .attestation_enabled(attestation_enabled)

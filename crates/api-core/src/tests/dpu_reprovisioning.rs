@@ -1707,7 +1707,7 @@ async fn test_reboot_no_retry_during_firmware_update(pool: sqlx::PgPool) {
 
     let last_reboot_requested_time = dpu.status.last_reboot_requested.as_ref();
 
-    let handler = MachineStateHandlerBuilder::builder()
+    let handler = MachineStateHandlerBuilder::builder(env.api.instrumentation.clone())
         .hardware_models(env.config.get_firmware_config())
         .dpu_up_threshold(chrono::Duration::minutes(5))
         .dpu_nic_firmware_initial_update_enabled(true)

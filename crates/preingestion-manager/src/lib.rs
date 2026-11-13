@@ -172,13 +172,15 @@ impl PreingestionManager {
         let metric_holder = Arc::new(metrics::MetricHolder::new(meter, hold_period));
 
         let bfb_rshim_copier = Arc::new(BfbRshimCopier::new(credential_reader.clone()));
+        let downloader =
+            downloader.unwrap_or_else(|| FirmwareDownloader::new(instrumentation.clone()));
 
         PreingestionManager {
             static_info: Arc::new(PreingestionManagerStatic {
                 instrumentation,
                 bmc_connector: BmcConnector::Libredfish(redfish_client_pool.clone()),
                 redfish_client_pool,
-                downloader: downloader.unwrap_or_default(),
+                downloader,
                 upload_limiter: upload_limiter.unwrap_or(Arc::new(Semaphore::new(5))),
                 upgrade_script_state: Default::default(),
                 credential_reader,
