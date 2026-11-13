@@ -2418,6 +2418,7 @@ async fn initialize_and_start_controllers<'a>(
             .processor_id(state_controller_id.clone())
             .services(
                 SpdmStateHandlerServices {
+                    instrumentation: api_service.instrumentation.clone(),
                     db_pool: db_pool.clone(),
                     redfish_client_pool: shared_redfish_pool.clone(),
                     bmc_connector: BmcConnector::new(
