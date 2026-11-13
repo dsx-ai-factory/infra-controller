@@ -478,7 +478,7 @@ mod tests {
     use crate::sink::event_mapper::OpenBmcEventMapper;
     use crate::sink::{
         CompositeDataSink, DiagnosticLogRecord, LogRecord, LogSeverity, MetricSample,
-        MetricSemantics,
+        MetricSemantics, RedfishResourceType, ResourceStatusInfo, ResourceStatusReport,
     };
 
     fn test_context() -> EventContext {
@@ -755,6 +755,44 @@ mod tests {
         let ctx = test_context();
         sink.handle_event(&ctx, &log_event("OpenBMC.0.1.Test", r#"["sensor1"]"#));
         assert!(sink.queue.pop().is_some());
+    }
+
+    #[test]
+    fn resource_status_types_queue_separately_and_reports_keep_the_latest() {
+        let sink = test_sink();
+        let context = test_context();
+        for resource_type in [RedfishResourceType::System, RedfishResourceType::Chassis] {
+            sink.handle_event(
+                &context,
+                &CollectorEvent::ResourceStatus(Box::new(ResourceStatusReport {
+                    resource_type,
+                    resources: Vec::new(),
+                })),
+            );
+        }
+        assert_eq!(sink.queue.len(), 2);
+
+        let sink = test_sink();
+        for id in ["first", "second"] {
+            sink.handle_event(
+                &context,
+                &CollectorEvent::ResourceStatus(Box::new(ResourceStatusReport {
+                    resource_type: RedfishResourceType::Firmware,
+                    resources: vec![ResourceStatusInfo {
+                        id: id.to_string(),
+                        name: id.to_string(),
+                        status: None,
+                    }],
+                })),
+            );
+        }
+
+        assert_eq!(sink.queue.len(), 1);
+        let (_, (_, event)) = sink.queue.pop().expect("latest resource-status report");
+        let CollectorEvent::ResourceStatus(report) = event else {
+            panic!("resource-status queue entry");
+        };
+        assert_eq!(report.resources[0].id, "second");
     }
 
     #[test]

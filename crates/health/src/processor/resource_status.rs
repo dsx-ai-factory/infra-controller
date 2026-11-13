@@ -20,6 +20,24 @@ use crate::sink::{
     RedfishResourceType, ResourceStatusInfo, ResourceStatusObservation, ResourceStatusReport,
 };
 
+fn report_from_resources<'a>(
+    resource_type: RedfishResourceType,
+    resources: impl Iterator<
+        Item = (
+            &'a str,
+            &'a str,
+            Option<&'a nv_redfish::schema::resource::Status>,
+        ),
+    >,
+) -> ResourceStatusReport {
+    ResourceStatusReport {
+        resource_type,
+        resources: resources
+            .map(|(id, name, status)| ResourceStatusInfo::from_redfish(id, name, status))
+            .collect(),
+    }
+}
+
 /// Projects source-owned Redfish observations into resource-status log events.
 #[derive(Default)]
 pub struct ResourceStatusProcessor;
@@ -46,62 +64,46 @@ impl EventProcessor for ResourceStatusProcessor {
         };
 
         let report = match observation.as_ref() {
-            ResourceStatusObservation::System(resources) => ResourceStatusReport {
-                resource_type: RedfishResourceType::System,
-                resources: resources
-                    .iter()
-                    .map(|resource| {
-                        ResourceStatusInfo::from_redfish(
-                            RedfishResourceType::System,
-                            &resource.id,
-                            &resource.name,
-                            resource.status.as_ref(),
-                        )
-                    })
-                    .collect(),
-            },
-            ResourceStatusObservation::Manager(resources) => ResourceStatusReport {
-                resource_type: RedfishResourceType::Manager,
-                resources: resources
-                    .iter()
-                    .map(|resource| {
-                        ResourceStatusInfo::from_redfish(
-                            RedfishResourceType::Manager,
-                            &resource.id,
-                            &resource.name,
-                            resource.status.as_ref(),
-                        )
-                    })
-                    .collect(),
-            },
-            ResourceStatusObservation::Chassis(resources) => ResourceStatusReport {
-                resource_type: RedfishResourceType::Chassis,
-                resources: resources
-                    .iter()
-                    .map(|resource| {
-                        ResourceStatusInfo::from_redfish(
-                            RedfishResourceType::Chassis,
-                            &resource.id,
-                            &resource.name,
-                            resource.status.as_ref(),
-                        )
-                    })
-                    .collect(),
-            },
-            ResourceStatusObservation::Firmware(resources) => ResourceStatusReport {
-                resource_type: RedfishResourceType::Firmware,
-                resources: resources
-                    .iter()
-                    .map(|resource| {
-                        ResourceStatusInfo::from_redfish(
-                            RedfishResourceType::Firmware,
-                            &resource.id,
-                            &resource.name,
-                            resource.status.as_ref(),
-                        )
-                    })
-                    .collect(),
-            },
+            ResourceStatusObservation::System(resources) => report_from_resources(
+                RedfishResourceType::System,
+                resources.iter().map(|resource| {
+                    (
+                        resource.id.as_str(),
+                        resource.name.as_str(),
+                        resource.status.as_ref(),
+                    )
+                }),
+            ),
+            ResourceStatusObservation::Manager(resources) => report_from_resources(
+                RedfishResourceType::Manager,
+                resources.iter().map(|resource| {
+                    (
+                        resource.id.as_str(),
+                        resource.name.as_str(),
+                        resource.status.as_ref(),
+                    )
+                }),
+            ),
+            ResourceStatusObservation::Chassis(resources) => report_from_resources(
+                RedfishResourceType::Chassis,
+                resources.iter().map(|resource| {
+                    (
+                        resource.id.as_str(),
+                        resource.name.as_str(),
+                        resource.status.as_ref(),
+                    )
+                }),
+            ),
+            ResourceStatusObservation::Firmware(resources) => report_from_resources(
+                RedfishResourceType::Firmware,
+                resources.iter().map(|resource| {
+                    (
+                        resource.id.as_str(),
+                        resource.name.as_str(),
+                        resource.status.as_ref(),
+                    )
+                }),
+            ),
         };
 
         if report.resources.is_empty() {
