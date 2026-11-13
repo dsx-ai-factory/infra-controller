@@ -1767,6 +1767,7 @@ async fn create_test_env_with_overrides_inner(
         .processor_id(state_controller_id.clone())
         .services(
             IBPartitionStateHandlerServices {
+                instrumentation: api.instrumentation.clone(),
                 db_pool: db_pool.clone(),
                 ib_fabric_manager: api.ib_fabric_manager.clone(),
                 ib_pools: common_pools.infiniband.clone(),
