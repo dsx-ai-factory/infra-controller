@@ -44,8 +44,11 @@ pub(super) async fn setup_and_run(
 
     // Setup client certificate renewal
     let forge_api_server = agent_config.forge_system.api_server.clone();
-    let client_cert_renewer =
-        ClientCertRenewer::new(forge_api_server.clone(), Arc::clone(&carbide_client_config));
+    let client_cert_renewer = ClientCertRenewer::new(
+        forge_api_server.clone(),
+        Arc::clone(&carbide_client_config),
+        carbide_instrument::Instrumentation::global(),
+    );
 
     let main_loop = MainLoop {
         agent_config,

@@ -109,11 +109,15 @@ pub(super) async fn setup_and_run(
     }
 
     let process_start_time = SystemTime::now();
+    let instrumentation = crate::instrumentation::get_event_instrumentation();
 
     let forge_api_server = agent_config.forge_system.api_server.clone();
     // Setup client certificate renewal
-    let client_cert_renewer =
-        ClientCertRenewer::new(forge_api_server.clone(), Arc::clone(&carbide_client_config));
+    let client_cert_renewer = ClientCertRenewer::new(
+        forge_api_server.clone(),
+        Arc::clone(&carbide_client_config),
+        instrumentation.clone(),
+    );
 
     let machine_info = MachineInfo::new(machine_id);
     let remediation_executor = RemediationExecutor::new(
@@ -136,7 +140,6 @@ pub(super) async fn setup_and_run(
     );
 
     let agent_meter = get_dpu_agent_meter();
-    let instrumentation = crate::instrumentation::get_event_instrumentation();
     let metrics = create_metrics(agent_meter, instrumentation.clone());
 
     // Containerized (DPF) mode starts not-ready: the pod should only become

@@ -2157,6 +2157,7 @@ version = "0.0.1"
 dependencies = [
  "carbide-certs",
  "carbide-host-support",
+ "carbide-instrument",
  "carbide-rpc",
  "carbide-systemd",
  "carbide-tls",
