@@ -282,9 +282,6 @@ install_base_packages() {
     iputils-ping
     jq
     just
-    kea-dev
-    kea-dhcp4-server
-    kea-dhcp6-server
     less
     libaio-dev
     libboost-dev
@@ -321,6 +318,28 @@ install_base_packages() {
   fi
 
   DEBIAN_FRONTEND=noninteractive apt-get install -y "${packages[@]}"
+}
+
+install_kea() {
+  log "Installing the pinned Kea LTS development and runtime packages"
+  local kea_version
+  kea_version="$(cat "${REPO_DIR}/dev/docker/kea.version")"
+  sh "${REPO_DIR}/dev/docker/setup-kea-repository.sh"
+  apt-get update
+  # The old common package can coexist with ISC packages and leave an obsolete
+  # libkea-dhcp++ that the native hook's library discovery would select first.
+  DEBIAN_FRONTEND=noninteractive apt-get install -y kea-common- \
+    "isc-kea-common=${kea_version}" "isc-kea-hooks=${kea_version}" "isc-kea-dev=${kea_version}" \
+    "isc-kea-dhcp4=${kea_version}" "isc-kea-dhcp6=${kea_version}"
+  # Build on this distribution so native tests and container hooks use the
+  # same handoff contract without mixing Debian and Ubuntu library ABIs.
+  local package_dir
+  package_dir="$(mktemp -d)"
+  KEA_PACKAGE_DIR="${package_dir}" sh "${REPO_DIR}/dev/docker/build-kea.sh" "${kea_version}"
+  dpkg -i "${package_dir}/isc-kea-common.deb"
+  rm -rf "${package_dir}"
+  # ISC executables are restricted to root and the _kea group.
+  usermod -aG _kea "${DEV_USER}"
 }
 
 configure_native_linker() {
@@ -560,9 +579,11 @@ configure_kea_apparmor() {
       printf '/run/secrets/spiffe.io/** r,\n'
       printf '"%s/target/{debug,ci-tests}/*.so" mr,\n' "${REPO_DIR}"
       printf '"%s/target/{debug,ci-tests}/deps/*.so" mr,\n' "${REPO_DIR}"
+      printf '"%s/target/{debug,ci-tests}/build/carbide-dhcp-*/out/lease_{io_fault,read_barrier}.so" mr,\n' "${REPO_DIR}"
       if [[ "${canonical_repo_dir}" != "${REPO_DIR}" ]]; then
         printf '"%s/target/{debug,ci-tests}/*.so" mr,\n' "${canonical_repo_dir}"
         printf '"%s/target/{debug,ci-tests}/deps/*.so" mr,\n' "${canonical_repo_dir}"
+        printf '"%s/target/{debug,ci-tests}/build/carbide-dhcp-*/out/lease_{io_fault,read_barrier}.so" mr,\n' "${canonical_repo_dir}"
       fi
     } | while IFS= read -r rule; do
       # Preserve permissions for other checkouts and administrator overrides.
@@ -831,6 +852,7 @@ main() {
   configure_openssl_tls
   configure_hashicorp_apt_source
   install_base_packages
+  install_kea
   configure_native_linker
   install_docker
   install_go

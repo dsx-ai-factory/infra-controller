@@ -1,0 +1,580 @@
+--- a/src/lib/dhcpsrv/alloc_engine.cc
++++ b/src/lib/dhcpsrv/alloc_engine.cc
+@@ -36,6 +36,7 @@
+ 
+ #include <boost/foreach.hpp>
+ #include <boost/make_shared.hpp>
++#include <map>
+ 
+ #include <algorithm>
+ #include <sstream>
+@@ -54,7 +55,43 @@
+ using namespace isc::data;
+ namespace ph = std::placeholders;
+ 
++// The DHCPv6 hook checks this native persistence contract before loading.
++extern "C" int nico_kea_lease6_handoff_contract() { return 2; }
++
+ namespace {
++
++// A SELECT hook may redirect an allocation onto an existing lease only by
++// supplying the snapshot it explicitly approved. Keep that row until the
++// replacement write succeeds; an absent snapshot retains INSERT collision checks.
++bool persistLease6Replacement(AllocEngine::ClientContext6& ctx,
++                              const Lease6Ptr& lease, const Lease6Ptr& replacement,
++                              const bool response_fqdn) {
++    auto& leases = LeaseMgrFactory::instance();
++    if (!replacement) {
++        return (leases.addLease(lease));
++    }
++    if (replacement->addr_ != lease->addr_ || replacement->type_ != lease->type_ ||
++        replacement->subnet_id_ != lease->subnet_id_) {
++        isc_throw(isc::BadValue, "SELECT replacement must identify the selected lease");
++    }
++    const auto current = leases.getLease6(lease->type_, lease->addr_);
++    if (!current || *current != *replacement) {
++        isc_throw(isc::Unexpected, "SELECT replacement lease changed before persistence");
++    }
++    lease->current_cltt_ = replacement->cltt_;
++    lease->current_valid_lft_ = replacement->valid_lft_;
++    leases.updateLease6(lease);
++    if (response_fqdn && (lease->fqdn_fwd_ || lease->fqdn_rev_)) {
++        // Kea 3 checks DUID changes and chains REMOVE/ADD in one NCR. Preserve
++        // that native ordering contract, including for an unchanged hostname.
++        ctx.currentIA().changed_leases_.push_back(replacement);
++    } else {
++        // Without new DNS updates the response path may have no FQDN option.
++        // Remove the old ownership after persistence even in that case.
++        queueNCR(CHG_REMOVE, replacement);
++    }
++    return (true);
++}
+ 
+ /// Structure that holds registered hook indexes
+ struct AllocEngineHooks {
+@@ -62,6 +99,7 @@
+     int hook_index_lease4_renew_;  ///< index for "lease4_renew" hook point
+     int hook_index_lease4_expire_; ///< index for "lease4_expire" hook point
+     int hook_index_lease4_recover_;///< index for "lease4_recover" hook point
++    int hook_index_lease6_existing_; ///< NICo existing-lease snapshot validation
+     int hook_index_lease6_select_; ///< index for "lease6_select" hook point
+     int hook_index_lease6_renew_;  ///< index for "lease6_renew" hook point
+     int hook_index_lease6_rebind_; ///< index for "lease6_rebind" hook point
+@@ -74,6 +112,7 @@
+         hook_index_lease4_renew_  = HooksManager::registerHook("lease4_renew");
+         hook_index_lease4_expire_ = HooksManager::registerHook("lease4_expire");
+         hook_index_lease4_recover_= HooksManager::registerHook("lease4_recover");
++        hook_index_lease6_existing_ = HooksManager::registerHook("lease6_existing");
+         hook_index_lease6_select_ = HooksManager::registerHook("lease6_select");
+         hook_index_lease6_renew_  = HooksManager::registerHook("lease6_renew");
+         hook_index_lease6_rebind_ = HooksManager::registerHook("lease6_rebind");
+@@ -87,6 +126,24 @@
+ // As a result, the hook indexes will be defined before any method in this
+ // module is called.
+ AllocEngineHooks Hooks;
++
++// Existing-DUID paths bypass SELECT and may delete leases for changed
++// reservations. Validate the fetched snapshots before any such mutation,
++// including when native processing resumes a queued packet.
++void validateExistingLeases6(AllocEngine::ClientContext6& ctx,
++                            const Lease6Collection& leases) {
++    if (leases.empty() || !ctx.callout_handle_ ||
++        !HooksManager::calloutsPresent(Hooks.hook_index_lease6_existing_)) {
++        return;
++    }
++    ScopedCalloutHandleState state(ctx.callout_handle_);
++    ctx.callout_handle_->setArgument("query6", ctx.query_);
++    ctx.callout_handle_->setArgument("leases6", leases);
++    HooksManager::callCallouts(Hooks.hook_index_lease6_existing_, *ctx.callout_handle_);
++    if (ctx.callout_handle_->getStatus() != CalloutHandle::NEXT_STEP_CONTINUE) {
++        isc_throw(isc::Unexpected, "existing DHCPv6 lease snapshot was refused by hook");
++    }
++}
+ 
+ }  // namespace
+ 
+@@ -483,6 +540,17 @@
+         Lease6Collection leases;
+         while (subnet) {
+             for (auto const& l : all_leases) {
++                if (l->type_ == Lease::TYPE_NA && l->stateExpiredReclaimed() &&
++                    HooksManager::calloutsPresent(hook_index_lease6_select_)) {
++                    const auto reservation = makeIPv6Resrv(*l);
++                    const auto host = ctx.hosts_.find(l->subnet_id_);
++                    if (!ctx.hasGlobalReservation(reservation) &&
++                        (host == ctx.hosts_.end() || !host->second->hasReservation(reservation))) {
++                        // Dynamic reclaimed leases must pass SELECT again.
++                        // Keep reservations on the existing-lease path.
++                        continue;
++                    }
++                }
+                 if (((l)->state_ != Lease::STATE_REGISTERED) &&
+                     ((l)->subnet_id_ == subnet->getID())) {
+                     leases.push_back(l);
+@@ -491,6 +559,8 @@
+ 
+             subnet = subnet->getNextSubnet(ctx.subnet_);
+         }
++
++        validateExistingLeases6(ctx, leases);
+ 
+         // Now do the checks:
+         // Case 1. if there are no leases, and there are reservations...
+@@ -1760,6 +1830,11 @@
+                                uint8_t prefix_len,
+                                CalloutHandle::CalloutNextStep& callout_status) {
+ 
++    const auto original_address = expired->addr_;
++    Lease6Ptr replacement;
++    bool response_fqdn = false;
++    std::map<std::string, int64_t> stat_adjustments;
++
+     if (!expired->expired()) {
+         isc_throw(BadValue, "Attempt to recycle lease that is still valid");
+     }
+@@ -1826,6 +1901,9 @@
+ 
+         // The lease that will be assigned to a client
+         ctx.callout_handle_->setArgument("lease6", expired);
++        ctx.callout_handle_->setArgument("lease6_replacement", replacement);
++        ctx.callout_handle_->setArgument("lease6_stat_adjustments", stat_adjustments);
++        ctx.callout_handle_->setArgument("nico_lease6_ddns_response", response_fqdn);
+ 
+         // Call the callouts
+         HooksManager::callCallouts(hook_index_lease6_select_, *ctx.callout_handle_);
+@@ -1848,6 +1926,9 @@
+         // Let's use whatever callout returned. Hopefully it is the same lease
+         // we handed to it.
+         ctx.callout_handle_->getArgument("lease6", expired);
++        ctx.callout_handle_->getArgument("lease6_replacement", replacement);
++        ctx.callout_handle_->getArgument("lease6_stat_adjustments", stat_adjustments);
++        ctx.callout_handle_->getArgument("nico_lease6_ddns_response", response_fqdn);
+     }
+ 
+     if (!ctx.fake_allocation_) {
+@@ -1860,7 +1941,14 @@
+         }
+ 
+         // for REQUEST we do update the lease
+-        LeaseMgrFactory::instance().updateLease6(expired);
++        if (original_address != expired->addr_) {
++            if (!persistLease6Replacement(ctx, expired, replacement, response_fqdn)) {
++                return (Lease6Ptr());
++            }
++            ctx.currentIA().addNewResource(expired->addr_, prefix_len);
++        } else {
++            LeaseMgrFactory::instance().updateLease6(expired);
++        }
+ 
+         // If the lease is in the current subnet we need to account
+         // for the re-assignment of The lease.
+@@ -1898,6 +1986,9 @@
+             StatsMgr::instance().addValue(ctx.currentIA().type_ == Lease::TYPE_NA ?
+                                           "cumulative-assigned-nas" : "cumulative-assigned-pds",
+                                           static_cast<int64_t>(1));
++        }
++        for (const auto& adjustment : stat_adjustments) {
++            StatsMgr::instance().addValue(adjustment.first, adjustment.second);
+         }
+     }
+ 
+@@ -1987,6 +2078,9 @@
+         prefix_len = 128; // non-PD lease types must be always /128
+     }
+ 
++    Lease6Ptr replacement;
++    bool response_fqdn = false;
++    std::map<std::string, int64_t> stat_adjustments;
+     uint32_t preferred = 0;
+     uint32_t valid = 0;
+     getLifetimes6(ctx, preferred, valid);
+@@ -2026,6 +2120,9 @@
+ 
+         // The lease that will be assigned to a client
+         ctx.callout_handle_->setArgument("lease6", lease);
++        ctx.callout_handle_->setArgument("lease6_replacement", replacement);
++        ctx.callout_handle_->setArgument("lease6_stat_adjustments", stat_adjustments);
++        ctx.callout_handle_->setArgument("nico_lease6_ddns_response", response_fqdn);
+ 
+         // This is the first callout, so no need to clear any arguments
+         HooksManager::callCallouts(hook_index_lease6_select_, *ctx.callout_handle_);
+@@ -2043,6 +2140,9 @@
+         // Let's use whatever callout returned. Hopefully it is the same lease
+         // we handed to it.
+         ctx.callout_handle_->getArgument("lease6", lease);
++        ctx.callout_handle_->getArgument("lease6_replacement", replacement);
++        ctx.callout_handle_->getArgument("lease6_stat_adjustments", stat_adjustments);
++        ctx.callout_handle_->getArgument("nico_lease6_ddns_response", response_fqdn);
+     }
+ 
+     if (!ctx.fake_allocation_) {
+@@ -2055,7 +2155,8 @@
+         }
+ 
+         // That is a real (REQUEST) allocation
+-        bool status = LeaseMgrFactory::instance().addLease(lease);
++        bool status = addr != lease->addr_ ? persistLease6Replacement(ctx, lease, replacement, response_fqdn)
++                                          : LeaseMgrFactory::instance().addLease(lease);
+ 
+         if (status) {
+             // The lease insertion succeeded - if the lease is in the
+@@ -2096,8 +2197,12 @@
+                                               static_cast<int64_t>(1));
+             }
+ 
++            for (const auto& adjustment : stat_adjustments) {
++                StatsMgr::instance().addValue(adjustment.first, adjustment.second);
++            }
++
+             // Record it so it won't be updated twice.
+-            ctx.currentIA().addNewResource(addr, prefix_len);
++            ctx.currentIA().addNewResource(lease->addr_, prefix_len);
+ 
+             return (lease);
+         } else {
+@@ -2137,12 +2242,25 @@
+                                                        ctx.currentIA().iaid_,
+                                                        subnet->getID());
+             for (auto const& l : leases_subnet) {
++                if (l->type_ == Lease::TYPE_NA && l->stateExpiredReclaimed() &&
++                    HooksManager::calloutsPresent(hook_index_lease6_select_)) {
++                    const auto reservation = makeIPv6Resrv(*l);
++                    const auto host = ctx.hosts_.find(l->subnet_id_);
++                    if (!ctx.hasGlobalReservation(reservation) &&
++                        (host == ctx.hosts_.end() || !host->second->hasReservation(reservation))) {
++                        // As in allocation, dynamic reclaimed rows must pass
++                        // SELECT again instead of invalidating active siblings.
++                        continue;
++                    }
++                }
+                 if (l->state_ != Lease::STATE_REGISTERED) {
+                     leases.push_back(l);
+                 }
+             }
+             subnet = subnet->getNextSubnet(ctx.subnet_);
+         }
++
++        validateExistingLeases6(ctx, leases);
+ 
+         if (!leases.empty()) {
+             LOG_DEBUG(alloc_engine_logger, ALLOC_ENGINE_DBG_TRACE,
+@@ -2916,8 +3034,16 @@
+         callout_handle->setArgument("lease6", lease);
+         callout_handle->setArgument("remove_lease", reclaim_mode == DB_RECLAIM_REMOVE);
+ 
++        bool reclaim_allowed = true;
++        callout_handle->setArgument("lease6_reclaim_allowed", reclaim_allowed);
++
+         HooksManager::callCallouts(Hooks.hook_index_lease6_expire_,
+                                    *callout_handle);
++
++        callout_handle->getArgument("lease6_reclaim_allowed", reclaim_allowed);
++        if (!reclaim_allowed || callout_handle->getStatus() == CalloutHandle::NEXT_STEP_DROP) {
++            isc_throw(Unexpected, "DHCPv6 lease reclamation was refused by hook");
++        }
+ 
+         skipped = callout_handle->getStatus() == CalloutHandle::NEXT_STEP_SKIP;
+     }
+--- a/src/lib/dhcpsrv/csv_lease_file6.cc
++++ b/src/lib/dhcpsrv/csv_lease_file6.cc
+@@ -10,6 +10,8 @@
+ #include <dhcpsrv/csv_lease_file6.h>
+ 
+ #include <ctime>
++#include <sys/stat.h>
++#include <unistd.h>
+ 
+ using namespace isc::asiolink;
+ using namespace isc::data;
+@@ -70,11 +72,42 @@
+         row.writeAtEscaped(getColumnIndex("user_context"), lease.getContext()->str());
+     }
+     row.writeAt(getColumnIndex("pool_id"), lease.pool_id_);
++    // Check the stream before the rollback handler: a closed failed stream
++    // must not be reopened by catching its next append's precondition error.
++    try {
++        flush();
++    } catch (const std::exception& error) {
++        ++write_errs_;
++        isc_throw(CSVFileFatalError, "IPv6 lease stream is unavailable: " << error.what());
++    }
++    // Memfile serializes appends and rotation. Remember the last committed
++    // offset before writing: a failed fstream flush can retain output and
++    // replay it on a later append or close, despite the failed transaction.
++    struct stat before;
++    if (::stat(getFilename().c_str(), &before) != 0) {
++        ++write_errs_;
++        isc_throw(CSVFileFatalError, "cannot inspect IPv6 lease file before append: "
++                  << strerror(errno));
++    }
+     try {
+         VersionedCSVFile::append(row);
+     } catch (const std::exception&) {
+         // Catch any errors so we can bump the error counter than rethrow it
+         ++write_errs_;
++        // Closing may retry the refused bytes; truncate only AFTER that retry.
++        // Leave the stream closed if rollback fails, so subsequent appends
++        // cannot silently build on an uncertain row.
++        close();
++        if (::truncate(getFilename().c_str(), before.st_size) != 0) {
++            isc_throw(CSVLeaseFile6RollbackError, "cannot roll back failed IPv6 lease append; "
++                      "repair lease file before restarting: " << strerror(errno));
++        }
++        try {
++            CSVFile::openExisting(true);
++        } catch (const std::exception& error) {
++            isc_throw(CSVFileFatalError, "cannot reopen IPv6 lease file after rollback: "
++                      << error.what());
++        }
+         throw;
+     }
+ 
+--- a/src/lib/dhcpsrv/csv_lease_file6.h
++++ b/src/lib/dhcpsrv/csv_lease_file6.h
+@@ -21,6 +21,13 @@
+ 
+ namespace isc {
+ namespace dhcp {
++
++/// @brief Failed rollback leaves persistent state uncertain and requires shutdown.
++class CSVLeaseFile6RollbackError : public isc::util::CSVFileFatalError {
++public:
++    CSVLeaseFile6RollbackError(const char* file, size_t line, const char* what)
++        : isc::util::CSVFileFatalError(file, line, what) {}
++};
+ 
+ /// @brief Provides methods to access CSV file with DHCPv6 leases.
+ ///
+--- a/src/lib/dhcpsrv/memfile_lease_mgr.cc
++++ b/src/lib/dhcpsrv/memfile_lease_mgr.cc
+@@ -938,8 +938,8 @@
+                 // Update current subnet id
+                 cur_id = (*lease)->subnet_id_;
+ 
+-                // Reset pool id
+-                cur_pool_id = 0;
++                // Preserve the first lease's pool when entering a subnet.
++                cur_pool_id = (*lease)->pool_id_;
+             }
+ 
+             // Bump the appropriate accumulator
+@@ -1090,11 +1090,21 @@
+ 
+ void
+ Memfile_LeaseMgr::handleDbLost() {
++    handleDbLost(false);
++}
++
++void
++Memfile_LeaseMgr::handleDbLost(bool force_stop) {
++    auto control = conn_.reconnectCtl();
++    if (force_stop) {
++        control.reset(new ReconnectCtl(control->backendType(), control->timerName(),
++                                       0, 0, OnFailAction::STOP_RETRY_EXIT, control->id()));
++    }
+     // Invoke application layer callback on the main IOService.
+     auto ios = conn_.getIOService();
+     if (ios) {
+         ios->post(std::bind(DatabaseConnection::invokeDbLostCallback,
+-                            conn_.reconnectCtl()));
++                            control));
+     }
+ }
+ 
+@@ -1160,6 +1170,9 @@
+     if (persistLeases(V6)) {
+         try {
+             lease_file6_->append(*lease);
++        } catch (const CSVLeaseFile6RollbackError&) {
++            handleDbLost(true);
++            throw;
+         } catch (const CSVFileFatalError&) {
+             handleDbLost();
+             throw;
+@@ -1983,6 +1996,9 @@
+     if (persist) {
+         try {
+             lease_file6_->append(*lease);
++        } catch (const CSVLeaseFile6RollbackError&) {
++            handleDbLost(true);
++            throw;
+         } catch (const CSVFileFatalError&) {
+             handleDbLost();
+             throw;
+@@ -2114,6 +2130,9 @@
+             lease_copy.preferred_lft_ = 0;
+             try {
+                 lease_file6_->append(lease_copy);
++            } catch (const CSVLeaseFile6RollbackError&) {
++                handleDbLost(true);
++                throw;
+             } catch (const CSVFileFatalError&) {
+                 handleDbLost();
+                 throw;
+@@ -2248,6 +2267,9 @@
+                 lease_copy.valid_lft_ = 0;
+                 try {
+                     lease_file->append(lease_copy);
++                } catch (const CSVLeaseFile6RollbackError&) {
++                    handleDbLost(true);
++                    throw;
+                 } catch (const CSVFileFatalError&) {
+                     handleDbLost();
+                     throw;
+--- a/src/lib/dhcpsrv/memfile_lease_mgr.h
++++ b/src/lib/dhcpsrv/memfile_lease_mgr.h
+@@ -1572,6 +1572,9 @@
+     /// (i.e. inside *Internal functions).
+     void handleDbLost();
+ 
++    /// @brief Override continue policy when rollback leaves uncertain disk state.
++    void handleDbLost(bool force_stop);
++
+ public:
+     /// @brief Factory class method.
+     ///
+--- a/src/lib/util/csv_file.cc
++++ b/src/lib/util/csv_file.cc
+@@ -315,69 +315,72 @@
+ 
+ void
+ CSVFile::open(const bool seek_to_end) {
+-    // If file doesn't exist or is empty, we have to create our own file.
+     if (size() == static_cast<std::streampos>(0)) {
+         recreate();
+-
+     } else {
+-        // Try to open existing file, holding some data.
+-        fs_.reset(new std::fstream(filename_.c_str()));
+-
+-        // Catch exceptions so as we can close the file if error occurs.
+-        try {
+-            // The file may fail to open. For example, because of insufficient
+-            // permissions. Although the file is not open we should call close
+-            // to reset our internal pointer.
+-            if (!fs_->is_open()) {
+-                isc_throw(CSVFileError, "unable to open '" << filename_ << "'");
++        openExisting(seek_to_end);
++    }
++}
++
++void
++CSVFile::openExisting(const bool seek_to_end) {
++    // Try to open existing file, holding some data.
++    fs_.reset(new std::fstream(filename_.c_str()));
++
++    // Catch exceptions so as we can close the file if error occurs.
++    try {
++        // The file may fail to open. For example, because of insufficient
++        // permissions. Although the file is not open we should call close
++        // to reset our internal pointer.
++        if (!fs_->is_open()) {
++            isc_throw(CSVFileError, "unable to open '" << filename_ << "'");
++        }
++        // Make sure we are on the beginning of the file, so as we
++        // can parse the header.
++        fs_->seekg(0);
++        if (!fs_->good()) {
++            isc_throw(CSVFileError, "unable to set read pointer in the file '"
++                      << filename_ << "'");
++        }
++
++        // Read the header.
++        CSVRow header;
++        if (!next(header, true)) {
++            isc_throw(CSVFileError, "failed to read and parse header of the"
++                      " CSV file '" << filename_ << "': "
++                      << getReadMsg());
++        }
++
++        // Check the header against the columns specified for the CSV file.
++        if (!validateHeader(header)) {
++            isc_throw(CSVFileError, "invalid header '" << header
++                      << "' in CSV file '" << filename_ << "': "
++                      << getReadMsg());
++        }
++
++        // Everything is good, so if we haven't added any columns yet,
++        // add them.
++        if (getColumnCount() == 0) {
++            for (size_t i = 0; i < header.getValuesCount(); ++i) {
++                addColumnInternal(header.readAt(i));
+             }
+-            // Make sure we are on the beginning of the file, so as we
+-            // can parse the header.
+-            fs_->seekg(0);
++        }
++
++        // If caller requested that the pointer is set at the end of file,
++        // move both read and write pointer.
++        if (seek_to_end) {
++            fs_->seekp(0, std::ios_base::end);
++            fs_->seekg(0, std::ios_base::end);
+             if (!fs_->good()) {
+-                isc_throw(CSVFileError, "unable to set read pointer in the file '"
+-                          << filename_ << "'");
++                isc_throw(CSVFileError, "unable to move to the end of"
++                          " CSV file '" << filename_ << "'");
+             }
+-
+-            // Read the header.
+-            CSVRow header;
+-            if (!next(header, true)) {
+-                isc_throw(CSVFileError, "failed to read and parse header of the"
+-                          " CSV file '" << filename_ << "': "
+-                          << getReadMsg());
+-            }
+-
+-            // Check the header against the columns specified for the CSV file.
+-            if (!validateHeader(header)) {
+-                isc_throw(CSVFileError, "invalid header '" << header
+-                          << "' in CSV file '" << filename_ << "': "
+-                          << getReadMsg());
+-            }
+-
+-            // Everything is good, so if we haven't added any columns yet,
+-            // add them.
+-            if (getColumnCount() == 0) {
+-                for (size_t i = 0; i < header.getValuesCount(); ++i) {
+-                    addColumnInternal(header.readAt(i));
+-                }
+-            }
+-
+-            // If caller requested that the pointer is set at the end of file,
+-            // move both read and write pointer.
+-            if (seek_to_end) {
+-                fs_->seekp(0, std::ios_base::end);
+-                fs_->seekg(0, std::ios_base::end);
+-                if (!fs_->good()) {
+-                    isc_throw(CSVFileError, "unable to move to the end of"
+-                              " CSV file '" << filename_ << "'");
+-                }
+-                fs_->clear();
+-            }
+-
+-        } catch (const std::exception&) {
+-            close();
+-            throw;
+-        }
++            fs_->clear();
++        }
++
++    } catch (const std::exception&) {
++        close();
++        throw;
+     }
+ }
+ 
+--- a/src/lib/util/csv_file.h
++++ b/src/lib/util/csv_file.h
+@@ -474,6 +474,10 @@
+ 
+     virtual void open(const bool seek_to_end = false);
+ 
++    /// @brief Open an existing file without creating or truncating it on error.
++    /// Used by append recovery, where an unreadable file must retain its data.
++    void openExisting(const bool seek_to_end = false);
++
+     /// @brief Creates a new CSV file.
+     ///
+     /// The file creation will fail if there are no columns specified.

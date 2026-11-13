@@ -16,7 +16,20 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-FROM debian:bookworm-slim as carbide
+ARG CONTAINER_BASE_IMAGE=debian:bookworm-slim@sha256:3783cc01769c7b2b1b83a5c5ad96c815348e28ed7da68e2e3687004faa906251
+FROM ${CONTAINER_BASE_IMAGE} AS kea-builder
+ARG KEA_VERSION
+COPY dev/docker/build-kea.sh dev/docker/kea-lease6-replacement.patch dev/docker/setup-kea-repository.sh dev/docker/isc-kea-3-0.asc /tmp/kea-build/
+RUN /tmp/kea-build/build-kea.sh "${KEA_VERSION}"
+
+FROM ${CONTAINER_BASE_IMAGE} AS carbide
+
+ARG KEA_VERSION
+
+COPY dev/docker/setup-kea-repository.sh dev/docker/isc-kea-3-0.asc dev/docker/configure-kea-runtime.sh /tmp/kea-repository/
+RUN sh /tmp/kea-repository/setup-kea-repository.sh
+
+ENV KEA_HOOKS_PATH=/usr/lib/kea/hooks
 
 RUN mkdir -p /opt/carbide/migrations && \
   mkdir -p /opt/carbide/pxe/templates && \
@@ -33,9 +46,11 @@ RUN --mount=type=cache,target=/var/cache/apt apt-get update && apt-get install -
   curl \
   iproute2 \
   iputils-ping \
-  kea-dev \
-  kea-dhcp4-server \
-  kea-dhcp6-server \
+  isc-kea-common=${KEA_VERSION} \
+  isc-kea-hooks=${KEA_VERSION} \
+  isc-kea-dev=${KEA_VERSION} \
+  isc-kea-dhcp4=${KEA_VERSION} \
+  isc-kea-dhcp6=${KEA_VERSION} \
   libssl-dev \
   libudev1 \
   ca-certificates \
@@ -47,3 +62,9 @@ RUN --mount=type=cache,target=/var/cache/apt apt-get update && apt-get install -
   tpm2-tools \
   nginx \
   libtss2-dev
+
+
+COPY --from=kea-builder /kea-packages/isc-kea-common.deb /tmp/isc-kea-common.deb
+RUN dpkg -i /tmp/isc-kea-common.deb && rm /tmp/isc-kea-common.deb
+
+RUN sh /tmp/kea-repository/configure-kea-runtime.sh && rm -rf /tmp/kea-repository

@@ -453,6 +453,18 @@ Only a client in a listed org is a service account, and only for requests to tha
 
 In connected mode, `serviceAccountOrgs` can list more than one org. Custom issuer `isServiceAccount` mappings, which used to require disconnected mode, are now accepted in connected mode with no limit on their number.
 
+### 2.4 → 2.5: Kea 3.0 LTS
+
+The DHCP runtime and NICo hook move to Kea 3.0 LTS in [issue #8084](https://github.com/dsx-ai-factory/infra-controller/issues/8084). Single IPv4 catch-all deployments whose retained leases use subnet ID `1` can upgrade directly, making that ID explicit; no preparation release or Core database change is required. Follow [Upgrade Kea to 3.0 LTS](../provisioning/kea-lts-upgrade.md) to preserve subnet IDs and replace obsolete hook-path and catch-all-pool overrides. Operator-owned IPv4 raw configurations and external ConfigMaps need those changes plus explicit cache and threading settings. Ship their GitOps source updates with the matching hook and daemon images; Kea 2.x hooks are incompatible. Preserve custom lease filenames where configured and the server identity. The stock IPv4 chart has no lease volume: release tooling must provide lease retention and writer coordination before applying the guide's retained-storage backup and rollback procedure. Exercise upgrade, renewal, and rollback before rollout. An image revert alone does not establish lease-format compatibility.
+
+DHCPv6 firmware-to-OS handoff also requires the NICo hook and repository-patched
+Kea runtime from the same revision. Stock Kea and older NICo patches fail DHCPv6
+startup with `NICo DHCPv6 requires patched Kea`; the package version alone does
+not establish compatibility. Rebuild external images with the matching runtime.
+DHCPv4 does not require this DHCPv6 capability. See
+[Kea Runtime Compatibility](../provisioning/dhcpv6-deployment.md#kea-runtime-compatibility)
+for installation and recovery requirements.
+
 ### 2.3 → 2.4: Standalone Temporal/Keycloak PostgreSQL deprecated
 
 <Warning>
@@ -597,6 +609,8 @@ For NICo Core and REST, the Helm release is rolled back in-place, and the databa
 The database dumps from the [pre-upgrade checklist](#back-up-the-databases) are the rollback foundation: `nico-pg-cluster` holds `nico_system_nico` (NICo Core), `nico_rest` (NICo REST), `flow`, and any retained `psm` or `nsm` databases from a predecessor bundled-manager deployment. The `temporal`, `temporal_visibility`, and `keycloak` databases are there too, unless the Site still runs the standalone `postgres` StatefulSet. Restoring means replaying the SQL against a clean instance (`psql -f <dump>.sql`).
 
 Re-running `setup.sh` with the prior image tags alone is **not** a complete rollback if the new version's migrations already ran. Restore the database dumps first, then deploy the prior version.
+
+For persistent Kea lease storage, also follow the [Kea recovery procedure](../provisioning/kea-lts-upgrade.md#deployment-and-recovery) before restoring older DHCP images. Database dumps do not include memfiles, and allocations made since the lease backup must be reconciled before restoring it.
 
 If you have upgraded to
 [asynchronous peering deletion](#upgrades-that-introduce-asynchronous-peering-deletion),

@@ -223,33 +223,39 @@ config:
       ## site values. Set to nico-pxe externalService LoadBalancer IP.
       provisioningServer: "REPLACE_WITH_NICO_PXE_VIP"
 
-    ## DHCPv4 subnets. Each entry maps to a kea subnet4 entry.
+    ## DHCPv4 subnets. IDs must match the existing Kea lease associations.
+    ## A single subnet without an ID retains the old generated ID 1.
+    ## Multiple subnets require explicit, unique IDs (1 through 4294967294).
     ## `pools` entries can be either:
-    ##   - a pool-range string (e.g. "0.0.0.0-255.255.255.255") — the
+    ##   - a pool-range string (e.g. "0.0.0.1-255.255.255.254") — the
     ##     helper wraps it in `{ "pool": "..." }` automatically; or
     ##   - a full kea pool object (e.g. { pool: "...", option-data: [...] })
     ##     — passed through verbatim via toJson.
     ## Any other shape fails at template-render time with a pointer to the
     ## offending subnet4[i].pools[j] index so the user can fix their value.
     subnet4:
-      - subnet: "0.0.0.0/0"
+      - id: 1
+        subnet: "0.0.0.0/0"
         pools:
-          - "0.0.0.0-255.255.255.255"
+          - "0.0.0.1-255.255.255.254"
 
-    ## Path to the kea libdhcp hook library inside the kea image. Default
-    ## is the x86_64 Debian-derived install location. Override for alt
-    ## arches (aarch64 → /usr/lib/aarch64-linux-gnu/...) or custom images.
-    hookLibraryPath: "/usr/lib/x86_64-linux-gnu/kea/hooks/libdhcp.so"
+    ## Path to the IPv4 kea libdhcp hook library inside the kea image. Default
+    ## uses the same path on both architectures, matching KEA_HOOKS_PATH.
+    ## A custom directory is supported only when dhcp.v6Enabled is false.
+    ## Set KEA_HOOKS_PATH in the image or env map to match that directory.
+    ## Both deployments share the image and env; IPv6 requires /usr/lib/kea/hooks.
+    hookLibraryPath: "/usr/lib/kea/hooks/libdhcp.so"
 
     ## Additional hooks-libraries entries appended after the libdhcp entry
     ## above. Each item is a full kea hooks-libraries object and is
     ## serialised via toJson. Use this for `ha`, `lease_cmds`, `stat_cmds`,
-    ## or any third-party hook. Leave empty for the libdhcp-only default.
+    ## or any third-party hook. Install additional libraries in KEA_HOOKS_PATH.
+    ## Leave empty for the libdhcp-only default.
     ##
     ## Example:
     ##   additionalHooksLibraries:
-    ##     - library: /usr/lib/x86_64-linux-gnu/kea/hooks/libdhcp_lease_cmds.so
-    ##     - library: /usr/lib/x86_64-linux-gnu/kea/hooks/libdhcp_stat_cmds.so
+    ##     - library: /usr/lib/kea/hooks/libdhcp_lease_cmds.so
+    ##     - library: /usr/lib/kea/hooks/libdhcp_stat_cmds.so
     additionalHooksLibraries: []
 
     ## kea-dhcp4 loggers. `outputOptions` is OPTIONAL per logger — when

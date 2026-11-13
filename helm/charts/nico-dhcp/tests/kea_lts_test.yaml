@@ -1,0 +1,160 @@
+suite: Kea LTS configuration compatibility
+templates:
+  - configmap.yaml
+  - configmap-v6.yaml
+tests:
+  - it: preserves the original subnet IDs, lease caching, and threading defaults
+    set:
+      dhcp.v6Enabled: true
+      dhcp.v6ServerIdentifier: "020000000001"
+    asserts:
+      - matchRegex:
+          path: data["kea_config.json"]
+          pattern: '"id": 1[,\s]'
+        template: configmap.yaml
+      - matchRegex:
+          path: data["kea_config.json"]
+          pattern: '"pool": "0\.0\.0\.1-255\.255\.255\.254"'
+        template: configmap.yaml
+      - matchRegex:
+          path: data["kea_config.json"]
+          pattern: '"cache-threshold": 0\.0[,\s]'
+        template: configmap.yaml
+      - matchRegex:
+          path: data["kea_config6.json"]
+          pattern: '"id": 1[,\s]'
+        template: configmap-v6.yaml
+      - matchRegex:
+          path: data["kea_config6.json"]
+          pattern: '"cache-threshold": 0\.0[,\s]'
+        template: configmap-v6.yaml
+      - matchRegex:
+          path: data["kea_config.json"]
+          pattern: '"enable-multi-threading": false'
+        template: configmap.yaml
+      - matchRegex:
+          path: data["kea_config6.json"]
+          pattern: '"enable-multi-threading": false'
+        template: configmap-v6.yaml
+
+  - it: retains explicit subnet IDs independently of list order
+    template: configmap.yaml
+    set:
+      config.kea.subnet4:
+        - id: 42
+          subnet: "192.0.2.0/24"
+          pools: ["192.0.2.10-192.0.2.20"]
+        - id: 17
+          subnet: "198.51.100.0/24"
+          pools: ["198.51.100.10-198.51.100.20"]
+    asserts:
+      - matchRegex:
+          path: data["kea_config.json"]
+          pattern: '"id": 42,\s*"subnet": "192.0.2.0/24"'
+      - matchRegex:
+          path: data["kea_config.json"]
+          pattern: '"id": 17,\s*"subnet": "198.51.100.0/24"'
+
+  - it: preserves the implicit ID for an existing single subnet override
+    template: configmap.yaml
+    set:
+      config.kea.subnet4:
+        - subnet: "192.0.2.0/24"
+    asserts:
+      - matchRegex:
+          path: data["kea_config.json"]
+          pattern: '"id": 1,\s*"subnet": "192.0.2.0/24"'
+
+  - it: requires explicit IDs for multiple subnets
+    template: configmap.yaml
+    set:
+      config.kea.subnet4:
+        - subnet: "192.0.2.0/24"
+        - subnet: "198.51.100.0/24"
+    asserts:
+      - failedTemplate:
+          errorMessage: "nico-dhcp: multiple IPv4 subnets require explicit id values matching existing leases"
+
+  - it: rejects duplicate subnet IDs
+    template: configmap.yaml
+    set:
+      config.kea.subnet4:
+        - id: 7
+          subnet: "192.0.2.0/24"
+        - id: 7
+          subnet: "198.51.100.0/24"
+    asserts:
+      - failedTemplate:
+          errorMessage: "nico-dhcp: duplicate IPv4 subnet id 7"
+
+  - it: rejects the reserved zero subnet ID
+    template: configmap.yaml
+    set:
+      config.kea.subnet4: [{id: 0, subnet: "192.0.2.0/24"}]
+    asserts: &invalidId
+      - failedTemplate:
+          errorPattern: 'config.kea.subnet4.0.id'
+
+  - it: rejects IDs beyond the usable 32-bit range
+    template: configmap.yaml
+    set:
+      config.kea.subnet4: [{id: 4294967295, subnet: "192.0.2.0/24"}]
+    asserts: *invalidId
+
+  - it: rejects fractional IDs instead of rounding them
+    template: configmap.yaml
+    set:
+      config.kea.subnet4: [{id: 1.5, subnet: "192.0.2.0/24"}]
+    asserts: *invalidId
+
+  - it: rejects a null structured config before emitting invalid JSON
+    template: configmap.yaml
+    set:
+      config.kea: null
+    asserts:
+      - failedTemplate:
+          errorMessage: "nico-dhcp: config.kea.hookParameters.nameservers must be set; null is not supported"
+
+  - it: rejects a null NTP server before emitting invalid JSON
+    template: configmap.yaml
+    set:
+      config.kea.hookParameters.ntpServer: null
+    asserts:
+      - failedTemplate:
+          errorMessage: "nico-dhcp: config.kea.hookParameters.ntpServer must be set; null is not supported"
+
+  - it: rejects a null provisioning server before emitting invalid JSON
+    template: configmap.yaml
+    set:
+      config.kea.hookParameters.provisioningServer: null
+    asserts:
+      - failedTemplate:
+          errorMessage: "nico-dhcp: config.kea.hookParameters.provisioningServer must be set; null is not supported"
+
+  - it: preserves explicit empty hook values
+    template: configmap.yaml
+    set:
+      config.kea.hookParameters.nameservers: ""
+      config.kea.hookParameters.ntpServer: ""
+      config.kea.hookParameters.provisioningServer: ""
+    asserts:
+      - matchRegex:
+          path: data["kea_config.json"]
+          pattern: '"nico-nameservers": "",\s*"carbide-nameservers": ""'
+      - matchRegex:
+          path: data["kea_config.json"]
+          pattern: '"nico-ntpserver": "",\s*"carbide-ntpserver": ""'
+      - matchRegex:
+          path: data["kea_config.json"]
+          pattern: '"nico-provisioning-server-ipv4": "",\s*"carbide-provisioning-server-ipv4": ""'
+
+  - it: ignores null structured hook values when raw configuration is supplied
+    template: configmap.yaml
+    set:
+      config.keaConfigJsonRaw: '{"Dhcp4": {}}'
+      config.kea.hookParameters.nameservers: null
+    asserts:
+      - equal:
+          path: data["kea_config.json"]
+          value: |
+            {"Dhcp4": {}}

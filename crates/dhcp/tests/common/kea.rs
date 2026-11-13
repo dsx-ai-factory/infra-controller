@@ -95,6 +95,7 @@ impl Drop for KeaRunPermit {
 
 pub(crate) struct Kea {
     temp_conf_file: PathBuf,
+    lease_file: PathBuf,
 
     dhcp_in_port: u16,
     dhcp_out_port: u16,
@@ -159,6 +160,7 @@ impl Kea {
 
         Ok(Kea {
             temp_conf_file,
+            lease_file,
             temp_base_directory,
             dhcp_in_port,
             dhcp_out_port,
@@ -221,9 +223,20 @@ impl Kea {
     fn run_once(&mut self) -> Result<Option<ExitStatus>, eyre::Report> {
         drop(self.dhcp_in_port_reservation.take());
 
-        let mut process = Command::new("/usr/sbin/kea-dhcp4")
+        let mut command = Command::new("/usr/sbin/kea-dhcp4");
+        // IPv4 must remain usable when both IPv6 native contracts are absent.
+        #[cfg(target_os = "linux")]
+        command
+            .env("LD_PRELOAD", env!("KEA_TEST_LEASE_IO_LIBRARY"))
+            .env("NICO_TEST_REJECT_KEA_CAPABILITY", "*");
+        let mut process = command
             .env("KEA_PIDFILE_DIR", self.temp_base_directory.path())
             .env("KEA_LOCKFILE_DIR", self.temp_base_directory.path())
+            .env("KEA_DHCP_DATA_DIR", self.lease_file.parent().unwrap())
+            .env(
+                "KEA_HOOKS_PATH",
+                Path::new(&super::hook_library_path()).parent().unwrap(),
+            )
             .arg("-c")
             .arg(self.temp_conf_file.as_os_str())
             .arg("-p")
@@ -338,6 +351,15 @@ impl Kea {
 
     fn config(api_server_url: &str, lease_file: &Path) -> String {
         let hook_lib = super::hook_library_path();
+        // Exercise the shipped pool: zero is an allocator-exhaustion sentinel
+        // in Kea 3, so a different test-only range can hide an allocation regression.
+        let chart_values: serde_json::Value = serde_yaml::from_str(include_str!(
+            "../../../../helm/charts/nico-dhcp/values.yaml"
+        ))
+        .expect("DHCP chart defaults must be valid YAML");
+        let default_pool = chart_values["config"]["kea"]["subnet4"][0]["pools"][0]
+            .as_str()
+            .expect("default DHCP pool must be a range string");
 
         let conf = json!({
         "Dhcp4": {
@@ -345,6 +367,7 @@ impl Kea {
                 "interfaces": [ "lo" ],
                 "dhcp-socket-type": "udp"
             },
+            "cache-threshold": 0.0,
             "lease-database": {
                 "type": "memfile",
                 "persist": true,
@@ -377,9 +400,10 @@ impl Kea {
             ],
             "subnet4": [
                 {
+                    "id": 1,
                     "subnet": "0.0.0.0/0",
                     "pools": [{
-                        "pool": "0.0.0.1-255.255.255.254"
+                        "pool": default_pool
                     }]
                 }
             ],

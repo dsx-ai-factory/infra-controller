@@ -14,9 +14,19 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-FROM arm64v8/rust:1.97.1-slim-bookworm@sha256:b28e5606d830400fabf789f910f9ed2ea22cdd6d51d463c5d0baa30bb2bedb2d
+ARG CONTAINER_BASE_IMAGE=arm64v8/rust:1.97.1-slim-bookworm@sha256:b28e5606d830400fabf789f910f9ed2ea22cdd6d51d463c5d0baa30bb2bedb2d
+ARG KEA_BUILD_BASE_IMAGE=arm64v8/debian:12-slim@sha256:6bd27d44e6c32a66bbd72d7cb2b76a8ae3497ec2e5274a81abd1b37f6013fa1f
+FROM ${KEA_BUILD_BASE_IMAGE} AS kea-builder
+ARG KEA_VERSION
+COPY dev/docker/build-kea.sh dev/docker/kea-lease6-replacement.patch dev/docker/setup-kea-repository.sh dev/docker/isc-kea-3-0.asc /tmp/kea-build/
+RUN /tmp/kea-build/build-kea.sh "${KEA_VERSION}"
+
+FROM ${CONTAINER_BASE_IMAGE}
 
 ARG KEA_VERSION
+
+COPY dev/docker/setup-kea-repository.sh dev/docker/isc-kea-3-0.asc /tmp/kea-repository/
+RUN sh /tmp/kea-repository/setup-kea-repository.sh && rm -rf /tmp/kea-repository
 
 # Set in gitlab-templates/scripts/build-push-container-image.sh
 ARG CI_COMMIT_SHORT_SHA
@@ -44,9 +54,11 @@ RUN CACHEKEY=${CI_COMMIT_SHORT_SHA} apt update &&  \
 		iproute2 \
 		iputils-ping \
 		jq \
-		kea-dev=${KEA_VERSION} \
-		kea-dhcp4-server=${KEA_VERSION} \
-		kea-dhcp6-server=${KEA_VERSION} \
+		isc-kea-common=${KEA_VERSION} \
+		isc-kea-hooks=${KEA_VERSION} \
+		isc-kea-dev=${KEA_VERSION} \
+		isc-kea-dhcp4=${KEA_VERSION} \
+		isc-kea-dhcp6=${KEA_VERSION} \
 		libboost-dev \
 		libgrpc-dev \
 		libopenipmi-dev \
@@ -71,19 +83,14 @@ RUN CACHEKEY=${CI_COMMIT_SHORT_SHA} apt update &&  \
 		git \
 	&& rm -rf /var/lib/apt/lists/*
 
-RUN test "$(dpkg-query -W -f='${Version}' kea-dev)" = "${KEA_VERSION}" && \
+COPY --from=kea-builder /kea-packages/isc-kea-common.deb /opt/kea/isc-kea-common.deb
+RUN dpkg -i /opt/kea/isc-kea-common.deb
+
+RUN test "$(dpkg-query -W -f='${Version}' isc-kea-dev)" = "${KEA_VERSION}" && \
 	kea-dhcp6 -V
 
-# Debian's Kea 2.2.0-6 development package omits a header required by
-# lease_mgr_factory.h. Restore the upstream declaration without changing Kea.
-RUN if [ ! -f /usr/include/kea/dhcpsrv/cfg_globals.h ]; then \
-	test "${KEA_VERSION}" = "2.2.0-6" && \
-	curl -fsSL https://raw.githubusercontent.com/isc-projects/kea/becddc2abdfba6d2ae305768c5ea334d9dede0de/src/lib/dhcpsrv/cfg_globals.h -o /tmp/kea-cfg_globals.h && \
-	echo 'e536a71235493949d9fc07c1ec1ff69b82c9d215627ba4bd1bfd2e2e6ac5c50e  /tmp/kea-cfg_globals.h' | sha256sum -c - && \
-	install -m 0644 /tmp/kea-cfg_globals.h /usr/include/kea/dhcpsrv/cfg_globals.h && \
-	rm /tmp/kea-cfg_globals.h; \
-	fi && \
-	printf '#include <dhcpsrv/lease_mgr_factory.h>\n' | c++ -x c++ -fsyntax-only -I/usr/include/kea -
+# Verify the shipped development headers needed by the native hook.
+RUN printf '#include <dhcpsrv/lease_mgr_factory.h>\n' | c++ -x c++ -fsyntax-only -I/usr/include/kea -
 
 # Keep the system linker for non-Rust builds such as iPXE, whose linker script
 # is not accepted by mold. Cargo uses this wrapper even outside the repository.

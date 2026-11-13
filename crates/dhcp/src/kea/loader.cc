@@ -16,6 +16,7 @@
  */
 
 #include <csignal>
+#include <dlfcn.h>
 
 #include <asiolink/io_address.h>
 #include <asiolink/io_error.h>
@@ -33,8 +34,8 @@ isc::log::Logger loader_logger("kea-shim-loader");
 using namespace isc::hooks;
 using namespace isc::data;
 
-static_assert(KEA_HOOKS_VERSION >= 20200,
-              "carbide-dhcp requires Kea 2.2 or newer");
+static_assert(KEA_HOOKS_VERSION >= 30000,
+              "nico-dhcp requires Kea 3.0 or newer");
 
 using StringSetter = void (*)(const char *);
 using ValidatedStringSetter = bool (*)(const char *);
@@ -195,15 +196,57 @@ ConstElementPtr disabled_rapid_commit_subnet(ConstElementPtr config) {
   return ConstElementPtr();
 }
 
+// Native Kea can reprocess FQDN policy after SELECT when a pool or subnet
+// changes. The replacement contract requires a stable policy through both
+// persistence and response generation, so reject differing scoped overrides.
+std::string differing_ddns_policy(ConstElementPtr scope, ConstElementPtr global) {
+  static const char *const policy_keys[] = {
+      "ddns-send-updates", "ddns-override-no-update", "ddns-override-client-update",
+      "ddns-replace-client-name", "ddns-generated-prefix", "ddns-qualifying-suffix",
+      "hostname-char-set", "hostname-char-replacement"};
+  if (scope != global) {
+    for (const auto key : policy_keys) {
+      const auto value = scope->get(key);
+      const auto inherited = global->get(key);
+      if (value && (!inherited || !value->equals(*inherited))) {
+        return key;
+      }
+    }
+  }
+  for (const auto list : {"shared-networks", "subnet6", "pools"}) {
+    if (const auto children = scope->get(list)) {
+      for (const auto &child : children->listValue()) {
+        const auto key = differing_ddns_policy(child, global);
+        if (!key.empty()) {
+          return key;
+        }
+      }
+    }
+  }
+  return "";
+}
+
 // Reject configurations where Core would commit a SOLICIT but Kea would only
 // advertise a fake allocation. Kea 2.2+ propagates DROP as a config error.
 extern "C" int dhcp6_srv_configured(CalloutHandle &handle) {
+  ConstElementPtr config;
+  handle.getArgument("json_config", config);
+  const auto ddns = config->get("dhcp-ddns");
+  const auto enabled = ddns ? ddns->get("enable-updates") : ConstElementPtr();
+  if (enabled && enabled->boolValue()) {
+    const auto key = differing_ddns_policy(config, config);
+    if (!key.empty()) {
+      const std::string error = "NICo DHCPv6 handoff requires uniform global DDNS policy; differing scoped " + key;
+      LOG_ERROR(loader_logger, "%1").arg(error);
+      handle.setArgument("error", error);
+      handle.setStatus(CalloutHandle::NEXT_STEP_DROP);
+      return 0;
+    }
+  }
   if (!hook_get_config_rapid_commit_v6()) {
     return 0;
   }
 
-  ConstElementPtr config;
-  handle.getArgument("json_config", config);
   const auto disabled = disabled_rapid_commit_subnet(config);
   if (!disabled) {
     return 0;
@@ -220,7 +263,23 @@ extern "C" int dhcp6_srv_configured(CalloutHandle &handle) {
   return 0;
 }
 
+bool require_runtime_capability(const char *name) {
+  const auto capability = reinterpret_cast<int (*)()>(dlsym(RTLD_DEFAULT, name));
+  if (capability && capability() == 2) {
+    return true;
+  }
+  LOG_ERROR(loader_logger, isc::log::LOG_CARBIDE_GENERIC)
+      .arg(std::string("NICo DHCPv6 requires patched Kea; missing runtime capability: ") +
+           name + ". Use the repository build/runtime images and matching hook library.");
+  return false;
+}
+
 bool configure_v6(LibraryHandle *handle) {
+  // Package versions do not distinguish stock Kea from our native backports.
+  // Reject incompatible runtimes before starting metrics or serving packets.
+  if (!require_runtime_capability("nico_kea_lease6_handoff_contract")) {
+    return false;
+  }
   // New DHCPv6 hook params intentionally use hook-* names.
   if (!set_validated_string_parameter(handle, "hook-dns-servers-ipv6",
                                       hook_set_config_dns_servers_ipv6) ||
@@ -239,6 +298,8 @@ bool configure_v6(LibraryHandle *handle) {
   handle->registerCallout("dhcp6_srv_configured", dhcp6_srv_configured);
 
   handle->registerCallout("pkt6_receive", pkt6_receive);
+  handle->registerCallout("lease6_existing", lease6_existing);
+  handle->registerCallout("ddns6_update", ddns6_update);
   handle->registerCallout("lease6_select", lease6_select);
   handle->registerCallout("lease6_renew", lease6_renew);
   handle->registerCallout("lease6_rebind", lease6_rebind);

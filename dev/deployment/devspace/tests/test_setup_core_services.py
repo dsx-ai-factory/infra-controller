@@ -15,7 +15,7 @@ SCRIPT = Path(__file__).resolve().parents[1] / "setup-core-services.sh"
 
 class SetupCoreServicesTest(unittest.TestCase):
     def test_dhcp_service_addresses(self):
-        for case in ("placeholders", "configured", "ipv6-only", "api-error", "retry-rollout"):
+        for case in ("placeholders", "configured", "ipv6-only", "api-error", "retry-rollout", "float-options"):
             with self.subTest(case=case), tempfile.TemporaryDirectory() as directory:
                 placeholders = {
                     "nameservers": "REPLACE_WITH_NICO_DNS_VIP",
@@ -31,6 +31,8 @@ class SetupCoreServicesTest(unittest.TestCase):
                 config = {"Dhcp4": {"hooks-libraries": [{
                     "library": "/usr/lib/kea/hooks/libdhcp.so", "parameters": parameters
                 }], "valid-lifetime": 3600}}
+                if case == "float-options":
+                    config["Dhcp4"]["cache-threshold"] = 0.0
                 (Path(directory) / "config.json").write_text(json.dumps({
                     "data": {"kea_config.json": json.dumps(config)}
                 }))
@@ -98,6 +100,8 @@ bash "$1" isolated
                                 for key, ip in zip(placeholders, ("10.96.1.1", "10.96.1.2", "10.96.1.3"))}
                     config["Dhcp4"]["hooks-libraries"][0]["parameters"] = expected
                     self.assertEqual(updated, config)
+                    if case == "float-options":
+                        self.assertIsInstance(updated["Dhcp4"]["cache-threshold"], float)
                 canonical = json.dumps(config, sort_keys=True, separators=(",", ":")) + "\n"
                 checksum = hashlib.sha256(canonical.encode()).hexdigest()
                 patch = json.loads(deployment_patch.read_text())

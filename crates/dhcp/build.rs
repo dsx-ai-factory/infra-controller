@@ -61,6 +61,49 @@ fn main() {
         .expect("Unable to generate bindings")
         .write_to_file(format!("{kea_shim_root}/carbide_rust.h"));
 
+    #[cfg(target_os = "linux")]
+    if env::var_os("CARGO_FEATURE_TEST_SUPPORT").is_some() {
+        let source = "tests/common/lease_io_fault.c";
+        let library = PathBuf::from(env::var_os("OUT_DIR").unwrap()).join("lease_io_fault.so");
+        let status = cc::Build::new()
+            .get_compiler()
+            .to_command()
+            .args(["-shared", "-fPIC", source, "-ldl", "-pthread", "-o"])
+            .arg(&library)
+            .status()
+            .expect("compile lease I/O test helper");
+        assert!(status.success(), "lease I/O test helper compilation failed");
+        println!(
+            "cargo:rustc-env=KEA_TEST_LEASE_IO_LIBRARY={}",
+            library.display()
+        );
+        println!("cargo:rerun-if-changed={source}");
+    }
+
+    #[cfg(target_os = "linux")]
+    if env::var_os("CARGO_FEATURE_TEST_SUPPORT").is_some() {
+        let source = "tests/common/lease_read_barrier.cc";
+        let library = PathBuf::from(env::var_os("OUT_DIR").unwrap()).join("lease_read_barrier.so");
+        let status = cc::Build::new()
+            .cpp(true)
+            .get_compiler()
+            .to_command()
+            .args(["-shared", "-fPIC", source, "-I"])
+            .arg(&kea_include_path)
+            .arg("-L")
+            .arg(kea_lib_path)
+            .args(["-lkea-hooks", "-o"])
+            .arg(&library)
+            .status()
+            .expect("compile lease read barrier");
+        assert!(status.success(), "lease read barrier compilation failed");
+        println!(
+            "cargo:rustc-env=KEA_TEST_LEASE_READ_LIBRARY={}",
+            library.display()
+        );
+        println!("cargo:rerun-if-changed={source}");
+    }
+
     cc::Build::new()
         .cpp(true)
         .file(format!("{kea_shim_root}/logger.cc"))
@@ -82,6 +125,7 @@ fn main() {
     println!("cargo:rustc-link-search=native={}", kea_lib_path.display());
     println!("cargo:rustc-link-lib=keashim");
     println!("cargo:rustc-link-lib=stdc++");
+    println!("cargo:rustc-link-lib=dl");
     println!("cargo:rustc-link-lib=kea-asiolink");
     println!("cargo:rustc-link-lib=kea-dhcpsrv");
     println!("cargo:rustc-link-lib={kea_dhcp_lib}");

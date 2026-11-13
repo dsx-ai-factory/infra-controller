@@ -4,6 +4,33 @@ Use this guide to enable NICo's opt-in Dynamic Host Configuration Protocol for I
 
 The Core chart runs Kea DHCPv4 in `nico-dhcp` and, when enabled, Kea DHCPv6 in `nico-dhcp6`. The Deployments have separate pods, selectors, configuration, Services, probes, and rollouts. Both use the same image, hook library, ServiceAccount, client certificate, and application programming interface (API) identity. Both hooks call the same API through gRPC with mutual Transport Layer Security (mTLS). API role-based access control (RBAC) continues to apply.
 
+## Kea Runtime Compatibility
+
+Use the NICo hook and patched Kea runtime built from the same repository
+revision. The build and runtime images use the ISC Kea 3.0 LTS packages pinned in
+[`kea.version`](https://github.com/dsx-ai-factory/infra-controller/blob/main/dev/docker/kea.version).
+[`build-kea.sh`](https://github.com/dsx-ai-factory/infra-controller/blob/main/dev/docker/build-kea.sh)
+verifies the release source checksum and rebuilds the allocation and CSV utility libraries with
+[`kea-lease6-replacement.patch`](https://github.com/dsx-ai-factory/infra-controller/blob/main/dev/docker/kea-lease6-replacement.patch).
+It preserves the other ISC package libraries and files. The patch provides safe
+lease replacement, existing-lease validation, reclamation refusal, and correct
+memfile pool accounting after restart. The Kea 2
+null-result backport is unnecessary in Kea 3.
+
+The DHCPv6 hook checks `nico_kea_lease6_handoff_contract` at startup. Stock Kea
+and an older NICo patch lack that contract and fail with
+`NICo DHCPv6 requires patched Kea`. The package version alone does not establish
+compatibility. Reinstalling the stock libraries prevents DHCPv6 startup;
+rebuild and redeploy the matching NICo image. DHCPv4 does not require this DHCPv6
+contract. No chart value or lease-file schema change is required by the handoff.
+
+The repository build images, DevSpace, Tilt, and native Ubuntu preparation all
+install the patched package. Native preparation builds against its host
+distribution; do not copy a Debian library into Ubuntu. Manual package-manager
+installation alone does not apply the patch. For DHCP tests, use the repository
+build image or rerun
+[`prepare-ubuntu-host-for-dev.sh`](https://github.com/dsx-ai-factory/infra-controller/blob/main/dev/deployment/devspace/prepare-ubuntu-host-for-dev.sh).
+
 ## Network and Identity Requirements
 
 Before enabling the DHCPv6 workload, review the following requirements:
@@ -76,6 +103,81 @@ nico-dhcp:
 Apply through the site's normal Helm upgrade workflow, using the Core image and chart from the same repository revision as required by the [image compatibility policy](https://github.com/dsx-ai-factory/infra-controller/blob/main/helm/README.md#image-configuration). When upgrading from a revision without the `dhcp` and `v6ExternalService` maps, update both the chart and Core image. DSX, hardware-health, and PXE use their dual-stack listener defaults unless an explicit listener configuration overrides them. Setting `dhcp.v6Enabled: false` removes the v6 resources while preserving the v4 pod template. The v6 Deployment uses `Recreate` so old and replacement v6 pods do not serve simultaneously.
 
 The example enables address allocation, not HTTP boot. Refer to [Helm Values](#helm-values) for the complete settings and defaults, then complete [Deployment Verification and Metrics](#deployment-verification-and-metrics).
+
+## Lease Handoff and Refusal
+
+Firmware and the installed OS can use different DUIDs or IAIDs for the same NIC.
+The hook redirects allocation to Core's IA_NA address. Replacing an assigned,
+released, or reclaimed lease at that target requires a matching stored MAC and subnet. A
+foreign or unknown MAC, another subnet, or a declined target is refused.
+Ordinary SOLICIT preserves the old owner; REQUEST or jointly enabled Rapid
+Commit persists the replacement in one native update. A failed update leaves
+the old target available for retry. This handoff does not expire Core's
+assignment for the target address. Reclamation of another expired allocation
+candidate is a separate operation and can succeed before the target write fails.
+Firmware RELEASE ends the local Kea lease without expiring Core's assignment.
+Once Kea considers the released lease expired, the OS can reuse it without
+waiting for a background reclamation pass. Allocation-time retirement of that
+same NIC's selected expired or released target also preserves Core's assignment.
+Background reclamation retains the normal scoped expiry notification, including
+released firmware leases that the OS has not yet reclaimed. If Core's
+`dhcp_lease_expiry_handling` is enabled, that notification removes the matching
+Core allocation; the next discovery must allocate again. It is disabled by default.
+
+Kea 3 enables multithreading by default; the repository chart explicitly disables
+it. For configurations that enable multithreading, the hook holds MAC and address guards
+through native packet processing; contention is refused with
+`lease_transaction_busy`, allowing the client to retry. Existing-DUID paths
+also validate their persisted lease snapshots and acquire each address guard
+before native reservation cleanup or updates, including queued continuations.
+A different relay MAC cannot use an unhinted firmware DUID/IAID request to
+restore a stale owner after handoff. Unrelated clients can continue while Core
+discovery is pending. Background reclamation retains acquired guards until the
+pass finishes, so a competing client may need to retry. These guards coordinate
+one Kea process, not external lease writers or multiple active servers.
+
+A failed retirement write vetoes native reclamation before counters change and
+before allocation or renewal continues. Kea 3's default memfile failure policy
+stops the server on fatal storage I/O errors. With native or externally mounted
+lease storage, restore storage and restart with the retained lease files before
+retrying. The chart does not mount a volume at `/var/lib/kea`: its lease files
+live in ephemeral container storage and are lost on container or pod replacement.
+Retained-file recovery requires operator-provided storage and a single writer.
+A custom `serve-retry-continue` policy permits in-process retries, but still
+cannot bypass a refused retirement. Delayed RENEW or REBIND with the previous DUID or IAID is dropped with
+`stale_lease_identity` and does not extend or replace the new owner's lease.
+The identity check also applies to expired, released, and reclaimed rows.
+A new boot stage must use SOLICIT/REQUEST or Rapid Commit to acquire ownership.
+The receive-side drop sends no reply; a client that only retries RENEW/REBIND
+recovers when it restarts discovery, according to its fallback policy and
+remaining valid lifetime (the chart default is 7200 seconds). Refusal in the
+native existing-lease path can return an IA-scoped failure. Inspect the `reason` label on
+`carbide_dhcp_v6_requests_dropped_total` when diagnosing retries across boot stages.
+
+The IPv6 memfile writer closes and truncates a failed append to its previous
+offset before reopening it. Refused buffered rows cannot be replayed by a later
+append or graceful shutdown. Recovery reopens the existing file without a create/truncate fallback.
+If truncation fails, Kea stops even with `serve-retry-continue`; inspect and
+repair any retained lease file before restart. Reopen failures retain fatal-error handling. This is not a power-loss
+or cross-process transaction guarantee.
+
+The chart does not enable native D2 updates. If a custom configuration enables
+D2, successful replacement uses Kea 3's native chained request to remove the
+old target's DUID/FQDN ownership before adding the new identity. This applies
+when the hostname stays the same, changes, or is generated by Kea after allocation. If the new lease
+does not request DNS updates or its hostname is scrubbed to empty, replacement
+queues only the old owner's removal.
+Failed persistence queues no replacement cleanup. D2 delivery and DNS-server
+acceptance remain subject to Kea's configured queue, transport, and DNS policy.
+For native reuse of an expired or released lease, reclamation sends its removal
+separately from the subsequent addition, following Kea's normal D2 behavior.
+With D2 enabled, the hook rejects differing shared-network, subnet, or pool
+overrides of `ddns-send-updates`, `ddns-override-no-update`,
+`ddns-override-client-update`, `ddns-replace-client-name`, `ddns-generated-prefix`,
+`ddns-qualifying-suffix`, `hostname-char-set`, and `hostname-char-replacement`.
+Configure these policies globally so post-allocation FQDN processing cannot
+invalidate the handoff's cleanup decision. Identical scoped values are accepted;
+TTL and conflict-resolution settings retain native Kea behavior.
 
 ## Deployment Verification and Metrics
 

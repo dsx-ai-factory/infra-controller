@@ -1,0 +1,66 @@
+#!/bin/sh
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+set -eu
+
+# Rebuild the allocation and CSV utility libraries from the exact ISC release.
+# Keep the ISC package's other libraries, service files and ABI intact.
+kea_version="$1"
+test "${kea_version%%-*}" = '3.0.5'
+script_dir=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
+sh "$script_dir/setup-kea-repository.sh"
+apt-get update
+apt-get install -y --no-install-recommends \
+    build-essential curl xz-utils patch pkg-config python3-venv ninja-build patchelf \
+    libboost-system-dev liblog4cplus-dev libssl-dev libkrb5-dev libpq-dev libmariadb-dev \
+    "isc-kea-common=$kea_version" "isc-kea-dev=$kea_version"
+
+build_dir=$(mktemp -d)
+trap 'rm -rf "$build_dir"' EXIT HUP INT TERM
+package_dir="${KEA_PACKAGE_DIR:-/kea-packages}"
+mkdir -p "$package_dir"
+cd "$build_dir"
+curl --fail --location --retry 3 https://downloads.isc.org/isc/kea/3.0.5/kea-3.0.5.tar.xz -o kea.tar.xz
+printf '%s  kea.tar.xz\n' '03ac2443f75b56c8c58144e2929230ce430cf7a2f85f0e2c056fb14933feb5eb' | sha256sum -c -
+tar -xJf kea.tar.xz
+cd kea-3.0.5
+patch --fuzz=0 -p1 < "$script_dir/kea-lease6-replacement.patch"
+python3 -m venv "$build_dir/meson"
+"$build_dir/meson"/bin/pip install --no-cache-dir meson==1.9.1
+multiarch=$(dpkg-architecture -qDEB_HOST_MULTIARCH)
+"$build_dir/meson"/bin/meson setup build --prefix=/usr --libdir="lib/$multiarch" \
+    --libexecdir=lib/kea --sysconfdir=/etc/kea --localstatedir=/var \
+    --sharedstatedir=/var/lib/kea --buildtype=release -Dcpp_std=c++17 \
+    -Dnetconf=disabled -Dtests=disabled -Dmysql=enabled -Dpostgresql=enabled -Dkrb5=enabled
+libraries='dhcpsrv/libkea-dhcpsrv.so.133.0.0 util/libkea-util.so.104.0.0'
+ninja -C build -j "${KEA_BUILD_JOBS:-4}" src/lib/dhcpsrv/libkea-dhcpsrv.so.133.0.0
+(cd "$build_dir" && apt-get download "isc-kea-common=$kea_version" && \
+    dpkg-deb --raw-extract ./isc-kea-common_*.deb package)
+for entry in $libraries; do
+    library=${entry##*/}
+    # Runtime must use the matching ISC dependencies, not the Meson build tree.
+    patchelf --remove-rpath "build/src/lib/$entry"
+    # Keep every exported strong symbol from both pinned ISC libraries.
+    nm -D --defined-only "$build_dir/package/usr/lib/$multiarch/$library" > "$build_dir/stock.nm"
+    nm -D --defined-only "build/src/lib/$entry" > "$build_dir/patched.nm"
+    awk '$2 ~ /^[TDBR]$/ {print $3}' "$build_dir/stock.nm" | LC_ALL=C sort > "$build_dir/stock.symbols"
+    awk '$2 ~ /^[TDBR]$/ {print $3}' "$build_dir/patched.nm" | LC_ALL=C sort > "$build_dir/patched.symbols"
+    test -s "$build_dir/stock.symbols"
+    test -s "$build_dir/patched.symbols"
+    LC_ALL=C comm -23 "$build_dir/stock.symbols" "$build_dir/patched.symbols" > "$build_dir/missing.symbols"
+    test ! -s "$build_dir/missing.symbols" || { cat "$build_dir/missing.symbols" >&2; exit 1; }
+done
+
+cd "$build_dir"
+for entry in $libraries; do
+    library=${entry##*/}
+    cp "kea-3.0.5/build/src/lib/$entry" "package/usr/lib/$multiarch/$library"
+    sed -i "\|usr/lib/$multiarch/$library$|d" package/DEBIAN/md5sums
+    (cd package && md5sum "usr/lib/$multiarch/$library" >> DEBIAN/md5sums)
+done
+# Preserve the package version: all ISC components depend on this exact build.
+# The hook checks the native capability, not the version string, at startup.
+mkdir -p package/usr/share/doc/isc-kea-common
+sha256sum "$script_dir/kea-lease6-replacement.patch" > package/usr/share/doc/isc-kea-common/nico-handoff-patch.sha256
+(cd package && md5sum usr/share/doc/isc-kea-common/nico-handoff-patch.sha256 >> DEBIAN/md5sums)
+dpkg-deb --build --root-owner-group package "$package_dir/isc-kea-common.deb"
