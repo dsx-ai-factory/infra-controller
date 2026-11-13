@@ -21,6 +21,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use bmc_explorer::Product;
+use bmc_platform::{PowerState, ResetType};
+use bmc_runtime::DriverConnector;
 use carbide_ipmi::IPMITool;
 use carbide_redfish::boot_interface::BootInterfaceTarget;
 use carbide_redfish::libredfish::BmcCredentialOps;
@@ -111,10 +113,18 @@ impl AuthenticatedBmcClient {
             credential_client: CredentialClient::new(credential_manager),
         }
     }
+
+    /// Runs moved BMC operations through `driver_connector`; `None` keeps them on
+    /// libredfish.
+    pub fn with_driver_connector(mut self, driver_connector: Option<Arc<DriverConnector>>) -> Self {
+        self.redfish_client.driver_connector = driver_connector;
+        self
+    }
 }
 
 /// An `EndpointExplorer` which uses redfish APIs to query the endpoint
 pub struct BmcEndpointExplorer {
+    instrumentation: carbide_instrument::Instrumentation,
     bmc_client: Arc<AuthenticatedBmcClient>,
     rotate_switch_nvos_credentials: Arc<AtomicBool>,
     /// Whether nv-redfish reports include drive firmware inventory entries.
@@ -128,13 +138,16 @@ pub struct BmcEndpointExplorer {
 }
 
 impl BmcEndpointExplorer {
-    /// Build an explorer over the shared authenticated BMC client.
+    /// Builds an explorer over the shared authenticated BMC client and supplied
+    /// Event instrumentation. Retain its provider while the explorer runs.
     pub fn new(
         bmc_client: Arc<AuthenticatedBmcClient>,
         rotate_switch_nvos_credentials: Arc<AtomicBool>,
         database_connection: Option<PgPool>,
+        instrumentation: carbide_instrument::Instrumentation,
     ) -> Self {
         Self {
+            instrumentation,
             bmc_client,
             rotate_switch_nvos_credentials,
             explore_drive_firmware: false,
@@ -537,7 +550,7 @@ impl BmcEndpointExplorer {
                     sitewide_bmc_password,
                 )
                 .await;
-            carbide_instrument::emit(BmcPasswordRotationFinished {
+            self.instrumentation.emit(BmcPasswordRotationFinished {
                 outcome: carbide_instrument::Outcome::from(&rotation),
                 bmc_ip_address,
                 bmc_mac_address,
@@ -753,6 +766,23 @@ impl AuthenticatedBmcClient {
     }
 }
 
+pub(crate) fn record_machine_identity(
+    machine_id: &carbide_uuid::machine::MachineId,
+    bmc_ip: Option<std::net::IpAddr>,
+) {
+    let id = machine_id.to_string();
+    let predicted = machine_id.machine_type().is_predicted_host();
+    let host = !machine_id.machine_type().is_dpu();
+    trace_propagation::MachineTraceAttributes {
+        machine_id: (!predicted).then_some(id.as_str()),
+        predicted_id: predicted.then_some(id.as_str()),
+        bmc_ip,
+        managed_host_id: host.then_some(id.as_str()),
+        managed_host_bmc_ip: if host { bmc_ip } else { None },
+    }
+    .record_on(&tracing::Span::current());
+}
+
 #[async_trait::async_trait]
 impl EndpointExplorer for BmcEndpointExplorer {
     async fn check_preconditions(
@@ -776,6 +806,16 @@ impl EndpointExplorer for BmcEndpointExplorer {
         last_exploration_error: Option<&EndpointExplorationError>,
         boot_interface: Option<&BootInterfaceTarget>,
     ) -> Result<EndpointExplorationReport, EndpointExplorationError> {
+        if let Some(machine_id) = interface.machine_id {
+            record_machine_identity(&machine_id, Some(bmc_ip_address.ip()));
+        } else {
+            trace_propagation::MachineTraceAttributes {
+                bmc_ip: Some(bmc_ip_address.ip()),
+                ..Default::default()
+            }
+            .record_on(&tracing::Span::current());
+        }
+
         // If the site explorer was previously unable to login to the root BMC account using
         // the expected credentials, wait for an operator to manually intervene.
         // This will avoid locking us out of BMCs.
@@ -997,7 +1037,8 @@ impl AuthenticatedBmc for AuthenticatedBmcClient {
         &self,
         bmc_ip_address: SocketAddr,
         interface: &MachineInterfaceSnapshot,
-    ) -> Result<libredfish::PowerState, EndpointExplorationError> {
+        report: Option<&EndpointExplorationReport>,
+    ) -> Result<Option<PowerState>, EndpointExplorationError> {
         let bmc_mac_address = interface.mac_address;
 
         match self.get_bmc_root_credentials(bmc_mac_address).await {
@@ -1009,6 +1050,7 @@ impl AuthenticatedBmc for AuthenticatedBmcClient {
                             bmc_mac_address,
                             credentials,
                         },
+                        report,
                     )
                     .await
             }
@@ -1028,7 +1070,8 @@ impl AuthenticatedBmc for AuthenticatedBmcClient {
         &self,
         bmc_ip_address: SocketAddr,
         interface: &MachineInterfaceSnapshot,
-        action: libredfish::SystemPowerControl,
+        report: Option<&EndpointExplorationReport>,
+        action: ResetType,
     ) -> Result<(), EndpointExplorationError> {
         let bmc_mac_address = interface.mac_address;
 
@@ -1041,6 +1084,7 @@ impl AuthenticatedBmc for AuthenticatedBmcClient {
                             bmc_mac_address,
                             credentials,
                         },
+                        report,
                         action,
                     )
                     .await
@@ -1061,8 +1105,9 @@ impl AuthenticatedBmc for AuthenticatedBmcClient {
         &self,
         bmc_ip_address: SocketAddr,
         interface: &MachineInterfaceSnapshot,
+        report: Option<&EndpointExplorationReport>,
         chassis_id: &str,
-        action: libredfish::SystemPowerControl,
+        action: ResetType,
     ) -> Result<(), EndpointExplorationError> {
         let bmc_mac_address = interface.mac_address;
         let credentials = self.get_bmc_root_credentials(bmc_mac_address).await?;
@@ -1073,6 +1118,7 @@ impl AuthenticatedBmc for AuthenticatedBmcClient {
                     bmc_mac_address,
                     credentials,
                 },
+                report,
                 chassis_id,
                 action,
             )
@@ -1544,12 +1590,16 @@ mod tests {
     use carbide_test_harness::prelude::{sqlx_test, sqlx_testing};
     use carbide_test_support::Outcome::*;
     use carbide_test_support::{Case, check_cases_async};
+    use carbide_utils::test_support::test_meter::TestMeter;
     use model::expected_power_shelf::ExpectedPowerShelf;
     use model::metadata::Metadata;
 
     use super::*;
 
-    fn explorer_with_redfish_sim(sim: Arc<RedfishSim>) -> BmcEndpointExplorer {
+    fn explorer_with_redfish_sim(
+        sim: Arc<RedfishSim>,
+        instrumentation: carbide_instrument::Instrumentation,
+    ) -> BmcEndpointExplorer {
         let proxy_address = Arc::new(ArcSwap::new(Arc::new(None)));
         let bmc_client = Arc::new(AuthenticatedBmcClient::new(
             sim,
@@ -1558,12 +1608,21 @@ mod tests {
             carbide_ipmi::test_support(),
             Arc::new(TestCredentialManager::default()),
         ));
-        BmcEndpointExplorer::new(bmc_client, Arc::new(AtomicBool::new(false)), None)
+        BmcEndpointExplorer::new(
+            bmc_client,
+            Arc::new(AtomicBool::new(false)),
+            None,
+            instrumentation,
+        )
     }
 
     #[sqlx_test]
     async fn retained_bmc_credentials_are_enrolled_without_a_site_version(pool: PgPool) {
-        let mut explorer = explorer_with_redfish_sim(Arc::new(RedfishSim::default()));
+        let test_meter = TestMeter::default();
+        let mut explorer = explorer_with_redfish_sim(
+            Arc::new(RedfishSim::default()),
+            carbide_instrument::Instrumentation::new(test_meter.meter()),
+        );
         explorer.database_connection = Some(pool.clone());
         let mac = "02:00:00:00:00:01".parse().unwrap();
         let credentials = explorer
@@ -1603,10 +1662,14 @@ mod tests {
 
     #[tokio::test]
     async fn successful_power_shelf_vendor_fallback_does_not_log_service_root_failure() {
+        let test_meter = TestMeter::default();
         let sim = Arc::new(RedfishSim::default());
         sim.set_service_root_vendor(Some("Unrecognized Vendor".to_string()));
         sim.set_chassis_manufacturer(Some("LITE-ON TECHNOLOGY CORP.".to_string()));
-        let explorer = explorer_with_redfish_sim(sim);
+        let explorer = explorer_with_redfish_sim(
+            sim,
+            carbide_instrument::Instrumentation::new(test_meter.meter()),
+        );
         let bmc_ip_address: SocketAddr = "127.0.0.1:443".parse().unwrap();
         let bmc_mac_address = "02:00:00:00:00:01".parse().unwrap();
         let expected = ExpectedEntity::PowerShelf(ExpectedPowerShelf {
@@ -1637,9 +1700,13 @@ mod tests {
 
     #[tokio::test]
     async fn terminal_service_root_failure_is_logged_once() {
+        let test_meter = TestMeter::default();
         let sim = Arc::new(RedfishSim::default());
         sim.set_service_root_vendor(Some("Unrecognized Vendor".to_string()));
-        let explorer = explorer_with_redfish_sim(sim);
+        let explorer = explorer_with_redfish_sim(
+            sim,
+            carbide_instrument::Instrumentation::new(test_meter.meter()),
+        );
         let bmc_ip_address: SocketAddr = "127.0.0.1:443".parse().unwrap();
         let bmc_mac_address = "02:00:00:00:00:01".parse().unwrap();
 
@@ -1665,6 +1732,7 @@ mod tests {
     }
 
     async fn explore_router_in_default_mode(router: Router) -> EndpointExplorationReport {
+        let test_meter = TestMeter::default();
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let bmc_ip_address = listener.local_addr().unwrap();
         let _server = CombinedServer::run_router(
@@ -1674,14 +1742,17 @@ mod tests {
             bmc_mock::tls::server_config(None::<&str>).unwrap(),
         );
 
-        explorer_with_redfish_sim(Arc::new(RedfishSim::default()))
-            .generate_exploration_report(
-                bmc_ip_address,
-                BmcAccess::Direct(Credentials::new("root", "password")),
-                None,
-            )
-            .await
-            .unwrap()
+        explorer_with_redfish_sim(
+            Arc::new(RedfishSim::default()),
+            carbide_instrument::Instrumentation::new(test_meter.meter()),
+        )
+        .generate_exploration_report(
+            bmc_ip_address,
+            BmcAccess::Direct(Credentials::new("root", "password")),
+            None,
+        )
+        .await
+        .unwrap()
     }
 
     #[tokio::test]
@@ -1730,7 +1801,7 @@ mod tests {
         .await;
 
         assert_eq!(
-            bmc_explorer::platform_identity(&report)
+            bmc_runtime::platform_identity(&report)
                 .service_root
                 .vendor
                 .as_deref(),
@@ -1779,6 +1850,7 @@ mod tests {
     }
 
     struct ReingestionFixture {
+        _test_meter: TestMeter,
         sim: Arc<RedfishSim>,
         credential_manager: Arc<TestCredentialManager>,
         explorer: BmcEndpointExplorer,
@@ -1842,7 +1914,14 @@ mod tests {
             carbide_ipmi::test_support(),
             credential_manager.clone(),
         ));
-        let explorer = BmcEndpointExplorer::new(bmc_client, Arc::new(AtomicBool::new(false)), None);
+        let test_meter = TestMeter::default();
+        let metrics = MetricsCapture::for_registry(test_meter.registry());
+        let explorer = BmcEndpointExplorer::new(
+            bmc_client,
+            Arc::new(AtomicBool::new(false)),
+            None,
+            carbide_instrument::Instrumentation::new(test_meter.meter()),
+        );
         let bmc_ip_address: SocketAddr = "127.0.0.1:443".parse().expect("valid test BMC address");
         let bmc_mac_address: MacAddress = "02:00:00:00:00:01".parse().expect("valid test BMC MAC");
         let interface = MachineInterfaceSnapshot::mock_with_mac(bmc_mac_address);
@@ -1877,7 +1956,15 @@ mod tests {
             .await
             .expect("delete the MAC-specific credential record with the machine entry");
 
+        assert_eq!(
+            metrics.counter_delta(
+                "carbide_site_explorer_bmc_password_rotations_total",
+                &[("outcome", "ok")]
+            ),
+            1.0
+        );
         Ok(ReingestionFixture {
+            _test_meter: test_meter,
             sim,
             credential_manager,
             explorer,
@@ -1937,8 +2024,6 @@ mod tests {
     // Authentication failures are throttled, so pause time to test fallback without waiting.
     #[tokio::test(start_paused = true)]
     async fn reingested_dpus_restore_missing_bmc_credentials_from_sitewide_password() {
-        // Ingestion emits the rotation metric, so hold its test lock to isolate metric counts.
-        let _metrics_window = MetricsCapture::start();
         // BF3 uses root and BF4 uses admin, so run the same recovery check for both.
         check_cases_async(
             [
@@ -1966,7 +2051,6 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn recovered_lenovo_credentials_require_ipmi_repair_before_storage() {
-        let _metrics_window = MetricsCapture::start();
         let fixture = prepare_reingestion_fixture(DpuGeneration {
             product: "BlueField-3 DPU",
             username: "root",
@@ -2022,7 +2106,6 @@ mod tests {
     // Authentication failures are throttled, so pause time to test rejection without waiting.
     #[tokio::test(start_paused = true)]
     async fn reingested_dpu_rejects_stale_sitewide_password() {
-        let _metrics_window = MetricsCapture::start();
         let fixture = prepare_reingestion_fixture(DpuGeneration {
             product: "BlueField-4 DPU",
             username: "admin",

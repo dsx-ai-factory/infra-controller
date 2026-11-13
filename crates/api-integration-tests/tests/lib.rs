@@ -553,7 +553,11 @@ async fn run_integration() -> eyre::Result<()> {
     exercise_ib_partition_mtu_fallback(&test_env).await?;
     exercise_nvlink_partition_monitor(&test_env, server_handle_2.ready.meter.clone()).await?;
 
-    carbide_api_core::test_support::poll_resource_pool_stats(test_env.db_pool.clone()).await?;
+    carbide_api_core::test_support::poll_resource_pool_stats(
+        test_env.db_pool.clone(),
+        &carbide_instrument::Instrumentation::from_meter_provider(&test_env.metrics.meter_provider),
+    )
+    .await?;
     // The live exporters supply local gauges; the direct poll emits the failure
     // counter without updating their samples. `test_service_health_metrics`
     // checks unavailable gauge rendering, while `resource_pool_inspection`
@@ -668,6 +672,9 @@ async fn run_integration() -> eyre::Result<()> {
     metric_infos.extend(collect_dhcp_metric_infos().await?);
     metric_infos.extend(metrics::parse_metric_infos(
         &carbide_health::test_support::hardware_metric_exposition()?,
+    ));
+    metric_infos.extend(metrics::parse_metric_infos(
+        &carbide_site_explorer::test_support::exploration_metric_exposition(),
     ));
     for name in [
         "carbide_dpu_client_certificate_expiration_time",
@@ -910,8 +917,8 @@ async fn exercise_dpf_exploration_suppression(
     use model::bmc_suppression::{
         BmcSuppressionSource, BmcSuppressionSubsystem, NewBmcSuppression,
     };
-    use rpc::forge_api_client::ForgeApiClient;
-    use rpc::forge_tls_client::{ApiConfig, ForgeClientConfig};
+    use rpc::carbide_api_client::CarbideApiClient;
+    use rpc::carbide_tls_client::{ApiConfig, CarbideClientConfig};
 
     let (address, mac): (std::net::IpAddr, MacAddress) = sqlx::query_as(
         "SELECT e.address, mi.mac_address FROM explored_endpoints e
@@ -934,14 +941,14 @@ async fn exercise_dpf_exploration_suppression(
     .await?;
     txn.commit().await?;
     let certs = &api_test_helper::utils::LOCALHOST_CERTS;
-    let config = ForgeClientConfig::new(
+    let config = CarbideClientConfig::new(
         certs.ca_cert.to_string_lossy().into_owned(),
-        Some(forge_tls::client_config::ClientCert {
+        Some(carbide_tls::client_config::ClientCert {
             cert_path: certs.client_cert.to_string_lossy().into_owned(),
             key_path: certs.client_key.to_string_lossy().into_owned(),
         }),
     );
-    let client = ForgeApiClient::new(&ApiConfig::new(
+    let client = CarbideApiClient::new(&ApiConfig::new(
         &format!("https://{}", test_env.carbide_api_addrs[0]),
         &config,
     ));
@@ -977,8 +984,8 @@ async fn exercise_admin_address_reconcile_failures(
 ) -> eyre::Result<()> {
     use carbide_uuid::machine::{MachineId, MachineInterfaceId};
     use model::machine::machine_search_config::MachineSearchConfig;
-    use rpc::forge_api_client::ForgeApiClient;
-    use rpc::forge_tls_client::{ApiConfig, ForgeClientConfig};
+    use rpc::carbide_api_client::CarbideApiClient;
+    use rpc::carbide_tls_client::{ApiConfig, CarbideClientConfig};
     use rpc::{DiscoveryData, DiscoveryInfo, MachineDiscoveryInfo};
 
     // A DPU's own OOB interface is primary and attached to itself; a host's
@@ -1036,14 +1043,14 @@ async fn exercise_admin_address_reconcile_failures(
     txn.commit().await?;
 
     let certs = &api_test_helper::utils::LOCALHOST_CERTS;
-    let config = ForgeClientConfig::new(
+    let config = CarbideClientConfig::new(
         certs.ca_cert.to_string_lossy().into_owned(),
-        Some(forge_tls::client_config::ClientCert {
+        Some(carbide_tls::client_config::ClientCert {
             cert_path: certs.client_cert.to_string_lossy().into_owned(),
             key_path: certs.client_key.to_string_lossy().into_owned(),
         }),
     );
-    let client = ForgeApiClient::new(&ApiConfig::new(
+    let client = CarbideApiClient::new(&ApiConfig::new(
         &format!("https://{}", test_env.carbide_api_addrs[0]),
         &config,
     ));
@@ -1082,8 +1089,8 @@ async fn exercise_ib_partition_mtu_fallback(
     test_env: &IntegrationTestEnvironment,
 ) -> eyre::Result<()> {
     use carbide_uuid::infiniband::IBPartitionId;
-    use rpc::forge_api_client::ForgeApiClient;
-    use rpc::forge_tls_client::{ApiConfig, ForgeClientConfig};
+    use rpc::carbide_api_client::CarbideApiClient;
+    use rpc::carbide_tls_client::{ApiConfig, CarbideClientConfig};
 
     let id = IBPartitionId::new();
     sqlx::query(
@@ -1098,14 +1105,14 @@ async fn exercise_ib_partition_mtu_fallback(
     .await?;
 
     let certs = &api_test_helper::utils::LOCALHOST_CERTS;
-    let config = ForgeClientConfig::new(
+    let config = CarbideClientConfig::new(
         certs.ca_cert.to_string_lossy().into_owned(),
-        Some(forge_tls::client_config::ClientCert {
+        Some(carbide_tls::client_config::ClientCert {
             cert_path: certs.client_cert.to_string_lossy().into_owned(),
             key_path: certs.client_key.to_string_lossy().into_owned(),
         }),
     );
-    let client = ForgeApiClient::new(&ApiConfig::new(
+    let client = CarbideApiClient::new(&ApiConfig::new(
         &format!("https://{}", test_env.carbide_api_addrs[0]),
         &config,
     ));

@@ -396,7 +396,14 @@ mod tests {
     use crate::state::{FmdsConfig, IBDeviceConfig, IBInstanceConfig};
 
     fn make_test_state() -> Arc<FmdsState> {
-        Arc::new(FmdsState::try_new("https://api.test".to_string(), None).unwrap())
+        Arc::new(
+            FmdsState::try_new(
+                "https://api.test".to_string(),
+                None,
+                carbide_instrument::Instrumentation::global(),
+            )
+            .unwrap(),
+        )
     }
 
     fn make_test_config() -> FmdsConfig {

@@ -1,0 +1,149 @@
+// SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-License-Identifier: Apache-2.0
+
+package handler
+
+import (
+	"errors"
+	"fmt"
+	"net/http"
+	"strings"
+
+	"github.com/google/uuid"
+	"github.com/labstack/echo/v4"
+	temporalEnums "go.temporal.io/api/enums/v1"
+
+	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/handler/util/common"
+	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/model"
+	sc "github.com/NVIDIA/infra-controller/rest-api/api/pkg/client/site"
+	auth "github.com/NVIDIA/infra-controller/rest-api/auth/pkg/authorization"
+	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
+	cdb "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
+	cdbm "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/model"
+	flowv1 "github.com/NVIDIA/infra-controller/rest-api/proto/flow/gen/v1"
+)
+
+type factoryResetScope string
+
+const factoryResetTray factoryResetScope = "tray"
+const factoryResetDomain factoryResetScope = "domain"
+
+// FactoryResetHandler shares authorization and site checks for tray/domain
+// reset. Scope is fixed by route construction, never taken from request data.
+type FactoryResetHandler struct {
+	dbSession *cdb.Session
+	scp       *sc.ClientPool
+	scope     factoryResetScope
+}
+
+func NewFactoryResetTrayHandler(dbSession *cdb.Session, scp *sc.ClientPool) FactoryResetHandler {
+	return FactoryResetHandler{dbSession: dbSession, scp: scp, scope: factoryResetTray}
+}
+func NewFactoryResetNVLinkDomainHandler(dbSession *cdb.Session, scp *sc.ClientPool) FactoryResetHandler {
+	return FactoryResetHandler{dbSession: dbSession, scp: scp, scope: factoryResetDomain}
+}
+
+// Handle authorizes a Provider Admin, then submits through the existing Flow
+// proxy. A 202 means tasks were created; GET task observes terminal outcomes.
+func (h FactoryResetHandler) Handle(c echo.Context) error {
+	org, user, ctx, logger, span := common.SetupHandler("Switch", "FactoryReset", c)
+	if span != nil {
+		defer span.End()
+	}
+	if user == nil {
+		return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to retrieve current user", nil)
+	}
+	member, _ := auth.ValidateOrgMembership(user, org)
+	if !member || !auth.ValidateUserRoles(user, org, nil, auth.ProviderAdminRole) {
+		return cutil.NewAPIErrorResponse(c, http.StatusForbidden, "Provider Admin membership is required", nil)
+	}
+	var request model.APIFactoryResetRequest
+	err := c.Bind(&request)
+	if err != nil {
+		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Failed to parse request data", nil)
+	}
+	err = request.Validate()
+	if err != nil {
+		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Invalid reset request", err)
+	}
+	provider, err := common.GetInfrastructureProviderForOrg(ctx, nil, h.dbSession, org)
+	if err != nil {
+		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Failed to retrieve Infrastructure Provider for org", nil)
+	}
+	site, err := common.GetSiteFromIDString(ctx, nil, request.SiteID, h.dbSession)
+	if err != nil {
+		if errors.Is(err, cdb.ErrDoesNotExist) || errors.Is(err, common.ErrInvalidID) {
+			return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Site specified in request does not exist or is invalid", nil)
+		}
+		logger.Error().Err(err).Msg("failed to retrieve reset site")
+		return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to retrieve Site", nil)
+	}
+	if site.InfrastructureProviderID != provider.ID {
+		return cutil.NewAPIErrorResponse(c, http.StatusForbidden, "Site does not belong to current org's Provider", nil)
+	}
+	if site.Status != cdbm.SiteStatusRegistered {
+		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Site must be Registered", nil)
+	}
+	target, err := getFactoryResetTarget(h.scope, c.Param("id"))
+	if err != nil {
+		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, err.Error(), nil)
+	}
+	client, err := h.scp.GetClientByID(site.ID)
+	if err != nil {
+		return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to retrieve client for Site", nil)
+	}
+	var response flowv1.SubmitTaskResponse
+	proxyErr := common.ProxyFlowGRPC(ctx, logger, client, flowv1.Flow_FactoryResetSwitches_FullMethodName,
+		&flowv1.FactoryResetSwitchesRequest{TargetSpec: target, Description: "API " + request.Target + " factory reset", ResetTarget: request.Target}, &response,
+		fmt.Sprintf("factory-reset-%s-%s", h.scope, uuid.NewString()), temporalEnums.WORKFLOW_ID_CONFLICT_POLICY_UNSPECIFIED)
+	if proxyErr != nil {
+		return cutil.NewAPIErrorResponse(c, proxyErr.Code, proxyErr.Message, nil)
+	}
+	if len(response.TaskIds) == 0 {
+		return cutil.NewAPIErrorResponse(c, http.StatusBadGateway, "Flow returned no reset tasks", nil)
+	}
+	for _, taskID := range response.TaskIds {
+		parsed, err := uuid.Parse(taskID.GetId())
+		if err != nil || parsed == uuid.Nil {
+			return cutil.NewAPIErrorResponse(c, http.StatusBadGateway, "Flow returned an invalid task reference", nil)
+		}
+	}
+	result := &model.APIFactoryResetResponse{}
+	result.FromProto(&response)
+	return c.JSON(http.StatusAccepted, result)
+}
+
+// getFactoryResetTarget restricts Domain expansion to switches; Core IDs for trays are
+// opaque, while domain IDs use the existing domain API validation.
+func getFactoryResetTarget(scope factoryResetScope, id string) (*flowv1.OperationTargetSpec, error) {
+	if strings.TrimSpace(id) == "" {
+		return nil, fmt.Errorf("target ID is required")
+	}
+	switch scope {
+	case factoryResetDomain:
+		err := model.ValidateNVLinkDomainID(id)
+		if err != nil {
+			return nil, err
+		}
+		return &flowv1.OperationTargetSpec{
+			Targets: &flowv1.OperationTargetSpec_NvlDomains{
+				NvlDomains: &flowv1.NVLDomainTargets{Targets: []*flowv1.NVLDomainTarget{{
+					Identifier:     &flowv1.NVLDomainTarget_ExternalId{ExternalId: id},
+					ComponentTypes: []flowv1.ComponentType{flowv1.ComponentType_COMPONENT_TYPE_NVSWITCH},
+				}}},
+			},
+		}, nil
+	case factoryResetTray:
+		return &flowv1.OperationTargetSpec{
+			Targets: &flowv1.OperationTargetSpec_Components{
+				Components: &flowv1.ComponentTargets{Targets: []*flowv1.ComponentTarget{{
+					Identifier: &flowv1.ComponentTarget_External{
+						External: &flowv1.ExternalRef{Id: id},
+					},
+				}}},
+			},
+		}, nil
+	default:
+		return nil, fmt.Errorf("unsupported reset scope")
+	}
+}

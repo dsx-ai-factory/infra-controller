@@ -77,7 +77,7 @@ pub(in crate::tests) mod tests {
     async fn a_second_spdm_environment_reuses_the_seeded_profile(pool: sqlx::PgPool) {
         for _ in 0..2 {
             let mut overrides = TestEnvOverrides::no_network_segments();
-            overrides.config = Some(spdm_enabled_config());
+            overrides.config = Some(Box::new(spdm_enabled_config()));
             let _env = create_test_env_with_overrides(pool.clone(), overrides).await;
         }
     }
@@ -328,9 +328,6 @@ pub(in crate::tests) mod tests {
     ) -> Result<(), eyre::Error> {
         const GPU_IDS: &[&str] = &["HGX_IRoT_GPU_0", "HGX_IRoT_GPU_1", "HGX_IRoT_GPU_2"];
 
-        // Install the test meter before host setup can cache the scheduling counter.
-        let metrics = MetricsCapture::start();
-
         struct Case {
             scenario: &'static str,
             /// Replaces the profile the fixture seeded for the mock host's
@@ -482,7 +479,7 @@ pub(in crate::tests) mod tests {
         let env = create_test_env_with_overrides(
             pool,
             TestEnvOverrides {
-                config: Some(spdm_enabled_config()),
+                config: Some(Box::new(spdm_enabled_config())),
                 ..Default::default()
             },
         )
@@ -515,12 +512,12 @@ pub(in crate::tests) mod tests {
                 .await?;
             txn.commit().await?;
 
+            // Capture only this environment's metrics after earlier work has finished.
+            let metrics = MetricsCapture::for_registry(env.test_meter.registry());
             let metric_labels = [
                 ("outcome", case.expect_metric_outcome),
                 ("profile_source", case.expect_profile_source),
             ];
-            let count_before =
-                metrics.counter_delta("carbide_attestation_scheduling_total", &metric_labels);
             let (response, logs) = capture_logs_async(env.api.trigger_machine_attestation(
                 Request::new(SpdmMachineAttestationTriggerRequest {
                     machine_id: Some(machine_id.into()),
@@ -559,12 +556,10 @@ pub(in crate::tests) mod tests {
                     case.scenario
                 );
             }
-            // Other tests can emit this counter concurrently; the captured event
-            // above ties these labels to this request without requiring a global delta of one.
-            assert!(
-                metrics.counter_delta("carbide_attestation_scheduling_total", &metric_labels)
-                    >= count_before + 1.0,
-                "{}: the scheduling counter must increase",
+            assert_eq!(
+                metrics.counter_delta("carbide_attestation_scheduling_total", &metric_labels),
+                1.0,
+                "{}: the request must increment its scheduling counter exactly once",
                 case.scenario
             );
 
@@ -702,7 +697,7 @@ pub(in crate::tests) mod tests {
         let env = create_test_env_with_overrides(
             pool,
             TestEnvOverrides {
-                config: Some(spdm_enabled_config()),
+                config: Some(Box::new(spdm_enabled_config())),
                 ..Default::default()
             },
         )
@@ -772,7 +767,7 @@ pub(in crate::tests) mod tests {
         let env = create_test_env_with_overrides(
             pool,
             TestEnvOverrides {
-                config: Some(spdm_enabled_config()),
+                config: Some(Box::new(spdm_enabled_config())),
                 ..Default::default()
             },
         )
@@ -881,7 +876,7 @@ pub(in crate::tests) mod tests {
         let env = create_test_env_with_overrides(
             pool,
             TestEnvOverrides {
-                config: Some(spdm_enabled_config()),
+                config: Some(Box::new(spdm_enabled_config())),
                 ..Default::default()
             },
         )
@@ -929,7 +924,7 @@ pub(in crate::tests) mod tests {
         let env = create_test_env_with_overrides(
             pool,
             TestEnvOverrides {
-                config: Some(spdm_enabled_config()),
+                config: Some(Box::new(spdm_enabled_config())),
                 ..Default::default()
             },
         )
@@ -991,7 +986,7 @@ pub(in crate::tests) mod tests {
         let env = create_test_env_with_overrides(
             pool,
             TestEnvOverrides {
-                config: Some(spdm_enabled_config()),
+                config: Some(Box::new(spdm_enabled_config())),
                 ..Default::default()
             },
         )
@@ -1137,7 +1132,7 @@ pub(in crate::tests) mod tests {
         let env = create_test_env_with_overrides(
             pool,
             TestEnvOverrides {
-                config: Some(config),
+                config: Some(Box::new(config)),
                 ..Default::default()
             },
         )
@@ -1393,7 +1388,7 @@ pub(in crate::tests) mod tests {
         let env = create_test_env_with_overrides(
             pool,
             TestEnvOverrides {
-                config: Some(spdm_enabled_config()),
+                config: Some(Box::new(spdm_enabled_config())),
                 ..Default::default()
             },
         )
@@ -1402,6 +1397,9 @@ pub(in crate::tests) mod tests {
             .redfish_sim
             .create_client("cancellation-fixture", None, RedfishAuth::Anonymous, None)
             .await?;
+
+        env.redfish_sim.set_evidence_collection_running(false);
+        let (machine_id, _dpu_id) = create_managed_host(&env).await.into();
 
         for Case {
             scenario,
@@ -1448,8 +1446,6 @@ pub(in crate::tests) mod tests {
                 cancel_error: None,
             },
         ] {
-            env.redfish_sim.set_evidence_collection_running(false);
-            let (machine_id, _dpu_id) = create_managed_host(&env).await.into();
             env.redfish_sim.set_evidence_collection_running(true);
             let job_id = uuid::Uuid::try_from(
                 env.api
@@ -1716,7 +1712,27 @@ pub(in crate::tests) mod tests {
                     "cleanup must not read evidence"
                 );
             }
-            if !finish_collection && operator_outcome.is_none() {
+            if finish_collection {
+                // Finish the retry before the next job uses the same devices; an
+                // unfinished job can claim them again on the next controller scan.
+                // With requeue disabled, five passes trigger collection, store evidence,
+                // verify it, enter `Passed`, and record completion.
+                for _ in 0..5 {
+                    env.run_spdm_controller_iteration_no_requeue().await;
+                }
+                for device in &devices {
+                    let snapshot = db::attestation::spdm::load_snapshot_for_machine_and_device_id(
+                        &mut txn,
+                        &machine_id,
+                        &device.device_id,
+                        &job_id,
+                    )
+                    .await?;
+                    assert_eq!(snapshot.state, SpdmAttestationState::Passed, "{scenario}");
+                    assert!(snapshot.completed_at.is_some(), "{scenario}");
+                    assert!(!snapshot.evidence_collection_locked, "{scenario}");
+                }
+            } else if operator_outcome.is_none() {
                 // The Failed handler records completion on the following iteration.
                 env.run_spdm_controller_iteration_no_requeue().await;
                 for device in &devices {
@@ -1839,7 +1855,7 @@ pub(in crate::tests) mod tests {
         let env = create_test_env_with_overrides(
             pool,
             TestEnvOverrides {
-                config: Some(spdm_enabled_config()),
+                config: Some(Box::new(spdm_enabled_config())),
                 ..Default::default()
             },
         )
@@ -1856,15 +1872,15 @@ pub(in crate::tests) mod tests {
                 .unwrap_err();
             assert_eq!(error.code(), code);
         }
+        // Host setup performs its own attestation before the scenario starts.
+        env.redfish_sim.set_evidence_collection_running(false);
+        let (machine_id, _dpu_id) = create_managed_host(&env).await.into();
         for case in cases {
             let expected_state = if case.fail {
                 SpdmAttestationState::Failed("Failed by operator".to_string())
             } else {
                 SpdmAttestationState::Waived
             };
-            // Host setup performs its own attestation before the scenario starts.
-            env.redfish_sim.set_evidence_collection_running(false);
-            let (machine_id, _dpu_id) = create_managed_host(&env).await.into();
             let initial_cancel_requests = env.redfish_sim.task_cancellation_requests().len();
             env.redfish_sim.set_evidence_collection_running(true);
             let job_id = uuid::Uuid::try_from(
@@ -2181,7 +2197,7 @@ pub(in crate::tests) mod tests {
         let env = create_test_env_with_overrides(
             pool,
             TestEnvOverrides {
-                config: Some(config),
+                config: Some(Box::new(config)),
                 ..TestEnvOverrides::no_network_segments()
             },
         )
@@ -2348,7 +2364,7 @@ pub(in crate::tests) mod tests {
         let env = create_test_env_with_overrides(
             pool,
             TestEnvOverrides {
-                config: Some(config),
+                config: Some(Box::new(config)),
                 ..Default::default()
             },
         )
@@ -2602,7 +2618,7 @@ pub(in crate::tests) mod tests {
         let env = create_test_env_with_overrides(
             pool,
             TestEnvOverrides {
-                config: Some(spdm_enabled_config()),
+                config: Some(Box::new(spdm_enabled_config())),
                 ..Default::default()
             },
         )

@@ -17,7 +17,7 @@
 
 use std::sync::Arc;
 
-use carbide_instrument::{Event, LabelValue, MetricFamily, emit};
+use carbide_instrument::{Event, LabelValue, MetricFamily};
 use eyre::eyre;
 use forge_dpu_agent_utils::utils::create_forge_client;
 use rpc::forge::InstancePhoneHomeLastContactRequest;
@@ -113,7 +113,7 @@ impl From<tonic::Status> for PhoneHomeError {
 }
 
 pub async fn phone_home(state: &Arc<FmdsState>) -> Result<(), eyre::Error> {
-    complete_phone_home(attempt_phone_home(state).await)
+    complete_phone_home(&state.instrumentation, attempt_phone_home(state).await)
 }
 
 struct PhoneHomeSuccess {
@@ -122,11 +122,12 @@ struct PhoneHomeSuccess {
 }
 
 fn complete_phone_home(
+    instrumentation: &carbide_instrument::Instrumentation,
     result: Result<PhoneHomeSuccess, PhoneHomeError>,
 ) -> Result<(), eyre::Error> {
     match result {
         Ok(success) => {
-            emit(PhoneHomeSucceeded {
+            instrumentation.emit(PhoneHomeSucceeded {
                 outcome: PhoneHomeOutcome::Ok,
                 machine_id: success.machine_id,
                 timestamp: success.timestamp,
@@ -135,7 +136,7 @@ fn complete_phone_home(
         }
         Err(failure) => {
             let PhoneHomeError { outcome, source } = failure;
-            emit(PhoneHomeCompleted {
+            instrumentation.emit(PhoneHomeCompleted {
                 outcome,
                 error: format!("{source:#}"),
             });
@@ -154,12 +155,12 @@ async fn attempt_phone_home(state: &Arc<FmdsState>) -> Result<PhoneHomeSuccess, 
             source: eyre!("rate limit exceeded for phone_home; {}\n", e),
         })?;
 
-    let forge_client_config = state
-        .forge_client_config
+    let carbide_client_config = state
+        .carbide_client_config
         .as_ref()
         .ok_or_else(|| eyre!("phone_home not configured: no forge client config"))?;
 
-    let mut client = create_forge_client(&state.forge_api, forge_client_config).await?;
+    let mut client = create_forge_client(&state.forge_api, carbide_client_config).await?;
 
     let machine_id = state
         .machine_id
@@ -291,10 +292,12 @@ mod tests {
             }),
         };
 
-        let metrics = MetricsCapture::start();
+        let (registry, instrumentation_owner) = crate::http_request_metrics::init(false).unwrap();
+        let instrumentation = instrumentation_owner.instrumentation();
+        let metrics = MetricsCapture::for_registry(&registry);
         let mut completion = None;
         let logs = capture_logs(|| {
-            completion = Some(complete_phone_home(result));
+            completion = Some(complete_phone_home(&instrumentation, result));
         })
         .into_iter()
         .map(|log| {

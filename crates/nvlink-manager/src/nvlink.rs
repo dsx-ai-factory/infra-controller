@@ -17,8 +17,7 @@
 
 #[cfg(any(test, feature = "test-support"))]
 pub mod test_support {
-    use std::collections::HashSet;
-    use std::path::PathBuf;
+    use std::collections::{HashMap, HashSet};
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
 
@@ -27,22 +26,30 @@ pub mod test_support {
         GetPartitionCountResponse, GetPartitionIdListResponse, GetPartitionInfoListResponse,
         GetSwitchNodeCountResponse, GetSwitchNodeInfoListResponse,
     };
-    use libnmxc::{Endpoint, Nmxc, NmxcClientPool, NmxcError, NmxcPool, NmxcTlsConfig};
+    use libnmxc::{Endpoint, Nmxc, NmxcClientPool, NmxcClientPoolBuilder, NmxcError, NmxcPool};
 
-    /// TLS settings for mutual TLS when both client certificate and key paths are configured.
-    fn nmxc_mtls_config_from_nvlink(cfg: &crate::config::NvLinkConfig) -> Option<NmxcTlsConfig> {
-        if cfg.nmx_c_tls_client_cert_path.is_none() || cfg.nmx_c_tls_client_key_path.is_none() {
-            return None;
+    use crate::config::{NmxCTlsConfigError, NvLinkConfig};
+
+    /// Simulator endpoint URL and pool builder for `url` under `nvlink`'s NMX-C TLS settings.
+    ///
+    /// The TLS settings from [`crate::config::NvLinkConfig::nmx_c_tls_config`] are always
+    /// attached. When TLS settings are present, an `http://` URL is upgraded to `https://`
+    /// according to the production HTTPS policy. Without TLS settings, the plain simulator
+    /// fallback is preserved; other URLs are kept as given.
+    fn simulator_connection(
+        url: &str,
+        nvlink: &NvLinkConfig,
+    ) -> Result<(String, NmxcClientPoolBuilder), NmxCTlsConfigError> {
+        let tls = nvlink.nmx_c_tls_config()?;
+        let endpoint_url = match url.strip_prefix("http://") {
+            Some(rest) if tls.is_some() && nvlink.nmx_c_uses_https() => format!("https://{rest}"),
+            _ => url.to_string(),
+        };
+        let mut builder = NmxcClientPool::builder();
+        if let Some(tls) = tls {
+            builder = builder.tls(tls);
         }
-        let ca = cfg.nmx_c_tls_ca_cert_path.as_ref().map(PathBuf::from);
-        let client_cert = cfg.nmx_c_tls_client_cert_path.as_ref().map(PathBuf::from);
-        let client_key = cfg.nmx_c_tls_client_key_path.as_ref().map(PathBuf::from);
-        Some(NmxcTlsConfig {
-            ca_cert_path: ca,
-            client_cert_path: client_cert,
-            client_key_path: client_key,
-            authority: cfg.nmx_c_tls_authority.clone(),
-        })
+        Ok((endpoint_url, builder))
     }
 
     #[derive(Debug)]
@@ -67,6 +74,9 @@ pub mod test_support {
         /// While set, `hello` fails on this client and the clients it created, simulating an
         /// NMX-C that cannot be reached.
         _hello_fails: Arc<AtomicBool>,
+        /// Partitions left out of the next listings, by partition id and remaining listings,
+        /// simulating an NMX-C that has not finished restoring its fabric state.
+        _hidden_listings: Arc<Mutex<HashMap<u32, usize>>>,
     }
 
     impl Default for NmxcSimClient {
@@ -80,6 +90,7 @@ pub mod test_support {
                 _partition_info_list_calls: Arc::new(AtomicUsize::new(0)),
                 _gpu_info_list: Arc::new(Vec::new()),
                 _hello_fails: Arc::new(AtomicBool::new(false)),
+                _hidden_listings: Arc::new(Mutex::new(HashMap::new())),
             }
         }
     }
@@ -88,8 +99,7 @@ pub mod test_support {
         /// Default simulator URL: plain gRPC on port 9601 (`http://localhost:9601`).
         pub const SIMULATOR_URL: &'static str = "http://localhost:9601";
 
-        /// Default simulator URL when [`crate::config::NvLinkConfig`] includes client TLS material
-        /// (HTTPS + mTLS to match [`libnmxc::NmxcClientPool`] behavior).
+        /// Default simulator URL when configured TLS settings require HTTPS, including mTLS.
         pub const SIMULATOR_URL_MTLS: &'static str = "https://localhost:9601";
 
         /// Creates a pool that proxies to the NMX-C gRPC simulator.
@@ -97,24 +107,13 @@ pub mod test_support {
             Self::with_simulator_url(Self::SIMULATOR_URL)
         }
 
-        /// Like [`Self::simulator`], but uses HTTPS and the same TLS settings as production when
-        /// `nvlink` has both client certificate and key paths configured.
-        pub fn simulator_for_nvlink_config(nvlink: &crate::config::NvLinkConfig) -> Self {
-            if let Some(tls) = nmxc_mtls_config_from_nvlink(nvlink) {
-                let pool = NmxcClientPool::builder()
-                    .tls(tls)
-                    .build()
-                    .expect("NmxcClientPool with TLS");
-                NmxcSimClient {
-                    _grpc_pool: Some(pool),
-                    _simulator_endpoint: Some(
-                        Endpoint::new(Self::SIMULATOR_URL_MTLS).expect("SIMULATOR_URL_MTLS"),
-                    ),
-                    ..Self::default()
-                }
-            } else {
-                Self::simulator()
-            }
+        /// Like [`Self::simulator`], with the same NMX-C TLS settings as production. Uses
+        /// [`Self::SIMULATOR_URL_MTLS`] when configured TLS settings require HTTPS.
+        /// Returns an error if only one half of the client identity is configured.
+        pub fn simulator_for_nvlink_config(
+            nvlink: &NvLinkConfig,
+        ) -> Result<Self, NmxCTlsConfigError> {
+            Self::with_simulator_url_for_nvlink(Self::SIMULATOR_URL, nvlink)
         }
 
         /// Creates a pool that proxies to an NMX-C gRPC simulator URL.
@@ -130,34 +129,22 @@ pub mod test_support {
             }
         }
 
-        /// Like [`Self::with_simulator_url`], but enables mTLS when `nvlink` has client cert and
-        /// key paths. An `http://` URL is upgraded to `https://` so [`libnmxc::NmxcClientPool`]
-        /// applies TLS.
+        /// Like [`Self::with_simulator_url`], with `nvlink`'s NMX-C TLS settings attached. An
+        /// `http://` URL is upgraded to `https://` when TLS settings are present and either
+        /// `allow_insecure` is false or a client identity is configured. Other URLs are kept
+        /// as given. Returns an error if only one half of the client identity is configured.
         pub fn with_simulator_url_for_nvlink(
             url: impl Into<String>,
-            nvlink: &crate::config::NvLinkConfig,
-        ) -> Self {
-            let url_str = url.into();
-            if let Some(tls) = nmxc_mtls_config_from_nvlink(nvlink) {
-                let endpoint_url = if let Some(rest) = url_str.strip_prefix("http://") {
-                    format!("https://{rest}")
-                } else {
-                    url_str
-                };
-                let pool = NmxcClientPool::builder()
-                    .tls(tls)
-                    .build()
-                    .expect("NmxcClientPool with TLS");
-                NmxcSimClient {
-                    _grpc_pool: Some(pool),
-                    _simulator_endpoint: Some(
-                        Endpoint::new(endpoint_url).expect("simulator endpoint URL"),
-                    ),
-                    ..Self::default()
-                }
-            } else {
-                Self::with_simulator_url(url_str)
-            }
+            nvlink: &NvLinkConfig,
+        ) -> Result<Self, NmxCTlsConfigError> {
+            let (endpoint_url, builder) = simulator_connection(&url.into(), nvlink)?;
+            Ok(NmxcSimClient {
+                _grpc_pool: Some(builder.build().expect("NmxcClientPool for the simulator")),
+                _simulator_endpoint: Some(
+                    Endpoint::new(endpoint_url).expect("simulator endpoint URL"),
+                ),
+                ..Self::default()
+            })
         }
 
         /// After n successful [`Nmxc::create_partition`] calls, further creates fail.
@@ -192,6 +179,15 @@ pub mod test_support {
         /// it has created or will create, so a test can take NMX-C down and bring it back.
         pub fn set_hello_fails(&self, fails: bool) {
             self._hello_fails.store(fails, Ordering::SeqCst);
+        }
+
+        /// Leaves `partition_id` out of the next `listings` partition listings on this client
+        /// and the clients it created, as an NMX-C still restoring its state would.
+        pub fn hide_partition_for_listings(&self, partition_id: u32, listings: usize) {
+            self._hidden_listings
+                .lock()
+                .unwrap()
+                .insert(partition_id, listings);
         }
 
         /// Serves one partition named `name` holding `gpu_uids`.
@@ -450,18 +446,27 @@ pub mod test_support {
         ) -> Result<GetPartitionInfoListResponse, NmxcError> {
             self._partition_info_list_calls
                 .fetch_add(1, Ordering::SeqCst);
+            let hidden: HashSet<u32> = {
+                let mut hidden_listings = self._hidden_listings.lock().unwrap();
+                let hidden = hidden_listings.keys().copied().collect();
+                hidden_listings.retain(|_, remaining| {
+                    *remaining -= 1;
+                    *remaining > 0
+                });
+                hidden
+            };
             let parts = self._partitions.lock().unwrap();
+            let visible = parts.iter().filter(|p| !hidden.contains(&p.partition_id));
             let partition_info_list: Vec<nmxc_model::PartitionInfo> =
                 if req.partition_id_list.is_empty() {
-                    parts.iter().map(Self::to_partition_info).collect()
+                    visible.map(Self::to_partition_info).collect()
                 } else {
                     let wanted: HashSet<u32> = req
                         .partition_id_list
                         .iter()
                         .map(|p| p.partition_id)
                         .collect();
-                    parts
-                        .iter()
+                    visible
                         .filter(|p| wanted.contains(&p.partition_id))
                         .map(Self::to_partition_info)
                         .collect()
@@ -593,6 +598,7 @@ pub mod test_support {
                 _partition_info_list_calls: self._partition_info_list_calls.clone(),
                 _gpu_info_list: self._gpu_info_list.clone(),
                 _hello_fails: self._hello_fails.clone(),
+                _hidden_listings: self._hidden_listings.clone(),
             }))
         }
     }
@@ -636,7 +642,7 @@ pub mod test_support {
                 nmx_c_tls_client_key_path: Some("/tmp/client-key.pem".to_string()),
                 ..Default::default()
             };
-            let s = NmxcSimClient::simulator_for_nvlink_config(&cfg);
+            let s = NmxcSimClient::simulator_for_nvlink_config(&cfg).unwrap();
             assert_eq!(
                 s._simulator_endpoint
                     .as_ref()
@@ -655,7 +661,8 @@ pub mod test_support {
                 nmx_c_tls_client_key_path: Some("/k".to_string()),
                 ..Default::default()
             };
-            let s = NmxcSimClient::with_simulator_url_for_nvlink("http://127.0.0.1:19999", &cfg);
+            let s = NmxcSimClient::with_simulator_url_for_nvlink("http://127.0.0.1:19999", &cfg)
+                .unwrap();
             assert_eq!(
                 s._simulator_endpoint
                     .as_ref()
@@ -668,6 +675,103 @@ pub mod test_support {
         #[test]
         fn implements_nmxc_pool() {
             let _pool: Arc<dyn NmxcPool> = Arc::new(NmxcSimClient::simulator());
+        }
+
+        #[test]
+        fn simulator_for_nvlink_config_propagates_invalid_tls_configuration() {
+            let cfg = crate::config::NvLinkConfig {
+                nmx_c_tls_client_cert_path: Some("/tls/tls.crt".to_string()),
+                ..Default::default()
+            };
+
+            assert_eq!(
+                NmxcSimClient::simulator_for_nvlink_config(&cfg).unwrap_err(),
+                crate::config::NmxCTlsConfigError::CertificateWithoutKey,
+            );
+        }
+
+        /// The simulator pool receives every configured TLS setting, including CA-only and
+        /// authority-only settings without a client identity. Configured TLS settings use the
+        /// production HTTPS policy, while the default simulator remains plain HTTP.
+        #[test]
+        fn simulator_connection_attaches_nmx_c_tls_settings() {
+            use std::path::PathBuf;
+
+            use carbide_test_support::{Check, check_values};
+            use libnmxc::{NmxcClientIdentity, NmxcTlsConfig};
+
+            use crate::config::NvLinkConfig;
+
+            let server_only = NvLinkConfig {
+                nmx_c_tls_ca_cert_path: Some("/tls/ca.crt".to_string()),
+                nmx_c_tls_authority: Some("nmxc.example".to_string()),
+                ..NvLinkConfig::default()
+            };
+            let server_only_tls = NmxcTlsConfig {
+                ca_cert_path: Some(PathBuf::from("/tls/ca.crt")),
+                client_identity: None,
+                authority: Some("nmxc.example".to_string()),
+            };
+            let mutual = NvLinkConfig {
+                nmx_c_tls_client_cert_path: Some("/tls/tls.crt".to_string()),
+                nmx_c_tls_client_key_path: Some("/tls/tls.key".to_string()),
+                allow_insecure: true,
+                ..server_only.clone()
+            };
+            let mutual_tls = NmxcTlsConfig {
+                client_identity: Some(NmxcClientIdentity {
+                    cert_path: PathBuf::from("/tls/tls.crt"),
+                    key_path: PathBuf::from("/tls/tls.key"),
+                }),
+                ..server_only_tls.clone()
+            };
+
+            check_values(
+                [
+                    Check {
+                        scenario: "explicit HTTPS keeps the CA and authority without a client identity",
+                        input: ("https://127.0.0.1:19999", server_only.clone()),
+                        expect: (
+                            "https://127.0.0.1:19999".to_string(),
+                            Some(server_only_tls.clone()),
+                        ),
+                    },
+                    Check {
+                        scenario: "server-only TLS upgrades HTTP when insecure transport is disabled",
+                        input: ("http://127.0.0.1:19999", server_only.clone()),
+                        expect: (
+                            "https://127.0.0.1:19999".to_string(),
+                            Some(server_only_tls.clone()),
+                        ),
+                    },
+                    Check {
+                        scenario: "server-only TLS preserves HTTP when insecure transport is allowed",
+                        input: (
+                            "http://127.0.0.1:19999",
+                            NvLinkConfig {
+                                allow_insecure: true,
+                                ..server_only
+                            },
+                        ),
+                        expect: ("http://127.0.0.1:19999".to_string(), Some(server_only_tls)),
+                    },
+                    Check {
+                        scenario: "a client identity upgrades HTTP even when insecure transport is allowed",
+                        input: ("http://127.0.0.1:19999", mutual),
+                        expect: ("https://127.0.0.1:19999".to_string(), Some(mutual_tls)),
+                    },
+                    Check {
+                        scenario: "no NMX-C TLS setting leaves the pool without TLS",
+                        input: ("http://127.0.0.1:19999", NvLinkConfig::default()),
+                        expect: ("http://127.0.0.1:19999".to_string(), None),
+                    },
+                ],
+                |(url, nvlink)| {
+                    let (endpoint_url, builder) =
+                        super::simulator_connection(url, &nvlink).unwrap();
+                    (endpoint_url, builder.tls)
+                },
+            );
         }
     }
 }

@@ -10,17 +10,27 @@ import "github.com/NVIDIA/infra-controller/dev/k8s/scale-test/internal/jsonx"
 const MaxCount = uint64(1) << 53
 
 // FixedQuantiles are the six fractions of n a stage is timed at. v1 times
-// ingestion stages up from a proven zero only, so there is no request
-// quantile, direction or base: the target of q is ceil(q*n).
+// stages up from a proven baseline. Quantiles and direction are fixed.
 var FixedQuantiles = [6]float64{0.5, 0.9, 0.95, 0.99, 0.995, 1}
 
 // SummaryParams are the parameters of one stage summary: the window and the
-// planned count n. The stage counts up from zero to ceil(q*n) for each
-// FixedQuantiles q.
+// planned count n. The stage counts up to base + ceil(q*n) for each
+// FixedQuantiles q. Base is a runner-local history extension, omitted for
+// existing zero-base probe contract requests.
+// SummaryBase is an immutable count and source sweep from the planned burst.
+// The stored baseline must match every field exactly before timing is usable.
+type SummaryBase struct {
+	Count               uint64     `json:"count"`
+	ProcessStartSeconds float64    `json:"processStartSeconds"`
+	SweepStart          jsonx.Time `json:"sweepStart"`
+	ReadAt              jsonx.Time `json:"readAt"`
+}
+
 type SummaryParams struct {
-	Start jsonx.Time `json:"start"`
-	End   jsonx.Time `json:"end"`
-	N     uint64     `json:"n"`
+	Base  *SummaryBase `json:"base,omitempty"`
+	Start jsonx.Time   `json:"start"`
+	End   jsonx.Time   `json:"end"`
+	N     uint64       `json:"n"`
 	// AddWindowSeconds is the dispatch window: how long the run took to send
 	// the stage's units, added to the timing error so a crossing is never
 	// reported earlier than a unit could have been dispatched.

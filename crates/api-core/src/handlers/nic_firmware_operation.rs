@@ -649,7 +649,7 @@ pub(super) async fn persist(
         .enqueue_object(&host_id)
         .await
     {
-        carbide_instrument::emit(StateHandlerWakeupFailed {
+        api.instrumentation.emit(StateHandlerWakeupFailed {
             trigger: WakeupTrigger::NicFirmwareObservation,
             machine_id: authenticated_machine_id,
             err: error.to_string(),

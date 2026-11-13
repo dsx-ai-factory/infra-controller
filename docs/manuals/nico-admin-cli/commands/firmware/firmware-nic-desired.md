@@ -15,7 +15,7 @@ nico-admin-cli firmware nic desired [OPTIONS] <HOST>
 
 ## DESCRIPTION
 
-Read desired NIC firmware for a host using Cores stored Scout
+Read desired NIC firmware for a host using Core's stored Scout
 observation. This command does not contact Scout, fetch artifacts,
 change selections, flash firmware, or change readiness. Reported
 identities and timestamps do not prove physical-card identity,
@@ -38,7 +38,7 @@ malformed or unsupported Core response fails the entire read without a
 partial report. Warnings identify saved card selectors absent from the
 observation, including when no observation exists. Without an
 observation, the report has no targets and does not check an allocation
-profiles existence.
+profile's existence.
 
 Use --format ascii-table (default), csv, json, or yaml and --output PATH
 before the firmware subcommand. JSON/YAML contains observed_at, targets
@@ -86,7 +86,7 @@ Sort output by specified field
 
 `-h, --help`
 
-Print help (see a summary with -h)
+Print help (see a summary with '-h')
 
 `<HOST>`
 

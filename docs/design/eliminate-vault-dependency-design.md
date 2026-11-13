@@ -113,7 +113,7 @@ an end-state provider can still be Vault-backed where stated.
 | `machine-a-tron` chart values | Stale Vault `envFrom` values remain but are not consumed by the deployment template | Omit unused credential-service values under [#5957](https://github.com/dsx-ai-factory/infra-controller/issues/5957); retain TLS configuration for the selected issuer described in the service-transport row | 3 |
 | Legacy Flow PSM and NSM upgrade cleanup | Predecessor Flow deployments can retain bundled PSM and NSM containers and their Vault-backed resources; the current chart is Flow-only, and setup fails closed while an older deployment or active pod remains | Operators upgrade Flow through the guarded procedure and rerun setup with the legacy Vault available for token revocation and policy cleanup. Only obsolete PSM/NSM security resources are cleaned up; configured Vault providers remain supported | 3 |
 | REST `powershelf-manager` and `nvswitch-manager` credentials in persistent mode | Vault-backed credential managers store device credentials | Selectable Vault or independent credential backend under [#5954](https://github.com/dsx-ai-factory/infra-controller/issues/5954) | 3 |
-| Deployment tooling: `helm-prereqs` and chart defaults | Installs and unseals Vault; creates PKI roles, policies, and token jobs; charts default to the Vault issuer, Secrets, and `vault-cluster-info` ConfigMap | Provider-driven installation deploys and configures Vault only when a selected credential, Transit, or PKI provider requires it, under [#5958](https://github.com/dsx-ai-factory/infra-controller/issues/5958) | 3 |
+| Deployment tooling: `helm-prereqs` and chart defaults | Installs and unseals Vault; creates PKI roles, policies, and token jobs; charts default to the Vault issuer, Secrets, and `vault-cluster-info` ConfigMap | Vault remains the default. The reference installer supports `setup.sh --skip-vault` under [#5958](https://github.com/dsx-ai-factory/infra-controller/issues/5958): it installs no Vault, renders `nico-prereqs` without its Vault resources (`vault.enabled: false`), deploys the charts with `site-issuer`, both cert-manager flags, and `nico-api.vault.enabled: false`, and pre-flights the Core values against the startup rules. Per-DPU credential delivery ([#6147](https://github.com/dsx-ai-factory/infra-controller/issues/6147)) and the REST device-manager backends ([#5954](https://github.com/dsx-ai-factory/infra-controller/issues/5954)) remain open and are outside the installer | 3 |
 
 Unused component settings are separate from provider requirements. Chart
 cleanup preserves Vault-backed certificate issuance and any credential or
@@ -620,8 +620,10 @@ The overall effort is complete when a supported site can:
 
 1. Which KMIP server products and exact protocol and cryptographic profiles are
    qualified first, and what are the minimum supported high-availability,
-   backup, and recovery configurations? This decision is tracked by
-   [#3253](https://github.com/dsx-ai-factory/infra-controller/issues/3253).
+   backup, and recovery configurations?
+   [#3253](https://github.com/dsx-ai-factory/infra-controller/issues/3253)
+   closed on 2026-11-03 after the provider merged; product qualification is
+   tracked by [#8658](https://github.com/dsx-ai-factory/infra-controller/issues/8658).
 2. How does API validation enforce individual node signing-credential
    disablement or revocation before certificate expiry without a CA-wide
    rotation? The same-CA cert-manager provider and new Rust
@@ -638,9 +640,32 @@ The overall effort is complete when a supported site can:
    credentials, and basic-auth credentials from any source, rotate by restart.
 4. What configuration selects each credential, KMS, and PKI provider, and what
    invalid or conflicting combinations fail startup? What upgrade and rollback
-   window remains supported? This
-   decision is tracked by
-   [#5958](https://github.com/dsx-ai-factory/infra-controller/issues/5958).
+   window remains supported? Decided under
+   [#5958](https://github.com/dsx-ai-factory/infra-controller/issues/5958):
+   selection is explicit, never inferred. The `[secrets]` section selects the
+   credential and KMS providers; the `use_cert_manager` and
+   `use_cert_manager_ufm` flags select the PKI provider, and both `true` is
+   the only Vault-free combination, because
+   `[certificates] backend` has only Vault values and is ignored while both
+   flags are `true`. The reference installer selects a Vault-free site with
+   `setup.sh --skip-vault` or `NICO_SKIP_VAULT=true`. Startup fails and names
+   the setting when the configuration still needs the shared Vault client
+   without Vault connection settings: a `vault` backend, writer, or
+   `import_from`; no `[secrets]` section; or a certificate type whose
+   cert-manager flag is `false` with the default `shared_vault` backend. Every
+   `transit` KEK provider, active or not,
+   also needs Vault. Preflight applies the same rules to the Core values before
+   installation and also rejects a nested `vault-nico-issuer` reference and a
+   non-empty `nico-api.vaultClusterInfo`. Existing Vault sites keep their
+   defaults. Moving a site to `--skip-vault` requires the completed credential
+   migration, KEKs re-wrapped off Transit, both cert-manager flags `true`, and
+   the issuer switched to `site-issuer`, which signs with the same `site-root`
+   CA that Vault PKI imports, so existing leaves stay valid until renewal.
+   Rollback is a rerun without the flag; credential writes follow the
+   asymmetric rule in [Secrets Storage](../configuration/secrets-storage.md#migrating-an-existing-vault-site).
+   Immutable snapshot binding and retention for the DPF version-0 credential
+   record are deferred to
+   [#6147](https://github.com/dsx-ai-factory/infra-controller/issues/6147).
 5. Which DPF release and API safely consume per-device credential updates,
    and how does NICo verify that DPF uses the updated credential before
    allowing dependent operations? This decision is tracked by
@@ -648,7 +673,7 @@ The overall effort is complete when a supported site can:
 
 ## 8. Implementation Status
 
-This section is a status snapshot dated 2026-10-27. Sections 1 through 7 define
+This section is a status snapshot dated 2026-11-06. Sections 1 through 7 define
 the end-state design and remain independent of implementation order. Phase 1
 ([#195](https://github.com/dsx-ai-factory/infra-controller/issues/195)) implementation
 is complete, and the design issue for this document
@@ -660,8 +685,13 @@ Under Phase 3
 cert-manager certificate provider
 ([#5956](https://github.com/dsx-ai-factory/infra-controller/issues/5956)) and the
 KMIP KEK provider code
-([#3253](https://github.com/dsx-ai-factory/infra-controller/issues/3253)) have
-merged; KMIP server qualification and the remaining Phase 3 items stay open. The
+([#3253](https://github.com/dsx-ai-factory/infra-controller/issues/3253), closed
+2026-11-03) have merged, and the reference installer supports Vault-free
+installation
+([#5958](https://github.com/dsx-ai-factory/infra-controller/issues/5958)); KMIP
+server qualification
+([#8658](https://github.com/dsx-ai-factory/infra-controller/issues/8658)) and
+the remaining Phase 3 items stay open. The
 tables below record the intentional intermediate states created when one epic
 lands before a dependency owned by another epic.
 
@@ -669,7 +699,7 @@ lands before a dependency owned by another epic.
 
 | Boundary | Intermediate state | Resolving work |
 | :--- | :--- | :--- |
-| Phase 1 credential-storage boundary | After [#195](https://github.com/dsx-ai-factory/infra-controller/issues/195), credentials can be authoritative in PostgreSQL while their per-record DEKs remain wrapped by a KEK in Vault/OpenBao Transit. PostgreSQL replaces Vault as the credential database but intentionally leaves KEK custody behind the KMS-provider boundary. | [#3253](https://github.com/dsx-ai-factory/infra-controller/issues/3253) adds and qualifies the KMIP provider alongside Transit. Sites can keep Transit or route new wraps to KMIP, re-wrap live records, and retain the prior provider through rollback and backup-retention windows. |
+| Phase 1 credential-storage boundary | After [#195](https://github.com/dsx-ai-factory/infra-controller/issues/195), credentials can be authoritative in PostgreSQL while their per-record DEKs remain wrapped by a KEK in Vault/OpenBao Transit. PostgreSQL replaces Vault as the credential database but intentionally leaves KEK custody behind the KMS-provider boundary. | [#3253](https://github.com/dsx-ai-factory/infra-controller/issues/3253) added the KMIP provider alongside Transit, and [#8658](https://github.com/dsx-ai-factory/infra-controller/issues/8658) qualifies server products. Sites can keep Transit or route new wraps to KMIP, re-wrap live records, and retain the prior provider through rollback and backup-retention windows. |
 | Services outside `nico-api` | Phase 1 made the `nico-api` chain Vault-optional, `dsx-exchange-consumer` and the `bmc-proxy` chart no longer require Vault configuration, and `machine-a-tron` carries no Vault values beyond its TLS issuer. Persistent `powershelf-manager` and `nvswitch-manager` deployments still use Vault credential managers. | [#5957](https://github.com/dsx-ai-factory/infra-controller/issues/5957) made the DSX Exchange credential sources optional and removed unused chart inputs, preserving the selected TLS issuer; [#5954](https://github.com/dsx-ai-factory/infra-controller/issues/5954) adds selectable persistent REST credential backends. Vault-backed providers remain supported. |
 | Legacy Flow upgrade and cleanup | The current chart is Flow-only, but a site still running the predecessor three-container deployment cannot resume setup until an operator upgrades Flow. Its legacy Vault resources remain until setup resumes. | The Flow-only chart, fail-closed guard, and cleanup landed in the [Flow-only deployment implementation](https://github.com/dsx-ai-factory/infra-controller/pull/5325), tracked by [#5324](https://github.com/dsx-ai-factory/infra-controller/issues/5324). After the operator completes and verifies the supported Flow upgrade, setup removes the stranded security resources while Vault is still available. |
 | DPF BMC credential delivery | [#6487](https://github.com/dsx-ai-factory/infra-controller/pull/6487) removed the Vault-issued temporary admin credential, in-cluster CLI job, and two-stage rollout. The BMC version-0 source selector and watched Secret are shipped, but the target-wide `bmc-shared-password` projection cannot represent a fleet on mixed credential versions. | [#6147](https://github.com/dsx-ai-factory/infra-controller/issues/6147) qualifies supporting DPF behavior and integrates per-DPU Secrets with the existing per-BMC credential records and rotation mechanism. |
@@ -698,8 +728,8 @@ and [Credential Sources](../configuration/credential-sources.md#site-wide-bmc-ro
 | Per-DPU BMC credentials | Blocked on supporting DPF behavior; integration reuses existing per-BMC credentials and rotation with per-DPU Secret delivery, reconciliation, and safe credential updates | [#6147](https://github.com/dsx-ai-factory/infra-controller/issues/6147) |
 | Certificate-provider separation | Implemented; production providers remain Vault-backed | [#2880](https://github.com/dsx-ai-factory/infra-controller/issues/2880), [implementation](https://github.com/dsx-ai-factory/infra-controller/pull/2881) |
 | Selectable cert-manager certificate provider | Implemented by [#7283](https://github.com/dsx-ai-factory/infra-controller/pull/7283) as an opt-in provider: `use_cert_manager` and `use_cert_manager_ufm` under `[certificates]` select CSR-only `CertificateRequest` issuance with in-memory keys for Scout, DPU, and UFM certificates, and Vault PKI remains the default. Existing trust, leaves, keys, Secrets, and mounts are unchanged. The shipped provider does not enforce individual node-signing credential disablement or revocation before expiry, and no issue has tracked that decision since #5956 closed; see open question 2. | [#5956](https://github.com/dsx-ai-factory/infra-controller/issues/5956), [#7283](https://github.com/dsx-ai-factory/infra-controller/pull/7283), [`CertificatesConfig`](https://github.com/dsx-ai-factory/infra-controller/blob/main/crates/api-core/src/cfg/README.md#certificatesconfig) |
-| Provider-driven installation and bootstrap | Open for selecting the chart and runtime credential, KMS, and PKI providers; the DPF BMC version-0 bootstrap path already has no Vault dependency, and `helm-prereqs` creates the KMIP client Secret and pre-flights the provider's mounts, as described in [Opting in to the KMIP KEK provider](https://github.com/dsx-ai-factory/infra-controller/blob/main/helm-prereqs/README.md#opting-in-to-the-kmip-kek-provider) | [#5958](https://github.com/dsx-ai-factory/infra-controller/issues/5958), [#6147](https://github.com/dsx-ai-factory/infra-controller/issues/6147) |
-| Production KMIP KEK provider | Implemented; per-product interoperability qualification is open, and no product is qualified yet | [#3253](https://github.com/dsx-ai-factory/infra-controller/issues/3253), [#7312](https://github.com/dsx-ai-factory/infra-controller/pull/7312), [#7779](https://github.com/dsx-ai-factory/infra-controller/pull/7779), [KMIP KEK Provider](../configuration/kmip-kek-provider.md) |
+| Provider-driven installation and bootstrap | Implemented for the reference installer as an explicit opt-out, not by inference from the selected providers: `setup.sh --skip-vault`, or `NICO_SKIP_VAULT=true`, installs a site without Vault, with `nico-prereqs` `vault.enabled: false`, the `site-issuer` CA ClusterIssuer for the Core, RMS, Flow, and site-agent service certificates, both cert-manager flags and `nico-api.vault.enabled: false` for Core, and a preflight check of the Core values against the startup rules, as described in [Installing without Vault](https://github.com/dsx-ai-factory/infra-controller/blob/main/helm-prereqs/README.md#installing-without-vault). Vault remains the default. The DPF BMC version-0 bootstrap path has no Vault dependency, and `helm-prereqs` creates the KMIP client Secret and pre-flights the provider's mounts. Remaining: per-DPU credential delivery and the REST device managers, both outside the installer | [#5958](https://github.com/dsx-ai-factory/infra-controller/issues/5958), [#6147](https://github.com/dsx-ai-factory/infra-controller/issues/6147), [#5954](https://github.com/dsx-ai-factory/infra-controller/issues/5954) |
+| Production KMIP KEK provider | Implemented; [#3253](https://github.com/dsx-ai-factory/infra-controller/issues/3253) closed on 2026-11-03, and per-product interoperability qualification continues with no product qualified yet | [#3253](https://github.com/dsx-ai-factory/infra-controller/issues/3253), [#8658](https://github.com/dsx-ai-factory/infra-controller/issues/8658), [#7312](https://github.com/dsx-ai-factory/infra-controller/pull/7312), [#7779](https://github.com/dsx-ai-factory/infra-controller/pull/7779), [KMIP KEK Provider](../configuration/kmip-kek-provider.md) |
 | Machine-identity encryption convergence | Open after #3253; independent of the selected production KMS provider | [#3255](https://github.com/dsx-ai-factory/infra-controller/issues/3255) |
 | Shared UFM/NMX-C cache lifecycle | Implemented by [#7294](https://github.com/dsx-ai-factory/infra-controller/pull/7294); UFM and NMX-C share one client-cache rotation helper and keep the #1837 behavior | [#5516](https://github.com/dsx-ai-factory/infra-controller/issues/5516), [#7294](https://github.com/dsx-ai-factory/infra-controller/pull/7294) |
 | Overall high-level design | Merged as this document; the design issue is closed | [#3251](https://github.com/dsx-ai-factory/infra-controller/issues/3251), [#5649](https://github.com/dsx-ai-factory/infra-controller/pull/5649) |

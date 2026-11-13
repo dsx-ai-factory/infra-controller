@@ -40,6 +40,11 @@ spec:
             capabilities:
               drop:
                 - ALL
+          env:
+            - name: CERT_AUTH_MODE
+              value: AUDIT
+            - name: CERT_AUTH_ALLOWED_IDENTITIES
+              value: spiffe://nico.local/nico-rest/sa/nico-rest-site-manager
           args:
             - --ca-common-name=NICo Local Dev CA
             - --ca-organization=NVIDIA

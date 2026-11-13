@@ -89,6 +89,7 @@ http-body-util = { workspace = true }
 hyper = { workspace = true, features = ["http2", "server"] }
 hyper-util = { workspace = true, features = ["tokio"] }
 prost = { workspace = true }
+tempfile = { workspace = true }
 
 [build-dependencies]
 clap = { workspace = true }

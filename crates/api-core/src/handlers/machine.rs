@@ -24,6 +24,7 @@ use ::rpc::forge as rpc;
 use ::rpc::model::machine::ManagedHostStateSnapshotRpc;
 use carbide_redfish::libredfish::RedfishAuth;
 use carbide_secrets::credentials::{BmcCredentialType, CredentialKey, Credentials};
+use carbide_site_explorer::dpu_asn::DPU_ASN_SLOT;
 use carbide_site_explorer::dpu_loopback::DPU_IPV4_LOOPBACK_SLOT;
 use carbide_uuid::machine::{
     DpuMachineId, HostMachineId, HostOrDpuId, MachineId, MachineIdSubtypeTrait,
@@ -806,19 +807,37 @@ async fn force_delete_cleanup_txn(
 
         db::network_devices::dpu_to_network_device_map::delete(&mut txn, &dpu_machine.id).await?;
 
-        if let Some(asn) = dpu_machine.asn {
-            match db::resource_pool::release(
+        // Ownership remains authoritative when the machine snapshot has no ASN.
+        if let Some(owned) = api
+            .resource_pool_registry
+            .find_owned(
                 &api.common_pools.ethernet.pool_fnn_asn,
                 &mut txn,
-                asn,
                 model::resource_pool::OwnerType::Machine,
                 &owner_id,
+                DPU_ASN_SLOT,
             )
             .await?
-            {
-                ConditionalWrite::Applied(())
-                | ConditionalWrite::NotApplied(ResourcePoolAllocationNotOwned) => {}
+        {
+            let asn = *owned.value();
+            match owned.release(&mut txn).await? {
+                ConditionalWrite::Applied(()) => {}
+                ConditionalWrite::NotApplied(ResourcePoolAllocationNotOwned) => {
+                    return Err(CarbideError::FailedPrecondition(format!(
+                        "DPU `{}` no longer owns ASN `{asn}`",
+                        dpu_machine.id,
+                    )));
+                }
             }
+        } else {
+            api.resource_pool_registry
+                .request_cancellation(
+                    &mut txn,
+                    model::resource_pool::OwnerType::Machine,
+                    &owner_id,
+                    DPU_ASN_SLOT,
+                )
+                .await?;
         }
         let owned_interfaces = if request.delete_interfaces {
             db::machine_interface::find_by_machine_id_for_update(&mut txn, &dpu_machine.id).await?

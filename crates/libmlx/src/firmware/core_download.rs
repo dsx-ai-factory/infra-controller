@@ -7,10 +7,10 @@
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use forge_tls::client_config::ClientCert;
+use carbide_tls::client_config::ClientCert;
 use http_body_util::BodyExt;
-use rpc::forge_tls_client::{
-    ConfigurationError, ForgeClientConfig, ForgeTlsClient, ForgeTlsClientError,
+use rpc::carbide_tls_client::{
+    CarbideClientConfig, CarbideTlsClient, CarbideTlsClientError, ConfigurationError,
 };
 use rpc::protos::firmware_supervisor::CoreFirmwareDownloadConfig as WireConfig;
 use tokio::time::{Instant, timeout_at};
@@ -28,7 +28,7 @@ const MAX_RETRY_DELAY: Duration = Duration::from_secs(30);
 ///
 /// The accepted worker owns this snapshot after the submitting RPC or Scout
 /// exits. The local request carries certificate paths and transport settings,
-/// without PEM bytes or node-auth tokens. `ForgeTlsClient` rereads certificates
+/// without PEM bytes or node-auth tokens. `CarbideTlsClient` rereads certificates
 /// and roots and mints JWTs locally. Keep this configuration out of the journal
 /// and diagnostics because proxy settings can contain secrets.
 #[derive(Clone)]
@@ -111,10 +111,10 @@ impl CoreFirmwareDownloadConfig {
     }
 
     /// Reconstruct Scout's resolved settings without consulting the helper environment.
-    fn client_config(&self) -> ForgeClientConfig {
+    fn client_config(&self) -> CarbideClientConfig {
         // Build from resolved fields, without rereading the environment of a
         // daemon that might predate the Scout supplying this operation.
-        ForgeClientConfig {
+        CarbideClientConfig {
             root_ca_path: self.root_ca_path.clone(),
             client_cert: Some(ClientCert {
                 cert_path: self.client_cert_path.clone(),
@@ -198,16 +198,16 @@ fn invalid_config(message: &str) -> FirmwareError {
 }
 
 /// Classify local setup without saving paths, proxy settings or source text.
-fn client_setup_error(error: ForgeTlsClientError) -> FirmwareError {
+fn client_setup_error(error: CarbideTlsClientError) -> FirmwareError {
     let failure = match &error {
-        ForgeTlsClientError::Configuration(ConfigurationError::CouldNotReadRootCa {
+        CarbideTlsClientError::Configuration(ConfigurationError::CouldNotReadRootCa {
             error,
             ..
         }) => CoreTransferFailure::RootCertificate(error.kind()),
-        ForgeTlsClientError::Configuration(
+        CarbideTlsClientError::Configuration(
             ConfigurationError::ClientCertNotLoaded | ConfigurationError::InvalidClientCert(_),
         ) => CoreTransferFailure::ClientCertificate,
-        ForgeTlsClientError::Configuration(ConfigurationError::Resolver(_)) => {
+        CarbideTlsClientError::Configuration(ConfigurationError::Resolver(_)) => {
             CoreTransferFailure::Resolver
         }
         _ => CoreTransferFailure::Configuration,
@@ -324,7 +324,7 @@ impl CoreFirmwareDelivery {
             // certificate/root refresh boundary and authenticated HTTP2 stack.
             let config = self.config.client_config();
             let response = timeout_at(deadline, async {
-                let mut client = ForgeTlsClient::new(&config)
+                let mut client = CarbideTlsClient::new(&config)
                     .build_http(&self.config.core_url)
                     .await
                     .map_err(client_setup_error)?;

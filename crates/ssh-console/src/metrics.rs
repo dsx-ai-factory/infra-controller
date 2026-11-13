@@ -144,6 +144,7 @@ impl ShutdownHandle<()> for MetricsHandle {
 }
 
 pub(crate) struct MetricsState {
+    pub(crate) instrumentation: carbide_instrument::Instrumentation,
     pub(crate) meter: Meter,
     pub(crate) registry: prometheus::Registry,
     _meter_provider: SdkMeterProvider,
@@ -178,6 +179,9 @@ impl MetricsState {
         let meter = meter_provider.meter("ssh-console");
 
         Self {
+            instrumentation: carbide_instrument::Instrumentation::from_meter_provider(
+                &meter_provider,
+            ),
             meter,
             registry,
             _meter_provider: meter_provider,

@@ -127,9 +127,13 @@ pub struct SchedulingResult {
 }
 
 impl SchedulingResult {
-    fn emit_scheduling_event(&self, machine_id: MachineId) {
+    fn emit_scheduling_event(
+        &self,
+        instrumentation: &carbide_instrument::Instrumentation,
+        machine_id: MachineId,
+    ) {
         // Count scheduling attempts for both API and managed-host triggers.
-        carbide_instrument::emit(AttestationScheduled {
+        instrumentation.emit(AttestationScheduled {
             outcome: self.outcome,
             machine_id,
             profile_source: ProfileSource::of(self),
@@ -199,6 +203,7 @@ struct AttestationScheduled {
 ///
 /// `triggered_by_mh_controller` is true only for managed-host lifecycle triggers;
 /// external triggers pass false. Every device row in the job records this origin.
+/// Scheduling attempts are recorded through the supplied instrumentation.
 ///
 /// `attester_id_regex`, when present, replaces profile selection for this request,
 /// including when no profile exists or its mode is `NONE`. Only eligible devices
@@ -209,6 +214,7 @@ struct AttestationScheduled {
 /// profile answers without it.
 pub async fn trigger_attestation(
     db_pool: &PgPool,
+    instrumentation: &carbide_instrument::Instrumentation,
     connect: impl AsyncFnOnce() -> Result<Box<dyn libredfish::Redfish>, StateHandlerError>,
     bmc_info: &BmcInfo,
     machine_id: &MachineId,
@@ -247,7 +253,7 @@ pub async fn trigger_attestation(
     if let Some(txn) = txn {
         txn.commit().await?;
     }
-    result.emit_scheduling_event(*machine_id);
+    result.emit_scheduling_event(instrumentation, *machine_id);
 
     Ok(result)
 }
@@ -502,7 +508,7 @@ pub(crate) async fn handle_spdm_trigger_state(
         true, // This job is part of the managed-host lifecycle.
     )
     .await?;
-    result.emit_scheduling_event(*host_machine_id);
+    result.emit_scheduling_event(&services.instrumentation, *host_machine_id);
 
     // Persist the job and its polling state together; a rejected transition rolls back both.
     // Empty selections have no transaction and advance without polling.

@@ -24,8 +24,8 @@ use carbide_uuid::machine::MachineId;
 use futures_util::future::join_all;
 use opentelemetry::KeyValue;
 use opentelemetry::metrics::{Counter, Gauge, Meter, ObservableGauge};
+use rpc::carbide_api_client::CarbideApiClient;
 use rpc::forge;
-use rpc::forge_api_client::ForgeApiClient;
 use tokio::sync::oneshot;
 use tokio::sync::oneshot::Receiver;
 use tokio::task::JoinHandle;
@@ -44,8 +44,9 @@ use crate::ssh_server::ServerMetrics;
 /// Spawn a background task that connects to all BMC's in the environment, reconnecting if they fail.
 pub(crate) fn spawn(
     config: Arc<Config>,
-    forge_api_client: ForgeApiClient,
+    carbide_api_client: CarbideApiClient,
     meter: &Meter,
+    instrumentation: carbide_instrument::Instrumentation,
     cancel_token: CancellationToken,
 ) -> Handle {
     let (cancel_token, drop_guard) = fork_cancel_token(cancel_token);
@@ -56,8 +57,8 @@ pub(crate) fn spawn(
             members: members.clone(),
             cancel_token,
             config,
-            forge_api_client,
-            metrics: Arc::new(BmcPoolMetrics::new(meter, members.clone())),
+            carbide_api_client,
+            metrics: Arc::new(BmcPoolMetrics::new(meter, instrumentation, members.clone())),
         }
         .run_loop(ready_tx),
     );
@@ -117,7 +118,7 @@ impl BmcConnectionStore {
         &self,
         machine_or_instance_id: &str,
         config: &Config,
-        forge_api_client: &ForgeApiClient,
+        carbide_api_client: &CarbideApiClient,
         metrics: Arc<ServerMetrics>,
     ) -> Result<BmcConnectionSubscription, GetConnectionError> {
         if let Ok(machine_id) = MachineId::from_str(machine_or_instance_id) {
@@ -153,7 +154,7 @@ impl BmcConnectionStore {
                 }) {
                 machine_id
             } else {
-                forge_api_client
+                carbide_api_client
                     .find_instances_by_ids(forge::InstancesByIdsRequest {
                         instance_ids: vec![instance_id],
                     })
@@ -207,11 +208,12 @@ struct BmcPool {
     members: Arc<RwLock<HashMap<MachineId, ClientHandle>>>,
     cancel_token: CancellationToken,
     config: Arc<Config>,
-    forge_api_client: ForgeApiClient,
+    carbide_api_client: CarbideApiClient,
     metrics: Arc<BmcPoolMetrics>,
 }
 
 pub(super) struct BmcPoolMetrics {
+    pub(super) instrumentation: carbide_instrument::Instrumentation,
     grpc_total_hosts: Gauge<u64>,
     total_machines: Gauge<u64>,
     _failed_machines: ObservableGauge<u64>,
@@ -226,15 +228,19 @@ pub(super) struct BmcPoolMetrics {
 }
 
 impl BmcPoolMetrics {
-    fn new(meter: &Meter, members: Arc<RwLock<HashMap<MachineId, ClientHandle>>>) -> Self {
-        // Bind the cached Event to SSH Console's installed global provider and
-        // expose its zero before any BMC client connects.
-        let initialized = carbide_instrument::initialize_counter_series(&BmcRecoveryAttempted);
+    fn new(
+        meter: &Meter,
+        instrumentation: carbide_instrument::Instrumentation,
+        members: Arc<RwLock<HashMap<MachineId, ClientHandle>>>,
+    ) -> Self {
+        // Expose the zero series in this pool's registry before any BMC client connects.
+        let initialized = instrumentation.initialize_counter_series(&BmcRecoveryAttempted);
         debug_assert!(
             initialized,
             "BMC recovery Event must initialize its counter"
         );
         Self {
+            instrumentation,
             grpc_total_hosts: meter
                 .u64_gauge("ssh_console_grpc_total_machines")
                 .with_description("Number of hosts reported by the Site Controller to the SSH Console service").build(),
@@ -306,11 +312,11 @@ impl BmcPoolMetrics {
     }
 
     #[cfg(test)]
-    pub(super) fn for_test() -> Self {
-        Self::new(
-            &opentelemetry::global::meter("ssh-console-ipmi-test"),
-            Arc::default(),
-        )
+    pub(super) fn for_test(
+        meter: &Meter,
+        instrumentation: carbide_instrument::Instrumentation,
+    ) -> Self {
+        Self::new(meter, instrumentation, Arc::default())
     }
 }
 
@@ -370,7 +376,7 @@ impl BmcPool {
                         .collect()
                 }
                 None => {
-                    self.forge_api_client
+                    self.carbide_api_client
                         .find_machine_ids(forge::MachineSearchConfig {
                             exclude_hosts: !self.config.hosts,
                             include_dpus: self.config.dpus,
@@ -415,12 +421,12 @@ impl BmcPool {
         // here.
         let all_connection_details = join_all(to_add.into_iter().map(|machine_id| {
             let config = self.config.clone();
-            let forge_api_client = self.forge_api_client.clone();
+            let carbide_api_client = self.carbide_api_client.clone();
             async move {
                 match connection::lookup(
                     &machine_id.to_string(),
                     &config,
-                    &forge_api_client,
+                    &carbide_api_client,
                 )
                     .await
                 {

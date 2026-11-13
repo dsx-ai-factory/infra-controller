@@ -16,10 +16,10 @@
  */
 use axum::extract::FromRequestParts;
 use axum::http::request::Parts;
-use forge_tls::client_config::ClientCert;
+use carbide_tls::client_config::ClientCert;
+use rpc::carbide_tls_client;
+use rpc::carbide_tls_client::{ApiConfig, CarbideClientConfig};
 use rpc::forge::CloudInitInstructionsRequest;
-use rpc::forge_tls_client;
-use rpc::forge_tls_client::{ApiConfig, ForgeClientConfig};
 
 use crate::common::{AppState, Machine};
 use crate::rpc_error::PxeRequestError;
@@ -31,7 +31,7 @@ impl FromRequestParts<AppState> for Machine {
         parts: &mut Parts,
         state: &AppState,
     ) -> Result<Self, Self::Rejection> {
-        let client_config = ForgeClientConfig::new(
+        let client_config = CarbideClientConfig::new(
             state.runtime_config.forge_root_ca_path.clone(),
             Some(ClientCert {
                 cert_path: state.runtime_config.server_cert_path.clone(),
@@ -40,7 +40,7 @@ impl FromRequestParts<AppState> for Machine {
         );
         let api_config = ApiConfig::new(&state.runtime_config.internal_api_url, &client_config);
 
-        let mut client = forge_tls_client::ForgeTlsClient::retry_build(&api_config)
+        let mut client = carbide_tls_client::CarbideTlsClient::retry_build(&api_config)
             .await
             .map_err(|err| {
                 tracing::error!(
@@ -62,8 +62,26 @@ impl FromRequestParts<AppState> for Machine {
                 ip: client_ip.to_string(),
             }))
             .await
-            .map(|response| Machine {
-                instructions: response.into_inner(),
+            .map(|response| {
+                let instructions = response.into_inner();
+                if let Some(id) = instructions.metadata.as_ref().and_then(|metadata| {
+                    metadata
+                        .instance_id
+                        .parse::<carbide_uuid::machine::MachineId>()
+                        .ok()
+                }) {
+                    let id_string = id.to_string();
+                    let predicted = id.machine_type().is_predicted_host();
+                    trace_propagation::MachineTraceAttributes {
+                        machine_id: (!predicted).then_some(id_string.as_str()),
+                        predicted_id: predicted.then_some(id_string.as_str()),
+                        managed_host_id: (!id.machine_type().is_dpu())
+                            .then_some(id_string.as_str()),
+                        ..Default::default()
+                    }
+                    .record_on(&tracing::Span::current());
+                }
+                Machine { instructions }
             })
             .map_err(PxeRequestError::CarbideApiError)
     }

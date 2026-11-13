@@ -18,6 +18,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use bmc_backend::BmcConnector;
 use carbide_credential_rotation::RotationGate;
 use carbide_health_metrics::PerObjectMetricsRegistry;
 use carbide_ib_fabric::IbFabricMonitor;
@@ -232,9 +233,11 @@ fn machine_state_controller(
         .build();
     let rotation_gate = |family| RotationGate::new_for_family(family);
     let services = MachineStateHandlerServices {
+        instrumentation: api.instrumentation().clone(),
         db_pool: api.database_connection.clone(),
         db_reader: api.database_connection.clone().into(),
         redfish_client_pool: clients.redfish.clone(),
+        bmc_connector: BmcConnector::Libredfish(clients.redfish.clone()),
         bmc_credential_ops: clients.redfish.clone(),
         ipmi_tool: carbide_ipmi::test_support(),
         site_config: config.machine_state_handler_site_config().into(),

@@ -17,7 +17,6 @@
 
 use std::net::IpAddr;
 
-use carbide_instrument::emit;
 use carbide_network::ip::IdentifyAddressFamily;
 use mac_address::MacAddress;
 use model::address_selection_strategy::AddressSelectionStrategy;
@@ -294,7 +293,7 @@ fn emit_preallocation_error(
     result: Result<PreallocationSuccess, CarbideError>,
 ) -> Result<PreallocationSuccess, CarbideError> {
     if let Err(error) = &result {
-        emit(StaticAddressPreallocationCompleted::Error {
+        carbide_instrument::emit(StaticAddressPreallocationCompleted::Error {
             error: error.to_string(),
         });
     }
@@ -333,7 +332,7 @@ pub(crate) async fn assign_static_address(
             error: error.to_string(),
         },
     };
-    emit(event);
+    api.instrumentation.emit(event);
 
     result
 }
@@ -438,7 +437,7 @@ pub(crate) async fn remove_static_address(
             error: error.to_string(),
         },
     };
-    emit(event);
+    api.instrumentation.emit(event);
 
     result
 }

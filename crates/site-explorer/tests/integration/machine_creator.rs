@@ -837,7 +837,7 @@ async fn test_host_reconciler_counts_a_failed_admin_address_reconcile(
     db::explored_endpoints::request_exploration_for_addresses(&[host_bmc_ip], txn.as_mut()).await?;
     txn.commit().await?;
 
-    let metrics = MetricsCapture::start();
+    let metrics = MetricsCapture::for_registry(env.test_harness.test_meter.registry());
     explorer.run_single_iteration().await?;
     assert_eq!(
         interface_machine_id(&env.pool, oob_mac).await?,
@@ -1131,7 +1131,7 @@ async fn test_explored_host_admin_addresses_are_reconciled_without_create_machin
         .await?;
     txn.commit().await?;
 
-    let metrics = MetricsCapture::start();
+    let metrics = MetricsCapture::for_registry(env.test_harness.test_meter.registry());
     explorer.run_single_iteration().await?;
     assert_eq!(
         metrics.counter_delta(
@@ -1311,7 +1311,7 @@ async fn test_host_reconciler_rolls_back_conflicting_oob_ownership(
     .await?;
     txn.commit().await?;
 
-    let metrics = MetricsCapture::start();
+    let metrics = MetricsCapture::for_registry(env.test_harness.test_meter.registry());
     explorer.run_single_iteration().await?;
 
     assert_eq!(
@@ -2250,7 +2250,7 @@ async fn test_create_machines_moves_on_after_a_failed_attempt_within_the_cap(
     let (healthy_host, endpoints) = register_ingestible_hosts(&env, &[rack_host(&rack_b)]).await?;
     explorer.insert_endpoints(endpoints);
 
-    let metrics = MetricsCapture::start();
+    let metrics = MetricsCapture::for_registry(env.test_harness.test_meter.registry());
     explorer.run_single_iteration().await?;
 
     assert_eq!(
@@ -3165,6 +3165,12 @@ async fn test_machine_creator_retries_changed_loopback_reservation_set(
     use model::resource_pool::{OwnerType, ResourcePoolEntryState};
 
     let env = Env::new(pool).await;
+    // Four preparations plus the gate occupy the fixture's five connections.
+    // Keep lock observations and intent edits on a separate connection.
+    let control = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(1)
+        .connect_with(env.pool.connect_options().as_ref().clone())
+        .await?;
     let creator = machine_creator(&env, machine_creator_config());
     let common_pools = env.api().common_pools();
     let loopback_pool = common_pools.ethernet.pool_loopback_ip.as_ref();
@@ -3225,9 +3231,9 @@ async fn test_machine_creator_retries_changed_loopback_reservation_set(
             tokio::pin!(creation);
             tokio::select! {
                 result = &mut creation => panic!("creation bypassed the preparation gate: {result:?}"),
-                _ = wait_for_blocked_queries(&env.pool, gate_pid, "SELECT value FROM resource_pool", 2) => {},
+                _ = wait_for_blocked_queries(&control, gate_pid, "SELECT value FROM resource_pool", 2) => {},
             }
-            let mut writer = env.pool.begin().await?;
+            let mut writer = control.begin().await?;
             let mut updated = expected.clone();
             updated.data.interfaces = replacement
                 .iter()
@@ -3318,5 +3324,6 @@ async fn test_machine_creator_retries_changed_loopback_reservation_set(
             );
         }
     }
+    control.close().await;
     Ok(())
 }

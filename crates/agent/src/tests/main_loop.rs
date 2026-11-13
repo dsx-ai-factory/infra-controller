@@ -261,7 +261,7 @@ async fn record_network_status_before_deadline(
     address: std::net::SocketAddr,
     status: rpc::DpuNetworkStatus,
 ) -> Result<(), eyre::Report> {
-    let client_config = forge_tls_client::ForgeClientConfig {
+    let client_config = carbide_tls_client::CarbideClientConfig {
         root_ca_path: concat!(env!("CARGO_MANIFEST_DIR"), "/test-certs/tls.crt").into(),
         ..Default::default()
     };

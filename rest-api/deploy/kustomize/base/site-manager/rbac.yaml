@@ -23,10 +23,6 @@ rules:
   - apiGroups: ["forge.nvidia.io"]
     resources: ["sites/status"]
     verbs: ["get", "update", "patch"]
-  # Access to secrets for TLS
-  - apiGroups: [""]
-    resources: ["secrets"]
-    verbs: ["get", "list", "watch", "create", "update", "patch"]
   - apiGroups: [""]
     resources: ["configmaps"]
     verbs: ["get", "list", "watch"]

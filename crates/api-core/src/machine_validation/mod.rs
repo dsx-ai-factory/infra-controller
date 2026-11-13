@@ -21,8 +21,9 @@ use std::default::Default;
 use std::io;
 use std::sync::Arc;
 
+use carbide_instrument::Instrumentation;
 use carbide_machine_controller::config::machine_validation::MachineValidationConfig;
-use carbide_utils::managed_loop::{self, LoopManager};
+use carbide_utils::managed_loop::{LoopManager, ManagedLoopIteration};
 use carbide_utils::periodic_timer::PeriodicTimer;
 use db::machine_validation::{StateColumn, ValidationNotActive};
 use db::{ConditionalWrite, ObjectColumnFilter};
@@ -122,6 +123,7 @@ impl carbide_instrument::DynamicLog for MachineValidationCompleted {
 }
 
 pub(crate) struct MachineValidationManager {
+    instrumentation: Instrumentation,
     database_connection: sqlx::PgPool,
     config: MachineValidationConfig,
     metric_holder: Arc<metrics::MetricHolder>,
@@ -132,6 +134,7 @@ impl MachineValidationManager {
         database_connection: sqlx::PgPool,
         mut config: MachineValidationConfig,
         meter: opentelemetry::metrics::Meter,
+        instrumentation: Instrumentation,
     ) -> Self {
         if config.stale_run_timeout < MachineValidationConfig::MIN_STALE_RUN_TIMEOUT {
             tracing::warn!(
@@ -150,6 +153,7 @@ impl MachineValidationManager {
         let metric_holder = Arc::new(metrics::MetricHolder::new(meter, hold_period));
 
         MachineValidationManager {
+            instrumentation,
             database_connection,
             config,
             metric_holder,
@@ -176,7 +180,10 @@ impl MachineValidationManager {
             } else {
                 self.cleanup_attempt_logs().await
             };
-            managed_loop::record_iteration(LoopManager::MachineValidationManager, &result);
+            self.instrumentation.emit(ManagedLoopIteration::from_result(
+                LoopManager::MachineValidationManager,
+                &result,
+            ));
 
             tokio::select! {
                 _ = tick.sleep() => {},
@@ -216,7 +223,9 @@ impl MachineValidationManager {
         txn.commit().await?;
         // Emit only after this phase is durable. Otherwise a rollback would
         // leave the validation active and a later retry would count it again.
-        completions.into_iter().for_each(carbide_instrument::emit);
+        completions
+            .into_iter()
+            .for_each(|completion| self.instrumentation.emit(completion));
 
         let mut txn = db::Transaction::begin(&self.database_connection).await?;
         let mut completions = Vec::new();
@@ -243,7 +252,9 @@ impl MachineValidationManager {
             }
         }
         txn.commit().await?;
-        completions.into_iter().for_each(carbide_instrument::emit);
+        completions
+            .into_iter()
+            .for_each(|completion| self.instrumentation.emit(completion));
 
         let mut txn = db::Transaction::begin(&self.database_connection).await?;
         let mut completions = Vec::new();
@@ -308,7 +319,9 @@ impl MachineValidationManager {
         self.metric_holder.update_metrics(metrics);
 
         txn.commit().await?;
-        completions.into_iter().for_each(carbide_instrument::emit);
+        completions
+            .into_iter()
+            .for_each(|completion| self.instrumentation.emit(completion));
 
         Ok(())
     }
@@ -858,10 +871,12 @@ mod tests {
             ),
         ];
 
-        let metrics = MetricsCapture::start();
+        let test_meter = carbide_utils::test_support::test_meter::TestMeter::default();
+        let instrumentation = Instrumentation::new(test_meter.meter());
+        let metrics = MetricsCapture::for_registry(test_meter.registry());
         let logs = capture_logs(|| {
             for (outcome, cause, error) in combos {
-                carbide_instrument::emit(MachineValidationCompleted {
+                instrumentation.emit(MachineValidationCompleted {
                     outcome,
                     cause,
                     machine_id,
@@ -912,10 +927,6 @@ mod tests {
             assert_eq!(field(log, "error"), Some(error.to_string()));
         }
 
-        // The exact-delta assertion sticks to the one (outcome, cause) pair
-        // no DB-gated completion-flow test in this binary drives (the others
-        // emit from the product funnels without holding the capture lock), so
-        // a parallel run cannot inflate it.
         assert_eq!(
             metrics.counter_delta(
                 "carbide_machine_validation_outcomes_total",

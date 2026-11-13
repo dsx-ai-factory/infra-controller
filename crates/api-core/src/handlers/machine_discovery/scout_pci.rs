@@ -131,13 +131,17 @@ impl Comparison {
     }
 
     /// Emits the comparison metric and its structured log.
-    pub(in crate::handlers) fn emit(self, machine_id: &MachineId) {
+    pub(in crate::handlers) fn emit(
+        self,
+        instrumentation: &carbide_instrument::Instrumentation,
+        machine_id: &MachineId,
+    ) {
         let (interface_mac_address, pci_slot) = self.subject.map_or_else(
             || (None, None),
             |subject| (Some(subject.mac_address.to_string()), subject.pci_slot),
         );
 
-        carbide_instrument::emit(ScoutPciCompared {
+        instrumentation.emit(ScoutPciCompared {
             result: self.comparison,
             machine_id: machine_id.to_string(),
             interface_mac_address,
@@ -765,7 +769,9 @@ mod tests {
                 level: tracing::Level::WARN,
             },
         ];
-        let metrics = MetricsCapture::start();
+        let test_meter = carbide_utils::test_support::test_meter::TestMeter::default();
+        let instrumentation = carbide_instrument::Instrumentation::new(test_meter.meter());
+        let metrics = MetricsCapture::for_registry(test_meter.registry());
         let machine_id = host_machine_id();
         let logs = capture_logs(|| {
             for case in &cases {
@@ -780,7 +786,7 @@ mod tests {
                     selection_source: Some(BootInterfaceSelectionSource::RedfishChassisId),
                     reason: "test reason",
                 }
-                .emit(&machine_id);
+                .emit(&instrumentation, &machine_id);
             }
         });
 

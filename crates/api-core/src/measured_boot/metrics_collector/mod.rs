@@ -68,6 +68,7 @@ impl carbide_instrument::DynamicLog for MeasuredBootCollectorIteration {
 
 /// `MeasuredBootMetricsCollector` monitors the state of all measured boot data.
 pub(crate) struct MeasuredBootMetricsCollector {
+    instrumentation: carbide_instrument::Instrumentation,
     database_connection: sqlx::PgPool,
     config: MeasuredBootMetricsCollectorConfig,
     metric_holder: Arc<metrics::MetricHolder>,
@@ -79,6 +80,7 @@ impl MeasuredBootMetricsCollector {
         database_connection: sqlx::PgPool,
         config: MeasuredBootMetricsCollectorConfig,
         meter: opentelemetry::metrics::Meter,
+        instrumentation: carbide_instrument::Instrumentation,
     ) -> Self {
         // We want to hold metrics for longer than the iteration interval, so there is continuity
         // in emitting metrics. However we want to avoid reporting outdated metrics in case
@@ -90,6 +92,7 @@ impl MeasuredBootMetricsCollector {
         let metric_holder = Arc::new(metrics::MetricHolder::new(meter, hold_period));
 
         MeasuredBootMetricsCollector {
+            instrumentation,
             database_connection,
             config,
             metric_holder,
@@ -133,7 +136,7 @@ impl MeasuredBootMetricsCollector {
     pub(in crate::measured_boot) async fn run_single_iteration(&self) -> CarbideResult<()> {
         let started = std::time::Instant::now();
         let result = self.collect_metrics().await;
-        carbide_instrument::emit(MeasuredBootCollectorIteration {
+        self.instrumentation.emit(MeasuredBootCollectorIteration {
             outcome: carbide_instrument::Outcome::from(&result),
             took: started.elapsed(),
             error: match &result {
@@ -324,9 +327,11 @@ mod tests {
                  milliseconds,
                  error,
              }| {
-                let metrics = MetricsCapture::start();
+                let test_meter = carbide_utils::test_support::test_meter::TestMeter::default();
+                let instrumentation = carbide_instrument::Instrumentation::new(test_meter.meter());
+                let metrics = MetricsCapture::for_registry(test_meter.registry());
                 let logs = capture_logs(|| {
-                    carbide_instrument::emit(MeasuredBootCollectorIteration {
+                    instrumentation.emit(MeasuredBootCollectorIteration {
                         outcome,
                         took: std::time::Duration::from_millis(milliseconds),
                         error: error.to_string(),

@@ -983,11 +983,11 @@ impl InternalRBACRules {
             "DeleteAllExpectedRacks",
             vec![ForgeAdminCLI, Machineatron, SiteAgent],
         );
-        x.perm("CreateExpectedNvLinkDomain", vec![ForgeAdminCLI, Flow]);
-        x.perm("DeleteExpectedNvLinkDomain", vec![ForgeAdminCLI, Flow]);
-        x.perm("GetExpectedNvLinkDomain", vec![ForgeAdminCLI, Flow]);
-        x.perm("FindExpectedNvLinkDomainIds", vec![ForgeAdminCLI, Flow]);
-        x.perm("FindExpectedNvLinkDomainsByIds", vec![ForgeAdminCLI, Flow]);
+        x.perm("CreateNvLinkDomain", vec![ForgeAdminCLI, Flow]);
+        x.perm("DeleteNvLinkDomain", vec![ForgeAdminCLI, Flow]);
+        x.perm("GetNvLinkDomain", vec![ForgeAdminCLI, Flow]);
+        x.perm("FindNvLinkDomainIds", vec![ForgeAdminCLI, Flow]);
+        x.perm("FindNvLinkDomainsByIds", vec![ForgeAdminCLI, Flow]);
         x.perm(
             "AddExpectedRackGroup",
             vec![ForgeAdminCLI, Machineatron, SiteAgent],
@@ -1117,6 +1117,7 @@ impl InternalRBACRules {
         x.perm("DeleteComputeAllocation", vec![ForgeAdminCLI, SiteAgent]);
         x.perm("ComponentPowerControl", vec![ForgeAdminCLI, Flow]);
         x.perm("GetComponentPowerDetails", vec![ForgeAdminCLI, Flow]);
+        x.perm("GetComponentFirmwareDetails", vec![ForgeAdminCLI, Flow]);
         x.perm("ComponentReset", vec![ForgeAdminCLI, Flow]);
         x.perm("GetComponentResetStatus", vec![ForgeAdminCLI, Flow]);
         x.perm("GetComponentInventory", vec![ForgeAdminCLI, Flow]);
@@ -1459,7 +1460,7 @@ mod rbac_rule_tests {
         }
     }
 
-    /// Component power details and reset operations belong to operator and
+    /// Component power/firmware details and reset operations belong to operator and
     /// Flow callers; unrelated device and site services must remain denied.
     #[test]
     fn component_operator_permissions() {
@@ -1474,27 +1475,28 @@ mod rbac_rule_tests {
                         "nico-cli-client".into(),
                         None,
                     )),
-                    expect: [true; 4],
+                    expect: [true; 5],
                 },
                 Check {
                     scenario: "Flow may access component operations",
                     input: Principal::SpiffeServiceIdentifier("nico-flow".into()),
-                    expect: [true, true, true, false],
+                    expect: [true, true, true, true, false],
                 },
                 Check {
                     scenario: "site agent has no operator access",
                     input: Principal::SpiffeServiceIdentifier("elektra-site-agent".into()),
-                    expect: [false; 4],
+                    expect: [false; 5],
                 },
                 Check {
                     scenario: "machine identity has no operator access",
                     input: Principal::SpiffeMachineIdentifier("host".into()),
-                    expect: [false; 4],
+                    expect: [false; 5],
                 },
             ],
             |principal| {
                 [
                     "GetComponentPowerDetails",
+                    "GetComponentFirmwareDetails",
                     "ComponentReset",
                     "GetComponentResetStatus",
                     "GetRmsJobStatus",
@@ -1756,7 +1758,7 @@ mod rbac_rule_tests {
     }
 
     #[test]
-    fn expected_nvlink_domain_inventory_allows_admin_and_flow() {
+    fn nvlink_domain_inventory_allows_admin_and_flow() {
         use carbide_test_support::{Check, check_values};
 
         let principals = [
@@ -1767,11 +1769,11 @@ mod rbac_rule_tests {
         ];
         check_values(
             [
-                "CreateExpectedNvLinkDomain",
-                "DeleteExpectedNvLinkDomain",
-                "GetExpectedNvLinkDomain",
-                "FindExpectedNvLinkDomainIds",
-                "FindExpectedNvLinkDomainsByIds",
+                "CreateNvLinkDomain",
+                "DeleteNvLinkDomain",
+                "GetNvLinkDomain",
+                "FindNvLinkDomainIds",
+                "FindNvLinkDomainsByIds",
             ]
             .map(|method| Check {
                 scenario: method,

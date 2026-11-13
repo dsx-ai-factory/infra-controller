@@ -35,7 +35,7 @@ use common::{base_dhcp_config, machine_cache};
 use dhcproto::v4::{Decodable, Decoder, DhcpOption, Message, MessageType, OptionCode};
 use dhcproto::{Encodable, Encoder};
 use lru::LruCache;
-use rpc::forge_tls_client::ForgeClientConfig;
+use rpc::carbide_tls_client::CarbideClientConfig;
 use tokio::net::UdpSocket;
 use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
@@ -65,7 +65,7 @@ fn service_config(groups: Vec<ServiceDhcpInterfaceReservations>) -> Config {
         base_dhcp_config(None),
         None,
         67,
-        ForgeClientConfig::new(String::new(), None),
+        CarbideClientConfig::new(String::new(), None),
     )
     .with_service_config(ServiceConfig::try_new(groups).unwrap())
 }
@@ -100,7 +100,7 @@ fn service_config_with_host_fallback(groups: Vec<ServiceDhcpInterfaceReservation
             host_ip_addresses,
         }),
         67,
-        ForgeClientConfig::new(String::new(), None),
+        CarbideClientConfig::new(String::new(), None),
     )
     .with_service_config(ServiceConfig::try_new(groups).unwrap())
 }

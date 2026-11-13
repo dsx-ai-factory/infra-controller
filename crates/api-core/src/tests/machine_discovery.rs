@@ -833,6 +833,24 @@ async fn test_direct_discovery_applies_dpu_loopback_reservation(
         Some(IpAddr::V4(reserved_v4))
     );
     assert_eq!(dpu_machine.network_config.loopback_ip_v6, Some(reserved_v6));
+    let asn = dpu_machine
+        .asn
+        .expect("prepared ASN attaches alongside declared IPv6");
+    let mut txn = env.pool.begin().await?;
+    assert_eq!(
+        env.api
+            .resource_pool_registry
+            .inspect_allocations(
+                &env.api.common_pools.ethernet.pool_fnn_asn,
+                &mut txn,
+                model::resource_pool::OwnerType::Machine,
+                &dpu_machine.id.to_string(),
+                carbide_site_explorer::dpu_asn::DPU_ASN_SLOT,
+            )
+            .await?,
+        vec![carbide_resource_pool::AllocationStatus::Attached { value: asn }],
+    );
+    txn.rollback().await?;
     let interfaces =
         db::machine_interface::find_by_mac_address(&env.pool, dpu.oob_mac_address).await?;
     assert!(
@@ -1855,6 +1873,11 @@ async fn test_dpu_rediscovery_retries_after_busy_group_without_blocking_admin_re
         db::resource_pool::stats(&env.pool, model::resource_pool::common::LOOPBACK_IP)
             .await?
             .used;
+    let dpu_before = dpu_machine(&env.pool, &dpu_machine_id).await?;
+    let host_before = db::machine::get_network_config(&env.pool, &host_machine_id).await?;
+    let mut setup = env.pool.begin().await?;
+    db::machine_topology::set_topology_update_needed(setup.as_mut(), &dpu_machine_id, true).await?;
+    setup.commit().await?;
     let mut blocker = env.pool.begin().await?;
     let blocker_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
         .fetch_one(&mut *blocker)
@@ -1879,12 +1902,27 @@ async fn test_dpu_rediscovery_retries_after_busy_group_without_blocking_admin_re
     .expect_err("a busy group rejects this attachment");
     assert_eq!(error.code(), tonic::Code::FailedPrecondition);
     assert!(error.message().contains("changed or is busy"));
+    let dpu_after = dpu_machine(&env.pool, &dpu_machine_id).await?;
+    let host_after = db::machine::get_network_config(&env.pool, &host_machine_id).await?;
+    assert_eq!(
+        dpu_after.network_config.value,
+        dpu_before.network_config.value
+    );
+    assert_eq!(
+        dpu_after.network_config.version,
+        dpu_before.network_config.version
+    );
+    assert_eq!(host_after.value, host_before.value);
+    assert_eq!(host_after.version, host_before.version);
+    let topology_pending: bool = sqlx::query_scalar(
+        "SELECT topology_update_needed FROM machine_topologies WHERE machine_id = $1",
+    )
+    .bind(dpu_machine_id)
+    .fetch_one(&env.pool)
+    .await?;
     assert!(
-        dpu_machine(&env.pool, &dpu_machine_id)
-            .await?
-            .network_config
-            .loopback_ip
-            .is_none()
+        topology_pending,
+        "failed discovery must roll back its topology write"
     );
     assert_eq!(
         db::resource_pool::stats(&env.pool, model::resource_pool::common::LOOPBACK_IP,)
@@ -1908,7 +1946,7 @@ async fn test_dpu_rediscovery_retries_after_busy_group_without_blocking_admin_re
         result = &mut repair => panic!("repair bypassed the held host: {result:?}"),
         _ = wait_for_blocked_query(&env.pool, blocker_pid, "UPDATE machines") => {},
     }
-    let metrics = MetricsCapture::start();
+    let metrics = MetricsCapture::for_registry(env.test_meter.registry());
     blocker.rollback().await?;
     let (rediscovered_machine_id, repaired) =
         tokio::time::timeout(Duration::from_secs(30), async {
@@ -1936,6 +1974,714 @@ async fn test_dpu_rediscovery_retries_after_busy_group_without_blocking_admin_re
             .loopback_ip
             .is_some()
     );
+    let topology_pending: bool = sqlx::query_scalar(
+        "SELECT topology_update_needed FROM machine_topologies WHERE machine_id = $1",
+    )
+    .bind(dpu_machine_id)
+    .fetch_one(&env.pool)
+    .await?;
+    assert!(
+        !topology_pending,
+        "successful discovery must clear its topology flag"
+    );
+    Ok(())
+}
+
+#[crate::sqlx_test]
+async fn test_dpu_discovery_rolls_back_when_a_new_group_member_is_busy(
+    pool: sqlx::PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use futures_util::future::maybe_done;
+    use model::machine_interface_address::MachineInterfaceAssociation;
+    use model::resource_pool::OwnerType;
+    use model::resource_pool::common::LOOPBACK_IP_V6;
+
+    struct RejectedAttempt {
+        prefix: serde_json::Value,
+        pool: model::resource_pool::ResourcePoolStats,
+        reservation_count: i64,
+        initial_group_held: bool,
+    }
+
+    let env = create_test_env(pool).await;
+    let host_config = env.managed_host_config();
+    let host = create_managed_host_with_config(&env, host_config.clone()).await;
+    let target = host_config.get_and_assert_single_dpu();
+    let target_id = MachineId::from(host.dpu_ids[0]);
+    let host_id = MachineId::from(host.id);
+    let target_interface = dpu_oob_interface(&env, target, target_id).await?;
+    let target_link = dpu_host_link(&env, target, host.dpu_ids[0]).await?;
+    assert!(target_link.primary_interface);
+
+    // The target DPU (A) has no IPv6 reservation yet. The new member (B)
+    // starts outside this host's group, with complete loopbacks and its own
+    // associated caller interface. Its factory link L already belongs to
+    // the host and is distinct from A's existing link.
+    let mut member = target.clone();
+    member.serial = "discovery-new-group-member".to_string();
+    member.oob_mac_address = "02:53:33:01:00:01".parse()?;
+    member.host_mac_address = "02:53:33:01:00:02".parse()?;
+    let member_id = from_hardware_info(&HardwareInfo::from(&member))?;
+    assert_ne!(member_id, target_id);
+    let member_dpu_id = DpuMachineId::try_from(member_id)?;
+    let member_interface_id = dpu_discover_dhcp(&env, &member.oob_mac_address.to_string()).await;
+    let new_link_id = dpu_discover_dhcp(&env, &member.host_mac_address.to_string()).await;
+    let mut setup = env.pool.begin().await?;
+    db::resource_pool::define(
+        setup.as_mut(),
+        LOOPBACK_IP_V6,
+        &ResourcePoolDef {
+            pool_type: ResourcePoolType::Ipv6,
+            prefix: Some("2001:db8:5333::/125".to_string()),
+            ranges: vec![],
+            delegate_prefix_len: None,
+        },
+    )
+    .await?;
+    db::machine::create(
+        setup.as_mut(),
+        Some(&env.common_pools),
+        &member_id,
+        ManagedHostState::Ready,
+        None,
+        2,
+    )
+    .await?;
+    let mut member_config = db::machine::get_network_config(setup.as_mut(), &member_id).await?;
+    member_config.value.loopback_ip = Some(
+        db::resource_pool::allocate(
+            &env.common_pools.ethernet.pool_loopback_ip,
+            setup.as_mut(),
+            OwnerType::Machine,
+            &member_id.to_string(),
+            None,
+        )
+        .await?,
+    );
+    assert_eq!(
+        db::machine::try_update_network_config(
+            setup.as_mut(),
+            &member_id,
+            member_config.version,
+            &member_config.value,
+        )
+        .await?,
+        db::ConditionalWrite::Applied(())
+    );
+    db::machine_interface::set_primary_interface(&new_link_id, false, setup.as_mut()).await?;
+    for (interface_id, machine_id) in [(member_interface_id, member_id), (new_link_id, host_id)] {
+        db::machine_interface::associate_interface_with_machine(
+            &interface_id,
+            MachineInterfaceAssociation::Machine(machine_id),
+            setup.as_mut(),
+        )
+        .await?;
+    }
+    db::machine_interface::associate_interface_with_dpu_machine(
+        &member_interface_id,
+        &member_id,
+        setup.as_mut(),
+    )
+    .await?;
+    db::machine_topology::set_topology_update_needed(setup.as_mut(), &target_id, true).await?;
+    setup.commit().await?;
+    let new_link = db::machine_interface::find_one(&env.pool, new_link_id).await?;
+    assert_eq!(new_link.segment_id, target_link.segment_id);
+    assert_eq!(new_link.machine_id, Some(host_id));
+    assert!(new_link.attached_dpu_machine_id.is_none());
+    assert!(!new_link.addresses.is_empty());
+    let target_before = db::machine::get_network_config(&env.pool, &target_id).await?;
+    let member_before = db::machine::get_network_config(&env.pool, &member_id).await?;
+    assert!(target_before.loopback_ip.is_some() && target_before.loopback_ip_v6.is_none());
+    assert!(member_before.loopback_ip.is_some() && member_before.loopback_ip_v6.is_some());
+    let machine_ids = [host_id, target_id, member_id];
+    let history_ids = machine_ids.map(|id| id.to_string());
+    let interface_ids = [target_interface.id, target_link.id, member_interface_id];
+    let prefix_snapshot = || async {
+        sqlx::query_scalar::<_, serde_json::Value>(
+            "SELECT jsonb_build_object(
+                'machines', (SELECT jsonb_agg(to_jsonb(m) ORDER BY m.id)
+                    FROM machines m WHERE id = ANY($1)),
+                'interfaces', (SELECT jsonb_agg(to_jsonb(i) ORDER BY i.id)
+                    FROM machine_interfaces i WHERE id = ANY($2)),
+                'addresses', (SELECT jsonb_agg(to_jsonb(a) ORDER BY a.id)
+                    FROM machine_interface_addresses a WHERE interface_id = ANY($2)),
+                'topology', (SELECT to_jsonb(t) FROM machine_topologies t WHERE machine_id = $3),
+                'history', (SELECT jsonb_agg(to_jsonb(h) ORDER BY h.id)
+                    FROM machine_state_history h WHERE object_id = ANY($4)),
+                'pool', (SELECT jsonb_agg(to_jsonb(p) ORDER BY p.id)
+                    FROM resource_pool p WHERE name = $5),
+                'reservations', (SELECT jsonb_agg(to_jsonb(r) ORDER BY r.allocation_id)
+                    FROM resource_pool_allocations r WHERE pool_name = $5))",
+        )
+        .bind(machine_ids.as_slice())
+        .bind(interface_ids.as_slice())
+        .bind(target_id)
+        .bind(history_ids.as_slice())
+        .bind(LOOPBACK_IP_V6)
+        .fetch_one(&env.pool)
+        .await
+    };
+    let prefix_before = prefix_snapshot().await?;
+    let pool_before = db::resource_pool::stats(&env.pool, LOOPBACK_IP_V6).await?;
+
+    // A passes group admission before its fresh allocation INSERT waits here.
+    // The separate segment gate stops B's post-commit address repair before
+    // it can acquire interface or Machine locks needed by rollback probes.
+    let mut allocation_gate = env.pool.begin().await?;
+    sqlx::query("LOCK TABLE resource_pool_allocations IN SHARE MODE")
+        .execute(allocation_gate.as_mut())
+        .await?;
+    let allocation_gate_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(allocation_gate.as_mut())
+        .await?;
+    let mut allocation_gate = Some(allocation_gate);
+    let mut repair_gate = env.pool.begin().await?;
+    db::machine_interface::lock_all_admin_segments(repair_gate.as_mut()).await?;
+    let repair_gate_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(repair_gate.as_mut())
+        .await?;
+    let mut member_gate = env.pool.begin().await?;
+    sqlx::query("SELECT id FROM machines WHERE id = $1 FOR NO KEY UPDATE")
+        .bind(member_id)
+        .fetch_one(member_gate.as_mut())
+        .await?;
+    let target_request = || {
+        Request::new(MachineDiscoveryInfo {
+            machine_interface_id: Some(target_interface.id),
+            discovery_data: Some(DiscoveryData::Info(
+                DiscoveryInfo::try_from(HardwareInfo::from(target)).unwrap(),
+            )),
+            create_machine: false,
+            ..Default::default()
+        })
+    };
+    let member_request = Request::new(MachineDiscoveryInfo {
+        machine_interface_id: Some(member_interface_id),
+        discovery_data: Some(DiscoveryData::Info(
+            DiscoveryInfo::try_from(HardwareInfo::from(&member)).unwrap(),
+        )),
+        create_machine: false,
+        ..Default::default()
+    });
+    let discovery = maybe_done(carbide_instrument::testing::capture_logs_async(
+        env.api.discover_machine(target_request()),
+    ));
+    let membership_change = maybe_done(env.api.discover_machine(member_request));
+    tokio::pin!(discovery, membership_change);
+    let mut discovery_pid = None;
+    let mut membership_pid = None;
+    let proof = async {
+        discovery_pid = Some(
+            tokio::time::timeout(Duration::from_secs(20), async {
+                tokio::select! {
+                    () = &mut discovery => Err("A finished before its allocation gate"),
+                    pid = wait_for_blocked_query(&env.pool, allocation_gate_pid,
+                        "INSERT INTO resource_pool_allocations") => Ok(pid),
+                }
+            })
+            .await??,
+        );
+        let mut probe = env.pool.begin().await?;
+        let host_held =
+            !db::machine::try_lock_by_id_for_no_key_update(probe.as_mut(), &host_id).await?;
+        let target_held =
+            !db::machine::try_lock_by_id_for_no_key_update(probe.as_mut(), &target_id).await?;
+        probe.rollback().await?;
+        membership_pid = Some(
+            tokio::time::timeout(Duration::from_secs(20), async {
+                tokio::select! {
+                    () = &mut membership_change => Err("B finished before its post-commit repair gate"),
+                    pid = wait_for_blocked_query(&env.pool, repair_gate_pid,
+                        "pg_advisory_xact_lock_shared(") => Ok(pid),
+                }
+            })
+            .await??,
+        );
+        let committed_link = db::machine_interface::find_one(&env.pool, new_link_id).await?;
+        if committed_link.machine_id != Some(host_id)
+            || committed_link.attached_dpu_machine_id != Some(member_dpu_id)
+        {
+            return Err("B did not commit its real Discovery association before A resumed".into());
+        }
+        // B changes only L's DPU association. Its unchanged host FK and B's
+        // complete loopbacks let it commit beside A's existing group locks.
+        allocation_gate
+            .take()
+            .expect("the allocator gate is held")
+            .rollback()
+            .await?;
+        tokio::time::timeout(Duration::from_secs(10), &mut discovery).await?;
+        let prefix = prefix_snapshot().await?;
+        let pool = db::resource_pool::stats(&env.pool, LOOPBACK_IP_V6).await?;
+        let reservation_count: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM resource_pool_allocations WHERE pool_name = $1 AND owner_id = $2",
+        )
+        .bind(LOOPBACK_IP_V6)
+        .bind(target_id.to_string())
+        .fetch_one(&env.pool)
+        .await?;
+        let mut probe = env.pool.begin().await?;
+        let released_locks = async {
+            sqlx::query("SELECT id FROM machines WHERE id = ANY($1) FOR NO KEY UPDATE NOWAIT")
+                .bind([host_id, target_id].as_slice())
+                .execute(probe.as_mut())
+                .await?;
+            sqlx::query("SELECT id FROM machine_interfaces WHERE id = ANY($1) FOR UPDATE NOWAIT")
+                .bind(interface_ids.as_slice())
+                .execute(probe.as_mut())
+                .await?;
+            sqlx::query("SELECT id FROM resource_pool WHERE name = $1 FOR UPDATE NOWAIT")
+                .bind(LOOPBACK_IP_V6)
+                .execute(probe.as_mut())
+                .await?;
+            Ok::<(), sqlx::Error>(())
+        }
+        .await;
+        let probe_end = probe.rollback().await;
+        released_locks?;
+        probe_end?;
+        Ok::<_, Box<dyn std::error::Error>>(RejectedAttempt {
+            prefix,
+            pool,
+            reservation_count,
+            initial_group_held: host_held && target_held,
+        })
+    }
+    .await;
+
+    // Settle both real API calls even when readiness or a probe failed.
+    let allocation_release = match allocation_gate.take() {
+        Some(gate) => gate.rollback().await,
+        None => Ok(()),
+    };
+    let member_release = member_gate.rollback().await;
+    let repair_release = repair_gate.rollback().await;
+    let completed = {
+        let joined = async {
+            tokio::join!(&mut discovery, &mut membership_change);
+        };
+        tokio::pin!(joined);
+        let completed = tokio::time::timeout(Duration::from_secs(30), &mut joined)
+            .await
+            .is_ok();
+        if !completed {
+            for pid in [discovery_pid, membership_pid].into_iter().flatten() {
+                sqlx::query_scalar::<_, bool>("SELECT pg_cancel_backend($1)")
+                    .bind(pid)
+                    .fetch_one(&env.pool)
+                    .await?;
+            }
+            tokio::time::timeout(Duration::from_secs(30), &mut joined).await?;
+        }
+        completed
+    };
+    allocation_release?;
+    member_release?;
+    repair_release?;
+    assert!(
+        completed,
+        "released discoveries must complete without cancellation"
+    );
+    let observation = proof?;
+    let (result, logs) = discovery.as_mut().take_output().expect("A joined");
+    let member_response = membership_change
+        .as_mut()
+        .take_output()
+        .expect("B joined")?;
+    assert_eq!(member_response.into_inner().machine_id, Some(member_id));
+    let error = result.expect_err("the final group write must reject the newly attached busy B");
+    let message = format!(
+        "machine network group for {} is busy; retry discovery",
+        host.dpu_ids[0]
+    );
+    assert_eq!(error.code(), Code::Unavailable);
+    assert_eq!(error.message(), message);
+    assert_eq!(
+        error.metadata().get("nico-error-code").unwrap(),
+        "NICO-API-503"
+    );
+    assert_eq!(
+        error.metadata().get("nico-error-text").unwrap(),
+        message.as_str()
+    );
+    assert_eq!(
+        error.metadata().get("nico-error-mitigation").unwrap(),
+        "Retry discovery with a fresh request after database contention clears."
+    );
+    let target_id_text = target_id.to_string();
+    assert!(
+        logs.iter().any(|log| {
+            log.message == "discovery network group write is busy"
+                && log.field("dpu_machine_id") == Some(target_id_text.as_str())
+                && log.field("error").is_some_and(|error| {
+                    error.contains("WITH locked_group")
+                        && error.contains("NOWAIT")
+                        && error.contains("machine.rs")
+                        && error.contains("line=")
+                })
+        }),
+        "the server log must retain the annotated final group-write failure"
+    );
+    assert!(observation.initial_group_held);
+    assert_eq!(observation.prefix, prefix_before);
+    assert_eq!(observation.pool, pool_before);
+    assert_eq!(observation.reservation_count, 0);
+
+    let configs_before_retry = [
+        db::machine::get_network_config(&env.pool, &host_id).await?,
+        db::machine::get_network_config(&env.pool, &target_id).await?,
+        db::machine::get_network_config(&env.pool, &member_id).await?,
+    ];
+    let response = tokio::time::timeout(
+        Duration::from_secs(30),
+        env.api.discover_machine(target_request()),
+    )
+    .await??
+    .into_inner();
+    assert_eq!(response.machine_id, Some(target_id));
+    let host_after = db::machine::get_network_config(&env.pool, &host_id).await?;
+    let target_after = db::machine::get_network_config(&env.pool, &target_id).await?;
+    let member_after = db::machine::get_network_config(&env.pool, &member_id).await?;
+    let mut expected_target = configs_before_retry[1].value.clone();
+    expected_target.loopback_ip_v6 = Some(
+        target_after
+            .loopback_ip_v6
+            .expect("fresh recovery reserves IPv6"),
+    );
+    assert_eq!(target_after.value, expected_target);
+    assert_eq!(host_after.value, configs_before_retry[0].value);
+    assert_eq!(member_after.value, configs_before_retry[2].value);
+    assert_eq!(host_after.version, target_after.version);
+    assert_eq!(member_after.version, target_after.version);
+    assert_eq!(
+        target_after.version.version_nr(),
+        configs_before_retry[1].version.version_nr() + 1
+    );
+    assert_eq!(
+        db::resource_pool::stats(&env.pool, LOOPBACK_IP_V6)
+            .await?
+            .used,
+        pool_before.used + 1
+    );
+    let topology_pending: bool = sqlx::query_scalar(
+        "SELECT topology_update_needed FROM machine_topologies WHERE machine_id = $1",
+    )
+    .bind(target_id)
+    .fetch_one(&env.pool)
+    .await?;
+    assert!(!topology_pending);
+    let recovered_link = db::machine_interface::find_one(&env.pool, new_link_id).await?;
+    assert_eq!(recovered_link.machine_id, Some(host_id));
+    assert_eq!(recovered_link.attached_dpu_machine_id, Some(member_dpu_id));
+    assert!(recovered_link.addresses.is_empty());
+    Ok(())
+}
+
+#[crate::sqlx_test]
+async fn test_dpu_discovery_releases_busy_predicted_host_dependencies(
+    pool: sqlx::PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use std::collections::HashMap;
+
+    use db::state_history::{StateHistoryTableId, find_by_object_ids};
+    use futures_util::future::maybe_done;
+    use model::machine::{DpuInitState, DpuInitStates, MachineLastRebootRequestedMode};
+    use model::resource_pool::common::LOOPBACK_IP_V6;
+
+    let env = create_test_env(pool).await;
+    let host_config = env.managed_host_config();
+    common::api_fixtures::site_explorer::new_mock_host_awaiting_discovery(
+        &env,
+        host_config.clone(),
+    )
+    .await
+    .expect("fixture retains its predicted host until first host discovery");
+    let dpu = host_config.get_and_assert_single_dpu();
+    let dpu_machine_id = from_hardware_info(&HardwareInfo::from(dpu))?;
+    let dpu_id = DpuMachineId::try_from(dpu_machine_id)?;
+    let dpu_interface = dpu_oob_interface(&env, dpu, dpu_machine_id).await?;
+    let old_link = dpu_host_link(&env, dpu, dpu_id).await?;
+    let host_machine_id = old_link
+        .machine_id
+        .expect("the original host link has an owner");
+    assert!(host_machine_id.machine_type().is_predicted_host());
+    assert!(old_link.primary_interface);
+    let host_id = HostMachineId::try_from(host_machine_id)?;
+    let machine_ids = [host_machine_id, dpu_machine_id];
+
+    // These phases are intentionally sequential. The history phase's retry
+    // fills IPv6. `update_reboot_requested_time` then holds the host while
+    // complete loopbacks let attachment skip its group write.
+    for (scenario, busy_history, factory_mac) in [
+        ("host history with missing IPv6", true, "02:53:33:00:00:02"),
+        (
+            "update_reboot_requested_time with complete loopbacks",
+            false,
+            "02:53:33:00:00:03",
+        ),
+    ] {
+        let mut changed_dpu = dpu.clone();
+        changed_dpu.host_mac_address = factory_mac.parse()?;
+        let hardware = HardwareInfo::from(&changed_dpu);
+        assert_eq!(from_hardware_info(&hardware)?, dpu_machine_id);
+        assert_eq!(
+            model::machine::machine_id::host_id_from_dpu_hardware_info(&hardware)?,
+            host_machine_id,
+        );
+        let new_link_id = dpu_discover_dhcp(&env, factory_mac).await;
+        let mut setup = env.pool.begin().await?;
+        db::machine_interface::set_primary_interface(&new_link_id, true, setup.as_mut()).await?;
+        if busy_history {
+            db::resource_pool::define(
+                setup.as_mut(),
+                LOOPBACK_IP_V6,
+                &ResourcePoolDef {
+                    pool_type: ResourcePoolType::Ipv6,
+                    prefix: Some("2001:db8::/125".to_string()),
+                    ranges: vec![],
+                    delegate_prefix_len: None,
+                },
+            )
+            .await?;
+        }
+        let initial_state = ManagedHostState::DPUInit {
+            dpu_states: DpuInitStates {
+                states: HashMap::from([(dpu_id, DpuInitState::PollingBiosSetup)]),
+            },
+        };
+        db::machine::update_state(setup.as_mut(), &host_id, &initial_state).await?;
+        db::machine_topology::set_topology_update_needed(setup.as_mut(), &dpu_machine_id, true)
+            .await?;
+        setup.commit().await?;
+        let new_link = db::machine_interface::find_one(&env.pool, new_link_id).await?;
+        assert!(new_link.machine_id.is_none() && new_link.attached_dpu_machine_id.is_none());
+        let before: serde_json::Value = sqlx::query_scalar(
+            "SELECT jsonb_agg(to_jsonb(m) ORDER BY m.id) FROM machines m WHERE m.id = ANY($1)",
+        )
+        .bind(machine_ids.as_slice())
+        .fetch_one(&env.pool)
+        .await?;
+        let host_before = db::machine::find_one(&env.pool, &host_id, Default::default())
+            .await?
+            .expect("the existing predicted host");
+        let dpu_before = dpu_machine(&env.pool, &dpu_machine_id).await?;
+        assert_eq!(
+            dpu_before.network_config.loopback_ip_v6.is_none(),
+            busy_history
+        );
+        let pool_before = db::resource_pool::stats(&env.pool, LOOPBACK_IP_V6).await?;
+        let mut read = env.pool.begin().await?;
+        let history_before =
+            find_by_object_ids(read.as_mut(), StateHistoryTableId::Machine, &machine_ids).await?;
+        read.commit().await?;
+
+        // Use the real history trigger or `update_reboot_requested_time`.
+        // Association's KEY SHARE is compatible with that function's row lock.
+        let mut gate = env.pool.begin().await?;
+        if busy_history {
+            db::state_history::persist(
+                gate.as_mut(),
+                StateHistoryTableId::Machine,
+                &host_id,
+                &initial_state,
+                host_before.state.version.increment(),
+            )
+            .await?;
+        } else {
+            db::machine::update_reboot_requested_time(
+                &host_machine_id,
+                gate.as_mut(),
+                MachineLastRebootRequestedMode::PowerOff,
+            )
+            .await?;
+        }
+        let request = || {
+            Request::new(MachineDiscoveryInfo {
+                machine_interface_id: Some(dpu_interface.id),
+                discovery_data: Some(DiscoveryData::Info(
+                    DiscoveryInfo::try_from(hardware.clone()).unwrap(),
+                )),
+                create_machine: false,
+                ..Default::default()
+            })
+        };
+        let discovery = maybe_done(env.api.discover_machine(request()));
+        tokio::pin!(discovery);
+        let completed = tokio::time::timeout(Duration::from_secs(10), &mut discovery)
+            .await
+            .is_ok();
+        let at_gate = async {
+            let machines: serde_json::Value = sqlx::query_scalar(
+                "SELECT jsonb_agg(to_jsonb(m) ORDER BY m.id) FROM machines m WHERE m.id = ANY($1)",
+            )
+            .bind(machine_ids.as_slice())
+            .fetch_one(&env.pool)
+            .await?;
+            let new_interface = db::machine_interface::find_one(&env.pool, new_link_id).await?;
+            let old_interface = db::machine_interface::find_one(&env.pool, old_link.id).await?;
+            let stats = db::resource_pool::stats(&env.pool, LOOPBACK_IP_V6).await?;
+            let pending: bool = sqlx::query_scalar(
+                "SELECT topology_update_needed FROM machine_topologies WHERE machine_id = $1",
+            )
+            .bind(dpu_machine_id)
+            .fetch_one(&env.pool)
+            .await?;
+            let mut probe = env.pool.begin().await?;
+            let history =
+                find_by_object_ids(probe.as_mut(), StateHistoryTableId::Machine, &machine_ids)
+                    .await?;
+            let dpu_released =
+                db::machine::try_lock_by_id_for_update(probe.as_mut(), &dpu_machine_id).await?;
+            let host_released = if busy_history {
+                Some(
+                    db::machine::try_lock_by_id_for_no_key_update(probe.as_mut(), &host_machine_id)
+                        .await?,
+                )
+            } else {
+                None
+            };
+            let interfaces_released = sqlx::query(
+                "SELECT id FROM machine_interfaces WHERE id = ANY($1) FOR UPDATE NOWAIT",
+            )
+            .bind([dpu_interface.id, old_link.id, new_link_id].as_slice())
+            .execute(probe.as_mut())
+            .await;
+            probe.rollback().await?;
+            interfaces_released?;
+            Ok::<_, Box<dyn std::error::Error>>((
+                machines,
+                new_interface,
+                old_interface,
+                stats,
+                pending,
+                history,
+                dpu_released,
+                host_released,
+            ))
+        }
+        .await;
+        gate.rollback().await?;
+        tokio::time::timeout(Duration::from_secs(30), &mut discovery).await?;
+        let rejected = discovery
+            .as_mut()
+            .take_output()
+            .expect("discovery completed");
+        assert!(
+            completed,
+            "{scenario}: discovery waited for the held dependency"
+        );
+        let error = rejected.expect_err("busy selected-host state must reject discovery");
+        assert_eq!(error.code(), Code::Unavailable, "{scenario}");
+        let expected_message = if busy_history {
+            format!("discovery state history for host {host_machine_id} is busy; retry discovery")
+        } else {
+            format!(
+                "discovery state for host {host_machine_id} is busy or missing; retry discovery"
+            )
+        };
+        assert_eq!(error.message(), expected_message, "{scenario}");
+        let (
+            machines,
+            new_interface,
+            old_interface,
+            stats,
+            pending,
+            history,
+            dpu_released,
+            host_released,
+        ) = at_gate?;
+        assert_eq!(machines, before, "{scenario}");
+        assert_eq!(
+            serde_json::to_value(new_interface)?,
+            serde_json::to_value(new_link)?
+        );
+        assert_eq!(
+            serde_json::to_value(old_interface)?,
+            serde_json::to_value(&old_link)?
+        );
+        assert_eq!(stats, pool_before);
+        assert_eq!(
+            serde_json::to_value(history)?,
+            serde_json::to_value(&history_before)?
+        );
+        assert!(pending && dpu_released, "{scenario}");
+        if let Some(host_released) = host_released {
+            assert!(host_released, "{scenario}");
+        }
+
+        let response =
+            tokio::time::timeout(Duration::from_secs(30), env.api.discover_machine(request()))
+                .await??
+                .into_inner();
+        assert_eq!(response.machine_id, Some(dpu_machine_id));
+        let topology_pending: bool = sqlx::query_scalar(
+            "SELECT topology_update_needed FROM machine_topologies WHERE machine_id = $1",
+        )
+        .bind(dpu_machine_id)
+        .fetch_one(&env.pool)
+        .await?;
+        assert!(
+            !topology_pending,
+            "successful discovery must clear its topology flag"
+        );
+        let reused_link = db::machine_interface::find_one(&env.pool, new_link_id).await?;
+        assert_eq!(reused_link.machine_id, Some(host_machine_id));
+        assert_eq!(reused_link.attached_dpu_machine_id, Some(dpu_id));
+        assert!(!reused_link.primary_interface && reused_link.addresses.is_empty());
+        let host_after = db::machine::find_one(&env.pool, &host_id, Default::default())
+            .await?
+            .expect("the reused predicted host");
+        let dpu_after = dpu_machine(&env.pool, &dpu_machine_id).await?;
+        let expected_state = ManagedHostState::DPUInit {
+            dpu_states: DpuInitStates {
+                states: HashMap::from([(dpu_id, DpuInitState::Init)]),
+            },
+        };
+        assert_eq!(host_after.state.value, expected_state);
+        assert_eq!(dpu_after.state.value, expected_state);
+        assert_eq!(
+            host_after.state.version.version_nr(),
+            host_before.state.version.version_nr() + 1
+        );
+        assert_eq!(dpu_after.state.version, host_after.state.version);
+        let mut expected_config = dpu_before.network_config.value;
+        expected_config.loopback_ip_v6 = dpu_after.network_config.loopback_ip_v6;
+        assert!(expected_config.loopback_ip_v6.is_some());
+        assert_eq!(dpu_after.network_config.value, expected_config);
+        assert_eq!(
+            host_after.network_config.value,
+            host_before.network_config.value
+        );
+        assert_eq!(
+            host_after.network_config.version,
+            dpu_after.network_config.version
+        );
+        assert_eq!(
+            dpu_after.network_config.version.version_nr(),
+            dpu_before.network_config.version.version_nr() + u64::from(busy_history)
+        );
+        assert_eq!(
+            db::resource_pool::stats(&env.pool, LOOPBACK_IP_V6)
+                .await?
+                .used,
+            pool_before.used + usize::from(busy_history)
+        );
+        let mut read = env.pool.begin().await?;
+        let history_after =
+            find_by_object_ids(read.as_mut(), StateHistoryTableId::Machine, &machine_ids).await?;
+        read.commit().await?;
+        for id in machine_ids {
+            assert_eq!(
+                history_after[&id.to_string()].len(),
+                history_before[&id.to_string()].len() + 1
+            );
+            assert_eq!(
+                history_after[&id.to_string()].last().unwrap().state_version,
+                host_after.state.version
+            );
+        }
+    }
     Ok(())
 }
 
@@ -1963,7 +2709,7 @@ async fn test_first_host_discovery_with_nothing_to_repair_writes_no_admin_addres
     assert!(dormant_link.addresses.is_empty(), "{dormant_link:?}");
     let version_before = network_config_version(&env.pool, &predicted_host_id).await?;
 
-    let metrics = MetricsCapture::start();
+    let metrics = MetricsCapture::for_registry(env.test_meter.registry());
     let stable_host_id =
         MachineId::from(host_discover_machine(&env, &host_config, primary_link.id).await);
 
@@ -2038,7 +2784,7 @@ async fn test_first_host_discovery_repairs_what_an_overlapping_dpu_discovery_mis
         .fetch_one(&mut *blocker)
         .await?;
 
-    let metrics = MetricsCapture::start();
+    let metrics = MetricsCapture::for_registry(env.test_meter.registry());
     let host_discovery = host_discover_machine(&env, &host_config, primary_link.id);
     tokio::pin!(host_discovery);
     let host_discovery_pid = tokio::select! {
