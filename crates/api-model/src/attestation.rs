@@ -165,6 +165,15 @@ pub mod spdm {
         Waived,
     }
 
+    impl SpdmAttestationState {
+        /// Whether attestation has settled, so no later iteration changes the
+        /// result. These are the states the newest-finished read counts as
+        /// finished, so entering one changes what a machine's health report says.
+        pub fn is_terminal(&self) -> bool {
+            matches!(self, Self::Passed | Self::Failed(_) | Self::Waived)
+        }
+    }
+
     impl<'r> sqlx::FromRow<'r, PgRow> for SpdmAttestationState {
         fn from_row(row: &'r PgRow) -> Result<Self, sqlx::Error> {
             let controller_state: sqlx::types::Json<SpdmAttestationState> = row.try_get("state")?;

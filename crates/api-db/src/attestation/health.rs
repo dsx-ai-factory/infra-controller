@@ -37,12 +37,33 @@ use crate::attestation::spdm;
 /// source when the list comes out empty.
 ///
 /// The list is built in full every time, so it does not matter which caller
-/// built the stored one or when.
+/// built the stored one or when. Locks the machine row until the caller's
+/// transaction ends, so the caller must store the result in that transaction.
 pub async fn build_health_report(
     txn: &mut PgConnection,
     machine_id: &MachineId,
 ) -> Result<HealthReport, DatabaseError> {
     let mut report = HealthReport::empty(HealthReport::ATTESTATION_SOURCE.to_string());
+
+    // Serialize rebuilds per machine. The reads below take no lock of their own,
+    // so under READ COMMITTED two devices finishing at once would each build a
+    // list from a snapshot missing the other's result, and the second store
+    // would drop the first one's alert. Holding the parent row makes the second
+    // rebuild wait and then read the first one's committed result.
+    //
+    // The mode has to be `FOR NO KEY UPDATE`. A caller arrives here having
+    // written one of the machine's device rows, which leaves it holding a key
+    // share of this row. `FOR UPDATE` conflicts with that share, so two
+    // devices of one machine finishing together each waited for the other's
+    // share to be released, and deadlocked. This mode does not conflict with
+    // it, and still conflicts with itself and with `FOR UPDATE`, which is what
+    // serializes the rebuilds against each other and against scheduling.
+    let lock = "SELECT 1 FROM machines WHERE id = $1 FOR NO KEY UPDATE";
+    sqlx::query(lock)
+        .bind(machine_id)
+        .fetch_optional(&mut *txn)
+        .await
+        .map_err(|e| DatabaseError::query(lock, e))?;
 
     // A machine that has never been scheduled has nothing to report.
     let Some(scheduling) =
@@ -242,6 +263,88 @@ mod tests {
         assert_eq!(report.source, HealthReport::ATTESTATION_SOURCE);
 
         txn.rollback().await?;
+        Ok(())
+    }
+
+    /// The row lock's contract, which no single-transaction test can show. A
+    /// rebuild has to wait for another rebuild of the same machine, or both
+    /// build their list from the same snapshot and the later write drops the
+    /// other's alert. It has to do that while another transaction is writing
+    /// the same machine's device rows, which is how every caller arrives here.
+    #[crate::sqlx_test]
+    async fn a_rebuild_waits_for_another_rebuild_of_the_same_machine(
+        pool: sqlx::PgPool,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let mut setup = pool.begin().await?;
+        let machine_id = insert_machine(setup.as_mut(), 3).await?;
+        for device_id in ["GPU_0", "GPU_1"] {
+            insert_attestation(
+                setup.as_mut(),
+                &machine_id,
+                device_id,
+                SpdmAttestationState::Passed,
+                None,
+            )
+            .await?;
+        }
+        // Finish both devices here. The job-cleanup trigger takes a per-machine
+        // advisory lock the first time a device's `completed_at` appears, which
+        // would serialize the two transactions below before either reached the
+        // lock under test.
+        sqlx::query(
+            "UPDATE spdm_machine_devices_attestation SET completed_at = now() \
+             WHERE machine_id = $1",
+        )
+        .bind(machine_id)
+        .execute(setup.as_mut())
+        .await?;
+        setup.commit().await?;
+
+        let mut first = pool.begin().await?;
+        let mut second = pool.begin().await?;
+        // Bound every statement below, so an unexpected wait fails the test
+        // with the statement that waited instead of hanging it. The first
+        // transaction is given room to be slow, since it must not wait at all.
+        sqlx::query("SET LOCAL lock_timeout = '10s'")
+            .execute(&mut *first)
+            .await?;
+        sqlx::query("SET LOCAL lock_timeout = '250ms'")
+            .execute(&mut *second)
+            .await?;
+
+        // Hold each transaction's own device row, the way a caller does by
+        // writing the result it just settled, before either asks for the
+        // machine row.
+        for (txn, device_id) in [(&mut first, "GPU_0"), (&mut second, "GPU_1")] {
+            sqlx::query(
+                "UPDATE spdm_machine_devices_attestation SET nonce = gen_random_uuid() \
+                 WHERE machine_id = $1 AND device_id = $2",
+            )
+            .bind(machine_id)
+            .bind(device_id)
+            .execute(&mut **txn)
+            .await?;
+        }
+
+        build_health_report(first.as_mut(), &machine_id).await?;
+
+        let error = build_health_report(second.as_mut(), &machine_id)
+            .await
+            .expect_err("a second rebuild must wait for the first");
+        let DatabaseError::Sqlx(annotated) = &error else {
+            panic!("expected a query failure: {error:?}");
+        };
+        // 55P03 is the timeout waiting for the first rebuild. 40P01 would mean
+        // the two rebuilds deadlocked on the machine row instead of queueing.
+        assert_eq!(
+            annotated
+                .source
+                .as_database_error()
+                .and_then(|database| database.code())
+                .as_deref(),
+            Some("55P03"),
+            "{error:?}"
+        );
         Ok(())
     }
 

@@ -3794,10 +3794,14 @@ dependencies = [
  "bmc-backend",
  "carbide-api-db",
  "carbide-api-model",
+ "carbide-health-report",
  "carbide-instrument",
+ "carbide-macros",
  "carbide-redfish",
+ "carbide-sqlx-testing",
  "carbide-test-support",
  "carbide-utils",
+ "carbide-uuid",
  "chrono",
  "config-version",
  "itertools 0.14.0",
@@ -3807,6 +3811,7 @@ dependencies = [
  "sqlx",
  "state-controller",
  "tracing",
+ "uuid",
 ]
 
 [[package]]
