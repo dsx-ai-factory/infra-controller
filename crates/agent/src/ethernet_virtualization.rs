@@ -1867,7 +1867,14 @@ pub(super) fn tenant_peers(network_config: &rpc::ManagedHostNetworkConfigRespons
 }
 
 /// Reset networking to blank.
-/// Clear DHCP and NVUE config files.
+///
+/// Blanks the supervisor unit files that start the DHCP relay and the DPU-local
+/// DHCP server, which stops both, and deletes the NVUE startup configuration.
+/// The DPU-local DHCP server serves from [`dhcp::SERVER_HOST_CONFIG_PATH`],
+/// which this leaves on disk; blanking its unit file is what stops it
+/// answering. A DPU that has been reset therefore serves no DHCP and holds no
+/// HBN configuration across a reboot, so only call this once the server has
+/// confirmed the DPU is gone.
 pub(super) async fn reset(hbn_root: &Path, skip_post: bool) {
     tracing::debug!("Setting network config to blank");
 
@@ -2135,7 +2142,7 @@ impl DhcpFileUpdate {
 
 // Update configuration file
 // Returns true if the file has changes, false otherwise.
-fn write(
+pub(super) fn write(
     // What to write into the file
     next_contents: String,
     // The file to write to
@@ -3344,6 +3351,51 @@ mod tests {
             }
         }
         Ok(())
+    }
+
+    /// Pins exactly which files a reset destroys. This is what a DPU with
+    /// `retain_hbn_config_on_boot` is protected from when Core is unreachable,
+    /// and the DPU-local DHCP data file is deliberately not among them:
+    /// blanking the supervisor unit is what stops that server, so restoring
+    /// service needs Core either way.
+    #[tokio::test]
+    async fn reset_blanks_the_dhcp_units_and_deletes_only_the_nvue_config() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let hbn_root = tempdir.path();
+
+        let populated = [
+            dhcp::RELAY_PATH,
+            dhcp::SERVER_PATH,
+            dhcp::SERVER_HOST_CONFIG_PATH,
+            nvue::PATH,
+        ];
+        for relative in populated {
+            let path = hbn_root.join(relative);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(&path, "configured").unwrap();
+        }
+
+        super::reset(hbn_root, true).await;
+
+        assert_eq!(
+            fs::read_to_string(hbn_root.join(dhcp::RELAY_PATH)).unwrap(),
+            dhcp::TMPL_EMPTY,
+            "the relay unit is blanked"
+        );
+        assert_eq!(
+            fs::read_to_string(hbn_root.join(dhcp::SERVER_PATH)).unwrap(),
+            dhcp::TMPL_EMPTY,
+            "the DHCP server unit is blanked, which is what stops it answering"
+        );
+        assert_eq!(
+            fs::read_to_string(hbn_root.join(dhcp::SERVER_HOST_CONFIG_PATH)).unwrap(),
+            "configured",
+            "the DHCP data file the DPU serves from is left alone"
+        );
+        assert!(
+            !hbn_root.join(nvue::PATH).exists(),
+            "the NVUE startup configuration is deleted, so a reboot brings back nothing"
+        );
     }
 
     /// Supplies stable PXE, NTP, and DNS discovery results to NVUE and DHCP tests so RDNSS and
@@ -7600,6 +7652,7 @@ esac
             quarantine_state: None,
         };
         rpc::ManagedHostNetworkConfigResponse {
+            retain_hbn_config_on_boot: false,
             service_interfaces: vec![],
             service_vpc_slot_inventory: None,
             asn: 4259912557,
@@ -8449,6 +8502,7 @@ esac
         };
 
         let mut network_config = rpc::ManagedHostNetworkConfigResponse {
+            retain_hbn_config_on_boot: false,
             service_interfaces: vec![],
             service_vpc_slot_inventory: None,
             bgp_leaf_session_password: None,
@@ -8734,6 +8788,7 @@ esac
             quarantine_state: None,
         };
         let network_config = rpc::ManagedHostNetworkConfigResponse {
+            retain_hbn_config_on_boot: false,
             service_interfaces: vec![],
             service_vpc_slot_inventory: None,
             bgp_leaf_session_password: None,

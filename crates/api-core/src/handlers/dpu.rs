@@ -1274,6 +1274,13 @@ async fn get_managed_host_network_config_inner(
         },
         astra_config,
         use_admin_network_changed,
+        // The flag lives on the host, and every DPU of that host inherits it:
+        // such a host is only reachable while its DPUs keep serving its
+        // network.
+        retain_hbn_config_on_boot: snapshot
+            .host_snapshot
+            .host_profile
+            .retain_hbn_config_on_boot,
     };
 
     // If this all worked, we shouldn't emit a log line

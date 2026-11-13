@@ -2100,6 +2100,7 @@ async fn handle_netconf(AxumState(state): AxumState<Arc<Mutex<State>>>) -> impl 
     // The DHCP retry scenario adds one endpoint and its fixed slot; the remaining fields provide
     // the shared complete network response used by both failure branches.
     let netconf = rpc::forge::ManagedHostNetworkConfigResponse {
+        retain_hbn_config_on_boot: false,
         service_interfaces: include_service_vpc
             .then(|| rpc::forge::ManagedHostServiceInterfaceConfig {
                 service_id: "10000000-0000-0000-0000-000000000001".to_string(),

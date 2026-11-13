@@ -21,7 +21,7 @@ use std::time::Duration;
 
 use ::rpc::carbide_tls_client::CarbideClientConfig;
 use ::rpc::{Instance, forge as rpc};
-use arc_swap::ArcSwapOption;
+use arc_swap::{ArcSwap, ArcSwapOption};
 use carbide_network::ip::{IdentifyAddressFamily, IpAddressFamily};
 use carbide_uuid::infiniband::IBPartitionId;
 use carbide_uuid::instance::InstanceId;
@@ -37,9 +37,55 @@ use crate::instrumentation::ConfigFetch;
 use crate::service_network;
 use crate::util::{get_periodic_dpu_config, get_sitename, jittered_interval};
 
+/// What the fetcher knows about this DPU's desired network configuration.
+///
+/// A plain `Option` collapses two unrelated conditions into `None`: Core
+/// answered `NotFound`, and Core did not answer at all. Only the first means
+/// the DPU was deleted, so they are kept apart here.
+#[derive(Clone, Debug, Default)]
+pub(super) enum NetworkConfigState {
+    /// A fetch succeeded. This is the configuration Core returned.
+    Known(Arc<rpc::ManagedHostNetworkConfigResponse>),
+    /// Core answered `NotFound`. The DPU was deleted.
+    Absent,
+    /// No fetch has succeeded in this process yet, or the last attempt failed
+    /// before Core could answer. Nothing may be inferred from this: in
+    /// particular it is not evidence that the DPU was deleted.
+    #[default]
+    Unknown,
+}
+
+impl NetworkConfigState {
+    /// Whether this state is evidence that the DPU's networking must be
+    /// blanked.
+    ///
+    /// `Absent` is that evidence for every DPU: Core was reachable and said
+    /// this DPU is gone. `Unknown` is not evidence of anything, but a DPU
+    /// without `retain_hbn_config_on_boot` still blanks on it, which is the
+    /// behavior that keeps a stale DPU off the network. A DPU with the flag
+    /// holds its configuration instead, so its host can boot while NICo is
+    /// unavailable. The flag therefore only changes what an unanswered fetch
+    /// means; it never overrides a `NotFound`.
+    /// The configuration Core returned, if there is one to act on.
+    pub(super) fn known(&self) -> Option<&Arc<rpc::ManagedHostNetworkConfigResponse>> {
+        match self {
+            Self::Known(conf) => Some(conf),
+            Self::Absent | Self::Unknown => None,
+        }
+    }
+
+    pub(super) fn requires_reset(&self, retain_hbn_config: bool) -> bool {
+        match self {
+            Self::Known(_) => false,
+            Self::Absent => true,
+            Self::Unknown => !retain_hbn_config,
+        }
+    }
+}
+
 struct PeriodicFetcherState {
     config: PeriodicConfigFetcherConfig,
-    netconf: ArcSwapOption<rpc::ManagedHostNetworkConfigResponse>,
+    netconf: ArcSwap<NetworkConfigState>,
     instmeta: ArcSwapOption<InstanceMetadata>,
     cancel_token: CancellationToken,
     sitename: Option<String>,
@@ -108,8 +154,15 @@ pub(super) struct IBInstanceConfig {
 }
 
 impl PeriodicConfigFetcherReader {
+    /// The configuration Core returned, if a fetch has ever succeeded and the
+    /// DPU has not since been deleted. Callers that must distinguish "deleted"
+    /// from "Core did not answer" use [`Self::net_conf_state`] instead.
     pub(super) fn net_conf_read(&self) -> Option<Arc<rpc::ManagedHostNetworkConfigResponse>> {
-        self.state.netconf.load_full()
+        self.state.netconf.load().known().map(Arc::clone)
+    }
+
+    pub(super) fn net_conf_state(&self) -> NetworkConfigState {
+        NetworkConfigState::clone(&self.state.netconf.load())
     }
 
     pub(super) fn meta_data_conf_reader(&self) -> Option<Arc<InstanceMetadata>> {
@@ -143,7 +196,7 @@ impl PeriodicConfigFetcher {
         };
 
         let state = Arc::new(PeriodicFetcherState {
-            netconf: ArcSwapOption::default(),
+            netconf: ArcSwap::default(),
             instmeta: ArcSwapOption::default(),
             sitename,
             config,
@@ -184,7 +237,7 @@ impl PeriodicConfigFetcher {
         self.state
             .netconf
             .load()
-            .as_ref()
+            .known()
             .and_then(|netconf| netconf.host_interface_id.as_ref())
             .and_then(|id| id.parse().ok())
     }
@@ -232,14 +285,16 @@ async fn single_fetch(
         &state.config.machine_id,
         &state.config.forge_api,
         carbide_client_config,
-        accepted.as_deref(),
+        accepted.known().map(Arc::as_ref),
     )
     .await;
     // A successful RPC whose instance metadata fails to convert is still a
     // failed fetch, so finish conversion before choosing the retry delay.
     let result = match result {
         Ok(resp) => {
-            state.netconf.store(Some(Arc::new(resp.clone())));
+            state
+                .netconf
+                .store(Arc::new(NetworkConfigState::Known(Arc::new(resp.clone()))));
             instance_metadata_from_instance(resp.instance, state.sitename.clone())
         }
         Err(err) => Err(err),
@@ -258,7 +313,7 @@ async fn single_fetch(
         }
         Err(err) => match err.downcast_ref::<tonic::Status>() {
             Some(grpc_status) if grpc_status.code() == tonic::Code::NotFound => {
-                state.netconf.store(None);
+                state.netconf.store(Arc::new(NetworkConfigState::Absent));
                 state.instmeta.store(None);
                 ConfigFetch::NotFound {
                     machine_id: state.config.machine_id.to_string(),
@@ -663,7 +718,7 @@ fn extract_instance_ib_config(instance: &Instance) -> Result<Vec<IBDeviceConfig>
 #[cfg(test)]
 mod tests {
     use carbide_test_support::Outcome::{Fails, Yields};
-    use carbide_test_support::scenarios;
+    use carbide_test_support::{scenarios, value_scenarios};
 
     use super::*;
 
@@ -1345,6 +1400,62 @@ mod tests {
                 None => result.expect(case.name),
             }
         }
+    }
+
+    /// A DPU only blanks its networking on evidence that it was deleted. An
+    /// unanswered fetch is not that evidence for a DPU that retains its HBN
+    /// configuration, and the flag never suppresses a `NotFound`.
+    #[test]
+    fn reset_follows_the_answer_core_gave_not_the_absence_of_one() {
+        #[derive(Debug)]
+        struct Row {
+            state: NetworkConfigState,
+            retain_hbn_config: bool,
+        }
+
+        value_scenarios!(run = |row: Row| row.state.requires_reset(row.retain_hbn_config);
+            "a configuration is applied, not reset" {
+                Row {
+                    state: NetworkConfigState::Known(Arc::default()),
+                    retain_hbn_config: false,
+                } => false,
+            }
+
+            "a designated machine with a configuration is not reset either" {
+                Row {
+                    state: NetworkConfigState::Known(Arc::default()),
+                    retain_hbn_config: true,
+                } => false,
+            }
+
+            "NotFound deletes an undesignated machine" {
+                Row {
+                    state: NetworkConfigState::Absent,
+                    retain_hbn_config: false,
+                } => true,
+            }
+
+            "NotFound deletes a designated machine too" {
+                Row {
+                    state: NetworkConfigState::Absent,
+                    retain_hbn_config: true,
+                } => true,
+            }
+
+            "an unanswered fetch still resets an undesignated machine" {
+                Row {
+                    state: NetworkConfigState::Unknown,
+                    retain_hbn_config: false,
+                } => true,
+            }
+
+            "an unanswered fetch leaves a designated machine alone" {
+                Row {
+                    state: NetworkConfigState::Unknown,
+                    retain_hbn_config: true,
+                } => false,
+            }
+        );
     }
 
     // Builds the deprecated compatibility shape used by older Core versions.
