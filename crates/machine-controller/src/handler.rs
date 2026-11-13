@@ -129,7 +129,7 @@ use crate::health_report::{
 };
 use crate::redfish::{
     did_dpu_finish_booting, host_power_control, host_power_control_with_location, power_state,
-    power_state_name, reboot_requested_mode, set_power,
+    power_state_name, reboot_requested_mode, reset_bmc, set_power,
 };
 use crate::{
     MeasuringOutcome, get_measuring_prerequisites, handle_measuring_state,
@@ -1970,10 +1970,7 @@ impl MachineStateHandler {
                             SecureEraseBossState::HandleJobFailure {
                                 failure: _,
                                 power_state: _,
-                            } => {
-                                handle_boss_job_failure(redfish_client.as_ref(), mh_snapshot, ctx)
-                                    .await
-                            }
+                            } => handle_boss_job_failure(mh_snapshot, ctx).await,
                         }
                     }
                     CleanupState::HostCleanup { boss_controller_id } => {
@@ -2112,10 +2109,7 @@ impl MachineStateHandler {
                             CreateBossVolumeState::HandleJobFailure {
                                 failure: _,
                                 power_state: _,
-                            } => {
-                                handle_boss_job_failure(redfish_client.as_ref(), mh_snapshot, ctx)
-                                    .await
-                            }
+                            } => handle_boss_job_failure(mh_snapshot, ctx).await,
                         }
                     }
                     CleanupState::DisableBIOSBMCLockdown => {
@@ -2683,40 +2677,44 @@ impl MachineStateHandler {
         let cage_mpo_encoded_string =
             model::machine::astra::astra_get_cage_mpo_encoded_string(nic_index);
 
-        let (fixed_ip, dpu_pci_address) = if let Some(nic) = legacy_nic {
+        let (fixed_ip, dpu_pci_address, logical_ifname) = if let Some(nic) = legacy_nic {
             // Preserve the MAC/IP inventory's original indexed DPA registration.
             let fixed_ip = nic.fixed_ip.ok_or_else(|| {
                 StateHandlerError::GenericError(eyre!(
                     "fixed IP not found for legacy astra NIC {nic_index}"
                 ))
             })?;
-            (fixed_ip, format!("CX_{nic_index}"))
+            // Legacy inventory declares no lanes, so it names no interface.
+            (fixed_ip, format!("CX_{nic_index}"), None)
         } else {
-            // Every declared lane has a validated fixed IP. Use one lane's address
-            // for the card-level DPA registration.
-            let lane_prefix = format!("{cage_mpo_encoded_string}-L");
-            let fixed_ip = cx9_nics
+            // The card-level DPA registration stands for lane L1, so a single
+            // declaration supplies its address, locator, and interface name.
+            let l1_physical_ifname = format!("{cage_mpo_encoded_string}-L1");
+            let l1_lane = cx9_nics
                 .iter()
-                .filter(|nic| {
-                    nic.physical_ifname
-                        .as_deref()
-                        .is_some_and(|name| name.starts_with(&lane_prefix))
-                })
-                .find_map(|nic| nic.fixed_ip)
+                .find(|nic| nic.physical_ifname.as_deref() == Some(l1_physical_ifname.as_str()))
                 .ok_or_else(|| {
                     StateHandlerError::GenericError(eyre!(
-                        "fixed IP not found for astra card {cage_mpo_encoded_string}"
+                        "astra lane {l1_physical_ifname} is not declared"
                     ))
                 })?;
+            // Every declared lane has a validated fixed IP.
+            let fixed_ip = l1_lane.fixed_ip.ok_or_else(|| {
+                StateHandlerError::GenericError(eyre!(
+                    "fixed IP not found for astra lane {l1_physical_ifname}"
+                ))
+            })?;
+            // A lane may be declared without a logical name, so this stays optional.
+            let logical_ifname = l1_lane.logical_ifname.clone();
             let dpu_pci_address = model::machine::astra::astra_dpu_pci_address_for_physical_ifname(
-                &format!("{cage_mpo_encoded_string}-L1"),
+                &l1_physical_ifname,
             )
             .ok_or_else(|| {
                 StateHandlerError::GenericError(eyre!(
                     "DPU PCI address not found for astra card {cage_mpo_encoded_string}"
                 ))
             })?;
-            (fixed_ip, dpu_pci_address.to_string())
+            (fixed_ip, dpu_pci_address.to_string(), logical_ifname)
         };
 
         // Now enable EastWestControlEnabled on this card.
@@ -2742,6 +2740,7 @@ impl MachineStateHandler {
                 pci_name: dpu_pci_address,
                 device_description: Some("NVIDIA Dual ConnectX-9 SuperNIC C9280V for Vera Rubin NVL 144 systems, Crypto Enabled, Secure Boot Enabled, Liquid Cooled".to_string()),
                 interface_type: DpaInterfaceType::Astra,
+                interface_name: logical_ifname,
             },
             &mut txn,
         )
@@ -4494,12 +4493,14 @@ async fn handle_dpu_reprovision(
                     "Initiating BMC reset of lenovo machine"
                 );
 
-                let redfish_client = ctx
-                    .services
-                    .create_redfish_client_from_machine(&state.host_snapshot)
-                    .await?;
+                // Connecting can itself need the Redfish service this works around, so a
+                // failed connection falls back to IPMI like a failed reset.
+                let redfish_result = match ctx.services.connect_bmc(&state.host_snapshot).await {
+                    Ok(bmc) => reset_bmc(&bmc).await.map_err(|error| error.to_string()),
+                    Err(error) => Err(error.to_string()),
+                };
 
-                if let Err(redfish_error) = redfish_client.bmc_reset(None).await {
+                if let Err(redfish_error) = redfish_result {
                     tracing::warn!(
                         machine_id = %state.host_snapshot.id,
                         error = %redfish_error,
@@ -8593,19 +8594,23 @@ impl StateHandler for HostMachineStateHandler {
                         .create_redfish_client_from_machine(&mh_snapshot.host_snapshot)
                         .await?;
 
-                    if !host_redfish_client
-                        .is_ipmi_over_lan_enabled()
+                    let bmc = ctx.services.connect_bmc(&mh_snapshot.host_snapshot).await?;
+                    let bmc_control = bmc
+                        .bmc_control()
+                        .map_err(|e| platform_error("enable_ipmi_over_lan", e.into()))?;
+                    if !bmc_control
+                        .ipmi_over_lan_enabled()
                         .await
-                        .map_err(|e| redfish_error("enable_ipmi_over_lan", e))?
+                        .map_err(|e| platform_error("enable_ipmi_over_lan", e))?
                     {
                         tracing::info!(
                             machine_id = %host_machine_id,
                             "IPMI over LAN is currently disabled on this host--enabling IPMI over LAN");
 
-                        host_redfish_client
-                            .enable_ipmi_over_lan(libredfish::EnabledDisabled::Enabled)
+                        bmc_control
+                            .set_ipmi_over_lan(true)
                             .await
-                            .map_err(|e| redfish_error("enable_ipmi_over_lan", e))?;
+                            .map_err(|e| platform_error("enable_ipmi_over_lan", e))?;
                     }
 
                     let machine_state = if mh_snapshot.has_managed_dpus()
@@ -12199,10 +12204,9 @@ impl HostUpgradeState {
                         state.host_snapshot.id
                     )));
                 }
-                redfish_client
-                    .bmc_reset(None)
+                reset_bmc(&bmc)
                     .await
-                    .map_err(|e| redfish_error("BMC reset", e))?;
+                    .map_err(|e| platform_error("BMC reset", e))?;
 
                 Ok(StateHandlerOutcome::transition(scenario.actual_new_state(
                     HostReprovisionState::InitialReset {
@@ -12936,12 +12940,9 @@ impl HostUpgradeState {
                 bmc_ip_address = %endpoint.address,
                 "Upgrade task has completed but needs BMC reboot, initiating one"
             );
-            let redfish_client = ctx
-                .services
-                .create_redfish_client_from_machine(&state.host_snapshot)
-                .await?;
+            let bmc = ctx.services.connect_bmc(&state.host_snapshot).await?;
 
-            if let Err(e) = redfish_client.bmc_reset(None).await {
+            if let Err(e) = reset_bmc(&bmc).await {
                 tracing::warn!(bmc_ip_address = %endpoint.address, error = %e, "Failed to reboot");
                 return Ok(StateHandlerOutcome::do_nothing());
             }
@@ -13874,7 +13875,6 @@ async fn wait_for_boss_controller_job_to_complete(
 }
 
 async fn handle_boss_job_failure(
-    redfish_client: &dyn Redfish,
     mh_snapshot: &ManagedHostStateSnapshot,
     ctx: &mut StateHandlerContext<'_, MachineStateHandlerContextObjects>,
 ) -> Result<StateHandlerOutcome<ManagedHostState>, StateHandlerError> {
@@ -13897,10 +13897,9 @@ async fn handle_boss_job_failure(
                 )));
             }
 
-            redfish_client
-                .bmc_reset(None)
+            reset_bmc(&bmc)
                 .await
-                .map_err(|e| redfish_error("bmc_reset", e))?;
+                .map_err(|e| platform_error("bmc_reset", e))?;
 
             Ok(StateHandlerOutcome::transition(next_state))
         }
@@ -15314,10 +15313,9 @@ async fn set_host_boot_order(
                         "HandleJobFailure: Resetting BMC after failure"
                     );
 
-                    redfish_client
-                        .bmc_reset(None)
+                    reset_bmc(&bmc)
                         .await
-                        .map_err(|e| redfish_error("bmc_reset", e))?;
+                        .map_err(|e| platform_error("bmc_reset", e))?;
 
                     // Transition to ExpectedPowerState::On to wait for BMC to come back
                     Ok(SetBootOrderOutcome::Continue(SetBootOrderInfo {

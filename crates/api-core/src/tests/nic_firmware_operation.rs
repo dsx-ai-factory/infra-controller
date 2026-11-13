@@ -1258,6 +1258,7 @@ async fn cards_converge_sequentially_after_inventory_retry_and_lockdown_readback
             pci_name: "0000:99:00.0".into(),
             device_description: None,
             interface_type: DpaInterfaceType::Svpc,
+            interface_name: None,
         },
         &mut txn,
     )

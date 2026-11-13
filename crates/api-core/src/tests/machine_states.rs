@@ -335,6 +335,7 @@ async fn rejected_dpa_network_config_rolls_back_before_transition(pool: sqlx::Pg
                 pci_name: pci_name.to_string(),
                 device_description: None,
                 interface_type: DpaInterfaceType::Svpc,
+                interface_name: None,
             },
             &mut txn,
         )
