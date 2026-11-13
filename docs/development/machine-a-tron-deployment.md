@@ -783,9 +783,9 @@ or a check fails, so it can gate a deploy script.
 
 ```bash
 # GB200 NVL72 racks in the values file, and the chart's
-# mat-k8s-controller.config.serviceGranularity (pod or device).
+# mat-k8s-controller.config.serviceGranularity (device, the chart default, or pod).
 racks=1112
-granularity=pod
+granularity=device
 ipvs_preflight() {
   local per_rack planned failed=0 checked=0 pod node header maxelem entries total verdict
   case "$granularity" in
