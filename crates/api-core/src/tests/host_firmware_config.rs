@@ -317,7 +317,7 @@ async fn upsert_host_firmware_config_drives_machine_update_manager(
     let env = create_test_env_with_overrides(
         pool,
         TestEnvOverrides {
-            config: Some(config),
+            config: Some(Box::new(config)),
             ..Default::default()
         },
     )
@@ -615,7 +615,7 @@ async fn gates_follow_override_without_manager(
     let env = create_test_env_with_overrides(
         pool,
         TestEnvOverrides {
-            config: Some(config),
+            config: Some(Box::new(config)),
             ..Default::default()
         },
     )
@@ -667,7 +667,7 @@ async fn gates_with_empty_cache_and_zero_capacity(
     let env = create_test_env_with_overrides(
         pool,
         TestEnvOverrides {
-            config: Some(config),
+            config: Some(Box::new(config)),
             ..Default::default()
         },
     )

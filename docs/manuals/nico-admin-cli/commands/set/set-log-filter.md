@@ -22,12 +22,12 @@ Set RUST_LOG
 
 `-f, --filter <FILTER>`
 
-Set servers RUST_LOG.
+Set server's RUST_LOG.
 
 `--expiry <EXPIRY> [default: 1h]`
 
 Revert to startup RUST_LOG after this much time, friendly format e.g.
-1h, 3min, [duration-str documentation](https://docs.rs/duration-str/latest/duration_str/)
+'1h', '3min', [duration-str documentation](https://docs.rs/duration-str/latest/duration_str/)
 
 `--extended`
 
@@ -49,7 +49,7 @@ Sort output by specified field
 
 `-h, --help`
 
-Print help (see a summary with -h)
+Print help (see a summary with '-h')
 
 ## Examples
 

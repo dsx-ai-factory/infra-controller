@@ -35,10 +35,6 @@ const SUMMARY_LABEL_WIDTH: usize = 29;
 
 #[derive(Parser, Debug, Dispatch)]
 pub(crate) enum Cmd {
-    // Note for the abouts below: possessives are deliberately avoided -- the
-    // man-page path (clap_mangen -> pandoc) drops apostrophes, so "a machine's
-    // boot interface" renders as "a machines boot interface" in the generated
-    // reference.
     #[clap(
         visible_alias = "details",
         about = "Show boot interfaces for a machine from every store (troubleshooting)",

@@ -23,7 +23,7 @@ use axum::extract::State;
 use axum::response::IntoResponse;
 use axum::routing::get;
 use carbide_instrument::emit;
-use forge_tls::client_config::ClientCert;
+use carbide_tls::client_config::ClientCert;
 use rpc::carbide_tls_client::CarbideClientConfig;
 
 use crate::common::{AppState, Machine, MachineInterface};

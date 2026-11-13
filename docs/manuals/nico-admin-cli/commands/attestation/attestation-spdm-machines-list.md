@@ -35,14 +35,14 @@ job is in progress even if a device has failed. The CLI fetches all
 pages automatically. Predictions can change between pages. Prints the
 prediction warning once to stderr, including when no machines match.
 With --machine-id, selects current attesters using the resolved profile
-and BMC inventory, then aggregates each selected devices latest result
+and BMC inventory, then aggregates each selected device's latest result
 across all job origins. Missing results mean in progress. This read-only
 assessment creates or changes no jobs and prints no prediction warning.
 The table shows attester selection status; JSON/YAML include the
 attester_selection_status field. Empty or disabled selections have no
 verdict (table: not assessed; JSON/YAML: null), with the reason in
 attester selection status. Partial selection reports the selected
-subsets status and warns on stderr. Machine lookup, BMC and timeout
+subset's status and warns on stderr. Machine lookup, BMC and timeout
 failures return errors. --machine-id conflicts with --machine-type and
 all status flags. Supports table, JSON, and YAML output; CSV is
 unsupported.
@@ -90,7 +90,7 @@ if another device failed
 
 `-h, --help`
 
-Print help (see a summary with -h)
+Print help (see a summary with '-h')
 
 ## Examples
 

@@ -40,6 +40,12 @@ pub(crate) fn platform_error(error: RedfishError) -> PlatformError {
             response_body,
             ..
         } => PlatformError::from_http_response(status_code.as_u16(), &response_body),
+        // libredfish reports a 409 response this way.
+        RedfishError::UnnecessaryOperation => PlatformError::Bmc {
+            status: 409,
+            message_id: None,
+            message: error.to_string(),
+        },
         RedfishError::NetworkError { .. } | RedfishError::ReqwestError(_) => {
             PlatformError::Unreachable
         }
@@ -50,7 +56,6 @@ pub(crate) fn platform_error(error: RedfishError) -> PlatformError {
         | RedfishError::NoHeader
         | RedfishError::MissingVendor
         | RedfishError::FileError(_)
-        | RedfishError::UnnecessaryOperation
         | RedfishError::MissingKey { .. }
         | RedfishError::InvalidKeyType { .. }
         | RedfishError::TypeMismatch { .. } => PlatformError::InvalidResponse {
@@ -84,6 +89,11 @@ mod tests {
                     status_code: http::StatusCode::FORBIDDEN,
                     response_body: String::new(),
                 } => PlatformError::Auth(AuthError::InsufficientPrivilege),
+                RedfishError::UnnecessaryOperation => PlatformError::Bmc {
+                    status: 409,
+                    message_id: None,
+                    message: RedfishError::UnnecessaryOperation.to_string(),
+                },
             }
             "message preserved" {
                 RedfishError::GenericError { error: "BMC busy".to_string() } => PlatformError::InvalidResponse {

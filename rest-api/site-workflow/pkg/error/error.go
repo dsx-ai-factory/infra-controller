@@ -17,6 +17,7 @@ var (
 	ErrTypeNICoUnavailable        = "NICoUnavailable"
 	ErrTypeNICoDenied             = "NICoDenied"
 	ErrTypeNICoAlreadyExists      = "NICoAlreadyExists"
+	ErrTypeNICoAborted            = "NICoAborted"
 	ErrTypeNICoFailedPrecondition = "NICoFailedPrecondition"
 	ErrTypeNICoInvalidArgument    = "NICoInvalidArgument"
 	ErrTypeNICoResourceExhausted  = "NICoResourceExhausted"
@@ -93,6 +94,8 @@ func WrapErr(err error) error {
 			return temporal.NewNonRetryableApplicationError(err.Error(), ErrTypeNICoUnavailable, err)
 		case codes.PermissionDenied:
 			return temporal.NewNonRetryableApplicationError(err.Error(), ErrTypeNICoDenied, err)
+		case codes.Aborted:
+			return temporal.NewNonRetryableApplicationError(err.Error(), ErrTypeNICoAborted, err)
 		case codes.AlreadyExists:
 			return temporal.NewNonRetryableApplicationError(err.Error(), ErrTypeNICoAlreadyExists, err)
 		case codes.FailedPrecondition:
