@@ -782,8 +782,6 @@ dig +short +timeout=3 example.com @unbound.nico
 
 A successful external recursion via `unbound.nico` confirms both DHCP option 6 (clients learn the resolver) and `unbound`'s recursion policy are correct.
 
----
-
 ### 3.5 IPv6 Connections from Core to Dependencies
 
 Core's PostgreSQL, Vault, and OpenTelemetry endpoints can use DNS names or IPv6
@@ -837,6 +835,8 @@ drops, or a site's Kubernetes routing and authentication configuration. Check
 resolution and real service operations from the consuming workload during
 rollout; DNS lookup success alone does not prove authentication, a database
 query, or collector receipt of a trace.
+
+---
 
 ## 4. End-to-end Day 0 Checklist
 
