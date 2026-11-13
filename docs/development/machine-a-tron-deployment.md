@@ -715,11 +715,12 @@ Count the entries the controller publishes before a large fleet is deployed:
   shelves) on port 443, plus its 9 switch NVOS addresses on ports 9370 and
   443. The default `maxelem` holds 736 racks (65,504 entries), and 1,112
   racks need 98,968.
-- At `device` granularity the same addresses are published, and each BMC
-  Service adds one entry per extra port it carries: the SSH port with
-  `machineATron.mockBmcSshServer: true`, the chart default, and the UDP IPMI
-  port with `machineATron.enableIpmiSimulation: true`. With the chart
-  defaults a rack needs 160 entries, so the set holds 409 racks.
+- At `device` granularity the same addresses are published, and a BMC
+  Service adds one entry per extra port it carries. With the chart default
+  `machineATron.mockBmcSshServer: true` the 36 DPU BMCs and the 8 power
+  shelves of a rack carry an SSH port; the host and switch BMCs do not. The
+  UDP IPMI port is added with `machineATron.enableIpmiSimulation: true`. With
+  the chart defaults a rack needs 133 entries, so the set holds 492 racks.
 - A host-count fleet needs one entry per BMC address and port,
   `hostCount x (1 + dpuPerHostCount)` addresses per machine group, and no
   NVOS entries.
@@ -752,8 +753,8 @@ Options, in the order to consider them:
    is 736 GB200 NVL72 racks; a larger fleet runs as several sites, each with
    its own cluster and kube-proxy. Refer to
    [Multiple Site Controllers](../getting-started/sizing-and-scale.md#multiple-site-controllers).
-   At `device` granularity, `machineATron.mockBmcSshServer: false` removes one
-   entry per BMC.
+   At `device` granularity, `machineATron.mockBmcSshServer: false` removes the
+   44 SSH entries of each rack.
 1. Rebuild kube-proxy with a larger default. Raise `MaxElem` and `HashSize`
    in `setIPSetDefaults`, build the image for the cluster's kube-proxy
    version, and roll it onto every node. `MaxElem` 1,048,576 and `HashSize`
@@ -769,33 +770,69 @@ Options, in the order to consider them:
    having the pods accept those addresses locally removes the ipset limit and
    the ServiceCIDR limit together. The chart does not implement this model.
 
-Before a fleet is deployed, compare the planned entry count with the live
-`maxelem` on every node. The loop assumes kube-proxy runs as the kubeadm
-DaemonSet in `kube-system` with the label `k8s-app=kube-proxy`; on a
-distribution that runs kube-proxy outside a pod, run
-`ipset list -t KUBE-EXTERNAL-IP` on each node instead. Set `racks` to the
-rack count of the values file, or replace `planned` with the count from the
-arithmetic above:
+Before a fleet is deployed, compare the planned entry count, plus the entries
+other Services already hold, with the live `maxelem` on every node. The loop
+assumes kube-proxy runs as the kubeadm DaemonSet in `kube-system` with the
+label `k8s-app=kube-proxy`; on a distribution that runs kube-proxy outside a
+pod, run `ipset list -t KUBE-EXTERNAL-IP` on each node instead. Set `racks`
+to the rack count of the values file and `granularity` to the chart's
+`serviceGranularity`, or replace `planned` with the count from the arithmetic
+above. Run it before the fleet is deployed: once the fleet is up, the live
+count already contains its entries. The block is bash; it returns non-zero when a node does not fit
+or a check fails, so it can gate a deploy script.
 
 ```bash
-racks=1112                # GB200 NVL72 racks in the values file
-planned=$((racks * 89))   # 71 BMC addresses x 1 port + 9 NVOS addresses x 2 ports
-kubectl -n kube-system get pods -l k8s-app=kube-proxy \
-  -o jsonpath='{range .items[*]}{.metadata.name} {.spec.nodeName}{"\n"}{end}' |
-while read -r pod node; do
-  header=$(kubectl -n kube-system exec "$pod" -- ipset list -t KUBE-EXTERNAL-IP 2>/dev/null)
-  maxelem=$(sed -n 's/.*maxelem \([0-9]*\).*/\1/p' <<<"$header")
-  if [ -z "$maxelem" ]; then
-    echo "$node: no KUBE-EXTERNAL-IP set, kube-proxy is not in IPVS mode and the limit does not apply"
-    continue
+# GB200 NVL72 racks in the values file, and the chart's
+# mat-k8s-controller.config.serviceGranularity (pod or device).
+racks=1112
+granularity=pod
+ipvs_preflight() {
+  local per_rack planned failed=0 checked=0 pod node header maxelem entries total verdict
+  case "$granularity" in
+    # 71 BMC addresses x 1 port + 9 NVOS addresses x 2 ports
+    pod) per_rack=89 ;;
+    # 71 Redfish + 44 SSH (36 DPU BMCs, 8 power shelves) + 18 NVOS;
+    # fewer without mockBmcSshServer, more with enableIpmiSimulation
+    device) per_rack=133 ;;
+    *) echo "unknown granularity: $granularity" >&2; return 2 ;;
+  esac
+  planned=$((racks * per_rack))
+  while read -r pod node; do
+    checked=$((checked + 1))
+    if ! header=$(kubectl -n kube-system exec "$pod" -- ipset list -t KUBE-EXTERNAL-IP 2>&1); then
+      case "$header" in
+        *"The set with the given name does not exist"*)
+          echo "$node: no KUBE-EXTERNAL-IP set, kube-proxy is not in IPVS mode and the limit does not apply" ;;
+        *) echo "$node: ERROR, the ipset check failed: $header"; failed=1 ;;
+      esac
+      continue
+    fi
+    maxelem=$(sed -n 's/.*maxelem \([0-9]*\).*/\1/p' <<<"$header")
+    entries=$(sed -n 's/^Number of entries: \([0-9]*\).*/\1/p' <<<"$header")
+    if [ -z "$maxelem" ] || [ -z "$entries" ]; then
+      echo "$node: ERROR, no maxelem or entry count in the ipset header: $header"; failed=1; continue
+    fi
+    total=$((planned + entries))
+    if [ "$total" -le "$maxelem" ]; then
+      verdict=fits
+    else
+      verdict="exceeds maxelem by $((total - maxelem))"; failed=1
+    fi
+    echo "$node: planned $planned + existing $entries = $total entries, maxelem $maxelem, $verdict"
+  done < <(kubectl -n kube-system get pods -l k8s-app=kube-proxy \
+    -o jsonpath='{range .items[*]}{.metadata.name} {.spec.nodeName}{"\n"}{end}')
+  if [ "$checked" -eq 0 ]; then
+    echo "no kube-proxy pod matched k8s-app=kube-proxy; run ipset list -t KUBE-EXTERNAL-IP on each node instead" >&2
+    failed=1
   fi
-  entries=$(sed -n 's/^Number of entries: //p' <<<"$header")
-  if [ "$planned" -le "$maxelem" ]; then verdict=fits; else verdict="exceeds maxelem"; fi
-  echo "$node: planned $planned entries, maxelem $maxelem, live entries ${entries:-0}, $verdict"
-done
+  [ "$failed" -eq 0 ] || echo "do not deploy until every node fits and every check succeeded" >&2
+  return "$failed"
+}
+ipvs_preflight
 ```
 
-After the fleet is up, the same loop shows the live entry count. Once every
+After the fleet is up, run the same block with `racks=0` to read the live entry count without
+counting the fleet twice. Once every
 device has its lease it reaches the planned count, plus the externalIPs that
 other Services in the cluster publish, on every node; a node below that is
 missing addresses.
