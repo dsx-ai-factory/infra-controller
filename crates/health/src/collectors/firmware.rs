@@ -28,6 +28,49 @@ use crate::sink::{
     CollectorEvent, DataSink, EventContext, FirmwareInfo, ResourceStatusObservation,
 };
 
+fn firmware_events(
+    firmware_inventory: Vec<Arc<nv_redfish::schema::software_inventory::SoftwareInventory>>,
+    emit_resource_status: bool,
+) -> (Vec<CollectorEvent>, usize) {
+    let mut events = Vec::new();
+    let mut firmware_statuses = Vec::new();
+    let mut firmware_count = 0;
+
+    for firmware_data in firmware_inventory {
+        if emit_resource_status {
+            firmware_statuses.push(Arc::clone(&firmware_data));
+        }
+
+        let Some(version) = firmware_data.version.clone().flatten() else {
+            tracing::debug!(
+                firmware_id = %firmware_data.id,
+                "Skipping firmware with no version"
+            );
+            continue;
+        };
+
+        let component = firmware_data.name.clone();
+        let attributes = vec![
+            (Cow::Borrowed("firmware_name"), component.clone()),
+            (Cow::Borrowed("version"), version.clone()),
+        ];
+        events.push(CollectorEvent::Firmware(FirmwareInfo {
+            component,
+            version,
+            attributes,
+        }));
+        firmware_count += 1;
+    }
+
+    if !firmware_statuses.is_empty() {
+        events.push(CollectorEvent::ResourceStatusObservation(Box::new(
+            ResourceStatusObservation::Firmware(firmware_statuses),
+        )));
+    }
+
+    (events, firmware_count)
+}
+
 pub struct FirmwareCollectorConfig {
     pub data_sink: Option<Arc<dyn DataSink>>,
     /// Emit source observations for the resource-status processor.
@@ -89,38 +132,15 @@ impl<B: Bmc + 'static> FirmwareCollector<B> {
         };
         let firmware_inventories = update_service.firmware_inventories().await?;
 
-        let mut firmware_count = 0;
-
-        for firmware_item in firmware_inventories.iter().flatten() {
-            let firmware_data = firmware_item.raw();
-
-            if self.emit_resource_status {
-                self.emit_event(CollectorEvent::ResourceStatusObservation(Box::new(
-                    ResourceStatusObservation::Firmware(Arc::clone(&firmware_data)),
-                )));
-            }
-
-            let Some(version) = firmware_data.version.clone().flatten() else {
-                tracing::debug!(
-                    firmware_id = %firmware_data.id,
-                    rack_id = self.event_context.rack_id().map(tracing::field::display),
-                    "Skipping firmware with no version"
-                );
-                continue;
-            };
-
-            let component = firmware_data.name.clone();
-            let attributes = vec![
-                (Cow::Borrowed("firmware_name"), component.clone()),
-                (Cow::Borrowed("version"), version.clone()),
-            ];
-
-            self.emit_event(CollectorEvent::Firmware(FirmwareInfo {
-                component,
-                version,
-                attributes,
-            }));
-            firmware_count += 1;
+        let firmware_inventory = firmware_inventories
+            .iter()
+            .flatten()
+            .map(|item| item.raw())
+            .collect();
+        let (events, firmware_count) =
+            firmware_events(firmware_inventory, self.emit_resource_status);
+        for event in events {
+            self.emit_event(event);
         }
 
         Ok(IterationResult {
@@ -128,5 +148,46 @@ impl<B: Bmc + 'static> FirmwareCollector<B> {
             entity_count: Some(firmware_count),
             fetch_failures: 0,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn batches_all_firmware_statuses_including_versionless_resources() {
+        let versioned = serde_json::from_value(serde_json::json!({
+            "@odata.id": "/redfish/v1/UpdateService/FirmwareInventory/BMC",
+            "Id": "BMC",
+            "Name": "BMC",
+            "Version": "1.2.3"
+        }))
+        .expect("versioned firmware resource");
+        let versionless = serde_json::from_value(serde_json::json!({
+            "@odata.id": "/redfish/v1/UpdateService/FirmwareInventory/CPLD",
+            "Id": "CPLD",
+            "Name": "CPLD"
+        }))
+        .expect("versionless firmware resource");
+
+        let (events, firmware_count) =
+            firmware_events(vec![Arc::new(versioned), Arc::new(versionless)], true);
+
+        assert_eq!(firmware_count, 1);
+        assert!(matches!(
+            events.as_slice(),
+            [
+                CollectorEvent::Firmware(info),
+                CollectorEvent::ResourceStatusObservation(observation)
+            ] if info.component == "BMC"
+                && matches!(
+                    observation.as_ref(),
+                    ResourceStatusObservation::Firmware(resources)
+                        if resources.len() == 2
+                            && resources[0].id == "BMC"
+                            && resources[1].id == "CPLD"
+                )
+        ));
     }
 }

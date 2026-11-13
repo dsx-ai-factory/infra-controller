@@ -483,7 +483,7 @@ Keep the following in mind when configuring health report records:
 
 ### Redfish Resource Status OTLP Log Contract
 
-When `[processors.resource_status]` and `[sinks.otlp]` are enabled, NICo projects status observations from its existing source collectors into OTLP logs. Entity discovery supplies System and Chassis observations, the manager collector supplies Manager observations, and the firmware collector supplies UpdateService/FirmwareInventory observations. There is no separate status polling task: each resource type follows its source collector's cadence and reuses the Redfish response that collector already fetched. A resource is emitted even when its `Status` property is absent so missing status is distinguishable from healthy status.
+When `[processors.resource_status]` and `[sinks.otlp]` are enabled, NICo projects status observations from its existing source collectors into OTLP logs. Entity discovery supplies System and Chassis observations, the manager collector supplies Manager observations, and the firmware collector supplies UpdateService/FirmwareInventory observations. There is no separate status polling task: each resource type follows its source collector's cadence and reuses the Redfish response that collector already fetched. A resource is included in its type report even when its `Status` property is absent so missing status is distinguishable from healthy status.
 
 `[processors.resource_status]` is disabled by default. Enable it together with the source collectors whose status you need. The manager collector is enabled by default; firmware collection is
 opt-in:
@@ -497,28 +497,35 @@ firmware_refresh_interval = "30m"
 enabled = true
 ```
 
-Firmware collection continues to emit its existing version inventory records for resources that provide a version. Resource-status records are also emitted for versionless FirmwareInventory resources.
+Firmware collection continues to emit its existing version inventory records for resources that provide a version. Versionless FirmwareInventory resources are still included in the firmware resource-status report.
+
+NICo emits one resource-status record for each resource type observed in a source collector iteration. System and Chassis remain separate records even though entity discovery obtains both. Resource details are aggregated in the JSON log body, while low-cardinality attributes provide routing fields and the aggregate result.
 
 Resource-status records use `event.type = "redfish.resource_status"` and carry these structured attributes:
 
 | Attribute | OTLP type | Presence | Value |
 |---|---|---|---|
-| `redfish.resource_status.schema_version` | string | Always | `v1` for the contract documented here. |
+| `redfish.resource_status.schema_version` | string | Always | `v2` for the contract documented here. |
 | `redfish.resource.type` | string | Always | `system`, `manager`, `chassis`, or `firmware`. |
-| `redfish.resource.id` | string | Always | Redfish resource `Id`. |
-| `redfish.resource.name` | string | Always | Redfish resource `Name`. |
-| `redfish.status.state` | string | Optional | Canonical Redfish `Status.State` value. |
-| `redfish.status.health` | string | Optional | Canonical Redfish `Status.Health` value. |
-| `redfish.status.health_rollup` | string | Optional | Canonical Redfish `Status.HealthRollup` value. |
-| `redfish.status.condition_count` | integer | Conditional | Number of conditions. Present when the BMC supplies `Status.Conditions`, including an empty list. |
-| `redfish.status.conditions` | array of `kvlist` | Conditional | First 64 conditions. Each entry contains `message_id` and the optional `timestamp`, `severity`, and `condition_type`. |
-| `redfish.status.conditions.dropped` | integer | Conditional | Number of conditions omitted after the first 64. |
+| `redfish.resource.count` | integer | Always | Number of resources observed in the source iteration, including any whose detail exceeds the body limit. |
+| `redfish.resource_status.aggregate_health` | string | Always | `Critical`, `Warning`, `Unknown`, or `OK` for the complete report. |
 
-The log body provides a compact human-readable summary, for example `firmware CPLDMB_0 status: state=Enabled, health=OK, health_rollup=OK, conditions=0`. A missing individual value is shown as `unknown`; if the resource omits the entire `Status` object, the body ends with `status: unavailable`. Use the structured attributes rather than parsing the body.
+The log body is a JSON object with `resources` and `resourcesDropped`. Each resource contains `id`, `name`, and `status`. Status contains the canonical Redfish `state`, `health`, `healthRollup`, and `conditions` fields. Each condition contains `timestamp`, `messageId`, `severity`, and `conditionType`; all except `messageId` can be `null`. A missing individual value is JSON `null`; if the resource omits the entire `Status` object, `status` is `null`. Redfish health values that nv-redfish does not recognize are discarded during decoding and are treated as missing.
 
-The OTLP severity is `ERROR` when health, health rollup, or a condition is `Critical`; `WARN` when at least one is `Warning`; and `INFO` otherwise. Missing status remains missing rather than being reported as healthy. At most 64 conditions are included in one record.
+The body is limited to 1 MiB, or less when the OTLP target's request-size limit requires space for the surrounding OTLP envelope. At most 64 conditions are retained across the complete report, prioritizing `Critical` conditions, then `Warning`, then all other or missing severities. Included resources and retained conditions preserve their source order. `conditionsDropped` gives the number omitted for each resource, or `0` when `conditions` is `null`. A resource whose base detail cannot fit is omitted, and `resourcesDropped` gives the number omitted. Aggregate health and `redfish.resource.count` still cover every observed resource, including omitted detail.
 
-When `[sinks.tracing]` is enabled, each record is also logged as "Redfish resource status event" with `resource_type`, `resource_id`, `resource_name`, and `status` fields.
+Aggregate health uses the first matching result in this order:
+
+1. `Critical` when any resource reports a `Critical` health, health rollup, or condition severity.
+2. `Warning` when any resource reports a `Warning` health, health rollup, or condition severity.
+3. `Unknown` when any resource has no available health signal, including after an unsupported value is discarded.
+4. `OK` when every resource has an `OK` health signal.
+
+Record severity follows the aggregate result: `ERROR` for `Critical`, `WARN` for `Warning`, and `INFO` for `Unknown` or `OK`. Missing status remains missing rather than being reported as `OK`.
+
+Because the aggregate covers the complete current report, a platform with resources that never expose status can remain `Unknown` after a separate `Warning` resource recovers to `OK`.
+
+When `[sinks.tracing]` is enabled, each report is also logged as "Redfish resource status report" with `resource_type`, `resource_count`, and up to 16 resource summaries containing ID, health, and health rollup. `resource_summaries_dropped` counts additional summaries omitted from the tracing event.
 
 ## DPU Health Checks
 

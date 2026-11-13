@@ -540,17 +540,28 @@ impl RedfishResourceType {
 /// Source-owned Redfish resource offered to the resource-status processor.
 #[derive(Clone, Debug)]
 pub enum ResourceStatusObservation {
-    System(Arc<nv_redfish::schema::computer_system::ComputerSystem>),
-    Manager(Arc<nv_redfish::schema::manager::Manager>),
-    Chassis(Arc<nv_redfish::schema::chassis::Chassis>),
-    Firmware(Arc<nv_redfish::schema::software_inventory::SoftwareInventory>),
+    /// Computer systems returned by one entity-discovery iteration.
+    System(Vec<Arc<nv_redfish::schema::computer_system::ComputerSystem>>),
+    /// Managers returned by one manager-collector iteration.
+    Manager(Vec<Arc<nv_redfish::schema::manager::Manager>>),
+    /// Chassis returned by one entity-discovery iteration.
+    Chassis(Vec<Arc<nv_redfish::schema::chassis::Chassis>>),
+    /// Firmware inventory returned by one firmware-collector iteration.
+    Firmware(Vec<Arc<nv_redfish::schema::software_inventory::SoftwareInventory>>),
+}
+
+/// Status observations for one Redfish resource type and source iteration.
+#[derive(Clone, Debug)]
+pub struct ResourceStatusReport {
+    /// Kind shared by every resource in this report.
+    pub resource_type: RedfishResourceType,
+    /// Resources observed during the source collector's iteration.
+    pub resources: Vec<ResourceStatusInfo>,
 }
 
 /// One periodically observed top-level Redfish resource and its status.
 #[derive(Clone, Debug)]
 pub struct ResourceStatusInfo {
-    /// Kind of Redfish resource observed.
-    pub resource_type: RedfishResourceType,
     /// Redfish resource `Id`.
     pub id: String,
     /// Redfish resource `Name`.
@@ -562,13 +573,11 @@ pub struct ResourceStatusInfo {
 impl ResourceStatusInfo {
     /// Normalizes one raw Redfish resource for downstream sinks.
     pub(crate) fn from_redfish(
-        resource_type: RedfishResourceType,
         id: &str,
         name: &str,
         status: Option<&nv_redfish::schema::resource::Status>,
     ) -> Self {
         Self {
-            resource_type,
             id: id.to_string(),
             name: name.to_string(),
             status: status.map(RedfishStatus::from_redfish),
@@ -694,8 +703,8 @@ pub enum CollectorEvent {
     Firmware(FirmwareInfo),
     /// Source observation offered to the resource-status processor.
     ResourceStatusObservation(Box<ResourceStatusObservation>),
-    /// Processed status record ready for log sinks.
-    ResourceStatus(Box<ResourceStatusInfo>),
+    /// Processed status report ready for log sinks.
+    ResourceStatus(Box<ResourceStatusReport>),
     HealthReport(Arc<HealthReport>),
 }
 
@@ -899,13 +908,11 @@ mod tests {
         .expect("resource status");
 
         let info = ResourceStatusInfo::from_redfish(
-            RedfishResourceType::Firmware,
             "BMC",
             "Baseboard Management Controller",
             Some(&status),
         );
 
-        assert_eq!(info.resource_type, RedfishResourceType::Firmware);
         assert_eq!(info.id, "BMC");
         assert_eq!(info.name, "Baseboard Management Controller");
         assert_eq!(
@@ -926,13 +933,43 @@ mod tests {
 
     #[test]
     fn resource_status_observation_preserves_missing_status() {
-        let info = ResourceStatusInfo::from_redfish(
-            RedfishResourceType::System,
-            "system-1",
-            "System",
-            None,
-        );
+        let info = ResourceStatusInfo::from_redfish("system-1", "System", None);
         assert_eq!(info.status, None);
+    }
+
+    #[test]
+    fn resource_status_observation_treats_unsupported_health_as_missing() {
+        let status = serde_json::from_value(json!({
+            "State": "Enabled",
+            "Health": "VendorSpecific"
+        }))
+        .expect("resource status");
+
+        let info = ResourceStatusInfo::from_redfish("system-1", "System", Some(&status));
+
+        assert_eq!(info.status.expect("status").health, None);
+    }
+
+    #[test]
+    fn redfish_resource_type_strings() {
+        value_scenarios!(
+            run = RedfishResourceType::as_str;
+            "System" {
+                RedfishResourceType::System => "system",
+            }
+
+            "Manager" {
+                RedfishResourceType::Manager => "manager",
+            }
+
+            "Chassis" {
+                RedfishResourceType::Chassis => "chassis",
+            }
+
+            "Firmware" {
+                RedfishResourceType::Firmware => "firmware",
+            }
+        );
     }
 
     #[derive(Clone, Copy)]

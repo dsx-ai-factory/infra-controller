@@ -132,6 +132,28 @@ impl DataSink for TracingSink {
             }
             CollectorEvent::ResourceStatusObservation(_) => {}
             CollectorEvent::ResourceStatus(info) => {
+                const MAX_TRACED_RESOURCE_SUMMARIES: usize = 16;
+                let resource_summaries = info
+                    .resources
+                    .iter()
+                    .take(MAX_TRACED_RESOURCE_SUMMARIES)
+                    .map(|resource| {
+                        let health = resource
+                            .status
+                            .as_ref()
+                            .and_then(|status| status.health.as_deref())
+                            .unwrap_or("unavailable");
+                        let health_rollup = resource
+                            .status
+                            .as_ref()
+                            .and_then(|status| status.health_rollup.as_deref())
+                            .unwrap_or("unavailable");
+                        format!(
+                            "{} health={health} health_rollup={health_rollup}",
+                            resource.id
+                        )
+                    })
+                    .collect::<Vec<_>>();
                 tracing::info!(
                     endpoint = %context.endpoint_key(),
                     collector = %context.collector_type,
@@ -139,10 +161,10 @@ impl DataSink for TracingSink {
                     system_uuid = context.system_uuid().map(tracing::field::display),
                     labels = ?context.labels(),
                     resource_type = info.resource_type.as_str(),
-                    resource_id = %info.id,
-                    resource_name = %info.name,
-                    status = ?info.status,
-                    "Redfish resource status event"
+                    resource_count = info.resources.len(),
+                    resource_summaries = ?resource_summaries,
+                    resource_summaries_dropped = info.resources.len().saturating_sub(resource_summaries.len()),
+                    "Redfish resource status report"
                 );
             }
             CollectorEvent::HealthReport(report) => {
