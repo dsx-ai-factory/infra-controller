@@ -1330,15 +1330,17 @@ async fn create_test_env_with_overrides_inner(
     let cancel_token = CancellationToken::new();
     let mut join_set = JoinSet::new();
 
+    let test_meter = TestMeter::default();
+    let instrumentation = carbide_instrument::Instrumentation::new(test_meter.meter());
     let work_lock_manager_handle = work_lock_manager::start(
         &mut join_set,
         db_pool.clone(),
         work_lock_manager::KeepaliveConfig::default(),
+        instrumentation.clone(),
     )
     .await
     .expect("work_lock_manager failed to start: no availble connections?");
 
-    let test_meter = TestMeter::default();
     let credential_manager = Arc::new(TestCredentialManager::default());
 
     let firmware_object_fetcher = overrides
@@ -1545,7 +1547,7 @@ async fn create_test_env_with_overrides_inner(
     .with_eth_data(eth_virt_data)
     .with_nmxc_client_pool(nmxc_sim.clone())
     .with_metric_emitter(ApiMetricsEmitter::new(&test_meter.meter()))
-    .with_instrumentation(carbide_instrument::Instrumentation::new(test_meter.meter()))
+    .with_instrumentation(instrumentation.clone())
     .with_redfish_pool(redfish_sim.clone())
     .with_ib_fabric_manager(ib_fabric_manager.clone())
     .with_firmware_object_fetcher(firmware_object_fetcher.clone())

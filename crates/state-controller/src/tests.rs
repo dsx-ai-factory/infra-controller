@@ -49,8 +49,13 @@ use crate::state_handler::{
 async fn test_start_iteration(pool: sqlx::PgPool) -> eyre::Result<()> {
     create_test_state_controller_tables(&pool).await;
     let mut join_set = JoinSet::new();
-    let work_lock_manager_handle =
-        db::work_lock_manager::start(&mut join_set, pool.clone(), Default::default()).await?;
+    let work_lock_manager_handle = db::work_lock_manager::start(
+        &mut join_set,
+        pool.clone(),
+        Default::default(),
+        carbide_instrument::Instrumentation::global(),
+    )
+    .await?;
 
     // First iteration can acquire the lock
     let result = controller::db::lock_and_start_iteration(
@@ -92,8 +97,13 @@ async fn test_start_iteration(pool: sqlx::PgPool) -> eyre::Result<()> {
 async fn test_delete_outdated_iterations(pool: sqlx::PgPool) -> eyre::Result<()> {
     create_test_state_controller_tables(&pool).await;
     let mut join_set = JoinSet::new();
-    let work_lock_manager_handle =
-        db::work_lock_manager::start(&mut join_set, pool.clone(), Default::default()).await?;
+    let work_lock_manager_handle = db::work_lock_manager::start(
+        &mut join_set,
+        pool.clone(),
+        Default::default(),
+        carbide_instrument::Instrumentation::global(),
+    )
+    .await?;
 
     // If we insert up to 10 iterations, all of them shoudl be visible
     for i in 1..=10 {
@@ -493,8 +503,13 @@ async fn test_state_controller_handle_set_wait_all_propagates_panic(
     create_test_state_controller_tables(&pool).await;
     let mut join_set = JoinSet::new();
     let cancel_token = CancellationToken::new();
-    let work_lock_manager_handle =
-        db::work_lock_manager::start(&mut join_set, pool.clone(), Default::default()).await?;
+    let work_lock_manager_handle = db::work_lock_manager::start(
+        &mut join_set,
+        pool.clone(),
+        Default::default(),
+        carbide_instrument::Instrumentation::global(),
+    )
+    .await?;
 
     StateController::<PanicInListObjectsStateControllerIO>::builder()
         .iteration_config(IterationConfig {
@@ -598,8 +613,13 @@ async fn test_state_controller_drains_claimed_work_on_shutdown(
     create_test_state_controller_tables(&pool).await;
     let mut join_set = JoinSet::new();
     let cancel_token = CancellationToken::new();
-    let work_lock_manager_handle =
-        db::work_lock_manager::start(&mut join_set, pool.clone(), Default::default()).await?;
+    let work_lock_manager_handle = db::work_lock_manager::start(
+        &mut join_set,
+        pool.clone(),
+        Default::default(),
+        carbide_instrument::Instrumentation::global(),
+    )
+    .await?;
 
     let mut txn = pool.begin().await?;
     create_test_object("stationary".to_string(), &mut txn).await;
@@ -715,8 +735,13 @@ async fn test_state_controller_handler_timeout_bounds_shutdown_drain(
     create_test_state_controller_tables(&pool).await;
     let mut join_set = JoinSet::new();
     let cancel_token = CancellationToken::new();
-    let work_lock_manager_handle =
-        db::work_lock_manager::start(&mut join_set, pool.clone(), Default::default()).await?;
+    let work_lock_manager_handle = db::work_lock_manager::start(
+        &mut join_set,
+        pool.clone(),
+        Default::default(),
+        carbide_instrument::Instrumentation::global(),
+    )
+    .await?;
 
     let mut txn = pool.begin().await?;
     create_test_object("timeout".to_string(), &mut txn).await;
@@ -794,8 +819,13 @@ async fn test_multiple_state_controllers_schedule_object_only_once(
     create_test_state_controller_tables(&pool).await;
     let mut join_set = JoinSet::new();
     let cancel_token = CancellationToken::new();
-    let work_lock_manager_handle =
-        db::work_lock_manager::start(&mut join_set, pool.clone(), Default::default()).await?;
+    let work_lock_manager_handle = db::work_lock_manager::start(
+        &mut join_set,
+        pool.clone(),
+        Default::default(),
+        carbide_instrument::Instrumentation::global(),
+    )
+    .await?;
 
     let num_objects = 4;
     let mut object_ids = Vec::new();
@@ -929,8 +959,13 @@ async fn test_state_handler_metrics_are_stable(pool: sqlx::PgPool) -> eyre::Resu
     create_test_state_controller_tables(&pool).await;
     let mut join_set = JoinSet::new();
     let cancel_token = CancellationToken::new();
-    let work_lock_manager_handle =
-        db::work_lock_manager::start(&mut join_set, pool.clone(), Default::default()).await?;
+    let work_lock_manager_handle = db::work_lock_manager::start(
+        &mut join_set,
+        pool.clone(),
+        Default::default(),
+        carbide_instrument::Instrumentation::global(),
+    )
+    .await?;
 
     let num_objects = 100;
     let mut object_ids = Vec::new();
@@ -1023,8 +1058,13 @@ async fn test_state_change_emitter_emits_events_on_transitions(
     create_test_state_controller_tables(&pool).await;
     let mut join_set = JoinSet::new();
     let cancel_token = CancellationToken::new();
-    let work_lock_manager_handle =
-        db::work_lock_manager::start(&mut join_set, pool.clone(), Default::default()).await?;
+    let work_lock_manager_handle = db::work_lock_manager::start(
+        &mut join_set,
+        pool.clone(),
+        Default::default(),
+        carbide_instrument::Instrumentation::global(),
+    )
+    .await?;
 
     // Create a single test object in state A
     let mut txn = pool.begin().await?;
@@ -1088,8 +1128,13 @@ async fn test_state_controller_manual_enqueuing(pool: sqlx::PgPool) -> eyre::Res
     create_test_state_controller_tables(&pool).await;
     let mut join_set = JoinSet::new();
     let cancel_token = CancellationToken::new();
-    let work_lock_manager_handle =
-        db::work_lock_manager::start(&mut join_set, pool.clone(), Default::default()).await?;
+    let work_lock_manager_handle = db::work_lock_manager::start(
+        &mut join_set,
+        pool.clone(),
+        Default::default(),
+        carbide_instrument::Instrumentation::global(),
+    )
+    .await?;
 
     // Create a single test object in state A
     let mut txn = pool.begin().await?;
@@ -1217,8 +1262,13 @@ where
 {
     create_test_state_controller_tables(pool).await;
     let mut join_set = JoinSet::new();
-    let work_lock_manager_handle =
-        db::work_lock_manager::start(&mut join_set, pool.clone(), Default::default()).await?;
+    let work_lock_manager_handle = db::work_lock_manager::start(
+        &mut join_set,
+        pool.clone(),
+        Default::default(),
+        carbide_instrument::Instrumentation::global(),
+    )
+    .await?;
 
     let mut txn = pool.begin().await?;
     create_test_object("test-obj-1".to_string(), &mut txn).await;
@@ -1693,8 +1743,13 @@ async fn check_invalidated_iteration(
         .execute(&pool)
         .await?;
     let mut join_set = JoinSet::new();
-    let work_lock_manager_handle =
-        db::work_lock_manager::start(&mut join_set, pool.clone(), Default::default()).await?;
+    let work_lock_manager_handle = db::work_lock_manager::start(
+        &mut join_set,
+        pool.clone(),
+        Default::default(),
+        carbide_instrument::Instrumentation::global(),
+    )
+    .await?;
 
     let io = Arc::new(TestStateControllerIO::default());
     let mut txn = pool.begin().await?;

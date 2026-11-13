@@ -186,6 +186,7 @@ pub(crate) async fn setup_resources(
         join_set,
         db_pool.clone(),
         work_lock_manager::KeepaliveConfig::default(),
+        instrumentation.clone(),
     )
     .await?;
 

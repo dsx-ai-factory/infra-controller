@@ -1177,6 +1177,7 @@ async fn exercise_nvlink_partition_monitor(
         &mut work_lock_tasks,
         test_env.db_pool.clone(),
         db::work_lock_manager::KeepaliveConfig::default(),
+        carbide_instrument::Instrumentation::global(),
     )
     .await?;
     let nmxc_client_pool = libnmxc::NmxcClientPool::builder()

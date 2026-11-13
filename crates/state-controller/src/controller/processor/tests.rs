@@ -404,8 +404,13 @@ async fn renamed_object_keeps_single_aggregate_count(pool: sqlx::PgPool) -> eyre
     // filtered by the replica-local database object-ID list.
     create_test_state_controller_tables(&pool).await;
     let mut join_set = JoinSet::new();
-    let work_lock_manager_handle =
-        ::db::work_lock_manager::start(&mut join_set, pool.clone(), Default::default()).await?;
+    let work_lock_manager_handle = ::db::work_lock_manager::start(
+        &mut join_set,
+        pool.clone(),
+        Default::default(),
+        carbide_instrument::Instrumentation::global(),
+    )
+    .await?;
     let mut txn = pool.begin().await?;
     create_test_object(ORIGINAL_ID.to_string(), &mut txn).await;
     txn.commit().await?;
@@ -590,8 +595,13 @@ async fn late_result_for_id_absent_from_database_does_not_contribute(
     // without inserting the completed result into the processor cache yet.
     create_test_state_controller_tables(&pool).await;
     let mut join_set = JoinSet::new();
-    let work_lock_manager_handle =
-        ::db::work_lock_manager::start(&mut join_set, pool.clone(), Default::default()).await?;
+    let work_lock_manager_handle = ::db::work_lock_manager::start(
+        &mut join_set,
+        pool.clone(),
+        Default::default(),
+        carbide_instrument::Instrumentation::global(),
+    )
+    .await?;
     let mut txn = pool.begin().await?;
     create_test_object(ORIGINAL_ID.to_string(), &mut txn).await;
     txn.commit().await?;
@@ -725,8 +735,13 @@ async fn failed_object_id_read_preserves_existing_object_error_metrics(
     // Setup: publish one existing object ID and process an ordinary handler error.
     create_test_state_controller_tables(&pool).await;
     let mut join_set = JoinSet::new();
-    let work_lock_manager_handle =
-        ::db::work_lock_manager::start(&mut join_set, pool.clone(), Default::default()).await?;
+    let work_lock_manager_handle = ::db::work_lock_manager::start(
+        &mut join_set,
+        pool.clone(),
+        Default::default(),
+        carbide_instrument::Instrumentation::global(),
+    )
+    .await?;
     let io = Arc::new(TestStateControllerIO::default());
     let mut txn = pool.begin().await?;
     create_test_object(OBJECT_ID.to_string(), &mut txn).await;
@@ -829,8 +844,13 @@ async fn non_lock_winner_refreshes_object_ids_from_database(
     // from outside the controller under test.
     create_test_state_controller_tables(&pool).await;
     let mut join_set = JoinSet::new();
-    let work_lock_manager_handle =
-        ::db::work_lock_manager::start(&mut join_set, pool.clone(), Default::default()).await?;
+    let work_lock_manager_handle = ::db::work_lock_manager::start(
+        &mut join_set,
+        pool.clone(),
+        Default::default(),
+        carbide_instrument::Instrumentation::global(),
+    )
+    .await?;
     let mut txn = pool.begin().await?;
     create_test_object(OBJECT_ID.to_string(), &mut txn).await;
     txn.commit().await?;
