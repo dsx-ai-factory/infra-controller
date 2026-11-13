@@ -4,7 +4,7 @@
 
 ## NAME
 
-nico-admin-cli-vpc-routing-state - Inspect the VPCs persisted routing
+nico-admin-cli-vpc-routing-state - Inspect the VPC's persisted routing
 profile and VNI allocations
 
 ## SYNOPSIS
@@ -16,7 +16,7 @@ nico-admin-cli vpc routing-state [--extended]
 
 ## DESCRIPTION
 
-Inspect the VPCs persisted routing profile, observed version, active
+Inspect the VPC's persisted routing profile, observed version, active
 VNI, and retained allocation. Each RPC attempt uses the client request
 timeout (300 seconds by default, configurable with
 FORGE_CLIENT_REQUEST_TIMEOUT_SECS), including connection setup and
@@ -49,7 +49,7 @@ Sort output by specified field
 
 `-h, --help`
 
-Print help (see a summary with -h)
+Print help (see a summary with '-h')
 
 `<ID>`
 

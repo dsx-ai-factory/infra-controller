@@ -435,7 +435,7 @@ async fn lowered_isolation_limit_preserves_retry_but_rejects_a_compacting_new_ro
     let env = create_test_env_with_overrides(
         pool,
         TestEnvOverrides {
-            config: Some(config),
+            config: Some(Box::new(config)),
             site_prefixes: Some(vec![]),
             ..Default::default()
         },
@@ -492,7 +492,7 @@ async fn tenant_site_prefix_admission_rejects_configured_denied_space(pool: sqlx
     let env = create_test_env_with_overrides(
         pool,
         TestEnvOverrides {
-            config: Some(config),
+            config: Some(Box::new(config)),
             site_prefixes: Some(vec![]),
             ..Default::default()
         },
@@ -553,7 +553,7 @@ async fn concurrent_tenant_roots_share_the_site_isolation_limit(pool: sqlx::PgPo
     let env = create_test_env_with_overrides(
         pool,
         TestEnvOverrides {
-            config: Some(config),
+            config: Some(Box::new(config)),
             site_prefixes: Some(vec![]),
             ..Default::default()
         },
@@ -1147,7 +1147,7 @@ async fn site_prefix_quota_retains_deleting_rows(pool: sqlx::PgPool) {
     let env = create_test_env_with_overrides(
         pool,
         TestEnvOverrides {
-            config: Some(config),
+            config: Some(Box::new(config)),
             ..Default::default()
         },
     )

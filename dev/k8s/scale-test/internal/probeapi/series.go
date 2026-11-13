@@ -85,7 +85,7 @@ func SeriesSpecFor(f Filter, fullHostRead bool) (SeriesSpec, error) {
 		return SeriesSpec{"expected_records", FamilyExpected, with(with(nil, "type", f.RecordType), "linked", f.Linked), nil}, nil
 	case UnitTypeHost:
 		return hostSpec(f, fullHostRead)
-	case UnitTypeDpu, UnitTypeSwitch, UnitTypePowerShelf, UnitTypeRack:
+	case UnitTypeDpu, UnitTypeSwitch, UnitTypePowerShelf, UnitTypeRack, UnitTypeInstance:
 		if f.Stage != nil && *f.Stage == StageExpected {
 			return expectedStageSpec(f)
 		}

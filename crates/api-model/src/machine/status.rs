@@ -39,6 +39,8 @@ use crate::sku::SkuStatus;
 /// Corresponds to `MachineStatus` in the protobuf.
 #[derive(Debug, Clone)]
 pub struct MachineStatus {
+    /// Last hardware command recorded by Core; an unsettled command excludes NIC updates.
+    pub hardware_dispatch: Option<crate::hardware_dispatch::HardwareDispatch>,
     pub interfaces: Vec<MachineInterfaceSnapshot>,
     /// Latest persisted convergence status for the desired boot interface.
     pub boot_interface_status_observation: Option<BootInterfaceStatusObservation>,

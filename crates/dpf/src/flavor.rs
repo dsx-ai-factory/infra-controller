@@ -130,9 +130,8 @@ fn get_default_ovs_defaults_base() -> String {
         "_ovs-vsctl --may-exist add-br br-sfc\n",
         "_ovs-vsctl set bridge br-sfc datapath_type=netdev\n",
         "_ovs-vsctl set bridge br-sfc fail_mode=secure\n",
-        "_ovs-vsctl --may-exist add-port br-sfc p0\n",
-        "_ovs-vsctl set Interface p0 type=dpdk\n",
-        "_ovs-vsctl set Interface p0 mtu_request=9216\n",
+        // Configure p0 atomically to avoid initializing OVS-DOCA with the default MTU.
+        "_ovs-vsctl --may-exist add-port br-sfc p0 -- set Interface p0 type=dpdk mtu_request=9216\n",
         "_ovs-vsctl set Port p0 external_ids:dpf-type=physical\n",
         "_ovs-vsctl --if-exists del-br br-hbn\n",
         "_ovs-vsctl --may-exist add-br br-hbn\n",
@@ -178,9 +177,8 @@ fn get_bf4_ovs_defaults_base() -> String {
         "_ovs-vsctl --may-exist add-br br-sfc\n",
         "_ovs-vsctl set bridge br-sfc datapath_type=netdev\n",
         "_ovs-vsctl set bridge br-sfc fail_mode=secure\n",
-        "_ovs-vsctl --may-exist add-port br-sfc p0\n",
-        "_ovs-vsctl set Interface p0 type=dpdk\n",
-        "_ovs-vsctl set Interface p0 mtu_request=9216\n",
+        // Configure p0 atomically to avoid initializing OVS-DOCA with the default MTU.
+        "_ovs-vsctl --may-exist add-port br-sfc p0 -- set Interface p0 type=dpdk mtu_request=9216\n",
         "_ovs-vsctl set Port p0 external_ids:dpf-type=physical\n",
 
         // br-hbn is absent on a fresh DPU, so a bare del-br would fail the run.
@@ -1777,9 +1775,8 @@ fn ovs_cerebro_script_raw() -> &'static str {
         _ovs-vsctl set bridge br-hbn fail_mode=secure
 
         # Pre plug p0 to br-sfc
-        _ovs-vsctl --may-exist add-port br-sfc p0
-        _ovs-vsctl set Interface p0 type=dpdk
-        _ovs-vsctl set Interface p0 mtu_request=9216
+        # Configure p0 atomically to avoid initializing OVS-DOCA with the default MTU.
+        _ovs-vsctl --may-exist add-port br-sfc p0 -- set Interface p0 type=dpdk mtu_request=9216
         _ovs-vsctl set Port p0 external_ids:dpf-type=physical
 
         # Pre plug p1 to br-sfc
@@ -1913,9 +1910,8 @@ fn ovs_legacy_script_raw() -> &'static str {
         _ovs-vsctl set bridge br-hbn fail_mode=secure
 
         # Pre plug p0 to br-sfc
-        _ovs-vsctl --may-exist add-port br-sfc p0
-        _ovs-vsctl set Interface p0 type=dpdk
-        _ovs-vsctl set Interface p0 mtu_request=9216
+        # Configure p0 atomically to avoid initializing OVS-DOCA with the default MTU.
+        _ovs-vsctl --may-exist add-port br-sfc p0 -- set Interface p0 type=dpdk mtu_request=9216
         _ovs-vsctl set Port p0 external_ids:dpf-type=physical
 
         # Pre plug p1 to br-sfc
@@ -5303,6 +5299,45 @@ done
     }
 
     // ── get_default_ovs_defaults (pure formatter) ──────────────────────────
+
+    /// Verifies each OVS bootstrap creates p0 with its type and MTU in one transaction
+    /// to avoid initializing OVS-DOCA with the default MTU.
+    #[test]
+    fn ovs_bootstraps_configure_p0_atomically() {
+        // Check the command emitted by each independently maintained p0 bootstrap.
+        value_scenarios!(
+            run = |script: String| {
+                // Reject separate creation or Interface updates that expose an intermediate p0 configuration.
+                script
+                    .lines()
+                    .map(str::trim)
+                    .filter(|line| {
+                        line.contains("add-port br-sfc p0") || line.contains("set Interface p0 ")
+                    })
+                    .eq(["_ovs-vsctl --may-exist add-port br-sfc p0 -- set Interface p0 type=dpdk mtu_request=9216"])
+            };
+
+            // BF3 and BF3Gb200 share this p0 initialization sequence.
+            "default BF3" {
+                get_default_ovs_defaults_base() => true,
+            }
+
+            // Generic BF4 maintains its own bootstrap independently of BF3.
+            "generic BF4" {
+                get_bf4_ovs_defaults_base() => true,
+            }
+
+            // Astra with Cerebro inventory selects a separate embedded script.
+            "Astra Cerebro" {
+                ovs_cerebro_script_raw().to_string() => true,
+            }
+
+            // Astra without Cerebro inventory selects the legacy embedded script.
+            "Astra legacy" {
+                ovs_legacy_script_raw().to_string() => true,
+            }
+        );
+    }
 
     #[test]
     fn ovs_defaults_contains_key_lines() {
