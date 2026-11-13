@@ -301,7 +301,7 @@ async fn ac_cycle_restores_onboard_nics_without_repeating_power_after_restart(po
         .set_service_root_product(Some("VR NVL72".into()));
     let request = queue_ac_cycle(&env, &host).await;
     let actions = env.redfish_sim.timepoint();
-    env.run_single_iteration().await;
+    env.run_single_iteration_without_requeue().await;
     assert_eq!(
         host.host.machine().await.state.value,
         ac_cycle_state(AcPowercycleState::PowerCycle, &request)
@@ -311,7 +311,7 @@ async fn ac_cycle_restores_onboard_nics_without_repeating_power_after_restart(po
     let before = host.host.machine().await;
     env.redfish_sim
         .set_create_client_error("BMC unavailable for platform detection");
-    env.run_single_iteration().await;
+    env.run_single_iteration_without_requeue().await;
     let failed = host.host.machine().await;
     assert_eq!(failed.state.value, before.state.value);
     assert_eq!(failed.state.version, before.state.version);
@@ -326,7 +326,7 @@ async fn ac_cycle_restores_onboard_nics_without_repeating_power_after_restart(po
             .is_empty()
     );
     env.redfish_sim.clear_create_client_error();
-    env.run_single_iteration().await;
+    env.run_single_iteration_without_requeue().await;
     assert_eq!(
         host.host.machine().await.state.value,
         ac_cycle_state(
@@ -354,7 +354,7 @@ async fn ac_cycle_restores_onboard_nics_without_repeating_power_after_restart(po
             env.redfish_sim
                 .fail_next_onboard_nics_write("temporary NIC write failure");
             let before = host.host.machine().await;
-            env.run_single_iteration().await;
+            env.run_single_iteration_without_requeue().await;
             let failed = host.host.machine().await;
             assert_eq!(failed.state.value, before.state.value);
             assert_eq!(failed.state.version, before.state.version);
@@ -366,7 +366,7 @@ async fn ac_cycle_restores_onboard_nics_without_repeating_power_after_restart(po
                 .with_credential_manager(valid_credential_manager())
                 .build_with_harness(env.test_harness, env.redfish_sim);
         }
-        env.run_single_iteration().await;
+        env.run_single_iteration_without_requeue().await;
         let waiting = host.host.machine().await;
         assert_eq!(
             waiting.state.value,
@@ -379,7 +379,7 @@ async fn ac_cycle_restores_onboard_nics_without_repeating_power_after_restart(po
                 &request
             )
         );
-        env.run_single_iteration().await;
+        env.run_single_iteration_without_requeue().await;
         let still_waiting = host.host.machine().await;
         assert_eq!(still_waiting.state.value, waiting.state.value);
         assert_eq!(still_waiting.state.version, waiting.state.version);
@@ -387,7 +387,7 @@ async fn ac_cycle_restores_onboard_nics_without_repeating_power_after_restart(po
             Some(PersistentStateHandlerOutcome::Wait { ref reason, .. })
                 if reason == "Waiting for onboard NIC configuration to be applied"));
         expire_wait(&env, &host).await;
-        env.run_single_iteration().await;
+        env.run_single_iteration_without_requeue().await;
         let expected = if enable {
             ac_cycle_state(
                 AcPowercycleState::DisableOnboardNics {
@@ -465,12 +465,12 @@ async fn ac_cycle_skips_onboard_nics_unless_vera_rubin_with_managed_dpus(pool: P
         host.advance_to_converged_ready().await;
         let request = queue_ac_cycle(&env, &host).await;
         let actions = env.redfish_sim.timepoint();
-        env.run_single_iteration().await;
+        env.run_single_iteration_without_requeue().await;
         assert_eq!(
             host.host.machine().await.state.value,
             ac_cycle_state(AcPowercycleState::PowerCycle, &request)
         );
-        env.run_single_iteration().await;
+        env.run_single_iteration_without_requeue().await;
         let finished = host.host.machine().await;
         assert_eq!(finished.state.value, ManagedHostState::Ready, "{product}");
         assert!(
