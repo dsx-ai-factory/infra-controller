@@ -565,16 +565,39 @@ async fn certificate_completion_preserves_replacement_after_controller_reload(po
         .await
         .unwrap();
         txn.commit().await.unwrap();
-        for _ in 0..2 {
-            run_switch_controller_with_services(
-                pool.clone(),
-                env.api.work_lock_manager_handle(),
-                services(job_state),
-            )
-            .await;
-        }
+        run_switch_controller_with_services(
+            pool.clone(),
+            env.api.work_lock_manager_handle(),
+            services(job_state),
+        )
+        .await;
+        let original = load_switch(&env, &switch_id)
+            .await
+            .switch_maintenance_requested
+            .unwrap();
+        // Replace pending work after admission, before the accepted certificate
+        // operation submits and persists its returned job ID.
+        request_switch_maintenance_via_cm(
+            &env,
+            &switch_id,
+            SwitchMaintenanceOperation::PowerOff { graceful: true },
+        )
+        .await;
+        let replacement = load_switch(&env, &switch_id)
+            .await
+            .switch_maintenance_requested
+            .unwrap();
+        run_switch_controller_with_services(
+            pool.clone(),
+            env.api.work_lock_manager_handle(),
+            services(job_state),
+        )
+        .await;
         let started = load_switch(&env, &switch_id).await;
-        let original = started.switch_maintenance_requested.unwrap();
+        assert_eq!(
+            started.switch_maintenance_requested,
+            Some(replacement.clone())
+        );
         assert_eq!(
             started.controller_state.value,
             SwitchControllerState::Maintenance {
@@ -596,16 +619,6 @@ async fn certificate_completion_preserves_replacement_after_controller_reload(po
             .await
             .unwrap();
         }
-        request_switch_maintenance_via_cm(
-            &env,
-            &switch_id,
-            SwitchMaintenanceOperation::PowerOff { graceful: true },
-        )
-        .await;
-        let replacement = load_switch(&env, &switch_id)
-            .await
-            .switch_maintenance_requested
-            .unwrap();
         run_switch_controller_with_services(
             pool.clone(),
             env.api.work_lock_manager_handle(),

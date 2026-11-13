@@ -61,12 +61,14 @@ func TestComponentReset(t *testing.T) {
 			if tc.preflightError {
 				preflightErr = errors.New("rack hosts still in use")
 			}
-			env.OnActivity(taskactivity.NamePrepareFactoryReset, mock.Anything, mock.MatchedBy(func(target targetcommon.Target) bool { return len(target.Identifiers) == 2 })).Return(preflightErr).Once()
+			env.OnActivity(taskactivity.NamePrepareFactoryReset, mock.Anything, mock.MatchedBy(func(target targetcommon.Target) bool {
+				return len(target.Identifiers) == 2 && target.TraceID == "1234567890abcdef1234567890abcdef"
+			})).Return(preflightErr).Once()
 			env.OnActivity(taskactivity.NameUpdateTaskStatus, mock.Anything, mock.Anything).Return(nil)
 			if !tc.preflightError && !tc.readinessChanged {
 				env.OnActivity(taskactivity.NameUpdateTaskReport, mock.Anything, mock.Anything).Return(nil)
 			}
-			first := targetcommon.Target{Type: devicetypes.ComponentTypeNVSwitch, IdentifierType: targetcommon.IdentifierTypeManagerID, Identifiers: []string{"first"}}
+			first := targetcommon.Target{TraceID: "1234567890abcdef1234567890abcdef", Type: devicetypes.ComponentTypeNVSwitch, IdentifierType: targetcommon.IdentifierTypeManagerID, Identifiers: []string{"first"}}
 			second := first
 			second.Identifiers = []string{"second"}
 			var secondSubmitted atomic.Bool
@@ -101,7 +103,7 @@ func TestComponentReset(t *testing.T) {
 					env.OnActivity(observeActivity, mock.Anything, second).Run(func(mock.Arguments) { secondCompleted.Store(true) }).Return(true, nil).Once()
 				}
 			}
-			env.ExecuteWorkflow(componentReset, task.ExecutionInfo{TaskID: uuid.New(), Components: []task.WorkflowComponent{{Type: devicetypes.ComponentTypeNVSwitch, ComponentID: "first"}, {Type: devicetypes.ComponentTypeNVSwitch, ComponentID: "second"}}}, &operations.ComponentResetTaskInfo{Target: tc.resetTarget})
+			env.ExecuteWorkflow(componentReset, task.ExecutionInfo{TraceID: "1234567890abcdef1234567890abcdef", TaskID: uuid.New(), Components: []task.WorkflowComponent{{Type: devicetypes.ComponentTypeNVSwitch, ComponentID: "first"}, {Type: devicetypes.ComponentTypeNVSwitch, ComponentID: "second"}}}, &operations.ComponentResetTaskInfo{Target: tc.resetTarget})
 			require.True(t, env.IsWorkflowCompleted())
 			require.Equal(t, tc.firstError || tc.preflightError, env.GetWorkflowError() != nil)
 			env.AssertExpectations(t)
