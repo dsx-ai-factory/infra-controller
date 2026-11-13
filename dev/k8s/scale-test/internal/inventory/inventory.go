@@ -188,6 +188,8 @@ func BmcKey(machineType, hardwareType string) string {
 
 // MatPod is one MAT pod and the records it served.
 type MatPod struct {
+	UID     string
+	Ready   bool
 	Name    string
 	IP      netip.Addr
 	Records Response
@@ -219,7 +221,7 @@ func (s *SiteInventory) CarbideAPIURL() (string, bool) {
 }
 
 // Read reads the inventory of every MAT pod matching selector in namespace, in parallel. The returned inventory holds what was read; Problems carries faults.
-func Read(ctx context.Context, lister PodLister, namespace string, reader RecordsReader, selector string, port uint16) SiteInventory {
+func Read(ctx context.Context, lister PodLister, namespace string, reader RecordsReader, selector string, port uint16, populated ...bool) SiteInventory {
 	inv := SiteInventory{BmcCounts: map[string]uint64{}}
 	pods, err := lister.ListPods(ctx, namespace, selector)
 	switch {
@@ -244,7 +246,7 @@ func Read(ctx context.Context, lister PodLister, namespace string, reader Record
 		go func() {
 			defer wg.Done()
 			for i := range jobs {
-				mp, problem := readPod(ctx, reader, pods[i], port)
+				mp, problem := readPod(ctx, reader, pods[i], port, populated...)
 				results[i] = result{mp, problem}
 			}
 		}()
@@ -277,7 +279,7 @@ dispatch:
 		}
 	}
 
-	inv.Problems = append(inv.Problems, checkPods(inv.Pods)...)
+	inv.Problems = append(inv.Problems, checkPods(inv.Pods, populated...)...)
 	for i := range inv.Pods {
 		r := &inv.Pods[i].Records
 		inv.N.add(r)
@@ -289,8 +291,8 @@ dispatch:
 	return inv
 }
 
-func readPod(ctx context.Context, reader RecordsReader, pod cluster.PodInfo, port uint16) (MatPod, string) {
-	if !pod.Ready {
+func readPod(ctx context.Context, reader RecordsReader, pod cluster.PodInfo, port uint16, populated ...bool) (MatPod, string) {
+	if !pod.Ready && (len(populated) == 0 || !populated[0]) {
 		return MatPod{}, fmt.Sprintf("pod %s: not Ready (phase %s)", pod.Name, pod.Phase)
 	}
 	if pod.IP == "" {
@@ -307,7 +309,12 @@ func readPod(ctx context.Context, reader RecordsReader, pod cluster.PodInfo, por
 	if err != nil {
 		return MatPod{}, fmt.Sprintf("pod %s: reading its records: %s", pod.Name, err)
 	}
-	return MatPod{Name: pod.Name, IP: ip, Records: records}, ""
+	out := MatPod{Name: pod.Name, IP: ip, Records: records}
+	if len(populated) > 0 && populated[0] {
+		out.UID = pod.UID
+		out.Ready = pod.Ready
+	}
+	return out, ""
 }
 
 // owners keeps the owners of a key in first-seen order; the caller sorts.
@@ -329,14 +336,14 @@ func (o *owners) add(key, owner string) {
 // checkPods finds the problems across the served records: registration still on, pods that disagree on the nico-api URL, a BMC MAC or rack served twice, a device naming
 // an unserved rack, a DPU whose parent is no served host, an interface or NVOS MAC on two devices. MACs compare in any case; the record-conversion fault is found by the
 // ingestion conversion.
-func checkPods(pods []MatPod) []string {
+func checkPods(pods []MatPod, populated ...bool) []string {
 	var problems []string
 	apiURLs := owners{}
 	bmcMacs := owners{}
 	racks := owners{}
 	for _, pod := range pods {
 		r := &pod.Records
-		if r.RegisterExpectedMachines {
+		if r.RegisterExpectedMachines && (len(populated) == 0 || !populated[0]) {
 			problems = append(problems, fmt.Sprintf(
 				"pod %s registers its own expected records (register_expected_machines is true)", pod.Name))
 		}

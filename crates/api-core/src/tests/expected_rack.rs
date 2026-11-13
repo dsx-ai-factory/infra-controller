@@ -24,7 +24,7 @@ async fn expected_rack_derived_profile(pool: sqlx::PgPool) {
     let env = create_test_env_with_overrides(
         pool.clone(),
         TestEnvOverrides {
-            config: Some(config),
+            config: Some(Box::new(config)),
             ..Default::default()
         },
     )

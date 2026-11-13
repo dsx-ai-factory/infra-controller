@@ -2,6 +2,17 @@
 
 This chart deploys the NICo Dynamic Host Configuration Protocol (DHCP) server. It can also render the shared IPv4 service-VPC NetworkAttachmentDefinition (NAD) and start its node-local DHCP Container Network Interface (CNI) daemon for data processing unit (DPU) extension-service pods. A NAD is the Kubernetes object that Multus uses to select a CNI network. The Scalable Function (SF) is the BlueField interface allocated to the extension-service pod. The DOCA Platform Framework (DPF) installs this chart into DPU-cluster namespaces.
 
+## DHCP Server Span Level
+
+Set `tracesSpanLevel` to configure the NICo DHCP server's `NICO_TRACES_SPAN_LEVEL` environment variable. It defaults to an empty string, which omits the variable and preserves the binary's span level of `info`. Configure an OTLP endpoint to enable span export and raise its verbosity through Helm values:
+
+```yaml
+otlpEndpoint: http://opentelemetry-collector.otel.svc.cluster.local:4317
+tracesSpanLevel: debug
+```
+
+The span level must be a string. This setting applies to the NICo DHCP server container.
+
 ## IPv4 Service-VPC Network
 
 The IPv4 service-VPC network is disabled by default. Enabling it renders the NAD and a DHCP CNI DaemonSet. A release with the default workload setting also retains the NICo DHCP server DaemonSet and Service. Core's stable platform release suppresses those server resources, so it owns the NAD and CNI daemon without deploying a second NICo DHCP server. The following example enables the network:

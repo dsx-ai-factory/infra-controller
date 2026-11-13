@@ -52,6 +52,8 @@ pub use matcher::{
     FirmwareVersionRange, FirmwareVersionRangeError, IdentityField, IdentityMatcher, MatchPattern,
     Precedence, derived_precedence,
 };
+/// The Redfish power types the [`Power`] capability reads and requests.
+pub use nv_redfish::resource::{PowerState, ResetType};
 pub use operation::{
     DriverOutcome, OperationReference, OperationStatus, VendorJobId, VendorJobIdError,
 };

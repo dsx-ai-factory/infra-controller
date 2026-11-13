@@ -21,6 +21,10 @@
         }
       }
     },
+    "tracesSpanLevel": {
+      "type": "string",
+      "description": "DHCP server span verbosity. Empty preserves the binary default of info."
+    },
     "serviceDaemonSet": {
       "type": "object",
       "description": "Configuration for the service DaemonSet",

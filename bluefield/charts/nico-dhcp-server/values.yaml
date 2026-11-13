@@ -29,6 +29,9 @@ serviceVpcNetworks:
 ## OTLP/gRPC collector endpoint. Empty leaves span export off.
 otlpEndpoint: ""
 
+## Span verbosity. Empty preserves the binary default of info.
+tracesSpanLevel: ""
+
 image:
   repository: ""
   pullPolicy: IfNotPresent

@@ -1,0 +1,32 @@
+suite: DHCP server span level
+templates:
+  - daemonset.yaml
+tests:
+  - it: omits the span level and collector endpoint when unset
+    asserts:
+      - notContains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: NICO_TRACES_SPAN_LEVEL
+          any: true
+      - notContains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: OTEL_EXPORTER_OTLP_TRACES_ENDPOINT
+          any: true
+
+  - it: configures span verbosity alongside the collector endpoint
+    set:
+      otlpEndpoint: http://collector:4317
+      tracesSpanLevel: debug
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: NICO_TRACES_SPAN_LEVEL
+            value: debug
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: OTEL_EXPORTER_OTLP_TRACES_ENDPOINT
+            value: http://collector:4317

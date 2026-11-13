@@ -15,7 +15,7 @@
  * limitations under the License.
  */
 
-use forge_tls::client_config::ClientCert;
+use carbide_tls::client_config::ClientCert;
 use rpc::carbide_tls_client::CarbideClientConfig;
 
 use crate::CONFIG;
