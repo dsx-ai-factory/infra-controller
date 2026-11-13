@@ -18,13 +18,15 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::net::{Ipv6Addr, UdpSocket};
 use std::path::PathBuf;
+use std::sync::LazyLock;
 use std::time::{Duration, Instant};
 
-use carbide_test_support::Outcome::Yields;
+use carbide_test_support::Outcome::{Fails, Yields};
 use carbide_test_support::{Case, check_cases};
 use dhcp::mock_api_server::{DHCP_RESPONSE_FQDN, ENDPOINT_DISCOVER_DHCP, MockAPIServer};
 use dhcproto::v6::{
     Architecture, DhcpOption, Message, MessageType, OptionCode, UnknownOption, VendorClass,
+    VendorOpts,
 };
 use eyre::WrapErr;
 use rpc::forge as rpc;
@@ -396,5 +398,254 @@ fn api_boot_url_override_and_empty_suppression_reach_the_wire() -> Result<(), ey
             Ok(boot_options(&response))
         },
     );
+    Ok(())
+}
+
+/// Requested service URLs replace only NICo's suboption and preserve boot data.
+#[test]
+fn nico_pxe_service_url_preserves_ipv6_boot_and_vendor_options() -> Result<(), eyre::Report> {
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?;
+    let api_server = runtime.block_on(MockAPIServer::start());
+    let url = "http://[2001:db8::20]:8080/";
+    let oversized_url = concat!(
+        "http://",
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.",
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.",
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.",
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/",
+    );
+    assert_eq!(oversized_url.len(), 246);
+    let long_url = &oversized_url[..245];
+    let vendor = |num, entries: &[(u16, &str)]| VendorOpts {
+        num,
+        opts: entries
+            .iter()
+            .map(|(code, value)| {
+                DhcpOption::Unknown(UnknownOption::new(
+                    (*code).into(),
+                    value.as_bytes().to_vec(),
+                ))
+            })
+            .collect(),
+    };
+    // Native option 17: duplicate NVIDIA 72="old", 73="keep"; another enterprise 72="other".
+    let nvidia = Some("00001647004800036f6c64004800036f6c64004900046b656570");
+    let other = Some("00007ed9004800056f74686572");
+    let requested = &[
+        OptionCode::OptBootfileUrl,
+        OptionCode::VendorClass,
+        OptionCode::VendorOpts,
+    ][..];
+    check_cases(
+        [
+            Case {
+                scenario: "omitted",
+                input: (None, None, requested),
+                expect: Yields(vec![]),
+            },
+            Case {
+                scenario: "vendor options not requested",
+                input: (Some(url), None, BOOT_REQUESTS),
+                expect: Yields(vec![]),
+            },
+            Case {
+                scenario: "replace all NVIDIA URLs and preserve other suboptions",
+                input: (Some(url), nvidia, requested),
+                expect: Yields(vec![vendor(5703, &[(72, url), (73, "keep")])]),
+            },
+            Case {
+                scenario: "deliver the maximum URL and preserve other enterprise",
+                input: (Some(long_url), other, requested),
+                expect: Yields(vec![
+                    vendor(5703, &[(72, long_url)]),
+                    vendor(32473, &[(72, "other")]),
+                ]),
+            },
+            Case {
+                scenario: "reject URL above the shared length limit",
+                input: (Some(oversized_url), None, requested),
+                expect: Fails,
+            },
+            Case {
+                scenario: "empty leaves native data",
+                input: (Some(""), nvidia, requested),
+                expect: Yields(vec![vendor(
+                    5703,
+                    &[(72, "old"), (72, "old"), (73, "keep")],
+                )]),
+            },
+        ],
+        |(nico_pxe_service_url, native_vendor_opts_hex, requested)| -> Result<Vec<VendorOpts>, String> {
+            let (_kea, socket) = Kea6::start_with_config(
+                api_server.local_http_addr(),
+                None,
+                Kea6Config {
+                    provisioning_server_ipv6: "2001:db8::10",
+                    nico_pxe_service_url,
+                    native_vendor_opts_hex,
+                    ..Kea6Config::default()
+                },
+            )
+            .map_err(|error| format!("{error:#}"))?;
+            socket
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .map_err(|error| error.to_string())?;
+            let response = send_and_recv_v6(
+                &socket,
+                DHCPv6Factory::information_request_with_boot_options(
+                    0x70,
+                    http_vendor_class(),
+                    &[Architecture::X64_Http],
+                    requested,
+                ),
+            )
+            .map_err(|error| format!("{error:#}"))?
+            .ok_or_else(|| "missing DHCPv6 reply".to_string())?;
+            assert_eq!(response.msg_type(), MessageType::Reply);
+            assert_eq!(
+                boot_options(&response),
+                expected_boot_options(X64_URL, Some(Architecture::X64_Http)),
+            );
+            assert_service_options(&response);
+            let mut actual: Vec<_> = response
+                .opts()
+                .get_all(OptionCode::VendorOpts)
+                .unwrap_or_default()
+                .iter()
+                .map(|option| match option {
+                    DhcpOption::VendorOpts(vendor) => vendor.clone(),
+                    other => panic!("unexpected vendor option: {other:?}"),
+                })
+                .collect();
+            actual.sort_by_key(|vendor| vendor.num);
+            Ok(actual)
+        },
+    );
+    Ok(())
+}
+
+/// A valid option 17 can still leave no room for the other reply data and relay headers.
+#[test]
+fn nico_pxe_service_url_rejects_oversized_ipv6_replies() -> Result<(), eyre::Report> {
+    static URL: [u8; 245] = [b'a'; 245];
+    static NATIVE_VENDOR_OPTS_HEX: LazyLock<String> =
+        LazyLock::new(|| format!("000016470049feb0{}", "6b".repeat(65_200)));
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?;
+    let api_server = runtime.block_on(MockAPIServer::start());
+    let (kea, socket) = Kea6::start_with_config(
+        api_server.local_http_addr(),
+        None,
+        Kea6Config {
+            nico_pxe_service_url: Some(std::str::from_utf8(&URL)?),
+            // Option 17 fits in 65,535 bytes; the complete relayed reply exceeds the UDP limit.
+            native_vendor_opts_hex: Some(NATIVE_VENDOR_OPTS_HEX.as_str()),
+            ..Kea6Config::default()
+        },
+    )?;
+    socket.set_read_timeout(Some(Duration::from_secs(2)))?;
+    let response = send_and_recv_v6(
+        &socket,
+        DHCPv6Factory::information_request_with_boot_options(
+            0x73,
+            http_vendor_class(),
+            &[Architecture::X64_Http],
+            &[OptionCode::VendorOpts],
+        ),
+    )?;
+    assert!(response.is_none());
+    assert!(kea.wait_for_log(
+        "nico-pxe-service-url and other reply data exceed DHCPv6 datagram payload limit of 65527 bytes",
+        Duration::from_secs(2),
+    ));
+    Ok(())
+}
+
+/// Stateful replies use the current request's ORO, including on cache hits.
+#[test]
+fn nico_pxe_service_url_reaches_stateful_ipv6_replies() -> Result<(), eyre::Report> {
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?;
+    let api_server = runtime.block_on(MockAPIServer::start());
+    let url = "http://pxe.example:8080/";
+    let (_kea, socket) = Kea6::start_with_config(
+        api_server.local_http_addr(),
+        None,
+        Kea6Config {
+            nico_pxe_service_url: Some(url),
+            ..Kea6Config::default()
+        },
+    )?;
+    socket.set_read_timeout(Some(Duration::from_secs(2)))?;
+    let idx = 0x71;
+    let offer = send_and_recv_v6(
+        &socket,
+        DHCPv6Factory::solicit_with_boot_options(
+            idx,
+            http_vendor_class(),
+            &[],
+            &[OptionCode::VendorOpts],
+        ),
+    )?
+    .ok_or_else(|| eyre::eyre!("missing DHCPv6 advertisement"))?;
+    let address = DHCPv6Factory::ia_addr(&offer).expect("advertised address");
+    let reply = send_and_recv_v6(
+        &socket,
+        DHCPv6Factory::request_with_boot_options(
+            idx,
+            DHCPv6Factory::server_id(&offer),
+            address,
+            http_vendor_class(),
+            &[],
+            &[OptionCode::VendorOpts],
+        ),
+    )?
+    .ok_or_else(|| eyre::eyre!("missing DHCPv6 reply"))?;
+    let expected = DhcpOption::VendorOpts(VendorOpts {
+        num: 5703,
+        opts: [DhcpOption::Unknown(UnknownOption::new(
+            72.into(),
+            url.as_bytes().to_vec(),
+        ))]
+        .into_iter()
+        .collect(),
+    });
+    for (response, message_type) in [
+        (&offer, MessageType::Advertise),
+        (&reply, MessageType::Reply),
+    ] {
+        assert_eq!(response.msg_type(), message_type);
+        assert_eq!(DHCPv6Factory::ia_addr(response), Some(address));
+        assert_eq!(
+            response
+                .opts()
+                .get_all(OptionCode::VendorOpts)
+                .unwrap_or_default(),
+            std::slice::from_ref(&expected)
+        );
+        assert_hook_v6_dns_servers(response);
+        assert_api_v6_domain_search(response);
+        assert_hook_v6_ntp_servers(response);
+    }
+    let unrequested = send_and_recv_v6(
+        &socket,
+        DHCPv6Factory::request_with_boot_options(
+            idx,
+            DHCPv6Factory::server_id(&offer),
+            address,
+            http_vendor_class(),
+            &[],
+            &[],
+        ),
+    )?
+    .ok_or_else(|| eyre::eyre!("missing DHCPv6 reply without ORO"))?;
+    assert_eq!(unrequested.msg_type(), MessageType::Reply);
+    assert_eq!(DHCPv6Factory::ia_addr(&unrequested), Some(address));
+    assert!(unrequested.opts().get(OptionCode::VendorOpts).is_none());
+    assert_eq!(api_server.calls_for(ENDPOINT_DISCOVER_DHCP), 1);
     Ok(())
 }
