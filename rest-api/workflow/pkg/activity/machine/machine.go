@@ -769,7 +769,7 @@ func (mm *ManageMachine) UpdateMachinesInDB(ctx context.Context, siteIDStr strin
 			slogger := logger.With().Str("Machine ID", existingMachine.ID).Logger()
 
 			status := cdbm.MachineStatusError
-			statusMessage := "Machine is missing on Site"
+			statusMessage := cdbm.MachineStatusMissingOnSiteMessage
 
 			// Update machine status/create status detail if it doesn't have this error recorded already
 			if status == existingMachine.Status {
@@ -1195,7 +1195,7 @@ func getNICoMachineStatus(controllerMachine *corev1.Machine, logger zerolog.Logg
 			statusMessage = cdbm.MachineStatusReadyMessage
 		case controllerMachineStatePrefixForceDeletion:
 			machineStatus = cdbm.MachineStatusInitializing
-			statusMessage = "Machine is being force deleted"
+			statusMessage = cdbm.MachineStatusForceDeletionMessage
 		case controllerMachineStatePrefixDecommissioning:
 			if controllerMachineSubstate == controllerMachineDecommissioningSubstateDecommissioned {
 				machineStatus = cdbm.MachineStatusDecommissioned
@@ -1226,7 +1226,7 @@ func getNICoMachineStatus(controllerMachine *corev1.Machine, logger zerolog.Logg
 			}
 		case controllerMachineStateMissing:
 			machineStatus = cdbm.MachineStatusError
-			statusMessage = "Machine is missing on Site"
+			statusMessage = cdbm.MachineStatusMissingOnSiteMessage
 		default:
 			logger.Warn().Str("Machine State", controllerMachine.State).Msg("Received unrecognized Machine state from Site Controller")
 			machineStatus = cdbm.MachineStatusUnknown
