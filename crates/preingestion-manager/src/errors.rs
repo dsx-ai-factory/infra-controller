@@ -15,6 +15,7 @@
  * limitations under the License.
  */
 
+use bmc_platform::PlatformError;
 use db::DatabaseError;
 
 #[derive(thiserror::Error, Debug)]
@@ -23,6 +24,8 @@ pub enum PreingestionManagerError {
     DatabaseError(#[from] DatabaseError),
     #[error("error in libredfish: {0}")]
     RedfishError(#[from] libredfish::RedfishError),
+    #[error("BMC operation failed: {0}")]
+    PlatformError(#[from] PlatformError),
     #[error("argument is invalid: {0}")]
     InvalidArgument(String),
     #[error("internal error: {message}")]

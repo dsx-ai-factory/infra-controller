@@ -30,11 +30,11 @@ use std::io;
 use std::net::{IpAddr, Ipv4Addr};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
-use bmc_backend::{BackendBmc, BmcConnectError, BmcConnector, platform_error};
+use bmc_backend::{BackendBmc, BmcConnectError, BmcConnector};
 use bmc_platform::{PlatformError, PowerState, ResetType};
-use bmc_runtime::DriverConnector;
+use bmc_runtime::{ConnectError, DriverConnector, ExploredConnectError};
 use carbide_firmware::{
     ArtifactStatus, FirmwareConfigSnapshot, FirmwareDownloader, ResolvedFirmwareArtifactSource,
     resolve_files_firmware_artifact,
@@ -625,6 +625,9 @@ impl PreingestionManagerStatic {
                 BmcConnectError::Libredfish(error) => {
                     PreingestionManagerError::internal(format!("{error}"))
                 }
+                BmcConnectError::Drivers(ExploredConnectError::Connect(
+                    ConnectError::Transport(error),
+                )) => PreingestionManagerError::PlatformError(error),
                 BmcConnectError::Drivers(error) => {
                     PreingestionManagerError::internal(error.to_string())
                 }
@@ -1257,22 +1260,6 @@ impl PreingestionManagerStatic {
             }
         };
 
-        let redfish_client = match self
-            .redfish_client_pool
-            .create_client_for_ingested_host(endpoint.address, db)
-            .await
-        {
-            Ok(redfish_client) => redfish_client,
-            Err(e) => {
-                tracing::error!(
-                    bmc_ip_address = %endpoint.address,
-                    error = %e,
-                    "Redfish connection failed"
-                );
-                return Ok(());
-            }
-        };
-
         let bmc = match self.connect_bmc(endpoint.address, db).await {
             Ok(bmc) => bmc,
             Err(e) => {
@@ -1562,9 +1549,7 @@ impl PreingestionManagerStatic {
             );
             if instrument_power_op(
                 PowerOperation::BmcReset,
-                redfish_client
-                    .bmc_reset(None)
-                    .map(|reset| reset.map_err(platform_error)),
+                reset_bmc(&bmc),
                 PowerControlLog::Step {
                     bmc_ip_address: endpoint.address,
                     step: PowerControlStep::BmcReboot,
@@ -1841,12 +1826,8 @@ impl PreingestionManagerStatic {
     ) -> PreingestionManagerResult<bool> {
         match phase {
             InitialBmcResetPhase::Start { attempts } => {
-                let redfish_client = match self
-                    .redfish_client_pool
-                    .create_client_for_ingested_host(endpoint.address, db)
-                    .await
-                {
-                    Ok(client) => client,
+                let bmc = match self.connect_bmc(endpoint.address, db).await {
+                    Ok(bmc) => bmc,
                     Err(e) => {
                         tracing::warn!(
                             bmc_ip_address = %endpoint.address,
@@ -1859,9 +1840,7 @@ impl PreingestionManagerStatic {
                 let next = attempts + 1;
                 if instrument_power_op(
                     PowerOperation::BmcReset,
-                    redfish_client
-                        .bmc_reset(None)
-                        .map(|reset| reset.map_err(platform_error)),
+                    reset_bmc(&bmc),
                     PowerControlLog::InitialBmcReset {
                         bmc_ip_address: endpoint.address,
                         attempt: next,
@@ -2027,12 +2006,8 @@ impl PreingestionManagerStatic {
             return self.run_initial_checks(db, endpoint).await;
         }
 
-        let redfish_client = match self
-            .redfish_client_pool
-            .create_client_for_ingested_host(endpoint.address, db)
-            .await
-        {
-            Ok(redfish_client) => redfish_client,
+        let bmc = match self.connect_bmc(endpoint.address, db).await {
+            Ok(bmc) => bmc,
             Err(e) => {
                 return self
                     .set_ntp_servers_retry_or_fail(db, endpoint, attempts, e)
@@ -2045,14 +2020,9 @@ impl PreingestionManagerStatic {
             .iter()
             .map(|addr| addr.to_string())
             .collect();
-        if let Err(e) = redfish_client.set_ntp_servers(&ntp_servers).await {
+        if let Err(e) = set_bmc_ntp_servers(&bmc, &ntp_servers).await {
             return self
-                .set_ntp_servers_retry_or_fail(
-                    db,
-                    endpoint,
-                    attempts,
-                    PreingestionManagerError::RedfishError(e),
-                )
+                .set_ntp_servers_retry_or_fail(db, endpoint, attempts, e.into())
                 .await;
         }
 
@@ -2132,7 +2102,6 @@ impl PreingestionManagerStatic {
     /// Returns true if successful, false if any step failed
     async fn execute_power_off_and_bmc_reset(
         &self,
-        redfish_client: &dyn libredfish::Redfish,
         bmc: &BackendBmc,
         endpoint: &ExploredEndpoint,
     ) -> bool {
@@ -2176,9 +2145,7 @@ impl PreingestionManagerStatic {
         }
         if instrument_power_op(
             PowerOperation::BmcReset,
-            redfish_client
-                .bmc_reset(None)
-                .map(|reset| reset.map_err(platform_error)),
+            reset_bmc(bmc),
             PowerControlLog::RecoverySequence {
                 bmc_ip_address: endpoint.address,
             },
@@ -2335,10 +2302,7 @@ impl PreingestionManagerStatic {
 
         match phase.unwrap_or(&InitialResetPhase::Start) {
             InitialResetPhase::Start => {
-                if !self
-                    .execute_power_off_and_bmc_reset(redfish_client.as_ref(), &bmc, endpoint)
-                    .await
-                {
+                if !self.execute_power_off_and_bmc_reset(&bmc, endpoint).await {
                     return Ok(());
                 }
                 tracing::info!(
@@ -2497,18 +2461,15 @@ impl PreingestionManagerStatic {
 
         match phase {
             TimeSyncResetPhase::Start => {
-                if let Err(e) = redfish_client.set_utc_timezone().await {
+                if let Err(e) = set_bmc_utc_timezone(&bmc).await {
                     tracing::error!(
                         bmc_ip_address = %endpoint.address,
                         error = %e,
                         "Could not set UTC timezone"
                     );
-                    return Err(PreingestionManagerError::RedfishError(e));
+                    return Err(e.into());
                 }
-                if !self
-                    .execute_power_off_and_bmc_reset(redfish_client.as_ref(), &bmc, endpoint)
-                    .await
-                {
+                if !self.execute_power_off_and_bmc_reset(&bmc, endpoint).await {
                     return Ok(false);
                 }
                 tracing::info!(
@@ -2965,25 +2926,10 @@ impl PreingestionManagerStatic {
         endpoint: &ExploredEndpoint,
     ) -> PreingestionManagerResult<bool> {
         tracing::debug!(?endpoint, "Checking BMC time sync");
-        let redfish_client = match self
-            .redfish_client_pool
-            .create_client_for_ingested_host(endpoint.address, db)
-            .await
-        {
-            Ok(redfish_client) => redfish_client,
-            Err(e) => {
-                return Err(e);
-            }
-        };
+        let bmc = self.connect_bmc(endpoint.address, db).await?;
 
-        // Get the manager's DateTime from Redfish
-        let bmc_time = match redfish_client
-            .get_manager()
-            .await
-            .map_err(PreingestionManagerError::RedfishError)?
-            .date_time
-        {
-            Some(time) => time,
+        let bmc_time = match bmc_clock(&bmc).await? {
+            Some(time) => DateTime::<Utc>::from(time),
             None => {
                 return Err(PreingestionManagerError::internal(
                     "Failed to get BMC time".to_string(),
@@ -4105,6 +4051,26 @@ async fn set_power(bmc: &BackendBmc, reset_type: ResetType) -> Result<(), Platfo
 /// NICo does not classify.
 async fn power_state(bmc: &BackendBmc) -> Result<Option<PowerState>, PlatformError> {
     bmc.power()?.state().await
+}
+
+/// Restarts `bmc` itself.
+async fn reset_bmc(bmc: &BackendBmc) -> Result<(), PlatformError> {
+    bmc.bmc_control()?.reset().await.map(drop)
+}
+
+/// Points `bmc`'s NTP client at `servers`.
+async fn set_bmc_ntp_servers(bmc: &BackendBmc, servers: &[String]) -> Result<(), PlatformError> {
+    bmc.bmc_control()?.set_ntp_servers(servers).await.map(drop)
+}
+
+/// Sets `bmc`'s clock to UTC where the platform has a time-zone setting.
+async fn set_bmc_utc_timezone(bmc: &BackendBmc) -> Result<(), PlatformError> {
+    bmc.bmc_control()?.set_utc_timezone().await.map(drop)
+}
+
+/// Reads `bmc`'s clock, `None` when it reports none.
+async fn bmc_clock(bmc: &BackendBmc) -> Result<Option<SystemTime>, PlatformError> {
+    Ok(bmc.bmc_control()?.time_status().await?.now)
 }
 
 /// Powers the host off for an HGX BMC or GPU firmware reset. DGX models only

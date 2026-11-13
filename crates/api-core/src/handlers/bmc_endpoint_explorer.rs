@@ -285,18 +285,16 @@ pub(crate) async fn summarize_boot_interface_candidates_for_test(
         }))
 }
 
-/// Map the request's `ResetType` to the libredfish `Manager.Reset` type.
+/// Map the request's `ResetType` to the `Manager.Reset` type.
 /// `Unspecified` maps to `None`, which each vendor resolves to its default
 /// (`GracefulRestart` for the standard/switch/power-shelf path, `ForceRestart`
 /// for AMI/Viking machine BMCs).
-fn map_reset_type(
-    reset_type: rpc::admin_bmc_reset_request::ResetType,
-) -> Option<libredfish::ManagerResetType> {
-    use rpc::admin_bmc_reset_request::ResetType;
+fn map_reset_type(reset_type: rpc::admin_bmc_reset_request::ResetType) -> Option<ResetType> {
+    use rpc::admin_bmc_reset_request::ResetType as RpcResetType;
     match reset_type {
-        ResetType::Unspecified => None,
-        ResetType::GracefulRestart => Some(libredfish::ManagerResetType::GracefulRestart),
-        ResetType::ForceRestart => Some(libredfish::ManagerResetType::ForceRestart),
+        RpcResetType::Unspecified => None,
+        RpcResetType::GracefulRestart => Some(ResetType::GracefulRestart),
+        RpcResetType::ForceRestart => Some(ResetType::ForceRestart),
     }
 }
 
@@ -922,13 +920,18 @@ pub(crate) async fn explore(
 async fn redfish_reset_bmc(
     api: &Api,
     request: rpc::BmcEndpointRequest,
-    reset_type: Option<libredfish::ManagerResetType>,
+    reset_type: Option<ResetType>,
 ) -> Result<Response<()>, Status> {
     let (bmc_addr, bmc_mac_address) = resolve_bmc_interface(api, &request).await?;
     let machine_interface = MachineInterfaceSnapshot::mock_with_mac(bmc_mac_address);
+    let report = db::explored_endpoints::find_by_ips(&api.database_connection, vec![bmc_addr.ip()])
+        .await?
+        .into_iter()
+        .next()
+        .map(|explored| explored.report);
 
     api.bmc_client
-        .redfish_reset_bmc(bmc_addr, &machine_interface, reset_type)
+        .redfish_reset_bmc(bmc_addr, &machine_interface, report.as_ref(), reset_type)
         .await
         .map_err(|e| CarbideError::internal(e.to_string()))?;
 
@@ -1544,22 +1547,22 @@ mod tests {
     }
 
     // `Unspecified` defers to the per-vendor default (None); the explicit types
-    // map one-to-one onto the libredfish `Manager.Reset` type.
+    // map one-to-one onto the `Manager.Reset` type.
     #[test]
     fn reset_type_maps_to_manager_reset_type() {
-        use super::rpc::admin_bmc_reset_request::ResetType;
+        use super::rpc::admin_bmc_reset_request::ResetType as RpcResetType;
 
-        value_scenarios!(run = |reset_type: ResetType| { map_reset_type(reset_type) };
+        value_scenarios!(run = |reset_type: RpcResetType| { map_reset_type(reset_type) };
             "unspecified defers to the vendor default" {
-                ResetType::Unspecified => None,
+                RpcResetType::Unspecified => None,
             }
 
             "graceful maps to GracefulRestart" {
-                ResetType::GracefulRestart => Some(libredfish::ManagerResetType::GracefulRestart),
+                RpcResetType::GracefulRestart => Some(ResetType::GracefulRestart),
             }
 
             "force maps to ForceRestart" {
-                ResetType::ForceRestart => Some(libredfish::ManagerResetType::ForceRestart),
+                RpcResetType::ForceRestart => Some(ResetType::ForceRestart),
             }
         );
     }
