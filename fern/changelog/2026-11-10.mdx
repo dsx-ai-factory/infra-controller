@@ -1,0 +1,37 @@
+---
+tags: ["unreleased", "rack-level-administration"]
+---
+
+## Direct RMS Admin CLI commands removed (unreleased)
+
+[PR #8989](https://github.com/dsx-ai-factory/infra-controller/pull/8989) removes the
+`nico-admin-cli rms` command group, including `inventory`, `power-state`, and
+`firmware-inventory`.
+
+### Update scripts and connection settings
+
+Remove the following global options from scripts. Passing a removed command or
+option fails argument parsing. The Admin CLI also stops reading their associated
+environment variables:
+
+| Removed option | Environment variable no longer read |
+| --- | --- |
+| `--rms-api-url` | `RMS_API_URL` |
+| `--rms-root-ca-path` | `RMS_ROOT_CA_PATH` |
+| `--rms-client-cert-path` | `RMS_CLIENT_CERT_PATH` |
+| `--rms-client-key-path` | `RMS_CLIENT_KEY_PATH` |
+
+Use NICo's rack and component-manager commands through `nico-api`:
+
+- For NICo rack inventory and component membership, use
+  [`rack list` and `rack show`](https://github.com/dsx-ai-factory/infra-controller/blob/main/docs/manuals/nico-admin-cli/commands/rack/rack.md).
+- For component firmware versions, use
+  [`component-manager get-firmware-versions`](https://github.com/dsx-ai-factory/infra-controller/blob/main/docs/manuals/nico-admin-cli/commands/component-manager/component-manager-get-firmware-versions.md).
+- For component power actions, use
+  [`component-manager component-power-control`](https://github.com/dsx-ai-factory/infra-controller/blob/main/docs/manuals/nico-admin-cli/commands/component-manager/component-manager-component-power-control.md).
+
+These commands use NICo inventory identifiers and selectors rather than RMS
+registry node IDs. Configure the connection using the
+[Admin CLI's `nico-api` settings](../../docs/manuals/nico-admin-cli.md#connecting-to-nico-api).
+The removed read-only `rms power-state` command has no direct replacement under
+`rack` or `component-manager`.

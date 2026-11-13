@@ -90,7 +90,7 @@ NICo uses a focused slice of the RMS API. Each call belongs to a specific workfl
 | Workflow | RMS APIs |
 | --- | --- |
 | Rack maintenance firmware upgrade | `apply_firmware_object`, `get_firmware_job_status` |
-| Component Manager firmware update | `apply_firmware_object`, `get_firmware_job_status`, `get_node_firmware_inventory`, `list_firmware_objects` |
+| Component Manager firmware update | `apply_firmware_object`, `get_firmware_job_status`, `batch_get_firmware_inventory`, `list_firmware_objects` |
 | Switch system image update | `apply_switch_system_image`, `get_switch_system_image_job_status` |
 | Power control | `batch_set_power_state`, `get_job_status` |
 | Switch certificate installation | `configure_switch_certificate`, `get_configure_switch_certificate_job_status` |
