@@ -261,6 +261,36 @@ All successful routes eventually return to component selection. Scout and
 Redfish updates first pass through NICo's activation and inventory-verification
 states; the legacy script path returns directly to inventory checking.
 
+### Scout Script Execution
+
+Scout script supervision and retained-input recovery are unreleased and require Scout builds containing [the script supervision implementation](https://github.com/dsx-ai-factory/infra-controller/pull/8841). Verify the deployed Scout image's build revision and install matching Scout/helper binaries. Older Scout builds run scripts directly and do not provide this claim, supervision, or retention policy.
+
+Every Scout script component, including UEFI, BMC, CPLD, drives, and CX7, uses the same host claim before downloading. Scout runs `sh` from its inherited `PATH` with the checked script path first, followed by checked artifact paths in task order. The working directory is the staging root. Standard input is `/dev/null`. Staged paths must be UTF-8; Scout checks the temporary root before acquiring the claim or downloading.
+
+Scout inherits its environment and overrides the following variables:
+
+**Scout Script Environment**
+
+| Variable | Value |
+| --- | --- |
+| `DOWNLOAD_DIR` | The staging root's `downloads` child, distinct from the working directory |
+| `COMPONENT_TYPE` | The task's component display name, such as `UEFI`, `CX7`, `CPLD MB`, or `drive-<model>`; it is not the lowercase catalog key |
+| `TARGET_VERSION` | The target version string supplied by the task |
+
+The matching `mlx-firmware-supervisor` must be installed beside `forge-scout`. Linux must enable `CONFIG_PROC_CHILDREN=y`, with readable procfs in the helper's PID namespace. Refer to the [helper prerequisites](https://github.com/dsx-ai-factory/infra-controller/blob/main/crates/libmlx/README.md#firmwareflasher).
+
+`execution_timeout_seconds` covers helper startup, script execution, descendants, and output collection. Each output stream is capped at 1 MiB. Exceeding a stream cap requests termination of the process family, including an active updater. Failure allows up to 5 seconds for descendant cleanup and 5 more for result delivery. Cleanup can remain unconfirmed; process exit does not prove device-internal work stopped. Core has a separate [task deadline and 5-hour cap](configuration.md#scout-script-execution-limits).
+
+Unlike durable NIC operations, scripts use the per-command helper's default policy that requests termination when Scout exits. The helper stays in Scout's service cgroup; `MLX_FIRMWARE_SUPERVISOR_LAUNCH` controls daemon placement, not this helper. Stopping the whole service cgroup can interrupt the updater and prevent cleanup. A Scout restart is not a safe recovery procedure.
+
+After proven non-dispatch or helper-reported success, Scout attempts staging removal and claim release independently. A pre-dispatch timeout also takes this cleanup path. Cleanup failure preserves diagnostics in the result and logs; helper-reported success remains successful. Do not rerun a successful script to repair local cleanup. A release error can follow marker unlink, so inspect actual state instead of assuming the marker remains.
+
+Success cleanup occurs before Scout reports to Core. If that success report is lost or arrives after Core's deadline, Core can request another execution. This differs from losing the helper's execution result, which retains exclusion. Refer to the [script result-delivery limitation](https://github.com/dsx-ai-factory/infra-controller/issues/8840).
+
+Invalid `MLX_FIRMWARE_STATE_DIRECTORY` path syntax or `MLX_FIRMWARE_SUPERVISOR_LAUNCH` values fail during environment parsing, before download or result reporting. Refer to the accepted settings in [Launch and State](https://github.com/dsx-ai-factory/infra-controller/blob/main/crates/libmlx/README.md#launch-and-state). Scout's `ScoutActionHandled` error log records that the script was not attempted and configuration needs repair. The same Core task remains pending, subject to Core's deadline; HTTP-client construction errors follow this policy too. Later state-directory trust, claim-acquisition, or missing/unusable-helper failures are reported to Core as failed attempts.
+
+For nonzero or uncertain execution, follow [Scout Script Recovery](#scout-script-recovery).
+
 ### Platform and OEM procedures
 
 NICo selects the configured component, starts the integrated installation
@@ -422,6 +452,11 @@ is exhausted, the host remains failed and is counted by
 > the configured interval without reaching the five-retry limit or the
 > exhausted-retry metric.
 
+A retained Scout script claim blocks another script execution, including tasks
+with a fresh UUID. Core still retries at the configured interval; those attempts
+fail before downloading and consume the existing retry budget. Refer to
+[Scout Script Recovery](#scout-script-recovery) before requesting another attempt.
+
 Correct the artifact, script, BMC, inventory matcher, or platform condition
 before forcing another attempt. Then reset host reprovisioning to firmware
 checking and, for an unassigned host, clear the retry count:
@@ -443,3 +478,23 @@ workflow, compare the catalog's `current_version_reported_as` matcher with the
 latest Redfish inventory. A missing matching inventory entry makes the desired
 and reported `Versions` maps differ, but leaves the execution path without a
 component it can install or verify.
+
+### Scout Script Recovery
+
+This guidance applies to Scout builds containing [the script supervision implementation](https://github.com/dsx-ai-factory/infra-controller/pull/8841) and matching Scout/helper binaries. Older builds run scripts directly and do not provide this claim or retention policy.
+
+A nonzero script exit, timeout after dispatch, output overflow, or lost helper result retains the host claim and checked or partial inputs. After claim acquisition, canceling Scout's action also retains them, including during downloads before dispatch. A new task UUID, Scout restart, or `reset-host-reprovisioning` does not clear an existing marker.
+
+The claim coordinates participating Scout scripts, startup and requested NIC inventory, the automatic direct-command loop, lockdown, hardware-touching operator streams, Discovery/Reset IB cleanup, and supervised NIC firmware admission. Automatic inventory and MLX commands defer while it is occupied. Discovery IB cleanup can fail, and Reset can record an IB cleanup error. A script instead reports a failed attempt before downloading when any participant holds the claim, including transient work. A busy claim does not by itself identify a failed script.
+
+This is cooperative exclusion. Core-local scripts, Redfish-based BMC, pre-ingestion, or DPU updates, standalone Scout MLX commands and preflight, direct library calls, and external tools do not acquire Scout's marker. Coordinate those routes separately.
+
+The marker is `<MLX_FIRMWARE_STATE_DIRECTORY>/mutation.json`. The shared `MLX_FIRMWARE_STATE_DIRECTORY` setting defaults to `/run/forge/mlx-firmware`; refer to [Launch and State](https://github.com/dsx-ai-factory/infra-controller/blob/main/crates/libmlx/README.md#launch-and-state). A script marker's `device_identity` records `scout-script task=<task-id> inputs=<staging-path>`. Preserve the marker, retained inputs, original logs, and failed-result diagnostics. A blocked script reports "cannot acquire firmware hardware claim" with "existing work must finish or be reconciled"; Core records the failure reason in `FailedFirmwareUpgrade`.
+
+Scripts have no durable operation receipt. The `mlxconfig-embedded` commands `firmware status` and `firmware cancel` inspect durable NIC operations and cannot resolve a script's `direct-scout-command` marker. NICo provides no generic supported automatic claim-clear or script-recovery procedure.
+
+Recovery requires the platform or site's approved maintenance procedure to prevent new hardware work from all callers, establish that the old script and descendants have stopped, and reconcile the actual component state through the approved vendor recovery or readback procedure. Process reaping, Scout restart, a policy toggle, or reboot alone does not establish device settlement or a safe interrupted flash. Any removal of the exact reconciled marker and obsolete inputs must be authorized by that procedure after both process and hardware settlement, while new work remains prevented. Do not delete a marker merely to admit another attempt. Platform recovery qualification remains tracked in [platform recovery qualification](https://github.com/dsx-ai-factory/infra-controller/issues/6689).
+
+After reconciliation, refer to the existing [firmware failure reset guidance](#firmware-execution-failures) before requesting another attempt. Resetting reprovisioning changes Core's state and retry count; it does not reconcile hardware or clear the host marker.
+
+Inputs remain in the system temporary directory. The default `/run` marker and temporary or PXE storage can disappear on reboot. Exclusion lasts only while the marker survives: losing it can permit another script attempt despite unresolved hardware work. An existing marker continues blocking acquisition after reboot; using persistent marker storage does not preserve temporary inputs or certify hardware settlement. Neither missing state nor whole-service termination proves recovery.
