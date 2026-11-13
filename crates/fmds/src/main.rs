@@ -144,12 +144,16 @@ async fn main() -> eyre::Result<()> {
         }
     };
 
+    let (prometheus_registry, http_request_metrics_state) = http_request_metrics::init(true)?;
     let state = Arc::new(
-        FmdsState::try_new(options.forge_api.clone(), carbide_client_config)
-            .map_err(|e| eyre::eyre!("failed to initialize FMDS state: {e}"))?,
+        FmdsState::try_new(
+            options.forge_api.clone(),
+            carbide_client_config,
+            http_request_metrics_state.instrumentation(),
+        )
+        .map_err(|e| eyre::eyre!("failed to initialize FMDS state: {e}"))?,
     );
 
-    let (prometheus_registry, http_request_metrics_state) = http_request_metrics::init()?;
     // init() installed the global meter provider, so the log-event counter can register now.
     carbide_instrument::log_events::register(&opentelemetry::global::meter("carbide-instrument"));
     let http_request_metrics_state = Arc::new(http_request_metrics_state);
@@ -281,8 +285,14 @@ mod tests {
             "127.0.0.1:0",
         ])
         .expect("listener configuration");
-        let state =
-            Arc::new(FmdsState::try_new("https://api.test".into(), None).expect("FMDS state"));
+        let state = Arc::new(
+            FmdsState::try_new(
+                "https://api.test".into(),
+                None,
+                carbide_instrument::Instrumentation::global(),
+            )
+            .expect("FMDS state"),
+        );
         state.update_config(FmdsConfig {
             public_ipv4: None,
             public_ipv6: Some("2001:db8::17".parse().expect("host address")),
