@@ -43,7 +43,6 @@ tracing-subscriber = { features = [
   "env-filter",
   "local-time",
 ], workspace = true }
-typed-builder = { workspace = true }
 
 # [local-dependencies]
 carbide-certs = { path = "../certs" }
@@ -62,6 +61,7 @@ reqwest = { default-features = false, features = [
 ], workspace = true }
 rustls-pemfile = { workspace = true }
 rustls-pki-types = { workspace = true }
+typed-builder = { workspace = true }
 
 [lints]
 workspace = true

@@ -27,10 +27,7 @@ carbide-instrument = { path = "../instrument" }
 
 async-trait.workspace = true
 base64 = { workspace = true }
-clap = { features = ["derive", "env"], workspace = true }
-fmt = { workspace = true }
 jsonwebtoken = { features = ["rust_crypto"], workspace = true }
-mockito = { workspace = true }
 reqwest = { default-features = false, features = [
   "rustls",
   "stream",
@@ -41,6 +38,11 @@ serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
+
+[dev-dependencies]
+clap = { features = ["derive", "env"], workspace = true }
+fmt = { workspace = true }
+mockito = { workspace = true }
 
 [lints]
 workspace = true
