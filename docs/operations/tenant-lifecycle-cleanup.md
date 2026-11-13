@@ -169,9 +169,13 @@ does not prove that the DPU has stopped forwarding tenant traffic. Refer to the
 for when to use the wait and what it confirms.
 
 **Understand what release confirms.** Release does not wait for confirmation
-from every fabric. If InfiniBand state cannot be observed, cleanup can finish
-with an `IbCleanupPending` alert that prevents new allocations until the IB
-monitor confirms cleanup. This path does not wait for NVLink removal.
+from every fabric. InfiniBand permits deferred cleanup for missing or incomplete
+configured-port entries within an existing observation. By default, an
+`IbCleanupPending` alert blocks new allocations while present. Its clearance
+alone does not confirm UFM membership removal. Refer to
+[Force-Delete and Cleanup](../manuals/networking/infiniband_partitioning.md#force-delete-and-cleanup)
+for the exact exception, override for targeted allocation, and verification limits.
+This path does not wait for NVLink removal.
 
 NICo also removes the instance's DNS records and reconfigures the DPU metadata
 service so the next tenant cannot read the prior tenant's metadata or identity.
@@ -335,9 +339,11 @@ If the Redfish job fails, NICo retries the job path and, if required, power-cycl
 
 ### InfiniBand Cleanup
 
-Scout reports InfiniBand cleanup through the `ib` cleanup step. NICo also uses
-cleanup-related health reports, including `IbCleanupPending`, to prevent the
-state machine from advancing before InfiniBand cleanup has cleared.
+Scout reports InfiniBand cleanup through the `ib` cleanup step. The separate
+`IbCleanupPending` health alert allows termination to continue but prevents new
+allocations by default while present. Refer to
+[Force-Delete and Cleanup](../manuals/networking/infiniband_partitioning.md#force-delete-and-cleanup)
+for its trigger, override for targeted allocation, and the limits of alert clearance.
 
 ## Platform Reset and Trust Controls
 
@@ -373,7 +379,9 @@ A released host is ready for reuse when all required gates pass:
 - The memory-overwrite check has passed, and any required manual
   volatile-memory procedure is complete.
 - InfiniBand cleanup has completed and blocking cleanup health reports are
-  clear.
+  clear. For deferred cleanup, verify UFM memberships as described in
+  [Force-Delete and Cleanup](../manuals/networking/infiniband_partitioning.md#force-delete-and-cleanup).
+  Absence of `IbCleanupPending` alone does not prove membership removal.
 - TPM, BIOS/UEFI, lockdown, and firmware checks satisfy site policy.
 - Measured boot or attestation checks satisfy site policy.
 - Inventory validation has completed.
