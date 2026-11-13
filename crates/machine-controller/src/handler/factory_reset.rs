@@ -74,12 +74,12 @@
 //!   non-`NotSupported` error and the instance parks for operator attention
 //!   rather than silently attempting a speculative unlock.
 
+use bmc_platform::PlatformError;
 use carbide_credential_rotation::site_explorer_pause::{self, GateDecision};
 use carbide_redfish::libredfish::RedfishAuth;
-use carbide_redfish::libredfish::error::state_handler_redfish_error as redfish_error;
+use carbide_redfish::state_handler::state_handler_platform_error as platform_error;
 use carbide_secrets::credentials::{BmcCredentialType, CredentialKey, Credentials};
 use eyre::eyre;
-use libredfish::RedfishError;
 use libredfish::model::service_root::RedfishVendor;
 use mac_address::MacAddress;
 use model::machine::{
@@ -91,6 +91,7 @@ use state_controller::state_handler::{
 };
 
 use crate::context::MachineStateHandlerContextObjects;
+use crate::redfish::reset_bmc_to_factory_defaults;
 
 /// Small intra-tick delay between the two credential probes, mirroring
 /// site-explorer's `BMC_AUTH_RETRY_DURATION`, so a BMC that throttles after a
@@ -437,12 +438,9 @@ async fn reset_to_defaults(
 
     // The BMC is still on its normal (per-device / site-wide) credential here, so
     // a stored-credential client authenticates.
-    let redfish_client = ctx
-        .services
-        .create_redfish_client_from_machine(&mh_snapshot.host_snapshot)
-        .await?;
+    let bmc = ctx.services.connect_bmc(&mh_snapshot.host_snapshot).await?;
 
-    match redfish_client.bmc_reset_to_defaults().await {
+    match reset_bmc_to_factory_defaults(&bmc).await {
         Ok(()) => {
             tracing::info!(
                 %host_bmc_mac,
@@ -454,17 +452,16 @@ async fn reset_to_defaults(
         }
         // A BMC that does not support factory reset cannot be sanitized this way;
         // skip the restore and continue the release rather than blocking it.
-        Err(RedfishError::NotSupported(msg)) => {
+        Err(PlatformError::Unsupported) => {
             tracing::warn!(
                 %host_bmc_mac,
-                %msg,
                 "BMC does not support factory reset; skipping BMC sanitize and continuing tenant release"
             );
             Ok(transition_to_factory_reset_bmc(
                 FactoryResetBmcState::RemoveSuppression,
             ))
         }
-        Err(e) => Err(redfish_error("bmc_reset_to_defaults", e)),
+        Err(e) => Err(platform_error("bmc_reset_to_defaults", e)),
     }
 }
 
