@@ -491,7 +491,10 @@ async fn sensor_and_sse_fanout_is_bounded_over_http_and_recovers() {
                 Some(base_url.clone()),
                 0,
                 NonZeroUsize::new(concurrency).unwrap(),
-                None,
+                crate::bmc::BmcInstrumentation::new(
+                    carbide_instrument::Instrumentation::global(),
+                    None,
+                ),
             )
             .unwrap(),
         );

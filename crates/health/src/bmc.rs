@@ -22,7 +22,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::{Duration, Instant};
 
-use carbide_instrument::emit;
+use carbide_instrument::Instrumentation;
 use carbide_utils::redfish::{
     format_forwarded_host_parameter, log_redfish_http_error, redact_redfish_response_body,
     redfish_basic_authorization_context,
@@ -376,7 +376,38 @@ pub(crate) fn bmc_latency_endpoint_labels(
     BmcLatencyEndpointLabels::new(machine_id, rack_id.map(ToString::to_string))
 }
 
+/// Event and optional HTTP-latency destinations shared by an endpoint source.
+/// Keep their providers alive until its BMC clients stop.
+#[derive(Clone)]
+pub struct BmcInstrumentation {
+    events: Instrumentation,
+    latency: Option<BmcLatencyInstrumentation>,
+}
+
+impl BmcInstrumentation {
+    /// Records Events through `events` and optionally records HTTP latency.
+    pub fn new(events: Instrumentation, latency_metrics: Option<Arc<BmcLatencyMetrics>>) -> Self {
+        Self {
+            events,
+            latency: latency_metrics.map(|metrics| {
+                BmcLatencyInstrumentation::new(metrics, BmcLatencyEndpointLabels::new(None, None))
+            }),
+        }
+    }
+
+    pub(crate) fn for_endpoint(&self, labels: BmcLatencyEndpointLabels) -> Self {
+        Self {
+            events: self.events.clone(),
+            latency: self
+                .latency
+                .as_ref()
+                .map(|latency| BmcLatencyInstrumentation::new(latency.metrics.clone(), labels)),
+        }
+    }
+}
+
 pub struct BmcClient {
+    instrumentation: Instrumentation,
     inner: HttpBmc<InstrumentedHttpClient>,
     /// Bounds complete operations, releasing stream capacity after handshake.
     request_slots: Semaphore,
@@ -415,7 +446,7 @@ impl BmcClient {
         proxy_url: Option<Url>,
         cache_size: usize,
         request_concurrency: NonZeroUsize,
-        bmc_latency_instrumentation: Option<BmcLatencyInstrumentation>,
+        instrumentation: BmcInstrumentation,
     ) -> Result<Self, HealthError> {
         let server_address = bmc_server_address(&addr);
         let url_scheme = bmc_url_scheme(&addr).to_string();
@@ -424,7 +455,7 @@ impl BmcClient {
         let bmc_identity = Arc::new(StdMutex::new(BmcIdentity::default()));
         let http_client = InstrumentedHttpClient::new(
             reqwest,
-            bmc_latency_instrumentation,
+            instrumentation.latency,
             server_address,
             url_scheme,
             Arc::clone(&bmc_identity),
@@ -443,6 +474,7 @@ impl BmcClient {
         );
 
         Ok(Self {
+            instrumentation: instrumentation.events,
             inner,
             request_slots: Semaphore::new(request_concurrency.get().min(Semaphore::MAX_PERMITS)),
             credential_use: RwLock::new(()),
@@ -990,7 +1022,7 @@ impl BmcClient {
         }
         let mut state = self.circuit.lock().expect("circuit mutex poisoned");
         if !matches!(*state, CircuitState::Closed) {
-            emit(ConnectionCircuitClosed {
+            self.instrumentation.emit(ConnectionCircuitClosed {
                 bmc_ip: self.addr.ip,
             });
             *state = CircuitState::Closed;
@@ -1010,7 +1042,7 @@ impl BmcClient {
                     until: Instant::now() + CIRCUIT_INITIAL_BACKOFF,
                     backoff: CIRCUIT_INITIAL_BACKOFF,
                 };
-                emit(ConnectionCircuitOpened {
+                self.instrumentation.emit(ConnectionCircuitOpened {
                     bmc_ip: self.addr.ip,
                     backoff_seconds: CIRCUIT_INITIAL_BACKOFF.as_secs(),
                     error: error.to_string(),
@@ -2269,7 +2301,10 @@ mod tests {
             proxy_url,
             cache_size,
             TEST_REQUEST_CONCURRENCY,
-            bmc_latency_instrumentation,
+            BmcInstrumentation {
+                events: carbide_instrument::Instrumentation::global(),
+                latency: bmc_latency_instrumentation,
+            },
         )
     }
 
@@ -2490,7 +2525,10 @@ mod tests {
                 Some(proxy_url),
                 10,
                 NonZeroUsize::MIN,
-                None,
+                BmcInstrumentation {
+                    events: carbide_instrument::Instrumentation::global(),
+                    latency: None,
+                },
             )
             .expect("constructor succeeds"),
         );
@@ -2580,7 +2618,24 @@ mod tests {
 
     #[test]
     fn circuit_open_and_close_are_emitted_once_per_transition() {
-        let client = test_client();
+        let setup = metrics_endpoint::new_metrics_setup("bmc-test", "forge-system", false).unwrap();
+        let metrics = carbide_instrument::testing::MetricsCapture::for_registry(&setup.registry);
+        let (provider, _) = CountingProvider::new(
+            BmcCredentials::SessionToken {
+                token: "t".to_string(),
+            },
+            None,
+        );
+        let client = BmcClient::new(
+            reqwest(),
+            test_addr(),
+            provider,
+            None,
+            10,
+            TEST_REQUEST_CONCURRENCY,
+            BmcInstrumentation::new(setup.instrumentation, None),
+        )
+        .expect("constructor ok");
         let logs = capture_logs(|| {
             client.trip_circuit(&dummy_error());
             client.trip_circuit(&dummy_error());
@@ -2596,6 +2651,12 @@ mod tests {
             ],
             "a failure while the circuit is already open is not another trip"
         );
+        for name in [
+            "carbide_health_bmc_connection_circuit_opened_total",
+            "carbide_health_bmc_connection_circuit_closed_total",
+        ] {
+            assert_eq!(metrics.counter_delta(name, &[]), 1.0);
+        }
     }
 
     #[tokio::test]

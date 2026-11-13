@@ -911,7 +911,10 @@ mod tests {
             &reqwest(),
             Some(&base_url),
             10,
-            None,
+            crate::bmc::BmcInstrumentation::new(
+                carbide_instrument::Instrumentation::global(),
+                None,
+            ),
         ));
         let mut config = Config::default();
         config.endpoint_sources.carbide_api = Configurable::Disabled;

@@ -1956,7 +1956,10 @@ mod tests {
                 None,
                 10,
                 std::num::NonZeroUsize::MIN,
-                None,
+                crate::bmc::BmcInstrumentation::new(
+                    carbide_instrument::Instrumentation::global(),
+                    None,
+                ),
             )
             .expect("constructor succeeds"),
         );

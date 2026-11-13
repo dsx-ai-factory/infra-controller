@@ -35,7 +35,7 @@ use url::Url;
 
 use crate::HealthError;
 use crate::bmc::{
-    BmcClient, BmcLatencyEndpointLabels, BmcLatencyInstrumentation, BoxFuture, CredentialProvider,
+    BmcClient, BmcInstrumentation, BmcLatencyEndpointLabels, BoxFuture, CredentialProvider,
     bmc_latency_endpoint_labels,
 };
 use crate::endpoint::{
@@ -43,7 +43,6 @@ use crate::endpoint::{
     EndpointSource, InventorySnapshot, MachineData, PowerShelfData, RackInventory,
     SharedSystemUuid, SwitchData, SwitchEndpointRole,
 };
-use crate::metrics::BmcLatencyMetrics;
 
 /// [`ApiEndpointSource`].
 #[derive(Clone)]
@@ -52,6 +51,8 @@ pub struct ApiClientWrapper {
 }
 
 impl ApiClientWrapper {
+    /// Builds clients using the supplied Event and optional latency destinations.
+    /// Retain their providers until the source and its clients stop.
     pub fn new(root_ca: String, client_cert: String, client_key: String, api_url: &Url) -> Self {
         let client_config = CarbideClientConfig::new(
             root_ca,
@@ -449,7 +450,7 @@ pub struct ApiEndpointSource {
     proxy_url: Option<Url>,
     cache_size: usize,
     bmc_request_concurrency: NonZeroUsize,
-    bmc_latency_metrics: Option<Arc<BmcLatencyMetrics>>,
+    instrumentation: BmcInstrumentation,
     bmc_client_cache: Mutex<HashMap<MacAddress, CachedBmcClient>>,
 }
 
@@ -483,7 +484,7 @@ impl ApiEndpointSource {
         reqwest: ReqwestClient,
         proxy_url: Option<Url>,
         cache_size: usize,
-        bmc_latency_metrics: Option<Arc<BmcLatencyMetrics>>,
+        instrumentation: BmcInstrumentation,
     ) -> Self {
         Self::new_with_request_concurrency(
             api,
@@ -491,7 +492,7 @@ impl ApiEndpointSource {
             proxy_url,
             cache_size,
             NonZeroUsize::MIN,
-            bmc_latency_metrics,
+            instrumentation,
         )
     }
 
@@ -501,7 +502,7 @@ impl ApiEndpointSource {
         proxy_url: Option<Url>,
         cache_size: usize,
         bmc_request_concurrency: NonZeroUsize,
-        bmc_latency_metrics: Option<Arc<BmcLatencyMetrics>>,
+        instrumentation: BmcInstrumentation,
     ) -> Self {
         Self {
             api,
@@ -509,7 +510,7 @@ impl ApiEndpointSource {
             proxy_url,
             cache_size,
             bmc_request_concurrency,
-            bmc_latency_metrics,
+            instrumentation,
             bmc_client_cache: Mutex::new(HashMap::new()),
         }
     }
@@ -987,10 +988,7 @@ impl ApiEndpointSource {
             HealthError::GenericError(format!("API endpoint {} has no BMC MAC address", addr.ip))
         })?;
         let latency_labels = bmc_latency_endpoint_labels(metadata.as_ref(), rack_id.as_ref());
-        let bmc_latency_instrumentation = self
-            .bmc_latency_metrics
-            .clone()
-            .map(|metrics| BmcLatencyInstrumentation::new(metrics, latency_labels.clone()));
+        let bmc_instrumentation = self.instrumentation.for_endpoint(latency_labels.clone());
         let cached = {
             let mut cache = self.bmc_client_cache.lock().expect("cache mutex poisoned");
             let binding = ClientBinding {
@@ -1010,7 +1008,7 @@ impl ApiEndpointSource {
                     self.proxy_url.clone(),
                     self.cache_size,
                     self.bmc_request_concurrency,
-                    bmc_latency_instrumentation,
+                    bmc_instrumentation,
                 )?))
             })?
         };
@@ -1237,6 +1235,7 @@ mod tests {
 
     use super::*;
     use crate::bmc::FixedCredentialProvider;
+    use crate::metrics::BmcLatencyMetrics;
 
     fn test_mac() -> MacAddress {
         MacAddress::from_str("00:11:22:33:44:55").expect("valid mac")
@@ -1292,7 +1291,7 @@ mod tests {
             None,
             10,
             NonZeroUsize::MIN,
-            None,
+            BmcInstrumentation::new(carbide_instrument::Instrumentation::global(), None),
         )?))
     }
 
@@ -1363,7 +1362,10 @@ mod tests {
             reqwest(),
             None,
             10,
-            None,
+            crate::bmc::BmcInstrumentation::new(
+                carbide_instrument::Instrumentation::global(),
+                None,
+            ),
         );
 
         for (serial, expected) in [
@@ -1489,7 +1491,10 @@ mod tests {
             reqwest(),
             None,
             10,
-            None,
+            crate::bmc::BmcInstrumentation::new(
+                carbide_instrument::Instrumentation::global(),
+                None,
+            ),
         );
         let endpoint = rpc::forge::BmcEndpoint {
             ip: Some("2001:db8::10".into()),
@@ -1758,7 +1763,10 @@ mod tests {
             reqwest(),
             None,
             10,
-            None,
+            crate::bmc::BmcInstrumentation::new(
+                carbide_instrument::Instrumentation::global(),
+                None,
+            ),
         );
 
         let rack_id = RackId::new("RACK_1");
@@ -1876,7 +1884,10 @@ mod tests {
             reqwest(),
             None,
             10,
-            None,
+            crate::bmc::BmcInstrumentation::new(
+                carbide_instrument::Instrumentation::global(),
+                None,
+            ),
         );
         let error = source
             .endpoint_for(
@@ -2142,7 +2153,10 @@ mod tests {
             reqwest(),
             None,
             10,
-            None,
+            crate::bmc::BmcInstrumentation::new(
+                carbide_instrument::Instrumentation::global(),
+                None,
+            ),
         );
 
         let cached_client = {
@@ -2414,7 +2428,10 @@ mod tests {
                 reqwest(),
                 Some(bmc_url),
                 10,
-                Some(latency),
+                crate::bmc::BmcInstrumentation::new(
+                    carbide_instrument::Instrumentation::global(),
+                    Some(latency),
+                ),
             ),
             machine_id: std::sync::Mutex::new(test_machine_id()),
         });

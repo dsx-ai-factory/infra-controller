@@ -168,6 +168,8 @@ async fn build_endpoint_wiring(
     bmc_latency_metrics: Option<Arc<BmcLatencyMetrics>>,
     instrumentation: carbide_instrument::Instrumentation,
 ) -> Result<EndpointWiring, HealthError> {
+    let bmc_instrumentation =
+        crate::bmc::BmcInstrumentation::new(instrumentation.clone(), bmc_latency_metrics);
     let reqwest = ReqwestClient::with_params(ReqwestClientParams::new().accept_invalid_certs(true))
         .map_err(BmcError::ReqwestError)?;
     let mut sources: Vec<Arc<dyn EndpointSource>> = Vec::new();
@@ -211,7 +213,7 @@ async fn build_endpoint_wiring(
             config.bmc_proxy_url.as_ref(),
             config.cache_size,
             config.bmc_request_concurrency,
-            bmc_latency_metrics.clone(),
+            bmc_instrumentation.clone(),
             file_provider.clone().ok_or_else(|| {
                 HealthError::GenericError(
                     "static endpoints require endpoint_sources.static_credentials_file".into(),
@@ -234,7 +236,7 @@ async fn build_endpoint_wiring(
             config.bmc_proxy_url.clone(),
             config.cache_size,
             config.bmc_request_concurrency,
-            bmc_latency_metrics.clone(),
+            bmc_instrumentation.clone(),
         ));
         sources.push(endpoint_source as Arc<dyn EndpointSource>);
     }
@@ -246,7 +248,7 @@ async fn build_endpoint_wiring(
             config.bmc_proxy_url.as_ref(),
             config.cache_size,
             config.bmc_request_concurrency,
-            bmc_latency_metrics,
+            bmc_instrumentation.clone(),
         );
         sources.push(Arc::new(cluster_source));
     }
