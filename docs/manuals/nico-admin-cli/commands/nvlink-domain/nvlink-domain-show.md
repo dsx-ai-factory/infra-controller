@@ -10,8 +10,7 @@ declarations in UUID order
 ## SYNOPSIS
 
 ```text
-nico-admin-cli nvlink-domain show [--rack-group-id]
-[-h|--help] [ID]
+nico-admin-cli nvlink-domain show [OPTIONS] [ID]
 ```
 
 ## DESCRIPTION

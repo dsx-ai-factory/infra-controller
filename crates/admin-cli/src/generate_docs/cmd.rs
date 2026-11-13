@@ -410,8 +410,8 @@ fn plain_cli_syntax(line: &str) -> String {
         .replace("\\`", "`")
 }
 
-/// Use Clap's usage for commands whose required or repeated arguments, selector
-/// groups, or explicit usage are not preserved by `clap_mangen`.
+/// Use Clap's usage where the man-page renderer loses argument values,
+/// selector groups, or an explicit usage.
 fn uses_clap_synopsis(path: &[String]) -> bool {
     matches!(
         (
@@ -421,6 +421,7 @@ fn uses_clap_synopsis(path: &[String]) -> bool {
         (Some("machine-validation"), Some("logs"))
             | (Some("machine"), Some("states"))
             | (Some("network-segment"), Some("add-prefix"))
+            | (Some("nvlink-domain"), Some("create" | "show"))
             | (Some("firmware"), Some("nic"))
             | (Some("spx-maintenance"), _)
             | (
@@ -787,6 +788,26 @@ An inline `HostInband` value and `mac=<mac>` selector.
         assert_eq!(
             command.clone().render_usage().to_string(),
             "Usage: nico-admin-cli network-segment add-prefix [OPTIONS] --id <NetworkSegmentId> --prefix <CIDR-prefix>"
+        );
+    }
+
+    #[test]
+    fn nvlink_domain_synopses_preserve_value_arguments() {
+        let root = command_tree();
+        value_scenarios!(run = |subcommand| {
+            let path = [BIN, "nvlink-domain", subcommand].map(String::from);
+            let command = path[1..].iter().fold(&root, |command, name| {
+                command.find_subcommand(name).expect("NVLink domain command exists")
+            });
+            assert!(uses_clap_synopsis(&path));
+            command.clone().render_usage().to_string()
+        };
+            "required member value and rack group" {
+                "create" => "Usage: nico-admin-cli nvlink-domain create [OPTIONS] --member <MEMBERS> <RACK_GROUP_ID>".to_owned(),
+            }
+            "optional filter is represented by the options section" {
+                "show" => "Usage: nico-admin-cli nvlink-domain show [OPTIONS] [ID]".to_owned(),
+            }
         );
     }
 

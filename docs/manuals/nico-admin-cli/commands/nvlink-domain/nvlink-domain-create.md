@@ -10,8 +10,7 @@ without configuring hardware
 ## SYNOPSIS
 
 ```text
-nico-admin-cli nvlink-domain create <--member> [--name]
-[-h|--help] <RACK_GROUP_ID>
+nico-admin-cli nvlink-domain create [OPTIONS] --member <MEMBERS> <RACK_GROUP_ID>
 ```
 
 ## DESCRIPTION

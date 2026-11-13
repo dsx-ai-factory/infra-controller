@@ -27,6 +27,7 @@ pub(super) struct Attributes {
     /// {"rack_id":"rack-01","members":[{"type":"Switch","manufacturer":"NVIDIA","id":"switch-01","cartridge_index":0}]}
     /// Both fields are required; use "members": [] for a rack without devices.
     /// Member type must be Compute, Switch, or PowerShelf. Omitting --rack supplies no racks.
+    /// Each member requires cartridge_index as an integer from 0 to 4294967295.
     #[arg(long = "rack", value_parser = parse_rack)]
     racks: Vec<ExpectedRackGroupRack>,
     /// Metadata name (ASCII, at most 256 characters). Defaults to empty.
