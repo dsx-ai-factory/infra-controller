@@ -39,7 +39,7 @@ use carbide_firmware::{
     ArtifactStatus, FirmwareConfigSnapshot, FirmwareDownloader, ResolvedFirmwareArtifactSource,
     resolve_files_firmware_artifact,
 };
-use carbide_instrument::emit;
+use carbide_instrument::Instrumentation;
 use carbide_rack_controller::firmware_object::FirmwareObjectFetcher;
 use carbide_redfish::libredfish::conv::IntoLibredfish;
 use carbide_redfish::libredfish::{RedfishClientCreationError, RedfishClientPool};
@@ -116,6 +116,7 @@ pub struct PreingestionManager {
 
 #[derive(Clone)]
 struct PreingestionManagerStatic {
+    instrumentation: Instrumentation,
     config: PreingestionManagerConfig,
     redfish_client_pool: Arc<dyn RedfishClientPool>,
     /// Connects moved BMC operations through the site's `bmc_backend`.
@@ -149,6 +150,8 @@ impl PreingestionManager {
     // Note on allow(too_many_arguments): It's normal for long-running services like this, which
     // integrate a lot of other services together (redfish, credentialss, config, work manager,
     // etc.) to require a lot of arguments. We can't really avoid this.
+    /// Creates a preingestion manager with explicit Event instrumentation.
+    /// Retain its provider until the manager and its background operations stop.
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         database_connection: sqlx::PgPool,
@@ -160,6 +163,7 @@ impl PreingestionManager {
         credential_reader: Option<Arc<dyn CredentialReader>>,
         work_lock_manager_handle: WorkLockManagerHandle,
         ntp_servers: Vec<Ipv4Addr>,
+        instrumentation: Instrumentation,
     ) -> PreingestionManager {
         let hold_period = config
             .run_interval
@@ -171,6 +175,7 @@ impl PreingestionManager {
 
         PreingestionManager {
             static_info: Arc::new(PreingestionManagerStatic {
+                instrumentation,
                 bmc_connector: BmcConnector::Libredfish(redfish_client_pool.clone()),
                 redfish_client_pool,
                 downloader: downloader.unwrap_or_default(),
@@ -1053,7 +1058,7 @@ impl PreingestionManagerStatic {
                                     )
                                     .await?
                                 {
-                                    emit(FirmwareUpgradeTaskFinished::Ok {
+                                    self.instrumentation.emit(FirmwareUpgradeTaskFinished::Ok {
                                         firmware: FirmwareComponentLabel(*upgrade_type),
                                         final_state: UpgradeTaskFinalState::Completed,
                                     });
@@ -1078,7 +1083,7 @@ impl PreingestionManagerStatic {
                             .boxed()
                         })
                         .await??;
-                        emit(FirmwareUpgradeTaskFinished::Ok {
+                        self.instrumentation.emit(FirmwareUpgradeTaskFinished::Ok {
                             firmware: FirmwareComponentLabel(*upgrade_type),
                             final_state: UpgradeTaskFinalState::Completed,
                         });
@@ -1148,13 +1153,14 @@ impl PreingestionManagerStatic {
                         // as a moving error series. It fires only after the
                         // transition commits -- a rolled-back pass re-observes
                         // this task and retries.
-                        emit(FirmwareUpgradeTaskFinished::Error {
-                            firmware: FirmwareComponentLabel(*upgrade_type),
-                            final_state: UpgradeTaskFinalState::from_failed_task_state(state),
+                        self.instrumentation
+                            .emit(FirmwareUpgradeTaskFinished::Error {
+                                firmware: FirmwareComponentLabel(*upgrade_type),
+                                final_state: UpgradeTaskFinalState::from_failed_task_state(state),
 
-                            address: endpoint.address,
-                            error: task_message,
-                        });
+                                address: endpoint.address,
+                                error: task_message,
+                            });
                     }
                     _ => {
                         // Unexpected state
@@ -1190,7 +1196,7 @@ impl PreingestionManagerStatic {
                             // The BMC dropped the task record after finishing;
                             // the confirmed new version is the completion
                             // evidence, so this task still counts as completed.
-                            emit(FirmwareUpgradeTaskFinished::Ok {
+                            self.instrumentation.emit(FirmwareUpgradeTaskFinished::Ok {
                                 firmware: FirmwareComponentLabel(*upgrade_type),
                                 final_state: UpgradeTaskFinalState::Completed,
                             });
@@ -1298,6 +1304,7 @@ impl PreingestionManagerStatic {
                                 bmc_ip_address: endpoint.address,
                                 step: PowerControlStep::PowerOff,
                             },
+                            &self.instrumentation,
                         )
                         .await
                         .is_err()
@@ -1347,6 +1354,7 @@ impl PreingestionManagerStatic {
                                         bmc_ip_address: endpoint.address,
                                         step: PowerControlStep::AcPowercyclePrerequisite,
                                     },
+                                    &self.instrumentation,
                                 )
                                 .await
                                 .is_err()
@@ -1390,6 +1398,7 @@ impl PreingestionManagerStatic {
                                 bmc_ip_address: endpoint.address,
                                 step: PowerControlStep::AcPowercycle,
                             },
+                            &self.instrumentation,
                         )
                         .await
                         .is_err()
@@ -1426,6 +1435,7 @@ impl PreingestionManagerStatic {
                             bmc_ip_address: endpoint.address,
                             step: PowerControlStep::PowerOn,
                         },
+                        &self.instrumentation,
                     )
                     .await
                     .is_err()
@@ -1503,6 +1513,7 @@ impl PreingestionManagerStatic {
                     bmc_ip_address: endpoint.address,
                     step,
                 },
+                &self.instrumentation,
             )
             .await
             .is_err()
@@ -1539,6 +1550,7 @@ impl PreingestionManagerStatic {
                     bmc_ip_address: endpoint.address,
                     step: PowerControlStep::BmcReboot,
                 },
+                &self.instrumentation,
             )
             .await
             .is_err()
@@ -1562,9 +1574,13 @@ impl PreingestionManagerStatic {
             || *upgrade_type == FirmwareComponentType::Gpu
         {
             // Needs a host power reset
-            if power_off_for_hgx_reset(redfish_client.as_ref(), endpoint.address)
-                .await
-                .is_err()
+            if power_off_for_hgx_reset(
+                redfish_client.as_ref(),
+                endpoint.address,
+                &self.instrumentation,
+            )
+            .await
+            .is_err()
             {
                 return Ok(());
             }
@@ -1576,6 +1592,7 @@ impl PreingestionManagerStatic {
                     bmc_ip_address: endpoint.address,
                     step: PowerControlStep::PowerOn,
                 },
+                &self.instrumentation,
             )
             .await
             .is_err()
@@ -1601,6 +1618,7 @@ impl PreingestionManagerStatic {
                     bmc_ip_address: endpoint.address,
                     step: PowerControlStep::CecChassisReset,
                 },
+                &self.instrumentation,
             )
             .await
             .ok();
@@ -1827,6 +1845,7 @@ impl PreingestionManagerStatic {
                         attempt: next,
                         max_attempts: INITIAL_BMC_RESET_MAX_ATTEMPTS,
                     },
+                    &self.instrumentation,
                 )
                 .await
                 .is_err()
@@ -2100,6 +2119,7 @@ impl PreingestionManagerStatic {
             PowerControlLog::RecoverySequence {
                 bmc_ip_address: endpoint.address,
             },
+            &self.instrumentation,
         )
         .await
         {
@@ -2136,6 +2156,7 @@ impl PreingestionManagerStatic {
             PowerControlLog::RecoverySequence {
                 bmc_ip_address: endpoint.address,
             },
+            &self.instrumentation,
         )
         .await
         .is_err()
@@ -2177,6 +2198,7 @@ impl PreingestionManagerStatic {
                         PowerControlLog::RecoverySequence {
                             bmc_ip_address: endpoint.address,
                         },
+                        &self.instrumentation,
                     )
                     .await
                     .is_ok();
@@ -2199,6 +2221,7 @@ impl PreingestionManagerStatic {
             PowerControlLog::RecoverySequence {
                 bmc_ip_address: endpoint.address,
             },
+            &self.instrumentation,
         )
         .await
         {
@@ -3056,6 +3079,7 @@ impl PreingestionManagerStatic {
                         host_bmc_ip_address: *host_bmc_ip,
                         post_install,
                     },
+                    &self.instrumentation,
                 )
                 .await
                 .is_err()
@@ -3111,6 +3135,7 @@ impl PreingestionManagerStatic {
                         host_bmc_ip_address: *host_bmc_ip,
                         post_install,
                     },
+                    &self.instrumentation,
                 )
                 .await
                 .is_err()
@@ -3262,6 +3287,7 @@ impl PreingestionManagerStatic {
         let bfb_rshim_copier = self.bfb_rshim_copier.clone();
         let bmc_addr = std::net::SocketAddr::new(address, 22);
 
+        let instrumentation = self.instrumentation.clone();
         tokio::spawn(async move {
             let _permit = permit;
 
@@ -3278,7 +3304,7 @@ impl PreingestionManagerStatic {
             match result {
                 Ok(()) => {
                     if bfb_copy_state.completed(&address.to_string(), BfbCopyResult::Success) {
-                        emit(BfbCopyFinished::Ok {
+                        instrumentation.emit(BfbCopyFinished::Ok {
                             took: started.elapsed(),
                             address,
                         });
@@ -3288,7 +3314,7 @@ impl PreingestionManagerStatic {
                     if bfb_copy_state
                         .completed(&address.to_string(), BfbCopyResult::Failed(e.to_string()))
                     {
-                        emit(BfbCopyFinished::Error {
+                        instrumentation.emit(BfbCopyFinished::Error {
                             took: started.elapsed(),
                             address,
                             error: e.to_string(),
@@ -3357,7 +3383,7 @@ impl PreingestionManagerStatic {
                 // reporting, or the copy is still dragging. The entry is
                 // already gone (removed under the resolution's lock), so
                 // this Timeout stays the copy's only record.
-                emit(BfbCopyFinished::Timeout {
+                self.instrumentation.emit(BfbCopyFinished::Timeout {
                     took: elapsed.to_std().unwrap_or_default(),
                     address: endpoint.address,
                     error: format!(
@@ -3829,16 +3855,18 @@ impl PreingestionManagerStatic {
                 .await
             {
                 Ok(task) => {
-                    emit(FirmwareUploadFinished::Succeeded {
-                        method: FirmwareUploadMethod::SimpleUpdate,
-                    });
+                    self.instrumentation
+                        .emit(FirmwareUploadFinished::Succeeded {
+                            method: FirmwareUploadMethod::SimpleUpdate,
+                        });
                     task.id
                 }
                 Err(e) => {
-                    emit(FirmwareUploadFinished::SimpleUpdateFailed {
-                        bmc_ip_address: endpoint_clone.address,
-                        error: e.to_string(),
-                    });
+                    self.instrumentation
+                        .emit(FirmwareUploadFinished::SimpleUpdateFailed {
+                            bmc_ip_address: endpoint_clone.address,
+                            error: e.to_string(),
+                        });
                     return Ok(false);
                 }
             }
@@ -3853,16 +3881,18 @@ impl PreingestionManagerStatic {
                 .await
             {
                 Ok(task) => {
-                    emit(FirmwareUploadFinished::Succeeded {
-                        method: FirmwareUploadMethod::Multipart,
-                    });
+                    self.instrumentation
+                        .emit(FirmwareUploadFinished::Succeeded {
+                            method: FirmwareUploadMethod::Multipart,
+                        });
                     task
                 }
                 Err(RedfishError::NotSupported(err)) => {
-                    emit(MultipartFirmwareUploadUnsupported {
-                        bmc_ip_address: endpoint_clone.address,
-                        error: err,
-                    });
+                    self.instrumentation
+                        .emit(MultipartFirmwareUploadUnsupported {
+                            bmc_ip_address: endpoint_clone.address,
+                            error: err,
+                        });
                     let file = match File::open(artifact.local_path.as_path()).await {
                         Ok(f) => f,
                         Err(e) => {
@@ -3876,25 +3906,28 @@ impl PreingestionManagerStatic {
                     };
                     match redfish_client.update_firmware(file).await {
                         Ok(task) => {
-                            emit(FirmwareUploadFinished::Succeeded {
-                                method: FirmwareUploadMethod::HttpPush,
-                            });
+                            self.instrumentation
+                                .emit(FirmwareUploadFinished::Succeeded {
+                                    method: FirmwareUploadMethod::HttpPush,
+                                });
                             task.id
                         }
                         Err(e) => {
-                            emit(FirmwareUploadFinished::HttpPushFailed {
-                                bmc_ip_address: endpoint_clone.address,
-                                error: e.to_string(),
-                            });
+                            self.instrumentation
+                                .emit(FirmwareUploadFinished::HttpPushFailed {
+                                    bmc_ip_address: endpoint_clone.address,
+                                    error: e.to_string(),
+                                });
                             return Ok(false);
                         }
                     }
                 }
                 Err(e) => {
-                    emit(FirmwareUploadFinished::MultipartFailed {
-                        bmc_ip_address: endpoint_clone.address,
-                        error: e.to_string(),
-                    });
+                    self.instrumentation
+                        .emit(FirmwareUploadFinished::MultipartFailed {
+                            bmc_ip_address: endpoint_clone.address,
+                            error: e.to_string(),
+                        });
                     return Ok(false);
                 }
             }
@@ -4026,6 +4059,7 @@ impl CreateClientForIngestedHost for Arc<dyn RedfishClientPool> {
 async fn power_off_for_hgx_reset(
     redfish_client: &dyn Redfish,
     bmc_ip_address: IpAddr,
+    instrumentation: &Instrumentation,
 ) -> Result<(), RedfishError> {
     let log = PowerControlLog::Step {
         bmc_ip_address,
@@ -4036,6 +4070,7 @@ async fn power_off_for_hgx_reset(
             PowerOperation::AcPowercycle,
             redfish_client.power(SystemPowerControl::ACPowercycle),
             log,
+            instrumentation,
         )
         .await
         {
@@ -4047,6 +4082,7 @@ async fn power_off_for_hgx_reset(
         PowerOperation::ForceOff,
         redfish_client.power(SystemPowerControl::ForceOff),
         log,
+        instrumentation,
     )
     .await
 }
@@ -4061,14 +4097,11 @@ mod tests {
     /// cycle is not supported; other errors still stop the reset.
     #[tokio::test]
     async fn power_off_for_hgx_reset_falls_back_to_force_off() {
-        use carbide_instrument::testing::MetricsCapture;
         use carbide_redfish::libredfish::RedfishAuth;
         use carbide_redfish::libredfish::test_support::{RedfishSim, RedfishSimAction};
 
-        // `power_off_for_hgx_reset` records `carbide_preingestion_power_control_total`,
-        // which a `metrics` test measures as a delta. Hold the shared `MetricsCapture`
-        // lock so these calls can't land inside that measurement.
-        let _metrics = MetricsCapture::start();
+        let test_meter = carbide_utils::test_support::test_meter::TestMeter::default();
+        let instrumentation = Instrumentation::new(test_meter.meter());
 
         let not_supported = || RedfishError::NotSupported("ACCycle".to_string());
         let generic = || RedfishError::GenericError {
@@ -4120,8 +4153,12 @@ mod tests {
                 .unwrap();
             let timepoint = sim.timepoint();
 
-            let result =
-                power_off_for_hgx_reset(client.as_ref(), "192.0.2.10".parse().unwrap()).await;
+            let result = power_off_for_hgx_reset(
+                client.as_ref(),
+                "192.0.2.10".parse().unwrap(),
+                &instrumentation,
+            )
+            .await;
 
             assert_eq!(result.is_ok(), expected_ok, "{case}: {result:?}");
             assert_eq!(

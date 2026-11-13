@@ -155,17 +155,20 @@ fn should_scan_underlay_interface_for_redfish(
 }
 
 /// Build an endpoint explorer over the authenticated BMC client supplied by
-/// the application composition root.
+/// the application composition root. Events use `instrumentation`; retain its provider
+/// while the explorer runs.
 pub fn new_bmc_explorer(
     bmc_client: Arc<AuthenticatedBmcClient>,
     rotate_switch_nvos_credentials: Arc<AtomicBool>,
     explore_drive_firmware: bool,
     database_connection: PgPool,
+    instrumentation: carbide_instrument::Instrumentation,
 ) -> Arc<BmcEndpointExplorer> {
     BmcEndpointExplorer::new(
         bmc_client,
         rotate_switch_nvos_credentials,
         Some(database_connection),
+        instrumentation,
     )
     .with_drive_firmware(explore_drive_firmware)
     .into()
@@ -578,6 +581,7 @@ impl RecentBmcResets {
 /// * `max_concurrent_machine_updates` the maximum number of updates allowed across all modules
 /// * `machine_update_run_interval` how often the manager calls the modules to start updates
 pub struct SiteExplorer {
+    instrumentation: carbide_instrument::Instrumentation,
     database_connection: PgPool,
     config: SiteExplorerConfig,
     metric_holder: Arc<metrics::MetricHolder>,
@@ -607,7 +611,8 @@ impl SiteExplorer {
     const SITE_EXPLORER_HEALTH_REPORT_WRITE_BATCH_SIZE: usize = 500;
 
     #[allow(clippy::too_many_arguments)]
-    /// Creates a site explorer.
+    /// Creates a site explorer with explicit Event instrumentation. Retain its
+    /// provider until the explorer and its background operations stop.
     ///
     /// The registry selects each DPU's IPv4 loopback backend. Creation and
     /// reconciliation prepare provider allocations before the machine transaction; `start` supplies
@@ -628,23 +633,27 @@ impl SiteExplorer {
         machine_info_provider: Option<Arc<dyn MachineInfoProvider>>,
         credential_manager: Arc<dyn CredentialManager>,
         dpf_enabled_at_site: bool,
+        instrumentation: carbide_instrument::Instrumentation,
     ) -> Self {
         let metric_holder = Arc::new(metrics::MetricHolder::new(meter, &explorer_config));
         let rack_profiles = Arc::new(rack_profiles);
         let endpoint_explorer = endpoint_exploration_service.endpoint_explorer();
 
         SiteExplorer {
+            instrumentation: instrumentation.clone(),
             host_reconciler: HostReconciler::new(
                 database_connection.clone(),
                 explorer_config.retained_boot_interface_window,
                 resource_pool_registry.clone(),
                 common_pools.clone(),
+                instrumentation.clone(),
             ),
             machine_location_reconciler: MachineLocationReconciler::new(
                 database_connection.clone(),
                 rack_profiles.clone(),
                 machine_info_provider.clone(),
                 credential_manager,
+                instrumentation.clone(),
             ),
             inventory_creator: InventoryCreator::new(
                 database_connection.clone(),
@@ -654,6 +663,7 @@ impl SiteExplorer {
                 rack_profiles,
                 machine_info_provider,
                 dpf_enabled_at_site,
+                instrumentation,
             ),
             database_connection,
             config: explorer_config,
@@ -789,9 +799,10 @@ impl SiteExplorer {
     fn emit_iteration_finished(
         metrics: &SiteExplorationMetrics,
         error: Option<&SiteExplorerError>,
+        instrumentation: &carbide_instrument::Instrumentation,
     ) {
         let latency = metrics.recording_started_at.elapsed();
-        carbide_instrument::emit(match error {
+        instrumentation.emit(match error {
             None => SiteExplorerIterationFinished::Succeeded { latency },
             Some(error) => SiteExplorerIterationFinished::Failed {
                 latency,
@@ -840,7 +851,7 @@ impl SiteExplorer {
                 // `None` keeps `SiteExplorerIterationFinished` metric-only, so
                 // expected replica contention does not also produce an
                 // `ERROR`.
-                Self::emit_iteration_finished(&metrics, None);
+                Self::emit_iteration_finished(&metrics, None, &self.instrumentation);
                 self.metric_holder.update_metrics(metrics);
                 return result;
             }
@@ -912,7 +923,7 @@ impl SiteExplorer {
         Self::record_run_status_metric(&mut metrics, &res);
         self.record_last_run_result(started_at, &metrics, &res)
             .await;
-        Self::emit_iteration_finished(&metrics, res.as_ref().err());
+        Self::emit_iteration_finished(&metrics, res.as_ref().err(), &self.instrumentation);
 
         // Cache all other metrics that have been captured in this iteration.
         // Those will be queried by OTEL on demand
@@ -1273,7 +1284,11 @@ impl SiteExplorer {
         }
 
         let (mut identified_hosts, boot_interfaces, unmatched_reports) =
-            MachineCreator::identify_managed_hosts(configured_candidates, metrics);
+            MachineCreator::identify_managed_hosts(
+                configured_candidates,
+                metrics,
+                &self.instrumentation,
+            );
 
         unmatched_host_reports.extend(unmatched_reports);
 
@@ -2143,6 +2158,7 @@ impl SiteExplorer {
                             suppression::record_deferred(
                                 *address,
                                 suppression::ExplorationRequest::Periodic,
+                                &self.instrumentation,
                             );
                         }
                         tracing::info!(bmc_ip_address = %address, bmc_mac_address = %iface.mac_address, "Skipping exploration of suppressed BMC");
@@ -2188,7 +2204,9 @@ impl SiteExplorer {
                     .contains(&iface.mac_address)
                 {
                     if run_context.dpf_provisioning_bmc_macs.contains(&iface.mac_address) {
-                        suppression::record_deferred(*address, suppression::ExplorationRequest::Periodic);
+                        suppression::record_deferred(*address, suppression::ExplorationRequest::Periodic,
+                            &self.instrumentation,
+                        );
                     }
                     tracing::info!(bmc_ip_address = %address, bmc_mac_address = %iface.mac_address, "Skipping exploration of suppressed BMC");
                     return false;
@@ -2490,7 +2508,12 @@ impl SiteExplorer {
                             endpoint_report_update_attempts += 1;
                             match report_write {
                                 ConditionalWrite::Applied(()) => {
-                                    attester_inventory::record(&report, &mut txn).await?;
+                                    attester_inventory::record(
+                                        &report,
+                                        &mut txn,
+                                        &self.instrumentation,
+                                    )
+                                    .await?;
                                     refreshed_endpoints.insert(address);
                                 }
                                 ConditionalWrite::NotApplied(EndpointReportNotCurrent) => {
@@ -2543,7 +2566,8 @@ impl SiteExplorer {
                                 &mut txn,
                             )
                             .await?;
-                            attester_inventory::record(&report, &mut txn).await?;
+                            attester_inventory::record(&report, &mut txn, &self.instrumentation)
+                                .await?;
                             insert_endpoint_attempts += 1;
                             refreshed_endpoints.insert(address);
                         }
@@ -2637,6 +2661,7 @@ impl SiteExplorer {
         method: BmcResetMethod,
         address: IpAddr,
         metrics: &mut SiteExplorationMetrics,
+        instrumentation: &carbide_instrument::Instrumentation,
     ) -> bool {
         let (status, error, succeeded) = match result {
             Ok(()) => {
@@ -2646,7 +2671,7 @@ impl SiteExplorer {
             Err(err) => (BmcResetStatus::Failed, err.to_string(), false),
         };
 
-        carbide_instrument::emit(match status {
+        instrumentation.emit(match status {
             BmcResetStatus::Succeeded => BmcResetFinished::Succeeded {
                 method,
                 address,
@@ -2822,6 +2847,7 @@ impl SiteExplorer {
                 BmcResetMethod::Redfish,
                 endpoint.address,
                 metrics,
+                &self.instrumentation,
             )
         {
             return;
@@ -2833,6 +2859,7 @@ impl SiteExplorer {
                 BmcResetMethod::Ipmitool,
                 endpoint.address,
                 metrics,
+                &self.instrumentation,
             );
         }
     }
@@ -2872,11 +2899,12 @@ impl SiteExplorer {
                 self.recent_bmc_resets
                     .record_ipmitool(endpoint.address, Utc::now());
                 if let Err(e) = self.persist_last_ipmitool_bmc_reset(endpoint.address).await {
-                    carbide_instrument::emit(BmcResetTimestampPersistenceFailed {
-                        method: BmcResetMethod::Ipmitool,
-                        bmc_ip_address: endpoint.address,
-                        error: e.to_string(),
-                    });
+                    self.instrumentation
+                        .emit(BmcResetTimestampPersistenceFailed {
+                            method: BmcResetMethod::Ipmitool,
+                            bmc_ip_address: endpoint.address,
+                            error: e.to_string(),
+                        });
                 }
                 Ok(())
             }
@@ -2922,11 +2950,12 @@ impl SiteExplorer {
                 self.recent_bmc_resets
                     .record_redfish(endpoint.address, Utc::now());
                 if let Err(e) = self.persist_last_redfish_bmc_reset(endpoint.address).await {
-                    carbide_instrument::emit(BmcResetTimestampPersistenceFailed {
-                        method: BmcResetMethod::Redfish,
-                        bmc_ip_address: endpoint.address,
-                        error: e.to_string(),
-                    });
+                    self.instrumentation
+                        .emit(BmcResetTimestampPersistenceFailed {
+                            method: BmcResetMethod::Redfish,
+                            bmc_ip_address: endpoint.address,
+                            error: e.to_string(),
+                        });
                 }
                 Ok(())
             }
@@ -4158,7 +4187,9 @@ mod tests {
                 let result = error.map_or(Ok(()), |error| {
                     Err(SiteExplorerError::internal(error.to_string()))
                 });
-                let event_metrics = MetricsCapture::start();
+                let test_meter = carbide_utils::test_support::test_meter::TestMeter::default();
+                let instrumentation = carbide_instrument::Instrumentation::new(test_meter.meter());
+                let event_metrics = MetricsCapture::for_registry(test_meter.registry());
                 let mut run_metrics = SiteExplorationMetrics::new();
                 let mut succeeded = false;
                 let logs = capture_logs(|| {
@@ -4167,6 +4198,7 @@ mod tests {
                         method,
                         address,
                         &mut run_metrics,
+                        &instrumentation,
                     );
                 });
                 let log = logs.first().map(|log| LogObservation {

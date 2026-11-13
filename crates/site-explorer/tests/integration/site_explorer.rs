@@ -1320,7 +1320,12 @@ async fn test_suppression_acknowledgement_waits_for_in_flight_exploration(
     explorer.insert_endpoints(vec![(bmc_ip, report)]);
     let blocker = explorer.endpoint_explorer().block_next_exploration();
     let service = explorer.endpoint_exploration_service();
-    let refresh = tokio::spawn(async move { service.refresh_endpoint_report(bmc_ip).await });
+    let instrumentation = env.api().instrumentation().clone();
+    let refresh = tokio::spawn(async move {
+        service
+            .refresh_endpoint_report(bmc_ip, &instrumentation)
+            .await
+    });
     blocker.wait_until_started().await;
 
     let mut txn = env.pool.begin().await?;
@@ -5781,8 +5786,10 @@ async fn test_site_explorer_backfills_boot_interface_id_onto_machine_interface(
 async fn test_dpf_suppression_preserves_report_and_resumes(
     pool: PgPool,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let metrics = carbide_instrument::testing::MetricsCapture::start();
     let env = Env::new(pool).await;
+    let metrics = carbide_instrument::testing::MetricsCapture::for_registry(
+        env.test_harness.test_meter.registry(),
+    );
     let mut machines = vec![env.new_machine("02:00:00:00:10:31", "Vendor1")];
     machines.discover_dhcp(env.api()).await?;
     let address = machines[0].ip.parse()?;
@@ -5801,7 +5808,7 @@ async fn test_dpf_suppression_preserves_report_and_resumes(
     let explorer = env.test_site_explorer(suppression_test_config(1));
     let queued = explorer
         .endpoint_exploration_service()
-        .refresh_endpoint_report(address)
+        .refresh_endpoint_report(address, env.api().instrumentation())
         .await?;
     assert!(queued.exploration_requested);
     let before = db::explored_endpoints::find_by_ips(&env.pool, vec![address]).await?;
@@ -5878,7 +5885,7 @@ async fn test_queued_refresh_survives_in_flight_exploration(
 
         let queued = explorer
             .endpoint_exploration_service()
-            .refresh_endpoint_report(address)
+            .refresh_endpoint_report(address, env.api().instrumentation())
             .await?;
         assert!(queued.exploration_requested);
         blocker.release();

@@ -11447,11 +11447,13 @@ impl HostUpgradeState {
                         .host_firmware_upgrade_retry_interval;
 
                 if can_retry && waited_enough {
-                    carbide_instrument::emit(HostFirmwareUpgradeRetried {
-                        machine_id: *machine_id,
-                        attempt: retry_count + 1,
-                        error: reason.clone().unwrap_or_default(),
-                    });
+                    ctx.services
+                        .instrumentation
+                        .emit(HostFirmwareUpgradeRetried {
+                            machine_id: *machine_id,
+                            attempt: retry_count + 1,
+                            error: reason.clone().unwrap_or_default(),
+                        });
 
                     let reprovision_state = HostReprovisionState::CheckingFirmwareV2 {
                         firmware_type: None,
@@ -16143,9 +16145,11 @@ mod tests {
                 .try_into()
                 .unwrap();
 
-        let metrics = MetricsCapture::start();
+        let test_meter = carbide_utils::test_support::test_meter::TestMeter::default();
+        let instrumentation = carbide_instrument::Instrumentation::new(test_meter.meter());
+        let metrics = MetricsCapture::for_registry(test_meter.registry());
         let logs = capture_logs(|| {
-            carbide_instrument::emit(HostFirmwareUpgradeRetried {
+            instrumentation.emit(HostFirmwareUpgradeRetried {
                 machine_id,
                 attempt: 1,
                 error: "scout upgrade failed".to_string(),

@@ -19,7 +19,7 @@
 
 use std::sync::Arc;
 
-use carbide_instrument::emit;
+use carbide_instrument::Instrumentation;
 use carbide_secrets::credentials::CredentialReader;
 use mqttea::QoS;
 use mqttea::client::{ClientOptions, MqtteaClient};
@@ -55,10 +55,12 @@ pub enum MqttMessage {
 /// queue/publish/connection metrics on the meter, subscribes to topics,
 /// and connects. Returns a sender handle (for the caller to observe the
 /// channel's pending depth) alongside the receiver that yields messages with
-/// drop-on-overflow.
+/// drop-on-overflow. Event metrics use `instrumentation`; retain its provider
+/// for the lifetime of the connection.
 pub async fn connect(
     config: &MqttConfig,
     meter: &opentelemetry::metrics::Meter,
+    instrumentation: Instrumentation,
     credential_reader: Arc<dyn CredentialReader>,
 ) -> Result<(mpsc::Sender<MqttMessage>, mpsc::Receiver<MqttMessage>), DsxConsumerError> {
     let (tx, rx) = mpsc::channel(config.queue_capacity);
@@ -100,11 +102,12 @@ pub async fn connect(
     client
         .on_message::<LeakMetadata, _, _>({
             let tx = tx.clone();
+            let instrumentation = instrumentation.clone();
             move |_client, metadata, topic| {
-                emit(MessageReceived);
+                instrumentation.emit(MessageReceived);
                 let msg = MqttMessage::Metadata { topic, metadata };
                 if tx.try_send(msg).is_err() {
-                    emit(MessageDropped {
+                    instrumentation.emit(MessageDropped {
                         message_type: DroppedMessageType::Metadata,
                     });
                 }
@@ -117,11 +120,12 @@ pub async fn connect(
     client
         .on_message::<ValueMessage, _, _>({
             let tx = tx.clone();
+            let instrumentation = instrumentation.clone();
             move |_client, value, topic| {
-                emit(MessageReceived);
+                instrumentation.emit(MessageReceived);
                 let msg = MqttMessage::Value { topic, value };
                 if tx.try_send(msg).is_err() {
-                    emit(MessageDropped {
+                    instrumentation.emit(MessageDropped {
                         message_type: DroppedMessageType::Value,
                     });
                 }

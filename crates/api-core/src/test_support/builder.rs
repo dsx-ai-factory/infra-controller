@@ -291,6 +291,7 @@ impl TestApiBuilder {
             runtime_config.bmc_session_lockout_threshold,
             runtime_config.allow_bmc_basic_auth_fallback,
             runtime_config.bmc_max_sessions_per_caller,
+            self.instrumentation.clone(),
         ));
 
         // In tests a real explorer can't explore (nv-redfish has no `RedfishSim`
@@ -310,6 +311,7 @@ impl TestApiBuilder {
             Arc::new(std::sync::atomic::AtomicBool::new(false)),
             false,
             self.db_pool.clone(),
+            self.instrumentation.clone(),
         );
         // A mock supplies both narrow interfaces so tests asserting on BMC calls
         // still see them; production-like tests use the independently constructed

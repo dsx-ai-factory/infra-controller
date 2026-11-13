@@ -101,6 +101,7 @@ pub(crate) async fn setup_resources(
     credential_config: &CredentialConfig,
     join_set: &mut JoinSet<()>,
     cancel_token: &CancellationToken,
+    instrumentation: &carbide_instrument::Instrumentation,
 ) -> eyre::Result<RuntimeResources> {
     let vault_config = vault_config_for_site(&credential_config.vault, carbide_config);
     let credential_store = std::env::var("CARBIDE_CREDENTIAL_STORE").ok();
@@ -218,6 +219,7 @@ pub(crate) async fn setup_resources(
             db_pool.clone(),
             routing.clone(),
             kms.clone(),
+            instrumentation.clone(),
         ));
         tracing::info!(
             active_provider = %secrets_config.kms.active,
@@ -1191,11 +1193,15 @@ mod tests {
             let mut config = vault_selection_config(secrets, DEDICATED_VAULT);
             config.certificates.dedicated_vault = Some(dedicated_vault.clone());
             config.database_pool_acquire_timeout = std::time::Duration::ZERO;
+            let metrics =
+                metrics_endpoint::new_metrics_setup("resource-validation-tests", "carbide", false)
+                    .expect("test metrics setup");
             let error = setup_resources(
                 &config,
                 &credential_config,
                 &mut JoinSet::new(),
                 &CancellationToken::new(),
+                &carbide_instrument::Instrumentation::from_meter_provider(&metrics.meter_provider),
             )
             .await
             .err()

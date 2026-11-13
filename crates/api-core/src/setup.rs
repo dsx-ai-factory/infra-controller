@@ -174,6 +174,7 @@ fn create_bmc_proxy_pools(
     credential_manager: Arc<dyn CredentialManager>,
     direct_pool: &Arc<dyn RedfishClientPool>,
     direct_nv_redfish_pool: &Arc<NvRedfishClientPool>,
+    instrumentation: carbide_instrument::Instrumentation,
 ) -> eyre::Result<BmcProxyPools> {
     let Some(proxy_config) = enabled_bmc_proxy_config(carbide_config) else {
         return Ok(BmcProxyPools {
@@ -191,6 +192,7 @@ fn create_bmc_proxy_pools(
     let proxied: Arc<dyn RedfishClientPool> = Arc::new(crate::bmc_proxy::ProxiedRedfishPool::new(
         proxy_config,
         credential_manager,
+        instrumentation,
     )?);
     let proxied_nv_redfish = carbide_redfish::nv_redfish::new_proxied_pool(
         proxy,
@@ -358,6 +360,7 @@ pub async fn start_runtime(runtime_inputs: RuntimeInputs<'_>) -> eyre::Result<So
         credential_manager.clone(),
         &shared_redfish_pool,
         &shared_nv_redfish_pool,
+        instrumentation.clone(),
     )?;
 
     let ipmi_tool = create_ipmi_tool(
@@ -645,6 +648,7 @@ pub async fn start_runtime(runtime_inputs: RuntimeInputs<'_>) -> eyre::Result<So
         carbide_config.bmc_session_lockout_threshold,
         carbide_config.allow_bmc_basic_auth_fallback,
         carbide_config.bmc_max_sessions_per_caller,
+        instrumentation.clone(),
     ));
 
     let bmc_client = Arc::new(
@@ -667,6 +671,7 @@ pub async fn start_runtime(runtime_inputs: RuntimeInputs<'_>) -> eyre::Result<So
             .clone(),
         carbide_config.site_explorer.explore_drive_firmware,
         db_pool.clone(),
+        instrumentation.clone(),
     );
     let endpoint_exploration_service = Arc::new(EndpointExplorationService::new(
         db_pool.clone(),
@@ -818,6 +823,10 @@ pub async fn start_runtime(runtime_inputs: RuntimeInputs<'_>) -> eyre::Result<So
             .wrap_err("failed to build the firmware-object HTTP client")?,
     );
 
+    let bmc_proxy_passthrough = enabled_bmc_proxy_config(&carbide_config)
+        .map(|config| crate::bmc_proxy::PassthroughClient::new(config, instrumentation.clone()))
+        .transpose()?
+        .map(Arc::new);
     let api_service = Arc::new(Api {
         instrumentation,
         certificate_provider,
@@ -837,10 +846,7 @@ pub async fn start_runtime(runtime_inputs: RuntimeInputs<'_>) -> eyre::Result<So
         redfish_pool: general_redfish_pool,
         bmc_credential_ops: bmc_credential_ops.clone(),
         driver_connector: driver_connector.clone(),
-        bmc_proxy_passthrough: enabled_bmc_proxy_config(&carbide_config)
-            .map(crate::bmc_proxy::PassthroughClient::new)
-            .transpose()?
-            .map(Arc::new),
+        bmc_proxy_passthrough,
         bmc_session_manager,
         runtime_config: carbide_config.clone(),
         scout_stream_registry: ConnectionRegistry::new(),
@@ -1925,6 +1931,7 @@ async fn initialize_and_start_controllers<'a>(
         common_pools,
         join_set,
         cancel_token.clone(),
+        api_service.instrumentation.clone(),
     )?;
     let health_pool = db_pool.clone();
     start_export_service_health_metrics(ServiceHealthContext {
@@ -2051,6 +2058,7 @@ async fn initialize_and_start_controllers<'a>(
                 config.queue_capacity,
                 &meter,
                 cancel_token.clone(),
+                api_service.instrumentation.clone(),
             )
             .await?;
 
@@ -2064,6 +2072,7 @@ async fn initialize_and_start_controllers<'a>(
             ManagedHostStateRepublisher::new(
                 client.clone(),
                 ManagedHostStateRepublisherParams {
+                    instrumentation: api_service.instrumentation.clone(),
                     db_pool: db_pool.clone(),
                     work_lock_manager_handle: work_lock_manager_handle.clone(),
                     topic_prefix: config.topic_prefix.clone(),
@@ -2082,6 +2091,7 @@ async fn initialize_and_start_controllers<'a>(
                 config.queue_capacity,
                 &meter,
                 cancel_token.clone(),
+                api_service.instrumentation.clone(),
             )));
         }
 
@@ -2199,6 +2209,7 @@ async fn initialize_and_start_controllers<'a>(
         .processor_id(state_controller_id.clone())
         .services(
             MachineStateHandlerServices {
+                instrumentation: api_service.instrumentation.clone(),
                 db_pool: db_pool.clone(),
                 db_reader: db_pool.clone().into(),
                 redfish_client_pool: shared_redfish_pool.clone(),
@@ -2642,6 +2653,7 @@ async fn initialize_and_start_controllers<'a>(
         site_explorer_machine_info_provider,
         credential_manager.clone(),
         carbide_config.dpf.enabled && dpf_sdk.is_some(),
+        api_service.instrumentation.clone(),
     )
     .start(join_set, cancel_token.clone())?;
 
@@ -2651,6 +2663,7 @@ async fn initialize_and_start_controllers<'a>(
         meter.clone(),
         work_lock_manager_handle.clone(),
         dpf_sdk.clone(),
+        api_service.instrumentation.clone(),
     )
     .start(join_set, cancel_token.clone())?;
 
@@ -2664,6 +2677,7 @@ async fn initialize_and_start_controllers<'a>(
         Some(api_service.credential_manager.clone()),
         work_lock_manager_handle.clone(),
         carbide_config.ntp_servers.clone(),
+        api_service.instrumentation.clone(),
     )
     .with_driver_connector(driver_connector.clone());
 
@@ -2687,6 +2701,7 @@ async fn initialize_and_start_controllers<'a>(
         db_pool.clone(),
         carbide_config.measured_boot_collector.clone(),
         meter.clone(),
+        api_service.instrumentation.clone(),
     )
     .start(join_set, cancel_token.clone())?;
 
@@ -2697,6 +2712,7 @@ async fn initialize_and_start_controllers<'a>(
         db_pool.clone(),
         carbide_config.machine_validation_config.clone(),
         meter.clone(),
+        api_service.instrumentation.clone(),
     )
     .start(join_set, cancel_token.clone())?;
 
@@ -4400,15 +4416,21 @@ mod tests {
     /// pools, so disabled mode cannot change behavior.
     #[test]
     fn pools_are_direct_unless_bmc_proxy_is_enabled() {
+        let test_meter = carbide_utils::test_support::test_meter::TestMeter::default();
         let (mut config, credential_manager, direct, direct_nv) = selection_fixtures();
 
         assert!(
             config.bmc_proxy.is_none(),
             "default test config has no section"
         );
-        let pools =
-            create_bmc_proxy_pools(&config, credential_manager.clone(), &direct, &direct_nv)
-                .expect("absent section selects pools");
+        let pools = create_bmc_proxy_pools(
+            &config,
+            credential_manager.clone(),
+            &direct,
+            &direct_nv,
+            carbide_instrument::Instrumentation::new(test_meter.meter()),
+        )
+        .expect("absent section selects pools");
         assert!(
             Arc::ptr_eq(&pools.general, &direct),
             "an absent [bmc_proxy] must alias the direct pool"
@@ -4426,8 +4448,14 @@ mod tests {
             serde_json::from_value(serde_json::json!({ "enabled": false }))
                 .expect("a disabled section parses without a url"),
         );
-        let pools = create_bmc_proxy_pools(&config, credential_manager, &direct, &direct_nv)
-            .expect("disabled section selects pools");
+        let pools = create_bmc_proxy_pools(
+            &config,
+            credential_manager,
+            &direct,
+            &direct_nv,
+            carbide_instrument::Instrumentation::new(test_meter.meter()),
+        )
+        .expect("disabled section selects pools");
         assert!(
             Arc::ptr_eq(&pools.general, &direct),
             "a disabled [bmc_proxy] must alias the direct pool"
@@ -4448,12 +4476,19 @@ mod tests {
     /// which is left for credential-lifecycle work.
     #[test]
     fn pools_are_proxied_when_bmc_proxy_is_enabled() {
+        let test_meter = carbide_utils::test_support::test_meter::TestMeter::default();
         let (mut config, credential_manager, direct, direct_nv) = selection_fixtures();
         let dir = tempfile::tempdir().expect("tempdir");
         config.bmc_proxy = Some(crate::bmc_proxy::test_config_with_generated_pems(&dir));
 
-        let pools = create_bmc_proxy_pools(&config, credential_manager, &direct, &direct_nv)
-            .expect("an enabled section with readable certs builds the proxied pools");
+        let pools = create_bmc_proxy_pools(
+            &config,
+            credential_manager,
+            &direct,
+            &direct_nv,
+            carbide_instrument::Instrumentation::new(test_meter.meter()),
+        )
+        .expect("an enabled section with readable certs builds the proxied pools");
         assert!(
             !Arc::ptr_eq(&pools.general, &direct),
             "an enabled [bmc_proxy] must select a distinct proxied pool"
@@ -4495,14 +4530,20 @@ mod tests {
     /// that silently dials BMCs directly.
     #[test]
     fn enabled_bmc_proxy_without_url_fails_startup() {
+        let test_meter = carbide_utils::test_support::test_meter::TestMeter::default();
         let (mut config, credential_manager, direct, direct_nv) = selection_fixtures();
         config.bmc_proxy = Some(
             serde_json::from_value(serde_json::json!({ "enabled": true }))
                 .expect("the section parses; the empty default address is rejected later"),
         );
 
-        let Err(err) = create_bmc_proxy_pools(&config, credential_manager, &direct, &direct_nv)
-        else {
+        let Err(err) = create_bmc_proxy_pools(
+            &config,
+            credential_manager,
+            &direct,
+            &direct_nv,
+            carbide_instrument::Instrumentation::new(test_meter.meter()),
+        ) else {
             panic!("an enabled section with no address must fail startup");
         };
         assert!(
