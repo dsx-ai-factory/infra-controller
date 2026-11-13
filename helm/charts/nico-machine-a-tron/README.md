@@ -171,13 +171,12 @@ for the RPCs it routes. The gateway exits and is restarted by
 the kubelet whenever the set of discovered instances changes. Partitions and
 other state created through the UFM API are lost on that restart; ports return
 with the first inventory poll and callers must re-create partitions once
-`/readyz` returns 200 again. RMS job ids are held in gateway memory as well.
-After that restart, a status poll for an id issued by the previous process is
-answered as the per-pod RMS mock answers an id it never issued: completed on
-`GetJobStatus` and `GetConfigureSwitchCertificateJobStatus`, and
-`RETURN_CODE_FAILURE` with `job <id> not found` on `GetFirmwareJobStatus` and
-`GetSwitchSystemImageJobStatus`. Refer to "In-Memory State Is Lost on Restart"
-in the gateway README.
+`/readyz` returns 200 again. RMS job ids are held in gateway memory as well,
+and one neither issued nor polled for
+`mat-k8s-controller.gateway.rmsJobRetention` is forgotten. A status poll for
+a forgotten id, or for one issued by a previous gateway process, is answered
+as not found in the form each RPC uses. Refer to "In-Memory State Is Lost on
+Restart" in the gateway README.
 
 The controller image ships both binaries: `dev/k8s/machine-a-tron-controller/Dockerfile`
 builds the Go controller and `mat-protocol-gateway` from the repository root,
@@ -201,6 +200,7 @@ requests. The listener is unaffected.
 | `mat-k8s-controller.gateway.listenIpAddress` | `"0.0.0.0"` | Bare IP address to bind. Set to `"::"` for IPv6; keep the IPv4 default on hosts where IPv6 sockets are disabled. Changing this setting requires restarting the controller Deployment |
 | `mat-k8s-controller.gateway.port` | `8443` | HTTPS port of the UFM API, the RMS gRPC API, the probes, and the Service |
 | `mat-k8s-controller.gateway.existingAuthSecret` | `""` | Secret with a `token` key for UFM HTTP Basic auth. Empty means the `nico-machine-a-tron-ufm-mock-auth` Secret this chart generates; the gateway does not inherit `ufmMock.existingAuthSecret`. Required whenever that default Secret is absent or renamed: set it to the Secret holding the token when `ufmMock.existingAuthSecret` is set, `ufmMock.enabled` is `false`, or the parent chart uses `nameOverride`, or the gateway fails to start |
+| `mat-k8s-controller.gateway.rmsJobRetention` | `24h` | How long the gateway remembers an RMS job id after it was last issued or polled, as a duration such as `24h`, nonzero and at most `7d`; rendered as the gateway's `rms.job_retention`. A job whose first status poll comes later is reported as not found. Changing this setting requires restarting the controller Deployment |
 | `mat-k8s-controller.gateway.resources` | 100m/256Mi requests, 1 CPU/1Gi limits | Gateway container resources |
 
 The gateway reads its listener address only at startup. Restarting the controller
