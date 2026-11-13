@@ -19,7 +19,7 @@ use rcgen::{
 use reqwest::{Client, Identity, StatusCode, Version};
 use tokio::task::JoinSet;
 
-use super::{IMAGE, Origin, admitted, cache, create, digest, machine_id, seed, uri};
+use super::{CONFIGURATION, IMAGE, Origin, admitted, cache, create, digest, machine_id, seed, uri};
 use crate::cfg::file::AuthConfig;
 use crate::listener::{self, ApiListenMode, ApiTlsConfig};
 
