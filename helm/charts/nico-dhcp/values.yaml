@@ -110,6 +110,11 @@ env:
 ##      hooks-libraries entries, advanced lease-database backends, etc.
 ##      Long-term any such case should be added to the structured shape
 ##      and this escape hatch removed.
+##
+## Changes to chart-managed ConfigMaps restart the Kea pods, including
+## changes unrelated to the PXE URL. For externally managed IPv4 configuration
+## (`config.enabled: false`), explicitly restart the IPv4 Deployment after edits.
+## A mounted-file update alone does not activate the hook setting.
 config:
   enabled: true
 
@@ -204,6 +209,11 @@ config:
       ## install path it can be set to e.g. `carbide-api`). DPUs reach
       ## this URL via the nameservers IP below.
       nicoApiUrl: ""
+      ## Optional PXE service URL for Kea hooks, separate from the firmware
+      ## boot-image URL. Empty or omitted leaves nico-pxe-service-url unset.
+      ## Passed unchanged; the hook rejects values longer than 245 bytes.
+      ## _NOTE_ This is a setting for a future feature and is not used right now.
+      nicoPxeServiceUrl: ""
       ## DHCPv4 hook metrics bind address and port; match metrics.port for Service scraping.
       nicoMetricsEndpoint: "[::]:1089"
       ## DNS server IP. Operators MUST override in site values.

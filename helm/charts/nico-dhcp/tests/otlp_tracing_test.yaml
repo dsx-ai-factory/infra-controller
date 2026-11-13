@@ -1,6 +1,7 @@
 suite: OTLP span export endpoint
 templates:
   - deployment.yaml
+  - configmap.yaml
   - deployment-v6.yaml
   - configmap-v6.yaml
 set:
