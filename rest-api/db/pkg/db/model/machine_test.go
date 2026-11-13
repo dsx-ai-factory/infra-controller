@@ -7,6 +7,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"slices"
 	"testing"
 	"time"
 
@@ -700,6 +701,81 @@ func TestMachineSQLDAO_GetCountByStatus(t *testing.T) {
 				span := otrace.SpanFromContext(ctx)
 				assert.True(t, span.SpanContext().IsValid())
 			}
+		})
+	}
+}
+
+func TestMachineSQLDAO_GetAllIDs(t *testing.T) {
+	ctx := context.Background()
+	dbSession := testInstanceTypeInitDB(t)
+	defer dbSession.Close()
+	testMachineSetupSchema(t, dbSession)
+
+	msd := NewMachineDAO(dbSession)
+	mcd := NewMachineCapabilityDAO(dbSession)
+
+	ip, site, it := testMachineInstanceTypeBuildInstanceType(t, dbSession, "sm.x86")
+	ip2, site2, _ := testMachineInstanceTypeBuildInstanceType(t, dbSession, "med.x86")
+
+	siteMachineIDs := []string{}
+	for range 3 {
+		siteMachineIDs = append(siteMachineIDs, testMachineBuildMachine(t, dbSession, ip.ID, site.ID, &it.ID, nil).ID)
+	}
+	slices.Sort(siteMachineIDs)
+	testMachineBuildMachine(t, dbSession, ip2.ID, site2.ID, nil, nil)
+
+	deletedMachine := testMachineBuildMachine(t, dbSession, ip.ID, site.ID, nil, nil)
+	require.NoError(t, msd.Delete(ctx, nil, deletedMachine.ID, false))
+	withDeletedIDs := append(slices.Clone(siteMachineIDs), deletedMachine.ID)
+	slices.Sort(withDeletedIDs)
+
+	// Two matching capabilities join the same Machine twice.
+	for _, name := range []string{"gpu-a", "gpu-b"} {
+		_, err := mcd.Create(ctx, nil, MachineCapabilityCreateInput{MachineID: &siteMachineIDs[0], InstanceTypeID: &it.ID, Type: MachineCapabilityTypeGPU, Name: name, Count: cutil.GetPtr(1)})
+		require.NoError(t, err)
+	}
+
+	tests := []struct {
+		desc     string
+		filter   MachineFilterInput
+		expected []string
+	}{
+		{
+			desc:     "Site filter excludes other Sites and soft-deleted Machines",
+			filter:   MachineFilterInput{SiteIDs: []uuid.UUID{site.ID}},
+			expected: siteMachineIDs,
+		},
+		{
+			desc:     "IncludeDeleted adds soft-deleted Machines",
+			filter:   MachineFilterInput{SiteIDs: []uuid.UUID{site.ID}, IncludeDeleted: true},
+			expected: withDeletedIDs,
+		},
+		{
+			desc:     "ExcludeMetadata does not affect the IDs",
+			filter:   MachineFilterInput{SiteIDs: []uuid.UUID{site.ID}, ExcludeMetadata: true},
+			expected: siteMachineIDs,
+		},
+		{
+			desc:     "capability filter returns each Machine once",
+			filter:   MachineFilterInput{CapabilityType: db.GetTypedStrPtr(MachineCapabilityTypeGPU)},
+			expected: siteMachineIDs[:1],
+		},
+		{
+			desc:     "no matching Machines returns an empty slice",
+			filter:   MachineFilterInput{SiteIDs: []uuid.UUID{uuid.New()}},
+			expected: []string{},
+		},
+		{
+			desc:     "empty Machine ID filter returns an empty slice",
+			filter:   MachineFilterInput{MachineIDs: []string{}},
+			expected: []string{},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.desc, func(t *testing.T) {
+			got, err := msd.GetAllIDs(ctx, nil, tc.filter)
+			require.NoError(t, err)
+			assert.Equal(t, tc.expected, got)
 		})
 	}
 }
