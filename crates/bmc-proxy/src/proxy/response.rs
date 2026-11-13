@@ -23,7 +23,7 @@ use std::borrow::Cow;
 use std::net::IpAddr;
 
 use axum::body::Body;
-use carbide_instrument::emit;
+use carbide_instrument::Instrumentation;
 use carbide_utils::redfish::redact_redfish_response_body;
 use http::{HeaderMap, Method, Response, StatusCode};
 use url::Url;
@@ -101,15 +101,27 @@ pub(super) enum PreparedResponseBody {
     Replaced(Body),
 }
 
+pub(super) struct ResponseContext<'a> {
+    pub(super) origins: &'a BmcOrigins,
+    pub(super) method: &'a Method,
+    pub(super) redirect_mode: RedirectMode,
+    pub(super) sensitive_values: &'a [String],
+    pub(super) instrumentation: &'a Instrumentation,
+}
+
 pub(super) fn build_response(
     status: reqwest::StatusCode,
     headers: &reqwest::header::HeaderMap,
     body: PreparedResponseBody,
-    origins: &BmcOrigins,
-    method: &Method,
-    redirect_mode: RedirectMode,
-    sensitive_values: &[String],
+    context: ResponseContext<'_>,
 ) -> Response<Body> {
+    let ResponseContext {
+        origins,
+        method,
+        redirect_mode,
+        sensitive_values,
+        instrumentation,
+    } = context;
     // A 3xx redirect with any malformed, unsafe, or duplicate `Location`
     // becomes a 502. Other responses keep their status and relay at most one
     // safe `Location`. Inspect all values so a safe first value cannot mask an
@@ -128,7 +140,7 @@ pub(super) fn build_response(
             RedirectLocation::Suppressed(reason, target) => (reason, target),
         };
         if is_redirect {
-            emit(RedirectObserved {
+            instrumentation.emit(RedirectObserved {
                 mode: redirect_mode,
                 status: RedirectStatus::from(status),
                 target,
@@ -160,7 +172,7 @@ pub(super) fn build_response(
     if let Some((relative, target)) = validated_location {
         response = response.header(reqwest::header::LOCATION, relative);
         if is_redirect {
-            emit(RedirectObserved {
+            instrumentation.emit(RedirectObserved {
                 mode: redirect_mode,
                 status: RedirectStatus::from(status),
                 target,
@@ -384,7 +396,7 @@ mod tests {
 
     use super::{
         BmcOrigins, MAX_REDACTABLE_RESPONSE_BODY_SIZE, OMITTED_BMC_ERROR_RESPONSE,
-        PreparedResponseBody, RedirectLocation, RedirectSuppressionReason,
+        PreparedResponseBody, RedirectLocation, RedirectSuppressionReason, ResponseContext,
         build_response as build_proxy_response, prepare_response_body, redirect_location,
     };
     use crate::config::RedirectMode;
@@ -411,10 +423,13 @@ mod tests {
             status,
             headers,
             body,
-            &origins("https://192.0.2.5/redfish/v1"),
-            &Method::GET,
-            RedirectMode::FollowSameOrigin,
-            &[],
+            ResponseContext {
+                origins: &origins("https://192.0.2.5/redfish/v1"),
+                method: &Method::GET,
+                redirect_mode: RedirectMode::FollowSameOrigin,
+                sensitive_values: &[],
+                instrumentation: &carbide_instrument::Instrumentation::global(),
+            },
         )
     }
 
@@ -555,10 +570,13 @@ mod tests {
             reqwest::StatusCode::TEMPORARY_REDIRECT,
             &headers,
             PreparedResponseBody::Unchanged(Body::empty()),
-            &origins("https://192.0.2.5/redfish/v1"),
-            &Method::GET,
-            RedirectMode::ReturnToClient,
-            &[],
+            ResponseContext {
+                origins: &origins("https://192.0.2.5/redfish/v1"),
+                method: &Method::GET,
+                redirect_mode: RedirectMode::ReturnToClient,
+                sensitive_values: &[],
+                instrumentation: &carbide_instrument::Instrumentation::global(),
+            },
         );
 
         assert_eq!(response.status(), StatusCode::TEMPORARY_REDIRECT);
@@ -595,10 +613,13 @@ mod tests {
                 reqwest::StatusCode::FOUND,
                 &headers,
                 PreparedResponseBody::Unchanged(Body::empty()),
-                &origins("https://192.0.2.5/redfish/v1"),
-                &Method::GET,
-                RedirectMode::FollowSameOrigin,
-                &[],
+                ResponseContext {
+                    origins: &origins("https://192.0.2.5/redfish/v1"),
+                    method: &Method::GET,
+                    redirect_mode: RedirectMode::FollowSameOrigin,
+                    sensitive_values: &[],
+                    instrumentation: &carbide_instrument::Instrumentation::global(),
+                },
             ));
         });
         let response = response.expect("response built");
@@ -657,10 +678,13 @@ mod tests {
                     reqwest::StatusCode::FOUND,
                     &headers,
                     PreparedResponseBody::Unchanged(Body::empty()),
-                    &origins("https://192.0.2.5/redfish/v1"),
-                    &Method::GET,
-                    mode,
-                    &sensitive_values,
+                    ResponseContext {
+                        origins: &origins("https://192.0.2.5/redfish/v1"),
+                        method: &Method::GET,
+                        redirect_mode: mode,
+                        sensitive_values: &sensitive_values,
+                        instrumentation: &carbide_instrument::Instrumentation::global(),
+                    },
                 ));
             });
             let redirect = redirect.expect("response built");
@@ -688,10 +712,13 @@ mod tests {
                 reqwest::StatusCode::CREATED,
                 &headers,
                 PreparedResponseBody::Unchanged(Body::empty()),
-                &origins("https://192.0.2.5/redfish/v1"),
-                &Method::POST,
-                mode,
-                &sensitive_values,
+                ResponseContext {
+                    origins: &origins("https://192.0.2.5/redfish/v1"),
+                    method: &Method::POST,
+                    redirect_mode: mode,
+                    sensitive_values: &sensitive_values,
+                    instrumentation: &carbide_instrument::Instrumentation::global(),
+                },
             );
             assert_eq!(created.status(), StatusCode::CREATED);
             assert!(!created.headers().contains_key(reqwest::header::LOCATION));
@@ -715,10 +742,13 @@ mod tests {
             reqwest::StatusCode::FOUND,
             &headers,
             PreparedResponseBody::Unchanged(Body::empty()),
-            &origins("https://192.0.2.5/redfish/v1"),
-            &Method::GET,
-            RedirectMode::ReturnToClient,
-            &[],
+            ResponseContext {
+                origins: &origins("https://192.0.2.5/redfish/v1"),
+                method: &Method::GET,
+                redirect_mode: RedirectMode::ReturnToClient,
+                sensitive_values: &[],
+                instrumentation: &carbide_instrument::Instrumentation::global(),
+            },
         );
 
         assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
@@ -754,10 +784,13 @@ mod tests {
             reqwest::StatusCode::FOUND,
             &headers,
             PreparedResponseBody::Unchanged(Body::empty()),
-            &origins("https://192.0.2.5/redfish/v1"),
-            &Method::GET,
-            RedirectMode::ReturnToClient,
-            &[],
+            ResponseContext {
+                origins: &origins("https://192.0.2.5/redfish/v1"),
+                method: &Method::GET,
+                redirect_mode: RedirectMode::ReturnToClient,
+                sensitive_values: &[],
+                instrumentation: &carbide_instrument::Instrumentation::global(),
+            },
         );
         assert_eq!(redirect.status(), StatusCode::BAD_GATEWAY);
         assert!(!redirect.headers().contains_key(reqwest::header::LOCATION));
@@ -778,10 +811,13 @@ mod tests {
             reqwest::StatusCode::CREATED,
             &headers,
             PreparedResponseBody::Unchanged(Body::empty()),
-            &origins("https://192.0.2.5/redfish/v1"),
-            &Method::POST,
-            RedirectMode::ReturnToClient,
-            &[],
+            ResponseContext {
+                origins: &origins("https://192.0.2.5/redfish/v1"),
+                method: &Method::POST,
+                redirect_mode: RedirectMode::ReturnToClient,
+                sensitive_values: &[],
+                instrumentation: &carbide_instrument::Instrumentation::global(),
+            },
         );
         assert_eq!(created.status(), StatusCode::CREATED);
         assert_eq!(
@@ -822,59 +858,62 @@ mod tests {
     #[test]
     fn non_redirect_response_keeps_its_status_and_withholds_external_location() {
         value_scenarios!(
-            run = |locations: &[&str]| {
-                let metrics = MetricsCapture::start();
-                let mut headers = HeaderMap::new();
-                for location in locations {
-                    headers.append(
-                        reqwest::header::LOCATION,
-                        HeaderValue::from_str(location).expect("Location header"),
-                    );
-                }
+                    run = |locations: &[&str]| {
+                        let metrics = MetricsCapture::start();
+                        let mut headers = HeaderMap::new();
+                        for location in locations {
+                            headers.append(
+                                reqwest::header::LOCATION,
+                                HeaderValue::from_str(location).expect("Location header"),
+                            );
+                        }
 
-                let response = build_proxy_response(
-                    reqwest::StatusCode::CREATED,
-                    &headers,
-                    PreparedResponseBody::Unchanged(Body::empty()),
-                    &origins("https://192.0.2.5/redfish/v1"),
-                    &Method::POST,
-                    RedirectMode::FollowSameOrigin,
-                    &[],
-                );
-
-                assert_eq!(response.status(), StatusCode::CREATED);
-                assert_eq!(
-                    metrics.counter_delta(
-                        "carbide_bmc_proxy_redirects_total",
-                        &[
-                            ("mode", "follow_same_origin"),
-                            ("status", "other"),
-                            ("target", "cross_origin"),
-                            ("disposition", "rejected"),
-                        ],
-                    ),
-                    0.0
-                );
-                response
-                    .headers()
-                    .get_all(reqwest::header::LOCATION)
-                    .iter()
-                    .map(|value| value.to_str().expect("relative Location").to_owned())
-                    .collect::<Vec<_>>()
-            };
-
-            "external Location is withheld" {
-                &["https://example.com/private"][..] => Vec::<String>::new(),
-            }
-
-            "safe Location survives surrounding unsafe values" {
-                &[
-                    "https://example.com/private",
-                    "https://192.0.2.5/redfish/v1/Systems/1",
-                    "https://example.com/other",
-                ][..] => vec!["/redfish/v1/Systems/1".to_string()],
-            }
+                        let response = build_proxy_response(
+        reqwest::StatusCode::CREATED,
+        &headers,
+        PreparedResponseBody::Unchanged(Body::empty()),
+        ResponseContext {
+        origins: &origins("https://192.0.2.5/redfish/v1"),
+        method: &Method::POST,
+        redirect_mode: RedirectMode::FollowSameOrigin,
+        sensitive_values: &[],
+        instrumentation: &carbide_instrument::Instrumentation::global(),
+        },
         );
+
+                        assert_eq!(response.status(), StatusCode::CREATED);
+                        assert_eq!(
+                            metrics.counter_delta(
+                                "carbide_bmc_proxy_redirects_total",
+                                &[
+                                    ("mode", "follow_same_origin"),
+                                    ("status", "other"),
+                                    ("target", "cross_origin"),
+                                    ("disposition", "rejected"),
+                                ],
+                            ),
+                            0.0
+                        );
+                        response
+                            .headers()
+                            .get_all(reqwest::header::LOCATION)
+                            .iter()
+                            .map(|value| value.to_str().expect("relative Location").to_owned())
+                            .collect::<Vec<_>>()
+                    };
+
+                    "external Location is withheld" {
+                        &["https://example.com/private"][..] => Vec::<String>::new(),
+                    }
+
+                    "safe Location survives surrounding unsafe values" {
+                        &[
+                            "https://example.com/private",
+                            "https://192.0.2.5/redfish/v1/Systems/1",
+                            "https://example.com/other",
+                        ][..] => vec!["/redfish/v1/Systems/1".to_string()],
+                    }
+                );
     }
 
     #[tokio::test]
