@@ -273,6 +273,7 @@ pub fn get() -> CarbideConfig {
             rack_firmware_reprovisioning_enabled: false,
             controller: StateControllerConfig::default(),
         },
+        nvlink_domain_state_controller: Default::default(),
         rack_state_controller: RackStateControllerConfig {
             controller: StateControllerConfig::default(),
             nmx_cluster_switch_mtls_services: vec![],

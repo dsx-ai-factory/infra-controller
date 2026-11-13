@@ -51,6 +51,7 @@ use carbide_machine_controller::per_object::MachinePerObjectInfo;
 use carbide_network_segment_controller::context::NetworkSegmentStateHandlerServices;
 use carbide_network_segment_controller::handler::NetworkSegmentStateHandler;
 use carbide_network_segment_controller::io::NetworkSegmentStateControllerIO;
+use carbide_nvlink_domain_controller::{NvLinkDomainStateControllerIO, NvLinkDomainStateHandler};
 use carbide_nvlink_manager::{NvLinkManager, NvLinkManagerArgs};
 use carbide_power_shelf_controller::context::PowerShelfStateHandlerServices;
 use carbide_power_shelf_controller::handler::PowerShelfStateHandler;
@@ -2120,6 +2121,7 @@ async fn initialize_and_start_controllers<'a>(
         &carbide_config.extension_service_state_controller.controller,
         &carbide_config.spdm_state_controller.controller,
         &carbide_config.ib_partition_state_controller.controller,
+        &carbide_config.nvlink_domain_state_controller.controller,
     ];
 
     // Cross-controller registry feeding the per-object health and state
@@ -2510,6 +2512,17 @@ async fn initialize_and_start_controllers<'a>(
         .state_handler(Arc::new(RackStateHandler::default()))
         .build_and_spawn(join_set, cancel_token.clone())
         .expect("Unable to build RackStateController");
+
+    StateController::<NvLinkDomainStateControllerIO>::builder()
+        .database(db_pool.clone(), work_lock_manager_handle.clone())
+        .meter("carbide_nvlink_domains", meter.clone())
+        .processor_id(state_controller_id.clone())
+        .services(Arc::new(db_pool.clone()))
+        .per_object_state_metrics(per_object_state_recorder("nvlink_domain"))
+        .iteration_config((&carbide_config.nvlink_domain_state_controller.controller).into())
+        .state_handler(Arc::new(NvLinkDomainStateHandler))
+        .build_and_spawn(join_set, cancel_token.clone())
+        .expect("Unable to build NvLinkDomainStateController");
 
     StateController::<SwitchStateControllerIO>::builder()
         .database(db_pool.clone(), work_lock_manager_handle.clone())

@@ -63,6 +63,8 @@ pub enum StateHistoryTableId {
     IbPartition,
     PowerShelf,
     Rack,
+    /// NVLink Domain lifecycle transitions.
+    NvLinkDomain,
     SitePrefix,
     Switch,
     ExtensionService,
@@ -78,6 +80,7 @@ impl StateHistoryTableId {
             StateHistoryTableId::IbPartition => "ib_partition_state_history",
             StateHistoryTableId::PowerShelf => "power_shelf_state_history",
             StateHistoryTableId::Rack => "rack_state_history",
+            StateHistoryTableId::NvLinkDomain => "nvlink_domain_state_history",
             StateHistoryTableId::SitePrefix => "site_prefix_state_history",
             StateHistoryTableId::Switch => "switch_state_history",
             StateHistoryTableId::ExtensionService => "extension_service_state_history",
@@ -200,7 +203,7 @@ mod tests {
 
     use super::{StateHistoryTableId, persist};
 
-    const TABLES: [StateHistoryTableId; 10] = [
+    const TABLES: [StateHistoryTableId; 11] = [
         StateHistoryTableId::Machine,
         StateHistoryTableId::NetworkSegment,
         StateHistoryTableId::VpcPrefix,
@@ -208,6 +211,7 @@ mod tests {
         StateHistoryTableId::IbPartition,
         StateHistoryTableId::PowerShelf,
         StateHistoryTableId::Rack,
+        StateHistoryTableId::NvLinkDomain,
         StateHistoryTableId::SitePrefix,
         StateHistoryTableId::Switch,
         StateHistoryTableId::ExtensionService,

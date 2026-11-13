@@ -1182,7 +1182,8 @@ type ForgeClient interface {
 	// or validate physical NVLink connectivity. A missing RackGroup returns NOT_FOUND.
 	// Positions already claimed by another domain return ALREADY_EXISTS.
 	CreateNvLinkDomain(ctx context.Context, in *CreateNvLinkDomainRequest, opts ...grpc.CallOption) (*NvLinkDomain, error)
-	// Delete only the declaration and release its positions; no hardware operations occur.
+	// Delete an unadopted declaration and release its positions; no hardware operations occur.
+	// Controller-owned domains are marked for asynchronous deletion and retain their positions.
 	// Missing declarations return NOT_FOUND. Observed domains and health reports are untouched.
 	DeleteNvLinkDomain(ctx context.Context, in *NvLinkDomainRequest, opts ...grpc.CallOption) (*emptypb.Empty, error)
 	GetNvLinkDomain(ctx context.Context, in *NvLinkDomainRequest, opts ...grpc.CallOption) (*NvLinkDomain, error)
@@ -8087,7 +8088,8 @@ type ForgeServer interface {
 	// or validate physical NVLink connectivity. A missing RackGroup returns NOT_FOUND.
 	// Positions already claimed by another domain return ALREADY_EXISTS.
 	CreateNvLinkDomain(context.Context, *CreateNvLinkDomainRequest) (*NvLinkDomain, error)
-	// Delete only the declaration and release its positions; no hardware operations occur.
+	// Delete an unadopted declaration and release its positions; no hardware operations occur.
+	// Controller-owned domains are marked for asynchronous deletion and retain their positions.
 	// Missing declarations return NOT_FOUND. Observed domains and health reports are untouched.
 	DeleteNvLinkDomain(context.Context, *NvLinkDomainRequest) (*emptypb.Empty, error)
 	GetNvLinkDomain(context.Context, *NvLinkDomainRequest) (*NvLinkDomain, error)
