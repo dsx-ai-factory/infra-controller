@@ -13729,9 +13729,12 @@ type VpcConfig struct {
 	// `VpcUpdateRequest`. Other virtualization types remain outside that support
 	// boundary. Core reports this field explicitly. An absent value indicates a
 	// response from a Core version that predates SLAAC support.
-	SlaacEnabled  *bool `protobuf:"varint,10,opt,name=slaac_enabled,json=slaacEnabled,proto3,oneof" json:"slaac_enabled,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	SlaacEnabled *bool `protobuf:"varint,10,opt,name=slaac_enabled,json=slaacEnabled,proto3,oneof" json:"slaac_enabled,omitempty"`
+	// Private DNS zone this VPC holds, as an FQDN including the trailing dot.
+	// Unset means that the VPC holds no private DNS zone.
+	PrivateDnsZone *string `protobuf:"bytes,12,opt,name=private_dns_zone,json=privateDnsZone,proto3,oneof" json:"private_dns_zone,omitempty"`
+	unknownFields  protoimpl.UnknownFields
+	sizeCache      protoimpl.SizeCache
 }
 
 func (x *VpcConfig) Reset() {
@@ -13832,6 +13835,13 @@ func (x *VpcConfig) GetSlaacEnabled() bool {
 		return *x.SlaacEnabled
 	}
 	return false
+}
+
+func (x *VpcConfig) GetPrivateDnsZone() string {
+	if x != nil && x.PrivateDnsZone != nil {
+		return *x.PrivateDnsZone
+	}
+	return ""
 }
 
 type VpcStatus struct {
@@ -82420,7 +82430,7 @@ const file_nico_nico_proto_rawDesc = "" +
 	"\vaccess_tier\x18\t \x01(\rR\n" +
 	"accessTier\x12c\n" +
 	"\"route_targets_on_exports_by_prefix\x18\n" +
-	" \x03(\v2\x18.forge.PrefixRouteTargetR\x1drouteTargetsOnExportsByPrefix\"\x80\a\n" +
+	" \x03(\v2\x18.forge.PrefixRouteTargetR\x1drouteTargetsOnExportsByPrefix\"\xc4\a\n" +
 	"\tVpcConfig\x124\n" +
 	"\x16tenant_organization_id\x18\x01 \x01(\tR\x14tenantOrganizationId\x12-\n" +
 	"\x10tenant_keyset_id\x18\x02 \x01(\tH\x00R\x0etenantKeysetId\x88\x01\x01\x12a\n" +
@@ -82432,7 +82442,8 @@ const file_nico_nico_proto_rawDesc = "" +
 	"\x19routing_profile_overrides\x18\b \x01(\v2!.forge.VpcRoutingProfileOverridesH\x06R\x17routingProfileOverrides\x88\x01\x01\x125\n" +
 	"\x14power_resource_group\x18\t \x01(\tH\aR\x12powerResourceGroup\x88\x01\x01\x12(\n" +
 	"\rslaac_enabled\x18\n" +
-	" \x01(\bH\bR\fslaacEnabled\x88\x01\x01B\x13\n" +
+	" \x01(\bH\bR\fslaacEnabled\x88\x01\x01\x12-\n" +
+	"\x10private_dns_zone\x18\f \x01(\tH\tR\x0eprivateDnsZone\x88\x01\x01B\x13\n" +
 	"\x11_tenant_keyset_idB\x1e\n" +
 	"\x1c_network_virtualization_typeB\x1c\n" +
 	"\x1a_network_security_group_idB&\n" +
@@ -82441,7 +82452,8 @@ const file_nico_nico_proto_rawDesc = "" +
 	"\x15_routing_profile_typeB\x1c\n" +
 	"\x1a_routing_profile_overridesB\x17\n" +
 	"\x15_power_resource_groupB\x10\n" +
-	"\x0e_slaac_enabled\"\xac\x01\n" +
+	"\x0e_slaac_enabledB\x13\n" +
+	"\x11_private_dns_zone\"\xac\x01\n" +
 	"\tVpcStatus\x12\x15\n" +
 	"\x03vni\x18\x01 \x01(\rH\x00R\x03vni\x88\x01\x01\x12b\n" +
 	"\x19effective_routing_profile\x18\x02 \x01(\v2!.forge.VpcEffectiveRoutingProfileH\x01R\x17effectiveRoutingProfile\x88\x01\x01B\x06\n" +

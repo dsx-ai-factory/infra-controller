@@ -29,9 +29,11 @@ use carbide_resource_pool::{
 use carbide_uuid::network_security_group::NetworkSecurityGroupId;
 use carbide_uuid::vpc::VpcId;
 use config_version::ConfigVersion;
+use db::db_read::DbReader;
 use db::resource_pool::{ResourcePoolAllocationNotOwned, ResourcePoolDatabaseError};
 use db::vpc::{self};
 use db::{self, ConditionalWrite, ObjectColumnFilter, network_security_group};
+use model::dns::DnsZone;
 use model::resource_pool;
 use model::tenant::{InvalidTenantOrg, Tenant};
 use model::vpc::{
@@ -222,6 +224,7 @@ async fn create_vpc(
                 // Resolve the selected profile before committing its allocated VNI.
                 vpc_to_rpc(
                     db::vpc::persist(new_vpc, VpcStatus { vni: Some(vni) }, &mut txn).await?,
+                    None,
                     api.runtime_config.fnn.as_ref(),
                     EffectiveProfileErrorPolicy::Reject(RouteTargetResolutionSource::ServerState),
                 )?
@@ -403,6 +406,7 @@ async fn finish_create(
     )?;
     vpc_to_rpc(
         vpc,
+        None,
         api.runtime_config.fnn.as_ref(),
         EffectiveProfileErrorPolicy::Reject(resolution_source),
     )
@@ -528,8 +532,10 @@ pub(crate) async fn update(
     } else {
         EffectiveProfileErrorPolicy::OmitRetained
     };
+    let private_dns_zone = find_private_dns_zone(&mut txn, vpc.id).await?;
     let rpc_vpc = vpc_to_rpc(
         vpc,
+        private_dns_zone,
         api.runtime_config.fnn.as_ref(),
         effective_profile_error_policy,
     )?;
@@ -1201,8 +1207,10 @@ pub(crate) async fn release_inactive_vni(
             vpc.version =
                 db::vpc::increment_vpc_version(&mut txn, vpc_id, expected_version).await?;
 
+            let private_dns_zone = find_private_dns_zone(&mut txn, vpc_id).await?;
             let rpc_vpc = vpc_to_rpc(
                 vpc,
+                private_dns_zone,
                 api.runtime_config.fnn.as_ref(),
                 EffectiveProfileErrorPolicy::OmitRetained,
             )?;
@@ -1666,13 +1674,17 @@ pub(crate) async fn find_by_ids(
         &api.database_connection,
         ObjectColumnFilter::List(vpc::IdColumn, &vpc_ids),
     )
-    .await;
+    .await?;
 
-    let vpcs = db_vpcs?
+    let mut private_dns_zones =
+        db::vpc::find_private_dns_zones_by_vpc_ids(&api.database_connection, &vpc_ids).await?;
+    let vpcs = db_vpcs
         .into_iter()
         .map(|vpc| {
+            let private_dns_zone = private_dns_zones.remove(&vpc.id);
             vpc_to_rpc(
                 vpc,
+                private_dns_zone,
                 api.runtime_config.fnn.as_ref(),
                 EffectiveProfileErrorPolicy::OmitRetained,
             )
@@ -1849,13 +1861,25 @@ fn route_target_vpc_vni(vpc: &model::vpc::Vpc) -> Result<Option<u32>, CarbideErr
         })
 }
 
-/// Converts a persisted VPC to RPC and populates its runtime-derived effective routing profile.
+/// Returns the private DNS zone the VPC holds, or `None` if it holds none.
+async fn find_private_dns_zone(
+    txn: impl DbReader<'_>,
+    vpc_id: VpcId,
+) -> Result<Option<DnsZone>, CarbideError> {
+    Ok(db::vpc::find_private_dns_zones_by_vpc_ids(txn, &[vpc_id])
+        .await?
+        .remove(&vpc_id))
+}
+
+/// Converts a persisted VPC to RPC and populates its private DNS zone and its
+/// runtime-derived effective routing profile.
 ///
 /// The effective profile is omitted when routing profiles are unsupported, FNN
 /// is disabled, the named profile is missing, or retained policy is incompatible
 /// and the caller permits omission.
 fn vpc_to_rpc(
     vpc: model::vpc::Vpc,
+    private_dns_zone: Option<DnsZone>,
     fnn_config: Option<&FnnConfig>,
     error_policy: EffectiveProfileErrorPolicy,
 ) -> Result<rpc::Vpc, CarbideError> {
@@ -1894,6 +1918,8 @@ fn vpc_to_rpc(
     };
 
     let mut rpc_vpc = rpc::Vpc::from(vpc);
+    rpc_vpc.config.get_or_insert_default().private_dns_zone =
+        private_dns_zone.map(|zone| zone.name.to_string());
     rpc_vpc
         .status
         .get_or_insert_default()
@@ -2253,6 +2279,7 @@ mod tests {
         // Convert the retained row through the effective-profile response path.
         let error = vpc_to_rpc(
             retained_vpc,
+            None,
             Some(&fnn_config),
             EffectiveProfileErrorPolicy::OmitRetained,
         )

@@ -34,7 +34,7 @@ pub use metadata::DomainMetadata;
 pub use resource_record::ResourceRecord;
 pub use snapshot::SoaSnapshot;
 pub use ttl::{ZoneTtl, ZoneTtlError};
-pub use zone::{Fqdn, NameError};
+pub use zone::{DnsZone, Fqdn, NameError};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Domain {

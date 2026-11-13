@@ -156,6 +156,18 @@ fn forge_vpc_config(vpc: &rpc::forge::Vpc) -> &rpc::forge::VpcConfig {
         .expect("structured config must be populated")
 }
 
+/// Gives the VPC the private DNS zone `corp.example.` by writing its row directly.
+async fn insert_private_dns_zone(env: &TestEnv, vpc_id: VpcId) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "INSERT INTO dns_zones (vpc_id, name, primary_ns, contact, serial, minimum, soa_ttl) \
+         VALUES ($1, 'corp.example', 'ns1.corp.example', 'hostmaster.corp.example', 1, 30, 3600)",
+    )
+    .bind(vpc_id)
+    .execute(&env.pool)
+    .await?;
+    Ok(())
+}
+
 async fn find_test_vpc(env: &TestEnv, vpc_id: VpcId) -> Result<rpc::forge::Vpc, tonic::Status> {
     Ok(env
         .api
@@ -767,6 +779,53 @@ async fn vpc_creation_reports_allocator_override_failure_as_failed_precondition(
         .into_inner();
     assert!(found.vpcs.is_empty());
     assert_eq!(vpc_vni_pool_state(&env).await?, allocations_before);
+    Ok(())
+}
+
+/// A VPC reports the private DNS zone it holds, and reports none without one.
+#[crate::sqlx_test]
+async fn vpc_responses_report_private_dns_zone(pool: sqlx::PgPool) -> Result<(), eyre::Report> {
+    // Give one of two VPCs a zone by writing its row directly.
+    let env = create_test_env(pool).await;
+    let (with_zone, _) = create_fixture_vpc(&env, "with zone".to_string(), None, None).await;
+    let (without_zone, _) = create_fixture_vpc(&env, "without zone".to_string(), None, None).await;
+    insert_private_dns_zone(&env, with_zone).await?;
+
+    // Read both VPCs in one request, then update the one holding the zone.
+    let found: HashMap<_, _> = env
+        .api
+        .find_vpcs_by_ids(tonic::Request::new(rpc::forge::VpcsByIdsRequest {
+            vpc_ids: vec![with_zone, without_zone],
+        }))
+        .await?
+        .into_inner()
+        .vpcs
+        .into_iter()
+        .map(|vpc| (vpc.id.expect("found VPC ID"), vpc))
+        .collect();
+    let updated = env
+        .api
+        .update_vpc(tonic::Request::new(rpc::forge::VpcUpdateRequest {
+            id: Some(with_zone),
+            metadata: Some(rpc::forge::Metadata {
+                name: "renamed".to_string(),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }))
+        .await?
+        .into_inner()
+        .vpc
+        .expect("updated VPC");
+
+    // Each response carries the zone of the VPC that holds one, and only that VPC.
+    let zone = Some("corp.example.".to_string());
+    assert_eq!(forge_vpc_config(&found[&with_zone]).private_dns_zone, zone);
+    assert_eq!(
+        forge_vpc_config(&found[&without_zone]).private_dns_zone,
+        None
+    );
+    assert_eq!(forge_vpc_config(&updated).private_dns_zone, zone);
     Ok(())
 }
 
@@ -5041,6 +5100,8 @@ async fn release_vpc_inactive_vni_preserves_active_state_and_rejects_replay(
     ] {
         let (vpc_id, mut created) =
             create_fixture_vpc(&env, scenario.to_string(), None, None).await;
+        // The full config comparison below includes the private DNS zone.
+        insert_private_dns_zone(&env, vpc_id).await?;
 
         // Check configuration preservation with an attached NSG as well as
         // without one; the full config comparison below includes the NSG ID.
