@@ -194,11 +194,11 @@ class InventoryTests(unittest.TestCase):
         )
         self.assertEqual(
             _read_job_condition("rest", "build-and-push"),
-            "${{ !startsWith(github.ref, 'refs/heads/pull-request/') }}",
+            "${{ !startsWith(github.ref, 'refs/heads/pull-request/') && github.event_name != 'merge_group' }}"
         )
         self.assertEqual(
             _read_job_condition("rest", "build-and-push-pr"),
-            "${{ startsWith(github.ref, 'refs/heads/pull-request/') }}",
+            "${{ startsWith(github.ref, 'refs/heads/pull-request/') || github.event_name == 'merge_group' }}",
         )
 
     def test_publishing_checks_do_not_add_prerequisite_jobs_to_changes(self) -> None:

@@ -163,7 +163,7 @@ jobs:
   # push refs has to be expressed as two mutually exclusive jobs.
   build-and-push:
     name: Build and Push Docker Images
-    if: ${{ !startsWith(github.ref, 'refs/heads/pull-request/') }}
+    if: ${{ !startsWith(github.ref, 'refs/heads/pull-request/') && github.event_name != 'merge_group' }}
     needs:
       - prepare
       - lint-and-test
@@ -209,7 +209,7 @@ jobs:
   # when `push_enabled` is false either.
   build-and-push-pr:
     name: Build Docker Images
-    if: ${{ startsWith(github.ref, 'refs/heads/pull-request/') }}
+    if: ${{ startsWith(github.ref, 'refs/heads/pull-request/') || github.event_name == 'merge_group' }}
     needs:
       - prepare
     permissions:
