@@ -4463,9 +4463,14 @@ async fn handle_dpu_reprovision(
                     "Initiating BMC reset of lenovo machine"
                 );
 
-                let bmc = ctx.services.connect_bmc(&state.host_snapshot).await?;
+                // Connecting can itself need the Redfish service this works around, so a
+                // failed connection falls back to IPMI like a failed reset.
+                let redfish_result = match ctx.services.connect_bmc(&state.host_snapshot).await {
+                    Ok(bmc) => reset_bmc(&bmc).await.map_err(|error| error.to_string()),
+                    Err(error) => Err(error.to_string()),
+                };
 
-                if let Err(redfish_error) = reset_bmc(&bmc).await {
+                if let Err(redfish_error) = redfish_result {
                     tracing::warn!(
                         machine_id = %state.host_snapshot.id,
                         error = %redfish_error,
