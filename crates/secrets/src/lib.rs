@@ -17,6 +17,9 @@
 use std::fmt::Display;
 use std::sync::Arc;
 
+use tokio::task::JoinSet;
+use tokio_util::sync::CancellationToken;
+
 pub use crate::chained_reader::ChainedCredentialReader;
 /// Direct vault access for the narrow cases that need it: `CertificateProvider`
 /// (PKI), and the Transit KMS provider, which builds its own raw vault client
@@ -99,10 +102,13 @@ pub enum CertBackend {
 /// Vault never uses it. `spiffe` is the site's SPIFFE identity; a dedicated
 /// Vault issues certs under the same identity namespace as the rest of the
 /// deployment.
+/// `supervisor` applies only to a newly created dedicated client, with the lifecycle
+/// described by [`create_vault_client`]; shared clients retain their existing supervisor.
 pub fn create_certificate_provider(
     config: &CertificateConfig,
     shared_vault: Option<&Arc<ForgeVaultClient>>,
     spiffe: SpiffeIdentity,
+    supervisor: Option<(&mut JoinSet<()>, CancellationToken)>,
 ) -> eyre::Result<Arc<dyn CertificateProvider>> {
     match &config.backend {
         CertBackend::SharedVault => {
@@ -117,7 +123,7 @@ pub fn create_certificate_provider(
         }
         CertBackend::DedicatedVault(dedicated) => {
             let provider: Arc<dyn CertificateProvider> =
-                create_dedicated_vault_client(dedicated, spiffe)?;
+                create_dedicated_vault_client(dedicated, spiffe, supervisor)?;
             Ok(provider)
         }
     }
@@ -139,7 +145,7 @@ pub async fn create_credential_manager(
         ));
     }
 
-    let vault_client = create_vault_client(&config.vault)?;
+    let vault_client = create_vault_client(&config.vault, None)?;
     readers.push(Box::new(vault_client.clone()));
 
     let chained = ChainedCredentialReader::from(readers);
@@ -185,7 +191,7 @@ async fn create_credential_reader_with(
     }
 
     if vault_is_named(&config.vault, env_address) {
-        readers.push(Box::new(create_vault_client(&config.vault)?));
+        readers.push(Box::new(create_vault_client(&config.vault, None)?));
     }
 
     Ok(Arc::new(ChainedCredentialReader::from(readers)))

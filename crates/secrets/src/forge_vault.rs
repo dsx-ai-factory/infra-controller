@@ -29,7 +29,9 @@ use eyre::{ContextCompat, WrapErr, eyre};
 use opentelemetry::StringValue;
 use rand::RngExt;
 use tokio::sync::mpsc::{Receiver, Sender};
+use tokio::task::JoinSet;
 use tokio::time::sleep;
+use tokio_util::sync::CancellationToken;
 use vaultrs::api::kv2::requests::SetSecretRequestOptions;
 use vaultrs::api::pki::requests::GenerateCertificateRequest;
 use vaultrs::client::{
@@ -439,6 +441,8 @@ struct VaultRequestDuration {
 /// The one Vault metric that stays a hand-rolled OpenTelemetry instrument: a
 struct RefresherMessage {
     response_tx: tokio::sync::oneshot::Sender<Result<Arc<VaultClient>, eyre::Report>>,
+    #[cfg(test)]
+    panic_before_refresh: bool,
 }
 
 pub struct ForgeVaultClient {
@@ -630,6 +634,11 @@ async fn vault_refresher_loop(
 ) {
     let mut auth_status = ForgeVaultAuthenticationStatus::Initialized;
     while let Some(message) = vault_refresher_rx.recv().await {
+        #[cfg(test)]
+        assert!(
+            !message.panic_before_refresh,
+            "injected Vault refresher panic"
+        );
         match maybe_refresh_vault_client(&vault_client_config, auth_status).await {
             Ok((auth, client)) => {
                 message.response_tx.send(Ok(client.clone())).ok();
@@ -656,21 +665,38 @@ impl From<VaultClientSettingsBuilderError> for SecretsError {
 }
 
 impl ForgeVaultClient {
-    fn new(vault_client_config: ForgeVaultClientConfig) -> Self {
+    fn new(
+        vault_client_config: ForgeVaultClientConfig,
+        supervisor: Option<(&mut JoinSet<()>, CancellationToken)>,
+    ) -> eyre::Result<Self> {
         let (vault_refresher_tx, vault_refresher_rx) = tokio::sync::mpsc::channel(1);
-        let vault_client_config_clone = vault_client_config.clone();
-        tokio::spawn(async move {
-            vault_refresher_loop(vault_refresher_rx, vault_client_config_clone).await;
-        });
-        Self {
+        let refresher = vault_refresher_loop(vault_refresher_rx, vault_client_config.clone());
+        if let Some((join_set, cancel_token)) = supervisor {
+            join_set
+                .build_task()
+                .name("vault_token_refresher")
+                .spawn(async move {
+                    cancel_token.run_until_cancelled(refresher).await;
+                    // An import-only client can be dropped before API shutdown.
+                    // Normal completion must not trip the early-task-return guard.
+                    cancel_token.cancelled().await;
+                })?;
+        } else {
+            tokio::spawn(refresher);
+        }
+        Ok(Self {
             vault_client_config,
             vault_refresher_tx,
-        }
+        })
     }
 
     async fn vault_client(&self) -> Result<Arc<VaultClient>, eyre::Report> {
         let (tx, rx) = tokio::sync::oneshot::channel();
-        let message = RefresherMessage { response_tx: tx };
+        let message = RefresherMessage {
+            response_tx: tx,
+            #[cfg(test)]
+            panic_before_refresh: false,
+        };
 
         self.vault_refresher_tx
             .send(message)
@@ -1550,7 +1576,16 @@ fn normalize_vault_namespace(namespace: Option<String>) -> Option<String> {
     })
 }
 
-pub fn create_vault_client(vault_config: &VaultConfig) -> eyre::Result<Arc<ForgeVaultClient>> {
+/// Builds a Vault client with an optionally supervised token refresher.
+///
+/// A supervisor reports refresher panics through its task set. Its cancellation
+/// token stops the refresher even if clients remain; normal completion after the
+/// last client is dropped waits for cancellation before returning to the task set.
+/// With `None`, the refresher remains detached and exits when its client is dropped.
+pub fn create_vault_client(
+    vault_config: &VaultConfig,
+    supervisor: Option<(&mut JoinSet<()>, CancellationToken)>,
+) -> eyre::Result<Arc<ForgeVaultClient>> {
     let configured_ca_path = vault_config
         .vault_cacert()
         .unwrap_or_else(|_| DEFAULT_VAULT_CA_PATH.to_string());
@@ -1577,7 +1612,7 @@ pub fn create_vault_client(vault_config: &VaultConfig) -> eyre::Result<Arc<Forge
         vault_root_ca_path,
     };
 
-    let forge_vault_client = ForgeVaultClient::new(vault_client_config);
+    let forge_vault_client = ForgeVaultClient::new(vault_client_config, supervisor)?;
     Ok(Arc::new(forge_vault_client))
 }
 
@@ -1651,9 +1686,11 @@ impl std::fmt::Debug for DedicatedVaultConfig {
 /// settings, with NO environment-variable fallback for the connection fields.
 /// A missing required setting fails here, at startup, rather than silently
 /// inheriting the credential Vault's configuration.
+/// `supervisor` follows the lifecycle described by [`create_vault_client`].
 pub fn create_dedicated_vault_client(
     config: &DedicatedVaultConfig,
     spiffe: SpiffeIdentity,
+    supervisor: Option<(&mut JoinSet<()>, CancellationToken)>,
 ) -> eyre::Result<Arc<ForgeVaultClient>> {
     // Required fields are non-`Option`, but an empty string would still slip
     // through serde and build a client that fails confusingly on first use.
@@ -1706,7 +1743,10 @@ pub fn create_dedicated_vault_client(
         vault_root_ca_path,
     };
 
-    Ok(Arc::new(ForgeVaultClient::new(vault_client_config)))
+    Ok(Arc::new(ForgeVaultClient::new(
+        vault_client_config,
+        supervisor,
+    )?))
 }
 
 /// Build raw vaultrs client settings for a separate vault consumer (the
@@ -1754,14 +1794,18 @@ mod tests {
     use base64::Engine;
     use serde_json::json;
     use serial_test::serial;
+    use tokio::task::JoinSet;
+    use tokio::time::timeout;
+    use tokio_util::sync::CancellationToken;
     use vaultrs::client::VaultClient;
     use vaultrs::{kv2, pki};
 
     use super::{
-        DedicatedVaultConfig, ForgeVaultAuthenticationType, ForgeVaultClientConfig, PathExclusion,
-        SpiffeIdentity, VaultConfig, VaultTokenRefreshWindowObserved,
-        create_dedicated_vault_client, create_vault_client_settings, machine_spiffe_uri,
-        service_account_role_name_from_jwt, vault_path_exclusion,
+        DedicatedVaultConfig, ForgeVaultAuthenticationType, ForgeVaultClient,
+        ForgeVaultClientConfig, PathExclusion, RefresherMessage, SpiffeIdentity, VaultConfig,
+        VaultTokenRefreshWindowObserved, create_dedicated_vault_client,
+        create_vault_client_settings, machine_spiffe_uri, service_account_role_name_from_jwt,
+        vault_path_exclusion,
     };
     use crate::credentials::CredentialPrefix;
 
@@ -1998,7 +2042,7 @@ mod tests {
         ] {
             let mut config = dedicated_config();
             mutate(&mut config);
-            let err = match create_dedicated_vault_client(&config, test_spiffe()) {
+            let err = match create_dedicated_vault_client(&config, test_spiffe(), None) {
                 Ok(_) => panic!("empty required field must be rejected"),
                 Err(err) => err,
             };
@@ -2091,6 +2135,72 @@ mod tests {
             .expect("build Vault client settings");
 
         assert_eq!(settings.namespace.as_deref(), Some("admin/platform/nico"));
+    }
+
+    #[tokio::test]
+    async fn vault_refresher_panic_is_reported_to_supervisor() {
+        let mut join_set = JoinSet::new();
+        let client = ForgeVaultClient::new(
+            vault_client_config("http://127.0.0.1:8200".to_string(), None),
+            Some((&mut join_set, CancellationToken::new())),
+        )
+        .expect("create supervised Vault client");
+        let (response_tx, _response_rx) = tokio::sync::oneshot::channel();
+        assert!(
+            client
+                .vault_refresher_tx
+                .send(RefresherMessage {
+                    response_tx,
+                    panic_before_refresh: true,
+                })
+                .await
+                .is_ok()
+        );
+
+        let error = timeout(Duration::from_secs(5), join_set.join_next())
+            .await
+            .expect("refresher panic must reach the supervisor")
+            .expect("refresher must be registered")
+            .expect_err("injected refresher panic must fail the task");
+        assert!(error.is_panic());
+    }
+
+    #[tokio::test]
+    async fn vault_refresher_supervision_waits_for_shutdown() {
+        for (scenario, retain_client) in [
+            ("client released after import", false),
+            ("client retained through shutdown", true),
+        ] {
+            let mut join_set = JoinSet::new();
+            let cancel_token = CancellationToken::new();
+            let client = ForgeVaultClient::new(
+                vault_client_config("http://127.0.0.1:8200".to_string(), None),
+                Some((&mut join_set, cancel_token.clone())),
+            )
+            .expect("create supervised Vault client");
+            let client = if retain_client {
+                Some(client)
+            } else {
+                drop(client);
+                None
+            };
+
+            assert!(
+                timeout(Duration::from_millis(100), join_set.join_next())
+                    .await
+                    .is_err(),
+                "{scenario}: refresher must not report early completion"
+            );
+            cancel_token.cancel();
+            timeout(Duration::from_secs(5), join_set.join_next())
+                .await
+                .expect("shutdown must stop the refresher")
+                .expect("refresher must be registered")
+                .expect("shutdown must complete without panicking");
+            if let Some(client) = client {
+                assert!(client.vault_refresher_tx.is_closed(), "{scenario}");
+            }
+        }
     }
 
     #[tokio::test]
