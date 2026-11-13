@@ -431,8 +431,26 @@ required.
 This Role trusts NICo to read, list, create, and delete every Secret in the DPF
 namespace, including `bmc-shared-password` and registry credentials. NICo's cleanup
 code limits deletion to Secrets with the matching device label and a generated
-name (`<device-id>-initial` or `<device-id>-v<version>`). These ownership checks
-are enforced by NICo; Kubernetes RBAC grants access throughout the namespace.
+name (`<device-id>-initial` or `<device-id>-v<version>`). NICo enforces these
+ownership checks itself; Kubernetes RBAC grants access throughout the namespace.
+
+<Note>
+With DPF 26.8.0 or later (excluding prereleases of 26.8.0), NICo registers each
+new DPUDevice with its own immutable, version-labeled BMC credential Secret
+containing the DPU's established ingestion password, including retained
+credentials. NICo preserves existing DPUDevice credential references. Older DPF
+versions continue to use the shared BMC password.
+
+Reset, forced deletion, and decommissioning wait for the host's DPUNode,
+DPUDevices, and DPUs to drain before deleting its credential Secrets. Forced
+deletion can bypass this wait with `allow_delete_with_orphaned_dpf_crds`, leaving
+resources for manual cleanup.
+
+Registration fails if a Secret with the same name already exists, even when its
+contents match. If Secret creation succeeds but DPUDevice creation fails, retries
+remain blocked until you reset or force-delete the host and let credential Secret
+cleanup finish. NICo does not automatically adopt the leftover Secret.
+</Note>
 
 <Note>
 On chart-based deployments, this Role/RoleBinding is created by the
