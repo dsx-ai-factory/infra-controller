@@ -132,7 +132,8 @@ Every prefix in this table must be aligned to its mask and no two may overlap.
 - `setup`: `command` is the `setup.sh` command line the provider will run; `env` maps each
   variable to a plain string or to a secret source table such as `{from: env}`.
   The switches are read from the simple command that runs `setup.sh`: the script as the program,
-  or behind a wrapper (`env`, `sudo`, `nohup`, `time`, `timeout`, an interpreter) and its
+  or behind a wrapper (`env`, `sudo`, `nohup`, `time`, `timeout`, an interpreter, `bash -c '…'`
+  included) and its
   options, with assignments before either, after any `cd … &&`. A command that merely names it (`test -x ./setup.sh &&`) is not
   it; when no command qualifies, the first one naming it is read. A line that does not run
   `setup.sh` (a developer site deployed by other scripts) makes no decision and is not compared.

@@ -51,9 +51,52 @@ pub(crate) struct SetupCommand {
 /// separates words, single quotes keep everything, double quotes keep everything but
 /// allow backslash escapes, a backslash escapes the next character, a backslash before
 /// a newline joins the lines, and an unquoted `#` at a word boundary starts a comment.
-/// No expansion, no execution. An unterminated quote returns what was read so far and
-/// the error.
+/// Unquoted control operators and parentheses are words of their own, while a `$(…)`
+/// substitution stays inside its word; redirections and their targets are dropped. No expansion, no execution. An unterminated quote or a
+/// redirection without a target returns what was read so far and the error.
 pub(crate) fn shell_words(line: &str) -> (Vec<String>, Option<String>) {
+    /// Reads a parenthesised body verbatim into `word` up to and including the `)` that
+    /// closes it, honouring nested parentheses, quotes and backslash escapes, as in
+    /// `$(…)`, `>(…)` and `<(…)`. Returns whether the body was closed.
+    fn read_balanced(
+        chars: &mut std::iter::Peekable<std::str::Chars<'_>>,
+        word: &mut String,
+    ) -> bool {
+        let mut depth = 1usize;
+        while let Some(q) = chars.next() {
+            word.push(q);
+            match q {
+                '\\' => word.extend(chars.next()),
+                '\'' => {
+                    for n in chars.by_ref() {
+                        word.push(n);
+                        if n == '\'' {
+                            break;
+                        }
+                    }
+                }
+                '"' => {
+                    while let Some(n) = chars.next() {
+                        word.push(n);
+                        if n == '\\' {
+                            word.extend(chars.next());
+                        } else if n == '"' {
+                            break;
+                        }
+                    }
+                }
+                '(' => depth += 1,
+                ')' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return true;
+                    }
+                }
+                _ => {}
+            }
+        }
+        false
+    }
     let mut words = Vec::new();
     let mut word = String::new();
     let mut in_word = false;
@@ -96,6 +139,21 @@ pub(crate) fn shell_words(line: &str) -> (Vec<String>, Option<String>) {
                 }
                 None => in_word = true,
             },
+            // `>(…)` and `<(…)` are process substitutions: one word, kept verbatim, dropped
+            // like any other target when a redirection precedes it (`> >(tee log)`).
+            '<' | '>' if chars.peek() == Some(&'(') => {
+                if in_word {
+                    finish(&mut words, &mut word, &mut drop_next_word, &mut word_quoted);
+                }
+                chars.next();
+                word.push(c);
+                word.push('(');
+                if !read_balanced(&mut chars, &mut word) {
+                    error.get_or_insert_with(|| "unterminated process substitution".to_string());
+                }
+                in_word = true;
+                word_quoted = true;
+            }
             // Unquoted redirections (`>file`, `2>&1`, `&>file`, `<file`) end the word before
             // them and swallow their target; a leading descriptor number belongs to them.
             '<' | '>' => {
@@ -136,16 +194,26 @@ pub(crate) fn shell_words(line: &str) -> (Vec<String>, Option<String>) {
                 }
                 drop_next_word = true;
             }
-            // Unquoted control operators are words of their own, attached or not
-            // (`--skip-rms;` is the switch and then `;`).
-            ';' | '&' | '|' => {
+            // `$(…)` is part of its word, nesting included; it is kept verbatim, unexpanded.
+            '(' if in_word && word.ends_with('$') => {
+                word.push('(');
+                if !read_balanced(&mut chars, &mut word) {
+                    error.get_or_insert_with(|| "unterminated command substitution".to_string());
+                }
+            }
+            // Unquoted control operators and parentheses are words of their own, attached
+            // or not (`--skip-rms;` is the switch and then `;`, `--skip-rms)` likewise).
+            ';' | '&' | '|' | '(' | ')' => {
                 if in_word {
                     finish(&mut words, &mut word, &mut drop_next_word, &mut word_quoted);
                     in_word = false;
                 }
                 // A redirection with no target before the operator is the shell's error;
                 // the next command's first word is not it.
-                drop_next_word = false;
+                if drop_next_word {
+                    error.get_or_insert_with(|| "redirection without a target".to_string());
+                    drop_next_word = false;
+                }
                 let mut op = String::from(c);
                 if (c == '&' || c == '|') && chars.peek() == Some(&c) {
                     op.push(c);
@@ -217,6 +285,9 @@ pub(crate) fn shell_words(line: &str) -> (Vec<String>, Option<String>) {
     if in_word {
         finish(&mut words, &mut word, &mut drop_next_word, &mut word_quoted);
     }
+    if drop_next_word {
+        error.get_or_insert_with(|| "redirection without a target".to_string());
+    }
     (words, error)
 }
 
@@ -239,7 +310,7 @@ impl SetupCommand {
                     && !name.starts_with(|c: char| c.is_ascii_digit())
             })
         };
-        let is_operator = |w: &str| matches!(w, "&&" | "||" | ";" | "|" | "&");
+        let is_operator = |w: &str| matches!(w, "&&" | "||" | ";" | "|" | "&" | "(" | ")");
         fn basename(p: &str) -> &str {
             p.rsplit('/').next().unwrap_or(p)
         }
@@ -280,20 +351,80 @@ impl SetupCommand {
         };
         /// A simple command on the line that names setup.sh.
         struct Naming<'a> {
-            assignments: Vec<(&'a str, &'a str)>,
+            /// Assignments before `env` (or all of them without one): the environment the
+            /// command inherits, which `env -u` and `env -i` can take away.
+            inherited: Vec<(&'a str, &'a str)>,
+            /// Assignments on the `env` command line itself: added after the removals.
+            own: Vec<(&'a str, &'a str)>,
             args: Vec<&'a str>,
             invokes: bool,
             /// Variables `env -u` removes, and whether `env -i` clears the inherited ones.
             unset: Vec<&'a str>,
             clear_env: bool,
         }
+        // `bash -c '…'` in command position runs the string as a command line of its own:
+        // its words replace the interpreter's, every command inside inherits what stood
+        // before the interpreter (assignments, `env` controls, wrappers), and anything
+        // after the string is `$0` and positional parameters, not switches. A `bash`
+        // that is another command's argument is left alone.
+        let mut quoting_error = quoting_error;
+        let mut expanded: Vec<String> = Vec::with_capacity(words.len());
+        let mut i = 0;
+        while i < words.len() {
+            let start = expanded
+                .iter()
+                .rposition(|w| is_operator(w))
+                .map_or(0, |p| p + 1);
+            let before: Vec<&str> = expanded[start..]
+                .iter()
+                .map(String::as_str)
+                .filter(|w| !is_assignment(w))
+                .collect();
+            let interpreter = matches!(basename(&words[i]), "bash" | "sh" | "dash" | "zsh");
+            if interpreter
+                && is_invocation(&before)
+                && words.get(i + 1).map(String::as_str) == Some("-c")
+                && let Some(script) = words.get(i + 2)
+            {
+                let (inner, err) = shell_words(script);
+                if quoting_error.is_none() {
+                    quoting_error = err;
+                }
+                let outer: Vec<String> = expanded.drain(start..).collect();
+                let mut at_segment_start = true;
+                for w in inner {
+                    if at_segment_start && !is_operator(&w) {
+                        expanded.extend(outer.iter().cloned());
+                    }
+                    at_segment_start = is_operator(&w);
+                    expanded.push(w);
+                }
+                i += 3;
+                while i < words.len() && !is_operator(&words[i]) {
+                    i += 1;
+                }
+            } else {
+                expanded.push(words[i].clone());
+                i += 1;
+            }
+        }
+        let words = expanded;
         let naming: Vec<Naming> = words
             .split(|w| is_operator(w))
             .filter_map(|seg| {
                 let at = seg
                     .iter()
                     .position(|w| !is_assignment(w) && basename(w) == "setup.sh")?;
-                let assignments: Vec<(&str, &str)> = seg[..at]
+                let env_at = seg[..at]
+                    .iter()
+                    .position(|w| !is_assignment(w) && basename(w) == "env")
+                    .unwrap_or(at);
+                let inherited: Vec<(&str, &str)> = seg[..env_at]
+                    .iter()
+                    .filter(|w| is_assignment(w))
+                    .filter_map(|w| w.split_once('='))
+                    .collect();
+                let own: Vec<(&str, &str)> = seg[env_at..at]
                     .iter()
                     .filter(|w| is_assignment(w))
                     .filter_map(|w| w.split_once('='))
@@ -320,7 +451,8 @@ impl SetupCommand {
                     }
                 }
                 Some(Naming {
-                    assignments,
+                    inherited,
+                    own,
                     args,
                     invokes: is_invocation(&before),
                     unset,
@@ -337,22 +469,23 @@ impl SetupCommand {
         let words: Vec<&str> = segment.map(|n| n.args.clone()).unwrap_or_default();
         // A variable as setup.sh will see it: an assignment on the line wins; otherwise
         // `setup.env`, unless `env -u` removed it or `env -i` cleared the environment.
+        // A variable as setup.sh will see it: an assignment on the `env` line itself wins;
+        // then, unless `env -u` removed it or `env -i` cleared the environment, an
+        // assignment before `env` or the value in `setup.env`.
+        fn last<'a>(list: &[(&'a str, &'a str)], name: &str) -> Option<&'a str> {
+            list.iter().rev().find(|(k, _)| *k == name).map(|(_, v)| *v)
+        }
         let plain = |name: &str| {
             let n = segment?;
-            n.assignments
-                .iter()
-                .rev()
-                .find(|(k, _)| *k == name)
-                .map(|(_, v)| *v)
-                .or_else(|| {
-                    if n.clear_env || n.unset.contains(&name) {
-                        return None;
-                    }
-                    match setup.env.get(name) {
-                        Some(EnvValue::Plain(v)) => Some(v.as_str()),
-                        _ => None,
-                    }
+            last(&n.own, name).or_else(|| {
+                if n.clear_env || n.unset.contains(&name) {
+                    return None;
+                }
+                last(&n.inherited, name).or_else(|| match setup.env.get(name) {
+                    Some(EnvValue::Plain(v)) => Some(v.as_str()),
+                    _ => None,
                 })
+            })
         };
         let mut c = SetupCommand {
             switches: Vec::new(),
@@ -597,6 +730,57 @@ mod tests {
             !c.installs_rms(),
             "a guard naming the script is not the command that runs it"
         );
+        let c = cmd("(cd helm-prereqs && ./setup.sh --skip-rms)");
+        assert!(
+            !c.installs_rms(),
+            "a closing parenthesis is not part of the switch"
+        );
+        let c = cmd("bash -c './setup.sh --skip-dpf --skip-rms'");
+        assert!(
+            c.runs_setup_sh() && !c.installs_dpf() && !c.installs_rms(),
+            "`bash -c` runs the string"
+        );
+        let c = cmd("NICO_SKIP_RMS=true bash -c 'env -u NICO_SKIP_RMS ./setup.sh --skip-dpf'");
+        assert!(
+            c.installs_rms() && !c.installs_dpf(),
+            "an inner `env -u` removes an inherited assignment"
+        );
+        let c = cmd("./setup.sh --core-values $(printf '%s' 'site(.yaml') --skip-rms");
+        assert_eq!(
+            c.core_values.as_deref(),
+            Some("$(printf '%s' 'site(.yaml')"),
+            "quotes inside a substitution"
+        );
+        assert!(!c.installs_rms() && c.quoting_error.is_none());
+        let c = cmd("./setup.sh > >(tee setup.log) --skip-rms");
+        assert!(
+            !c.installs_rms() && c.quoting_error.is_none(),
+            "a process substitution is one target"
+        );
+        let c = cmd("NICO_SKIP_RMS=true bash -c 'cd helm-prereqs && ./setup.sh --skip-dpf'");
+        assert!(
+            !c.installs_rms() && !c.installs_dpf(),
+            "the outer assignment reaches every embedded command"
+        );
+        let c = cmd(
+            r"printf '%s\n' bash -c 'echo preview; ./setup.sh --skip-rms' && ./setup.sh --skip-dpf",
+        );
+        assert!(
+            c.installs_rms() && !c.installs_dpf(),
+            "`bash` as an argument is not expanded"
+        );
+        let c = cmd("./setup.sh --core-values $(pwd)/values.yaml --skip-rms");
+        assert_eq!(
+            c.core_values.as_deref(),
+            Some("$(pwd)/values.yaml"),
+            "a substitution stays in its word"
+        );
+        assert!(!c.installs_rms());
+        let c = cmd("bash -c './setup.sh --skip-rms' bash --skip-dpf");
+        assert!(
+            c.installs_dpf(),
+            "words after the `-c` string are positional parameters"
+        );
         let c = cmd("env test -x ./setup.sh && ./setup.sh --skip-rms");
         assert!(!c.installs_rms(), "a wrapped guard is still a guard");
         let c = cmd("./setup.sh --skip-rms --core-values v.yaml && rm ./setup.sh");
@@ -672,7 +856,13 @@ mod tests {
             "a quoted digit is an argument"
         );
         assert!(!c.installs_rms());
-        let (words, _) = shell_words("./setup.sh > ; echo x");
+        let (_, err) = shell_words("./setup.sh --skip-rms >");
+        assert_eq!(err.as_deref(), Some("redirection without a target"));
+        let (words, err) = shell_words("./setup.sh > ; echo x");
+        assert!(
+            err.is_some(),
+            "a dangling redirection before an operator is an error too"
+        );
         assert_eq!(
             words,
             ["./setup.sh", ";", "echo", "x"],
