@@ -141,7 +141,7 @@ jobs:
           fetch-depth: 0
       - name: Compute TruffleHog scan range
         id: scan-range
-        if: startsWith(github.ref, 'refs/heads/pull-request/') || (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/'))
+        if: startsWith(github.ref, 'refs/heads/pull-request/') || (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')) || github.event_name == 'merge_group'
         env:
           GH_TOKEN: ${{ github.token }}
         run: bash .github/ci/resolve-secret-scan-range.sh >> "$GITHUB_OUTPUT"
