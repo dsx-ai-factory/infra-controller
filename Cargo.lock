@@ -2961,6 +2961,7 @@ name = "carbide-mockdpa"
 version = "0.0.1"
 dependencies = [
  "carbide-dpa",
+ "carbide-instrument",
  "chrono",
  "clap",
  "mqttea",
@@ -7936,6 +7937,7 @@ dependencies = [
 name = "mqttea-example"
 version = "0.1.0"
 dependencies = [
+ "carbide-instrument",
  "chrono",
  "clap",
  "mqttea",

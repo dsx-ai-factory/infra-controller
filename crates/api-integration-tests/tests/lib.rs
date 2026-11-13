@@ -310,8 +310,16 @@ async fn run_integration() -> eyre::Result<()> {
 
     // Observable MQTT instruments export their initial zeros without a broker
     // connection. Register them on the server's meter for the catalogue scrape.
-    let mqtt_client =
-        mqttea::MqtteaClient::new("localhost", 1883, "test-metric-catalogue", None).await?;
+    let mqtt_client = mqttea::MqtteaClient::new(
+        "localhost",
+        1883,
+        "test-metric-catalogue",
+        None,
+        carbide_instrument::Instrumentation::from_meter_provider(
+            &opentelemetry::metrics::noop::NoopMeterProvider::new(),
+        ),
+    )
+    .await?;
     mqtt_client.register_metrics(&server_handle_2.ready.meter, "test_catalogue");
 
     assert_ne!(test_env.carbide_api_addrs[0], test_env.carbide_api_addrs[1]);

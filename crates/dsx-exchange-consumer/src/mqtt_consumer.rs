@@ -82,9 +82,15 @@ pub async fn connect(
     // pod coming up while the old one is still terminating) do not race for
     // the same MQTT session and ping-pong each other off the broker.
     let client_id = mqttea::unique_client_id(&config.client_id);
-    let client = MqtteaClient::new(&config.endpoint, config.port, &client_id, Some(options))
-        .await
-        .map_err(|e| DsxConsumerError::Mqtt(e.to_string()))?;
+    let client = MqtteaClient::new(
+        &config.endpoint,
+        config.port,
+        &client_id,
+        Some(options),
+        instrumentation.clone(),
+    )
+    .await
+    .map_err(|e| DsxConsumerError::Mqtt(e.to_string()))?;
     client.register_metrics(meter, "dsx_exchange_consumer");
 
     // Register message types with distinct topic patterns.

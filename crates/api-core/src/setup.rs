@@ -2035,6 +2035,7 @@ async fn initialize_and_start_controllers<'a>(
                 config.mqtt_broker_port,
                 &client_id,
                 Some(options),
+                api_service.instrumentation.clone(),
             )
             .map_err(|e| eyre::eyre!("failed to create DSX exchange event bus MQTT client: {e}"))
             .await?;
