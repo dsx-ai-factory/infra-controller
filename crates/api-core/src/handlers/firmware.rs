@@ -114,7 +114,7 @@ pub(crate) async fn list_host_firmware(
                             .clone()
                             .map(|x| x.as_str().to_string())
                             .unwrap_or("UNSPECIFIED".to_string()),
-                        version: firmware.version.clone(),
+                        version: firmware.version,
                         needs_explicit_start: entry.explicit_start_needed,
                     });
                 }

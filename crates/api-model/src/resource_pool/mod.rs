@@ -256,11 +256,11 @@ pub enum ResourcePoolError {
     },
     #[error("cannot convert '{v}' to {pool_name}'s pool type for {owner_type} {owner_id}: {e}")]
     Parse {
-        e: String,
-        v: String,
-        pool_name: String,
-        owner_type: String,
-        owner_id: String,
+        e: Box<str>,
+        v: Box<str>,
+        pool_name: Box<str>,
+        owner_type: Box<str>,
+        owner_id: Box<str>,
     },
 }
 

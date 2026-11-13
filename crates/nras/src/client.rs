@@ -153,11 +153,11 @@ impl TryFrom<serde_json::Value> for RawAttestationOutcome {
                     match elem {
                         serde_json::Value::Object(map) => {
                             let (key, value) = extract_map_obj(&map)?;
-                            devices_outcome.insert(key.clone(), value.clone());
+                            devices_outcome.insert(key, value);
                         }
                         serde_json::Value::Array(arr_values) => {
                             let (key, value) = extract_array_obj(&arr_values)?;
-                            overall_outcome = (key.clone(), value.clone());
+                            overall_outcome = (key, value);
                         }
                         _ => {
                             return Err(NrasError::ParsingVerifierResponse(

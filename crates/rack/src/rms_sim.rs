@@ -922,7 +922,7 @@ impl RmsApi for MockRmsClient {
                     node_id: node.node_id.clone(),
                     rack_id: node.rack_id.clone(),
                     r#type: node.r#type.unwrap_or(0),
-                    node_descriptor: node.node_descriptor.clone(),
+                    node_descriptor: node.node_descriptor,
                     ..Default::default()
                 });
             }

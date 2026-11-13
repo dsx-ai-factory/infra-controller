@@ -845,10 +845,7 @@ async fn test_multiple_state_controllers_schedule_object_only_once(
 
     for object_id in object_ids {
         let guard = state_handler.counts_per_id.lock().unwrap();
-        let count = guard
-            .get(&object_id.to_string())
-            .copied()
-            .unwrap_or_default() as f64;
+        let count = guard.get(&object_id).copied().unwrap_or_default() as f64;
 
         assert!(
             count >= 0.60 * expected_iterations && count <= 1.25 * expected_iterations,
