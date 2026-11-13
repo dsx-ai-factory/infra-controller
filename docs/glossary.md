@@ -210,7 +210,7 @@ NICo coordinates tenant isolation across four network fabrics, each with its own
 | --- | --- | --- |
 | Ethernet north-south | VXLAN with EVPN for VPC creation | DPU through HBN |
 | East-west Ethernet | ConnectX-based firmware paths where configured | Outside the current DPU HBN path |
-| InfiniBand | Partition key assignment | UFM |
+| InfiniBand | Partition membership | UFM |
 | NVLink | Partition management | NMX-C |
 
 DPUs enforce Ethernet isolation in hardware, UFM enforces InfiniBand isolation, and NMX-C enforces NVLink isolation, all coordinated by NICo.
@@ -235,7 +235,10 @@ VXLAN Tunnel Endpoint. A VTEP wraps Ethernet frames into VXLAN packets and unwra
 
 ### P_Key
 
-InfiniBand partition key. P_Keys are the isolation mechanism used by UFM for InfiniBand tenant separation, analogous to how VXLAN identifies isolated Ethernet overlays.
+InfiniBand partition key. Core allocates NICo-managed P_Keys from its configured
+pool. UFM manages partition membership for InfiniBand tenant separation,
+analogous to how VXLAN identifies isolated Ethernet overlays. Refer to
+[P_Key Allocation](manuals/networking/infiniband_partitioning.md#p_key-allocation).
 
 ### NVLink
 
@@ -346,7 +349,9 @@ NVIDIA Data Center-on-a-Chip Architecture. In NICo, DOCA is the software framewo
 
 ### UFM
 
-Unified Fabric Manager. NICo relies on UFM for InfiniBand partition management, including assigning P_Keys for tenant isolation on the IB fabric.
+Unified Fabric Manager. NICo uses UFM to manage InfiniBand partition membership.
+Core allocates the NICo-managed P_Keys. Refer to
+[P_Key Allocation](manuals/networking/infiniband_partitioning.md#p_key-allocation).
 
 ### IMDS
 
@@ -403,7 +408,7 @@ NICo Core is site-local and continues to manage hardware independently of the RE
 | NICo | NVIDIA Infra Controller | This platform, also known historically as NICo, NICo, and BMM |
 | NMX-C | NMX Controller | NVLink partition management for GPU-to-GPU isolation |
 | OOB | Out of Band | Management network path independent from the Host OS |
-| P_Key | Partition Key | InfiniBand isolation identifier assigned by UFM |
+| P_Key | Partition Key | InfiniBand isolation identifier allocated by Core for NICo-managed partitions |
 | protobuf | Protocol Buffers | Interface definition and serialization format for Core APIs |
 | PXE | Preboot Execution Environment | Network boot mechanism used by DPUs and Hosts |
 | Redfish | Redfish API | BMC API used for out-of-band hardware management |

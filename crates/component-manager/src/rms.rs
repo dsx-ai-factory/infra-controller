@@ -336,14 +336,17 @@ fn rms_node_descriptor_config_error(
 ///
 /// # Compute power and firmware commands
 ///
-/// If the machine lookup finds a different MAC at a requested BMC IP, the
-/// command returns a failure under the requested IP and MAC with no job ID.
+/// Compute AC power cycles delegate to Core's Redfish implementation using the
+/// supplied endpoints and credentials, without an RMS identity lookup or job.
+/// For commands sent to RMS, if the machine lookup finds a different MAC at a
+/// requested BMC IP, the command returns a failure under the requested IP and MAC with no job ID.
 /// That endpoint is not sent to RMS and its firmware tracking is unchanged;
 /// other valid endpoints can proceed. The check uses the machine ownership
 /// found during lookup, including machines without a rack. It does not check
 /// other inventory kinds or prevent reassignment after the lookup.
 pub struct RmsBackend {
     client: Arc<dyn RmsApi>,
+    core_compute_manager: Option<crate::core_compute_manager::CoreComputeTrayManager>,
     switch_system_image_client: Option<Arc<dyn RmsSwitchSystemImageStatusApi>>,
     db: PgPool,
     rack_profiles: Arc<RackProfileConfig>,
@@ -1373,12 +1376,23 @@ impl RmsBackend {
     ) -> Self {
         Self {
             client,
+            core_compute_manager: None,
             switch_system_image_client,
             db,
             rack_profiles,
             firmware_jobs: Mutex::new(HashMap::new()),
             staged_firmware_objects: Mutex::new(HashMap::new()),
         }
+    }
+
+    /// Enables compute AC power cycles through Core's Redfish implementation.
+    /// Other compute operations and all switch/shelf operations continue to use RMS.
+    pub(crate) fn with_core_compute_manager(
+        mut self,
+        manager: crate::core_compute_manager::CoreComputeTrayManager,
+    ) -> Self {
+        self.core_compute_manager = Some(manager);
+        self
     }
 
     /// Installs `jobs` as the full set of firmware jobs tracked for `bmc_mac`,
@@ -5984,6 +5998,14 @@ impl ComputeTrayManager for RmsBackend {
         endpoints: &[ComputeTrayEndpoint],
         action: PowerAction,
     ) -> Result<Vec<ComputeTrayResult>, ComponentManagerError> {
+        if action == PowerAction::AcPowercycle {
+            let core = self.core_compute_manager.as_ref().ok_or_else(|| {
+                ComponentManagerError::Unsupported(
+                    "compute AC power cycle requires the Core Redfish manager".into(),
+                )
+            })?;
+            return core.power_control(endpoints, action).await;
+        }
         let operation = to_rms_power_operation(action)?;
         // Ingested trays resolve their RMS identity from the machine row by BMC
         // IP.
@@ -6566,7 +6588,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn ac_power_cycle_is_rejected_before_rms_dispatch_for_all_components() {
+    async fn ac_power_cycle_is_rejected_before_rms_dispatch_for_switches_and_shelves() {
         // A closed pool makes accidental identity lookups fail immediately.
         let pool = sqlx::postgres::PgPoolOptions::new()
             .connect_lazy("postgresql://localhost/unused")
@@ -6582,16 +6604,6 @@ mod tests {
         );
         let action = PowerAction::AcPowercycle;
         for (component, error) in [
-            (
-                "compute",
-                ComputeTrayManager::power_control(
-                    &backend,
-                    &[make_ct_endpoint(CT_IP_1, CT_MAC_1)],
-                    action,
-                )
-                .await
-                .unwrap_err(),
-            ),
             (
                 "switch",
                 NvSwitchManager::power_control(&backend, &[make_sw_endpoint(SW_MAC_1)], action)
@@ -6610,6 +6622,81 @@ mod tests {
                 "{component}: {error}"
             );
         }
+        assert!(mock.batch_set_power_state_calls().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn compute_ac_power_cycle_uses_core_and_preserves_per_device_results() {
+        use carbide_redfish::libredfish::test_support::{RedfishSim, RedfishSimAction};
+
+        use crate::component_manager::build_component_manager;
+        use crate::config::ComponentManagerConfig;
+
+        // AC cycles need neither an RMS identity nor an RMS connection.
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .connect_lazy("postgresql://localhost/unused")
+            .unwrap();
+        pool.close().await;
+        let mock = Arc::new(MockRmsApi::new());
+        let redfish = Arc::new(RedfishSim::default());
+        let manager = build_component_manager(
+            &ComponentManagerConfig {
+                compute_tray_backend: ComputeTrayBackend::Rms,
+                nv_switch_backend: NvSwitchBackend::Mock,
+                power_shelf_backend: PowerShelfBackend::Mock,
+                ..Default::default()
+            },
+            rack_profile_config(),
+            Some(mock.clone()),
+            None,
+            Some(pool),
+            Some(redfish.clone()),
+            None,
+        )
+        .await
+        .unwrap();
+        let endpoints = [
+            make_ct_endpoint(CT_IP_1, CT_MAC_1),
+            make_ct_endpoint(CT_IP_2, CT_MAC_2),
+        ];
+        let before = redfish.timepoint();
+        redfish.fail_next_power_action(
+            libredfish::SystemPowerControl::ACPowercycle,
+            "AC cycle rejected",
+        );
+        let results = manager
+            .compute_tray
+            .power_control(&endpoints, PowerAction::AcPowercycle)
+            .await
+            .unwrap();
+        assert_eq!(results.len(), 2);
+        for (result, endpoint) in results.iter().zip(&endpoints) {
+            assert_eq!(result.bmc_ip, endpoint.bmc_ip);
+            assert_eq!(result.bmc_mac, endpoint.bmc_mac);
+            assert!(result.backend_job_id.is_none());
+        }
+        assert!(!results[0].success);
+        assert!(
+            results[0]
+                .error
+                .as_deref()
+                .unwrap()
+                .contains("AC cycle rejected")
+        );
+        assert!(results[1].success);
+        assert!(results[1].error.is_none());
+        assert_eq!(
+            redfish.actions_since(&before).for_host(CT_IP_1),
+            vec![RedfishSimAction::PowerFailed(
+                libredfish::SystemPowerControl::ACPowercycle
+            )]
+        );
+        assert_eq!(
+            redfish.actions_since(&before).for_host(CT_IP_2),
+            vec![RedfishSimAction::Power(
+                libredfish::SystemPowerControl::ACPowercycle
+            )]
+        );
         assert!(mock.batch_set_power_state_calls().await.is_empty());
     }
 

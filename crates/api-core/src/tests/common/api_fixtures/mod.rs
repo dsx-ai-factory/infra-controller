@@ -365,6 +365,7 @@ impl TestEnv {
     /// test environment
     pub(in crate::tests) fn machine_state_handler_services(&self) -> MachineStateHandlerServices {
         MachineStateHandlerServices {
+            instrumentation: self.api.instrumentation.clone(),
             db_pool: self.pool.clone(),
             db_reader: self.pool.clone().into(),
             redfish_client_pool: self.redfish_sim.clone(),
@@ -1544,6 +1545,7 @@ async fn create_test_env_with_overrides_inner(
     .with_eth_data(eth_virt_data)
     .with_nmxc_client_pool(nmxc_sim.clone())
     .with_metric_emitter(ApiMetricsEmitter::new(&test_meter.meter()))
+    .with_instrumentation(carbide_instrument::Instrumentation::new(test_meter.meter()))
     .with_redfish_pool(redfish_sim.clone())
     .with_ib_fabric_manager(ib_fabric_manager.clone())
     .with_firmware_object_fetcher(firmware_object_fetcher.clone())
@@ -1691,6 +1693,7 @@ async fn create_test_env_with_overrides_inner(
     let machine_controller = machine_controller_builder
         .services(
             MachineStateHandlerServices {
+                instrumentation: api.instrumentation.clone(),
                 db_pool: db_pool.clone(),
                 db_reader: db_pool.clone().into(),
                 redfish_client_pool: redfish_sim.clone(),
@@ -1916,6 +1919,7 @@ async fn create_test_env_with_overrides_inner(
         test_machine_info_provider(&rms_sim),
         credential_manager.clone(),
         api.runtime_config.dpf.enabled && api.dpf_sdk.is_some(),
+        api.instrumentation.clone(),
     );
 
     // Create some instance types

@@ -80,6 +80,8 @@ axum = { workspace = true }
 carbide-instrument = { path = "../instrument", features = ["test-support"] }
 carbide-test-support = { path = "../test-support" }
 rcgen = { workspace = true }
+rustls = { workspace = true }
+tonic-prost = { workspace = true }
 
 [build-dependencies]
 carbide-version = { path = "../version" }

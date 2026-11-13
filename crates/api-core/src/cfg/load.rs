@@ -772,6 +772,40 @@ request_timeout_seconds = 5"#
         })
     }
 
+    /// A present firmware settings table defaults omitted delivery controls.
+    #[test]
+    #[allow(clippy::result_large_err)]
+    fn firmware_delivery_defaults_apply_to_present_global_section() {
+        use carbide_firmware::downloader::FirmwareDownloadConfig;
+        use carbide_libmlx_model::firmware::FirmwareDeliveryMode;
+
+        figment::Jail::expect_with(|jail| {
+            jail.create_file(
+                "config.toml",
+                &format!(
+                    "{}\n[firmware_global]\nmax_uploads = 1\n",
+                    include_str!("test_data/min_config.toml")
+                ),
+            )?;
+            let config = parse_carbide_config(Path::new("config.toml"), None)
+                .expect("existing firmware settings accept omitted delivery controls");
+            assert_eq!(config.firmware_global.max_uploads, 1);
+            assert_eq!(
+                config.firmware_global.downloads,
+                FirmwareDownloadConfig::default()
+            );
+            assert_eq!(
+                config.firmware_global.nic_firmware_cache_capacity_bytes,
+                16 * 1024 * 1024 * 1024
+            );
+            assert_eq!(
+                config.firmware_global.nic_firmware_delivery_mode,
+                FirmwareDeliveryMode::SiteCache
+            );
+            Ok(())
+        })
+    }
+
     /// Loads BMC driver rule overrides and rejects any the drivers cannot
     /// serve before activating Core.
     #[test]

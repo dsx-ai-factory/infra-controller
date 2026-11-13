@@ -30,6 +30,7 @@ use ::rpc::protos::dns::{
     UpdateDomainRequest,
 };
 use ::rpc::protos::{measured_boot as measured_boot_pb, mlx_device as mlx_device_pb};
+use bmc_backend::{BackendBmc, BmcConnectError, BmcConnector};
 use bmc_runtime::DriverConnector;
 use carbide_ib_fabric::ib::IBFabricManager;
 use carbide_machine_controller::dpf::DpfOperations;
@@ -44,6 +45,7 @@ use carbide_secrets::credentials::{
     BmcCredentialType, CredentialKey, CredentialManager, CredentialType, Credentials,
 };
 use carbide_site_explorer::{AuthenticatedBmc, EndpointExplorationService, EndpointExplorer};
+use carbide_utils::redfish::{BmcAccessInfo, parse_uri_host_ip};
 use carbide_uuid::machine::{
     AsMachineId, DpuMachineId, MachineId, MachineInterfaceId, StableHostMachineId,
 };
@@ -94,6 +96,8 @@ pub(crate) fn grpc_receipt_layer<B>() -> tower::util::MapRequestLayer<
 }
 
 pub struct Api {
+    /// Event destination for migrated handlers; other paths retain global recording.
+    pub(crate) instrumentation: carbide_instrument::Instrumentation,
     // `pub` (not `pub(crate)`): read by the `carbide-api-web` admin UI (e.g. IPAM/DNS pages).
     pub database_connection: sqlx::PgPool,
     pub(crate) credential_manager: Arc<dyn CredentialManager>,
@@ -4341,7 +4345,61 @@ pub(crate) fn log_request_data_redacted(s: impl AsRef<str>) {
 
 /// Logs the Machine ID in the current tracing span
 pub(crate) fn log_machine_id(machine_id: &MachineId) {
-    tracing::Span::current().record("forge.machine_id", tracing::field::display(machine_id));
+    let span = tracing::Span::current();
+    span.record("forge.machine_id", tracing::field::display(machine_id));
+    let id = machine_id.to_string();
+    let predicted = machine_id.machine_type().is_predicted_host();
+    trace_propagation::MachineTraceAttributes {
+        machine_id: (!predicted).then_some(id.as_str()),
+        predicted_id: predicted.then_some(id.as_str()),
+        managed_host_id: (!machine_id.machine_type().is_dpu()).then_some(id.as_str()),
+        ..Default::default()
+    }
+    .record_on(&span);
+}
+
+/// Records machine_id and bmc_ip for a machine into the current tracing span.
+pub(crate) fn log_machine_snapshot(
+    machine: &model::machine::Machine<impl carbide_uuid::machine::MachineIdSubtypeTrait>,
+) {
+    let machine_id = machine.id.to_machine_id();
+    log_machine_id(&machine_id);
+    trace_propagation::MachineTraceAttributes {
+        bmc_ip: machine.status.bmc_info.ip,
+        managed_host_bmc_ip: if !machine_id.machine_type().is_dpu() {
+            machine.status.bmc_info.ip
+        } else {
+            None
+        },
+        ..Default::default()
+    }
+    .record_on(&tracing::Span::current());
+}
+
+/// Adds tracing associations from a machine snapshot to the current tracing span.
+/// When recording the BMC IP: if `machine_id` is a DPU ID: records that DPU's BMC IP. Otherwise
+/// records the managed host's BMC IP.
+pub(crate) fn log_managed_host_snapshot(
+    snapshot: &model::machine::ManagedHostStateSnapshot,
+    machine_id: &MachineId,
+) {
+    let host = &snapshot.host_snapshot;
+    let bmc_ip = if machine_id == &host.id.to_machine_id() {
+        host.status.bmc_info.ip
+    } else {
+        snapshot
+            .dpu_snapshots
+            .iter()
+            .find(|dpu| dpu.id.to_machine_id() == *machine_id)
+            .and_then(|dpu| dpu.status.bmc_info.ip)
+    };
+    trace_propagation::MachineTraceAttributes {
+        bmc_ip,
+        managed_host_id: Some(&host.id.to_string()),
+        managed_host_bmc_ip: host.status.bmc_info.ip,
+        ..Default::default()
+    }
+    .record_on(&tracing::Span::current());
 }
 
 pub(crate) fn log_tenant_organization_id(organization_id: &str) {
@@ -4396,6 +4454,37 @@ fn default_credential_display_name(key: &CredentialKey) -> &'static str {
 }
 
 impl Api {
+    /// Connects to the BMC at `access` through the configured `bmc_backend`,
+    /// loading its explored endpoint only for the drivers.
+    pub(crate) async fn connect_bmc(
+        &self,
+        access: &BmcAccessInfo,
+    ) -> Result<BackendBmc, CarbideError> {
+        let report = || async {
+            let ip = parse_uri_host_ip(&access.host).ok_or_else(|| {
+                CarbideError::internal(format!("BMC address {} is not an IP address", access.host))
+            })?;
+            db::explored_endpoints::find_by_ips(&self.database_connection, vec![ip])
+                .await?
+                .into_iter()
+                .next()
+                .map(|explored| explored.report)
+                .ok_or_else(|| {
+                    CarbideError::internal(format!(
+                        "BMC {ip} has no explored endpoint to select drivers from"
+                    ))
+                })
+        };
+        BmcConnector::new(self.redfish_pool.clone(), self.driver_connector.clone())
+            .connect(access, report)
+            .await
+            .map_err(|error| match error {
+                BmcConnectError::Report(error) => error,
+                BmcConnectError::Libredfish(error) => CarbideError::internal(error.to_string()),
+                BmcConnectError::Drivers(error) => CarbideError::internal(error.to_string()),
+            })
+    }
+
     /// Returns the site-wide default credentials that gate endpoint exploration
     /// (the same set validated by the site explorer's `check_preconditions`) but
     /// are currently unset.

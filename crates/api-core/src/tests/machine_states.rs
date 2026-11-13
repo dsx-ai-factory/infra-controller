@@ -335,6 +335,7 @@ async fn rejected_dpa_network_config_rolls_back_before_transition(pool: sqlx::Pg
                 pci_name: pci_name.to_string(),
                 device_description: None,
                 interface_type: DpaInterfaceType::Svpc,
+                interface_name: None,
             },
             &mut txn,
         )
@@ -677,6 +678,7 @@ async fn test_machine_creator_created_host_advances_through_dpu_discovery(
         Arc::new(env.config.rack_profiles.clone()),
         None,
         false,
+        env.api.instrumentation.clone(),
     );
 
     // Use a known DPU serial so we can assert on the generated MachineId.

@@ -177,6 +177,7 @@ fn expected_action(operation: MachineMaintenanceOperation) -> PowerAction {
         MachineMaintenanceOperation::PowerOff { graceful: true } => PowerAction::GracefulShutdown,
         MachineMaintenanceOperation::PowerOff { graceful: false } => PowerAction::ForceOff,
         MachineMaintenanceOperation::Reset { graceful: false } => PowerAction::ForceRestart,
+        MachineMaintenanceOperation::AcPowercycle { .. } => PowerAction::AcPowercycle,
         MachineMaintenanceOperation::Reset { graceful: true }
         | MachineMaintenanceOperation::Reboot => PowerAction::GracefulRestart,
         MachineMaintenanceOperation::ChassisReset { .. } => {

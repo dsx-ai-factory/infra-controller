@@ -169,6 +169,7 @@ fn creator(fixture: &RemotePoolFixture) -> MachineCreator {
         Arc::new(fixture.env.config.rack_profiles.clone()),
         None,
         false,
+        fixture.env.api.instrumentation.clone(),
     )
 }
 
@@ -1240,6 +1241,7 @@ async fn remote_dpu_asn_pending_deletion_and_stale_absence_keep_exact_cleanup(
             inputs.machine_id,
             None,
             &fixture.cancel,
+            fixture.env.api.instrumentation.clone(),
         )
         .await?;
         let mut txn = fixture.env.pool.begin().await?;
@@ -1907,6 +1909,7 @@ async fn owning_site_explorer(
         None,
         fixture.env.test_credential_manager.clone(),
         false,
+        fixture.env.api.instrumentation.clone(),
     ))
 }
 
@@ -1925,6 +1928,7 @@ async fn integrated_dpu_preparation_has_no_provider_reservation(
         machine_id,
         None,
         &env.api.cancel_token,
+        env.api.instrumentation.clone(),
     )
     .await?;
     assert!(!prepared.has_provider_reservation());
@@ -2000,6 +2004,7 @@ async fn integrated_dpu_requested_loopback_preserves_existing_ownership(
             machine_id,
             Some(requested),
             &env.api.cancel_token,
+            env.api.instrumentation.clone(),
         )
         .await?;
         assert!(!prepared.has_provider_reservation());
@@ -2037,6 +2042,7 @@ async fn integrated_dpu_requested_loopback_preserves_existing_ownership(
             machine_id,
             Some(replacement),
             &env.api.cancel_token,
+            env.api.instrumentation.clone(),
         )
         .await?;
         let mut txn = env.pool.begin().await?;
@@ -2147,6 +2153,7 @@ async fn remote_dpu_discovery_and_site_repair_reuse_a_lost_reply(
         let reused = PreparedDpuLoopback::prepare(
             &fixture.env.pool, &fixture.env.api.resource_pool_registry,
             &fixture.env.common_pools, inputs.machine_id, None, &fixture.cancel,
+            fixture.env.api.instrumentation.clone(),
         ).await?;
         assert!(!reused.has_provider_reservation(), "attached ownership needs no provider admission deadline");
         let found = fixture.env.api.find_ip_address(Request::new(forge::FindIpAddressRequest {
@@ -2454,6 +2461,7 @@ async fn remote_dpu_stale_force_delete_preserves_same_id_replacement(
             let prepared = PreparedDpuLoopback::prepare(
                 &fixture.env.pool, &fixture.env.api.resource_pool_registry,
                 &fixture.env.common_pools, inputs.machine_id, None, &fixture.cancel,
+                fixture.env.api.instrumentation.clone(),
             ).await?;
             assert!(prepared.has_provider_reservation(), "a new provider assignment retains bounded admission");
             prepared.check_identity(&mut replacement_txn).await?;
@@ -2619,6 +2627,7 @@ async fn remote_dpu_lookup_cancellation_stops_pool_wait(database: PgPool) -> eyr
                     inputs.machine_id,
                     None,
                     &cancel,
+                    fixture.env.api.instrumentation.clone(),
                 )
                 .await
                 .map(drop)

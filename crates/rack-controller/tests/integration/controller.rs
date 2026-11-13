@@ -193,7 +193,7 @@ async fn test_can_retrieve_rack_state_history_with_real_handler(
     let env = create_test_env_with_overrides(
         pool.clone(),
         TestEnvOverrides {
-            config: Some(crate::handler::config_with_rack_profiles()),
+            config: Some(Box::new(crate::handler::config_with_rack_profiles())),
             ..Default::default()
         },
     )
@@ -777,13 +777,15 @@ async fn test_stale_rack_maintenance_termination_latch_does_not_block_non_mainte
     Ok(())
 }
 
-async fn get_db_rack<DB>(conn: &mut DB, rack_id: &RackId) -> Rack
+async fn get_db_rack<DB>(conn: &mut DB, rack_id: &RackId) -> Box<Rack>
 where
     for<'db> &'db mut DB: DbReader<'db>,
 {
-    db_rack::find_by(conn, ObjectColumnFilter::One(db_rack::IdColumn, rack_id))
-        .await
-        .unwrap()
-        .pop()
-        .unwrap()
+    Box::new(
+        db_rack::find_by(conn, ObjectColumnFilter::One(db_rack::IdColumn, rack_id))
+            .await
+            .unwrap()
+            .pop()
+            .unwrap(),
+    )
 }

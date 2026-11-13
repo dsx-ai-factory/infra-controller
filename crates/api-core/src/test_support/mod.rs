@@ -51,6 +51,11 @@ pub fn default_credential_key(credential: &crate::api::DefaultCredential) -> &st
 }
 
 impl Api {
+    /// Returns the Event metric destination shared with this fixture's components.
+    pub fn instrumentation(&self) -> &carbide_instrument::Instrumentation {
+        &self.instrumentation
+    }
+
     pub fn work_lock_manager_handle(&self) -> WorkLockManagerHandle {
         self.work_lock_manager_handle.clone()
     }

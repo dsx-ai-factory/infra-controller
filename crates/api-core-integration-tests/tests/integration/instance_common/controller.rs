@@ -233,6 +233,7 @@ fn machine_state_controller(
         .build();
     let rotation_gate = |family| RotationGate::new_for_family(family);
     let services = MachineStateHandlerServices {
+        instrumentation: api.instrumentation().clone(),
         db_pool: api.database_connection.clone(),
         db_reader: api.database_connection.clone().into(),
         redfish_client_pool: clients.redfish.clone(),
