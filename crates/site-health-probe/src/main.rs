@@ -121,7 +121,7 @@ async fn run() -> eyre::Result<()> {
     ));
 
     let mut enabled = build_probes(&cfg, &gates).wrap_err("build probes")?;
-    let (readers, families) = build_readers(
+    let (readers, families, catalog) = build_readers(
         &cfg,
         &gates,
         state_sink,
@@ -151,11 +151,14 @@ async fn run() -> eyre::Result<()> {
         let api_addr = cfg.api_listen_addr()?;
         let listener = bind(api_addr).await.wrap_err("bind the /v1 API")?;
         tracing::info!(api_listen = %listener.local_addr()?, "serving /v1");
-        let router = api::router(api::ApiState::new(
+        let mut router = api::router(api::ApiState::new(
             Arc::clone(&store),
             &cfg.state,
             process_start,
         ));
+        if let Some(catalog) = catalog {
+            router = router.merge(readers::fixture::router(catalog));
+        }
         Some(serve_api(
             listener,
             router,
@@ -411,7 +414,11 @@ fn build_readers(
     sink: Arc<state_metrics::CountingSink>,
     census: Arc<dyn snapshot::CensusView>,
     process_start: SystemTime,
-) -> eyre::Result<(ProbeSet, Vec<Family>)> {
+) -> eyre::Result<(
+    ProbeSet,
+    Vec<Family>,
+    Option<Arc<readers::fixture::Catalog>>,
+)> {
     use readers::devices::{DEVICE_FAMILIES, DevicesReader};
     use readers::rest_inventory::{Inventory, RestInventoryReader};
     use rest::auth::Auth;
@@ -419,9 +426,10 @@ fn build_readers(
 
     let mut out: ProbeSet = Vec::new();
     let mut families = Vec::new();
+    let mut catalog = None;
     let state = &cfg.state;
     if !state.enabled {
-        return Ok((out, families));
+        return Ok((out, families, None));
     }
     let schedule = &state.readers;
 
@@ -442,41 +450,62 @@ fn build_readers(
     if schedule.rest_inventory.enabled {
         let rest = &state.rest;
         let http = new_http_client(&rest.ca)?;
-        out.push(Arc::new(RestInventoryReader::new(
-            schedule.rest_inventory.clone(),
-            Arc::new(RestClient::new(
-                http.clone(),
-                &rest.target,
-                Arc::clone(&gates.rest),
-            )?),
-            Inventory {
-                provider_auth: Arc::new(Auth::new(&rest.provider.auth, http.clone())),
-                tenant: rest
-                    .tenant
-                    .as_ref()
-                    .map(|t| readers::rest_instances::Fixture {
-                        config: t.clone(),
-                        auth: Arc::new(Auth::new(&t.auth, http.clone())),
-                        previous: Default::default(),
-                    }),
-                provider_org: rest.provider.org.clone(),
-                site_id: state.site_id.clone(),
-                totals: !rest.skip_totals,
-            },
-            schedule.devices.enabled.then_some(census),
-            Arc::clone(&sink) as _,
-            process_start,
-        )));
-        if !rest.skip_totals {
-            families.push(Family::RestTotals);
-        }
-        families.push(Family::RestSiteMatch);
-        if rest.tenant.is_some() {
+        let client = Arc::new(RestClient::new(
+            http.clone(),
+            &rest.target,
+            gates.rest.clone(),
+        )?);
+        let provider_auth = Arc::new(Auth::new(&rest.provider.auth, http.clone()));
+        if let Some(fixture) = &rest.fixture {
+            let c = Arc::new(readers::fixture::Catalog::new(
+                fixture.clone(),
+                client,
+                provider_auth,
+                Arc::new(Auth::new(&fixture.auth, http)),
+                (rest.provider.org.clone(), state.site_id.clone()),
+                process_start,
+                gates.rest.clone(),
+            ));
+            out.push(Arc::new(readers::fixture::FixtureReader::new(
+                c.clone(),
+                schedule.rest_inventory.clone(),
+                sink.clone(),
+            )));
+            catalog = Some(c);
             families.extend(readers::rest_instances::FAMILIES);
+        } else {
+            out.push(Arc::new(RestInventoryReader::new(
+                schedule.rest_inventory.clone(),
+                client,
+                Inventory {
+                    totals: !rest.skip_totals,
+                    provider_auth,
+                    tenant: rest
+                        .tenant
+                        .as_ref()
+                        .map(|t| readers::rest_instances::Fixture {
+                            config: t.clone(),
+                            auth: Arc::new(Auth::new(&t.auth, http.clone())),
+                            previous: Default::default(),
+                        }),
+                    provider_org: rest.provider.org.clone(),
+                    site_id: state.site_id.clone(),
+                },
+                schedule.devices.enabled.then_some(census),
+                Arc::clone(&sink) as _,
+                process_start,
+            )));
+            if !rest.skip_totals {
+                families.push(Family::RestTotals)
+            }
+            families.push(Family::RestSiteMatch);
+            if rest.tenant.is_some() {
+                families.extend(readers::rest_instances::FAMILIES);
+            }
         }
     }
     sink.start_counters(&families);
-    Ok((out, families))
+    Ok((out, families, catalog))
 }
 
 #[cfg(test)]
@@ -867,7 +896,7 @@ mod tests {
                 Arc::clone(&store),
                 &setup.meter,
             ));
-            let (readers, families) = build_readers(
+            let (readers, families, _) = build_readers(
                 cfg,
                 &gates,
                 sink,

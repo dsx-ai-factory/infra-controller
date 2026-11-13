@@ -76,7 +76,7 @@ func poolHealth(rows []history.RawSeries, now time.Time) ([]string, error) {
 
 // ProbeDemand measures all shared-gate calls, including retries and latency
 // probes. A counter reset, missing API or incomplete interval refuses calibration.
-func (c *Client) ProbeDemand(ctx context.Context, until time.Time, span time.Duration) error {
+func (c *Client) ProbeDemand(ctx context.Context, until time.Time, span time.Duration, extraREST ...float64) error {
 	now := time.Now()
 	q := query{names: []string{"carbide_site_health_probe_calls_total"}, matchers: c.selector(), span: span + 33*time.Second}
 	rows, err := bounded(ctx, c.end(until), func(ctx context.Context) ([]history.RawSeries, error) { return c.raw(ctx, q, now) })
@@ -104,8 +104,19 @@ func (c *Client) ProbeDemand(ctx context.Context, until time.Time, span time.Dur
 		}
 		totals[api] += (last.Value - first.Value) / (float64(last.AtMs-first.AtMs) / 1000)
 	}
+	if len(extraREST) > 1 {
+		return unavailable("invalid sidecar call accounting")
+	}
+	if len(extraREST) == 1 {
+		if !(extraREST[0] >= 0 && extraREST[0] < 1) {
+			return unavailable("sidecar call accounting missing or saturated")
+		}
+	}
 	for _, api := range []string{"nico-api", "nico-rest-api"} {
 		n, ok := totals[api]
+		if api == "nico-rest-api" && len(extraREST) == 1 {
+			n += extraREST[0]
+		}
 		if !ok || !(n < 1) {
 			return unavailable("probe source demand is missing or at least one call per second")
 		}

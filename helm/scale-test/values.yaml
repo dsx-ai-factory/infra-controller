@@ -111,7 +111,7 @@ store:
   transition:
     start: ""
     end: ""
-    n: ""
+    "n": ""
     targets: ""
     reached: ""
     minTimingErrorSeconds: ""
@@ -132,11 +132,24 @@ store:
 # send nothing) or false. It has no helm test. The README sizes the budgets.
 runner:
   enabled: false
-  command: fleet-up
-  rest: {url: "", org: "", providerOrg: "", tokenSecret: "", caSecret: {name: "", key: ca.crt}}
+  command: fleet-up # or ingestion, instance-create, instance-delete, instance-lifecycle
+  rest: {url: "", org: "", providerOrg: "", tokenSecret: "", caSecret: {name: "", key: ca.crt}, auth: {tokenUrl: "", providerSecret: "", tenantClientId: "", tenantSecret: ""}}
+  fixture:
+    name: "" # nonempty enables one-install setup and a run-owned REST-only sidecar
+    siteId: ""
+    machineCapabilities: []
+    ipBlockCIDR: ""
+    allocationPrefixLength: 18
+    subnetPrefixLength: 18
+    fabricPrefixCIDRs: [] # operator attestation, not a read of controller configuration
+    ipxeScript: ""
+    teardown: false # after the last owned instance is deleted, proven resources only
+    setupSeconds: 3600
+    probeImage: "" # exact repository@sha256:digest of the probe built with fixture support
   # Must equal the probe sweep interval. A mismatch fails before writes.
   observation: {intervalSeconds: 480, labelReadbackSeconds: 1800}
   instance:
+    deleteCount: 0 # instance-delete only, 0 deletes all instances in ownedManifest
     "n": 5
     burstSize: 100
     topologyOptimized: false # Allow cohorts across topology domains.
@@ -145,7 +158,7 @@ runner:
     vpcId: ""
     subnetId: ""
     ipxeSecret: "" # key script.ipxe, pinned for the run
-    ownedManifest: "" # basename of the create run's .owned.json on the shared PVC
+    ownedManifest: "" # latest successful create/delete .owned.json on the shared PVC
     apiPoolReplicas: 0 # required, expected number of API replica series
     apiPoolSelector: {} # labels selecting every relevant API replica, never an aggregate
   dryRun: null

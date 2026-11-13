@@ -24,6 +24,7 @@
 
 use std::fmt;
 use std::future::Future;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 use std::time::Duration;
 
@@ -126,6 +127,7 @@ pub(crate) struct CallGate {
     state: Mutex<GateState>,
     /// `calls_total`, once metrics are set up.
     calls: OnceLock<Counter<u64>>,
+    total: AtomicU64,
 }
 
 struct GateState {
@@ -151,6 +153,7 @@ impl CallGate {
                 backoff: Duration::ZERO,
             }),
             calls: OnceLock::new(),
+            total: AtomicU64::new(0),
         }
     }
 
@@ -161,7 +164,11 @@ impl CallGate {
     }
 
     /// Adds one call to `calls` with this result, if a counter is registered.
+    pub(crate) fn total_calls(&self) -> u64 {
+        self.total.load(Ordering::Relaxed)
+    }
     fn count(&self, call: &'static str, result: &'static str) {
+        self.total.fetch_add(1, Ordering::Relaxed);
         if let Some(calls) = self.calls.get() {
             calls.add(
                 1,

@@ -67,7 +67,7 @@ type Call struct {
 	// ReconcileUnclear verifies an uncertain result before a same-op retry.
 	// It returns true only after journaled settlement, false only with retry proof.
 	ReconcileUnclear func(uint64) (bool, error)
-	// BeforeDispatch is a bounded, side-effect-free guard for each attempt.
+	// BeforeDispatch is bounded and side-effect-free, and may run more than once per attempt.
 	BeforeDispatch func() error
 }
 
@@ -218,18 +218,30 @@ func Send(ctx context.Context, w *Writer, c Call, attempt func(context.Context) 
 		// dispatch itself, after every lock and bookkeeping step. Nothing
 		// waits on the journal between this check and the dispatch. run reports
 		// the actual dispatch time, taken after that final check.
-		reply, dispatchAt, halt := run(w, ctx, c.Retry.AttemptTimeout, func() error {
+		live := func() error {
 			if err := w.halted(ctx); err != nil {
 				return err
 			} else if c.cut() || in.Attempt > 1 && !c.RetryCutoff.IsZero() && !time.Now().Before(c.RetryCutoff) {
 				return ErrCutoff
 			} else if in.Attempt == 1 || !w.pastDeadline(0) {
-				if c.BeforeDispatch != nil {
-					return c.BeforeDispatch()
-				}
 				return nil
 			}
 			return errPastDeadline
+		}
+		check := func() error {
+			if err := live(); err != nil {
+				return err
+			}
+			if c.BeforeDispatch != nil {
+				return c.BeforeDispatch()
+			}
+			return nil
+		}
+		reply, dispatchAt, halt := run(w, ctx, c.Retry.AttemptTimeout, func() error {
+			if err := check(); err != nil {
+				return err
+			}
+			return check()
 		}, attempt)
 		repliedAt := time.Now().UTC()
 		if halt != nil {
