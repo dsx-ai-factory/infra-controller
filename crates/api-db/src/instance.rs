@@ -924,6 +924,8 @@ pub async fn update_config(
     let mut os_ipxe_script = String::new();
     let os_user_data = config.os.user_data;
     let mut os_image_id = None;
+    let os_boots_from_dhcp_option_set =
+        matches!(config.os.variant, OperatingSystemVariant::DhcpOptionSet);
     let operating_system_id = match &config.os.variant {
         OperatingSystemVariant::Ipxe(ipxe) => {
             os_ipxe_script = ipxe.ipxe_script.clone();
@@ -934,13 +936,14 @@ pub async fn update_config(
             None
         }
         OperatingSystemVariant::OperatingSystemId(id) => Some(*id),
+        OperatingSystemVariant::DhcpOptionSet => None,
     };
 
     let query = "UPDATE instances SET config_version=$1,
             operating_system_id=$2, os_ipxe_script=$3, os_user_data=$4, os_always_boot_with_ipxe=$5, os_phone_home_enabled=$6,
             os_image_id=$7, keyset_ids=$8,
             name=$9, description=$10, labels=$11::json, network_security_group_id=$14,
-            power_profile=$15
+            power_profile=$15, dhcp_option_set_id=$16, os_boots_from_dhcp_option_set=$17
             WHERE id=$12 AND config_version=$13 AND deleted IS NULL
             RETURNING id";
     let query_result: Result<(InstanceId,), _> = sqlx::query_as(query)
@@ -959,6 +962,8 @@ pub async fn update_config(
         .bind(expected_version)
         .bind(config.network_security_group_id)
         .bind(config.power_profile)
+        .bind(config.dhcp_option_set_id)
+        .bind(os_boots_from_dhcp_option_set)
         .fetch_one(&mut *txn)
         .await;
 
@@ -992,6 +997,7 @@ pub async fn update_os(
     let mut os_ipxe_script = String::new();
     let os_user_data = os.user_data;
     let mut os_image_id = None;
+    let os_boots_from_dhcp_option_set = matches!(os.variant, OperatingSystemVariant::DhcpOptionSet);
     let operating_system_id = match &os.variant {
         OperatingSystemVariant::Ipxe(ipxe) => {
             os_ipxe_script = ipxe.ipxe_script.clone();
@@ -1002,10 +1008,12 @@ pub async fn update_os(
             None
         }
         OperatingSystemVariant::OperatingSystemId(id) => Some(*id),
+        OperatingSystemVariant::DhcpOptionSet => None,
     };
 
     let query = "UPDATE instances SET config_version=$1,
-            operating_system_id=$2, os_ipxe_script=$3, os_user_data=$4, os_always_boot_with_ipxe=$5, os_phone_home_enabled=$6, os_image_id=$7
+            operating_system_id=$2, os_ipxe_script=$3, os_user_data=$4, os_always_boot_with_ipxe=$5, os_phone_home_enabled=$6, os_image_id=$7,
+            os_boots_from_dhcp_option_set=$10
             WHERE id=$8 AND config_version=$9 AND deleted IS NULL
             RETURNING id";
     let query_result: Result<(InstanceId,), _> = sqlx::query_as(query)
@@ -1018,6 +1026,7 @@ pub async fn update_os(
         .bind(os_image_id)
         .bind(instance_id)
         .bind(expected_version)
+        .bind(os_boots_from_dhcp_option_set)
         .fetch_one(&mut *txn)
         .await;
 
@@ -1587,7 +1596,7 @@ pub async fn update_extension_services_config(
 /// (126k binds) would fail outright. `batch_persist` chunks the INSERT into
 /// sub-batches of `BIND_LIMIT / BATCH_PERSIST_BINDS_PER_ROW` rows, all issued
 /// on the caller's transaction so the write stays all-or-nothing.
-const BATCH_PERSIST_BINDS_PER_ROW: usize = 28;
+const BATCH_PERSIST_BINDS_PER_ROW: usize = 30;
 
 /// Batch insert for multiple instances.
 /// This is optimized for inserting many instances in a single database operation.
@@ -1635,7 +1644,9 @@ pub async fn batch_persist<'a>(
                         nvlink_config_version,
                         spx_config,
                         spx_config_version,
-                        power_profile
+                        power_profile,
+                        dhcp_option_set_id,
+                        os_boots_from_dhcp_option_set
                     )
                     SELECT 
                             vals.id, vals.machine_id, vals.operating_system_id, vals.os_user_data, vals.os_ipxe_script,
@@ -1648,7 +1659,7 @@ pub async fn batch_persist<'a>(
                             vals.instance_type_id, vals.extension_services_config::json, 
                             vals.extension_services_config_version, vals.nvlink_config::json, 
                             vals.nvlink_config_version, vals.spx_config::json, vals.spx_config_version,
-                            vals.power_profile
+                            vals.power_profile, vals.dhcp_option_set_id, vals.os_boots_from_dhcp_option_set
                     FROM (VALUES ";
 
     let expected_count = values.len() as u64;
@@ -1663,6 +1674,10 @@ pub async fn batch_persist<'a>(
             let mut os_ipxe_script = String::new();
             let os_user_data = value.config.os.user_data.clone();
             let mut os_image_id: Option<uuid::Uuid> = None;
+            let os_boots_from_dhcp_option_set = matches!(
+                value.config.os.variant,
+                OperatingSystemVariant::DhcpOptionSet
+            );
             let operating_system_id = match &value.config.os.variant {
                 OperatingSystemVariant::Ipxe(ipxe) => {
                     os_ipxe_script = ipxe.ipxe_script.clone();
@@ -1673,6 +1688,7 @@ pub async fn batch_persist<'a>(
                     None
                 }
                 OperatingSystemVariant::OperatingSystemId(id) => Some(*id),
+                OperatingSystemVariant::DhcpOptionSet => None,
             };
 
             separated.push("(");
@@ -1744,6 +1760,10 @@ pub async fn batch_persist<'a>(
             separated.push_bind_unseparated(value.spx_config_version);
             separated.push_unseparated(",");
             separated.push_bind_unseparated(&value.config.power_profile);
+            separated.push_unseparated(",");
+            separated.push_bind_unseparated(value.config.dhcp_option_set_id);
+            separated.push_unseparated(",");
+            separated.push_bind_unseparated(os_boots_from_dhcp_option_set);
             separated.push_unseparated(")");
         }
 
@@ -1753,7 +1773,7 @@ pub async fn batch_persist<'a>(
                        description, labels, config_version, hostname, network_security_group_id,
                        instance_type_id, extension_services_config, extension_services_config_version,
                        nvlink_config, nvlink_config_version, spx_config, spx_config_version,
-                       power_profile)
+                       power_profile, dhcp_option_set_id, os_boots_from_dhcp_option_set)
             INNER JOIN machines m ON m.id = vals.machine_id
                 AND (vals.instance_type_id IS NULL OR m.instance_type_id = vals.instance_type_id)");
 
@@ -2469,6 +2489,7 @@ mod tests {
             network: InstanceNetworkConfig::default(),
             infiniband: InstanceInfinibandConfig::default(),
             network_security_group_id: None,
+            dhcp_option_set_id: None,
             extension_services: InstanceExtensionServicesConfig::default(),
             nvlink: InstanceNvLinkConfig::default(),
             spxconfig: InstanceSpxConfig::default(),

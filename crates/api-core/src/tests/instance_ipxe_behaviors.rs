@@ -271,6 +271,7 @@ pub(in crate::tests) async fn create_instance<'a, 'b>(
         network: Some(single_interface_network_config(segment_id)),
         infiniband: None,
         network_security_group_id: None,
+        dhcp_option_set_id: None,
         dpu_extension_services: None,
         nvlink: None,
         spxconfig: None,

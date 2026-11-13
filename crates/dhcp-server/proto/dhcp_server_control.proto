@@ -95,6 +95,14 @@ message InterfaceInfo {
     optional string booturl = 5;
     optional uint32 mtu = 6;
     optional InterfaceInfoV6 ipv6 = 7;
+    // Tenant boot URL for DHCPv4 replies; when unset, booturl is used.
+    optional string booturl_v4 = 8;
+    // Tenant boot URL for DHCPv6 replies; when unset, booturl is used.
+    optional string booturl_v6 = 9;
+    // Tenant DNS servers for DHCPv4 replies; empty uses the site's servers.
+    repeated string dns_servers_v4 = 10;
+    // Tenant DNS servers for DHCPv6 replies; empty uses the site's servers.
+    repeated string dns_servers_v6 = 11;
 }
 
 message InterfaceInfoV6 {

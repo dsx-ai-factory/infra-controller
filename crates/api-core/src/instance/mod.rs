@@ -2293,6 +2293,37 @@ pub(crate) async fn batch_allocate_instances(
         }
     }
 
+    let mut dhcp_option_set_validations: Vec<_> = requests
+        .iter()
+        .filter_map(|r| {
+            r.config
+                .dhcp_option_set_id
+                .as_ref()
+                .map(|id| (id, &r.config.tenant.tenant_organization_id))
+        })
+        .collect();
+    // Lock the sets in ID order so concurrent batches cannot deadlock.
+    dhcp_option_set_validations.sort_by_key(|(id, _)| **id);
+    dhcp_option_set_validations.dedup();
+
+    for (id, tenant_org_id) in &dhcp_option_set_validations {
+        // Lock the set until commit so it cannot be deleted and its ID reused meanwhile.
+        if db::dhcp_option_set::find_by_ids(
+            &mut txn,
+            std::slice::from_ref(id),
+            Some(tenant_org_id),
+            true,
+        )
+        .await?
+        .pop()
+        .is_none()
+        {
+            return Err(CarbideError::FailedPrecondition(format!(
+                "DhcpOptionSet `{id}` does not exist or is not owned by tenant `{tenant_org_id}`"
+            )));
+        }
+    }
+
     // Collect every requested service ID before resolving them while their
     // service and version rows are locked.
     let service_ids = requests

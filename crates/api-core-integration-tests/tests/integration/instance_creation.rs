@@ -203,6 +203,7 @@ async fn test_instance_phone_home(_: PgPoolOptions, options: PgConnectOptions) {
         nvlink: None,
         spxconfig: None,
         network_security_group_id: None,
+        dhcp_option_set_id: None,
         dpu_extension_services: None,
         power_profile: None,
     };

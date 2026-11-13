@@ -357,7 +357,8 @@ impl From<forgerpc::Instance> for InstanceDetail {
                         phone_home_enabled: os.phone_home_enabled,
                         ..Default::default()
                     },
-                    forgerpc::instance_operating_system_config::Variant::OsImageId(_id) => {
+                    forgerpc::instance_operating_system_config::Variant::OsImageId(_)
+                    | forgerpc::instance_operating_system_config::Variant::DhcpOptionSet(_) => {
                         InstanceOs {
                             userdata: os.user_data.clone().unwrap_or_default(),
                             run_provisioning_instructions_on_every_boot: os

@@ -1668,6 +1668,10 @@ async fn handle_netconf(AxumState(state): AxumState<Arc<Mutex<State>>>) -> impl 
         prefix: Some("192.168.0.1/32".to_string()),
         fqdn: "host1".to_string(),
         booturl: loopback_ip_override.map(|_| "http://[2001:db8::80]/boot.efi".to_string()),
+        booturl_v4: None,
+        booturl_v6: None,
+        dns_servers_v4: vec![],
+        dns_servers_v6: vec![],
         svi_ip: get_svi_ip(&Some(svi_ip), virtualization_type, false, 28)
             .unwrap()
             .map(|ip| ip.to_string()),
@@ -1702,6 +1706,10 @@ async fn handle_netconf(AxumState(state): AxumState<Arc<Mutex<State>>>) -> impl 
         // IPv6-primary tenants need the same explicit IPv6 boot URL as the admin fixture;
         // their IPv4-only service discovery cannot generate one.
         booturl: loopback_ip_override.map(|_| "http://[2001:db8::80]/boot.efi".to_string()),
+        booturl_v4: None,
+        booturl_v6: None,
+        dns_servers_v4: vec![],
+        dns_servers_v6: vec![],
         svi_ip: get_svi_ip(&Some(svi_ip), virtualization_type, false, 28)
             .unwrap()
             .map(|ip| ip.to_string()),
@@ -2040,6 +2048,7 @@ async fn handle_netconf(AxumState(state): AxumState<Arc<Mutex<State>>>) -> impl 
             }),
             infiniband: None,
             network_security_group_id: None,
+            dhcp_option_set_id: None,
             dpu_extension_services: None,
             nvlink: None,
             spxconfig: None,

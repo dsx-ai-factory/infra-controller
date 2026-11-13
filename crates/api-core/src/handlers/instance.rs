@@ -1619,6 +1619,26 @@ pub(crate) async fn update_instance_config(
         }
     }
 
+    if let Some(ref id) = config.dhcp_option_set_id {
+        let tenant_org = &config.tenant.tenant_organization_id;
+        // Lock the set until commit so it cannot be deleted and its ID reused meanwhile.
+        if db::dhcp_option_set::find_by_ids(
+            &mut txn,
+            std::slice::from_ref(id),
+            Some(tenant_org),
+            true,
+        )
+        .await?
+        .pop()
+        .is_none()
+        {
+            return Err(CarbideError::FailedPrecondition(format!(
+                "DhcpOptionSet `{id}` does not exist or is not owned by tenant `{tenant_org}`"
+            ))
+            .into());
+        }
+    }
+
     // Resolve and lock service/version rows before network allocation, matching
     // initial allocation and extension-only updates. Network allocation then
     // locks the address table before either path mutates the Instance.

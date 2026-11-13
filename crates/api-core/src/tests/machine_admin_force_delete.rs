@@ -1825,6 +1825,7 @@ async fn test_admin_force_delete_rejects_instance_committed_before_machine_lock(
         network: InstanceNetworkConfig::default(),
         infiniband: InstanceInfinibandConfig::default(),
         network_security_group_id: None,
+        dhcp_option_set_id: None,
         extension_services: InstanceExtensionServicesConfig::default(),
         nvlink: InstanceNvLinkConfig::default(),
         spxconfig: InstanceSpxConfig::default(),

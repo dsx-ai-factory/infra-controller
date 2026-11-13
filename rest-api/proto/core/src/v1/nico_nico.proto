@@ -818,6 +818,15 @@ service Forge {
   rpc GetNetworkSecurityGroupPropagationStatus(GetNetworkSecurityGroupPropagationStatusRequest) returns (GetNetworkSecurityGroupPropagationStatusResponse);
   rpc GetNetworkSecurityGroupAttachments(GetNetworkSecurityGroupAttachmentsRequest) returns (GetNetworkSecurityGroupAttachmentsResponse);
 
+  //
+  // DhcpOptionSets
+  //
+  rpc CreateDhcpOptionSet(CreateDhcpOptionSetRequest) returns (CreateDhcpOptionSetResponse);
+  rpc FindDhcpOptionSetIds(FindDhcpOptionSetIdsRequest) returns (FindDhcpOptionSetIdsResponse);
+  rpc FindDhcpOptionSetsByIds(FindDhcpOptionSetsByIdsRequest) returns (FindDhcpOptionSetsByIdsResponse);
+  rpc UpdateDhcpOptionSet(UpdateDhcpOptionSetRequest) returns (UpdateDhcpOptionSetResponse);
+  rpc DeleteDhcpOptionSet(DeleteDhcpOptionSetRequest) returns (DeleteDhcpOptionSetResponse);
+
 
   rpc CreateOsImage(OsImageAttributes) returns (OsImage);
   rpc DeleteOsImage(DeleteOsImageRequest) returns (DeleteOsImageResponse);
@@ -2443,6 +2452,8 @@ message VpcConfig {
   // boundary. Core reports this field explicitly. An absent value indicates a
   // response from a Core version that predates SLAAC support.
   optional bool slaac_enabled = 10;
+  // DHCP option set used by hosts in this VPC unless an instance sets its own.
+  optional string dhcp_option_set_id = 11;
 }
 
 message VpcStatus {
@@ -2557,6 +2568,8 @@ message VpcCreationRequest {
   // SLAAC. Core evaluates this value only during VPC creation.
   // `VpcUpdateRequest` cannot change the resulting policy.
   optional bool slaac_enabled = 20;
+  // DHCP option set used by hosts in this VPC unless an instance sets its own.
+  optional string dhcp_option_set_id = 21;
 }
 
 enum VpcVirtualizationType {
@@ -2615,6 +2628,9 @@ message VpcUpdateRequest {
   // preserve the current association, send an empty string to remove it, or
   // send a non-empty value to replace it.
   optional string power_resource_group = 20;
+  // DHCP option set used by hosts in this VPC unless an instance sets its own.
+  // Omitting it or sending an empty string removes the set; a non-empty value replaces it.
+  optional string dhcp_option_set_id = 21;
 }
 
 message VpcUpdateResult {
@@ -3916,6 +3932,8 @@ message InstanceOperatingSystemConfig {
     // Reference any operating system definition by ID (any variant except OS image).
     // On read the actual variant (iPXE / ipxe_os_definition) is resolved from the row.
     common.OperatingSystemId operating_system_id = 4;
+    // Boot from the boot URL of the instance's or VPC's DHCP option set.
+    DhcpOptionSetBoot dhcp_option_set = 5;
   }
 
   // If this flag is set to `true` the instance will not transition to a Ready state until
@@ -3943,6 +3961,10 @@ message InstanceOperatingSystemConfig {
   bool run_provisioning_instructions_on_every_boot = 12;
   // tenant cloud-init script for any type of OS, preferred
   optional string user_data = 13;
+}
+
+// Selects booting from the DHCP option set's boot URL; carries no settings.
+message DhcpOptionSetBoot {
 }
 
 message InlineIpxe {
@@ -3993,6 +4015,10 @@ message InstanceConfig {
   // compatibility with older clients, an empty string explicitly clears it,
   // and a non-empty value replaces it.
   optional string power_profile = 26;
+
+  // DHCP option set for this instance; overrides the VPC's option set per field.
+  // On update, omitting it or sending an empty string removes the set.
+  optional string dhcp_option_set_id = 27;
 }
 
 // Desired network configuration for an instance
@@ -5481,6 +5507,9 @@ message DhcpRecord {
 
   // Per site NTP server IPs
   repeated string ntp_servers = 13;
+
+  // DNS servers for this record; empty uses the DHCP server's configured servers.
+  repeated string dns_servers = 16;
 }
 
 message NetworkSegmentList {
@@ -6078,6 +6107,15 @@ message FlatInterfaceConfig {
 
   // A UUID used to associate a network status with an interface config.
   optional common.UUID internal_uuid = 108;
+
+  // Tenant boot URL for DHCPv4 replies; when unset, booturl is used.
+  optional string booturl_v4 = 109;
+  // Tenant boot URL for DHCPv6 replies; when unset, booturl is used.
+  optional string booturl_v6 = 110;
+  // Tenant DNS servers for DHCPv4 replies; empty uses the site's servers.
+  repeated string dns_servers_v4 = 111;
+  // Tenant DNS servers for DHCPv6 replies; empty uses the site's servers.
+  repeated string dns_servers_v6 = 112;
 }
 
 message FlatInterfaceRoutingProfile {
@@ -13162,6 +13200,80 @@ message NvLinkDomainsByIdsRequest {
 
 message NvLinkDomainList {
   repeated NvLinkDomain domains = 1;
+}
+
+// At least one value must be set; boot URLs must use http or https. Unset values keep NICo's default.
+message DhcpOptions {
+  DhcpOptionsV4 v4 = 1;
+  DhcpOptionsV6 v6 = 2;
+}
+
+message DhcpOptionsV4 {
+  optional string boot_url    = 1;
+  repeated string dns_servers = 2;
+}
+
+message DhcpOptionsV6 {
+  optional string boot_url    = 1;
+  repeated string dns_servers = 2;
+}
+
+message DhcpOptionSet {
+  common.DhcpOptionSetId id     = 1;
+  string tenant_organization_id = 2;
+  Metadata metadata             = 3;
+  DhcpOptions options           = 4;
+  string version                = 5;
+  optional string created_at    = 6;
+}
+
+message CreateDhcpOptionSetRequest {
+  optional common.DhcpOptionSetId id = 1;
+  string tenant_organization_id      = 2;
+  Metadata metadata                  = 3;
+  DhcpOptions options                = 4;
+}
+
+message CreateDhcpOptionSetResponse {
+  DhcpOptionSet dhcp_option_set = 1;
+}
+
+message FindDhcpOptionSetIdsRequest {
+  optional string name                   = 1;
+  optional string tenant_organization_id = 2;
+}
+
+message FindDhcpOptionSetIdsResponse {
+  repeated common.DhcpOptionSetId ids = 1;
+}
+
+message FindDhcpOptionSetsByIdsRequest {
+  repeated common.DhcpOptionSetId ids    = 1;
+  optional string tenant_organization_id = 2;
+}
+
+message FindDhcpOptionSetsByIdsResponse {
+  repeated DhcpOptionSet dhcp_option_sets = 1;
+}
+
+message UpdateDhcpOptionSetRequest {
+  common.DhcpOptionSetId id        = 1;
+  string tenant_organization_id    = 2;
+  Metadata metadata                = 3;
+  DhcpOptions options              = 4;
+  optional string if_version_match = 5;
+}
+
+message UpdateDhcpOptionSetResponse {
+  DhcpOptionSet dhcp_option_set = 1;
+}
+
+message DeleteDhcpOptionSetRequest {
+  common.DhcpOptionSetId id     = 1;
+  string tenant_organization_id = 2;
+}
+
+message DeleteDhcpOptionSetResponse {
 }
 
 // `InspectResourcePoolsRequest` selects every pool with local inventory or a saved binding.

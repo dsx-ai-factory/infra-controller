@@ -27,6 +27,7 @@ use db::vpc::{self};
 use db::vpc_peering::get_prefixes_by_vpcs;
 use db::{self, ObjectColumnFilter, network_security_group};
 use ipnetwork::IpNetwork;
+use model::dhcp_option_set::{DhcpOptions, DhcpOverrides};
 use model::instance::config::network::{
     InstanceInterfaceConfig, InstanceInterfaceRoutingProfile, InstanceNetworkConfig,
     InterfaceFunctionId,
@@ -666,6 +667,10 @@ pub(crate) async fn admin_network(
         prefix: prefix.map(|prefix| prefix.prefix.to_string()),
         fqdn: format!("{}.{}", active_interface.hostname, domain),
         booturl: booturl.clone(),
+        booturl_v4: None,
+        booturl_v6: None,
+        dns_servers_v4: vec![],
+        dns_servers_v6: vec![],
         svi_ip,
         tenant_vrf_loopback_ip: tenant_vrf_loopback_for_legacy_ipv4_field(tenant_vrf_loopback_ip),
         is_l2_segment: !(fnn_enabled_on_admin && l3_only),
@@ -893,6 +898,8 @@ pub(crate) async fn tenant_network(
     vpc_peering_policy_on_existing: Option<VpcPeeringPolicy>,
     booturl: &Option<String>,
     fnn_config: Option<&FnnConfig>,
+    use_tenant_dhcp_options: bool,
+    instance_dhcp_options: Option<&DhcpOptions>,
 ) -> Result<rpc::FlatInterfaceConfig, tonic::Status> {
     // Any stretchable segment is treated as L2 segment by FNN.
     let is_l2_segment = segment.status.can_stretch.unwrap_or(true);
@@ -959,6 +966,21 @@ pub(crate) async fn tenant_network(
     let vpc = resolved_vpc.as_ref().map(|resolved| &resolved.vpc);
     let slaac_enabled = vpc.is_some_and(|vpc| vpc.config.slaac_enabled);
 
+    let dhcp_overrides = if use_tenant_dhcp_options {
+        let vpc_dhcp_options = match vpc.and_then(|v| v.config.dhcp_option_set_id) {
+            Some(id) => {
+                db::dhcp_option_set::find_by_ids(&mut *txn, std::slice::from_ref(&id), None, false)
+                    .await?
+                    .pop()
+                    .map(|set| set.options)
+            }
+            None => None,
+        };
+        DhcpOverrides::resolve(instance_dhcp_options, vpc_dhcp_options.as_ref())
+    } else {
+        DhcpOverrides::default()
+    };
+
     // Only host interfaces apply iface.routing_profile; service endpoints store no override.
     let interface_routing_profile = match (vpc, iface.routing_profile.as_ref()) {
         (Some(vpc), Some(profile))
@@ -1013,6 +1035,18 @@ pub(crate) async fn tenant_network(
         // user's provided fqdn later.
         fqdn,
         booturl: booturl.clone(),
+        booturl_v4: dhcp_overrides.boot_url_v4.clone(),
+        booturl_v6: dhcp_overrides.boot_url_v6.clone(),
+        dns_servers_v4: dhcp_overrides
+            .dns_servers_v4
+            .iter()
+            .map(ToString::to_string)
+            .collect(),
+        dns_servers_v6: dhcp_overrides
+            .dns_servers_v6
+            .iter()
+            .map(ToString::to_string)
+            .collect(),
         svi_ip,
         tenant_vrf_loopback_ip: tenant_vrf_loopback_for_legacy_ipv4_field(loopback_ip),
         is_l2_segment,

@@ -32,6 +32,7 @@ pub mod db_read;
 mod db_session;
 pub mod desired_firmware;
 pub mod dhcp_entry;
+pub mod dhcp_option_set;
 pub mod dhcp_record;
 pub mod direct_dispatch_rms_job;
 pub mod dns;

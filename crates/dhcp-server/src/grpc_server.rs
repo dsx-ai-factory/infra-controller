@@ -177,6 +177,10 @@ impl TryFrom<proto::InterfaceInfo> for ModelInterfaceInfo {
             prefix,
             fqdn: i.fqdn,
             booturl: i.booturl,
+            booturl_v4: i.booturl_v4,
+            booturl_v6: i.booturl_v6,
+            dns_servers_v4: i.dns_servers_v4,
+            dns_servers_v6: i.dns_servers_v6,
             mtu: i.mtu,
             ipv6: i.ipv6.map(ModelInterfaceInfoV6::try_from).transpose()?,
         })

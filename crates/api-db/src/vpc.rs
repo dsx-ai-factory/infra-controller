@@ -75,8 +75,8 @@ pub async fn persist(
         "INSERT INTO vpcs (id, name, organization_id, network_security_group_id, version, network_virtualization_type,
                 description,
                 labels, routing_profile_type, routing_profile_overrides, vni, status, power_resource_group,
-                slaac_enabled)
-                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+                slaac_enabled, dhcp_option_set_id)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
                 RETURNING {}",
         Vpc::db_table_columns(),
     );
@@ -95,6 +95,7 @@ pub async fn persist(
         .bind(sqlx::types::Json(&status))
         .bind(value.power_resource_group)
         .bind(value.slaac_enabled)
+        .bind(value.dhcp_option_set_id)
         .fetch_one(txn)
         .await
         .map_err(|e| DatabaseError::query(&query, e))
@@ -466,6 +467,7 @@ pub async fn update(value: &UpdateVpc, txn: &mut PgConnection) -> DatabaseResult
                 labels=$5::json,
                 routing_profile_overrides=COALESCE($6::jsonb, routing_profile_overrides),
                 power_resource_group=CASE WHEN $7 THEN $8 ELSE power_resource_group END,
+                dhcp_option_set_id=$11,
                 updated=NOW()
             WHERE id=$9 AND version=$10 AND deleted is null
             RETURNING {}",
@@ -495,6 +497,7 @@ pub async fn update(value: &UpdateVpc, txn: &mut PgConnection) -> DatabaseResult
         .bind(power_resource_group)
         .bind(value.id)
         .bind(current_version)
+        .bind(value.dhcp_option_set_id)
         .fetch_one(txn)
         .await;
 
