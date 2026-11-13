@@ -39,6 +39,7 @@ carbide-utils = { path = "../utils" }
 carbide-uuid = { path = "../uuid" }
 component-manager = { path = "../component-manager" }
 config-version = { path = "../config-version" }
+trace-propagation = { path = "../trace-propagation" }
 
 # these are alphabetized
 arc-swap = { workspace = true }

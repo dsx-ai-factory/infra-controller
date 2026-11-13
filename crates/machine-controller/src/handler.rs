@@ -3445,6 +3445,20 @@ impl StateHandler for MachineStateHandler {
         _mh_state: &Self::ControllerState, // mh_snapshot above already contains it
         ctx: &mut StateHandlerContext<Self::ContextObjects>,
     ) -> Result<StateHandlerOutcome<ManagedHostState>, StateHandlerError> {
+        let id = host_machine_id.to_string();
+        let predicted = host_machine_id
+            .to_machine_id()
+            .machine_type()
+            .is_predicted_host();
+        trace_propagation::MachineTraceAttributes {
+            machine_id: (!predicted).then_some(id.as_str()),
+            predicted_id: predicted.then_some(id.as_str()),
+            bmc_ip: mh_snapshot.host_snapshot.status.bmc_info.ip,
+            managed_host_id: Some(&id),
+            managed_host_bmc_ip: mh_snapshot.host_snapshot.status.bmc_info.ip,
+        }
+        .record_on(&tracing::Span::current());
+
         let was_dpf_provisioning = mh_snapshot.managed_state.suppresses_exploration_for_dpf();
 
         // Refresh the per-object info/association series before any early

@@ -1406,6 +1406,11 @@ pub(super) async fn validate_and_complete_bmc_endpoint_request(
                     bmc_endpoint_request.ip_address
                 ))
             })?;
+            trace_propagation::MachineTraceAttributes {
+                bmc_ip: Some(parsed_ip),
+                ..Default::default()
+            }
+            .record_on(&tracing::Span::current());
             let interface = db::machine_interface::find_by_ip(txn, parsed_ip)
                 .await?
                 .ok_or_else(|| CarbideError::NotFoundError {
@@ -1435,6 +1440,9 @@ pub(super) async fn validate_and_complete_bmc_endpoint_request(
                 }
             };
 
+            if let Some(machine_id) = interface.machine_id {
+                log_machine_id(&machine_id);
+            }
             Ok((
                 rpc::BmcEndpointRequest {
                     ip_address: bmc_endpoint_request.ip_address,
@@ -1454,6 +1462,7 @@ pub(super) async fn validate_and_complete_bmc_endpoint_request(
                     id: machine_id.to_string(),
                 })?;
 
+            crate::api::log_machine_snapshot(&machine);
             let bmc_ip = machine.status.bmc_info.ip.as_ref().ok_or_else(|| {
                 CarbideError::internal(format!(
                     "machine found for {machine_id} but BMC IP is missing"

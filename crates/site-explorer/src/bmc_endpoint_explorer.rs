@@ -761,6 +761,23 @@ impl AuthenticatedBmcClient {
     }
 }
 
+pub(crate) fn record_machine_identity(
+    machine_id: &carbide_uuid::machine::MachineId,
+    bmc_ip: Option<std::net::IpAddr>,
+) {
+    let id = machine_id.to_string();
+    let predicted = machine_id.machine_type().is_predicted_host();
+    let host = !machine_id.machine_type().is_dpu();
+    trace_propagation::MachineTraceAttributes {
+        machine_id: (!predicted).then_some(id.as_str()),
+        predicted_id: predicted.then_some(id.as_str()),
+        bmc_ip,
+        managed_host_id: host.then_some(id.as_str()),
+        managed_host_bmc_ip: if host { bmc_ip } else { None },
+    }
+    .record_on(&tracing::Span::current());
+}
+
 #[async_trait::async_trait]
 impl EndpointExplorer for BmcEndpointExplorer {
     async fn check_preconditions(
@@ -784,6 +801,16 @@ impl EndpointExplorer for BmcEndpointExplorer {
         last_exploration_error: Option<&EndpointExplorationError>,
         boot_interface: Option<&BootInterfaceTarget>,
     ) -> Result<EndpointExplorationReport, EndpointExplorationError> {
+        if let Some(machine_id) = interface.machine_id {
+            record_machine_identity(&machine_id, Some(bmc_ip_address.ip()));
+        } else {
+            trace_propagation::MachineTraceAttributes {
+                bmc_ip: Some(bmc_ip_address.ip()),
+                ..Default::default()
+            }
+            .record_on(&tracing::Span::current());
+        }
+
         // If the site explorer was previously unable to login to the root BMC account using
         // the expected credentials, wait for an operator to manually intervene.
         // This will avoid locking us out of BMCs.
