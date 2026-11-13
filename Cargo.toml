@@ -83,6 +83,7 @@ p256 = { version = "0.14.0-rc.7", features = ["pem"] }
 aes-gcm = "0.10"
 anyhow = "1.0"
 arc-swap = "1.6"
+arrayvec = "0.7.6"
 askama = "0.16.0"
 askama_escape = "0.16"
 asn1-rs = "0.7.0"

@@ -731,8 +731,25 @@ async fn incompatible_dpf_update_does_not_consume_capacity(pool: sqlx::PgPool) {
 
 /// A request admitted earlier must be checked again if labels or Kubernetes
 /// availability change before the `Ready` controller starts it.
-#[crate::sqlx_test]
-async fn queued_dpf_update_rechecks_before_restart(pool: sqlx::PgPool) {
+#[test]
+fn queued_dpf_update_rechecks_before_restart() {
+    let args = sqlx::testing::TestArgs::new(concat!(
+        module_path!(),
+        "::queued_dpf_update_rechecks_before_restart"
+    ));
+    let test_fn: fn(sqlx::PgPool) -> _ = queued_dpf_update_rechecks_before_restart_body;
+    // Match Core's worker stack: this preflight path nests enough unoptimized
+    // state-machine frames to exceed libtest's default without changing
+    // production runtime settings.
+    std::thread::Builder::new()
+        .stack_size(8 * 1024 * 1024)
+        .spawn(move || sqlx_testing::TestFn::run_test(test_fn, args))
+        .expect("spawn queued DPF update recheck test")
+        .join()
+        .expect("queued DPF update recheck test panicked");
+}
+
+async fn queued_dpf_update_rechecks_before_restart_body(pool: sqlx::PgPool) {
     let f = fixture(pool).await;
     let work_lock = f
         .env
