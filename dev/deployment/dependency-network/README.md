@@ -22,11 +22,12 @@ and literal-address exchanges in [#6604](https://github.com/dsx-ai-factory/infra
   overlapping Docker allocation; the driver does not modify existing networks.
 
 The driver creates its own named networks and containers. It publishes no host
-ports, uses disposable credentials, and removes its containers and networks on
-completion or a handled failure. A single SIGINT/SIGTERM/SIGHUP starts cleanup.
-It leaves the test image and Cargo caches for reuse. Repeated signals during
-cleanup, SIGKILL, or host failure can leave resources named `nico-dependency-*`;
-inspect their identities before removing them.
+ports and uses disposable credentials. It attempts to remove its containers and
+networks on completion or a handled failure. A single SIGINT/SIGTERM/SIGHUP
+starts cleanup; repeated signals can interrupt it. Cleanup is best effort:
+Docker errors or interruption can leave resources named `nico-dependency-*`.
+Inspect their identities before removing them. The test image and Cargo caches
+are retained for reuse.
 
 ## Build and run
 
