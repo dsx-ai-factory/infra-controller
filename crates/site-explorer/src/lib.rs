@@ -87,6 +87,7 @@ mod host_reconciler;
 use host_reconciler::HostReconciler;
 mod boot_order_tracker;
 use boot_order_tracker::BootOrderTracker;
+pub mod dpu_asn;
 pub mod dpu_loopback;
 mod inventory_creator;
 pub use inventory_creator::{
@@ -154,17 +155,20 @@ fn should_scan_underlay_interface_for_redfish(
 }
 
 /// Build an endpoint explorer over the authenticated BMC client supplied by
-/// the application composition root.
+/// the application composition root. Events use `instrumentation`; retain its provider
+/// while the explorer runs.
 pub fn new_bmc_explorer(
     bmc_client: Arc<AuthenticatedBmcClient>,
     rotate_switch_nvos_credentials: Arc<AtomicBool>,
     explore_drive_firmware: bool,
     database_connection: PgPool,
+    instrumentation: carbide_instrument::Instrumentation,
 ) -> Arc<BmcEndpointExplorer> {
     BmcEndpointExplorer::new(
         bmc_client,
         rotate_switch_nvos_credentials,
         Some(database_connection),
+        instrumentation,
     )
     .with_drive_firmware(explore_drive_firmware)
     .into()
@@ -577,6 +581,7 @@ impl RecentBmcResets {
 /// * `max_concurrent_machine_updates` the maximum number of updates allowed across all modules
 /// * `machine_update_run_interval` how often the manager calls the modules to start updates
 pub struct SiteExplorer {
+    instrumentation: carbide_instrument::Instrumentation,
     database_connection: PgPool,
     config: SiteExplorerConfig,
     metric_holder: Arc<metrics::MetricHolder>,
@@ -606,10 +611,11 @@ impl SiteExplorer {
     const SITE_EXPLORER_HEALTH_REPORT_WRITE_BATCH_SIZE: usize = 500;
 
     #[allow(clippy::too_many_arguments)]
-    /// Creates a site explorer.
+    /// Creates a site explorer with explicit Event instrumentation. Retain its
+    /// provider until the explorer and its background operations stop.
     ///
-    /// The registry selects each DPU's IPv4 loopback backend. Creation prepares
-    /// provider allocations before the machine transaction; `start` supplies
+    /// The registry selects each DPU's IPv4 loopback backend. Creation and
+    /// reconciliation prepare provider allocations before the machine transaction; `start` supplies
     /// the shutdown token for that preparation.
     ///
     /// When `dpf_enabled_at_site` is true, eligible hosts are marked for DPF-managed ingestion.
@@ -627,18 +633,27 @@ impl SiteExplorer {
         machine_info_provider: Option<Arc<dyn MachineInfoProvider>>,
         credential_manager: Arc<dyn CredentialManager>,
         dpf_enabled_at_site: bool,
+        instrumentation: carbide_instrument::Instrumentation,
     ) -> Self {
         let metric_holder = Arc::new(metrics::MetricHolder::new(meter, &explorer_config));
         let rack_profiles = Arc::new(rack_profiles);
         let endpoint_explorer = endpoint_exploration_service.endpoint_explorer();
 
         SiteExplorer {
-            host_reconciler: HostReconciler::new(database_connection.clone()),
+            instrumentation: instrumentation.clone(),
+            host_reconciler: HostReconciler::new(
+                database_connection.clone(),
+                explorer_config.retained_boot_interface_window,
+                resource_pool_registry.clone(),
+                common_pools.clone(),
+                instrumentation.clone(),
+            ),
             machine_location_reconciler: MachineLocationReconciler::new(
                 database_connection.clone(),
                 rack_profiles.clone(),
                 machine_info_provider.clone(),
                 credential_manager,
+                instrumentation.clone(),
             ),
             inventory_creator: InventoryCreator::new(
                 database_connection.clone(),
@@ -648,6 +663,7 @@ impl SiteExplorer {
                 rack_profiles,
                 machine_info_provider,
                 dpf_enabled_at_site,
+                instrumentation,
             ),
             database_connection,
             config: explorer_config,
@@ -670,6 +686,7 @@ impl SiteExplorer {
     ) -> io::Result<()> {
         self.inventory_creator
             .set_preparation_cancel_token(cancel_token.clone());
+        self.host_reconciler.preparation_cancel_token = cancel_token.clone();
         join_set
             .build_task()
             .name("site_explorer")
@@ -782,9 +799,10 @@ impl SiteExplorer {
     fn emit_iteration_finished(
         metrics: &SiteExplorationMetrics,
         error: Option<&SiteExplorerError>,
+        instrumentation: &carbide_instrument::Instrumentation,
     ) {
         let latency = metrics.recording_started_at.elapsed();
-        carbide_instrument::emit(match error {
+        instrumentation.emit(match error {
             None => SiteExplorerIterationFinished::Succeeded { latency },
             Some(error) => SiteExplorerIterationFinished::Failed {
                 latency,
@@ -833,7 +851,7 @@ impl SiteExplorer {
                 // `None` keeps `SiteExplorerIterationFinished` metric-only, so
                 // expected replica contention does not also produce an
                 // `ERROR`.
-                Self::emit_iteration_finished(&metrics, None);
+                Self::emit_iteration_finished(&metrics, None, &self.instrumentation);
                 self.metric_holder.update_metrics(metrics);
                 return result;
             }
@@ -905,7 +923,7 @@ impl SiteExplorer {
         Self::record_run_status_metric(&mut metrics, &res);
         self.record_last_run_result(started_at, &metrics, &res)
             .await;
-        Self::emit_iteration_finished(&metrics, res.as_ref().err());
+        Self::emit_iteration_finished(&metrics, res.as_ref().err(), &self.instrumentation);
 
         // Cache all other metrics that have been captured in this iteration.
         // Those will be queried by OTEL on demand
@@ -918,11 +936,13 @@ impl SiteExplorer {
     /// Also updates the Site Explorer Health Report for all explored endpoints based on the last exploration data.
     ///
     /// * `metrics`                   - A metrics collector for accumulating and later emitting metrics.
-    /// * `matched_expected_machines` - A map of expected machines that have been matched to interfaces, indexed by IP(s).
-    async fn audit_exploration_results(
+    /// * `expected_endpoint_index`  - Expected entities matched with explored endpoints.
+    /// * `explored_managed_hosts`   - The complete host/DPU associations persisted this iteration.
+    async fn audit_exploration_results<'a>(
         &self,
         metrics: &mut SiteExplorationMetrics,
         expected_endpoint_index: &ExploredEndpointIndex,
+        explored_managed_hosts: impl Iterator<Item = &'a ExploredManagedHost>,
     ) -> SiteExplorerResult<()> {
         let audit_load_start = Instant::now();
         let mut txn = self.txn_begin().await?;
@@ -930,7 +950,6 @@ impl SiteExplorer {
         // Grab them all because we care about everything,
         // not just the subset in the current run.
         let explored_endpoints = db::explored_endpoints::find_all(txn.as_pgconn()).await?;
-        let explored_managed_hosts = db::explored_managed_host::find_all(txn.as_pgconn()).await?;
 
         txn.rollback().await?;
         metrics.record_phase_latency("audit_load", audit_load_start.elapsed());
@@ -1190,12 +1209,10 @@ impl SiteExplorer {
         // physical card. BF4 does not expose that serial on the DPU system
         // object, so this uses `EndpointExplorationReport::dpu_pairing_serial_number`
         // rather than reading `systems[0].serial_number` directly.
-        let mut dpu_sn_to_endpoint = HashMap::new();
-        for (_, ep) in explored_dpus {
-            if let Some(sn) = ep.report.dpu_pairing_serial_number() {
-                dpu_sn_to_endpoint.insert(sn.to_string(), ep);
-            }
-        }
+        let dpu_sn_to_endpoint = explored_dpus
+            .values()
+            .filter_map(|ep| ep.report.dpu_pairing_serial_number().map(|sn| (sn, ep)))
+            .collect::<HashMap<_, _>>();
 
         let mut candidates = Vec::with_capacity(explored_hosts.len());
         for (_, ep) in explored_hosts {
@@ -1235,6 +1252,9 @@ impl SiteExplorer {
         }
 
         let mut configured_candidates = Vec::with_capacity(candidates.len());
+        // Retain fresh observations even when creation policy rejects their
+        // matching, so existing-host reconciliation can select its own work.
+        let mut unmatched_host_reports = Vec::new();
         for candidate in candidates {
             let dpus = match candidate.dpu_matches {
                 Some(dpu_matches) => {
@@ -1247,6 +1267,7 @@ impl SiteExplorer {
                         )
                         .await
                     else {
+                        unmatched_host_reports.push(candidate.endpoint);
                         continue;
                     };
                     dpus
@@ -1262,8 +1283,14 @@ impl SiteExplorer {
             });
         }
 
-        let (mut identified_hosts, boot_interfaces) =
-            MachineCreator::identify_managed_hosts(configured_candidates, metrics);
+        let (mut identified_hosts, boot_interfaces, unmatched_reports) =
+            MachineCreator::identify_managed_hosts(
+                configured_candidates,
+                metrics,
+                &self.instrumentation,
+            );
+
+        unmatched_host_reports.extend(unmatched_reports);
 
         let mut txn = self.txn_begin().await?;
         Self::persist_identified_managed_hosts(&mut txn, &identified_hosts).await?;
@@ -1277,29 +1304,43 @@ impl SiteExplorer {
         );
 
         self.inventory_creator
-            .create_or_reconcile_hosts(
+            .create_hosts(
                 metrics,
                 &mut identified_hosts,
                 &expected_endpoint_index,
                 &already_ingested_bmc_ips,
-                &explored_this_run,
                 &run_context.suppressed_bmc_macs,
             )
             .await;
 
-        let reconcile_desired_boot_interfaces_start = Instant::now();
-        let reconcile_desired_boot_interfaces_res =
-            self.host_reconciler.run_single_iteration().await;
-        metrics.record_phase_latency(
-            "reconcile_desired_boot_interfaces",
-            reconcile_desired_boot_interfaces_start.elapsed(),
-        );
-        if let Err(error) = reconcile_desired_boot_interfaces_res {
+        let reconcile_hosts_start = Instant::now();
+        let reconcile_hosts_res = self
+            .host_reconciler
+            .run_single_iteration(
+                identified_hosts.iter().map(|host| &host.explored_host),
+                identified_hosts
+                    .iter()
+                    .map(|host| (host.explored_host.host_bmc_ip, &host.report))
+                    .chain(
+                        unmatched_host_reports
+                            .iter()
+                            .map(|endpoint| (endpoint.address, &endpoint.report)),
+                    ),
+                &expected_endpoint_index,
+                &already_ingested_bmc_ips,
+                &explored_this_run,
+            )
+            .await;
+        metrics.record_phase_latency("reconcile_hosts", reconcile_hosts_start.elapsed());
+        if let Err(error) = reconcile_hosts_res {
             tracing::warn!(
                 %error,
                 "Desired boot-interface reconciliation pass failed; a later Site Explorer run will retry"
             );
         }
+        // Rejected reports are only retained for reconciliation; release them
+        // before audit loads the full endpoint set for health reporting.
+        drop(unmatched_host_reports);
 
         self.inventory_creator
             .create_switches_and_power_shelves(
@@ -1311,8 +1352,12 @@ impl SiteExplorer {
 
         // Audit after everything has been explored, identified, and created.
         let audit_exploration_results_start = Instant::now();
-        self.audit_exploration_results(metrics, &expected_endpoint_index)
-            .await?;
+        self.audit_exploration_results(
+            metrics,
+            &expected_endpoint_index,
+            identified_hosts.iter().map(|host| &host.explored_host),
+        )
+        .await?;
         metrics.record_phase_latency(
             "audit_exploration_results",
             audit_exploration_results_start.elapsed(),
@@ -1893,11 +1938,10 @@ impl SiteExplorer {
                 self.config.retained_boot_interface_window,
             )
             .await;
-            for nic in
-                expected_machine.data.interfaces.iter().filter(|interface| {
-                    interface.mac_address != Some(expected_machine.bmc_mac_address)
-                })
-            {
+            for nic in expected_machine.data.interfaces.iter().filter(|interface| {
+                !interface.role.is_dpu_loopback()
+                    && interface.mac_address != Some(expected_machine.bmc_mac_address)
+            }) {
                 try_apply_expected_interface(
                     &self.database_connection,
                     expected_machine,
@@ -2023,10 +2067,13 @@ impl SiteExplorer {
             .iter()
             .flat_map(|machine| &machine.data.interfaces)
             .filter(|interface| {
-                // A DpuOs interface terminates on the DPU operating system,
-                // not its management controller. Redfish is exposed through
-                // the separate DpuBmc interface.
-                interface.role == model::expected_machine::ExpectedInterfaceRole::DpuOs
+                // Both declarations identify the OS/admin MAC, including when
+                // only loopback intent is supplied. Redfish uses DpuBmc.
+                matches!(
+                    interface.role,
+                    model::expected_machine::ExpectedInterfaceRole::DpuOs
+                        | model::expected_machine::ExpectedInterfaceRole::DpuLoopback
+                )
             })
             .filter_map(|interface| interface.mac_address)
             .chain(
@@ -2111,6 +2158,7 @@ impl SiteExplorer {
                             suppression::record_deferred(
                                 *address,
                                 suppression::ExplorationRequest::Periodic,
+                                &self.instrumentation,
                             );
                         }
                         tracing::info!(bmc_ip_address = %address, bmc_mac_address = %iface.mac_address, "Skipping exploration of suppressed BMC");
@@ -2156,7 +2204,9 @@ impl SiteExplorer {
                     .contains(&iface.mac_address)
                 {
                     if run_context.dpf_provisioning_bmc_macs.contains(&iface.mac_address) {
-                        suppression::record_deferred(*address, suppression::ExplorationRequest::Periodic);
+                        suppression::record_deferred(*address, suppression::ExplorationRequest::Periodic,
+                            &self.instrumentation,
+                        );
                     }
                     tracing::info!(bmc_ip_address = %address, bmc_mac_address = %iface.mac_address, "Skipping exploration of suppressed BMC");
                     return false;
@@ -2390,11 +2440,8 @@ impl SiteExplorer {
                 .endpoint_exploration_duration
                 .push(exploration_duration);
             match &result {
-                Ok(report) => {
+                Ok(_) => {
                     metrics.endpoint_explorations_success += 1;
-                    if let Some(e) = &report.remediation_error {
-                        redfish_error = Some(e.clone());
-                    }
                 }
                 Err(e) => {
                     *metrics
@@ -2461,12 +2508,16 @@ impl SiteExplorer {
                             endpoint_report_update_attempts += 1;
                             match report_write {
                                 ConditionalWrite::Applied(()) => {
-                                    attester_inventory::record(&report, &mut txn).await?;
+                                    attester_inventory::record(
+                                        &report,
+                                        &mut txn,
+                                        &self.instrumentation,
+                                    )
+                                    .await?;
                                     refreshed_endpoints.insert(address);
                                 }
                                 ConditionalWrite::NotApplied(EndpointReportNotCurrent) => {
-                                    // Skip transient remediation: it would use
-                                    // the rejected report's stale endpoint snapshot.
+                                    // Undo topology changes from the rejected report.
                                     txn.rollback().await?;
                                     continue;
                                 }
@@ -2515,7 +2566,8 @@ impl SiteExplorer {
                                 &mut txn,
                             )
                             .await?;
-                            attester_inventory::record(&report, &mut txn).await?;
+                            attester_inventory::record(&report, &mut txn, &self.instrumentation)
+                                .await?;
                             insert_endpoint_attempts += 1;
                             refreshed_endpoints.insert(address);
                         }
@@ -2609,6 +2661,7 @@ impl SiteExplorer {
         method: BmcResetMethod,
         address: IpAddr,
         metrics: &mut SiteExplorationMetrics,
+        instrumentation: &carbide_instrument::Instrumentation,
     ) -> bool {
         let (status, error, succeeded) = match result {
             Ok(()) => {
@@ -2618,7 +2671,7 @@ impl SiteExplorer {
             Err(err) => (BmcResetStatus::Failed, err.to_string(), false),
         };
 
-        carbide_instrument::emit(match status {
+        instrumentation.emit(match status {
             BmcResetStatus::Succeeded => BmcResetFinished::Succeeded {
                 method,
                 address,
@@ -2772,31 +2825,6 @@ impl SiteExplorer {
             "Site explorer captured an error"
         );
 
-        // If the endpoint is a DPU, and the error is that the BIOS attributes are coming up as empty for this DPU,
-        // reboot the DPU as our first course of action. This is the official workaround from the DPU redfish team to mitigate empty UEFI attributes
-        // until https://redmine.mellanox.com/issues/3746477 is fixed.
-        //
-        // If this fails, and we continue seeing the BIOS attributes come up as empty after twenty minutes (providing plenty of time)
-        // for the DPU to come back up after the reboot, lets try resetting the BMC to see if it helps.
-
-        if (error.is_dpu_redfish_bios_response_invalid())
-            && time_since_redfish_reboot > reset_rate_limit
-            && self
-                .redfish_power(endpoint, libredfish::SystemPowerControl::ForceRestart)
-                .await
-                .map_err(|err| {
-                    tracing::error!(
-                        bmc_ip_address = %endpoint.address,
-                        error = %err,
-                        "Site Explorer failed to reboot"
-                    )
-                })
-                .is_ok()
-        {
-            metrics.bmc_reboot_count += 1;
-            return;
-        }
-
         if self.is_viking_bmc(endpoint).await && time_since_redfish_reboot > reset_rate_limit {
             match self.clear_nvram(endpoint).await {
                 Ok(_) => {
@@ -2819,6 +2847,7 @@ impl SiteExplorer {
                 BmcResetMethod::Redfish,
                 endpoint.address,
                 metrics,
+                &self.instrumentation,
             )
         {
             return;
@@ -2830,6 +2859,7 @@ impl SiteExplorer {
                 BmcResetMethod::Ipmitool,
                 endpoint.address,
                 metrics,
+                &self.instrumentation,
             );
         }
     }
@@ -2869,11 +2899,12 @@ impl SiteExplorer {
                 self.recent_bmc_resets
                     .record_ipmitool(endpoint.address, Utc::now());
                 if let Err(e) = self.persist_last_ipmitool_bmc_reset(endpoint.address).await {
-                    carbide_instrument::emit(BmcResetTimestampPersistenceFailed {
-                        method: BmcResetMethod::Ipmitool,
-                        bmc_ip_address: endpoint.address,
-                        error: e.to_string(),
-                    });
+                    self.instrumentation
+                        .emit(BmcResetTimestampPersistenceFailed {
+                            method: BmcResetMethod::Ipmitool,
+                            bmc_ip_address: endpoint.address,
+                            error: e.to_string(),
+                        });
                 }
                 Ok(())
             }
@@ -2919,11 +2950,12 @@ impl SiteExplorer {
                 self.recent_bmc_resets
                     .record_redfish(endpoint.address, Utc::now());
                 if let Err(e) = self.persist_last_redfish_bmc_reset(endpoint.address).await {
-                    carbide_instrument::emit(BmcResetTimestampPersistenceFailed {
-                        method: BmcResetMethod::Redfish,
-                        bmc_ip_address: endpoint.address,
-                        error: e.to_string(),
-                    });
+                    self.instrumentation
+                        .emit(BmcResetTimestampPersistenceFailed {
+                            method: BmcResetMethod::Redfish,
+                            bmc_ip_address: endpoint.address,
+                            error: e.to_string(),
+                        });
                 }
                 Ok(())
             }
@@ -4155,7 +4187,9 @@ mod tests {
                 let result = error.map_or(Ok(()), |error| {
                     Err(SiteExplorerError::internal(error.to_string()))
                 });
-                let event_metrics = MetricsCapture::start();
+                let test_meter = carbide_utils::test_support::test_meter::TestMeter::default();
+                let instrumentation = carbide_instrument::Instrumentation::new(test_meter.meter());
+                let event_metrics = MetricsCapture::for_registry(test_meter.registry());
                 let mut run_metrics = SiteExplorationMetrics::new();
                 let mut succeeded = false;
                 let logs = capture_logs(|| {
@@ -4164,6 +4198,7 @@ mod tests {
                         method,
                         address,
                         &mut run_metrics,
+                        &instrumentation,
                     );
                 });
                 let log = logs.first().map(|log| LogObservation {

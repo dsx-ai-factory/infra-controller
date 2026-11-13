@@ -145,7 +145,10 @@ where
             .await
             .expect("failed to connect test pool");
 
-        let res = test_fn(pool.clone()).await;
+        // Do not embed the test's future in every harness/runtime wrapper.
+        // Large integration tests otherwise multiply its size through the
+        // temporaries used to construct and poll those enclosing futures.
+        let res = Box::pin(test_fn(pool.clone())).await;
 
         let close_timed_out = sqlx_core::rt::timeout(Duration::from_secs(10), pool.close())
             .await

@@ -27,10 +27,10 @@ use carbide_uuid::dpu_remediations::RemediationId;
 use carbide_uuid::machine::DpuMachineId;
 use rand::RngExt;
 use rpc::Metadata;
+use rpc::carbide_tls_client::CarbideClientConfig;
 use rpc::forge::{
     GetNextRemediationForMachineRequest, RemediationApplicationStatus, RemediationAppliedRequest,
 };
-use rpc::forge_tls_client::ForgeClientConfig;
 
 use crate::metrics::{
     RemediationApplyFailed, RemediationClientCreationFailed, RemediationFetchFailed,
@@ -66,19 +66,19 @@ impl MachineInfo {
 
 pub struct RemediationExecutor {
     forge_api_server: String,
-    forge_client_config: Arc<ForgeClientConfig>,
+    carbide_client_config: Arc<CarbideClientConfig>,
     machine_info: MachineInfo,
 }
 
 impl RemediationExecutor {
     pub fn new(
         forge_api_server: String,
-        forge_client_config: Arc<ForgeClientConfig>,
+        carbide_client_config: Arc<CarbideClientConfig>,
         machine_info: MachineInfo,
     ) -> Self {
         Self {
             forge_api_server,
-            forge_client_config,
+            carbide_client_config,
             machine_info,
         }
     }
@@ -87,7 +87,7 @@ impl RemediationExecutor {
         &self,
         remediation_id: RemediationId,
         script: String,
-        mut client: rpc::forge_tls_client::ForgeClientT,
+        mut client: rpc::carbide_tls_client::CarbideClientT,
     ) -> Result<(), Box<dyn Error>> {
         // setup tmp dir with new random UUID
         let tmp_dir_location = format!("/tmp/remediations/{}", uuid::Uuid::new_v4());
@@ -208,7 +208,7 @@ impl RemediationExecutor {
         loop {
             match forge_dpu_agent_utils::utils::create_forge_client(
                 self.forge_api_server.as_str(),
-                &self.forge_client_config,
+                &self.carbide_client_config,
             )
             .await
             {

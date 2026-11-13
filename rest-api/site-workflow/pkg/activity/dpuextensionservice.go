@@ -13,6 +13,8 @@ import (
 	cclient "github.com/NVIDIA/infra-controller/rest-api/site-workflow/pkg/grpc/client"
 	"github.com/rs/zerolog/log"
 	"go.temporal.io/sdk/temporal"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
@@ -201,6 +203,27 @@ func (mdes *ManageDpuExtensionService) DeleteDpuExtensionServiceOnSite(ctx conte
 	_, err = grpcServiceClient.DeleteDpuExtensionService(ctx, request)
 	duration := time.Since(start)
 	if err != nil {
+		if status.Code(err) == codes.NotFound && len(request.Versions) == 0 {
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
+			// Core also returns NotFound for a missing version of an existing service.
+			// Treat deletion as successful only if the service itself is absent.
+			services, lookupErr := grpcServiceClient.FindDpuExtensionServicesByIds(ctx, &corev1.DpuExtensionServicesByIdsRequest{
+				ServiceIds: []string{request.ServiceId},
+			})
+			if lookupErr != nil {
+				logger.Warn().Err(lookupErr).Msg("Failed to check whether DPU Extension Service is already absent on Site")
+				return swe.WrapErr(lookupErr)
+			}
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
+			if len(services.Services) == 0 {
+				logger.Info().Msg("DPU Extension Service is already absent on Site")
+				return nil
+			}
+		}
 		logger.Warn().Err(err).Dur("grpc_duration", duration).Msg("Failed to delete DPU Extension Service using Core gRPC API")
 		return swe.WrapErr(err)
 	}

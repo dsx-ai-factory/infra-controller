@@ -45,6 +45,9 @@ pub(crate) async fn get_pxe_instructions(
     // machine_interface, either via direct machine_interface_addresses lookup
     // or via instance_address for tenant-allocated machines.
     let iface = resolve_machine_interface(txn.as_pgconn(), pxe_request.client_ip).await?;
+    if let Some(machine_id) = iface.machine_id {
+        crate::api::log_machine_id(&machine_id);
+    }
 
     let input = PxeInstructionsInput {
         interface_id: iface.id,

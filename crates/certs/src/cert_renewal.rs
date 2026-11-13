@@ -19,12 +19,12 @@ use std::ops::Add;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use ::rpc::carbide_tls_client::{self, ApiConfig, CarbideClientConfig};
 use ::rpc::forge as rpc;
-use ::rpc::forge_tls_client::{self, ApiConfig, ForgeClientConfig};
 use carbide_host_support::registration;
 use carbide_instrument::{Event, Outcome, emit};
+use carbide_tls::client_config::{ClientCert, MAX_CERT_RENEWAL_TIME_SECS};
 use eyre::Context;
-use forge_tls::client_config::{ClientCert, MAX_CERT_RENEWAL_TIME_SECS};
 use rand::RngExt;
 
 /// Certificates are renewed between in these 2 time intervals
@@ -69,11 +69,11 @@ enum CertRenewalCompleted {
 pub struct ClientCertRenewer {
     cert_renewal_time: std::time::Instant,
     forge_api_server: String,
-    client_config: Arc<ForgeClientConfig>,
+    client_config: Arc<CarbideClientConfig>,
 }
 
 impl ClientCertRenewer {
-    pub fn new(forge_api_server: String, client_config: Arc<ForgeClientConfig>) -> Self {
+    pub fn new(forge_api_server: String, client_config: Arc<CarbideClientConfig>) -> Self {
         let cert_renewal_period =
             rand::rng().random_range(MIN_CERT_RENEWAL_TIME_SECS..MAX_CERT_RENEWAL_TIME_SECS);
         let cert_renewal_time = Instant::now().add(Duration::from_secs(cert_renewal_period));
@@ -124,7 +124,7 @@ impl ClientCertRenewer {
         override_client_cert: Option<&ClientCert>,
     ) -> Result<(), eyre::Report> {
         tracing::info!("Trying to renew TLS client certificates");
-        let mut client = forge_tls_client::ForgeTlsClient::retry_build(&ApiConfig::new(
+        let mut client = carbide_tls_client::CarbideTlsClient::retry_build(&ApiConfig::new(
             &self.forge_api_server,
             &self.client_config,
         ))
@@ -229,7 +229,7 @@ mod tests {
         // A fresh renewer's first renewal is days away, so this call skips.
         let mut renewer = ClientCertRenewer::new(
             "https://localhost:1".to_string(),
-            Arc::new(ForgeClientConfig::new(String::new(), None)),
+            Arc::new(CarbideClientConfig::new(String::new(), None)),
         );
         let runtime = tokio::runtime::Builder::new_current_thread()
             .build()

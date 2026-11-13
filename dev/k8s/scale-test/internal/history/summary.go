@@ -55,6 +55,7 @@ func unixSecs(t time.Time) float64 { return float64(t.Unix()) + float64(t.Nanose
 
 // input is the request, in seconds.
 type input struct {
+	base             *probeapi.SummaryBase
 	family           probeapi.Family
 	start, end       float64
 	n                uint64
@@ -145,6 +146,9 @@ func compute(in *input, before *sweep, window []*sweep, finalScrapeSeen bool) pr
 	}
 	for i, q := range probeapi.FixedQuantiles {
 		t, _ := target(in.n, q) // Prepare checked every target is a count.
+		if in.base != nil {
+			t += in.base.Count
+		}
 		r.Crossings[i] = probeapi.Crossing{Q: q, Target: t}
 	}
 	if len(span) == 0 {
@@ -158,9 +162,11 @@ func compute(in *input, before *sweep, window []*sweep, finalScrapeSeen bool) pr
 	// regression anywhere in the span, leaves the times unknown, never read as
 	// a clean completion.
 	switch {
-	case before == nil || before.count != 0 || before.end < in.start-2*in.interval:
+	case before == nil || before.end < in.start-2*in.interval:
 		return r
-	case !monotone(span):
+	case in.base == nil && (before.count != 0 || !monotone(span)):
+		return r
+	case in.base != nil && (before.count != float64(in.base.Count) || before.start != unixSecs(in.base.SweepStart.Time) || before.end != unixSecs(in.base.ReadAt.Time) || before.process != in.base.ProcessStartSeconds):
 		return r
 	}
 	for i := range r.Crossings {
@@ -244,17 +250,25 @@ func Prepare(ctx context.Context, c Context, f probeapi.Filter, p probeapi.Summa
 		return nil, InvalidInput{"start", fmt.Sprintf("the window is longer than %v", maxWindow)}
 	}
 	for _, q := range probeapi.FixedQuantiles {
-		if _, ok := target(p.N, q); !ok {
+		if target, ok := target(p.N, q); !ok || p.Base != nil && (p.Base.Count > probeapi.MaxCount || target > probeapi.MaxCount-p.Base.Count) {
 			return nil, InvalidInput{"n", "a target would exceed the largest count: n is too large"}
 		}
+	}
+	if p.Base != nil && (p.Base.ProcessStartSeconds != c.Probe.Info.ProcessStartSeconds || !p.Base.SweepStart.Before(p.Base.ReadAt.Time) || !p.Base.ReadAt.Before(p.Start.Time)) {
+		return nil, InvalidInput{"base", "baseline epoch or source times do not precede the window"}
 	}
 	// A write window longer than the longest run window is no write window,
 	// and a huge one would make the timing error infinite.
 	if !(p.AddWindowSeconds >= 0 && p.AddWindowSeconds <= maxWindow.Seconds()) {
 		return nil, InvalidInput{"addWindowSeconds", "addWindowSeconds must be from 0 to the longest window"}
 	}
+	base := p.Base
+	if base != nil {
+		copy := *base
+		base = &copy
+	}
 	r := &Request{Spec: spec, Start: p.Start.Time, End: p.End.Time, in: input{
-		family: spec.Family, start: unixSecs(p.Start.Time), end: unixSecs(p.End.Time), n: p.N, addWindowSeconds: p.AddWindowSeconds,
+		base: base, family: spec.Family, start: unixSecs(p.Start.Time), end: unixSecs(p.End.Time), n: p.N, addWindowSeconds: p.AddWindowSeconds,
 		process: c.Probe.Info.ProcessStartSeconds, interval: interval.Seconds(),
 	}}
 	// A request checked past the deadline, or after a cancel, is not taken.
@@ -330,6 +344,9 @@ func Summarize(ctx context.Context, c Context, r *Request, s Samples) (probeapi.
 	if foreign {
 		return none, Unavailable{"a sweep in the window is from another probe process: a restart or a replaced pod"}
 	}
+	if r.in.base != nil {
+		before = plannedBaseline(sweeps, points, &r.in)
+	}
 	span := window
 	if before != nil {
 		span = append([]*sweep{before}, window...)
@@ -343,4 +360,32 @@ func Summarize(ctx context.Context, c Context, r *Request, s Samples) (probeapi.
 		return none, err
 	}
 	return reply, nil
+}
+
+// plannedBaseline proves the frozen source reference, allowing intervening
+// pre-dispatch sweeps only while their count and process remain unchanged.
+func plannedBaseline(sweeps []sweep, points []point, in *input) *sweep {
+	var found *sweep
+	b := in.base
+	for i := range sweeps {
+		s := &sweeps[i]
+		if s.process == b.ProcessStartSeconds && s.start == unixSecs(b.SweepStart.Time) && s.end == unixSecs(b.ReadAt.Time) && s.count == float64(b.Count) {
+			found = s
+		}
+	}
+	if found == nil {
+		return nil
+	}
+	for _, s := range sweeps {
+		if s.end >= found.end && s.end < in.start && (s.process != in.process || s.count != float64(b.Count)) {
+			return nil
+		}
+	}
+	for _, p := range points {
+		at := float64(p.at) / 1000
+		if at >= found.end && at <= in.end && p.process != in.process {
+			return nil
+		}
+	}
+	return found
 }

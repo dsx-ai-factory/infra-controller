@@ -26,8 +26,10 @@ use std::task::{Context, Poll};
 use std::time::Duration;
 
 use carbide_uuid::rack::RackId;
+use futures::stream::FuturesUnordered;
 use prometheus::{Counter, Gauge, Histogram, HistogramOpts, IntGauge, Opts};
 use tokio::sync::OnceCell;
+use tokio::task::JoinHandle;
 use tokio::time::{Instant, Sleep};
 use tokio_stream::{Stream, StreamExt};
 use tokio_util::sync::CancellationToken;
@@ -301,7 +303,20 @@ struct ExtendedGnmiStreamState {
     processor: ExtendedGnmiProcessor,
 }
 
-/// Endpoint-owned incremental readings retained through collector metadata replacement.
+enum GnmiStream {
+    Sample,
+    Interfaces,
+    LeakSensors,
+    SystemEvents,
+    Additional { subscription: String },
+}
+
+struct GnmiStreamTask {
+    stream: GnmiStream,
+    handle: JoinHandle<()>,
+}
+
+/// Endpoint-owned incremental readings retained across collector replacement.
 #[derive(Default)]
 pub(crate) struct GnmiRetainedCache {
     event_rows: super::on_change_processor::SharedEventRows,
@@ -1044,18 +1059,9 @@ pub(super) fn spawn_gnmi_collector_with_settings(
         client_provider,
         &collector_registry,
         data_sink.clone(),
-        switch_id,
+        switch_id.clone(),
         retained,
     )?;
-
-    // Plan construction must succeed before cached readings reach the new contexts.
-    if let Some(state) = &plan.on_change {
-        state.processor.republish();
-    }
-
-    for state in &plan.extended {
-        state.processor.reconciliation.republish();
-    }
 
     let sample_enabled = !plan.sample.config.paths.is_empty();
 
@@ -1079,67 +1085,64 @@ pub(super) fn spawn_gnmi_collector_with_settings(
         // Keep the subregistry registered until all gNMI stream tasks finish.
         let _collector_registry = collector_registry;
 
-        let sample_handle = sample_enabled.then(|| {
-            tokio::spawn(gnmi_sample_task(
+        let sample_task = sample_enabled.then(|| GnmiStreamTask {
+            stream: GnmiStream::Sample,
+            handle: tokio::spawn(gnmi_sample_task(
                 cancel_token.clone(),
                 sample.config,
                 sample.stream_metrics,
                 sample.processor,
-            ))
+            )),
         });
 
-        let interface_handle = interface.map(|state| {
-            tokio::spawn(gnmi_sample_task(
+        let interface_task = interface.map(|state| GnmiStreamTask {
+            stream: GnmiStream::Interfaces,
+            handle: tokio::spawn(gnmi_sample_task(
                 cancel_token.clone(),
                 state.config,
                 state.stream_metrics,
                 state.processor,
-            ))
+            )),
         });
 
-        let leak_sensor_handle = leak_sensor.map(|state| {
-            tokio::spawn(gnmi_sample_task(
+        let leak_sensor_task = leak_sensor.map(|state| GnmiStreamTask {
+            stream: GnmiStream::LeakSensors,
+            handle: tokio::spawn(gnmi_sample_task(
                 cancel_token.clone(),
                 state.config,
                 state.stream_metrics,
                 state.processor,
-            ))
+            )),
         });
 
-        let on_change_handle = on_change.map(|state| {
-            tokio::spawn(gnmi_on_change_task(
+        let on_change_task = on_change.map(|state| GnmiStreamTask {
+            stream: GnmiStream::SystemEvents,
+            handle: tokio::spawn(gnmi_on_change_task(
                 cancel_token.clone(),
                 state.client_provider,
                 state.stream_metrics,
                 state.processor,
                 state.reconcile_interval,
-            ))
+            )),
         });
 
-        let extended_handles = extended
-            .into_iter()
-            .map(|state| tokio::spawn(gnmi_extended_task(cancel_token.clone(), state)))
-            .collect::<Vec<_>>();
+        let tasks = [
+            sample_task,
+            interface_task,
+            leak_sensor_task,
+            on_change_task,
+        ]
+        .into_iter()
+        .flatten()
+        .chain(extended.into_iter().map(|state| GnmiStreamTask {
+            stream: GnmiStream::Additional {
+                subscription: state.processor.subscription_name.clone(),
+            },
+            handle: tokio::spawn(gnmi_extended_task(cancel_token.clone(), state)),
+        }))
+        .collect();
 
-        if let Some(handle) = sample_handle {
-            let _ = handle.await;
-        }
-
-        if let Some(handle) = interface_handle {
-            let _ = handle.await;
-        }
-
-        if let Some(handle) = leak_sensor_handle {
-            let _ = handle.await;
-        }
-
-        if let Some(handle) = on_change_handle {
-            let _ = handle.await;
-        }
-
-        for handle in extended_handles {
-            let _ = handle.await;
-        }
+        supervise_gnmi_tasks(&cancel_token, &switch_id, tasks).await;
 
         if let Some(data_sink) = collector_removed_data_sink.as_deref() {
             if sample_collector_enabled {
@@ -1157,9 +1160,72 @@ pub(super) fn spawn_gnmi_collector_with_settings(
     }))
 }
 
+/// Joins all stream tasks concurrently, including during normal cancellation.
+/// An unexpected exit cancels siblings; an empty plan waits for cancellation.
+/// The caller then removes telemetry and releases its registry. Discovery replaces
+/// the finished collector on its next successful pass, using its retained readings.
+/// A persistent replay failure can fail each replacement; it does not request an
+/// immediate pass, so retries remain bounded by the discovery cadence.
+async fn supervise_gnmi_tasks(
+    cancel_token: &CancellationToken,
+    switch_id: &str,
+    tasks: Vec<GnmiStreamTask>,
+) {
+    // An enabled collector may have no streams. Keep its registration until
+    // cancellation so discovery does not repeatedly recreate the empty plan.
+    if tasks.is_empty() {
+        cancel_token.cancelled().await;
+        return;
+    }
+
+    // Keep each identity outside its task so the failure log can name a panicked stream.
+    let mut running = tasks
+        .into_iter()
+        .map(|task| async move { (task.stream, task.handle.await) })
+        .collect::<FuturesUnordered<_>>();
+
+    while let Some((identity, result)) = running.next().await {
+        let (stream, subscription) = match &identity {
+            GnmiStream::Sample => (NVUE_GNMI_SAMPLE_STREAM_ID, None),
+            GnmiStream::Interfaces => (INTERFACE_STREAM_NAME, None),
+            GnmiStream::LeakSensors => (LEAK_SENSOR_STREAM_NAME, None),
+            GnmiStream::SystemEvents => (ON_CHANGE_STREAM_ID_SYSTEM_EVENTS, None),
+            GnmiStream::Additional { subscription } => {
+                (EXTENDED_GNMI_STREAM_ID, Some(subscription.as_str()))
+            }
+        };
+        match result {
+            Err(error) => {
+                tracing::error!(
+                    %switch_id,
+                    stream,
+                    subscription,
+                    ?error,
+                    "gNMI stream task failed; stopping collector"
+                );
+                cancel_token.cancel();
+            }
+            Ok(()) if !cancel_token.is_cancelled() => {
+                tracing::error!(
+                    %switch_id,
+                    stream,
+                    subscription,
+                    "gNMI stream task exited unexpectedly; stopping collector"
+                );
+                cancel_token.cancel();
+            }
+            Ok(()) => {}
+        }
+    }
+}
+
 async fn gnmi_extended_task(cancel_token: CancellationToken, mut state: ExtendedGnmiStreamState) {
     let subscription_name = state.processor.subscription_name.clone();
     let reconciliation = state.processor.reconciliation.clone();
+
+    // Replay inside the supervised stream so a repeated sink panic cannot
+    // unwind discovery while it replaces this collector.
+    reconciliation.republish();
 
     run_subscription(
         &cancel_token,
@@ -1269,6 +1335,8 @@ async fn gnmi_on_change_task(
 ) {
     let request =
         build_on_change_subscribe_request(&system_events_prefix(), &system_events_subscribe_path());
+
+    on_change_processor.republish();
 
     run_subscription(
         &cancel_token,
@@ -1511,6 +1579,7 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::SystemTime;
 
+    use carbide_instrument::testing::capture_logs_async;
     use carbide_test_support::Outcome::*;
     use carbide_test_support::{Case, check_cases_async};
     use carbide_uuid::rack::RackId;
@@ -1826,6 +1895,219 @@ mod tests {
             ("switch_id".to_string(), "test-switch".to_string()),
             ("switch_ip".to_string(), "10.0.0.1".to_string()),
         ])
+    }
+
+    #[tokio::test]
+    async fn stream_task_supervision_cancels_and_joins_siblings() {
+        // Healthy tasks surround the failing task so sequential joins in either
+        // direction block. Hold both siblings after cancellation to prove every join.
+        #[derive(Clone, Copy)]
+        enum Completion {
+            CleanExit,
+            Panic,
+            Cancellation,
+        }
+
+        for (scenario, completion) in [
+            ("unexpected clean exit", Completion::CleanExit),
+            ("stream panic between healthy siblings", Completion::Panic),
+            ("ordinary cancellation", Completion::Cancellation),
+        ] {
+            let (_, logs) = capture_logs_async(async {
+                let cancel_token = CancellationToken::new();
+                let sibling_token = cancel_token.clone();
+                let late_token = cancel_token.clone();
+                let trailing_token = cancel_token.clone();
+                let joined = Arc::new(AtomicUsize::new(0));
+                let sibling_joined = joined.clone();
+                let trailing_joined = joined.clone();
+                let (ready, started) = tokio::sync::oneshot::channel();
+                let (cancelled, observed_cancellation) = tokio::sync::oneshot::channel();
+                let (release, finish) = tokio::sync::oneshot::channel();
+                let (exit, should_exit) = tokio::sync::oneshot::channel();
+                let (sample_done, sample_finished) = tokio::sync::oneshot::channel();
+                let (trailing_cancelled, trailing_observed_cancellation) =
+                    tokio::sync::oneshot::channel();
+                let (release_trailing, trailing_finish) = tokio::sync::oneshot::channel();
+
+                let tasks = vec![
+                    GnmiStreamTask {
+                        stream: GnmiStream::Sample,
+                        handle: tokio::spawn(async move {
+                            ready.send(()).unwrap();
+                            sibling_token.cancelled().await;
+                            cancelled.send(()).unwrap();
+                            finish.await.unwrap();
+                            sibling_joined.fetch_add(1, Ordering::SeqCst);
+                            sample_done.send(()).unwrap();
+                        }),
+                    },
+                    GnmiStreamTask {
+                        stream: GnmiStream::Additional {
+                            subscription: "late-subscription".into(),
+                        },
+                        handle: tokio::spawn(async move {
+                            should_exit.await.unwrap();
+
+                            match completion {
+                                Completion::CleanExit => {}
+                                Completion::Panic => panic!("injected stream task panic"),
+                                Completion::Cancellation => late_token.cancelled().await,
+                            }
+                        }),
+                    },
+                    GnmiStreamTask {
+                        stream: GnmiStream::SystemEvents,
+                        handle: tokio::spawn(async move {
+                            trailing_token.cancelled().await;
+                            trailing_cancelled.send(()).unwrap();
+                            trailing_finish.await.unwrap();
+                            trailing_joined.fetch_add(1, Ordering::SeqCst);
+                        }),
+                    },
+                ];
+
+                started.await.unwrap();
+                exit.send(()).unwrap();
+
+                let supervision = supervise_gnmi_tasks(&cancel_token, "test-switch", tasks);
+                tokio::pin!(supervision);
+
+                if matches!(completion, Completion::Cancellation) {
+                    futures::future::poll_fn(|cx| {
+                        assert!(supervision.as_mut().poll(cx).is_pending());
+                        Poll::Ready(())
+                    })
+                    .await;
+                    cancel_token.cancel();
+                }
+
+                tokio::time::timeout(Duration::from_secs(5), async {
+                    tokio::select! {
+                        () = &mut supervision => panic!("{scenario}: supervision finished before sibling cancellation"),
+                        result = async {
+                            observed_cancellation.await.unwrap();
+                            trailing_observed_cancellation.await.unwrap();
+                        } => result,
+                    }
+                })
+                .await
+                .unwrap_or_else(|_| {
+                    panic!("{scenario}: healthy sibling did not observe cancellation")
+                });
+
+                assert!(cancel_token.is_cancelled(), "{scenario}");
+                assert_eq!(joined.load(Ordering::SeqCst), 0, "{scenario}");
+                release.send(()).unwrap();
+                tokio::time::timeout(Duration::from_secs(5), sample_finished)
+                    .await
+                    .expect("sample sibling must finish")
+                    .unwrap();
+                assert_eq!(joined.load(Ordering::SeqCst), 1, "{scenario}");
+                futures::future::poll_fn(|cx| {
+                    assert!(supervision.as_mut().poll(cx).is_pending(), "{scenario}");
+                    Poll::Ready(())
+                })
+                .await;
+                release_trailing.send(()).unwrap();
+
+                tokio::time::timeout(Duration::from_secs(5), &mut supervision)
+                    .await
+                    .unwrap_or_else(|_| {
+                        panic!("{scenario}: supervisor did not drain its children")
+                    });
+
+                assert_eq!(joined.load(Ordering::SeqCst), 2, "{scenario}");
+            })
+            .await;
+            let logs = logs
+                .iter()
+                .filter(|log| log.level == tracing::Level::ERROR)
+                .collect::<Vec<_>>();
+
+            let (message, error) = match completion {
+                Completion::CleanExit => (Some("exited unexpectedly"), None),
+                Completion::Panic => (Some("task failed"), Some("injected stream task panic")),
+                Completion::Cancellation => (None, None),
+            };
+            match message {
+                None => assert!(logs.is_empty(), "{scenario}: {logs:?}"),
+                Some(message) => {
+                    assert_eq!(logs.len(), 1, "{scenario}: {logs:?}");
+                    let log = &logs[0];
+                    assert_eq!(log.field("switch_id"), Some("test-switch"));
+                    assert_eq!(log.field("stream"), Some(EXTENDED_GNMI_STREAM_ID));
+                    assert_eq!(log.field("subscription"), Some("late-subscription"));
+                    assert!(log.message.contains(message));
+
+                    match error {
+                        Some(error) => assert!(log.field("error").unwrap().contains(error)),
+                        None => assert_eq!(log.field("error"), None),
+                    }
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn empty_stream_plan_stays_idle_until_cancelled() {
+        // Poll inline so a panic in empty supervision cannot be hidden by the
+        // collector's completion helper discarding a parent JoinError.
+        let token = CancellationToken::new();
+        let supervision = supervise_gnmi_tasks(&token, "empty-switch", Vec::new());
+        tokio::pin!(supervision);
+        futures::future::poll_fn(|cx| {
+            assert!(supervision.as_mut().poll(cx).is_pending());
+            Poll::Ready(())
+        })
+        .await;
+        assert!(!token.is_cancelled());
+        token.cancel();
+        tokio::time::timeout(Duration::from_secs(5), supervision)
+            .await
+            .expect("empty supervision must finish after cancellation");
+
+        let endpoint = test_bmc_endpoint("55:66:77:88:99:cc".parse().unwrap());
+        let metrics = MetricsManager::new("test").unwrap();
+        let registry = Arc::new(
+            metrics
+                .create_collector_registry("empty_gnmi".into(), "test")
+                .unwrap(),
+        );
+        let sink = Arc::new(CollectorRemovalSink::default());
+        let mut config = NvueGnmiConfig {
+            system_events_enabled: false,
+            ..Default::default()
+        };
+        config.paths.components_enabled = false;
+        config.paths.interfaces_enabled = false;
+        config.paths.platform_general_enabled = false;
+        config.paths.leak_sensors_enabled = false;
+
+        let collector = spawn_gnmi_collector(
+            &endpoint,
+            &config,
+            RecordingProvider::responding_with(ProviderResponse::Pending),
+            registry,
+            Some(sink.clone()),
+            None,
+            &mut Default::default(),
+        )
+        .unwrap();
+
+        assert!(
+            metrics
+                .export_metrics()
+                .unwrap()
+                .contains("nvue_gnmi_connection_state")
+        );
+        tokio::task::yield_now().await;
+        assert!(!collector.is_finished());
+        tokio::time::timeout(Duration::from_secs(5), collector.stop())
+            .await
+            .expect("empty collector must stop on cancellation");
+        assert!(sink.0.lock().unwrap().is_empty());
+        assert!(!metrics.export_metrics().unwrap().contains("nvue_gnmi"));
     }
 
     #[tokio::test]

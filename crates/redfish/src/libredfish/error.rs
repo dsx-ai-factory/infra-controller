@@ -96,7 +96,7 @@ pub fn state_handler_redfish_error(
     .into()
 }
 
-fn redfish_operation_metric_label(operation: &'static str) -> &'static str {
+pub(crate) fn redfish_operation_metric_label(operation: &'static str) -> &'static str {
     match operation {
         "restart" => "redfish_restart_error",
         "lockdown" => "redfish_lockdown_error",

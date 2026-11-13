@@ -18,11 +18,10 @@
 use carbide_uuid::vpc::VpcId;
 use sqlx::PgConnection;
 
-/// Inserts a minimal VPC row for DNS ownership tests.
+/// Inserts a minimal VPC row for tests.
 ///
-/// The version must parse as a `ConfigVersion` because domain validation reads
-/// the row back through `vpc::find_by_with_lock`. Every fixture VPC shares one
-/// organization because domain ownership validation does not depend on it.
+/// The version must parse as a `ConfigVersion` so the row can be read back as
+/// a `Vpc`. Every fixture VPC shares one organization.
 pub(crate) async fn insert_vpc(conn: &mut PgConnection, name: &str) -> VpcId {
     sqlx::query_scalar(
         "INSERT INTO vpcs (name, version, organization_id) VALUES ($1, 'V1-T0', 'dns-test') RETURNING id",

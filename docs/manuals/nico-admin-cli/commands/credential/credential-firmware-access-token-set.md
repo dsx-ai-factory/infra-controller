@@ -27,7 +27,7 @@ Non-secret credential name
 
 `--token-file <TOKEN_FILE>`
 
-File containing the token, or - to read standard input
+File containing the token, or '-' to read standard input
 
 `--extended`
 
@@ -49,7 +49,7 @@ Sort output by specified field
 
 `-h, --help`
 
-Print help (see a summary with -h)
+Print help (see a summary with '-h')
 
 ## Examples
 

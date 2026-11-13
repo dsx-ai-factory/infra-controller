@@ -17,9 +17,8 @@
 
 use std::collections::HashSet;
 
+use ::rpc::carbide_api_client::{EXPECTED_SWITCH_UPDATE_MASK_HEADER, ExpectedSwitchUpdateField};
 use ::rpc::forge as rpc;
-use ::rpc::forge_api_client::{EXPECTED_SWITCH_UPDATE_MASK_HEADER, ExpectedSwitchUpdateField};
-use carbide_instrument::emit;
 use db::{DatabaseError, expected_switch as db_expected_switch};
 use mac_address::MacAddress;
 use model::expected_switch::{
@@ -313,7 +312,8 @@ pub(crate) async fn update_expected_switch(
     })?;
 
     for outcome in preallocations {
-        emit(StaticAddressPreallocationCompleted::from(outcome));
+        api.instrumentation
+            .emit(StaticAddressPreallocationCompleted::from(outcome));
     }
 
     Ok(Response::new(()))
@@ -424,7 +424,8 @@ pub(crate) async fn patch_expected_switch(
     .await?;
     txn.commit().await?;
     for preallocation in preallocations {
-        emit(StaticAddressPreallocationCompleted::from(preallocation));
+        api.instrumentation
+            .emit(StaticAddressPreallocationCompleted::from(preallocation));
     }
     Ok(Response::new(()))
 }

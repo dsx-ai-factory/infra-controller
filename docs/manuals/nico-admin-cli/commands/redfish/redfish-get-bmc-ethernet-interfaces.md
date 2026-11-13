@@ -4,7 +4,7 @@
 
 ## NAME
 
-nico-admin-cli-redfish-get-bmc-ethernet-interfaces - Show BMCs Ethernet
+nico-admin-cli-redfish-get-bmc-ethernet-interfaces - Show BMC's Ethernet
 interface information
 
 ## SYNOPSIS
@@ -16,7 +16,7 @@ nico-admin-cli redfish get-bmc-ethernet-interfaces
 
 ## DESCRIPTION
 
-Show BMCs Ethernet interface information
+Show BMC's Ethernet interface information
 
 ## OPTIONS
 
@@ -40,7 +40,7 @@ Sort output by specified field
 
 `-h, --help`
 
-Print help (see a summary with -h)
+Print help (see a summary with '-h')
 
 ---
 

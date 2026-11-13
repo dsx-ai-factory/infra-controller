@@ -98,6 +98,7 @@ impl VerifyQuoteState {
 /// log, and will check to see if things are good (or if an
 /// error needs to be returned + the event log dumped to log).
 pub(crate) fn verify_quote_state(
+    instrumentation: &carbide_instrument::Instrumentation,
     signature_valid: bool,
     pcr_hash_matches: bool,
     event_log: &Option<Vec<u8>>,
@@ -106,7 +107,7 @@ pub(crate) fn verify_quote_state(
     match quote_state {
         VerifyQuoteState::Success => Ok(()),
         VerifyQuoteState::SignatureInvalid => {
-            carbide_instrument::emit(MeasuredBootVerificationFailed {
+            instrumentation.emit(MeasuredBootVerificationFailed {
                 cause: MeasuredBootVerificationFailureCause::SignatureInvalid,
                 event_log: event_log_to_string(event_log),
                 error: String::new(),
@@ -116,7 +117,7 @@ pub(crate) fn verify_quote_state(
             ))
         }
         VerifyQuoteState::VerifyHashNoMatch => {
-            carbide_instrument::emit(MeasuredBootVerificationFailed {
+            instrumentation.emit(MeasuredBootVerificationFailed {
                 cause: MeasuredBootVerificationFailureCause::HashMismatch,
                 event_log: event_log_to_string(event_log),
                 error: String::new(),
@@ -126,7 +127,7 @@ pub(crate) fn verify_quote_state(
             ))
         }
         VerifyQuoteState::CompleteFailure => {
-            carbide_instrument::emit(MeasuredBootVerificationFailed {
+            instrumentation.emit(MeasuredBootVerificationFailed {
                 cause: MeasuredBootVerificationFailureCause::SignatureAndHashMismatch,
                 event_log: event_log_to_string(event_log),
                 error: String::new(),
@@ -552,16 +553,15 @@ mod tests {
     fn verification_failure_logs_and_counts_by_cause() {
         let event_log = Some(b"tpm event log".to_vec());
 
-        // The quote-failure DB tests each drive one cause once, from
-        // seconds-long flows that do not hold the capture lock -- the odds of
-        // one landing inside this capture window are negligible.
-        let metrics = MetricsCapture::start();
+        let test_meter = carbide_utils::test_support::test_meter::TestMeter::default();
+        let instrumentation = carbide_instrument::Instrumentation::new(test_meter.meter());
+        let metrics = MetricsCapture::for_registry(test_meter.registry());
         let logs = capture_logs(|| {
-            assert!(verify_quote_state(true, true, &event_log).is_ok());
-            assert!(verify_quote_state(false, true, &event_log).is_err());
-            assert!(verify_quote_state(true, false, &event_log).is_err());
-            assert!(verify_quote_state(false, false, &event_log).is_err());
-            carbide_instrument::emit(MeasuredBootVerificationFailed {
+            assert!(verify_quote_state(&instrumentation, true, true, &event_log).is_ok());
+            assert!(verify_quote_state(&instrumentation, false, true, &event_log).is_err());
+            assert!(verify_quote_state(&instrumentation, true, false, &event_log).is_err());
+            assert!(verify_quote_state(&instrumentation, false, false, &event_log).is_err());
+            instrumentation.emit(MeasuredBootVerificationFailed {
                 cause: MeasuredBootVerificationFailureCause::VerificationError,
                 event_log: event_log_to_string(&event_log),
                 error: "PCR signature verification failed: bad AK".to_string(),

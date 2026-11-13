@@ -31,10 +31,10 @@ pub(crate) enum Cmd {
     #[clap(about = "Display Domain information")]
     Show(show::Args),
     #[clap(
-        about = "Create a Domain, optionally owned by a VPC",
-        long_about = "Create a Domain, optionally owned by a VPC.\n\n\
+        about = "Create a Domain",
+        long_about = "Create a Domain.\n\n\
             On success, JSON mode prints the created domain as pretty JSON. Other output modes \
-            print labelled fields: ID, NAME, DEFAULT TTL, VPC, CREATED, UPDATED, and DELETED.\n\n\
+            print labelled fields: ID, NAME, DEFAULT TTL, CREATED, UPDATED, and DELETED.\n\n\
             The inherited --extended and --sort-by options have no effect on this command."
     )]
     Create(create::Args),

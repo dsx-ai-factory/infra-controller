@@ -781,6 +781,17 @@ impl NvRedfishClientPool {
             .await
     }
 
+    /// Like [`Self::connection_with_bmc_credentials`], but never caches the
+    /// connection, for credentials used once rather than the stored ones.
+    pub async fn uncached_connection_with_bmc_credentials(
+        &self,
+        bmc_address: SocketAddr,
+        credentials: BmcCredentials,
+    ) -> Result<NvRedfishConnection, Error> {
+        self.connection_with_cache_predicate(bmc_address, credentials, |_| false)
+            .await
+    }
+
     async fn connection_with_cache_predicate(
         &self,
         bmc_address: SocketAddr,
@@ -862,6 +873,12 @@ impl NvRedfishClientPool {
         }
     }
 
+    /// Whether nico-bmc-proxy authenticates this pool's connections upstream,
+    /// so callers send it no BMC credentials.
+    pub fn authenticates_upstream(&self) -> bool {
+        matches!(self.client_tls, NvClientTls::Mutual { .. })
+    }
+
     /// The credential nv-redfish's client type carries for one BMC. `None`
     /// is valid only on the proxied pool, which sends none: nico-bmc-proxy
     /// authenticates upstream.
@@ -870,9 +887,7 @@ impl NvRedfishClientPool {
             Some(Credentials::UsernamePassword { username, password }) => {
                 Ok(BmcCredentials::new(username, password))
             }
-            None if matches!(self.client_tls, NvClientTls::Mutual { .. }) => {
-                Ok(BmcCredentials::anonymous())
-            }
+            None if self.authenticates_upstream() => Ok(BmcCredentials::anonymous()),
             None => Err(Error::Bmc(BmcError::InvalidRequest(
                 "BMC credentials are required for a direct (non-proxied) connection".to_string(),
             ))),

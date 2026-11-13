@@ -44,6 +44,8 @@ pub struct StartArgs {
     pub cancel_token: CancellationToken,
     pub ready_channel: Sender<carbide::ApiServerReady>,
     pub credential_config: CredentialConfig,
+    /// Provider and registry owned by the fixture and shared with this server.
+    pub metrics: metrics_endpoint::MetricsSetup,
     pub insecure_discovery: bool,
     /// Enable the SPDM controller and the machine controller's SPDM measuring paths.
     /// This flag is fixed for the server's lifetime. The fixture uses deliberately
@@ -55,7 +57,16 @@ pub async fn start(args: StartArgs) -> eyre::Result<()> {
     start_with_config(args, toml::Table::new()).await
 }
 
-pub(crate) async fn start_with_config(
+pub(crate) fn start_with_config(
+    args: StartArgs,
+    overrides: toml::Table,
+) -> impl Future<Output = eyre::Result<()>> {
+    // Server bootstrap has a large future; do not copy it through the startup
+    // helpers and the task that owns the running server.
+    Box::pin(start_with_config_inner(args, overrides))
+}
+
+async fn start_with_config_inner(
     StartArgs {
         addr,
         metrics_addr,
@@ -66,6 +77,7 @@ pub(crate) async fn start_with_config(
         cancel_token,
         ready_channel,
         credential_config,
+        metrics,
         insecure_discovery,
         spdm_enabled,
     }: StartArgs,
@@ -113,6 +125,9 @@ pub(crate) async fn start_with_config(
         scout_boot_interface_correction_enabled = true
         enable_admin_ui = false
         panic_on_early_task_return = true
+
+        [observability]
+        per_object_metrics_for_classifications = ["Hardware"]
 
         [ib_config]
         max_partition_per_tenant = 31
@@ -367,6 +382,7 @@ pub(crate) async fn start_with_config(
         tmp.path().to_path_buf(),
         None,
         credential_config,
+        metrics,
         true,
         cancel_token,
         ready_channel,

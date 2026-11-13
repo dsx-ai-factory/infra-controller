@@ -370,8 +370,9 @@ impl StateControllerIO for MachineStateControllerIO {
                 let op = match operation {
                     MachineMaintenanceOperation::PowerOn => "power_on",
                     MachineMaintenanceOperation::PowerOff { .. } => "power_off",
-                    MachineMaintenanceOperation::Reset => "reset",
+                    MachineMaintenanceOperation::Reset { .. } => "reset",
                     MachineMaintenanceOperation::Reboot => "reboot",
+                    MachineMaintenanceOperation::AcPowercycle { .. } => "ac_powercycle",
                     MachineMaintenanceOperation::ChassisReset { .. } => "chassis_reset",
                 };
                 ("maintenance", op)

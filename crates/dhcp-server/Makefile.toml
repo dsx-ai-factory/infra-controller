@@ -33,6 +33,7 @@ script = '''
 docker run --rm -v $REPO_ROOT:/carbide --user $(id -u):$(id -g) \
     --env CARGO_HOME=/cargo \
     -v $CARGO_HOME:/cargo \
+    --env CARGO_BUILD_BUILD_DIR=/carbide/target/cross-aarch64-build \
     build-artifacts-container-cross-aarch64:latest \
     "cargo" \
     "build" \

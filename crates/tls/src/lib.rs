@@ -15,7 +15,7 @@
  * limitations under the License.
  */
 
-//! forge-tls is a library that is used by any applications
+//! carbide-tls is a library that is used by any applications
 //! which have a need for any sort of common TLS integrated
 //! across the system.
 

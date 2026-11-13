@@ -2522,7 +2522,7 @@ async fn test_record_dpu_network_status_counts_failed_host_wakeup(pool: sqlx::Pg
         .await
         .unwrap();
 
-    let metrics = MetricsCapture::start();
+    let metrics = MetricsCapture::for_registry(env.test_meter.registry());
     // A never-before-observed network config version registers as a change,
     // which is what prompts the host state-handler wakeup.
     record_dpu_network_status(&env, dpu_machine_id, Some(network_config_version.clone())).await;
@@ -2809,6 +2809,14 @@ async fn test_managed_host_network_config_includes_per_vpc_routing_profiles(pool
         vni_self: true, // Each interface must substitute its own allocated VNI.
     };
 
+    // Share one conditional rule across both profiles to verify resolution for each VPC.
+    let conditional_export = crate::cfg::file::PrefixRouteTargetConfig {
+        prefix: "0.0.0.0/0".parse().expect("default route"),
+        match_type: carbide_network::virtualization::ExportPrefixMatchType::Exact,
+        max_prefix_length: None,
+        route_targets: vec![symbolic_target.clone()],
+    };
+
     // Configure two distinguishable FNN routing profiles.
     let env = api_fixtures::create_test_env_with_overrides(
         pool,
@@ -2824,6 +2832,7 @@ async fn test_managed_host_network_config_includes_per_vpc_routing_profiles(pool
                         access_tier: Some(1),
                         leak_default_route_from_underlay: Some(true),
                         route_target_imports: Some(vec![symbolic_target.clone()]),
+                        route_targets_on_exports_by_prefix: Some(vec![conditional_export.clone()]),
                         ..Default::default()
                     },
                 ),
@@ -2834,6 +2843,7 @@ async fn test_managed_host_network_config_includes_per_vpc_routing_profiles(pool
                         access_tier: Some(2),
                         leak_tenant_host_routes_to_underlay: Some(true),
                         route_targets_on_exports: Some(vec![symbolic_target.clone()]),
+                        route_targets_on_exports_by_prefix: Some(vec![conditional_export]),
                         ..Default::default()
                     },
                 ),
@@ -2972,6 +2982,23 @@ async fn test_managed_host_network_config_includes_per_vpc_routing_profiles(pool
             vni_self: false,
         }]
     );
+
+    // The identical conditional rule must carry each interface VPC's concrete target.
+    for (vni, profile) in &profiles_by_vni {
+        assert_eq!(
+            profile.route_targets_on_exports_by_prefix,
+            vec![rpc::forge::PrefixRouteTarget {
+                prefix: "0.0.0.0/0".into(),
+                match_type: rpc::forge::ExportPrefixMatchType::Exact as i32,
+                max_prefix_length: None,
+                route_targets: vec![rpc::common::RouteTarget {
+                    asn: symbolic_target.asn,
+                    vni: Some(*vni),
+                    vni_self: false,
+                }],
+            }]
+        );
+    }
 
     let external_profile = profiles_by_vni.get(&external_vni).unwrap();
     assert!(external_profile.leak_tenant_host_routes_to_underlay);

@@ -24,6 +24,7 @@ use std::time::{Duration, Instant};
 use carbide_resource_pool::ResourcePoolRegistry;
 use component_manager::MachineInfoProvider;
 use mac_address::MacAddress;
+use model::expected_machine::HostDpuPolicy;
 use model::rack_type::RackProfileConfig;
 use model::resource_pool::common::CommonPools;
 use sqlx::PgPool;
@@ -65,6 +66,8 @@ pub struct Config {
     pub switches_created_per_run: u64,
     /// Whether host interfaces can use IPv6-only admin segments.
     pub admin_fnn_enabled: bool,
+    /// Site policy inherited by hosts without an explicit Nic or Ignore policy.
+    pub dpu_policy: Option<HostDpuPolicy>,
     /// How long retained boot interfaces remain applicable; `None` means forever.
     pub retained_boot_interface_window: Option<chrono::Duration>,
 }
@@ -87,6 +90,7 @@ impl InventoryCreator {
         self.machine_creator.preparation_cancel_token = cancel_token;
     }
 
+    #[allow(clippy::too_many_arguments)] // The creator shares its parent's dependencies.
     pub(super) fn new(
         database_connection: PgPool,
         config: Config,
@@ -95,6 +99,7 @@ impl InventoryCreator {
         rack_profiles: Arc<RackProfileConfig>,
         machine_info_provider: Option<Arc<dyn MachineInfoProvider>>,
         dpf_enabled_at_site: bool,
+        instrumentation: carbide_instrument::Instrumentation,
     ) -> Self {
         Self {
             machine_creator: MachineCreator::new(
@@ -105,6 +110,7 @@ impl InventoryCreator {
                 rack_profiles,
                 machine_info_provider,
                 dpf_enabled_at_site,
+                instrumentation,
             ),
             power_shelf_creator: PowerShelfCreator::new(
                 database_connection.clone(),
@@ -115,14 +121,13 @@ impl InventoryCreator {
         }
     }
 
-    /// Creates or reconciles hosts, with periodic switch and power-shelf passes.
-    pub(super) async fn create_or_reconcile_hosts(
+    /// Creates hosts, with periodic switch and power-shelf passes.
+    pub(super) async fn create_hosts(
         &self,
         metrics: &mut SiteExplorationMetrics,
         identified_hosts: &mut [IdentifiedManagedHost],
         expected_endpoint_index: &ExploredEndpointIndex,
         already_ingested_bmc_ips: &HashSet<IpAddr>,
-        explored_this_run: &HashSet<IpAddr>,
         suppressed_bmc_macs: &HashSet<MacAddress>,
     ) {
         if self.config.create_machines.load(Ordering::Relaxed) {
@@ -152,7 +157,6 @@ impl InventoryCreator {
                 identified_hosts,
                 expected_endpoint_index,
                 already_ingested_bmc_ips,
-                explored_this_run,
             );
             let mut create_machines_latency = Duration::ZERO;
             loop {
@@ -184,22 +188,6 @@ impl InventoryCreator {
             }
             metrics.create_machines_latency = Some(create_machines_latency);
             metrics.record_phase_latency("create_machines", create_machines_latency);
-        } else {
-            // `create_machines` revisits ingested hosts explored this run on
-            // its steady-state path; with it off, revisit them here so a
-            // pending admin address repair is still made.
-            let reconcile_admin_addresses_start = Instant::now();
-            self.machine_creator
-                .reconcile_explored_host_admin_addresses(
-                    identified_hosts,
-                    already_ingested_bmc_ips,
-                    explored_this_run,
-                )
-                .await;
-            metrics.record_phase_latency(
-                "reconcile_explored_host_admin_addresses",
-                reconcile_admin_addresses_start.elapsed(),
-            );
         }
     }
 

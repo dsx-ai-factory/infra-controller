@@ -93,11 +93,12 @@ type Check struct {
 	Detail string `json:"detail"`
 }
 
-// Report is every check, sorted by name, and the restart count of every serving control-plane pod ("namespace/pod"),
-// the whole baseline an ingestion run must not raise.
+// Report is every check, sorted by name, the restart count of every serving control-plane pod ("namespace/pod"),
+// the whole baseline an ingestion run must not raise, and the MAT inventory the checks read, which ingestion sends.
 type Report struct {
-	Checks   []Check
-	Restarts map[string]uint32
+	Checks    []Check
+	Restarts  map[string]uint32
+	Inventory inventory.SiteInventory
 }
 
 // Ready is true when there are checks and every one passed.
@@ -119,10 +120,20 @@ func (r Report) Detail() json.RawMessage {
 // the deadline (or a cancel) is failed as not finished and left to stop on its own; an answer taken once the run
 // clock reaches the deadline is late, so it is not finished too.
 func Run(ctx context.Context, d Deps, deadline time.Time) Report {
+	return runChecks(ctx, d, deadline, false)
+}
+
+// Populated checks the existing fixture without greenfield or direct NICo reads.
+// Cohort selection and dependency checks belong to the instance journey.
+func Populated(ctx context.Context, d Deps, deadline time.Time) Report {
+	return runChecks(ctx, d, deadline, true)
+}
+
+func runChecks(ctx context.Context, d Deps, deadline time.Time, populated bool) Report {
 	ctx, cancel := context.WithDeadline(ctx, deadline)
 	defer cancel()
 	s := d.Settings
-	inv := inventory.Read(ctx, d.Pods, s.Namespace, d.Records, s.MatSelector, s.MatPort)
+	inv := inventory.Read(ctx, d.Pods, s.Namespace, d.Records, s.MatSelector, s.MatPort, populated)
 	var restarts map[string]uint32 // read only once its check is taken
 	checks := map[string]func() (bool, string){
 		"probe":            func() (bool, string) { return d.probeCheck(ctx) },
@@ -132,6 +143,11 @@ func Run(ctx context.Context, d Deps, deadline time.Time) Report {
 		"nicoIdentity":     func() (bool, string) { return d.identityCheck(ctx, &inv) },
 		"controlPlanePods": func() (ok bool, detail string) { ok, detail, restarts = d.controlPlane(ctx); return },
 		"bmc":              func() (bool, string) { return d.bmcCheck(ctx, deadline, inv.BmcCounts) },
+	}
+	if populated {
+		delete(checks, "emptySite")
+		delete(checks, "nicoIdentity")
+		delete(checks, "bmc")
 	}
 	done := make(chan Check, len(checks)) // buffered: a check that answers late never blocks
 	for name, run := range checks {
@@ -150,7 +166,7 @@ wait:
 			break wait
 		}
 	}
-	var r Report
+	r := Report{Inventory: inv}
 	for name := range checks {
 		late := Check{name, false, "not finished before the readiness deadline"}
 		if ctx.Err() == context.Canceled {
@@ -313,8 +329,7 @@ func (d Deps) controlPlane(ctx context.Context) (bool, string, map[string]uint32
 		}
 		serving := 0
 		for _, p := range pods {
-			_, job := p.Labels["batch.kubernetes.io/job-name"]
-			if _, old := p.Labels["job-name"]; job || old || p.Phase == "Succeeded" {
+			if !Serving(p) {
 				continue
 			}
 			serving++
@@ -336,6 +351,13 @@ func (d Deps) controlPlane(ctx context.Context) (bool, string, map[string]uint32
 		return false, "no control-plane pod besides the MAT pods", restarts
 	}
 	return true, fmt.Sprintf("%d serving pods Ready, restarts: %s", len(baseline), listed(baseline)), restarts
+}
+
+// Serving is false for a pod that ran to completion or that a Job runs: it serves nothing.
+func Serving(p cluster.PodInfo) bool {
+	_, job := p.Labels["batch.kubernetes.io/job-name"]
+	_, old := p.Labels["job-name"]
+	return !job && !old && p.Phase != "Succeeded"
 }
 
 // bmcCheck reconciles the host and DPU Services with the served inventory, then gates the external IP of each. A

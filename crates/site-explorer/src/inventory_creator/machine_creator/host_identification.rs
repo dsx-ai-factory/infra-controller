@@ -109,12 +109,19 @@ impl MachineCreator {
     /// Builds managed hosts and boot-interface updates from configured candidates.
     ///
     /// Identification runs independently of whether machine creation is enabled.
+    /// Unmatched observations are returned for independent reconciliation.
     pub(crate) fn identify_managed_hosts(
         candidates: Vec<ConfiguredIngestionCandidate>,
         metrics: &mut SiteExplorationMetrics,
-    ) -> (Vec<IdentifiedManagedHost>, HostBootInterfaces) {
+        instrumentation: &carbide_instrument::Instrumentation,
+    ) -> (
+        Vec<IdentifiedManagedHost>,
+        HostBootInterfaces,
+        Vec<ExploredEndpoint>,
+    ) {
         let mut managed_hosts = Vec::new();
         let mut boot_interfaces = HostBootInterfaces::new();
+        let mut unmatched_reports = Vec::new();
         for candidate in candidates {
             let ConfiguredIngestionCandidate {
                 endpoint: ep,
@@ -133,47 +140,54 @@ impl MachineCreator {
                         boot_interfaces.add(&ep, selection.mac_address);
                     }
 
-                    Some(IdentifiedManagedHost {
-                        explored_host: ExploredManagedHost {
+                    Some((
+                        ExploredManagedHost {
                             host_bmc_ip: ep.address,
                             dpus: Vec::new(),
                         },
-                        report: ep.report,
                         primary_interface_selection,
-                    })
+                    ))
                 }
                 HostDpuPolicy::Manage | HostDpuPolicy::Nic => Self::build_managed_host(
-                    ep,
+                    &ep,
                     dpus,
                     host_dpu_policy,
                     declared_primary,
                     &mut boot_interfaces,
                     metrics,
+                    instrumentation,
                 ),
             };
 
-            if let Some(managed_host) = managed_host {
-                managed_hosts.push(managed_host);
+            if let Some((explored_host, primary_interface_selection)) = managed_host {
+                managed_hosts.push(IdentifiedManagedHost {
+                    explored_host,
+                    report: ep.report,
+                    primary_interface_selection,
+                });
                 metrics.exploration_identified_managed_hosts += 1;
+            } else {
+                unmatched_reports.push(ep);
             }
         }
 
-        (managed_hosts, boot_interfaces)
+        (managed_hosts, boot_interfaces, unmatched_reports)
     }
 
-    /// Builds an identified managed host by ordering DPUs and selecting its primary interface.
+    /// Resolves host/DPU grouping and primary-interface selection, borrowing the report.
     ///
     /// Returns `None` when the selected boot MAC does not match the discovered DPUs.
     /// Report-selected boot interfaces are recorded even when that mismatch blocks
     /// identification. The caller handles hosts with the `Ignore` policy separately.
     fn build_managed_host(
-        ep: ExploredEndpoint,
+        ep: &ExploredEndpoint,
         mut dpus_explored_for_host: Vec<ExploredDpu>,
         host_dpu_policy: HostDpuPolicy,
         declared_primary: Option<MacAddress>,
         boot_interfaces: &mut HostBootInterfaces,
         metrics: &mut SiteExplorationMetrics,
-    ) -> Option<IdentifiedManagedHost> {
+        instrumentation: &carbide_instrument::Instrumentation,
+    ) -> Option<(ExploredManagedHost, Option<HostPrimaryInterfaceSelection>)> {
         // The host report owns the physical chassis identity, while each
         // `ExploredDpu` owns the DPU endpoint report. Join those views by
         // the same serial number used for DPU pairing before we choose a
@@ -188,7 +202,7 @@ impl MachineCreator {
             .select_host_primary_interface(&dpus_explored_for_host, declared_primary);
         if let Some(selection) = primary_interface_selection {
             let mac_address = selection.mac_address;
-            boot_interfaces.add(&ep, mac_address);
+            boot_interfaces.add(ep, mac_address);
 
             match Self::apply_report_selection(&mut dpus_explored_for_host, selection.mac_address) {
                 ReportSelectionOrdering::Applied => dpu_order_resolved = true,
@@ -269,7 +283,7 @@ impl MachineCreator {
                     .and_then(|system| system.serial_number.clone()),
             )
         {
-            carbide_instrument::emit(event);
+            instrumentation.emit(event);
         }
 
         // For `Nic` hosts, don't attach DPUs even if matching
@@ -296,14 +310,13 @@ impl MachineCreator {
             }
         };
 
-        Some(IdentifiedManagedHost {
-            explored_host: ExploredManagedHost {
+        Some((
+            ExploredManagedHost {
                 host_bmc_ip: ep.address,
                 dpus,
             },
-            report: ep.report,
             primary_interface_selection,
-        })
+        ))
     }
 
     /// `assign_host_chassis_ids` joins each explored DPU to one host BMC

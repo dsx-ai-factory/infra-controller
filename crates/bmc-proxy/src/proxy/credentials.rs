@@ -28,8 +28,8 @@ use carbide_utils::redfish::redfish_basic_authorization_context;
 use carbide_uuid::switch::SwitchId;
 use mac_address::MacAddress;
 use moka::future::Cache as MokaCache;
+use rpc::carbide_api_client::CarbideApiClient;
 use rpc::forge;
-use rpc::forge_api_client::ForgeApiClient;
 
 use crate::metrics::SwitchProbeDenied;
 use crate::proxy::BmcProxyError;
@@ -182,7 +182,7 @@ impl TryFrom<forge::BmcCredentials> for BmcCredentials {
 /// otherwise the BMC credentials for the MAC.
 pub(super) async fn resolve_credentials(
     ip: IpAddr,
-    api_client: &ForgeApiClient,
+    api_client: &CarbideApiClient,
     credential_cache: &CredentialCache,
     switch_probe: &SwitchProbe,
 ) -> Result<TargetCredentials, BmcProxyError> {
@@ -230,7 +230,7 @@ pub(super) async fn resolve_credentials(
 async fn switch_with_nvos_mac(
     ip: IpAddr,
     mac_address: MacAddress,
-    api_client: &ForgeApiClient,
+    api_client: &CarbideApiClient,
     switch_probe: &SwitchProbe,
 ) -> Result<Option<SwitchId>, BmcProxyError> {
     if switch_probe.is_denied_at(tokio::time::Instant::now()) {
@@ -268,7 +268,7 @@ async fn switch_with_nvos_mac(
 async fn nvos_credentials(
     ip: IpAddr,
     switch_id: SwitchId,
-    api_client: &ForgeApiClient,
+    api_client: &CarbideApiClient,
 ) -> Result<BmcCredentials, BmcProxyError> {
     api_client
         .get_switch_nvos_credentials(forge::GetSwitchNvosCredentialsRequest {
@@ -284,7 +284,7 @@ async fn nvos_credentials(
 async fn bmc_credentials(
     ip: IpAddr,
     mac_address: MacAddress,
-    api_client: &ForgeApiClient,
+    api_client: &CarbideApiClient,
 ) -> Result<BmcCredentials, BmcProxyError> {
     api_client
         .get_bmc_credentials(forge::GetBmcCredentialsRequest {

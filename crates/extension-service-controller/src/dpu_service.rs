@@ -39,6 +39,7 @@ use serde_json::{Map, Value, json};
 
 const MULTUS_NETWORKS_ANNOTATION: &str = "k8s.v1.cni.cncf.io/networks";
 const SERVICE_VPC_INTERFACE_NAME: &str = "svc0";
+const SERVICE_VPC_SF_RESOURCE: &str = "nvidia.com/bf_sf";
 const SERVICE_VPC_IPV4_NAD: &str = "nico-service-vpc-ipv4";
 const SERVICE_VPC_IPV6_NAD: &str = "nico-service-vpc-ipv6";
 
@@ -95,6 +96,8 @@ pub fn project_dpu_service(
 
 /// Builds every dormant DPF parent with the chart workload serviceID and persisted MAC so retries
 /// and pod recreation retain attachment identity.
+/// Derives the minimum SF quantity from service-facing interfaces without changing caller data,
+/// preserving larger explicit requests and rejecting invalid whole-number quantities.
 pub fn project_service_vpc_registration(
     extension_service_id: ExtensionServiceId,
     namespace: &str,
@@ -174,12 +177,29 @@ pub fn project_service_vpc_registration(
         data,
         ExtensionServiceDeploymentType::DemandDriven,
     );
-    service.interfaces = Some(vec![service_interface_name]);
-    let annotations = service
+    let service_interfaces = vec![service_interface_name];
+    let required_sf = i32::try_from(service_interfaces.len())
+        .map_err(|_| DpfHelmChartServiceDataError::InvalidSfQuantity)?;
+    service.interfaces = Some(service_interfaces);
+
+    // Request SFs per service Pod; fixed-slot patches and selected DPUs do not consume extra
+    // service-facing interfaces in that Pod.
+    let supplied_sf = data
         .service_daemon_set
-        .get_or_insert_with(Default::default)
-        .annotations
-        .get_or_insert_with(BTreeMap::new);
+        .as_ref()
+        .and_then(|daemon_set| daemon_set.resources.as_ref())
+        .and_then(|resources| resources.get(SERVICE_VPC_SF_RESOURCE))
+        .map(service_vpc_sf_quantity)
+        .transpose()?
+        .unwrap_or(0);
+    let daemon_set = service.service_daemon_set.get_or_insert_default();
+    if supplied_sf < i64::from(required_sf) {
+        daemon_set.resources.get_or_insert_default().insert(
+            SERVICE_VPC_SF_RESOURCE.to_owned(),
+            IntOrString::Int(required_sf),
+        );
+    }
+    let annotations = daemon_set.annotations.get_or_insert_default();
     annotations.insert(
         MULTUS_NETWORKS_ANNOTATION.to_owned(),
         json!([{
@@ -729,6 +749,127 @@ fn projected_service_daemon_set(
     }
 }
 
+/// Parses nonnegative whole-number SF quantities exactly so fractional requests cannot be rounded
+/// into valid device allocations or silently replaced by the derived minimum.
+fn service_vpc_sf_quantity(
+    quantity: &DpfHelmChartIntOrString,
+) -> Result<i64, DpfHelmChartServiceDataError> {
+    let invalid = || DpfHelmChartServiceDataError::InvalidSfQuantity;
+    let quantity = match quantity {
+        DpfHelmChartIntOrString::Int(value) => {
+            return (*value >= 0)
+                .then_some(i64::from(*value))
+                .ok_or_else(invalid);
+        }
+        DpfHelmChartIntOrString::String(value) => value.as_str(),
+    };
+
+    // Separate the sign and Kubernetes suffix before validating the decimal coefficient.
+    let (negative, quantity) = match quantity.strip_prefix('-') {
+        Some(unsigned) => (true, unsigned),
+        None => (false, quantity.strip_prefix('+').unwrap_or(quantity)),
+    };
+    let suffix_start = quantity
+        .find(|character: char| !character.is_ascii_digit() && character != '.')
+        .unwrap_or(quantity.len());
+    let (number, suffix) = quantity.split_at(suffix_start);
+    let (whole, fraction) = number.split_once('.').unwrap_or((number, ""));
+    if (whole.is_empty() && fraction.is_empty())
+        || !whole
+            .bytes()
+            .chain(fraction.bytes())
+            .all(|digit| digit.is_ascii_digit())
+    {
+        return Err(invalid());
+    }
+    let (exponent, multiplier): (i64, u64) = match suffix {
+        "n" => (-9, 1),
+        "u" => (-6, 1),
+        "m" => (-3, 1),
+        "" => (0, 1),
+        "k" => (3, 1),
+        "M" => (6, 1),
+        "G" => (9, 1),
+        "T" => (12, 1),
+        "P" => (15, 1),
+        "E" => (18, 1),
+        "Ki" => (0, 1 << 10),
+        "Mi" => (0, 1 << 20),
+        "Gi" => (0, 1 << 30),
+        "Ti" => (0, 1 << 40),
+        "Pi" => (0, 1 << 50),
+        "Ei" => (0, 1 << 60),
+        // Decimal exponents can change whether a fractional coefficient counts whole devices.
+        _ => (
+            i64::from(
+                suffix
+                    .strip_prefix(['e', 'E'])
+                    .ok_or_else(invalid)?
+                    .parse::<i32>()
+                    .map_err(|_| invalid())?,
+            ),
+            1,
+        ),
+    };
+    let exponent = exponent
+        .checked_sub(i64::try_from(fraction.len()).map_err(|_| invalid())?)
+        .ok_or_else(invalid)?;
+
+    // Multiply decimal digits exactly, retaining fractions until whole-device validation.
+    // Each step is below 10 * 2^60, so its carry fits u64 even for the Ei suffix.
+    let mut digits = whole
+        .bytes()
+        .chain(fraction.bytes())
+        .rev()
+        .map(|digit| digit - b'0')
+        .collect::<Vec<_>>();
+    let mut carry = 0;
+    for digit in &mut digits {
+        let product = u64::from(*digit) * multiplier + carry;
+        *digit = (product % 10) as u8;
+        carry = product / 10;
+    }
+    while carry != 0 {
+        digits.push((carry % 10) as u8);
+        carry /= 10;
+    }
+    while digits.last() == Some(&0) {
+        digits.pop();
+    }
+    // Signed zero is still a valid nonnegative quantity.
+    if digits.is_empty() {
+        return Ok(0);
+    }
+    if negative {
+        return Err(invalid());
+    }
+
+    // Reject fractional devices before converting the retained whole digits to the Kubernetes range.
+    let whole_digits = if exponent < 0 {
+        let decimal_places = usize::try_from(exponent.unsigned_abs()).map_err(|_| invalid())?;
+        let (fraction, whole) = digits
+            .split_at_checked(decimal_places)
+            .ok_or_else(invalid)?;
+        if fraction.iter().any(|digit| *digit != 0) {
+            return Err(invalid());
+        }
+        whole
+    } else {
+        digits.as_slice()
+    };
+    let whole = whole_digits
+        .iter()
+        .rev()
+        .try_fold(0_i64, |value, digit| {
+            value.checked_mul(10)?.checked_add(i64::from(*digit))
+        })
+        .ok_or_else(invalid)?;
+    let scale = u32::try_from(exponent.max(0)).map_err(|_| invalid())?;
+    whole
+        .checked_mul(10_i64.checked_pow(scale).ok_or_else(invalid)?)
+        .ok_or_else(invalid)
+}
+
 /// Preserves the integer-or-string representation expected by DPF.
 fn projected_int_or_string(value: &DpfHelmChartIntOrString) -> IntOrString {
     match value {
@@ -839,6 +980,8 @@ mod tests {
     use std::str::FromStr;
 
     use carbide_dpf::DpuServiceDaemonSetObservation;
+    use carbide_test_support::Outcome::{FailsWith, Yields};
+    use carbide_test_support::scenarios;
     use model::extension_service::{DpfHelmChartServiceDaemonSet, DpfHelmChartServiceSecurity};
 
     use super::*;
@@ -1050,6 +1193,7 @@ mod tests {
 
     /// Verifies one interface across two slots preserves tenant annotations and produces the exact
     /// chart serviceID, selector, NAD, naming, and MAC contract required by later activation.
+    /// Requires only one SF per service Pod despite two slots, preserving unrelated caller resources.
     #[test]
     fn service_vpc_projection_builds_one_service_interface_and_two_slot_paths() {
         // Preserve a tenant annotation beside Multus while two validated slots drive only patch
@@ -1061,9 +1205,14 @@ mod tests {
                 "tenant.example.com/preserved".to_owned(),
                 "true".to_owned(),
             )])),
-            resources: None,
+            // Include caller memory resources to exercise preservation during SF derivation.
+            resources: Some(BTreeMap::from([(
+                "memory".to_owned(),
+                DpfHelmChartIntOrString::String("500Mi".to_owned()),
+            )])),
             update_strategy: None,
         });
+        let caller_definition = service_data.clone();
         let mac = ExtensionServiceInterfaceMac::candidate(service_id(), 0, 0);
         let slots = ServiceVpcSlots::new(2).expect("two slots fit the DPF inventory");
         let projected = project_service_vpc_registration(
@@ -1075,6 +1224,21 @@ mod tests {
             slots,
         )
         .expect("valid service data includes a DPF workload identity");
+
+        // Two slots still consume one SF per Pod, and derivation leaves the caller definition intact.
+        assert_eq!(service_data, caller_definition);
+        assert_eq!(
+            projected
+                .service
+                .service_daemon_set
+                .as_ref()
+                .unwrap()
+                .resources,
+            Some(BTreeMap::from([
+                ("memory".to_owned(), IntOrString::String("500Mi".to_owned())),
+                (SERVICE_VPC_SF_RESOURCE.to_owned(), IntOrString::Int(1)),
+            ]))
+        );
 
         // Build the complete expected resource contract without calling the definition builders.
         let owner_labels = BTreeMap::from([
@@ -1212,6 +1376,134 @@ mod tests {
                     service_mtu: SERVICE_VPC_MTU,
                 },
             ]
+        );
+    }
+
+    /// Verifies networked services create missing SF requests, raise undersized quantities, and
+    /// preserve sufficient caller values, so networking does not overwrite explicit device requests.
+    /// Rejects invalid SF quantities instead of replacing them with the derived minimum.
+    /// Rebuilding without interfaces restores caller resources, including an explicitly smaller SF.
+    #[test]
+    fn service_vpc_projection_merges_sf_resources_without_changing_caller_data() {
+        scenarios!(run = |settings: Option<Value>| {
+            // Keep only the caller's DaemonSet settings variable; chart identity stays valid.
+            let caller_resources = settings.as_ref()
+                .and_then(|settings| settings.get("resources"))
+                .cloned()
+                .unwrap_or(Value::Null);
+            let mut service_data = data(None);
+            service_data.service_daemon_set = settings
+                .map(|settings| serde_json::from_value(settings).expect("valid DaemonSet settings"));
+            let caller_definition = service_data.clone();
+
+            // Build the networked definition and then the desired definition after interface removal.
+            let networked = project_service_vpc_registration(
+                service_id(),
+                NAMESPACE,
+                &service_data,
+                ServiceVpcAddressFamily::Ipv4,
+                ExtensionServiceInterfaceMac::candidate(service_id(), 0, 0),
+                ServiceVpcSlots::new(1).expect("one slot is valid"),
+            );
+            let unnetworked = project_dpu_service(
+                service_id(), NAMESPACE, &service_data, ExtensionServiceDeploymentType::DemandDriven,
+            );
+
+            // Derivation must not alter caller data or survive removal of interface requirements.
+            assert_eq!(service_data, caller_definition);
+            assert_eq!(
+                serde_json::to_value(&unnetworked.service_daemon_set.unwrap().resources).unwrap(),
+                caller_resources,
+            );
+            networked.map(|registration| {
+                registration.service.service_daemon_set.unwrap().resources.unwrap()
+                    [SERVICE_VPC_SF_RESOURCE].clone()
+            })
+        };
+            "optional structures" {
+                // Create the resource map even when the caller omits the entire DaemonSet.
+                None => Yields(IntOrString::Int(1)),
+                // A present DaemonSet can still omit its resource map.
+                Some(json!({})) => Yields(IntOrString::Int(1)),
+            }
+            "explicit quantities" {
+                // Raise an integer request that cannot provide the required interface.
+                Some(json!({"resources": {"nvidia.com/bf_sf": 0}})) => Yields(IntOrString::Int(1)),
+                // A string zero has the same minimum as an integer zero.
+                Some(json!({"resources": {"nvidia.com/bf_sf": "0"}})) => Yields(IntOrString::Int(1)),
+                // An equal integer request already satisfies the interface requirement.
+                Some(json!({"resources": {"nvidia.com/bf_sf": 1}})) => Yields(IntOrString::Int(1)),
+                // Preserve an equal string quantity verbatim instead of normalizing it to an integer.
+                Some(json!({"resources": {"nvidia.com/bf_sf": "1.0"}})) => Yields(IntOrString::String("1.0".to_owned())),
+                // Preserve larger integer requests that may serve chart-specific device usage.
+                Some(json!({"resources": {"nvidia.com/bf_sf": 3}})) => Yields(IntOrString::Int(3)),
+                // Preserve the string representation of a larger request as well.
+                Some(json!({"resources": {"nvidia.com/bf_sf": "3"}})) => Yields(IntOrString::String("3".to_owned())),
+                // Reject a fractional request so parser errors cannot fall back to the derived minimum.
+                Some(json!({"resources": {"nvidia.com/bf_sf": "500m"}})) => FailsWith(DpfHelmChartServiceDataError::InvalidSfQuantity),
+            }
+        );
+    }
+
+    /// Verifies SF quantities accept exact whole-device counts and reject invalid values, preventing
+    /// floating-point rounding, overflow, or fallback from hiding an unusable caller request.
+    #[test]
+    fn service_vpc_sf_quantities_require_exact_nonnegative_whole_devices() {
+        scenarios!(run = |quantity| {
+            // Decode the same integer-or-string representation accepted in caller Helm data.
+            let quantity = serde_json::from_value(quantity).expect("typed integer-or-string quantity");
+            service_vpc_sf_quantity(&quantity)
+        };
+            "exact quantities" {
+                // Typed integers bypass suffix parsing while retaining their device count.
+                json!(7) => Yields(7),
+                // Milli quantities are valid when they describe complete devices.
+                json!("1000m") => Yields(1),
+                // Decimal SI scaling must preserve the complete device count.
+                json!("2k") => Yields(2000),
+                // The E suffix denotes exa rather than an incomplete exponent.
+                json!("1E") => Yields(1_000_000_000_000_000_000),
+                // Binary scaling can turn a fractional coefficient into whole devices.
+                json!("1.5Ki") => Yields(1536),
+                // Exact binary fractions can need more precision than fixed-width decimal mantissas.
+                json!("0.000000000000000000867361737988403547205962240695953369140625Ei") => Yields(1),
+                // Positive decimal exponents multiply the coefficient.
+                json!("2e3") => Yields(2000),
+                // Negative decimal exponents remain valid when division leaves no fractional device.
+                json!("200e-2") => Yields(2),
+                // Kubernetes permits an explicit plus sign and a trailing decimal point.
+                json!("+3.") => Yields(3),
+                // Signed zero is nonnegative and can be raised to the derived minimum.
+                json!("-0") => Yields(0),
+                // Preserve the largest whole quantity supported by Kubernetes.
+                json!("9223372036854775807") => Yields(i64::MAX),
+            }
+            "invalid quantities" {
+                // Reject typed negative quantities before deriving a replacement.
+                json!(-1) => FailsWith(DpfHelmChartServiceDataError::InvalidSfQuantity),
+                // A negative string is equally invalid even with a recognized suffix.
+                json!("-1Ki") => FailsWith(DpfHelmChartServiceDataError::InvalidSfQuantity),
+                // Empty strings cannot stand in for an omitted request.
+                json!("") => FailsWith(DpfHelmChartServiceDataError::InvalidSfQuantity),
+                // A decimal point without digits is malformed rather than zero.
+                json!(".") => FailsWith(DpfHelmChartServiceDataError::InvalidSfQuantity),
+                // Multiple decimal points cannot form a numeric coefficient.
+                json!("1.2.3") => FailsWith(DpfHelmChartServiceDataError::InvalidSfQuantity),
+                // Unknown suffixes must not be treated as unscaled device counts.
+                json!("1SF") => FailsWith(DpfHelmChartServiceDataError::InvalidSfQuantity),
+                // Exponents require a complete integer exponent.
+                json!("1e+") => FailsWith(DpfHelmChartServiceDataError::InvalidSfQuantity),
+                // Fractional extended resources cannot be rounded to the derived minimum.
+                json!("500m") => FailsWith(DpfHelmChartServiceDataError::InvalidSfQuantity),
+                // Binary suffixes do not make every fractional coefficient integral.
+                json!("0.1Ki") => FailsWith(DpfHelmChartServiceDataError::InvalidSfQuantity),
+                // Tiny fractional remainders must not disappear through floating-point rounding.
+                json!("1.0000000000000000001") => FailsWith(DpfHelmChartServiceDataError::InvalidSfQuantity),
+                // Reject overflow while converting a coefficient to the Kubernetes range.
+                json!("9223372036854775808") => FailsWith(DpfHelmChartServiceDataError::InvalidSfQuantity),
+                // Large exponents must fail without allocating an exponent-sized number.
+                json!("1e1000000") => FailsWith(DpfHelmChartServiceDataError::InvalidSfQuantity),
+            }
         );
     }
 
@@ -1645,7 +1937,7 @@ mod tests {
 
     /// Verifies mutable convergence covers chart, security, and daemon-set fields while excluding
     /// Multus identity.
-    /// Proves Ready reconciliation repairs tenant drift without patching attachment identity.
+    /// Proves mutable drift is detected while Multus attachment drift is rejected as immutable.
     #[test]
     fn mutable_field_matching_uses_the_patch_ownership_boundary() {
         // Start with a faithful networked observation so every owned mutable field is converged.
@@ -1689,16 +1981,19 @@ mod tests {
             .labels = Some(BTreeMap::from([("app".to_owned(), "other".to_owned())]));
         assert!(!dpu_service_mutable_fields_match(&projected, &daemon_drift));
 
-        // Resource drift must trigger repair so the workload keeps its caller-supplied limits.
+        // Resource drift must trigger repair so the workload keeps its caller-supplied limits and
+        // derived SF minimum.
+        // Change only the existing SF quantity so unrelated mutable drift cannot cause the mismatch.
         let mut resource_drift = matching.clone();
-        resource_drift
+        *resource_drift
             .service_daemon_set
             .as_mut()
             .expect("the projection supplies daemon-set settings")
-            .resources = Some(BTreeMap::from([(
-            "cpu".to_owned(),
-            IntOrString::String("2".to_owned()),
-        )]));
+            .resources
+            .as_mut()
+            .expect("the projection supplies derived SF resources")
+            .get_mut(SERVICE_VPC_SF_RESOURCE)
+            .expect("the projection supplies an SF request") = IntOrString::Int(0);
         assert!(!dpu_service_mutable_fields_match(
             &projected,
             &resource_drift

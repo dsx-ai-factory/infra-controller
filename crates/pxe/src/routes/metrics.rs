@@ -33,7 +33,8 @@ async fn metrics(state: State<AppState>) -> ([(axum::http::HeaderName, &'static 
     let mut exposition = state.prometheus_handle.render();
 
     let mut buffer = Vec::new();
-    match prometheus::TextEncoder::new().encode(&state.otel_registry.gather(), &mut buffer) {
+    match prometheus::TextEncoder::new().encode(&state.otel_metrics.registry.gather(), &mut buffer)
+    {
         Ok(()) => exposition.push_str(&String::from_utf8_lossy(&buffer)),
         // Keep the scrape serveable: on an encode failure the OTel section
         // is absent from this response rather than corrupting it.
@@ -75,20 +76,12 @@ mod tests {
             metrics::counter!("http_requests_total", "endpoint" => "/api/v0/pxe/boot").increment(1);
         });
 
-        let otel =
-            metrics_endpoint::new_metrics_setup("carbide-pxe-metrics-route-test", "test", false)
-                .expect("build a local OTel metrics setup");
-        // The OTel prometheus exporter appends the counter suffix, exposing
-        // this instrument as `carbide_pxe_boot_outcomes_total` -- the same
-        // cancellation the instrumentation framework relies on.
-        otel.meter
-            .u64_counter("carbide_pxe_boot_outcomes")
-            .build()
-            .add(1, &[]);
-
         let mut state = test_app_state();
         state.prometheus_handle = handle;
-        state.otel_registry = otel.registry.clone();
+        state.instrumentation.emit(crate::metrics::PxeBootOutcome {
+            endpoint: crate::metrics::BootEndpoint::Boot,
+            reason: crate::metrics::OutcomeReason::Ok,
+        });
 
         let http_section = state.prometheus_handle.render();
         let (_content_type, exposition) = super::metrics(State(state)).await;

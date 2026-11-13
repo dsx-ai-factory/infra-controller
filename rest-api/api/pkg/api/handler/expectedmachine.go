@@ -720,6 +720,20 @@ func (uemh UpdateExpectedMachineHandler) Handle(c echo.Context) error {
 			validationErrors := bmcMacImmutableValidationError()
 			return nil, cutil.NewAPIError(http.StatusBadRequest, "Failed to validate Expected Machine update data", validationErrors)
 		}
+		var interfaces []cdbm.ExpectedMachineInterface
+		if apiRequest.Interfaces != nil {
+			// Merge from locked state so a concurrent reservation edit cannot be lost.
+			stored, err := emDAO.Get(ctx, tx, expectedMachineID, nil, true)
+			if err != nil {
+				if errors.Is(err, cdb.ErrDoesNotExist) {
+					return nil, cutil.NewAPIError(http.StatusConflict, "Expected Machine was removed before the update completed", nil)
+				}
+				logger.Error().Err(err).Msg("failed to lock ExpectedMachine for interface update")
+				return nil, cutil.NewAPIError(http.StatusInternalServerError, "Failed to update Expected Machine due to DB error", nil)
+			}
+			replaceLoopbacks := apiRequest.ReplaceDpuLoopbacks != nil && *apiRequest.ReplaceDpuLoopbacks
+			interfaces = apiRequest.Interfaces.ToDBModelPreservingLoopbacks(stored.Interfaces, replaceLoopbacks)
+		}
 		// Note: DefaultBmcUsername and BmcPassword are not stored in DB, only passed to workflow
 		em, err := emDAO.Update(
 			ctx,
@@ -730,7 +744,7 @@ func (uemh UpdateExpectedMachineHandler) Handle(c echo.Context) error {
 				ChassisSerialNumber:      apiRequest.ChassisSerialNumber,
 				SkuID:                    apiRequest.SkuID,
 				FallbackDpuSerialNumbers: apiRequest.FallbackDPUSerialNumbers,
-				Interfaces:               apiRequest.InterfacesToDBModel(),
+				Interfaces:               interfaces,
 				RackID:                   apiRequest.RackID,
 				Name:                     apiRequest.Name,
 				Manufacturer:             apiRequest.Manufacturer,
@@ -1004,7 +1018,7 @@ func (cemh CreateExpectedMachinesHandler) Handle(c echo.Context) error {
 
 		// SiteID is mandatory for batch create and must be the same for all items
 		if req.SiteID == "" {
-			common.AddToValidationErrors(itemErrors, "siteID", fmt.Errorf("Site ID is required"))
+			common.AddToValidationErrors(itemErrors, "siteID", fmt.Errorf("site ID is required"))
 		}
 		siteID, _ := uuid.Parse(req.SiteID) // already validated
 		if foundSiteID == nil {
@@ -1012,7 +1026,7 @@ func (cemh CreateExpectedMachinesHandler) Handle(c echo.Context) error {
 		} else {
 			if siteID != *foundSiteID {
 				common.AddToValidationErrors(itemErrors, "siteID", fmt.Errorf(
-					"Expected Machine does not belong to the same Site (%s) as other Expected Machines in request", req.SiteID))
+					"the Expected Machine does not belong to the same Site (%s) as other Expected Machines in request", req.SiteID))
 			}
 		}
 
@@ -1300,12 +1314,12 @@ func (cemh CreateExpectedMachinesHandler) Handle(c echo.Context) error {
 			// Check MAC unicity
 			if existingMacAddressMap[req.BmcMacAddress] {
 				common.AddToValidationErrors(itemErrors, "bmcMacAddress", fmt.Errorf(
-					"Expected Machine with BMC MAC Address: %s already exist", req.BmcMacAddress))
+					"the Expected Machine with BMC MAC Address: %s already exist", req.BmcMacAddress))
 			}
 			// Check Serial unicity
 			if existingSerialMap[req.ChassisSerialNumber] {
 				common.AddToValidationErrors(itemErrors, "chassisSerialNumber", fmt.Errorf(
-					"Expected Machine with Chassis Serial Number: %s already exists", req.ChassisSerialNumber))
+					"the Expected Machine with Chassis Serial Number: %s already exists", req.ChassisSerialNumber))
 			}
 			// Check SKU existence
 			if req.SkuID != nil && !existingSkuIDsMap[*req.SkuID] {
@@ -1435,7 +1449,7 @@ type expectedMachineUpdateFieldSet struct {
 // expectedMachineUpdateFields records field presence across the complete update
 // request without comparing values. Keep it in sync with
 // `model.APIExpectedMachineUpdateRequest`: `ID` selects the row, and
-// `bmcIpAddress` is the sole documented per-machine exception.
+// `bmcIpAddress` and the `replaceDpuLoopbacks` intent are per-machine exceptions.
 func expectedMachineUpdateFields(req model.APIExpectedMachineUpdateRequest) expectedMachineUpdateFieldSet {
 	return expectedMachineUpdateFieldSet{
 		bmcMacAddress:            req.BmcMacAddress != nil,
@@ -1526,7 +1540,7 @@ func (uemh UpdateExpectedMachinesHandler) Handle(c echo.Context) error {
 
 		// validation must accept nil ID for single update use case so we need to check for nil ID here
 		if req.ID == nil {
-			common.AddToValidationErrors(itemErrors, "id", fmt.Errorf("Missing required Expected Machine ID"))
+			common.AddToValidationErrors(itemErrors, "id", fmt.Errorf("missing required Expected Machine ID"))
 		} else {
 			// extract already validated UUID
 			mid, _ := uuid.Parse(*req.ID)
@@ -1552,7 +1566,7 @@ func (uemh UpdateExpectedMachinesHandler) Handle(c echo.Context) error {
 		}
 
 		if expectedMachineUpdateFields(req) != batchFields {
-			common.AddToValidationErrors(itemErrors, "fields", errors.New("must provide the same set of fields as batch item 0, except bmcIpAddress"))
+			common.AddToValidationErrors(itemErrors, "fields", errors.New("must provide the same set of fields as batch item 0, except bmcIpAddress and replaceDpuLoopbacks"))
 		}
 
 		if len(itemErrors) > 0 {
@@ -1601,7 +1615,7 @@ func (uemh UpdateExpectedMachinesHandler) Handle(c echo.Context) error {
 		em, ok := requestedEmMap[mid]
 		if !ok {
 			common.AddToValidationErrors(itemErrors, "id", fmt.Errorf(
-				"Expected Machine with ID %s not found in DB", *req.ID))
+				"the Expected Machine with ID %s not found in DB", *req.ID))
 			validationErrors[strIndex] = itemErrors
 			continue
 		}
@@ -1612,7 +1626,7 @@ func (uemh UpdateExpectedMachinesHandler) Handle(c echo.Context) error {
 		} else {
 			if em.SiteID != *foundSiteID {
 				common.AddToValidationErrors(itemErrors, "siteID", fmt.Errorf(
-					"Expected Machine with ID %s does not belong to the same Site (%s) as other Expected Machines in request", *req.ID, *foundSiteID))
+					"the Expected Machine with ID %s does not belong to the same Site (%s) as other Expected Machines in request", *req.ID, *foundSiteID))
 			}
 		}
 
@@ -1777,7 +1791,7 @@ func (uemh UpdateExpectedMachinesHandler) Handle(c echo.Context) error {
 			// Check Serial unicity
 			if req.ChassisSerialNumber != nil && expectedMachineSerialNumberChecker.DoesIDHaveConflict(mid) {
 				common.AddToValidationErrors(itemErrors, "chassisSerialNumber", fmt.Errorf(
-					"Expected Machine with Chassis Serial Number: %s already exists", *req.ChassisSerialNumber))
+					"the Expected Machine with Chassis Serial Number: %s already exists", *req.ChassisSerialNumber))
 			}
 			// Check SKU existence
 			if req.SkuID != nil && !uniqueSkuIDsOnSite[*req.SkuID] {
@@ -1804,6 +1818,20 @@ func (uemh UpdateExpectedMachinesHandler) Handle(c echo.Context) error {
 			}
 			logger.Error().Err(derr).Msg("error locking ExpectedMachine records for batch update")
 			return nil, cutil.NewAPIError(http.StatusInternalServerError, "Failed to update Expected Machine due to DB error", nil)
+		}
+		if batchFields.interfaces {
+			stored, _, derr := emDAO.GetAll(ctx, tx, cdbm.ExpectedMachineFilterInput{
+				ExpectedMachineIDs: slices.Collect(maps.Keys(idMap)),
+			}, paginator.PageInput{Limit: cutil.GetPtr(paginator.TotalLimit)}, nil)
+			if derr != nil {
+				logger.Error().Err(derr).Msg("error reading locked ExpectedMachine interfaces for batch update")
+				return nil, cutil.NewAPIError(http.StatusInternalServerError, "Failed to update Expected Machine due to DB error", nil)
+			}
+			for _, machine := range stored {
+				request := requestsByID[machine.ID]
+				replaceLoopbacks := request.ReplaceDpuLoopbacks != nil && *request.ReplaceDpuLoopbacks
+				updateInputs[idMap[machine.ID]].Interfaces = request.Interfaces.ToDBModelPreservingLoopbacks(machine.Interfaces, replaceLoopbacks)
+			}
 		}
 
 		// Clear first so UpdateMultiple's final SELECT sees nil. Its scoped
@@ -1933,8 +1961,10 @@ func (h ReplaceAllExpectedMachinesHandler) Handle(c echo.Context) error {
 
 	inputs := make([]cdbm.ExpectedMachineCreateInput, 0, len(request.ExpectedMachines))
 	credentials := make(map[uuid.UUID]cdbm.ExpectedMachineCredentials, len(request.ExpectedMachines))
+	requestsByID := make(map[uuid.UUID]*model.APIExpectedMachineCreateRequest, len(request.ExpectedMachines))
 	for _, machine := range request.ExpectedMachines {
 		id := uuid.New()
+		requestsByID[id] = machine
 		credentials[id] = cdbm.ExpectedMachineCredentials{Username: machine.DefaultBmcUsername, Password: machine.DefaultBmcPassword}
 		inputs = append(inputs, cdbm.ExpectedMachineCreateInput{
 			ExpectedMachineID: id, SiteID: site.ID, BmcMacAddress: machine.BmcMacAddress,
@@ -1984,6 +2014,27 @@ func (h ReplaceAllExpectedMachinesHandler) Handle(c echo.Context) error {
 		if err != nil {
 			return nil, cutil.NewAPIError(http.StatusInternalServerError, "Failed to retrieve client for Site", nil)
 		}
+		stored, _, derr := dao.GetAll(ctx, tx, cdbm.ExpectedMachineFilterInput{
+			SiteIDs: []uuid.UUID{site.ID},
+		}, paginator.PageInput{Limit: cutil.GetPtr(paginator.TotalLimit)}, nil)
+		if derr != nil {
+			logger.Error().Err(derr).Msg("error reading ExpectedMachine interfaces for replacement")
+			return nil, cutil.NewAPIError(http.StatusInternalServerError, "Failed to replace Expected Machines due to DB error", nil)
+		}
+		interfacesByMAC := make(map[string][]cdbm.ExpectedMachineInterface, len(stored))
+		for _, machine := range stored {
+			interfacesByMAC[cdbm.NormalizeMacAddress(machine.BmcMacAddress)] = machine.Interfaces
+		}
+		for i := range inputs {
+			request := requestsByID[inputs[i].ExpectedMachineID]
+			interfaces := request.Interfaces
+			if interfaces == nil {
+				// Replace-all still replaces physical declarations when the list is omitted.
+				interfaces = model.APIExpectedMachineInterfaces{}
+			}
+			replaceLoopbacks := request.ReplaceDpuLoopbacks != nil && *request.ReplaceDpuLoopbacks
+			inputs[i].Interfaces = interfaces.ToDBModelPreservingLoopbacks(interfacesByMAC[cdbm.NormalizeMacAddress(inputs[i].BmcMacAddress)], replaceLoopbacks)
+		}
 		machines, derr := dao.ReplaceAll(ctx, tx, cdbm.ExpectedMachineFilterInput{SiteIDs: []uuid.UUID{site.ID}}, inputs)
 		if derr != nil {
 			logger.Error().Err(derr).Msg("error replacing ExpectedMachine records in DB")
@@ -1992,8 +2043,15 @@ func (h ReplaceAllExpectedMachinesHandler) Handle(c echo.Context) error {
 		protos := make([]*corev1.ExpectedMachine, 0, len(machines))
 		for i := range machines {
 			machine := machines[i].ToProto(credentials[machines[i].ID])
-			// Replace-all owns the entire list, including removal of nested Host BMCs.
+			request := requestsByID[machines[i].ID]
+			// Cached loopbacks are response state, not new replacement intent for Core.
+			machine.HostNics = nil
+			for _, expectedInterface := range request.Interfaces {
+				machine.HostNics = append(machine.HostNics, expectedInterface.ToDBModel().ToProto())
+			}
+			// Replace-all replaces physical interfaces, including nested Host BMCs.
 			machine.ReplaceHostNics = true
+			machine.ReplaceDpuLoopbacks = request.ReplaceDpuLoopbacks != nil && *request.ReplaceDpuLoopbacks
 			protos = append(protos, machine)
 		}
 		coreRequest := &corev1.ExpectedMachineList{ExpectedMachines: protos}

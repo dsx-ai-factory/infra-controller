@@ -109,6 +109,35 @@ claim can delete the journal and result.json, depending on the volume's
 reclaim policy, so preserve required data first. The Job deadline must exceed
 `runner.wholeRunSeconds` plus the run's 90 s shutdown budget.
 
+The stage window is `runner.wholeRunSeconds - runner.finalizeSeconds`;
+readiness, writes and stages must fit. Ingestion finalize (min 1800 s)
+collects ten summaries and end reads. Defaults leave 4800 s + 1800 s;
+increase wholeRunSeconds and activeDeadlineSeconds for a longer window.
+Increasing finalizeSeconds alone shortens the stage window.
+
+`runner.resultMaxBytes`: 8 MiB default, 262144–16777216 bytes. Admission
+reports bytes needed and keeps every unresolved key. Default headroom is
+over 2× at 1,100 racks (18 hosts/rack, 2 DPUs/host), including UUID rack
+IDs. The ceiling bounds the file; ConfigMaps hold only a small status.
+
+`runner.bmc` sets port/concurrency/timeoutSeconds/tries (443/64/5/2). At
+1,100 racks only 59,400 host/DPU BMCs are dialled: 929 batches at 64
+workers, ~929 s at 1 s/reply or ~9,290 s for two 5 s tries each. Budget
+readinessSeconds for measured BMC and list latency, below
+finalizeSeconds. Raise concurrency only with measured site headroom.
+
+`runner.probeRequestTimeoutSeconds`: 5 s default (1–600). Caller
+deadlines, snapshot retention and freshness bound a 40-page DPU read.
+
+Service lists allow 200,000 objects / 4,000 s: over 2× 88,000 Services /
+176 pages at 10 s/page. The caller's readiness deadline may shorten
+this; size it from measured list and BMC latency.
+
+The 1.5 GiB journal cap is over 2× 40,700 writes using 30 attempts each.
+The 4 GiB default claim holds over 2× that cap plus the result and its
+atomic replacement. Check existing capacity and expansion support before
+upgrading; retained files also consume space.
+
 Install the runner into the MAT namespace: the release namespace must be the
 one that holds the MAT Pods and Services, because the runner reads them in its
 own namespace (not `inventory.namespace`) and keeps the site lock and the
@@ -140,3 +169,44 @@ elsewhere once a multi-arch image exists.
 - Jobs never restart, have `backoffLimit: 0`, bounded Job and test deadlines,
   run nonroot with a read-only root filesystem, all capabilities dropped and
   the RuntimeDefault seccomp profile.
+
+## Instance create and delete
+
+Install one runner Job per command with `runner.command: instance-create` or
+`instance-delete`, a fresh `runner.runId` and explicit `runner.dryRun`.
+Use the same retained PVC for both. Delete requires the successful create
+run's `.owned.json` basename in `runner.instance.ownedManifest` and the same N,
+tenant, type and REST origin. It never discovers instances to delete.
+
+Set `runner.rest.org` to the tenant org and `providerOrg` to the provider org.
+The runner rereads mounted `tokenSecret` before writes but does not mint tokens.
+Refresh `token` externally each half lifetime, before expiry, with both org grants.
+A 401 stops as a clean refusal. Create mounts `ipxeSecret` key `script.ipxe`.
+Pin an iPXE fixture suitable for the simulator. Phone-home is disabled.
+For a private REST CA, set `runner.rest.caSecret.name` and `.key` (default
+`ca.crt`). The client trusts only the supplied PEM bundle, capped at 1 MiB.
+Without a CA Secret it uses system trust. HTTPS verification stays enabled.
+
+Match `runner.observation.intervalSeconds` to the probe sweep interval.
+A mismatch fails before writes and reports both values. Allow two
+calibration sweeps in readiness. Supply every fleet count, every relevant
+control-plane selector, and `apiPoolSelector` plus `apiPoolReplicas` covering
+all API pool series. Start with a dry run, then five hosts.
+Use `runner.instance.topologyOptimized: false` (default) across domains.
+
+An unclear Machine label write is read back through the probe.
+`runner.observation.labelReadbackSeconds` defaults to 1800 seconds, covering
+two 10-minute inventory cycles plus probe headroom, within the work deadline.
+The exact owned value settles addition, absence settles removal, and another
+owner stops the run. Proven absence permits one journaled resend and another
+read-back only when both fit the remaining budget. Unclear create/delete
+mutations remain blocked for operator reconciliation.
+
+Unsettled writes leave pending work and block the site Lease.
+There is no automatic create/delete replay, cleanup or takeover.
+Before recovery writes,
+fence the old execution, inspect the journal and hashed sidecars, establish
+a renewing maintenance Lease and validate ownership. Verify settlement in
+native and REST state through the probe. Empty read-back after a lost create
+is insufficient. Exercise this operator handoff before qualifying writes.
+If the procedure is unavailable, keep the site blocked.

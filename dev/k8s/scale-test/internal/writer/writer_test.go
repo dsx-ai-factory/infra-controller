@@ -4,6 +4,7 @@
 package writer
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -161,6 +162,8 @@ func show(o Outcome, err error) string {
 		return fmt.Sprintf("accepted x%d", o.Attempts)
 	case Failed:
 		return fmt.Sprintf("failed %s x%d", o.Reason, o.Attempts)
+	case Planned:
+		return fmt.Sprintf("planned op%d", o.Op)
 	}
 	return fmt.Sprintf("unclear op%d", o.Op)
 }
@@ -278,6 +281,23 @@ func TestSend(t *testing.T) {
 			}
 		}
 	}
+	// A retry's intent sync that outlasts the 6 s cutoff, whichever wait led to it.
+	stallRetry := onIntent(2, func(*rig) { time.Sleep(10 * time.Second) })
+	cutoffAt6s := func(c *Call) { c.Cutoff = time.Now().Add(6 * time.Second) }
+	// afterStall: one notDispatched receipt (the retry) and the journal's counts and uncertainty.
+	afterStall := func(counts journal.Counts, unsettled bool) func(*testing.T, *rig) {
+		return func(t *testing.T, r *rig) {
+			n := 0
+			for _, m := range rawLines(t, r.j) {
+				if m["entry"] == "receipt" && m["outcome"].(map[string]any)["kind"] == journal.NotDispatched {
+					n++
+				}
+			}
+			if r.j.Counts() != counts || r.j.Unsettled() != unsettled || n != 1 {
+				t.Fatalf("counts %+v unsettled %t notDispatched %d", r.j.Counts(), r.j.Unsettled(), n)
+			}
+		}
+	}
 	var order []string
 	rows := []sendRow{
 		{name: "journal_intent_is_synced_before_call", setup: func(_ *testing.T, r *rig) {
@@ -357,6 +377,12 @@ func TestSend(t *testing.T) {
 			r.w = New(r.j, r.gate, r.stop, time.Now().Add(500*time.Millisecond))
 		}, sends: []sendSpec{{script: []Attempt{grpcRej(codes.ResourceExhausted, "100"), acc()}, want: "failed pushback-grpc-ResourceExhausted x1", calls: 1}},
 			states: "k1=failed(pushback-grpc-ResourceExhausted)", took: "0s"}, // the backoff passes the 0.5 s deadline: no retry
+		{name: "a_retry_stalled_past_the_cutoff_after_a_pushback_stays_failed", setup: stallRetry, sends: []sendSpec{{tweak: cutoffAt6s,
+			script: []Attempt{grpcRej(codes.ResourceExhausted, "100"), acc()}, want: "failed pushback-grpc-ResourceExhausted x1", calls: 1}},
+			states: "k1=failed(pushback-grpc-ResourceExhausted)x2", check: afterStall(journal.Counts{Ops: 1, Attempts: 1, Known: true}, false)},
+		{name: "a_retry_stalled_past_the_cutoff_after_no_reply_stays_unclear", setup: stallRetry, sends: []sendSpec{{tweak: cutoffAt6s,
+			script: []Attempt{noReply(), acc()}, want: "unclear op1", calls: 1}},
+			states: "k1=unclearx2", check: afterStall(journal.Counts{Ops: 1, Attempts: 1, Unclear: 1, Known: true}, true)},
 		{name: "a_detail_never_reaches_the_journal", sends: []sendSpec{{script: []Attempt{{
 			Rejected: &Rejection{Reason: journal.Grpc("InvalidArgument")},
 			Detail:   "https://user:pw@api.example/v1?token=abc " + strings.Repeat("x", 10_000),
@@ -418,6 +444,51 @@ func TestSend(t *testing.T) {
 					row.check(t, r)
 				}
 			})
+		})
+	}
+}
+
+// TestPlan proves the dry-run path journals the intent, settles it with a planned receipt (never an accepted one), keeps the gate and
+// stop checks and the journal-before-dispatch order, and counts a planned op with no attempt.
+func TestPlan(t *testing.T) {
+	closeGate := func(r *rig) { r.gate.Close() }
+	onIntent := func(f func(*rig)) func(*rig) {
+		return func(r *rig) {
+			r.j.AfterSync = func(e any) {
+				if _, ok := e.(journal.Intent); ok {
+					f(r)
+				}
+			}
+		}
+	}
+	for _, row := range []struct {
+		name, want, entries string
+		setup               func(*rig)
+		counts              journal.Counts
+		unsettled           bool
+	}{
+		{"planned", "planned op1", "intent planned", func(*rig) {}, journal.Counts{Ops: 1, Known: true}, false},
+		{"lock_lost_before_the_intent", "lockLost", "", closeGate, journal.Counts{Known: true}, false},
+		{"lock_lost_during_the_intent_sync", "op1 dispatched=false lockLost", "intent notDispatched", onIntent(closeGate), journal.Counts{Ops: 1, Known: true}, false},
+		{"stop_during_the_intent_sync", "op1 dispatched=false softStop", "intent notDispatched", onIntent(func(r *rig) { r.stop.stop() }), journal.Counts{Ops: 1, Known: true}, false},
+		{"receipt_io_failure", "op1 dispatched=false io", "intent", onIntent(func(r *rig) { r.j.Inject(failSync) }), journal.Counts{Ops: 1, Attempts: 1, Unclear: 1}, true},
+	} {
+		t.Run(row.name, func(t *testing.T) {
+			r := newRig(t)
+			row.setup(r)
+			out, err := Plan(r.ctx, r.w, mkCall("k1", "d1", nil))
+			var got []string
+			for _, m := range rawLines(t, r.j) {
+				switch m["entry"] {
+				case "intent":
+					got = append(got, "intent")
+				case "receipt":
+					got = append(got, m["outcome"].(map[string]any)["kind"].(string))
+				}
+			}
+			if g := show(out, err); g != row.want || strings.Join(got, " ") != row.entries || r.j.Counts() != row.counts || r.j.Unsettled() != row.unsettled {
+				t.Fatalf("got %q entries %q counts %+v unsettled %t", g, got, r.j.Counts(), r.j.Unsettled())
+			}
 		})
 	}
 }
@@ -617,4 +688,96 @@ func TestCloseJoinsAReleasedCallback(t *testing.T) {
 		synctest.Wait()
 		<-closed
 	})
+}
+
+func TestPendingWorkAndCreatedReceipts(t *testing.T) {
+	id := "00000000-0000-4000-8000-000000000001"
+	for _, tc := range []struct {
+		name      string
+		ids       []string
+		failClear bool
+		kind      Kind
+	}{
+		{"accepted work remains pending", []string{id}, false, Accepted},
+		{"failed settlement sync", []string{id}, true, Accepted},
+		{"receipt too many IDs", slices.Repeat([]string{id}, 19), false, Unclear},
+		{"receipt escape expansion", []string{strings.Repeat("\n", 36)}, false, Unclear},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r := newRig(t)
+			if err := r.w.Pending(r.ctx, true); err != nil {
+				t.Fatal(err)
+			}
+			out, err := Send(r.ctx, r.w, mkCall("create", "digest", nonIdem), func(context.Context) Attempt { return Attempt{IDs: tc.ids} })
+			if err != nil || out.Kind != tc.kind || !r.j.Unsettled() {
+				t.Fatalf("out=%+v err=%v pending=%t", out, err, r.j.Unsettled())
+			}
+			if tc.kind == Unclear {
+				return
+			}
+			data, err := os.ReadFile(r.j.Path())
+			if err != nil || !strings.Contains(string(data), `"ids":["`+id+`"]`) {
+				t.Fatal("created IDs were not durably journaled")
+			}
+			if tc.failClear {
+				r.j.Inject(func(*os.File, []byte) error { return errors.New("sync failed") })
+			}
+			err = r.w.Pending(r.ctx, false)
+			if (err != nil) != tc.failClear || r.j.Unsettled() != tc.failClear {
+				t.Fatalf("settlement error=%v pending=%t", err, r.j.Unsettled())
+			}
+			_ = r.j.Close()
+			_, err = journal.Create(r.dir, journal.Header{RunID: "r1", Command: "create"})
+			if !errors.Is(err, journal.ErrExists) {
+				t.Fatal("crashed or completed journal replayed")
+			}
+		})
+	}
+}
+
+func TestOnlyUnclearLabelsSettleWithLiveProof(t *testing.T) {
+	for _, mode := range []string{"ok", "create", "lock", "stop", "cancel", "fsync"} {
+		t.Run(mode, func(t *testing.T) {
+			r := newRig(t)
+			kind := "labels"
+			if mode == "create" {
+				kind = "create"
+			}
+			if err := r.w.Pending(r.ctx, true); err != nil {
+				t.Fatal(err)
+			}
+			out, err := Send(r.ctx, r.w, Call{WriteCall: journal.WriteCall{Key: "one", Kind: kind}, Retry: RetryPolicy{MaxAttempts: 1, AttemptTimeout: time.Second}}, func(context.Context) Attempt { return noReply() })
+			if err != nil || out.Kind != Unclear {
+				t.Fatalf("unclear attempt: %v", err)
+			}
+			switch mode {
+			case "lock":
+				r.gate.Close()
+			case "stop":
+				r.stop.stop()
+			case "cancel":
+				r.cancel()
+			case "fsync":
+				r.j.Inject(func(*os.File, []byte) error { return errors.New("sync failed") })
+			}
+			err = r.w.SettleLabel(r.ctx, out.Op, map[string]string{"source": "probe"})
+			if (err == nil) != (mode == "ok") {
+				t.Fatalf("settlement gate: %v", err)
+			}
+			if mode == "ok" {
+				if r.j.Counts().Unclear != 0 || !r.j.Unsettled() {
+					t.Fatal("proof lost or run-level pending cleared")
+				}
+				if err = r.w.Pending(r.ctx, false); err != nil || r.j.Unsettled() {
+					t.Fatal("proven labels remain unclear")
+				}
+				raw, _ := os.ReadFile(r.j.Path())
+				if !bytes.Contains(raw, []byte(`"entry":"labelSettled"`)) {
+					t.Fatal("settlement not durable")
+				}
+			} else if !r.j.Unsettled() {
+				t.Fatal("unfinished work cleared")
+			}
+		})
+	}
 }

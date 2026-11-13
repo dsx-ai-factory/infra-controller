@@ -4,9 +4,11 @@
 package ingestion
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"maps"
 	"os"
 	"slices"
@@ -26,6 +28,7 @@ import (
 	"github.com/NVIDIA/infra-controller/dev/k8s/scale-test/internal/forge"
 	"github.com/NVIDIA/infra-controller/dev/k8s/scale-test/internal/inventory"
 	"github.com/NVIDIA/infra-controller/dev/k8s/scale-test/internal/journal"
+	"github.com/NVIDIA/infra-controller/dev/k8s/scale-test/internal/result"
 	"github.com/NVIDIA/infra-controller/dev/k8s/scale-test/internal/writer"
 )
 
@@ -116,6 +119,7 @@ type rig struct {
 	gate *gate
 	w    *writer.Writer
 	f    *fakeForge
+	end  time.Time // the dispatch deadline, none when zero
 }
 
 func newRig(t *testing.T) *rig {
@@ -136,7 +140,7 @@ func (r *rig) dispatch(t *testing.T, ctx context.Context, inv *inventory.SiteInv
 	if err != nil {
 		t.Fatal(err)
 	}
-	res := Dispatch(ctx, r.w, r.f, plan, recs, conc, dryRun)
+	res := Dispatch(ctx, r.w, r.f, plan, recs, conc, r.end, dryRun)
 	r.w.Close()
 	return res
 }
@@ -402,21 +406,29 @@ func TestAStopLeavesTheRestNotSent(t *testing.T) {
 	}
 }
 
-// TestDryRunJournalsAndSendsNothing: a dry run journals every key and sends none, each key planned with no attempt, send or reply; a run sends every key.
+// TestDryRunJournalsAndSendsNothing: a dry run journals every key and sends none, each key planned with no attempt, send, reply or dispatch window, a planned
+// receipt and log line and never an accepted one; a run sends every key and logs it accepted.
 func TestDryRunJournalsAndSendsNothing(t *testing.T) {
 	for _, dryRun := range []bool{true, false} {
+		var logs bytes.Buffer
+		old := slog.Default()
+		slog.SetDefault(slog.New(slog.NewTextHandler(&logs, nil)))
+		t.Cleanup(func() { slog.SetDefault(old) })
 		r := newRig(t)
 		res := r.dispatch(t, context.Background(), fixture(), one, dryRun)
 		data, err := os.ReadFile(r.j.Path())
 		if err != nil {
 			t.Fatal(err)
 		}
-		want, calls := Sent, 8
+		want, calls, planned, acc := Sent, 8, 0, 8
 		if dryRun {
-			want, calls = Planned, 0
+			want, calls, planned, acc = Planned, 0, 8, 0
 		}
 		is(t, []any{len(r.f.seen()), strings.Count(string(data), `"entry":"intent"`), len(res.Outcomes), res.Err}, []any{calls, 8, 8, nil},
 			"calls, intents journaled, outcomes, error")
+		is(t, []any{strings.Count(string(data), `"kind":"planned"`), strings.Count(string(data), `"kind":"accepted"`), strings.Count(logs.String(), "write planned"),
+			strings.Count(logs.String(), "write accepted"), len(res.Windows) == 0, r.j.Unsettled()},
+			[]any{planned, acc, planned, acc, dryRun, false}, "planned and accepted receipts, planned and accepted logs, no windows, settled")
 		for k, o := range res.Outcomes {
 			is(t, []any{o.Status, o.Attempts == 0, o.SentAt.IsZero(), o.RepliedAt.IsZero()}, []any{want, dryRun, dryRun, dryRun}, string(k))
 		}
@@ -464,7 +476,7 @@ func TestDispatchRefusesBadInput(t *testing.T) {
 			if tc.noW {
 				w = nil
 			}
-			res := Dispatch(context.Background(), w, tc.f, plan, tc.recs, tc.conc, false)
+			res := Dispatch(context.Background(), w, tc.f, plan, tc.recs, tc.conc, time.Time{}, false)
 			is(t, fmt.Sprint(res.Err), tc.want, "error")
 			for k := range recs {
 				is(t, res.Outcomes[k].Status, NotSent, string(k))
@@ -472,6 +484,120 @@ func TestDispatchRefusesBadInput(t *testing.T) {
 			if f, ok := tc.f.(*fakeForge); ok && len(f.seen()) != 0 {
 				t.Errorf("sent %v", f.seen())
 			}
+		})
+	}
+}
+
+// TestWindowsOpenAtTheFirstUnitDispatch: a stream's T0 is its first unit dispatch, never its rack group's, set even when that send is rejected; its end is the
+// last accepted reply, moved to the return of an unclear send, which may have landed by then. A stream never dispatched has no window.
+func TestWindowsOpenAtTheFirstUnitDispatch(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		r, start := newRig(t), time.Now()
+		r.f.during = func(context.Context, string) { time.Sleep(time.Second) }
+		r.f.reply = func(call string, _ int) reply {
+			switch call {
+			case "rack r1":
+				return st(codes.InvalidArgument)
+			case "machine aa:01":
+				return st(codes.Unavailable)
+			}
+			return reply{}
+		}
+		res := r.dispatch(t, context.Background(), fixture(), one, false)
+		got := map[Stream][2]time.Duration{}
+		for s, w := range res.Windows {
+			got[s] = [2]time.Duration{w.T0.Sub(start), w.End.Sub(start)}
+		}
+		is(t, got, map[Stream][2]time.Duration{Rack: {time.Second, 4 * time.Second}, Switch: {4 * time.Second, 5 * time.Second},
+			Host: {4 * time.Second, time.Since(start)}}, "windows")
+		is(t, res.Outcomes["host/aa:01"].Status, Unclear, "the host write")
+	})
+}
+
+// TestT0IsTheFirstAttemptOut: a stream's T0 is its first attempt past the writer's last gate and stop check: none when the gate closes after the intent or
+// under dryRun, the RPC time after a slow intent, and set by a rejected attempt, whose end stays unknown. An RPC out before the deadline is not cut by it: its late reply is accepted, ending the window, and the next key is notSent. No attempt goes out at or past the deadline: with an
+// intent held across it, the send begun before it is notDispatched with no RPC or T0, and the next key is notSent, never journaled.
+func TestT0IsTheFirstAttemptOut(t *testing.T) {
+	hold := func(d time.Duration) func(*rig) {
+		return func(r *rig) { r.j.Inject(func(*os.File, []byte) error { time.Sleep(d); return nil }) }
+	}
+	for _, tc := range []struct {
+		name   string
+		setup  func(r *rig)
+		dryRun bool
+		want   map[Stream][2]time.Duration // T0 and End after the start; -1 for none
+		counts [4]int                      // intents, RPCs, notDispatched receipts, dispatched attempts
+	}{
+		{"gate closed after the intent", func(r *rig) { r.j.Inject(func(*os.File, []byte) error { r.gate.lost.Store(true); return nil }) }, false, map[Stream][2]time.Duration{}, [4]int{1, 0, 1, 0}},
+		{"dry run", func(*rig) {}, true, map[Stream][2]time.Duration{}, [4]int{2, 0, 0, 0}},
+		{"slow intent", hold(5 * time.Second), false, map[Stream][2]time.Duration{Host: {5 * time.Second, 5 * time.Second}}, [4]int{2, 2, 0, 2}},
+		{"rejected", func(r *rig) { r.f.reply = func(string, int) reply { return st(codes.InvalidArgument) } }, false, map[Stream][2]time.Duration{Host: {0, -1}}, [4]int{2, 2, 0, 2}},
+		{"answer after the deadline", func(r *rig) { r.f.during = func(context.Context, string) { time.Sleep(15 * time.Second) } }, false, map[Stream][2]time.Duration{Host: {0, 15 * time.Second}}, [4]int{1, 1, 0, 1}},
+		{"intent held past the deadline", hold(15 * time.Second), false, map[Stream][2]time.Duration{}, [4]int{1, 0, 1, 0}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				r, start := newRig(t), time.Now()
+				r.end = start.Add(10 * time.Second)
+				tc.setup(r)
+				res := r.dispatch(t, context.Background(), inv(nil, inventory.Device{Kind: "machine", BmcMac: "0", Serial: "m000"}, inventory.Device{Kind: "machine", BmcMac: "1", Serial: "m001"}), one, tc.dryRun)
+				got := map[Stream][2]time.Duration{}
+				for s, w := range res.Windows {
+					if got[s] = [2]time.Duration{w.T0.Sub(start), w.End.Sub(start)}; w.End.IsZero() {
+						got[s] = [2]time.Duration{w.T0.Sub(start), -1}
+					}
+				}
+				data, _ := os.ReadFile(r.j.Path())
+				is(t, []any{got, [4]int{strings.Count(string(data), `"entry":"intent"`), len(r.f.seen()), strings.Count(string(data), `"kind":"notDispatched"`), int(r.j.Counts().Attempts)}},
+					[]any{tc.want, tc.counts}, "windows, intents, RPCs, notDispatched receipts and dispatched attempts")
+			})
+		})
+	}
+}
+
+// TestCutoffKeepsDescendantsNotSent checks dispatch through reconciliation: a cutoff is not a rejected prerequisite, and no unit stream began.
+func TestCutoffKeepsDescendantsNotSent(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		calls []string
+	}{
+		{"group intent held past cutoff", nil},
+		{"group accepted past cutoff", []string{"group g-r1"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				r, inv := newRig(t), site()
+				r.end = time.Now().Add(10 * time.Second)
+				if len(tc.calls) == 0 {
+					r.j.Inject(func(*os.File, []byte) error { time.Sleep(15 * time.Second); return nil })
+				} else {
+					r.f.during = func(context.Context, string) { time.Sleep(15 * time.Second) }
+				}
+				res := r.dispatch(t, context.Background(), inv, one, false)
+				plan, _, err := Records(inv)
+				if err != nil {
+					t.Fatal(err)
+				}
+				for _, k := range plan.keys() {
+					want := NotSent
+					if len(tc.calls) > 0 && k == GroupKey("r1") {
+						want = Sent
+					}
+					is(t, res.Outcomes[k].Status, want, string(k))
+				}
+				data, _ := os.ReadFile(r.j.Path())
+				n := len(tc.calls)
+				is(t, []any{res.Err, r.f.seen(), len(res.Windows), r.j.Unsettled(), [5]int{strings.Count(string(data), `"entry":"intent"`), len(r.f.seen()),
+					strings.Count(string(data), `"kind":"notDispatched"`), strings.Count(string(data), `"kind":"accepted"`), int(r.j.Counts().Attempts)}},
+					[]any{nil, tc.calls, 0, false, [5]int{1, n, 1 - n, n, n}}, "error, calls, windows, unsettled, intents, RPCs, receipts and attempts")
+				rec := reconcile(plan, inv, res.Outcomes, endOf(nil))
+				var stages []result.StageResult
+				for _, st := range Stages(inv.N) {
+					is(t, *rec.Tallies[st.ID], Tally{Unknown: st.N, Unproven: st.N}, string(st.ID))
+					stages = append(stages, stageResult(st, rec.Tallies[st.ID], result.StageUnresolved))
+				}
+				is(t, result.Evaluate(result.Admitted{Stages: stages, Planned: len(stages)}, nil), result.Unresolved, "unsent units do not fail the run")
+			})
 		})
 	}
 }

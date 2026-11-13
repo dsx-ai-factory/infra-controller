@@ -43,8 +43,9 @@ use carbide_uuid::vpc::{VpcId, VpcPrefixId};
 use config_version::ConfigVersion;
 use model::controller_outcome::PersistentStateHandlerOutcome;
 use model::extension_service::{
-    DPF_HELM_CHART_OWNER_LABEL, ExtensionServiceDeploymentType, ExtensionServiceInterfaceMac,
-    ExtensionServiceLifecycleState, ExtensionServiceType, ServiceVpcAddressFamily,
+    DPF_HELM_CHART_OWNER_LABEL, DpfHelmChartIntOrString, ExtensionServiceDeploymentType,
+    ExtensionServiceInterfaceMac, ExtensionServiceLifecycleState, ExtensionServiceType,
+    ServiceVpcAddressFamily,
 };
 use model::instance::config::extension_services::{
     InstanceExtensionServiceConfig, InstanceExtensionServicesConfig,
@@ -992,12 +993,22 @@ async fn test_networked_dpf_registration_recovers_from_mac_collision(
 
 /// Verifies enabled IPv4 reconciliation creates every two-slot parent in dependency order before
 /// Ready.
+/// Confirms one SF is derived without an explicit caller request even with two slots.
+/// Verifies reconciliation keeps the derived SF request out of the persisted caller V1 data.
 /// Verifies DPUServiceInterface and DPUServiceChain creation precedes the consuming DPUService
 /// while `project_service_vpc_registration` tests own field-level resource checks.
 #[crate::sqlx_test]
 async fn test_networked_dpf_registration_reconciles_two_slot_inventory(
     db_pool: sqlx::PgPool,
 ) -> Result<(), eyre::Report> {
+    // Omit caller resources to exercise automatic SF derivation through the public registration API.
+    let mut data =
+        model::extension_service::DpfHelmChartServiceData::parse(TEST_DPF_HELM_CHART_SERVICE_DATA)?;
+    data.service_daemon_set
+        .as_mut()
+        .expect("fixture includes DaemonSet settings")
+        .resources = None;
+
     // Record the consumed interface and resource kinds without repeating field-level graph
     // assertions.
     let service_id = ExtensionServiceId::new();
@@ -1078,7 +1089,7 @@ async fn test_networked_dpf_registration_reconciles_two_slot_inventory(
             description: None,
             tenant_organization_id: "best_org".to_string(),
             service_type: rpc::DpuExtensionServiceType::DpfHelmChart.into(),
-            data: TEST_DPF_HELM_CHART_SERVICE_DATA.to_string(),
+            data: data.normalized_json()?,
             credential: None,
             observability: None,
         }))
@@ -1099,6 +1110,16 @@ async fn test_networked_dpf_registration_reconciles_two_slot_inventory(
         .pop()
         .expect("reconciled registration remains visible");
     assert_eq!(lifecycle_state(&persisted), "ready");
+
+    // The public reload must retain the original V1 data without the derived SF request.
+    assert_eq!(
+        persisted
+            .latest_version_info
+            .as_ref()
+            .expect("reconciled registration returns its V1 definition")
+            .data,
+        data.normalized_json()?,
+    );
 
     // Every interface precedes every chain, and the consumer is published only after all parents.
     assert_eq!(
@@ -1125,6 +1146,17 @@ async fn test_networked_dpf_registration_reconciles_two_slot_inventory(
         .clone()
         .expect("DPUService is created after its parents");
     assert_eq!(service.interfaces, Some(vec![service_interface_name]));
+    // The created consumer requests one SF for its one service-facing interface, regardless of slots.
+    assert_eq!(
+        service
+            .service_daemon_set
+            .as_ref()
+            .unwrap()
+            .resources
+            .as_ref()
+            .unwrap()["nvidia.com/bf_sf"],
+        carbide_dpf::IntOrString::Int(1),
+    );
     let mut connection = env.pool.acquire().await?;
     let mac = db::extension_service::find_interface_macs(&mut connection, service_id)
         .await?
@@ -2445,10 +2477,19 @@ async fn test_ready_networked_registration_repairs_expanded_slots_after_family_d
 /// repair.
 /// The barrier prevents consumers from treating stale tenant runtime settings as a converged
 /// registration.
+/// A missing derived SF request is repaired through the same revision-fenced patch as security.
 #[crate::sqlx_test]
 async fn test_ready_networked_registration_repairs_mutable_dpu_service_drift(
     db_pool: sqlx::PgPool,
 ) -> Result<(), eyre::Report> {
+    // Leave the SF quantity absent from caller data so repair must rebuild the derived request.
+    let mut data =
+        model::extension_service::DpfHelmChartServiceData::parse(TEST_DPF_HELM_CHART_SERVICE_DATA)?;
+    data.service_daemon_set
+        .as_mut()
+        .expect("fixture includes DaemonSet settings")
+        .resources = None;
+
     // Persist a Ready one-slot registration and its allocated attachment identity.
     let service_id = ExtensionServiceId::new();
     let initial_env =
@@ -2468,7 +2509,7 @@ async fn test_ready_networked_registration_repairs_mutable_dpu_service_drift(
             description: None,
             tenant_organization_id: "best_org".to_string(),
             service_type: rpc::DpuExtensionServiceType::DpfHelmChart.into(),
-            data: TEST_DPF_HELM_CHART_SERVICE_DATA.to_string(),
+            data: data.normalized_json()?,
             credential: None,
             observability: None,
         }))
@@ -2482,9 +2523,7 @@ async fn test_ready_networked_registration_repairs_mutable_dpu_service_drift(
     .pop()
     .expect("networked registration has stable identity");
 
-    // Change only a patch-owned security field in the observed DPUService.
-    let data =
-        model::extension_service::DpfHelmChartServiceData::parse(TEST_DPF_HELM_CHART_SERVICE_DATA)?;
+    // Change a patch-owned security field and remove the derived SF request from the observed DPUService.
     let projection = project_service_vpc_registration(
         service_id,
         carbide_dpf::NAMESPACE,
@@ -2499,6 +2538,11 @@ async fn test_ready_networked_registration_repairs_mutable_dpu_service_drift(
         .as_mut()
         .expect("projected service includes security")
         .privileged = Some(!projection.service.security.privileged);
+    drifted_service
+        .service_daemon_set
+        .as_mut()
+        .expect("projected service includes DaemonSet settings")
+        .resources = None;
     let expected_patch_v1 = dpu_service_mutable_patch(&projection.service, &drifted_service, "1");
     let expected_patch_v2 = dpu_service_mutable_patch(&projection.service, &drifted_service, "2");
     let expected_patch_v3 = dpu_service_mutable_patch(&projection.service, &drifted_service, "3");
@@ -2547,6 +2591,17 @@ async fn test_ready_networked_registration_repairs_mutable_dpu_service_drift(
         let patch_attempts = Arc::clone(&patch_attempts);
         move |name, patch| {
             assert_eq!(name, expected_service_name.as_str());
+            // Every retry must restore the automatically derived quantity, not just security.
+            let resources = patch
+                .as_array()
+                .expect("JSON Patch is an operation array")
+                .iter()
+                .find(|operation| operation["path"] == "/spec/serviceDaemonSet/resources")
+                .expect("repair includes the derived SF request");
+            assert_eq!(
+                resources["value"],
+                serde_json::json!({"nvidia.com/bf_sf": 1})
+            );
             match patch_attempts.fetch_add(1, Ordering::Relaxed) {
                 0 => {
                     assert_eq!(&patch, &expected_patch_v1);
@@ -3494,14 +3549,23 @@ async fn test_retained_endpoint_defers_shrunk_slots_until_capacity_drains(
 /// replacement.
 /// The MAC remains reserved, and the same-name chain is deleted only after refreshed preconditions
 /// are observed.
+/// Removing interface requirements drops the derived SF request while retaining unrelated caller resources.
 #[crate::sqlx_test]
 async fn test_networked_to_unnetworked_replacement_retries_and_preserves_mac(
     db_pool: sqlx::PgPool,
 ) -> Result<(), eyre::Report> {
     // Materialize the old one-slot IPv4 graph so every replacement deletion is observable.
     let service_id = ExtensionServiceId::new();
-    let data =
+    let mut data =
         model::extension_service::DpfHelmChartServiceData::parse(TEST_DPF_HELM_CHART_SERVICE_DATA)?;
+    // Keep an unrelated resource in caller data so topology replacement must remove only derived SFs.
+    data.service_daemon_set
+        .as_mut()
+        .expect("fixture includes DaemonSet settings")
+        .resources = Some(BTreeMap::from([(
+        "memory".to_owned(),
+        DpfHelmChartIntOrString::String("500Mi".to_owned()),
+    )]));
     let old_registration = project_service_vpc_registration(
         service_id,
         carbide_dpf::NAMESPACE,
@@ -3581,8 +3645,8 @@ async fn test_networked_to_unnetworked_replacement_retries_and_preserves_mac(
                     Some(preconditions.resource_version.as_str())
                 );
                 if chain_delete_attempts.fetch_add(1, Ordering::Relaxed) == 0 {
-                    // A same-name generation wins the race, so the apiserver rejects the stale
-                    // delete identity.
+                    // A same-name chain replacement wins the race, so the apiserver rejects
+                    // the stale delete identity.
                     chain.uid = Some("replacement-chain-uid".to_owned());
                     chain.resource_version = Some("2".to_owned());
                     return Err(DpfError::InvalidState(
@@ -3639,7 +3703,7 @@ async fn test_networked_to_unnetworked_replacement_retries_and_preserves_mac(
             description: None,
             tenant_organization_id: "best_org".to_string(),
             service_type: rpc::DpuExtensionServiceType::DpfHelmChart.into(),
-            data: TEST_DPF_HELM_CHART_SERVICE_DATA.to_string(),
+            data: data.normalized_json()?,
             credential: None,
             observability: None,
         }))
@@ -3660,7 +3724,7 @@ async fn test_networked_to_unnetworked_replacement_retries_and_preserves_mac(
             service_id: created.service_id,
             service_name: None,
             description: None,
-            data: TEST_DPF_HELM_CHART_SERVICE_DATA.to_string(),
+            data: data.normalized_json()?,
             credential: None,
             observability: None,
             if_version_ctr_match: Some(created.version_ctr),
@@ -3707,7 +3771,7 @@ async fn test_networked_to_unnetworked_replacement_retries_and_preserves_mac(
     );
 
     // Retry the chain, delete both interfaces in the same reconciliation phase, and create the
-    // baseline service to complete replacement.
+    // unnetworked service to complete replacement.
     for _ in 0..3 {
         env.run_extension_service_controller_iteration().await;
         let mut connection = env.pool.acquire().await?;
@@ -3742,6 +3806,18 @@ async fn test_networked_to_unnetworked_replacement_retries_and_preserves_mac(
         .expect("unnetworked DPUService is created");
     assert!(replacement.interfaces.is_none());
     assert_eq!(replacement.service_id.as_deref(), Some("tenant-service-v1"));
+    // Recreated unnetworked resources restore the caller map without the derived SF contribution.
+    assert_eq!(
+        serde_json::to_value(
+            replacement
+                .service_daemon_set
+                .as_ref()
+                .unwrap()
+                .resources
+                .as_ref()
+        )?,
+        serde_json::json!({"memory": "500Mi"}),
+    );
     assert_eq!(
         *deletion_order.lock().unwrap(),
         vec![
@@ -5307,6 +5383,19 @@ async fn test_dpf_helm_chart_delete_waits_for_dpf_finalization(
     assert!(deleting[0].active_versions.is_empty());
     assert!(deleting[0].latest_version_info.is_none());
 
+    // The inventory ID pass must retain everything still visible in exact snapshots.
+    let listed = env
+        .api
+        .find_dpu_extension_service_ids(Request::new(rpc::DpuExtensionServiceSearchFilter {
+            service_type: Some(rpc::DpuExtensionServiceType::DpfHelmChart.into()),
+            name: Some("DELETE-DPF-SERVICE".to_string()),
+            tenant_organization_id: Some("best_org".to_string()),
+        }))
+        .await?
+        .into_inner()
+        .service_ids;
+    assert_eq!(listed, vec![service_id.to_string()]);
+
     let recreate_while_deleting = env
         .api
         .create_dpu_extension_service(Request::new(rpc::CreateDpuExtensionServiceRequest {
@@ -5382,6 +5471,15 @@ async fn test_dpf_helm_chart_delete_waits_for_dpf_finalization(
             if reason == "DPF DPUService finalization is in progress; retrying"
     ));
     txn.commit().await?;
+    let listed = env
+        .api
+        .find_dpu_extension_service_ids(Request::new(
+            rpc::DpuExtensionServiceSearchFilter::default(),
+        ))
+        .await?
+        .into_inner()
+        .service_ids;
+    assert_eq!(listed, vec![service_id.to_string()]);
 
     // Confirmed absence lets the controller commit Deleted; reload the row before proving the
     // reserved service name can be reused.
@@ -5419,6 +5517,15 @@ async fn test_dpf_helm_chart_delete_waits_for_dpf_finalization(
         .into_inner()
         .services;
     assert!(terminal.is_empty());
+    let listed = env
+        .api
+        .find_dpu_extension_service_ids(Request::new(
+            rpc::DpuExtensionServiceSearchFilter::default(),
+        ))
+        .await?
+        .into_inner()
+        .service_ids;
+    assert!(listed.is_empty());
 
     // Only completed DPF deletion releases the name for a new registration.
     let recreated = env
@@ -6957,7 +7064,7 @@ async fn test_extension_service_create_failure(db_pool: sqlx::PgPool) -> Result<
         .await?
         .expect("creating an extension service should have created a credential");
 
-    let metrics = MetricsCapture::start();
+    let metrics = MetricsCapture::for_registry(env.test_meter.registry());
     env.test_credential_manager
         .set_delete_credentials_failure(true);
 
@@ -7158,7 +7265,7 @@ async fn test_extension_service_update_failure(db_pool: sqlx::PgPool) -> Result<
         c
     };
 
-    let metrics = MetricsCapture::start();
+    let metrics = MetricsCapture::for_registry(env.test_meter.registry());
     env.test_credential_manager
         .set_delete_credentials_failure(true);
 
@@ -8639,7 +8746,7 @@ async fn test_extension_service_delete_credential_cleanup_failure(
         .get_credentials(&second_credential_key)
         .await?;
 
-    let metrics = MetricsCapture::start();
+    let metrics = MetricsCapture::for_registry(env.test_meter.registry());
     env.test_credential_manager
         .set_delete_credentials_failure(true);
 

@@ -74,9 +74,11 @@ const (
 
 // ExpectedRackGroupMember declares a device by its external identity.
 type ExpectedRackGroupMember struct {
-	Type         ExpectedRackGroupMemberType `json:"type"`
-	Manufacturer string                      `json:"manufacturer"`
-	ID           string                      `json:"id"`
+	// CartridgeIndex is unspecified when nil; zero is valid.
+	CartridgeIndex *uint32                     `json:"cartridgeIndex"`
+	Type           ExpectedRackGroupMemberType `json:"type"`
+	Manufacturer   string                      `json:"manufacturer"`
+	ID             string                      `json:"id"`
 }
 
 func (member ExpectedRackGroupMember) Validate() error {
@@ -96,7 +98,7 @@ func (member ExpectedRackGroupMember) ToProto() *corev1.ExpectedRackGroupMember 
 	if member.Type == ExpectedRackGroupMemberTypeNVSwitch {
 		coreType = "Switch"
 	}
-	return &corev1.ExpectedRackGroupMember{Type: coreType, Manufacturer: member.Manufacturer, Id: member.ID}
+	return &corev1.ExpectedRackGroupMember{Type: coreType, Manufacturer: member.Manufacturer, Id: member.ID, CartridgeIndex: member.CartridgeIndex}
 }
 
 func (member *ExpectedRackGroupMember) FromProto(value *corev1.ExpectedRackGroupMember) error {
@@ -111,7 +113,7 @@ func (member *ExpectedRackGroupMember) FromProto(value *corev1.ExpectedRackGroup
 	default:
 		return fmt.Errorf("unsupported Core rack group member type %q", value.GetType())
 	}
-	*member = ExpectedRackGroupMember{Type: memberType, Manufacturer: value.GetManufacturer(), ID: value.GetId()}
+	*member = ExpectedRackGroupMember{Type: memberType, Manufacturer: value.GetManufacturer(), ID: value.GetId(), CartridgeIndex: value.CartridgeIndex}
 	return nil
 }
 
@@ -125,16 +127,17 @@ func (rack ExpectedRackGroupRack) Validate() error {
 	if strings.TrimSpace(rack.RackID) == "" {
 		return fmt.Errorf("rackId must not be blank")
 	}
-	seen := make(map[ExpectedRackGroupMember]bool, len(rack.Members))
+	seen := make(map[[3]string]bool, len(rack.Members))
 	for _, member := range rack.Members {
 		err := member.Validate()
 		if err != nil {
 			return err
 		}
-		if seen[member] {
+		identity := [3]string{string(member.Type), member.Manufacturer, member.ID}
+		if seen[identity] {
 			return fmt.Errorf("duplicate device member %q", member.ID)
 		}
-		seen[member] = true
+		seen[identity] = true
 	}
 	return nil
 }
@@ -167,7 +170,7 @@ func (rack *ExpectedRackGroupRack) FromProto(value *corev1.ExpectedRackGroupRack
 
 func (er ExpectedRackGroup) Validate() error {
 	seenRacks := make(map[string]bool, len(er.Racks))
-	seenMembers := make(map[ExpectedRackGroupMember]bool)
+	seenMembers := make(map[[3]string]bool)
 	for _, rack := range er.Racks {
 		err := rack.Validate()
 		if err != nil {
@@ -178,10 +181,11 @@ func (er ExpectedRackGroup) Validate() error {
 		}
 		seenRacks[rack.RackID] = true
 		for _, member := range rack.Members {
-			if seenMembers[member] {
+			identity := [3]string{string(member.Type), member.Manufacturer, member.ID}
+			if seenMembers[identity] {
 				return fmt.Errorf("duplicate device member %q across racks", member.ID)
 			}
-			seenMembers[member] = true
+			seenMembers[identity] = true
 		}
 	}
 	return nil

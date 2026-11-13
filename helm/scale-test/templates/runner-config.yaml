@@ -3,10 +3,28 @@
 {{- $inv := .Values.inventory }}
 {{- $s := .Values.store }}
 {{- $name := include "scale-test.jobName" (dict "root" . "suite" "runner") }}
+{{- $ingest := eq (toString $r.command) "ingestion" }}
+{{- $instances := has $r.command (list "instance-create" "instance-delete") }}
+{{- $writes := or $ingest $instances }}
+{{- $resultMax := include "scale-test.count" (dict "key" "runner.resultMaxBytes" "value" $r.resultMaxBytes) }}
+{{- if or (lt (int64 $resultMax) 262144) (gt (int64 $resultMax) 16777216) }}
+{{- fail "runner.resultMaxBytes must be 262144 to 16777216" }}
+{{- end }}
+{{- $probeTimeout := include "scale-test.positiveSeconds" (dict "key" "runner.probeRequestTimeoutSeconds" "value" $r.probeRequestTimeoutSeconds) }}
+{{- if gt (int64 $probeTimeout) 600 }}{{ fail "runner.probeRequestTimeoutSeconds must be at most 600" }}{{ end }}
+{{- if not (has $r.command (list "fleet-up" "ingestion" "instance-create" "instance-delete")) }}
+{{- fail "runner.command must be fleet-up, ingestion, instance-create or instance-delete" }}
+{{- else if and $writes (not (kindIs "bool" $r.dryRun)) }}
+{{- fail (printf "runner.dryRun must be true or false for %s, which writes" $r.command) }}
+{{- else if and (not $writes) (not (kindIs "invalid" $r.dryRun)) }}
+{{- fail "runner.dryRun must be unset for fleet-up, which writes nothing" }}
+{{- else if and $ingest (or (le (int64 $r.wholeRunSeconds) 1800) (lt (int64 $r.finalizeSeconds) 1800)) }}
+{{- fail "ingestion needs runner.wholeRunSeconds over 1800 and runner.finalizeSeconds of at least 1800" }}
+{{- end }}
 {{- if not $r.controlPlane }}
 {{- fail "runner.controlPlane needs at least one namespace and labelSelector when the runner is enabled" }}
 {{- end }}
-# The fleet-up run config. The MAT Pods and Services are read in the release
+# The fleet-up or ingestion run config. The MAT Pods and Services are read in the release
 # namespace, where the site lock and the result ConfigMap live too.
 apiVersion: v1
 kind: ConfigMap
@@ -18,12 +36,17 @@ metadata:
 data:
   config.yaml: |
     runId: {{ required "runner.runId is required when the runner is enabled" $r.runId | quote }}
-    command: fleet-up
+    command: {{ $r.command }}
+    {{- if $writes }}
+    dryRun: {{ $r.dryRun }}
+    {{- end }}
     namespace: {{ .Release.Namespace | quote }}
+    resultMaxBytes: {{ $resultMax }}
     site:
       lockName: {{ required "runner.lockName is required when the runner is enabled" $r.lockName | quote }}
     probe:
       url: {{ required "probeUrl is required when the runner is enabled" .Values.probeUrl | quote }}
+      requestTimeoutSeconds: {{ $probeTimeout }}
     timeouts:
       readinessSeconds: {{ include "scale-test.positiveSeconds" (dict "key" "runner.readinessSeconds" "value" $r.readinessSeconds) }}
       finalizeSeconds: {{ include "scale-test.positiveSeconds" (dict "key" "runner.finalizeSeconds" "value" $r.finalizeSeconds) }}
@@ -37,7 +60,15 @@ data:
       dir: {{ .Values.persistence.mountPath | quote }}
       claim: {{ include "scale-test.runDataClaim" . | quote }}
     settings:
+      bmc:
+        {{- range $k, $max := dict "port" 65535 "concurrency" 65535 "timeoutSeconds" 65535 "tries" 255 }}
+        {{- $v := include "scale-test.count" (dict "key" (printf "runner.bmc.%s" $k) "value" (index $r.bmc $k)) }}
+        {{- if or (lt (int64 $v) 1) (gt (int64 $v) (int64 $max)) }}{{ fail (printf "runner.bmc.%s must be 1 to %d" $k $max) }}{{ end }}
+        {{ $k }}: {{ $v }}
+        {{- end }}
+      {{- if not $instances }}
       expectedRelease: {{ required "inventory.expected.release is required when the runner is enabled" $inv.expected.release | quote }}
+      {{- end }}
       mat:
         selector: {{ $inv.selector | quote }}
       checkStore: {{ $r.checkStore }}
@@ -45,12 +76,14 @@ data:
         {{- range $k := list "racks" "hosts" "switches" "powerShelves" "dpus" }}
         {{ $k }}: {{ include "scale-test.count" (dict "key" (printf "inventory.expected.%s" $k) "value" (index $inv.expected $k)) }}
         {{- end }}
+      {{- if not $instances }}
       nicoApi:
         serverName: {{ $inv.spiffe.serverName | quote }}
         spiffe:
           trustDomain: {{ required "inventory.spiffe.trustDomain is required when the runner is enabled" $inv.spiffe.trustDomain | quote }}
           serviceBasePaths: {{ splitList "," (required "inventory.spiffe.serviceBasePaths is required when the runner is enabled" $inv.spiffe.serviceBasePaths) | toJson }}
           machineBasePath: {{ $inv.spiffe.machineBasePath | quote }}
+      {{- end }}
       {{- if $r.checkStore }}
       store:
         url: {{ required "store.url is required when the runner checks the store" $s.url | quote }}
@@ -61,5 +94,45 @@ data:
         {{- if $s.caSecret }}
         caFile: /var/run/secrets/store-ca/ca.crt
         {{- end }}
+      {{- end }}
+      {{- if $ingest }}
+      writes:
+        concurrency:
+          {{- range $k := list "rack" "host" "switch" "powerShelf" }}
+          {{- $n := include "scale-test.count" (dict "key" (printf "runner.writes.concurrency.%s" $k) "value" (index $r.writes.concurrency $k)) }}
+          {{- if eq $n "0" }}{{ fail (printf "runner.writes.concurrency.%s must be at least 1" $k) }}{{ end }}
+          {{ $k }}: {{ $n }}
+          {{- end }}
+      {{- end }}
+      {{- if $instances }}
+      rest:
+        url: {{ required "runner.rest.url is required for instances" $r.rest.url | quote }}
+        org: {{ required "runner.rest.org is required for instances" $r.rest.org | quote }}
+        providerOrg: {{ required "runner.rest.providerOrg is required for label writes" $r.rest.providerOrg | quote }}
+        tokenFile: /var/run/secrets/rest-token/token
+        {{- if $r.rest.caSecret.name }}
+        caFile: /var/run/secrets/rest-ca/ca.crt
+        {{- end }}
+      observation:
+        intervalSeconds: {{ include "scale-test.positiveSeconds" (dict "key" "runner.observation.intervalSeconds" "value" $r.observation.intervalSeconds) }}
+        labelReadbackSeconds: {{ include "scale-test.positiveSeconds" (dict "key" "runner.observation.labelReadbackSeconds" "value" $r.observation.labelReadbackSeconds) }}
+      instance:
+        {{- if not (kindIs "bool" $r.instance.topologyOptimized) }}{{ fail "runner.instance.topologyOptimized must be a boolean" }}{{ end }}
+        topologyOptimized: {{ $r.instance.topologyOptimized }}
+        {{- range $key, $min := dict "n" 1 "burstSize" 2 "apiPoolReplicas" 1 }}
+        {{- $count := include "scale-test.count" (dict "key" (printf "runner.instance.%s" $key) "value" (index $r.instance $key)) }}
+        {{- if lt (int64 $count) $min }}{{ fail (printf "runner.instance.%s must be at least %d" $key $min) }}{{ end }}
+        {{ $key }}: {{ $count }}
+        {{- end }}
+        tenantId: {{ required "runner.instance.tenantId is required" $r.instance.tenantId | quote }}
+        instanceTypeId: {{ required "runner.instance.instanceTypeId is required" $r.instance.instanceTypeId | quote }}
+        {{- if eq $r.command "instance-create" }}
+        vpcId: {{ required "runner.instance.vpcId is required" $r.instance.vpcId | quote }}
+        subnetId: {{ required "runner.instance.subnetId is required" $r.instance.subnetId | quote }}
+        ipxeFile: /var/run/secrets/instance-ipxe/script.ipxe
+        {{- else }}
+        ownedManifest: {{ required "runner.instance.ownedManifest is required for delete" $r.instance.ownedManifest | quote }}
+        {{- end }}
+        apiPoolSelector: {{ required "runner.instance.apiPoolSelector is required" $r.instance.apiPoolSelector | toJson }}
       {{- end }}
 {{- end }}

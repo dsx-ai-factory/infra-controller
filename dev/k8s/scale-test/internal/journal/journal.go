@@ -36,7 +36,7 @@ var (
 
 // MaxJournalBytes is the largest journal written. A var only so tests can
 // lower it.
-var MaxJournalBytes uint64 = 256 << 20
+var MaxJournalBytes uint64 = 1536 << 20
 
 const (
 	// MaxLineBytes is the longest line written.
@@ -102,17 +102,21 @@ type Receipt struct {
 	At      jsonx.Time `json:"at"`
 }
 
-// Outcome of one attempt. A NICo write returns Empty, so an accepted attempt
-// creates no IDs: Kind alone, or a rejection's Reason, is kept.
+// Outcome of one attempt. REST creates retain bounded server-assigned IDs.
+// Other writes retain Kind and a rejection's Reason only.
 type Outcome struct {
-	Kind   string `json:"kind"`
-	Reason Reason `json:"reason,omitempty"`
+	IDs    []string `json:"ids,omitempty"`
+	Kind   string   `json:"kind"`
+	Reason Reason   `json:"reason,omitempty"`
 }
 
 const (
 	Accepted      = "accepted"
 	Rejected      = "rejected"
 	NotDispatched = "notDispatched"
+	// Planned: a dry run journaled the write and sent nothing. It settles the
+	// op like a clean non-dispatch and is never a server acceptance.
+	Planned = "planned"
 )
 
 // IntentRef is the persisted intent of one attempt, for its receipt.
@@ -130,6 +134,7 @@ const (
 )
 
 type track struct {
+	kind       string
 	op         uint64
 	attempts   uint32
 	idempotent bool
@@ -158,7 +163,9 @@ type Journal struct {
 	fsync           func(*os.File) error // (*os.File).Sync; a seam for tests
 	nextSeq, nextOp uint64
 	open            map[string]*track
+	pending         bool // accepted work still needs semantic settlement
 	broken          error
+	attempts        uint64 // intents, less those settled notDispatched or planned
 	bytes, max      uint64
 	reserved        uint64
 	fault           func(*os.File, []byte) error
@@ -223,7 +230,34 @@ func (j *Journal) Freeze() { j.frozen.Store(true) }
 func (j *Journal) Unsettled() bool {
 	j.mu.Lock()
 	defer j.mu.Unlock()
-	return j.broken != nil || len(j.open) > 0
+	return j.broken != nil || j.pending || len(j.open) > 0
+}
+
+// Counts is a snapshot of the journal's records, from what is already tracked.
+// Ops is every op with a persisted intent, planned or sent. Attempts is the
+// persisted attempt records that were not settled notDispatched or planned, so
+// it is the RPCs that went out or may have (an attempt in flight, or a lost
+// reply, counts): a dry run has Ops and no Attempts. Unclear is the ops with
+// no proven outcome: an attempt in flight, a lost reply or an unclear receipt.
+// Known is false once a journal write has failed: a torn line may hide a
+// record, so no count is trusted.
+type Counts struct {
+	Ops, Attempts, Unclear uint64
+	Known                  bool
+}
+
+// Counts reads the counts under the journal's lock. It writes and replays
+// nothing.
+func (j *Journal) Counts() Counts {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	c := Counts{Ops: j.nextOp - 1, Attempts: j.attempts, Known: j.broken == nil}
+	for _, t := range j.open {
+		if t.status != retryPending || t.lostReply {
+			c.Unclear++
+		}
+	}
+	return c
 }
 
 // Close freezes the journal and closes its file. Unlike Freeze, it waits for
@@ -338,7 +372,7 @@ func (j *Journal) Intent(c WriteCall) (IntentRef, error) {
 			if t.status == inFlight {
 				return nil, fmt.Errorf("%w: %s", ErrKeyBusy, c.Key)
 			}
-			same := c.Idempotent && t.idempotent && t.digest == c.RequestDigest
+			same := c.Idempotent && t.idempotent && t.digest == c.RequestDigest && t.kind == c.Kind
 			if !same && (t.status == unclear || t.lostReply) {
 				return nil, fmt.Errorf("%w: %s", ErrUnclearKey, c.Key)
 			}
@@ -350,10 +384,11 @@ func (j *Journal) Intent(c WriteCall) (IntentRef, error) {
 			return nil, err
 		}
 		j.nextSeq++
+		j.attempts++
 		if ref.Attempt == 1 {
 			j.nextOp++
 		}
-		next := &track{op: ref.Op, attempts: ref.Attempt, idempotent: c.Idempotent, digest: c.RequestDigest}
+		next := &track{kind: c.Kind, op: ref.Op, attempts: ref.Attempt, idempotent: c.Idempotent, digest: c.RequestDigest}
 		if t != nil {
 			next.lostReply = t.lostReply
 		}
@@ -380,10 +415,13 @@ func (j *Journal) Receipt(in IntentRef, o Outcome) error {
 			return e, err
 		}
 		j.land(t)
+		if err == nil && (o.Kind == NotDispatched || o.Kind == Planned) {
+			j.attempts--
+		}
 		switch {
 		case err != nil:
 			t.lostReply = true
-		case o.Kind == Accepted, o.Kind == NotDispatched && !t.lostReply:
+		case o.Kind == Accepted, (o.Kind == NotDispatched || o.Kind == Planned) && !t.lostReply:
 			delete(j.open, key)
 		case o.Kind == Rejected:
 			t.status = retryPending
@@ -447,4 +485,48 @@ func (j *Journal) CloseFailed(op uint64) bool {
 		delete(j.open, key)
 	}
 	return t.lostReply
+}
+
+// Record persists bounded command evidence before a subsequent mutation.
+func (j *Journal) Record(kind string, data any) error {
+	return j.append(struct {
+		Entry string `json:"entry"`
+		Data  any    `json:"data"`
+	}{kind, data})
+}
+
+// Pending persists the run-level settlement marker. Receipts cannot clear it.
+func (j *Journal) Pending(pending bool) error {
+	return j.locked(func() (any, error) {
+		e := struct {
+			Entry   string `json:"entry"`
+			Pending bool   `json:"pending"`
+		}{"pendingWork", pending}
+		if err := j.write(e, j.reserved); err != nil {
+			return nil, err
+		}
+		j.pending = pending
+		return e, nil
+	})
+}
+
+// SettleLabel persists probe proof before closing an unclear label operation.
+// It never settles another write kind or clears the run-level pending marker.
+func (j *Journal) SettleLabel(op uint64, proof any) error {
+	return j.locked(func() (any, error) {
+		key, t := j.openOp(op)
+		if t == nil || t.kind != "labels" || t.status != unclear || !t.lostReply {
+			return nil, errors.New("operation is not an unclear label write")
+		}
+		e := struct {
+			Entry string `json:"entry"`
+			Op    uint64 `json:"op"`
+			Data  any    `json:"data"`
+		}{"labelSettled", op, proof}
+		if err := j.write(e, j.reserved); err != nil {
+			return nil, err
+		}
+		delete(j.open, key)
+		return e, nil
+	})
 }

@@ -132,6 +132,7 @@ async fn run_machine_a_tron_racks_test(
         .into_iter()
         .flat_map(|(device_type, manufacturer, count)| {
             (0..count).map(move |index| ExpectedRackGroupMember {
+                cartridge_index: Some(0),
                 id: format!("{rack_id}-{device_type}-{index}"),
                 device_type: device_type.clone(),
                 manufacturer: manufacturer.into(),

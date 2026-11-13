@@ -20,9 +20,9 @@ import (
 // checks if the RackFilter type satisfies the MappedNullable interface at compile time
 var _ MappedNullable = &RackFilter{}
 
-// RackFilter Filter criteria for selecting racks in batch operations. If omitted or empty, all racks in the site are targeted.
+// RackFilter Select racks by name for batch power, firmware, and bring-up operations. Provide a nonempty `names` list. Omitted, null, or empty filters, including an empty names list, are rejected before task creation. To target every rack in a site, list every intended rack name.
 type RackFilter struct {
-	// Filter racks by name
+	// Names of the racks to target. Provide at least one rack name.
 	Names []string `json:"names,omitempty"`
 }
 

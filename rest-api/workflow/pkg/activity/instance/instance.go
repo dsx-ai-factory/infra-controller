@@ -64,6 +64,24 @@ func getDevicelessInterfaceKey(networkResourceID string, isPhysical bool, virtua
 	return fmt.Sprintf("%s-virtual-%d", networkResourceID, *virtualFunctionID)
 }
 
+func dpuExtensionServiceDeploymentStatusFromSite(status corev1.DpuExtensionServiceDeploymentStatus) (string, bool) {
+	switch status {
+	case corev1.DpuExtensionServiceDeploymentStatus_DPU_EXTENSION_SERVICE_PENDING:
+		return cdbm.DpuExtensionServiceDeploymentStatusPending, true
+	case corev1.DpuExtensionServiceDeploymentStatus_DPU_EXTENSION_SERVICE_RUNNING:
+		return cdbm.DpuExtensionServiceDeploymentStatusRunning, true
+	case corev1.DpuExtensionServiceDeploymentStatus_DPU_EXTENSION_SERVICE_TERMINATING,
+		corev1.DpuExtensionServiceDeploymentStatus_DPU_EXTENSION_SERVICE_TERMINATED:
+		return cdbm.DpuExtensionServiceDeploymentStatusTerminating, false
+	case corev1.DpuExtensionServiceDeploymentStatus_DPU_EXTENSION_SERVICE_ERROR:
+		return cdbm.DpuExtensionServiceDeploymentStatusError, true
+	case corev1.DpuExtensionServiceDeploymentStatus_DPU_EXTENSION_SERVICE_FAILED:
+		return cdbm.DpuExtensionServiceDeploymentStatusFailed, true
+	default:
+		return "", false
+	}
+}
+
 // Activity functions
 
 // UpdateInstancesInDB is a Temporal activity that takes a collection of Instance data pushed by Site Agent and updates the DB
@@ -939,41 +957,71 @@ func (mi ManageInstance) UpdateInstancesInDB(ctx context.Context, siteID uuid.UU
 		}
 
 		if controllerInstance.Config.DpuExtensionServices != nil && controllerInstance.Status.DpuExtensionServices != nil {
+			configuredDeployments := map[string]bool{}
+			for _, serviceConfig := range controllerInstance.Config.DpuExtensionServices.ServiceConfigs {
+				if serviceConfig == nil {
+					continue
+				}
+				key := fmt.Sprintf("%s-%s", serviceConfig.ServiceId, serviceConfig.Version)
+				configuredDeployments[key] = true
+			}
+
 			for _, desdStatus := range controllerInstance.Status.DpuExtensionServices.DpuExtensionServices {
+				if desdStatus == nil {
+					slogger.Warn().Msg("DPU Extension Service Deployment status is nil, skipping")
+					continue
+				}
 				desvID := fmt.Sprintf("%s-%s", desdStatus.ServiceId, desdStatus.Version)
 				desd, exists := desdMap[desvID]
-				if !exists {
-					logger.Warn().Str("DPU Extension Service Deployment ID", desvID).Msg("DPU Extension Service Deployment does not exist in DB, possibly created directly on Site")
-					// NOTE: Should we automatically create a new DPU Extension Service Deployment record in DB?
+				if exists {
+					// A reported deployment remains present even if a newer Core version
+					// introduces a status REST does not understand yet.
+					controllerDesdMap[desvID] = desd
+				}
+
+				reportedStatus, recoverable := dpuExtensionServiceDeploymentStatusFromSite(desdStatus.DeploymentStatus)
+				if reportedStatus == "" {
+					slogger.Warn().Str("DPU Extension Service Deployment ID", desvID).
+						Str("Site Status", desdStatus.DeploymentStatus.String()).
+						Msg("DPU Extension Service Deployment has unsupported status, skipping")
 					continue
+				}
+
+				if !exists {
+					if !configuredDeployments[desvID] {
+						slogger.Warn().Str("DPU Extension Service Deployment ID", desvID).
+							Msg("DPU Extension Service Deployment is absent from desired Instance configuration, skipping recovery")
+						continue
+					}
+					if !recoverable || desdStatus.GetRemoved() != "" {
+						slogger.Info().Str("DPU Extension Service Deployment ID", desvID).
+							Msg("not recovering terminal DPU Extension Service Deployment")
+						continue
+					}
+
+					desd, serr = mi.createOrUpdateDpuExtensionServiceDeploymentFromSite(ctx, site, instance, desdStatus, reportedStatus)
+					if serr != nil {
+						slogger.Error().Err(serr).Str("DPU Extension Service Deployment ID", desvID).
+							Msg("failed to recover DPU Extension Service Deployment from Site inventory")
+						continue
+					}
+					if desd == nil {
+						continue
+					}
+					desdMap[desvID] = desd
+					slogger.Info().Str("DPU Extension Service Deployment ID", desd.ID.String()).
+						Msg("created or undeleted DPU Extension Service Deployment from Site inventory")
 				}
 
 				controllerDesdMap[desvID] = desd
 
-				var status *string
-				switch desdStatus.DeploymentStatus {
-				case corev1.DpuExtensionServiceDeploymentStatus_DPU_EXTENSION_SERVICE_PENDING:
-					status = cwutil.GetPtr(cdbm.DpuExtensionServiceDeploymentStatusPending)
-				case corev1.DpuExtensionServiceDeploymentStatus_DPU_EXTENSION_SERVICE_RUNNING:
-					status = cwutil.GetPtr(cdbm.DpuExtensionServiceDeploymentStatusRunning)
-				case corev1.DpuExtensionServiceDeploymentStatus_DPU_EXTENSION_SERVICE_TERMINATING:
-					status = cwutil.GetPtr(cdbm.DpuExtensionServiceDeploymentStatusTerminating)
-				case corev1.DpuExtensionServiceDeploymentStatus_DPU_EXTENSION_SERVICE_TERMINATED:
-					// This state is unlikely to be seen but in case we see it, Site is still in the process of removing the entry
-					status = cwutil.GetPtr(cdbm.DpuExtensionServiceDeploymentStatusTerminating)
-				case corev1.DpuExtensionServiceDeploymentStatus_DPU_EXTENSION_SERVICE_ERROR:
-					status = cwutil.GetPtr(cdbm.DpuExtensionServiceDeploymentStatusError)
-				case corev1.DpuExtensionServiceDeploymentStatus_DPU_EXTENSION_SERVICE_FAILED:
-					status = cwutil.GetPtr(cdbm.DpuExtensionServiceDeploymentStatusFailed)
-				}
-
-				if status == nil || *status == desd.Status {
+				if reportedStatus == desd.Status {
 					continue
 				}
 
 				_, serr := desdDAO.Update(ctx, nil, cdbm.DpuExtensionServiceDeploymentUpdateInput{
 					DpuExtensionServiceDeploymentID: desd.ID,
-					Status:                          status,
+					Status:                          &reportedStatus,
 				})
 				if serr != nil {
 					logger.Error().Err(serr).Str("DPU Extension Service Deployment ID", desd.ID.String()).Msg("failed to update DPU Extension Service Deployment in DB")
@@ -1314,6 +1362,148 @@ func (mi ManageInstance) UpdateInstancesInDB(ctx context.Context, siteID uuid.UU
 	return instanceLifecycleEvents, nil
 }
 
+// createOrUpdateDpuExtensionServiceDeploymentFromSite recovers a deployment reported
+// for an existing Instance. Site inventory owns deployment status, but the referenced
+// service, version, Site, and Tenant must already agree with REST state.
+func (mi ManageInstance) createOrUpdateDpuExtensionServiceDeploymentFromSite(
+	ctx context.Context,
+	site *cdbm.Site,
+	instance *cdbm.Instance,
+	reported *corev1.InstanceDpuExtensionServiceStatus,
+	status string,
+) (*cdbm.DpuExtensionServiceDeployment, error) {
+	logger := log.With().
+		Str("Activity", "UpdateInstancesInDB").
+		Str("Site ID", site.ID.String()).
+		Str("Instance ID", instance.ID.String()).
+		Logger()
+
+	serviceID, err := uuid.Parse(reported.GetServiceId())
+	if err != nil {
+		logger.Warn().Msgf("unable to recover DPU Extension Service Deployment: failed to parse service ID, not a valid UUID %s", reported.GetServiceId())
+		return nil, nil
+	}
+	version := reported.GetVersion()
+	if version == "" {
+		logger.Warn().Str("DPU Extension Service ID", serviceID.String()).
+			Msg("unable to recover DPU Extension Service Deployment: reported version is empty")
+		return nil, nil
+	}
+
+	logger = logger.With().
+		Str("DPU Extension Service ID", serviceID.String()).
+		Str("Version", version).
+		Logger()
+
+	return cdb.WithTxResult(ctx, mi.dbSession, func(tx *cdb.Tx) (*cdbm.DpuExtensionServiceDeployment, error) {
+		// Instance updates write the Instance before reconciling deployments. Taking
+		// the same row lock prevents inventory recovery from racing an API update,
+		// and serializes recoveries for this Instance.
+		lockedInstance, lockErr := cdbm.NewInstanceDAO(mi.dbSession).GetByID(ctx, tx, instance.ID, nil, true)
+		if lockErr != nil {
+			if lockErr == cdb.ErrDoesNotExist {
+				logger.Warn().Msg("unable to recover DPU Extension Service Deployment: Instance was not found")
+				return nil, nil
+			}
+			return nil, fmt.Errorf("unable to recover DPU Extension Service Deployment: failed to lock Instance, DB error: %w", lockErr)
+		}
+		if lockedInstance.SiteID != site.ID {
+			logger.Warn().Msg("unable to recover DPU Extension Service Deployment: Instance belongs to a different Site")
+			return nil, nil
+		}
+
+		service, serviceErr := cdbm.NewDpuExtensionServiceDAO(mi.dbSession).GetByID(ctx, tx, serviceID, nil)
+		if serviceErr != nil {
+			if serviceErr == cdb.ErrDoesNotExist {
+				logger.Warn().Msg("unable to recover DPU Extension Service Deployment: service was not found")
+				return nil, nil
+			}
+			return nil, fmt.Errorf("unable to recover DPU Extension Service Deployment: failed to retrieve service, DB error: %w", serviceErr)
+		}
+		if service.SiteID != site.ID || service.TenantID != lockedInstance.TenantID {
+			logger.Warn().Msg("unable to recover DPU Extension Service Deployment: service ownership or Site differs from Instance")
+			return nil, nil
+		}
+		if !slices.Contains(service.ActiveVersions, version) {
+			logger.Warn().Msg("unable to recover DPU Extension Service Deployment: reported version is not active")
+			return nil, nil
+		}
+
+		deploymentDAO := cdbm.NewDpuExtensionServiceDeploymentDAO(mi.dbSession)
+		matches, _, queryErr := deploymentDAO.GetAll(
+			ctx,
+			tx,
+			cdbm.DpuExtensionServiceDeploymentFilterInput{
+				InstanceIDs:            []uuid.UUID{instance.ID},
+				SiteIDs:                []uuid.UUID{site.ID},
+				TenantIDs:              []uuid.UUID{lockedInstance.TenantID},
+				DpuExtensionServiceIDs: []uuid.UUID{serviceID},
+				Versions:               []string{version},
+				IncludeDeleted:         true,
+			},
+			cdbp.PageInput{Limit: cwutil.GetPtr(cdbp.TotalLimit)},
+			nil,
+		)
+		if queryErr != nil {
+			return nil, fmt.Errorf("unable to recover DPU Extension Service Deployment: failed to retrieve deployment, DB error: %w", queryErr)
+		}
+
+		var active *cdbm.DpuExtensionServiceDeployment
+		var deleted *cdbm.DpuExtensionServiceDeployment
+		for i := range matches {
+			deployment := &matches[i]
+			if deployment.Deleted == nil {
+				active = deployment
+				break
+			}
+			if deleted == nil || deployment.Deleted.After(*deleted.Deleted) {
+				deleted = deployment
+			}
+		}
+		if active != nil {
+			return active, nil
+		}
+		if deleted != nil {
+			if site.IsTimeWithinStaleInventoryThreshold(*deleted.Deleted) {
+				logger.Info().Msg("not undeleting DPU Extension Service Deployment yet because it was deleted within the inventory staleness window")
+				return nil, nil
+			}
+			restored, clearErr := deploymentDAO.Clear(ctx, tx, cdbm.DpuExtensionServiceDeploymentClearInput{
+				DpuExtensionServiceDeploymentID: deleted.ID,
+				Deleted:                         true,
+			})
+			if clearErr != nil {
+				return nil, fmt.Errorf("unable to recover DPU Extension Service Deployment: failed to undelete deployment, DB error: %w", clearErr)
+			}
+			if restored.Status == status {
+				return restored, nil
+			}
+			updated, updateErr := deploymentDAO.Update(ctx, tx, cdbm.DpuExtensionServiceDeploymentUpdateInput{
+				DpuExtensionServiceDeploymentID: restored.ID,
+				Status:                          &status,
+			})
+			if updateErr != nil {
+				return nil, fmt.Errorf("unable to recover DPU Extension Service Deployment: failed to refresh deployment status, DB error: %w", updateErr)
+			}
+			return updated, nil
+		}
+
+		created, createErr := deploymentDAO.Create(ctx, tx, cdbm.DpuExtensionServiceDeploymentCreateInput{
+			SiteID:                site.ID,
+			TenantID:              lockedInstance.TenantID,
+			InstanceID:            instance.ID,
+			DpuExtensionServiceID: serviceID,
+			Version:               version,
+			Status:                status,
+			CreatedBy:             lockedInstance.CreatedBy,
+		})
+		if createErr != nil {
+			return nil, fmt.Errorf("unable to recover DPU Extension Service Deployment: failed to create deployment, DB error: %w", createErr)
+		}
+		return created, nil
+	})
+}
+
 // deleteInstanceFromDB deletes an instance from the DB
 func (mi ManageInstance) deleteInstanceFromDB(ctx context.Context, tx *cdb.Tx, instance *cdbm.Instance, logger zerolog.Logger) error {
 	instanceDAO := cdbm.NewInstanceDAO(mi.dbSession)
@@ -1585,7 +1775,7 @@ func (mi ManageInstance) UpdateInstanceMetadata(ctx context.Context, siteID uuid
 	logger.Info().Msg("starting activity")
 
 	instanceDAO := cdbm.NewInstanceDAO(mi.dbSession)
-	instance, err := instanceDAO.GetByID(ctx, nil, instanceID, nil)
+	instance, err := instanceDAO.GetByID(ctx, nil, instanceID, nil, false)
 	if err != nil {
 		logger.Error().Err(err).Msg("failed to retrieve Instance from DB by ID")
 		return err

@@ -8,7 +8,7 @@ How NICo component tracing works, what it covers, how to turn it on and off and 
 
 - **nico-api** (the `carbide-api` binary) is NICo's primary tracing source and the subject of this
   document. **nico-dns** also emits traces, but with a separate simpler opt-in setup.
-  **nico-bmc-proxy** emits traces for each proxied BMC request when configured (see
+  **nico-bmc-proxy** adds spans to sampled caller traces when configured (see
   [nico-bmc-proxy tracing](#nico-bmc-proxy-tracing)) and **nico-pxe** for each boot request it
   serves (see [nico-pxe tracing](#nico-pxe-tracing)).
 - **nico-api traces are off by default**; two things must both be true before any spans are emitted:
@@ -53,7 +53,7 @@ The following binaries build an OTLP span exporter:
 - **nico-api** (`crates/api-core/src/logging/setup.rs`) - the rich, control-plane tracing this
   document is mostly about, off by default behind endpoint plus enabled-flag configuration
 - **nico-dns** (`crates/dns/src/main.rs`) - a separate, much simpler **opt-in** setup.
-- **nico-bmc-proxy** (`crates/bmc-proxy/src/setup.rs`) - one span per proxied BMC request, off by
+- **nico-bmc-proxy** (`crates/bmc-proxy/src/setup.rs`) - spans for sampled caller traces, off by
   default behind endpoint plus `[tracing] enabled` (see
   [nico-bmc-proxy tracing](#nico-bmc-proxy-tracing)).
 - **nico-pxe** (`crates/pxe/src/main.rs`) - request spans, off by default unless an OTLP
@@ -209,7 +209,7 @@ nico-api's:
 
 ### nico-bmc-proxy tracing
 
-nico-bmc-proxy traces each proxied Redfish request through the BMC credential proxy
+nico-bmc-proxy continues caller traces through the BMC credential proxy
 (`crates/bmc-proxy/src/proxy/`). It follows the same W3C propagation model as nico-api
 (issue [#2438](https://github.com/dsx-ai-factory/infra-controller/issues/2438)) so a call from nico-api or
 DPS stays one trace across the proxy hop (issue
@@ -230,13 +230,17 @@ DPS stays one trace across the proxy hop (issue
   itself and apply as well. A malformed endpoint is rejected when the
   exporter is built; the proxy logs a warning and serves BMC traffic without tracing rather than
   refusing to start.
-- **Ingress.** Each proxied request opens a `bmc_proxy_request` span and adopts any inbound
-  `traceparent`/`tracestate` via `trace_propagation::set_span_parent_from_headers`.
+- **Ingress and sampling.** The proxy inherits valid inbound `traceparent`/`tracestate`
+  context and the caller's sampling decision. Sampled requests export a `bmc_proxy_request`
+  span and outbound request spans. Unsampled requests propagate the inherited trace ID without
+  exporting spans. Requests with missing or malformed context receive a new, unsampled trace ID
+  that is propagated to nico-api metadata lookups and BMC requests without exporting spans.
+  The proxy uses parent-based sampling with root sampling disabled; sampling is decided by callers.
 - **Egress to BMC.** Upstream Redfish calls use a `reqwest-tracing` client so the active proxy
   span's W3C context is injected on the BMC leg. The inbound headers are dropped before the upstream
   request is assembled — `trace_propagation::is_propagated_header` asks the configured propagator
   which headers are its own — so the BMC parents under the proxy's span rather than the caller's.
-- **Egress to nico-api (gRPC).** Credential lookup uses the shared `ForgeApiClient`, which already
+- **Egress to nico-api (gRPC).** Credential lookup uses the shared `CarbideApiClient`, which already
   wraps the transport with `TraceInjectService`.
 - **Resource / tracer:** `service.name = nico-bmc-proxy`, tracer name `nico-bmc-proxy`.
 - **Span fields:** HTTP method and request path, the status the proxy answered its caller with (not
@@ -283,7 +287,7 @@ routes. It uses the shared setup in `carbide_instrument::otlp_tracing`, enabled 
   and uses any inbound `traceparent` or `tracestate` header as its parent.
   - A booting node cannot send those headers, so most requests span starts a new trace.
   - A request from another traced service continues that service's trace.
-- **Outbound gRPC to nico-api.** Calls use the shared `ForgeTlsClient`, which wraps its transport
+- **Outbound gRPC to nico-api.** Calls use the shared `CarbideTlsClient`, which wraps its transport
   with `TraceInjectService` and sends the trace context on every request. No per-call code is
   needed.
 - **Resource / tracer:** `service.name = nico-pxe`, tracer name `nico-pxe`.
@@ -320,7 +324,7 @@ Two separate programs serve DHCP, and both use the shared setup in
 - **Each packet starts a new trace.** A DHCP client sends no `traceparent`, so there is
   no inbound context to continue. Spans opened inside that root span, including the outbound gRPC
   call, join the same trace.
-- **Outbound gRPC to nico-api.** Calls use the shared `ForgeTlsClient`, which sends the trace
+- **Outbound gRPC to nico-api.** Calls use the shared `CarbideTlsClient`, which sends the trace
   context on every request, so a DHCP trace continues into nico-api.
 - **Hook logging is unchanged.** The hook logs through Kea's logger, and installing span export
   does not add log lines or route them through `RUST_LOG`.
@@ -354,7 +358,7 @@ Two separate programs serve DHCP, and both use the shared setup in
   produce a span.
 - **Trace roots.** An SSH client cannot send a `traceparent` header, so each operation span starts a
   new trace.
-- **Outbound gRPC to nico-api.** Calls use the shared `ForgeTlsClient`, which wraps its transport
+- **Outbound gRPC to nico-api.** Calls use the shared `CarbideTlsClient`, which wraps its transport
   with `TraceInjectService` and sends the trace context on every request, so tenant public key
   validation and instance ID lookups appear in the same trace as the operation that triggered them.
 - **Resource / tracer:** `service.name = nico-ssh-console-rs`, tracer name
@@ -406,7 +410,7 @@ Propagation is automatic on ingress but opt-in on egress. Keep the following in 
   for you.
 - **New outbound gRPC client (tonic/hyper):** wrap its channel/service with
   `trace_propagation::TraceInjectService` at construction. Better yet, build through an existing shared
-  client that already wraps the transport (see `crates/rpc/src/forge_tls_client.rs`).
+  client that already wraps the transport (see `crates/rpc/src/carbide_tls_client.rs`).
 - **New outbound HTTP client (`reqwest`):** build it through the `reqwest-tracing` middleware instead of using a
   bare `reqwest::Client`. The wrapped client injects the current `traceparent` and `tracestate` into every request
   automatically, so there is no per-call code:

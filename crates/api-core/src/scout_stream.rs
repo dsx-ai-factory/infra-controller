@@ -61,6 +61,14 @@ pub(crate) struct ConnectionRegistry {
     connections: Arc<RwLock<HashMap<MachineId, AgentConnection>>>,
 }
 
+/// Whether failure happened before Scout could receive a command.
+pub(crate) enum ScoutRequestError {
+    /// The local channel never accepted the request; no Scout effect is possible.
+    NotEnqueued(Status),
+    /// The request may have reached Scout; a missing reply cannot prove completion.
+    Uncertain(Status),
+}
+
 impl ConnectionRegistry {
     // new creates a new connection registry.
     pub(crate) fn new() -> Self {
@@ -113,26 +121,32 @@ impl ConnectionRegistry {
                     Err(_) => continue,
                 };
 
-                // Route response to the waiting flow.
+                // Authenticated mutation replies may already have settled a
+                // saved command after its caller stopped waiting. Other dropped
+                // reply kinds still deserve a warning, without dumping payloads.
+                let mutation_reply = matches!(response.payload.as_ref(), Some(
+                    ::rpc::forge::scout_stream_api_bound_message::Payload::MlxDeviceProfileSyncResponse(_)
+                    | ::rpc::forge::scout_stream_api_bound_message::Payload::MlxDeviceConfigSetResponse(_)
+                    | ::rpc::forge::scout_stream_api_bound_message::Payload::MlxDeviceConfigSyncResponse(_)
+                    | ::rpc::forge::scout_stream_api_bound_message::Payload::MlxDeviceLockdownResponse(_)
+                ));
                 let mut flows = connection_flows.write().await;
-                if let Some(sender) = flows.remove(&flow_uuid) {
-                    if let Err(send_err) = sender.send(response) {
-                        tracing::warn!(
-                            %machine_id,
-                            %flow_uuid,
-                            error = ?send_err,
-                            "Failed to relay Scout flow response",
-                        );
+                let delivered = flows
+                    .remove(&flow_uuid)
+                    .is_some_and(|sender| sender.send(response).is_ok());
+                if !delivered {
+                    if mutation_reply {
+                        tracing::debug!(%machine_id, %flow_uuid,
+                            "No API caller is waiting for this MLX command response");
+                    } else {
+                        tracing::warn!(%machine_id, %flow_uuid,
+                            "No API caller consumed this Scout response");
                     }
-                } else {
-                    tracing::warn!(
-                        %machine_id,
-                        %flow_uuid,
-                        ?response,
-                        "Dropping response for unknown Scout flow",
-                    );
                 }
             }
+            // A closed Scout response stream cannot satisfy its remaining
+            // waiters. Wake them with uncertainty; this is not non-enqueue proof.
+            connection_flows.write().await.clear();
         });
 
         let mut connections = self.connections.write().await;
@@ -167,36 +181,56 @@ impl ConnectionRegistry {
         machine_id: MachineId,
         request: ScoutStreamScoutBoundMessage,
     ) -> Result<ScoutStreamApiBoundMessage, Status> {
+        self.send_request_with_delivery(machine_id, request)
+            .await
+            .map_err(|error| match error {
+                ScoutRequestError::NotEnqueued(status) | ScoutRequestError::Uncertain(status) => {
+                    status
+                }
+            })
+    }
+
+    /// Preserve local non-enqueue evidence separately from a lost response.
+    /// Dropping this future provides no evidence of whether delivery happened.
+    pub(crate) async fn send_request_with_delivery(
+        &self,
+        machine_id: MachineId,
+        request: ScoutStreamScoutBoundMessage,
+    ) -> Result<ScoutStreamApiBoundMessage, ScoutRequestError> {
         let Some(flow_uuid_pb) = request.flow_uuid.as_ref() else {
-            return Err(CarbideError::Internal {
-                message: format!(
-                    "flow_uuid empty for flow with {machine_id}, unable to build flow",
-                ),
-            }
-            .into());
+            return Err(ScoutRequestError::NotEnqueued(
+                CarbideError::Internal {
+                    message: format!(
+                        "flow_uuid empty for flow with {machine_id}, unable to build flow",
+                    ),
+                }
+                .into(),
+            ));
         };
 
         let flow_uuid: uuid::Uuid = match flow_uuid_pb.clone().try_into() {
             Ok(flow_uuid) => flow_uuid,
             Err(e) => {
-                return Err(CarbideError::Internal {
+                return Err(ScoutRequestError::NotEnqueued(CarbideError::Internal {
                     message: format!(
                         "failed to decode flow_uuid (machine_id={machine_id}): {flow_uuid_pb:?}: {e:?}",
                     ),
                 }
-                .into());
+                .into()));
             }
         };
 
         let (connection_tx, connection_flows) = {
             let connections = self.connections.read().await;
-            let connection =
-                connections
-                    .get(&machine_id)
-                    .ok_or_else(|| CarbideError::NotFoundError {
+            let connection = connections.get(&machine_id).ok_or_else(|| {
+                ScoutRequestError::NotEnqueued(
+                    CarbideError::NotFoundError {
                         kind: "scout stream connection",
                         id: machine_id.to_string(),
-                    })?;
+                    }
+                    .into(),
+                )
+            })?;
             (connection.tx.clone(), Arc::clone(&connection.flows))
         };
 
@@ -220,21 +254,25 @@ impl ConnectionRegistry {
             "Sending request to Scout agent",
         );
 
-        connection_tx.send(Ok(request)).await.map_err(|e| CarbideError::Internal {
+        if let Err(e) = connection_tx.send(Ok(request)).await {
+            connection_flows.write().await.remove(&flow_uuid);
+            return Err(ScoutRequestError::NotEnqueued(CarbideError::Internal {
                 message: format!(
                     "failed to send request to scout agent (machine_id={machine_id}, flow_uuid={flow_uuid}): {e}"
                 ),
-        })?;
+            }.into()));
+        }
 
         // And now we wait for a response from the agent.
-        // TODO(chet): This is where we'd put timeout handling.
-        response_rx.await.map_err(|e| -> Status {
-            CarbideError::Internal {
+        // Reserved MLX mutations bound this wait in their sender. Other stream
+        // callers retain their long-lived wait until a reply or disconnect.
+        response_rx.await.map_err(|e| {
+            ScoutRequestError::Uncertain(CarbideError::Internal {
                 message: format!(
                     "response channel error (machine_id={machine_id}, flow_uuid={flow_uuid}): {e}",
                 ),
             }
-            .into()
+            .into())
         })
     }
 

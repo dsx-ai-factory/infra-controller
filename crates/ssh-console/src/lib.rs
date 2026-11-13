@@ -54,7 +54,7 @@ pub async fn spawn(
 ) -> Result<SpawnHandle, SpawnError> {
     let config = Arc::new(config);
     let metrics = Arc::new(MetricsState::new());
-    let forge_api_client = config.make_forge_api_client();
+    let carbide_api_client = config.make_carbide_api_client();
 
     let (cancel_token, drop_guard) = {
         let cancel_token = cancel_token.unwrap_or_default();
@@ -64,8 +64,9 @@ pub async fn spawn(
     // 1) Start BMC client pool
     let mut bmc_client_pool = bmc::client_pool::spawn(
         config.clone(),
-        forge_api_client.clone(),
+        carbide_api_client.clone(),
         &metrics.meter,
+        metrics.instrumentation.clone(),
         cancel_token.clone(),
     );
     bmc_client_pool
@@ -76,7 +77,7 @@ pub async fn spawn(
     // 2) Start SSH server itself
     let server = ssh_server::spawn(
         config.clone(),
-        forge_api_client.clone(),
+        carbide_api_client.clone(),
         bmc_client_pool.connection_store(),
         &metrics.meter,
         cancel_token.clone(),
@@ -87,6 +88,7 @@ pub async fn spawn(
     let api_server = api_server::spawn(
         config.clone(),
         bmc_client_pool.connection_store(),
+        metrics.instrumentation.clone(),
         cancel_token.clone(),
     )
     .await?;

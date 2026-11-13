@@ -248,23 +248,27 @@ struct ExecutionTimedOut {
     client_identifier: String,
 }
 
-struct CarbideAdmissionObserver;
+struct CarbideAdmissionObserver {
+    instrumentation: carbide_instrument::Instrumentation,
+}
 
 impl AdmissionObserver for CarbideAdmissionObserver {
     fn admitted(&self) {
-        carbide_instrument::emit(RequestAdmitted);
+        self.instrumentation.emit(RequestAdmitted);
     }
 
     fn pending_finished(&self, duration: Duration) {
-        carbide_instrument::emit(PendingWaitFinished { duration });
+        self.instrumentation.emit(PendingWaitFinished { duration });
     }
 
     fn execution_finished(&self, duration: Duration) {
-        carbide_instrument::emit(HandlerExecutionFinished { duration });
+        self.instrumentation
+            .emit(HandlerExecutionFinished { duration });
     }
 }
 
 pub(crate) struct ApiAdmissionControl {
+    instrumentation: carbide_instrument::Instrumentation,
     engine: Arc<FairAdmission>,
     default_client_limits: ClientLimits,
     service_limits: HashMap<String, ClientLimits>,
@@ -310,6 +314,7 @@ impl ApiAdmissionControl {
     pub(crate) fn from_config(
         config: &ApiAdmissionControlConfig,
         meter: &Meter,
+        instrumentation: carbide_instrument::Instrumentation,
         shutdown: CancellationToken,
         join_set: &mut JoinSet<()>,
     ) -> eyre::Result<Option<Arc<Self>>> {
@@ -339,7 +344,9 @@ impl ApiAdmissionControl {
             })
             .collect::<eyre::Result<HashMap<_, _>>>()?;
 
-        let observer: Arc<dyn AdmissionObserver> = Arc::new(CarbideAdmissionObserver);
+        let observer: Arc<dyn AdmissionObserver> = Arc::new(CarbideAdmissionObserver {
+            instrumentation: instrumentation.clone(),
+        });
         let in_flight = Arc::new(ExecutionRegistry::new());
         let engine = FairAdmission::start(limits, shutdown.clone(), observer, join_set);
         let work_in_flight_gauge = register_occupancy_gauge(
@@ -361,6 +368,7 @@ impl ApiAdmissionControl {
         let work_in_flight_by_client_kind_gauge =
             register_work_in_flight_by_client_kind_gauge(meter, Arc::clone(&in_flight));
         let control = Arc::new(Self {
+            instrumentation,
             engine,
             default_client_limits: limits.default_client(),
             service_limits,
@@ -387,7 +395,7 @@ impl ApiAdmissionControl {
         rejection: AdmissionRejection,
     ) -> Response<Body> {
         let AdmissionRejection { reason, retry } = rejection;
-        carbide_instrument::emit(RequestRejected {
+        self.instrumentation.emit(RequestRejected {
             reason: reason.into(),
             scope: reason.scope().into(),
         });
@@ -602,7 +610,7 @@ async fn enforce_transport(
     let response = match tokio::time::timeout(deadline, handler).await {
         Ok(response) => response,
         Err(_) => {
-            carbide_instrument::emit(ExecutionTimedOut {
+            control.instrumentation.emit(ExecutionTimedOut {
                 transport,
                 client_kind,
                 route,
@@ -640,8 +648,13 @@ mod tests {
         max_pending: usize,
         pending_timeout: Duration,
         shutdown: CancellationToken,
-    ) -> (Arc<ApiAdmissionControl>, JoinSet<()>) {
+    ) -> (
+        Arc<ApiAdmissionControl>,
+        JoinSet<()>,
+        carbide_utils::test_support::test_meter::TestMeter,
+    ) {
         let mut join_set = JoinSet::new();
+        let test_meter = carbide_utils::test_support::test_meter::TestMeter::default();
         let control = ApiAdmissionControl::from_config(
             &ApiAdmissionControlConfig {
                 enabled: true,
@@ -654,13 +667,14 @@ mod tests {
                 client_idle_timeout: Duration::from_secs(60),
                 service_limits: Default::default(),
             },
-            &opentelemetry::global::meter("api-admission-tests"),
+            &test_meter.meter(),
+            carbide_instrument::Instrumentation::new(test_meter.meter()),
             shutdown,
             &mut join_set,
         )
         .expect("test admission config is valid")
         .expect("test admission is enabled");
-        (control, join_set)
+        (control, join_set, test_meter)
     }
 
     fn test_client(control: &ApiAdmissionControl) -> (ClientKeyRef<'_>, ClientLimits) {
@@ -801,9 +815,9 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn rejection_reason_is_preserved_in_metrics() {
         let _serial = ADMISSION_TEST_SERIAL.lock().await;
-        let metrics = MetricsCapture::start();
-        let (control, _join_set) =
+        let (control, _join_set, test_meter) =
             controller(1, 1, Duration::from_secs(5), CancellationToken::new());
+        let metrics = MetricsCapture::for_registry(test_meter.registry());
         let (client_key, client_limits) = test_client(&control);
         let executing = control
             .engine
@@ -861,7 +875,7 @@ mod tests {
 
     #[tokio::test]
     async fn rejection_log_limiter_distinguishes_reason_and_transport() {
-        let (control, _join_set) =
+        let (control, _join_set, _test_meter) =
             controller(1, 1, Duration::from_secs(1), CancellationToken::new());
         let summary = "API request rejected by admission control";
 
@@ -895,7 +909,7 @@ mod tests {
     #[tokio::test]
     async fn grpc_and_admin_routes_share_capacity_and_bypasses_remain_available() {
         let _serial = ADMISSION_TEST_SERIAL.lock().await;
-        let (controller, _join_set) =
+        let (controller, _join_set, _test_meter) =
             controller(1, 1, Duration::from_secs(1), CancellationToken::new());
         let handler_calls = Arc::new(AtomicUsize::new(0));
         let handler_started = Arc::new(Notify::new());
@@ -1051,8 +1065,13 @@ mod tests {
         pending_timeout: Duration,
         max_execution_time: Duration,
         shutdown: CancellationToken,
-    ) -> (Arc<ApiAdmissionControl>, JoinSet<()>) {
+    ) -> (
+        Arc<ApiAdmissionControl>,
+        JoinSet<()>,
+        carbide_utils::test_support::test_meter::TestMeter,
+    ) {
         let mut join_set = JoinSet::new();
+        let test_meter = carbide_utils::test_support::test_meter::TestMeter::default();
         let control = ApiAdmissionControl::from_config(
             &ApiAdmissionControlConfig {
                 enabled: true,
@@ -1065,13 +1084,14 @@ mod tests {
                 client_idle_timeout: Duration::from_secs(60),
                 service_limits: Default::default(),
             },
-            &opentelemetry::global::meter("api-admission-tests"),
+            &test_meter.meter(),
+            carbide_instrument::Instrumentation::new(test_meter.meter()),
             shutdown,
             &mut join_set,
         )
         .expect("test admission config is valid")
         .expect("test admission is enabled");
-        (control, join_set)
+        (control, join_set, test_meter)
     }
 
     /// A gRPC router with a `Stuck` handler that never returns and a `Ready`
@@ -1155,14 +1175,14 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn execution_deadline_releases_slot() {
         let _serial = ADMISSION_TEST_SERIAL.lock().await;
-        let metrics = MetricsCapture::start();
-        let (controller, _join_set) = controller_with_execution_time(
+        let (controller, _join_set, test_meter) = controller_with_execution_time(
             1,
             1,
             Duration::from_secs(5),
             Duration::from_secs(1),
             CancellationToken::new(),
         );
+        let metrics = MetricsCapture::for_registry(test_meter.registry());
         let router = stuck_and_ready_router(&controller, Arc::new(Notify::new()));
 
         let timed_out = deadline_bounded(
@@ -1193,7 +1213,7 @@ mod tests {
     #[tokio::test]
     async fn cancelled_request_releases_slot_and_in_flight_entry() {
         let _serial = ADMISSION_TEST_SERIAL.lock().await;
-        let (controller, _join_set) = controller_with_execution_time(
+        let (controller, _join_set, _test_meter) = controller_with_execution_time(
             1,
             1,
             Duration::from_secs(5),
@@ -1233,6 +1253,7 @@ mod tests {
     async fn stuck_client_lane_recovers_after_execution_deadline() {
         let _serial = ADMISSION_TEST_SERIAL.lock().await;
         let mut join_set = JoinSet::new();
+        let test_meter = carbide_utils::test_support::test_meter::TestMeter::default();
         let controller = ApiAdmissionControl::from_config(
             &ApiAdmissionControlConfig {
                 enabled: true,
@@ -1245,7 +1266,8 @@ mod tests {
                 client_idle_timeout: Duration::from_secs(600),
                 service_limits: Default::default(),
             },
-            &opentelemetry::global::meter("api-admission-tests"),
+            &test_meter.meter(),
+            carbide_instrument::Instrumentation::new(test_meter.meter()),
             CancellationToken::new(),
             &mut join_set,
         )

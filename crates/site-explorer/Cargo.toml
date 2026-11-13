@@ -16,10 +16,12 @@ path = "tests/integration/main.rs"
 
 [features]
 default = []
-test-support = []
+test-support = ["carbide-utils/test-support"]
 
 [dependencies]
 bmc-explorer = { path = "../bmc-explorer" }
+bmc-backend = { path = "../bmc-backend" }
+bmc-runtime = { path = "../bmc-runtime" }
 bmc-vendor = { path = "../bmc-vendor" }
 carbide-api-db = { path = "../api-db", default-features = false }
 carbide-api-model = { path = "../api-model", default-features = false }
@@ -37,6 +39,7 @@ carbide-utils = { path = "../utils" }
 carbide-uuid = { path = "../uuid" }
 component-manager = { path = "../component-manager" }
 config-version = { path = "../config-version" }
+trace-propagation = { path = "../trace-propagation" }
 
 # these are alphabetized
 arc-swap = { workspace = true }

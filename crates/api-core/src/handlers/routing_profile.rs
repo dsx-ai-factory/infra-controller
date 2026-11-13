@@ -110,6 +110,12 @@ impl From<&FnnRoutingProfileConfig> for rpc::NamedRoutingProfileConfig {
                         .collect(),
                 }
             }),
+            route_targets_on_exports_by_prefix: profile
+                .route_targets_on_exports_by_prefix
+                .as_ref()
+                .map(|entries| rpc::PrefixRouteTargets {
+                    values: entries.iter().cloned().map(Into::into).collect(),
+                }),
             route_targets_on_exports: profile.route_targets_on_exports.as_ref().map(|targets| {
                 ::rpc::common::RouteTargets {
                     values: targets

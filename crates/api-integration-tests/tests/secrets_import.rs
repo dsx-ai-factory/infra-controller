@@ -300,10 +300,12 @@ async fn exercise_import(test_pool: &PgPool) -> eyre::Result<()> {
     eprintln!("Imported {} secrets into Postgres", secrets.len());
 
     // --- Verify all secrets are readable from Postgres ---
+    let metrics = metrics_endpoint::new_metrics_setup("secrets-import-test", "carbide", false)?;
     let pg_mgr = carbide_api_core::secrets::PostgresCredentialManager::new(
         test_pool.clone(),
         routing.clone(),
         kms.clone(),
+        carbide_instrument::Instrumentation::from_meter_provider(&metrics.meter_provider),
     );
     for (key, expected_cred) in &secrets {
         let actual = pg_mgr.get_credentials(key).await?;

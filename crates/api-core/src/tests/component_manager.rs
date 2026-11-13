@@ -36,6 +36,308 @@ use crate::tests::common::api_fixtures::site_explorer::create_expected_switch;
 use crate::tests::common::api_fixtures::{TestEnv, create_test_env};
 
 #[crate::sqlx_test]
+async fn compute_restart_and_ac_cycle_preserve_intent_and_routing(pool: sqlx::PgPool) {
+    use carbide_uuid::machine::{HostMachineId, MachineId, MachineIdSource, MachineType};
+    use component_manager::component_manager::ComponentManager;
+    use component_manager::mock::{MockComputeTrayManager, MockPowerShelfManager};
+    use model::expected_machine::ExpectedMachineData;
+    use model::machine::{
+        CURRENT_STATE_MODEL_VERSION, MachineMaintenanceOperation, ManagedHostState,
+    };
+
+    use crate::tests::common::api_fixtures::site_explorer::TestRackDbBuilder;
+
+    let env = create_test_env(pool.clone()).await;
+    let rack_id = RackId::new("queued-compute-restart");
+    let machine_id = MachineId::new(
+        MachineIdSource::ProductBoardChassisSerial,
+        [91; 32],
+        MachineType::Host,
+    );
+    let host_id = HostMachineId::try_from(machine_id).unwrap();
+    let mut txn = pool.begin().await.unwrap();
+    TestRackDbBuilder::new()
+        .with_rack_id(rack_id.clone())
+        .persist(&mut txn)
+        .await
+        .unwrap();
+    db::machine::create(
+        &mut txn,
+        None,
+        &machine_id,
+        ManagedHostState::Ready,
+        Some(&ExpectedMachineData {
+            rack_id: Some(rack_id),
+            ..Default::default()
+        }),
+        CURRENT_STATE_MODEL_VERSION,
+    )
+    .await
+    .unwrap();
+    let underlay = db::network_segment::find_by_name(&mut txn, "UNDERLAY")
+        .await
+        .unwrap();
+    let interface = db::machine_interface::create(
+        &mut txn,
+        std::slice::from_ref(&underlay),
+        &"02:00:00:00:00:91".parse().unwrap(),
+        false,
+        model::address_selection_strategy::AddressSelectionStrategy::NextAvailableIp,
+        None,
+    )
+    .await
+    .unwrap();
+    db::machine_interface::associate_bmc_interface(
+        &interface.id,
+        model::machine_interface_address::MachineInterfaceAssociation::Machine(machine_id),
+        &mut txn,
+    )
+    .await
+    .unwrap();
+    txn.commit().await.unwrap();
+
+    let manager = ComponentManager::new(
+        Arc::new(MockNvSwitchManager::default()),
+        Arc::new(MockPowerShelfManager),
+        Arc::new(MockComputeTrayManager),
+        false,
+        false,
+        true,
+    );
+    let api = TestApiBuilder::new(
+        pool.clone(),
+        env.common_pools.clone(),
+        env.api.work_lock_manager_handle.clone(),
+    )
+    .with_component_manager(Arc::new(manager))
+    .build();
+    let response = crate::handlers::component_manager::component_power_control(
+        &api,
+        Request::new(rpc::ComponentPowerControlRequest {
+            target: Some(rpc::component_power_control_request::Target::MachineIds(
+                ::rpc::common::HostMachineIdList {
+                    machine_ids: vec![host_id],
+                },
+            )),
+            action: ::rpc::common::SystemPowerControl::GracefulRestart as i32,
+            bypass_state_controller: false,
+            ..Default::default()
+        }),
+    )
+    .await
+    .unwrap()
+    .into_inner();
+    assert_eq!(response.results.len(), 1);
+    assert_eq!(
+        response.results[0].status,
+        rpc::ComponentManagerStatusCode::Success as i32
+    );
+
+    let mut txn = pool.begin().await.unwrap();
+    let machine = db::machine::find_one(txn.as_mut(), &host_id, Default::default())
+        .await
+        .unwrap()
+        .unwrap();
+    let request = machine.machine_maintenance_requested.unwrap();
+    assert_eq!(
+        request.operation,
+        MachineMaintenanceOperation::Reset { graceful: true }
+    );
+    assert_eq!(request.initiator, "component-manager");
+    assert_eq!(machine.state.value, ManagedHostState::Ready);
+
+    let power = db::power_options::get_by_ids(&[host_id], &mut txn)
+        .await
+        .unwrap()
+        .remove(0);
+    db::power_options::update_desired_state(
+        &host_id,
+        model::power_manager::PowerState::Off,
+        &power.desired_power_state_version,
+        &mut txn,
+    )
+    .await
+    .unwrap();
+    txn.commit().await.unwrap();
+
+    let mock = Arc::new(api_test_helper::mock_rms::MockRmsApi::new());
+    let backend = component_manager::component_manager::build_component_manager(
+        &component_manager::config::ComponentManagerConfig {
+            compute_tray_backend: component_manager::compute_tray_manager::Backend::Rms,
+            nv_switch_backend: component_manager::nv_switch_manager::Backend::Mock,
+            power_shelf_backend: component_manager::power_shelf_manager::Backend::Mock,
+            ..Default::default()
+        },
+        crate::tests::common::api_fixtures::get_config_with_rack_profiles().rack_profiles,
+        Some(mock.clone()),
+        None,
+        Some(pool.clone()),
+        Some(env.redfish_sim.clone()),
+        None,
+    )
+    .await
+    .unwrap()
+    .compute_tray;
+    let manager = ComponentManager::new(
+        Arc::new(MockNvSwitchManager::default()),
+        Arc::new(MockPowerShelfManager),
+        backend.clone(),
+        false,
+        false,
+        true,
+    );
+    let api = TestApiBuilder::new(
+        pool.clone(),
+        env.common_pools.clone(),
+        env.api.work_lock_manager_handle.clone(),
+    )
+    .with_component_manager(Arc::new(manager))
+    .build();
+    // Complete the previous request before queuing a different operation.
+    let mut txn = pool.begin().await.unwrap();
+    assert_eq!(
+        db::machine::clear_machine_maintenance_requested(&mut txn, host_id, &request)
+            .await
+            .unwrap(),
+        db::ConditionalWrite::Applied(())
+    );
+    txn.commit().await.unwrap();
+    let before = env.redfish_sim.timepoint();
+    let response = crate::handlers::component_manager::component_power_control(
+        &api,
+        Request::new(rpc::ComponentPowerControlRequest {
+            target: Some(rpc::component_power_control_request::Target::MachineIds(
+                ::rpc::common::HostMachineIdList {
+                    machine_ids: vec![host_id],
+                },
+            )),
+            action: ::rpc::common::SystemPowerControl::AcPowercycle as i32,
+            ..Default::default()
+        }),
+    )
+    .await
+    .unwrap()
+    .into_inner();
+    assert_eq!(response.results.len(), 1);
+    assert_eq!(
+        response.results[0].status,
+        rpc::ComponentManagerStatusCode::Success as i32
+    );
+    let mut txn = pool.begin().await.unwrap();
+    let machine = db::machine::find_one(txn.as_mut(), &host_id, Default::default())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        machine
+            .machine_maintenance_requested
+            .as_ref()
+            .unwrap()
+            .operation,
+        MachineMaintenanceOperation::AcPowercycle {
+            state: Default::default()
+        }
+    );
+    assert_eq!(machine.state.value, ManagedHostState::Ready);
+    let power = db::power_options::get_by_ids(&[host_id], &mut txn)
+        .await
+        .unwrap()
+        .remove(0);
+    assert_eq!(
+        power.desired_power_state,
+        model::power_manager::PowerState::On
+    );
+    assert!(mock.batch_set_power_state_calls().await.is_empty());
+    assert!(
+        env.redfish_sim
+            .actions_since(&before)
+            .all_hosts()
+            .is_empty()
+    );
+    txn.rollback().await.unwrap();
+
+    // Explicit direct routing retains its semantics even for Vera Rubin: no
+    // queued work is replaced and no post-cycle NIC sequence runs in the API.
+    env.redfish_sim
+        .set_service_root_vendor(Some("NVIDIA".into()));
+    env.redfish_sim
+        .set_service_root_product(Some("VR NVL72".into()));
+    for (scenario, use_controller, bypass) in [("direct", false, false), ("bypass", true, true)] {
+        let manager = ComponentManager::new(
+            Arc::new(MockNvSwitchManager::default()),
+            Arc::new(MockPowerShelfManager),
+            backend.clone(),
+            false,
+            false,
+            use_controller,
+        );
+        let api = TestApiBuilder::new(
+            pool.clone(),
+            env.common_pools.clone(),
+            env.api.work_lock_manager_handle.clone(),
+        )
+        .with_component_manager(Arc::new(manager))
+        .with_credential_manager(Arc::new(
+            carbide_secrets::test_support::credentials::TestCredentialManager::new(
+                carbide_secrets::credentials::Credentials::UsernamePassword {
+                    username: "root".into(),
+                    password: "password".into(),
+                },
+            ),
+        ))
+        .build();
+        let before = env.redfish_sim.timepoint();
+        let response = crate::handlers::component_manager::component_power_control(
+            &api,
+            Request::new(rpc::ComponentPowerControlRequest {
+                target: Some(rpc::component_power_control_request::Target::MachineIds(
+                    ::rpc::common::HostMachineIdList {
+                        machine_ids: vec![host_id],
+                    },
+                )),
+                action: ::rpc::common::SystemPowerControl::AcPowercycle as i32,
+                bypass_state_controller: bypass,
+                ..Default::default()
+            }),
+        )
+        .await
+        .unwrap()
+        .into_inner();
+        assert_eq!(response.results.len(), 1, "{scenario}");
+        assert_eq!(
+            response.results[0].status,
+            rpc::ComponentManagerStatusCode::Success as i32,
+            "{scenario}: {:?}",
+            response.results
+        );
+        assert_eq!(
+            env.redfish_sim
+                .actions_since(&before)
+                .for_host(&machine.status.bmc_info.ip.unwrap().to_string()),
+            vec![
+                carbide_redfish::libredfish::test_support::RedfishSimAction::Power(
+                    libredfish::SystemPowerControl::ACPowercycle
+                )
+            ],
+            "{scenario}"
+        );
+        let after = db::machine::find_one(&pool, &host_id, Default::default())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            after.machine_maintenance_requested, machine.machine_maintenance_requested,
+            "{scenario}"
+        );
+        assert_eq!(after.state.value, ManagedHostState::Ready, "{scenario}");
+        assert!(
+            mock.batch_set_power_state_calls().await.is_empty(),
+            "{scenario}"
+        );
+    }
+}
+
+#[crate::sqlx_test]
 async fn switch_firmware_status_uses_only_current_cycle_persistence(
     pool: sqlx::PgPool,
 ) -> Result<(), Box<dyn std::error::Error>> {

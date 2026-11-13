@@ -125,8 +125,32 @@ store:
 # journal and result.json go on the shared run-data claim (persistence), which
 # the runner keeps on uninstall. A new runId is a new run. checkStore false is
 # a diagnostic run, which is never go.
+#
+# command ingestion runs `/scale-test ingestion` instead, under the same config,
+# account, RBAC and claim: it registers the served MAT inventory in nico-api and
+# times ten stages to Ready. It writes, so dryRun must be true (journal the plan,
+# send nothing) or false. It has no helm test. The README sizes the budgets.
 runner:
   enabled: false
+  command: fleet-up
+  rest: {url: "", org: "", providerOrg: "", tokenSecret: "", caSecret: {name: "", key: ca.crt}}
+  # Must equal the probe sweep interval. A mismatch fails before writes.
+  observation: {intervalSeconds: 480, labelReadbackSeconds: 1800}
+  instance:
+    "n": 5
+    burstSize: 100
+    topologyOptimized: false # Allow cohorts across topology domains.
+    tenantId: ""
+    instanceTypeId: ""
+    vpcId: ""
+    subnetId: ""
+    ipxeSecret: "" # key script.ipxe, pinned for the run
+    ownedManifest: "" # basename of the create run's .owned.json on the shared PVC
+    apiPoolReplicas: 0 # required, expected number of API replica series
+    apiPoolSelector: {} # labels selecting every relevant API replica, never an aggregate
+  dryRun: null
+  writes:
+    concurrency: {rack: 8, host: 8, switch: 8, powerShelf: 8}
   runId: ""
   lockName: nico-scale-test-site-lock
   # The NICo control-plane pods that must be Ready, besides the MAT pods: at
@@ -134,10 +158,14 @@ runner:
   # for the runner and the fleetup suite.
   controlPlane: []
   checkStore: true
+  # Complete result on the PVC, not the ConfigMap: 256 KiB to 16 MiB.
+  resultMaxBytes: 8388608
+  probeRequestTimeoutSeconds: 5 # 1 to 600, per probe page or count read
+  bmc: {port: 443, concurrency: 64, timeoutSeconds: 5, tries: 2}
   readinessSeconds: 300
-  finalizeSeconds: 600
-  wholeRunSeconds: 900
-  activeDeadlineSeconds: 1200 # over wholeRunSeconds plus the 90 s shutdown budget
+  finalizeSeconds: 1800 # the summaries and end reads after the stage window
+  wholeRunSeconds: 6600 # a 4800 s (80 min) stage window: wholeRunSeconds - finalizeSeconds
+  activeDeadlineSeconds: 6720 # over wholeRunSeconds plus the 90 s shutdown budget
 
 # The Job deadline and the go test timeout for each suite, both positive
 # integer seconds (the timeout renders as a Go duration such as 480s).
@@ -156,7 +184,7 @@ persistence:
   create: false
   claimName: ""        # defaults to <fullname>-run-data
   storageClass: ""     # required when the claim is created
-  size: 1Gi
+  size: 4Gi
   fsGroup: 65532
   mountPath: /run-data
 
