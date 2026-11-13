@@ -16,7 +16,7 @@ nico-admin-cli mlx info identities [--extended]
 
 ## DESCRIPTION
 
-Show NIC identity evidence from the hosts stored Scout observation and
+Show NIC identity evidence from the host's stored Scout observation and
 current managed-DPU associations. Does not contact Scout.
 
 The observed device fields do not establish physical-card identity or
@@ -50,7 +50,7 @@ Sort output by specified field
 
 `-h, --help`
 
-Print help (see a summary with -h)
+Print help (see a summary with '-h')
 
 `<MACHINE_ID>`
 

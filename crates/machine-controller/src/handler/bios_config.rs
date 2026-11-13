@@ -17,13 +17,16 @@
 
 //! BIOS configuration: machine_setup, Dell job wait/recovery, and PollingBiosSetup escalation.
 
+use bmc_platform::{PowerState, ResetType};
 use carbide_redfish::boot_interface::BootInterfaceTarget;
 use carbide_redfish::libredfish::error::state_handler_redfish_error as redfish_error;
+use carbide_redfish::state_handler::state_handler_platform_error as platform_error;
 use chrono::Utc;
 use eyre::eyre;
-use libredfish::{Redfish, SystemPowerControl};
+use libredfish::Redfish;
 use model::machine::{
-    BiosConfigInfo, BiosConfigState, ManagedHostState, ManagedHostStateSnapshot, PowerState,
+    BiosConfigInfo, BiosConfigState, ManagedHostState, ManagedHostStateSnapshot,
+    PowerState as ExpectedPowerState,
 };
 use state_controller::state_handler::{
     StateHandlerContext, StateHandlerError, StateHandlerOutcome,
@@ -35,6 +38,7 @@ use super::{
 };
 use crate::config::MachineStateControllerConfig;
 use crate::context::MachineStateHandlerContextObjects;
+use crate::redfish::power_state_name;
 
 /// Outcome of configure_host_bios function.
 pub(super) enum BiosConfigOutcome {
@@ -118,8 +122,7 @@ pub(super) async fn configure_host_bios(
                 .last_reboot_requested
                 .is_none()
             {
-                handler_host_power_control(mh_snapshot, ctx, SystemPowerControl::ForceRestart)
-                    .await?;
+                handler_host_power_control(mh_snapshot, ctx, ResetType::ForceRestart).await?;
 
                 RebootStatus {
                     increase_retry_count: true,
@@ -209,7 +212,7 @@ pub(super) async fn advance_bios_config_job(
             }))
         }
         BiosConfigState::RebootHost => {
-            handler_host_power_control(mh_snapshot, ctx, SystemPowerControl::ForceRestart).await?;
+            handler_host_power_control(mh_snapshot, ctx, ResetType::ForceRestart).await?;
             if info.bios_job_id.is_none() {
                 return Ok(BiosConfigJobAdvanceOutcome::Done);
             }
@@ -285,18 +288,18 @@ pub(super) async fn advance_bios_config_job(
             failure,
             power_state,
         } => {
-            let current_power_state = redfish_client
-                .get_power_state()
+            let bmc = ctx.services.connect_bmc(&mh_snapshot.host_snapshot).await?;
+            let current_power_state = crate::redfish::power_state(&bmc)
                 .await
-                .map_err(|e| redfish_error("get_power_state", e))?;
+                .map_err(|e| platform_error("get_power_state", e))?;
 
             match power_state {
-                PowerState::Off => {
-                    if current_power_state != libredfish::PowerState::Off {
-                        handler_host_power_control(mh_snapshot, ctx, SystemPowerControl::ForceOff)
-                            .await?;
+                ExpectedPowerState::Off => {
+                    if current_power_state != Some(PowerState::Off) {
+                        handler_host_power_control(mh_snapshot, ctx, ResetType::ForceOff).await?;
                         return Ok(BiosConfigJobAdvanceOutcome::Wait(format!(
-                            "HandleBiosJobFailure: waiting for power down; current power state: {current_power_state}; failure: {failure}"
+                            "HandleBiosJobFailure: waiting for power down; current power state: {current_power_state}; failure: {failure}",
+                            current_power_state = power_state_name(current_power_state)
                         )));
                     }
                     tracing::info!(
@@ -311,13 +314,13 @@ pub(super) async fn advance_bios_config_job(
                         bios_job_id: info.bios_job_id,
                         bios_config_state: BiosConfigState::HandleBiosJobFailure {
                             failure,
-                            power_state: PowerState::On,
+                            power_state: ExpectedPowerState::On,
                         },
                         retry_count: info.retry_count,
                     }))
                 }
-                PowerState::On => {
-                    if current_power_state != libredfish::PowerState::On {
+                ExpectedPowerState::On => {
+                    if current_power_state != Some(PowerState::On) {
                         let basetime = mh_snapshot
                             .host_snapshot
                             .status
@@ -335,8 +338,7 @@ pub(super) async fn advance_bios_config_job(
                                 "HandleBiosJobFailure: waiting for BMC to come back online; failure: {failure}"
                             )));
                         }
-                        handler_host_power_control(mh_snapshot, ctx, SystemPowerControl::On)
-                            .await?;
+                        handler_host_power_control(mh_snapshot, ctx, ResetType::On).await?;
                         return Ok(BiosConfigJobAdvanceOutcome::Wait(format!(
                             "HandleBiosJobFailure: powering on after BMC reset; failure: {failure}"
                         )));
@@ -383,7 +385,7 @@ fn try_bios_recovery_attempt(
         bios_job_id,
         bios_config_state: BiosConfigState::HandleBiosJobFailure {
             failure,
-            power_state: PowerState::Off,
+            power_state: ExpectedPowerState::Off,
         },
         retry_count: retry_count + 1,
     }))
@@ -539,7 +541,7 @@ mod tests {
         assert!(matches!(
             info.bios_config_state,
             BiosConfigState::HandleBiosJobFailure {
-                power_state: PowerState::Off,
+                power_state: ExpectedPowerState::Off,
                 ..
             }
         ));

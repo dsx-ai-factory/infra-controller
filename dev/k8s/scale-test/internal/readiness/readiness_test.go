@@ -308,3 +308,16 @@ func TestRunKeepsTheWholeRestartBaseline(t *testing.T) {
 		t.Errorf("baseline = %v, detail %s", r.Restarts, r.Detail())
 	}
 }
+
+func TestPopulatedNeverReadsNICoDirectly(t *testing.T) {
+	s, d := ready("")
+	s.records.RegisterExpectedMachines = true
+	d.Version = func(context.Context, string) (string, error) {
+		t.Error("populated readiness called NICo directly")
+		return "", errors.New("forbidden")
+	}
+	rep := readiness.Populated(context.Background(), d, time.Now().Add(time.Minute))
+	if !rep.Ready() {
+		t.Fatalf("populated readiness: %+v", rep.Checks)
+	}
+}

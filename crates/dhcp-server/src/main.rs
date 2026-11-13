@@ -39,10 +39,10 @@ use carbide_dhcp_server::{
 };
 use carbide_instrument::emit;
 use carbide_rpc_utils::dhcp::{DhcpConfig, DhcpTimestamps, DhcpTimestampsFilePath, ServiceConfig};
+use carbide_tls::client_config::ClientCert;
+use carbide_tls::default::{default_client_cert, default_client_key, default_root_ca};
 use chrono::Utc;
 use command_line::{Args, ServerMode};
-use forge_tls::client_config::ClientCert;
-use forge_tls::default::{default_client_cert, default_client_key, default_root_ca};
 use grpc_server::{ApplyError, ControlRequest, run_grpc_server};
 use lru::LruCache;
 use metrics_endpoint::{MetricsEndpointConfig, new_metrics_setup, run_metrics_endpoint};
@@ -3489,10 +3489,13 @@ mod test {
     #[test]
     fn forge_client_tls_paths_are_configurable() {
         let defaults = carbide_client_config(&get_test_args()).unwrap();
-        assert_eq!(defaults.root_ca_path, forge_tls::default::ROOT_CA);
+        assert_eq!(defaults.root_ca_path, carbide_tls::default::ROOT_CA);
         let default_identity = defaults.client_cert.unwrap();
-        assert_eq!(default_identity.cert_path, forge_tls::default::CLIENT_CERT);
-        assert_eq!(default_identity.key_path, forge_tls::default::CLIENT_KEY);
+        assert_eq!(
+            default_identity.cert_path,
+            carbide_tls::default::CLIENT_CERT
+        );
+        assert_eq!(default_identity.key_path, carbide_tls::default::CLIENT_KEY);
 
         let mut explicit = get_test_args();
         explicit.forge_root_ca_path = Some("/local/ca.crt".to_string());

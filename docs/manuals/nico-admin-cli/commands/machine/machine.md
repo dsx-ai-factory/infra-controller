@@ -39,13 +39,14 @@ Sort output by specified field
 
 `-h, --help`
 
-Print help (see a summary with -h)
+Print help (see a summary with '-h')
 
 ## Subcommands
 
 | Subcommand | Description |
 |---|---|
 | [`show`](./machine-show.md) | Display Machine information |
+| [`states`](./machine-states.md) | Display machine lifecycle states without full records |
 | [`network`](./machine-network.md) | Networking information |
 | [`health-report`](./machine-health-report.md) | Manage health report sources |
 | [`reboot`](./machine-reboot.md) | Reboot a machine |

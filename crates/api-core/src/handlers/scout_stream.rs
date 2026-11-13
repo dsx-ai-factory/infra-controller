@@ -121,6 +121,25 @@ pub(crate) async fn scout_stream(
                     "Failed to retain MLX observation; forwarding Scout response"
                 );
             }
+            // A matching completed command may outlive its original API caller.
+            if let Some(authenticated) = authenticated_machine_id {
+                let settlement = cancel_token
+                    .run_until_cancelled(super::mlx_admin::dispatch::accept_reply(
+                        &pool,
+                        authenticated,
+                        &message,
+                    ))
+                    .await;
+                match settlement {
+                    None => break,
+                    Some(Err(error)) => tracing::warn!(
+                        machine_id = %authenticated,
+                        error = %error,
+                        "Failed to settle MLX command; retaining host reservation"
+                    ),
+                    Some(Ok(())) => {}
+                }
+            }
             if agent_tx.send(message).await.is_err() {
                 tracing::error!("failed to forward message received from scout agent");
                 break;
