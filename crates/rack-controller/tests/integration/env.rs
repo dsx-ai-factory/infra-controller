@@ -243,6 +243,7 @@ async fn create_test_env_inner(pool: PgPool, overrides: TestEnvOverrides) -> Tes
         &credentials,
         Some(component_manager.clone()),
         firmware_object_fetcher.clone(),
+        api.instrumentation().clone(),
     );
     let cancel_token = CancellationToken::new();
     let controller = StateController::builder()
@@ -286,8 +287,10 @@ fn services(
     credentials: &Arc<TestCredentialManager>,
     component_manager: Option<Arc<ComponentManager>>,
     firmware_object_fetcher: Arc<dyn FirmwareObjectFetcher>,
+    instrumentation: carbide_instrument::Instrumentation,
 ) -> RackStateHandlerServices {
     RackStateHandlerServices {
+        instrumentation,
         db_pool: pool.clone(),
         site_config: ControllerConfig {
             rms: config.rms.clone(),
@@ -331,6 +334,7 @@ impl TestEnv {
             &self.test_credential_manager,
             Some(self.component_manager.clone()),
             self.firmware_object_fetcher.clone(),
+            self.api.instrumentation().clone(),
         )
     }
     pub(super) fn run_rack_controller_iteration(&self) -> impl Future<Output = ()> {

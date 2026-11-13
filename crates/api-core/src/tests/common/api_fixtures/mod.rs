@@ -1853,6 +1853,7 @@ async fn create_test_env_with_overrides_inner(
         .processor_id(state_controller_id.clone())
         .services(
             RackStateHandlerServices {
+                instrumentation: api.instrumentation.clone(),
                 db_pool: db_pool.clone(),
                 site_config: RackConfig {
                     rms: config.rms.clone(),

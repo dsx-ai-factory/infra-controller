@@ -2497,6 +2497,7 @@ async fn initialize_and_start_controllers<'a>(
         .processor_id(state_controller_id.clone())
         .services(
             RackStateHandlerServices {
+                instrumentation: api_service.instrumentation.clone(),
                 db_pool: db_pool.clone(),
                 site_config: RackConfig {
                     rms: carbide_config.rms.clone(),
