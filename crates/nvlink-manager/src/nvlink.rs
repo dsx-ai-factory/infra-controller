@@ -207,6 +207,16 @@ pub mod test_support {
                 .insert(partition_id, listings);
         }
 
+        /// The name and members of each partition currently held, in creation order.
+        pub fn partitions(&self) -> Vec<(String, Vec<u64>)> {
+            self._partitions
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|p| (p.name.clone(), p.gpu_uids.clone()))
+                .collect()
+        }
+
         /// Number of `get_partition_info_list` calls served in memory so far.
         pub fn partition_info_list_calls(&self) -> usize {
             self._partition_info_list_calls.load(Ordering::SeqCst)

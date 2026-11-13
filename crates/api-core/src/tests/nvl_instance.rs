@@ -1867,13 +1867,35 @@ async fn test_partition_monitor_removes_stale_physical_partition_rows(pool: sqlx
     assert_eq!(stale_deleted(&env), vec!["1".to_string()]);
 }
 
+/// Keep listing-recovery tests focused on the existing partition. A hidden
+/// listing would otherwise let the simulator create a second partition with
+/// the same GPUs, making the database's GPU-based matching ambiguous.
+async fn create_partition_listing_recovery_env(pool: sqlx::PgPool) -> TestEnv {
+    let mut config = common::api_fixtures::get_config();
+    let nvlink_config = config
+        .nvlink_config
+        .as_mut()
+        .expect("test config has nvlink_config");
+    nvlink_config.enabled = true;
+    nvlink_config.partition_monitor_full_check_interval = std::time::Duration::ZERO;
+    common::api_fixtures::create_test_env_with_overrides(
+        pool,
+        TestEnvOverrides {
+            // Allow the host's initial partition, then reject replacement creates
+            // while its listing is temporarily hidden.
+            nmxc_fail_after_n_creates: Some(1),
+            ..TestEnvOverrides::with_config(config)
+        },
+    )
+    .await
+}
+
 /// A partition missing from the listing a pass starts with, but back in the
 /// listing taken after the pass's operations, keeps its row: NMX-C was still
 /// restoring its state, not reporting the partition gone.
 #[crate::sqlx_test]
 async fn test_partition_monitor_keeps_row_of_partition_listed_again(pool: sqlx::PgPool) {
-    let env =
-        create_partition_monitor_test_env(pool.clone(), Some(std::time::Duration::ZERO)).await;
+    let env = create_partition_listing_recovery_env(pool.clone()).await;
     create_partitioned_host(&env).await;
     env.run_nvl_partition_monitor_iteration().await;
     let live_rows = nvl_physical_partition_rows(&pool).await;
@@ -1885,12 +1907,20 @@ async fn test_partition_monitor_keeps_row_of_partition_listed_again(pool: sqlx::
     // Two passes each start with a listing that lacks the partition, which is
     // what makes its row due for removal, and each ends with one that has it.
     for _ in 0..2 {
+        let listings_before = env.nmxc_sim_client.partition_info_list_calls();
         env.nmxc_sim_client
             .hide_partition_for_listings(nmx_c_partition_id, 1);
         env.run_nvl_partition_monitor_iteration().await;
+        assert_eq!(
+            env.nmxc_sim_client.partition_info_list_calls(),
+            listings_before + 2,
+            "each pass must read the initial and refreshed partition listings"
+        );
     }
 
     let rows = nvl_physical_partition_rows(&pool).await;
+    assert_eq!(rows.len(), 1, "the fixture must not create duplicate rows");
+    assert_eq!(env.nmxc_sim_client.partitions().len(), 1);
     assert!(
         rows.iter().any(|row| row.id == live_row.id),
         "the row of a partition listed again must be kept, got {rows:?}"
@@ -1910,8 +1940,7 @@ async fn test_partition_monitor_keeps_row_of_partition_listed_again(pool: sqlx::
 /// second, and the row survives it. The pass after that is the second miss.
 #[crate::sqlx_test]
 async fn test_partition_monitor_refreshed_listing_resets_miss_count(pool: sqlx::PgPool) {
-    let env =
-        create_partition_monitor_test_env(pool.clone(), Some(std::time::Duration::ZERO)).await;
+    let env = create_partition_listing_recovery_env(pool.clone()).await;
     create_partitioned_host(&env).await;
     env.run_nvl_partition_monitor_iteration().await;
     let live_rows = nvl_physical_partition_rows(&pool).await;
@@ -1926,6 +1955,12 @@ async fn test_partition_monitor_refreshed_listing_resets_miss_count(pool: sqlx::
     env.nmxc_sim_client
         .hide_partition_for_listings(nmx_c_partition_id, 1);
     env.run_nvl_partition_monitor_iteration().await;
+    assert_eq!(
+        nvl_physical_partition_rows(&pool).await.len(),
+        1,
+        "the fixture must not create duplicate rows"
+    );
+    assert_eq!(env.nmxc_sim_client.partitions().len(), 1);
 
     // Both listings omit it: the first miss after the reset.
     env.nmxc_sim_client
