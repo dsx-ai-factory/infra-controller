@@ -968,12 +968,10 @@ func (mi ManageInstance) UpdateInstancesInDB(ctx context.Context, siteID uuid.UU
 					continue
 				}
 
-				// A synced config and an aged row do not show that this attachment is gone,
-				// only that some attachment synced and that the row has not changed
-				// recently. Deleting a row the Site still reports would also drop the last
-				// link its Partition has to a live Instance, which is what the REST
-				// deletion guard counts.
-				if reportedSxaKeys[sxa.Key()] {
+				// A reported identity keeps its lone Deleting row because the Site may still
+				// be retiring it. When an active row has the same identity, that row owns the
+				// report and the older Deleting duplicate is safe to remove.
+				if reportedSxaKeys[sxa.Key()] && spectrumXAttachmentMap[sxa.Key()] == nil {
 					continue
 				}
 

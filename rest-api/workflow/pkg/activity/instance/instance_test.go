@@ -3821,6 +3821,21 @@ func TestUpdateInstancesInDB_SpectrumXAttachmentReconciliation(t *testing.T) {
 			"the row must survive while the Site still reports the attachment")
 	})
 
+	t.Run("removes a retiring duplicate when an active row owns the Site report", func(t *testing.T) {
+		fx := newSpectrumXInventoryFixture(t)
+		active := fx.attachment(t, 0, cdbm.SpectrumXAttachmentStatusReady)
+		duplicate := fx.attachment(t, 0, cdbm.SpectrumXAttachmentStatusDeleting)
+		fx.age(t, duplicate.ID)
+
+		require.NoError(t, fx.reportInventory(t, []uint32{0}, []*corev1.InstanceSpxAttachmentStatus{
+			{MacAddr: cutil.GetPtr("00:11:22:33:44:55")},
+		}, corev1.SyncState_SYNCED))
+
+		assert.Equal(t, cdbm.SpectrumXAttachmentStatusReady, fx.get(t, active.ID).Status)
+		_, err := fx.sxaDAO.Get(context.Background(), nil, duplicate.ID, nil)
+		assert.ErrorIs(t, err, cdb.ErrDoesNotExist)
+	})
+
 	// Changing the attachment type retires the old row and creates a new one sharing the
 	// Partition, device and device instance, so a stale report for the retired Physical
 	// attachment must not be applied to its OVS replacement.

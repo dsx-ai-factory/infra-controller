@@ -5079,6 +5079,50 @@ func TestUpdateInstanceHandler_Handle(t *testing.T) {
 	sxpPending := testBuildSpectrumXPartition(t, dbSession, "test-spectrumx-partition-pending", tnOrg1, st1, tn1, nil, cdbm.SpectrumXPartitionStatusPending)
 	assert.NotNil(t, sxp1)
 
+	spectrumXReissueMachine := testInstanceBuildMachine(t, dbSession, ip.ID, st1.ID, cutil.GetPtr(false), nil)
+	assert.NotNil(t, spectrumXReissueMachine)
+	assert.NotNil(t, testInstanceBuildMachineInstanceType(t, dbSession, spectrumXReissueMachine, ist1))
+	spectrumXReissueInstance := testInstanceBuildInstance(
+		t,
+		dbSession,
+		"test-instance-spectrumx-reissue",
+		tn1.ID,
+		ip.ID,
+		st1.ID,
+		&ist1.ID,
+		vpc1.ID,
+		cutil.GetPtr(spectrumXReissueMachine.ID),
+		&os2.ID,
+		nil,
+		cdbm.InstanceStatusReady,
+	)
+	staleMacAddress := "00:11:22:33:44:55"
+	staleIPAddress := "192.0.2.15"
+	deletingSpectrumXAttachment, sxaErr := cdbm.NewSpectrumXAttachmentDAO(dbSession).Create(ctx, nil, cdbm.SpectrumXAttachmentCreateInput{
+		InstanceID:           spectrumXReissueInstance.ID,
+		SiteID:               st1.ID,
+		SpectrumXPartitionID: sxp1.ID,
+		Device:               "NVIDIA BlueField-3 B3140L E-Series FHHL SuperNIC",
+		DeviceInstance:       0,
+		AttachmentType:       cdbm.SpectrumXAttachmentTypePhysical,
+		MacAddress:           &staleMacAddress,
+		IPAddress:            &staleIPAddress,
+		Status:               cdbm.SpectrumXAttachmentStatusDeleting,
+		CreatedBy:            tnu1.ID,
+	})
+	require.NoError(t, sxaErr)
+	replacementSpectrumXAttachment, sxaErr := cdbm.NewSpectrumXAttachmentDAO(dbSession).Create(ctx, nil, cdbm.SpectrumXAttachmentCreateInput{
+		InstanceID:           spectrumXReissueInstance.ID,
+		SiteID:               st1.ID,
+		SpectrumXPartitionID: sxpReplacement.ID,
+		Device:               "NVIDIA BlueField-3 B3140L E-Series FHHL SuperNIC",
+		DeviceInstance:       0,
+		AttachmentType:       cdbm.SpectrumXAttachmentTypePhysical,
+		Status:               cdbm.SpectrumXAttachmentStatusPending,
+		CreatedBy:            tnu1.ID,
+	})
+	require.NoError(t, sxaErr)
+
 	existingPowerProfile := "balanced"
 	_, updatePowerProfileErr := dbSession.DB.Exec("UPDATE instance SET power_profile = ? WHERE id = ?", existingPowerProfile, inst1.ID)
 	require.NoError(t, updatePowerProfileErr)
@@ -5935,6 +5979,56 @@ func TestUpdateInstanceHandler_Handle(t *testing.T) {
 					})
 				},
 			},
+		},
+		{
+			name: "test Instance update reactivates a matching Deleting SpectrumX Attachment without duplicating it",
+			fields: fields{
+				dbSession: dbSession,
+				tc:        tc,
+				scp:       scp,
+				cfg:       cfg,
+			},
+			args: args{
+				reqData: &model.APIInstanceUpdateRequest{
+					IpxeScript: os2.IpxeScript,
+					SpectrumXAttachments: []model.APISpectrumXAttachmentCreateOrUpdateRequest{{
+						SpectrumXPartitionID: sxp1.ID.String(),
+						Device:               "NVIDIA BlueField-3 B3140L E-Series FHHL SuperNIC",
+						DeviceInstance:       cutil.GetPtr(0),
+						AttachmentType:       cdbm.SpectrumXAttachmentTypePhysical,
+					}},
+				},
+				reqInstance:                          spectrumXReissueInstance.ID.String(),
+				cleanInstanceToStatus:                spectrumXReissueInstance.Status,
+				reqOrg:                               tnOrg1,
+				reqUser:                              tnu1,
+				respCode:                             http.StatusOK,
+				expectedSiteSpectrumXAttachmentCount: cutil.GetPtr(1),
+				afterHandle: func(t *testing.T) {
+					sxaDAO := cdbm.NewSpectrumXAttachmentDAO(dbSession)
+					reactivated, gerr := sxaDAO.Get(context.Background(), nil, deletingSpectrumXAttachment.ID, nil)
+					require.NoError(t, gerr)
+					assert.Equal(t, cdbm.SpectrumXAttachmentStatusPending, reactivated.Status)
+					assert.Nil(t, reactivated.MacAddress)
+					assert.Nil(t, reactivated.IPAddress)
+
+					replacement, gerr := sxaDAO.Get(context.Background(), nil, replacementSpectrumXAttachment.ID, nil)
+					require.NoError(t, gerr)
+					assert.Equal(t, cdbm.SpectrumXAttachmentStatusDeleting, replacement.Status)
+
+					attachments, count, gerr := sxaDAO.GetAll(
+						context.Background(),
+						nil,
+						cdbm.SpectrumXAttachmentFilterInput{InstanceIDs: []uuid.UUID{spectrumXReissueInstance.ID}},
+						cdbp.PageInput{},
+						nil,
+					)
+					require.NoError(t, gerr)
+					assert.Equal(t, 2, count)
+					require.Len(t, attachments, 2)
+				},
+			},
+			verifySiteControllerRequest: true,
 		},
 		{
 			name: "test Instance update marks the Instance configuring for a SpectrumX-only update",
