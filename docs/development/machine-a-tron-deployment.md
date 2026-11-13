@@ -778,8 +778,10 @@ pod, run `ipset list -t KUBE-EXTERNAL-IP` on each node instead. Set `racks`
 to the rack count of the values file and `granularity` to the chart's
 `serviceGranularity`, or replace `planned` with the count from the arithmetic
 above. Run it before the fleet is deployed: once the fleet is up, the live
-count already contains its entries. The block is bash; it returns non-zero when a node does not fit
-or a check fails, so it can gate a deploy script.
+count already contains its entries. The block is bash. It returns non-zero
+when a node does not fit, a check fails, a node has no kube-proxy pod, or a
+node has no set while the kube-proxy ConfigMap does not put it in `iptables`
+or `nftables` mode, so it can gate a deploy script.
 
 ```bash
 # GB200 NVL72 racks in the values file, and the chart's
@@ -787,7 +789,7 @@ or a check fails, so it can gate a deploy script.
 racks=1112
 granularity=device
 ipvs_preflight() {
-  local per_rack planned failed=0 checked=0 pod node header maxelem entries total verdict
+  local per_rack planned failed=0 checked=0 seen=" " conf mode pod node header maxelem entries total verdict
   case "$granularity" in
     # 71 BMC addresses x 1 port + 9 NVOS addresses x 2 ports
     pod) per_rack=89 ;;
@@ -797,12 +799,24 @@ ipvs_preflight() {
     *) echo "unknown granularity: $granularity" >&2; return 2 ;;
   esac
   planned=$((racks * per_rack))
+  # kube-proxy mode from the kubeadm ConfigMap; an unset mode means iptables
+  if conf=$(kubectl -n kube-system get configmap kube-proxy -o jsonpath='{.data.config\.conf}' 2>/dev/null); then
+    mode=$(sed -n 's/^mode: *"\{0,1\}\([a-z]*\)"\{0,1\}.*/\1/p' <<<"$conf")
+    mode=${mode:-iptables}
+  else
+    mode=unknown
+  fi
   while read -r pod node; do
     checked=$((checked + 1))
+    seen="$seen$node "
     if ! header=$(kubectl -n kube-system exec "$pod" -- ipset list -t KUBE-EXTERNAL-IP 2>&1); then
       case "$header" in
         *"The set with the given name does not exist"*)
-          echo "$node: no KUBE-EXTERNAL-IP set, kube-proxy is not in IPVS mode and the limit does not apply" ;;
+          case "$mode" in
+            iptables|nftables)
+              echo "$node: no KUBE-EXTERNAL-IP set, kube-proxy mode is $mode and the limit does not apply" ;;
+            *) echo "$node: ERROR, no KUBE-EXTERNAL-IP set and kube-proxy mode is $mode; rerun after kube-proxy has synced"; failed=1 ;;
+          esac ;;
         *) echo "$node: ERROR, the ipset check failed: $header"; failed=1 ;;
       esac
       continue
@@ -825,6 +839,12 @@ ipvs_preflight() {
     echo "no kube-proxy pod matched k8s-app=kube-proxy; run ipset list -t KUBE-EXTERNAL-IP on each node instead" >&2
     failed=1
   fi
+  for node in $(kubectl get nodes -o jsonpath='{.items[*].metadata.name}'); do
+    case "$seen" in
+      *" $node "*) ;;
+      *) echo "$node: ERROR, no kube-proxy pod on this node, its ipset was not checked"; failed=1 ;;
+    esac
+  done
   [ "$failed" -eq 0 ] || echo "do not deploy until every node fits and every check succeeded" >&2
   return "$failed"
 }
