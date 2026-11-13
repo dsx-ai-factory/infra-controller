@@ -17,7 +17,7 @@ ARG TARGETARCH
 RUN --mount=type=cache,id=nico-dependency-cargo-home-${TARGETARCH},target=/cargo-home,sharing=locked \
     --mount=type=cache,id=nico-dependency-cargo-target-${TARGETARCH},target=/cargo-target,sharing=locked <<'BUILD'
 set -eu
-test -n "$VERSION" && test -n "$CI_COMMIT_SHORT_SHA" && test -n "$SOURCE_REVISION"
+: "${VERSION:?VERSION must be set}" "${CI_COMMIT_SHORT_SHA:?CI_COMMIT_SHORT_SHA must be set}" "${SOURCE_REVISION:?SOURCE_REVISION must be set}"
 cargo test --locked --jobs 4 --no-run --lib -p carbide-api -p carbide-secrets \
     --message-format=json-render-diagnostics > /tmp/artifacts.json
 mkdir /qualification
