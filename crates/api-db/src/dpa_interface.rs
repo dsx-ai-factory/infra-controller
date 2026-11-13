@@ -44,8 +44,8 @@ pub async fn persist(
     let state = DpaInterfaceControllerState::Provisioning;
     let description = value.device_description.unwrap_or_default();
 
-    let query = "INSERT INTO dpa_interfaces (machine_id, mac_address, network_config_version, network_config, controller_state_version, controller_state, device_type, pci_name, device_description, interface_type)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) RETURNING row_to_json(dpa_interfaces.*)";
+    let query = "INSERT INTO dpa_interfaces (machine_id, mac_address, network_config_version, network_config, controller_state_version, controller_state, device_type, pci_name, device_description, interface_type, interface_name)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11) RETURNING row_to_json(dpa_interfaces.*)";
 
     sqlx::query_as(query)
         .bind(value.machine_id.to_string())
@@ -58,6 +58,7 @@ pub async fn persist(
         .bind(value.pci_name)
         .bind(description)
         .bind(value.interface_type)
+        .bind(value.interface_name)
         .fetch_one(txn)
         .await
         .map_err(|e| DatabaseError::query(query, e))
@@ -77,8 +78,8 @@ pub async fn ensure(
     let state = DpaInterfaceControllerState::Provisioning;
     let description = value.device_description.unwrap_or_default();
 
-    let insert_query = "INSERT INTO dpa_interfaces (machine_id, mac_address, network_config_version, network_config, controller_state_version, controller_state, device_type, pci_name, device_description, interface_type)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) ON CONFLICT (machine_id, mac_address) DO NOTHING RETURNING row_to_json(dpa_interfaces.*)";
+    let insert_query = "INSERT INTO dpa_interfaces (machine_id, mac_address, network_config_version, network_config, controller_state_version, controller_state, device_type, pci_name, device_description, interface_type, interface_name)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11) ON CONFLICT (machine_id, mac_address) DO NOTHING RETURNING row_to_json(dpa_interfaces.*)";
 
     let result: Option<DpaInterface> = sqlx::query_as(insert_query)
         .bind(value.machine_id.to_string())
@@ -91,6 +92,7 @@ pub async fn ensure(
         .bind(value.pci_name)
         .bind(description)
         .bind(value.interface_type)
+        .bind(value.interface_name)
         .fetch_optional(&mut *txn)
         .await
         .map_err(|e| DatabaseError::query(insert_query, e))?;
@@ -712,6 +714,7 @@ mod test {
                         pci_name: format!("{i:02x}:00.0"),
                         device_description: None,
                         interface_type: DpaInterfaceType::Svpc,
+                        interface_name: None,
                     },
                     &mut txn,
                 )
@@ -881,6 +884,7 @@ mod test {
                 pci_name: "0000:cc:00.0".to_string(),
                 device_description: None,
                 interface_type: DpaInterfaceType::Svpc,
+                interface_name: None,
             },
             &mut txn,
         )
@@ -946,6 +950,7 @@ mod test {
             pci_name: "5e:00.0".to_string(),
             device_description: None,
             interface_type: DpaInterfaceType::Svpc,
+            interface_name: None,
         };
 
         let intf = crate::dpa_interface::persist(new_intf, &mut txn).await?;
@@ -988,6 +993,7 @@ mod test {
                 pci_name: "5e:00.0".to_string(),
                 device_description: None,
                 interface_type: DpaInterfaceType::Svpc,
+                interface_name: None,
             },
             &mut txn,
         )
@@ -1076,6 +1082,7 @@ mod test {
                 pci_name: "5e:00.0".to_string(),
                 device_description: None,
                 interface_type: DpaInterfaceType::Svpc,
+                interface_name: None,
             },
             &mut txn,
         )
@@ -1138,6 +1145,7 @@ mod test {
             pci_name: "01:00.0".to_string(),
             device_description: None,
             interface_type: DpaInterfaceType::Svpc,
+            interface_name: None,
         };
 
         // First call should insert a new interface.
@@ -1158,6 +1166,7 @@ mod test {
             pci_name: "01:00.0".to_string(),
             device_description: None,
             interface_type: DpaInterfaceType::Svpc,
+            interface_name: None,
         };
         let second = crate::dpa_interface::ensure(second_intf, &mut txn).await?;
         assert_eq!(second.id, first.id);
@@ -1198,6 +1207,7 @@ mod test {
             pci_name: pci_name.to_string(),
             device_description: None,
             interface_type: DpaInterfaceType::Svpc,
+            interface_name: None,
         };
 
         crate::dpa_interface::persist(new_intf, &mut txn).await?;
