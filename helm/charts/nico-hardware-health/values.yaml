@@ -97,6 +97,9 @@ env:
   ## Keep direct Prometheus collection independent of optional OTLP analyzer targets.
   CARBIDE_HEALTH__SINKS__PROMETHEUS__ENABLED: "true"
 
+## /livez answers from the collector's main loop, which is busy on large fleets
+## (about 6 cores at 20,000 hosts); the 1 s kubelet default killed a healthy
+## collector there.
 livenessProbe:
   httpGet:
     path: /livez
@@ -104,6 +107,7 @@ livenessProbe:
     scheme: HTTP
   initialDelaySeconds: 20
   periodSeconds: 300
+  timeoutSeconds: 10
   failureThreshold: 3
   successThreshold: 1
 
