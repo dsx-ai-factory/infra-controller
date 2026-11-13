@@ -340,6 +340,7 @@ mod tests {
 
     async fn stalled_initial_message_test_body(pool: sqlx::PgPool) {
         let env = create_test_env(pool).await;
+        let test_meter = carbide_utils::test_support::test_meter::TestMeter::default();
         let mut join_set = JoinSet::new();
         let controller = ApiAdmissionControl::from_config(
             &ApiAdmissionControlConfig {
@@ -352,7 +353,8 @@ mod tests {
                 client_idle_timeout: Duration::from_secs(60),
                 service_limits: Default::default(),
             },
-            &opentelemetry::global::meter("scout-stream-init-timeout-test"),
+            &test_meter.meter(),
+            carbide_instrument::Instrumentation::new(test_meter.meter()),
             CancellationToken::new(),
             &mut join_set,
         )

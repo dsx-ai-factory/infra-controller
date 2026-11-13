@@ -524,8 +524,13 @@ pub(crate) async fn start(
     };
 
     let admission_config = &api_service.runtime_config.api_admission_control;
-    let admission_control =
-        ApiAdmissionControl::from_config(admission_config, &meter, cancel_token.clone(), join_set)?;
+    let admission_control = ApiAdmissionControl::from_config(
+        admission_config,
+        &meter,
+        api_service.instrumentation.clone(),
+        cancel_token.clone(),
+        join_set,
+    )?;
     if admission_control.is_none() {
         tracing::info!("API admission control disabled");
     }
