@@ -553,7 +553,11 @@ async fn run_integration() -> eyre::Result<()> {
     exercise_ib_partition_mtu_fallback(&test_env).await?;
     exercise_nvlink_partition_monitor(&test_env, server_handle_2.ready.meter.clone()).await?;
 
-    carbide_api_core::test_support::poll_resource_pool_stats(test_env.db_pool.clone()).await?;
+    carbide_api_core::test_support::poll_resource_pool_stats(
+        test_env.db_pool.clone(),
+        &carbide_instrument::Instrumentation::from_meter_provider(&test_env.metrics.meter_provider),
+    )
+    .await?;
     // The live exporters supply local gauges; the direct poll emits the failure
     // counter without updating their samples. `test_service_health_metrics`
     // checks unavailable gauge rendering, while `resource_pool_inspection`

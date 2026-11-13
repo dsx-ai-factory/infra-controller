@@ -1926,6 +1926,7 @@ async fn initialize_and_start_controllers<'a>(
         common_pools,
         join_set,
         cancel_token.clone(),
+        api_service.instrumentation.clone(),
     )?;
     let health_pool = db_pool.clone();
     start_export_service_health_metrics(ServiceHealthContext {

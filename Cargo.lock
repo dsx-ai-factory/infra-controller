@@ -1532,6 +1532,7 @@ dependencies = [
  "carbide-dhcp",
  "carbide-health",
  "carbide-health-report",
+ "carbide-instrument",
  "carbide-kms-provider",
  "carbide-machine-a-tron",
  "carbide-nvlink-manager",
