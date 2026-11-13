@@ -29,6 +29,7 @@ mod power;
 use bmc_runtime::ConnectedBmc;
 use carbide_redfish::nv_redfish::RedfishBmc;
 pub use connector::{BmcConnectError, BmcConnector};
+pub use convert::platform_error;
 use libredfish::Redfish;
 pub use power::BackendPower;
 
