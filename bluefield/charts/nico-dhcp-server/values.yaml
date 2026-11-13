@@ -1,6 +1,7 @@
 ### DPF contract ###
-# NICo sets this from [dpf].multiClusterSupport. Enable only with compatible
-# HBN and NICo charts. False preserves legacy Service names and addresses.
+# NICo sets this from [dpf].multiClusterSupport. Enable only with DPF 30.0 rc.4
+# or newer and compatible HBN and NICo charts. False preserves legacy Service
+# names and addresses.
 multiClusterSupport: false
 dpf:
   dpuService:

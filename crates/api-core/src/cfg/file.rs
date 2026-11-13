@@ -2037,7 +2037,8 @@ pub struct DpfConfig {
     pub enabled: bool,
     /// Uses DPUService-based Service names and peer addresses in NICo's DHCP, FMDS,
     /// DPU-agent, and OTel charts. Defaults to false to preserve legacy naming.
-    /// Enable only with HBN and NICo chart versions that support this naming scheme.
+    /// Enable only with DPF 30.0 rc.4 or newer and HBN and NICo chart versions
+    /// that support this naming scheme.
     /// This site-wide value overrides per-service Helm values and is read at startup.
     #[serde(default, rename = "multiClusterSupport")]
     pub multi_cluster_support: bool,
