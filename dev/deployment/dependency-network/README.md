@@ -9,17 +9,19 @@ and literal-address exchanges in [#6604](https://github.com/dsx-ai-factory/infra
 
 ## Prerequisites
 
-- A Linux Docker Engine with IPv6 networking and support for
-  `docker network create --ipv4=false`. Run inside a local Linux VM on macOS:
-  the driver connects directly to container addresses when checking readiness.
-- Python 3 and OpenSSL on that Linux host.
-- An existing native repository build image containing the pinned Rust toolchain,
-  PostgreSQL 15, Vault, and the other Core build prerequisites. The repository's
-  [ARM64](../../docker/Dockerfile.build-container-aarch64) and
-  [AMD64](../../docker/Dockerfile.build-container-x86_64) build recipes supply these.
+- A Linux host with a local Docker Engine, BuildKit, IPv6 networking, and support
+  for `docker network create --ipv4=false`. The driver connects directly to
+  container addresses when checking readiness, so a remote Docker daemon is not
+  supported. On macOS, run the commands inside a Linux VM.
+- Git, Python 3, OpenSSL, and a repository checkout with its release tags.
 - The ranges `172.30.54.0/24` and `fd00:5403::/64` must be unused by other Docker
   networks and must not overlap routes needed by the host. Docker rejects an
   overlapping Docker allocation; the driver does not modify existing networks.
+
+The build downloads images and dependencies using the host's internet
+connection. External IPv6 connectivity is not required: the test services and
+IPv6 DNS server communicate over private Docker networks. No NICo deployment,
+VM provisioning tooling, or prebuilt repository image is required.
 
 The driver creates its own named networks and containers. It publishes no host
 ports and uses disposable credentials. It attempts to remove its containers and
@@ -31,13 +33,32 @@ are retained for reuse.
 
 ## Build and run
 
-From the repository root, substitute the name of the native build image if it
-differs from `build-container-localdev`:
+Run these commands from the repository root on the Linux host. First build the
+native compiler image from the repository's
+[AMD64](../../docker/Dockerfile.build-container-x86_64) or
+[ARM64](../../docker/Dockerfile.build-container-aarch64) recipe. This supplies
+Rust, PostgreSQL 15, Vault, and the other Core build prerequisites:
+
+```bash
+case "$(docker info --format '{{.OSType}}/{{.Architecture}}')" in
+  linux/amd64|linux/x86_64) dependency_build_arch=x86_64 ;;
+  linux/arm64|linux/aarch64) dependency_build_arch=aarch64 ;;
+  *) echo "A native Linux Docker Engine is required" >&2; exit 1 ;;
+esac
+
+docker build \
+  --build-arg "KEA_VERSION=$(cat dev/docker/kea.version)" \
+  -f "dev/docker/Dockerfile.build-container-${dependency_build_arch}" \
+  -t nico-dependency-build \
+  dev/docker
+```
+
+Then build the test binaries and run the qualification:
 
 ```bash
 docker build \
   -f dev/deployment/dependency-network/Dockerfile \
-  --build-arg BUILD_IMAGE=build-container-localdev \
+  --build-arg BUILD_IMAGE=nico-dependency-build \
   --build-arg VERSION="$(git describe --tags --first-parent --always --long)" \
   --build-arg CI_COMMIT_SHORT_SHA="$(git rev-parse --short=8 HEAD)" \
   --build-arg SOURCE_REVISION="$(git rev-parse HEAD)" \
@@ -52,6 +73,9 @@ Use a new output directory for each run. The image contains the working tree's
 test code; its revision label records `HEAD`. Retain the diff as well when
 qualifying uncommitted changes. The Dockerfile-specific context allowlist excludes
 local environment files and includes the repository's public test certificates.
+Cargo caches are created on first use and retained under the
+`nico-dependency-cargo-home-*` and `nico-dependency-cargo-target-*` BuildKit cache
+IDs. Subsequent builds can reuse them; the first build needs no existing cache.
 
 The build compiles the `carbide-api` and `carbide-secrets` library test binaries.
 The driver invokes one named test per service and verifies that it ran. The Vault

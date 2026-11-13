@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-ARG BUILD_IMAGE=build-container-localdev
+ARG BUILD_IMAGE=nico-dependency-build
 FROM ${BUILD_IMAGE}
 ARG VERSION
 ARG CI_COMMIT_SHORT_SHA
@@ -14,8 +14,8 @@ ENV VERSION=${VERSION} CI_COMMIT_SHORT_SHA=${CI_COMMIT_SHORT_SHA}
 WORKDIR /workspace
 COPY . .
 ARG TARGETARCH
-RUN --mount=type=cache,id=nico-dev-cargo-home-${TARGETARCH},target=/cargo-home,sharing=locked \
-    --mount=type=cache,id=nico-dev-cargo-target-${TARGETARCH},target=/cargo-target,sharing=locked <<'BUILD'
+RUN --mount=type=cache,id=nico-dependency-cargo-home-${TARGETARCH},target=/cargo-home,sharing=locked \
+    --mount=type=cache,id=nico-dependency-cargo-target-${TARGETARCH},target=/cargo-target,sharing=locked <<'BUILD'
 set -eu
 test -n "$VERSION" && test -n "$CI_COMMIT_SHORT_SHA" && test -n "$SOURCE_REVISION"
 cargo test --locked --jobs 4 --no-run --lib -p carbide-api -p carbide-secrets \
