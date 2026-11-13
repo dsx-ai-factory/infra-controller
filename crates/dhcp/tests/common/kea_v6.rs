@@ -66,6 +66,8 @@ pub(crate) struct Kea6Config {
     pub(crate) provisioning_server_ipv6: &'static str,
     pub(crate) dns_servers_ipv6: &'static [&'static str],
     pub(crate) prefix_pool: bool,
+    pub(crate) nico_pxe_service_url: Option<&'static str>,
+    pub(crate) native_vendor_opts_hex: Option<&'static str>,
     pub(crate) mac_sources: Option<&'static [&'static str]>,
     pub(crate) expired_leases_processing: Option<Kea6ExpiredLeasesProcessing>,
 }
@@ -82,6 +84,8 @@ impl Default for Kea6Config {
             provisioning_server_ipv6: "",
             dns_servers_ipv6: &HOOK_DNS_SERVERS_IPV6,
             prefix_pool: false,
+            nico_pxe_service_url: None,
+            native_vendor_opts_hex: None,
             mac_sources: None,
             expired_leases_processing: None,
         }
@@ -579,6 +583,17 @@ impl Kea6 {
                 }
             ]
         });
+        if let Some(url) = config.nico_pxe_service_url {
+            dhcp6["hooks-libraries"][0]["parameters"]["nico-pxe-service-url"] = json!(url);
+        }
+        if let Some(payload) = config.native_vendor_opts_hex {
+            dhcp6["option-data"] = json!([{
+                "code": 17,
+                "csv-format": false,
+                "data": payload,
+                "always-send": true,
+            }]);
+        }
         if config.prefix_pool {
             dhcp6["subnet6"][0]["pd-pools"] = json!([{
                 "prefix": "2001:db8:1::",

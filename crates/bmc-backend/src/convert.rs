@@ -18,8 +18,11 @@
 use bmc_platform::{AuthError, PlatformError};
 use libredfish::RedfishError;
 
-/// Keeps libredfish's message wherever the platform error can carry one.
-pub(crate) fn platform_error(error: RedfishError) -> PlatformError {
+/// Classifies a libredfish failure as the drivers classify theirs, keeping
+/// libredfish's message wherever the platform error can carry one. Callers
+/// still making a libredfish call beside driver calls use it to handle one
+/// error type.
+pub fn platform_error(error: RedfishError) -> PlatformError {
     match error {
         RedfishError::NotSupported(_) => PlatformError::Unsupported,
         RedfishError::Lockdown => PlatformError::LockedDown,

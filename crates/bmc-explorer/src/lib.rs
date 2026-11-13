@@ -62,6 +62,7 @@ use bmc_platform::ServiceRootIdentity;
 use chassis::ExploredChassisCollection;
 use component_integrity::ExploredComponentIntegrity;
 use computer_system::ExploredComputerSystem;
+pub use computer_system::model_power_state;
 use drives::ExploredDrives;
 pub use error::Error;
 use inventories::ExploredInventories;
@@ -188,6 +189,26 @@ fn build_chassis_explore_config<B: Bmc>(root: &ServiceRoot<B>) -> chassis::Confi
     }
 }
 
+/// Index of the host system among a BMC's systems. BMCs that list a host
+/// beside baseboards report a BIOS only on the host, so the first system after
+/// the first that reports one wins, otherwise the first. `None` when the BMC
+/// lists no systems.
+pub fn primary_system_index<B: Bmc>(
+    systems: &[nv_redfish::computer_system::ComputerSystem<B>],
+) -> Option<usize> {
+    if systems.is_empty() {
+        return None;
+    }
+    Some(
+        systems
+            .iter()
+            .enumerate()
+            .skip(1)
+            .find(|(_, system)| system.raw().bios.is_some())
+            .map_or(0, |(index, _)| index),
+    )
+}
+
 /// Collects required resources, then converts them into an exploration report.
 #[tracing::instrument(name = "generate_exploration_report", skip_all)]
 pub async fn nv_generate_exploration_report<B: Bmc>(
@@ -234,16 +255,8 @@ pub async fn nv_generate_exploration_report<B: Bmc>(
         .await
         .map_err(Error::nv_redfish("systems members"))?;
 
-    let primary_index = systems
-        .iter()
-        .enumerate()
-        .skip(1)
-        .find(|(_, system)| system.raw().bios.is_some())
-        .map(|(index, _)| index)
-        .unwrap_or(0);
-    if systems.is_empty() {
-        return Err(Error::bmc_not_provided("at least one computer system")());
-    }
+    let primary_index = primary_system_index(&systems)
+        .ok_or_else(Error::bmc_not_provided("at least one computer system"))?;
     let mut systems = systems;
     let system = systems.swap_remove(primary_index);
     let primary_system_id = system.raw().id.clone();

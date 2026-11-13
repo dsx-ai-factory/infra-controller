@@ -1275,6 +1275,7 @@ dependencies = [
  "bmc-backend",
  "bmc-drivers",
  "bmc-explorer",
+ "bmc-platform",
  "bmc-runtime",
  "bmc-vendor",
  "byteorder",
@@ -3131,6 +3132,7 @@ version = "0.0.1"
 dependencies = [
  "async-trait",
  "bmc-backend",
+ "bmc-platform",
  "bmc-runtime",
  "bmc-vendor",
  "carbide-api-db",
@@ -3666,8 +3668,10 @@ dependencies = [
  "async-trait",
  "axum",
  "bmc-backend",
+ "bmc-drivers",
  "bmc-explorer",
  "bmc-mock",
+ "bmc-platform",
  "bmc-runtime",
  "bmc-vendor",
  "carbide-api-db",
@@ -3920,6 +3924,7 @@ version = "0.0.0"
 dependencies = [
  "async-trait",
  "bmc-backend",
+ "bmc-platform",
  "carbide-api-db",
  "carbide-api-model",
  "carbide-credential-rotation",
@@ -4472,6 +4477,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "bmc-backend",
+ "bmc-platform",
  "bmc-runtime",
  "bmc-vendor",
  "carbide-api-db",

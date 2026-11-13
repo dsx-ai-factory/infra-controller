@@ -21,6 +21,7 @@ test-support = ["carbide-utils/test-support"]
 [dependencies]
 bmc-explorer = { path = "../bmc-explorer" }
 bmc-backend = { path = "../bmc-backend" }
+bmc-platform = { path = "../bmc-platform" }
 bmc-runtime = { path = "../bmc-runtime" }
 bmc-vendor = { path = "../bmc-vendor" }
 carbide-api-db = { path = "../api-db", default-features = false }
@@ -51,7 +52,7 @@ itertools = { workspace = true }
 http = { workspace = true }
 libredfish = { workspace = true }
 mac_address = { workspace = true }
-nv-redfish = { workspace = true }
+nv-redfish = { workspace = true, features = ["computer-systems"] }
 opentelemetry = { workspace = true }
 opentelemetry_sdk = { workspace = true }
 rand = { workspace = true }
@@ -67,6 +68,7 @@ version-compare = { workspace = true }
 
 [dev-dependencies]
 axum = { workspace = true }
+bmc-drivers = { path = "../bmc-drivers" }
 bmc-explorer = { path = "../bmc-explorer", features = ["test-support"] }
 bmc-mock = { path = "../bmc-mock" }
 opentelemetry-prometheus = { workspace = true }

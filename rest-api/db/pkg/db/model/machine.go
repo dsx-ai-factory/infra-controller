@@ -440,6 +440,8 @@ type MachineDAO interface {
 	Clear(ctx context.Context, tx *db.Tx, input MachineClearInput) (*Machine, error)
 	// GetAll returns all the rows based on the filter and page inputs
 	GetAll(ctx context.Context, tx *db.Tx, filter MachineFilterInput, page paginator.PageInput, includeRelations []string) ([]Machine, int, error)
+	// GetAllIDs returns the IDs of all rows matching the filter
+	GetAllIDs(ctx context.Context, tx *db.Tx, filter MachineFilterInput) ([]string, error)
 	// GetDistinctLabelKeys returns the distinct label keys based on the filter and page inputs
 	GetDistinctLabelKeys(ctx context.Context, tx *db.Tx, filter MachineFilterInput, page paginator.PageInput) ([]string, int, error)
 	// GetDistinctLabelValues returns the distinct values for a label key based on the filter and page inputs
@@ -717,10 +719,6 @@ func (msd MachineSQLDAO) setQueryWithFilter(filter MachineFilterInput, query *bu
 		cotel.SetAttribute(machineDAOSpan, attribute.String("machine_label_selector", string(labelsJSON)))
 	}
 
-	if filter.ExcludeMetadata {
-		query = query.ExcludeColumn("metadata")
-	}
-
 	return query, nil
 }
 
@@ -767,6 +765,10 @@ func (msd MachineSQLDAO) GetAll(ctx context.Context, tx *db.Tx, filter MachineFi
 		return machines, 0, err
 	}
 
+	if filter.ExcludeMetadata {
+		query = query.ExcludeColumn("metadata")
+	}
+
 	for _, relation := range includeRelations {
 		query = query.Relation(relation)
 	}
@@ -787,6 +789,41 @@ func (msd MachineSQLDAO) GetAll(ctx context.Context, tx *db.Tx, filter MachineFi
 	}
 
 	return machines, machinePaginator.Total, nil
+}
+
+// GetAllIDs returns the IDs of all Machines matching the filter, ordered by ID
+// The returned slice is empty but not nil when no Machines match
+func (msd MachineSQLDAO) GetAllIDs(ctx context.Context, tx *db.Tx, filter MachineFilterInput) (_ []string, retErr error) {
+	// Create a child span and set the attributes for current request
+	ctx, machineDAOSpan := cotel.StartSpan(ctx, "MachineDAO.GetAllIDs")
+	defer func() { cotel.EndSpan(machineDAOSpan, retErr) }()
+
+	ids := []string{}
+
+	if filter.MachineIDs != nil && len(filter.MachineIDs) == 0 {
+		return ids, nil
+	}
+
+	if filter.HwSkuDeviceTypes != nil && len(filter.HwSkuDeviceTypes) == 0 {
+		return ids, nil
+	}
+
+	query := db.GetIDB(tx, msd.dbSession).NewSelect().Model((*Machine)(nil)).Column("id")
+	if filter.IncludeDeleted {
+		query = query.WhereAllWithDeleted()
+	}
+
+	query, err := msd.setQueryWithFilter(filter, query, machineDAOSpan)
+	if err != nil {
+		return nil, err
+	}
+
+	err = query.Order("m.id").Scan(ctx, &ids)
+	if err != nil {
+		return nil, err
+	}
+
+	return ids, nil
 }
 
 // GetDistinctLabelKeys returns paginated, distinct Machine label keys.

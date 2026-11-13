@@ -137,6 +137,32 @@ impl Kea {
         Ok((kea, relay_socket))
     }
 
+    /// Apply the URL setting through a new process and reconnect the relay socket.
+    pub(crate) fn restart_with_nico_pxe_service_url(
+        &mut self,
+        relay_socket: &UdpSocket,
+        url: Option<&str>,
+    ) -> Result<(), eyre::Report> {
+        self.stop_process();
+        let mut config: serde_json::Value =
+            serde_json::from_reader(File::open(&self.temp_conf_file)?)?;
+        let parameters = config["Dhcp4"]["hooks-libraries"][0]["parameters"]
+            .as_object_mut()
+            .unwrap();
+        parameters.remove("nico-pxe-service-url");
+        if let Some(url) = url {
+            parameters.insert("nico-pxe-service-url".into(), url.into());
+        }
+        serde_json::to_writer(File::create(&self.temp_conf_file)?, &config)?;
+        let run_permit = self
+            ._run_permit
+            .take()
+            .expect("Kea restart requires an active run permit");
+        self.run(run_permit)?;
+        relay_socket.connect(format!("127.0.0.1:{}", self.dhcp_in_port))?;
+        Ok(())
+    }
+
     fn new_inner(
         api_server_url: &str,
         dhcp_in_port: u16,

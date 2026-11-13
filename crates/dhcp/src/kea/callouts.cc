@@ -17,15 +17,21 @@
 
 #include "callouts.h"
 #include "carbide_rust.h"
+#include <algorithm>
 #include <dhcp/option6_ia.h>
 #include <dhcp/option6_iaaddr.h>
 #include <dhcp/option6_status_code.h>
+#include <dhcp/option_vendor.h>
+#include <dhcp/protocol_util.h>
+#include <limits>
 #include <vector>
 
 isc::log::Logger logger("carbide-callouts");
 
 const int IPV4_ADDR_SIZEB = 4;
 const int IPV6_ADDR_SIZEB = 16;
+const uint32_t NVIDIA_ENTERPRISE_NUMBER = 5703;
+const uint16_t NICO_PXE_SERVICE_URL_SUBOPTION = 72;
 const char REQUESTED_PREFIX_IAIDS[] = "requested_prefix_iaids";
 
 const uint8_t *nullable_data(const OptionBuffer &buffer) {
@@ -460,6 +466,35 @@ void set_options_v6(CalloutHandle &handle, Pkt6Ptr query6_ptr,
     add_or_replace_option6(response6_ptr, 56,
                            machine_get_ntp_servers_ipv6(machine));
 
+    DhcpByteBufferGuard nico_pxe_service_url(hook_get_config_nico_pxe_service_url());
+    auto requested = boost::dynamic_pointer_cast<OptionUint16Array>(
+        query6_ptr ? query6_ptr->getOption(D6O_ORO) : OptionPtr());
+    const bool advertise_nico_pxe_service_url =
+        !nico_pxe_service_url.empty() && requested &&
+        std::find(requested->getValues().begin(), requested->getValues().end(),
+                  D6O_VENDOR_OPTS) != requested->getValues().end();
+    if (advertise_nico_pxe_service_url) {
+      OptionVendorPtr vendor;
+      // pkt6_send retrieves packet-local copies, preserving shared config.
+      for (const auto &entry : response6_ptr->getOptions(D6O_VENDOR_OPTS)) {
+        auto candidate = boost::dynamic_pointer_cast<OptionVendor>(entry.second);
+        if (candidate && candidate->getVendorId() == NVIDIA_ENTERPRISE_NUMBER) {
+          vendor = candidate;
+          break;
+        }
+      }
+      if (!vendor) {
+        vendor.reset(new OptionVendor(Option::V6, NVIDIA_ENTERPRISE_NUMBER));
+        response6_ptr->addOption(vendor);
+      }
+      // Replace only NICo's URL, retaining other enterprise data and suboptions.
+      while (vendor->delOption(NICO_PXE_SERVICE_URL_SUBOPTION)) {
+      }
+      vendor->addOption(OptionPtr(new Option(
+          Option::V6, NICO_PXE_SERVICE_URL_SUBOPTION,
+          nico_pxe_service_url.optionBuffer())));
+    }
+
     // Client FQDN is client-controlled; echo negotiation flags only and
     // render the API-owned hostname. This cannot use add_or_replace_option6
     // because the response payload depends on the client's requested flags.
@@ -493,6 +528,16 @@ void set_options_v6(CalloutHandle &handle, Pkt6Ptr query6_ptr,
     if (rapid_commit) {
       response6_ptr->addOption(OptionPtr(new Option(Option::V6, D6O_RAPID_COMMIT)));
     }
+
+    if (advertise_nico_pxe_service_url) {
+      // Measure actual bytes, including relay headers and every reply option; len() can wrap.
+      response6_ptr->pack();
+      if (response6_ptr->getBuffer().getLength() >
+          std::numeric_limits<uint16_t>::max() - UDP_HEADER_LEN) {
+        isc_throw(isc::OutOfRange,
+                  "nico-pxe-service-url and other reply data exceed DHCPv6 datagram payload limit of 65527 bytes");
+      }
+    }
   } catch (exception &e) {
     LOG_ERROR(logger, "LOG_CARBIDE_PKT6_SEND: packet send Exception: %1")
         .arg(e.what());
@@ -513,6 +558,13 @@ void set_vendor_options(Pkt4Ptr response4_ptr) {
   }
   vendor_option_6.reset(new OptionInt<uint32_t>(Option::V4, 6, 0x8));
   option_vendor->addOption(vendor_option_6);
+
+  DhcpByteBufferGuard nico_pxe_service_url(hook_get_config_nico_pxe_service_url());
+  if (!nico_pxe_service_url.empty()) {
+    option_vendor->addOption(OptionPtr(
+        new Option(Option::V4, NICO_PXE_SERVICE_URL_SUBOPTION,
+                   nico_pxe_service_url.optionBuffer())));
+  }
 
   response4_ptr->addOption(option_vendor);
 }

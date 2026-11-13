@@ -22,13 +22,16 @@
 //! name and signature of every [`ConnectedBmc`] counterpart, so callers keep
 //! their code when they hold a [`ConnectedBmc`] instead.
 
+mod bmc_control;
 mod connector;
 mod convert;
 mod power;
 
+pub use bmc_control::BackendBmcControl;
 use bmc_runtime::ConnectedBmc;
 use carbide_redfish::nv_redfish::RedfishBmc;
 pub use connector::{BmcConnectError, BmcConnector};
+pub use convert::platform_error;
 use libredfish::Redfish;
 pub use power::BackendPower;
 

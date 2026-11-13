@@ -829,13 +829,13 @@ pool; the uplink-side block defines public prefixes and how they are
 advertised. Both are documented field-by-field in
 [`crates/api-core/src/cfg/README.md` → VmaasConfig](../../../crates/api-core/src/cfg/README.md#vmaasconfig).
 
-### InfiniBand fabric definitions — `[ib_fabrics.<name>]`
+### InfiniBand fabric definitions — `[ib_fabrics.default]`
 
-`[ib_config]` toggles InfiniBand support fleet-wide; `[ib_fabrics.<name>]`
-defines a specific UFM-managed fabric. Currently exactly one fabric is
-supported. Required fields: UFM endpoint, credentials (a token or a client
-certificate), MGMT IB subnet, GUID prefix. See
-[`crates/api-core/src/cfg/README.md` → NicoConfig](../../../crates/api-core/src/cfg/README.md#nicoconfig-top-level).
+`[ib_config]` toggles InfiniBand support fleet-wide. When enabled, it supports
+at most one configured fabric, named `default`. The
+[InfiniBand partitioning manual](../../../docs/manuals/networking/infiniband_partitioning.md#configuring-nico-to-talk-to-ufm)
+defines the supported fabric settings, P_Key ranges and separate credential
+configuration.
 
 ### Operator dev / debug knobs
 
@@ -1123,7 +1123,7 @@ InfiniBand fabric monitoring is a top-level capability gated on
 enabled = true
 max_partition_per_tenant = 16
 allow_insecure = false              # disable in production
-mtu = 4096
+mtu = 4 # 4k; accepted values are 2 (2k) and 4 (4k)
 rate_limit = 100
 service_level = 0
 fabric_monitor_run_interval = "60s" # how often UFM is polled for fabric topology + partition status
@@ -1131,7 +1131,7 @@ fabric_monitor_run_interval = "60s" # how often UFM is polled for fabric topolog
 
 The fabric monitor talks to UFM (Unified Fabric Manager) over its REST API
 to read partitions, map them to tenants, and enforce the per-tenant cap.
-Connection details (UFM host, credentials) live in `[ib_fabrics.<name>]`.
+The UFM endpoint and P_Key pool are configured in `[ib_fabrics.default]`.
 
 See [`crates/api-core/src/cfg/README.md` → IBFabricConfig](../../../crates/api-core/src/cfg/README.md#ibfabricconfig).
 
@@ -1599,7 +1599,7 @@ These are intentional compatibility surfaces, not bugs.
 | **SVID** | SPIFFE Verifiable Identity Document. Either X.509 (default) or JWT (used for tenant DPU identity via `[machine_identity]`). |
 | **TPM** | Trusted Platform Module. Required for `attestation_enabled`; can be bypassed for testing via `tpm_required = false`. |
 | **UEFI HTTP Boot** | UEFI firmware feature that fetches the bootloader over HTTP. Used by `nico-pxe`. URL pinned via DHCP option 67 or `HttpBootUri` Redfish setting. |
-| **UFM** | Unified Fabric Manager (NVIDIA). InfiniBand fabric controller. Talked to via `[ib_config]` + `[ib_fabrics.<name>]`. |
+| **UFM** | Unified Fabric Manager (NVIDIA). InfiniBand fabric controller. Talked to via `[ib_config]` + `[ib_fabrics.default]`. |
 | **VMaaS** | Virtual Machine as a Service. VM integration mode for sites that run VMs alongside bare-metal. Configured via `[vmaas_config]`. |
 | **VNI** | VXLAN Network Identifier. Allocated from `[pools.vni]` / `[pools.vpc-vni]`. |
 | **VPC** | Virtual Private Cloud. Tenant-level network isolation domain. Peering controlled by `vpc_peering_policy`. |

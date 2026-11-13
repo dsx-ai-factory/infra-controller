@@ -231,6 +231,16 @@ pub static ASTRA_NIC_MAPPINGS: [AstraNicMapping; 32] = [
     },
 ];
 
+/// Given a dpu_pci_address prefix, return the four AstraNicMapping entries that have this prefix in dpu_pci_address.
+pub fn astra_nic_mappings_for_dpu_pci_address_prefix(
+    dpu_pci_address_prefix: &str,
+) -> Vec<&AstraNicMapping> {
+    ASTRA_NIC_MAPPINGS
+        .iter()
+        .filter(|mapping| mapping.dpu_pci_address.starts_with(dpu_pci_address_prefix))
+        .collect()
+}
+
 /// Return the DPU PCI address for the Astra NIC whose physical interface name
 /// matches `physical_ifname`, if any.
 pub fn astra_dpu_pci_address_for_physical_ifname(physical_ifname: &str) -> Option<&'static str> {
@@ -243,8 +253,24 @@ pub fn astra_dpu_pci_address_for_physical_ifname(physical_ifname: &str) -> Optio
 /// Return the cage index for a NIC index in Astra.
 ///
 /// Cage index is `((nic_index / 2) * 2) + 1`.
+/// This is the table for CX9 label to MPO label mapping.
+///      CX9 label   MPO label
+///      CX-0        C1-1
+///      CX-1        C1-2
+///      CX-2        C3-1
+///      CX-3        C3-2
+///      CX-4        C7-1
+///      CX-5        C7-2
+///      CX-6        C5-1
+///      CX-7        C5-2
 pub fn astra_get_cage_index(nic_index: u8) -> u8 {
-    ((nic_index / 2) * 2) + 1
+    match nic_index / 2 {
+        0 => 1,
+        1 => 3,
+        2 => 7,
+        3 => 5,
+        _ => panic!("invalid NIC index {nic_index}"), // or return Option/Result
+    }
 }
 
 /// Return the MPO index for a NIC index in Astra.

@@ -20,11 +20,12 @@ use std::net::IpAddr;
 use std::time::Duration;
 
 use ::carbide_utils::metrics::SharedMetricsHolder;
+use bmc_platform::PlatformError;
 use carbide_instrument::{
     DynamicLog, DynamicMessage, Event, Instrumentation, LabelValue, LogAt, MetricFamily, Outcome,
 };
+use libredfish::SystemPowerControl;
 use libredfish::model::task::TaskState;
-use libredfish::{RedfishError, SystemPowerControl};
 use model::firmware::FirmwareComponentType;
 use opentelemetry::StringValue;
 use opentelemetry::metrics::Meter;
@@ -390,9 +391,9 @@ impl From<SystemPowerControl> for PowerOperation {
 }
 
 impl PowerOperation {
-    /// Whether `RedfishError::UnnecessaryOperation` means this operation's
-    /// goal already held. libredfish maps every HTTP 409 onto that error: for
-    /// an operation that targets a power state a 409 means "already in the
+    /// Whether a BMC's HTTP 409 means this operation's goal already held. Both
+    /// backends report it as `PlatformError::Bmc` with status 409: for an
+    /// operation that targets a power state a 409 means "already in the
     /// requested state", which is success in all but name. Restarts and
     /// powercycles are transitions with no requested state to already be in
     /// -- a 409 is the BMC refusing the operation (a powercycle on a chassis
@@ -650,22 +651,22 @@ enum BfbPlatformPowerControlFinished {
 /// Wraps one preingestion Redfish power operation: the result is returned
 /// untouched, while one Event updates the counter and owns any terminal log.
 /// For operations that target a power state (`On`, `GracefulShutdown`,
-/// `ForceOff`), `RedfishError::UnnecessaryOperation` counts as `ok` (the
-/// requested state already held); for restarts, powercycles, and the BMC and
-/// chassis resets it counts as `error` -- there is no state to already be in,
-/// so a 409 is a refusal (see [`PowerOperation::treats_unnecessary_as_ok`]).
+/// `ForceOff`), a 409 counts as `ok` (the requested state already held); for
+/// restarts, powercycles, and the BMC and chassis resets it counts as `error`
+/// -- there is no state to already be in, so a 409 is a refusal (see
+/// [`PowerOperation::treats_unnecessary_as_ok`]).
 pub(crate) async fn instrument_power_op<T>(
     operation: PowerOperation,
-    call: impl Future<Output = Result<T, RedfishError>>,
+    call: impl Future<Output = Result<T, PlatformError>>,
     log: PowerControlLog,
     instrumentation: &Instrumentation,
-) -> Result<T, RedfishError> {
+) -> Result<T, PlatformError> {
     let result = call.await;
+    let unnecessary = matches!(result, Err(PlatformError::Bmc { status: 409, .. }));
+    let unsupported = matches!(result, Err(PlatformError::Unsupported));
     let outcome = match &result {
         Ok(_) => Outcome::Ok,
-        Err(RedfishError::UnnecessaryOperation) if operation.treats_unnecessary_as_ok() => {
-            Outcome::Ok
-        }
+        Err(_) if unnecessary && operation.treats_unnecessary_as_ok() => Outcome::Ok,
         Err(_) => Outcome::Error,
     };
     let error = result
@@ -679,7 +680,7 @@ pub(crate) async fn instrument_power_op<T>(
             bmc_ip_address,
             mut step,
         } => {
-            if step == PowerControlStep::CecChassisReset && error.contains("is not supported") {
+            if step == PowerControlStep::CecChassisReset && unsupported {
                 step = PowerControlStep::CecChassisResetUnsupported;
             }
             instrumentation.emit(PowerControlFinished {
@@ -703,16 +704,14 @@ pub(crate) async fn instrument_power_op<T>(
             error,
         }),
         PowerControlLog::RecoverySequence { bmc_ip_address } => {
-            let power_step = match (operation, &result) {
-                (PowerOperation::ForceOff, Err(RedfishError::UnnecessaryOperation)) => {
+            let power_step = match operation {
+                PowerOperation::ForceOff if unnecessary => {
                     PowerControlStep::RecoveryPowerOffNotNeeded
                 }
-                (PowerOperation::ForceOff, _) => PowerControlStep::RecoveryPowerOff,
-                (PowerOperation::BmcReset, _) => PowerControlStep::RecoveryBmcReset,
-                (PowerOperation::On, Err(RedfishError::UnnecessaryOperation)) => {
-                    PowerControlStep::RecoveryPowerOnNotNeeded
-                }
-                (PowerOperation::On, _) => PowerControlStep::RecoveryPowerOn,
+                PowerOperation::ForceOff => PowerControlStep::RecoveryPowerOff,
+                PowerOperation::BmcReset => PowerControlStep::RecoveryBmcReset,
+                PowerOperation::On if unnecessary => PowerControlStep::RecoveryPowerOnNotNeeded,
+                PowerOperation::On => PowerControlStep::RecoveryPowerOn,
                 _ => PowerControlStep::RecoveryPowerControl,
             };
             instrumentation.emit(PowerControlFinished {
@@ -1233,8 +1232,8 @@ mod tests {
         );
     }
 
-    /// `UnnecessaryOperation` is successful only for operations whose target
-    /// is a durable power state. Restarts, powercycles, and reset calls ask the
+    /// A 409 is successful only for operations whose target is a durable
+    /// power state. Restarts, powercycles, and reset calls ask the
     /// BMC to perform a transition, so the same HTTP 409 remains an error.
     #[test]
     fn power_operation_classifies_unnecessary_operation() {
@@ -1259,24 +1258,34 @@ mod tests {
     #[derive(Clone, Copy)]
     enum PowerCall {
         Ok,
-        Unnecessary,
-        NotSupported(&'static str),
+        Conflict,
+        Unsupported,
+        Failed(&'static str),
     }
 
     impl PowerCall {
-        fn result(self) -> Result<(), RedfishError> {
+        fn result(self) -> Result<(), PlatformError> {
             match self {
                 Self::Ok => Ok(()),
-                Self::Unnecessary => Err(RedfishError::UnnecessaryOperation),
-                Self::NotSupported(error) => Err(RedfishError::NotSupported(error.to_string())),
+                Self::Conflict => Err(PlatformError::Bmc {
+                    status: 409,
+                    message_id: None,
+                    message: "already off".to_string(),
+                }),
+                Self::Unsupported => Err(PlatformError::Unsupported),
+                Self::Failed(message) => Err(PlatformError::Bmc {
+                    status: 500,
+                    message_id: None,
+                    message: message.to_string(),
+                }),
             }
         }
 
         fn metric_outcome(self, operation: PowerOperation) -> Outcome {
             match self {
                 Self::Ok => Outcome::Ok,
-                Self::Unnecessary if operation.treats_unnecessary_as_ok() => Outcome::Ok,
-                Self::Unnecessary | Self::NotSupported(_) => Outcome::Error,
+                Self::Conflict if operation.treats_unnecessary_as_ok() => Outcome::Ok,
+                Self::Conflict | Self::Unsupported | Self::Failed(_) => Outcome::Error,
             }
         }
     }
@@ -1456,7 +1465,7 @@ mod tests {
                     scenario: "workflow failure",
                     input: PowerControlInput {
                         operation: PowerOperation::ForceOff,
-                        call: PowerCall::NotSupported("power control unavailable"),
+                        call: PowerCall::Failed("power control unavailable"),
                         log: PowerControlLog::Step {
                             bmc_ip_address,
                             step: PowerControlStep::PowerOff,
@@ -1465,7 +1474,7 @@ mod tests {
                     expect: expected_power_control(
                         true,
                         Some(
-                            "Level(Error)|preingestion_power_control_finished|Failed to power off|operation=force_off|outcome=error|bmc=10.0.0.5|dpu=-|host=-|step=power_off|attempt=-|max=-|post_install=-|error=BMC vendor does not support this operation: power control unavailable",
+                            "Level(Error)|preingestion_power_control_finished|Failed to power off|operation=force_off|outcome=error|bmc=10.0.0.5|dpu=-|host=-|step=power_off|attempt=-|max=-|post_install=-|error=BMC request failed with HTTP status 500: power control unavailable",
                         ),
                     ),
                 },
@@ -1473,7 +1482,7 @@ mod tests {
                     scenario: "already-off workflow failure still logs but counts as ok",
                     input: PowerControlInput {
                         operation: PowerOperation::ForceOff,
-                        call: PowerCall::Unnecessary,
+                        call: PowerCall::Conflict,
                         log: PowerControlLog::Step {
                             bmc_ip_address,
                             step: PowerControlStep::PowerOff,
@@ -1482,7 +1491,7 @@ mod tests {
                     expect: expected_power_control(
                         true,
                         Some(
-                            "Level(Error)|preingestion_power_control_finished|Failed to power off|operation=force_off|outcome=ok|bmc=10.0.0.5|dpu=-|host=-|step=power_off|attempt=-|max=-|post_install=-|error=UnnecessaryOperation such as trying to turn on a machine that is already on.",
+                            "Level(Error)|preingestion_power_control_finished|Failed to power off|operation=force_off|outcome=ok|bmc=10.0.0.5|dpu=-|host=-|step=power_off|attempt=-|max=-|post_install=-|error=BMC request failed with HTTP status 409: already off",
                         ),
                     ),
                 },
@@ -1490,13 +1499,13 @@ mod tests {
                     scenario: "already-off recovery step",
                     input: PowerControlInput {
                         operation: PowerOperation::ForceOff,
-                        call: PowerCall::Unnecessary,
+                        call: PowerCall::Conflict,
                         log: PowerControlLog::RecoverySequence { bmc_ip_address },
                     },
                     expect: expected_power_control(
                         true,
                         Some(
-                            "Level(Debug)|preingestion_power_control_finished|Power off not needed|operation=force_off|outcome=ok|bmc=10.0.0.5|dpu=-|host=-|step=recovery_power_off_not_needed|attempt=-|max=-|post_install=-|error=UnnecessaryOperation such as trying to turn on a machine that is already on.",
+                            "Level(Debug)|preingestion_power_control_finished|Power off not needed|operation=force_off|outcome=ok|bmc=10.0.0.5|dpu=-|host=-|step=recovery_power_off_not_needed|attempt=-|max=-|post_install=-|error=BMC request failed with HTTP status 409: already off",
                         ),
                     ),
                 },
@@ -1504,7 +1513,7 @@ mod tests {
                     scenario: "retryable initial BMC reset",
                     input: PowerControlInput {
                         operation: PowerOperation::BmcReset,
-                        call: PowerCall::NotSupported("reset unavailable"),
+                        call: PowerCall::Failed("reset unavailable"),
                         log: PowerControlLog::InitialBmcReset {
                             bmc_ip_address,
                             attempt: 1,
@@ -1514,7 +1523,7 @@ mod tests {
                     expect: expected_power_control(
                         true,
                         Some(
-                            "Level(Warn)|preingestion_initial_bmc_reset_finished|Initial BMC reset failed; will retry|operation=bmc_reset|outcome=error|bmc=10.0.0.5|dpu=-|host=-|step=-|attempt=1|max=3|post_install=-|error=BMC vendor does not support this operation: reset unavailable",
+                            "Level(Warn)|preingestion_initial_bmc_reset_finished|Initial BMC reset failed; will retry|operation=bmc_reset|outcome=error|bmc=10.0.0.5|dpu=-|host=-|step=-|attempt=1|max=3|post_install=-|error=BMC request failed with HTTP status 500: reset unavailable",
                         ),
                     ),
                 },
@@ -1522,7 +1531,7 @@ mod tests {
                     scenario: "final initial BMC reset attempt",
                     input: PowerControlInput {
                         operation: PowerOperation::BmcReset,
-                        call: PowerCall::NotSupported("reset unavailable"),
+                        call: PowerCall::Failed("reset unavailable"),
                         log: PowerControlLog::InitialBmcReset {
                             bmc_ip_address,
                             attempt: 3,
@@ -1532,7 +1541,7 @@ mod tests {
                     expect: expected_power_control(
                         true,
                         Some(
-                            "Level(Warn)|preingestion_initial_bmc_reset_finished|Initial BMC reset failed; proceeding with preingestion without it|operation=bmc_reset|outcome=error|bmc=10.0.0.5|dpu=-|host=-|step=-|attempt=3|max=3|post_install=-|error=BMC vendor does not support this operation: reset unavailable",
+                            "Level(Warn)|preingestion_initial_bmc_reset_finished|Initial BMC reset failed; proceeding with preingestion without it|operation=bmc_reset|outcome=error|bmc=10.0.0.5|dpu=-|host=-|step=-|attempt=3|max=3|post_install=-|error=BMC request failed with HTTP status 500: reset unavailable",
                         ),
                     ),
                 },
@@ -1540,7 +1549,7 @@ mod tests {
                     scenario: "unsupported CEC reset",
                     input: PowerControlInput {
                         operation: PowerOperation::ChassisReset,
-                        call: PowerCall::NotSupported("reset is not supported"),
+                        call: PowerCall::Unsupported,
                         log: PowerControlLog::Step {
                             bmc_ip_address,
                             step: PowerControlStep::CecChassisReset,
@@ -1549,7 +1558,7 @@ mod tests {
                     expect: expected_power_control(
                         true,
                         Some(
-                            "Level(Error)|preingestion_power_control_finished|Chassis reset is not supported by current CEC firmware; host power cycle required|operation=chassis_reset|outcome=error|bmc=10.0.0.5|dpu=-|host=-|step=cec_chassis_reset_unsupported|attempt=-|max=-|post_install=-|error=BMC vendor does not support this operation: reset is not supported",
+                            "Level(Error)|preingestion_power_control_finished|Chassis reset is not supported by current CEC firmware; host power cycle required|operation=chassis_reset|outcome=error|bmc=10.0.0.5|dpu=-|host=-|step=cec_chassis_reset_unsupported|attempt=-|max=-|post_install=-|error=operation is unsupported",
                         ),
                     ),
                 },
@@ -1557,7 +1566,7 @@ mod tests {
                     scenario: "BFB platform power failure",
                     input: PowerControlInput {
                         operation: PowerOperation::ForceOff,
-                        call: PowerCall::NotSupported("host power unavailable"),
+                        call: PowerCall::Failed("host power unavailable"),
                         log: PowerControlLog::BfbPlatformPowercycle {
                             dpu_bmc_ip_address: IpAddr::from([10, 0, 0, 6]),
                             host_bmc_ip_address: bmc_ip_address,
@@ -1567,7 +1576,7 @@ mod tests {
                     expect: expected_power_control(
                         true,
                         Some(
-                            "Level(Error)|preingestion_bfb_platform_power_control_finished|Failed to power off host during BFB power cycle; will retry|operation=force_off|outcome=error|bmc=-|dpu=10.0.0.6|host=10.0.0.5|step=-|attempt=-|max=-|post_install=true|error=BMC vendor does not support this operation: host power unavailable",
+                            "Level(Error)|preingestion_bfb_platform_power_control_finished|Failed to power off host during BFB power cycle; will retry|operation=force_off|outcome=error|bmc=-|dpu=10.0.0.6|host=10.0.0.5|step=-|attempt=-|max=-|post_install=true|error=BMC request failed with HTTP status 500: host power unavailable",
                         ),
                     ),
                 },
