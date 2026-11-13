@@ -30,6 +30,8 @@ type BatchRackFirmwareUpdateRequest struct {
 	Filter *RackFilter `json:"filter,omitempty"`
 	// Target firmware input serialized as a string. Its format is a contract between the caller and the component backend selected for the target. The REST API and Flow orchestration otherwise preserve this value. Flow only unwraps the optional per-tray mapping described below before passing the value to the selected component manager.  Flow's built-in firmware rule includes Compute and NVSwitch stages. Do not use a compute-specific host-catalog component map as shared input for other backends. For mixed backends, use the per-tray mapping below with values appropriate to each selected backend.  For RMS-backed rack-scale firmware updates, use the complete SOT firmware-object JSON document, not a release version such as `24.11.0`. A SOT document is an object with `ProductName` and `Milestones` at the top level. Each milestone contains `Name`, `State`, and `BoardSKUs`; each board SKU contains `Name`, `Type`, and `Components`. Component groups contain `Software` and `Firmware` entries describing `Component`, `Version`, `Type`, `FileNames`, artifact `Locations`, and optional `SubComponents`. Obtain the complete document from the SOT release process; the abbreviated examples are not executable input. Supply a complete document covering all component types selected by the operation rule.  The string can contain either one shared firmware input for all selected trays or a JSON mapping from tray type (`compute`, `nvswitch`, `powershelf`) to firmware input. Each mapping value must satisfy its selected backend's contract. Flow forwards object values as raw JSON and unquotes string values. These exact lowercase top-level keys are reserved for per-tray mappings; a shared JSON object must not contain any of them. A missing tray type in the mapping skips that component type. A non-empty, non-layered value is forwarded unchanged. For rack-scale RMS components, an omitted, null, empty, or whitespace-only value uses the owning rack profile's configured firmware object. Resolution or fetch failures are reported by the asynchronous task.
 	Version NullableString `json:"version,omitempty"`
+	// Optional firmware sub-parts selected within the operation rule, resolved inventory and per-tray version scope. Names are matched separately for each tray type; each receives only its applicable subset. A type with no matching sub-parts skips all its rule steps, including power actions. For example, bios selects Compute and Switch BIOS and skips PowerShelf; nvos selects only Switch; dpu selects only Compute; pmc selects only PowerShelf. Each requested name must match a firmware action in this scope. Unknown names and selections with no matching devices are rejected before dispatch. Selected backend options are also checked before dispatch; a backend restriction is an error, not a reason to skip otherwise applicable devices. Hardware or backend execution errors can still cause partial completion after dispatch.  Supported names by tray type:   - compute: bmc, bios, cec, nic, cpld_mb, cpld_pdb, hgx_bmc,     combined_bmc_uefi, gpu, cx7, dpu   - switch: bmc, cpld, bios, nvos   - powershelf: pmc, psu  Omitted or empty keeps backend defaults for the selected rule: compute and switch use their default firmware selection, and nico PowerShelf defaults to PMC. DPU reprovisioning requires an explicit dpu; dpu-only Compute selection skips compute-tray firmware and uses the site-configured DPU version. The opt-in nicolegacy compute manager rejects non-DPU compute sub-target selections before task creation. A version may be omitted to use configured firmware defaults for rack-scale RMS components.
+	Targets []string `json:"targets,omitempty"`
 	// Optional, write-only authentication data for firmware downloads. Not supported for DPU-only updates or by the legacy NICo compute firmware controller.
 	AuthenticationData NullableFirmwareAuthenticationData `json:"authenticationData,omitempty"`
 	// Optional Operation Rule UUID. When set, pins every task spawned by this batch to the named rule and overrides Flow's default rule resolution.
@@ -165,6 +167,38 @@ func (o *BatchRackFirmwareUpdateRequest) SetVersionNil() {
 // UnsetVersion ensures that no value is present for Version, not even an explicit nil
 func (o *BatchRackFirmwareUpdateRequest) UnsetVersion() {
 	o.Version.Unset()
+}
+
+// GetTargets returns the Targets field value if set, zero value otherwise.
+func (o *BatchRackFirmwareUpdateRequest) GetTargets() []string {
+	if o == nil || IsNil(o.Targets) {
+		var ret []string
+		return ret
+	}
+	return o.Targets
+}
+
+// GetTargetsOk returns a tuple with the Targets field value if set, nil otherwise
+// and a boolean to check if the value has been set.
+func (o *BatchRackFirmwareUpdateRequest) GetTargetsOk() ([]string, bool) {
+	if o == nil || IsNil(o.Targets) {
+		return nil, false
+	}
+	return o.Targets, true
+}
+
+// HasTargets returns a boolean if a field has been set.
+func (o *BatchRackFirmwareUpdateRequest) HasTargets() bool {
+	if o != nil && !IsNil(o.Targets) {
+		return true
+	}
+
+	return false
+}
+
+// SetTargets gets a reference to the given []string and assigns it to the Targets field.
+func (o *BatchRackFirmwareUpdateRequest) SetTargets(v []string) {
+	o.Targets = v
 }
 
 // GetAuthenticationData returns the AuthenticationData field value if set, zero value otherwise (both if not set or set to explicit null).
@@ -322,6 +356,9 @@ func (o BatchRackFirmwareUpdateRequest) ToMap() (map[string]interface{}, error) 
 	}
 	if o.Version.IsSet() {
 		toSerialize["version"] = o.Version.Get()
+	}
+	if !IsNil(o.Targets) {
+		toSerialize["targets"] = o.Targets
 	}
 	if o.AuthenticationData.IsSet() {
 		toSerialize["authenticationData"] = o.AuthenticationData.Get()

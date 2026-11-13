@@ -8,6 +8,7 @@ import (
 
 	"go.temporal.io/sdk/workflow"
 
+	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/firmwareplan"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/operationrules"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/operations"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/task"
@@ -93,6 +94,17 @@ func ExecutionTimeout(info *task.ExecutionInfo, operationInfo any, fallback time
 	targets := buildTargets(info)
 	if firmware, ok := operationInfo.(*operations.FirmwareControlTaskInfo); ok {
 		targets = selectFirmwareTargets(targets, firmware.TargetVersion)
+		if len(firmware.SubTargets) > 0 {
+			plan, err := firmwareplan.Build(*info, *firmware)
+			if err != nil {
+				return fallback
+			}
+			for typ := range targets {
+				if _, selected := plan[typ]; !selected {
+					delete(targets, typ)
+				}
+			}
+		}
 	}
 	hasFirmware := false
 	stages := make(map[int]time.Duration)

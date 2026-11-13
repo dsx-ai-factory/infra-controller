@@ -29212,6 +29212,56 @@ components:
             whitespace-only value uses the owning rack profile's configured
             firmware object. Resolution or fetch failures are reported by the
             asynchronous task.
+        targets:
+          type: array
+          items:
+            type: string
+            minLength: 1
+            enum:
+              - bmc
+              - cpld
+              - bios
+              - nvos
+              - pmc
+              - psu
+              - dpu
+              - cec
+              - nic
+              - cpld_mb
+              - cpld_pdb
+              - hgx_bmc
+              - combined_bmc_uefi
+              - gpu
+              - cx7
+          description: |-
+            Optional firmware sub-parts selected within the operation rule,
+            resolved inventory and per-tray version scope. Names are matched
+            separately for each tray type; each receives only its applicable
+            subset. A type with no matching sub-parts skips all its rule steps,
+            including power actions. For example, bios selects Compute and
+            Switch BIOS and skips PowerShelf; nvos selects only Switch;
+            dpu selects only Compute; pmc selects only PowerShelf.
+            Each requested name must match a firmware action in this scope.
+            Unknown names and selections with no matching devices are rejected
+            before dispatch. Selected backend options are also checked before
+            dispatch; a backend restriction is an error, not a reason to skip
+            otherwise applicable devices. Hardware or backend execution errors
+            can still cause partial completion after dispatch.
+
+            Supported names by tray type:
+              - compute: bmc, bios, cec, nic, cpld_mb, cpld_pdb, hgx_bmc,
+                combined_bmc_uefi, gpu, cx7, dpu
+              - switch: bmc, cpld, bios, nvos
+              - powershelf: pmc, psu
+
+            Omitted or empty keeps backend defaults for the selected rule:
+            compute and switch use their default firmware selection, and nico
+            PowerShelf defaults to PMC. DPU reprovisioning requires an explicit
+            dpu; dpu-only Compute selection skips compute-tray firmware and uses
+            the site-configured DPU version. The opt-in nicolegacy compute
+            manager rejects non-DPU compute sub-target selections before task
+            creation. A version may be omitted to use configured firmware
+            defaults for rack-scale RMS components.
         authenticationData:
           $ref: '#/components/schemas/FirmwareAuthenticationData'
           writeOnly: true
@@ -29243,6 +29293,12 @@ components:
             on the owning rack for rack-scoped components) are reported as not
             ready by their persisted status. Intended for operator-supervised
             maintenance.
+      examples:
+        - siteId: 550e8400-e29b-41d4-a716-446655440000
+          filter:
+            names: [rack-1]
+          ruleId: 64d2028c-ae87-4069-a624-66089d957ef9
+          targets: [bmc]
     BringUpRackRequest:
       title: BringUpRackRequest
       type: object
@@ -30473,31 +30529,43 @@ components:
               - pmc
               - psu
               - dpu
+              - cec
+              - nic
+              - cpld_mb
+              - cpld_pdb
+              - hgx_bmc
+              - combined_bmc_uefi
+              - gpu
+              - cx7
           description: |-
-            Optional subset of firmware targets to update within each matched tray.
-            Names are lowercase and select sub-parts of the tray
-            (BMC, BIOS, etc.). The accepted set per tray type comes from
-            the Flow service's NICo proto bindings (which mirror Core's
-            per-tray-type enums in `NICo-core/crates/rpc/proto/forge.proto`),
-            so the supported values track Core as new sub-parts are added:
-              - switch trays (NvSwitchComponent): currently bmc, cpld, bios, nvos
-              - powershelf trays (PowerShelfComponent): currently pmc, psu
-              - compute trays (ComputeTrayComponent): currently bmc, bios
+            Optional firmware sub-parts selected within the operation rule,
+            resolved inventory and per-tray version scope. Names are matched
+            separately for each tray type; each receives only its applicable
+            subset. A type with no matching sub-parts skips all its rule steps,
+            including power actions. For example, bios selects Compute and
+            Switch BIOS and skips PowerShelf; nvos selects only Switch;
+            dpu selects only Compute; pmc selects only PowerShelf.
+            Each requested name must match a firmware action in this scope.
+            Unknown names and selections with no matching devices are rejected
+            before dispatch. Selected backend options are also checked before
+            dispatch; a backend restriction is an error, not a reason to skip
+            otherwise applicable devices. Hardware or backend execution errors
+            can still cause partial completion after dispatch.
 
-            The default `nico` compute component manager forwards BMC and BIOS
-            selections through `UpdateComponentFirmware`. The opt-in
-            `nicolegacy` manager schedules the whole configured host firmware
-            bundle; it does not honor BMC or BIOS sub-target selection.
-            Omitted or empty means "update everything in the bundle"
-            (the historical default) for compute-tray-internal targets.
-            Unknown names are rejected.
-            The special target `dpu`, valid only on compute trays,
-            requests DPU reprovisioning on each matched host. Unlike
-            the other targets, `dpu` is NOT covered by the
-            "omitted/empty means everything" default — it must be
-            listed explicitly. `version` is ignored on the `dpu`
-            branch; the target firmware version comes from site
-            configuration.
+            Supported names by tray type:
+              - compute: bmc, bios, cec, nic, cpld_mb, cpld_pdb, hgx_bmc,
+                combined_bmc_uefi, gpu, cx7, dpu
+              - switch: bmc, cpld, bios, nvos
+              - powershelf: pmc, psu
+
+            Omitted or empty keeps backend defaults for the selected rule:
+            compute and switch use their default firmware selection, and nico
+            PowerShelf defaults to PMC. DPU reprovisioning requires an explicit
+            dpu; dpu-only Compute selection skips compute-tray firmware and uses
+            the site-configured DPU version. The opt-in nicolegacy compute
+            manager rejects non-DPU compute sub-target selections before task
+            creation. A version may be omitted to use configured firmware
+            defaults for rack-scale RMS components.
         authenticationData:
           $ref: '#/components/schemas/FirmwareAuthenticationData'
           writeOnly: true
@@ -30719,31 +30787,43 @@ components:
               - pmc
               - psu
               - dpu
+              - cec
+              - nic
+              - cpld_mb
+              - cpld_pdb
+              - hgx_bmc
+              - combined_bmc_uefi
+              - gpu
+              - cx7
           description: |-
-            Optional subset of firmware targets to update within the targeted tray.
-            Names are lowercase and select sub-parts of the tray
-            (BMC, BIOS, etc.). The accepted set per tray type comes from
-            the Flow service's NICo proto bindings (which mirror Core's
-            per-tray-type enums in `NICo-core/crates/rpc/proto/forge.proto`),
-            so the supported values track Core as new sub-parts are added:
-              - switch trays (NvSwitchComponent): currently bmc, cpld, bios, nvos
-              - powershelf trays (PowerShelfComponent): currently pmc, psu
-              - compute trays (ComputeTrayComponent): currently bmc, bios
+            Optional firmware sub-parts selected within the operation rule,
+            resolved inventory and per-tray version scope. Names are matched
+            separately for each tray type; each receives only its applicable
+            subset. A type with no matching sub-parts skips all its rule steps,
+            including power actions. For example, bios selects Compute and
+            Switch BIOS and skips PowerShelf; nvos selects only Switch;
+            dpu selects only Compute; pmc selects only PowerShelf.
+            Each requested name must match a firmware action in this scope.
+            Unknown names and selections with no matching devices are rejected
+            before dispatch. Selected backend options are also checked before
+            dispatch; a backend restriction is an error, not a reason to skip
+            otherwise applicable devices. Hardware or backend execution errors
+            can still cause partial completion after dispatch.
 
-            The default `nico` compute component manager forwards BMC and BIOS
-            selections through `UpdateComponentFirmware`. The opt-in
-            `nicolegacy` manager schedules the whole configured host firmware
-            bundle; it does not honor BMC or BIOS sub-target selection.
-            Omitted or empty means "update everything in the bundle"
-            (the historical default) for compute-tray-internal targets.
-            Unknown names are rejected.
-            The special target `dpu`, valid only on compute trays,
-            requests DPU reprovisioning on the matched host. Unlike
-            the other targets, `dpu` is NOT covered by the
-            "omitted/empty means everything" default — it must be
-            listed explicitly. `version` is ignored on the `dpu`
-            branch; the target firmware version comes from site
-            configuration.
+            Supported names by tray type:
+              - compute: bmc, bios, cec, nic, cpld_mb, cpld_pdb, hgx_bmc,
+                combined_bmc_uefi, gpu, cx7, dpu
+              - switch: bmc, cpld, bios, nvos
+              - powershelf: pmc, psu
+
+            Omitted or empty keeps backend defaults for the selected rule:
+            compute and switch use their default firmware selection, and nico
+            PowerShelf defaults to PMC. DPU reprovisioning requires an explicit
+            dpu; dpu-only Compute selection skips compute-tray firmware and uses
+            the site-configured DPU version. The opt-in nicolegacy compute
+            manager rejects non-DPU compute sub-target selections before task
+            creation. A version may be omitted to use configured firmware
+            defaults for rack-scale RMS components.
         authenticationData:
           $ref: '#/components/schemas/FirmwareAuthenticationData'
           writeOnly: true

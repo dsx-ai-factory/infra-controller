@@ -86,11 +86,12 @@ func TestFlowMutationHelpersProxyRequests(t *testing.T) {
 	version := "1.2.3"
 
 	cases := []struct {
-		name           string
-		execute        func(context.Context, tclient.Client) (*flowv1.SubmitTaskResponse, *cutil.APIError)
-		wantFullMethod string
-		wantRequest    proto.Message
-		wantWorkflowID string
+		name                 string
+		execute              func(context.Context, tclient.Client) (*flowv1.SubmitTaskResponse, *cutil.APIError)
+		wantFullMethod       string
+		wantRequest          proto.Message
+		wantWorkflowID       string
+		wantWorkflowIDPrefix string
 	}{
 		{
 			name: "power on",
@@ -183,8 +184,8 @@ func TestFlowMutationHelpersProxyRequests(t *testing.T) {
 			execute: func(ctx context.Context, stc tclient.Client) (*flowv1.SubmitTaskResponse, *cutil.APIError) {
 				return ExecuteFirmwareUpdateWorkflow(ctx, zerolog.Nop(), stc, mutationTargetSpec(rackID), &version, []string{"bmc", "nvos"}, nil, siteID, nil, false, true, workflowID, entityName)
 			},
-			wantFullMethod: flowv1.Flow_UpgradeFirmware_FullMethodName,
-			wantWorkflowID: workflowID + "-override-version-check",
+			wantFullMethod:       flowv1.Flow_UpgradeFirmware_FullMethodName,
+			wantWorkflowIDPrefix: workflowID + "-override-version-check-targets-",
 			wantRequest: &flowv1.UpgradeFirmwareRequest{
 				TargetSpec:           mutationTargetSpec(rackID),
 				TargetVersion:        &version,
@@ -213,7 +214,12 @@ func TestFlowMutationHelpersProxyRequests(t *testing.T) {
 				if wantWorkflowID == "" {
 					wantWorkflowID = workflowID
 				}
-				assert.Equal(t, wantWorkflowID, call.options.ID)
+				if tc.wantWorkflowIDPrefix != "" {
+					assert.True(t, strings.HasPrefix(call.options.ID, tc.wantWorkflowIDPrefix))
+					assert.NotEqual(t, tc.wantWorkflowIDPrefix, call.options.ID)
+				} else {
+					assert.Equal(t, wantWorkflowID, call.options.ID)
+				}
 				assert.Equal(t, temporalEnums.WORKFLOW_ID_CONFLICT_POLICY_USE_EXISTING, call.options.WorkflowIDConflictPolicy)
 			})
 
@@ -280,4 +286,54 @@ func TestExecutePowerControlWorkflowRejectsUnknownState(t *testing.T) {
 	assert.Equal(t, http.StatusBadRequest, apiErr.Code)
 	assert.Equal(t, "Invalid power control state: hibernate", apiErr.Message)
 	temporalClient.AssertNotCalled(t, "ExecuteWorkflow", mock.Anything, mock.Anything, mock.Anything, mock.Anything)
+}
+
+func TestExecuteFirmwareUpdateWorkflow(t *testing.T) {
+	const (
+		rackID     = "6f1b7c4e-9c2a-4d1e-8f3b-2a5c7d9e1b04"
+		siteID     = "58fe7a29-58b7-4d61-9b64-e355eaff6024"
+		workflowID = "rack-firmware-1"
+	)
+	cases := []struct {
+		name          string
+		firstTargets  []string
+		secondTargets []string
+		firstVersion  string
+		secondVersion string
+		wantSameID    bool
+	}{
+		{name: "omitted and empty keep existing default identity", secondTargets: []string{}, wantSameID: true},
+		{name: "BMC-only does not reuse default submission", secondTargets: []string{"bmc"}},
+		{name: "DPU-only does not reuse BMC-only submission", firstTargets: []string{"bmc"}, secondTargets: []string{"dpu"}},
+		{name: "identical explicit requests still coalesce", firstTargets: []string{"bmc"}, secondTargets: []string{"bmc"}, wantSameID: true},
+		{name: "different firmware input does not reuse filtered submission", firstTargets: []string{"bmc"}, secondTargets: []string{"bmc"}, firstVersion: "firmware-object-a", secondVersion: "firmware-object-b"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ids := make([]string, 0, 2)
+			for _, request := range []struct {
+				targets []string
+				version string
+			}{
+				{tc.firstTargets, tc.firstVersion},
+				{tc.secondTargets, tc.secondVersion},
+			} {
+				temporalClient, call := newMutationProxyClient(t, &flowv1.SubmitTaskResponse{})
+				_, apiErr := ExecuteFirmwareUpdateWorkflow(context.Background(), zerolog.Nop(), temporalClient,
+					mutationTargetSpec(rackID), &request.version, request.targets, nil, siteID, nil, false, false,
+					workflowID, "rack r1")
+				require.Nil(t, apiErr)
+				assert.Equal(t, temporalEnums.WORKFLOW_ID_CONFLICT_POLICY_USE_EXISTING, call.options.WorkflowIDConflictPolicy)
+				ids = append(ids, call.options.ID)
+			}
+			if tc.wantSameID {
+				assert.Equal(t, ids[0], ids[1])
+			} else {
+				assert.NotEqual(t, ids[0], ids[1])
+			}
+			if len(tc.firstTargets) == 0 {
+				assert.Equal(t, workflowID, ids[0])
+			}
+		})
+	}
 }

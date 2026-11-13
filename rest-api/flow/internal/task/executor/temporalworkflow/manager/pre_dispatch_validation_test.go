@@ -240,3 +240,79 @@ func newPreflightCapabilityRegistry(
 
 	return registry
 }
+
+func TestValidateFirmwareSelection(t *testing.T) {
+	compute, sw, ps := devicetypes.ComponentTypeCompute, devicetypes.ComponentTypeNVSwitch, devicetypes.ComponentTypePowerShelf
+	cases := []struct {
+		name          string
+		targets       []string
+		rejectCompute bool
+		want          []devicetypes.ComponentType
+		wantSubsets   map[devicetypes.ComponentType][]string
+		wantError     bool
+	}{
+		{name: "mixed names validate only each tray subset", targets: []string{"bmc", "nvos"}, want: []devicetypes.ComponentType{compute, sw}, wantSubsets: map[devicetypes.ComponentType][]string{compute: {"bmc"}, sw: {"bmc", "nvos"}}},
+
+		{name: "bios skips unconfigured powershelf", targets: []string{"bios"}, want: []devicetypes.ComponentType{compute, sw}},
+		{name: "nvos skips compute validator", targets: []string{"nvos"}, rejectCompute: true, want: []devicetypes.ComponentType{sw}},
+		{name: "applicable backend rejection is not treated as a skip", targets: []string{"bios"}, rejectCompute: true, wantError: true},
+		{name: "unknown name rejects before backend validation", targets: []string{"bios", "typo"}, wantError: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var calls []devicetypes.ComponentType
+			var specs []componentmanager.FactorySpec
+			implementations := map[devicetypes.ComponentType]string{}
+			for _, typ := range []devicetypes.ComponentType{compute, sw} {
+				descriptor := cmcatalog.Descriptor{DescriptorIdentity: cmcatalog.DescriptorIdentity{Type: typ, Implementation: "selection-test"}, Capabilities: capability.CapabilitySet{capability.CapabilityFirmwareControl, capability.CapabilityFirmwareStatus}}
+				specs = append(specs, componentmanager.FactorySpec{Descriptor: descriptor, Factory: func(*providerapi.ProviderRegistry) (componentmanager.ComponentManager, error) {
+					return selectionValidationManager{descriptor: descriptor, validate: func(info operations.FirmwareControlTaskInfo) error {
+						calls = append(calls, typ)
+						expected := tc.targets
+						if tc.wantSubsets != nil {
+							expected = tc.wantSubsets[typ]
+						}
+						require.Equal(t, expected, info.SubTargets)
+						if typ == compute && tc.rejectCompute {
+							return errors.New("unsupported compute firmware option")
+						}
+						return nil
+					}}, nil
+				}})
+				implementations[typ] = "selection-test"
+			}
+			registry, err := componentmanager.NewRegistry(specs, cmconfig.Config{ComponentManagers: implementations}, providerapi.NewProviderRegistry())
+			require.NoError(t, err)
+			info := firmwareControlExecutionInfo(t)
+			data, err := json.Marshal(operations.FirmwareControlTaskInfo{Operation: operations.FirmwareOperationUpgrade, SubTargets: tc.targets})
+			require.NoError(t, err)
+			info.OperationInfo = data
+			for _, typ := range []devicetypes.ComponentType{sw, ps} {
+				info.Components = append(info.Components, task.WorkflowComponent{Type: typ, ComponentID: "device"})
+				info.RuleDefinition.Steps = append(info.RuleDefinition.Steps, operationrules.SequenceStep{ComponentType: typ, MainOperation: operationrules.ActionConfig{Name: operationrules.ActionFirmwareControl}})
+			}
+			manager := &Manager{conf: Config{ComponentManagerRegistry: registry}}
+			err = manager.Validate(&task.ExecutionRequest{Info: info, Async: true})
+			if tc.wantError {
+				require.Error(t, err)
+			} else {
+				require.NoError(t, err)
+				require.Equal(t, tc.want, calls)
+			}
+			if tc.name == "unknown name rejects before backend validation" {
+				require.Empty(t, calls)
+			}
+			require.Len(t, info.RuleDefinition.Steps, 3)
+		})
+	}
+}
+
+type selectionValidationManager struct {
+	descriptor cmcatalog.Descriptor
+	validate   func(operations.FirmwareControlTaskInfo) error
+}
+
+func (m selectionValidationManager) Descriptor() cmcatalog.Descriptor { return m.descriptor }
+func (m selectionValidationManager) ValidateFirmwareControl(info operations.FirmwareControlTaskInfo) error {
+	return m.validate(info)
+}
