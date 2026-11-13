@@ -15,8 +15,10 @@
  * limitations under the License.
  */
 
+use std::time::SystemTime;
+
 use bmc_drivers::CatalogError;
-use bmc_platform::{BmcControl, DriverOutcome, PlatformError};
+use bmc_platform::{BmcControl, DriverOutcome, PlatformError, TimeStatus};
 use bmc_runtime::BoundDriver;
 use carbide_redfish::nv_redfish::RedfishBmc;
 use libredfish::{EnabledDisabled, Redfish};
@@ -63,6 +65,49 @@ impl BackendBmcControl<'_> {
                 Ok(DriverOutcome::complete())
             }
             Self::Drivers(bmc_control) => bmc_control.reset_to_factory_defaults().await,
+        }
+    }
+
+    /// See [`BmcControl::set_ntp_servers`].
+    pub async fn set_ntp_servers(
+        &self,
+        servers: &[String],
+    ) -> Result<DriverOutcome, PlatformError> {
+        match self {
+            Self::Libredfish(client) => {
+                client
+                    .set_ntp_servers(servers)
+                    .await
+                    .map_err(platform_error)?;
+                Ok(DriverOutcome::complete())
+            }
+            Self::Drivers(bmc_control) => bmc_control.set_ntp_servers(servers).await,
+        }
+    }
+
+    /// See [`BmcControl::set_utc_timezone`].
+    pub async fn set_utc_timezone(&self) -> Result<DriverOutcome, PlatformError> {
+        match self {
+            Self::Libredfish(client) => {
+                client.set_utc_timezone().await.map_err(platform_error)?;
+                Ok(DriverOutcome::complete())
+            }
+            Self::Drivers(bmc_control) => bmc_control.set_utc_timezone().await,
+        }
+    }
+
+    /// See [`BmcControl::time_status`]. Under libredfish only `now` is read;
+    /// the other fields keep their defaults.
+    pub async fn time_status(&self) -> Result<TimeStatus, PlatformError> {
+        match self {
+            Self::Libredfish(client) => {
+                let manager = client.get_manager().await.map_err(platform_error)?;
+                Ok(TimeStatus {
+                    now: manager.date_time.map(SystemTime::from),
+                    ..TimeStatus::default()
+                })
+            }
+            Self::Drivers(bmc_control) => bmc_control.time_status().await,
         }
     }
 

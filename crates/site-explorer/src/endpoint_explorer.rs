@@ -57,12 +57,16 @@ pub trait EndpointExplorer: Send + Sync + 'static {
 /// don't route through the explorer.
 #[async_trait::async_trait]
 pub trait AuthenticatedBmc: Send + Sync + 'static {
-    // redfish_reset_bmc issues a BMC reset through redfish.
+    /// Issues a BMC reset through Redfish. `report` selects the drivers as for
+    /// [`Self::redfish_get_power_state`]. A `reset_type` is sent as given; without
+    /// one the platform's default reset is used, which the drivers backend knows
+    /// only for a BMC `report` identifies and otherwise leaves to the BMC.
     async fn redfish_reset_bmc(
         &self,
         address: SocketAddr,
         interface: &MachineInterfaceSnapshot,
-        reset_type: Option<libredfish::ManagerResetType>,
+        report: Option<&EndpointExplorationReport>,
+        reset_type: Option<ResetType>,
     ) -> Result<(), EndpointExplorationError>;
 
     // ipmitool_reset_bmc issues a cold BMC reset through ipmitool.
