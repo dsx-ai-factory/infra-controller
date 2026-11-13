@@ -1664,6 +1664,12 @@ async fn completed_burn_reboot_recovery(pool: sqlx::PgPool) {
     let mut metrics = MachineMetrics::default();
     let mut pending_db_writes = DbWriteBatch::new();
     let mut ctx = StateHandlerContext {
+        deadline: tokio::time::Instant::now()
+            + services
+                .site_config
+                .machine_state_controller
+                .controller
+                .max_object_handling_time,
         services: &mut services,
         metrics: &mut metrics,
         pending_db_writes: &mut pending_db_writes,
@@ -1744,6 +1750,12 @@ async fn completed_burn_reboot_recovery(pool: sqlx::PgPool) {
     let mut recovery_metrics = MachineMetrics::default();
     let mut recovery_writes = DbWriteBatch::new();
     let mut recovery_ctx = StateHandlerContext {
+        deadline: tokio::time::Instant::now()
+            + recovery_services
+                .site_config
+                .machine_state_controller
+                .controller
+                .max_object_handling_time,
         services: &mut recovery_services,
         metrics: &mut recovery_metrics,
         pending_db_writes: &mut recovery_writes,
@@ -1887,6 +1899,12 @@ async fn completed_burn_reboot_recovery(pool: sqlx::PgPool) {
     let mut metrics = MachineMetrics::default();
     let mut writes = DbWriteBatch::new();
     let mut ctx = StateHandlerContext {
+        deadline: tokio::time::Instant::now()
+            + services
+                .site_config
+                .machine_state_controller
+                .controller
+                .max_object_handling_time,
         services: &mut services,
         metrics: &mut metrics,
         pending_db_writes: &mut writes,
@@ -2986,6 +3004,12 @@ async fn activation_timeout_keeps_the_committed_attempt_without_accepting_a_rebo
     let mut metrics = MachineMetrics::default();
     let mut pending_db_writes = DbWriteBatch::new();
     let mut ctx = StateHandlerContext {
+        deadline: tokio::time::Instant::now()
+            + services
+                .site_config
+                .machine_state_controller
+                .controller
+                .max_object_handling_time,
         services: &mut services,
         metrics: &mut metrics,
         pending_db_writes: &mut pending_db_writes,
@@ -3464,6 +3488,12 @@ async fn firmware_activation_preserves_the_ipmi_route_and_committed_request_time
     let mut metrics = MachineMetrics::default();
     let mut writes = DbWriteBatch::new();
     let mut ctx = StateHandlerContext {
+        deadline: tokio::time::Instant::now()
+            + services
+                .site_config
+                .machine_state_controller
+                .controller
+                .max_object_handling_time,
         services: &mut services,
         metrics: &mut metrics,
         pending_db_writes: &mut writes,

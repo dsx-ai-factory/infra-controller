@@ -22,12 +22,14 @@ eyre = { workspace = true }
 reqwest = { workspace = true, features = ["json"] }
 serde = { features = ["derive"], workspace = true }
 serde_json = { workspace = true }
+tokio = { workspace = true }
 tracing = { workspace = true }
 
 [dev-dependencies]
 carbide-instrument = { path = "../instrument", features = ["test-support"] }
 carbide-secrets = { path = "../secrets", features = ["test-support"] }
 carbide-test-support = { path = "../test-support" }
+tempfile = { workspace = true }
 
 [lints.clippy]
 undocumented_unsafe_blocks = "deny"

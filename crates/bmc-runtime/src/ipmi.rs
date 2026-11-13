@@ -29,11 +29,13 @@ use carbide_secrets::credentials::CredentialKey;
 /// `carbide-ipmi` retains responsibility for reading the credential identified
 /// by `credential_key`; neither the secret nor a secret-bearing lease is stored
 /// by this adapter. `ipmitool` failures carry no structure NICo can classify,
-/// so every failure is logged with its cause and reported as unreachable.
+/// so failures are logged with their cause and reported as unreachable. A
+/// single-attempt preparation failure also preserves the known non-send.
 pub struct EndpointIpmiOps {
     tool: Arc<dyn IPMITool>,
     address: SocketAddr,
     credential_key: CredentialKey,
+    single_attempt: bool,
 }
 
 impl EndpointIpmiOps {
@@ -47,7 +49,14 @@ impl EndpointIpmiOps {
             tool,
             address,
             credential_key,
+            single_attempt: false,
         }
+    }
+
+    /// Give a durable controller ownership of chassis reset retries.
+    pub(crate) fn without_restart_retries(mut self) -> Self {
+        self.single_attempt = true;
+        self
     }
 
     /// Logs why `operation` failed, which `Unreachable` cannot carry. The
@@ -74,6 +83,20 @@ impl IpmiOps for EndpointIpmiOps {
     }
 
     async fn chassis_power_reset(&self) -> Result<(), PlatformError> {
+        if self.single_attempt {
+            return self
+                .tool
+                .restart_once(self.address, &self.credential_key)
+                .await
+                .map_err(|error| match error {
+                    carbide_ipmi::RestartError::NotSent(error) => PlatformError::NotSent {
+                        source: Box::new(self.unreachable("chassis_power_reset", &error)),
+                    },
+                    carbide_ipmi::RestartError::Uncertain(error) => {
+                        self.unreachable("chassis_power_reset", &error)
+                    }
+                });
+        }
         self.tool
             .restart(self.address, false, &self.credential_key)
             .await

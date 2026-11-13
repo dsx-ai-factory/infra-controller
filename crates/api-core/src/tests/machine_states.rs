@@ -280,6 +280,12 @@ async fn rejected_machine_network_config_stops_before_transition(pool: sqlx::PgP
         let mut metrics = MachineMetrics::default();
         let mut pending_db_writes = DbWriteBatch::new();
         let mut ctx = StateHandlerContext {
+            deadline: tokio::time::Instant::now()
+                + services
+                    .site_config
+                    .machine_state_controller
+                    .controller
+                    .max_object_handling_time,
             services: &mut services,
             metrics: &mut metrics,
             pending_db_writes: &mut pending_db_writes,
@@ -382,6 +388,12 @@ async fn rejected_dpa_network_config_rolls_back_before_transition(pool: sqlx::Pg
         let mut metrics = MachineMetrics::default();
         let mut pending_db_writes = DbWriteBatch::new();
         let mut ctx = StateHandlerContext {
+            deadline: tokio::time::Instant::now()
+                + services
+                    .site_config
+                    .machine_state_controller
+                    .controller
+                    .max_object_handling_time,
             services: &mut services,
             metrics: &mut metrics,
             pending_db_writes: &mut pending_db_writes,
@@ -3225,7 +3237,7 @@ async fn create_zero_dpu_test_env(pool: sqlx::PgPool) -> TestEnv {
     create_zero_dpu_test_env_with_overrides(pool, TestEnvOverrides::default()).await
 }
 
-async fn create_zero_dpu_test_env_with_overrides(
+pub(in crate::tests) async fn create_zero_dpu_test_env_with_overrides(
     pool: sqlx::PgPool,
     mut overrides: TestEnvOverrides,
 ) -> TestEnv {

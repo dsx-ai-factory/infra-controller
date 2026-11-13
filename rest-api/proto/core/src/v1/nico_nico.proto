@@ -3808,6 +3808,39 @@ message InstancePowerRequest {
   common.InstanceId instance_id = 5;
 }
 
+// Ordinary reboots return after the BMC call by default. With
+// machine_state_controller.instance_reboot_queue_enabled=true, this acknowledges a
+// saved request, not BMC acceptance or OS boot completion. The machine controller
+// sends queued reboots during Assigned/Ready reconciliation. Custom-PXE requests in
+// Ready use the existing boot-order flow; before Ready they remain synchronous
+// and do not queue an additional ordinary reboot. In either mode, approving a
+// pending update uses its existing controller flow instead of issuing an ordinary
+// reboot, while retaining any requested custom-PXE intent. A pending custom-PXE
+// flow rejects an ordinary queued reboot with FAILED_PRECONDITION.
+// With queueing enabled, terminating allocations reject every request mode with
+// FAILED_PRECONDITION. After hardware-work and terminating-allocation exclusions,
+// a missing BMC IP returns NOT_FOUND before ordinary queued-state validation.
+// With a BMC IP present, failed provisioning and host reset/deletion reject
+// ordinary queued requests with FAILED_PRECONDITION. Ordinary queued requests
+// require Assigned/Ready; other provisioning states return FAILED_PRECONDITION.
+// An otherwise eligible queued request with no BMC MAC returns NOT_FOUND.
+// Active NIC firmware work and unresolved queued reboots reject competing requests
+// with FAILED_PRECONDITION even when queueing is disabled. Other unfinished hardware
+// requests block this API only while queueing is enabled.
+// Queued sends reuse the machine controller's existing vendor power workarounds.
+// An initially powered-off host is powered on. If a second power read skips a
+// restart, the request remains pending; a proven first non-send remains cancellable.
+// Uncertain attempts use failure_retry_time (minimum one minute). Automatic resends
+// honor the reboot health override. Each retry decision checks a window of fifteen
+// retry intervals from the saved request; expiry retains ownership for intervention.
+// An attempt allowed before the cutoff keeps its separate handling deadline;
+// crossing the retry window afterward does not revoke that attempt. Reconciliation waits
+// for the original sender's saved worker reservation, independent of a replacement
+// controller's timeout. Attempted records without that reservation need intervention.
+// Supported fresh restart logs can settle the request without another send, including after that retry window.
+// Queued controller errors appear in HostState.state_reason; an interrupted or
+// timed-out iteration can leave the request pending with diagnostics only in
+// controller logs and metrics. Disabling the queue does not cancel saved requests.
 message InstancePowerResult {
 }
 

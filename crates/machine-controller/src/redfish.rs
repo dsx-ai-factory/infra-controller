@@ -25,6 +25,29 @@ use state_controller::state_handler::StateHandlerContext;
 use crate::context::MachineStateHandlerContextObjects;
 use crate::write_ops::MachineWriteOp;
 
+/// `PowerControlError` distinguishes preparation failures from possibly applied power changes.
+/// A queued caller can restore its earlier attempt only when no mutation was attempted.
+#[derive(Debug)]
+pub(crate) enum PowerControlError<E> {
+    NotSent(E),
+    Uncertain(E),
+}
+
+impl<E> PowerControlError<E> {
+    pub(crate) fn into_inner(self) -> E {
+        match self {
+            Self::NotSent(error) | Self::Uncertain(error) => error,
+        }
+    }
+
+    pub(crate) fn map<F>(self, map: impl FnOnce(E) -> F) -> PowerControlError<F> {
+        match self {
+            Self::NotSent(error) => PowerControlError::NotSent(map(error)),
+            Self::Uncertain(error) => PowerControlError::Uncertain(map(error)),
+        }
+    }
+}
+
 /// Reads the power state of `bmc`'s system, `None` when it reports a state
 /// NICo does not classify.
 pub async fn power_state(bmc: &BackendBmc) -> Result<Option<PowerState>, PlatformError> {
@@ -74,7 +97,12 @@ pub fn host_power_control(
     ctx: &mut StateHandlerContext<'_, MachineStateHandlerContextObjects>,
 ) -> impl Future<Output = Result<(), PlatformError>> {
     let trigger_location = std::panic::Location::caller();
-    host_power_control_with_location(bmc, machine, action, ctx, trigger_location, None)
+    async move {
+        host_power_control_with_location(bmc, machine, action, ctx, trigger_location, None)
+            .await
+            .map(drop)
+            .map_err(PowerControlError::into_inner)
+    }
 }
 
 /// Advance lockdown recovery only after the BMC accepts the required restart.
@@ -113,16 +141,23 @@ pub(crate) fn restart_host_for_lockdown(
 
 /// Control host power and queue its accepted request. `requested_at` lets a
 /// durable workflow use its database-clock intent; other callers use Core time.
-pub async fn host_power_control_with_location(
+/// Returns false when a restart was skipped because the host was powered off.
+pub(crate) async fn host_power_control_with_location(
     bmc: &BackendBmc,
     machine: &Machine<impl MachineIdSubtypeTrait>,
     action: ResetType,
     ctx: &mut StateHandlerContext<'_, MachineStateHandlerContextObjects>,
     trigger_location: &std::panic::Location<'_>,
     requested_at: Option<DateTime<Utc>>,
-) -> Result<(), PlatformError> {
-    let power = bmc.power()?;
-    let action = if action == ResetType::FullPowerCycle && !power.ac_power_cycle_supported().await?
+) -> Result<bool, PowerControlError<PlatformError>> {
+    let power = bmc
+        .power()
+        .map_err(|error| PowerControlError::NotSent(error.into()))?;
+    let action = if action == ResetType::FullPowerCycle
+        && !power
+            .ac_power_cycle_supported()
+            .await
+            .map_err(PowerControlError::NotSent)?
     {
         // Not supported here, so just turn off
         ResetType::ForceOff
@@ -152,7 +187,7 @@ pub async fn host_power_control_with_location(
     }
 
     if (action == ResetType::GracefulRestart) || (action == ResetType::ForceRestart) {
-        let power_state = power.state().await?;
+        let power_state = power.state().await.map_err(PowerControlError::NotSent)?;
         tracing::info!(
             machine_id = machine.id.to_string(),
             ?power_state,
@@ -164,19 +199,25 @@ pub async fn host_power_control_with_location(
                 action = "Manual intervention required to initiate power-on".to_string(),
                 "Host Power Action"
             );
-            return Ok(());
+            return Ok(false);
         } else {
-            power.set(action).await?;
+            power.set(action).await.map_err(|error| match error {
+                PlatformError::NotSent { source } => PowerControlError::NotSent(*source),
+                error => PowerControlError::Uncertain(error),
+            })?;
         }
     } else if action == ResetType::FullPowerCycle {
-        let power_state = power.state().await?;
+        let power_state = power.state().await.map_err(PowerControlError::NotSent)?;
         if power_state != Some(PowerState::Off) {
             tracing::warn!(
                 machine_id = machine.id.to_string(),
                 ?power_state,
                 "ACPowercycle requires chassis to be Off, forcing off first"
             );
-            power.set(ResetType::ForceOff).await?;
+            power
+                .set(ResetType::ForceOff)
+                .await
+                .map_err(PowerControlError::Uncertain)?;
         }
         match power.set(action).await {
             // The BMC has no AC power cycle action. Treat it like a BMC without
@@ -194,11 +235,14 @@ pub async fn host_power_control_with_location(
                     });
             }
             result => {
-                result?;
+                result.map_err(PowerControlError::Uncertain)?;
             }
         }
     } else {
-        power.set(action).await?;
+        power
+            .set(action)
+            .await
+            .map_err(PowerControlError::Uncertain)?;
     }
 
     if record_after_success {
@@ -210,7 +254,7 @@ pub async fn host_power_control_with_location(
             });
     }
 
-    Ok(())
+    Ok(true)
 }
 
 // did_dpu_finish_booting returns true if the DPU has come up from the last reboot and the OS is running. It will return false if the DPU has not come up from the last reboot or is stuck booting.

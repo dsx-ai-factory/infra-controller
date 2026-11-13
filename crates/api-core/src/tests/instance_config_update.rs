@@ -2927,6 +2927,12 @@ async fn test_pending_host_network_promotion_preserves_live_service_interfaces(p
             let mut metrics = MachineMetrics::default();
             let mut pending_db_writes = DbWriteBatch::new();
             let mut ctx = StateHandlerContext {
+                deadline: tokio::time::Instant::now()
+                    + handler_services
+                        .site_config
+                        .machine_state_controller
+                        .controller
+                        .max_object_handling_time,
                 services: &mut handler_services,
                 metrics: &mut metrics,
                 pending_db_writes: &mut pending_db_writes,

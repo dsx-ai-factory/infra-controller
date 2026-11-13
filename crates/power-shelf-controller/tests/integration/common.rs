@@ -250,6 +250,8 @@ pub(super) async fn run_handler(
     let mut metrics = PowerShelfMetrics::default();
     let mut writes = DbWriteBatch::default();
     let mut ctx = StateHandlerContext::<PowerShelfStateHandlerContextObjects> {
+        deadline: tokio::time::Instant::now()
+            + state_controller::config::IterationConfig::default().max_object_handling_time,
         services,
         metrics: &mut metrics,
         pending_db_writes: &mut writes,

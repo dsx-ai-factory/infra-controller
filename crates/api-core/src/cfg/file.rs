@@ -425,8 +425,9 @@ pub struct CarbideConfig {
     /// (e.g., "prod" or "fake").
     pub dpu_ipmi_tool_impl: Option<String>,
 
-    /// Number of retries when IPMI returns an error during
-    /// DPU reboot.
+    /// Total process attempts per command for the production IPMI tool; defaults to three.
+    /// Zero starts no process and returns an invalid-retry error. Queued instance
+    /// reboots use one bounded attempt independently of this legacy setting.
     pub dpu_ipmi_reboot_attempts: Option<u32>,
 
     /// Number of consecutive HTTP 401/403 responses from a BMC before the
@@ -6766,6 +6767,7 @@ path = "credentials.yaml"
             polling_bios_setup_stuck_threshold: Duration::minutes(15),
             boot_interface_observation_interval: Duration::hours(2),
             full_lockdown_recovery_enabled: true,
+            instance_reboot_queue_enabled: true,
         };
 
         let config_str = serde_json::to_string(&input).unwrap();
@@ -6817,6 +6819,7 @@ path = "credentials.yaml"
                 polling_bios_setup_stuck_threshold: Duration::minutes(15),
                 boot_interface_observation_interval: Duration::hours(2),
                 full_lockdown_recovery_enabled: false,
+                instance_reboot_queue_enabled: false,
             }
         );
     }
@@ -6843,6 +6846,7 @@ path = "credentials.yaml"
                 polling_bios_setup_stuck_threshold: Duration::minutes(15),
                 boot_interface_observation_interval: Duration::minutes(10),
                 full_lockdown_recovery_enabled: false,
+                instance_reboot_queue_enabled: false,
             }
         );
     }

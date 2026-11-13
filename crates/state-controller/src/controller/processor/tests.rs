@@ -929,6 +929,7 @@ async fn expired_task_does_not_start_object_io() {
 #[derive(Debug)]
 struct WaitingHandler {
     started: Semaphore,
+    expected_deadline: tokio::time::Instant,
 }
 
 #[async_trait::async_trait]
@@ -943,8 +944,9 @@ impl StateHandler for WaitingHandler {
         _object_id: &String,
         _state: &mut TestObject,
         _controller_state: &TestObjectControllerState,
-        _ctx: &mut StateHandlerContext<Self::ContextObjects>,
+        ctx: &mut StateHandlerContext<Self::ContextObjects>,
     ) -> Result<StateHandlerOutcome<TestObjectControllerState>, StateHandlerError> {
+        assert_eq!(ctx.deadline, self.expected_deadline);
         self.started.add_permits(1);
         std::future::pending().await
     }
@@ -1115,13 +1117,14 @@ async fn dispatched_handler_keeps_the_claim_deadline(pool: sqlx::PgPool) -> eyre
     create_test_object("host".to_string(), &mut txn).await;
     txn.commit().await?;
     let mut processor = processor(pool);
+    // Five seconds remain from the claim's original 180-second budget. The handler
+    // must receive that exact deadline rather than start a fresh budget for substeps.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
     let handler = Arc::new(WaitingHandler {
         started: Semaphore::new(0),
+        expected_deadline: deadline,
     });
     processor.state_handler = handler.clone();
-
-    // Five seconds remain from the claim's original 180-second budget.
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
     processor.dispatch_object_handling_task("host".to_string(), deadline);
     tokio::time::timeout(Duration::from_secs(5), handler.started.acquire())
         .await??

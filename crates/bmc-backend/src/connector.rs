@@ -18,7 +18,7 @@
 use std::sync::Arc;
 
 use bmc_runtime::{DriverConnector, ExploredConnectError};
-use carbide_redfish::libredfish::{RedfishClientCreationError, RedfishClientPool};
+use carbide_redfish::libredfish::{RedfishAuth, RedfishClientCreationError, RedfishClientPool};
 use carbide_utils::redfish::BmcAccessInfo;
 use model::site_explorer::EndpointExplorationReport;
 
@@ -43,25 +43,66 @@ impl BmcConnector {
 
     /// Connects to the BMC at `access`. Only the drivers call `report` for the
     /// exploration report they select by, so libredfish never loads it.
-    pub async fn connect<E, Fut>(
+    pub fn connect<E, Fut>(
         &self,
         access: &BmcAccessInfo,
         report: impl FnOnce() -> Fut,
+    ) -> impl Future<Output = Result<BackendBmc, BmcConnectError<E>>>
+    where
+        Fut: Future<Output = Result<EndpointExplorationReport, E>>,
+    {
+        self.connect_with_policy(access, report, false)
+    }
+
+    /// Connect for a durable mutation without application-level mutation retries.
+    /// IPMI chassis resets use one bounded attempt; protocol-level HTTP retries remain.
+    pub fn connect_without_mutation_retries<E, Fut>(
+        &self,
+        access: &BmcAccessInfo,
+        report: impl FnOnce() -> Fut,
+    ) -> impl Future<Output = Result<BackendBmc, BmcConnectError<E>>>
+    where
+        Fut: Future<Output = Result<EndpointExplorationReport, E>>,
+    {
+        self.connect_with_policy(access, report, true)
+    }
+
+    async fn connect_with_policy<E, Fut>(
+        &self,
+        access: &BmcAccessInfo,
+        report: impl FnOnce() -> Fut,
+        single_attempt: bool,
     ) -> Result<BackendBmc, BmcConnectError<E>>
     where
         Fut: Future<Output = Result<EndpointExplorationReport, E>>,
     {
         match self {
-            Self::Libredfish(pool) => pool
-                .client_by_info(access)
-                .await
-                .map(BackendBmc::from)
-                .map_err(BmcConnectError::Libredfish),
+            Self::Libredfish(pool) => {
+                let result = if single_attempt {
+                    pool.create_client_without_mutation_retries(
+                        &access.host,
+                        access.port,
+                        RedfishAuth::for_bmc_mac(access.mac_address),
+                        None,
+                    )
+                    .await
+                } else {
+                    pool.client_by_info(access).await
+                };
+                result
+                    .map(BackendBmc::from)
+                    .map_err(BmcConnectError::Libredfish)
+            }
             Self::Drivers(drivers) => {
                 let report = report().await.map_err(BmcConnectError::Report)?;
-                drivers
-                    .connect(access, &report)
-                    .await
+                let result = if single_attempt {
+                    drivers
+                        .connect_without_mutation_retries(access, &report)
+                        .await
+                } else {
+                    drivers.connect(access, &report).await
+                };
+                result
                     .map(BackendBmc::from)
                     .map_err(BmcConnectError::Drivers)
             }

@@ -268,6 +268,12 @@ async fn provisioning_and_network_config_operations_record_inventory_identity(po
     let mut metrics = carbide_machine_controller::metrics::MachineMetrics::default();
     let mut pending_db_writes = state_controller::db_write_batch::DbWriteBatch::new();
     let mut ctx = state_controller::state_handler::StateHandlerContext {
+        deadline: tokio::time::Instant::now()
+            + services
+                .site_config
+                .machine_state_controller
+                .controller
+                .max_object_handling_time,
         services: &mut services,
         metrics: &mut metrics,
         pending_db_writes: &mut pending_db_writes,

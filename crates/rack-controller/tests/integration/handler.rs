@@ -678,6 +678,8 @@ async fn test_expected_no_definition_stays_parked(
     let mut metrics = RackMetrics::default();
     let mut db_writes = DbWriteBatch::default();
     let mut ctx = StateHandlerContext::<RackStateHandlerContextObjects> {
+        deadline: tokio::time::Instant::now()
+            + state_controller::config::IterationConfig::default().max_object_handling_time,
         services: &mut services,
         metrics: &mut metrics,
         pending_db_writes: &mut db_writes,
@@ -737,6 +739,8 @@ async fn test_created_waits_for_missing_switches(
     let mut metrics = RackMetrics::default();
     let mut db_writes = DbWriteBatch::default();
     let mut ctx = StateHandlerContext::<RackStateHandlerContextObjects> {
+        deadline: tokio::time::Instant::now()
+            + state_controller::config::IterationConfig::default().max_object_handling_time,
         services: &mut services,
         metrics: &mut metrics,
         pending_db_writes: &mut db_writes,
@@ -1269,6 +1273,8 @@ async fn test_expected_zero_topology_transitions_to_discovering(
     let mut metrics = RackMetrics::default();
     let mut db_writes = DbWriteBatch::default();
     let mut ctx = StateHandlerContext::<RackStateHandlerContextObjects> {
+        deadline: tokio::time::Instant::now()
+            + state_controller::config::IterationConfig::default().max_object_handling_time,
         services: &mut services,
         metrics: &mut metrics,
         pending_db_writes: &mut db_writes,
@@ -1379,6 +1385,8 @@ async fn test_discovering_waits_for_missing_switches(
     let mut metrics = RackMetrics::default();
     let mut db_writes = DbWriteBatch::default();
     let mut ctx = StateHandlerContext::<RackStateHandlerContextObjects> {
+        deadline: tokio::time::Instant::now()
+            + state_controller::config::IterationConfig::default().max_object_handling_time,
         services: &mut services,
         metrics: &mut metrics,
         pending_db_writes: &mut db_writes,
@@ -1541,6 +1549,8 @@ async fn test_discovering_empty_rack_transitions_to_maintenance(
     let mut metrics = RackMetrics::default();
     let mut db_writes = DbWriteBatch::default();
     let mut ctx = StateHandlerContext::<RackStateHandlerContextObjects> {
+        deadline: tokio::time::Instant::now()
+            + state_controller::config::IterationConfig::default().max_object_handling_time,
         services: &mut services,
         metrics: &mut metrics,
         pending_db_writes: &mut db_writes,
@@ -1605,6 +1615,8 @@ async fn test_error_state_does_nothing(
     let mut metrics = RackMetrics::default();
     let mut db_writes = DbWriteBatch::default();
     let mut ctx = StateHandlerContext::<RackStateHandlerContextObjects> {
+        deadline: tokio::time::Instant::now()
+            + state_controller::config::IterationConfig::default().max_object_handling_time,
         services: &mut services,
         metrics: &mut metrics,
         pending_db_writes: &mut db_writes,
@@ -1662,6 +1674,8 @@ async fn test_maintenance_completed_transitions_to_validation(
     let mut metrics = RackMetrics::default();
     let mut db_writes = DbWriteBatch::default();
     let mut ctx = StateHandlerContext::<RackStateHandlerContextObjects> {
+        deadline: tokio::time::Instant::now()
+            + state_controller::config::IterationConfig::default().max_object_handling_time,
         services: &mut services,
         metrics: &mut metrics,
         pending_db_writes: &mut db_writes,
@@ -2529,6 +2543,8 @@ async fn test_ready_with_no_labels_stays_ready(
     let mut metrics = RackMetrics::default();
     let mut db_writes = DbWriteBatch::default();
     let mut ctx = StateHandlerContext::<RackStateHandlerContextObjects> {
+        deadline: tokio::time::Instant::now()
+            + state_controller::config::IterationConfig::default().max_object_handling_time,
         services: &mut services,
         metrics: &mut metrics,
         pending_db_writes: &mut db_writes,
@@ -2575,6 +2591,8 @@ async fn test_firmware_upgrade_start_skips_without_json(
     let mut metrics = RackMetrics::default();
     let mut db_writes = DbWriteBatch::default();
     let mut ctx = StateHandlerContext::<RackStateHandlerContextObjects> {
+        deadline: tokio::time::Instant::now()
+            + state_controller::config::IterationConfig::default().max_object_handling_time,
         services: &mut services,
         metrics: &mut metrics,
         pending_db_writes: &mut db_writes,
@@ -2771,6 +2789,8 @@ async fn test_ingestion_transitions_to_firmware_upgrade_and_submits_rack_profile
     let mut db_writes = DbWriteBatch::default();
 
     let mut ctx = StateHandlerContext::<RackStateHandlerContextObjects> {
+        deadline: tokio::time::Instant::now()
+            + state_controller::config::IterationConfig::default().max_object_handling_time,
         services: &mut services,
         metrics: &mut metrics,
         pending_db_writes: &mut db_writes,
@@ -2988,6 +3008,8 @@ async fn test_firmware_upgrade_start_rejects_desired_off_machine_before_rms_subm
     let mut metrics = RackMetrics::default();
     let mut db_writes = DbWriteBatch::default();
     let mut ctx = StateHandlerContext::<RackStateHandlerContextObjects> {
+        deadline: tokio::time::Instant::now()
+            + state_controller::config::IterationConfig::default().max_object_handling_time,
         services: &mut services,
         metrics: &mut metrics,
         pending_db_writes: &mut db_writes,
@@ -3127,6 +3149,8 @@ async fn test_firmware_upgrade_start_submits_json_and_deletes_access_token(
     let mut metrics = RackMetrics::default();
     let mut db_writes = DbWriteBatch::default();
     let mut ctx = StateHandlerContext::<RackStateHandlerContextObjects> {
+        deadline: tokio::time::Instant::now()
+            + state_controller::config::IterationConfig::default().max_object_handling_time,
         services: &mut services,
         metrics: &mut metrics,
         pending_db_writes: &mut db_writes,
@@ -3241,6 +3265,8 @@ async fn test_firmware_upgrade_start_missing_profile_deletes_access_token(
     let mut metrics = RackMetrics::default();
     let mut db_writes = DbWriteBatch::default();
     let mut ctx = StateHandlerContext::<RackStateHandlerContextObjects> {
+        deadline: tokio::time::Instant::now()
+            + state_controller::config::IterationConfig::default().max_object_handling_time,
         services: &mut services,
         metrics: &mut metrics,
         pending_db_writes: &mut db_writes,
@@ -3367,6 +3393,8 @@ async fn test_firmware_upgrade_wait_for_complete_recovers_power_blocked_machine(
     let mut metrics = RackMetrics::default();
     let mut db_writes = DbWriteBatch::default();
     let mut ctx = StateHandlerContext::<RackStateHandlerContextObjects> {
+        deadline: tokio::time::Instant::now()
+            + state_controller::config::IterationConfig::default().max_object_handling_time,
         services: &mut services,
         metrics: &mut metrics,
         pending_db_writes: &mut db_writes,
@@ -3600,6 +3628,8 @@ async fn test_rack_maintenance_termination_unwinds_all_scoped_device_state_body(
     let mut metrics = RackMetrics::default();
     let mut db_writes = DbWriteBatch::default();
     let mut ctx = StateHandlerContext::<RackStateHandlerContextObjects> {
+        deadline: tokio::time::Instant::now()
+            + state_controller::config::IterationConfig::default().max_object_handling_time,
         services: &mut services,
         metrics: &mut metrics,
         pending_db_writes: &mut db_writes,
@@ -3745,6 +3775,8 @@ async fn test_rack_maintenance_termination_fails_current_nvos_job(
     let mut metrics = RackMetrics::default();
     let mut db_writes = DbWriteBatch::default();
     let mut ctx = StateHandlerContext::<RackStateHandlerContextObjects> {
+        deadline: tokio::time::Instant::now()
+            + state_controller::config::IterationConfig::default().max_object_handling_time,
         services: &mut services,
         metrics: &mut metrics,
         pending_db_writes: &mut db_writes,
@@ -4516,6 +4548,8 @@ async fn test_firmware_upgrade_wait_for_complete_waits_while_jobs_running(
     let mut metrics = RackMetrics::default();
     let mut db_writes = DbWriteBatch::default();
     let mut ctx = StateHandlerContext::<RackStateHandlerContextObjects> {
+        deadline: tokio::time::Instant::now()
+            + state_controller::config::IterationConfig::default().max_object_handling_time,
         services: &mut services,
         metrics: &mut metrics,
         pending_db_writes: &mut db_writes,
@@ -4634,6 +4668,8 @@ async fn test_firmware_upgrade_wait_for_complete_transitions_to_error_on_job_fai
     let mut metrics = RackMetrics::default();
     let mut db_writes = DbWriteBatch::default();
     let mut ctx = StateHandlerContext::<RackStateHandlerContextObjects> {
+        deadline: tokio::time::Instant::now()
+            + state_controller::config::IterationConfig::default().max_object_handling_time,
         services: &mut services,
         metrics: &mut metrics,
         pending_db_writes: &mut db_writes,
@@ -4829,6 +4865,8 @@ async fn test_firmware_upgrade_wait_for_complete_waits_for_all_nodes_to_be_termi
     let mut metrics = RackMetrics::default();
     let mut db_writes = DbWriteBatch::default();
     let mut ctx = StateHandlerContext::<RackStateHandlerContextObjects> {
+        deadline: tokio::time::Instant::now()
+            + state_controller::config::IterationConfig::default().max_object_handling_time,
         services: &mut services,
         metrics: &mut metrics,
         pending_db_writes: &mut db_writes,
@@ -5024,6 +5062,8 @@ async fn test_firmware_upgrade_wait_for_complete_retries_when_job_lookup_fails(
     let mut metrics = RackMetrics::default();
     let mut db_writes = DbWriteBatch::default();
     let mut ctx = StateHandlerContext::<RackStateHandlerContextObjects> {
+        deadline: tokio::time::Instant::now()
+            + state_controller::config::IterationConfig::default().max_object_handling_time,
         services: &mut services,
         metrics: &mut metrics,
         pending_db_writes: &mut db_writes,
@@ -5109,6 +5149,8 @@ async fn test_firmware_upgrade_wait_for_complete_retries_on_transient_poll_error
     let mut metrics = RackMetrics::default();
     let mut db_writes = DbWriteBatch::default();
     let mut ctx = StateHandlerContext::<RackStateHandlerContextObjects> {
+        deadline: tokio::time::Instant::now()
+            + state_controller::config::IterationConfig::default().max_object_handling_time,
         services: &mut services,
         metrics: &mut metrics,
         pending_db_writes: &mut db_writes,
@@ -6194,6 +6236,8 @@ async fn test_nvos_update_recovers_password_after_rms_restart(
     let mut db_writes = DbWriteBatch::default();
 
     let mut ctx = StateHandlerContext::<RackStateHandlerContextObjects> {
+        deadline: tokio::time::Instant::now()
+            + state_controller::config::IterationConfig::default().max_object_handling_time,
         services: &mut services,
         metrics: &mut metrics,
         pending_db_writes: &mut db_writes,
@@ -8162,6 +8206,8 @@ async fn test_configure_nmx_cluster_retired_sub_state_transitions_to_error(
     let mut db_writes = DbWriteBatch::default();
 
     let mut ctx = StateHandlerContext::<RackStateHandlerContextObjects> {
+        deadline: tokio::time::Instant::now()
+            + state_controller::config::IterationConfig::default().max_object_handling_time,
         services: &mut services,
         metrics: &mut metrics,
         pending_db_writes: &mut db_writes,
@@ -8224,6 +8270,8 @@ async fn test_configure_nmx_cluster_transitions_to_completed(
     let mut metrics = RackMetrics::default();
     let mut db_writes = DbWriteBatch::default();
     let mut ctx = StateHandlerContext::<RackStateHandlerContextObjects> {
+        deadline: tokio::time::Instant::now()
+            + state_controller::config::IterationConfig::default().max_object_handling_time,
         services: &mut services,
         metrics: &mut metrics,
         pending_db_writes: &mut db_writes,
@@ -8293,6 +8341,8 @@ async fn test_ready_topology_changed_transitions_to_discovering(
     let mut metrics = RackMetrics::default();
     let mut db_writes = DbWriteBatch::default();
     let mut ctx = StateHandlerContext::<RackStateHandlerContextObjects> {
+        deadline: tokio::time::Instant::now()
+            + state_controller::config::IterationConfig::default().max_object_handling_time,
         services: &mut services,
         metrics: &mut metrics,
         pending_db_writes: &mut db_writes,
@@ -8352,6 +8402,8 @@ async fn test_ready_reprovision_requested_transitions_to_maintenance(
     let mut metrics = RackMetrics::default();
     let mut db_writes = DbWriteBatch::default();
     let mut ctx = StateHandlerContext::<RackStateHandlerContextObjects> {
+        deadline: tokio::time::Instant::now()
+            + state_controller::config::IterationConfig::default().max_object_handling_time,
         services: &mut services,
         metrics: &mut metrics,
         pending_db_writes: &mut db_writes,
@@ -8413,6 +8465,8 @@ async fn test_validation_failed_transitions_to_error(
     let mut metrics = RackMetrics::default();
     let mut db_writes = DbWriteBatch::default();
     let mut ctx = StateHandlerContext::<RackStateHandlerContextObjects> {
+        deadline: tokio::time::Instant::now()
+            + state_controller::config::IterationConfig::default().max_object_handling_time,
         services: &mut services,
         metrics: &mut metrics,
         pending_db_writes: &mut db_writes,
@@ -8512,6 +8566,8 @@ async fn test_ready_with_failed_switch_transitions_to_error(
     let mut metrics = RackMetrics::default();
     let mut db_writes = DbWriteBatch::default();
     let mut ctx = StateHandlerContext::<RackStateHandlerContextObjects> {
+        deadline: tokio::time::Instant::now()
+            + state_controller::config::IterationConfig::default().max_object_handling_time,
         services: &mut services,
         metrics: &mut metrics,
         pending_db_writes: &mut db_writes,
@@ -8592,6 +8648,8 @@ async fn test_ready_with_failed_power_shelf_transitions_to_error(
     let mut metrics = RackMetrics::default();
     let mut db_writes = DbWriteBatch::default();
     let mut ctx = StateHandlerContext::<RackStateHandlerContextObjects> {
+        deadline: tokio::time::Instant::now()
+            + state_controller::config::IterationConfig::default().max_object_handling_time,
         services: &mut services,
         metrics: &mut metrics,
         pending_db_writes: &mut db_writes,
@@ -8647,6 +8705,8 @@ async fn test_ready_with_all_healthy_components_waits(
     let mut metrics = RackMetrics::default();
     let mut db_writes = DbWriteBatch::default();
     let mut ctx = StateHandlerContext::<RackStateHandlerContextObjects> {
+        deadline: tokio::time::Instant::now()
+            + state_controller::config::IterationConfig::default().max_object_handling_time,
         services: &mut services,
         metrics: &mut metrics,
         pending_db_writes: &mut db_writes,
@@ -9131,6 +9191,8 @@ async fn test_error_recovers_to_ready_when_all_components_ready(
     let mut metrics = RackMetrics::default();
     let mut db_writes = DbWriteBatch::default();
     let mut ctx = StateHandlerContext::<RackStateHandlerContextObjects> {
+        deadline: tokio::time::Instant::now()
+            + state_controller::config::IterationConfig::default().max_object_handling_time,
         services: &mut services,
         metrics: &mut metrics,
         pending_db_writes: &mut db_writes,
@@ -9199,6 +9261,8 @@ async fn test_error_recovers_while_switch_initializes(
     let mut metrics = RackMetrics::default();
     let mut db_writes = DbWriteBatch::default();
     let mut ctx = StateHandlerContext::<RackStateHandlerContextObjects> {
+        deadline: tokio::time::Instant::now()
+            + state_controller::config::IterationConfig::default().max_object_handling_time,
         services: &mut services,
         metrics: &mut metrics,
         pending_db_writes: &mut db_writes,
@@ -9274,6 +9338,8 @@ async fn run_rack_handler_and_apply_writes(
     let mut metrics = RackMetrics::default();
     let mut db_writes = DbWriteBatch::default();
     let mut ctx = StateHandlerContext::<RackStateHandlerContextObjects> {
+        deadline: tokio::time::Instant::now()
+            + state_controller::config::IterationConfig::default().max_object_handling_time,
         services: &mut services,
         metrics: &mut metrics,
         pending_db_writes: &mut db_writes,

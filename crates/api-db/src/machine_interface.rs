@@ -906,6 +906,22 @@ pub async fn lock_for_address_assignment(
         ))
 }
 
+/// Keep a host's BMC address stable while authorizing a saved hardware request.
+/// The caller already holds the Machine lock. Forced cleanup takes interfaces first,
+/// so fail without waiting on a busy row and let the controller retry its transaction.
+pub async fn lock_bmc_interfaces(
+    txn: &mut PgConnection,
+    machine_id: carbide_uuid::machine::HostMachineId,
+) -> DatabaseResult<()> {
+    let query = "SELECT id FROM machine_interfaces WHERE machine_id = $1 AND interface_type = 'Bmc' ORDER BY id FOR UPDATE NOWAIT";
+    sqlx::query(query)
+        .bind(machine_id)
+        .fetch_all(txn)
+        .await
+        .map_err(|error| DatabaseError::query(query, error))?;
+    Ok(())
+}
+
 /// Optional metadata used while finding or creating a DHCP machine interface.
 ///
 /// DHCPv4 and DHCPv6 for the same NIC intentionally converge on one
