@@ -124,6 +124,7 @@ pub(super) async fn setup_and_run(
         forge_api_server.clone(),
         Arc::clone(&carbide_client_config),
         machine_info,
+        instrumentation.clone(),
     );
     tokio::task::spawn(async move {
         remediation_executor.run().await;
