@@ -158,8 +158,9 @@ therefore be reachable from the RMS namespace.
   class uses a different backend.
 - **The integration is config-gated at both ends.** NICo builds no RMS client without
   `[rms] api_url`, and RMS accepts no NICo traffic without matching TLS material.
-- **Asynchronous by default.** Every consequential RMS operation returns a job identifier
-  rather than a result, and correctness depends on polling to a terminal state.
+- **Asynchronous by default.** Firmware, image, certificate, and fabric operations return
+  RMS job identifiers and require polling to a terminal state. Delegated compute AC cycles
+  return Redfish command acceptance without an RMS job.
 - **Manifests flow through NICo; artifacts do not.** NICo hands RMS the document and RMS
   fetches the binaries, so artifact reachability is an RMS-side network requirement.
 - **Shared PostgreSQL, separate database.** RMS persists to the same cluster as NICo under its
