@@ -8,7 +8,7 @@ use std::fmt::Write;
 use carbide_uuid::rack::RackGroupId;
 use clap::Parser;
 use color_eyre::eyre::WrapErr;
-use model::rack_type::RackCapabilityType;
+use model::nvlink_domain::NvLinkDomainMemberType;
 use prettytable::{Table, row};
 use rpc::admin_cli::OutputFormat;
 use rpc::forge;
@@ -248,11 +248,8 @@ fn parse_member(value: &str) -> Result<forge::NvLinkDomainMember, String> {
     let [rack, slot, kind] = parts.as_slice() else {
         return Err("expected RACK_INDEX:SLOT_INDEX:TYPE".into());
     };
-    let component_type: RackCapabilityType =
+    let component_type: NvLinkDomainMemberType =
         kind.parse().map_err(|_| "type must be Compute or Switch")?;
-    if component_type == RackCapabilityType::PowerShelf {
-        return Err("type must be Compute or Switch".into());
-    }
     Ok(forge::NvLinkDomainMember {
         rack_index: Some(rack.parse().map_err(|_| "rack index must be a uint32")?),
         slot_index: Some(slot.parse().map_err(|_| "slot index must be a uint32")?),
