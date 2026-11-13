@@ -326,6 +326,88 @@ func TestSkuSQLDAO_Get(t *testing.T) {
 	}
 }
 
+func TestSkuSQLDAO_GetForUpdate(t *testing.T) {
+	ctx := context.Background()
+	session := testSKUInitDB(t)
+	defer session.Close()
+	testSKUSetupSchema(t, session)
+	user := TestBuildUser(t, session, "test-user", "test-org", []string{"admin"})
+	ip := TestBuildInfrastructureProvider(t, session, "provider", "test-org", user)
+	site := TestBuildSite(t, session, ip, "site", user)
+	rows := testSkuCreateSkus(ctx, t, session, site.ID)
+	dao := NewSkuDAO(session)
+	for _, tc := range []struct {
+		name      string
+		id        string
+		withoutTx bool
+		want      *SKU
+		wantErr   error
+	}{
+		{name: "requires a transaction", id: rows[1].ID, withoutTx: true, wantErr: db.ErrInvalidValue},
+		{name: "absent SKU returns no object", id: "missing", wantErr: db.ErrDoesNotExist},
+		{name: "selects the requested SKU among companions", id: rows[1].ID, want: &rows[1]},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var selected *SKU
+			var err error
+			if tc.withoutTx {
+				selected, err = dao.GetForUpdate(ctx, nil, tc.id)
+			} else {
+				err = db.WithTx(ctx, session, func(tx *db.Tx) error {
+					var getErr error
+					selected, getErr = dao.GetForUpdate(ctx, tx, tc.id)
+					return getErr
+				})
+			}
+			if tc.wantErr != nil {
+				require.ErrorIs(t, err, tc.wantErr)
+			} else {
+				require.NoError(t, err)
+			}
+			assert.Equal(t, tc.want, selected)
+		})
+	}
+}
+
+func TestSkuSQLDAO_HasExpectedMachineReferences(t *testing.T) {
+	ctx := context.Background()
+	session := testSKUInitDB(t)
+	defer session.Close()
+	testExpectedMachineSetupSchema(t, session)
+	require.NoError(t, session.DB.ResetModel(ctx, (*PendingExpectedMachine)(nil)))
+	user := TestBuildUser(t, session, "test-user", "test-org", []string{"admin"})
+	ip := TestBuildInfrastructureProvider(t, session, "provider", "test-org", user)
+	site := TestBuildSite(t, session, ip, "SKU Site", user)
+	otherSite := TestBuildSite(t, session, ip, "reference Site", user)
+	rows := testSkuCreateSkus(ctx, t, session, site.ID)
+	_, err := NewExpectedMachineDAO(session).Create(ctx, nil, ExpectedMachineCreateInput{
+		ExpectedMachineID: uuid.New(), SiteID: otherSite.ID, SkuID: &rows[0].ID,
+		BmcMacAddress: "00:11:22:33:44:55", ChassisSerialNumber: "public", CreatedBy: user.ID,
+	})
+	require.NoError(t, err)
+	err = NewPendingExpectedMachineBatchDAO(session).Create(ctx, nil, PendingExpectedMachineBatch{
+		WorkflowID: "pending-reference", SiteID: otherSite.ID,
+		Inputs: []ExpectedMachineCreateInput{{ExpectedMachineID: uuid.New(), SiteID: otherSite.ID, SkuID: &rows[1].ID,
+			BmcMacAddress: "00:11:22:33:44:56", ChassisSerialNumber: "private", CreatedBy: user.ID}},
+	})
+	require.NoError(t, err)
+	for _, tc := range []struct {
+		name string
+		id   string
+		want bool
+	}{
+		{name: "unrelated SKU ignores both reference owners", id: rows[2].ID},
+		{name: "public reference on another Site", id: rows[0].ID, want: true},
+		{name: "pending reference on another Site", id: rows[1].ID, want: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			referenced, err := NewSkuDAO(session).HasExpectedMachineReferences(ctx, nil, tc.id)
+			require.NoError(t, err)
+			assert.Equal(t, tc.want, referenced)
+		})
+	}
+}
+
 func TestSkuSQLDAO_GetForAttachment(t *testing.T) {
 	ctx := context.Background()
 	dbSession := testSKUInitDB(t)
@@ -835,6 +917,7 @@ func TestSkuSQLDAO_DeleteIfUnchanged(t *testing.T) {
 		name        string
 		id          string
 		updated     time.Time
+		siteID      uuid.UUID
 		wantDeleted bool
 		want        *SKU
 	}{
@@ -857,6 +940,13 @@ func TestSkuSQLDAO_DeleteIfUnchanged(t *testing.T) {
 			want:    &existing[2],
 		},
 		{
+			name:    "matching timestamp on another Site preserves the row",
+			id:      existing[2].ID,
+			updated: existing[2].Updated,
+			siteID:  uuid.New(),
+			want:    &existing[2],
+		},
+		{
 			name:    "absent row preserves another row with the same timestamp",
 			id:      "absent-sku",
 			updated: existing[2].Updated,
@@ -864,7 +954,11 @@ func TestSkuSQLDAO_DeleteIfUnchanged(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			deleted, err := dao.DeleteIfUnchanged(ctx, nil, tc.id, tc.updated)
+			siteID := tc.siteID
+			if siteID == uuid.Nil {
+				siteID = site.ID
+			}
+			deleted, err := dao.DeleteIfUnchanged(ctx, nil, tc.id, siteID, tc.updated)
 			require.NoError(t, err)
 			assert.Equal(t, tc.wantDeleted, deleted)
 

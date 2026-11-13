@@ -6883,6 +6883,8 @@ paths:
         Create a SKU.
 
         The Org must have an Infrastructure Provider that owns the Site. The user must have an authorization role with the `PROVIDER_ADMIN` suffix.
+
+        HTTP 409 covers an existing SKU ID or a concurrent REST mutation that prevents saving the local record. The error message identifies when Core has already created the SKU. If REST has not saved that record, GET can return HTTP 404 until inventory reconciliation discovers the SKU. Refresh the SKU before retrying.
       requestBody:
         content:
           application/json:
@@ -6900,6 +6902,8 @@ paths:
           $ref: '#/components/responses/ValidationError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
+        '409':
+          $ref: '#/components/responses/ConflictError'
       tags:
         - SKU
   '/v2/org/{org}/nico/sku/{skuId}':
@@ -6985,6 +6989,16 @@ paths:
         Delete an unused SKU. The Site is determined from the saved SKU record.
 
         The Org must have an Infrastructure Provider that owns the SKU's Site. The user must have an authorization role with the `PROVIDER_ADMIN` suffix.
+
+        A SKU with associated Machines, public Expected Machines, or pending Expected Machine batch references cannot be deleted (HTTP 400). The Site must be Registered. Expected Machine create and update requests that attach this SKU wait while deletion checks references, calls Core, and removes the local record. HTTP 204 confirms local cleanup after Core deletion succeeds or reports that the SKU is already absent.
+
+        HTTP 409 indicates that another REST request is changing the SKU, that its Site changed before deletion, or that Core reported a conflict. Refresh the SKU before retrying. After an interrupted request releases its locks, a retry can join a Core deletion that is still running for the same Site and SKU. After that execution closes, a retry can start another Core call. Recreating the same SKU ID while an earlier deletion is running can cause a retry to reuse the earlier deletion's result.
+
+        Deletion uses one request budget, capped at 50 seconds or the caller's earlier deadline, for lookup, waiting for locks, Site communication, and cleanup. HTTP 504 can occur during admission, workflow-start communication, waiting for Core's result, or local cleanup or commit after Core's successful reply. REST stops waiting; Core can have completed deletion or can finish after the response. A transaction rollback retains the REST record and releases its locks, even if Core has already deleted the SKU. A commit error can leave local cleanup uncertain; refresh the SKU before retrying.
+
+        When REST does not receive Core's result, REST rolls back local deletion. A later Expected Machine request can attach to the retained REST record. Such references prevent Core dispatch on a later DELETE and prevent inventory cleanup until the references are removed. If Core has already removed an unreferenced SKU, normal inventory reconciliation can remove the stale REST record.
+
+        HTTP 503 indicates an unavailable Site service, workflow, or namespace. Core rejection statuses are preserved, including HTTP 412 for a failed precondition, HTTP 429 for exhausted resources, and HTTP 501 for an unsupported operation.
       responses:
         '204':
           description: No Content
@@ -6994,6 +7008,20 @@ paths:
           $ref: '#/components/responses/ForbiddenError'
         '404':
           $ref: '#/components/responses/NotFoundError'
+        '409':
+          $ref: '#/components/responses/ConflictError'
+        '412':
+          $ref: '#/components/responses/GenericHttpError'
+        '429':
+          $ref: '#/components/responses/ResourceExhaustedError'
+        '500':
+          $ref: '#/components/responses/GenericHttpError'
+        '501':
+          $ref: '#/components/responses/GenericHttpError'
+        '503':
+          $ref: '#/components/responses/GenericHttpError'
+        '504':
+          $ref: '#/components/responses/GatewayTimeoutError'
       tags:
         - SKU
     patch:
@@ -7006,6 +7034,8 @@ paths:
         the schema version will be updated to the current version (5).
 
         The Org must have an Infrastructure Provider that owns the SKU's Site. The user must have an authorization role with the `PROVIDER_ADMIN` suffix.
+
+        HTTP 409 can occur after Core updates the SKU if a concurrent REST mutation prevents saving the local record. The error message identifies this condition. Refresh the SKU before retrying; inventory reconciliation can update the local record after the Core change.
       requestBody:
         required: true
         content:
@@ -7025,6 +7055,8 @@ paths:
           $ref: '#/components/responses/ForbiddenError'
         '404':
           $ref: '#/components/responses/NotFoundError'
+        '409':
+          $ref: '#/components/responses/ConflictError'
       tags:
         - SKU
   '/v2/org/{org}/nico/infiniband-partition':
