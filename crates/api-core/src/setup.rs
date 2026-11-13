@@ -494,7 +494,12 @@ pub async fn start_runtime(runtime_inputs: RuntimeInputs<'_>) -> eyre::Result<So
         // and accepted definitions for remote pools, before it builds the handles
         // used by the API and controllers. Route servers and site prefixes also
         // need to reflect the config before the API starts serving requests.
-        db::resource_pool::reconcile_pool_defs(&mut txn, &seed_data.initial_pools).await?;
+        db::resource_pool::reconcile_pool_defs(
+            &mut txn,
+            &seed_data.initial_pools,
+            &instrumentation,
+        )
+        .await?;
         // We'll always update whatever route servers are in the config
         // to the database, and then leverage the enable_route_servers
         // flag where needed to determine if we actually want to use
