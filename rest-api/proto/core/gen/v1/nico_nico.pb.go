@@ -8529,7 +8529,8 @@ type SpdmMachineAttestationTriggerRequest struct {
 	// INVALID_ARGUMENT before contacting the BMC. Device eligibility checks and
 	// site-wide SPDM enablement still apply. No eligible match creates no job;
 	// the response reports NO_ATTESTERS_FOUND if none were eligible, otherwise
-	// POLICY_MATCHED_NOTHING. The stored profile is never modified.
+	// SPDM_SCHEDULING_OUTCOME_INDIVIDUAL_ATTESTER_TRIGGER_MATCHED_NOTHING.
+	// The stored profile is never modified.
 	AttesterIdRegex *string `protobuf:"bytes,3,opt,name=attester_id_regex,json=attesterIdRegex,proto3,oneof" json:"attester_id_regex,omitempty"`
 	unknownFields   protoimpl.UnknownFields
 	sizeCache       protoimpl.SizeCache
