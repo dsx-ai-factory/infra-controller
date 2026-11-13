@@ -47,6 +47,7 @@ carbide-uuid = { path = "../uuid" }
 
 chrono = { workspace = true }
 eyre = { workspace = true }
+opentelemetry = { workspace = true }
 serde = { features = ["derive"], workspace = true }
 serde_json = { workspace = true }
 serial_test = { workspace = true }

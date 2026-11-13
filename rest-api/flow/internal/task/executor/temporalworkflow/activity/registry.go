@@ -43,9 +43,9 @@ func New(
 // from other Activities instances.
 func (a *Activities) All() map[string]any {
 	return map[string]any{
-		NameResetSDN:                         a.ResetSDN,
+		NamePrepareFactoryReset:              a.PrepareFactoryReset,
+		NameSubmitFactoryReset:               a.SubmitFactoryReset,
 		NameSDNResetCompleted:                a.SDNResetCompleted,
-		NameResetNVOS:                        a.ResetNVOS,
 		NameNVOSResetCompleted:               a.NVOSResetCompleted,
 		NameInjectExpectation:                a.InjectExpectation,
 		NamePowerControl:                     a.PowerControl,
@@ -54,8 +54,8 @@ func (a *Activities) All() map[string]any {
 		NameUpdateTaskReport:                 a.UpdateTaskReport,
 		NameFirmwareControlWithCredentials:   a.FirmwareControl,
 		NameFirmwareControl:                  a.FirmwareControl,
-		NameGetFirmwareStatus:                a.GetFirmwareStatus,
 		NameGetFirmwareStatusWithCredentials: a.GetFirmwareStatusWithCredentials,
+		NameGetFirmwareStatus:                a.GetFirmwareStatus,
 		NameBringUpControl:                   a.BringUpControl,
 		NameGetBringUpStatus:                 a.GetBringUpStatus,
 		NameVerifyFirmwareConsistency:        a.VerifyFirmwareConsistency,

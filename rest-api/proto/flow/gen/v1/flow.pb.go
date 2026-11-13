@@ -6709,7 +6709,7 @@ type FactoryResetSwitchesRequest struct {
 	state       protoimpl.MessageState `protogen:"open.v1"`
 	TargetSpec  *OperationTargetSpec   `protobuf:"bytes,1,opt,name=target_spec,json=targetSpec,proto3" json:"target_spec,omitempty"`
 	Description string                 `protobuf:"bytes,2,opt,name=description,proto3" json:"description,omitempty"`
-	// Reset scope: "nvos" or "sdn". Omission retains NVOS for older clients.
+	// Required reset scope: "nvos" or "sdn". Missing or empty values are rejected.
 	ResetTarget   string `protobuf:"bytes,3,opt,name=reset_target,json=resetTarget,proto3" json:"reset_target,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache

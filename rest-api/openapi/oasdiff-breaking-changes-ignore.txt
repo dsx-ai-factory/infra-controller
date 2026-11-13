@@ -554,3 +554,4 @@ API GET /v2/org/{org}/nico/instance/{instanceId} added `#/components/schemas/Net
 API GET /v2/org/{org}/nico/instance/{instanceId} the `networkSecurityGroupPropagationDetails` response's property `type` changed from `object` to `any` for status `200`
 API PATCH /v2/org/{org}/nico/instance/{instanceId} added `#/components/schemas/NetworkSecurityGroupPropagationDetails, subschema #2` to the `networkSecurityGroupPropagationDetails` response property `oneOf` list for the response status `200`
 API PATCH /v2/org/{org}/nico/instance/{instanceId} the `networkSecurityGroupPropagationDetails` response's property `type` changed from `object` to `any` for status `200`
+GET /v2/org/{org}/nico/tray/{id}/power added the new `AcPowercycle` enum value to the `operations/actions/items/operation` response property for the response status `200`

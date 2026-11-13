@@ -91,6 +91,7 @@ var powerActionStatusNames = map[corev1.ComponentPowerActionStatus]APIPowerActio
 }
 
 var powerActionOperationNames = map[corev1.ComponentPowerActionOperation]APIPowerActionOperation{
+	corev1.ComponentPowerActionOperation_COMPONENT_POWER_ACTION_OPERATION_AC_POWERCYCLE: "AcPowercycle",
 	corev1.ComponentPowerActionOperation_COMPONENT_POWER_ACTION_OPERATION_POWER_ON:      "PowerOn",
 	corev1.ComponentPowerActionOperation_COMPONENT_POWER_ACTION_OPERATION_POWER_OFF:     "PowerOff",
 	corev1.ComponentPowerActionOperation_COMPONENT_POWER_ACTION_OPERATION_RESET:         "Reset",

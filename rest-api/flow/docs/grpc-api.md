@@ -977,7 +977,7 @@ include the NVSwitch component filter. Existing rack conflict handling applies.
 | ----- | ---- | ----- | ----------- |
 | target_spec | [OperationTargetSpec](#v1-OperationTargetSpec) |  |  |
 | description | [string](#string) |  |  |
-| reset_target | [string](#string) |  | Reset scope: &#34;nvos&#34; or &#34;sdn&#34;. Omission retains NVOS for older clients. |
+| reset_target | [string](#string) |  | Required reset scope: &#34;nvos&#34; or &#34;sdn&#34;. Missing or empty values are rejected. |
 
 <a name="v1-FieldDiff"></a>
 
