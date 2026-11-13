@@ -177,6 +177,9 @@ async fn delete_destination<B: Bmc>(
 
 /// Configuration for the Redfish SSE log collector.
 pub struct SseLogCollectorConfig<B: Bmc> {
+    /// Destination for subscription and event-record resolution metrics.
+    /// Retain its provider until the collector stops.
+    pub instrumentation: carbide_instrument::Instrumentation,
     /// Attach Redfish diagnostic payloads to emitted log records.
     pub include_diagnostics: bool,
 
@@ -196,6 +199,7 @@ pub struct SseLogCollectorConfig<B: Bmc> {
 }
 
 pub struct SseLogCollector<B: Bmc> {
+    instrumentation: carbide_instrument::Instrumentation,
     bmc: Arc<B>,
     endpoint: Arc<BmcEndpoint>,
     include_diagnostics: bool,
@@ -260,7 +264,7 @@ impl<B: Bmc + 'static> SseLogCollector<B> {
         if warn {
             self.last_cap_warning = Some(Instant::now());
 
-            carbide_instrument::emit(SseCapacityExhausted {
+            self.instrumentation.emit(SseCapacityExhausted {
                 endpoint_address: endpoint_address.clone(),
                 sse_destination_count: ids.len(),
                 sse_destinations: ids.join(","),
@@ -284,7 +288,7 @@ impl<B: Bmc + 'static> SseLogCollector<B> {
 
             let (outcome, error) = delete_destination(destination, remaining).await;
 
-            carbide_instrument::emit(SseSubscriptionReaped {
+            self.instrumentation.emit(SseSubscriptionReaped {
                 outcome,
                 odata_id,
                 endpoint_address: endpoint_address.clone(),
@@ -306,6 +310,7 @@ impl<B: Bmc + 'static> StreamingCollector<B> for SseLogCollector<B> {
         Ok(Self {
             bmc,
             endpoint,
+            instrumentation: config.instrumentation,
             include_diagnostics: config.include_diagnostics,
             request_concurrency: config.request_concurrency.get(),
             gpu_inventory: config.gpu_inventory,
@@ -360,6 +365,7 @@ impl<B: Bmc + 'static> StreamingCollector<B> for SseLogCollector<B> {
             self.include_diagnostics,
             self.request_concurrency,
             self.gpu_inventory.clone(),
+            self.instrumentation.clone(),
         );
 
         Ok(StreamingConnectResult::Connected(event_stream))
@@ -370,7 +376,7 @@ impl<B: Bmc + 'static> StreamingCollector<B> for SseLogCollector<B> {
         let endpoint_address = format!("{:?}", self.endpoint.addr);
 
         let Some(destination) = self.destination.take() else {
-            carbide_instrument::emit(SseSubscriptionClosed {
+            self.instrumentation.emit(SseSubscriptionClosed {
                 outcome: SseCloseOutcome::SocketOnly,
                 odata_id: String::new(),
                 endpoint_address,
@@ -400,7 +406,7 @@ impl<B: Bmc + 'static> StreamingCollector<B> for SseLogCollector<B> {
             self.undeleted_destination = Some(odata_id.clone());
         }
 
-        carbide_instrument::emit(SseSubscriptionClosed {
+        self.instrumentation.emit(SseSubscriptionClosed {
             outcome,
             odata_id,
             endpoint_address,
@@ -419,6 +425,7 @@ fn map_event_stream<'a, B, S>(
     include_diagnostics: bool,
     request_concurrency: usize,
     gpu_inventory: Option<SharedInventory<B>>,
+    instrumentation: carbide_instrument::Instrumentation,
 ) -> EventStream<'a>
 where
     B: Bmc + 'static,
@@ -431,6 +438,7 @@ where
             let bmc = Arc::clone(&bmc);
             let fetch_permits = Arc::clone(&fetch_permits);
             let gpu_inventory = gpu_inventory.clone();
+            let instrumentation = instrumentation.clone();
             async move {
                 map_payload(
                     result,
@@ -438,6 +446,7 @@ where
                     include_diagnostics,
                     fetch_permits.as_ref(),
                     gpu_inventory.as_ref(),
+                    &instrumentation,
                 )
                 .await
             }
@@ -453,6 +462,7 @@ async fn map_payload<B: Bmc>(
     include_diagnostics: bool,
     fetch_permits: &Semaphore,
     gpu_inventory: Option<&SharedInventory<B>>,
+    instrumentation: &carbide_instrument::Instrumentation,
 ) -> Vec<Result<CollectorEvent, HealthError>> {
     match result {
         Ok(EventStreamPayload::Event(event)) => {
@@ -463,6 +473,7 @@ async fn map_payload<B: Bmc>(
                 fetch_permits,
                 EVENT_RECORD_RESOLUTION_TIMEOUT,
                 gpu_inventory,
+                instrumentation,
             )
             .await
         }
@@ -479,6 +490,7 @@ async fn event_to_logs<B: Bmc>(
     fetch_permits: &Semaphore,
     resolution_timeout: Duration,
     gpu_inventory: Option<&SharedInventory<B>>,
+    instrumentation: &carbide_instrument::Instrumentation,
 ) -> Vec<Result<CollectorEvent, HealthError>> {
     let deadline = tokio::time::Instant::now() + resolution_timeout;
 
@@ -486,7 +498,7 @@ async fn event_to_logs<B: Bmc>(
         event
             .events
             .iter()
-            .map(|nav| resolve_event_record(nav, bmc, fetch_permits, deadline)),
+            .map(|nav| resolve_event_record(nav, bmc, fetch_permits, deadline, instrumentation)),
     )
     .await
     .into_iter()
@@ -581,6 +593,7 @@ async fn resolve_event_record<B: Bmc>(
     bmc: &B,
     fetch_permits: &Semaphore,
     deadline: tokio::time::Instant,
+    instrumentation: &carbide_instrument::Instrumentation,
 ) -> Option<Arc<nv_redfish::schema::event::EventRecord>> {
     let odata_id = nav.odata_id().to_string();
     let is_reference = matches!(nav, NavProperty::Reference(_));
@@ -607,7 +620,7 @@ async fn resolve_event_record<B: Bmc>(
                 let retry_at = (tokio::time::Instant::now() + retry_backoff).min(deadline);
                 tokio::time::sleep_until(retry_at).await;
                 if retry_at == deadline {
-                    carbide_instrument::emit(EventRecordResolutionFailed {
+                    instrumentation.emit(EventRecordResolutionFailed {
                         reason: EventRecordResolutionFailure::Fetch,
                         odata_id,
                         error: error.to_string(),
@@ -617,7 +630,7 @@ async fn resolve_event_record<B: Bmc>(
                 retry_backoff = (retry_backoff * 2).min(EVENT_RECORD_RETRY_MAX_BACKOFF);
             }
             Ok(Err(error)) => {
-                carbide_instrument::emit(EventRecordResolutionFailed {
+                instrumentation.emit(EventRecordResolutionFailed {
                     reason: EventRecordResolutionFailure::Fetch,
                     odata_id,
                     error: error.to_string(),
@@ -625,7 +638,7 @@ async fn resolve_event_record<B: Bmc>(
                 return None;
             }
             Err(error) => {
-                carbide_instrument::emit(EventRecordResolutionFailed {
+                instrumentation.emit(EventRecordResolutionFailed {
                     reason: EventRecordResolutionFailure::Timeout,
                     odata_id,
                     error: error.to_string(),
@@ -883,6 +896,7 @@ mod tests {
                 Arc::clone(endpoint.bmc()),
                 endpoint,
                 SseLogCollectorConfig {
+                    instrumentation: carbide_instrument::Instrumentation::global(),
                     include_diagnostics: false,
                     request_concurrency: NonZeroUsize::MIN,
                     gpu_inventory: None,
@@ -960,6 +974,7 @@ mod tests {
             Arc::clone(endpoint.bmc()),
             endpoint,
             SseLogCollectorConfig {
+                instrumentation: carbide_instrument::Instrumentation::global(),
                 include_diagnostics: false,
                 request_concurrency: NonZeroUsize::MIN,
                 gpu_inventory: None,
@@ -1026,6 +1041,7 @@ mod tests {
             Arc::clone(endpoint.bmc()),
             endpoint,
             SseLogCollectorConfig {
+                instrumentation: carbide_instrument::Instrumentation::global(),
                 include_diagnostics: false,
                 request_concurrency: NonZeroUsize::MIN,
                 gpu_inventory: None,
@@ -1636,6 +1652,7 @@ mod tests {
             &fetch_permits,
             resolution_timeout,
             None,
+            &carbide_instrument::Instrumentation::global(),
         )
         .await
     }
@@ -1671,6 +1688,7 @@ mod tests {
             false,
             &fetch_permits,
             None,
+            &carbide_instrument::Instrumentation::global(),
         )
         .await;
 
@@ -1945,6 +1963,7 @@ mod tests {
                 task_permits.as_ref(),
                 Duration::from_secs(1),
                 None,
+                &carbide_instrument::Instrumentation::global(),
             )
             .await
         });
@@ -2016,7 +2035,14 @@ mod tests {
             Ok(EventStreamPayload::Event(referenced_event(&[hung_path]))),
             Ok(EventStreamPayload::Event(referenced_event(&[good_path]))),
         ]);
-        let mut event_stream = map_event_stream(sse_stream, bmc, false, 2, None);
+        let mut event_stream = map_event_stream(
+            sse_stream,
+            bmc,
+            false,
+            2,
+            None,
+            carbide_instrument::Instrumentation::global(),
+        );
         let next_event = tokio::spawn(async move { event_stream.next().await });
 
         tokio::time::timeout(Duration::from_secs(1), good_request_started.notified())

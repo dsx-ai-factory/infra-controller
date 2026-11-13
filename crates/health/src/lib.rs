@@ -566,6 +566,7 @@ pub async fn run_service(
             config.clone(),
             tls_config,
             nmxc_schema_override,
+            framework_metrics.instrumentation.clone(),
         )?;
 
         let collector_transition_notify = ctx.collector_transition_notify.clone();

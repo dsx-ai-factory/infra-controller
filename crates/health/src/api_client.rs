@@ -2434,6 +2434,7 @@ mod tests {
             Arc::new(NoopLimiter),
             Arc::new(MetricsManager::new("machine_change_iteration").expect("metrics manager")),
             Arc::new(config),
+            carbide_instrument::Instrumentation::global(),
         )
         .expect("discovery context");
         let shard_manager = ShardManager {
