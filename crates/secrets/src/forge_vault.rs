@@ -48,6 +48,8 @@ use crate::credentials::{
 const DEFAULT_VAULT_CA_PATH: &str = "/var/run/secrets/forge-roots/ca.crt";
 const VAULT_CACERT_ENV_VAR: &str = "VAULT_CACERT";
 const VAULT_NAMESPACE_ENV_VAR: &str = "VAULT_NAMESPACE";
+const VAULT_KUBERNETES_AUTH_MOUNT_ENV_VAR: &str = "VAULT_KUBERNETES_AUTH_MOUNT";
+const DEFAULT_VAULT_KUBERNETES_AUTH_MOUNT: &str = "kubernetes";
 const DEFAULT_SPIFFE_TRUST_DOMAIN: &str = "nico.local";
 const DEFAULT_SPIFFE_MACHINE_BASE_PATH: &str = "/forge-system/machine/";
 const VAULT_SPIFFE_TRUST_DOMAIN_ENV_VAR: &str = "VAULT_SPIFFE_TRUST_DOMAIN";
@@ -85,6 +87,7 @@ struct ForgeVaultClientConfig {
     pub pki_mount_location: String,
     pub pki_role_name: String,
     namespace: Option<String>,
+    kubernetes_auth_mount: String,
     spiffe_trust_domain: String,
     spiffe_machine_base_path: String,
     vault_root_ca_path: String,
@@ -541,7 +544,7 @@ async fn vault_token_refresh(
             let time_started_vault_request = Instant::now();
             let vault_response = vaultrs::auth::kubernetes::login(
                 &vault_client,
-                "kubernetes",
+                vault_client_config.kubernetes_auth_mount.as_str(),
                 role_name.as_str(),
                 jwt.as_str(),
             )
@@ -1470,6 +1473,7 @@ pub struct VaultConfig {
     /// When configured, this takes precedence over `VAULT_NAMESPACE` and is
     /// sent as `X-Vault-Namespace` on every Vault API request.
     pub namespace: Option<String>,
+    pub kubernetes_auth_mount: Option<String>,
     /// SPIFFE trust domain for machine PKI URI SANs. Defaults to `nico.local`.
     pub spiffe_trust_domain: Option<String>,
     /// Path prefix after the trust domain, e.g. `/forge-system/machine/`.
@@ -1527,6 +1531,12 @@ impl VaultConfig {
             .or_else(|| normalize_vault_namespace(env::var(VAULT_NAMESPACE_ENV_VAR).ok()))
     }
 
+    pub fn kubernetes_auth_mount(&self) -> String {
+        normalize_vault_mount(self.kubernetes_auth_mount.clone())
+            .or_else(|| normalize_vault_mount(env::var(VAULT_KUBERNETES_AUTH_MOUNT_ENV_VAR).ok()))
+            .unwrap_or_else(|| DEFAULT_VAULT_KUBERNETES_AUTH_MOUNT.to_string())
+    }
+
     pub fn spiffe_trust_domain(&self) -> String {
         self.spiffe_trust_domain
             .clone()
@@ -1547,6 +1557,13 @@ fn normalize_vault_namespace(namespace: Option<String>) -> Option<String> {
     namespace.and_then(|namespace| {
         let namespace = namespace.trim();
         (!namespace.is_empty()).then(|| namespace.to_string())
+    })
+}
+
+fn normalize_vault_mount(mount: Option<String>) -> Option<String> {
+    mount.and_then(|mount| {
+        let mount = mount.trim().trim_matches('/');
+        (!mount.is_empty()).then(|| mount.to_string())
     })
 }
 
@@ -1572,6 +1589,7 @@ pub fn create_vault_client(vault_config: &VaultConfig) -> eyre::Result<Arc<Forge
         pki_mount_location: vault_config.pki_mount_location()?,
         pki_role_name: vault_config.pki_role_name()?,
         namespace: vault_config.namespace(),
+        kubernetes_auth_mount: vault_config.kubernetes_auth_mount(),
         spiffe_trust_domain: vault_config.spiffe_trust_domain(),
         spiffe_machine_base_path: vault_config.spiffe_machine_base_path(),
         vault_root_ca_path,
@@ -1701,6 +1719,7 @@ pub fn create_dedicated_vault_client(
         pki_mount_location: config.pki_mount_location.clone(),
         pki_role_name: config.pki_role_name.clone(),
         namespace: config.namespace(),
+        kubernetes_auth_mount: DEFAULT_VAULT_KUBERNETES_AUTH_MOUNT.to_string(),
         spiffe_trust_domain: spiffe.trust_domain,
         spiffe_machine_base_path: spiffe.machine_base_path,
         vault_root_ca_path,
@@ -1761,7 +1780,7 @@ mod tests {
         DedicatedVaultConfig, ForgeVaultAuthenticationType, ForgeVaultClientConfig, PathExclusion,
         SpiffeIdentity, VaultConfig, VaultTokenRefreshWindowObserved,
         create_dedicated_vault_client, create_vault_client_settings, machine_spiffe_uri,
-        service_account_role_name_from_jwt, vault_path_exclusion,
+        service_account_role_name_from_jwt, vault_path_exclusion, vault_token_refresh,
     };
     use crate::credentials::CredentialPrefix;
 
@@ -1868,6 +1887,7 @@ mod tests {
             pki_mount_location: "pki".to_string(),
             pki_role_name: "nico".to_string(),
             namespace: namespace.map(str::to_string),
+            kubernetes_auth_mount: "kubernetes".to_string(),
             spiffe_trust_domain: "nico.local".to_string(),
             spiffe_machine_base_path: "/forge-system/machine/".to_string(),
             // The settings builder checks that a CA path is configured, but an
@@ -2078,6 +2098,128 @@ mod tests {
         let _namespace = EnvironmentVariableGuard::set("VAULT_NAMESPACE", " \t ");
 
         assert_eq!(VaultConfig::default().namespace(), None);
+    }
+
+    #[test]
+    #[serial]
+    fn vault_kubernetes_auth_mount_defaults_to_kubernetes() {
+        let _mount = EnvironmentVariableGuard::set("VAULT_KUBERNETES_AUTH_MOUNT", " / ");
+
+        assert_eq!(VaultConfig::default().kubernetes_auth_mount(), "kubernetes");
+    }
+
+    #[test]
+    #[serial]
+    fn vault_kubernetes_auth_mount_from_environment_with_config_precedence() {
+        let _mount =
+            EnvironmentVariableGuard::set("VAULT_KUBERNETES_AUTH_MOUNT", "/site-a/kubernetes/");
+
+        assert_eq!(
+            VaultConfig::default().kubernetes_auth_mount(),
+            "site-a/kubernetes"
+        );
+
+        let config = VaultConfig {
+            kubernetes_auth_mount: Some("site/kubernetes".to_string()),
+            ..Default::default()
+        };
+        assert_eq!(config.kubernetes_auth_mount(), "site/kubernetes");
+    }
+
+    #[tokio::test]
+    async fn service_account_login_uses_the_configured_kubernetes_auth_mount() {
+        use carbide_instrument::testing::MetricsCapture;
+
+        let mut server = mockito::Server::new_async().await;
+        let default_mount_login = server
+            .mock("POST", "/v1/auth/kubernetes/login")
+            .expect(0)
+            .create_async()
+            .await;
+        let login = server
+            .mock("POST", "/v1/auth/site-a/kubernetes/login")
+            .match_body(mockito::Matcher::PartialJson(json!({ "role": "nico-api" })))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                json!({
+                    "request_id": "login",
+                    "lease_id": "",
+                    "renewable": false,
+                    "lease_duration": 0,
+                    "data": null,
+                    "wrap_info": null,
+                    "warnings": null,
+                    "auth": {
+                        "client_token": "s.site-a",
+                        "accessor": "accessor",
+                        "policies": ["default"],
+                        "token_policies": ["default"],
+                        "metadata": { "role": "nico-api", "service_account_name": "nico-api" },
+                        "lease_duration": 3600,
+                        "renewable": true,
+                        "entity_id": "entity",
+                        "token_type": "service",
+                        "orphan": true
+                    }
+                })
+                .to_string(),
+            )
+            .expect(1)
+            .create_async()
+            .await;
+        let token_probe = server
+            .mock(
+                "POST",
+                "/v1/secret/data/machines/token_refresh/current_token",
+            )
+            .match_header("x-vault-token", "s.site-a")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                json!({
+                    "request_id": "probe",
+                    "lease_id": "",
+                    "renewable": false,
+                    "lease_duration": 0,
+                    "data": {
+                        "created_time": "2024-01-01T00:00:00Z",
+                        "deletion_time": "",
+                        "custom_metadata": null,
+                        "destroyed": false,
+                        "version": 1
+                    }
+                })
+                .to_string(),
+            )
+            .expect(1)
+            .create_async()
+            .await;
+
+        let token_file = tempfile::NamedTempFile::new().expect("create service account token");
+        std::fs::write(token_file.path(), jwt_with_account("nico-api".into()))
+            .expect("write service account token");
+        let config = ForgeVaultClientConfig {
+            auth_type: ForgeVaultAuthenticationType::ServiceAccount(token_file.path().to_owned()),
+            kubernetes_auth_mount: "site-a/kubernetes".to_string(),
+            ..vault_client_config(server.url(), None)
+        };
+
+        let metrics = MetricsCapture::start();
+        vault_token_refresh(&config)
+            .await
+            .expect("service account login");
+
+        login.assert_async().await;
+        token_probe.assert_async().await;
+        default_mount_login.assert_async().await;
+        assert_eq!(
+            metrics.counter_delta(
+                "carbide_api_vault_requests_succeeded_total",
+                &[("request_type", "service_account_login")]
+            ),
+            1.0
+        );
     }
 
     #[test]
