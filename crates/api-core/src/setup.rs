@@ -645,6 +645,7 @@ pub async fn start_runtime(runtime_inputs: RuntimeInputs<'_>) -> eyre::Result<So
         carbide_config.bmc_session_lockout_threshold,
         carbide_config.allow_bmc_basic_auth_fallback,
         carbide_config.bmc_max_sessions_per_caller,
+        instrumentation.clone(),
     ));
 
     let bmc_client = Arc::new(

@@ -291,6 +291,7 @@ impl TestApiBuilder {
             runtime_config.bmc_session_lockout_threshold,
             runtime_config.allow_bmc_basic_auth_fallback,
             runtime_config.bmc_max_sessions_per_caller,
+            self.instrumentation.clone(),
         ));
 
         // In tests a real explorer can't explore (nv-redfish has no `RedfishSim`
