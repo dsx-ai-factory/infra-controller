@@ -175,6 +175,7 @@ pub async fn run(
         &credential_config,
         &mut join_set,
         &cancel_token,
+        &instrumentation,
     )
     .await?;
 
