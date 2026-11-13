@@ -8,14 +8,18 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/google/uuid"
 	"github.com/labstack/echo/v4"
+	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 	tmocks "go.temporal.io/sdk/mocks"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/encoding/protojson"
 	"google.golang.org/protobuf/proto"
 
@@ -26,6 +30,7 @@ import (
 	authz "github.com/NVIDIA/infra-controller/rest-api/auth/pkg/authorization"
 	"github.com/NVIDIA/infra-controller/rest-api/common/pkg/grpcproxy"
 	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
+	cdb "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
 	cdbm "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/model"
 	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
 )
@@ -307,6 +312,238 @@ func TestGetDpuMachineHandler_Handle(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestResolveDpuMachine(t *testing.T) {
+	dpuMachine := &corev1.Machine{
+		Id:          &corev1.MachineId{Id: "dpu-1"},
+		MachineType: corev1.MachineType_DPU,
+		Status:      &corev1.MachineStatus{AssociatedHostMachineId: &corev1.MachineId{Id: "host-1"}},
+	}
+	coreRejection := testMachineCoreFailure(status.Error(codes.FailedPrecondition, "Core rejected the Machine lookup"))
+
+	tests := []struct {
+		name        string
+		setup       func(*testing.T, *dpuMachineCoreFixture)
+		siteID      func(*dpuMachineCoreFixture) string
+		wantCode    int
+		wantMessage string
+		// wantCoreMessage is the Core status message expected within the proxy's rendering of it.
+		wantCoreMessage    string
+		wantProxiedMethods []string
+	}{
+		{
+			name: "returns the DPU Machine with its Site and Site client",
+			setup: func(t *testing.T, f *dpuMachineCoreFixture) {
+				f.expectDpuMachine(t, dpuMachine)
+			},
+			wantProxiedMethods: []string{corev1.Forge_FindMachineIds_FullMethodName, corev1.Forge_FindMachinesByIds_FullMethodName},
+		},
+		{
+			name: "returns not found without looking up an ID Core does not list as a DPU",
+			setup: func(t *testing.T, f *dpuMachineCoreFixture) {
+				f.expectProxyResponse(t, &corev1.MachineIdList{MachineIds: []*corev1.MachineId{{Id: "dpu-2"}}})
+			},
+			wantCode:           http.StatusNotFound,
+			wantMessage:        "Could not find DPU Machine with specified ID",
+			wantProxiedMethods: []string{corev1.Forge_FindMachineIds_FullMethodName},
+		},
+		{
+			name: "returns not found for a host Machine",
+			setup: func(t *testing.T, f *dpuMachineCoreFixture) {
+				f.expectDpuMachine(t, &corev1.Machine{Id: &corev1.MachineId{Id: "dpu-1"}, MachineType: corev1.MachineType_HOST})
+			},
+			wantCode:           http.StatusNotFound,
+			wantMessage:        "Could not find DPU Machine with specified ID",
+			wantProxiedMethods: []string{corev1.Forge_FindMachineIds_FullMethodName, corev1.Forge_FindMachinesByIds_FullMethodName},
+		},
+		{
+			name: "surfaces a Core failure listing DPU Machine IDs",
+			setup: func(_ *testing.T, f *dpuMachineCoreFixture) {
+				f.expectProxyError(coreRejection)
+			},
+			wantCode:           http.StatusPreconditionFailed,
+			wantCoreMessage:    "Core rejected the Machine lookup",
+			wantProxiedMethods: []string{corev1.Forge_FindMachineIds_FullMethodName},
+		},
+		{
+			name: "surfaces a Core failure retrieving the DPU Machine",
+			setup: func(t *testing.T, f *dpuMachineCoreFixture) {
+				f.expectProxyResponse(t, &corev1.MachineIdList{MachineIds: []*corev1.MachineId{{Id: "dpu-1"}}})
+				f.expectProxyError(coreRejection)
+			},
+			wantCode:           http.StatusPreconditionFailed,
+			wantCoreMessage:    "Core rejected the Machine lookup",
+			wantProxiedMethods: []string{corev1.Forge_FindMachineIds_FullMethodName, corev1.Forge_FindMachinesByIds_FullMethodName},
+		},
+		{
+			name: "rejects a caller without the Provider Admin role",
+			setup: func(_ *testing.T, f *dpuMachineCoreFixture) {
+				f.setUserRoles(authz.TenantAdminRole)
+			},
+			wantCode:    http.StatusForbidden,
+			wantMessage: "User does not have Provider Admin role with org",
+		},
+		{
+			name:     "rejects a Site that does not exist",
+			siteID:   func(*dpuMachineCoreFixture) string { return uuid.NewString() },
+			wantCode: http.StatusBadRequest,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			fixture := newDpuMachineCoreFixture(t)
+			if tt.setup != nil {
+				tt.setup(t, fixture)
+			}
+			siteID := fixture.siteID
+			if tt.siteID != nil {
+				siteID = tt.siteID(fixture)
+			}
+
+			resolved, apiErr := resolveDpuMachine(resolveDpuMachineInput{
+				Ctx:          context.Background(),
+				Logger:       zerolog.Nop(),
+				DBSession:    fixture.dbSession,
+				SCP:          fixture.scp,
+				Org:          fixture.org,
+				User:         fixture.user,
+				SiteID:       siteID,
+				DpuMachineID: "dpu-1",
+			})
+
+			assert.Equal(t, tt.wantProxiedMethods, fixture.proxiedMethods())
+			if tt.wantCode != 0 {
+				require.NotNil(t, apiErr)
+				assert.Nil(t, resolved)
+				assert.Equal(t, tt.wantCode, apiErr.Code)
+				if tt.wantMessage != "" {
+					assert.Equal(t, tt.wantMessage, apiErr.Message)
+				}
+				if tt.wantCoreMessage != "" {
+					assert.Contains(t, apiErr.Message, tt.wantCoreMessage)
+					assert.Nil(t, apiErr.Data)
+				}
+				return
+			}
+
+			require.Nil(t, apiErr)
+			require.NotNil(t, resolved)
+			assert.Equal(t, "dpu-1", resolved.machine.GetId().GetId())
+			assert.Equal(t, "host-1", resolved.machine.GetStatus().GetAssociatedHostMachineId().GetId())
+			assert.Equal(t, fixture.siteID, resolved.site.ID.String())
+			assert.Same(t, fixture.tsc, resolved.stc)
+
+			var search corev1.MachineSearchConfig
+			require.NoError(t, protojson.Unmarshal(fixture.proxiedReqs[0].RequestJSON, &search))
+			assert.True(t, search.GetIncludeDpus())
+			assert.True(t, search.GetExcludeHosts())
+			var byIDs corev1.MachinesByIdsRequest
+			require.NoError(t, protojson.Unmarshal(fixture.proxiedReqs[1].RequestJSON, &byIDs))
+			require.Len(t, byIDs.GetMachineIds(), 1)
+			assert.Equal(t, "dpu-1", byIDs.GetMachineIds()[0].GetId())
+		})
+	}
+}
+
+// dpuMachineCoreFixture is a Registered Site owned by a Provider Admin, a host
+// Machine in the REST DB, and a Site client that replays queued Core proxy
+// results in order while recording each proxied request.
+type dpuMachineCoreFixture struct {
+	dbSession     *cdb.Session
+	scp           *sc.ClientPool
+	org           string
+	siteID        string
+	hostMachineID string
+	user          *cdbm.User
+	tsc           *tmocks.Client
+	proxiedReqs   []grpcproxy.Request
+}
+
+func newDpuMachineCoreFixture(t *testing.T) *dpuMachineCoreFixture {
+	t.Helper()
+	base := common.NewTestSetupProviderMachineHandlerFixture(t, nil)
+	user, ok := base.User.(*cdbm.User)
+	require.True(t, ok)
+
+	tsc := &tmocks.Client{}
+	base.SiteClientPool.IDClientMap[base.SiteID] = tsc
+	return &dpuMachineCoreFixture{
+		dbSession:     base.DBSession,
+		scp:           base.SiteClientPool,
+		org:           base.Org,
+		siteID:        base.SiteID,
+		hostMachineID: base.MachineID,
+		user:          user,
+		tsc:           tsc,
+	}
+}
+
+// setUserRoles replaces the caller with an org member holding only the given roles.
+func (f *dpuMachineCoreFixture) setUserRoles(roles ...string) {
+	f.user = &cdbm.User{OrgData: cdbm.OrgData{f.org: cdbm.Org{Name: f.org, Roles: roles}}}
+}
+
+func (f *dpuMachineCoreFixture) expectProxyResult(run func(mock.Arguments), err error) {
+	wrun := &tmocks.WorkflowRun{}
+	get := wrun.On("Get", mock.Anything, mock.Anything)
+	if run != nil {
+		get = get.Run(run)
+	}
+	get.Return(err).Once()
+	f.tsc.On("ExecuteWorkflow", mock.Anything, mock.Anything, grpcproxy.Core.WorkflowName, mock.Anything).
+		Run(func(args mock.Arguments) {
+			f.proxiedReqs = append(f.proxiedReqs, args.Get(3).(grpcproxy.Request))
+		}).Return(wrun, nil).Once()
+}
+
+// expectProxyResponse queues a successful Core response for the next proxied call.
+func (f *dpuMachineCoreFixture) expectProxyResponse(t *testing.T, response proto.Message) {
+	t.Helper()
+	f.expectProxyResult(func(args mock.Arguments) {
+		out := args.Get(1).(*grpcproxy.Response)
+		responseJSON, err := protojson.Marshal(response)
+		require.NoError(t, err)
+		out.ResponseJSON = responseJSON
+	}, nil)
+}
+
+// expectProxyError queues a Core failure for the next proxied call.
+func (f *dpuMachineCoreFixture) expectProxyError(err error) {
+	f.expectProxyResult(nil, err)
+}
+
+// expectDpuMachine queues the two Core responses resolveDpuMachine reads for machine.
+func (f *dpuMachineCoreFixture) expectDpuMachine(t *testing.T, machine *corev1.Machine) {
+	t.Helper()
+	f.expectProxyResponse(t, &corev1.MachineIdList{MachineIds: []*corev1.MachineId{machine.GetId()}})
+	f.expectProxyResponse(t, &corev1.MachineList{Machines: []*corev1.Machine{machine}})
+}
+
+func (f *dpuMachineCoreFixture) proxiedMethods() []string {
+	var methods []string
+	for _, req := range f.proxiedReqs {
+		methods = append(methods, req.FullMethod)
+	}
+	return methods
+}
+
+// request sends one request for dpuMachineID through handler. An empty body sends no JSON payload.
+func (f *dpuMachineCoreFixture) request(t *testing.T, handler echo.HandlerFunc, method, target, body, dpuMachineID string) *httptest.ResponseRecorder {
+	t.Helper()
+	e := echo.New()
+	req := httptest.NewRequest(method, target, strings.NewReader(body))
+	if body != "" {
+		req.Header.Set(echo.HeaderContentType, echo.MIMEApplicationJSON)
+	}
+	rec := httptest.NewRecorder()
+	ec := e.NewContext(req, rec)
+	ec.SetParamNames("orgName", "id")
+	ec.SetParamValues(f.org, dpuMachineID)
+	ec.Set("user", f.user)
+	require.NoError(t, handler(ec))
+	return rec
 }
 
 type getAllDpuMachinesHandlerFixture struct {

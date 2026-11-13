@@ -64,7 +64,7 @@ func TestNewAPIRoutes(t *testing.T) {
 		"expected-rack-group":       8,
 		"expected-switch":           7,
 		"instance-type":             5,
-		"machine":                   23,
+		"machine":                   25,
 		"allocation":                6,
 		"subnet":                    5,
 		"machine-instance-type":     3,
@@ -264,6 +264,8 @@ func TestNewAPIRoutes(t *testing.T) {
 			dpuPath := "/org/:orgName/" + cfg.GetAPIName() + "/dpu"
 			assertRouteExists(t, got, http.MethodGet, dpuPath)
 			assertRouteExists(t, got, http.MethodGet, dpuPath+"/:id")
+			assertRouteExists(t, got, http.MethodGet, dpuPath+"/:id/health-report")
+			assertRouteExists(t, got, http.MethodPatch, dpuPath+"/:id/power")
 			assertRouteExists(t, got, http.MethodPatch, machineAdminPath+"/bmc/reset")
 			assertRouteExists(t, got, http.MethodPatch, machineAdminPath+"/chassis/:chassisId/reset")
 			assertRouteExists(t, got, http.MethodPatch, machineAdminPath+"/dpu/reprovision")
