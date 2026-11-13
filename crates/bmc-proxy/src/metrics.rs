@@ -45,8 +45,10 @@ pub(crate) async fn start(
         .build_task()
         .name("bmc-proxy metrics service")
         .spawn(async move {
+            let _meter_provider = metrics_setup.meter_provider;
             if let Err(e) = metrics_endpoint::run_metrics_endpoint_with_listener(
                 &MetricsEndpointConfig {
+                    instrumentation: metrics_setup.instrumentation.clone(),
                     address,
                     registry: metrics_setup.registry,
                     health_controller: Some(metrics_setup.health_controller),

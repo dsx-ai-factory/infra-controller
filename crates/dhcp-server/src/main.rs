@@ -1293,7 +1293,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     // served below.
     let metrics_setup = new_metrics_setup("carbide-dhcp-server", "forge-system", true)
         .map_err(|e| format!("Failed to set up metrics: {e}"))?;
-    let instrumentation = Instrumentation::from_meter_provider(&metrics_setup.meter_provider);
+    let instrumentation = metrics_setup.instrumentation.clone();
     carbide_instrument::log_events::register(&metrics_setup.meter);
 
     // Must keep meter_provider alive for the lifetime of the server;
@@ -1305,6 +1305,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
             .parse()
             .map_err(|e| format!("Invalid --metrics-listen-addr '{}': {}", addr_str, e))?;
         let metrics_config = MetricsEndpointConfig {
+            instrumentation: instrumentation.clone(),
             address: metrics_listen_addr,
             registry: metrics_setup.registry,
             health_controller: Some(metrics_setup.health_controller),

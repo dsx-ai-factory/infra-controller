@@ -77,8 +77,7 @@ pub async fn run_service(config: Config) -> Result<(), DsxConsumerError> {
         metrics_endpoint::new_metrics_setup("carbide-dsx-exchange-consumer", "carbide", true)
             .map_err(|e| DsxConsumerError::Metrics(e.to_string()))?;
 
-    let instrumentation =
-        carbide_instrument::Instrumentation::from_meter_provider(&metrics_setup.meter_provider);
+    let instrumentation = metrics_setup.instrumentation.clone();
     let _metrics_provider = metrics_setup.meter_provider;
     let registry = metrics_setup.registry;
     let meter = metrics_setup.meter;
@@ -86,6 +85,7 @@ pub async fn run_service(config: Config) -> Result<(), DsxConsumerError> {
 
     // Spawn metrics server
     let metrics_config = metrics_endpoint::MetricsEndpointConfig {
+        instrumentation: instrumentation.clone(),
         address: metrics_endpoint,
         registry,
         health_controller: Some(metrics_setup.health_controller),

@@ -774,6 +774,7 @@ async fn collect_dhcp_metric_infos() -> eyre::Result<Vec<metrics::MetricInfo>> {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
     let address = listener.local_addr()?;
     let config = MetricsEndpointConfig {
+        instrumentation: setup.instrumentation.clone(),
         address,
         registry: setup.registry.clone(),
         health_controller: None,

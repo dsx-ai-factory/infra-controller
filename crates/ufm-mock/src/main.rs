@@ -66,6 +66,7 @@ async fn main() -> eyre::Result<()> {
 
     let metrics_task = config.mock.metrics_address.map(|address| {
         let metrics_config = MetricsEndpointConfig {
+            instrumentation: metrics_setup.instrumentation.clone(),
             address,
             registry: metrics_setup.registry,
             health_controller: Some(metrics_setup.health_controller),
