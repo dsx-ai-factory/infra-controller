@@ -19,7 +19,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use bms_dsx_exchange::{BmsDsxExchangePublisher, Publication, PublisherConfig, SourceUpdate};
-use carbide_instrument::{Event, LabelValue, emit};
+use carbide_instrument::{Event, Instrumentation, LabelValue};
 use carbide_mqtt_common::hook::MqttPublisher;
 use carbide_mqtt_common::metrics::{MqttHookMetrics, PublishComponent};
 use carbide_uuid::rack::RackId;
@@ -94,10 +94,14 @@ struct BmsDsxExchangeCommandDropped {
 }
 
 pub struct BmsDsxExchangeHandle {
+    instrumentation: Instrumentation,
     sender: mpsc::Sender<Command>,
 }
 
 impl BmsDsxExchangeHandle {
+    /// Starts the BMS publisher with explicit Event instrumentation. Retain
+    /// the meter provider until the handle and worker have stopped.
+    #[allow(clippy::too_many_arguments)] // Runtime dependencies and queue settings are supplied at startup.
     pub async fn new(
         client: Arc<MqtteaClient>,
         db_pool: &sqlx::PgPool,
@@ -106,15 +110,24 @@ impl BmsDsxExchangeHandle {
         queue_capacity: usize,
         meter: &Meter,
         cancel_token: CancellationToken,
+        instrumentation: Instrumentation,
     ) -> Result<Arc<Self>, eyre::Error> {
         let publisher_config = PublisherConfig::default();
         let tick_interval = publisher_config
             .heartbeat_interval
             .min(publisher_config.republish_interval);
         let (sender, receiver) = mpsc::channel(queue_capacity);
-        let metrics = MqttHookMetrics::new(meter, sender.downgrade(), PublishComponent::Bms);
+        let metrics = MqttHookMetrics::new(
+            meter,
+            sender.downgrade(),
+            PublishComponent::Bms,
+            instrumentation.clone(),
+        );
 
-        let handle = Arc::new(BmsDsxExchangeHandle { sender });
+        let handle = Arc::new(BmsDsxExchangeHandle {
+            sender,
+            instrumentation,
+        });
 
         join_set.spawn(run_worker(
             receiver,
@@ -158,7 +171,7 @@ impl BmsDsxExchangeHandle {
     async fn send(&self, command: Command) {
         let command_kind = command.kind();
         if let Err(error) = self.sender.send(command).await {
-            emit(BmsDsxExchangeCommandDropped {
+            self.instrumentation.emit(BmsDsxExchangeCommandDropped {
                 command_kind,
                 error: format!("{error:?}"),
             });
@@ -315,7 +328,6 @@ mod tests {
     use carbide_test_support::value_scenarios;
     use carbide_uuid::rack::RackId;
     use mqttea::MqtteaClientError;
-    use opentelemetry::global;
     use tokio::sync::{Mutex, Notify};
     use tokio::task::JoinSet;
     use tokio_util::sync::CancellationToken;
@@ -357,8 +369,9 @@ mod tests {
         }
     }
 
-    fn test_meter() -> Meter {
-        global::meter("bms-client-test")
+    fn test_metrics() -> metrics_endpoint::MetricsSetup {
+        metrics_endpoint::new_metrics_setup("bms-client-test", "carbide", false)
+            .expect("test metrics setup")
     }
 
     fn leak_metadata_json() -> Vec<u8> {
@@ -427,6 +440,7 @@ mod tests {
 
     fn spawn_test_handle(
         publisher: Arc<RecordingPublisher>,
+        metrics_setup: &metrics_endpoint::MetricsSetup,
     ) -> (Arc<BmsDsxExchangeHandle>, JoinSet<()>, CancellationToken) {
         let publisher_config = PublisherConfig::default();
         let tick_interval = publisher_config
@@ -435,8 +449,13 @@ mod tests {
         let mut join_set = JoinSet::new();
         let cancel_token = CancellationToken::new();
         let (sender, receiver) = mpsc::channel(32);
-        let metrics =
-            MqttHookMetrics::new(&test_meter(), sender.downgrade(), PublishComponent::Bms);
+        let instrumentation = Instrumentation::from_meter_provider(&metrics_setup.meter_provider);
+        let metrics = MqttHookMetrics::new(
+            &metrics_setup.meter,
+            sender.downgrade(),
+            PublishComponent::Bms,
+            instrumentation.clone(),
+        );
 
         join_set.spawn(run_worker(
             receiver,
@@ -449,7 +468,10 @@ mod tests {
         ));
 
         (
-            Arc::new(BmsDsxExchangeHandle { sender }),
+            Arc::new(BmsDsxExchangeHandle {
+                sender,
+                instrumentation,
+            }),
             join_set,
             cancel_token,
         )
@@ -485,8 +507,10 @@ mod tests {
                     .expect("test runtime");
                 let (sender, receiver) = mpsc::channel(1);
                 drop(receiver);
-                let handle = BmsDsxExchangeHandle { sender };
-                let metrics = MetricsCapture::start();
+                let metrics_setup = test_metrics();
+                let instrumentation = Instrumentation::from_meter_provider(&metrics_setup.meter_provider);
+                let handle = BmsDsxExchangeHandle { sender, instrumentation };
+                let metrics = MetricsCapture::for_registry(&metrics_setup.registry);
 
                 let logs: Vec<_> = capture_logs(|| {
                     runtime.block_on(async {
@@ -612,7 +636,8 @@ mod tests {
     #[tokio::test]
     async fn set_rack_leak_state_publishes_isolation_values_without_sleeping() {
         let publisher = Arc::new(RecordingPublisher::default());
-        let (handle, join_set, cancel_token) = spawn_test_handle(publisher.clone());
+        let metrics_setup = test_metrics();
+        let (handle, join_set, cancel_token) = spawn_test_handle(publisher.clone(), &metrics_setup);
 
         handle
             .handle_metadata(
@@ -645,7 +670,8 @@ mod tests {
     #[tokio::test]
     async fn update_rack_leak_state_uses_explicit_override_source_without_sleeping() {
         let publisher = Arc::new(RecordingPublisher::default());
-        let (handle, join_set, cancel_token) = spawn_test_handle(publisher.clone());
+        let metrics_setup = test_metrics();
+        let (handle, join_set, cancel_token) = spawn_test_handle(publisher.clone(), &metrics_setup);
 
         handle
             .handle_metadata(
@@ -676,7 +702,8 @@ mod tests {
     #[tokio::test]
     async fn rack_leak_metadata_does_not_publish_without_rack_leak_source_update() {
         let publisher = Arc::new(RecordingPublisher::default());
-        let (handle, join_set, cancel_token) = spawn_test_handle(publisher.clone());
+        let metrics_setup = test_metrics();
+        let (handle, join_set, cancel_token) = spawn_test_handle(publisher.clone(), &metrics_setup);
 
         handle
             .handle_metadata(

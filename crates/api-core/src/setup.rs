@@ -2057,6 +2057,7 @@ async fn initialize_and_start_controllers<'a>(
                 config.queue_capacity,
                 &meter,
                 cancel_token.clone(),
+                api_service.instrumentation.clone(),
             )
             .await?;
 
@@ -2070,6 +2071,7 @@ async fn initialize_and_start_controllers<'a>(
             ManagedHostStateRepublisher::new(
                 client.clone(),
                 ManagedHostStateRepublisherParams {
+                    instrumentation: api_service.instrumentation.clone(),
                     db_pool: db_pool.clone(),
                     work_lock_manager_handle: work_lock_manager_handle.clone(),
                     topic_prefix: config.topic_prefix.clone(),
@@ -2088,6 +2090,7 @@ async fn initialize_and_start_controllers<'a>(
                 config.queue_capacity,
                 &meter,
                 cancel_token.clone(),
+                api_service.instrumentation.clone(),
             )));
         }
 
