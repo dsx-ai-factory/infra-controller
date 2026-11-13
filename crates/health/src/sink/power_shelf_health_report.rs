@@ -17,7 +17,7 @@
 
 use std::sync::Arc;
 
-use carbide_instrument::{Outcome, emit};
+use carbide_instrument::{Instrumentation, Outcome};
 use carbide_uuid::power_shelf::PowerShelfId;
 
 use super::dedup_queue::DedupQueue;
@@ -41,7 +41,12 @@ pub struct PowerShelfHealthReportSink {
 }
 
 impl PowerShelfHealthReportSink {
-    pub fn new(config: &PowerShelfHealthReportSinkConfig) -> Result<Self, HealthError> {
+    /// Starts report workers using the supplied Event destination.
+    /// Retain the instrumentation provider until the workers stop.
+    pub fn new(
+        config: &PowerShelfHealthReportSinkConfig,
+        instrumentation: Instrumentation,
+    ) -> Result<Self, HealthError> {
         let handle = tokio::runtime::Handle::try_current().map_err(|error| {
             HealthError::GenericError(format!(
                 "power shelf health report sink requires active Tokio runtime: {error}"
@@ -61,6 +66,7 @@ impl PowerShelfHealthReportSink {
         for worker_id in 0..config.workers {
             let worker_client = Arc::clone(&client);
             let worker_queue = Arc::clone(&queue);
+            let instrumentation = instrumentation.clone();
             handle.spawn(async move {
                 loop {
                     let (key, report) = worker_queue.next().await;
@@ -70,7 +76,7 @@ impl PowerShelfHealthReportSink {
                             let result = worker_client
                                 .submit_power_shelf_health_report(&key.id, converted)
                                 .await;
-                            emit(HealthReportSubmitted {
+                            instrumentation.emit(HealthReportSubmitted {
                                 target: HealthReportTarget::PowerShelf,
                                 outcome: Outcome::from(&result),
                                 id: key.id.to_string(),

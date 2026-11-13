@@ -267,6 +267,7 @@ async fn build_endpoint_wiring(
 fn build_data_sink(
     config: &Config,
     metrics_manager: Arc<MetricsManager>,
+    instrumentation: &carbide_instrument::Instrumentation,
 ) -> Result<Option<Arc<dyn DataSink>>, HealthError> {
     let mut sinks: Vec<Arc<dyn DataSink>> = Vec::new();
     let mut processors: Vec<Arc<dyn EventProcessor>> = Vec::new();
@@ -322,23 +323,38 @@ fn build_data_sink(
     }
 
     if let Configurable::Enabled(ref sink_cfg) = config.sinks.health_report {
-        sinks.push(Arc::new(HealthReportSink::new(sink_cfg)?));
+        sinks.push(Arc::new(HealthReportSink::new(
+            sink_cfg,
+            instrumentation.clone(),
+        )?));
     }
 
     if let Configurable::Enabled(ref sink_cfg) = config.sinks.rack_health_report {
-        sinks.push(Arc::new(RackHealthReportSink::new(sink_cfg)?));
+        sinks.push(Arc::new(RackHealthReportSink::new(
+            sink_cfg,
+            instrumentation.clone(),
+        )?));
     }
 
     if let Configurable::Enabled(ref sink_cfg) = config.sinks.switch_health_report {
-        sinks.push(Arc::new(SwitchHealthReportSink::new(sink_cfg)?));
+        sinks.push(Arc::new(SwitchHealthReportSink::new(
+            sink_cfg,
+            instrumentation.clone(),
+        )?));
     }
 
     if let Configurable::Enabled(ref sink_cfg) = config.sinks.nvlink_domain_health_report {
-        sinks.push(Arc::new(NvLinkDomainHealthReportSink::new(sink_cfg)?));
+        sinks.push(Arc::new(NvLinkDomainHealthReportSink::new(
+            sink_cfg,
+            instrumentation.clone(),
+        )?));
     }
 
     if let Configurable::Enabled(ref sink_cfg) = config.sinks.power_shelf_health_report {
-        sinks.push(Arc::new(PowerShelfHealthReportSink::new(sink_cfg)?));
+        sinks.push(Arc::new(PowerShelfHealthReportSink::new(
+            sink_cfg,
+            instrumentation.clone(),
+        )?));
     }
 
     if let Configurable::Enabled(ref otlp_cfg) = config.sinks.otlp {
@@ -519,7 +535,11 @@ pub async fn run_service(
     )
     .await?;
 
-    let data_sink = build_data_sink(&config, metrics_manager.clone())?;
+    let data_sink = build_data_sink(
+        &config,
+        metrics_manager.clone(),
+        &framework_metrics.instrumentation,
+    )?;
 
     let config_arc = Arc::new(config);
 
