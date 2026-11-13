@@ -1418,7 +1418,7 @@ jobs:
     if: >-
       ${{
         !cancelled()
-        && startsWith(github.ref, 'refs/heads/pull-request/')
+        && (startsWith(github.ref, 'refs/heads/pull-request/') || github.event_name == 'merge_group')
         && needs.prepare.result == 'success'
         && contains('success,skipped', needs.build-container-x86_64.result)
         && contains('success,skipped', needs.build-container-aarch64.result)
@@ -2170,7 +2170,7 @@ jobs:
   proto-police:
     needs:
       - prepare
-    if: ${{ needs.prepare.outputs.proto_files_changed == 'true' && contains(github.ref, 'pull-request/') }}
+    if: ${{ needs.prepare.outputs.proto_files_changed == 'true' && (contains(github.ref, 'pull-request/') || github.event_name == 'merge_group') }}
     runs-on: linux-amd64-cpu4
     container:
       image: yoheimuta/protolint
@@ -2186,7 +2186,7 @@ jobs:
   migration-police:
     needs:
       - changes
-    if: ${{ contains(github.ref, 'pull-request/') }}
+    if: ${{ contains(github.ref, 'pull-request/') || github.event_name == 'merge_group' }}
     runs-on: linux-amd64-cpu4
     steps:
       - name: Checkout code
@@ -2282,7 +2282,7 @@ jobs:
     needs:
       - prepare
       - build-container-x86_64
-    if: ${{ !failure() && !cancelled() && needs.prepare.outputs.source_files_changed == 'true' && contains(github.ref, 'pull-request/') }}
+    if: ${{ !failure() && !cancelled() && needs.prepare.outputs.source_files_changed == 'true' && (contains(github.ref, 'pull-request/') || github.event_name == 'merge_group') }}
     runs-on: linux-amd64-cpu32
     container:
       image: ${{ needs.prepare.outputs.lint_container_ref }}
