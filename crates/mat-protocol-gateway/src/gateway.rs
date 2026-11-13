@@ -77,6 +77,7 @@ impl Gateway {
     /// Creates the UFM mock, the RMS proxy and the metrics registry; nothing is served or polled
     /// yet. The CA file named by `sources.ca_cert_path` is read here.
     pub fn new(config: GatewayConfig, auth_token: &UfmAuthToken) -> eyre::Result<Self> {
+        config.validate()?;
         let metrics_setup = new_metrics_setup("carbide-mat-protocol-gateway", "carbide", false)?;
         // Not ready until `bootstrap` has a source list; the metrics endpoint shares the flag.
         metrics_setup.health_controller.set_ready(false);
