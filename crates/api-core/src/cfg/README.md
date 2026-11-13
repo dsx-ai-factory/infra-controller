@@ -459,19 +459,22 @@ different share without allowing it to exceed either global bound.
 | `max_work_in_flight_per_client` | `usize` | `8` | Default maximum business requests from one client that may execute concurrently. Must be greater than zero, no greater than `max_work_in_flight`, and representable as a `u32`. |
 | `max_pending_per_client` | `usize` | `64` | Default hard bound on pending business requests from one client. Must be greater than zero and no greater than `max_pending`. |
 | `pending_timeout` | `Duration` | `5s` | Default maximum time a client's pending request may wait for execution. Admission can reject earlier when its queue-delay estimate exceeds this value. Must be greater than zero. |
+| `max_execution_time` | `Duration` | `300s` | Maximum time an admitted request may execute its handler. The default matches the Rust client's `300s` request timeout. Must cover the longest legitimate unary RPC, and must be at least twice `certificates.cert_manager.request_timeout_secs` when `use_cert_manager` or `use_cert_manager_ufm` is set. Must be greater than zero. |
 | `client_idle_timeout` | `Duration` | `5m` | How long an empty, inactive client's scheduler state is cached before cleanup. Must be greater than zero. |
 | `service_limits` | `BTreeMap<String, ApiAdmissionServiceLimitsConfig>` | `{}` | Per-service overrides keyed by the exact SPIFFE service identifier described below. Unlisted services use the default per-client limits. |
 
 #### `ApiAdmissionServiceLimitsConfig`
 
-Every field is required for each service override; the nested structure has no
-field-level defaults.
+`max_work_in_flight`, `max_pending`, and `pending_timeout` are required for each
+service override. `max_execution_time` is optional and falls back to the global
+`max_execution_time` when omitted.
 
 | Field | Type | Default | Description |
 | ------- | ------ | --------- | ------------- |
 | `max_work_in_flight` | `usize` | **required** | Maximum requests from this service that may execute concurrently. Must be greater than zero, no greater than the global `max_work_in_flight`, and representable as a `u32`. |
 | `max_pending` | `usize` | **required** | Hard bound on this service's pending requests. Must be greater than zero and no greater than the global `max_pending`. |
 | `pending_timeout` | `Duration` | **required** | Maximum time this service's pending request may wait for execution. Admission can reject earlier when its queue-delay estimate exceeds this value. Must be greater than zero. |
+| `max_execution_time` | `Duration` | *(optional)* | Overrides the global `max_execution_time` for this service. Must be greater than zero when set. |
 
 The map key is the identifier extracted by removing one of
 `auth.trust.spiffe_service_base_paths` from the certificate's SPIFFE path. For
@@ -2200,7 +2203,7 @@ use_cert_manager_ufm = false
 | `namespace` | `String` | `forge-system` | Non-empty namespace for CertificateRequests. The API service account needs `create`, `get`, and `delete` on `certificaterequests` in this namespace. Helm sets it to the deployed API namespace. |
 | `issuer_name` | `String` | `site-issuer` | Non-empty name of an existing issuer in `cert-manager.io`, chaining to the same site CA trusted by the API, Scout, and DPU agents. |
 | `issuer_kind` | `IssuerKind` | `ClusterIssuer` | Accepts `ClusterIssuer` or `Issuer`; an `Issuer` must be in `namespace`. |
-| `request_timeout_secs` | `u64` | `120` | Issuance deadline including Kubernetes creation, in seconds; accepts `1` through `600`. Cleanup has a separate wait bounded by the same duration. |
+| `request_timeout_secs` | `u64` | `120` | Issuance deadline including Kubernetes creation, in seconds; accepts `1` through `600`. Cleanup has a separate wait bounded by the same duration, so with API admission enabled, `api_admission_control.max_execution_time` must be at least twice this value. |
 | `max_ttl` | `Duration` | `720h` | Whole-second duration of at least the maximum agent renewal interval plus one day of grace (`8d` with the seven-day renewal maximum), in human-readable format (for example `720h`). Caps machine and explicit UFM lifetimes; set it to the existing Vault PKI role's maximum when migrating. |
 
 The two flags are independent and require an API restart to change provider

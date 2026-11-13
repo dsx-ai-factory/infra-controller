@@ -478,6 +478,7 @@ pub fn parse_carbide_config_with_deferred_diagnostics(
     config
         .driver_rules()
         .wrap_err("invalid bmc_driver_rules configuration")?;
+    config.validate_admission_covers_cert_manager()?;
     config
         .firmware_global
         .downloads

@@ -120,6 +120,30 @@ where
         .transpose()
 }
 
+fn deserialize_optional_std_duration<'de, D>(
+    deserializer: D,
+) -> Result<Option<std::time::Duration>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Option::<String>::deserialize(deserializer)?
+        .map(|value| duration_str::parse(&value).map_err(serde::de::Error::custom))
+        .transpose()
+}
+
+fn serialize_optional_std_duration<S>(
+    duration: &Option<std::time::Duration>,
+    serializer: S,
+) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    match duration {
+        None => serializer.serialize_none(),
+        Some(duration) => as_std_duration(duration, serializer),
+    }
+}
+
 /// nico-api configuration file content
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -1084,6 +1108,16 @@ pub struct ApiAdmissionControlConfig {
     )]
     pub pending_timeout: std::time::Duration,
 
+    /// Maximum time an admitted request may execute its handler. Must cover the
+    /// longest legitimate unary RPC served by nico-api, including twice
+    /// `certificates.cert_manager.request_timeout_secs` when cert-manager is enabled.
+    #[serde(
+        default = "default_api_admission_max_execution_time",
+        deserialize_with = "deserialize_duration",
+        serialize_with = "as_std_duration"
+    )]
+    pub max_execution_time: std::time::Duration,
+
     /// How long empty client scheduling state remains cached.
     #[serde(
         default = "default_api_admission_client_idle_timeout",
@@ -1107,6 +1141,13 @@ pub struct ApiAdmissionServiceLimitsConfig {
         serialize_with = "as_std_duration"
     )]
     pub pending_timeout: std::time::Duration,
+    /// Overrides the global `max_execution_time` for this service when set.
+    #[serde(
+        default,
+        deserialize_with = "deserialize_optional_std_duration",
+        serialize_with = "serialize_optional_std_duration"
+    )]
+    pub max_execution_time: Option<std::time::Duration>,
 }
 
 impl Default for ApiAdmissionControlConfig {
@@ -1118,6 +1159,7 @@ impl Default for ApiAdmissionControlConfig {
             max_work_in_flight_per_client: default_api_admission_max_work_in_flight_per_client(),
             max_pending_per_client: default_api_admission_max_pending_per_client(),
             pending_timeout: default_api_admission_pending_timeout(),
+            max_execution_time: default_api_admission_max_execution_time(),
             client_idle_timeout: default_api_admission_client_idle_timeout(),
             service_limits: BTreeMap::new(),
         }
@@ -1138,6 +1180,7 @@ impl ApiAdmissionControlConfig {
             self.max_work_in_flight_per_client,
             self.max_pending_per_client,
             self.pending_timeout,
+            self.max_execution_time,
             self.client_idle_timeout,
         )
         .map(Some)
@@ -1158,6 +1201,7 @@ impl ApiAdmissionControlConfig {
                 limits.max_work_in_flight,
                 limits.max_pending,
                 limits.pending_timeout,
+                limits.max_execution_time.unwrap_or(self.max_execution_time),
                 self.max_work_in_flight,
                 self.max_pending,
             )
@@ -3745,6 +3789,50 @@ impl CarbideConfig {
         )
     }
 
+    /// Reject an admission deadline that would drop a cert-manager issuance before its
+    /// cleanup runs. Issuance and cleanup each wait up to `request_timeout_secs`, and a
+    /// dropped handler leaves its CertificateRequest behind. Internal services can reach
+    /// issuance through `DiscoverMachine` and `CreateCredential`, so each service
+    /// `max_execution_time` override must cover it as well.
+    pub fn validate_admission_covers_cert_manager(&self) -> eyre::Result<()> {
+        let admission = &self.api_admission_control;
+        if !admission.enabled {
+            return Ok(());
+        }
+        let Some(cert_manager) = self.certificates.cert_manager_config()? else {
+            return Ok(());
+        };
+        let required =
+            std::time::Duration::from_secs(cert_manager.request_timeout_secs).saturating_mul(2);
+        let overrides = admission
+            .service_limits
+            .iter()
+            .filter_map(|(service_id, limits)| {
+                limits.max_execution_time.map(|deadline| {
+                    (
+                        format!(
+                            "api_admission_control.service_limits.{service_id}.max_execution_time"
+                        ),
+                        deadline,
+                    )
+                })
+            });
+        let deadlines = std::iter::once((
+            "api_admission_control.max_execution_time".to_string(),
+            admission.max_execution_time,
+        ))
+        .chain(overrides);
+        for (field, deadline) in deadlines {
+            eyre::ensure!(
+                deadline >= required,
+                "{field} ({deadline:?}) must be at least twice \
+                 certificates.cert_manager.request_timeout_secs ({}s) when cert-manager is enabled",
+                cert_manager.request_timeout_secs,
+            );
+        }
+        Ok(())
+    }
+
     /// Returns an error when two `tools` entries share a `name`,
     /// since names are used as stable identifiers (e.g. `name = "grafana"`
     /// is referenced by the per-machine "Logs" deep link).
@@ -4397,6 +4485,13 @@ const fn default_api_admission_max_work_in_flight_per_client() -> usize {
 
 const fn default_api_admission_max_pending_per_client() -> usize {
     64
+}
+
+const fn default_api_admission_max_execution_time() -> std::time::Duration {
+    // Matches the Rust client's request timeout. That client sends no `grpc-timeout`, so a
+    // shorter default would cut off admin-cli, Scout and DPU agent calls the client still waits on.
+    // Keep in sync with the cert-manager deadline in the nico-api chart's config template.
+    std::time::Duration::from_secs(300)
 }
 
 const fn default_api_admission_pending_timeout() -> std::time::Duration {
@@ -7077,7 +7172,7 @@ path = "credentials.yaml"
     #[test]
     fn api_admission_control_only_validates_bounds_when_enabled() {
         type ZeroOut = fn(&mut ApiAdmissionControlConfig);
-        let cases: [(&str, ZeroOut); 6] = [
+        let cases: [(&str, ZeroOut); 7] = [
             ("max_work_in_flight", |config| config.max_work_in_flight = 0),
             ("max_pending", |config| config.max_pending = 0),
             ("max_work_in_flight_per_client", |config| {
@@ -7088,6 +7183,9 @@ path = "credentials.yaml"
             }),
             ("pending_timeout", |config| {
                 config.pending_timeout = std::time::Duration::ZERO
+            }),
+            ("max_execution_time", |config| {
+                config.max_execution_time = std::time::Duration::ZERO
             }),
             ("client_idle_timeout", |config| {
                 config.client_idle_timeout = std::time::Duration::ZERO
@@ -7101,6 +7199,7 @@ path = "credentials.yaml"
             max_work_in_flight_per_client: 0,
             max_pending_per_client: 0,
             pending_timeout: std::time::Duration::ZERO,
+            max_execution_time: std::time::Duration::from_secs(120),
             client_idle_timeout: std::time::Duration::ZERO,
             service_limits: BTreeMap::new(),
         };
@@ -7152,6 +7251,155 @@ path = "credentials.yaml"
         assert_api_admission_semaphore_bound("max_work_in_flight", |config, value| {
             config.max_work_in_flight = value;
         });
+    }
+
+    /// The default admission deadline covers cert-manager's default issuance plus cleanup. A
+    /// longer cert-manager timeout, or a shorter service override, is rejected only while
+    /// admission and either cert-manager backend are enabled.
+    #[test]
+    fn validate_admission_covers_cert_manager_issuance_and_cleanup() {
+        struct Case {
+            name: &'static str,
+            admission_enabled: bool,
+            use_cert_manager: bool,
+            use_cert_manager_ufm: bool,
+            request_timeout_secs: u64,
+            service_deadline_secs: Option<u64>,
+            rejected_field: Option<&'static str>,
+        }
+        let cases = [
+            Case {
+                name: "exactly twice the default deadline",
+                admission_enabled: true,
+                use_cert_manager: true,
+                use_cert_manager_ufm: false,
+                request_timeout_secs: 150,
+                service_deadline_secs: None,
+                rejected_field: None,
+            },
+            Case {
+                name: "over half the default deadline",
+                admission_enabled: true,
+                use_cert_manager: true,
+                use_cert_manager_ufm: false,
+                request_timeout_secs: 151,
+                service_deadline_secs: None,
+                rejected_field: Some("api_admission_control.max_execution_time"),
+            },
+            Case {
+                name: "UFM backend alone",
+                admission_enabled: true,
+                use_cert_manager: false,
+                use_cert_manager_ufm: true,
+                request_timeout_secs: 151,
+                service_deadline_secs: None,
+                rejected_field: Some("api_admission_control.max_execution_time"),
+            },
+            Case {
+                name: "service override below twice the timeout",
+                admission_enabled: true,
+                use_cert_manager: true,
+                use_cert_manager_ufm: false,
+                request_timeout_secs: 150,
+                service_deadline_secs: Some(299),
+                rejected_field: Some(
+                    "api_admission_control.service_limits.site-agent.max_execution_time",
+                ),
+            },
+            Case {
+                name: "cert-manager disabled",
+                admission_enabled: true,
+                use_cert_manager: false,
+                use_cert_manager_ufm: false,
+                request_timeout_secs: 600,
+                service_deadline_secs: Some(1),
+                rejected_field: None,
+            },
+            Case {
+                name: "admission disabled",
+                admission_enabled: false,
+                use_cert_manager: true,
+                use_cert_manager_ufm: false,
+                request_timeout_secs: 600,
+                service_deadline_secs: Some(1),
+                rejected_field: None,
+            },
+        ];
+
+        for case in cases {
+            let mut config: CarbideConfig = Figment::new()
+                .merge(Toml::file(format!("{TEST_DATA_DIR}/min_config.toml")))
+                .extract()
+                .unwrap();
+            config.api_admission_control.enabled = case.admission_enabled;
+            config.certificates.use_cert_manager = case.use_cert_manager;
+            config.certificates.use_cert_manager_ufm = case.use_cert_manager_ufm;
+            config.certificates.cert_manager = Some(cert_manager::Config {
+                request_timeout_secs: case.request_timeout_secs,
+                ..Default::default()
+            });
+            if let Some(secs) = case.service_deadline_secs {
+                config.api_admission_control.service_limits.insert(
+                    "site-agent".to_string(),
+                    ApiAdmissionServiceLimitsConfig {
+                        max_work_in_flight: 1,
+                        max_pending: 1,
+                        pending_timeout: std::time::Duration::from_secs(1),
+                        max_execution_time: Some(std::time::Duration::from_secs(secs)),
+                    },
+                );
+            }
+
+            let result = config.validate_admission_covers_cert_manager();
+            match case.rejected_field {
+                None => result.unwrap_or_else(|error| panic!("{}: {error}", case.name)),
+                Some(field) => {
+                    let error = result.expect_err(case.name).to_string();
+                    let timeout = format!("request_timeout_secs ({}s)", case.request_timeout_secs);
+                    assert!(
+                        error.starts_with(&format!("{field} (")) && error.contains(&timeout),
+                        "{}: unexpected error: {error}",
+                        case.name
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn api_admission_control_parses_max_execution_time_overrides() {
+        let config = toml::from_str::<ApiAdmissionControlConfig>(
+            r#"
+            max_execution_time = "45s"
+
+            [service_limits.site-agent]
+            max_work_in_flight = 4
+            max_pending = 32
+            pending_timeout = "5s"
+            max_execution_time = "300s"
+
+            [service_limits.flow]
+            max_work_in_flight = 4
+            max_pending = 32
+            pending_timeout = "5s"
+            "#,
+        )
+        .expect("admission config parses");
+
+        assert_eq!(
+            config.max_execution_time,
+            std::time::Duration::from_secs(45)
+        );
+        assert_eq!(
+            config.service_limits["site-agent"].max_execution_time,
+            Some(std::time::Duration::from_secs(300))
+        );
+        // An omitted override inherits the global value when limits are built.
+        assert_eq!(config.service_limits["flow"].max_execution_time, None);
+        config
+            .admission_limits()
+            .expect("overrides are valid")
+            .expect("admission is enabled");
     }
 
     #[test]
@@ -7312,6 +7560,7 @@ path = "credentials.yaml"
                 max_work_in_flight_per_client: 8,
                 max_pending_per_client: 64,
                 pending_timeout: std::time::Duration::from_secs(5),
+                max_execution_time: std::time::Duration::from_secs(300),
                 client_idle_timeout: std::time::Duration::from_secs(5 * 60),
                 service_limits: BTreeMap::new(),
             }
@@ -7620,6 +7869,8 @@ path = "credentials.yaml"
                 "ssh-console.nico-system.svc.cluster.local:1079",
             ),
             ("{{ .Values.tracing.enabled }}", "false"),
+            // Twice the `requestTimeoutSecs` value rendered above.
+            ("{{ $certDeadline }}", "240"),
             ("{{ . | quote }}", r#""/tmp/test.pem""#),
         ] {
             config = config.replace(template, rendered);

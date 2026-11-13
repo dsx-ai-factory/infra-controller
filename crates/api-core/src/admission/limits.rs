@@ -40,6 +40,8 @@ pub(crate) enum AdmissionLimitsError {
     ClientPendingCapacityTooLarge,
     #[error("pending_timeout must be greater than zero")]
     ZeroPendingTimeout,
+    #[error("max_execution_time must be greater than zero")]
+    ZeroMaxExecutionTime,
     #[error("client_idle_timeout must be greater than zero")]
     ZeroClientIdleTimeout,
 }
@@ -49,6 +51,7 @@ pub(crate) struct ClientLimits {
     pub(super) max_work_in_flight: NonZeroU32,
     pub(super) max_pending: NonZeroUsize,
     pending_timeout: Duration,
+    max_execution_time: Duration,
 }
 
 impl ClientLimits {
@@ -56,6 +59,7 @@ impl ClientLimits {
         max_work_in_flight: usize,
         max_pending: usize,
         pending_timeout: Duration,
+        max_execution_time: Duration,
         global_max_work_in_flight: usize,
         global_max_pending: usize,
     ) -> Result<Self, AdmissionLimitsError> {
@@ -76,6 +80,9 @@ impl ClientLimits {
         if pending_timeout.is_zero() {
             return Err(AdmissionLimitsError::ZeroPendingTimeout);
         }
+        if max_execution_time.is_zero() {
+            return Err(AdmissionLimitsError::ZeroMaxExecutionTime);
+        }
 
         Ok(Self {
             max_work_in_flight: NonZeroU32::new(
@@ -86,6 +93,7 @@ impl ClientLimits {
             max_pending: NonZeroUsize::new(max_pending)
                 .expect("validated client pending capacity is non-zero"),
             pending_timeout,
+            max_execution_time,
         })
     }
 
@@ -99,6 +107,10 @@ impl ClientLimits {
 
     pub(crate) const fn pending_timeout(self) -> Duration {
         self.pending_timeout
+    }
+
+    pub(crate) const fn max_execution_time(self) -> Duration {
+        self.max_execution_time
     }
 }
 
@@ -117,6 +129,7 @@ impl AdmissionLimits {
         default_client_work_in_flight: usize,
         default_client_pending: usize,
         pending_timeout: Duration,
+        max_execution_time: Duration,
         client_idle_timeout: Duration,
     ) -> Result<Self, AdmissionLimitsError> {
         if max_work_in_flight == 0 {
@@ -142,6 +155,7 @@ impl AdmissionLimits {
             default_client_work_in_flight,
             default_client_pending,
             pending_timeout,
+            max_execution_time,
             max_work_in_flight,
             max_pending,
         )?;
@@ -180,17 +194,38 @@ mod tests {
     #[test]
     fn client_limits_reject_global_overrides() {
         assert!(matches!(
-            ClientLimits::new(65, 1, Duration::from_secs(1), 64, 1024),
+            ClientLimits::new(
+                65,
+                1,
+                Duration::from_secs(1),
+                Duration::from_secs(120),
+                64,
+                1024
+            ),
             Err(AdmissionLimitsError::ClientWorkCapacityTooLarge)
         ));
         assert!(matches!(
-            ClientLimits::new(1, 1025, Duration::from_secs(1), 64, 1024),
+            ClientLimits::new(
+                1,
+                1025,
+                Duration::from_secs(1),
+                Duration::from_secs(120),
+                64,
+                1024
+            ),
             Err(AdmissionLimitsError::ClientPendingCapacityTooLarge)
         ));
         assert_eq!(
-            ClientLimits::new(8, 64, Duration::from_secs(5), 64, 1024)
-                .expect("test limits are valid")
-                .max_work_in_flight(),
+            ClientLimits::new(
+                8,
+                64,
+                Duration::from_secs(5),
+                Duration::from_secs(120),
+                64,
+                1024
+            )
+            .expect("test limits are valid")
+            .max_work_in_flight(),
             8
         );
     }
