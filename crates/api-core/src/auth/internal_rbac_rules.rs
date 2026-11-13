@@ -725,7 +725,7 @@ impl InternalRBACRules {
         );
         x.perm(
             "GetDesiredFirmwareVersions",
-            vec![ForgeAdminCLI, Machineatron, Flow],
+            vec![ForgeAdminCLI, Machineatron, Flow, SiteHealthProbe],
         );
         x.perm("UpsertHostFirmwareConfig", vec![ForgeAdminCLI, SiteAgent]);
         x.perm("DeleteHostFirmwareConfig", vec![ForgeAdminCLI, SiteAgent]);
@@ -781,7 +781,10 @@ impl InternalRBACRules {
         x.perm("SetBmcRootPassword", vec![ForgeAdminCLI]);
         x.perm("ProbeBmcVendor", vec![ForgeAdminCLI]);
         x.perm("SetFirmwareUpdateTimeWindow", vec![ForgeAdminCLI, Flow]);
-        x.perm("ListHostFirmware", vec![ForgeAdminCLI, Flow]);
+        x.perm(
+            "ListHostFirmware",
+            vec![ForgeAdminCLI, Flow, SiteHealthProbe],
+        );
         x.perm("EnableInfiniteBoot", vec![ForgeAdminCLI]);
         x.perm("IsInfiniteBootEnabled", vec![ForgeAdminCLI]);
         x.perm("Lockdown", vec![ForgeAdminCLI]);
@@ -1598,6 +1601,24 @@ mod rbac_rule_tests {
         ));
     }
 
+    #[test]
+    fn probe_catalog_read_permissions() {
+        let probe = Principal::SpiffeServiceIdentifier("nico-site-health-probe".into());
+        for (method, allowed) in [
+            ("Version", true),
+            ("GetDesiredFirmwareVersions", true),
+            ("ListHostFirmware", true),
+            ("SetFirmwareUpdateTimeWindow", false),
+            ("UpsertHostFirmwareConfig", false),
+            ("DeleteHostFirmwareConfig", false),
+        ] {
+            assert_eq!(
+                InternalRBACRules::allowed_from_static(method, std::slice::from_ref(&probe)),
+                allowed,
+                "{method}"
+            );
+        }
+    }
     /// Compact machine states belong to the admin CLI, not MaT or the site probe.
     #[test]
     fn find_machine_states_by_ids_permissions() {

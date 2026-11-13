@@ -183,7 +183,7 @@ A duration value ("500ms", "5s", "2m", "1h", "1m30s") in seconds.
 */}}
 {{- define "nico-site-health-probe.nicoReaders" -}}
 {{- with .Values.state -}}
-{{- if and .enabled .readers.devices.enabled -}}true{{- end -}}
+{{- if and .enabled (or .readers.devices.enabled .readers.nicoConfig.enabled) -}}true{{- end -}}
 {{- end -}}
 {{- end }}
 
@@ -239,7 +239,7 @@ deployer should hear about at install time.
 {{- if .enabled -}}
 {{- $_ := required "state.siteId is required when state is enabled" .siteId -}}
 {{- if and (include "nico-site-health-probe.nicoReaders" $) (not $.Values.nicoApiClientCert.existingSecret) -}}
-{{- fail "nicoApiClientCert.existingSecret is required while a nico-api state reader is on: the probe's SPIFFE identity may call only FindMachineIds, FindMachinesByIds and FindHostStatesByIds" -}}
+{{- fail "nicoApiClientCert.existingSecret is required while a nico-api state reader is on" -}}
 {{- end -}}
 {{- if not (has (toString .nicoApi.hostRead) (list "auto" "full" "compact")) -}}
 {{- fail (printf "state.nicoApi.hostRead must be auto, full or compact, not %q" (toString .nicoApi.hostRead)) -}}

@@ -130,12 +130,18 @@ pub(crate) async fn find_host_states_by_ids(
                         });
                     explored_firmware(row, inventory)
                 });
-            Some(host_state_from_snapshot(
+            let mut state = host_state_from_snapshot(
                 snapshot,
                 explored,
                 host_update_eligibility(&rows, bmc_ip, firmware_autoupdate, on_disable_list),
                 firmware_policy(&rows, firmware_autoupdate, on_disable_list),
-            ))
+            );
+            if let Some(row) = rows.first() {
+                state.firmware_update_window_known = true;
+                state.firmware_update_window_start = row.window_start.map(Into::into);
+                state.firmware_update_window_end = row.window_end.map(Into::into);
+            }
+            Some(state)
         })
         .collect();
 

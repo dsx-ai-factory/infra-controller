@@ -13865,6 +13865,10 @@ message HostState {
   // Unset when no explored report exists for bmc_ip.
   HostExploredFirmware explored = 16;
   HostUpdateEligibility update = 17;
+  google.protobuf.Timestamp firmware_update_window_start = 18;
+  google.protobuf.Timestamp firmware_update_window_end = 19;
+  // False means unknown, including replies from servers without window support.
+  bool firmware_update_window_known = 20;
 }
 
 message HostAllocation {

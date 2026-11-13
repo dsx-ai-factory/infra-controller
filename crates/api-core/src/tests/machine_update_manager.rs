@@ -53,6 +53,8 @@ struct TestUpdateModule {
     start_updates_notified: Arc<Notify>,
     clear_completed_updates_called: Arc<Mutex<i32>>,
     cleanup_marker: Option<HostMachineId>,
+    fail_metrics: bool,
+    pause_metrics: bool,
 }
 
 #[async_trait]
@@ -104,6 +106,13 @@ impl MachineUpdateModule for TestUpdateModule {
         _pool: &sqlx::Pool<sqlx::Postgres>,
         _snapshots: &HashMap<HostMachineId, ManagedHostStateSnapshot>,
     ) -> CarbideResult<()> {
+        if self.fail_metrics {
+            return Err(CarbideError::internal("injected module failure".into()));
+        }
+        if self.pause_metrics {
+            self.start_updates_notified.notify_one();
+            std::future::pending::<()>().await;
+        }
         Ok(())
     }
 }
@@ -120,6 +129,8 @@ impl TestUpdateModule {
             start_updates_notified: Arc::new(Notify::new()),
             clear_completed_updates_called: Arc::new(Mutex::new(0)),
             cleanup_marker: None,
+            fail_metrics: false,
+            pause_metrics: false,
         }
     }
     pub(in crate::tests) fn get_start_updates_called(&self) -> usize {
@@ -420,6 +431,11 @@ fn test_run_single_iteration_propagates_lock_infrastructure_failure(pool: sqlx::
         .await
         .expect_err("a dead work lock manager is an infrastructure failure, not a yield");
     assert!(
+        instrumentation_meter
+            .formatted_metric("carbide_machine_update_manager_completed_passes_total")
+            .is_none()
+    );
+    assert!(
         matches!(err, CarbideError::Internal { .. }),
         "expected CarbideError::Internal, got {err:?}"
     );
@@ -706,4 +722,81 @@ async fn manager_cleanup_keeps_ownership_until_marker_commit(
         .await?;
     assert!(committed);
     Ok(())
+}
+
+#[crate::sqlx_test]
+async fn completed_pass_counter_excludes_skips(pool: sqlx::PgPool) {
+    let env = create_test_env(pool).await;
+    let mut config = (*env.config).clone();
+    config
+        .machine_updater
+        .max_concurrent_machine_updates_absolute = Some(0);
+    for scenario in [
+        "success",
+        "locked",
+        "module error",
+        "SQL error",
+        "cancelled",
+    ] {
+        let meter = carbide_utils::test_support::test_meter::TestMeter::default();
+        let mut module = TestUpdateModule::new(vec![], HashSet::new());
+        module.fail_metrics = scenario == "module error";
+        module.pause_metrics = scenario == "cancelled";
+        let manager = MachineUpdateManager::new_with_modules(
+            env.pool.clone(),
+            Arc::new(config.clone()),
+            vec![Box::new(module.clone())],
+            env.api.work_lock_manager_handle.clone(),
+            carbide_instrument::Instrumentation::new(meter.meter()),
+        );
+        let _lock = if scenario == "locked" {
+            Some(
+                env.api
+                    .work_lock_manager_handle
+                    .try_acquire_lock("MachineUpdateManager::run_single_iteration".into())
+                    .await
+                    .unwrap(),
+            )
+        } else {
+            None
+        };
+        if scenario == "SQL error" {
+            sqlx::query("ALTER TABLE machines RENAME TO hidden_machines")
+                .execute(&env.pool)
+                .await
+                .unwrap();
+        }
+        if scenario == "cancelled" {
+            let mut iteration = Box::pin(manager.run_single_iteration());
+            tokio::select! {
+                result = &mut iteration => panic!("pending pass completed: {result:?}"),
+                _ = module.start_updates_notified.notified() => {}
+            }
+            drop(iteration);
+        } else {
+            let result = manager.run_single_iteration().await;
+            assert_eq!(
+                result.is_ok(),
+                matches!(scenario, "success" | "locked"),
+                "{scenario}"
+            );
+        }
+        if scenario == "SQL error" {
+            sqlx::query("ALTER TABLE hidden_machines RENAME TO machines")
+                .execute(&env.pool)
+                .await
+                .unwrap();
+        }
+        assert_eq!(
+            meter
+                .formatted_metric("carbide_machine_update_manager_completed_passes_total")
+                .as_deref(),
+            if scenario == "success" {
+                Some("1")
+            } else {
+                None
+            },
+            "{scenario}"
+        );
+    }
 }

@@ -324,6 +324,7 @@ This file contains a list of metrics exported by NVIDIA Infra Controller (NICo).
 <tr><td>carbide_machine_identity_token_exchange_failures_total</td><td>counter</td><td>Number of machine identity token exchange failures, by failure stage</td></tr>
 <tr><td>carbide_machine_instance_info</td><td>gauge</td><td>Association between a host machine and its tenant instance. Exposed only on the opt-in per-object endpoint.</td></tr>
 <tr><td>carbide_machine_reboot_duration_seconds</td><td>histogram</td><td>Time taken for machine/host to reboot in seconds</td></tr>
+<tr><td>carbide_machine_update_manager_completed_passes_total</td><td>counter</td><td>Number of successful machine update manager work passes, excluding lock skips and failed or cancelled passes</td></tr>
 <tr><td>carbide_machine_updates_started_count</td><td>gauge</td><td>Number of machines in the system in the process of updating</td></tr>
 <tr><td>carbide_machine_validation_completed</td><td>gauge</td><td>Number of successfully completed machine validation runs</td></tr>
 <tr><td>carbide_machine_validation_failed</td><td>gauge</td><td>Number of failed machine validation runs</td></tr>
