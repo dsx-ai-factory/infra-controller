@@ -27,6 +27,7 @@ import (
 	"github.com/NVIDIA/infra-controller/rest-api/flow/pkg/inventoryobjects/component"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/pkg/inventoryobjects/nvldomain"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/pkg/inventoryobjects/rack"
+	"github.com/NVIDIA/infra-controller/rest-api/flow/pkg/types"
 )
 
 // PostgresStore implements the Store interface using PostgreSQL.
@@ -918,7 +919,7 @@ func (s *PostgresStore) racksFromDAOs(
 		rackIDs = append(rackIDs, rackDAOs[i].ID)
 	}
 
-	statuses, err := model.GetRackOperationStatuses(ctx, idb, rackIDs)
+	counts, err := model.GetRackOperationStatusCounts(ctx, idb, rackIDs)
 	if err != nil {
 		return nil, errors.GRPCErrorInternal(err.Error())
 	}
@@ -944,7 +945,9 @@ func (s *PostgresStore) racksFromDAOs(
 	for i := range rackDAOs {
 		rackDAOs[i].NVLDomain = domainsByID[rackDAOs[i].NVLDomainID]
 		converted := dao.RackFrom(&rackDAOs[i])
-		converted.OperationStatus = statuses[rackDAOs[i].ID]
+		trayCounts := counts[rackDAOs[i].ID]
+		converted.OperationStatus = trayCounts.Phase()
+		converted.OperationStatusDetails = &types.RackOperationStatusDetails{TrayCountsByType: trayCounts}
 		results = append(results, converted)
 	}
 	return results, nil

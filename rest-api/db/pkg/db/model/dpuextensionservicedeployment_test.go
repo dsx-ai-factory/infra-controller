@@ -676,6 +676,94 @@ func TestDpuExtensionServiceDeploymentSQLDAO_Update(t *testing.T) {
 	}
 }
 
+func TestDpuExtensionServiceDeploymentSQLDAO_Clear(t *testing.T) {
+	ctx := context.Background()
+	dbSession := testInitDB(t)
+	defer dbSession.Close()
+	TestSetupSchema(t, dbSession)
+
+	ipu := testBuildUser(t, dbSession, nil, testGenerateStarfleetID(), cutil.GetPtr("johnd@test.com"), cutil.GetPtr("John"), cutil.GetPtr("Doe"))
+	ip := testBuildInfrastructureProvider(t, dbSession, nil, "test-ip", "Test Provider", ipu.ID)
+	st := testBuildSite(t, dbSession, nil, ip.ID, "test-site", "Test Site", ip.Org, ipu.ID)
+	tnu := testBuildUser(t, dbSession, nil, testGenerateStarfleetID(), cutil.GetPtr("jdoe@test.com"), cutil.GetPtr("Jane"), cutil.GetPtr("Doe"))
+	tn := testBuildTenant(t, dbSession, nil, "test-tenant", "test-tenant-org", tnu.ID)
+	it := testBuildInstanceType(t, dbSession, nil, "test-instance-type", ip.ID, st.ID, tnu.ID)
+	vpc := TestBuildVPC(t, dbSession, "test-vpc", ip, tn, st, cutil.GetPtr(VpcEthernetVirtualizer), nil, nil, VpcStatusPending, ipu, nil)
+
+	instance := &Instance{
+		ID:                       uuid.New(),
+		Name:                     "test-instance",
+		SiteID:                   st.ID,
+		TenantID:                 tn.ID,
+		InfrastructureProviderID: ip.ID,
+		InstanceTypeID:           &it.ID,
+		VpcID:                    vpc.ID,
+		Status:                   InstanceStatusPending,
+		CreatedBy:                tnu.ID,
+	}
+	_, err := dbSession.DB.NewInsert().Model(instance).Exec(ctx)
+	require.NoError(t, err)
+
+	service := testBuildDpuExtensionService(
+		t,
+		dbSession,
+		nil,
+		"test-dpu-service",
+		DpuExtensionServiceServiceTypeKubernetesPod,
+		st.ID,
+		tn.ID,
+		cutil.GetPtr("1.0.0"),
+		DpuExtensionServiceStatusReady,
+		tnu.ID,
+	)
+	deployment := testBuildDpuExtensionServiceDeployment(
+		t,
+		dbSession,
+		nil,
+		st.ID,
+		tn.ID,
+		instance.ID,
+		service.ID,
+		*service.Version,
+		DpuExtensionServiceDeploymentStatusPending,
+		tnu.ID,
+	)
+
+	dao := NewDpuExtensionServiceDeploymentDAO(dbSession)
+	require.NoError(t, dao.Delete(ctx, nil, deployment.ID))
+
+	_, err = dao.GetByID(ctx, nil, deployment.ID, nil)
+	require.ErrorIs(t, err, db.ErrDoesNotExist)
+
+	deletedDeployments, count, err := dao.GetAll(
+		ctx,
+		nil,
+		DpuExtensionServiceDeploymentFilterInput{
+			DpuExtensionServiceDeploymentIDs: []uuid.UUID{deployment.ID},
+			IncludeDeleted:                   true,
+		},
+		paginator.PageInput{},
+		nil,
+	)
+	require.NoError(t, err)
+	require.Equal(t, 1, count)
+	require.Len(t, deletedDeployments, 1)
+	require.NotNil(t, deletedDeployments[0].Deleted)
+
+	restored, err := dao.Clear(ctx, nil, DpuExtensionServiceDeploymentClearInput{
+		DpuExtensionServiceDeploymentID: deployment.ID,
+		Deleted:                         true,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, deployment.ID, restored.ID)
+	assert.Nil(t, restored.Deleted)
+
+	visible, err := dao.GetByID(ctx, nil, deployment.ID, nil)
+	require.NoError(t, err)
+	assert.Equal(t, deployment.ID, visible.ID)
+	assert.Nil(t, visible.Deleted)
+}
+
 func TestDpuExtensionServiceDeploymentSQLDAO_Delete(t *testing.T) {
 	type fields struct {
 		dbSession *db.Session

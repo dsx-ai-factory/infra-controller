@@ -354,6 +354,8 @@ mod tests {
                     mac_address: Some(eth0_mac.parse().unwrap()),
                     ..Default::default()
                 }],
+                firmware_version: None,
+                model: None,
             }],
             ..Default::default()
         }

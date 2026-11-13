@@ -48,13 +48,13 @@ Sort output by specified field
 
 `-h, --help`
 
-Print help (see a summary with -h)
+Print help (see a summary with '-h')
 
 ## Examples
 
 ```sh
 nico-admin-cli component-manager get-reset-status --action sdn-factory-reset switch --switch-id sw100nsner0op5osl6n85t7772j010jmhafm934n7oej4mlome3okrn9b60
-nico-admin-cli component-manager get-reset-status --action sdn-factory-reset switch --mac-address 00:11:22:33:44:55
+nico-admin-cli component-manager get-reset-status --action nvos-factory-reset switch --mac-address 00:11:22:33:44:55
 ```
 
 ---

@@ -435,7 +435,7 @@ async fn lowered_isolation_limit_preserves_retry_but_rejects_a_compacting_new_ro
     let env = create_test_env_with_overrides(
         pool,
         TestEnvOverrides {
-            config: Some(config),
+            config: Some(Box::new(config)),
             site_prefixes: Some(vec![]),
             ..Default::default()
         },
@@ -492,7 +492,7 @@ async fn tenant_site_prefix_admission_rejects_configured_denied_space(pool: sqlx
     let env = create_test_env_with_overrides(
         pool,
         TestEnvOverrides {
-            config: Some(config),
+            config: Some(Box::new(config)),
             site_prefixes: Some(vec![]),
             ..Default::default()
         },
@@ -553,7 +553,7 @@ async fn concurrent_tenant_roots_share_the_site_isolation_limit(pool: sqlx::PgPo
     let env = create_test_env_with_overrides(
         pool,
         TestEnvOverrides {
-            config: Some(config),
+            config: Some(Box::new(config)),
             site_prefixes: Some(vec![]),
             ..Default::default()
         },
@@ -703,6 +703,7 @@ async fn open_isolation_does_not_require_tenant_null_routes_or_rule_budget(pool:
     let mut overrides = TestEnvOverrides::with_config(config).with_fnn_config(None);
     overrides.fnn_config.as_mut().unwrap().admin_vpc = Some(AdminFnnConfig {
         enabled: true,
+        l3_only: false,
         vpc_vni: Some(10000),
         routing_profile: Default::default(),
     });
@@ -770,6 +771,7 @@ async fn uncovered_retained_tenant_root_blocks_fnn_admin_and_startup_but_not_ver
     let mut overrides = TestEnvOverrides::with_config(config).with_fnn_config(None);
     overrides.fnn_config.as_mut().unwrap().admin_vpc = Some(AdminFnnConfig {
         enabled: true,
+        l3_only: false,
         vpc_vni: Some(10000),
         routing_profile: Default::default(),
     });
@@ -1145,7 +1147,7 @@ async fn site_prefix_quota_retains_deleting_rows(pool: sqlx::PgPool) {
     let env = create_test_env_with_overrides(
         pool,
         TestEnvOverrides {
-            config: Some(config),
+            config: Some(Box::new(config)),
             ..Default::default()
         },
     )

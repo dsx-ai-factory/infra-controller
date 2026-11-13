@@ -20,7 +20,7 @@ use std::fmt::{Display, Formatter};
 use std::sync::Arc;
 use std::time::Duration;
 
-use forge_tls::dummy_tls_verifier::DummyTlsVerifier;
+use carbide_tls::dummy_tls_verifier::DummyTlsVerifier;
 use http_body_util::BodyExt;
 use hyper::header::{AUTHORIZATION, CONTENT_TYPE, USER_AGENT};
 use hyper::http::StatusCode;

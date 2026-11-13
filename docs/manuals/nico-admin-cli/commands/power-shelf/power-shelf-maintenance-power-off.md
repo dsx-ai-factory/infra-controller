@@ -11,8 +11,8 @@ power shelves to power off
 
 ```text
 nico-admin-cli power-shelf maintenance power-off
-<--power-shelf-id> [--reference] [--extended]
-[--sort-by] [-h|--help]
+<--power-shelf-id> [--reference] [--graceful]
+[--extended] [--sort-by] [-h|--help]
 ```
 
 ## DESCRIPTION
@@ -28,6 +28,11 @@ One or more Power Shelf IDs to drive into maintenance
 `--reference <REFERENCE>`
 
 URL of reference (ticket, issue, etc) for this maintenance request
+
+`--graceful`
+
+Request a graceful OS-ordered shutdown instead of the default forced
+power-off
 
 `--extended`
 
@@ -49,13 +54,14 @@ Sort output by specified field
 
 `-h, --help`
 
-Print help (see a summary with -h)
+Print help (see a summary with '-h')
 
 ## Examples
 
 ```sh
-nico-admin-cli power-shelf maintenance power-off --power-shelf-id 12345678-1234-5678-90ab-cdef01234567
-nico-admin-cli power-shelf maintenance power-off --power-shelf-id 12345678-1234-5678-90ab-cdef01234567 abcdef01-2345-6789-abcd-ef0123456789 --reference https://tickets.example.com/PS-42
+nico-admin-cli power-shelf maintenance power-off --power-shelf-id ps100htjtiaehv1n5vh67tbmqq4eabcjdng40f7jupsadbedhruh6rag1l0
+nico-admin-cli power-shelf maintenance power-off --power-shelf-id ps100htjtiaehv1n5vh67tbmqq4eabcjdng40f7jupsadbedhruh6rag1l0 --graceful
+nico-admin-cli power-shelf maintenance power-off --power-shelf-id ps100htjtiaehv1n5vh67tbmqq4eabcjdng40f7jupsadbedhruh6rag1l0 ps100hsasb5dsh6e6ogogslpovne4rj82rp9jlf00qd7mcvmaadv85phk3g --reference https://tickets.example.com/PS-42
 ```
 
 ---

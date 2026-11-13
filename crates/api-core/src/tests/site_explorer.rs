@@ -33,7 +33,7 @@ use model::machine::ManagedHostStateSnapshot;
 use model::machine_boot_interface::MachineBootInterfaceTarget;
 use model::site_explorer::{
     Chassis, EndpointExplorationError, EndpointExplorationReport, ExploredDpu, ExploredManagedHost,
-    MachineSetupStatus,
+    MachineSetupStatus, Manager, ServiceRoot,
 };
 use model::test_support::{DpuConfig, ManagedHostConfig};
 use rpc::forge::forge_server::Forge;
@@ -113,7 +113,7 @@ async fn test_disable_machine_creation_outside_site_explorer(
 /// managed-host commit. When its network config bump loses to a concurrent
 /// writer, it re-reads the winning config and swaps again: the row repairs
 /// commit, the winning config is republished under the next version, the
-/// creation call still succeeds, no failure is counted, and the host BMC is
+/// explorer iteration still succeeds, no failure is counted, and the host BMC is
 /// not flagged for exploration.
 #[sqlx_test]
 async fn admin_address_reconciliation_republishes_a_config_changed_under_it(
@@ -121,27 +121,11 @@ async fn admin_address_reconciliation_republishes_a_config_changed_under_it(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let env = api_fixtures::create_test_env(pool).await;
     let host_config = ManagedHostConfig::default();
-    let bmc_mac_address = host_config.bmc_mac_address;
     let mh = api_fixtures::create_managed_host_with_config(&env, host_config).await;
     let host_id = mh.host().id;
-    let creator = MachineCreator::new(
-        env.pool.clone(),
-        (&env.config.site_explorer).into(),
-        env.api.resource_pool_registry.clone(),
-        env.common_pools.clone(),
-        Arc::new(env.config.rack_profiles.clone()),
-        None,
-        false,
-    );
     let host_bmc_ip = host_bmc_ip(&env, &mh).await?;
-    let mut host_report = explored_endpoint(&env, host_bmc_ip).await?.report;
 
     let mut txn = env.pool.begin().await?;
-    let expected_machine =
-        db::expected_machine::find_by_bmc_mac_address(&mut *txn, bmc_mac_address)
-            .await?
-            .unwrap();
-    let dpu_bmc_ip = mh.dpu().bmc_ip(&mut txn).await.unwrap();
     let interfaces = db::machine_interface::find_by_machine_ids(&mut txn, &[host_id]).await?;
     let primary = interfaces[&host_id]
         .iter()
@@ -164,17 +148,9 @@ async fn admin_address_reconciliation_republishes_a_config_changed_under_it(
     .await?;
     let before = db::machine_interface::find_one(&mut *txn, primary.id).await?;
     assert!(before.addresses.is_empty());
+    db::explored_endpoints::request_exploration_for_addresses(&[host_bmc_ip], txn.as_mut()).await?;
     txn.commit().await?;
 
-    let explored_host = ExploredManagedHost {
-        host_bmc_ip,
-        dpus: vec![ExploredDpu {
-            bmc_ip: dpu_bmc_ip,
-            host_pf_mac_address: Some(primary.mac_address),
-            host_chassis_id: None,
-            report: Arc::new(explored_endpoint(&env, dpu_bmc_ip).await?.report),
-        }],
-    };
     let mut writer = env.db_txn().await;
     let writer_pid: i32 =
         sqlx::query_scalar("SELECT pg_backend_pid() FROM machines WHERE id = $1 FOR UPDATE")
@@ -186,15 +162,9 @@ async fn admin_address_reconciliation_republishes_a_config_changed_under_it(
     winning_config.use_admin_network = Some(!winning_config.use_admin_network.unwrap_or(true));
 
     let metrics = MetricsCapture::start();
-    // Box `create_managed_host` to keep this test within libtest's default
-    // thread stack. Its inline future enlarges the test and SQLx runner
-    // frames even during fixture setup, before reconciliation starts.
-    let reconcile = Box::pin(creator.create_managed_host(
-        &explored_host,
-        &mut host_report,
-        Some(&expected_machine),
-        &env.pool,
-    ));
+    // Keep the exploration future on the heap so this test fits within
+    // libtest's default thread stack.
+    let reconcile = Box::pin(env.site_explorer.run_single_iteration());
     let competing_write = async {
         // Reconciliation has repaired the address rows and read the old version.
         // Change the config before releasing the machine row it needs to update.
@@ -228,9 +198,7 @@ async fn admin_address_reconciliation_republishes_a_config_changed_under_it(
         })
         .await
         .expect("admin address reconciliation should finish after the competing writer commits");
-    let created =
-        result.expect("the managed-host transaction commits before the admin address reconcile");
-    assert!(!created, "an existing host is not created again");
+    result.expect("the explorer completes after the admin address reconcile");
     assert_eq!(
         metrics.counter_delta(
             "carbide_site_explorer_host_admin_address_reconcile_failures_total",
@@ -278,28 +246,7 @@ async fn boot_target_repair_retries_after_a_concurrent_host_network_write(
         let host_id = mh.host().id;
         let boot_host_id: carbide_uuid::machine::HostMachineId = host_id.into();
         let dpu_id = mh.dpu().id;
-        let host_bmc_ip = host_bmc_ip(&env, &mh).await?;
-        let mut host_report = explored_endpoint(&env, host_bmc_ip).await?.report;
         let mut txn = env.pool.begin().await?;
-        let expected =
-            db::expected_machine::find_by_bmc_mac_address(&mut *txn, config.bmc_mac_address)
-                .await?
-                .expect("expected host");
-        let dpu_bmc_ip = mh.dpu().bmc_ip(&mut txn).await.expect("DPU BMC address");
-        let interfaces = db::machine_interface::find_by_machine_ids(&mut txn, &[host_id]).await?;
-        let primary = interfaces[&host_id]
-            .iter()
-            .find(|interface| interface.primary_interface)
-            .expect("host primary interface");
-        let explored = ExploredManagedHost {
-            host_bmc_ip,
-            dpus: vec![ExploredDpu {
-                bmc_ip: dpu_bmc_ip,
-                host_pf_mac_address: Some(primary.mac_address),
-                host_chassis_id: None,
-                report: Arc::new(explored_endpoint(&env, dpu_bmc_ip).await?.report),
-            }],
-        };
         let desired = db::machine_desired_boot_interface::get(&mut *txn, &boot_host_id)
             .await?
             .expect("original desired boot target");
@@ -311,15 +258,6 @@ async fn boot_target_repair_retries_after_a_concurrent_host_network_write(
             .await?;
         let before = db::machine::get_network_config(&mut *txn, &dpu_id).await?;
         txn.commit().await?;
-        let creator = MachineCreator::new(
-            env.pool.clone(),
-            (&env.config.site_explorer).into(),
-            env.api.resource_pool_registry.clone(),
-            env.common_pools.clone(),
-            Arc::new(env.config.rack_profiles.clone()),
-            None,
-            false,
-        );
         // Park the real host-first network writer on the DPU. It already owns
         // the host row at this point, reproducing the opposite lock order.
         let mut blocker = env.pool.begin().await?;
@@ -353,17 +291,12 @@ async fn boot_target_repair_retries_after_a_concurrent_host_network_write(
             )
             .await??
         );
-        let error = tokio::time::timeout(
+        // Reconciliation is best-effort: the busy host is skipped without waiting.
+        tokio::time::timeout(
             std::time::Duration::from_secs(5),
-            creator.create_managed_host(&explored, &mut host_report, Some(&expected), &env.pool),
+            Box::pin(env.site_explorer.run_single_iteration()),
         )
-        .await?
-        .expect_err("busy group must roll back boot repair");
-        assert!(
-            matches!(error, carbide_site_explorer::errors::SiteExplorerError::DatabaseError(
-            db::DatabaseError::FailedPrecondition(ref message),
-        ) if message.contains("changed or is busy"))
-        );
+        .await??;
         assert!(
             db::machine_desired_boot_interface::get(&env.pool, &boot_host_id)
                 .await?
@@ -374,11 +307,11 @@ async fn boot_target_repair_retries_after_a_concurrent_host_network_write(
         // Reload every changed field so success cannot hide a partial repair.
         blocker.rollback().await?;
         tokio::time::timeout(std::time::Duration::from_secs(5), &mut writer).await??;
-        assert!(
-            !creator
-                .create_managed_host(&explored, &mut host_report, Some(&expected), &env.pool,)
-                .await?
-        );
+        tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            Box::pin(env.site_explorer.run_single_iteration()),
+        )
+        .await??;
         assert_eq!(
             db::machine_desired_boot_interface::get(&env.pool, &boot_host_id)
                 .await?
@@ -749,6 +682,69 @@ async fn test_site_explorer_fixtures_zerodpu_site_explorer_before_host_dhcp(
         .await?;
 
     assert_eq!(snapshot.dpu_snapshots.len(), 0);
+
+    Ok(())
+}
+
+#[sqlx_test]
+async fn test_find_bmc_driver_selection_selects_from_the_latest_report(
+    pool: PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let env = common::api_fixtures::create_test_env(pool.clone()).await;
+    let find = |ip: &str| {
+        env.api
+            .find_bmc_driver_selection(Request::new(rpc::forge::BmcEndpointRequest {
+                ip_address: ip.to_string(),
+                mac_address: None,
+            }))
+    };
+
+    let error = find("192.0.2.1").await.expect_err("unknown endpoint");
+    assert_eq!(error.code(), tonic::Code::NotFound);
+
+    let unexplored = "192.0.2.2";
+    let xcc3 = "192.0.2.3";
+    let mut txn = env.pool.begin().await?;
+    db::explored_endpoints::insert(
+        IpAddr::from_str(unexplored)?,
+        &EndpointExplorationReport::default(),
+        false,
+        &mut txn,
+    )
+    .await?;
+    db::explored_endpoints::insert(
+        IpAddr::from_str(xcc3)?,
+        &EndpointExplorationReport {
+            service_root: Some(ServiceRoot {
+                vendor: Some("Lenovo".to_string()),
+                ..Default::default()
+            }),
+            managers: vec![Manager {
+                id: "1".to_string(),
+                model: Some("Lenovo XClarity Controller 3".to_string()),
+                ..Default::default()
+            }],
+            ..Default::default()
+        },
+        false,
+        &mut txn,
+    )
+    .await?;
+    txn.commit().await?;
+
+    assert_eq!(
+        find(unexplored).await?.into_inner(),
+        rpc::forge::BmcDriverSelection::default(),
+        "a report without the service root selects nothing"
+    );
+
+    let response = find(xcc3).await?.into_inner();
+    let selection: serde_json::Value =
+        serde_json::from_str(response.selection.as_deref().expect("selection"))?;
+    assert_eq!(selection["drivers"]["boot_order"], "lenovo-xcc3-boot-order");
+    let identity: serde_json::Value =
+        serde_json::from_str(response.identity.as_deref().expect("identity"))?;
+    assert_eq!(identity["service_root"]["vendor"], "Lenovo");
 
     Ok(())
 }

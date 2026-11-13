@@ -35,6 +35,8 @@ pub enum RmsJobKind {
     SwitchSystemImage,
     /// SDN factory reset for a switch.
     SwitchSdnFactoryReset,
+    /// NVOS factory reset for a switch.
+    SwitchNvosFactoryReset,
 }
 
 impl RmsJobKind {
@@ -44,6 +46,7 @@ impl RmsJobKind {
             Self::FirmwareObject => "firmware_object",
             Self::SwitchSystemImage => "switch_system_image",
             Self::SwitchSdnFactoryReset => "switch_sdn_factory_reset",
+            Self::SwitchNvosFactoryReset => "switch_nvos_factory_reset",
         }
     }
 
@@ -53,6 +56,7 @@ impl RmsJobKind {
             "firmware_object" => Some(Self::FirmwareObject),
             "switch_system_image" => Some(Self::SwitchSystemImage),
             "switch_sdn_factory_reset" => Some(Self::SwitchSdnFactoryReset),
+            "switch_nvos_factory_reset" => Some(Self::SwitchNvosFactoryReset),
             _ => None,
         }
     }
@@ -211,6 +215,7 @@ mod tests {
     const FW_OBJECT: RmsJobKind = RmsJobKind::FirmwareObject;
     const SYS_IMAGE: RmsJobKind = RmsJobKind::SwitchSystemImage;
     const SDN_RESET: RmsJobKind = RmsJobKind::SwitchSdnFactoryReset;
+    const NVOS_RESET: RmsJobKind = RmsJobKind::SwitchNvosFactoryReset;
 
     fn mac(last: u8) -> MacAddress {
         MacAddress::new([0x02, 0x00, 0x00, 0x00, 0x00, last])
@@ -256,10 +261,11 @@ mod tests {
 
     #[crate::sqlx_test]
     async fn distinct_kinds_coexist_and_replace_sets_full_set(pool: sqlx::PgPool) {
-        // Two kinds for one device coexist under the composite key.
+        // Firmware and both reset actions coexist under the composite key.
         save(&pool, mac(1), FW_OBJECT, "job-fw").await.unwrap();
         save(&pool, mac(1), SYS_IMAGE, "job-img").await.unwrap();
         save(&pool, mac(1), SDN_RESET, "job-reset").await.unwrap();
+        save(&pool, mac(1), NVOS_RESET, "job-nvos").await.unwrap();
         let mut all = get_firmware_jobs(&pool, mac(1)).await.unwrap();
         all.sort();
         assert_eq!(
@@ -281,12 +287,16 @@ mod tests {
         );
         assert_eq!(get(&pool, mac(1), FW_OBJECT).await.unwrap(), None);
 
-        // An empty firmware set cannot clear the device's reset reference.
+        // An empty firmware set cannot clear either reset reference.
         replace_firmware_jobs(&pool, mac(1), &[]).await.unwrap();
         assert!(get_firmware_jobs(&pool, mac(1)).await.unwrap().is_empty());
         assert_eq!(
             get(&pool, mac(1), SDN_RESET).await.unwrap().as_deref(),
             Some("job-reset")
+        );
+        assert_eq!(
+            get(&pool, mac(1), NVOS_RESET).await.unwrap().as_deref(),
+            Some("job-nvos")
         );
     }
 
@@ -295,9 +305,10 @@ mod tests {
         save(&pool, mac(1), FW_OBJECT, "job-1").await.unwrap();
         save(&pool, mac(2), SDN_RESET, "job-reset").await.unwrap();
         save(&pool, mac(3), FW_OBJECT, "job-3").await.unwrap();
+        save(&pool, mac(4), NVOS_RESET, "job-nvos").await.unwrap();
 
         // A reset-only device must not enter firmware direct-dispatch routing.
-        let found = find_macs_with_firmware_job(&pool, &[mac(1), mac(2), mac(3)])
+        let found = find_macs_with_firmware_job(&pool, &[mac(1), mac(2), mac(3), mac(4)])
             .await
             .unwrap();
         assert_eq!(found, HashSet::from([mac(1), mac(3)]));

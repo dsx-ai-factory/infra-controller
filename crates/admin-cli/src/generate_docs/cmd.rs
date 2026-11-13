@@ -35,6 +35,7 @@ use std::fmt::Write as _;
 use std::path::Path;
 
 use clap::{Command, CommandFactory};
+use eyre::Context;
 
 use crate::cfg::cli_options::{CliDomain, CliOptions, domain_for_command};
 use crate::errors::{CarbideCliError, CarbideCliResult};
@@ -409,8 +410,8 @@ fn plain_cli_syntax(line: &str) -> String {
         .replace("\\`", "`")
 }
 
-/// Use Clap's usage for commands whose required arguments, selector groups, or
-/// explicit usage are not preserved by `clap_mangen`.
+/// Use Clap's usage for commands whose required or repeated arguments, selector
+/// groups, or explicit usage are not preserved by `clap_mangen`.
 fn uses_clap_synopsis(path: &[String]) -> bool {
     matches!(
         (
@@ -418,6 +419,7 @@ fn uses_clap_synopsis(path: &[String]) -> bool {
             path.get(2).map(String::as_str),
         ),
         (Some("machine-validation"), Some("logs"))
+            | (Some("machine"), Some("states"))
             | (Some("firmware"), Some("nic"))
             | (Some("spx-maintenance"), _)
             | (
@@ -511,8 +513,17 @@ fn clean_pandoc_prose(line: &str, in_inline_code: &mut bool) -> String {
 /// man page's `# NAME`/`# OPTIONS`/… sections to `## ` so each generated page
 /// can own the `# ` title (the full command invocation).
 fn man_to_markdown(man_file: &Path) -> CarbideCliResult<String> {
+    let man = std::fs::read_to_string(man_file).with_context(|| {
+        format!(
+            "while attempting to read man page {} for markdown conversion",
+            man_file.display()
+        )
+    })?;
+    // Pandoc can skip roff's conditional Aq definition. Predefine the apostrophe
+    // for conversion without depending on the generated preamble's layout.
+    let man = format!(".ds Aq \\(aq\n{man}");
     let mut pandoc = pandoc::new();
-    pandoc.add_input(man_file);
+    pandoc.set_input(pandoc::InputKind::Pipe(man));
     pandoc.set_input_format(pandoc::InputFormat::Other("man".to_string()), Vec::new());
     pandoc.set_output_format(pandoc::OutputFormat::Other("gfm".to_string()), Vec::new());
     // Keep list spacing consistent across Pandoc versions and with Markdown lint.
@@ -592,6 +603,50 @@ mod tests {
         BIN, clean_pandoc_markdown, command_tree, format_markdown_links, replace_synopsis,
         uses_clap_synopsis,
     };
+
+    #[test]
+    fn man_read_error_includes_filename_and_cause() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("missing-man-page.1");
+        let cause = std::fs::read_to_string(&path).unwrap_err();
+
+        let error = format!("{:#}", super::man_to_markdown(&path).unwrap_err());
+
+        assert!(error.contains("read man page"), "{error}");
+        assert!(error.contains(&path.display().to_string()), "{error}");
+        assert!(error.contains(&cause.to_string()), "{error}");
+    }
+
+    #[test]
+    #[ignore = "requires pandoc on PATH"]
+    fn man_conversion_preserves_apostrophes() {
+        let dir = tempfile::tempdir().unwrap();
+        let command = clap::Command::new("apostrophes")
+            .about("Inspect the server's profiles and the tenant's choices.");
+        clap_mangen::generate_to(command, dir.path()).unwrap();
+        let path = dir.path().join("apostrophes.1");
+        let original = std::fs::read_to_string(&path).unwrap();
+
+        value_scenarios!(run = |prefix: &str| {
+            let man = format!("{prefix}{original}");
+            std::fs::write(&path, &man).unwrap();
+
+            let markdown = super::man_to_markdown(&path).unwrap();
+
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), man);
+            (
+                markdown.contains("server's profiles"),
+                markdown.contains("tenant's choices"),
+            )
+        };
+            "generated preamble" {
+                "" => (true, true),
+            }
+            "comment before generated preamble" {
+                ".\\\" Generated documentation\n" => (true, true),
+            }
+        );
+    }
 
     #[test]
     fn repository_doc_paths_become_links_in_generated_markdown() {
@@ -697,6 +752,23 @@ An inline `HostInband` value and `mac=<mac>` selector.
         assert_eq!(
             command.clone().render_usage().to_string(),
             "Usage: nico-admin-cli firmware nic profile update [OPTIONS] --if-version-match <VERSION> <ID>"
+        );
+    }
+
+    #[test]
+    fn machine_states_synopsis_preserves_repeated_optional_ids() {
+        let root = command_tree();
+        let path = [BIN, "machine", "states"].map(String::from);
+        let command = path[1..].iter().fold(&root, |command, name| {
+            command
+                .find_subcommand(name)
+                .expect("machine states exists in the CLI tree")
+        });
+
+        assert!(uses_clap_synopsis(&path));
+        assert_eq!(
+            command.clone().render_usage().to_string(),
+            "Usage: nico-admin-cli machine states [OPTIONS] [MACHINE_ID]..."
         );
     }
 

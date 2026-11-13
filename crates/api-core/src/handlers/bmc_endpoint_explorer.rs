@@ -24,7 +24,7 @@ use carbide_utils::none_if_empty::NoneIfEmpty;
 use carbide_uuid::device::DeviceId;
 use carbide_uuid::machine::{HostMachineId, HostMachineIdSubtype, MachineId};
 use db::WithTransaction;
-use db::machine_interface::find_by_ip;
+use db::machine_interface::{MachineInterfaces, find_by_ip};
 use libredfish::RoleId;
 use mac_address::MacAddress;
 use model::expected_entity::ExpectedEntity;
@@ -32,9 +32,7 @@ use model::machine::machine_search_config::MachineSearchConfig;
 use model::machine::{LoadSnapshotOptions, MachineInterfaceSnapshot, ManagedHostState};
 use model::machine_boot_interface::{
     BootInterfaceSelectionAuthority, MachineBootInterface, MachineBootInterfaceTarget,
-    canonical_redfish_boot_interface_id,
 };
-use model::predicted_machine_interface::PredictedMachineInterface;
 use model::site_explorer::{BlueFieldOperatingMode, PreingestionState};
 use sqlx::PgConnection;
 use tonic::{Request, Response, Status};
@@ -92,56 +90,11 @@ fn admin_selection_authority(entered_mac: Option<MacAddress>) -> BootInterfaceSe
 fn resolve_admin_boot_interface_target(
     stored: Option<MachineBootInterface>,
     desired: Option<&MachineBootInterfaceTarget>,
-    candidates: Option<&BootInterfaceCandidates>,
+    candidates: Option<&MachineInterfaces>,
     entered_mac: Option<MacAddress>,
 ) -> Option<BootInterfaceTarget> {
-    enum UniqueInterfaceId {
-        Missing,
-        One(String),
-        Conflicting,
-    }
-
-    fn unique_interface_id<'a>(ids: impl Iterator<Item = &'a str>) -> UniqueInterfaceId {
-        let mut unique = ids.filter_map(canonical_redfish_boot_interface_id);
-        let Some(first) = unique.next() else {
-            return UniqueInterfaceId::Missing;
-        };
-        if unique.any(|id| id != first) {
-            UniqueInterfaceId::Conflicting
-        } else {
-            UniqueInterfaceId::One(first.to_string())
-        }
-    }
-
-    // The machine's unambiguous `MachineBootInterface` for `mac`, if known:
-    // owned rows first, then predictions only when owned rows offer no id.
     let pair_from_candidates = |mac: MacAddress| -> Option<MachineBootInterface> {
-        let candidates = candidates?;
-        let owned = unique_interface_id(
-            candidates
-                .interfaces
-                .iter()
-                .filter(|row| row.mac_address == mac)
-                .filter_map(|row| row.boot_interface_id.as_deref()),
-        );
-        let interface_id = match owned {
-            UniqueInterfaceId::One(interface_id) => interface_id,
-            UniqueInterfaceId::Conflicting => return None,
-            UniqueInterfaceId::Missing => match unique_interface_id(
-                candidates
-                    .predicted
-                    .iter()
-                    .filter(|predicted| predicted.mac_address == mac)
-                    .filter_map(|predicted| predicted.boot_interface_id.as_deref()),
-            ) {
-                UniqueInterfaceId::One(interface_id) => interface_id,
-                UniqueInterfaceId::Missing | UniqueInterfaceId::Conflicting => return None,
-            },
-        };
-        Some(MachineBootInterface {
-            mac_address: mac,
-            interface_id,
-        })
+        candidates?.boot_interface_for_mac(mac)
     };
     let desired_pair_for = |mac: MacAddress| match desired {
         Some(MachineBootInterfaceTarget::Pair(pair)) if pair.mac_address == mac => {
@@ -191,7 +144,7 @@ fn resolve_admin_boot_interface_target(
                     }
                 });
             }
-            if let Some(picked) = model::machine::pick_boot_interface(&candidates.interfaces) {
+            if let Some(picked) = candidates.boot_interface() {
                 return Some(target_from_candidates(picked.mac_address));
             }
             // The rows offered no boot candidate: the machine's predicted NICs
@@ -199,7 +152,7 @@ fn resolve_admin_boot_interface_target(
             // primary, else the sole non-underlay prediction. With several and
             // none declared primary the boot NIC is unknowable, so it returns
             // `None` and the action keeps requiring an explicit MAC.
-            if let Some(predicted) = model::machine::pick_boot_prediction(&candidates.predicted) {
+            if let Some(predicted) = candidates.boot_prediction() {
                 return Some(target_from_candidates(predicted.mac_address));
             }
             // An owned machine resolves from its own data alone: no
@@ -277,7 +230,7 @@ async fn boot_interface_reconciliation_eligible(
 fn managed_boot_interface_target(
     machine_id: Option<MachineId>,
     desired: Option<&MachineBootInterfaceTarget>,
-    candidates: Option<&BootInterfaceCandidates>,
+    candidates: Option<&MachineInterfaces>,
     entered_mac: Option<MacAddress>,
 ) -> Result<Option<(HostMachineId, BootInterfaceTarget)>, CarbideError> {
     let Some(Ok(host_machine_id)) = machine_id.map(HostMachineId::try_from) else {
@@ -292,21 +245,6 @@ fn managed_boot_interface_target(
     Ok(Some((host_machine_id, target)))
 }
 
-/// What a host machine offers boot-interface resolution to select from: its
-/// real `machine_interfaces` rows, and -- for the window before a NIC's first
-/// DHCP lease creates a real row -- its `predicted_machine_interfaces`.
-struct BootInterfaceCandidates {
-    /// The machine's non-BMC `machine_interfaces` rows. When they offer a
-    /// boot candidate (the machine-controller's own `pick_boot_interface`
-    /// selection), it is the first fallback when no desired target is stored.
-    interfaces: Vec<MachineInterfaceSnapshot>,
-    /// The machine's predicted interfaces, consulted only when the rows
-    /// offer no fallback candidate -- none exist yet (zero-DPU/NIC-mode
-    /// machines awaiting their first lease), or none are selectable (e.g.
-    /// only underlay-typed declared NICs).
-    predicted: Vec<PredictedMachineInterface>,
-}
-
 /// Load what boot-interface resolution selects from, when the BMC endpoint
 /// belongs to a (predicted or confirmed) host machine.
 ///
@@ -319,19 +257,11 @@ struct BootInterfaceCandidates {
 async fn boot_interface_candidates(
     txn: &mut PgConnection,
     machine_id: Option<MachineId>,
-) -> Result<Option<BootInterfaceCandidates>, CarbideError> {
+) -> Result<Option<MachineInterfaces>, CarbideError> {
     let Some(machine_id) = machine_id.filter(|id| !id.machine_type().is_dpu()) else {
         return Ok(None);
     };
-    let interfaces = db::machine_interface::find_by_machine_ids(txn, &[machine_id])
-        .await?
-        .remove(&machine_id)
-        .unwrap_or_default();
-    let predicted = db::predicted_machine_interface::find_by_machine_id(txn, &machine_id).await?;
-    Ok(Some(BootInterfaceCandidates {
-        interfaces,
-        predicted,
-    }))
+    Ok(Some(MachineInterfaces::load(txn, &machine_id).await?))
 }
 
 /// Summarize boot-interface candidates for crate-local integration-style unit tests without
@@ -349,7 +279,7 @@ pub(crate) async fn summarize_boot_interface_candidates_for_test(
                     .interfaces
                     .iter()
                     .any(|interface| interface.primary_interface),
-                candidates.predicted.is_empty(),
+                candidates.predictions.is_empty(),
             )
         }))
 }
@@ -1553,6 +1483,7 @@ pub(super) async fn validate_and_complete_bmc_endpoint_request(
 mod tests {
     use carbide_test_support::value_scenarios;
     use model::network_segment::NetworkSegmentType;
+    use model::predicted_machine_interface::PredictedMachineInterface;
 
     use super::*;
 
@@ -1645,12 +1576,12 @@ mod tests {
 
     #[test]
     fn no_mac_keeps_the_desired_mac_and_refreshes_its_redfish_id() {
-        let c = BootInterfaceCandidates {
+        let c = MachineInterfaces {
             interfaces: vec![
                 row("00:00:5e:00:53:01", true, Some("NIC.Integrated.1-1-1")),
                 row("00:00:5e:00:53:02", false, Some("NIC.Slot.7-1-1")),
             ],
-            predicted: vec![],
+            predictions: vec![],
         };
         let desired =
             MachineBootInterfaceTarget::Pair(pair("00:00:5e:00:53:02", "NIC.Remembered.7-1-1"));
@@ -1667,12 +1598,12 @@ mod tests {
     #[test]
     fn no_mac_completes_a_persisted_mac_only_target_from_current_rows() {
         let desired = MachineBootInterfaceTarget::MacOnly("00:00:5e:00:53:02".parse().unwrap());
-        let c = BootInterfaceCandidates {
+        let c = MachineInterfaces {
             interfaces: vec![
                 row("00:00:5e:00:53:01", true, Some("NIC.Integrated.1-1-1")),
                 row("00:00:5e:00:53:02", false, Some("NIC.Slot.7-1-1")),
             ],
-            predicted: vec![],
+            predictions: vec![],
         };
 
         assert_eq!(
@@ -1691,7 +1622,7 @@ mod tests {
 
         value_scenarios!(run = |(desired, candidates): (
             Option<MachineBootInterfaceTarget>,
-            BootInterfaceCandidates,
+            MachineInterfaces,
         )| {
             resolve_admin_boot_interface_target(
                 None,
@@ -1706,9 +1637,9 @@ mod tests {
                         mac,
                         "NIC.Remembered.7-1-1",
                     ))),
-                    BootInterfaceCandidates {
+                    MachineInterfaces {
                         interfaces: vec![row(mac, true, None)],
-                        predicted: vec![],
+                        predictions: vec![],
                     },
                 ) => Some(BootInterfaceTarget::Pair(pair(
                     mac,
@@ -1722,12 +1653,12 @@ mod tests {
                         mac,
                         "NIC.Remembered.7-1-1",
                     ))),
-                    BootInterfaceCandidates {
+                    MachineInterfaces {
                         interfaces: vec![
                             row(mac, true, Some("NIC.Conflicting.1")),
                             row(mac, false, Some("NIC.Conflicting.2")),
                         ],
-                        predicted: vec![predicted(mac, Some("NIC.Predicted.1"))],
+                        predictions: vec![predicted(mac, Some("NIC.Predicted.1"))],
                     },
                 ) => Some(BootInterfaceTarget::Pair(pair(
                     mac,
@@ -1738,12 +1669,12 @@ mod tests {
             "duplicate owned id is unambiguous" {
                 (
                     None,
-                    BootInterfaceCandidates {
+                    MachineInterfaces {
                         interfaces: vec![
                             row(mac, true, Some(" \tNIC.Owned.1\n ")),
                             row(mac, false, Some("NIC.Owned.1")),
                         ],
-                        predicted: vec![predicted(mac, Some("NIC.Predicted.1"))],
+                        predictions: vec![predicted(mac, Some("NIC.Predicted.1"))],
                     },
                 ) => Some(BootInterfaceTarget::Pair(pair(mac, "NIC.Owned.1"))),
             }
@@ -1751,12 +1682,12 @@ mod tests {
             "conflicting owned ids block prediction fallback" {
                 (
                     None,
-                    BootInterfaceCandidates {
+                    MachineInterfaces {
                         interfaces: vec![
                             row(mac, true, Some("NIC.Owned.1")),
                             row(mac, false, Some("NIC.Owned.2")),
                         ],
-                        predicted: vec![predicted(mac, Some("NIC.Predicted.1"))],
+                        predictions: vec![predicted(mac, Some("NIC.Predicted.1"))],
                     },
                 ) => Some(BootInterfaceTarget::MacOnly(entered_mac)),
             }
@@ -1764,9 +1695,9 @@ mod tests {
             "duplicate prediction id is unambiguous" {
                 (
                     None,
-                    BootInterfaceCandidates {
+                    MachineInterfaces {
                         interfaces: vec![row(mac, true, None)],
-                        predicted: vec![
+                        predictions: vec![
                             predicted(mac, Some("NIC.Predicted.1")),
                             predicted(mac, Some("NIC.Predicted.1")),
                         ],
@@ -1777,9 +1708,9 @@ mod tests {
             "whitespace-only owned id falls through to prediction" {
                 (
                     None,
-                    BootInterfaceCandidates {
+                    MachineInterfaces {
                         interfaces: vec![row(mac, true, Some("\t\n"))],
-                        predicted: vec![predicted(mac, Some("NIC.Predicted.1"))],
+                        predictions: vec![predicted(mac, Some("NIC.Predicted.1"))],
                     },
                 ) => Some(BootInterfaceTarget::Pair(pair(mac, "NIC.Predicted.1"))),
             }
@@ -1787,9 +1718,9 @@ mod tests {
             "conflicting prediction ids remain MAC-only" {
                 (
                     None,
-                    BootInterfaceCandidates {
+                    MachineInterfaces {
                         interfaces: vec![row(mac, true, None)],
-                        predicted: vec![
+                        predictions: vec![
                             predicted(mac, Some("NIC.Predicted.1")),
                             predicted(mac, Some("NIC.Predicted.2")),
                         ],
@@ -1804,12 +1735,12 @@ mod tests {
         // The operator picked a NIC; its machine_interface row holds the Redfish
         // id, so the target is the full pair -- even though the explored default
         // names a different NIC.
-        let c = BootInterfaceCandidates {
+        let c = MachineInterfaces {
             interfaces: vec![
                 row("00:00:5e:00:53:01", true, Some("NIC.Integrated.1-1-1")),
                 row("00:00:5e:00:53:02", false, Some("NIC.Slot.7-1-1")),
             ],
-            predicted: vec![],
+            predictions: vec![],
         };
         let stored = Some(pair("00:00:5e:00:53:01", "NIC.Integrated.1-1-1"));
         let target = resolve_admin_boot_interface_target(
@@ -1832,9 +1763,9 @@ mod tests {
         // The named NIC has no machine_interfaces row yet (its first lease is
         // still pending), but the machine's prediction for it recorded the
         // Redfish id -- the entered MAC is completed from there.
-        let c = BootInterfaceCandidates {
+        let c = MachineInterfaces {
             interfaces: vec![],
-            predicted: vec![predicted("00:00:5e:00:53:02", Some("NIC.Embedded.1-1-1"))],
+            predictions: vec![predicted("00:00:5e:00:53:02", Some("NIC.Embedded.1-1-1"))],
         };
         let target = resolve_admin_boot_interface_target(
             None,
@@ -1882,12 +1813,12 @@ mod tests {
     fn no_mac_prefers_the_machines_designation_over_the_explored_default() {
         // The machine's primary row is the authority; the explored default
         // (site-explorer's automatic pick) names a different NIC and loses.
-        let c = BootInterfaceCandidates {
+        let c = MachineInterfaces {
             interfaces: vec![
                 row("00:00:5e:00:53:01", false, Some("NIC.Integrated.1-1-1")),
                 row("00:00:5e:00:53:02", true, Some("NIC.Slot.7-1-1")),
             ],
-            predicted: vec![],
+            predictions: vec![],
         };
         let stored = Some(pair("00:00:5e:00:53:01", "NIC.Integrated.1-1-1"));
         assert_eq!(
@@ -1903,9 +1834,9 @@ mod tests {
     fn no_mac_real_rows_beat_predicted_interfaces() {
         // Once any real machine_interfaces row exists, predictions are out of
         // the running -- even a fully-populated one.
-        let c = BootInterfaceCandidates {
+        let c = MachineInterfaces {
             interfaces: vec![row("00:00:5e:00:53:02", true, Some("NIC.Slot.7-1-1"))],
-            predicted: vec![predicted("00:00:5e:00:53:01", Some("NIC.Embedded.1-1-1"))],
+            predictions: vec![predicted("00:00:5e:00:53:01", Some("NIC.Embedded.1-1-1"))],
         };
         assert_eq!(
             resolve_admin_boot_interface_target(None, None, Some(&c), None),
@@ -1922,9 +1853,9 @@ mod tests {
         // MAC alone, exactly like the machine-controller's
         // boot_interface_target. The explored default is not consulted for an
         // owned machine -- even when it holds an id for the very same NIC.
-        let c = BootInterfaceCandidates {
+        let c = MachineInterfaces {
             interfaces: vec![row("00:00:5e:00:53:02", true, None)],
-            predicted: vec![],
+            predictions: vec![],
         };
         for stored in [
             Some(pair("00:00:5e:00:53:02", "NIC.Slot.7-1-1")),
@@ -1945,9 +1876,9 @@ mod tests {
         // A machine awaiting its first lease resolves from its prediction when
         // there is exactly one: the recorded id completes the pair, and a
         // prediction without an id is targeted by MAC alone.
-        let c = BootInterfaceCandidates {
+        let c = MachineInterfaces {
             interfaces: vec![],
-            predicted: vec![predicted("00:00:5e:00:53:01", Some("NIC.Embedded.1-1-1"))],
+            predictions: vec![predicted("00:00:5e:00:53:01", Some("NIC.Embedded.1-1-1"))],
         };
         assert_eq!(
             resolve_admin_boot_interface_target(None, None, Some(&c), None),
@@ -1957,9 +1888,9 @@ mod tests {
             ))),
         );
 
-        let idless = BootInterfaceCandidates {
+        let idless = MachineInterfaces {
             interfaces: vec![],
-            predicted: vec![predicted("00:00:5e:00:53:01", None)],
+            predictions: vec![predicted("00:00:5e:00:53:01", None)],
         };
         assert_eq!(
             resolve_admin_boot_interface_target(None, None, Some(&idless), None),
@@ -1977,9 +1908,9 @@ mod tests {
         // refuses to guess rather than silently programming boot order against
         // whichever NIC sorts lowest. The operator's explicit MAC still
         // resolves, completed from the matching prediction.
-        let c = BootInterfaceCandidates {
+        let c = MachineInterfaces {
             interfaces: vec![],
-            predicted: vec![
+            predictions: vec![
                 predicted("00:00:5e:00:53:02", Some("NIC.Slot.7-1-1")),
                 predicted("00:00:5e:00:53:01", Some("NIC.Embedded.1-1-1")),
             ],
@@ -2019,9 +1950,9 @@ mod tests {
             ..predicted("00:00:5e:00:53:01", Some("NIC.Embedded.1-1-1"))
         };
         let other = predicted("00:00:5e:00:53:02", Some("NIC.Slot.7-1-1"));
-        let c = BootInterfaceCandidates {
+        let c = MachineInterfaces {
             interfaces: vec![],
-            predicted: vec![other, declared_primary],
+            predictions: vec![other, declared_primary],
         };
         assert_eq!(
             resolve_admin_boot_interface_target(None, None, Some(&c), None),
@@ -2039,9 +1970,9 @@ mod tests {
         // the explored default.
         let mut underlay = row("00:00:5e:00:53:09", false, None);
         underlay.network_segment_type = Some(NetworkSegmentType::Underlay);
-        let c = BootInterfaceCandidates {
+        let c = MachineInterfaces {
             interfaces: vec![underlay],
-            predicted: vec![predicted("00:00:5e:00:53:01", Some("NIC.Embedded.1-1-1"))],
+            predictions: vec![predicted("00:00:5e:00:53:01", Some("NIC.Embedded.1-1-1"))],
         };
         let stored = Some(pair("00:00:5e:00:53:09", "NIC.Other.9-9-9"));
         assert_eq!(
@@ -2063,9 +1994,9 @@ mod tests {
             resolve_admin_boot_interface_target(Some(stored.clone()), None, None, None),
             Some(BootInterfaceTarget::Pair(stored.clone())),
         );
-        let empty = BootInterfaceCandidates {
+        let empty = MachineInterfaces {
             interfaces: vec![],
-            predicted: vec![],
+            predictions: vec![],
         };
         assert_eq!(
             resolve_admin_boot_interface_target(Some(stored), None, Some(&empty), None),

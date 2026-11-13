@@ -21,9 +21,12 @@ fullnameOverride: ""
 
 # Suites. Each enabled entry renders one `helm test` Job that runs a fixed
 # binary and anchored test; only the suites the chart knows (cluster, probe,
-# inventory, history, lock, store, store-transition) may be enabled, and at least
-# one must be. Lower weight runs first. The lock suite proves the Lease site lock
-# against the API.
+# inventory, history, lock, store, store-transition, result, fleetup) may be
+# enabled, and at least one must be. Lower weight runs first. The lock suite
+# proves the Lease site lock, and the result suite the result claim, status
+# write and result.json, against the real API server. The fleetup suite runs
+# every fleet-up readiness check against the live site with the inventory,
+# store, probeUrl and runner.controlPlane values, and needs go.
 suites:
   cluster:
     enabled: true
@@ -46,6 +49,12 @@ suites:
   lock:
     enabled: false
     weight: 7
+  result:
+    enabled: false
+    weight: 8
+  fleetup:
+    enabled: false
+    weight: 9
 
 # Base URL of the probe Service (SCALE_TEST_PROBE_URL) for the probe suite. When
 # unset, the enabled probe fixture fails rather than skipping.
@@ -107,6 +116,57 @@ store:
     reached: ""
     minTimingErrorSeconds: ""
 
+# The production fleet-up runner: a plain Job (not a helm test) that runs
+# `/scale-test fleet-up` under its own ServiceAccount, whose Role may not delete
+# a Lease. Install it in the MAT namespace: it reads the MAT Pods and Services
+# in the release namespace (not inventory.namespace) and keeps the site lock and
+# the result ConfigMap there. It reuses probeUrl, store (when checkStore) and
+# inventory's selector, expected counts, release, spiffe and clientSecret. The
+# journal and result.json go on the shared run-data claim (persistence), which
+# the runner keeps on uninstall. A new runId is a new run. checkStore false is
+# a diagnostic run, which is never go.
+#
+# command ingestion runs `/scale-test ingestion` instead, under the same config,
+# account, RBAC and claim: it registers the served MAT inventory in nico-api and
+# times ten stages to Ready. It writes, so dryRun must be true (journal the plan,
+# send nothing) or false. It has no helm test. The README sizes the budgets.
+runner:
+  enabled: false
+  command: fleet-up
+  rest: {url: "", org: "", providerOrg: "", tokenSecret: "", caSecret: {name: "", key: ca.crt}}
+  # Must equal the probe sweep interval. A mismatch fails before writes.
+  observation: {intervalSeconds: 480, labelReadbackSeconds: 1800}
+  instance:
+    "n": 5
+    burstSize: 100
+    topologyOptimized: false # Allow cohorts across topology domains.
+    tenantId: ""
+    instanceTypeId: ""
+    vpcId: ""
+    subnetId: ""
+    ipxeSecret: "" # key script.ipxe, pinned for the run
+    ownedManifest: "" # basename of the create run's .owned.json on the shared PVC
+    apiPoolReplicas: 0 # required, expected number of API replica series
+    apiPoolSelector: {} # labels selecting every relevant API replica, never an aggregate
+  dryRun: null
+  writes:
+    concurrency: {rack: 8, host: 8, switch: 8, powerShelf: 8}
+  runId: ""
+  lockName: nico-scale-test-site-lock
+  # The NICo control-plane pods that must be Ready, besides the MAT pods: at
+  # least one {namespace, labelSelector}. Each namespace gets a Pod read Role
+  # for the runner and the fleetup suite.
+  controlPlane: []
+  checkStore: true
+  # Complete result on the PVC, not the ConfigMap: 256 KiB to 16 MiB.
+  resultMaxBytes: 8388608
+  probeRequestTimeoutSeconds: 5 # 1 to 600, per probe page or count read
+  bmc: {port: 443, concurrency: 64, timeoutSeconds: 5, tries: 2}
+  readinessSeconds: 300
+  finalizeSeconds: 1800 # the summaries and end reads after the stage window
+  wholeRunSeconds: 6600 # a 4800 s (80 min) stage window: wholeRunSeconds - finalizeSeconds
+  activeDeadlineSeconds: 6720 # over wholeRunSeconds plus the 90 s shutdown budget
+
 # The Job deadline and the go test timeout for each suite, both positive
 # integer seconds (the timeout renders as a Go duration such as 480s).
 testBudget:
@@ -114,16 +174,17 @@ testBudget:
   testTimeoutSeconds: 480
 
 # Shared run-data volume. One ReadWriteOnce PersistentVolumeClaim holds the run
-# journal that the journal proof writes and that a later run-results suite
-# reuses, so the claim is shared rather than suite-specific. It is created when
-# the journal suite is enabled or when create is set on its own. storageClass is
+# journal that the journal proof writes and the fleet-up runner's journal and
+# result.json, so the claim is shared rather than suite-specific. It is created
+# when the journal suite or the runner is enabled, or when create is set on its
+# own; with the runner it is kept on uninstall. storageClass is
 # required whenever the claim is created (no silent default-class binding), and
 # fsGroup makes the volume group-writable by the nonroot test user (65532).
 persistence:
   create: false
   claimName: ""        # defaults to <fullname>-run-data
   storageClass: ""     # required when the claim is created
-  size: 1Gi
+  size: 4Gi
   fsGroup: 65532
   mountPath: /run-data
 

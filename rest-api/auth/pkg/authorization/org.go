@@ -54,7 +54,7 @@ func ValidateUserRoles(user *cdbm.User, orgName string, teamName *string, target
 // TODO: remove the stripped fallback once all stored roles have been migrated to the
 // new unprefixed form (i.e. no "NICO_*" or "FORGE_*" role values remain).
 // NOTE: callers must pass the package-level constants (ProviderAdminRole, etc.) as
-// targetRoles — not hand-written string copies — so that the comparison is always
+// targetRoles (not hand-written string copies), so that the comparison is always
 // against the canonical unprefixed form.
 func matchesTargetRole(role string, targetRoleMap map[string]bool) bool {
 	if targetRoleMap[role] {
@@ -65,6 +65,21 @@ func matchesTargetRole(role string, targetRoleMap map[string]bool) bool {
 		return targetRoleMap[role[idx+1:]]
 	}
 	return false
+}
+
+// ValidateUserHasAllRolesInOrg checks if user has every one of the specified org level roles.
+// It returns false when no roles are specified.
+// targetRoles must be the package-level constants (ProviderAdminRole, etc.).
+func ValidateUserHasAllRolesInOrg(userOrgDetails cdbm.Org, targetRoles ...string) bool {
+	if len(targetRoles) == 0 {
+		return false
+	}
+	for _, targetRole := range targetRoles {
+		if !ValidateUserRolesInOrg(userOrgDetails, nil, targetRole) {
+			return false
+		}
+	}
+	return true
 }
 
 // ValidateUserRolesInOrg checks if user has any of the specified roles (not all).

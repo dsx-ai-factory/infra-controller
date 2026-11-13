@@ -1,0 +1,156 @@
+{{- if .Values.runner.enabled }}
+{{- $r := .Values.runner }}
+{{- $s := .Values.store }}
+{{- $instances := has $r.command (list "instance-create" "instance-delete") }}
+{{- $name := include "scale-test.jobName" (dict "root" . "suite" "runner") }}
+{{- $runId := required "runner.runId is required when the runner is enabled" $r.runId | toString }}
+{{- if not (regexMatch "^[a-z0-9]([a-z0-9-]{0,38}[a-z0-9])?$" $runId) }}
+{{- fail "runner.runId must be 1 to 40 of a-z, 0-9 and '-', starting and ending with a letter or digit" }}
+{{- end }}
+{{- $deadline := include "scale-test.positiveSeconds" (dict "key" "runner.activeDeadlineSeconds" "value" $r.activeDeadlineSeconds) }}
+{{- $whole := include "scale-test.positiveSeconds" (dict "key" "runner.wholeRunSeconds" "value" $r.wholeRunSeconds) }}
+{{/* The run bounds itself by wholeRunSeconds plus its 90 s shutdown budget;
+     the Job deadline must not cut it short of publishing its result. */}}
+{{- if le (int64 $deadline) (add (int64 $whole) 90) }}
+{{- fail "runner.activeDeadlineSeconds must exceed runner.wholeRunSeconds by more than the 90 s shutdown budget" }}
+{{- end }}
+# One fleet-up or ingestion run, named runner-<runId> under the release so it never takes a
+# test hook's name: a new runId is a new Job, and the finished one is kept
+# until then. This is a plain Job, not a helm test hook.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "scale-test.jobName" (dict "root" . "suite" (printf "runner-%s" $runId)) }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "scale-test.labels" . | nindent 4 }}
+    app.kubernetes.io/component: runner
+spec:
+  backoffLimit: 0
+  activeDeadlineSeconds: {{ $deadline }}
+  template:
+    metadata:
+      labels:
+        {{- include "scale-test.labels" . | nindent 8 }}
+        app.kubernetes.io/component: runner
+    spec:
+      restartPolicy: Never
+      # The MAT namespace holds a Service per BMC: Service env vars would overflow exec.
+      enableServiceLinks: false
+      # Room for a cancelled run to drain, publish its result and release the lock.
+      terminationGracePeriodSeconds: 120
+      serviceAccountName: {{ $name }}
+      automountServiceAccountToken: true
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: {{ .Values.persistence.fsGroup }}
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: {{ $r.command }}
+          image: {{ include "scale-test.image" . | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: ["/scale-test", {{ $r.command | quote }}, "--config", "/etc/scale-test/config.yaml"]
+          env:
+            # The pod name is the run's execution ID.
+            - name: SCALE_TEST_EXECUTION_ID
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+            - name: config
+              mountPath: /etc/scale-test
+              readOnly: true
+            - name: run-data
+              mountPath: {{ .Values.persistence.mountPath | quote }}
+            {{- if not $instances }}
+            # The nico-api client certificate, referenced (never inline).
+            - name: nico-client-cert
+              mountPath: /var/run/secrets/spiffe.io
+              readOnly: true
+            {{- end }}
+            {{- if $instances }}
+            {{- if $r.rest.caSecret.name }}
+            - name: rest-ca
+              mountPath: /var/run/secrets/rest-ca
+              readOnly: true
+            {{- end }}
+            - name: rest-token
+              mountPath: /var/run/secrets/rest-token
+              readOnly: true
+            {{- if eq $r.command "instance-create" }}
+            - name: instance-ipxe
+              mountPath: /var/run/secrets/instance-ipxe
+              readOnly: true
+            {{- end }}
+            {{- end }}
+            {{- if and $r.checkStore $s.tokenSecret }}
+            - name: store-token
+              mountPath: /var/run/secrets/store-token
+              readOnly: true
+            {{- end }}
+            {{- if and $r.checkStore $s.caSecret }}
+            - name: store-ca
+              mountPath: /var/run/secrets/store-ca
+              readOnly: true
+            {{- end }}
+      volumes:
+        - name: tmp
+          emptyDir: {}
+        - name: config
+          configMap:
+            name: {{ $name }}
+        - name: run-data
+          persistentVolumeClaim:
+            claimName: {{ include "scale-test.runDataClaim" . }}
+        {{- if not $instances }}
+        - name: nico-client-cert
+          secret:
+            secretName: {{ required "inventory.clientSecret is required when the runner is enabled" .Values.inventory.clientSecret | quote }}
+        {{- end }}
+        {{- if $instances }}
+        {{- if $r.rest.caSecret.name }}
+        - name: rest-ca
+          secret:
+            secretName: {{ $r.rest.caSecret.name | quote }}
+            items:
+              - key: {{ required "runner.rest.caSecret.key is required with a CA Secret" $r.rest.caSecret.key | quote }}
+                path: ca.crt
+        {{- end }}
+        - name: rest-token
+          secret:
+            secretName: {{ required "runner.rest.tokenSecret is required" $r.rest.tokenSecret | quote }}
+        {{- if eq $r.command "instance-create" }}
+        - name: instance-ipxe
+          secret:
+            secretName: {{ required "runner.instance.ipxeSecret is required for create" $r.instance.ipxeSecret | quote }}
+        {{- end }}
+        {{- end }}
+        {{- if and $r.checkStore $s.tokenSecret }}
+        - name: store-token
+          secret:
+            secretName: {{ $s.tokenSecret | quote }}
+        {{- end }}
+        {{- if and $r.checkStore $s.caSecret }}
+        - name: store-ca
+          secret:
+            secretName: {{ $s.caSecret | quote }}
+        {{- end }}
+{{- end }}

@@ -135,6 +135,7 @@ async fn create_test_env_inner(pool: PgPool, overrides: TestEnvOverrides) -> Tes
         None,
         Some(pool.clone()),
         None,
+        None,
     )
     .await
     .expect("test component manager should build");
@@ -332,6 +333,15 @@ impl TestEnv {
     }
     pub(super) async fn run_rack_controller_iteration(&self) {
         self.controller.lock().await.run_single_iteration().await;
+    }
+
+    /// Processes each rack once so assertions can inspect the immediate transition.
+    pub(super) async fn run_rack_controller_iteration_no_requeue(&self) {
+        self.controller
+            .lock()
+            .await
+            .run_single_iteration_ext(false)
+            .await;
     }
 }
 

@@ -25,6 +25,7 @@ mod rack_firmware;
 pub mod test_support;
 
 use std::collections::HashMap;
+use std::convert::Infallible;
 use std::default::Default;
 use std::io;
 use std::net::{IpAddr, Ipv4Addr};
@@ -32,6 +33,8 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
+use bmc_backend::{BackendBmc, BmcConnectError, BmcConnector};
+use bmc_runtime::DriverConnector;
 use carbide_firmware::{
     ArtifactStatus, FirmwareConfigSnapshot, FirmwareDownloader, ResolvedFirmwareArtifactSource,
     resolve_files_firmware_artifact,
@@ -115,6 +118,8 @@ pub struct PreingestionManager {
 struct PreingestionManagerStatic {
     config: PreingestionManagerConfig,
     redfish_client_pool: Arc<dyn RedfishClientPool>,
+    /// Connects moved BMC operations through the site's `bmc_backend`.
+    bmc_connector: BmcConnector,
     downloader: FirmwareDownloader,
     upload_limiter: Arc<Semaphore>,
     upgrade_script_state: Arc<UpdateScriptManager>,
@@ -166,6 +171,7 @@ impl PreingestionManager {
 
         PreingestionManager {
             static_info: Arc::new(PreingestionManagerStatic {
+                bmc_connector: BmcConnector::Libredfish(redfish_client_pool.clone()),
                 redfish_client_pool,
                 downloader: downloader.unwrap_or_default(),
                 upload_limiter: upload_limiter.unwrap_or(Arc::new(Semaphore::new(5))),
@@ -184,6 +190,15 @@ impl PreingestionManager {
             metric_holder,
             database_connection,
         }
+    }
+
+    /// Runs moved BMC operations through `driver_connector`; `None` keeps them on
+    /// libredfish.
+    pub fn with_driver_connector(mut self, driver_connector: Option<Arc<DriverConnector>>) -> Self {
+        let static_info = Arc::make_mut(&mut self.static_info);
+        static_info.bmc_connector =
+            BmcConnector::new(static_info.redfish_client_pool.clone(), driver_connector);
+        self
     }
 
     /// Enable rack-profile firmware-object handling with an RMS compute-tray backend.
@@ -571,6 +586,37 @@ async fn one_endpoint(
 }
 
 impl PreingestionManagerStatic {
+    /// Connects to `endpoint`'s BMC through the configured `bmc_backend`.
+    #[expect(
+        dead_code,
+        reason = "callers arrive as operations move to the driver system"
+    )]
+    async fn connect_bmc(
+        &self,
+        endpoint: &ExploredEndpoint,
+        db_pool: &PgPool,
+    ) -> PreingestionManagerResult<BackendBmc> {
+        let bmc_access_info =
+            db::machine_interface::lookup_bmc_access_info(db_pool, endpoint.address, None).await?;
+        self.bmc_connector
+            .connect(&bmc_access_info, || async {
+                Ok::<_, Infallible>(endpoint.report.clone())
+            })
+            .await
+            .map_err(|error| match error {
+                BmcConnectError::Report(never) => match never {},
+                BmcConnectError::Libredfish(RedfishClientCreationError::RedfishError(error)) => {
+                    PreingestionManagerError::RedfishError(error)
+                }
+                BmcConnectError::Libredfish(error) => {
+                    PreingestionManagerError::internal(format!("{error}"))
+                }
+                BmcConnectError::Drivers(error) => {
+                    PreingestionManagerError::internal(error.to_string())
+                }
+            })
+    }
+
     async fn firmware_config_snapshot(
         &self,
         db: &PgPool,

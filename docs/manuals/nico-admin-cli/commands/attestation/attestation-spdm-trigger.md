@@ -11,8 +11,8 @@ given machine with id
 
 ```text
 nico-admin-cli attestation spdm trigger
-<--redfish-timeout-secs> [--extended] [--sort-by]
-[-h|--help] <MACHINE_ID>
+<--redfish-timeout-secs> [--sort-by] [-h|--help]
+<MACHINE_ID>
 ```
 
 ## DESCRIPTION
@@ -26,14 +26,6 @@ Trigger attestation for a given machine with id
 Timeout in seconds for Redfish operations while triggering attestation
 (passed to carbide-api)
 
-`--extended`
-
-Extended result output.
-
-This is used by measured boot, where basic output contains just what you
-probably care about, and "extended" output also dumps out all the
-internal UUIDs that are used to associate instances.
-
 `--sort-by <SORT_BY> [default: primary-id]`
 
 Sort output by specified field
@@ -46,7 +38,7 @@ Sort output by specified field
 
 `-h, --help`
 
-Print help (see a summary with -h)
+Print help (see a summary with '-h')
 
 `<MACHINE_ID>`
 

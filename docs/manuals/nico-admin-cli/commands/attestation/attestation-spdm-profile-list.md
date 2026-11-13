@@ -10,8 +10,8 @@ attestation profile
 ## SYNOPSIS
 
 ```text
-nico-admin-cli attestation spdm profile list [--extended]
-[--sort-by] [-h|--help]
+nico-admin-cli attestation spdm profile list [--sort-by]
+[-h|--help]
 ```
 
 ## DESCRIPTION
@@ -19,14 +19,6 @@ nico-admin-cli attestation spdm profile list [--extended]
 List every stored attestation profile
 
 ## OPTIONS
-
-`--extended`
-
-Extended result output.
-
-This is used by measured boot, where basic output contains just what you
-probably care about, and "extended" output also dumps out all the
-internal UUIDs that are used to associate instances.
 
 `--sort-by <SORT_BY> [default: primary-id]`
 
@@ -40,7 +32,7 @@ Sort output by specified field
 
 `-h, --help`
 
-Print help (see a summary with -h)
+Print help (see a summary with '-h')
 
 ## Examples
 

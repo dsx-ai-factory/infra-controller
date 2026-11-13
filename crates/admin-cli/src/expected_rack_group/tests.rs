@@ -31,9 +31,9 @@ use hyper::{Request, Response, header};
 use hyper_util::rt::{TokioExecutor, TokioIo};
 use prost::Message;
 use rpc::admin_cli::OutputFormat;
+use rpc::carbide_api_client::CarbideApiClient;
+use rpc::carbide_tls_client::{ApiConfig, CarbideClientConfig};
 use rpc::forge;
-use rpc::forge_api_client::ForgeApiClient;
-use rpc::forge_tls_client::{ApiConfig, ForgeClientConfig};
 use tokio::net::TcpListener;
 
 use super::Cmd;
@@ -59,6 +59,17 @@ fn parse(args: &[&str]) -> Result<Cmd, clap::Error> {
 #[test]
 fn required_arguments_are_validated_before_dispatch() {
     for (args, expected) in [
+        (
+            vec![
+                "add",
+                "group-01",
+                "NVLINK_V6",
+                "topology",
+                "--rack",
+                r#"{"rack_id":"rack-01","members":[{"type":"Switch","manufacturer":"NVIDIA","id":"switch-01"}]}"#,
+            ],
+            clap::error::ErrorKind::ValueValidation,
+        ),
         (
             vec!["update", "group-01"],
             clap::error::ErrorKind::MissingRequiredArgument,
@@ -107,6 +118,7 @@ fn populated_group() -> forge::ExpectedRackGroup {
             forge::ExpectedRackGroupRack {
                 rack_id: Some("rack-01".parse().unwrap()),
                 members: vec![forge::ExpectedRackGroupMember {
+                    cartridge_index: Some(0),
                     r#type: "Switch".into(),
                     manufacturer: "NVIDIA".into(),
                     id: "switch-01".into(),
@@ -132,7 +144,7 @@ fn populated_group() -> forge::ExpectedRackGroup {
 async fn writes_dispatch_expected_rpc_payloads() {
     let attributes = [
         "--rack",
-        r#"{"rack_id":"rack-01","members":[{"type":"Switch","manufacturer":"NVIDIA","id":"switch-01"}]}"#,
+        r#"{"rack_id":"rack-01","members":[{"type":"Switch","manufacturer":"NVIDIA","id":"switch-01","cartridge_index":0}]}"#,
         "--rack",
         r#"{"rack_id":"rack-02","members":[]}"#,
         "--meta-name",
@@ -517,13 +529,13 @@ async fn dispatch(
             .await
             .unwrap();
     });
-    let client_config = ForgeClientConfig {
+    let client_config = CarbideClientConfig {
         request_timeout: Some(Duration::from_secs(5)),
         ..Default::default()
     };
     let mut captured = CapturedOutput::new();
     let ctx = RuntimeContext {
-        api_client: ApiClient(ForgeApiClient::new(&ApiConfig::new(
+        api_client: ApiClient(CarbideApiClient::new(&ApiConfig::new(
             &format!("http://{address}"),
             &client_config,
         ))),

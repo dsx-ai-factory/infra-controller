@@ -19,10 +19,11 @@ use std::collections::HashMap;
 use std::net::IpAddr;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
-use std::time::Duration;
 
 use ::rpc::forge as rpc;
-use carbide_site_explorer::dpu_loopback::PreparedDpuLoopback;
+use carbide_resource_pool::ResourcePoolBackendError;
+use carbide_site_explorer::dpu_asn::PreparedDpuAsn;
+use carbide_site_explorer::dpu_loopback::{PreparedDpuLoopback, acquire_admin_admission};
 use carbide_utils::none_if_empty::NoneIfEmpty;
 use carbide_uuid::machine::{
     HostMachineId, MachineId, MachineIdSource, MachineIdSubtype, MachineInterfaceId,
@@ -46,10 +47,6 @@ use crate::handlers::utils::{convert_and_log_machine_id, enqueue_boot_interface_
 use crate::{CarbideError, attestation as attest};
 
 pub(super) mod scout_pci;
-
-// Bound admission while a provider reservation waits for attachment. Integrated
-// allocation and reused ownership retain their existing admission wait.
-const DPU_ADMISSION_TIMEOUT: Duration = Duration::from_secs(5);
 
 pub(crate) async fn discover_machine(
     api: &Api,
@@ -199,7 +196,7 @@ pub(crate) async fn discover_machine(
         caller_machine_id.and_then(|id| PredictedHostMachineId::try_from(id).ok())
     };
 
-    let (dpu_loopback, admin_admission) = if hardware_info.is_dpu() {
+    let (dpu_loopback, dpu_asn, admin_admission, loopback_intent) = if hardware_info.is_dpu() {
         let mut preflight = api.txn_begin().await?;
         let interface = discovery_interface(
             &mut preflight,
@@ -238,41 +235,72 @@ pub(crate) async fn discover_machine(
             };
             return Err(CarbideError::InvalidArgument(reason).into());
         }
+        // Read without a reservation lock while the caller interface is locked.
+        // Creation rechecks intent in reservation-before-interface lock order.
+        let reservation = if machine_discovery_info.create_machine {
+            db::expected_dpu_loopback_reservation::find_by_dpu_oob_net0_mac(
+                &mut preflight,
+                interface.mac_address,
+            )
+            .await?
+        } else {
+            None
+        };
         preflight.commit().await?;
         drop(admin_admission);
-        (
-            Some(
-                PreparedDpuLoopback::prepare(
-                    api.pg_pool(),
-                    &api.resource_pool_registry,
-                    &api.common_pools,
-                    stable_machine_id,
-                    &api.cancel_token,
-                )
-                .await
-                .map_err(CarbideError::from)?,
+        let (loopback, asn) = tokio::join!(
+            PreparedDpuLoopback::prepare(
+                api.pg_pool(),
+                &api.resource_pool_registry,
+                &api.common_pools,
+                stable_machine_id,
+                reservation.as_ref().and_then(|r| r.loopback_ipv4),
+                &api.cancel_token,
             ),
+            PreparedDpuAsn::prepare(
+                api.pg_pool(),
+                &api.resource_pool_registry,
+                &api.common_pools,
+                stable_machine_id,
+                &api.cancel_token,
+            ),
+        );
+        // Both preparations have finished. Clean the successful one before an
+        // error returns here, ahead of the later entity-transaction cleanup.
+        if loopback.is_err()
+            && let Ok(prepared) = &asn
+            && let Err(error) = prepared.cancel(api.pg_pool()).await
+        {
+            tracing::error!(machine_id = %stable_machine_id, error = %error, "Could not save DPU ASN cancellation");
+        }
+        if asn.is_err()
+            && let Ok(prepared) = &loopback
+            && let Err(error) = prepared.cancel(api.pg_pool()).await
+        {
+            tracing::error!(machine_id = %stable_machine_id, error = %error, "Could not save DPU loopback cancellation");
+        }
+        (
+            Some(loopback.map_err(CarbideError::from)?),
+            Some(asn.map_err(CarbideError::from)?),
             None,
+            machine_discovery_info
+                .create_machine
+                .then_some((interface.mac_address, reservation)),
         )
     } else {
-        (None, Some(admin_admission))
+        (None, None, Some(admin_admission), None)
     };
 
     let result = async {
+        let needs_bounded_admission = dpu_loopback
+            .as_ref()
+            .is_some_and(PreparedDpuLoopback::has_provider_reservation)
+            || dpu_asn.as_ref().is_some_and(PreparedDpuAsn::has_provider_reservation);
         let admin_admission = match admin_admission {
             Some(permit) => permit,
-            None if !dpu_loopback.as_ref().is_some_and(PreparedDpuLoopback::has_provider_reservation) => {
-                db::machine_interface::admin_lock_admission().await
-            }
-            None => api.cancel_token.run_until_cancelled(tokio::time::timeout(
-                DPU_ADMISSION_TIMEOUT, db::machine_interface::admin_lock_admission(),
-            )).await
-                .ok_or(CarbideError::ResourcePoolCancelled {
-                    operation: "DPU admin lock admission",
-                })?
-                .map_err(|_| CarbideError::ResourcePoolDeadlineExceeded {
-                    operation: "DPU admin lock admission",
-                })?,
+            None => acquire_admin_admission(needs_bounded_admission, &api.cancel_token)
+                .await
+                .map_err(CarbideError::from)?,
         };
         // Provider preparation releases admission. Read current host-link
         // ownership now because another writer may have detached it meanwhile.
@@ -284,6 +312,22 @@ pub(crate) async fn discover_machine(
         )
         .await?;
         let mut txn = api.txn_begin().await?;
+
+        // Preparation can call a provider outside this transaction. Reject
+        // changed intent before taking admin/interface locks or attaching it.
+        let loopback_reservation = if let Some((mac, expected)) = &loopback_intent {
+            let current = db::expected_dpu_loopback_reservation::find_by_dpu_oob_net0_mac_for_update(
+                &mut txn, *mac,
+            ).await?;
+            if &current != expected {
+                return Err(CarbideError::FailedPrecondition(
+                    "DPU loopback reservation changed during preparation; retry".to_owned(),
+                ).into());
+            }
+            current
+        } else {
+            None
+        };
 
         // Segment advisory locks come before any interface row lock, so the ones
         // this transaction needs are taken before the caller interface is locked.
@@ -313,6 +357,14 @@ pub(crate) async fn discover_machine(
             &mut txn, secure_remote_ip, direct_interface_id,
             machine_discovery_info.machine_interface_id,
         ).await?;
+
+        if let Some((mac, _)) = &loopback_intent
+            && caller_interface.mac_address != *mac
+        {
+            return Err(CarbideError::FailedPrecondition(
+                "DPU discovery interface MAC changed during preparation; retry".to_owned(),
+            ).into());
+        }
 
         // The rows locked above belong to the predicted id read before the
         // transaction opened. A caller interface that carries another predicted
@@ -344,6 +396,9 @@ pub(crate) async fn discover_machine(
         }
 
         if let Some(prepared) = &dpu_loopback {
+            prepared.check_identity(&mut txn).await?;
+        }
+        if let Some(prepared) = &dpu_asn {
             prepared.check_identity(&mut txn).await?;
         }
 
@@ -412,9 +467,10 @@ pub(crate) async fn discover_machine(
             let db_machine = if machine_discovery_info.create_machine {
                 let machine = db::machine::get_or_create(
                     &mut txn,
-                    Some(&api.common_pools),
+                    Some(db::machine::MachineCreationPools::Ipv6Only(&api.common_pools)),
                     &stable_machine_id,
                     &caller_interface,
+                    loopback_reservation.as_ref().and_then(|r| r.loopback_ipv6),
                 )
                 .await?;
 
@@ -494,7 +550,35 @@ pub(crate) async fn discover_machine(
 
             // Interface rows precede the conditional machine/configuration write.
             if let Some(prepared) = &dpu_loopback {
-                prepared.attach(&mut txn, true).await.map_err(CarbideError::from)?;
+                match prepared.attach(&mut txn, true).await {
+                    Ok(()) => {}
+                    Err(ResourcePoolBackendError::Database(error))
+                        if error.is_lock_not_available() =>
+                    {
+                        tracing::warn!(
+                            %dpu_machine_id,
+                            error = %error,
+                            "discovery network group write is busy"
+                        );
+                        // NOWAIT aborts the transaction. Release all writes
+                        // made so far before cancelling preparation.
+                        txn.rollback_or_log("discovery network group contention").await;
+                        return Err(CarbideError::DiscoveryContended(format!(
+                            "machine network group for {dpu_machine_id} is busy; retry discovery"
+                        ))
+                        .into());
+                    }
+                    Err(error) => {
+                        txn.rollback_or_log("discovery loopback attachment failure").await;
+                        return Err(CarbideError::from(error).into());
+                    }
+                }
+            }
+            if let Some(prepared) = &dpu_asn
+                && let Err(error) = prepared.attach(&mut txn).await
+            {
+                txn.rollback_or_log("DPU resource attachment failed").await;
+                return Err(CarbideError::from(error).into());
             }
 
             let host_machine_id = if let Some(host_machine_id) = machine_interface.machine_id {
@@ -529,9 +613,10 @@ pub(crate) async fn discover_machine(
                 let mi_id = machine_interface.id;
                 let proactive_machine = db::machine::get_or_create(
                     &mut txn,
-                    Some(&api.common_pools),
+                    Some(db::machine::MachineCreationPools::All(&api.common_pools)),
                     &predicted_machine_id,
                     &machine_interface,
+                    None,
                 )
                 .await?;
 
@@ -539,6 +624,29 @@ pub(crate) async fn discover_machine(
                 let host_machine_id =
                     carbide_uuid::machine::HostMachineId::try_from(proactive_machine.id)
                         .map_err(|error| CarbideError::internal(error.to_string()))?;
+                // Reusing a predicted host takes only a foreign-key KEY SHARE
+                // lock. `update_reboot_requested_time` can still hold a
+                // non-key update lock, and state writers take history before
+                // the Machine row. Try both dependencies rather than wait
+                // while retaining discovery writes.
+                if !db::machine::try_lock_by_id_for_no_key_update(&mut txn, &host_machine_id.into())
+                    .await?
+                {
+                    txn.rollback_or_log("discovery host row contention").await;
+                    return Err(CarbideError::DiscoveryContended(format!(
+                        "discovery state for host {host_machine_id} is busy or missing; retry discovery"
+                    ))
+                    .into());
+                }
+                if !db::machine::try_lock_machine_state_history(&mut txn, &host_machine_id.into())
+                    .await?
+                {
+                    txn.rollback_or_log("discovery host history contention").await;
+                    return Err(CarbideError::DiscoveryContended(format!(
+                        "discovery state history for host {host_machine_id} is busy; retry discovery"
+                    ))
+                    .into());
+                }
                 db::machine::update_state(
                     &mut txn,
                     &host_machine_id,
@@ -623,6 +731,10 @@ pub(crate) async fn discover_machine(
             && let Err(error) = prepared.cancel(api.pg_pool()).await
         {
             tracing::error!(machine_id = %stable_machine_id, %error, "Could not save unused DPU loopback cancellation");
+        }
+        if let Some(prepared) = &dpu_asn
+            && let Err(error) = prepared.cancel(api.pg_pool()).await {
+            tracing::error!(machine_id = %stable_machine_id, error = %error, "Could not save unused DPU ASN cancellation");
         }
 
         // The reconcile runs in a transaction of its own after this one has
@@ -739,6 +851,12 @@ pub(crate) async fn discover_machine(
         && let Err(error) = prepared.cancel(api.pg_pool()).await
     {
         tracing::error!(machine_id = %stable_machine_id, %error, "Could not save DPU loopback cancellation");
+    }
+    if result.is_err()
+        && let Some(prepared) = &dpu_asn
+        && let Err(error) = prepared.cancel(api.pg_pool()).await
+    {
+        tracing::error!(machine_id = %stable_machine_id, error = %error, "Could not save DPU ASN cancellation");
     }
     result
 }

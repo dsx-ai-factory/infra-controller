@@ -1,0 +1,726 @@
+suite: scale-test production runner
+templates:
+  - runner-job.yaml
+  - runner-rbac.yaml
+  - runner-config.yaml
+  - run-data-pvc.yaml
+  - control-plane-rbac.yaml
+release:
+  name: run
+  namespace: mat-ns
+set:
+  image:
+    repository: registry.example/scale-test
+    digest: sha256:0000000000000000000000000000000000000000000000000000000000000000
+  probeUrl: http://probe.mat-ns.svc:9010
+  store.url: http://prometheus.monitoring.svc:9090
+  store.tokenSecret: store-bearer
+  persistence.storageClass: fast
+  runner.controlPlane:
+    - namespace: nico
+      labelSelector: app=nico-api
+  inventory:
+    clientSecret: nico-cert
+    spiffe:
+      trustDomain: example.org
+      serviceBasePaths: /a/,/b/
+    expected:
+      release: v2026.1
+      racks: 2
+      hosts: 1000000
+      switches: 0
+      powerShelves: 0
+      dpus: 4
+tests:
+  - it: renders nothing when the runner is disabled
+    asserts:
+      - hasDocuments:
+          count: 0
+
+  - it: runs fleet-up once as a plain Job under its own account, nonroot, on the shared run-data claim
+    set:
+      runner.enabled: true
+      runner.runId: fu-1
+    template: runner-job.yaml
+    asserts:
+      - isKind:
+          of: Job
+      - equal:
+          path: metadata.name
+          value: run-scale-test-runner-fu-1
+      - notExists:
+          path: metadata.annotations
+      - equal:
+          path: spec.backoffLimit
+          value: 0
+      - equal:
+          path: spec.activeDeadlineSeconds
+          value: 6720
+      - equal:
+          path: spec.template.spec.restartPolicy
+          value: Never
+      - equal:
+          path: spec.template.spec.enableServiceLinks
+          value: false
+      - equal:
+          path: spec.template.spec.serviceAccountName
+          value: run-scale-test-runner
+      - equal:
+          path: spec.template.spec.containers[0].command
+          value: ["/scale-test", "fleet-up", "--config", "/etc/scale-test/config.yaml"]
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: SCALE_TEST_EXECUTION_ID
+            valueFrom:
+              fieldRef:
+                fieldPath: metadata.name
+      - equal:
+          path: spec.template.spec.securityContext.runAsNonRoot
+          value: true
+      - equal:
+          path: spec.template.spec.securityContext.seccompProfile.type
+          value: RuntimeDefault
+      - equal:
+          path: spec.template.spec.containers[0].securityContext.readOnlyRootFilesystem
+          value: true
+      - contains:
+          path: spec.template.spec.containers[0].securityContext.capabilities.drop
+          content: ALL
+      - contains:
+          path: spec.template.spec.volumes
+          content:
+            name: run-data
+            persistentVolumeClaim:
+              claimName: run-scale-test-run-data
+      - contains:
+          path: spec.template.spec.volumes
+          content:
+            name: nico-client-cert
+            secret:
+              secretName: nico-cert
+      - contains:
+          path: spec.template.spec.volumes
+          content:
+            name: store-token
+            secret:
+              secretName: store-bearer
+
+  - it: grants the runner Lease and result ConfigMap access by name, without delete, and MAT reads, in its namespace only
+    set:
+      runner.enabled: true
+      runner.runId: fu-1
+      runner.lockName: site-lock
+    template: runner-rbac.yaml
+    asserts:
+      - hasDocuments:
+          count: 3
+      - isKind:
+          of: Role
+        documentIndex: 1
+      - equal:
+          path: rules
+          value:
+            - apiGroups: ["coordination.k8s.io"]
+              resources: ["leases"]
+              verbs: ["create"]
+            - apiGroups: ["coordination.k8s.io"]
+              resources: ["leases"]
+              resourceNames: ["site-lock"]
+              verbs: ["get", "update"]
+            - apiGroups: [""]
+              resources: ["configmaps"]
+              verbs: ["create"]
+            - apiGroups: [""]
+              resources: ["configmaps"]
+              resourceNames: ["fu-1-result"]
+              verbs: ["get", "update"]
+            - apiGroups: [""]
+              resources: ["pods", "services"]
+              verbs: ["get", "list"]
+        documentIndex: 1
+      - equal:
+          path: metadata.namespace
+          value: mat-ns
+        documentIndex: 1
+      - equal:
+          path: subjects[0].name
+          value: run-scale-test-runner
+        documentIndex: 2
+
+  - it: renders the run config from the shared site values
+    set:
+      runner.enabled: true
+      runner.runId: fu-1
+      store.ingestionDelaySeconds: 30
+    template: runner-config.yaml
+    asserts:
+      - matchRegex:
+          path: data["config.yaml"]
+          pattern: 'runId: "fu-1"\ncommand: fleet-up\nnamespace: "mat-ns"\n'
+      - matchRegex:
+          path: data["config.yaml"]
+          pattern: 'url: "http://probe.mat-ns.svc:9010"'
+      - matchRegex:
+          path: data["config.yaml"]
+          pattern: 'resultMaxBytes: 8388608\n'
+      - matchRegex:
+          path: data["config.yaml"]
+          pattern: 'requestTimeoutSeconds: 5\n'
+      - matchRegex:
+          path: data["config.yaml"]
+          pattern: 'journal:\n *dir: "/run-data"\n *claim: "run-scale-test-run-data"\n'
+      - matchRegex:
+          path: data["config.yaml"]
+          pattern: 'controlPlane:\n *- namespace: "nico"\n *labelSelector: "app=nico-api"\n'
+      # A large count renders as an integer, never 1e+06, and an explicit 0 stays.
+      - matchRegex:
+          path: data["config.yaml"]
+          pattern: 'expectedRelease: "v2026.1"\n(.|\n)*racks: 2\n *hosts: 1000000\n *switches: 0\n *powerShelves: 0\n *dpus: 4\n'
+      - matchRegex:
+          path: data["config.yaml"]
+          pattern: 'ingestionDelaySeconds: 30\n *bearerTokenFile: /var/run/secrets/store-token/token'
+
+  - it: renders configurable result and BMC budgets
+    set:
+      runner.enabled: true
+      runner.runId: fu-1
+      runner.resultMaxBytes: 12582912
+      runner.probeRequestTimeoutSeconds: 15
+      runner.bmc: {port: 8443, concurrency: 128, timeoutSeconds: 10, tries: 3}
+    template: runner-config.yaml
+    asserts:
+      - matchRegex:
+          path: data["config.yaml"]
+          pattern: 'resultMaxBytes: 12582912\n'
+      - matchRegex:
+          path: data["config.yaml"]
+          pattern: 'requestTimeoutSeconds: 15\n'
+      - matchRegex:
+          path: data["config.yaml"]
+          pattern: 'bmc:\n *concurrency: 128\n *port: 8443\n *timeoutSeconds: 10\n *tries: 3\n'
+
+  - it: rejects a result budget below the minimum
+    set: {runner.enabled: true, runner.runId: fu-1, runner.resultMaxBytes: 262143}
+    template: runner-config.yaml
+    asserts:
+      - failedTemplate: {errorMessage: "runner.resultMaxBytes must be 262144 to 16777216"}
+
+  - it: rejects a result budget above the maximum
+    set: {runner.enabled: true, runner.runId: fu-1, runner.resultMaxBytes: 16777217}
+    template: runner-config.yaml
+    asserts:
+      - failedTemplate: {errorMessage: "runner.resultMaxBytes must be 262144 to 16777216"}
+
+  - it: rejects a BMC concurrency wider than its configuration type
+    set: {runner.enabled: true, runner.runId: fu-1, runner.bmc.concurrency: 65536}
+    template: runner-config.yaml
+    asserts:
+      - failedTemplate: {errorMessage: "runner.bmc.concurrency must be 1 to 65535"}
+
+  - it: rejects a BMC retry count wider than its configuration type
+    set: {runner.enabled: true, runner.runId: fu-1, runner.bmc.tries: 256}
+    template: runner-config.yaml
+    asserts:
+      - failedTemplate: {errorMessage: "runner.bmc.tries must be 1 to 255"}
+
+  - it: rejects a BMC concurrency that overflows an int64
+    set: {runner.enabled: true, runner.runId: fu-1, runner.bmc.concurrency: "9223372036854775808"}
+    template: runner-config.yaml
+    asserts:
+      - failedTemplate: {errorMessage: "runner.bmc.concurrency must be 1 to 65535"}
+
+  - it: rejects a probe timeout above the runner limit
+    set: {runner.enabled: true, runner.runId: fu-1, runner.probeRequestTimeoutSeconds: 601}
+    template: runner-config.yaml
+    asserts:
+      - failedTemplate: {errorMessage: "runner.probeRequestTimeoutSeconds must be at most 600"}
+
+  - it: names the Job runner-<runId>, apart from the cluster hook a runId of cluster would otherwise replace
+    set:
+      runner.enabled: true
+      runner.runId: cluster
+    template: runner-job.yaml
+    asserts:
+      - equal:
+          path: metadata.name
+          value: run-scale-test-runner-cluster
+
+  - it: keeps the shared run-data claim on uninstall for the runner's journal and result
+    set:
+      runner.enabled: true
+      runner.runId: fu-1
+    template: run-data-pvc.yaml
+    asserts:
+      - equal:
+          path: metadata.name
+          value: run-scale-test-run-data
+      - equal:
+          path: metadata.annotations["helm.sh/resource-policy"]
+          value: keep
+
+  - it: names two releases that differ after a long shared prefix apart, keeping the run ID
+    set:
+      runner.enabled: true
+      runner.runId: fu-1
+    release:
+      name: long-release-name-shared-by-two-installs-of-the-one
+    template: runner-job.yaml
+    asserts:
+      - equal:
+          path: metadata.name
+          value: long-release-name-shared-by-two-installs-o-048ad9ed-runner-fu-1
+
+  - it: names the second release apart from the first
+    set:
+      runner.enabled: true
+      runner.runId: fu-1
+    release:
+      name: long-release-name-shared-by-two-installs-of-the-two
+    template: runner-job.yaml
+    asserts:
+      - equal:
+          path: metadata.name
+          value: long-release-name-shared-by-two-installs-o-2ce6d32f-runner-fu-1
+
+  - it: grants Pod reads in each control-plane namespace to the runner account
+    set:
+      runner.enabled: true
+      runner.runId: fu-1
+    template: control-plane-rbac.yaml
+    asserts:
+      - hasDocuments:
+          count: 2
+      - equal:
+          path: metadata.namespace
+          value: nico
+      - equal:
+          path: rules
+          value:
+            - apiGroups: [""]
+              resources: ["pods"]
+              verbs: ["get", "list"]
+        documentIndex: 0
+      - equal:
+          path: subjects
+          value:
+            - kind: ServiceAccount
+              name: run-scale-test-runner
+              namespace: mat-ns
+        documentIndex: 1
+
+  - it: fails without a control-plane selector
+    set:
+      runner.enabled: true
+      runner.runId: fu-1
+      runner.controlPlane: []
+    template: runner-config.yaml
+    asserts:
+      - failedTemplate:
+          errorMessage: runner.controlPlane needs at least one namespace and labelSelector when the runner is enabled
+
+  - it: fails without the expected release
+    set:
+      runner.enabled: true
+      runner.runId: fu-1
+      inventory.expected.release: ""
+    template: runner-config.yaml
+    asserts:
+      - failedTemplate:
+          errorMessage: inventory.expected.release is required when the runner is enabled
+
+  - it: fails on a fractional count, not truncating it
+    set:
+      runner.enabled: true
+      runner.runId: fu-1
+      inventory.expected.hosts: 1.5
+    template: runner-config.yaml
+    asserts:
+      - failedTemplate:
+          errorMessage: inventory.expected.hosts must be a whole count of 0 or more
+
+  - it: fails on a negative count
+    set:
+      runner.enabled: true
+      runner.runId: fu-1
+      inventory.expected.racks: -1
+    template: runner-config.yaml
+    asserts:
+      - failedTemplate:
+          errorMessage: inventory.expected.racks must be a whole count of 0 or more
+
+  - it: fails on a count that is not a number
+    set:
+      runner.enabled: true
+      runner.runId: fu-1
+      inventory.expected.switches: two
+    template: runner-config.yaml
+    asserts:
+      - failedTemplate:
+          errorMessage: inventory.expected.switches must be a whole count of 0 or more
+
+  - it: fails on a fractional store delay, not truncating it
+    set:
+      runner.enabled: true
+      runner.runId: fu-1
+      store.ingestionDelaySeconds: 30.5
+    template: runner-config.yaml
+    asserts:
+      - failedTemplate:
+          errorMessage: store.ingestionDelaySeconds must be a whole number of seconds from 0 to 44, got "30.5"
+
+  - it: fails on a run ID that cannot name a Job
+    set:
+      runner.enabled: true
+      runner.runId: Fu_1
+    template: runner-job.yaml
+    asserts:
+      - failedTemplate:
+          errorMessage: runner.runId must be 1 to 40 of a-z, 0-9 and '-', starting and ending with a letter or digit
+
+  - it: fails without a run ID
+    set:
+      runner.enabled: true
+    template: runner-job.yaml
+    asserts:
+      - failedTemplate:
+          errorMessage: runner.runId is required when the runner is enabled
+
+  - it: fails without the probe URL
+    set:
+      runner.enabled: true
+      runner.runId: fu-1
+      probeUrl: ""
+    template: runner-config.yaml
+    asserts:
+      - failedTemplate:
+          errorMessage: probeUrl is required when the runner is enabled
+
+  - it: fails without a lock name
+    set:
+      runner.enabled: true
+      runner.runId: fu-1
+      runner.lockName: ""
+    template: runner-config.yaml
+    asserts:
+      - failedTemplate:
+          errorMessage: runner.lockName is required when the runner is enabled
+
+  - it: fails without an expected count
+    set:
+      runner.enabled: true
+      runner.runId: fu-1
+      inventory.expected.dpus: ""
+    template: runner-config.yaml
+    asserts:
+      - failedTemplate:
+          errorMessage: inventory.expected.dpus must be a whole count of 0 or more
+
+  - it: fails without the store URL while the store is checked
+    set:
+      runner.enabled: true
+      runner.runId: fu-1
+      store.url: ""
+    template: runner-config.yaml
+    asserts:
+      - failedTemplate:
+          errorMessage: store.url is required when the runner checks the store
+
+  - it: fails without the SPIFFE trust domain
+    set:
+      runner.enabled: true
+      runner.runId: fu-1
+      inventory.spiffe.trustDomain: ""
+    template: runner-config.yaml
+    asserts:
+      - failedTemplate:
+          errorMessage: inventory.spiffe.trustDomain is required when the runner is enabled
+
+  - it: fails without the SPIFFE service base paths
+    set:
+      runner.enabled: true
+      runner.runId: fu-1
+      inventory.spiffe.serviceBasePaths: ""
+    template: runner-config.yaml
+    asserts:
+      - failedTemplate:
+          errorMessage: inventory.spiffe.serviceBasePaths is required when the runner is enabled
+
+  - it: fails without the nico-api client Secret
+    set:
+      runner.enabled: true
+      runner.runId: fu-1
+      inventory.clientSecret: ""
+    template: runner-job.yaml
+    asserts:
+      - failedTemplate:
+          errorMessage: inventory.clientSecret is required when the runner is enabled
+
+  - it: fails without the image
+    set:
+      runner.enabled: true
+      runner.runId: fu-1
+      image.repository: ""
+    template: runner-job.yaml
+    asserts:
+      - failedTemplate:
+          errorMessage: image.repository is required
+
+  - it: fails when the Job deadline could cut the run short of publishing
+    set:
+      runner.enabled: true
+      runner.runId: fu-1
+      runner.activeDeadlineSeconds: 6690
+    template: runner-job.yaml
+    asserts:
+      - failedTemplate:
+          errorMessage: runner.activeDeadlineSeconds must exceed runner.wholeRunSeconds by more than the 90 s shutdown budget
+
+  - it: runs ingestion with dryRun, the write concurrency and the longer timeouts, on the runner's account and claim
+    set:
+      runner: &ingestion
+        enabled: true
+        runId: in-1
+        command: ingestion
+        dryRun: false
+        writes: {concurrency: {host: 16}}
+        wholeRunSeconds: 7200
+        finalizeSeconds: 1800
+        activeDeadlineSeconds: 7300
+        controlPlane: [{namespace: nico, labelSelector: app=nico-api}]
+    template: runner-config.yaml
+    asserts:
+      - matchRegex:
+          path: data["config.yaml"]
+          pattern: 'runId: "in-1"\ncommand: ingestion\ndryRun: false\nnamespace: "mat-ns"\n'
+      - matchRegex:
+          path: data["config.yaml"]
+          pattern: 'finalizeSeconds: 1800\n *wholeRunSeconds: 7200\n'
+      - matchRegex:
+          path: data["config.yaml"]
+          pattern: 'writes:\n *concurrency:\n *rack: 8\n *host: 16\n *switch: 8\n *powerShelf: 8\n'
+
+  - it: runs the ingestion command in the runner Job on the shared claim
+    set:
+      runner: *ingestion
+    template: runner-job.yaml
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].command
+          value: ["/scale-test", "ingestion", "--config", "/etc/scale-test/config.yaml"]
+      - equal:
+          path: spec.template.spec.serviceAccountName
+          value: run-scale-test-runner
+      - contains:
+          path: spec.template.spec.volumes
+          content:
+            name: run-data
+            persistentVolumeClaim:
+              claimName: run-scale-test-run-data
+
+  - it: fails ingestion without dryRun
+    set:
+      runner: {<<: *ingestion, dryRun: null}
+    template: runner-config.yaml
+    asserts:
+      - failedTemplate:
+          errorMessage: runner.dryRun must be true or false for ingestion, which writes
+
+  - it: renders a default ingestion install, its timeouts giving a 4800 s stage window
+    set:
+      runner: {enabled: true, runId: in-1, command: ingestion, dryRun: true}
+    template: runner-config.yaml
+    asserts:
+      - matchRegex:
+          path: data["config.yaml"]
+          pattern: 'readinessSeconds: 300\n *finalizeSeconds: 1800\n *wholeRunSeconds: 6600\n'
+
+  - it: fails ingestion with explicit timeouts under its minimum
+    set:
+      runner: {<<: *ingestion, finalizeSeconds: 600}
+    template: runner-config.yaml
+    asserts:
+      - failedTemplate:
+          errorMessage: ingestion needs runner.wholeRunSeconds over 1800 and runner.finalizeSeconds of at least 1800
+
+  - it: fails ingestion with no write in flight
+    set:
+      runner: {<<: *ingestion, writes: {concurrency: {switch: 0}}}
+    template: runner-config.yaml
+    asserts:
+      - failedTemplate:
+          errorMessage: runner.writes.concurrency.switch must be at least 1
+
+  - it: fails fleet-up with dryRun
+    set:
+      runner.enabled: true
+      runner.runId: fu-1
+      runner.dryRun: true
+    template: runner-config.yaml
+    asserts:
+      - failedTemplate:
+          errorMessage: runner.dryRun must be unset for fleet-up, which writes nothing
+
+  - it: fails an unknown command
+    set:
+      runner.enabled: true
+      runner.runId: fu-1
+      runner.command: burst
+    template: runner-config.yaml
+    asserts:
+      - failedTemplate:
+          errorMessage: runner.command must be fleet-up, ingestion, instance-create or instance-delete
+
+  - it: renders a five-host instance create with one runner Job and referenced credentials
+    template: runner-config.yaml
+    set: &instanceValues
+      runner.enabled: true
+      runner.command: instance-create
+      runner.dryRun: false
+      runner.runId: create-five
+      runner.rest.url: https://rest.example
+      runner.rest.org: tenant-org
+      runner.rest.providerOrg: provider-org
+      runner.rest.tokenSecret: rest-write-token
+      runner.instance.tenantId: 00000000-0000-4000-8000-000000000001
+      runner.instance.instanceTypeId: 00000000-0000-4000-8000-000000000002
+      runner.instance.vpcId: 00000000-0000-4000-8000-000000000003
+      runner.instance.subnetId: 00000000-0000-4000-8000-000000000004
+      runner.instance.ipxeSecret: fixture-ipxe
+      runner.instance.apiPoolReplicas: 1
+      runner.instance.apiPoolSelector: {job: api, namespace: core}
+    asserts:
+      - matchRegex:
+          path: data["config.yaml"]
+          pattern: 'command: instance-create'
+      - matchRegex: {path: 'data["config.yaml"]', pattern: 'topologyOptimized: false'}
+      - matchRegex:
+          path: data["config.yaml"]
+          pattern: 'tokenFile: /var/run/secrets/rest-token/token'
+      - matchRegex:
+          path: data["config.yaml"]
+          pattern: 'n: 5'
+      - matchRegex:
+          path: data["config.yaml"]
+          pattern: 'ipxeFile: /var/run/secrets/instance-ipxe/script.ipxe'
+      - notMatchRegex:
+          path: data["config.yaml"]
+          pattern: 'caFile: /var/run/secrets/rest-ca/ca.crt'
+
+  - it: renders instance delete from the owned manifest on the same PVC
+    template: runner-config.yaml
+    set:
+      <<: *instanceValues
+      runner.command: instance-delete
+      runner.runId: delete-five
+      runner.instance.ownedManifest: create-five.owned.json
+    asserts:
+      - matchRegex:
+          path: data["config.yaml"]
+          pattern: 'command: instance-delete'
+      - matchRegex:
+          path: data["config.yaml"]
+          pattern: 'ownedManifest: "create-five.owned.json"'
+      - notMatchRegex:
+          path: data["config.yaml"]
+          pattern: 'ipxeFile:'
+
+  - it: mounts the instance write token and iPXE fixture without another Job
+    template: runner-job.yaml
+    set:
+      <<: *instanceValues
+      inventory.clientSecret: ""
+    asserts:
+      - notContains:
+          path: spec.template.spec.volumes
+          content: {name: nico-client-cert}
+          any: true
+      - notContains:
+          path: spec.template.spec.containers[0].volumeMounts
+          content: {name: nico-client-cert}
+          any: true
+      - hasDocuments: {count: 1}
+      - equal:
+          path: spec.template.spec.containers[0].command
+          value: [/scale-test, instance-create, --config, /etc/scale-test/config.yaml]
+      - notContains:
+          path: spec.template.spec.volumes
+          content: {name: rest-ca}
+          any: true
+      - contains:
+          path: spec.template.spec.volumes
+          content: {name: rest-token, secret: {secretName: rest-write-token}}
+      - contains:
+          path: spec.template.spec.volumes
+          content: {name: instance-ipxe, secret: {secretName: fixture-ipxe}}
+
+  - it: renders instance delete without a NICo client certificate
+    template: runner-job.yaml
+    set:
+      <<: *instanceValues
+      runner.command: instance-delete
+      runner.instance.ownedManifest: create-five.owned.json
+      inventory.clientSecret: ""
+    asserts:
+      - notContains:
+          path: spec.template.spec.volumes
+          content: {name: nico-client-cert}
+          any: true
+      - notContains:
+          path: spec.template.spec.containers[0].volumeMounts
+          content: {name: nico-client-cert}
+          any: true
+
+  - it: mounts a private REST CA key read-only
+    template: runner-job.yaml
+    set:
+      <<: *instanceValues
+      runner.rest.caSecret: {name: private-rest-ca, key: root.pem}
+    asserts:
+      - contains:
+          path: spec.template.spec.volumes
+          content:
+            name: rest-ca
+            secret:
+              secretName: private-rest-ca
+              items: [{key: root.pem, path: ca.crt}]
+      - contains:
+          path: spec.template.spec.containers[0].volumeMounts
+          content: {name: rest-ca, mountPath: /var/run/secrets/rest-ca, readOnly: true}
+
+  - it: configures the mounted REST CA file
+    template: runner-config.yaml
+    set:
+      <<: *instanceValues
+      runner.rest.caSecret: {name: private-rest-ca, key: root.pem}
+      runner.instance.topologyOptimized: true
+    asserts:
+      - matchRegex: {path: 'data["config.yaml"]', pattern: 'topologyOptimized: true'}
+      - matchRegex:
+          path: data["config.yaml"]
+          pattern: 'caFile: /var/run/secrets/rest-ca/ca.crt'
+
+  - it: rejects a REST CA Secret without a key
+    template: runner-job.yaml
+    set:
+      <<: *instanceValues
+      runner.rest.caSecret: {name: private-rest-ca, key: ""}
+    asserts:
+      - failedTemplate:
+          errorMessage: runner.rest.caSecret.key is required with a CA Secret
+
+  - it: configures a bounded label read-back window
+    template: runner-config.yaml
+    set:
+      <<: *instanceValues
+      runner.observation.labelReadbackSeconds: 1200
+    asserts:
+      - matchRegex:
+          path: data["config.yaml"]
+          pattern: 'labelReadbackSeconds: 1200'
+
+  - it: rejects a non-boolean instance topology option
+    template: runner-config.yaml
+    set: {<<: *instanceValues, runner.instance.topologyOptimized: invalid}
+    asserts:
+      - failedTemplate: {errorMessage: runner.instance.topologyOptimized must be a boolean}

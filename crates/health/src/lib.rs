@@ -54,10 +54,10 @@ use crate::endpoint::{
     ClusterEndpointSource, CompositeEndpointSource, EndpointSource, StaticEndpointSource,
 };
 use crate::limiter::{BucketLimiter, NoopLimiter, RateLimiter};
-use crate::metrics::{BmcLatencyMetrics, MetricsManager, run_metrics_server};
+use crate::metrics::{BmcLatencyMetrics, MetricsManager, run_metrics_server_with_config};
 use crate::processor::{
     BmcIntrusionEventProcessor, EventProcessingPipeline, EventProcessor, HealthReportProcessor,
-    LeakEventProcessor, NmxcDomainStateProcessor, RackLeakProcessor,
+    LeakEventProcessor, NmxcDomainStateProcessor, RackLeakProcessor, ResourceStatusProcessor,
 };
 use crate::sharding::ShardManager;
 use crate::sink::event_mapper::{OpenBmcEventMapper, RedfishEventMapper};
@@ -305,6 +305,10 @@ fn build_data_sink(
         )));
     }
 
+    if config.processors.resource_status.is_enabled() {
+        processors.push(Arc::new(ResourceStatusProcessor::new()));
+    }
+
     if let Configurable::Enabled(ref sink_cfg) = config.sinks.log_file {
         sinks.push(Arc::new(
             LogFileSink::new(sink_cfg).map_err(HealthError::GenericError)?,
@@ -464,9 +468,18 @@ pub async fn run_service(
     carbide_instrument::log_events::register(&framework_metrics.meter);
     metrics_manager.expose_framework_registry(framework_metrics.registry.clone());
 
-    let join_listener = tokio::spawn(run_metrics_server(
+    let prometheus_config = config
+        .sinks
+        .prometheus
+        .as_option()
+        .cloned()
+        .unwrap_or_default();
+
+    let join_listener = tokio::spawn(run_metrics_server_with_config(
         metrics_endpoint,
         metrics_manager.clone(),
+        prometheus_config,
+        cancel_token.clone(),
     ));
 
     let registry = metrics_manager.global_registry();

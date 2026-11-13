@@ -175,6 +175,8 @@ pub struct RackGroupIntent {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MemberIntent {
+    /// Cartridge index assigned to this simulated member.
+    pub cartridge_index: u32,
     pub r#type: String,
     pub manufacturer: String,
     pub id: String,
@@ -267,12 +269,17 @@ impl RackIntent {
             .racks
             .into_iter()
             .flat_map(|rack| rack.members)
-            .map(|member| MemberIntent {
-                r#type: member.r#type,
-                manufacturer: member.manufacturer,
-                id: member.id,
+            .map(|member| {
+                Ok(MemberIntent {
+                    cartridge_index: member.cartridge_index.ok_or_else(|| {
+                        eyre::eyre!("simulated member is missing cartridge_index")
+                    })?,
+                    r#type: member.r#type,
+                    manufacturer: member.manufacturer,
+                    id: member.id,
+                })
             })
-            .collect();
+            .collect::<eyre::Result<Vec<_>>>()?;
         Ok(Self {
             rack_id: rack.rack_id.to_string(),
             rack_profile_id: rack.rack_profile_id.to_string(),
@@ -301,6 +308,7 @@ impl RackIntent {
             .members
             .iter()
             .map(|member| ExpectedRackGroupMember {
+                cartridge_index: Some(member.cartridge_index),
                 r#type: member.r#type.clone(),
                 manufacturer: member.manufacturer.clone(),
                 id: member.id.clone(),

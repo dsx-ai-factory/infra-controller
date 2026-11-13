@@ -21,6 +21,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use bmc_explorer::Product;
+use bmc_runtime::DriverConnector;
 use carbide_ipmi::IPMITool;
 use carbide_redfish::boot_interface::BootInterfaceTarget;
 use carbide_redfish::libredfish::BmcCredentialOps;
@@ -110,6 +111,13 @@ impl AuthenticatedBmcClient {
             ipmi_tool,
             credential_client: CredentialClient::new(credential_manager),
         }
+    }
+
+    /// Runs moved BMC operations through `driver_connector`; `None` keeps them on
+    /// libredfish.
+    pub fn with_driver_connector(mut self, driver_connector: Option<Arc<DriverConnector>>) -> Self {
+        self.redfish_client.driver_connector = driver_connector;
+        self
     }
 }
 
@@ -1720,6 +1728,22 @@ mod tests {
     async fn explorer_chooses_correct_manager() {
         let report = explore_router_in_default_mode(nvidia_gh200_swapped_managers_router()).await;
         assert_eq!(report.managers[0].id, "BMC_0");
+    }
+
+    #[tokio::test]
+    async fn exploration_records_the_identity_drivers_select_from() {
+        let report = explore_router_in_default_mode(
+            bmc_mock::test_support::lenovo_xcc_router_with_partial_system_network_inventory(),
+        )
+        .await;
+
+        assert_eq!(
+            bmc_runtime::platform_identity(&report)
+                .service_root
+                .vendor
+                .as_deref(),
+            Some("Lenovo")
+        );
     }
 
     #[tokio::test]

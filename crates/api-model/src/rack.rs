@@ -90,6 +90,10 @@ pub struct FirmwareUpgradeJob {
     pub status: Option<FirmwareProgressState>,
     pub started_at: Option<DateTime<Utc>>,
     pub completed_at: Option<DateTime<Utc>>,
+    /// Supplemental ingestion firmware started after all rack maintenance finished.
+    /// Resume Completed instead of repeating NVOS, rack reboots, and NMX setup.
+    #[serde(default)]
+    pub return_to_completed: bool,
     #[serde(default)]
     pub batch_job_ids: Vec<String>,
     #[serde(default)]
@@ -98,6 +102,11 @@ pub struct FirmwareUpgradeJob {
     pub switches: Vec<FirmwareUpgradeDeviceStatus>,
     #[serde(default)]
     pub power_shelves: Vec<FirmwareUpgradeDeviceStatus>,
+    /// Shelves admitted to this automatic ingestion cycle's controller requests.
+    /// Separate from RMS handles because the backend may not return shelf jobs.
+    /// Missing on predecessor jobs; polling recovers membership from rack-owned requests.
+    #[serde(default)]
+    pub ingestion_power_shelf_ids: Option<Vec<PowerShelfId>>,
 }
 
 impl FirmwareUpgradeJob {
@@ -345,10 +354,59 @@ pub fn derive_rack_aggregate_health(sources: &HealthReportSources) -> health_rep
     }
     let mut output = health_report::HealthReport::empty("rack-aggregate-health".to_string());
     for report in sources.merges.values() {
-        output.merge(report);
+        if report.source == health_report::HealthReport::RACK_FIRMWARE_SOURCE {
+            output.merge(&summarize_firmware_mismatches(report));
+        } else {
+            output.merge(report);
+        }
     }
     output.observed_at = Some(chrono::Utc::now());
     output
+}
+
+/// Summarizes component evidence without changing its persisted recovery state.
+/// The timestamp is the earliest outstanding mismatch; the target is the rack.
+fn summarize_firmware_mismatches(
+    report: &health_report::HealthReport,
+) -> health_report::HealthReport {
+    let probe_id = health_report::HealthProbeId::rack_firmware_mismatch();
+    let mut mismatches = report
+        .alerts
+        .iter()
+        .filter(|alert| alert.id == probe_id)
+        .collect::<Vec<_>>();
+    if mismatches.is_empty() {
+        return report.clone();
+    }
+    mismatches.sort_by(|first, second| first.target.cmp(&second.target));
+    let summary = health_report::HealthProbeAlert {
+        id: probe_id.clone(),
+        target: None,
+        in_alert_since: mismatches
+            .iter()
+            .filter_map(|alert| alert.in_alert_since)
+            .min(),
+        message: format!(
+            "Firmware version mismatch in {} rack component(s):\n{}",
+            mismatches.len(),
+            mismatches
+                .iter()
+                .map(|alert| alert.message.as_str())
+                .collect::<Vec<_>>()
+                .join("\n"),
+        ),
+        tenant_message: None,
+        classifications: mismatches
+            .iter()
+            .flat_map(|alert| alert.classifications.iter().cloned())
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
+            .collect(),
+    };
+    let mut report = report.clone();
+    report.alerts.retain(|alert| alert.id != probe_id);
+    report.alerts.push(summary);
+    report
 }
 
 /// SQL `NULL` maps to `None` for `controller_state_outcome`,
@@ -455,7 +513,13 @@ pub enum RackErrorRecoveryPolicy {
 /// ```text
 /// FirmwareUpgrade -> NVOSUpdate -> [PowerSequence(PowerReset)]
 ///   -> ConfigureNmxCluster -> Completed -> Validating(Pending)
+///
+/// Completed -> FirmwareUpgrade(WaitForComplete) -> Completed
+///   (supplemental compute firmware during automatic ingestion)
 /// ```
+///
+/// During automatic ingestion, Completed may re-enter FirmwareUpgrade for
+/// late compute hosts; supplemental completion returns directly to Completed.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "state", rename_all = "snake_case")]
 pub enum RackState {
@@ -465,8 +529,8 @@ pub enum RackState {
     #[serde(alias = "expected", alias = "unknown")]
     Created,
 
-    /// Discovery in progress - waiting for all expected devices to appear
-    /// and reach ManagedHostState::Ready.
+    /// Discovery waits for the rack profile's minimum number of ready switches.
+    /// Compute tray and power shelf counts and readiness do not gate this state.
     Discovering,
 
     /// Rack is in the validation phase. The sub-state tracks progress from
@@ -1042,6 +1106,70 @@ mod tests {
     use super::*;
 
     #[test]
+    fn rack_firmware_summary_preserves_evidence_and_override_semantics() {
+        use health_report::{
+            HealthAlertClassification, HealthProbeAlert, HealthProbeId, HealthReport,
+        };
+
+        let started = Utc::now();
+        let mut report = HealthReport::empty(HealthReport::RACK_FIRMWARE_SOURCE.to_string());
+        report.alerts = [
+            ("switch/BMC", "switch BMC: 1 versus 2", started),
+            (
+                "compute/BIOS",
+                "compute BIOS: 3 versus 4",
+                started - chrono::Duration::seconds(1),
+            ),
+        ]
+        .into_iter()
+        .map(|(target, message, in_alert_since)| HealthProbeAlert {
+            id: HealthProbeId::rack_firmware_mismatch(),
+            target: Some(target.to_string()),
+            message: message.to_string(),
+            in_alert_since: Some(in_alert_since),
+            tenant_message: None,
+            classifications: vec![HealthAlertClassification::hardware()],
+        })
+        .collect();
+        let mut sources = HealthReportSources::default();
+        sources.merges.insert(report.source.clone(), report.clone());
+        let aggregate = derive_rack_aggregate_health(&sources);
+        let [alert] = aggregate.alerts.as_slice() else {
+            panic!("expected one rack firmware summary");
+        };
+        assert_eq!(alert.id, HealthProbeId::rack_firmware_mismatch());
+        assert_eq!(alert.target, None);
+        assert_eq!(
+            alert.in_alert_since,
+            Some(started - chrono::Duration::seconds(1))
+        );
+        assert_eq!(
+            alert.classifications,
+            vec![HealthAlertClassification::hardware()]
+        );
+        assert_eq!(
+            alert.message,
+            "Firmware version mismatch in 2 rack component(s):\ncompute BIOS: 3 versus 4\nswitch BMC: 1 versus 2"
+        );
+        assert_eq!(sources.merges[HealthReport::RACK_FIRMWARE_SOURCE], report);
+
+        let mut external_report = report;
+        external_report.source = "operator".to_string();
+        let mut external_sources = HealthReportSources::default();
+        external_sources
+            .merges
+            .insert(external_report.source.clone(), external_report.clone());
+        let mut expected_alerts = external_report.alerts.clone();
+        expected_alerts.sort_by(|first, second| first.target.cmp(&second.target));
+        assert_eq!(
+            derive_rack_aggregate_health(&external_sources).alerts,
+            expected_alerts
+        );
+        sources.replace = Some(external_report.clone());
+        assert_eq!(derive_rack_aggregate_health(&sources), external_report);
+    }
+
+    #[test]
     fn power_sequence_preserves_legacy_states_and_submitted_targets() {
         let host_id: HostMachineId = "fm100htes3rn1npvbtm5qd57dkilaag7ljugl1llmm7rfuq1ov50i0rpl30"
             .parse()
@@ -1487,6 +1615,52 @@ mod tests {
                 state
             );
         }
+    }
+
+    #[test]
+    fn firmware_upgrade_job_preserves_shelf_membership() {
+        for ids in [
+            None,
+            Some(Vec::new()),
+            Some(vec![PowerShelfId::from(uuid::Uuid::from_bytes([1; 16]))]),
+        ] {
+            let mut wire = serde_json::json!({ "job_id": null, "status": null, "started_at": null, "completed_at": null });
+            if let Some(ids) = &ids {
+                wire["ingestion_power_shelf_ids"] = serde_json::to_value(ids).unwrap();
+            }
+            let job: FirmwareUpgradeJob = serde_json::from_value(wire).unwrap();
+            let reloaded: FirmwareUpgradeJob =
+                serde_json::from_str(&serde_json::to_string(&job).unwrap()).unwrap();
+            assert_eq!(reloaded.ingestion_power_shelf_ids, ids);
+        }
+    }
+
+    #[test]
+    fn firmware_upgrade_job_preserves_completed_return_marker() {
+        scenarios!(
+            run = |marker: Option<bool>| -> Result<bool, String> {
+                // Predecessor job JSON has no return marker or device lists.
+                let mut wire = serde_json::json!({
+                    "job_id": "parent-job", "status": "in_progress",
+                    "started_at": null, "completed_at": null
+                });
+                if let Some(marker) = marker {
+                    wire["return_to_completed"] = serde_json::json!(marker);
+                }
+                let job: FirmwareUpgradeJob = serde_json::from_value(wire).map_err(|error| error.to_string())?;
+                let persisted = serde_json::to_string(&job).map_err(|error| error.to_string())?;
+                let resumed: FirmwareUpgradeJob =
+                    serde_json::from_str(&persisted).map_err(|error| error.to_string())?;
+                Ok(resumed.return_to_completed)
+            };
+            "legacy and normal jobs retain the normal maintenance continuation" {
+                None => Yields(false),
+                Some(false) => Yields(false),
+            }
+            "supplemental jobs retain their continuation after reload" {
+                Some(true) => Yields(true),
+            }
+        );
     }
 
     #[test]

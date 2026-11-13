@@ -36,6 +36,308 @@ use crate::tests::common::api_fixtures::site_explorer::create_expected_switch;
 use crate::tests::common::api_fixtures::{TestEnv, create_test_env};
 
 #[crate::sqlx_test]
+async fn compute_restart_and_ac_cycle_preserve_intent_and_routing(pool: sqlx::PgPool) {
+    use carbide_uuid::machine::{HostMachineId, MachineId, MachineIdSource, MachineType};
+    use component_manager::component_manager::ComponentManager;
+    use component_manager::mock::{MockComputeTrayManager, MockPowerShelfManager};
+    use model::expected_machine::ExpectedMachineData;
+    use model::machine::{
+        CURRENT_STATE_MODEL_VERSION, MachineMaintenanceOperation, ManagedHostState,
+    };
+
+    use crate::tests::common::api_fixtures::site_explorer::TestRackDbBuilder;
+
+    let env = create_test_env(pool.clone()).await;
+    let rack_id = RackId::new("queued-compute-restart");
+    let machine_id = MachineId::new(
+        MachineIdSource::ProductBoardChassisSerial,
+        [91; 32],
+        MachineType::Host,
+    );
+    let host_id = HostMachineId::try_from(machine_id).unwrap();
+    let mut txn = pool.begin().await.unwrap();
+    TestRackDbBuilder::new()
+        .with_rack_id(rack_id.clone())
+        .persist(&mut txn)
+        .await
+        .unwrap();
+    db::machine::create(
+        &mut txn,
+        None,
+        &machine_id,
+        ManagedHostState::Ready,
+        Some(&ExpectedMachineData {
+            rack_id: Some(rack_id),
+            ..Default::default()
+        }),
+        CURRENT_STATE_MODEL_VERSION,
+    )
+    .await
+    .unwrap();
+    let underlay = db::network_segment::find_by_name(&mut txn, "UNDERLAY")
+        .await
+        .unwrap();
+    let interface = db::machine_interface::create(
+        &mut txn,
+        std::slice::from_ref(&underlay),
+        &"02:00:00:00:00:91".parse().unwrap(),
+        false,
+        model::address_selection_strategy::AddressSelectionStrategy::NextAvailableIp,
+        None,
+    )
+    .await
+    .unwrap();
+    db::machine_interface::associate_bmc_interface(
+        &interface.id,
+        model::machine_interface_address::MachineInterfaceAssociation::Machine(machine_id),
+        &mut txn,
+    )
+    .await
+    .unwrap();
+    txn.commit().await.unwrap();
+
+    let manager = ComponentManager::new(
+        Arc::new(MockNvSwitchManager::default()),
+        Arc::new(MockPowerShelfManager),
+        Arc::new(MockComputeTrayManager),
+        false,
+        false,
+        true,
+    );
+    let api = TestApiBuilder::new(
+        pool.clone(),
+        env.common_pools.clone(),
+        env.api.work_lock_manager_handle.clone(),
+    )
+    .with_component_manager(Arc::new(manager))
+    .build();
+    let response = crate::handlers::component_manager::component_power_control(
+        &api,
+        Request::new(rpc::ComponentPowerControlRequest {
+            target: Some(rpc::component_power_control_request::Target::MachineIds(
+                ::rpc::common::HostMachineIdList {
+                    machine_ids: vec![host_id],
+                },
+            )),
+            action: ::rpc::common::SystemPowerControl::GracefulRestart as i32,
+            bypass_state_controller: false,
+            ..Default::default()
+        }),
+    )
+    .await
+    .unwrap()
+    .into_inner();
+    assert_eq!(response.results.len(), 1);
+    assert_eq!(
+        response.results[0].status,
+        rpc::ComponentManagerStatusCode::Success as i32
+    );
+
+    let mut txn = pool.begin().await.unwrap();
+    let machine = db::machine::find_one(txn.as_mut(), &host_id, Default::default())
+        .await
+        .unwrap()
+        .unwrap();
+    let request = machine.machine_maintenance_requested.unwrap();
+    assert_eq!(
+        request.operation,
+        MachineMaintenanceOperation::Reset { graceful: true }
+    );
+    assert_eq!(request.initiator, "component-manager");
+    assert_eq!(machine.state.value, ManagedHostState::Ready);
+
+    let power = db::power_options::get_by_ids(&[host_id], &mut txn)
+        .await
+        .unwrap()
+        .remove(0);
+    db::power_options::update_desired_state(
+        &host_id,
+        model::power_manager::PowerState::Off,
+        &power.desired_power_state_version,
+        &mut txn,
+    )
+    .await
+    .unwrap();
+    txn.commit().await.unwrap();
+
+    let mock = Arc::new(api_test_helper::mock_rms::MockRmsApi::new());
+    let backend = component_manager::component_manager::build_component_manager(
+        &component_manager::config::ComponentManagerConfig {
+            compute_tray_backend: component_manager::compute_tray_manager::Backend::Rms,
+            nv_switch_backend: component_manager::nv_switch_manager::Backend::Mock,
+            power_shelf_backend: component_manager::power_shelf_manager::Backend::Mock,
+            ..Default::default()
+        },
+        crate::tests::common::api_fixtures::get_config_with_rack_profiles().rack_profiles,
+        Some(mock.clone()),
+        None,
+        Some(pool.clone()),
+        Some(env.redfish_sim.clone()),
+        None,
+    )
+    .await
+    .unwrap()
+    .compute_tray;
+    let manager = ComponentManager::new(
+        Arc::new(MockNvSwitchManager::default()),
+        Arc::new(MockPowerShelfManager),
+        backend.clone(),
+        false,
+        false,
+        true,
+    );
+    let api = TestApiBuilder::new(
+        pool.clone(),
+        env.common_pools.clone(),
+        env.api.work_lock_manager_handle.clone(),
+    )
+    .with_component_manager(Arc::new(manager))
+    .build();
+    // Complete the previous request before queuing a different operation.
+    let mut txn = pool.begin().await.unwrap();
+    assert_eq!(
+        db::machine::clear_machine_maintenance_requested(&mut txn, host_id, &request)
+            .await
+            .unwrap(),
+        db::ConditionalWrite::Applied(())
+    );
+    txn.commit().await.unwrap();
+    let before = env.redfish_sim.timepoint();
+    let response = crate::handlers::component_manager::component_power_control(
+        &api,
+        Request::new(rpc::ComponentPowerControlRequest {
+            target: Some(rpc::component_power_control_request::Target::MachineIds(
+                ::rpc::common::HostMachineIdList {
+                    machine_ids: vec![host_id],
+                },
+            )),
+            action: ::rpc::common::SystemPowerControl::AcPowercycle as i32,
+            ..Default::default()
+        }),
+    )
+    .await
+    .unwrap()
+    .into_inner();
+    assert_eq!(response.results.len(), 1);
+    assert_eq!(
+        response.results[0].status,
+        rpc::ComponentManagerStatusCode::Success as i32
+    );
+    let mut txn = pool.begin().await.unwrap();
+    let machine = db::machine::find_one(txn.as_mut(), &host_id, Default::default())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        machine
+            .machine_maintenance_requested
+            .as_ref()
+            .unwrap()
+            .operation,
+        MachineMaintenanceOperation::AcPowercycle {
+            state: Default::default()
+        }
+    );
+    assert_eq!(machine.state.value, ManagedHostState::Ready);
+    let power = db::power_options::get_by_ids(&[host_id], &mut txn)
+        .await
+        .unwrap()
+        .remove(0);
+    assert_eq!(
+        power.desired_power_state,
+        model::power_manager::PowerState::On
+    );
+    assert!(mock.batch_set_power_state_calls().await.is_empty());
+    assert!(
+        env.redfish_sim
+            .actions_since(&before)
+            .all_hosts()
+            .is_empty()
+    );
+    txn.rollback().await.unwrap();
+
+    // Explicit direct routing retains its semantics even for Vera Rubin: no
+    // queued work is replaced and no post-cycle NIC sequence runs in the API.
+    env.redfish_sim
+        .set_service_root_vendor(Some("NVIDIA".into()));
+    env.redfish_sim
+        .set_service_root_product(Some("VR NVL72".into()));
+    for (scenario, use_controller, bypass) in [("direct", false, false), ("bypass", true, true)] {
+        let manager = ComponentManager::new(
+            Arc::new(MockNvSwitchManager::default()),
+            Arc::new(MockPowerShelfManager),
+            backend.clone(),
+            false,
+            false,
+            use_controller,
+        );
+        let api = TestApiBuilder::new(
+            pool.clone(),
+            env.common_pools.clone(),
+            env.api.work_lock_manager_handle.clone(),
+        )
+        .with_component_manager(Arc::new(manager))
+        .with_credential_manager(Arc::new(
+            carbide_secrets::test_support::credentials::TestCredentialManager::new(
+                carbide_secrets::credentials::Credentials::UsernamePassword {
+                    username: "root".into(),
+                    password: "password".into(),
+                },
+            ),
+        ))
+        .build();
+        let before = env.redfish_sim.timepoint();
+        let response = crate::handlers::component_manager::component_power_control(
+            &api,
+            Request::new(rpc::ComponentPowerControlRequest {
+                target: Some(rpc::component_power_control_request::Target::MachineIds(
+                    ::rpc::common::HostMachineIdList {
+                        machine_ids: vec![host_id],
+                    },
+                )),
+                action: ::rpc::common::SystemPowerControl::AcPowercycle as i32,
+                bypass_state_controller: bypass,
+                ..Default::default()
+            }),
+        )
+        .await
+        .unwrap()
+        .into_inner();
+        assert_eq!(response.results.len(), 1, "{scenario}");
+        assert_eq!(
+            response.results[0].status,
+            rpc::ComponentManagerStatusCode::Success as i32,
+            "{scenario}: {:?}",
+            response.results
+        );
+        assert_eq!(
+            env.redfish_sim
+                .actions_since(&before)
+                .for_host(&machine.status.bmc_info.ip.unwrap().to_string()),
+            vec![
+                carbide_redfish::libredfish::test_support::RedfishSimAction::Power(
+                    libredfish::SystemPowerControl::ACPowercycle
+                )
+            ],
+            "{scenario}"
+        );
+        let after = db::machine::find_one(&pool, &host_id, Default::default())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            after.machine_maintenance_requested, machine.machine_maintenance_requested,
+            "{scenario}"
+        );
+        assert_eq!(after.state.value, ManagedHostState::Ready, "{scenario}");
+        assert!(
+            mock.batch_set_power_state_calls().await.is_empty(),
+            "{scenario}"
+        );
+    }
+}
+
+#[crate::sqlx_test]
 async fn switch_firmware_status_uses_only_current_cycle_persistence(
     pool: sqlx::PgPool,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -640,11 +942,31 @@ async fn component_reset_dispatches_valid_targets_and_polls_by_identity(pool: sq
             tonic::Code::InvalidArgument,
         ),
         (
+            "domain on NVOS reset",
+            rpc::ComponentResetRequest {
+                action: rpc::ComponentResetAction::NvosFactoryReset as i32,
+                domain_name: Some("domain".into()),
+                ..valid_structure.clone()
+            },
+            tonic::Code::InvalidArgument,
+        ),
+        (
             "SDN reset on compute",
             rpc::ComponentResetRequest {
                 target: Some(Target::ComputeBmcMacs(rpc::MacAddressList {
                     mac_addresses: vec!["aa:bb:cc:00:00:01".into()],
                 })),
+                ..valid_structure.clone()
+            },
+            tonic::Code::InvalidArgument,
+        ),
+        (
+            "NVOS reset on power shelf",
+            rpc::ComponentResetRequest {
+                target: Some(Target::PowerShelfPmcMacs(rpc::MacAddressList {
+                    mac_addresses: vec!["aa:bb:cc:00:00:01".into()],
+                })),
+                action: rpc::ComponentResetAction::NvosFactoryReset as i32,
                 ..valid_structure.clone()
             },
             tonic::Code::InvalidArgument,
@@ -662,6 +984,11 @@ async fn component_reset_dispatches_valid_targets_and_polls_by_identity(pool: sq
     }
     assert!(
         mock.batch_reset_switch_sdn_factory_default_calls()
+            .await
+            .is_empty()
+    );
+    assert!(
+        mock.batch_reset_switch_factory_default_calls()
             .await
             .is_empty()
     );
@@ -790,7 +1117,7 @@ async fn component_reset_dispatches_valid_targets_and_polls_by_identity(pool: sq
     assert_eq!(
         submitted.results[3].error,
         format!(
-            "RMS rejected SDN reset for node {}: certificate domain missing",
+            "RMS rejected switch SDN factory-reset for node {}: certificate domain missing",
             rejected_switch.id
         ),
     );
@@ -1199,53 +1526,93 @@ async fn component_reset_tracks_pre_ingestion_mac_after_ingestion(pool: sqlx::Pg
         )
         .await
         .unwrap();
-    mock.enqueue_batch_reset_switch_sdn_factory_default(Ok(
-        rms::BatchResetSwitchSdnFactoryDefaultResponse {
-            response: Some(rms::NodeBatchResponse {
-                job_id: "pre-ingestion-job".into(),
-                status: rms::ReturnCode::Success as i32,
-                stats: Some(rms::NodeOperationStats {
-                    total_nodes: 1,
-                    successful_nodes: 1,
-                    failed_nodes: 0,
-                }),
-                ..Default::default()
+    let reset_jobs = [
+        (
+            rpc::ComponentResetAction::SdnFactoryReset,
+            "pre-ingestion-sdn-job",
+        ),
+        (
+            rpc::ComponentResetAction::NvosFactoryReset,
+            "pre-ingestion-nvos-job",
+        ),
+    ];
+    for (action, job_id) in reset_jobs {
+        let response = Some(rms::NodeBatchResponse {
+            job_id: job_id.into(),
+            status: rms::ReturnCode::Success as i32,
+            node_results: if action == rpc::ComponentResetAction::NvosFactoryReset {
+                vec![rms::NodeOperationResult {
+                    node_id: bmc_mac.to_string(),
+                    status: rms::ReturnCode::Success as i32,
+                    ..Default::default()
+                }]
+            } else {
+                vec![]
+            },
+            stats: Some(rms::NodeOperationStats {
+                total_nodes: 1,
+                successful_nodes: 1,
+                failed_nodes: 0,
             }),
-        },
-    ))
-    .await;
-    let results = api
-        .component_reset(Request::new(rpc::ComponentResetRequest {
-            target: Some(rpc::component_reset_request::Target::SwitchBmcMacs(
-                rpc::MacAddressList {
-                    mac_addresses: vec!["invalid".into(), bmc_mac.to_string()],
-                },
-            )),
-            action: rpc::ComponentResetAction::SdnFactoryReset as i32,
-            domain_name: None,
-        }))
-        .await
-        .unwrap()
-        .into_inner()
-        .results;
-    assert_eq!(results.len(), 2);
-    assert_eq!(
-        results[0].status,
-        rpc::ComponentManagerStatusCode::InvalidArgument as i32
-    );
-    assert_eq!(
-        results[1].status,
-        rpc::ComponentManagerStatusCode::Success as i32
-    );
-    assert_eq!(results[1].component_id, None);
-    assert_eq!(results[1].mac_address, Some(bmc_mac.to_string()));
-    let calls = mock.batch_reset_switch_sdn_factory_default_calls().await;
-    assert_eq!(calls.len(), 1);
-    assert_eq!(
-        calls[0].nodes.as_ref().unwrap().nodes[0].node_id,
-        bmc_mac.to_string()
-    );
-    assert_eq!(calls[0].domain, None);
+            ..Default::default()
+        });
+        match action {
+            rpc::ComponentResetAction::SdnFactoryReset => {
+                mock.enqueue_batch_reset_switch_sdn_factory_default(Ok(
+                    rms::BatchResetSwitchSdnFactoryDefaultResponse { response },
+                ))
+                .await;
+            }
+            rpc::ComponentResetAction::NvosFactoryReset => {
+                mock.enqueue_batch_reset_switch_factory_default(Ok(
+                    rms::BatchResetSwitchFactoryDefaultResponse { response },
+                ))
+                .await;
+            }
+            _ => unreachable!("test only submits SDN and NVOS resets"),
+        }
+        let results = api
+            .component_reset(Request::new(rpc::ComponentResetRequest {
+                target: Some(rpc::component_reset_request::Target::SwitchBmcMacs(
+                    rpc::MacAddressList {
+                        mac_addresses: vec!["invalid".into(), bmc_mac.to_string()],
+                    },
+                )),
+                action: action as i32,
+                domain_name: None,
+            }))
+            .await
+            .unwrap()
+            .into_inner()
+            .results;
+        assert_eq!(results.len(), 2);
+        assert_eq!(
+            results[0].status,
+            rpc::ComponentManagerStatusCode::InvalidArgument as i32,
+            "{action:?}",
+        );
+        assert_eq!(
+            results[1].status,
+            rpc::ComponentManagerStatusCode::Success as i32,
+            "{action:?}: {:?}",
+            results[1],
+        );
+        assert_eq!(results[1].component_id, None);
+        assert_eq!(results[1].mac_address, Some(bmc_mac.to_string()));
+    }
+    let sdn_calls = mock.batch_reset_switch_sdn_factory_default_calls().await;
+    let nvos_calls = mock.batch_reset_switch_factory_default_calls().await;
+    assert_eq!(sdn_calls.len(), 1);
+    assert_eq!(nvos_calls.len(), 1);
+    for (nodes, domain) in [
+        (&sdn_calls[0].nodes, &sdn_calls[0].domain),
+        (&nvos_calls[0].nodes, &nvos_calls[0].domain),
+    ] {
+        let nodes = &nodes.as_ref().unwrap().nodes;
+        assert_eq!(nodes.len(), 1);
+        assert_eq!(nodes[0].node_id, bmc_mac.to_string());
+        assert_eq!(*domain, None);
+    }
 
     let mut txn = pool.begin().await.unwrap();
     db::switch::create(
@@ -1270,52 +1637,62 @@ async fn component_reset_tracks_pre_ingestion_mac_after_ingestion(pool: sqlx::Pg
         })
         .await
         .unwrap();
-    mock.enqueue_get_job_status(Ok(rms::GetJobStatusResponse {
-        job_states: vec![
-            rms::JobStatus {
-                job_id: "pre-ingestion-job".into(),
-                child_job_ids: vec!["child".into()],
-                execution_state: rms::JobExecutionState::Completed as i32,
-                ..Default::default()
-            },
-            rms::JobStatus {
-                job_id: "child".into(),
-                parent_job_id: Some("pre-ingestion-job".into()),
-                node_id: Some(bmc_mac.to_string()),
-                execution_state: rms::JobExecutionState::Completed as i32,
-                ..Default::default()
-            },
-        ],
-    }))
-    .await;
-    let statuses = api
-        .get_component_reset_status(Request::new(rpc::GetComponentResetStatusRequest {
-            target: Some(rpc::get_component_reset_status_request::Target::SwitchIds(
-                rpc::SwitchIdList {
-                    ids: vec![switch.id],
+    // Each action retains its own reference across ingestion, and neither lookup
+    // needs the credentials that the NVOS reset may have invalidated.
+    for (action, job_id) in reset_jobs {
+        mock.enqueue_get_job_status(Ok(rms::GetJobStatusResponse {
+            job_states: vec![
+                rms::JobStatus {
+                    job_id: job_id.into(),
+                    child_job_ids: vec!["child".into()],
+                    execution_state: rms::JobExecutionState::Completed as i32,
+                    ..Default::default()
                 },
-            )),
-            action: rpc::ComponentResetAction::SdnFactoryReset as i32,
+                rms::JobStatus {
+                    job_id: "child".into(),
+                    parent_job_id: Some(job_id.into()),
+                    node_id: Some(bmc_mac.to_string()),
+                    execution_state: rms::JobExecutionState::Completed as i32,
+                    ..Default::default()
+                },
+            ],
         }))
-        .await
-        .unwrap()
-        .into_inner()
-        .statuses;
-    assert_eq!(statuses.len(), 1);
+        .await;
+        let statuses = api
+            .get_component_reset_status(Request::new(rpc::GetComponentResetStatusRequest {
+                target: Some(rpc::get_component_reset_status_request::Target::SwitchIds(
+                    rpc::SwitchIdList {
+                        ids: vec![switch.id],
+                    },
+                )),
+                action: action as i32,
+            }))
+            .await
+            .unwrap()
+            .into_inner()
+            .statuses;
+        assert_eq!(statuses.len(), 1);
+        assert_eq!(statuses[0].action, action as i32);
+        assert_eq!(
+            statuses[0].state,
+            rpc::ComponentResetState::Completed as i32,
+            "{action:?}: {:?}",
+            statuses[0],
+        );
+        let result = statuses[0].result.as_ref().unwrap();
+        assert_eq!(
+            result.status,
+            rpc::ComponentManagerStatusCode::Success as i32
+        );
+        assert_eq!(result.component_id, Some(switch.id.to_string()));
+        assert_eq!(result.mac_address, Some(bmc_mac.to_string()));
+    }
+    let calls = mock.get_job_status_calls().await;
     assert_eq!(
-        statuses[0].state,
-        rpc::ComponentResetState::Completed as i32
-    );
-    assert_eq!(
-        statuses[0].result.as_ref().unwrap().component_id,
-        Some(switch.id.to_string())
-    );
-    assert_eq!(
-        statuses[0].result.as_ref().unwrap().mac_address,
-        Some(bmc_mac.to_string())
-    );
-    assert_eq!(
-        mock.get_job_status_calls().await[0].job_id,
-        "pre-ingestion-job"
+        calls
+            .iter()
+            .map(|call| call.job_id.as_str())
+            .collect::<Vec<_>>(),
+        reset_jobs.map(|(_, job_id)| job_id),
     );
 }

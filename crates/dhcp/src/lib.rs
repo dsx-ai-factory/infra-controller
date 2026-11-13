@@ -26,12 +26,12 @@ use std::sync::{Arc, RwLock};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use forge_tls::default as tls_default;
+use carbide_tls::default as tls_default;
 use libc::c_char;
 use mac_address::MacAddress;
 use metrics_endpoint::HealthController;
 use once_cell::sync::Lazy;
-use rpc::forge_tls_client::ForgeClientConfig;
+use rpc::carbide_tls_client::CarbideClientConfig;
 use tokio::runtime::{Builder, Runtime};
 
 mod cache;
@@ -105,7 +105,7 @@ struct CarbideDhcpContext {
 // state reported by the certificate-expiry gauge and its alias.
 #[derive(Debug, Clone)]
 struct CarbideDhcpMetrics {
-    forge_client_config: ForgeClientConfig,
+    carbide_client_config: CarbideClientConfig,
     certificate_expiration_value: Arc<AtomicI64>,
 }
 

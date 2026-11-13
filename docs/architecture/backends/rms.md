@@ -98,6 +98,30 @@ NICo uses a focused slice of the RMS API. Each call belongs to a specific workfl
 | Machine slot and tray enrichment | `batch_get_node_device_info` |
 | Switch password rotation and decommissioning | `update_switch_system_password`, `batch_reset_switch_factory_default` |
 
+The RMS compute backend delegates `AcPowercycle` to `CoreComputeTrayManager`,
+which uses NICo's direct Redfish pool and the endpoint's BMC credentials. This
+applies to direct requests (including pre-ingestion) and queued compute maintenance.
+The call returns command acceptance, with per-device Redfish errors and no RMS job ID;
+hardware support depends on the device's Redfish implementation. Native RMS AC
+cycling is tracked in [power-control support](https://github.com/dsx-ai-factory/infra-controller/issues/8753).
+RMS switch and power-shelf backends reject `AcPowercycle`. `GracefulRestart` and
+`ForceRestart` remain distinct RMS operations.
+
+Queued compute AC cycles have dedicated maintenance phases. For hosts with managed
+DPUs, maintenance checks the platform before issuing the power command; a failed
+check retries without issuing the command. After the power command succeeds, Vera
+Rubin hosts with managed DPUs run ingestion's onboard NIC sequence:
+enable, wait at least ten seconds, disable, then wait at least ten seconds. AC cycling
+re-enables these NICs, so the AC maintenance sequence restores their disabled
+configuration before completing. Other platforms and hosts without managed DPUs
+skip this sequence. While the request remains pending, BMC or NIC errors retain the
+persisted phase for retry without resubmitting an accepted cycle. AC maintenance
+uses the existing request-replacement behavior; it does not guarantee cleanup if
+another request replaces it. A failed power command can be retried,
+including when its response was lost; command acceptance and progress persistence
+are not atomic. Explicit direct/bypass requests retain direct dispatch and do not
+run this maintenance cleanup.
+
 Firmware, image, certificate, and fabric calls are asynchronous. RMS returns a job identifier
 immediately and NICo polls the matching status API until the job reaches a terminal state.
 Treat accepted, queued, and in-progress as nonterminal.
@@ -134,8 +158,9 @@ therefore be reachable from the RMS namespace.
   class uses a different backend.
 - **The integration is config-gated at both ends.** NICo builds no RMS client without
   `[rms] api_url`, and RMS accepts no NICo traffic without matching TLS material.
-- **Asynchronous by default.** Every consequential RMS operation returns a job identifier
-  rather than a result, and correctness depends on polling to a terminal state.
+- **Asynchronous by default.** Firmware, image, certificate, and fabric operations return
+  RMS job identifiers and require polling to a terminal state. Delegated compute AC cycles
+  return Redfish command acceptance without an RMS job.
 - **Manifests flow through NICo; artifacts do not.** NICo hands RMS the document and RMS
   fetches the binaries, so artifact reachability is an RMS-side network requirement.
 - **Shared PostgreSQL, separate database.** RMS persists to the same cluster as NICo under its

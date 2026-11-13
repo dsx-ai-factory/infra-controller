@@ -116,9 +116,9 @@ mod tests {
     use carbide_test_support::Outcome::FailsWith;
     use carbide_test_support::{Case, check_cases_async};
     use rpc::admin_cli::OutputFormat;
+    use rpc::carbide_api_client::CarbideApiClient;
+    use rpc::carbide_tls_client::{ApiConfig, CarbideClientConfig};
     use rpc::forge::TenantNicFirmwareConfig;
-    use rpc::forge_api_client::ForgeApiClient;
-    use rpc::forge_tls_client::{ApiConfig, ForgeClientConfig};
 
     use super::write_mutation_result;
     use crate::async_write::CapturedOutput;
@@ -161,9 +161,9 @@ mod tests {
                 let tenant_org_id = "fds34511233a".parse().expect("valid tenant ID");
                 let mut captured = CapturedOutput::new();
                 let mut ctx = RuntimeContext {
-                    api_client: ApiClient(ForgeApiClient::new(&ApiConfig::new(
+                    api_client: ApiClient(CarbideApiClient::new(&ApiConfig::new(
                         "http://127.0.0.1:1",
-                        &ForgeClientConfig::default(),
+                        &CarbideClientConfig::default(),
                     ))),
                     config: RuntimeConfig {
                         format: OutputFormat::Json,
@@ -215,9 +215,9 @@ mod tests {
         let (writer, reader) = tokio::io::duplex(64);
         drop(reader);
         let mut ctx = RuntimeContext {
-            api_client: ApiClient(ForgeApiClient::new(&ApiConfig::new(
+            api_client: ApiClient(CarbideApiClient::new(&ApiConfig::new(
                 "http://127.0.0.1:1",
-                &ForgeClientConfig::default(),
+                &CarbideClientConfig::default(),
             ))),
             config: RuntimeConfig {
                 format: OutputFormat::Json,

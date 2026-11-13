@@ -22,11 +22,11 @@ Update the metadata of a SKU
 
 `--description <DESCRIPTION>`
 
-Update the SKUs description
+Update the SKU's description
 
 `--device-type <DEVICE_TYPE>`
 
-Update the SKUs device type
+Update the SKU's device type
 
 `--extended`
 
@@ -48,7 +48,7 @@ Sort output by specified field
 
 `-h, --help`
 
-Print help (see a summary with -h)
+Print help (see a summary with '-h')
 
 `<SKU_ID>`
 

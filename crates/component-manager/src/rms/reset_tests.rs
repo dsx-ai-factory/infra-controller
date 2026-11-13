@@ -91,7 +91,7 @@ async fn component_reset_replaces_only_accepted_references(pool: sqlx::PgPool) {
             Ok(reset_batch_response(" \t", 2, &[&sw1.to_string()])),
             [Unknown, Rejected],
             [
-                Some("accepted the SDN reset but returned no job reference"),
+                Some("accepted the reset but returned no job reference"),
                 Some("reset already in progress"),
             ],
         ),
@@ -109,7 +109,7 @@ async fn component_reset_replaces_only_accepted_references(pool: sqlx::PgPool) {
                 tonic::Status::unimplemented("unsupported"),
             )),
             [Unsupported, Unsupported],
-            [Some("RMS does not support switch SDN factory reset"); 2],
+            [Some("RMS does not support switch SDN factory-reset"); 2],
         ),
     ];
     let case_count = cases.len();
@@ -124,7 +124,7 @@ async fn component_reset_replaces_only_accepted_references(pool: sqlx::PgPool) {
         assert_eq!(results.len(), endpoints.len());
         let results: HashMap<_, _> = results
             .into_iter()
-            .map(|result| (result.bmc_mac, result))
+            .map(|response| (response.result.bmc_mac, response.result))
             .collect();
         assert_eq!(
             endpoints
@@ -201,7 +201,10 @@ async fn component_reset_replaces_only_accepted_references(pool: sqlx::PgPool) {
     assert_eq!(results.len(), endpoints.len());
     let results: HashMap<_, _> = results
         .into_iter()
-        .map(|result| (result.bmc_mac, result))
+        .map(|response| {
+            assert_eq!(response.parent_job_id.as_deref(), Some("unrecorded-reset"));
+            (response.result.bmc_mac, response.result)
+        })
         .collect();
     assert!(!results[&endpoints[0].bmc_mac].success);
     let Some(ComponentManagerError::OperationOutcomeUnknown(error)) =
@@ -342,9 +345,10 @@ async fn component_reset_submission_rejects_unobservable_batches() {
                     },
                 )
             });
-            let (result, logs) = capture_logs_async(rms_batch_reset_switch_sdn_factory_default(
+            let (result, logs) = capture_logs_async(rms_batch_reset_switch(
                 &mock,
                 switches.into(),
+                RmsJobKind::SwitchSdnFactoryReset,
                 None,
             ))
             .await;
@@ -368,6 +372,111 @@ async fn component_reset_submission_rejects_unobservable_batches() {
     .await;
 }
 
+fn nvos_reset_batch_response(
+    job_id: &str,
+    accepted_nodes: &[&str],
+    rejected_nodes: &[&str],
+) -> rms::BatchResetSwitchFactoryDefaultResponse {
+    let mut batch = reset_batch_response(
+        job_id,
+        (accepted_nodes.len() + rejected_nodes.len()) as u32,
+        rejected_nodes,
+    )
+    .response
+    .unwrap();
+    // NVOS reports every node, with rejections before accepted nodes.
+    batch.node_results.extend(
+        accepted_nodes
+            .iter()
+            .map(|node_id| rms::NodeOperationResult {
+                node_id: (*node_id).to_owned(),
+                status: rms::ReturnCode::Success as i32,
+                error_message: String::new(),
+            }),
+    );
+    rms::BatchResetSwitchFactoryDefaultResponse {
+        response: Some(batch),
+    }
+}
+
+#[carbide_macros::sqlx_test]
+async fn component_nvos_reset_replaces_only_accepted_references(pool: sqlx::PgPool) {
+    let (mock, backend, _, _, _, sw1, sw2) = make_backend(&pool).await;
+    let endpoints = [make_sw_endpoint(SW_MAC_2), make_sw_endpoint(SW_MAC_1)];
+    let kind = RmsJobKind::SwitchNvosFactoryReset;
+    for endpoint in &endpoints {
+        for (kind, reference) in [
+            (kind, "previous-nvos"),
+            (RmsJobKind::SwitchSdnFactoryReset, "previous-sdn"),
+        ] {
+            db::direct_dispatch_rms_job::save(&pool, endpoint.bmc_mac, kind, reference)
+                .await
+                .unwrap();
+        }
+    }
+    // The accepted switch is first in the request but last in the RMS response.
+    mock.enqueue_batch_reset_switch_factory_default(Ok(nvos_reset_batch_response(
+        "new-nvos",
+        &[&sw2.to_string()],
+        &[&sw1.to_string()],
+    )))
+    .await;
+    let results = NvSwitchManager::batch_reset_switch_factory_default(&backend, &endpoints, None)
+        .await
+        .unwrap();
+    assert_eq!(results.len(), 2);
+    let results: HashMap<_, _> = results
+        .into_iter()
+        .map(|response| {
+            assert_eq!(response.parent_job_id.as_deref(), Some("new-nvos"));
+            (response.result.bmc_mac, response.result)
+        })
+        .collect();
+    assert!(results[&endpoints[0].bmc_mac].success);
+    assert!(results[&endpoints[0].bmc_mac].error.is_none());
+    assert!(!results[&endpoints[1].bmc_mac].success);
+    assert!(matches!(
+        &results[&endpoints[1].bmc_mac].error,
+        Some(ComponentManagerError::RejectedBeforeDispatch(message))
+            if message.contains("reset already in progress")
+    ));
+    for (endpoint, expected_nvos) in endpoints.iter().zip(["new-nvos", "previous-nvos"]) {
+        for (kind, reference) in [
+            (kind, expected_nvos),
+            (RmsJobKind::SwitchSdnFactoryReset, "previous-sdn"),
+        ] {
+            assert_eq!(
+                db::direct_dispatch_rms_job::get(&pool, endpoint.bmc_mac, kind)
+                    .await
+                    .unwrap()
+                    .as_deref(),
+                Some(reference),
+                "{kind:?}",
+            );
+        }
+    }
+    let calls = mock.batch_reset_switch_factory_default_calls().await;
+    assert_eq!(calls.len(), 1, "submissions must not be retried");
+    assert!(calls[0].allow_ssh_fallback);
+    assert!(calls[0].domain.is_none());
+    assert_eq!(
+        calls[0]
+            .nodes
+            .as_ref()
+            .unwrap()
+            .nodes
+            .iter()
+            .map(|node| node.node_id.as_str())
+            .collect::<Vec<_>>(),
+        [sw2.to_string(), sw1.to_string()],
+    );
+    assert!(
+        mock.batch_reset_switch_sdn_factory_default_calls()
+            .await
+            .is_empty()
+    );
+}
+
 #[carbide_macros::sqlx_test]
 async fn component_reset_dispatches_valid_targets_in_one_batch(pool: sqlx::PgPool) {
     let (mock, backend, _, _, _, sw1, sw2) = make_backend(&pool).await;
@@ -385,7 +494,13 @@ async fn component_reset_dispatches_valid_targets_in_one_batch(pool: sqlx::PgPoo
     assert_eq!(results.len(), endpoints.len());
     let results: HashMap<_, _> = results
         .into_iter()
-        .map(|result| (result.bmc_mac, result))
+        .map(|response| {
+            assert_eq!(
+                response.parent_job_id.as_deref(),
+                response.result.success.then_some("parent"),
+            );
+            (response.result.bmc_mac, response.result)
+        })
         .collect();
     assert!(results[&endpoints[0].bmc_mac].success);
     assert!(!results[&endpoints[1].bmc_mac].success);

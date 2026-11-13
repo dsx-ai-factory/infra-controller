@@ -24,6 +24,7 @@ use ::rpc::forge as rpc;
 use ::rpc::model::machine::ManagedHostStateSnapshotRpc;
 use carbide_redfish::libredfish::RedfishAuth;
 use carbide_secrets::credentials::{BmcCredentialType, CredentialKey, Credentials};
+use carbide_site_explorer::dpu_asn::DPU_ASN_SLOT;
 use carbide_site_explorer::dpu_loopback::DPU_IPV4_LOOPBACK_SLOT;
 use carbide_uuid::machine::{
     DpuMachineId, HostMachineId, HostOrDpuId, MachineId, MachineIdSubtypeTrait,
@@ -118,6 +119,56 @@ pub(crate) async fn find_machine_ids_by_bmc_ips(
     };
 
     Ok(Response::new(rpc_pairs))
+}
+
+// Bound each SQL statement as well as acquisition and the complete read.
+const MACHINE_STATE_READ_TIMEOUT: Duration = Duration::from_secs(300);
+
+pub(crate) async fn find_machine_states_by_ids(
+    api: &Api,
+    request: Request<rpc::MachineStatesByIdsRequest>,
+) -> Result<Response<rpc::MachineStateList>, Status> {
+    log_request_data(&request);
+    let machine_ids = request.into_inner().machine_ids;
+    let max_find_by_ids = api.runtime_config.max_find_by_ids as usize;
+    if machine_ids.len() > max_find_by_ids {
+        return Err(CarbideError::InvalidArgument(format!(
+            "no more than {max_find_by_ids} IDs can be accepted"
+        ))
+        .into());
+    } else if machine_ids.is_empty() {
+        return Err(
+            CarbideError::InvalidArgument("at least one ID must be provided".to_string()).into(),
+        );
+    }
+
+    // The guard releases local capacity on cancellation; the transaction-local
+    // SQL limit also bounds work PostgreSQL may retain after the client leaves.
+    let states = tokio::time::timeout(MACHINE_STATE_READ_TIMEOUT, async {
+        let mut connection = db::DbSessionGuard::acquire(api.pg_pool()).await?;
+        let mut txn = connection
+            .begin_read_only_snapshot(MACHINE_STATE_READ_TIMEOUT)
+            .await?;
+        let states = db::machine::find_states_by_ids(txn.as_pgconn(), &machine_ids).await?;
+        txn.commit().await?;
+        connection.return_to_pool();
+        Ok::<_, CarbideError>(states)
+    })
+    .await
+    .map_err(|_| CarbideError::Internal {
+        message: "machine state read timed out".into(),
+    })??;
+    let machines = states
+        .into_iter()
+        .map(|(id, state)| rpc::MachineStateSummary {
+            id: Some(id),
+            state: match id.host_or_dpu_id() {
+                HostOrDpuId::Host(_) => state.to_string(),
+                HostOrDpuId::Dpu(dpu_id) => state.dpu_state_string(&dpu_id),
+            },
+        })
+        .collect();
+    Ok(Response::new(rpc::MachineStateList { machines }))
 }
 
 pub(crate) async fn find_machines_by_ids(
@@ -756,19 +807,37 @@ async fn force_delete_cleanup_txn(
 
         db::network_devices::dpu_to_network_device_map::delete(&mut txn, &dpu_machine.id).await?;
 
-        if let Some(asn) = dpu_machine.asn {
-            match db::resource_pool::release(
+        // Ownership remains authoritative when the machine snapshot has no ASN.
+        if let Some(owned) = api
+            .resource_pool_registry
+            .find_owned(
                 &api.common_pools.ethernet.pool_fnn_asn,
                 &mut txn,
-                asn,
                 model::resource_pool::OwnerType::Machine,
                 &owner_id,
+                DPU_ASN_SLOT,
             )
             .await?
-            {
-                ConditionalWrite::Applied(())
-                | ConditionalWrite::NotApplied(ResourcePoolAllocationNotOwned) => {}
+        {
+            let asn = *owned.value();
+            match owned.release(&mut txn).await? {
+                ConditionalWrite::Applied(()) => {}
+                ConditionalWrite::NotApplied(ResourcePoolAllocationNotOwned) => {
+                    return Err(CarbideError::FailedPrecondition(format!(
+                        "DPU `{}` no longer owns ASN `{asn}`",
+                        dpu_machine.id,
+                    )));
+                }
             }
+        } else {
+            api.resource_pool_registry
+                .request_cancellation(
+                    &mut txn,
+                    model::resource_pool::OwnerType::Machine,
+                    &owner_id,
+                    DPU_ASN_SLOT,
+                )
+                .await?;
         }
         let owned_interfaces = if request.delete_interfaces {
             db::machine_interface::find_by_machine_id_for_update(&mut txn, &dpu_machine.id).await?

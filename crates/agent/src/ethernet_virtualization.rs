@@ -47,8 +47,14 @@ use tokio::time::timeout;
 use crate::nvue::NetworkSecurityGroupRule;
 use crate::{HBNDeviceNames, acl_rules, dhcp, hbn, nvue, service_network};
 
-/// None of the files we deal with should be bigger than this
-const MAX_EXPECTED_SIZE: u64 = 1048576; // 1 MiB
+/// Bounds NVUE startup-file reads and writes unless admin recovery forces replacement.
+const MAX_EXPECTED_SIZE: u64 = 10 * 1024 * 1024; // 10 MiB
+
+/// Retains forced admin replacement above the original 1 MiB file limit.
+const ADMIN_FORCE_WRITE_THRESHOLD: u64 = 1024 * 1024; // 1 MiB
+
+/// Bounds DHCP and ACL files independently of the NVUE startup-file allowance.
+const MAX_DHCP_ACL_SIZE: u64 = 1024 * 1024; // 1 MiB
 
 /// ACL to prevent access to nvued's API
 const NVUED_BLOCK_RULE: &str = r"
@@ -284,10 +290,12 @@ fn route_target_from_rpc(
         !target.vni_self,
         "received unresolved route target with vni_self set"
     );
-    Ok(nvue::RouteTargetConfig {
+    let target = nvue::RouteTargetConfig {
         asn: target.asn,
         vni: target.vni.unwrap_or_default(),
-    })
+    };
+    target.validate()?;
+    Ok(target)
 }
 
 /// Converts a concrete RPC routing profile while rejecting Core-owned symbolic values.
@@ -296,7 +304,28 @@ impl TryFrom<&rpc::RoutingProfile> for nvue::RoutingProfile {
 
     fn try_from(profile: &rpc::RoutingProfile) -> Result<Self, Self::Error> {
         // Preserve the API-provided routing policy without applying template concerns here.
+        let route_targets_on_exports_by_prefix = profile
+            .route_targets_on_exports_by_prefix
+            .iter()
+            .map(|entry| {
+                let match_type = rpc::ExportPrefixMatchType::try_from(entry.match_type)?;
+                let entry = nvue::PrefixRouteTargetConfig {
+                    prefix: entry.prefix.parse::<IpNet>()?.trunc(),
+                    match_type: match_type.into(),
+                    max_prefix_length: entry.max_prefix_length,
+                    route_targets: entry
+                        .route_targets
+                        .iter()
+                        .map(route_target_from_rpc)
+                        .collect::<eyre::Result<_>>()?,
+                };
+                entry.validate()?;
+                Ok(entry)
+            })
+            .collect::<eyre::Result<Vec<_>>>()?;
+        nvue::PrefixRouteTargetConfig::validate_entries(&route_targets_on_exports_by_prefix)?;
         Ok(nvue::RoutingProfile {
+            route_targets_on_exports_by_prefix,
             leak_default_route_from_underlay: profile.leak_default_route_from_underlay,
             leak_tenant_host_routes_to_underlay: profile.leak_tenant_host_routes_to_underlay,
             tenant_leak_communities_accepted: profile.tenant_leak_communities_accepted,
@@ -480,19 +509,19 @@ fn ipv6_segment_prefix(interface: &FlatInterfaceConfig, legacy_fallback: &str) -
     normalized_ipv6_segment_prefix(address).map(|prefix| prefix.to_string())
 }
 
-/// Builds stateful RA inputs for the existing primary-DPU admin VLAN SVI.
+/// Builds stateful RA inputs from an admin host `/128` and its containing segment.
 ///
+/// Callers must select admin ports only on the primary DPU.
 /// The canonical address entry keeps the host `/128` distinct from the
 /// containing segment so the host route cannot become the advertised prefix.
 fn admin_ipv6_router_advertisement(
     virtualization_type: VpcVirtualizationType,
-    interface: &FlatInterfaceConfig,
     address: &rpc::InterfaceAddressConfig,
     rdnss_servers: &[Ipv6Addr],
 ) -> Option<nvue::Ipv6RouterAdvertisementConfig> {
     // The caller supplies admin ports only on the primary DPU. Keep the
-    // render-side guard for the FNN L2 SVI that can actually emit RA.
-    if virtualization_type != VpcVirtualizationType::Fnn || !interface.is_l2_segment {
+    // render-side FNN guard for both the VLAN SVI and the routed PF.
+    if virtualization_type != VpcVirtualizationType::Fnn {
         return None;
     }
 
@@ -528,8 +557,9 @@ pub(super) fn tenant_vrf_loopback_ip(interface: &FlatInterfaceConfig) -> Option<
 
 /// Update the NVUE network config, returning whether NVUE applied a change.
 /// With `StartupFile` and `skip_post`, only save the desired file and return
-/// whether that file was replaced. Errors from saving or applying the desired
-/// configuration are returned to the caller.
+/// whether that file was replaced. Startup-file YAML must fit within 10 MiB after
+/// supplemental merging unless an admin update replaces an existing file above 1 MiB.
+/// Errors from saving or applying the desired configuration are returned to the caller.
 /// `fmds_ipv6_gateway` is resolved from the local agent configuration, not
 /// the Core response, so both startup-file and REST updates use the same peer.
 // The fetcher projects `addresses` into these compatibility fields before rendering.
@@ -644,7 +674,6 @@ pub(super) async fn update_nvue(
                     svi_ip: ipv6.svi_ip.clone(),
                     router_advertisement: admin_ipv6_router_advertisement(
                         vpc_virtualization_type,
-                        admin_interface,
                         ipv6,
                         &rdnss_servers,
                     ),
@@ -914,6 +943,25 @@ pub(super) async fn update_nvue(
             hbn_root,
             skip_post,
         } => {
+            let startup_path = hbn_root.join(nvue::PATH);
+            // If switching to the admin network, we want to just force the write.
+            // We've seen a past incident where a tenant managed to create a config
+            // that exceeded the original 1 MiB limit. Because of the diff check failing, it
+            // also prevented a successful termination because the NVUE config couldn't
+            // be switched to the admin network.
+            let force = nc.use_admin_network
+                && startup_path.exists()
+                && startup_path.metadata()?.len() > ADMIN_FORCE_WRITE_THRESHOLD;
+
+            // Bound startup files before cleanup or writes unless admin recovery forces replacement.
+            // Keep REST submissions outside this file-size check.
+            eyre::ensure!(
+                force || next_contents.len() <= MAX_EXPECTED_SIZE as usize,
+                "NVUE configuration exceeds maximum size: {} > {} bytes",
+                next_contents.len(),
+                MAX_EXPECTED_SIZE,
+            );
+
             // Cleanup non-NVUE ACL files
             // We can remove this once az01 is upgraded
             cleanup_old_acls(hbn_root);
@@ -923,7 +971,7 @@ pub(super) async fn update_nvue(
             path_acl.cleanup();
             let mut rules = NVUED_BLOCK_RULE.to_string();
             rules.push_str(acl_rules::ARP_SUPPRESSION_RULE);
-            match write(rules, &path_acl, "NVUE ACL", false) {
+            match write(rules, &path_acl, "NVUE ACL", MAX_DHCP_ACL_SIZE, false) {
                 Ok(true) => {
                     if !skip_post {
                         let cmd = acl_rules::RELOAD_CMD;
@@ -957,22 +1005,10 @@ pub(super) async fn update_nvue(
             }
 
             // Write the config we're going to apply
-            let path = FPath(hbn_root.join(nvue::PATH));
+            let path = FPath(startup_path);
             path.cleanup();
-            // If switching to the admin network, we want to just force the write.
-            // We've seen a past incident where a tenant managed to create a config
-            // that exceeded MAX_EXPECTED_SIZE.  Because of the diff check failing, it
-            // also prevented a successful termination because the NVUE config couldn't
-            // be switched to the admin network.
-            let file_changed = write(
-                next_contents,
-                &path,
-                "NVUE",
-                nc.use_admin_network
-                    && path.0.exists()
-                    && path.0.metadata()?.len() > MAX_EXPECTED_SIZE,
-            )
-            .wrap_err(format!("NVUE config at {path}"))?;
+            let file_changed = write(next_contents, &path, "NVUE", MAX_EXPECTED_SIZE, force)
+                .wrap_err(format!("NVUE config at {path}"))?;
 
             if !skip_post {
                 // The agent can restart after saving the file but before
@@ -1838,7 +1874,13 @@ pub(super) async fn reset(hbn_root: &Path, skip_post: bool) {
     let mut errs = vec![];
     let mut post_actions = vec![];
     let dhcp_relay_path = FPath(hbn_root.join(dhcp::RELAY_PATH));
-    match write(dhcp::blank(), &dhcp_relay_path, "DHCP relay", false) {
+    match write(
+        dhcp::blank(),
+        &dhcp_relay_path,
+        "DHCP relay",
+        MAX_DHCP_ACL_SIZE,
+        false,
+    ) {
         Ok(true) => post_actions.push(PostAction {
             cmd: dhcp::RELOAD_CMD,
         }),
@@ -1846,7 +1888,13 @@ pub(super) async fn reset(hbn_root: &Path, skip_post: bool) {
         Err(err) => errs.push(format!("Write blank DHCP relay: {err:#}")),
     }
     let dhcp_server_path = FPath(hbn_root.join(dhcp::SERVER_PATH));
-    match write(dhcp::blank(), &dhcp_server_path, "DHCP server", false) {
+    match write(
+        dhcp::blank(),
+        &dhcp_server_path,
+        "DHCP server",
+        MAX_DHCP_ACL_SIZE,
+        false,
+    ) {
         Ok(true) => post_actions.push(PostAction {
             cmd: dhcp::RELOAD_CMD,
         }),
@@ -1882,12 +1930,21 @@ fn prepare_dhcp_server_config(
     hbn_device_names: &HBNDeviceNames,
 ) -> eyre::Result<PreparedDhcpServerConfig> {
     let interfaces = if nc.use_admin_network {
-        let vlan_intf = nc
+        let interface_name = nc
             .admin_interface
             .as_ref()
-            .map(|x| format!("vlan{}", x.vlan_id))
+            .map(|interface| {
+                // Routed admin ports have no VLAN SVI for the DHCP listener.
+                if nc.network_virtualization_type() == ::rpc::forge::VpcVirtualizationType::Fnn
+                    && !interface.is_l2_segment
+                {
+                    hbn_device_names.reps[0].to_string()
+                } else {
+                    format!("vlan{}", interface.vlan_id)
+                }
+            })
             .ok_or_else(|| eyre::eyre!("admin interface missing on admin network"))?;
-        vec![vlan_intf]
+        vec![interface_name]
     } else {
         let mut interfaces = Vec::with_capacity(nc.tenant_interfaces.len());
         for interface in &nc.tenant_interfaces {
@@ -1959,7 +2016,7 @@ impl PreparedDhcpServerConfig {
                 return Err(error).wrap_err_with(|| format!("read DHCP identity {identity_path}"));
             }
         }
-        let previous = match read_limited(live_config) {
+        let previous = match read_limited(live_config, MAX_DHCP_ACL_SIZE) {
             Ok(contents) => contents,
             Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
             Err(error) => {
@@ -2041,7 +2098,7 @@ struct DhcpFileUpdate {
 
 impl DhcpFileUpdate {
     fn new(path: &FPath, next: Option<String>) -> eyre::Result<Self> {
-        let previous = match read_limited(path) {
+        let previous = match read_limited(path, MAX_DHCP_ACL_SIZE) {
             Ok(contents) => Some(contents),
             Err(error) if error.kind() == io::ErrorKind::NotFound => None,
             Err(error) => return Err(error).wrap_err_with(|| format!("read DHCP file {path}")),
@@ -2056,7 +2113,13 @@ impl DhcpFileUpdate {
     fn write(&self, contents: Option<&str>) -> eyre::Result<()> {
         match contents {
             Some(contents) => {
-                write(contents.to_owned(), &self.path, "DHCP configuration", false)?;
+                write(
+                    contents.to_owned(),
+                    &self.path,
+                    "DHCP configuration",
+                    MAX_DHCP_ACL_SIZE,
+                    false,
+                )?;
             }
             None => match fs::remove_file(&self.path) {
                 Ok(()) => {}
@@ -2079,6 +2142,8 @@ fn write(
     path: &FPath,
     // Human readable description of the file, for error messages
     file_type: &str,
+    // Maximum file size in bytes; force bypasses size checks and bounded comparison reads.
+    maximum_size: u64,
     force: bool,
 ) -> eyre::Result<bool> {
     let path_tmp = path.temp();
@@ -2087,18 +2152,19 @@ fn write(
 
     if !force {
         let path_tmp_size = path_tmp.metadata()?.len();
-        if path_tmp_size > MAX_EXPECTED_SIZE {
+        if path_tmp_size > maximum_size {
             return Err(eyre::eyre!(
-                "new content for '{}' would exceed MAX_EXPECTED_SIZE: {} > {}",
+                "new content for '{}' would exceed maximum size: {} > {}",
                 path_tmp.display(),
                 path_tmp_size,
-                MAX_EXPECTED_SIZE
+                maximum_size
             ));
         }
     }
 
     let has_changed = if !force && path.0.exists() {
-        let current = read_limited(path).wrap_err_with(|| format!("read_limited {path}"))?;
+        let current =
+            read_limited(path, maximum_size).wrap_err_with(|| format!("read_limited {path}"))?;
         current != next_contents
     } else {
         true
@@ -2266,18 +2332,18 @@ async fn tenant_vf_mac(vlan_fdb: &[Fdb]) -> eyre::Result<&str> {
     Ok(&remote_side[0].mac)
 }
 
-// std::fs::read_to_string but limited to 4k bytes for safety
-fn read_limited<P: AsRef<Path>>(path: P) -> io::Result<String> {
+// std::fs::read_to_string but limited to maximum_size bytes for safety
+fn read_limited<P: AsRef<Path>>(path: P, maximum_size: u64) -> io::Result<String> {
     let f = File::open(path)?;
     let l = f.metadata()?.len();
-    if l > MAX_EXPECTED_SIZE {
+    if l > maximum_size {
         return Err(io::Error::other(
             // ErrorKind::FileTooLarge but it's nightly only
-            format!("{l} > {MAX_EXPECTED_SIZE} bytes"),
+            format!("{l} > {maximum_size} bytes"),
         ));
     }
     // in case it changes as we read
-    let mut f_limit = f.take(MAX_EXPECTED_SIZE);
+    let mut f_limit = f.take(maximum_size);
     let mut s = String::with_capacity(l as usize);
     f_limit.read_to_string(&mut s)?;
     Ok(s)
@@ -2469,6 +2535,8 @@ mod tests {
 
     /// Verifies the agent preserves legacy zero while rejecting symbolic values
     /// that only Core can resolve.
+    /// Also rejects concrete targets with two oversized components while accepting
+    /// either component at 65535 so both ASN-specific encodings stay available.
     #[test]
     fn route_target_conversion_handles_legacy_and_unresolved_values() {
         use carbide_test_support::Outcome::*;
@@ -2494,6 +2562,34 @@ mod tests {
                     vni: None,
                     vni_self: true, // Core must resolve this before agent delivery.
                 } => Fails,
+            }
+            "agent encoding" {
+                // Two oversized components fit neither encoding and must fail before rendering.
+                rpc_common::RouteTarget {
+                    asn: 65_536, // Requires the four-byte ASN encoding.
+                    vni: Some(65_536), // Exceeds its two-byte local-administrator limit.
+                    vni_self: false,
+                } => Fails,
+
+                // A four-byte ASN accepts the inclusive two-byte local-administrator limit.
+                rpc_common::RouteTarget {
+                    asn: 65_536, // Selects the four-byte ASN encoding.
+                    vni: Some(65_535), // Retains the largest two-byte local administrator.
+                    vni_self: false,
+                } => Yields(nvue::RouteTargetConfig {
+                    asn: 65_536,
+                    vni: 65_535,
+                }),
+
+                // A two-byte ASN accepts a local administrator requiring four bytes.
+                rpc_common::RouteTarget {
+                    asn: 65_535, // Retains the inclusive two-byte ASN limit.
+                    vni: Some(65_536), // Requires the four-byte local-administrator encoding.
+                    vni_self: false,
+                } => Yields(nvue::RouteTargetConfig {
+                    asn: 65_535,
+                    vni: 65_536,
+                }),
             }
         );
     }
@@ -2678,11 +2774,32 @@ mod tests {
         server.await.expect("NVUE server task should finish");
     }
 
+    /// Verifies unknown conditional match enums fail at the RPC conversion before GE can be assumed.
+    #[test]
+    fn conditional_export_conversion_rejects_unknown_match() {
+        // Keep the target concrete so only the unknown wire enum drives rejection.
+        let profile = rpc::RoutingProfile {
+            route_targets_on_exports_by_prefix: vec![rpc::PrefixRouteTarget {
+                prefix: "0.0.0.0/0".into(),
+                match_type: 99, // Prost preserves this unsupported value.
+                route_targets: vec![rpc_common::RouteTarget {
+                    asn: 64512,
+                    vni: Some(100),
+                    vni_self: false,
+                }],
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        // Convert through the same adapter used by update_nvue.
+        assert!(nvue::RoutingProfile::try_from(&profile).is_err());
+    }
+
     /// Verifies unresolved Core-owned route targets stop `update_nvue` before
     /// publication, preventing the DPU from guessing the missing VNI.
     #[tokio::test]
     async fn unresolved_route_target_stops_nvue_before_publication() -> eyre::Result<()> {
-        // Make only the response-level export target unresolved.
+        // Make only a nested conditional export target unresolved.
         let mut network_config = netconf(
             VpcVirtualizationType::Fnn,
             32,
@@ -2692,16 +2809,19 @@ mod tests {
             false,
             false,
         );
-        let unresolved_target = network_config
+        network_config
             .routing_profile
             .as_mut()
             .expect("fixture response-level routing profile")
-            .route_targets_on_exports
-            .first_mut()
-            .expect("fixture export route target");
-        // Remove the literal value so only the symbolic source remains.
-        unresolved_target.vni = None;
-        unresolved_target.vni_self = true;
+            .route_targets_on_exports_by_prefix = vec![rpc::PrefixRouteTarget {
+            prefix: "0.0.0.0/0".into(),
+            route_targets: vec![rpc_common::RouteTarget {
+                asn: 64512,
+                vni: None, // Core must resolve the nested target before publication.
+                vni_self: true,
+            }],
+            ..Default::default()
+        }];
 
         // Precreate every destination directory so publication could succeed.
         let tempdir = tempfile::tempdir()?;
@@ -2731,6 +2851,498 @@ mod tests {
         );
         assert!(!hbn_root.join(nvue::PATH).exists());
         assert!(!hbn_root.join(nvue::PATH_ACL).exists());
+        Ok(())
+    }
+
+    /// Builds twelve 256-action VPC profiles so publication tests exercise aggregate YAML size
+    /// independently of the per-profile expansion limit.
+    #[allow(deprecated)]
+    fn large_conditional_export_config() -> rpc::ManagedHostNetworkConfigResponse {
+        // Retain ordinary host networking while varying only conditional policy and VPC membership.
+        let mut config = netconf(
+            VpcVirtualizationType::Fnn,
+            32,
+            24,
+            false,
+            None,
+            false,
+            false,
+        );
+        // Set FNN explicitly because netconf preserves an omitted network_virtualization_type.
+        config.network_virtualization_type = Some(rpc::VpcVirtualizationType::Fnn as i32);
+        let conditional_export = rpc::PrefixRouteTarget {
+            // Use a full-width IPv6 prefix with a non-exact maximum to retain the LE stanza.
+            prefix: "ffff:ffff:ffff:ffff:ffff:ffff:ffff:fffe/127".into(),
+            match_type: rpc::ExportPrefixMatchType::Le as i32,
+            max_prefix_length: Some(128),
+            route_targets: (0..256)
+                .map(|target| rpc_common::RouteTarget {
+                    asn: u32::MAX,
+                    vni: Some(target), // Keep every four-byte-ASN target encodable and distinct.
+                    vni_self: false,
+                })
+                .collect(),
+        };
+
+        // Give the required PF and its VFs separate VPCs and disjoint subnets without prefix reuse.
+        let interface = config.tenant_interfaces[0].clone();
+        config.tenant_interfaces = (0_u32..12)
+            .map(|index| {
+                let mut interface = interface.clone();
+                interface.virtual_function_id = index.checked_sub(1);
+                if index == 0 {
+                    interface.function_type = rpc::InterfaceFunctionType::Physical.into();
+                }
+                interface.vlan_id = 200 + index;
+                interface.vni = 1000 + index;
+                interface.vpc_vni = 2000 + index;
+                let subnet = format!("10.217.{}", 100 + index);
+                interface.ip = Some(format!("{subnet}.2"));
+                interface.interface_prefix = Some(format!("{subnet}.2/32"));
+                interface.prefix = Some(format!("{subnet}.0/29"));
+                interface.gateway = Some(format!("{subnet}.1/29"));
+                interface.svi_ip = Some(format!("{subnet}.3/29"));
+                interface.vpc_prefixes = vec![format!("{subnet}.0/24")];
+                // Clear copied peer prefixes and VNIs to avoid describing the cloned VPC's peerings.
+                interface.vpc_peer_prefixes.clear();
+                interface.vpc_peer_vnis.clear();
+                interface
+                    .vpc_routing_profile
+                    .as_mut()
+                    .expect("fixture VPC routing profile")
+                    .route_targets_on_exports_by_prefix = vec![conditional_export.clone()];
+                interface
+            })
+            .collect();
+        config
+    }
+
+    /// Rejects oversized startup-file YAML before file changes while preserving REST submission
+    /// above 10 MiB so the legacy file limit does not restrict the REST publication contract.
+    #[tokio::test]
+    async fn oversized_nvue_config_is_rejected_only_for_startup_files() -> eyre::Result<()> {
+        use nvue_client::client::NvueServerAddress;
+        use tokio::net::UnixListener;
+
+        // Retain ordinary host networking without conditional targets and add supplemental content above 10 MiB.
+        let ordinary_config = netconf(
+            VpcVirtualizationType::Fnn,
+            32,
+            24,
+            false,
+            None,
+            false,
+            false,
+        );
+        let oversized_patch = serde_json::json!({
+            "system": {"hostname": "x".repeat(MAX_EXPECTED_SIZE as usize + 1)}
+        })
+        .to_string();
+
+        // Seed files that the StartupFile path can change before writing its desired YAML.
+        let directory = tempfile::tempdir()?;
+        let hbn_root = directory.path();
+        let startup = FPath(hbn_root.join(nvue::PATH));
+        let protected_paths = [
+            startup.0.clone(),
+            startup.temp(),
+            startup.backup(),
+            hbn_root.join(nvue::PATH_ACL),
+            hbn_root.join(nvue::SAVE_PATH),
+            hbn_root.join(acl_rules::PATH),
+        ];
+        for path in &protected_paths {
+            fs::create_dir_all(path.parent().expect("fixture file has a directory"))?;
+            fs::write(path, "previous configuration")?;
+        }
+
+        // Capture revision submission and report no semantic diff without simulating vendor acceptance.
+        let socket_path = hbn_root.join("nvue.sock");
+        let listener = UnixListener::bind(&socket_path)?;
+        let publication_requests = Arc::new(AtomicUsize::new(0));
+        let revision_requests = Arc::clone(&publication_requests);
+        let submitted_body = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+        let captured_body = Arc::clone(&submitted_body);
+        let app = Router::new()
+            .route(
+                "/nvue_v1/system",
+                axum::routing::get(|| async {
+                    axum::Json(serde_json::json!({"build": "HBN 2.3.0"}))
+                }),
+            )
+            .route(
+                "/nvue_v1/revision",
+                axum::routing::post(move || {
+                    let revision_requests = Arc::clone(&revision_requests);
+                    async move {
+                        revision_requests.fetch_add(1, Ordering::SeqCst);
+                        axum::Json(serde_json::json!({"1": {}}))
+                    }
+                }),
+            )
+            .route(
+                "/nvue_v1/",
+                axum::routing::delete(|| async { axum::Json(serde_json::json!({})) })
+                    .patch(move |request: axum::extract::Request| {
+                        let captured_body = Arc::clone(&captured_body);
+                        async move {
+                            // Read the raw request above Axum's default JSON body limit.
+                            let body = axum::body::to_bytes(
+                                request.into_body(),
+                                2 * MAX_EXPECTED_SIZE as usize,
+                            )
+                            .await
+                            .expect("bounded oversized NVUE request");
+                            *captured_body.lock().await = body.to_vec();
+                            axum::Json(serde_json::json!({}))
+                        }
+                    })
+                    .get(|| async { axum::Json(serde_json::json!({})) }),
+            );
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app)
+                .await
+                .expect("NVUE test server should run");
+        });
+        let client = NvueClient::new(NvueServerAddress::UnixSocket { socket_path })?;
+        let mut context = NvueClientContext::new(client);
+        // Seed the prior REST hash before exercising either publication path.
+        context.last_applied_hash = Some(7);
+
+        for (scenario, config, supplemental, use_rest) in [
+            // StartupFile rejection must precede cleanup or replacement of existing artifacts.
+            (
+                "supplemental StartupFile YAML",
+                &ordinary_config,
+                Some(oversized_patch.as_str()),
+                false,
+            ),
+            // REST must submit the same oversized supplemental content without applying a local file limit.
+            (
+                "supplemental REST YAML",
+                &ordinary_config,
+                Some(oversized_patch.as_str()),
+                true,
+            ),
+        ] {
+            // Exercise each real publication path without allowing a live container apply.
+            let flavor = if use_rest {
+                NvueUpdateFlavor::RestApi {
+                    nvue_context: &mut context,
+                }
+            } else {
+                NvueUpdateFlavor::StartupFile {
+                    hbn_root,
+                    skip_post: true,
+                }
+            };
+            let result = update_nvue(
+                VpcVirtualizationType::Fnn,
+                flavor,
+                config,
+                &test_service_addresses(),
+                HBNDeviceNames::hbn_23(),
+                supplemental,
+                None,
+            )
+            .await;
+
+            // Verify REST submits the complete content while StartupFile rejects before publication.
+            if use_rest {
+                assert!(!result?, "mocked no-diff revision must skip apply");
+                assert_eq!(publication_requests.load(Ordering::SeqCst), 1, "{scenario}");
+                let body = submitted_body.lock().await;
+                assert!(body.len() > MAX_EXPECTED_SIZE as usize);
+                let submitted: NvueConfig = serde_json::from_slice(&body)?;
+                let submitted_json: serde_json::Value = serde_json::from_slice(&body)?;
+                assert_eq!(
+                    submitted_json["system"]["hostname"],
+                    "x".repeat(MAX_EXPECTED_SIZE as usize + 1)
+                );
+                assert_eq!(context.last_applied_hash, Some(submitted.u64_hash()));
+            } else {
+                let error = result.expect_err("oversized startup YAML must stop publication");
+                assert!(
+                    format!("{error:#}").contains("NVUE configuration exceeds maximum size"),
+                    "{scenario}: {error:#}"
+                );
+                assert_eq!(publication_requests.load(Ordering::SeqCst), 0, "{scenario}");
+                assert_eq!(context.last_applied_hash, Some(7), "{scenario}");
+            }
+
+            // Neither publication path may change the pre-existing local artifacts in this scenario.
+            for path in &protected_paths {
+                assert_eq!(
+                    fs::read_to_string(path)?,
+                    "previous configuration",
+                    "{scenario}: {} changed",
+                    path.display()
+                );
+            }
+        }
+        server.abort();
+        Ok(())
+    }
+
+    /// Rejects DHCP files above 1 MiB on writes and previous-file reads so oversized DHCP
+    /// state cannot pass file staging or rollback preparation.
+    #[test]
+    fn dhcp_files_retain_existing_size_limit() -> eyre::Result<()> {
+        // Create a DHCP candidate one byte above 1 MiB in an empty directory.
+        let directory = tempfile::tempdir()?;
+        let path = FPath(directory.path().join("dhcp.yaml"));
+        let oversized = "x".repeat(1024 * 1024 + 1);
+        let update = DhcpFileUpdate::new(&path, Some(oversized.clone()))?;
+
+        // Verify the DHCP writer rejects the candidate before creating the live file.
+        assert!(update.write(update.next.as_deref()).is_err());
+        assert!(!path.0.exists());
+
+        // Seed an oversized live DHCP file using the same contents.
+        fs::write(&path, &oversized)?;
+
+        // Verify previous-file loading rejects oversized state before preparing rollback contents.
+        assert!(DhcpFileUpdate::new(&path, None).is_err());
+        Ok(())
+    }
+
+    /// Publishes NVUE YAML above 1 MiB and applies supplemental deletions so large configurations
+    /// remain readable during reconciliation and retain merge-patch support.
+    #[tokio::test]
+    async fn larger_nvue_configs_support_readback_and_supplemental_deletions() -> eyre::Result<()> {
+        // Use twelve profiles with 256 IPv6 actions each and ordinary host networking.
+        let config = large_conditional_export_config();
+        let directory = tempfile::tempdir()?;
+        let hbn_root = directory.path();
+        fs::create_dir_all(hbn_root.join("var/support"))?;
+        fs::create_dir_all(hbn_root.join("etc/cumulus/acl/policy.d"))?;
+
+        // Publish all twelve profiles within the NVUE startup-file budget.
+        assert!(
+            update_nvue(
+                VpcVirtualizationType::Fnn,
+                NvueUpdateFlavor::StartupFile {
+                    hbn_root,
+                    skip_post: true,
+                },
+                &config,
+                &test_service_addresses(),
+                HBNDeviceNames::hbn_23(),
+                None,
+                None,
+            )
+            .await?
+        );
+
+        // Read back an artifact above the former limit to prove the larger configuration persisted.
+        let published = read_limited(hbn_root.join(nvue::PATH), MAX_EXPECTED_SIZE)?;
+        assert!(published.len() > 1024 * 1024);
+        assert!(published.len() <= MAX_EXPECTED_SIZE as usize);
+        assert!(published.contains("EXPORT_RT_"));
+
+        // Reconcile the same response to exercise comparison against an existing large file.
+        assert!(
+            !update_nvue(
+                VpcVirtualizationType::Fnn,
+                NvueUpdateFlavor::StartupFile {
+                    hbn_root,
+                    skip_post: true,
+                },
+                &config,
+                &test_service_addresses(),
+                HBNDeviceNames::hbn_23(),
+                None,
+                None,
+            )
+            .await?
+        );
+
+        // Build a patch removing only conditional export maps, their prefix lists, and their VRF references.
+        let mut prefix_lists = serde_json::Map::new();
+        let mut route_maps = serde_json::Map::new();
+        let mut vrfs = serde_json::Map::new();
+        for interface in &config.tenant_interfaces {
+            let vrf = format!("vpc_{}", interface.vpc_vni);
+            let route_map = format!("EXPORT_RT_{vrf}_V6");
+            for index in 1..=256 {
+                prefix_lists.insert(format!("{route_map}_{index}"), serde_json::Value::Null);
+            }
+            route_maps.insert(route_map, serde_json::Value::Null);
+            vrfs.insert(
+                vrf,
+                serde_json::json!({
+                    "router": {"bgp": {"address-family": {
+                        "ipv6-unicast": {"route-export": {"to-evpn": {"route-map": null}}}
+                    }}}
+                }),
+            );
+        }
+        let supplemental = serde_json::json!({
+            "router": {"policy": {"prefix-list": prefix_lists, "route-map": route_maps}},
+            "vrf": vrfs,
+        })
+        .to_string();
+
+        // Publish the complete replacement after supplemental merging has removed those actions.
+        assert!(
+            update_nvue(
+                VpcVirtualizationType::Fnn,
+                NvueUpdateFlavor::StartupFile {
+                    hbn_root,
+                    skip_post: true,
+                },
+                &config,
+                &test_service_addresses(),
+                HBNDeviceNames::hbn_23(),
+                Some(&supplemental),
+                None,
+            )
+            .await?
+        );
+
+        // Read the saved artifact to prove the final document fits and retained VPC state survives.
+        let published = fs::read_to_string(hbn_root.join(nvue::PATH))?;
+        assert!(published.len() <= MAX_EXPECTED_SIZE as usize);
+        assert!(published.contains("vpc_2000:"));
+        assert!(!published.contains("EXPORT_RT_"));
+        Ok(())
+    }
+
+    /// Verifies admin updates force replacement only when the old file exceeds 1 MiB, bypassing
+    /// new-document size checks and bounded comparison reads so size limits cannot block saving
+    /// the admin configuration during release. Other updates retain the 10 MiB document guard.
+    #[tokio::test]
+    async fn nvue_size_guard_preserves_admin_recovery() -> eyre::Result<()> {
+        // Vary admin selection and file sizes while retaining the ordinary response-level profile fallback.
+        let mut config = netconf(
+            VpcVirtualizationType::Fnn,
+            32,
+            24,
+            false,
+            None,
+            false,
+            false,
+        );
+        // Set FNN explicitly because netconf preserves an omitted network_virtualization_type.
+        config.network_virtualization_type = Some(rpc::VpcVirtualizationType::Fnn as i32);
+
+        // Add supplemental content above 10 MiB without enabling conditional export targets.
+        let oversized_size = MAX_EXPECTED_SIZE as usize + 1;
+        let oversized_hostname = "x".repeat(oversized_size);
+        let oversized_patch = serde_json::json!({
+            "system": {"hostname": oversized_hostname.as_str()}
+        })
+        .to_string();
+        // Fix the original limit independently of the production constant to catch threshold changes.
+        let original_limit = 1024 * 1024;
+
+        for (scenario, previous_size, use_admin_network, oversized, should_replace) in [
+            // The original threshold is exclusive, so an admin update at exactly 1 MiB keeps the guard.
+            ("admin at original limit", original_limit, true, true, false),
+            // Crossing the original limit must force an admin write even below the new 10 MiB allowance.
+            (
+                "admin above original limit",
+                original_limit + 1,
+                true,
+                true,
+                true,
+            ),
+            // An admin replacement may exceed 10 MiB even when bounded comparison cannot read the old file.
+            (
+                "admin oversized replacement",
+                oversized_size,
+                true,
+                true,
+                true,
+            ),
+            // A bounded admin replacement must still recover an old file rejected by bounded comparison.
+            (
+                "admin bounded replacement",
+                oversized_size,
+                true,
+                false,
+                true,
+            ),
+            // An oversized old file cannot grant tenant updates the admin-only bypass.
+            (
+                "tenant oversized replacement",
+                oversized_size,
+                false,
+                true,
+                false,
+            ),
+        ] {
+            // Select admin or tenant networking independently for each candidate.
+            config.use_admin_network = use_admin_network;
+
+            // Seed exact old-file lengths independently; comparison does not parse previous YAML.
+            let directory = tempfile::tempdir()?;
+            let hbn_root = directory.path();
+            fs::create_dir_all(hbn_root.join("var/support"))?;
+            fs::create_dir_all(hbn_root.join("etc/cumulus/acl/policy.d"))?;
+            let startup = hbn_root.join(nvue::PATH);
+            let previous = "x".repeat(previous_size);
+            fs::write(&startup, &previous)?;
+
+            // Confirm old files above 10 MiB cannot pass the ordinary bounded comparison.
+            if previous_size > MAX_EXPECTED_SIZE as usize {
+                assert!(
+                    read_limited(&startup, MAX_EXPECTED_SIZE).is_err(),
+                    "{scenario}"
+                );
+            }
+
+            // Save the candidate without applying it to a container; these checks prove local file behavior.
+            let result = update_nvue(
+                VpcVirtualizationType::Fnn,
+                NvueUpdateFlavor::StartupFile {
+                    hbn_root,
+                    skip_post: true,
+                },
+                &config,
+                &test_service_addresses(),
+                HBNDeviceNames::hbn_23(),
+                oversized.then_some(oversized_patch.as_str()),
+                None,
+            )
+            .await;
+
+            if should_replace {
+                // Read the saved document to prove replacement retained admin configuration at either size.
+                assert!(result?, "{scenario}");
+                let saved = fs::read_to_string(&startup)?;
+                assert_eq!(
+                    saved.len() > MAX_EXPECTED_SIZE as usize,
+                    oversized,
+                    "{scenario}"
+                );
+                let saved_config: serde_yaml::Value = serde_yaml::from_str(&saved)?;
+                let saved_set = &saved_config[1]["set"];
+                assert!(saved_set["vrf"]["vpc_1002"].is_mapping(), "{scenario}");
+                assert_eq!(
+                    saved_set["interface"]["vlan1"]["ip"]["vrf"].as_str(),
+                    Some("vpc_1002"),
+                    "{scenario}"
+                );
+
+                // Compare the complete supplemental value so forced writes cannot silently truncate it.
+                if oversized {
+                    assert!(
+                        saved_set["system"]["hostname"].as_str()
+                            == Some(oversized_hostname.as_str()),
+                        "{scenario}: complete supplemental hostname must persist"
+                    );
+                }
+            } else {
+                // Reject an unforced oversized candidate without changing any previous startup-file content.
+                let error = result.expect_err("unforced oversized candidate must be rejected");
+                assert!(
+                    format!("{error:#}").contains("NVUE configuration exceeds maximum size"),
+                    "{scenario}: {error:#}"
+                );
+                assert_eq!(fs::read_to_string(&startup)?, previous, "{scenario}");
+            }
+        }
         Ok(())
     }
 
@@ -4424,6 +5036,7 @@ esac
     /// loopback, accepts a later service loopback for that VRF, and removes that loopback when the
     /// service endpoints depart.
     /// Also verifies MTU omission so service ports follow existing host-port rendering.
+    /// Equivalent conditional target orders on host and service ports must not cause a state mismatch.
     #[tokio::test]
     #[allow(deprecated)]
     async fn groups_service_endpoints_and_preserves_shared_vpc_state_on_removal() -> eyre::Result<()>
@@ -4452,10 +5065,49 @@ esac
             false,
         );
 
+        // Give host and service ports the same conditional targets in different orders.
+        let conditional_export = rpc::PrefixRouteTarget {
+            prefix: "0.0.0.0/0".into(),
+            match_type: rpc::ExportPrefixMatchType::Exact as i32,
+            route_targets: vec![
+                rpc_common::RouteTarget {
+                    asn: 64512,
+                    vni: Some(50000),
+                    vni_self: false,
+                },
+                rpc_common::RouteTarget {
+                    asn: 64512,
+                    vni: Some(50001),
+                    vni_self: false,
+                },
+            ],
+            ..Default::default()
+        };
+        config.tenant_interfaces[1]
+            .vpc_routing_profile
+            .as_mut()
+            .expect("host profile")
+            .route_targets_on_exports_by_prefix = vec![conditional_export.clone()];
+        for interface in &mut config.service_interfaces {
+            let mut reordered = conditional_export.clone();
+            reordered.route_targets.reverse();
+            interface
+                .vpc_routing_profile
+                .as_mut()
+                .expect("service profile")
+                .route_targets_on_exports_by_prefix = vec![reordered];
+        }
+
         // Render all endpoints and inspect their address set on the shared slot port.
         let output = render_startup_yaml(&config).await?;
         let documents: serde_yaml::Value = serde_yaml::from_str(&output)?;
         let set = &documents.as_sequence().expect("two YAML documents")[1]["set"];
+        // Equivalent target order must pass host/service validation and attach the shared VPC export map.
+        assert_eq!(
+            set["vrf"]["vpc_1025186"]["router"]["bgp"]["address-family"]["ipv4-unicast"]["route-export"]
+                ["to-evpn"]["route-map"],
+            "EXPORT_RT_vpc_1025186_V4"
+        );
         let service_port = &set["interface"]["iface_svc_0"];
         let addresses = service_port["ip"]["address"]
             .as_mapping()
@@ -5021,7 +5673,7 @@ esac
             vni_self: false,
         }];
         external_profile.route_targets_on_exports = vec![rpc_common::RouteTarget {
-            asn: 77_000,
+            asn: 57_000,
             vni: Some(88_000),
             vni_self: false,
         }];
@@ -5111,7 +5763,7 @@ esac
             std::collections::BTreeSet::from([
                 "11414:1500001".to_string(),
                 "11415:200".to_string(),
-                "77000:88000".to_string(),
+                "57000:88000".to_string(),
             ])
         );
         assert_eq!(
@@ -5675,6 +6327,163 @@ esac
                 ["vpc_7777"]["loopback"]["ip"]["address"]["2001:db8:9::4/128"]
                 .as_mapping()
                 .is_some()
+        );
+        Ok(())
+    }
+
+    /// Verifies routed admin renders existing gateway prefixes, PF DHCP/RA, and host routes
+    /// without a host-facing bridge or SVI, so enabling it preserves the client addressing contract.
+    /// Secondary admin service ports must retain link-prefix leaks because they use separate addressing.
+    #[tokio::test]
+    async fn routed_admin_preserves_subnet_addressing() -> eyre::Result<()> {
+        // Retain matching canonical and legacy addresses while selecting routed admin and host leaks.
+        let mut config = netconf(
+            VpcVirtualizationType::Fnn,
+            32,
+            24,
+            false,
+            None,
+            false,
+            false,
+        );
+        config.use_admin_network = true;
+        config.network_virtualization_type = Some(rpc::VpcVirtualizationType::Fnn.into());
+        let mut admin_interface = dual_stack_admin_interface();
+        admin_interface.is_l2_segment = false; // Route the existing /26 and /64 on the PF.
+        admin_interface.vpc_routing_profile = Some(rpc::RoutingProfile {
+            leak_tenant_host_routes_to_underlay: true, // Preserve the admin host-export policy.
+            ..Default::default()
+        });
+        config.admin_interface = Some(admin_interface);
+
+        // Render the complete response through the same startup-file path used by DPU OS agents.
+        let output = render_startup_yaml(&config).await?;
+        let documents: serde_yaml::Value = serde_yaml::from_str(&output)?;
+        let set = &documents.as_sequence().expect("two YAML documents")[1]["set"];
+        let host_port = &set["interface"]["pf0hpf_if"];
+
+        // Keep the existing gateway prefixes on the PF and remove the admin L2 attachment.
+        assert!(set.get("bridge").is_none());
+        assert!(set["interface"].get("vlan123").is_none());
+        assert!(host_port.get("bridge").is_none());
+        assert!(host_port["ip"].get("vrr").is_none());
+        assert_eq!(host_port["ip"]["vrf"].as_str(), Some("vpc_7777"));
+        assert_eq!(
+            host_port["ip"]["address"],
+            serde_yaml::from_str::<serde_yaml::Value>(
+                "10.217.4.65/26: {}\n2001:db8:100::/64: {}\n"
+            )?
+        );
+        assert!(set["vrf"]["vpc_7777"]["evpn"]["vni"]["7777"].is_mapping());
+
+        // Originate each host route through its local PF while preserving both EVPN exports.
+        let router = &set["vrf"]["vpc_7777"]["router"];
+        for (prefix, family) in [
+            // IPv4 must advertise the individual host rather than rely on the shared /26.
+            ("10.217.4.70/32", "ipv4-unicast"),
+            // IPv6 must retain a host /128 independently of the /64 advertised by RA.
+            ("2001:db8:100::70/128", "ipv6-unicast"),
+        ] {
+            assert_eq!(
+                router["static"][prefix],
+                serde_yaml::from_str::<serde_yaml::Value>(&format!(
+                    "address-family: {family}\nvia:\n  pf0hpf_if:\n    type: interface\n"
+                ))?
+            );
+            assert_eq!(
+                router["bgp"]["address-family"][family]["network"],
+                serde_yaml::from_str::<serde_yaml::Value>(&format!("{prefix}: {{}}\n"))?
+            );
+            assert_eq!(
+                router["bgp"]["address-family"][family]["route-export"]["to-evpn"]["enable"]
+                    .as_str(),
+                Some("on")
+            );
+        }
+
+        // Preserve the existing per-host IPv6 underlay leak instead of exporting the shared /64.
+        let prefix_lists = &set["router"]["policy"]["prefix-list"];
+        assert_eq!(
+            prefix_lists["ALLOW_TO_UNDERLAY_PREFIX_LIST_IPV6"]["rule"]["65002"]["match"],
+            serde_yaml::from_str::<serde_yaml::Value>("2001:db8:100::70/128: {}\n")?
+        );
+
+        // Emit stateful RA on the PF using the retained admin /64 rather than a /127 linknet.
+        let snippet = set["system"]["config"]["snippet"]["frr.conf"]
+            .as_str()
+            .expect("routed admin RA");
+        assert!(snippet.contains("interface pf0hpf_if vrf vpc_7777"));
+        assert!(!snippet.contains("interface vlan123 vrf vpc_7777"));
+        assert!(snippet.contains("ipv6 nd prefix 2001:db8:100::/64 no-autoconfig"));
+        assert!(
+            snippet
+                .lines()
+                .any(|line| line.trim() == "ipv6 nd managed-config-flag")
+        );
+
+        // Match the file-based DHCP listener and reservation to the PF without changing client masks.
+        let prepared = prepare_dhcp_server_config(
+            &config,
+            &test_service_addresses(),
+            &HBNDeviceNames::hbn_23(),
+        )?;
+        assert!(prepared.supervisor.contains("--interfaces pf0hpf_if "));
+        assert!(!prepared.supervisor.contains("--interfaces vlan123 "));
+        let host_config: HostConfig = serde_yaml::from_str(&prepared.host)?;
+        assert_eq!(host_config.host_ip_addresses.len(), 1);
+        let host_binding = host_config
+            .host_ip_addresses
+            .get("pf0hpf_if")
+            .expect("admin PF binding");
+        assert_eq!(
+            (
+                host_binding.address,
+                host_binding.gateway,
+                host_binding.prefix.as_deref()
+            ),
+            (
+                Some("10.217.4.70".parse()?),
+                Some("10.217.4.65".parse()?),
+                Some("10.217.4.64/26")
+            )
+        );
+        let ipv6_binding = host_binding
+            .ipv6
+            .as_ref()
+            .expect("stateful admin IPv6 binding");
+        assert_eq!(ipv6_binding.address, Some("2001:db8:100::70".parse()?));
+        assert_eq!(ipv6_binding.prefix, "2001:db8:100::70/128");
+
+        // Preserve the DPF DHCP control path's host PF listener for the same routed response.
+        let control_update = prepare_dhcp_grpc_update(
+            &config,
+            &test_service_addresses(),
+            HBNDeviceNames::hbn_23(),
+            None,
+        )?
+        .expect("primary admin DHCP update");
+        assert_eq!(control_update.interfaces, vec!["pf0hpf_if".to_string()]);
+
+        // Retain a service on a secondary Admin DPU, where the host PF is not rendered.
+        config.is_primary_dpu = false;
+        add_service_slot(&mut config, &["2001:db8:100:1::10/127"], None, None, false);
+        config.service_interfaces[0]
+            .vpc_routing_profile
+            .as_mut()
+            .expect("service routing profile")
+            .leak_tenant_host_routes_to_underlay = true;
+
+        // Render the secondary response and verify its service keeps the routed link-prefix leak.
+        let secondary_output = render_startup_yaml(&config).await?;
+        let secondary_documents: serde_yaml::Value = serde_yaml::from_str(&secondary_output)?;
+        let secondary_set = &secondary_documents
+            .as_sequence()
+            .expect("two YAML documents")[1]["set"];
+        assert!(secondary_set["interface"].get("pf0hpf_if").is_none());
+        assert_eq!(
+            secondary_set["router"]["policy"]["prefix-list"]["ALLOW_TO_UNDERLAY_PREFIX_LIST_IPV6"]
+                ["rule"]["65002"]["match"],
+            serde_yaml::from_str::<serde_yaml::Value>("2001:db8:100:1::10/127: {}\n")?
         );
         Ok(())
     }
@@ -6531,6 +7340,7 @@ esac
                 mtu: None,
                 ipv6_interface_config: None,
                 vpc_routing_profile: Some(rpc::RoutingProfile {
+                    route_targets_on_exports_by_prefix: vec![],
                     leak_default_route_from_underlay:
                         include_network_host_route_and_default_leaking,
                     leak_tenant_host_routes_to_underlay:
@@ -6736,6 +7546,7 @@ esac
                 mtu: None,
                 ipv6_interface_config: None,
                 vpc_routing_profile: Some(rpc::RoutingProfile {
+                    route_targets_on_exports_by_prefix: vec![],
                     leak_default_route_from_underlay:
                         include_network_host_route_and_default_leaking,
                     leak_tenant_host_routes_to_underlay:
@@ -6810,6 +7621,7 @@ esac
 
             // This should be ignored because we've defined the routing profile on the "flat interface" config.
             routing_profile: Some(rpc::RoutingProfile {
+                route_targets_on_exports_by_prefix: vec![],
                 leak_default_route_from_underlay: include_network_host_route_and_default_leaking,
                 leak_tenant_host_routes_to_underlay: include_network_host_route_and_default_leaking,
                 tenant_leak_communities_accepted: include_network_host_route_and_default_leaking,
@@ -6908,6 +7720,7 @@ esac
             dpu_extension_services: vec![],
             astra_config: None,
             use_admin_network_changed: None,
+            accepted_lldp_snapshot_fingerprint: None,
         }
     }
 
@@ -6931,8 +7744,8 @@ esac
 
         // check dhcp server
         let dhcp_path = hbn_root.join("etc/supervisor/conf.d/default-forge-dhcp-server.conf");
-        let dhcp_contents =
-            super::read_limited(&dhcp_path).wrap_err(format!("failed reading {dhcp_path:?}"))?;
+        let dhcp_contents = super::read_limited(&dhcp_path, MAX_DHCP_ACL_SIZE)
+            .wrap_err(format!("failed reading {dhcp_path:?}"))?;
         assert_eq!(dhcp_contents, crate::dhcp::TMPL_EMPTY);
         Ok(())
     }
@@ -7083,6 +7896,7 @@ esac
             // Global and per-VPC targets each contribute a separate rendered
             // entry, so use distinct values in this YAML syntax fixture.
             ct_routing_profile: Some(nvue::RoutingProfile {
+                route_targets_on_exports_by_prefix: vec![],
                 tenant_leak_communities_accepted: false,
                 leak_default_route_from_underlay: false,
                 leak_tenant_host_routes_to_underlay: false,
@@ -7141,7 +7955,7 @@ esac
         p1: P,
         expected: &str,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        let left_contents = super::read_limited(p1.as_ref())?;
+        let left_contents = fs::read_to_string(p1.as_ref())?;
         let left_contents = left_contents.as_str();
         let right_contents = expected;
         let r = crate::util::compare_lines(left_contents, right_contents, None);
@@ -7341,7 +8155,8 @@ esac
         );
     }
 
-    /// Verifies admin RA accepts only an FNN VLAN with a contained host `/128`.
+    /// Verifies admin RA requires FNN and a contained host `/128`, so the
+    /// containing segment is advertised without requiring a tenant `/127`.
     /// Primary-DPU/admin-mode gating remains at its sole production call site.
     #[test]
     #[allow(deprecated)]
@@ -7349,8 +8164,10 @@ esac
         use carbide_test_support::value_scenarios;
 
         let valid = dual_stack_admin_interface();
+        // Retain complete canonical IPv6 while omitting its deprecated sidecar.
         let mut canonical_only = valid.clone();
         canonical_only.ipv6_interface_config = None;
+        // Replace the individual host route with the shared segment to exercise validation.
         let mut invalid_host_route = valid.clone();
         invalid_host_route
             .addresses
@@ -7358,6 +8175,7 @@ esac
             .find(|address| address.address_family == i32::from(rpc::AddressFamily::V6))
             .expect("fixture should contain canonical IPv6")
             .interface_prefix = "2001:db8:100::/64".to_string();
+        // Keep the host address while replacing its containing segment with an unrelated prefix.
         let mut outside_segment = valid.clone();
         outside_segment
             .addresses
@@ -7372,7 +8190,6 @@ esac
                     .expect("test interface should contain canonical IPv6");
                 admin_ipv6_router_advertisement(
                     virtualization_type,
-                    &interface,
                     address,
                     &resolvers,
                 )
@@ -7391,7 +8208,7 @@ esac
                 )),
             }
             "non-FNN admin interface" {
-                // ETV has no supported admin VPC SVI RA path.
+                // ETV has no supported admin VPC RA path.
                 (VpcVirtualizationType::EthernetVirtualizer, valid) => None,
             }
             "non-host interface prefix" {
@@ -7652,6 +8469,7 @@ esac
             anycast_site_prefixes: vec!["5.255.255.0/24".to_string()],
             tenant_host_asn: Some(65100),
             routing_profile: Some(rpc::RoutingProfile {
+                route_targets_on_exports_by_prefix: vec![],
                 tenant_leak_communities_accepted: false,
                 leak_default_route_from_underlay: false,
                 leak_tenant_host_routes_to_underlay: false,
@@ -7715,6 +8533,7 @@ esac
             dpu_extension_services: vec![],
             astra_config: None,
             use_admin_network_changed: None,
+            accepted_lldp_snapshot_fingerprint: None,
         };
 
         // Include sibling backup files in the fixture's cleanup on every exit.
@@ -7779,14 +8598,15 @@ esac
                 // success
             }
         }
-        let dhcp_contents = super::read_limited(g.path())?;
+        let dhcp_contents = super::read_limited(g.path(), MAX_DHCP_ACL_SIZE)?;
         assert!(dhcp_contents.contains("vlan1"));
 
         let dhcp_config_received: DhcpConfig =
-            serde_yaml::from_str(&super::read_limited(h.path())?)?;
+            serde_yaml::from_str(&super::read_limited(h.path(), MAX_DHCP_ACL_SIZE)?)?;
         validate_dhcp_config(dhcp_config_received, dhcp_config);
 
-        let dhcp_host_config: HostConfig = serde_yaml::from_str(&super::read_limited(i.path())?)?;
+        let dhcp_host_config: HostConfig =
+            serde_yaml::from_str(&super::read_limited(i.path(), MAX_DHCP_ACL_SIZE)?)?;
         assert_eq!(
             dhcp_host_config
                 .host_ip_addresses
@@ -7861,15 +8681,16 @@ esac
             dhcpv6_server_preference: Some(0),
             ..Default::default()
         };
-        let dhcp_contents = super::read_limited(g.path())?;
+        let dhcp_contents = super::read_limited(g.path(), MAX_DHCP_ACL_SIZE)?;
         assert!(dhcp_contents.contains("vlan196"));
         assert!(dhcp_contents.contains("vlan185"));
 
         let dhcp_config_received: DhcpConfig =
-            serde_yaml::from_str(&super::read_limited(h.path())?)?;
+            serde_yaml::from_str(&super::read_limited(h.path(), MAX_DHCP_ACL_SIZE)?)?;
         validate_dhcp_config(dhcp_config_received, dhcp_config);
 
-        let dhcp_host_config: HostConfig = serde_yaml::from_str(&super::read_limited(i.path())?)?;
+        let dhcp_host_config: HostConfig =
+            serde_yaml::from_str(&super::read_limited(i.path(), MAX_DHCP_ACL_SIZE)?)?;
         assert!(
             dhcp_host_config
                 .host_ip_addresses
@@ -7957,6 +8778,7 @@ esac
             dpu_extension_services: vec![],
             astra_config: None,
             use_admin_network_changed: None,
+            accepted_lldp_snapshot_fingerprint: None,
         };
 
         let directory = tempfile::tempdir()?;

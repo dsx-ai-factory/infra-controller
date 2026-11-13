@@ -35,7 +35,9 @@ const (
 // Settings is the nico-api client configuration.
 type Settings struct {
 	CertDir string
-	Spiffe  SpiffeSettings
+	// Spiffe is the SPIFFE settings the client enforces on the mounted certificate at every credential load, including each handshake reload, so a certificate that
+	// stops naming the write service is refused rather than used.
+	Spiffe SpiffeSettings
 	// ServerName is the TLS server name nico-api's certificate is verified against. OPEN (spec-E section 11): the Rust default was not traced; set from config, never
 	// guessed here.
 	ServerName string
@@ -60,8 +62,9 @@ type Client struct {
 }
 
 // Dial builds a nico-api client that presents the mounted client certificate over verified TLS. It refuses a URL the records reader refuses, the override that turns
-// verification off, and a key that does not load or match. The pair is re-read for each connection, which fails rather than connecting without a certificate when the
-// pair no longer loads: nico-api accepts a TLS client with no certificate, so an unloadable key must never send writes anonymously.
+// verification off, a key that does not load or match, and a certificate that does not name the write service, so a wrong identity is named at startup rather than as an
+// opaque call failure later. The pair is re-read and re-checked for each connection, which fails rather than connecting without a valid certificate when the pair no
+// longer loads or no longer names the write service: nico-api accepts a TLS client with no certificate, so an unloadable or misnamed pair must never send writes.
 func Dial(apiURL string, s Settings) (*Client, error) {
 	if reason := inventory.CheckedAPIURL(apiURL); reason != "" {
 		return nil, errors.New(reason)
@@ -70,6 +73,13 @@ func Dial(apiURL string, s Settings) (*Client, error) {
 		return nil, errors.New(tlsOverride + " is set: scale tests talk to nico-api only over verified TLS")
 	}
 	if err := CheckKeyPairFiles(s.certPath(), s.keyPath()); err != nil {
+		return nil, err
+	}
+	cert, err := readFile(s.certPath())
+	if err != nil {
+		return nil, err
+	}
+	if _, err := CheckIdentity(cert, s.Spiffe); err != nil {
 		return nil, err
 	}
 	creds, err := transportCreds(s)
@@ -85,8 +95,8 @@ func Dial(apiURL string, s Settings) (*Client, error) {
 	return &Client{conn, corev1.NewForgeClient(conn), rpcTimeout}, nil
 }
 
-// transportCreds verifies the server against ca.crt and reloads the client pair on every handshake; a reload error aborts the handshake, so nothing is sent without a
-// certificate.
+// transportCreds verifies the server against ca.crt and reloads the client pair on every handshake. The reload re-checks the certificate's SPIFFE identity, so a
+// certificate that no longer names the write service, or a key that no longer loads or matches, aborts the handshake: nothing is ever sent without a valid identity.
 func transportCreds(s Settings) (credentials.TransportCredentials, error) {
 	caPEM, err := readFile(s.caPath())
 	if err != nil {
@@ -104,6 +114,9 @@ func transportCreds(s Settings) (credentials.TransportCredentials, error) {
 			cert, err := os.ReadFile(s.certPath())
 			if err != nil {
 				return nil, errors.New("the client certificate could not be read")
+			}
+			if _, err := CheckIdentity(cert, s.Spiffe); err != nil {
+				return nil, err
 			}
 			key, err := os.ReadFile(s.keyPath())
 			if err != nil {

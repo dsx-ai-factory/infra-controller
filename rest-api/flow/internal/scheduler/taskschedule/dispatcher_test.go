@@ -195,6 +195,10 @@ func (m *mockTaskStore) ListPowerTasksForRack(_ context.Context, _ uuid.UUID) ([
 	panic("mockTaskStore.ListPowerTasksForRack: not implemented")
 }
 
+func (m *mockTaskStore) ListFirmwareTasksForRack(_ context.Context, _ uuid.UUID) ([]taskdef.FirmwareTaskDetails, error) {
+	panic("mockTaskStore.ListFirmwareTasksForRack: not implemented")
+}
+
 func (m *mockTaskStore) LatestLeakageShutdownTaskStatuses(
 	_ context.Context,
 	_ []uuid.UUID,

@@ -93,6 +93,36 @@ Usage: {{ include "scale-test.positiveSeconds" (dict "key" "testBudget.x" "value
 {{- end -}}
 
 {{/*
+count validates a whole count of 0 or more, accepting Helm's --set int64,
+YAML's float64 and a string of digits, and rejecting an omitted (empty or
+null), fractional, negative or non-numeric one: an explicit 0 is kept and
+nothing is coerced. Returns the count as canonical digits.
+Usage: {{ include "scale-test.count" (dict "key" "inventory.expected.hosts" "value" $v) }}
+*/}}
+{{- define "scale-test.count" -}}
+{{- $s := toString .value -}}
+{{- if kindIs "float64" .value -}}
+{{- $s = ternary (printf "%.0f" .value) "-" (eq .value (floor .value)) -}}
+{{- end -}}
+{{- if not (regexMatch "^(0|[1-9][0-9]{0,18})$" $s) -}}
+{{- fail (printf "%s must be a whole count of 0 or more" .key) -}}
+{{- end -}}
+{{- $s -}}
+{{- end -}}
+
+{{/*
+The store ingestion delay, whole seconds from 0 to 44: the store client needs
+it under half its 90 s summary timeout.
+*/}}
+{{- define "scale-test.ingestionDelay" -}}
+{{- $delay := toString .Values.store.ingestionDelaySeconds -}}
+{{- if not (regexMatch "^([0-9]|[1-3][0-9]|4[0-4])$" $delay) -}}
+{{- fail (printf "store.ingestionDelaySeconds must be a whole number of seconds from 0 to 44, got %q" $delay) -}}
+{{- end -}}
+{{- $delay -}}
+{{- end -}}
+
+{{/*
 Job deadline, in seconds.
 */}}
 {{- define "scale-test.jobDeadline" -}}

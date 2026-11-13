@@ -58,6 +58,7 @@ use std::convert::identity;
 use std::sync::Arc;
 use std::time::Duration;
 
+use bmc_platform::ServiceRootIdentity;
 use chassis::ExploredChassisCollection;
 use component_integrity::ExploredComponentIntegrity;
 use computer_system::ExploredComputerSystem;
@@ -69,7 +70,8 @@ use mac_address::MacAddress;
 use manager::ExploredManager;
 use model::site_explorer::{
     ComputerSystem, EndpointExplorationReport, EndpointType, InternalLockdownStatus,
-    LockdownStatus, MachineSetupDiff, MachineSetupStatus, derive_hardware_class,
+    LockdownStatus, MachineSetupDiff, MachineSetupStatus, ServiceRoot as ModelServiceRoot,
+    derive_hardware_class,
 };
 use nv_redfish::assembly::Model as AssemblyModel;
 use nv_redfish::computer_system::BootOption;
@@ -97,6 +99,22 @@ pub enum ErrorClass {
 }
 
 pub type ErrorClassifier<'a, B> = &'a (dyn Fn(&<B as Bmc>::Error) -> Option<ErrorClass> + Sync);
+
+/// The [`ErrorClassifier`] for nv-redfish's HTTP client.
+pub fn nv_redfish_error_class(
+    error: &nv_redfish::bmc_http::reqwest::BmcError,
+) -> Option<ErrorClass> {
+    match error {
+        nv_redfish::bmc_http::reqwest::BmcError::InvalidResponse { status, .. } => {
+            match status.as_u16() {
+                404 => Some(ErrorClass::NotFound),
+                500 => Some(ErrorClass::InternalServerError),
+                _ => None,
+            }
+        }
+        _ => None,
+    }
+}
 
 fn is_bluefield_system_id(id: &str) -> bool {
     matches!(id, "Bluefield" | "BlueField_0")
@@ -146,6 +164,7 @@ fn build_chassis_explore_config<B: Bmc>(root: &ServiceRoot<B>) -> chassis::Confi
                 model.is_some_and(|model| {
                     hw::vera_rubin::chassis_assembly_serial_model(model.into_inner())
                 }) || model == Some(AssemblyModel::new("GB200 NVL"))
+                    || model == Some(AssemblyModel::new("Titania-Bianca Compute Tray PDB"))
             })
         },
         // BlueField-3 DPU (Tested on BF-25.10-9 firmware) has issue
@@ -324,6 +343,7 @@ pub async fn nv_generate_exploration_report<B: Bmc>(
             },
             hw::HwType::LenovoAmi => manager::Config {
                 need_oem_ami_config_bmc: true,
+                need_host_interfaces: true,
                 ..Default::default()
             },
             hw::HwType::LenovoGb300 => manager::Config {
@@ -457,6 +477,7 @@ pub async fn nv_generate_exploration_report<B: Bmc>(
         component_integrities: component_integrities.entries,
         component_integrity_unavailable: component_integrities.unavailable,
         vendor: hw_type.and_then(|hw_type| hw_type.bmc_vendor()),
+        service_root: Some(service_root(&root)),
         hardware_class: Some(hardware_class),
         versions: HashMap::default(),
         model: None,
@@ -465,7 +486,6 @@ pub async fn nv_generate_exploration_report<B: Bmc>(
         machine_setup_status: Some(machine_setup_status),
         secure_boot_status,
         lockdown_status,
-        remediation_error: None,
         ..Default::default()
     })
 }
@@ -533,6 +553,7 @@ async fn build_powershelf_report<B: Bmc>(
         component_integrities: component_integrities.entries,
         component_integrity_unavailable: component_integrities.unavailable,
         vendor: hw_type.bmc_vendor(),
+        service_root: Some(service_root(root)),
         hardware_class: Some(hardware_class),
         versions: HashMap::default(),
         model: None,
@@ -545,13 +566,40 @@ async fn build_powershelf_report<B: Bmc>(
         }),
         secure_boot_status: None,
         lockdown_status: None,
-        remediation_error: None,
         ..Default::default()
     })
 }
 
 /// The class recorded for an endpoint: the host system's reported identity,
 /// with the service root standing in for the fields it left empty.
+/// The service root fields the report records.
+fn service_root<B: Bmc>(root: &ServiceRoot<B>) -> ModelServiceRoot {
+    ModelServiceRoot {
+        vendor: root.vendor().map(|vendor| vendor.into_inner().to_string()),
+        product: root
+            .product()
+            .map(|product| product.into_inner().to_string()),
+        oem_keys: root
+            .root
+            .oem
+            .as_ref()
+            .and_then(|oem| oem.additional_properties.as_object())
+            .map(|oem| oem.keys().cloned().collect())
+            .unwrap_or_default(),
+    }
+}
+
+/// The service root part of the identity driver selection matches on, read
+/// from `root` directly. It is all a BMC in factory state serves.
+pub fn service_root_identity<B: Bmc>(root: &ServiceRoot<B>) -> ServiceRootIdentity {
+    let root = service_root(root);
+    ServiceRootIdentity {
+        vendor: root.vendor,
+        product: root.product,
+        oem_keys: root.oem_keys,
+    }
+}
+
 fn hardware_class<B: Bmc>(root: &ServiceRoot<B>, system: &ComputerSystem) -> String {
     derive_hardware_class(
         Some(system),
@@ -763,51 +811,13 @@ fn lockdown_status<B: Bmc>(
                 .as_ref()
                 .ok_or_else(Error::bmc_not_provided("AMI Manager ConfigBMC"))?;
             let attrs = config_bmc.raw();
-            let descr = [
-                (
-                    "LockoutHostControl",
-                    attrs
-                        .lockout_host_control
-                        .map(|v| v == LockoutHostControlState::Enable),
-                ),
-                (
-                    "LockoutBiosVariableWriteMode",
-                    attrs
-                        .lockout_bios_variable_write_mode
-                        .map(|v| v == LockoutBiosVariableWriteMode::Enable),
-                ),
-                (
-                    "LockdownBiosSettingsChange",
-                    attrs
-                        .lockdown_bios_settings_change
-                        .map(|v| v == LockdownBiosSettingsChangeState::Enable),
-                ),
-                (
-                    "LockdownBiosUpgradeDowngrade",
-                    attrs
-                        .lockdown_bios_upgrade_downgrade
-                        .map(|v| v == LockdownBiosUpgradeDowngradeState::Enable),
-                ),
-            ];
-            let all_enabled = descr.iter().filter_map(|v| v.1).all(identity);
-            let all_disabled = descr.iter().filter_map(|v| v.1).all(|v| !v);
-            let status = if all_enabled {
-                InternalLockdownStatus::Enabled
-            } else if all_disabled {
-                InternalLockdownStatus::Disabled
-            } else {
-                InternalLockdownStatus::Partial
-            };
-            let message = descr
-                .iter()
-                .filter_map(|(name, enabled)| {
-                    enabled.map(|enabled| {
-                        format!("{name}={}", if enabled { "Enable" } else { "Disable" })
-                    })
-                })
-                .join(", ");
-
-            Ok(Some(LockdownStatus { status, message }))
+            let interface = explored_manager
+                .host_interfaces
+                .as_ref()
+                .ok_or_else(Error::bmc_not_provided("host interfaces"))?
+                .first()
+                .map(|interface| interface.interface_enabled().unwrap_or(true));
+            Ok(Some(lenovo_ami_lockdown_status(&attrs, interface)))
         }
 
         hw::HwType::Lenovo => {
@@ -958,6 +968,57 @@ fn lockdown_status<B: Bmc>(
 
         _ => Ok(None),
     }
+}
+
+fn lenovo_ami_lockdown_status(
+    attrs: &nv_redfish::oem::ami::schema::ami_manager::ConfigBmc,
+    interface: Option<bool>,
+) -> LockdownStatus {
+    let descr = [
+        (
+            "LockoutHostControl",
+            attrs
+                .lockout_host_control
+                .map(|v| v == LockoutHostControlState::Enable),
+        ),
+        (
+            "LockoutBiosVariableWriteMode",
+            attrs
+                .lockout_bios_variable_write_mode
+                .map(|v| v == LockoutBiosVariableWriteMode::Enable),
+        ),
+        (
+            "LockdownBiosSettingsChange",
+            attrs
+                .lockdown_bios_settings_change
+                .map(|v| v == LockdownBiosSettingsChangeState::Enable),
+        ),
+        (
+            "LockdownBiosUpgradeDowngrade",
+            attrs
+                .lockdown_bios_upgrade_downgrade
+                .map(|v| v == LockdownBiosUpgradeDowngradeState::Enable),
+        ),
+    ];
+    let all_enabled =
+        descr.iter().all(|(_, value)| *value == Some(true)) && interface == Some(false);
+    let all_disabled =
+        descr.iter().all(|(_, value)| *value == Some(false)) && interface == Some(true);
+    let status = if all_enabled {
+        InternalLockdownStatus::Enabled
+    } else if all_disabled {
+        InternalLockdownStatus::Disabled
+    } else {
+        InternalLockdownStatus::Partial
+    };
+    let message = descr
+        .iter()
+        .filter_map(|(name, enabled)| {
+            enabled.map(|enabled| format!("{name}={}", if enabled { "Enable" } else { "Disable" }))
+        })
+        .join(", ");
+    let message = format!("{message}, host_interface={interface:?}");
+    LockdownStatus { status, message }
 }
 
 /// WARNING: KCS is not represented: it is neither configurable nor readable over
@@ -1477,9 +1538,36 @@ mod tests {
     use super::hw::HwType;
     use super::{
         InternalLockdownStatus, Product, giga_computing_ami_lockdown_status, is_bf4_product,
-        should_fetch_bf4_chassis_except_irot_nic, should_fetch_supplemental_network_adapter_ports,
-        should_use_network_adapter_port_fallback,
+        lenovo_ami_lockdown_status, should_fetch_bf4_chassis_except_irot_nic,
+        should_fetch_supplemental_network_adapter_ports, should_use_network_adapter_port_fallback,
     };
+
+    #[test]
+    fn lenovo_ami_lockdown_requires_config_and_host_interface_to_agree() {
+        for (value, interface, expected) in [
+            ("Enable", Some(false), InternalLockdownStatus::Enabled),
+            ("Disable", Some(true), InternalLockdownStatus::Disabled),
+            ("Enable", Some(true), InternalLockdownStatus::Partial),
+            ("Disable", Some(false), InternalLockdownStatus::Partial),
+            ("Disable", None, InternalLockdownStatus::Partial),
+        ] {
+            let attrs = serde_json::from_value(serde_json::json!({
+                "@odata.id": "/redfish/v1/Managers/Self/Oem/ConfigBMC",
+                "LockoutHostControl": value,
+                "LockoutBiosVariableWriteMode": value,
+                "LockdownBiosSettingsChange": value,
+                "LockdownBiosUpgradeDowngrade": value,
+            }))
+            .unwrap();
+            let status = lenovo_ami_lockdown_status(&attrs, interface);
+            assert_eq!(status.status, expected, "{value}, {interface:?}");
+            assert!(
+                status
+                    .message
+                    .contains(&format!("host_interface={interface:?}"))
+            );
+        }
+    }
 
     /// Build a host interface schema from the JSON a Giga Computing BMC returns
     /// for `Managers/Self/HostInterfaces/Self`, keeping only the lockdown fields.
