@@ -731,7 +731,12 @@ pub(crate) async fn attest_quote(
     // continue (the event log goes with, since it will be
     // logged in the event of an invalid signature or PCR
     // hash mismatch).
-    crate::attestation::verify_quote_state(signature_valid, pcr_hash_matches, &request.event_log)?;
+    crate::attestation::verify_quote_state(
+        &api.instrumentation,
+        signature_valid,
+        pcr_hash_matches,
+        &request.event_log,
+    )?;
 
     // If we've reached this point, we can now clean up
     // now ephemeral secret data from the database, and send
