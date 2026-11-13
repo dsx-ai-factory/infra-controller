@@ -48,6 +48,12 @@ fn outcome(outcome: i32) -> &'static str {
         Ok(SpdmSchedulingOutcome::NoProfile) => {
             "nothing scheduled: neither this class nor any has a profile"
         }
+        Ok(SpdmSchedulingOutcome::IndividualAttesterTriggerMatchedNothing) => {
+            "nothing scheduled: the manual trigger's regex matched no eligible attester"
+        }
+        Ok(SpdmSchedulingOutcome::IndividualAttesterTriggerScheduled) => {
+            "scheduled using the manual trigger's regex"
+        }
         Ok(SpdmSchedulingOutcome::Unspecified) | Err(_) => {
             "unknown to this client; the server is newer"
         }

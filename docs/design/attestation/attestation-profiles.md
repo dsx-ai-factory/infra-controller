@@ -1080,11 +1080,13 @@ message SpdmMachineAttestationTriggerResponse {
   optional string profile_version = 6;
   optional google.protobuf.Timestamp started_at = 7;
   common.UUID job_id = 8;
+  repeated string attester_ids = 9;
+  optional string attester_id_regex = 10;
 }
 ```
 
-`outcome` is an enum of the §5.3 values rather than a string, so the schema
-carries them and a client switching on it is exhaustive:
+`outcome` is an enum of the §5.3 profile outcomes and the manual-trigger outcomes
+below, so the schema carries them and a client switching on it is exhaustive:
 
 ```protobuf
 enum SpdmSchedulingOutcome {
@@ -1098,8 +1100,17 @@ enum SpdmSchedulingOutcome {
   SPDM_SCHEDULING_OUTCOME_CLASS_NOT_RECORDED = 5;
   SPDM_SCHEDULING_OUTCOME_NO_PROFILE = 6;
   SPDM_SCHEDULING_OUTCOME_PARTIALLY_SATISFIED = 7;
+  SPDM_SCHEDULING_OUTCOME_INDIVIDUAL_ATTESTER_TRIGGER_MATCHED_NOTHING = 8;
+  SPDM_SCHEDULING_OUTCOME_INDIVIDUAL_ATTESTER_TRIGGER_SCHEDULED = 9;
 }
 ```
+
+With `attester_id_regex`, eligible devices selected by the regex report
+`IndividualAttesterTriggerScheduled`. If eligible devices exist but none match,
+the outcome is `IndividualAttesterTriggerMatchedNothing` and no job is created.
+An absent component-integrity collection or no eligible devices still reports
+`NoAttestersFound`. The regex can select one or several devices; these outcomes
+identify manual selection rather than the number of selected devices.
 
 `used_any_fallback` is needed separately because `resolved_hardware_class`
 reports the machine's class either way, so without it the response cannot
@@ -1111,14 +1122,15 @@ from a count whether it was applied.
 separately does not answer this: profiles are editable, so the one an operator
 reads before or after a trigger may not be the one that ran. It is `optional`
 because `class_not_recorded` and `no_profile` are reached before any profile
-applies, so they have no version to report, and an empty string would read as
-unknown rather than none.
+applies, and manual regex overrides apply no profile. They have no version to
+report, and an empty string would read as unknown rather than none.
 
 It answers "which policy produced this response", not "which policy the machine
 is attesting under".
 
 `job_id` identifies the scheduling attempt. It is present only when devices
-were scheduled, including a `PartiallySatisfied` outcome. Use it with
+were scheduled, including `PartiallySatisfied` and
+`IndividualAttesterTriggerScheduled` outcomes. Use it with
 `GetAttestation` to read that job's device details in
 `SpdmGetAttestationResponse`, with `WaiveAttestation` to request a waiver,
 or with `FailAttestation` to request failure. Either request may replace the
@@ -1171,10 +1183,24 @@ struct AttestationScheduled {
 }
 ```
 
-`outcome` is a fixed enum of the §5.3 values, and `profile_source` a three-value
-enum: the class's own profile, the `any` fallback, or neither, which keeps
-`ClassNotRecorded` and `NoProfile` from reading as a profile an operator never
-wrote. Both are safe as labels, and they are the only two. `profile_source`
+`outcome` is a fixed enum of the §5.3 profile outcomes and the §8 manual-trigger
+outcomes. Manual regex selection reports
+`individual_attester_trigger_scheduled` when devices are scheduled, or
+`individual_attester_trigger_matched_nothing` when eligible devices exist but
+none match. These values separate manual selection from profile-driven
+`scheduled` and `policy_matched_nothing` attempts.
+
+`profile_source` is `class`, `any_fallback`, or `unprofiled`. It describes the
+profile that supplied the selection, rather than whether a profile is stored
+for the machine. Manual overrides always report `unprofiled`, even when the
+machine has a valid profile, because the regex replaces that profile's selection.
+`NoAttestersFound` remains the outcome when discovery exposes no eligible
+devices, including for manual overrides; it reports an inventory limitation
+rather than an unsuccessful regex match. An override with that outcome is also
+`unprofiled`. Database and BMC errors propagate without emitting this settled
+scheduling event; an empty selection emits the event but creates no job.
+
+Both labels are bounded, and they are the only two. `profile_source`
 earns its place because a class re-keyed by changed BMC reporting (§5.2) drops
 onto the `any` fallback and keeps reporting `Scheduled`, so the outcome alone
 cannot tell a machine attesting what its operator asked for from one attesting

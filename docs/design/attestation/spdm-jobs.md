@@ -108,11 +108,16 @@ Empty or invalid patterns are rejected before contacting the BMC. Device
 enablement, SPDM type/version checks, and site-wide SPDM enablement still apply.
 
 The trigger prints the applied regex for an override, the scheduled attester IDs
-in ascending order, and the job ID. No eligible match creates no job:
+in ascending order, and the job ID. A matching override reports
+`IndividualAttesterTriggerScheduled`. No eligible match creates no job:
 `NoAttestersFound` means discovery found no eligible devices, while
-`PolicyMatchedNothing` means eligible devices existed but none matched the
-regex. Inspect the targeted run through its job ID; machine assessment still
-uses the current profile's selection.
+`IndividualAttesterTriggerMatchedNothing` means eligible devices existed but
+none matched the regex. Manual overrides apply no profile, so their scheduling
+events report `profile_source=unprofiled` even when a profile exists. The distinct
+manual outcomes separate successful selection and unmatched regexes from
+profile-driven `Scheduled` and `PolicyMatchedNothing` attempts. Inspect the
+targeted run through its job ID; machine assessment still uses the current
+profile's selection.
 
 ### Inspect, fail, or waive a run: `job`
 

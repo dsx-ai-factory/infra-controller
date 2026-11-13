@@ -65,6 +65,10 @@ pub enum SchedulingOutcome {
     ClassNotRecorded,
     /// Neither the machine's class nor `any` has a profile.
     NoProfile,
+    /// Eligible attesters existed, but none matched the manual trigger's regex.
+    IndividualAttesterTriggerMatchedNothing,
+    /// Eligible attesters were selected by the manual trigger's regex.
+    IndividualAttesterTriggerScheduled,
 }
 
 /// Which lookup supplied the profile.
@@ -817,9 +821,9 @@ async fn select_attesters_by_regex(
         .cloned()
         .collect();
     selection.outcome = if selection.attesters.is_empty() {
-        SchedulingOutcome::PolicyMatchedNothing
+        SchedulingOutcome::IndividualAttesterTriggerMatchedNothing
     } else {
-        SchedulingOutcome::Scheduled
+        SchedulingOutcome::IndividualAttesterTriggerScheduled
     };
     Ok(selection)
 }
@@ -865,6 +869,7 @@ async fn discover_component_integrities(
 
 #[cfg(test)]
 mod test {
+    use carbide_instrument::testing::MetricsCapture;
     use carbide_test_support::value_scenarios;
     use libredfish::model::component_integrity::{ComponentIntegrities, ComponentIntegrity};
 
@@ -962,6 +967,44 @@ mod test {
             // MachineAttesterSelection::unprofiled, which records no version.
             "neither lookup yielded a profile" {
                 (None, false) => ProfileSource::Unprofiled,
+            }
+        );
+    }
+
+    #[test]
+    fn manual_triggers_count_their_own_outcomes_without_applying_a_profile() {
+        let machine_id = "fm100hsag07peffp850l14kvmhrqjf9h6jslilfahaknhvb6sq786c0g3jg"
+            .parse()
+            .unwrap();
+        value_scenarios!(
+            run = |(outcome, outcome_label): (SchedulingOutcome, &str)| {
+                let result = SchedulingResult {
+                    outcome,
+                    hardware_class: String::new(),
+                    used_any_fallback: false,
+                    profile_version: None,
+                    started_at: None,
+                    job_id: None,
+                    devices_scheduled: 0,
+                    attester_ids: Vec::new(),
+                };
+                // Check the emitted counter, rather than just the enum's spelling.
+                let metrics = MetricsCapture::start();
+                result.emit_scheduling_event(machine_id);
+                metrics.counter_delta(
+                    "carbide_attestation_scheduling_total",
+                    &[("outcome", outcome_label), ("profile_source", "unprofiled")],
+                )
+            };
+
+            "a matching manual regex" {
+                (SchedulingOutcome::IndividualAttesterTriggerScheduled,
+                 "individual_attester_trigger_scheduled") => 1.0,
+            }
+
+            "eligible devices exist but none match the manual regex" {
+                (SchedulingOutcome::IndividualAttesterTriggerMatchedNothing,
+                 "individual_attester_trigger_matched_nothing") => 1.0,
             }
         );
     }

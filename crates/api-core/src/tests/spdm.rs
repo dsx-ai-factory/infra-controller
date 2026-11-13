@@ -430,7 +430,7 @@ pub(in crate::tests) mod tests {
                 },
                 // The simulator also reports disabled and non-SPDM entries with this ID.
                 attester_id_regex: Some("^HGX_IRoT_GPU_1$"),
-                expect_outcome: SpdmSchedulingOutcome::Scheduled,
+                expect_outcome: SpdmSchedulingOutcome::IndividualAttesterTriggerScheduled,
                 expect_attester_ids: &["HGX_IRoT_GPU_1"],
                 expect_fallback: false,
             },
@@ -438,7 +438,7 @@ pub(in crate::tests) mod tests {
                 scenario: "an unanchored regex selects multiple devices without a profile",
                 reprofile: Vec::new,
                 attester_id_regex: Some("GPU_[02]$"),
-                expect_outcome: SpdmSchedulingOutcome::Scheduled,
+                expect_outcome: SpdmSchedulingOutcome::IndividualAttesterTriggerScheduled,
                 expect_attester_ids: &["HGX_IRoT_GPU_0", "HGX_IRoT_GPU_2"],
                 expect_fallback: false,
             },
@@ -446,7 +446,7 @@ pub(in crate::tests) mod tests {
                 scenario: "an unmatched regex does not fall back to the profile",
                 reprofile: || vec![(MOCK_HOST_HARDWARE_CLASS.to_string(), gpu_allowlist())],
                 attester_id_regex: Some("^NOT_PRESENT$"),
-                expect_outcome: SpdmSchedulingOutcome::PolicyMatchedNothing,
+                expect_outcome: SpdmSchedulingOutcome::IndividualAttesterTriggerMatchedNothing,
                 expect_attester_ids: &[],
                 expect_fallback: false,
             },
@@ -2657,7 +2657,10 @@ pub(in crate::tests) mod tests {
                     ))
                     .await?
                     .into_inner();
-                assert_eq!(trigger.outcome(), SpdmSchedulingOutcome::Scheduled);
+                assert_eq!(
+                    trigger.outcome(),
+                    SpdmSchedulingOutcome::IndividualAttesterTriggerScheduled
+                );
                 assert_eq!(trigger.devices_under_attestation, 1);
                 assert_eq!(trigger.attester_ids, ["HGX_IRoT_GPU_2"]);
                 assert_eq!(trigger.attester_id_regex.as_deref(), Some(pattern));

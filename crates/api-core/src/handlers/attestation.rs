@@ -175,6 +175,12 @@ fn reported_outcome(outcome: SchedulingOutcome) -> rpc::SpdmSchedulingOutcome {
         SchedulingOutcome::PolicyMatchedNothing => rpc::SpdmSchedulingOutcome::PolicyMatchedNothing,
         SchedulingOutcome::ClassNotRecorded => rpc::SpdmSchedulingOutcome::ClassNotRecorded,
         SchedulingOutcome::NoProfile => rpc::SpdmSchedulingOutcome::NoProfile,
+        SchedulingOutcome::IndividualAttesterTriggerMatchedNothing => {
+            rpc::SpdmSchedulingOutcome::IndividualAttesterTriggerMatchedNothing
+        }
+        SchedulingOutcome::IndividualAttesterTriggerScheduled => {
+            rpc::SpdmSchedulingOutcome::IndividualAttesterTriggerScheduled
+        }
     }
 }
 
@@ -439,11 +445,17 @@ async fn assess_machine_attestation(
     };
     // Selection success reports what was selected, without implying a job was scheduled.
     let attester_selection_status = match selection.outcome {
-        SchedulingOutcome::Scheduled => AttesterSelectionStatus::Selected,
+        // Assessment uses profile selection; keep its statuses independent of trigger origin.
+        SchedulingOutcome::Scheduled | SchedulingOutcome::IndividualAttesterTriggerScheduled => {
+            AttesterSelectionStatus::Selected
+        }
         SchedulingOutcome::PartiallySatisfied => AttesterSelectionStatus::PartiallySatisfied,
         SchedulingOutcome::AttestationDisabled => AttesterSelectionStatus::Disabled,
         SchedulingOutcome::NoAttestersFound => AttesterSelectionStatus::NoAttestersFound,
-        SchedulingOutcome::PolicyMatchedNothing => AttesterSelectionStatus::PolicyMatchedNothing,
+        SchedulingOutcome::PolicyMatchedNothing
+        | SchedulingOutcome::IndividualAttesterTriggerMatchedNothing => {
+            AttesterSelectionStatus::PolicyMatchedNothing
+        }
         SchedulingOutcome::ClassNotRecorded => AttesterSelectionStatus::ClassNotRecorded,
         SchedulingOutcome::NoProfile => AttesterSelectionStatus::NoProfile,
     };
@@ -847,6 +859,8 @@ mod tests {
             SchedulingOutcome::PolicyMatchedNothing,
             SchedulingOutcome::ClassNotRecorded,
             SchedulingOutcome::NoProfile,
+            SchedulingOutcome::IndividualAttesterTriggerMatchedNothing,
+            SchedulingOutcome::IndividualAttesterTriggerScheduled,
         ]
         .map(|outcome| {
             let wire = reported_outcome(outcome);
