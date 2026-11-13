@@ -37,7 +37,7 @@ Sort output by specified field
 
 `-h, --help`
 
-Print help (see a summary with -h)
+Print help (see a summary with '-h')
 
 `<ID>`
 
@@ -57,9 +57,9 @@ The virtualizer to use for this VPC
 >   the underlay (zero-DPU hosts, or hosts with their DPU in NIC mode)
 >   and whose interfaces are bound to `HostInband` network segments
 >   rather than a NICo-managed overlay. Flat VPCs are still real tenant
->   VPCs with a VNI and NSGs, but NICo doesnt drive their data plane --
+>   VPCs with a VNI and NSGs, but NICo doesn't drive their data plane --
 >   routing and ACL enforcement between Flat VPCs and other VPCs is the
->   network operators responsibility
+>   network operator's responsibility
 
 ## Examples
 

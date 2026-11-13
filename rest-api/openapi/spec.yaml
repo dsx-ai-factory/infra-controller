@@ -11206,9 +11206,13 @@ paths:
           name: siteId
           description: Filter Machines by Site ID
         - schema:
-            type: string
+            type: array
+            items:
+              type: string
           in: query
           name: id
+          style: form
+          explode: true
           description: Filter Machines by ID.  Can be specified multiple times to filter on more than one ID.
         - schema:
             type: boolean
@@ -11216,14 +11220,22 @@ paths:
           name: hasInstanceType
           description: Filter Machines that have been assigned an Instance Type.
         - schema:
-            type: string
+            type: array
+            items:
+              type: string
           in: query
           name: instanceTypeId
+          style: form
+          explode: true
           description: Filter Machines by Instance Type ID.  Can be specified multiple times to filter on more than one Instance Type ID.
         - schema:
-            type: string
+            type: array
+            items:
+              type: string
           in: query
           name: tenantId
+          style: form
+          explode: true
           description: Filter Machines by ID of tenant of assigned instance. Can be specified multiple times to filter on more than one Tenant ID.
         - schema:
             type: boolean
@@ -11241,9 +11253,13 @@ paths:
           name: includeMetadata
           description: 'Include Machine metadata e.g. BMC, DPU, GPU and Interface data. Can only be requested by Provider.'
         - schema:
-            type: string
+            type: array
+            items:
+              type: string
           in: query
           name: status
+          style: form
+          explode: true
           description: Filter Machines by Status.  Can be specified multiple times to filter on more than one Status.
         - schema:
             type: string
@@ -11251,15 +11267,23 @@ paths:
           name: capabilityType
           description: Filter Machines by Capability Type
         - schema:
-            type: string
+            type: array
+            items:
+              type: string
           in: query
           name: capabilityName
+          style: form
+          explode: true
           description: Filter Machines by Capability Name.  Can be specified multiple times to filter on more than one Capability Name.
         - schema:
-            type: string
+            type: array
+            items:
+              type: string
           in: query
           name: hwSkuDeviceType
-          description: 'Filter Machines by hardware SKU Device Type. Example values: "gpu", "cpu", "storage", "cache"'
+          style: form
+          explode: true
+          description: 'Filter Machines by hardware SKU Device Type. Can be specified multiple times to filter on more than one Device Type. Example values: "gpu", "cpu", "storage", "cache"'
         - schema:
             type: string
           in: query
@@ -19045,8 +19069,194 @@ paths:
         '503':
           description: Core gRPC API is unavailable.
           $ref: '#/components/responses/GenericHttpError'
+  '/v2/org/{org}/nico/tray/{id}/factory-reset':
+    post:
+      tags: [Tray]
+      operationId: factory-reset-tray
+      summary: Restore factory defaults on a switch tray
+      description: |-
+        Restores factory defaults on a switch tray. Only Provider Admins can call this endpoint. The Site must be Registered and belong to the current organization's provider.
+
+        `target` is required, case-sensitive, and has no default:
+
+        - `nvos` clears the NVOS configuration and reboots the switch.
+        - `sdn` restores the SDN configuration to factory defaults.
+
+        Only an ingested switch can be reset. The request returns `409` if a conflicting task is Pending or Running on the switch's rack. The reset task fails without resetting the switch if a host in that rack does not become ready for a disruptive operation, for example because a Tenant is using it. This check cannot be overridden.
+
+        The reset runs in the background. A `202` response returns the reset task ID in `taskIds`; it means the task was created, not that the switch accepted or completed the reset. Use the Task APIs to see whether the task completed, failed, or was terminated. If the task fails before any reset is submitted, read the task message for the reason. When available, the task report provides additional details. A completed task means the Site reported the reset as finished, not that the switch is back in service. NICo does not restore the switch configuration or re-ingest the switch afterwards.
+
+        If the Site does not support the selected reset, the task fails.
+
+        Failed or uncertain reset submissions are not retried automatically. After a timeout or a lost response, check existing tasks and the switch before submitting again, since the first reset may already be running. Avoid starting another reset of the same type on the switch outside this API while its task is running, as the task may report that reset's outcome instead.
+      security:
+        - JWTBearerToken: []
+      parameters:
+        - name: org
+          in: path
+          required: true
+          description: Name of the organization whose provider owns the Site.
+          schema: {type: string}
+        - name: id
+          in: path
+          required: true
+          description: Switch inventory identifier
+          schema: {type: string}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/FactoryResetRequest'
+            example:
+              siteId: 60189e9c-7d12-438c-b9ca-6998d9c364b1
+              target: nvos
+      responses:
+        '202':
+          description: Reset tasks created; hardware work is asynchronous.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/FactoryResetResponse'
+              example:
+                taskIds: [497f6eca-6276-4993-bfeb-53cbbbba6f08]
+        '400':
+          description: Invalid request, unregistered site, or unsupported target type.
+          $ref: '#/components/responses/ValidationError'
+        '403':
+          description: Provider Admin membership is required; site must belong to the provider.
+          $ref: '#/components/responses/ForbiddenError'
+        '404':
+          description: Target does not exist at the selected site.
+          $ref: '#/components/responses/NotFoundError'
+        '409':
+          description: A conflicting rack task prevents reset admission.
+          $ref: '#/components/responses/ConflictError'
+        '412':
+          description: Selected switches are not linked to actual inventory.
+          $ref: '#/components/responses/GenericHttpError'
+        '500':
+          description: Internal failure.
+          $ref: '#/components/responses/GenericHttpError'
+        '502':
+          description: Flow returned missing or invalid task references.
+          $ref: '#/components/responses/GenericHttpError'
+        '503':
+          description: Flow service is unavailable.
+          $ref: '#/components/responses/GenericHttpError'
+        '504':
+          description: Submission outcome is unknown; do not automatically resubmit.
+          $ref: '#/components/responses/GenericHttpError'
+  '/v2/org/{org}/nico/domain/nvlink/{id}/factory-reset':
+    post:
+      tags: [Domain]
+      operationId: factory-reset-nvlink-domain
+      summary: Restore factory defaults on an NVLink Domain’s switches
+      description: |-
+        Restores factory defaults on every switch in an NVLink Domain. Only Provider Admins can call this endpoint. The Site must be Registered and belong to the current organization's provider.
+
+        `target` is required, case-sensitive, and has no default:
+
+        - `nvos` clears the NVOS configuration and reboots the switches.
+        - `sdn` restores the SDN configuration to factory defaults.
+
+        Every switch in the Domain must be ingested. The request returns `409` if a conflicting task is Pending or Running on any of the Domain's racks. A rack's task fails without resetting any of its switches if a host in that rack does not become ready for a disruptive operation, for example because a Tenant is using it. If a host goes into use while the task is running, remaining switches whose resets have not been submitted are skipped and the task fails. Resets already accepted may still complete. This check cannot be overridden.
+
+        The reset runs in the background. A `202` response returns one task ID for each rack the Domain's switches belong to, in no particular order. It means the tasks were created, not that the switches accepted or completed the resets. Use the Task APIs to see whether each task completed, failed, or was terminated. If a rack's task fails before any reset is submitted, read its task message for the reason. When available, its task report provides additional details. A completed task means the Site reported the resets as finished, not that the Domain is operational. NICo does not restore the switch configurations or re-ingest the switches afterwards.
+
+        If the Site does not support the selected reset, the task fails.
+
+        Failed or uncertain reset submissions are not retried automatically. After a timeout or a lost response, check existing tasks and the switches before submitting again, since resets may already be running. Avoid starting another reset of the same type on these switches outside this API while their tasks are running, as a task may report that reset's outcome instead.
+      security:
+        - JWTBearerToken: []
+      parameters:
+        - name: org
+          in: path
+          required: true
+          description: Name of the organization whose provider owns the Site.
+          schema: {type: string}
+        - name: id
+          in: path
+          required: true
+          description: Core NVLink Domain ID
+          schema: {type: string}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/FactoryResetRequest'
+            example:
+              siteId: 60189e9c-7d12-438c-b9ca-6998d9c364b1
+              target: sdn
+      responses:
+        '202':
+          description: Reset tasks created; hardware work is asynchronous.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/FactoryResetResponse'
+              example:
+                taskIds: [497f6eca-6276-4993-bfeb-53cbbbba6f08]
+        '400':
+          description: Invalid request, unregistered site, or unsupported target type.
+          $ref: '#/components/responses/ValidationError'
+        '403':
+          description: Provider Admin membership is required; site must belong to the provider.
+          $ref: '#/components/responses/ForbiddenError'
+        '404':
+          description: Target does not exist at the selected site.
+          $ref: '#/components/responses/NotFoundError'
+        '409':
+          description: A conflicting rack task prevents reset admission.
+          $ref: '#/components/responses/ConflictError'
+        '412':
+          description: Selected switches are not linked to actual inventory.
+          $ref: '#/components/responses/GenericHttpError'
+        '500':
+          description: Internal failure.
+          $ref: '#/components/responses/GenericHttpError'
+        '502':
+          description: Flow returned missing or invalid task references.
+          $ref: '#/components/responses/GenericHttpError'
+        '503':
+          description: Flow service is unavailable.
+          $ref: '#/components/responses/GenericHttpError'
+        '504':
+          description: Submission outcome is unknown; do not automatically resubmit.
+          $ref: '#/components/responses/GenericHttpError'
+
+
 components:
   schemas:
+    FactoryResetRequest:
+      type: object
+      example:
+        siteId: 60189e9c-7d12-438c-b9ca-6998d9c364b1
+        target: nvos
+      required: [siteId, target]
+      properties:
+        siteId:
+          type: string
+          format: uuid
+          description: Registered site owned by the current organization’s provider.
+        target:
+          type: string
+          enum: [nvos, sdn]
+          description: Required reset scope. Accepted values are `nvos` and `sdn`; case-sensitive, with no default.
+    FactoryResetResponse:
+      type: object
+      example:
+        taskIds: [497f6eca-6276-4993-bfeb-53cbbbba6f08]
+      required: [taskIds]
+      properties:
+        taskIds:
+          type: array
+          minItems: 1
+          items:
+            type: string
+            format: uuid
+          description: Asynchronous reset task IDs, one per owning rack; ordering is unspecified.
     PageNumber:
       title: PageNumber
       type: integer
@@ -28592,6 +28802,7 @@ components:
           - PowerOff
           - Reset
           - ChassisReset
+          - AcPowercycle
           - Unknown
         requested:
           type:
@@ -28858,6 +29069,7 @@ components:
           - BringUp
           - Decommission
           - InjectExpectation
+          - ComponentReset
           - Unknown
         status:
           type: string

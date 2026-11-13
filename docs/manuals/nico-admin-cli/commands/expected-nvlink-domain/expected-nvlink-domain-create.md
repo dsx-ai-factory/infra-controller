@@ -38,7 +38,7 @@ Optional nonblank name, at most 256 characters; need not be unique
 
 `-h, --help`
 
-Print help (see a summary with -h)
+Print help (see a summary with '-h')
 
 `<RACK_GROUP_ID>`
 

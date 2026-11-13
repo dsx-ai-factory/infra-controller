@@ -61,6 +61,9 @@ use crate::state_history::StateHistoryRecord;
 /// convert it into a Machine.
 #[derive(Serialize, Deserialize)]
 pub struct MachineSnapshotPgJson {
+    /// Absent on older snapshots and NULL before any tracked hardware command.
+    #[serde(default)]
+    pub hardware_dispatch: Option<crate::hardware_dispatch::HardwareDispatch>,
     pub id: MachineId,
     pub rack_id: Option<RackId>,
     pub created: DateTime<Utc>,
@@ -369,6 +372,7 @@ impl TryFrom<MachineSnapshotPgJson> for AnyMachine {
                 maintenance_start_time,
             },
             status: MachineStatus {
+                hardware_dispatch: value.hardware_dispatch,
                 interfaces: value.interfaces,
                 boot_interface_status_observation,
                 hardware_info,

@@ -22,10 +22,10 @@ use std::num::NonZeroUsize;
 use std::str::FromStr;
 use std::sync::{Arc, Mutex};
 
+use carbide_tls::client_config::ClientCert;
 use carbide_uuid::nvlink::NvLinkDomainId;
 use carbide_uuid::rack::RackId;
 use carbide_uuid::switch::SwitchId;
-use forge_tls::client_config::ClientCert;
 use mac_address::MacAddress;
 use nv_redfish::bmc_http::reqwest::Client as ReqwestClient;
 use rpc::carbide_api_client::CarbideApiClient;

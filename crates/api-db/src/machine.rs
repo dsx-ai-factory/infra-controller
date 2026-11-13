@@ -3824,6 +3824,7 @@ pub async fn allocate_loopback_ip_v6(
             ),
         ) => {
             crate::resource_pool::emit_allocation_failure(
+                &carbide_instrument::Instrumentation::global(),
                 pool.value_type,
                 owner_id,
                 false,
@@ -3836,6 +3837,7 @@ pub async fn allocate_loopback_ip_v6(
         }
         Err(error) => {
             crate::resource_pool::emit_allocation_failure(
+                &carbide_instrument::Instrumentation::global(),
                 pool.value_type,
                 owner_id,
                 false,
@@ -3871,6 +3873,7 @@ pub async fn allocate_vpc_dpu_loopback(
             ),
         ) => {
             crate::resource_pool::emit_allocation_failure(
+                &carbide_instrument::Instrumentation::global(),
                 common_pools.ethernet.pool_vpc_dpu_loopback_ip.value_type,
                 owner_id,
                 false,
@@ -3883,6 +3886,7 @@ pub async fn allocate_vpc_dpu_loopback(
         }
         Err(err) => {
             crate::resource_pool::emit_allocation_failure(
+                &carbide_instrument::Instrumentation::global(),
                 common_pools.ethernet.pool_vpc_dpu_loopback_ip.value_type,
                 owner_id,
                 false,

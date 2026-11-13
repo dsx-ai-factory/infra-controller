@@ -33,7 +33,7 @@ integration environments. This setting is independent of static
 
 `--proxy <PROXY>`
 
-host:port string use as a proxy for talking to BMCs
+host:port string use as a proxy for talking to BMC's
 
 `--extended`
 
@@ -55,7 +55,7 @@ Sort output by specified field
 
 `-h, --help`
 
-Print help (see a summary with -h)
+Print help (see a summary with '-h')
 
 ## Examples
 
