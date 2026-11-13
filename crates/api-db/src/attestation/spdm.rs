@@ -1715,4 +1715,90 @@ mod tests {
         txn.rollback().await?;
         Ok(())
     }
+
+    /// Cleanup has to keep the row the read above returns. A device being
+    /// attested again has an unfinished newest attempt, so the rule that keeps
+    /// each device's newest attempt does not cover the finished failure behind
+    /// it, and ten later jobs that leave the device out would age it out. The
+    /// machine's alerts would then clear with no pass, waiver, or profile
+    /// change behind it.
+    #[crate::sqlx_test]
+    async fn cleanup_keeps_the_newest_finished_result_of_a_device_being_retried(
+        pool: sqlx::PgPool,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let machine_id = MachineId::new(
+            MachineIdSource::ProductBoardChassisSerial,
+            [11; 32],
+            MachineType::Host,
+        );
+        let mut txn = pool.begin().await?;
+        sqlx::query("INSERT INTO machines (id, dpf) VALUES ($1, '{}'::jsonb)")
+            .bind(machine_id)
+            .execute(&mut *txn)
+            .await?;
+
+        let now = chrono::Utc::now();
+        let insert = "INSERT INTO spdm_machine_devices_attestation \
+             (machine_id, device_id, nonce, state, job_id, started_at, completed_at) \
+             VALUES ($1, $2, gen_random_uuid(), $3, $4, $5, $6)";
+        let failed_job = uuid::Uuid::new_v4();
+        sqlx::query(insert)
+            .bind(machine_id)
+            .bind("GPU_0")
+            .bind(sqlx::types::Json(SpdmAttestationState::Failed(
+                "bad measurement".to_string(),
+            )))
+            .bind(failed_job)
+            .bind(now - chrono::Duration::minutes(60))
+            .bind(now - chrono::Duration::minutes(59))
+            .execute(&mut *txn)
+            .await?;
+        // The retry, which makes the failure the device's newest finished
+        // result rather than its newest attempt.
+        sqlx::query(insert)
+            .bind(machine_id)
+            .bind("GPU_0")
+            .bind(sqlx::types::Json(SpdmAttestationState::FetchMetadata))
+            .bind(uuid::Uuid::new_v4())
+            .bind(now - chrono::Duration::minutes(50))
+            .bind(None::<chrono::DateTime<chrono::Utc>>)
+            .execute(&mut *txn)
+            .await?;
+
+        // Ten later jobs covering another device only. Each completion runs
+        // cleanup, and the tenth leaves the failure outside the jobs it keeps.
+        for minutes_ago in (0..10).rev() {
+            let job_id = uuid::Uuid::new_v4();
+            sqlx::query(insert)
+                .bind(machine_id)
+                .bind("GPU_1")
+                .bind(sqlx::types::Json(SpdmAttestationState::Passed))
+                .bind(job_id)
+                .bind(now - chrono::Duration::minutes(minutes_ago))
+                .bind(None::<chrono::DateTime<chrono::Utc>>)
+                .execute(&mut *txn)
+                .await?;
+            sqlx::query(
+                "UPDATE spdm_machine_devices_attestation SET completed_at = now() \
+                 WHERE job_id = $1",
+            )
+            .bind(job_id)
+            .execute(&mut *txn)
+            .await?;
+        }
+
+        let newest = get_newest_finished_attestations_for_machine_id(&mut txn, &machine_id).await?;
+        assert_eq!(
+            newest
+                .iter()
+                .map(|details| (details.device_id.as_str(), details.failure_reason()))
+                .collect::<Vec<_>>(),
+            vec![("GPU_0", Some("bad measurement")), ("GPU_1", None)],
+            "the failure a device is being retried for must survive later jobs \
+             that leave the device out"
+        );
+
+        txn.rollback().await?;
+        Ok(())
+    }
 }
