@@ -2071,6 +2071,154 @@ pub(in crate::tests) mod tests {
         Ok(())
     }
 
+    /// An override on a device that already finished leaves the SPDM
+    /// controller no transition to make, so only the handler itself can
+    /// republish. For a machine NICo never attests on its own, nothing else
+    /// would, and the overridden result would keep being reported.
+    #[crate::sqlx_test]
+    async fn an_operator_override_on_a_finished_job_republishes_its_alerts(
+        pool: sqlx::PgPool,
+    ) -> Result<(), eyre::Error> {
+        struct Case {
+            scenario: &'static str,
+            settled: fn() -> SpdmAttestationState,
+            fail: bool,
+            failed_before: bool,
+            failed_after: bool,
+        }
+        let cases = [
+            Case {
+                scenario: "a waiver drops the alerts of a job that already failed",
+                settled: || SpdmAttestationState::Failed("verification failed".to_string()),
+                fail: false,
+                failed_before: true,
+                failed_after: false,
+            },
+            Case {
+                scenario: "an operator failure raises alerts for a job that already passed",
+                settled: || SpdmAttestationState::Passed,
+                fail: true,
+                failed_before: false,
+                failed_after: true,
+            },
+        ];
+
+        /// The failed attesters the machine is reporting, and the rest of its
+        /// list, so an override that disturbed anything else would show.
+        async fn alerts(
+            pool: &sqlx::PgPool,
+            machine_id: &MachineId,
+        ) -> Result<(Vec<String>, Vec<String>), eyre::Error> {
+            let published: Option<sqlx::types::Json<health_report::HealthReport>> =
+                sqlx::query_scalar(
+                    "SELECT health_reports->'merges'->'attestation' FROM machines WHERE id = $1",
+                )
+                .bind(machine_id)
+                .fetch_one(pool)
+                .await?;
+            let (mut failed, mut other) = (Vec::new(), Vec::new());
+            for alert in published.map_or_else(Vec::new, |json| json.0.alerts) {
+                if alert.id.as_str() == "SpdmAttestationFailed" {
+                    failed.push(alert.target.unwrap_or_default());
+                } else {
+                    other.push(format!("{}:{:?}", alert.id.as_str(), alert.target));
+                }
+            }
+            failed.sort();
+            other.sort();
+            Ok((failed, other))
+        }
+
+        let env = create_test_env_with_overrides(
+            pool,
+            TestEnvOverrides {
+                config: Some(Box::new(spdm_enabled_config())),
+                ..Default::default()
+            },
+        )
+        .await;
+        // Host setup performs its own attestation before the scenario starts.
+        env.redfish_sim.set_evidence_collection_running(false);
+        let (machine_id, _dpu_id) = create_managed_host(&env).await.into();
+
+        for case in cases {
+            let job_id = uuid::Uuid::try_from(
+                env.api
+                    .trigger_machine_attestation(Request::new(
+                        SpdmMachineAttestationTriggerRequest {
+                            machine_id: Some(machine_id.into()),
+                            redfish_timeout_secs: u32::MAX,
+                        },
+                    ))
+                    .await?
+                    .into_inner()
+                    .job_id
+                    .expect("scheduled attestation has a job ID"),
+            )?;
+
+            // Settle the job without running the controller, then publish that
+            // result, so the override is the only thing that can move the
+            // alerts from here on.
+            let mut attesters: Vec<String> = sqlx::query_scalar(
+                "UPDATE spdm_machine_devices_attestation
+                 SET state = $2, completed_at = now() WHERE job_id = $1
+                 RETURNING device_id",
+            )
+            .bind(job_id)
+            .bind(sqlx::types::Json((case.settled)()))
+            .fetch_all(&env.pool)
+            .await?;
+            assert!(!attesters.is_empty(), "{}", case.scenario);
+            attesters.sort();
+
+            let mut txn = env.db_txn().await;
+            let report =
+                db::attestation::health::build_health_report(&mut txn, &machine_id).await?;
+            db::machine::update_attestation_health_report(&mut txn, &machine_id, &report).await?;
+            txn.commit().await?;
+
+            let (failed_before, other_before) = alerts(&env.pool, &machine_id).await?;
+            assert_eq!(
+                failed_before,
+                if case.failed_before {
+                    attesters.clone()
+                } else {
+                    Vec::new()
+                },
+                "{}: the result the operator is about to override",
+                case.scenario
+            );
+
+            if case.fail {
+                env.api
+                    .fail_attestation(Request::new(job_id.into()))
+                    .await?;
+            } else {
+                env.api
+                    .waive_attestation(Request::new(job_id.into()))
+                    .await?;
+            }
+
+            let (failed_after, other_after) = alerts(&env.pool, &machine_id).await?;
+            assert_eq!(
+                failed_after,
+                if case.failed_after {
+                    attesters
+                } else {
+                    Vec::new()
+                },
+                "{}: the override has to reach the alerts without a transition",
+                case.scenario
+            );
+            assert_eq!(
+                other_before, other_after,
+                "{}: an override moves only the alerts for its own results",
+                case.scenario
+            );
+        }
+        Ok(())
+    }
+
     #[crate::sqlx_test]
     async fn attestation_jobs_rpc_paginates_and_validates(pool: sqlx::PgPool) -> eyre::Result<()> {
         use base64::Engine;

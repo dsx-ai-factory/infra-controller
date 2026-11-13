@@ -167,7 +167,7 @@ A result is finished once it has passed, failed, or been cancelled. An operator 
 
 The selected attesters come from resolving the profile for the machine's hardware class and evaluating it against the attesters the machine has results for.
 
-Every update builds that whole list and writes it over the stored one. Nothing edits a single alert in place. So neither of the two writers (§5.1) has to know what the other left behind, and an update that lands twice leaves the same report as one that lands once.
+Every update builds that whole list and writes it over the stored one. Nothing edits a single alert in place. So no writer (§5.1) has to know what the others left behind, and an update that lands twice leaves the same report as one that lands once. An update holds the machine row while it rebuilds, because a whole-list write made from a stale read would drop whatever landed in between.
 
 The report is stored on the row of the machine being attested, so a DPU's alerts live on the DPU's own row. When the list comes out empty, NICo deletes the source rather than storing it with no alerts in it.
 
@@ -206,11 +206,13 @@ The two arrows numbered 7 share a number because the aggregate feeds both at onc
 
 ### 5.1 When the source is updated
 
-Two places update the `attestation` source, because the two halves of what it reports become known at different moments.
+Three places update the `attestation` source, because what it reports becomes known at three different moments.
 
 **Scheduling updates it, because the outcomes that most need reporting create no job.** `NoProfile`, `ClassNotRecorded`, `NoAttestersFound`, `PolicyMatchedNothing`, and `AttestationDisabled` all end immediately, with no job and no rows, so there is no later moment for them.
 
 **The SPDM controller updates it as results arrive, because only then do results exist.** Every time a device in the job reaches `Passed`, `Failed`, or `Cancelled`, it rebuilds the source, so a failed attester is reported as soon as it fails rather than waiting on devices still running.
+
+**An operator override updates it, because a device that already finished produces no further transition.** Waiving or failing a job changes what its stored results mean (§5) without changing the results themselves, so the controller has nothing to carry it through. The RPC handler rebuilds instead, on the transaction that records the request.
 
 An edited profile is the usual reason to trigger again, and per-attester scheduling ([#4488](https://github.com/dsx-ai-factory/infra-controller/issues/4488)) will make that routine. So every update resolves the profile again rather than trusting the selection an earlier one used (§5.5).
 
@@ -326,7 +328,7 @@ No alert is ever cleared on its own. Each update replaces the whole source (§5)
 
 - **Starting a job clears nothing.** A job that has not yet finished an attester leaves that attester's newest finished result unchanged, so a failure stays reported while that attester is attested again.
 - **A profile change can clear an alert.** An attester the profile no longer selects drops out of the report at the next update, even though its failed result is still recorded.
-- **An operator override changes an alert without a new result.** A waiver drops that attester's failure alert at the next update, and an operator failure raises one. Neither rewrites the stored result, so the override and the result it overrides both survive.
+- **An operator override changes an alert without a new result.** Waiving a job drops the failure alerts of the attesters it covers, and failing one raises them. The request applies the change itself (§5.1) rather than leaving it for a later update. Neither rewrites the stored result, so the override and the result it overrides both survive.
 
 An attestation that creates no job updates the report once, at scheduling, since no result ever follows.
 
@@ -368,7 +370,7 @@ These are known gaps, listed so nobody expects more from the Health Alerts colum
 
 ## 8 Implementation
 
-Five steps, each one commit. Four have landed; the result update remains.
+Six steps, each one commit. All have landed.
 
 | #   | What lands                                                                                            | Crates                                                | Status      |
 | --- | ------------------------------------------------------------------------------------------------------ | ----------------------------------------------------- | ----------- |
@@ -376,13 +378,18 @@ Five steps, each one commit. Four have landed; the result update remains.
 | 2   | `update_attestation_health_report`, the builder that turns a stored decision and the stored results into the whole list, and the alert IDs in [`health_probe_ids.md`](../../architecture/health/health_probe_ids.md) | `api-db`, `api-model`, documentation | Landed      |
 | 3   | Scheduling recording what it decided                                                                  | `machine-controller`, `api-core`                      | Landed      |
 | 4   | Scheduling storing the report on the transaction that records the decision                            | `machine-controller`                                  | Landed      |
-| 5   | The result update, which rebuilds the same list each time a device finishes                           | `spdm-controller`                                     | Outstanding |
+| 5   | The result update, which rebuilds the same list each time a device finishes                           | `spdm-controller`                                     | Landed      |
+| 6   | The override update, which rebuilds the list for the machines a waive or fail request covers          | `api-db`, `api-core`                                  | Landed      |
 
 **Step 1 is the only migration**, and it is additive with nothing reading the column yet, so it stands alone. It also moves `SchedulingOutcome` from `machine-controller` to `api-model`, because `spdm-controller` has to read the outcome back in step 5 and both crates already depend on `api-model`. `api-model` already depends on `carbide-instrument`, so the enum keeps its `carbide_instrument::LabelValue` derive through the move and the metric label keeps the same seven strings. `UnsatisfiedRequirement` gains serde derives for the `unsatisfied` key (§5.3).
 
 **Steps 1 and 2 add library functions before their caller exists.** Both are library crates, so neither widens visibility for the sake of it.
 
 **One write point covers both trigger paths.** They do not share an entry point: the `TriggerMachineAttestation` RPC calls `trigger_attestation`, while the state machine calls `schedule` directly, because it has a machine transition to persist alongside the new job. Both reach `schedule`, which records the decision and stores the report on one transaction its caller commits, so the RPC needs nothing of its own.
+
+**Step 5 writes where every transition already passes.** The handler returns its transitions from a dozen places, so the update hangs off `persist_controller_state`, which the state controller calls once per transition on the transaction it commits. It rebuilds only for a state that settles the device, since attestation passes through several states per device and the rest change nothing the report says.
+
+**Step 6 covers the case step 5 cannot reach.** An override on a device still running reaches a terminal state through the controller, so step 5 already republishes it. An override on a device that has finished does not, because the handler makes no transition for an already-terminal state. The two handlers rebuild for themselves, over the machines `request_attestation_cancellation` reports it updated, so the set is the one the write actually covered rather than a second read of the job.
 
 **Every step is gated by `spdm.enabled`.** Nothing here changes behavior for a site that has not turned SPDM on, and nothing changes behavior for another health source.
 
@@ -397,10 +404,13 @@ Five steps, each one commit. Four have landed; the result update remains.
 | An `AttestationPolicyUnsatisfied` message names the unsatisfied requirement, for both an allowlist pattern and a denylist that excluded everything | `api-model` tests         | Landed      |
 | An attestation with no alerts to report deletes the source instead of storing an empty one                                           | `api-db` tests                        | Landed      |
 | A machine with a failed older job and a passed newer job reports only the newer result                                               | `api-db` tests                        | Landed      |
-| Each device result rebuilds the whole list: the coverage alert from the stored decision, plus one failure alert per failed attester  | `spdm-controller` tests               | Outstanding |
-| A failed attester is reported while other devices in the job are still running                                                       | `spdm-controller` tests               | Outstanding |
-| A result arriving from an older job while a newer one is running still produces the correct list                                     | `spdm-controller` tests               | Outstanding |
-| A failure alert survives while that attester is attested again, and clears only when the new result passes                          | `spdm-controller` tests               | Outstanding |
+| A settled device rebuilds the whole list, the coverage alert from the stored decision plus one failure alert per failed attester, leaving out a device still being attested | `spdm-controller` tests | Landed      |
+| A transition that does not settle the device leaves the source untouched                                                            | `spdm-controller` tests               | Landed      |
+| A result arriving from an older job while a newer one is running still produces the correct list                                     | `spdm-controller` tests               | Landed      |
+| A failure alert survives while that attester is attested again, and clears only when the new result passes                          | `spdm-controller` tests               | Landed      |
+| Waiving a job that already failed drops its alerts, failing one that already passed raises them, and neither disturbs the rest of the list | `api-core` tests            | Landed      |
+| A cancellation request names each machine it updated once, however many devices it covered                                          | `api-db` tests                        | Landed      |
+| A rebuild makes a second rebuild of the same machine wait, rather than both building from one snapshot                              | `api-db` tests                        | Landed      |
 | A failed attester on a DPU stores its alert on the DPU's row and blocks allocation of the DPU's host                                 | `api-core` integration test           | Outstanding |
 | Coverage alerts do not prevent allocation                                                                                            | `api-core` health aggregation tests   | Outstanding |
 | The trigger RPC updates the source just as a state-machine trigger does                                                             | `api-core` integration test           | Outstanding |

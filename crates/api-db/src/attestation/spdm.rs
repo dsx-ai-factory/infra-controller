@@ -97,39 +97,44 @@ pub async fn insert_device_attestations(
 /// Records the latest operator cancellation request for every device in a job.
 /// Either target may replace the other, including after completion. Stored results,
 /// completion timestamps and versions are preserved; status reads apply terminal overrides.
+/// Returns the distinct machines the job touched, in ID order, so a caller can
+/// update whatever it derives from their results.
 /// Returns `NotFoundError` when the job has no retained devices.
 pub async fn request_attestation_cancellation(
     txn: &mut PgConnection,
     job_id: &uuid::Uuid,
     target: SpdmCancellationTarget,
-) -> DatabaseResult<()> {
+) -> DatabaseResult<Vec<MachineId>> {
     // Lock in the same order as lifecycle decisions, then replace intent atomically.
     // Keep cancelled_at for an existing main-branch writer during rollout.
     let query = "WITH devices AS (
             SELECT machine_id, device_id, job_id FROM spdm_machine_devices_attestation
             WHERE job_id = $1 ORDER BY machine_id, device_id, job_id FOR UPDATE
+        ), updated AS (
+            UPDATE spdm_machine_devices_attestation a
+            SET cancelled_at = $2, cancellation_target = $3,
+                cancellation_cleanup_started_at = COALESCE(cancellation_cleanup_started_at,
+                    CASE WHEN completed_at IS NULL THEN COALESCE(cancelled_at, $2) END)
+            FROM devices
+            WHERE a.machine_id = devices.machine_id AND a.device_id = devices.device_id
+                AND a.job_id = devices.job_id
+            RETURNING a.machine_id
         )
-        UPDATE spdm_machine_devices_attestation a
-        SET cancelled_at = $2, cancellation_target = $3,
-            cancellation_cleanup_started_at = COALESCE(cancellation_cleanup_started_at,
-                CASE WHEN completed_at IS NULL THEN COALESCE(cancelled_at, $2) END)
-        FROM devices
-        WHERE a.machine_id = devices.machine_id AND a.device_id = devices.device_id
-            AND a.job_id = devices.job_id";
-    let result = sqlx::query(query)
+        SELECT DISTINCT machine_id FROM updated ORDER BY machine_id";
+    let machine_ids: Vec<MachineId> = sqlx::query_scalar(query)
         .bind(job_id)
         .bind(chrono::Utc::now())
         .bind(target)
-        .execute(txn)
+        .fetch_all(txn)
         .await
         .map_err(|error| DatabaseError::query(query, error))?;
-    if result.rows_affected() == 0 {
+    if machine_ids.is_empty() {
         return Err(DatabaseError::NotFoundError {
             kind: "SPDM Attestation Job",
             id: job_id.to_string(),
         });
     }
-    Ok(())
+    Ok(machine_ids)
 }
 
 /// Locks selected device records until the caller commits its lifecycle decision.
@@ -992,7 +997,11 @@ mod tests {
         ] {
             sqlx::query("UPDATE spdm_machine_devices_attestation SET cancelled_at = now() - INTERVAL '1 minute' WHERE job_id = $1")
                 .bind(job_id).execute(&mut *txn).await?;
-            request_attestation_cancellation(&mut txn, &job_id, target).await?;
+            // Each machine is named once, however many of its devices the job covers.
+            assert_eq!(
+                request_attestation_cancellation(&mut txn, &job_id, target).await?,
+                vec![machine_id]
+            );
             let rows: Vec<(
                 chrono::DateTime<chrono::Utc>,
                 SpdmCancellationTarget,
