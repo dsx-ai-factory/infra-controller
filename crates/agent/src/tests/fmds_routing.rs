@@ -179,6 +179,7 @@ async fn routed_metadata() {
             "http://127.0.0.1:1".to_string(),
             Arc::new(CarbideClientConfig::default()),
             MachineIdentityConfig::default(),
+            carbide_instrument::Instrumentation::global(),
         )
         .expect("metadata state"),
     );

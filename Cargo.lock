@@ -2142,6 +2142,7 @@ dependencies = [
  "carbide-test-support",
  "governor",
  "http-body-util",
+ "metrics-endpoint",
  "reqwest 0.13.4",
  "serde",
  "serde_json",

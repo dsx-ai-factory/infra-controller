@@ -136,6 +136,7 @@ pub(super) async fn setup_and_run(
             forge_api_server.clone(),
             Arc::clone(&carbide_client_config),
             agent_config.machine_identity.clone(),
+            instrumentation.clone(),
         )
         .map_err(|e| eyre::eyre!("failed to initialize instance metadata router state: {e}"))?,
     );
