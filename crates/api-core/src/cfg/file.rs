@@ -989,17 +989,17 @@ pub struct CarbideConfig {
     #[serde(default = "default_to_true")]
     pub enable_admin_ui: bool,
 
-    /// External tool links surfaced in the admin web UI's "Tools"
-    /// sidebar. Each entry's `name` must be unique. The section is
-    /// hidden when the list is empty.
+    /// Links shown in the admin web UI. They are hidden by default.
     #[serde(default)]
-    pub web_ui_sidebar_tools: Vec<ToolLink>,
+    pub web_ui: WebUiConfig,
 
-    /// URL template for the "Logs" link on machine and endpoint detail
-    /// pages. The placeholder `{search}` is replaced with the machine ID
-    /// or BMC IP. When empty, the Logs link is hidden.
-    #[serde(default)]
-    pub web_ui_logs_link_template: String,
+    /// Old name for `web_ui.sidebar_tools`, kept so startup can warn about its use.
+    #[serde(default, rename = "web_ui_sidebar_tools", skip_serializing)]
+    pub deprecated_web_ui_sidebar_tools: Option<Vec<ToolLink>>,
+
+    /// Old name for `web_ui.logs_link_template`, kept so startup can warn about its use.
+    #[serde(default, rename = "web_ui_logs_link_template", skip_serializing)]
+    pub deprecated_web_ui_logs_link_template: Option<String>,
 
     /// In-memory log history for the admin web live log viewer
     /// (`/admin/logs`): how much recent log data to keep for
@@ -1629,6 +1629,21 @@ impl PerObjectStateMetricObjectType {
             Self::IbPartition => "ib_partition",
         }
     }
+}
+
+/// Settings for admin web UI links, grouped under `[web_ui]`.
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct WebUiConfig {
+    /// External links in the Tools sidebar. Names must be unique and URLs must
+    /// use HTTP or HTTPS. An empty list hides the section.
+    #[serde(default)]
+    pub sidebar_tools: Vec<ToolLink>,
+
+    /// URL template for Logs links on machine and endpoint detail pages.
+    /// `{search}` is replaced with the machine ID or BMC IP. An empty string hides the link.
+    #[serde(default)]
+    pub logs_link_template: String,
 }
 
 /// One external tool link rendered in the admin web UI's "Tools"
@@ -3737,7 +3752,7 @@ impl CarbideConfig {
     /// `https` scheme.
     pub fn validate_web_ui_sidebar_tools(&self) -> eyre::Result<()> {
         let mut seen = std::collections::HashSet::new();
-        for tool in &self.web_ui_sidebar_tools {
+        for tool in &self.web_ui.sidebar_tools {
             if !seen.insert(tool.name.as_str()) {
                 return Err(eyre::eyre!(
                     "duplicate tools entry with name = {:?}; tool names must be unique",
@@ -6838,7 +6853,7 @@ path = "credentials.yaml"
             .merge(Toml::file(format!("{TEST_DATA_DIR}/min_config.toml")))
             .extract()
             .unwrap();
-        config.web_ui_sidebar_tools = vec![ToolLink {
+        config.web_ui.sidebar_tools = vec![ToolLink {
             name: "evil".to_string(),
             display_name: "Evil".to_string(),
             url: BAD_URL.to_string(),

@@ -149,8 +149,7 @@ compatibility parsing does not restore their former behavior.
 | `default_tenant_routing_profile_type` | `String` | `EXTERNAL` | `networking` | The default routing profile used when a tenant is created. |
 | `initial_objects_file` | `Option<PathBuf>` | — | `server` | Path to the `initial_objects.toml` file for seeding the database. |
 | `enable_admin_ui` | `bool` | `true` | `server` | Whether to serve the admin web UI (the HTML pages under `/admin`). Set to `false` to run only the gRPC API; the gRPC service is unaffected either way. |
-| `web_ui_sidebar_tools` | `Vec<ToolLink>` | `[]` | `server` | External tool links surfaced in the admin web UI's "Tools" sidebar. Each entry's `name` must be unique; the section is hidden when the list is empty. |
-| `web_ui_logs_link_template` | `String` | `""` | `server` | URL template for the "Logs" link on machine and endpoint detail pages. The placeholder `{search}` is replaced with the machine ID or BMC IP. When empty, the link is hidden. |
+| `web_ui` | `WebUiConfig` | *(default)* | `server` | Admin web UI links (see [WebUiConfig](#webuiconfig)). |
 | `log_history` | `LogHistoryConfig` | *(default)* | `integrations` | In-memory log history for the admin web live log viewer at `/admin/logs` (see [LogHistoryConfig](#loghistoryconfig)). |
 | `tracing` | `TracingConfig` | *(default)* | `integrations` | OTLP trace export settings (see [TracingConfig](#tracingconfig)). |
 | `secrets` | `Option<SecretsConfig>` | — | `security` | Secrets backend configuration. When present, the credential reader chain and write target are operator-configured (see [SecretsConfig](#secretsconfig)). |
@@ -344,6 +343,32 @@ available for topology-specific flows.
 ---
 
 ## Sub-Structs
+
+### `WebUiConfig`
+
+These settings control the Tools section and Logs links in the admin web UI.
+Both are hidden by default. Settings are read at startup, so changes require a
+restart.
+
+| Field | Type | Default | Description |
+| ------- | ------ | --------- | ------------- |
+| `sidebar_tools` | `Vec<ToolLink>` | `[]` | Links shown in the Tools section, in list order. Each entry needs a unique `name`, a `display_name`, and an absolute HTTP or HTTPS `url`. An empty list hides the section. Duplicate names or invalid URLs prevent startup. |
+| `logs_link_template` | `String` | `""` | URL template for Logs links on machine and endpoint detail pages. `{search}` is replaced with the machine ID or BMC IP. An empty string hides the link. |
+
+```toml
+[web_ui]
+logs_link_template = "https://logs.example.com/?query={search}"
+
+[[web_ui.sidebar_tools]]
+name = "grafana"
+display_name = "Grafana"
+url = "https://grafana.example.com"
+```
+
+The deprecated top-level fields `web_ui_sidebar_tools` and
+`web_ui_logs_link_template` still work, and startup logs a warning for each one.
+If a config sets both forms, the `[web_ui]` value is used. See
+[issue #4994](https://github.com/dsx-ai-factory/infra-controller/issues/4994).
 
 ### `BmcProxyConfig` — `bmc_proxy`
 
