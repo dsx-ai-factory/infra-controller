@@ -859,7 +859,11 @@ impl ApiClient {
         name: String,
         default_ttl: Option<u32>,
     ) -> CarbideCliResult<::rpc::protos::dns::Domain> {
-        let request = ::rpc::protos::dns::CreateDomainRequest { name, default_ttl };
+        let request = ::rpc::protos::dns::CreateDomainRequest {
+            name,
+            default_ttl,
+            reserved_id: None,
+        };
         Ok(self.0.create_domain(request).await?)
     }
 

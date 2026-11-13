@@ -18,6 +18,7 @@
 use std::net::IpAddr;
 
 use carbide_api_core::test_support::network_segment::create_static_assignments_segment;
+use carbide_authn::middleware::Principal;
 use carbide_test_harness::TestNetworkSegment;
 use carbide_test_harness::prelude::*;
 use carbide_uuid::machine::MachineId;
@@ -28,6 +29,28 @@ use tonic::Request;
 const DOMAIN_NAME: &str = "dwrt1.com";
 const DNS_ADM_SUBDOMAIN: &str = concatcp!("adm.", DOMAIN_NAME);
 const DNS_BMC_SUBDOMAIN: &str = concatcp!("bmc.", DOMAIN_NAME);
+
+// In-process fixtures inject authentication evidence. They do not exercise
+// certificate authentication or RPC middleware permissions.
+fn request_with_principals<T>(payload: T, principals: Vec<Principal>) -> Request<T> {
+    let mut request = Request::new(payload);
+    request
+        .extensions_mut()
+        .insert(carbide_api_core::AuthContext {
+            principals,
+            authorization: None,
+        });
+    request
+}
+
+fn site_agent() -> Principal {
+    Principal::SpiffeServiceIdentifier("elektra-site-agent".to_string())
+}
+
+fn site_request<T>(payload: T) -> Request<T> {
+    // Real mTLS contributes both the concrete identity and this credential marker.
+    request_with_principals(payload, vec![site_agent(), Principal::TrustedCertificate])
+}
 
 struct DnsTestEnv {
     env: TestHarness,
@@ -83,6 +106,7 @@ async fn test_domain_writes_reject_reverse_roots(pool: PgPool) {
         .create_domain(Request::new(CreateDomainRequest {
             name: DOMAIN_NAME.to_string(),
             default_ttl: None,
+            reserved_id: None,
         }))
         .await
         .expect("valid DNS test fixture")
@@ -99,6 +123,7 @@ async fn test_domain_writes_reject_reverse_roots(pool: PgPool) {
             .create_domain(Request::new(CreateDomainRequest {
                 name: name.to_string(),
                 default_ttl: None,
+                reserved_id: None,
             }))
             .await
             .expect_err("reverse domain writes are rejected");
@@ -149,6 +174,7 @@ async fn test_domain_default_ttl_omission_and_range_rules(pool: PgPool) {
         .create_domain(Request::new(CreateDomainRequest {
             name: DOMAIN_NAME.to_string(),
             default_ttl: Some(600),
+            reserved_id: None,
         }))
         .await
         .expect("create domain with a default TTL")
@@ -183,6 +209,7 @@ async fn test_domain_default_ttl_omission_and_range_rules(pool: PgPool) {
         .create_domain(Request::new(CreateDomainRequest {
             name: "short-ttl.example".to_string(),
             default_ttl: Some(5),
+            reserved_id: None,
         }))
         .await
         .expect_err("TTL below the floor on create");
@@ -199,6 +226,723 @@ async fn test_domain_default_ttl_omission_and_range_rules(pool: PgPool) {
         .await
         .expect_err("TTL below the floor on update");
     assert_eq!(error.code(), tonic::Code::InvalidArgument);
+}
+
+/// Exercise the Core handler against disposable Postgres, not a mocked RPC.
+/// The site-agent identity is set on the direct request because this fixture
+/// bypasses the TLS/auth middleware; RBAC itself has separate principal tests.
+#[sqlx_test]
+async fn test_domain_reserved_id_replay_and_reference_guard(pool: PgPool) {
+    use carbide_uuid::domain::DomainId;
+    use rpc::protos::dns::{CreateDomainRequest, DomainDeletionRequest, UpdateDomainRequest};
+
+    fn external_user() -> Principal {
+        Principal::ExternalUser(carbide_authn::middleware::ExternalUserInfo::new(
+            None,
+            "nico-cli-client".into(),
+            None,
+        ))
+    }
+
+    let env = TestHarness::builder(pool).build().await;
+    let api = env.api();
+    let id: DomainId = uuid::Uuid::new_v4().into();
+    let payload = || CreateDomainRequest {
+        name: "owned.example".to_string(),
+        default_ttl: Some(600),
+        reserved_id: Some(id),
+    };
+    // A site-agent service cannot drop the reserved-ID fence and obtain a
+    // fresh operator-owned domain, even though RPC RBAC admits this method.
+    let unreserved_site_create = api
+        .create_domain(site_request(CreateDomainRequest {
+            name: "unreserved-site.example".into(),
+            default_ttl: None,
+            reserved_id: None,
+        }))
+        .await
+        .expect_err("SiteAgent must use the reserved create operation");
+    assert_eq!(unreserved_site_create.code(), tonic::Code::PermissionDenied);
+
+    let unauthorized = api
+        .create_domain(Request::new(payload()))
+        .await
+        .expect_err("direct caller without SiteAgent identity cannot reserve an ID");
+    assert_eq!(unauthorized.code(), tonic::Code::PermissionDenied);
+
+    for (name, principals) in [
+        (
+            "trusted certificate without an identity",
+            vec![Principal::TrustedCertificate],
+        ),
+        (
+            "other service mTLS",
+            vec![
+                Principal::SpiffeServiceIdentifier("nico-dns".to_string()),
+                Principal::TrustedCertificate,
+            ],
+        ),
+        (
+            "site agent plus another service",
+            vec![
+                site_agent(),
+                Principal::TrustedCertificate,
+                Principal::SpiffeServiceIdentifier("nico-dns".to_string()),
+            ],
+        ),
+        (
+            "site agent plus external user",
+            vec![site_agent(), Principal::TrustedCertificate, external_user()],
+        ),
+        (
+            "machine bearer plus site agent mTLS",
+            vec![
+                Principal::SpiffeMachineIdentifier("machine-1".to_string()),
+                Principal::TrustedCertificate,
+                site_agent(),
+                Principal::TrustedCertificate,
+            ],
+        ),
+        (
+            "external user mTLS",
+            vec![external_user(), Principal::TrustedCertificate],
+        ),
+    ] {
+        let error = api
+            .create_domain(request_with_principals(payload(), principals))
+            .await
+            .expect_err("unsupported identity must not inherit SiteAgent reserve authority");
+        assert_eq!(error.code(), tonic::Code::PermissionDenied, "{name}");
+    }
+
+    let operator_request = request_with_principals(
+        CreateDomainRequest {
+            name: "operator-owned.example".into(),
+            default_ttl: None,
+            reserved_id: None,
+        },
+        vec![external_user(), Principal::TrustedCertificate],
+    );
+    let operator_zone = api
+        .create_domain(operator_request)
+        .await
+        .expect("operator create remains available")
+        .into_inner();
+    assert_ne!(operator_zone.id, Some(id));
+    api.delete_domain(Request::new(DomainDeletionRequest {
+        id: operator_zone.id,
+        cancel_reserved_id: false,
+    }))
+    .await
+    .expect("operator ordinary delete remains available");
+
+    let created = api
+        .create_domain(site_request(payload()))
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(created.id, Some(id));
+    let first_created_at = created.created;
+    let replay = api
+        .create_domain(site_request(payload()))
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(
+        replay.id,
+        Some(id),
+        "timeout replay cannot create another Core ID"
+    );
+    assert_eq!(
+        replay.created, first_created_at,
+        "replay preserves the original row"
+    );
+    let mut alias = payload();
+    alias.name = "OWNED.Example.".to_string();
+    assert_eq!(
+        api.create_domain(site_request(alias))
+            .await
+            .expect("case/root-dot variations replay the same canonical intent")
+            .into_inner()
+            .id,
+        Some(id)
+    );
+
+    let mut wrong_name = payload();
+    wrong_name.name = "other.example".to_string();
+    assert_eq!(
+        api.create_domain(site_request(wrong_name))
+            .await
+            .unwrap_err()
+            .code(),
+        tonic::Code::FailedPrecondition
+    );
+    let mut wrong_ttl = payload();
+    wrong_ttl.default_ttl = Some(601);
+    assert_eq!(
+        api.create_domain(site_request(wrong_ttl))
+            .await
+            .unwrap_err()
+            .code(),
+        tonic::Code::FailedPrecondition
+    );
+
+    // Mutating the live TTL cannot invalidate the immutable create snapshot.
+    let updated = api
+        .update_domain(Request::new(UpdateDomainRequest {
+            domain: Some(rpc::protos::dns::Domain {
+                id: Some(id),
+                default_ttl: Some(1800),
+                ..Default::default()
+            }),
+        }))
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(updated.default_ttl, Some(1800));
+    let replay = api
+        .create_domain(site_request(payload()))
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(replay.id, Some(id));
+    assert_eq!(replay.default_ttl, Some(1800));
+
+    // An attached segment is a live reference even when the Core domain
+    // caller only knows the ID. The guard must leave both rows intact.
+    let domain = env.create_test_domain("referenced.example").await;
+    let segment = env.network_controller().create_admin_segment(&domain).await;
+    let unauthorized_site_delete = api
+        .delete_domain(site_request(DomainDeletionRequest {
+            id: Some(domain.id),
+            cancel_reserved_id: false,
+        }))
+        .await
+        .expect_err("SiteAgent cannot perform an operator delete on another domain");
+    assert_eq!(
+        unauthorized_site_delete.code(),
+        tonic::Code::PermissionDenied
+    );
+    let unauthorized_site_owned_delete = api
+        .delete_domain(site_request(DomainDeletionRequest {
+            id: Some(id),
+            cancel_reserved_id: false,
+        }))
+        .await
+        .expect_err("SiteAgent cannot omit the cancellation fence for its own domain");
+    assert_eq!(
+        unauthorized_site_owned_delete.code(),
+        tonic::Code::PermissionDenied
+    );
+    let blocked = api
+        .delete_domain(Request::new(DomainDeletionRequest {
+            id: Some(domain.id),
+            cancel_reserved_id: false,
+        }))
+        .await
+        .expect_err("live subnet must prevent domain deletion");
+    assert_eq!(blocked.code(), tonic::Code::FailedPrecondition);
+    assert!(!segment.id.to_string().is_empty());
+
+    api.delete_domain(Request::new(DomainDeletionRequest {
+        id: Some(id),
+        cancel_reserved_id: false,
+    }))
+    .await
+    .unwrap();
+    api.delete_domain(Request::new(DomainDeletionRequest {
+        id: Some(id),
+        cancel_reserved_id: false,
+    }))
+    .await
+    .expect("repeat delete of a tombstoned domain is idempotent");
+    let late_update = api
+        .update_domain(Request::new(UpdateDomainRequest {
+            domain: Some(rpc::protos::dns::Domain {
+                id: Some(id),
+                default_ttl: Some(900),
+                ..Default::default()
+            }),
+        }))
+        .await
+        .expect_err("late TTL update cannot mutate a tombstone");
+    assert_eq!(late_update.code(), tonic::Code::NotFound);
+    assert_eq!(
+        api.create_domain(site_request(payload()))
+            .await
+            .unwrap_err()
+            .code(),
+        tonic::Code::FailedPrecondition
+    );
+
+    let missing: DomainId = uuid::Uuid::new_v4().into();
+    assert_eq!(
+        api.delete_domain(Request::new(DomainDeletionRequest {
+            id: Some(missing),
+            cancel_reserved_id: false,
+        }))
+        .await
+        .unwrap_err()
+        .code(),
+        tonic::Code::NotFound,
+        "ordinary unknown domain deletion remains not-found"
+    );
+    assert_eq!(
+        api.delete_domain(Request::new(DomainDeletionRequest {
+            id: Some(missing),
+            cancel_reserved_id: true,
+        }))
+        .await
+        .unwrap_err()
+        .code(),
+        tonic::Code::PermissionDenied,
+        "arbitrary callers cannot cancel a reserved ID"
+    );
+    let cancellation = || DomainDeletionRequest {
+        id: Some(missing),
+        cancel_reserved_id: true,
+    };
+    for (name, principals) in [
+        (
+            "site agent plus another service",
+            vec![
+                site_agent(),
+                Principal::TrustedCertificate,
+                Principal::SpiffeServiceIdentifier("nico-dns".to_string()),
+            ],
+        ),
+        (
+            "external user mTLS",
+            vec![external_user(), Principal::TrustedCertificate],
+        ),
+    ] {
+        let error = api
+            .delete_domain(request_with_principals(cancellation(), principals))
+            .await
+            .expect_err("unsupported identity must not cancel a reserved domain ID");
+        assert_eq!(error.code(), tonic::Code::PermissionDenied, "{name}");
+    }
+    api.delete_domain(site_request(cancellation()))
+        .await
+        .unwrap();
+    api.delete_domain(site_request(cancellation()))
+        .await
+        .expect("cancellation retries are idempotent");
+    assert_eq!(
+        api.create_domain(site_request(CreateDomainRequest {
+            name: "late.example".to_string(),
+            default_ttl: None,
+            reserved_id: Some(missing),
+        }))
+        .await
+        .unwrap_err()
+        .code(),
+        tonic::Code::FailedPrecondition,
+        "a delayed create cannot resurrect an absent cancelled ID"
+    );
+    assert_eq!(
+        api.delete_domain(site_request(DomainDeletionRequest {
+            id: Some(domain.id),
+            cancel_reserved_id: true,
+        }))
+        .await
+        .unwrap_err()
+        .code(),
+        tonic::Code::FailedPrecondition,
+        "SiteAgent cannot claim a legacy-created domain as reserved"
+    );
+}
+
+#[sqlx_test]
+async fn test_reserved_create_delete_concurrent_and_duplicate_names(pool: PgPool) {
+    use carbide_uuid::domain::DomainId;
+    use rpc::protos::dns::{CreateDomainRequest, DomainDeletionRequest};
+
+    let env = TestHarness::builder(pool).build().await;
+    let api = env.api();
+    let id: DomainId = uuid::Uuid::new_v4().into();
+    let create = site_request(CreateDomainRequest {
+        name: "race.example".into(),
+        default_ttl: None,
+        reserved_id: Some(id),
+    });
+    let cancel = site_request(DomainDeletionRequest {
+        id: Some(id),
+        cancel_reserved_id: true,
+    });
+    let (created, cancelled) = tokio::join!(api.create_domain(create), api.delete_domain(cancel));
+    cancelled
+        .expect("concurrent cancellation either tombstones absent ID or deletes the created row");
+    if let Err(error) = created {
+        assert_eq!(error.code(), tonic::Code::FailedPrecondition);
+    }
+    assert_eq!(
+        api.create_domain(site_request(CreateDomainRequest {
+            name: "race.example".into(),
+            default_ttl: None,
+            reserved_id: Some(id),
+        }))
+        .await
+        .unwrap_err()
+        .code(),
+        tonic::Code::FailedPrecondition,
+        "a cancelled reserved ID must never become live"
+    );
+
+    // Repeated delivery of the *same* create intent must converge on one
+    // stable row even when both calls begin before either has returned.
+    // The ID advisory lock serializes the two transactions; this test does
+    // not force them to overlap inside the database transaction.
+    let replay_id: DomainId = uuid::Uuid::new_v4().into();
+    let replay_payload = || {
+        site_request(CreateDomainRequest {
+            name: "same-intent.example".into(),
+            default_ttl: Some(720),
+            reserved_id: Some(replay_id),
+        })
+    };
+    let (first, second) = tokio::join!(
+        api.create_domain(replay_payload()),
+        api.create_domain(replay_payload())
+    );
+    let first = first.expect("first reserved create succeeds").into_inner();
+    let second = second.expect("same-ID replay succeeds").into_inner();
+    assert_eq!(first.id, Some(replay_id));
+    assert_eq!(second.id, first.id);
+    assert_eq!(
+        second.created, first.created,
+        "replay returned the same row"
+    );
+
+    let a: DomainId = uuid::Uuid::new_v4().into();
+    let b: DomainId = uuid::Uuid::new_v4().into();
+    let payload = |id| {
+        site_request(CreateDomainRequest {
+            name: "same.example".into(),
+            default_ttl: None,
+            reserved_id: Some(id),
+        })
+    };
+    let (one, two) = tokio::join!(api.create_domain(payload(a)), api.create_domain(payload(b)));
+    let one = one
+        .expect("first reserved ID can use the forward name")
+        .into_inner();
+    let two = two
+        .expect("second reserved ID can use the same forward name")
+        .into_inner();
+    assert_eq!(one.id, Some(a));
+    assert_eq!(two.id, Some(b));
+    assert_ne!(one.id, two.id);
+    assert_eq!(one.name, two.name);
+    api.delete_domain(site_request(DomainDeletionRequest {
+        id: Some(a),
+        cancel_reserved_id: true,
+    }))
+    .await
+    .expect("cancellation is scoped to the reserved ID, not its name");
+    let survivor = api
+        .create_domain(payload(b))
+        .await
+        .expect("cancelling the other ID leaves this intent replayable")
+        .into_inner();
+    assert_eq!(survivor, two);
+}
+
+#[sqlx_test]
+async fn test_reserved_replay_keeps_omitted_create_ttl(pool: PgPool) {
+    use carbide_uuid::domain::DomainId;
+    use rpc::protos::dns::{CreateDomainRequest, DomainSearchQuery, UpdateDomainRequest};
+
+    let env = TestHarness::builder(pool).build().await;
+    let api = env.api();
+    let id: DomainId = uuid::Uuid::new_v4().into();
+    let payload = CreateDomainRequest {
+        name: "reserved-ttl.example".into(),
+        default_ttl: None,
+        reserved_id: Some(id),
+    };
+    let created = api
+        .create_domain(site_request(payload.clone()))
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(created.id, Some(id));
+    assert_eq!(created.default_ttl, None);
+
+    let updated = api
+        .update_domain(Request::new(UpdateDomainRequest {
+            domain: Some(rpc::protos::dns::Domain {
+                id: Some(id),
+                default_ttl: Some(900),
+                ..Default::default()
+            }),
+        }))
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(updated.default_ttl, Some(900));
+    let replay = api
+        .create_domain(site_request(payload.clone()))
+        .await
+        .expect("omitted original TTL remains an exact replay after a live TTL update")
+        .into_inner();
+    assert_eq!(replay, updated);
+
+    for (scenario, ttl) in [
+        ("explicit site default is not original omission", 300),
+        ("live TTL is not the original create TTL", 900),
+    ] {
+        let error = api
+            .create_domain(site_request(CreateDomainRequest {
+                default_ttl: Some(ttl),
+                ..payload.clone()
+            }))
+            .await
+            .expect_err("a different create intent cannot reuse the reserved ID");
+        assert_eq!(error.code(), tonic::Code::FailedPrecondition, "{scenario}");
+        let current = api
+            .find_domain(Request::new(DomainSearchQuery {
+                id: Some(id),
+                name: None,
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(current.domains, vec![updated.clone()], "{scenario}");
+    }
+}
+
+#[sqlx_test]
+async fn test_reserved_operations_cannot_adopt_unreferenced_legacy_ids(pool: PgPool) {
+    use carbide_uuid::domain::DomainId;
+    use rpc::protos::dns::{CreateDomainRequest, DomainDeletionRequest};
+
+    async fn stored_domain(pool: &PgPool, id: DomainId) -> serde_json::Value {
+        sqlx::query_scalar("SELECT to_jsonb(domains) FROM domains WHERE id = $1")
+            .bind(id)
+            .fetch_one(pool)
+            .await
+            .unwrap()
+    }
+
+    let env = TestHarness::builder(pool.clone()).build().await;
+    let api = env.api();
+    for deleted in [false, true] {
+        let payload = CreateDomainRequest {
+            name: format!("legacy-{deleted}.example"),
+            default_ttl: None,
+            reserved_id: None,
+        };
+        let created = api
+            .create_domain(Request::new(payload.clone()))
+            .await
+            .unwrap()
+            .into_inner();
+        let id = created.id.unwrap();
+        if deleted {
+            api.delete_domain(Request::new(DomainDeletionRequest {
+                id: Some(id),
+                cancel_reserved_id: false,
+            }))
+            .await
+            .unwrap();
+        }
+        let before = stored_domain(&pool, id).await;
+        assert_eq!(before["reserved_create"], false);
+        assert_eq!(before["deleted"].is_null(), !deleted);
+
+        let error = api
+            .create_domain(site_request(CreateDomainRequest {
+                reserved_id: Some(id),
+                ..payload
+            }))
+            .await
+            .expect_err("matching fields cannot adopt a legacy ID as a reserved intent");
+        assert_eq!(
+            error.code(),
+            tonic::Code::FailedPrecondition,
+            "deleted={deleted}"
+        );
+        assert_eq!(stored_domain(&pool, id).await, before);
+
+        // No segment or interface references this row: only the ownership
+        // check can reject cancellation of the live legacy domain.
+        let error = api
+            .delete_domain(site_request(DomainDeletionRequest {
+                id: Some(id),
+                cancel_reserved_id: true,
+            }))
+            .await
+            .expect_err("reserved cancellation cannot delete or accept a legacy ID");
+        assert_eq!(
+            error.code(),
+            tonic::Code::FailedPrecondition,
+            "deleted={deleted}"
+        );
+        assert_eq!(stored_domain(&pool, id).await, before);
+    }
+}
+
+#[sqlx_test]
+async fn test_reserved_cancellation_preserves_references_and_is_terminal(pool: PgPool) {
+    use carbide_uuid::domain::DomainId;
+    use rpc::protos::dns::{CreateDomainRequest, DomainDeletionRequest};
+
+    let env = TestHarness::builder(pool.clone()).build().await;
+    let api = env.api();
+    let id: DomainId = uuid::Uuid::new_v4().into();
+    let payload = CreateDomainRequest {
+        name: "reserved-reference.example".into(),
+        default_ttl: Some(600),
+        reserved_id: Some(id),
+    };
+    api.create_domain(site_request(payload.clone()))
+        .await
+        .unwrap();
+    let segment = env
+        .network_controller()
+        .create_admin_segment(&carbide_test_harness::dns::TestDomain {
+            id,
+            name: payload.name.clone(),
+        })
+        .await;
+    let cancellation = DomainDeletionRequest {
+        id: Some(id),
+        cancel_reserved_id: true,
+    };
+    let before = db::dns::domain::find_by_uuid(&pool, id)
+        .await
+        .unwrap()
+        .unwrap();
+    let error = api
+        .delete_domain(site_request(cancellation.clone()))
+        .await
+        .expect_err("reserved ownership cannot bypass a live reference");
+    assert_eq!(error.code(), tonic::Code::FailedPrecondition);
+    let after = db::dns::domain::find_by_uuid(&pool, id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        serde_json::to_value(&after).unwrap(),
+        serde_json::to_value(&before).unwrap()
+    );
+    assert_eq!(
+        api.create_domain(site_request(payload.clone()))
+            .await
+            .unwrap()
+            .into_inner()
+            .id,
+        Some(id),
+        "failed cancellation must not tombstone the owned ID"
+    );
+
+    api.delete_network_segment(Request::new(rpc::forge::NetworkSegmentDeletionRequest {
+        id: Some(segment.id),
+    }))
+    .await
+    .unwrap();
+    api.delete_domain(site_request(cancellation.clone()))
+        .await
+        .expect("reserved cancellation succeeds after its live reference is removed");
+    let deleted = db::dns::domain::find_by_uuid(&pool, id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(deleted.deleted.is_some());
+    api.delete_domain(site_request(cancellation))
+        .await
+        .expect("cancelling an already deleted reserved ID is idempotent");
+    let repeated = db::dns::domain::find_by_uuid(&pool, id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        serde_json::to_value(&repeated).unwrap(),
+        serde_json::to_value(&deleted).unwrap()
+    );
+    let late = api
+        .create_domain(site_request(payload))
+        .await
+        .expect_err("late reserved create cannot resurrect the deleted row");
+    assert_eq!(late.code(), tonic::Code::FailedPrecondition);
+}
+
+#[sqlx_test]
+async fn test_reserved_create_and_cancel_wait_for_the_same_id_lock(pool: PgPool) {
+    use std::time::Duration;
+
+    use carbide_uuid::domain::DomainId;
+    use rpc::protos::dns::{CreateDomainRequest, DomainDeletionRequest};
+
+    let env = TestHarness::builder(pool.clone()).build().await;
+    let api = env.api();
+    let id: DomainId = uuid::Uuid::new_v4().into();
+    let mut blocker = pool.begin().await.unwrap();
+    let blocker_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(blocker.as_mut())
+        .await
+        .unwrap();
+    db::dns::domain::lock_id_exclusive(blocker.as_mut(), id)
+        .await
+        .unwrap();
+    let payload = || CreateDomainRequest {
+        name: "locked-reservation.example".into(),
+        default_ttl: None,
+        reserved_id: Some(id),
+    };
+    let release_after_both_wait = async {
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                let waiters: i64 = sqlx::query_scalar(
+                    "SELECT count(*) FROM pg_stat_activity
+                     WHERE datname = current_database()
+                       AND $1 = ANY(pg_blocking_pids(pid))
+                       AND wait_event_type = 'Lock'",
+                )
+                .bind(blocker_pid)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+                if waiters == 2 {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("create and cancel must both wait on the held Domain identity lock");
+        blocker.commit().await.unwrap();
+    };
+    let (created, cancelled, ()) = tokio::join!(
+        api.create_domain(site_request(payload())),
+        api.delete_domain(site_request(DomainDeletionRequest {
+            id: Some(id),
+            cancel_reserved_id: true,
+        })),
+        release_after_both_wait,
+    );
+    match created {
+        Ok(response) => assert_eq!(response.into_inner().id, Some(id)),
+        Err(error) => assert_eq!(error.code(), tonic::Code::FailedPrecondition),
+    }
+    cancelled.expect("cancellation succeeds regardless of which waiter acquires the lock first");
+    let live: bool = sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM domains WHERE id = $1 AND deleted IS NULL)",
+    )
+    .bind(id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert!(
+        !live,
+        "successful cancellation must not leave a live Domain behind"
+    );
+    let late = api
+        .create_domain(site_request(payload()))
+        .await
+        .expect_err("cancellation remains terminal after both queued operations finish");
+    assert_eq!(late.code(), tonic::Code::FailedPrecondition);
 }
 
 #[sqlx_test]

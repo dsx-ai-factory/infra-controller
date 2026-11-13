@@ -130,7 +130,10 @@ message Domain {
 message CreateDomainRequest {
   // Reverse DNS serves inventory-derived PTRs, not managed zones. Names at or below
   // in-addr.arpa or ip6.arpa are rejected with INVALID_ARGUMENT, ignoring case,
-  // surrounding whitespace, and trailing dots.
+  // surrounding whitespace, and trailing dots. Reserved-ID forward names are
+  // normalized to ASCII lowercase with trailing dots removed; other forward
+  // names must already be lowercase. Forward names need not be unique;
+  // reserved_id identifies a create retry independently of the name.
   string name = 1;
   // Default record TTL in seconds, 30 to 86400 inclusive; values outside that
   // range are rejected with INVALID_ARGUMENT. Absent means the site default
@@ -138,6 +141,12 @@ message CreateDomainRequest {
   optional uint32 default_ttl = 2;
   reserved 3;
   reserved "vpc_id";
+  // Internal REST ownership-index retry, required for the exclusive SiteAgent
+  // identity. Other callers supplying an ID, or SiteAgent omitting it, receive
+  // PERMISSION_DENIED. Omit for legacy/operator calls. A cancelled, deleted, or
+  // legacy-created ID is rejected with FAILED_PRECONDITION, as is a replay whose
+  // canonical name or requested TTL differs from the original intent.
+  common.DomainId reserved_id = 4;
 }
 
 message UpdateDomainRequest {
@@ -158,6 +167,14 @@ message DomainDeletionRequest {
   // a live network segment or machine interface references the Domain.
   // Repeated deletion of a previously deleted Domain succeeds.
   common.DomainId id = 1;
+  // Internal cancellation of an owned, durably reserved ID. Only the exclusive
+  // SiteAgent identity may set this to true, and SiteAgent must use this mode;
+  // other combinations receive PERMISSION_DENIED. False when omitted for
+  // legacy/operator deletes.
+  // On an absent ID this records a terminal tombstone so a delayed CreateDomain
+  // cannot resurrect the zone. Any existing ID not created through reserved_id
+  // is rejected with FAILED_PRECONDITION, including a deleted legacy Domain.
+  bool cancel_reserved_id = 2;
 }
 
 message DomainDeletionResult{

@@ -15,6 +15,7 @@
  * limitations under the License.
  */
 
+use carbide_uuid::domain::DomainId;
 use db::ObjectColumnFilter;
 use model::dns::NewDomain;
 
@@ -390,5 +391,38 @@ async fn soa_serial_cannot_leave_the_u32_range(pool: sqlx::PgPool) {
         stored_serial(txn.as_mut(), zone.id).await,
         u32::MAX,
         "the rejected bump left the stored serial alone"
+    );
+}
+
+#[crate::sqlx_test]
+async fn reserved_and_ordinary_ids_can_share_a_forward_name(pool: sqlx::PgPool) {
+    let mut txn = pool.begin().await.unwrap();
+    let name = "existing.example";
+    let ordinary = db::dns::domain::persist(NewDomain::new(name), txn.as_mut())
+        .await
+        .unwrap();
+    let mut ids = std::collections::HashSet::from([ordinary.id]);
+    for _ in 0..2 {
+        let id = DomainId::new();
+        db::dns::domain::lock_id_exclusive(txn.as_mut(), id)
+            .await
+            .unwrap();
+        let reserved = db::dns::domain::persist_reserved(NewDomain::new(name), id, txn.as_mut())
+            .await
+            .expect("different IDs may use the same forward name");
+        assert_eq!(reserved.id, id);
+        assert_eq!(reserved.name, name);
+        assert!(ids.insert(reserved.id), "each row has its own identity");
+    }
+    let matches = db::dns::domain::find_by_name(txn.as_mut(), name)
+        .await
+        .unwrap();
+    assert_eq!(matches.len(), 3);
+    assert_eq!(
+        matches
+            .into_iter()
+            .map(|domain| domain.id)
+            .collect::<std::collections::HashSet<_>>(),
+        ids
     );
 }

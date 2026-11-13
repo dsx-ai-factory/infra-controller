@@ -891,12 +891,21 @@ type CreateDomainRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// Reverse DNS serves inventory-derived PTRs, not managed zones. Names at or below
 	// in-addr.arpa or ip6.arpa are rejected with INVALID_ARGUMENT, ignoring case,
-	// surrounding whitespace, and trailing dots.
+	// surrounding whitespace, and trailing dots. Reserved-ID forward names are
+	// normalized to ASCII lowercase with trailing dots removed; other forward
+	// names must already be lowercase. Forward names need not be unique;
+	// reserved_id identifies a create retry independently of the name.
 	Name string `protobuf:"bytes,1,opt,name=name,proto3" json:"name,omitempty"`
 	// Default record TTL in seconds, 30 to 86400 inclusive; values outside that
 	// range are rejected with INVALID_ARGUMENT. Absent means the site default
 	// of 300.
-	DefaultTtl    *uint32 `protobuf:"varint,2,opt,name=default_ttl,json=defaultTtl,proto3,oneof" json:"default_ttl,omitempty"`
+	DefaultTtl *uint32 `protobuf:"varint,2,opt,name=default_ttl,json=defaultTtl,proto3,oneof" json:"default_ttl,omitempty"`
+	// Internal REST ownership-index retry, required for the exclusive SiteAgent
+	// identity. Other callers supplying an ID, or SiteAgent omitting it, receive
+	// PERMISSION_DENIED. Omit for legacy/operator calls. A cancelled, deleted, or
+	// legacy-created ID is rejected with FAILED_PRECONDITION, as is a replay whose
+	// canonical name or requested TTL differs from the original intent.
+	ReservedId    *DomainId `protobuf:"bytes,4,opt,name=reserved_id,json=reservedId,proto3" json:"reserved_id,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -943,6 +952,13 @@ func (x *CreateDomainRequest) GetDefaultTtl() uint32 {
 		return *x.DefaultTtl
 	}
 	return 0
+}
+
+func (x *CreateDomainRequest) GetReservedId() *DomainId {
+	if x != nil {
+		return x.ReservedId
+	}
+	return nil
 }
 
 type UpdateDomainRequest struct {
@@ -1050,9 +1066,17 @@ type DomainDeletionRequest struct {
 	// Required Domain ID. Deletion is rejected with FAILED_PRECONDITION while
 	// a live network segment or machine interface references the Domain.
 	// Repeated deletion of a previously deleted Domain succeeds.
-	Id            *DomainId `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	Id *DomainId `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
+	// Internal cancellation of an owned, durably reserved ID. Only the exclusive
+	// SiteAgent identity may set this to true, and SiteAgent must use this mode;
+	// other combinations receive PERMISSION_DENIED. False when omitted for
+	// legacy/operator deletes.
+	// On an absent ID this records a terminal tombstone so a delayed CreateDomain
+	// cannot resurrect the zone. Any existing ID not created through reserved_id
+	// is rejected with FAILED_PRECONDITION, including a deleted legacy Domain.
+	CancelReservedId bool `protobuf:"varint,2,opt,name=cancel_reserved_id,json=cancelReservedId,proto3" json:"cancel_reserved_id,omitempty"`
+	unknownFields    protoimpl.UnknownFields
+	sizeCache        protoimpl.SizeCache
 }
 
 func (x *DomainDeletionRequest) Reset() {
@@ -1090,6 +1114,13 @@ func (x *DomainDeletionRequest) GetId() *DomainId {
 		return x.Id
 	}
 	return nil
+}
+
+func (x *DomainDeletionRequest) GetCancelReservedId() bool {
+	if x != nil {
+		return x.CancelReservedId
+	}
+	return false
 }
 
 type DomainDeletionResult struct {
@@ -1201,11 +1232,13 @@ const file_dns_nico_proto_rawDesc = "" +
 	"defaultTtl\x88\x01\x01B\x06\n" +
 	"\x04_soaB\x0e\n" +
 	"\f_default_ttlJ\x04\b\t\x10\n" +
-	"R\x06vpc_id\"m\n" +
+	"R\x06vpc_id\"\xa0\x01\n" +
 	"\x13CreateDomainRequest\x12\x12\n" +
 	"\x04name\x18\x01 \x01(\tR\x04name\x12$\n" +
 	"\vdefault_ttl\x18\x02 \x01(\rH\x00R\n" +
-	"defaultTtl\x88\x01\x01B\x0e\n" +
+	"defaultTtl\x88\x01\x01\x121\n" +
+	"\vreserved_id\x18\x04 \x01(\v2\x10.common.DomainIdR\n" +
+	"reservedIdB\x0e\n" +
 	"\f_default_ttlJ\x04\b\x03\x10\x04R\x06vpc_id\":\n" +
 	"\x13UpdateDomainRequest\x12#\n" +
 	"\x06domain\x18\x01 \x01(\v2\v.dns.DomainR\x06domain\"c\n" +
@@ -1213,9 +1246,10 @@ const file_dns_nico_proto_rawDesc = "" +
 	"\x02id\x18\x01 \x01(\v2\x10.common.DomainIdH\x00R\x02id\x88\x01\x01\x12\x17\n" +
 	"\x04name\x18\x02 \x01(\tH\x01R\x04name\x88\x01\x01B\x05\n" +
 	"\x03_idB\a\n" +
-	"\x05_name\"9\n" +
+	"\x05_name\"g\n" +
 	"\x15DomainDeletionRequest\x12 \n" +
-	"\x02id\x18\x01 \x01(\v2\x10.common.DomainIdR\x02id\"\x16\n" +
+	"\x02id\x18\x01 \x01(\v2\x10.common.DomainIdR\x02id\x12,\n" +
+	"\x12cancel_reserved_id\x18\x02 \x01(\bR\x10cancelReservedId\"\x16\n" +
 	"\x14DomainDeletionResult*\x8d\x02\n" +
 	"\x10DnsLookupOutcome\x12\"\n" +
 	"\x1eDNS_LOOKUP_OUTCOME_UNSPECIFIED\x10\x00\x12\x1e\n" +
@@ -1277,14 +1311,15 @@ var file_dns_nico_proto_depIdxs = []int32{
 	20, // 10: dns.Domain.updated:type_name -> google.protobuf.Timestamp
 	20, // 11: dns.Domain.deleted:type_name -> google.protobuf.Timestamp
 	4,  // 12: dns.Domain.metadata:type_name -> dns.DomainMetadata
-	13, // 13: dns.UpdateDomainRequest.domain:type_name -> dns.Domain
-	19, // 14: dns.DomainSearchQuery.id:type_name -> common.DomainId
-	19, // 15: dns.DomainDeletionRequest.id:type_name -> common.DomainId
-	16, // [16:16] is the sub-list for method output_type
-	16, // [16:16] is the sub-list for method input_type
-	16, // [16:16] is the sub-list for extension type_name
-	16, // [16:16] is the sub-list for extension extendee
-	0,  // [0:16] is the sub-list for field type_name
+	19, // 13: dns.CreateDomainRequest.reserved_id:type_name -> common.DomainId
+	13, // 14: dns.UpdateDomainRequest.domain:type_name -> dns.Domain
+	19, // 15: dns.DomainSearchQuery.id:type_name -> common.DomainId
+	19, // 16: dns.DomainDeletionRequest.id:type_name -> common.DomainId
+	17, // [17:17] is the sub-list for method output_type
+	17, // [17:17] is the sub-list for method input_type
+	17, // [17:17] is the sub-list for extension type_name
+	17, // [17:17] is the sub-list for extension extendee
+	0,  // [0:17] is the sub-list for field type_name
 }
 
 func init() { file_dns_nico_proto_init() }

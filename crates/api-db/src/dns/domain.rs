@@ -55,6 +55,10 @@ pub struct DbDomain {
     pub name: String,
     /// Default record TTL; absence means the site default.
     pub default_ttl: Option<model::dns::ZoneTtl>,
+    /// Whether REST reserved this domain's identity before creation.
+    pub reserved_create: bool,
+    /// Immutable default TTL of the reserved create request.
+    pub create_default_ttl: Option<model::dns::ZoneTtl>,
     pub created: DateTime<Utc>,
     pub updated: DateTime<Utc>,
     pub deleted: Option<DateTime<Utc>>,
@@ -122,7 +126,39 @@ pub async fn persist(value: NewDomain, txn: &mut PgConnection) -> DatabaseResult
     }
 }
 
-/// Create the domain only if it would be the first one
+/// Create an internal REST-owned domain with the ID durably reserved before
+/// the RPC. The caller must hold the exclusive per-ID advisory transaction lock
+/// (via `lock_id_exclusive`) and check that this ID does not exist.
+pub async fn persist_reserved(
+    value: NewDomain,
+    id: DomainId,
+    txn: &mut PgConnection,
+) -> DatabaseResult<Domain> {
+    validate_domain_name(&value.name)?;
+    let metadata_id = super::domain_metadata::DbMetadata::create_default(txn).await?;
+    let query = format!(
+        "INSERT INTO domains
+                 (id, name, soa, domain_metadata_id, default_ttl, reserved_create, create_default_ttl)
+                 VALUES ($1, $2, $3, $4, $5, true, $5)
+                 RETURNING {}",
+        DbDomain::db_table_columns()
+    );
+    sqlx::query_as::<_, DbDomain>(sqlx::AssertSqlSafe(query.as_str()))
+        .bind(id)
+        .bind(&value.name)
+        .bind(sqlx::types::Json(&value.soa))
+        .bind(metadata_id)
+        .bind(value.default_ttl)
+        .fetch_one(txn)
+        .await
+        .map(Domain::from)
+        .map_err(|error| DatabaseError::query(&query, error))
+}
+
+/// Creates the initial domain in an empty `domains` table.
+///
+/// Returns `None` if any row already exists, including deleted rows.
+/// The caller must use a transaction, as for [`persist`].
 pub async fn persist_first(
     value: &NewDomain,
     txn: &mut PgConnection,
@@ -311,8 +347,11 @@ pub async fn lock_live_for_reference(
     Ok(())
 }
 
-/// Exclusively locks a domain identity.
-async fn lock_id_exclusive(txn: &mut PgConnection, uuid: DomainId) -> Result<(), DatabaseError> {
+/// Exclusively locks a domain identity, including an as-yet-uncreated ID.
+pub async fn lock_id_exclusive(
+    txn: &mut PgConnection,
+    uuid: DomainId,
+) -> Result<(), DatabaseError> {
     let lock_query = "SELECT pg_advisory_xact_lock(
                           hashtextextended('domains:id:' || $1::text, 0)
                       )";
@@ -331,7 +370,7 @@ pub async fn find_by_uuid_for_delete(
     uuid: DomainId,
 ) -> Result<Option<Domain>, DatabaseError> {
     lock_id_exclusive(txn, uuid).await?;
-    let query = "SELECT id, name, default_ttl, created, updated, deleted, soa, domain_metadata_id
+    let query = "SELECT id, name, default_ttl, created, updated, deleted, soa, domain_metadata_id, reserved_create, create_default_ttl
                  FROM domains WHERE id = $1";
     sqlx::query_as::<_, DbDomain>(query)
         .bind(uuid)
@@ -358,6 +397,56 @@ pub async fn has_live_references(
                  )";
     sqlx::query_scalar(query)
         .bind(uuid)
+        .fetch_one(txn)
+        .await
+        .map_err(|error| DatabaseError::query(query, error))
+}
+
+/// Returns the immutable create-intent snapshot for a locked ID, including
+/// a soft-deleted row, so retries cannot adopt a legacy/foreign zone.
+pub async fn reserved_create_intent(
+    txn: &mut PgConnection,
+    id: DomainId,
+) -> DatabaseResult<Option<(Domain, bool, Option<model::dns::ZoneTtl>)>> {
+    let query = "SELECT id, name, default_ttl, created, updated, deleted, soa, domain_metadata_id, reserved_create, create_default_ttl
+                 FROM domains WHERE id = $1";
+    sqlx::query_as::<_, DbDomain>(query)
+        .bind(id)
+        .fetch_optional(txn)
+        .await
+        .map(|row| {
+            row.map(|d| {
+                let is_reserved = d.reserved_create;
+                let create_ttl = d.create_default_ttl;
+                (Domain::from(d), is_reserved, create_ttl)
+            })
+        })
+        .map_err(|error| DatabaseError::query(query, error))
+}
+
+/// Mark an absent, REST-reserved ID as cancelled. The caller MUST hold the
+/// per-domain exclusive advisory lock through commit; this is also the lock
+/// used by reserved create. Repeated cancellations are idempotent.
+pub async fn cancel_reserved_id(txn: &mut PgConnection, id: DomainId) -> DatabaseResult<()> {
+    let query = "INSERT INTO domain_reserved_id_cancellations(id) VALUES ($1)
+                 ON CONFLICT (id) DO NOTHING";
+    sqlx::query(query)
+        .bind(id)
+        .execute(txn)
+        .await
+        .map_err(|error| DatabaseError::query(query, error))?;
+    Ok(())
+}
+
+/// Must be called under the per-ID lock held by create/delete to avoid a
+/// response-lost creation racing an absent-ID cancellation.
+pub async fn is_reserved_id_cancelled(
+    txn: &mut PgConnection,
+    id: DomainId,
+) -> DatabaseResult<bool> {
+    let query = "SELECT EXISTS (SELECT 1 FROM domain_reserved_id_cancellations WHERE id = $1)";
+    sqlx::query_scalar(query)
+        .bind(id)
         .fetch_one(txn)
         .await
         .map_err(|error| DatabaseError::query(query, error))
