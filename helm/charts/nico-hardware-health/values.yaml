@@ -32,6 +32,21 @@ replicas: 1
 ## exceed CARBIDE_HEALTH__SHUTDOWN_TIMEOUT (whole seconds only) or the 20s default.
 terminationGracePeriodSeconds: 30
 
+## Container-level security context, rendered after the always-applied
+## `allowPrivilegeEscalation: false` baseline (chart-managed; an
+## allowPrivilegeEscalation key set here is ignored). The chart default adds SYS_PTRACE.
+## OpenShift's restricted Security Context Constraints (SCC) do not permit it.
+## Drop it with a non-null empty list — list replacement is stable under
+## Helm's value coalescing, unlike a top-level null:
+##   containerSecurityContext:
+##     capabilities:
+##       add: []
+## See helm-prereqs/values/nico-core-openshift.yaml for a full working example.
+containerSecurityContext:
+  capabilities:
+    add:
+      - SYS_PTRACE
+
 ## Container resource requests and limits. Empty by default.
 resources: {}
 
