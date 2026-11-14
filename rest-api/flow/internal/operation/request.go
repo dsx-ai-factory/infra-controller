@@ -73,6 +73,8 @@ type Request struct {
 	Operation   Wrapper
 	TargetSpec  TargetSpec // Exactly one of racks, NVLink domains, or components
 	Description string
+	// SkipUnaddressableTargets defaults to false. It does not override readiness or execution failures.
+	SkipUnaddressableTargets bool
 
 	// ConflictStrategy controls how the task behaves when a conflict is
 	// detected. Default (ConflictStrategyReject) rejects on conflict.

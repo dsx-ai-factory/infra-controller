@@ -95,15 +95,30 @@ func TestFlowMutationHelpersProxyRequests(t *testing.T) {
 		{
 			name: "power on",
 			execute: func(ctx context.Context, stc tclient.Client) (*flowv1.SubmitTaskResponse, *cutil.APIError) {
-				return ExecutePowerControlWorkflow(ctx, zerolog.Nop(), stc, mutationTargetSpec(rackID), cam.PowerControlStateOn, &ruleIDArg, false, workflowID, entityName)
+				return ExecutePowerControlWorkflow(ctx, zerolog.Nop(), stc, mutationTargetSpec(rackID), cam.PowerControlStateOn, &ruleIDArg, false, workflowID, entityName, cutil.GetPtr(true))
+			},
+			wantWorkflowID: workflowID + "-skip-unaddressable-targets",
+			wantFullMethod: flowv1.Flow_PowerOnRack_FullMethodName,
+			wantRequest: &flowv1.PowerOnRackRequest{
+				SkipUnaddressableTargets: cutil.GetPtr(true),
+				TargetSpec:               mutationTargetSpec(rackID),
+				Description:              "API power on rack r1",
+				RuleId:                   &flowv1.UUID{Id: ruleID},
+			},
+		},
+		{
+			name: "power on with explicit opt out",
+			execute: func(ctx context.Context, stc tclient.Client) (*flowv1.SubmitTaskResponse, *cutil.APIError) {
+				return ExecutePowerControlWorkflow(ctx, zerolog.Nop(), stc, mutationTargetSpec(rackID), cam.PowerControlStateOn, nil, false, workflowID, entityName, cutil.GetPtr(false))
 			},
 			wantFullMethod: flowv1.Flow_PowerOnRack_FullMethodName,
 			wantRequest: &flowv1.PowerOnRackRequest{
-				TargetSpec:  mutationTargetSpec(rackID),
-				Description: "API power on rack r1",
-				RuleId:      &flowv1.UUID{Id: ruleID},
+				SkipUnaddressableTargets: cutil.GetPtr(false),
+				TargetSpec:               mutationTargetSpec(rackID),
+				Description:              "API power on rack r1",
 			},
 		},
+
 		{
 			name: "power off",
 			execute: func(ctx context.Context, stc tclient.Client) (*flowv1.SubmitTaskResponse, *cutil.APIError) {
@@ -168,29 +183,32 @@ func TestFlowMutationHelpersProxyRequests(t *testing.T) {
 		{
 			name: "bring up",
 			execute: func(ctx context.Context, stc tclient.Client) (*flowv1.SubmitTaskResponse, *cutil.APIError) {
-				return ExecuteBringUpRackWorkflow(ctx, zerolog.Nop(), stc, mutationTargetSpec(rackID), "API bring up rack r1", &ruleIDArg, true, workflowID, entityName)
+				return ExecuteBringUpRackWorkflow(ctx, zerolog.Nop(), stc, mutationTargetSpec(rackID), "API bring up rack r1", &ruleIDArg, true, workflowID, entityName, cutil.GetPtr(true))
 			},
+			wantWorkflowID: workflowID + "-skip-unaddressable-targets",
 			wantFullMethod: flowv1.Flow_BringUpRack_FullMethodName,
 			wantRequest: &flowv1.BringUpRackRequest{
-				TargetSpec:             mutationTargetSpec(rackID),
-				Description:            "API bring up rack r1",
-				RuleId:                 &flowv1.UUID{Id: ruleID},
-				OverrideReadinessCheck: true,
+				SkipUnaddressableTargets: cutil.GetPtr(true),
+				TargetSpec:               mutationTargetSpec(rackID),
+				Description:              "API bring up rack r1",
+				RuleId:                   &flowv1.UUID{Id: ruleID},
+				OverrideReadinessCheck:   true,
 			},
 		},
 		{
 			name: "firmware update",
 			execute: func(ctx context.Context, stc tclient.Client) (*flowv1.SubmitTaskResponse, *cutil.APIError) {
-				return ExecuteFirmwareUpdateWorkflow(ctx, zerolog.Nop(), stc, mutationTargetSpec(rackID), &version, []string{"bmc", "nvos"}, nil, siteID, nil, false, true, workflowID, entityName)
+				return ExecuteFirmwareUpdateWorkflow(ctx, zerolog.Nop(), stc, mutationTargetSpec(rackID), &version, []string{"bmc", "nvos"}, nil, siteID, nil, false, true, workflowID, entityName, cutil.GetPtr(true))
 			},
 			wantFullMethod: flowv1.Flow_UpgradeFirmware_FullMethodName,
-			wantWorkflowID: workflowID + "-override-version-check",
+			wantWorkflowID: workflowID + "-skip-unaddressable-targets-override-version-check",
 			wantRequest: &flowv1.UpgradeFirmwareRequest{
-				TargetSpec:           mutationTargetSpec(rackID),
-				TargetVersion:        &version,
-				SubTargets:           []string{"bmc", "nvos"},
-				Description:          "API firmware update rack r1",
-				OverrideVersionCheck: true,
+				SkipUnaddressableTargets: cutil.GetPtr(true),
+				TargetSpec:               mutationTargetSpec(rackID),
+				TargetVersion:            &version,
+				SubTargets:               []string{"bmc", "nvos"},
+				Description:              "API firmware update rack r1",
+				OverrideVersionCheck:     true,
 			},
 		},
 	}

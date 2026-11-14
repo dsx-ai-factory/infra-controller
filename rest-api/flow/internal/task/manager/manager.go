@@ -28,6 +28,7 @@ import (
 	identifier "github.com/NVIDIA/infra-controller/rest-api/flow/pkg/common/Identifier"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/pkg/common/devicetypes"
 	flowerrors "github.com/NVIDIA/infra-controller/rest-api/flow/pkg/common/errors"
+	"github.com/NVIDIA/infra-controller/rest-api/flow/pkg/inventoryobjects/component"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/pkg/inventoryobjects/rack"
 )
 
@@ -39,6 +40,8 @@ const (
 )
 
 var (
+	errRecordedTargetsChanged = errors.New("recorded task targets are no longer present")
+
 	// ErrRackConflict marks a rejected task submission caused by an active
 	// conflicting task on the target rack.
 	ErrRackConflict = errors.New("rack conflict")
@@ -182,6 +185,7 @@ func (m *ManagerImpl) Start(ctx context.Context) error {
 		m.cancel = cancel
 
 		m.promoter.Start(startCtx)
+		go m.runBatchDispatchRecovery(startCtx)
 	})
 
 	return startErr
@@ -233,9 +237,20 @@ func (m *ManagerImpl) SubmitTask(
 			existing.Status == taskcommon.TaskStatusWaiting) {
 			return []uuid.UUID{existing.ID}, nil
 		}
+		if existing != nil && existing.Attributes.TargetResolution != nil {
+			targetRack, err := m.loadRackForTask(ctx, existing)
+			if err != nil {
+				return nil, err
+			}
+			id, err := m.createAndExecuteIdempotentTask(ctx, req, targetRack, existing.Attributes.TargetResolution)
+			if err != nil {
+				return nil, err
+			}
+			return []uuid.UUID{id}, nil
+		}
 	}
 
-	rackMap, err := m.validateTask(ctx, req)
+	rackMap, resolutions, err := m.validateTask(ctx, req)
 	if err != nil {
 		return nil, err
 	}
@@ -244,10 +259,15 @@ func (m *ManagerImpl) SubmitTask(
 		return m.createResetTasks(ctx, req, rackMap)
 	}
 
+	// Admit multi-rack requests atomically before starting any external work.
+	if len(rackMap) > 1 {
+		return m.submitRackBatch(ctx, req, rackMap, resolutions)
+	}
+
 	// Create and execute task for each rack.
 	var taskIDs []uuid.UUID
 	for _, targetRack := range rackMap {
-		taskID, err := m.createAndExecuteTask(ctx, req, targetRack)
+		taskID, err := m.createAndExecuteTask(ctx, req, targetRack, resolutions[targetRack.Info.ID])
 		if err != nil {
 			log.Error().
 				Err(err).
@@ -285,7 +305,7 @@ func (m *ManagerImpl) ValidateTask(
 		return err
 	}
 
-	_, err := m.validateTask(ctx, req)
+	_, _, err := m.validateTask(ctx, req)
 	return err
 }
 
@@ -294,36 +314,36 @@ func (m *ManagerImpl) ValidateTask(
 func (m *ManagerImpl) validateTask(
 	ctx context.Context,
 	req *operation.Request,
-) (map[uuid.UUID]*rack.Rack, error) {
+) (map[uuid.UUID]*rack.Rack, map[uuid.UUID]*taskcommon.TargetResolution, error) {
 	// Fail-fast: verify the requested rule exists before creating any tasks.
 	// The resolver will check again at execution time (defense-in-depth for
 	// queued tasks whose rule may be deleted while waiting).
 	if req.RuleID != nil && *req.RuleID != uuid.Nil {
 		rule, err := m.taskStore.GetRule(ctx, *req.RuleID)
 		if err != nil {
-			return nil, fmt.Errorf("requested rule_id %s: %w", req.RuleID, err)
+			return nil, nil, fmt.Errorf("requested rule_id %s: %w", req.RuleID, err)
 		}
 		if rule == nil {
-			return nil, fmt.Errorf("requested rule_id %s not found", req.RuleID)
+			return nil, nil, fmt.Errorf("requested rule_id %s not found", req.RuleID)
 		}
 	}
 
 	// Resolve targets to racks with components.
 	rackMap, err := resolveTargetSpecToRacks(ctx, m.inventoryStore, &req.TargetSpec)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	if len(rackMap) == 0 {
 		if req.Operation.Type == taskcommon.TaskTypeComponentReset {
-			return nil, flowerrors.GRPCErrorInvalidArgument("no valid racks found for request")
+			return nil, nil, flowerrors.GRPCErrorInvalidArgument("no valid racks found for request")
 		}
-		return nil, fmt.Errorf("no valid racks found for request")
+		return nil, nil, fmt.Errorf("no valid racks found for request")
 	}
 
 	if req.RequiredRackID != uuid.Nil {
 		if len(rackMap) != 1 {
-			return nil, fmt.Errorf(
+			return nil, nil, fmt.Errorf(
 				"RequiredRackID: components resolved to %d racks, expected exactly rack %s",
 				len(rackMap), req.RequiredRackID,
 			)
@@ -333,18 +353,22 @@ func (m *ManagerImpl) validateTask(
 			for id := range rackMap {
 				actualID = id
 			}
-			return nil, fmt.Errorf(
+			return nil, nil, fmt.Errorf(
 				"RequiredRackID: components resolved to rack %s, expected %s",
 				actualID, req.RequiredRackID,
 			)
 		}
 	}
 
+	resolutions, err := m.resolveSubmissionTargets(ctx, req, rackMap)
+	if err != nil {
+		return nil, nil, err
+	}
 	if err := m.validateSubmissionRackTargets(ctx, req.Operation, rackMap); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
-	return rackMap, nil
+	return rackMap, resolutions, nil
 }
 
 // validateSubmissionRackTargets resolves the effective rule for each rack and
@@ -505,8 +529,7 @@ func validateResolvedRackTargets(
 			if op.Type == taskcommon.TaskTypeComponentReset && comp.Type != devicetypes.ComponentTypeNVSwitch {
 				return flowerrors.GRPCErrorInvalidArgument("factory reset requires switch targets")
 			}
-			if comp.ComponentID == "" &&
-				(!macTargetSupported || comp.ManagementMAC() == "") {
+			if !targetAddressable(&comp, expectationOnly, macTargetSupported) {
 				unlinkedComponents = append(
 					unlinkedComponents,
 					fmt.Sprintf(
@@ -541,6 +564,10 @@ func validateResolvedRackTargets(
 	}
 
 	return nil
+}
+
+func targetAddressable(c *component.Component, expectationOnly, macSupported bool) bool {
+	return expectationOnly || c.ComponentID != "" || (macSupported && c.ManagementMAC() != "")
 }
 
 type unlinkedTargetsError struct {
@@ -582,12 +609,17 @@ func (m *ManagerImpl) createAndExecuteTask(
 	ctx context.Context,
 	req *operation.Request,
 	targetRack *rack.Rack,
+	resolutions ...*taskcommon.TargetResolution,
 ) (uuid.UUID, error) {
 	if req.HasIdempotencyKey() {
-		return m.createAndExecuteIdempotentTask(ctx, req, targetRack)
+		return m.createAndExecuteIdempotentTask(ctx, req, targetRack, resolutions...)
 	}
 
-	task := newTaskForRack(req, targetRack)
+	task := newTaskForRack(req, targetRack, resolutions...)
+	initializeErr := initializeTargetReport(&task)
+	if initializeErr != nil {
+		return uuid.Nil, initializeErr
+	}
 
 	// Check for conflicts inside a transaction to avoid a race between the
 	// check and the creation.
@@ -627,6 +659,7 @@ func (m *ManagerImpl) createAndExecuteIdempotentTask(
 	ctx context.Context,
 	req *operation.Request,
 	targetRack *rack.Rack,
+	resolutions ...*taskcommon.TargetResolution,
 ) (uuid.UUID, error) {
 	var task taskdef.Task
 	taskAlreadyPersisted := false
@@ -656,7 +689,11 @@ func (m *ManagerImpl) createAndExecuteIdempotentTask(
 
 			} else {
 				// No existing tasks with this idempotency key, create a new one.
-				task = newTaskForRack(req, targetRack)
+				task = newTaskForRack(req, targetRack, resolutions...)
+				initializeErr := initializeTargetReport(&task)
+				if initializeErr != nil {
+					return initializeErr
+				}
 				if err := m.lockRackAndResolveConflict(txCtx, req, targetRack, &task); err != nil {
 					return err
 				}
@@ -679,6 +716,15 @@ func (m *ManagerImpl) createAndExecuteIdempotentTask(
 					Str("rack_id", targetRack.Info.ID.String()).
 					Msg("task queued: waiting for rack to become available")
 				return nil
+			}
+
+			// An unscheduled task may be recovered after a process restart.
+			// Use its persisted membership even if the retry resolves more devices.
+			if task.Attributes.TargetResolution != nil {
+				targetRack, err = m.loadRackForTask(txCtx, &task)
+				if err != nil {
+					return err
+				}
 			}
 
 			// Keep the idempotency lock until the execution ID or deferred
@@ -722,7 +768,11 @@ func validateIdempotentTaskRack(req *operation.Request, existing *taskdef.Task) 
 	)
 }
 
-func newTaskForRack(req *operation.Request, targetRack *rack.Rack) taskdef.Task {
+func newTaskForRack(req *operation.Request, targetRack *rack.Rack, resolutions ...*taskcommon.TargetResolution) taskdef.Task {
+	var resolution *taskcommon.TargetResolution
+	if len(resolutions) > 0 {
+		resolution = resolutions[0]
+	}
 	compsByType := make(
 		map[devicetypes.ComponentType][]uuid.UUID,
 		len(targetRack.Components),
@@ -737,6 +787,7 @@ func newTaskForRack(req *operation.Request, targetRack *rack.Rack) taskdef.Task 
 		RackID:    targetRack.Info.ID,
 		Attributes: taskcommon.TaskAttributes{
 			ComponentsByType: compsByType,
+			TargetResolution: resolution,
 		},
 		Description:    req.Description,
 		ExecutorType:   taskcommon.ExecutorTypeUnknown,
@@ -810,12 +861,30 @@ func (m *ManagerImpl) lockRackAndResolveConflict(
 func (m *ManagerImpl) promoteTask(ctx context.Context, taskID uuid.UUID) error {
 	task, err := m.taskStore.GetTask(ctx, taskID)
 	if err != nil {
-		return fmt.Errorf("promoteTask: failed to load task %s: %w", taskID, err)
+		requeueErr := m.requeuePendingDispatch(ctx, taskID, nil, err)
+		return fmt.Errorf("promoteTask: failed to load task %s: %w", taskID, errors.Join(err, requeueErr))
+	}
+
+	if task.Attributes.BatchDispatch != "" && task.Attributes.BatchDispatch != taskcommon.BatchDispatchReady {
+		return nil
 	}
 
 	targetRack, err := m.loadRackForTask(ctx, task)
 	if err != nil {
+		if errors.Is(err, errRecordedTargetsChanged) {
+			updateErr := m.taskStore.UpdateTaskStatus(ctx, &taskdef.TaskStatusUpdate{ID: task.ID, Status: taskcommon.TaskStatusFailed, Message: message.ForFailure(err), OnlyIfPendingUnscheduled: true})
+			if updateErr != nil {
+				return fmt.Errorf("record target snapshot failure: %w", errors.Join(err, updateErr))
+			}
+		} else {
+			requeueErr := m.requeuePendingDispatch(ctx, taskID, nil, err)
+			err = errors.Join(err, requeueErr)
+		}
 		return fmt.Errorf("promoteTask: failed to load rack: %w", err)
+	}
+
+	if task.Attributes.BatchDispatch == taskcommon.BatchDispatchReady {
+		return m.resolveAndExecuteBatchTask(ctx, task, targetRack)
 	}
 
 	return m.resolveAndExecuteTask(ctx, task, targetRack)
@@ -854,6 +923,14 @@ func (m *ManagerImpl) resolveAndExecuteTaskWithTransaction(
 	}
 	if rule == nil {
 		return fmt.Errorf("resolver returned nil rule (should never happen)")
+	}
+
+	return m.executeResolvedTask(ctx, task, targetRack, rule, transactionActive)
+}
+
+func (m *ManagerImpl) executeResolvedTask(ctx context.Context, task *taskdef.Task, targetRack *rack.Rack, rule *operationrules.OperationRule, transactionActive bool) error {
+	if rule == nil {
+		return fmt.Errorf("operation rule is nil")
 	}
 
 	if rule.ID != uuid.Nil {
@@ -1046,6 +1123,7 @@ func (m *ManagerImpl) deferUnlinkedTask(
 			}
 			if status == taskcommon.TaskStatusWaiting {
 				update.QueueExpiresAt = deadline
+				update.RetryBatchDispatch = task.Attributes.BatchDispatch == taskcommon.BatchDispatchStarted
 			}
 			return m.taskStore.UpdateTaskStatus(txCtx, update)
 		}
@@ -1159,6 +1237,9 @@ func (m *ManagerImpl) loadRackForTask(
 			r.AddComponent(comp)
 		}
 	}
+	if task.Attributes.TargetResolution != nil && len(r.Components) != len(allUUIDs) {
+		return nil, fmt.Errorf("%w on rack %s", errRecordedTargetsChanged, task.RackID)
+	}
 	return r, nil
 }
 
@@ -1210,11 +1291,12 @@ func (m *ManagerImpl) executeTask(
 
 	req := taskdef.ExecutionRequest{
 		Info: taskdef.ExecutionInfo{
-			TaskID:         task.ID,
-			Components:     workflowComponentsFrom(targetRack),
-			RuleDefinition: &rule.RuleDefinition,
-			OperationType:  task.Operation.Type,
-			OperationInfo:  task.Operation.Info, // already json.RawMessage from the DB
+			TaskID:           task.ID,
+			Components:       workflowComponentsFrom(targetRack),
+			TargetResolution: task.Attributes.TargetResolution,
+			RuleDefinition:   &rule.RuleDefinition,
+			OperationType:    task.Operation.Type,
+			OperationInfo:    task.Operation.Info, // already json.RawMessage from the DB
 		},
 		Async: true,
 	}

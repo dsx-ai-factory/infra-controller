@@ -88,6 +88,8 @@ type APIUpdatePowerStateRequest struct {
 	// rack-scoped components) are reported as not ready by their persisted
 	// status. Intended for operator-supervised maintenance.
 	OverrideReadinessCheck bool `json:"overrideReadinessCheck,omitempty"`
+	// SkipUnaddressableTargets opts in to skipping unaddressable targets; omission defaults to false.
+	SkipUnaddressableTargets *bool `json:"skipUnaddressableTargets,omitempty"`
 }
 
 // Validate validates the power control request
@@ -142,6 +144,8 @@ type APIBatchUpdateRackPowerStateRequest struct {
 	// OverrideReadinessCheck applies the readiness-gate bypass to every task
 	// spawned by this batch. See APIUpdatePowerStateRequest for semantics.
 	OverrideReadinessCheck bool `json:"overrideReadinessCheck,omitempty"`
+	// SkipUnaddressableTargets opts in to skipping unaddressable targets; omission defaults to false.
+	SkipUnaddressableTargets *bool `json:"skipUnaddressableTargets,omitempty"`
 }
 
 // Validate checks required fields and power state validity.
@@ -172,6 +176,8 @@ type APIBatchUpdateTrayPowerStateRequest struct {
 	// OverrideReadinessCheck applies the readiness-gate bypass to every task
 	// spawned by this batch. See APIUpdatePowerStateRequest for semantics.
 	OverrideReadinessCheck bool `json:"overrideReadinessCheck,omitempty"`
+	// SkipUnaddressableTargets opts in to skipping unaddressable targets; omission defaults to false.
+	SkipUnaddressableTargets *bool `json:"skipUnaddressableTargets,omitempty"`
 }
 
 // Validate checks required fields, power state validity, and filter constraints.

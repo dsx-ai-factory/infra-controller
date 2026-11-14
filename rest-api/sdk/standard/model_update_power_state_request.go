@@ -24,6 +24,8 @@ var _ MappedNullable = &UpdatePowerStateRequest{}
 
 // UpdatePowerStateRequest Request body for single-resource power control operations
 type UpdatePowerStateRequest struct {
+	// Opt in to skipping unaddressable targets after component-type filtering. Omitted, null, or false requires every selected component to be addressable; otherwise the request is rejected before task creation. True submits addressable components and records the others as skipped in task reports. Each selected rack must retain at least one addressable component, otherwise the entire request is rejected. Management-MAC and expectation-only addressing remain supported where the operation permits them. Readiness overrides and step execution failure behavior are independent. Multi-rack admission creates all task records atomically; after admission the returned IDs include tasks whose scheduling fails, with outcomes in task status.
+	SkipUnaddressableTargets NullableBool `json:"skipUnaddressableTargets,omitempty"`
 	// ID of the Site
 	SiteId string `json:"siteId"`
 	// Power control state to apply: - `On`: Power on the target(s) - `Off`: Graceful power off - `Cycle`: Graceful power cycle (restart) - `ForceOff`: Forced power off (immediate) - `ForceCycle`: Forced power cycle (immediate restart) - `ACPowerCycle`: Remove and restore AC power (unsupported on Viking systems)  Exact lowercase forms are also accepted for compatibility.
@@ -42,6 +44,8 @@ type _UpdatePowerStateRequest UpdatePowerStateRequest
 // will change when the set of required properties is changed
 func NewUpdatePowerStateRequest(siteId string, state string) *UpdatePowerStateRequest {
 	this := UpdatePowerStateRequest{}
+	var skipUnaddressableTargets bool = false
+	this.SkipUnaddressableTargets = *NewNullableBool(&skipUnaddressableTargets)
 	this.SiteId = siteId
 	this.State = state
 	var overrideReadinessCheck bool = false
@@ -54,9 +58,54 @@ func NewUpdatePowerStateRequest(siteId string, state string) *UpdatePowerStateRe
 // but it doesn't guarantee that properties required by API are set
 func NewUpdatePowerStateRequestWithDefaults() *UpdatePowerStateRequest {
 	this := UpdatePowerStateRequest{}
+	var skipUnaddressableTargets bool = false
+	this.SkipUnaddressableTargets = *NewNullableBool(&skipUnaddressableTargets)
 	var overrideReadinessCheck bool = false
 	this.OverrideReadinessCheck = &overrideReadinessCheck
 	return &this
+}
+
+// GetSkipUnaddressableTargets returns the SkipUnaddressableTargets field value if set, zero value otherwise (both if not set or set to explicit null).
+func (o *UpdatePowerStateRequest) GetSkipUnaddressableTargets() bool {
+	if o == nil || IsNil(o.SkipUnaddressableTargets.Get()) {
+		var ret bool
+		return ret
+	}
+	return *o.SkipUnaddressableTargets.Get()
+}
+
+// GetSkipUnaddressableTargetsOk returns a tuple with the SkipUnaddressableTargets field value if set, nil otherwise
+// and a boolean to check if the value has been set.
+// NOTE: If the value is an explicit nil, `nil, true` will be returned
+func (o *UpdatePowerStateRequest) GetSkipUnaddressableTargetsOk() (*bool, bool) {
+	if o == nil {
+		return nil, false
+	}
+	return o.SkipUnaddressableTargets.Get(), o.SkipUnaddressableTargets.IsSet()
+}
+
+// HasSkipUnaddressableTargets returns a boolean if a field has been set.
+func (o *UpdatePowerStateRequest) HasSkipUnaddressableTargets() bool {
+	if o != nil && o.SkipUnaddressableTargets.IsSet() {
+		return true
+	}
+
+	return false
+}
+
+// SetSkipUnaddressableTargets gets a reference to the given NullableBool and assigns it to the SkipUnaddressableTargets field.
+func (o *UpdatePowerStateRequest) SetSkipUnaddressableTargets(v bool) {
+	o.SkipUnaddressableTargets.Set(&v)
+}
+
+// SetSkipUnaddressableTargetsNil sets the value for SkipUnaddressableTargets to be an explicit nil
+func (o *UpdatePowerStateRequest) SetSkipUnaddressableTargetsNil() {
+	o.SkipUnaddressableTargets.Set(nil)
+}
+
+// UnsetSkipUnaddressableTargets ensures that no value is present for SkipUnaddressableTargets, not even an explicit nil
+func (o *UpdatePowerStateRequest) UnsetSkipUnaddressableTargets() {
+	o.SkipUnaddressableTargets.Unset()
 }
 
 // GetSiteId returns the SiteId field value
@@ -181,6 +230,9 @@ func (o UpdatePowerStateRequest) MarshalJSON() ([]byte, error) {
 
 func (o UpdatePowerStateRequest) ToMap() (map[string]interface{}, error) {
 	toSerialize := map[string]interface{}{}
+	if o.SkipUnaddressableTargets.IsSet() {
+		toSerialize["skipUnaddressableTargets"] = o.SkipUnaddressableTargets.Get()
+	}
 	toSerialize["siteId"] = o.SiteId
 	toSerialize["state"] = o.State
 	if !IsNil(o.RuleId) {

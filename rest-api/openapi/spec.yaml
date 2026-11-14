@@ -28151,6 +28151,8 @@ components:
         - domainIds
         - state
       properties:
+        skipUnaddressableTargets:
+          $ref: '#/components/schemas/SkipUnaddressableTargets'
         siteId:
           type: string
           format: uuid
@@ -28208,6 +28210,8 @@ components:
       required:
         - siteId
       properties:
+        skipUnaddressableTargets:
+          $ref: '#/components/schemas/SkipUnaddressableTargets'
         siteId:
           type: string
           format: uuid
@@ -28258,6 +28262,8 @@ components:
         - siteId
         - domainIds
       properties:
+        skipUnaddressableTargets:
+          $ref: '#/components/schemas/SkipUnaddressableTargets'
         siteId:
           type: string
           format: uuid
@@ -28319,6 +28325,8 @@ components:
         - siteId
         - state
       properties:
+        skipUnaddressableTargets:
+          $ref: '#/components/schemas/SkipUnaddressableTargets'
         siteId:
           type: string
           format: uuid
@@ -29228,6 +29236,8 @@ components:
         - siteId
         - state
       properties:
+        skipUnaddressableTargets:
+          $ref: '#/components/schemas/SkipUnaddressableTargets'
         siteId:
           type: string
           format: uuid
@@ -29273,6 +29283,8 @@ components:
       required:
         - siteId
       properties:
+        skipUnaddressableTargets:
+          $ref: '#/components/schemas/SkipUnaddressableTargets'
         siteId:
           type: string
           format: uuid
@@ -29361,6 +29373,8 @@ components:
       required:
         - siteId
       properties:
+        skipUnaddressableTargets:
+          $ref: '#/components/schemas/SkipUnaddressableTargets'
         siteId:
           type: string
           format: uuid
@@ -29392,6 +29406,8 @@ components:
       required:
         - siteId
       properties:
+        skipUnaddressableTargets:
+          $ref: '#/components/schemas/SkipUnaddressableTargets'
         siteId:
           type: string
           format: uuid
@@ -29485,7 +29501,7 @@ components:
           allOf:
             - $ref: '#/components/schemas/TaskReportV1'
           description: |
-            Structured v1 execution report for the task. Populated on single-task `GET` and `cancel` responses, and on list responses only when `includeReport=true` is set. Omitted when the task has not yet produced a report (e.g. still queued) or when the caller did not opt in on list endpoints.
+            Structured v1 execution report for the task. Populated on single-task `GET` and `cancel` responses, and on list responses only when `includeReport=true` is set. Admission details are available while newly admitted tasks are queued. Legacy tasks may omit the report until execution produces one. List responses omit it when the caller does not opt in.
 
             A future schema revision will be exposed as a new `TaskReportV2` schema referenced from a parallel response field; v1 consumers are not disturbed by that bump.
       examples:
@@ -30385,6 +30401,71 @@ components:
             everything in the bundle. Unknown names are rejected.
           items:
             type: string
+    SkipUnaddressableTargets:
+      type: [boolean, 'null']
+      default: false
+      description: >-
+        Opt in to skipping unaddressable targets after component-type filtering.
+        Omitted, null, or false requires every selected component to be addressable;
+        otherwise the request is rejected before task creation. True submits
+        addressable components and records the others as skipped in task reports.
+        Each selected rack must retain at least one addressable component,
+        otherwise the entire request is rejected. Management-MAC and
+        expectation-only addressing remain supported where the operation permits them.
+        Readiness overrides and step execution failure behavior are independent.
+        Multi-rack admission creates all task records atomically; after admission
+        the returned IDs include tasks whose scheduling fails, with outcomes in task status.
+      example: true
+    TaskTargetResolution:
+      type: object
+      description: Immutable admission result. Selected equals submitted plus the number of skipped entries. Submitted counts admitted targets, not completed work; execution outcomes remain per rule step.
+      required: [skipUnaddressableTargets, selected, submitted, skipped]
+      properties:
+        skipUnaddressableTargets:
+          type: boolean
+          description: Effective opt-in value recorded when the task was admitted.
+        selected:
+          type: integer
+          minimum: 0
+        submitted:
+          type: integer
+          minimum: 0
+        skipped:
+          type: array
+          description: Skipped components ordered by Flow component UUID; empty when none were skipped.
+          items:
+            $ref: '#/components/schemas/SkippedTaskTarget'
+      example:
+        skipUnaddressableTargets: true
+        selected: 1
+        submitted: 1
+        skipped: []
+    SkippedTaskTarget:
+      type: object
+      description: Expected component excluded at admission because the operation cannot address it. The componentId is a Flow UUID, not an external inventory ID; rack identity comes from the parent task.
+      required: [componentId, componentType, slotId, trayIndex, hostId, reason]
+      properties:
+        componentId:
+          type: string
+          format: uuid
+        componentType:
+          type: string
+        slotId:
+          type: integer
+        trayIndex:
+          type: integer
+        hostId:
+          type: integer
+        reason:
+          type: string
+          enum: [unaddressable_target]
+      example:
+        componentId: 550e8400-e29b-41d4-a716-446655440000
+        componentType: Compute
+        slotId: 1
+        trayIndex: 0
+        hostId: 0
+        reason: unaddressable_target
     TaskReportV1:
       title: TaskReportV1
       type: object
@@ -30397,6 +30478,11 @@ components:
         - version
         - stages
       properties:
+        targetResolution:
+          oneOf:
+            - $ref: '#/components/schemas/TaskTargetResolution'
+            - type: 'null'
+          description: Admission result, including skipped targets. Null for tasks created before explicit target-resolution modes. Available before queued work executes.
         version:
           type: integer
           enum: [1]
@@ -30520,6 +30606,8 @@ components:
       required:
         - siteId
       properties:
+        skipUnaddressableTargets:
+          $ref: '#/components/schemas/SkipUnaddressableTargets'
         siteId:
           type: string
           format: uuid
@@ -30654,6 +30742,8 @@ components:
         - siteId
         - state
       properties:
+        skipUnaddressableTargets:
+          $ref: '#/components/schemas/SkipUnaddressableTargets'
         siteId:
           type: string
           format: uuid
@@ -30769,6 +30859,8 @@ components:
       required:
         - siteId
       properties:
+        skipUnaddressableTargets:
+          $ref: '#/components/schemas/SkipUnaddressableTargets'
         siteId:
           type: string
           format: uuid

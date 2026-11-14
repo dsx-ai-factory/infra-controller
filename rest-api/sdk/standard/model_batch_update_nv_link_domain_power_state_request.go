@@ -24,6 +24,8 @@ var _ MappedNullable = &BatchUpdateNVLinkDomainPowerStateRequest{}
 
 // BatchUpdateNVLinkDomainPowerStateRequest Request body for power control of explicitly selected NVLink Domains
 type BatchUpdateNVLinkDomainPowerStateRequest struct {
+	// Opt in to skipping unaddressable targets after component-type filtering. Omitted, null, or false requires every selected component to be addressable; otherwise the request is rejected before task creation. True submits addressable components and records the others as skipped in task reports. Each selected rack must retain at least one addressable component, otherwise the entire request is rejected. Management-MAC and expectation-only addressing remain supported where the operation permits them. Readiness overrides and step execution failure behavior are independent. Multi-rack admission creates all task records atomically; after admission the returned IDs include tasks whose scheduling fails, with outcomes in task status.
+	SkipUnaddressableTargets NullableBool `json:"skipUnaddressableTargets,omitempty"`
 	// ID of the Site
 	SiteId string `json:"siteId"`
 	// Nonblank, case-sensitive IDs of the NVLink Domains to power control. Exact duplicate IDs are rejected.
@@ -44,6 +46,8 @@ type _BatchUpdateNVLinkDomainPowerStateRequest BatchUpdateNVLinkDomainPowerState
 // will change when the set of required properties is changed
 func NewBatchUpdateNVLinkDomainPowerStateRequest(siteId string, domainIds []string, state string) *BatchUpdateNVLinkDomainPowerStateRequest {
 	this := BatchUpdateNVLinkDomainPowerStateRequest{}
+	var skipUnaddressableTargets bool = false
+	this.SkipUnaddressableTargets = *NewNullableBool(&skipUnaddressableTargets)
 	this.SiteId = siteId
 	this.DomainIds = domainIds
 	this.State = state
@@ -57,9 +61,54 @@ func NewBatchUpdateNVLinkDomainPowerStateRequest(siteId string, domainIds []stri
 // but it doesn't guarantee that properties required by API are set
 func NewBatchUpdateNVLinkDomainPowerStateRequestWithDefaults() *BatchUpdateNVLinkDomainPowerStateRequest {
 	this := BatchUpdateNVLinkDomainPowerStateRequest{}
+	var skipUnaddressableTargets bool = false
+	this.SkipUnaddressableTargets = *NewNullableBool(&skipUnaddressableTargets)
 	var overrideReadinessCheck bool = false
 	this.OverrideReadinessCheck = &overrideReadinessCheck
 	return &this
+}
+
+// GetSkipUnaddressableTargets returns the SkipUnaddressableTargets field value if set, zero value otherwise (both if not set or set to explicit null).
+func (o *BatchUpdateNVLinkDomainPowerStateRequest) GetSkipUnaddressableTargets() bool {
+	if o == nil || IsNil(o.SkipUnaddressableTargets.Get()) {
+		var ret bool
+		return ret
+	}
+	return *o.SkipUnaddressableTargets.Get()
+}
+
+// GetSkipUnaddressableTargetsOk returns a tuple with the SkipUnaddressableTargets field value if set, nil otherwise
+// and a boolean to check if the value has been set.
+// NOTE: If the value is an explicit nil, `nil, true` will be returned
+func (o *BatchUpdateNVLinkDomainPowerStateRequest) GetSkipUnaddressableTargetsOk() (*bool, bool) {
+	if o == nil {
+		return nil, false
+	}
+	return o.SkipUnaddressableTargets.Get(), o.SkipUnaddressableTargets.IsSet()
+}
+
+// HasSkipUnaddressableTargets returns a boolean if a field has been set.
+func (o *BatchUpdateNVLinkDomainPowerStateRequest) HasSkipUnaddressableTargets() bool {
+	if o != nil && o.SkipUnaddressableTargets.IsSet() {
+		return true
+	}
+
+	return false
+}
+
+// SetSkipUnaddressableTargets gets a reference to the given NullableBool and assigns it to the SkipUnaddressableTargets field.
+func (o *BatchUpdateNVLinkDomainPowerStateRequest) SetSkipUnaddressableTargets(v bool) {
+	o.SkipUnaddressableTargets.Set(&v)
+}
+
+// SetSkipUnaddressableTargetsNil sets the value for SkipUnaddressableTargets to be an explicit nil
+func (o *BatchUpdateNVLinkDomainPowerStateRequest) SetSkipUnaddressableTargetsNil() {
+	o.SkipUnaddressableTargets.Set(nil)
+}
+
+// UnsetSkipUnaddressableTargets ensures that no value is present for SkipUnaddressableTargets, not even an explicit nil
+func (o *BatchUpdateNVLinkDomainPowerStateRequest) UnsetSkipUnaddressableTargets() {
+	o.SkipUnaddressableTargets.Unset()
 }
 
 // GetSiteId returns the SiteId field value
@@ -208,6 +257,9 @@ func (o BatchUpdateNVLinkDomainPowerStateRequest) MarshalJSON() ([]byte, error) 
 
 func (o BatchUpdateNVLinkDomainPowerStateRequest) ToMap() (map[string]interface{}, error) {
 	toSerialize := map[string]interface{}{}
+	if o.SkipUnaddressableTargets.IsSet() {
+		toSerialize["skipUnaddressableTargets"] = o.SkipUnaddressableTargets.Get()
+	}
 	toSerialize["siteId"] = o.SiteId
 	toSerialize["domainIds"] = o.DomainIds
 	toSerialize["state"] = o.State

@@ -79,8 +79,9 @@ const (
 // type; a future schema iteration ships as APITaskReportV2 alongside a
 // parallel response field, leaving v1 consumers untouched.
 type APITaskReportV1 struct {
-	Version int                    `json:"version"`
-	Stages  []APITaskReportV1Stage `json:"stages"`
+	TargetResolution *APITargetResolution   `json:"targetResolution"`
+	Version          int                    `json:"version"`
+	Stages           []APITaskReportV1Stage `json:"stages"`
 	// Error is the top-level failure summary: the message from the
 	// first stage that fails in this report. Not overwritten by later
 	// failures so a single canonical task-level error survives.
@@ -128,10 +129,25 @@ type APITaskReportV1Step struct {
 // (snake_case JSON keys). Used solely as an unmarshal target so the
 // REST-facing APITaskReportV1 can keep camelCase keys per the rest of
 // the API surface. Kept private; clients consume APITaskReportV1.
+type flowTaskTargetResolution struct {
+	SkipUnaddressableTargets bool `json:"skip_unaddressable_targets"`
+	Selected                 int  `json:"selected"`
+	Submitted                int  `json:"submitted"`
+	Skipped                  []struct {
+		ComponentID   string `json:"component_id"`
+		ComponentType string `json:"component_type"`
+		SlotID        int    `json:"slot_id"`
+		TrayIndex     int    `json:"tray_index"`
+		HostID        int    `json:"host_id"`
+		Reason        string `json:"reason"`
+	} `json:"skipped"`
+}
+
 type flowTaskReportV1 struct {
-	Version int                     `json:"version"`
-	Stages  []flowTaskReportV1Stage `json:"stages"`
-	Error   string                  `json:"error,omitempty"`
+	TargetResolution *flowTaskTargetResolution `json:"target_resolution"`
+	Version          int                       `json:"version"`
+	Stages           []flowTaskReportV1Stage   `json:"stages"`
+	Error            string                    `json:"error,omitempty"`
 }
 
 type flowTaskReportV1Stage struct {
@@ -170,6 +186,17 @@ func (r *APITaskReportV1) UnmarshalJSON(data []byte) error {
 	}
 	if src.Version != 1 {
 		return fmt.Errorf("unsupported task report version %d", src.Version)
+	}
+	r.TargetResolution = nil
+	if src.TargetResolution != nil {
+		v := src.TargetResolution
+		r.TargetResolution = &APITargetResolution{SkipUnaddressableTargets: v.SkipUnaddressableTargets, Selected: v.Selected, Submitted: v.Submitted, Skipped: []APISkippedTarget{}}
+		for _, item := range v.Skipped {
+			r.TargetResolution.Skipped = append(r.TargetResolution.Skipped, APISkippedTarget{
+				ComponentID: item.ComponentID, ComponentType: item.ComponentType,
+				SlotID: item.SlotID, TrayIndex: item.TrayIndex, HostID: item.HostID, Reason: item.Reason,
+			})
+		}
 	}
 	r.Version = src.Version
 	r.Error = src.Error

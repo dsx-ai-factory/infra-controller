@@ -53,6 +53,8 @@ type APIUpdateFirmwareRequest struct {
 	// rack-scoped components) are reported as not ready by their persisted
 	// status. Intended for operator-supervised maintenance.
 	OverrideReadinessCheck bool `json:"overrideReadinessCheck,omitempty"`
+	// SkipUnaddressableTargets opts in to skipping unaddressable targets; omission defaults to false.
+	SkipUnaddressableTargets *bool `json:"skipUnaddressableTargets,omitempty"`
 	// OverrideVersionCheck requests that the component backend apply firmware
 	// without enforcing version-based skip or downgrade decisions.
 	OverrideVersionCheck bool `json:"overrideVersionCheck"`
@@ -238,6 +240,8 @@ type APIBatchRackFirmwareUpdateRequest struct {
 	// OverrideReadinessCheck applies the readiness-gate bypass to every task
 	// spawned by this batch. See APIUpdateFirmwareRequest for semantics.
 	OverrideReadinessCheck bool `json:"overrideReadinessCheck,omitempty"`
+	// SkipUnaddressableTargets opts in to skipping unaddressable targets; omission defaults to false.
+	SkipUnaddressableTargets *bool `json:"skipUnaddressableTargets,omitempty"`
 	// OverrideVersionCheck applies the firmware version-check override to every
 	// task spawned by this batch. See APIUpdateFirmwareRequest for semantics.
 	OverrideVersionCheck bool `json:"overrideVersionCheck"`
@@ -270,6 +274,8 @@ type APIBatchTrayFirmwareUpdateRequest struct {
 	// OverrideReadinessCheck applies the readiness-gate bypass to every task
 	// spawned by this batch. See APIUpdateFirmwareRequest for semantics.
 	OverrideReadinessCheck bool `json:"overrideReadinessCheck,omitempty"`
+	// SkipUnaddressableTargets opts in to skipping unaddressable targets; omission defaults to false.
+	SkipUnaddressableTargets *bool `json:"skipUnaddressableTargets,omitempty"`
 	// OverrideVersionCheck applies the firmware version-check override to every
 	// task spawned by this batch. See APIUpdateFirmwareRequest for semantics.
 	OverrideVersionCheck bool `json:"overrideVersionCheck"`

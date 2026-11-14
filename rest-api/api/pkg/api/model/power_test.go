@@ -7,8 +7,10 @@ import (
 	"encoding/json"
 	"testing"
 
-	flowv1 "github.com/NVIDIA/infra-controller/rest-api/proto/flow/gen/v1"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
+	flowv1 "github.com/NVIDIA/infra-controller/rest-api/proto/flow/gen/v1"
 )
 
 func TestAPIUpdatePowerStateRequest_OverrideReadinessCheck(t *testing.T) {
@@ -22,6 +24,31 @@ func TestAPIUpdatePowerStateRequest_OverrideReadinessCheck(t *testing.T) {
 }
 
 func TestAPIUpdatePowerStateRequest_Validate(t *testing.T) {
+	t.Run("skip unaddressable targets", func(t *testing.T) {
+		for _, tc := range []struct {
+			name, body string
+			want       *bool
+			invalid    bool
+		}{
+			{name: "omitted", body: `{"siteId":"site","state":"On"}`},
+			{name: "explicit false", body: `{"siteId":"site","state":"On","skipUnaddressableTargets":false}`, want: new(false)},
+			{name: "opt in", body: `{"siteId":"site","state":"On","skipUnaddressableTargets":true}`, want: new(true)},
+			{name: "rejects enum string", body: `{"siteId":"site","state":"On","skipUnaddressableTargets":"BestEffort"}`, invalid: true},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				var req APIUpdatePowerStateRequest
+				err := json.Unmarshal([]byte(tc.body), &req)
+				if tc.invalid {
+					require.Error(t, err)
+					return
+				}
+				require.NoError(t, err)
+				require.NoError(t, req.Validate())
+				require.Equal(t, tc.want, req.SkipUnaddressableTargets)
+			})
+		}
+	})
+
 	states := []struct {
 		canonical string
 		legacy    string

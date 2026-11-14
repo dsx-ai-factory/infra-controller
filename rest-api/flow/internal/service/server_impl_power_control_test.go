@@ -31,13 +31,15 @@ func TestFlowServerImpl_ACPowerCycleRack(t *testing.T) {
 				},
 			},
 		},
-		Description:            "AC power cycle test",
-		OverrideReadinessCheck: true,
+		Description:              "AC power cycle test",
+		OverrideReadinessCheck:   true,
+		SkipUnaddressableTargets: new(true),
 	})
 
 	require.NoError(t, err)
 	require.Len(t, response.GetTaskIds(), 1)
 	require.NotNil(t, manager.request)
+	require.True(t, manager.request.SkipUnaddressableTargets)
 	assert.Equal(t, "AC power cycle test", manager.request.Description)
 
 	var info operations.PowerControlTaskInfo

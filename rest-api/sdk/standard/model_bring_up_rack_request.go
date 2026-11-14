@@ -24,6 +24,8 @@ var _ MappedNullable = &BringUpRackRequest{}
 
 // BringUpRackRequest Request body for single-rack bring up operations
 type BringUpRackRequest struct {
+	// Opt in to skipping unaddressable targets after component-type filtering. Omitted, null, or false requires every selected component to be addressable; otherwise the request is rejected before task creation. True submits addressable components and records the others as skipped in task reports. Each selected rack must retain at least one addressable component, otherwise the entire request is rejected. Management-MAC and expectation-only addressing remain supported where the operation permits them. Readiness overrides and step execution failure behavior are independent. Multi-rack admission creates all task records atomically; after admission the returned IDs include tasks whose scheduling fails, with outcomes in task status.
+	SkipUnaddressableTargets NullableBool `json:"skipUnaddressableTargets,omitempty"`
 	// ID of the Site
 	SiteId string `json:"siteId"`
 	// Optional description for the bring up operation
@@ -42,6 +44,8 @@ type _BringUpRackRequest BringUpRackRequest
 // will change when the set of required properties is changed
 func NewBringUpRackRequest(siteId string) *BringUpRackRequest {
 	this := BringUpRackRequest{}
+	var skipUnaddressableTargets bool = false
+	this.SkipUnaddressableTargets = *NewNullableBool(&skipUnaddressableTargets)
 	this.SiteId = siteId
 	var overrideReadinessCheck bool = false
 	this.OverrideReadinessCheck = &overrideReadinessCheck
@@ -53,9 +57,54 @@ func NewBringUpRackRequest(siteId string) *BringUpRackRequest {
 // but it doesn't guarantee that properties required by API are set
 func NewBringUpRackRequestWithDefaults() *BringUpRackRequest {
 	this := BringUpRackRequest{}
+	var skipUnaddressableTargets bool = false
+	this.SkipUnaddressableTargets = *NewNullableBool(&skipUnaddressableTargets)
 	var overrideReadinessCheck bool = false
 	this.OverrideReadinessCheck = &overrideReadinessCheck
 	return &this
+}
+
+// GetSkipUnaddressableTargets returns the SkipUnaddressableTargets field value if set, zero value otherwise (both if not set or set to explicit null).
+func (o *BringUpRackRequest) GetSkipUnaddressableTargets() bool {
+	if o == nil || IsNil(o.SkipUnaddressableTargets.Get()) {
+		var ret bool
+		return ret
+	}
+	return *o.SkipUnaddressableTargets.Get()
+}
+
+// GetSkipUnaddressableTargetsOk returns a tuple with the SkipUnaddressableTargets field value if set, nil otherwise
+// and a boolean to check if the value has been set.
+// NOTE: If the value is an explicit nil, `nil, true` will be returned
+func (o *BringUpRackRequest) GetSkipUnaddressableTargetsOk() (*bool, bool) {
+	if o == nil {
+		return nil, false
+	}
+	return o.SkipUnaddressableTargets.Get(), o.SkipUnaddressableTargets.IsSet()
+}
+
+// HasSkipUnaddressableTargets returns a boolean if a field has been set.
+func (o *BringUpRackRequest) HasSkipUnaddressableTargets() bool {
+	if o != nil && o.SkipUnaddressableTargets.IsSet() {
+		return true
+	}
+
+	return false
+}
+
+// SetSkipUnaddressableTargets gets a reference to the given NullableBool and assigns it to the SkipUnaddressableTargets field.
+func (o *BringUpRackRequest) SetSkipUnaddressableTargets(v bool) {
+	o.SkipUnaddressableTargets.Set(&v)
+}
+
+// SetSkipUnaddressableTargetsNil sets the value for SkipUnaddressableTargets to be an explicit nil
+func (o *BringUpRackRequest) SetSkipUnaddressableTargetsNil() {
+	o.SkipUnaddressableTargets.Set(nil)
+}
+
+// UnsetSkipUnaddressableTargets ensures that no value is present for SkipUnaddressableTargets, not even an explicit nil
+func (o *BringUpRackRequest) UnsetSkipUnaddressableTargets() {
+	o.SkipUnaddressableTargets.Unset()
 }
 
 // GetSiteId returns the SiteId field value
@@ -188,6 +237,9 @@ func (o BringUpRackRequest) MarshalJSON() ([]byte, error) {
 
 func (o BringUpRackRequest) ToMap() (map[string]interface{}, error) {
 	toSerialize := map[string]interface{}{}
+	if o.SkipUnaddressableTargets.IsSet() {
+		toSerialize["skipUnaddressableTargets"] = o.SkipUnaddressableTargets.Get()
+	}
 	toSerialize["siteId"] = o.SiteId
 	if !IsNil(o.Description) {
 		toSerialize["description"] = o.Description

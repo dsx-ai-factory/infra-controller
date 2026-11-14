@@ -827,6 +827,7 @@ func (rs *FlowServerImpl) PowerOnRack(
 			Operation:              operations.PowerOperationPowerOn,
 			OverrideReadinessCheck: req.GetOverrideReadinessCheck(),
 		},
+		req.GetSkipUnaddressableTargets(),
 	)
 }
 
@@ -849,6 +850,7 @@ func (rs *FlowServerImpl) PowerOffRack(
 			Forced:                 req.GetForced(),
 			OverrideReadinessCheck: req.GetOverrideReadinessCheck(),
 		},
+		req.GetSkipUnaddressableTargets(),
 	)
 }
 
@@ -871,6 +873,7 @@ func (rs *FlowServerImpl) PowerResetRack(
 			Forced:                 req.GetForced(),
 			OverrideReadinessCheck: req.GetOverrideReadinessCheck(),
 		},
+		req.GetSkipUnaddressableTargets(),
 	)
 }
 
@@ -889,6 +892,7 @@ func (rs *FlowServerImpl) ACPowerCycleRack(
 			Operation:              operations.PowerOperationColdReset,
 			OverrideReadinessCheck: req.GetOverrideReadinessCheck(),
 		},
+		req.GetSkipUnaddressableTargets(),
 	)
 }
 
@@ -927,6 +931,7 @@ func (rs *FlowServerImpl) BringUpRack(
 	}
 
 	opReq.RuleID = ruleID
+	opReq.SkipUnaddressableTargets = req.GetSkipUnaddressableTargets()
 
 	taskIDs, err := rs.taskManager.SubmitTask(ctx, opReq)
 	if err != nil {
@@ -981,6 +986,7 @@ func (rs *FlowServerImpl) IngestRack(
 	// ingestion-only rule instead of the full bring-up rule.
 	opReq.Operation.Code = taskcommon.OpCodeIngest
 	opReq.RuleID = ruleID
+	opReq.SkipUnaddressableTargets = req.GetSkipUnaddressableTargets()
 
 	taskIDs, err := rs.taskManager.SubmitTask(ctx, opReq)
 	if err != nil {
@@ -1055,6 +1061,7 @@ func (rs *FlowServerImpl) decommissionRackImpl(
 
 	opReq.ConflictStrategy, opReq.QueueTimeout = protobuf.QueueOptionsFrom(req.GetQueueOptions())
 	opReq.RuleID = ruleID
+	opReq.SkipUnaddressableTargets = req.GetSkipUnaddressableTargets()
 
 	taskIDs, err := rs.taskManager.SubmitTask(ctx, opReq)
 	if err != nil {
@@ -1079,6 +1086,7 @@ func (rs *FlowServerImpl) handlePowerControlTask(
 	queueOptions *pb.QueueOptions,
 	pbRuleID *pb.UUID,
 	info *operations.PowerControlTaskInfo,
+	skipOptions ...bool,
 ) (*pb.SubmitTaskResponse, error) {
 	if rs.taskManager == nil {
 		return nil, errors.New("task manager is not available")
@@ -1104,6 +1112,9 @@ func (rs *FlowServerImpl) handlePowerControlTask(
 
 	req.ConflictStrategy, req.QueueTimeout = protobuf.QueueOptionsFrom(queueOptions)
 	req.RuleID = ruleID
+	if len(skipOptions) > 0 {
+		req.SkipUnaddressableTargets = skipOptions[0]
+	}
 
 	// Task Manager handles resolve + split by rack + create tasks
 	taskIDs, err := rs.taskManager.SubmitTask(ctx, req)
@@ -1599,6 +1610,7 @@ func (rs *FlowServerImpl) UpgradeFirmware(
 		req.GetQueueOptions(),
 	)
 	opReq.RuleID = ruleID
+	opReq.SkipUnaddressableTargets = req.GetSkipUnaddressableTargets()
 
 	// Task Manager handles resolve + split by rack + create tasks
 	taskIDs, err := rs.taskManager.SubmitTask(ctx, opReq)
