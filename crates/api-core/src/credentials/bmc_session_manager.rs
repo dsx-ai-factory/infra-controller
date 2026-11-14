@@ -66,8 +66,11 @@
 //! any subsequent mint for the same BMC short-circuits with
 //! [`BmcSessionError::AvoidLockout`] rather than attempting another login
 //! (which could exhaust the BMC root account's retry budget). The breaker
-//! is cleared by:
+//! is cleared or moved to a single half-open probe by:
 //!   * a successful mint (online recovery),
+//!   * a stored per-BMC credential that no longer matches the one that tripped
+//!     the breaker, whichever component wrote it, allowing one probe on the
+//!     next mint,
 //!   * [`BmcSessionManager::flush_mac`] (credentials deleted), or
 //!   * [`BmcSessionManager::note_credentials_updated`] (credentials set or
 //!     rotated).
@@ -78,8 +81,10 @@
 //! timeouts, 5xx responses, and deserialization failures do **not** count
 //! against the threshold.
 
+use std::collections::hash_map::DefaultHasher;
 use std::collections::{HashMap, HashSet};
 use std::fmt;
+use std::hash::{Hash, Hasher};
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Instant;
@@ -326,9 +331,26 @@ impl BmcSessionLockoutBreakerCleared {
 struct LockoutState {
     consecutive_unauthorized: u32,
     last_status: u16,
+    /// A hash of the stored credential that produced the unauthorized responses, never the
+    /// credential itself; used to notice that any writer has since replaced the stored credential.
+    rejected_credential_fingerprint: Option<u64>,
+    /// True while the breaker allows a single probe with a credential that changed after
+    /// the trip. The next unauthorized response re-trips without waiting for the threshold;
+    /// a successful mint clears the state.
+    half_open_probe: bool,
     /// `Some(when)` once the breaker has tripped; subsequent rotate calls
-    /// short-circuit until the state is cleared.
+    /// short-circuit until the state is cleared or moves to a half-open probe.
     tripped_at: Option<Instant>,
+}
+
+/// Produces an in-memory-only credential fingerprint.
+///
+/// A process-local hash is sufficient; it must never be logged, persisted, or compared across
+/// processes.
+fn credential_fingerprint(credentials: &Credentials) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    credentials.hash(&mut hasher);
+    hasher.finish()
 }
 
 /// Persistence layer for outstanding Redfish sessions. Wraps DB errors as
@@ -498,11 +520,33 @@ impl BmcSessionManager {
         let mac_lock = self.acquire_mac_lock(bmc_mac).await;
         let mac_guard = mac_lock.lock().await;
 
-        if let Some(err) = self.check_not_locked_out(bmc_mac).await {
-            return Err(err);
-        }
+        let lockout = self.check_not_locked_out(bmc_mac).await;
+        let creds = match lockout {
+            None => self.bmc_root_credentials(bmc_mac).await?,
+            Some((lockout_err, rejected_credential_fingerprint)) => {
+                let creds = match self.bmc_root_credentials(bmc_mac).await {
+                    Ok(creds) => creds,
+                    Err(_) => return Err(lockout_err),
+                };
+                if rejected_credential_fingerprint == Some(credential_fingerprint(&creds)) {
+                    return Err(lockout_err);
+                }
 
-        let creds = self.bmc_root_credentials(bmc_mac).await?;
+                let creds_fingerprint = credential_fingerprint(&creds);
+                if let Some(state) = self.lockouts.lock().await.get_mut(&bmc_mac) {
+                    state.tripped_at = None;
+                    state.half_open_probe = true;
+                    state.rejected_credential_fingerprint = Some(creds_fingerprint);
+                    carbide_instrument::emit(BmcSessionLockoutBreakerCleared::new(bmc_mac));
+                }
+                tracing::info!(
+                    bmc_mac_address = %bmc_mac,
+                    "Stored BMC credential changed since the lockout breaker tripped; attempting one login"
+                );
+                creds
+            }
+        };
+        let creds_fingerprint = credential_fingerprint(&creds);
         let (username, password) = match &creds {
             Credentials::UsernamePassword { username, password } => {
                 (username.clone(), password.clone())
@@ -511,13 +555,21 @@ impl BmcSessionManager {
 
         let service_root = match self.redfish_pool.service_root(bmc_addr, Some(creds)).await {
             Ok(root) => root,
-            Err(err) => return Err(self.classify_and_map(err, bmc_mac, bmc_addr).await),
+            Err(err) => {
+                return Err(self
+                    .classify_and_map(err, bmc_mac, bmc_addr, creds_fingerprint)
+                    .await);
+            }
         };
 
         let session_service = match service_root.session_service().await {
             Ok(Some(svc)) => svc,
             Ok(None) => return Err(BmcSessionError::NoSessionService { bmc_addr }),
-            Err(err) => return Err(self.classify_and_map(err, bmc_mac, bmc_addr).await),
+            Err(err) => {
+                return Err(self
+                    .classify_and_map(err, bmc_mac, bmc_addr, creds_fingerprint)
+                    .await);
+            }
         };
 
         let sessions = match session_service.sessions().await {
@@ -528,7 +580,11 @@ impl BmcSessionManager {
                     detail: "BMC SessionService does not expose a Sessions collection".to_string(),
                 });
             }
-            Err(err) => return Err(self.classify_and_map(err, bmc_mac, bmc_addr).await),
+            Err(err) => {
+                return Err(self
+                    .classify_and_map(err, bmc_mac, bmc_addr, creds_fingerprint)
+                    .await);
+            }
         };
 
         let created = match sessions
@@ -536,7 +592,11 @@ impl BmcSessionManager {
             .await
         {
             Ok(s) => s,
-            Err(err) => return Err(self.classify_and_map(err, bmc_mac, bmc_addr).await),
+            Err(err) => {
+                return Err(self
+                    .classify_and_map(err, bmc_mac, bmc_addr, creds_fingerprint)
+                    .await);
+            }
         };
 
         let token = created
@@ -735,9 +795,12 @@ impl BmcSessionManager {
         err: NvError<RedfishBmc>,
         bmc_mac: MacAddress,
         bmc_addr: SocketAddr,
+        rejected_credential_fingerprint: u64,
     ) -> BmcSessionError {
         if let Some(status) = classify_unauthorized(&err)
-            && let Some(lockout_err) = self.record_unauthorized(bmc_mac, status).await
+            && let Some(lockout_err) = self
+                .record_unauthorized(bmc_mac, status, rejected_credential_fingerprint)
+                .await
         {
             return lockout_err;
         }
@@ -778,15 +841,21 @@ impl BmcSessionManager {
         }
     }
 
-    async fn check_not_locked_out(&self, bmc_mac: MacAddress) -> Option<BmcSessionError> {
+    async fn check_not_locked_out(
+        &self,
+        bmc_mac: MacAddress,
+    ) -> Option<(BmcSessionError, Option<u64>)> {
         let lockouts = self.lockouts.lock().await;
         let state = lockouts.get(&bmc_mac)?;
         if state.tripped_at.is_some() {
-            Some(BmcSessionError::AvoidLockout {
-                bmc_mac,
-                consecutive_unauthorized: state.consecutive_unauthorized,
-                last_status: state.last_status,
-            })
+            Some((
+                BmcSessionError::AvoidLockout {
+                    bmc_mac,
+                    consecutive_unauthorized: state.consecutive_unauthorized,
+                    last_status: state.last_status,
+                },
+                state.rejected_credential_fingerprint,
+            ))
         } else {
             None
         }
@@ -797,16 +866,24 @@ impl BmcSessionManager {
         &self,
         bmc_mac: MacAddress,
         status: u16,
+        rejected_credential_fingerprint: u64,
     ) -> Option<BmcSessionError> {
         let mut lockouts = self.lockouts.lock().await;
         let entry = lockouts.entry(bmc_mac).or_insert(LockoutState {
             consecutive_unauthorized: 0,
             last_status: status,
+            rejected_credential_fingerprint: None,
+            half_open_probe: false,
             tripped_at: None,
         });
+        let half_open_probe = entry.half_open_probe;
         entry.consecutive_unauthorized = entry.consecutive_unauthorized.saturating_add(1);
         entry.last_status = status;
-        if entry.consecutive_unauthorized >= self.lockout_threshold && entry.tripped_at.is_none() {
+        entry.rejected_credential_fingerprint = Some(rejected_credential_fingerprint);
+        if (half_open_probe || entry.consecutive_unauthorized >= self.lockout_threshold)
+            && entry.tripped_at.is_none()
+        {
+            entry.half_open_probe = false;
             entry.tripped_at = Some(Instant::now());
             self.instrumentation
                 .emit(BmcSessionLockoutBreakerTripped::new(
@@ -838,11 +915,18 @@ impl BmcSessionManager {
         consecutive_unauthorized: u32,
         last_status: u16,
     ) {
+        let rejected_credential_fingerprint = self
+            .bmc_root_credentials(bmc_mac)
+            .await
+            .ok()
+            .map(|credentials| credential_fingerprint(&credentials));
         self.lockouts.lock().await.insert(
             bmc_mac,
             LockoutState {
                 consecutive_unauthorized: consecutive_unauthorized.max(1),
                 last_status,
+                rejected_credential_fingerprint,
+                half_open_probe: false,
                 tripped_at: Some(Instant::now()),
             },
         );
@@ -941,6 +1025,17 @@ mod tests {
     const TEST_LOCKOUT_THRESHOLD: u32 = 3;
     const TEST_MAX_SESSIONS_PER_CALLER: usize = 4;
     const CLEANUP_FAILURE_METRIC: &str = "carbide_bmc_session_cleanup_failures_total";
+
+    fn test_credentials(password: &str) -> Credentials {
+        Credentials::UsernamePassword {
+            username: "root".to_string(),
+            password: password.to_string(),
+        }
+    }
+
+    fn test_credential_fingerprint(password: &str) -> u64 {
+        super::credential_fingerprint(&test_credentials(password))
+    }
 
     /// One row per session, insertion-ordered like the Postgres store's
     /// `issued_at` ordering (rows are only ever appended).
@@ -1110,6 +1205,52 @@ mod tests {
             carbide_instrument::Instrumentation::new(test_meter.meter()),
         ));
         (manager, store, test_meter)
+    }
+
+    fn manager_with_mutable_credentials(
+        threshold: u32,
+    ) -> (
+        Arc<BmcSessionManager>,
+        Arc<TestCredentialManager>,
+        Arc<InMemoryBmcSessionStore>,
+    ) {
+        let bmc_proxy = Arc::new(ArcSwap::new(Arc::new(None)));
+        let redfish_pool = carbide_redfish::nv_redfish::new_pool(bmc_proxy);
+        let credential_manager = Arc::new(TestCredentialManager::default());
+        let store = InMemoryBmcSessionStore::new();
+        let manager = Arc::new(BmcSessionManager::new(
+            redfish_pool,
+            credential_manager.clone(),
+            store.clone(),
+            threshold,
+            false,
+            TEST_MAX_SESSIONS_PER_CALLER,
+        ));
+        (manager, credential_manager, store)
+    }
+
+    fn bmc_root_key(bmc_mac: MacAddress) -> CredentialKey {
+        CredentialKey::BmcCredentials {
+            credential_type: BmcCredentialType::BmcRoot {
+                bmc_mac_address: bmc_mac,
+            },
+        }
+    }
+
+    async fn trip_breaker_with_credentials(
+        manager: &BmcSessionManager,
+        bmc_mac: MacAddress,
+        credentials: &Credentials,
+    ) {
+        let fingerprint = super::credential_fingerprint(credentials);
+        for attempt in 1..=TEST_LOCKOUT_THRESHOLD {
+            let result = manager.record_unauthorized(bmc_mac, 401, fingerprint).await;
+            assert_eq!(
+                result.is_some(),
+                attempt == TEST_LOCKOUT_THRESHOLD,
+                "only the threshold-crossing unauthorized response should trip the breaker"
+            );
+        }
     }
 
     fn cap_row(n: u8) -> StoredSession {
@@ -1619,7 +1760,12 @@ mod tests {
         let (manager, _store, _test_meter) = manager_with_creds_and_threshold(3);
         let bmc_mac = mac(0xDE);
         for _ in 0..2 {
-            assert!(manager.record_unauthorized(bmc_mac, 401).await.is_none());
+            assert!(
+                manager
+                    .record_unauthorized(bmc_mac, 401, test_credential_fingerprint("password"))
+                    .await
+                    .is_none()
+            );
             assert!(
                 manager.check_not_locked_out(bmc_mac).await.is_none(),
                 "breaker should not trip below threshold"
@@ -1640,10 +1786,20 @@ mod tests {
     async fn record_unauthorized_trips_at_threshold() {
         let (manager, _store, _test_meter) = manager_with_creds_and_threshold(3);
         let bmc_mac = mac(0xDE);
-        assert!(manager.record_unauthorized(bmc_mac, 401).await.is_none());
-        assert!(manager.record_unauthorized(bmc_mac, 401).await.is_none());
+        assert!(
+            manager
+                .record_unauthorized(bmc_mac, 401, test_credential_fingerprint("password"))
+                .await
+                .is_none()
+        );
+        assert!(
+            manager
+                .record_unauthorized(bmc_mac, 401, test_credential_fingerprint("password"))
+                .await
+                .is_none()
+        );
         let trip = manager
-            .record_unauthorized(bmc_mac, 403)
+            .record_unauthorized(bmc_mac, 403, test_credential_fingerprint("password"))
             .await
             .expect("third unauthorized should trip the breaker");
         match trip {
@@ -1662,20 +1818,32 @@ mod tests {
             .check_not_locked_out(bmc_mac)
             .await
             .expect("breaker should remain tripped");
-        assert!(matches!(still, super::BmcSessionError::AvoidLockout { .. }));
+        assert!(matches!(
+            still.0,
+            super::BmcSessionError::AvoidLockout { .. }
+        ));
     }
 
     #[tokio::test]
     async fn record_unauthorized_only_emits_avoid_lockout_on_the_tripping_request() {
         let (manager, _store, _test_meter) = manager_with_creds_and_threshold(2);
         let bmc_mac = mac(0xDE);
-        assert!(manager.record_unauthorized(bmc_mac, 401).await.is_none());
-        let trip = manager.record_unauthorized(bmc_mac, 401).await;
+        assert!(
+            manager
+                .record_unauthorized(bmc_mac, 401, test_credential_fingerprint("password"))
+                .await
+                .is_none()
+        );
+        let trip = manager
+            .record_unauthorized(bmc_mac, 401, test_credential_fingerprint("password"))
+            .await;
         assert!(matches!(
             trip,
             Some(super::BmcSessionError::AvoidLockout { .. })
         ));
-        let follow_up = manager.record_unauthorized(bmc_mac, 401).await;
+        let follow_up = manager
+            .record_unauthorized(bmc_mac, 401, test_credential_fingerprint("password"))
+            .await;
         assert!(
             follow_up.is_none(),
             "second AvoidLockout should not be emitted from record_unauthorized"
@@ -1908,12 +2076,36 @@ mod tests {
             runtime.block_on(async {
                 match case {
                     BreakerTransitionCase::Trip => {
-                        unauthorized_results
-                            .push(manager.record_unauthorized(bmc_mac, 401).await.is_some());
-                        unauthorized_results
-                            .push(manager.record_unauthorized(bmc_mac, 403).await.is_some());
-                        unauthorized_results
-                            .push(manager.record_unauthorized(bmc_mac, 401).await.is_some());
+                        unauthorized_results.push(
+                            manager
+                                .record_unauthorized(
+                                    bmc_mac,
+                                    401,
+                                    test_credential_fingerprint("password"),
+                                )
+                                .await
+                                .is_some(),
+                        );
+                        unauthorized_results.push(
+                            manager
+                                .record_unauthorized(
+                                    bmc_mac,
+                                    403,
+                                    test_credential_fingerprint("password"),
+                                )
+                                .await
+                                .is_some(),
+                        );
+                        unauthorized_results.push(
+                            manager
+                                .record_unauthorized(
+                                    bmc_mac,
+                                    401,
+                                    test_credential_fingerprint("password"),
+                                )
+                                .await
+                                .is_some(),
+                        );
                     }
                     BreakerTransitionCase::ClearExisting => {
                         manager.force_trip_for_test(bmc_mac, 4, 403).await;
@@ -2109,6 +2301,157 @@ mod tests {
         }
     }
 
+    /// Credential-store mutations preserve a tripped breaker unless a changed credential earns
+    /// one half-open probe, whose first unauthorized response must immediately re-trip it.
+    #[tokio::test]
+    async fn tripped_breaker_handles_stored_credential_mutations() {
+        #[derive(Clone, Copy)]
+        enum CredentialMutation {
+            Changed,
+            Unchanged,
+            Missing,
+            ChangedThenUnauthorized,
+        }
+
+        struct BreakerMutationCase {
+            scenario: &'static str,
+            mutation: CredentialMutation,
+        }
+
+        let _metrics = MetricsCapture::start();
+        for (case_index, case) in [
+            // A changed credential earns one probe, proven by reaching the Redfish transport.
+            BreakerMutationCase {
+                scenario: "changed_credential_attempts_login",
+                mutation: CredentialMutation::Changed,
+            },
+            // Rewriting the rejected credential leaves the breaker tripped, because retrying an
+            // unchanged password would only consume the BMC account's lockout budget.
+            BreakerMutationCase {
+                scenario: "unchanged_credential_remains_locked_out",
+                mutation: CredentialMutation::Unchanged,
+            },
+            // Removing the rejected credential leaves the breaker tripped and hides credential
+            // absence, because a tripped BMC must not resume login attempts until a replacement
+            // is available.
+            BreakerMutationCase {
+                scenario: "missing_credential_remains_locked_out",
+                mutation: CredentialMutation::Missing,
+            },
+            // A changed credential that receives one probe 401 re-trips before the following mint.
+            BreakerMutationCase {
+                scenario: "changed_credential_probe_unauthorized_retrips",
+                mutation: CredentialMutation::ChangedThenUnauthorized,
+            },
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            // Seed credential A and trip the breaker on its rejected fingerprint.
+            let (manager, credential_manager, _store) =
+                manager_with_mutable_credentials(TEST_LOCKOUT_THRESHOLD);
+            let bmc_mac = mac(0xF3 + case_index as u8);
+            let key = bmc_root_key(bmc_mac);
+            let credential_a = test_credentials("credential-a");
+            let credential_b = test_credentials("credential-b");
+            credential_manager
+                .set_credentials(&key, &credential_a)
+                .await
+                .expect("seed credential A");
+            trip_breaker_with_credentials(&manager, bmc_mac, &credential_a).await;
+
+            // Apply the case's credential-store mutation without notifying the session manager.
+            match case.mutation {
+                CredentialMutation::Changed | CredentialMutation::ChangedThenUnauthorized => {
+                    // Replace the stored credential directly, without notifying the session manager.
+                    credential_manager
+                        .set_credentials(&key, &credential_b)
+                        .await
+                        .expect("replace credential A with credential B");
+                }
+                CredentialMutation::Unchanged => {
+                    // Rewrite the same credential directly, without notifying the session manager.
+                    credential_manager
+                        .set_credentials(&key, &credential_a)
+                        .await
+                        .expect("rewrite credential A");
+                }
+                CredentialMutation::Missing => {
+                    // Delete the credential directly, without flush_mac or any breaker notification.
+                    credential_manager
+                        .delete_credentials(&key)
+                        .await
+                        .expect("delete credential A");
+                }
+            }
+
+            let bmc_addr = "127.0.0.1:1".parse().unwrap();
+            let first_error = manager
+                .mint_session(case.scenario, bmc_mac, bmc_addr)
+                .await
+                .expect_err("the test case must not mint a session");
+
+            match case.mutation {
+                CredentialMutation::Changed => {
+                    // A Redfish transport error proves the changed credential reached the login path.
+                    // The stale breaker state must move half-open before the login attempt.
+                    assert!(
+                        matches!(first_error, BmcSessionError::Redfish { .. }),
+                        "{}: changed credentials must reach the login path: {first_error:?}",
+                        case.scenario
+                    );
+                }
+                CredentialMutation::Unchanged => {
+                    // AvoidLockout, rather than the test address's Redfish error, proves no login was tried.
+                    assert!(
+                        matches!(first_error, BmcSessionError::AvoidLockout { .. }),
+                        "{}: unchanged credentials must not reach the login path: {first_error:?}",
+                        case.scenario
+                    );
+                }
+                CredentialMutation::Missing => {
+                    // The tripped state masks MissingRootCredentials and remains authoritative.
+                    assert!(
+                        matches!(first_error, BmcSessionError::AvoidLockout { .. }),
+                        "{}: missing credentials must remain masked by AvoidLockout: {first_error:?}",
+                        case.scenario
+                    );
+                }
+                CredentialMutation::ChangedThenUnauthorized => {
+                    assert!(
+                        matches!(first_error, BmcSessionError::Redfish { .. }),
+                        "{}: changed credentials must reach the login path: {first_error:?}",
+                        case.scenario
+                    );
+
+                    // The unreachable test address cannot return 401, so simulate the probe response.
+                    let retrip = manager
+                        .record_unauthorized(
+                            bmc_mac,
+                            401,
+                            super::credential_fingerprint(&credential_b),
+                        )
+                        .await;
+                    assert!(
+                        matches!(retrip, Some(BmcSessionError::AvoidLockout { .. })),
+                        "{}: the probe's first 401 must immediately re-trip",
+                        case.scenario
+                    );
+
+                    let next_error = manager
+                        .mint_session(case.scenario, bmc_mac, bmc_addr)
+                        .await
+                        .expect_err("the mint after a rejected probe must remain blocked");
+                    assert!(
+                        matches!(next_error, BmcSessionError::AvoidLockout { .. }),
+                        "{}: the mint after the rejected probe must return AvoidLockout: {next_error:?}",
+                        case.scenario
+                    );
+                }
+            }
+        }
+    }
+
     #[tokio::test]
     async fn concurrent_unauthorized_records_trip_exactly_once() {
         let (manager, _store, _test_meter) = manager_with_creds_and_threshold(3);
@@ -2118,7 +2461,9 @@ mod tests {
         for _ in 0..16 {
             let manager = manager.clone();
             handles.push(tokio::spawn(async move {
-                manager.record_unauthorized(bmc_mac, 401).await
+                manager
+                    .record_unauthorized(bmc_mac, 401, test_credential_fingerprint("password"))
+                    .await
             }));
         }
 
