@@ -1,0 +1,143 @@
+#
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+name: Publish Ansible Collection
+
+on:
+  push:
+    tags:
+      - "v[0-9]*.[0-9]*.[0-9]*"
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    name: Build and publish nvidia.infra_controller to Ansible Galaxy
+    runs-on: linux-amd64-cpu4
+    # NICo tags pre-release builds with suffixes (v2.4.0-rc.1, v2.5.0-pr).
+    # Only final vX.Y.Z tags publish; pre-release tags skip this job.
+    if: ${{ !contains(github.ref_name, '-') }}
+    environment: ansible-galaxy-publish
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.14'
+
+      - name: Install dependencies
+        # Mirror ansible-ci.yml: the series matching the committed sanity
+        # ignores requires Python >= 3.12, and the published artifact must be
+        # built with the same ansible-core series CI validates.
+        run: |
+          ANSIBLE_SERIES=$(sed -n "s/^SANITY_IGNORE_ANSIBLE_VERSION = '\([0-9][0-9.]*\)'.*/\1/p" tools/generate/backends/ansible.py)
+          if [ -z "$ANSIBLE_SERIES" ]; then
+            echo "ERROR: could not read SANITY_IGNORE_ANSIBLE_VERSION from tools/generate/backends/ansible.py"
+            exit 1
+          fi
+          pip install pyyaml "ansible-core~=${ANSIBLE_SERIES}.0"
+
+      - name: Resolve version from tag
+        id: version
+        run: |
+          TAG="${GITHUB_REF#refs/tags/v}"
+          echo "version=$TAG" >> "$GITHUB_OUTPUT"
+          echo "Publishing collection version $TAG"
+
+      - name: Validate version is strict semver
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          echo "$VERSION" | grep -E '^[0-9]+\.[0-9]+\.[0-9]+$' \
+            || { echo "ERROR: tag must be strict semver (vX.Y.Z), got: $VERSION"; exit 1; }
+
+      - name: Stamp release version in galaxy.yml and CHANGELOG.md
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          sed -i "s/^version:.*/version: $VERSION/" ansible/galaxy.yml
+          sed -i "s/^## Unreleased.*/## v$VERSION/" ansible/CHANGELOG.md
+
+      - name: Generate Ansible collection modules
+        run: |
+          python3 tools/generate/generate.py \
+            --backend ansible \
+            --spec rest-api/openapi/spec.yaml \
+            --output ansible/plugins/modules \
+            --root .
+
+      - name: Build collection tarball
+        working-directory: ansible
+        run: |
+          mkdir -p ../dist
+          ansible-galaxy collection build --output-path ../dist/
+
+      - name: Publish to Ansible Galaxy
+        env:
+          GALAXY_KEY: ${{ secrets.ANSIBLE_GALAXY_API_KEY }}
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          # ansible-galaxy reads the API key from the token file at
+          # ANSIBLE_GALAXY_TOKEN_PATH when --api-key is absent, keeping the
+          # secret out of process arguments.
+          TOKEN_FILE=$(mktemp)
+          printf 'token: %s\n' "$GALAXY_KEY" > "$TOKEN_FILE"
+          chmod 600 "$TOKEN_FILE"
+          # A rerun of a partially failed release republishes the same
+          # version, which Galaxy rejects as a duplicate. Treat an
+          # already-published version as success so the rerun can proceed to
+          # repair the GitHub release. The documented Galaxy NG content API
+          # 404s for unknown versions; -L follows the legacy-path redirect.
+          set +e
+          ANSIBLE_GALAXY_TOKEN_PATH="$TOKEN_FILE" \
+            ansible-galaxy collection publish "dist/nvidia-infra_controller-${VERSION}.tar.gz"
+          STATUS=$?
+          set -e
+          rm -f "$TOKEN_FILE"
+          if [ "$STATUS" -ne 0 ]; then
+            echo "Galaxy publish failed; checking whether version ${VERSION} is already published."
+            if curl -sfL "https://galaxy.ansible.com/api/v3/plugin/ansible/content/published/collections/index/nvidia/infra_controller/versions/${VERSION}/" > /dev/null; then
+              echo "Version ${VERSION} is already published on Galaxy; continuing."
+            else
+              echo "ERROR: Galaxy publication failed and version ${VERSION} is not published."
+              exit 1
+            fi
+          fi
+
+      - name: Publish GitHub release with the tarball
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG_NAME: ${{ github.ref_name }}
+        run: |
+          # Attach the tarball during release creation so the release never
+          # goes public without its asset; the existing-release path is the
+          # retry-safe route for a re-run.
+          if gh release view "$TAG_NAME" > /dev/null 2>&1; then
+            gh release upload "$TAG_NAME" dist/*.tar.gz --clobber
+          else
+            gh release create "$TAG_NAME" dist/*.tar.gz \
+              --title "$TAG_NAME" \
+              --notes "Release $TAG_NAME" \
+              --draft=false
+          fi
+
