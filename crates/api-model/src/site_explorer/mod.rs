@@ -1203,6 +1203,11 @@ impl EndpointExplorationReport {
     ///
     /// TODO(chet): These are obviously workarounds for now while
     /// we work with vendors to update their BMC firmware.
+    ///
+    /// Site explorer creates a power-shelf row only for an endpoint this
+    /// accepts, and `GetComponentCredentials` returns a stored BMC root
+    /// credential only for a MAC address with such a row. Loosening this
+    /// check widens which credentials that RPC can return.
     pub fn is_power_shelf(&self) -> bool {
         self.chassis.iter().any(|c| {
             c.id.to_lowercase().contains("powershelf")
@@ -1215,6 +1220,11 @@ impl EndpointExplorationReport {
     }
 
     /// Return `true` if the explored endpoint is a Switch
+    ///
+    /// Site explorer creates a switch row only for an endpoint this accepts,
+    /// and `GetComponentCredentials` returns stored switch credentials only
+    /// for a MAC address with such a row. Loosening this check widens which
+    /// credentials that RPC can return.
     pub fn is_switch(&self) -> bool {
         self.chassis
             .iter()
