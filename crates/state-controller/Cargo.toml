@@ -35,6 +35,7 @@ test-support = []
 carbide-api-db = { path = "../api-db", default-features = false }
 carbide-api-model = { path = "../api-model", default-features = false }
 carbide-health-metrics = { path = "../health-metrics" }
+carbide-instrument = { path = "../instrument" }
 carbide-utils = { path = "../utils" }
 carbide-uuid = { path = "../uuid", features = ["sqlx"] }
 config-version = { path = "../config-version", features = ["sqlx"] }

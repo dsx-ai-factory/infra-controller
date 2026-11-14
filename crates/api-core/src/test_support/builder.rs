@@ -355,12 +355,12 @@ impl TestApiBuilder {
             .unwrap_or_else(|| Arc::new(NmxcSimClient::default()));
 
         Api {
-            instrumentation: self.instrumentation,
+            instrumentation: self.instrumentation.clone(),
             dpf_sdk: self.dpf_sdk,
             runtime_config,
             credential_manager,
             certificate_provider,
-            database_connection: self.db_pool,
+            database_connection: db::DatabaseConnection::new(self.db_pool, self.instrumentation),
             // dyn upcast: the ops handle is also the general pool in tests.
             redfish_pool: redfish_pool.clone(),
             bmc_credential_ops: redfish_pool,

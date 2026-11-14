@@ -198,7 +198,13 @@ impl<IO: StateControllerIO> Builder<IO> {
             });
 
         let enqueuer = PeriodicEnqueuer::<IO> {
-            pool: database.clone(),
+            pool: db::DatabaseConnection::new(
+                database.clone(),
+                meter
+                    .clone()
+                    .map(carbide_instrument::Instrumentation::new)
+                    .unwrap_or_else(carbide_instrument::Instrumentation::global),
+            ),
             work_lock_manager_handle,
             cancel_token: cancel_token.clone(),
             metric_emitter: period_enqueuer_metric_emitter,

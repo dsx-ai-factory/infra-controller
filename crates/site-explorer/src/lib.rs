@@ -2458,7 +2458,7 @@ impl SiteExplorer {
 
             // Keep topology writes ahead of endpoint writes to match machine deletion's
             // lock order. A savepoint lets a rejected report undo only its own topology.
-            let mut txn = db::Transaction::begin_inner(txn.as_pgconn()).await?;
+            let mut txn = txn.begin_nested().await?;
 
             // Update possible stale machine versions
             // Configured firmware versions remain the preferred source. Hosts

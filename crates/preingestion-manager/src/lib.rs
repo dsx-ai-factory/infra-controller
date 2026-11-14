@@ -66,7 +66,6 @@ use model::site_explorer::{
     PowerDrainState, PreingestionState, TimeSyncResetPhase,
 };
 use opentelemetry::metrics::Meter;
-use sqlx::PgPool;
 use tokio::fs::File;
 use tokio::io::AsyncBufReadExt;
 use tokio::sync::Semaphore;
@@ -111,7 +110,7 @@ const BMC_RESET_POWER_ON_TIMEOUT: chrono::TimeDelta = chrono::TimeDelta::minutes
 pub struct PreingestionManager {
     static_info: Arc<PreingestionManagerStatic>,
     metric_holder: Arc<metrics::MetricHolder>,
-    database_connection: PgPool,
+    database_connection: db::DatabaseConnection,
 }
 
 #[derive(Clone)]
@@ -165,6 +164,8 @@ impl PreingestionManager {
         ntp_servers: Vec<Ipv4Addr>,
         instrumentation: Instrumentation,
     ) -> PreingestionManager {
+        let database_connection =
+            db::DatabaseConnection::new(database_connection, instrumentation.clone());
         let hold_period = config
             .run_interval
             .saturating_add(std::time::Duration::from_secs(60));
@@ -365,7 +366,7 @@ struct EndpointResult {
 }
 
 async fn one_endpoint(
-    db: &PgPool,
+    db: &db::DatabaseConnection,
     endpoint: &ExploredEndpoint,
     static_info: Arc<PreingestionManagerStatic>,
 ) -> PreingestionManagerResult<EndpointResult> {
@@ -598,7 +599,7 @@ impl PreingestionManagerStatic {
     async fn connect_bmc(
         &self,
         address: IpAddr,
-        db_pool: &PgPool,
+        db_pool: &db::DatabaseConnection,
     ) -> PreingestionManagerResult<BackendBmc> {
         let report = || async {
             db::explored_endpoints::find_by_ips(db_pool, vec![address])
@@ -636,7 +637,7 @@ impl PreingestionManagerStatic {
 
     async fn firmware_config_snapshot(
         &self,
-        db: &PgPool,
+        db: &db::DatabaseConnection,
     ) -> PreingestionManagerResult<FirmwareConfigSnapshot> {
         let host_firmware_configs = db::host_firmware_config::list_configs(db).await?;
         Ok(self
@@ -648,7 +649,7 @@ impl PreingestionManagerStatic {
     /// find_fw_info_for_host looks up the firmware config for the given endpoint
     async fn find_fw_info_for_host(
         &self,
-        db: &PgPool,
+        db: &db::DatabaseConnection,
         endpoint: &ExploredEndpoint,
     ) -> PreingestionManagerResult<Option<Firmware>> {
         Ok(self
@@ -667,7 +668,7 @@ impl PreingestionManagerStatic {
     /// Complete regardless).
     async fn check_firmware_versions_below_preingestion(
         &self,
-        db: &PgPool,
+        db: &db::DatabaseConnection,
         endpoint: &ExploredEndpoint,
         repeat: bool,
     ) -> PreingestionManagerResult<bool> {
@@ -820,7 +821,7 @@ impl PreingestionManagerStatic {
     /// explorer's refresh-wait tier picks up this state within its budget.
     async fn defer_firmware_check(
         &self,
-        db: &PgPool,
+        db: &db::DatabaseConnection,
         endpoint: &ExploredEndpoint,
         reason: &str,
     ) -> PreingestionManagerResult<()> {
@@ -851,7 +852,7 @@ impl PreingestionManagerStatic {
     /// would make a significant difference, as we're limited by our own upload bandwidth.
     async fn start_firmware_uploads_or_continue(
         &self,
-        db: &PgPool,
+        db: &db::DatabaseConnection,
         endpoint: &ExploredEndpoint,
         repeat: bool,
     ) -> PreingestionManagerResult<bool> {
@@ -930,7 +931,7 @@ impl PreingestionManagerStatic {
     /// First bool is true if started an upgrade, or for some other reason shouldn't check for updating other firmwares.  Second is if we delayed the update.
     async fn start_upgrade_if_needed(
         &self,
-        db: &PgPool,
+        db: &db::DatabaseConnection,
         endpoint: &ExploredEndpoint,
         fw_info: &Firmware,
         fw_type: FirmwareComponentType,
@@ -989,7 +990,7 @@ impl PreingestionManagerStatic {
     /// in_upgrade_firmware_wait triggers when we are waiting for installation of firmware after an upload.
     async fn in_upgrade_firmware_wait(
         &self,
-        db: &PgPool,
+        db: &db::DatabaseConnection,
         args: &InUpgradeFirmwareWaitArgs<'_>,
     ) -> PreingestionManagerResult<()> {
         let (endpoint, task_id, final_version, upgrade_type, power_drains_needed, firmware_number) = (
@@ -1229,7 +1230,7 @@ impl PreingestionManagerStatic {
 
     async fn in_reset_for_new_firmware(
         &self,
-        db: &PgPool,
+        db: &db::DatabaseConnection,
         endpoint: &ExploredEndpoint,
         state: &PreingestionState,
     ) -> PreingestionManagerResult<()> {
@@ -1646,7 +1647,7 @@ impl PreingestionManagerStatic {
 
     async fn in_new_firmware_reported_wait(
         &self,
-        db: &PgPool,
+        db: &db::DatabaseConnection,
         endpoint: &ExploredEndpoint,
         final_version: &str,
         upgrade_type: &FirmwareComponentType,
@@ -1738,7 +1739,7 @@ impl PreingestionManagerStatic {
 
     async fn run_initial_checks(
         &self,
-        db: &PgPool,
+        db: &db::DatabaseConnection,
         endpoint: &ExploredEndpoint,
     ) -> PreingestionManagerResult<bool> {
         match self.check_bmc_time_sync(db, endpoint).await {
@@ -1820,7 +1821,7 @@ impl PreingestionManagerStatic {
 
     async fn initial_bmc_reset(
         &self,
-        db: &PgPool,
+        db: &db::DatabaseConnection,
         endpoint: &ExploredEndpoint,
         phase: &InitialBmcResetPhase,
     ) -> PreingestionManagerResult<bool> {
@@ -1973,7 +1974,7 @@ impl PreingestionManagerStatic {
     /// Handle the `SetNtpServers` preingestion state before initial checks.
     async fn set_ntp_servers(
         &self,
-        db: &PgPool,
+        db: &db::DatabaseConnection,
         endpoint: &ExploredEndpoint,
         set_at: Option<&DateTime<Utc>>,
         attempts: u32,
@@ -2047,7 +2048,7 @@ impl PreingestionManagerStatic {
     /// Helper to retry setting NTP servers or fail after a failed NTP Redfish operation.
     async fn set_ntp_servers_retry_or_fail(
         &self,
-        db: &PgPool,
+        db: &db::DatabaseConnection,
         endpoint: &ExploredEndpoint,
         attempts: u32,
         error: PreingestionManagerError,
@@ -2267,7 +2268,7 @@ impl PreingestionManagerStatic {
 
     async fn pre_update_resets(
         &self,
-        db: &PgPool,
+        db: &db::DatabaseConnection,
         endpoint: &ExploredEndpoint,
         phase: Option<&InitialResetPhase>,
         last_time: Option<&DateTime<Utc>>,
@@ -2417,7 +2418,7 @@ impl PreingestionManagerStatic {
 
     async fn time_sync_resets(
         &self,
-        db: &PgPool,
+        db: &db::DatabaseConnection,
         endpoint: &ExploredEndpoint,
         phase: &TimeSyncResetPhase,
         last_time: Option<&DateTime<Utc>>,
@@ -2701,7 +2702,7 @@ impl PreingestionManagerStatic {
 
     async fn by_script(
         &self,
-        db: &PgPool,
+        db: &db::DatabaseConnection,
         endpoint_address: std::net::IpAddr,
         to_install: &FirmwareEntry,
     ) -> Result<(), DatabaseError> {
@@ -2891,7 +2892,7 @@ impl PreingestionManagerStatic {
 
     async fn waiting_for_script(
         &self,
-        db: &PgPool,
+        db: &db::DatabaseConnection,
         endpoint: &ExploredEndpoint,
     ) -> Result<(), DatabaseError> {
         db.with_txn(|txn| async move {
@@ -2922,7 +2923,7 @@ impl PreingestionManagerStatic {
     /// false otherwise.
     async fn check_bmc_time_sync(
         &self,
-        db: &PgPool,
+        db: &db::DatabaseConnection,
         endpoint: &ExploredEndpoint,
     ) -> PreingestionManagerResult<bool> {
         tracing::debug!(?endpoint, "Checking BMC time sync");
@@ -2975,7 +2976,11 @@ impl PreingestionManagerStatic {
     /// Fails closed: on a lookup error we report the host as ingested so the
     /// caller skips the destructive time-sync remediation rather than risk power
     /// cycling a tenant-assigned node.
-    async fn is_ingested_host(&self, db: &PgPool, endpoint: &ExploredEndpoint) -> bool {
+    async fn is_ingested_host(
+        &self,
+        db: &db::DatabaseConnection,
+        endpoint: &ExploredEndpoint,
+    ) -> bool {
         match db::machine_topology::find_machine_id_by_bmc_ip(db, &endpoint.address.to_string())
             .await
         {
@@ -2995,7 +3000,7 @@ impl PreingestionManagerStatic {
     /// Host preingestion state was already validated by the gRPC handler at trigger time.
     async fn in_bfb_recovery_needed(
         &self,
-        db: &PgPool,
+        db: &db::DatabaseConnection,
         endpoint: &ExploredEndpoint,
         host_bmc_ip: &std::net::IpAddr,
         pre_copy_powercycle: bool,
@@ -3025,7 +3030,7 @@ impl PreingestionManagerStatic {
 
     async fn in_bfb_platform_powercycle(
         &self,
-        db: &PgPool,
+        db: &db::DatabaseConnection,
         endpoint: &ExploredEndpoint,
         host_bmc_ip: &std::net::IpAddr,
         phase: &model::site_explorer::BfbPlatformPowercyclePhase,
@@ -3204,7 +3209,7 @@ impl PreingestionManagerStatic {
     /// A legacy state has no identity to validate and must be explicitly requeued.
     async fn validate_bfb_target(
         &self,
-        db: &PgPool,
+        db: &db::DatabaseConnection,
         endpoint: &ExploredEndpoint,
         host_bmc_ip: std::net::IpAddr,
     ) -> Result<Option<mac_address::MacAddress>, DatabaseError> {
@@ -3238,7 +3243,7 @@ impl PreingestionManagerStatic {
 
     async fn start_bfb_copy(
         &self,
-        db: &PgPool,
+        db: &db::DatabaseConnection,
         endpoint: &ExploredEndpoint,
         host_bmc_ip: std::net::IpAddr,
     ) -> Result<(), DatabaseError> {
@@ -3318,7 +3323,7 @@ impl PreingestionManagerStatic {
 
     async fn in_bfb_copy_in_progress(
         &self,
-        db: &PgPool,
+        db: &db::DatabaseConnection,
         endpoint: &ExploredEndpoint,
         started_at: &DateTime<Utc>,
         host_bmc_ip: &std::net::IpAddr,
@@ -3418,7 +3423,7 @@ impl PreingestionManagerStatic {
 
     async fn in_bfb_installation_wait(
         &self,
-        db: &PgPool,
+        db: &db::DatabaseConnection,
         endpoint: &ExploredEndpoint,
         started_at: &DateTime<Utc>,
         host_bmc_ip: &std::net::IpAddr,
@@ -3713,7 +3718,7 @@ impl PreingestionManagerStatic {
         to_install: &FirmwareEntry,
         firmware_type: &FirmwareComponentType,
         firmware_number: u32,
-        db_pool: &PgPool,
+        db_pool: &db::DatabaseConnection,
     ) -> Result<bool, DatabaseError> {
         let artifact = match resolve_preingestion_firmware_artifact(
             &self.config.firmware_download_cache_directory,
@@ -4018,7 +4023,7 @@ trait CreateClientForIngestedHost {
     async fn create_client_for_ingested_host(
         &self,
         ip: IpAddr,
-        db_pool: &PgPool,
+        db_pool: &db::DatabaseConnection,
     ) -> PreingestionManagerResult<Box<dyn Redfish>>;
 }
 
@@ -4026,7 +4031,7 @@ impl CreateClientForIngestedHost for Arc<dyn RedfishClientPool> {
     async fn create_client_for_ingested_host(
         &self,
         ip: IpAddr,
-        db_pool: &PgPool,
+        db_pool: &db::DatabaseConnection,
     ) -> PreingestionManagerResult<Box<dyn Redfish>> {
         let bmc_access_info =
             db::machine_interface::lookup_bmc_access_info(db_pool, ip, None).await?;

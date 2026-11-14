@@ -641,7 +641,12 @@ async fn preserves_replacement_maintenance_after_power_completion(pool: PgPool) 
                 arrival.await.unwrap();
                 let accepted = component_manager
                     .request_machine_maintenance_via_state_controller(
-                        &pool,
+                        &db::DatabaseConnection::new(
+                            pool.clone(),
+                            carbide_instrument::Instrumentation::from_meter_provider(
+                                &opentelemetry::metrics::noop::NoopMeterProvider::new(),
+                            ),
+                        ),
                         &[host.host.id],
                         replacement_operation.clone(),
                         "maintenance-test",
@@ -856,7 +861,12 @@ async fn chassis_reset_preserves_replacement_including_legacy_state(pool: PgPool
         }
         let accepted = component_manager
             .request_machine_maintenance_via_state_controller(
-                &pool,
+                &db::DatabaseConnection::new(
+                    pool.clone(),
+                    carbide_instrument::Instrumentation::from_meter_provider(
+                        &opentelemetry::metrics::noop::NoopMeterProvider::new(),
+                    ),
+                ),
                 &[host.host.id],
                 MachineMaintenanceOperation::PowerOff { graceful: false },
                 "replacement",

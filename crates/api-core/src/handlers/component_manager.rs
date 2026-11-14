@@ -86,7 +86,7 @@ pub(crate) fn standalone_compute_tray_manager(api: &Api) -> CoreComputeTrayManag
         api.bmc_credential_ops.clone();
     CoreComputeTrayManager::new(direct_pool).with_driver_connector(
         api.driver_connector.clone(),
-        api.database_connection.clone(),
+        api.database_connection.pool().clone(),
     )
 }
 

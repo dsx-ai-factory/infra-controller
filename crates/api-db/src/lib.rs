@@ -28,6 +28,8 @@ pub mod compute_allocation;
 mod conditional_write;
 mod config_drift;
 pub mod credential_rotation;
+mod database_connection;
+pub use database_connection::DatabaseConnection;
 pub mod db_read;
 mod db_session;
 pub mod desired_firmware;
@@ -138,7 +140,7 @@ use std::panic::Location;
 use std::pin::Pin;
 use std::sync::Arc;
 
-use carbide_instrument::{Event, LabelValue, emit};
+use carbide_instrument::{Event, Instrumentation, LabelValue};
 #[cfg(test)]
 pub(crate) use carbide_macros::sqlx_test;
 use carbide_uuid::machine::{InvalidMachineType, MachineId};
@@ -796,20 +798,25 @@ impl DatabaseTransactionRollbackFailed {
 }
 
 fn record_database_transaction_rollback_failure(
+    instrumentation: &Instrumentation,
     trigger: DatabaseTransactionRollbackTrigger,
     caller: &'static Location<'static>,
     context: &'static str,
     error: sqlx::Error,
 ) {
     let error = DatabaseError::txn_rollback(error, caller);
-    emit(DatabaseTransactionRollbackFailed::new(
+    instrumentation.emit(DatabaseTransactionRollbackFailed::new(
         trigger, caller, context, &error,
     ));
 }
 
+/// A transaction with caller-aware errors and a retained Event metric destination.
+///
+/// Service owners should create it through [DatabaseConnection].
 #[derive(Debug)]
 pub struct Transaction<'a> {
     inner: sqlx::PgTransaction<'a>,
+    instrumentation: Instrumentation,
 }
 
 impl<'a> AsMut<sqlx::PgTransaction<'a>> for Transaction<'a> {
@@ -820,44 +827,72 @@ impl<'a> AsMut<sqlx::PgTransaction<'a>> for Transaction<'a> {
 }
 
 impl<'a> Transaction<'a> {
-    // This function can just async when
-    // https://github.com/rust-lang/rust/issues/110011 will be
-    // implemented
+    /// Begins a transaction using the process-global compatibility destination.
+    /// Owners with an explicit handle should use [DatabaseConnection].
     #[track_caller]
     pub fn begin(pool: &'a sqlx::PgPool) -> impl Future<Output = Result<Self, DatabaseError>> {
-        let loc = Location::caller();
-        async move {
-            pool.begin()
-                .await
-                .map_err(|e| DatabaseError::txn_begin(e, loc))
-                .map(|inner| Self { inner })
-        }
+        Self::begin_instrumented_at(pool, Instrumentation::global(), Location::caller())
     }
 
+    /// Begins an instrumented transaction while preserving an upstream call site.
+    async fn begin_instrumented_at(
+        pool: &sqlx::PgPool,
+        instrumentation: Instrumentation,
+        caller: &'static Location<'static>,
+    ) -> Result<Self, DatabaseError> {
+        let inner = pool
+            .begin()
+            .await
+            .map_err(|e| DatabaseError::txn_begin(e, caller))?;
+        Ok(Self {
+            inner,
+            instrumentation,
+        })
+    }
+
+    /// Begins a compatibility transaction with an explicitly retained call site.
     pub async fn begin_with_location(
         pool: &sqlx::PgPool,
         loc: &'static Location<'static>,
     ) -> Result<Self, DatabaseError> {
-        pool.begin()
-            .await
-            .map_err(|e| DatabaseError::txn_begin(e, loc))
-            .map(|inner| Self { inner })
+        Self::begin_instrumented_at(pool, Instrumentation::global(), loc).await
     }
 
-    // This function can just async when
-    // https://github.com/rust-lang/rust/issues/110011 will be
-    // implemented
+    /// Begins a transaction or savepoint on a bare connection using global instrumentation.
+    /// Use [Self::begin_nested] when the parent transaction is available.
     #[track_caller]
     pub fn begin_inner(
         conn: &'a mut sqlx::PgConnection,
     ) -> Pin<Box<dyn Future<Output = Result<Self, DatabaseError>> + Send + 'a>> {
         let loc = Location::caller();
         Box::pin(async move {
-            conn.begin()
+            let inner = conn
+                .begin()
                 .await
-                .map_err(|e| DatabaseError::txn_begin(e, loc))
-                .map(|inner| Self { inner })
+                .map_err(|e| DatabaseError::txn_begin(e, loc))?;
+            Ok(Self {
+                inner,
+                instrumentation: Instrumentation::global(),
+            })
         })
+    }
+
+    /// Begins a savepoint that retains the parent transaction's metric destination.
+    #[track_caller]
+    pub fn begin_nested(&mut self) -> impl Future<Output = Result<Transaction<'_>, DatabaseError>> {
+        let caller = Location::caller();
+        let instrumentation = self.instrumentation.clone();
+        async move {
+            let inner = self
+                .inner
+                .begin()
+                .await
+                .map_err(|e| DatabaseError::txn_begin(e, caller))?;
+            Ok(Transaction {
+                inner,
+                instrumentation,
+            })
+        }
     }
 
     // This function can just async when
@@ -900,12 +935,25 @@ impl<'a> Transaction<'a> {
         self,
         context: &'static str,
     ) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>> {
-        let loc = Location::caller();
+        self.rollback_and_record_failure(
+            DatabaseTransactionRollbackTrigger::ExplicitCleanup,
+            Location::caller(),
+            context,
+        )
+    }
+
+    fn rollback_and_record_failure(
+        self,
+        trigger: DatabaseTransactionRollbackTrigger,
+        caller: &'static Location<'static>,
+        context: &'static str,
+    ) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>> {
         Box::pin(async move {
             if let Err(error) = self.inner.rollback().await {
                 record_database_transaction_rollback_failure(
-                    DatabaseTransactionRollbackTrigger::ExplicitCleanup,
-                    loc,
+                    &self.instrumentation,
+                    trigger,
+                    caller,
                     context,
                     error,
                 );
@@ -934,60 +982,56 @@ impl DerefMut for Transaction<'_> {
     }
 }
 
-/// Provides an easy way to auto-commit a transaction if no error is thrown.
-pub trait WithTransaction {
-    #[track_caller]
-    fn with_txn<'pool, T, E>(
-        &'pool self,
-        f: impl for<'txn> FnOnce(
-            &'txn mut PgTransaction<'pool>,
-        ) -> futures::future::BoxFuture<'txn, Result<T, E>>
-        + Send,
-    ) -> impl Future<Output = DatabaseResult<Result<T, E>>> + Send
-    where
-        T: Send,
-        E: Send;
-}
+/// Runs a transaction closure using the owner's pool and Event metric destination.
+///
+/// Successful closures commit. A closure error rolls back and is preserved even
+/// if rollback also fails; that secondary failure is logged and counted locally.
+/// Begin and commit failures return the outer [DatabaseError]; closure errors
+/// return the inner error.
+pub trait WithTransaction: Sync {
+    /// Returns the database pool together with its Event metric destination.
+    fn database_connection(&self) -> &DatabaseConnection;
 
-impl WithTransaction for PgPool {
+    /// Runs a closure in a transaction while preserving the caller's location.
     #[track_caller]
     fn with_txn<'pool, T, E>(
         &'pool self,
         f: impl for<'txn> FnOnce(
             &'txn mut PgTransaction<'pool>,
         ) -> futures::future::BoxFuture<'txn, Result<T, E>>
-        + Send,
-    ) -> impl Future<Output = DatabaseResult<Result<T, E>>>
+        + Send
+        + 'pool,
+    ) -> futures::future::BoxFuture<'pool, DatabaseResult<Result<T, E>>>
     where
-        T: Send,
-        E: Send,
+        T: Send + 'pool,
+        E: Send + 'pool,
     {
         let caller = Location::caller();
-        async move {
-            let mut t = self
-                .begin()
-                .await
-                .map_err(|e| DatabaseError::txn_begin(e, caller))?;
-            match f(&mut t).await {
+        let database = self.database_connection();
+        let pool = database.pool();
+        let instrumentation = database.instrumentation().clone();
+        Box::pin(async move {
+            let mut txn: Transaction<'pool> =
+                Transaction::begin_instrumented_at(pool, instrumentation, caller).await?;
+            match f(txn.as_mut()).await {
                 Ok(output) => {
-                    t.commit()
+                    txn.inner
+                        .commit()
                         .await
                         .map_err(|e| DatabaseError::txn_commit(e, caller))?;
                     Ok(Ok(output))
                 }
-                Err(e) => {
-                    if let Err(error) = t.rollback().await {
-                        record_database_transaction_rollback_failure(
-                            DatabaseTransactionRollbackTrigger::ClosureError,
-                            caller,
-                            "transaction closure returned an error",
-                            error,
-                        );
-                    }
-                    Ok(Err(e))
+                Err(error) => {
+                    txn.rollback_and_record_failure(
+                        DatabaseTransactionRollbackTrigger::ClosureError,
+                        caller,
+                        "transaction closure returned an error",
+                    )
+                    .await;
+                    Ok(Err(error))
                 }
             }
-        }
+        })
     }
 }
 
@@ -1024,6 +1068,7 @@ fn setup_test_logging() {
 
 #[cfg(test)]
 mod tests {
+    use carbide_instrument::emit;
     use carbide_instrument::testing::{MetricsCapture, capture_logs};
     use carbide_test_support::{Check, check_values};
 
@@ -1077,6 +1122,167 @@ mod tests {
             error.as_database_error().and_then(|e| e.code()).as_deref(),
             Some("25006")
         );
+    }
+
+    #[crate::sqlx_test]
+    async fn database_connections_record_rollback_failures_in_their_registry(pool: PgPool) {
+        use carbide_instrument::testing::capture_logs_async;
+        use carbide_utils::test_support::test_meter::TestMeter;
+
+        enum FailurePath {
+            Explicit,
+            Nested,
+            Closure,
+        }
+
+        let meters = [TestMeter::default(), TestMeter::default()];
+        let instrumentation = meters
+            .each_ref()
+            .map(|meter| Instrumentation::new(meter.meter()));
+        for (context, owner, path, trigger) in [
+            (
+                "explicit cleanup",
+                0,
+                FailurePath::Explicit,
+                "explicit_cleanup",
+            ),
+            ("nested cleanup", 0, FailurePath::Nested, "explicit_cleanup"),
+            ("closure error", 1, FailurePath::Closure, "closure_error"),
+        ] {
+            let metrics = meters
+                .each_ref()
+                .map(|meter| MetricsCapture::for_registry(meter.registry()));
+            let source = DatabaseConnection::new(pool.clone(), instrumentation[owner].clone());
+            let ((), logs) = capture_logs_async(async {
+                match path {
+                    FailurePath::Explicit => {
+                        let mut txn = source.txn_begin().await.unwrap();
+                        terminate_transaction_backend(&pool, txn.as_pgconn()).await;
+                        txn.rollback_or_log(context).await;
+                    }
+                    FailurePath::Nested => {
+                        let mut parent = source.txn_begin().await.unwrap();
+                        let mut nested = parent.begin_nested().await.unwrap();
+                        terminate_transaction_backend(&pool, nested.as_pgconn()).await;
+                        nested.rollback_or_log(context).await;
+                    }
+                    FailurePath::Closure => {
+                        let control = pool.clone();
+                        let output = source
+                            .with_txn(move |txn| {
+                                Box::pin(async move {
+                                    terminate_transaction_backend(&control, txn.as_mut()).await;
+                                    Err::<(), _>("original operation failure")
+                                })
+                            })
+                            .await
+                            .unwrap();
+                        assert_eq!(output, Err("original operation failure"));
+                    }
+                }
+            })
+            .await;
+            let events = logs
+                .iter()
+                .filter(|log| {
+                    log.field("event_name") == Some("database_transaction_rollback_failed")
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(events.len(), 1, "case: {context}");
+            assert_eq!(events[0].level, tracing::Level::WARN);
+            assert_eq!(events[0].field("trigger"), Some(trigger));
+            assert_eq!(
+                metrics[owner].counter_delta(
+                    TRANSACTION_ROLLBACK_FAILURES_METRIC,
+                    &[("trigger", trigger)]
+                ),
+                1.0,
+                "case: {context}",
+            );
+            assert_eq!(
+                metrics[1 - owner].counter_delta(
+                    TRANSACTION_ROLLBACK_FAILURES_METRIC,
+                    &[("trigger", trigger)]
+                ),
+                0.0,
+                "case: {context}",
+            );
+        }
+    }
+
+    async fn terminate_transaction_backend(pool: &PgPool, connection: &mut sqlx::PgConnection) {
+        let pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+            .fetch_one(connection)
+            .await
+            .unwrap();
+        let terminated: bool = sqlx::query_scalar("SELECT pg_terminate_backend($1)")
+            .bind(pid)
+            .fetch_one(pool)
+            .await
+            .unwrap();
+        assert!(
+            terminated,
+            "the fixture must terminate its own transaction backend"
+        );
+    }
+
+    #[crate::sqlx_test]
+    async fn database_connections_commit_or_rollback_without_counting_a_failure(pool: PgPool) {
+        use carbide_utils::test_support::test_meter::TestMeter;
+
+        sqlx::query("CREATE TABLE transaction_instrumentation_probe (value integer NOT NULL)")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let meter = TestMeter::default();
+        let instrumentation = Instrumentation::new(meter.meter());
+        let metrics = MetricsCapture::for_registry(meter.registry());
+        let source = DatabaseConnection::new(pool.clone(), instrumentation);
+        for (commit, value) in [(true, 1_i32), (false, 2)] {
+            let output = source
+                .with_txn(move |txn| {
+                    Box::pin(async move {
+                        sqlx::query(
+                            "INSERT INTO transaction_instrumentation_probe (value) VALUES ($1)",
+                        )
+                        .bind(value)
+                        .execute(txn.as_mut())
+                        .await
+                        .unwrap();
+                        if commit {
+                            Ok(value)
+                        } else {
+                            Err("operation failure")
+                        }
+                    })
+                })
+                .await
+                .unwrap();
+            assert_eq!(
+                output,
+                if commit {
+                    Ok(value)
+                } else {
+                    Err("operation failure")
+                }
+            );
+        }
+        let stored: Vec<i32> = sqlx::query_scalar(
+            "SELECT value FROM transaction_instrumentation_probe ORDER BY value",
+        )
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        assert_eq!(stored, vec![1]);
+        for trigger in ["explicit_cleanup", "closure_error"] {
+            assert_eq!(
+                metrics.counter_delta(
+                    TRANSACTION_ROLLBACK_FAILURES_METRIC,
+                    &[("trigger", trigger)]
+                ),
+                0.0
+            );
+        }
     }
 
     const TRANSACTION_ROLLBACK_FAILURES_METRIC: &str =

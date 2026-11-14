@@ -555,7 +555,7 @@ pub(crate) async fn start(
         .route("/", axum::routing::get(root_url))
         .merge(grpc_router)
         .merge(crate::handlers::nic_firmware_artifact::router(
-            api_service.database_connection.clone(),
+            api_service.database_connection.pool().clone(),
             firmware_artifact_cache,
             cancel_token.clone(),
         ))

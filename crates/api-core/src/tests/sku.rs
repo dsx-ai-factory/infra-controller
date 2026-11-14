@@ -2249,7 +2249,13 @@ pub(in crate::tests) mod tests {
         let assigned_sku_id = machine.config.hw_sku.unwrap();
         // Make a new sku, using the assigned sku as a base and renaming it "unassigned-sku" (and
         // bump its cpu count.)
-        let unassigned_sku = pool
+        let transactions = db::DatabaseConnection::new(
+            pool.clone(),
+            carbide_instrument::Instrumentation::from_meter_provider(
+                &opentelemetry::metrics::noop::NoopMeterProvider::new(),
+            ),
+        );
+        let unassigned_sku = transactions
             .with_txn({
                 let assigned_sku_id = assigned_sku_id.clone();
                 |txn| {

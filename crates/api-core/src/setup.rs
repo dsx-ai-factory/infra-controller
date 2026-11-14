@@ -841,14 +841,14 @@ pub async fn start_runtime(runtime_inputs: RuntimeInputs<'_>) -> eyre::Result<So
         .transpose()?
         .map(Arc::new);
     let api_service = Arc::new(Api {
-        instrumentation,
+        instrumentation: instrumentation.clone(),
         certificate_provider,
         common_pools,
         resource_pool_registry: registry,
         resource_pool_monitor,
         credential_manager,
         node_jwt_validator,
-        database_connection: db_pool.clone(),
+        database_connection: db::DatabaseConnection::new(db_pool.clone(), instrumentation),
         dpu_health_log_limiter: LogLimiter::default(),
         dynamic_settings,
         endpoint_explorer: bmc_explorer,
@@ -1841,6 +1841,7 @@ async fn initialize_and_start_controllers<'a>(
         credential_manager,
         ..
     } = api_service.as_ref();
+    let db_pool = db_pool.pool();
 
     let nvos_update_manager = rms_client.clone().map(|client| {
         Arc::new(component_manager::rms::rms_nvos_update_manager(client))

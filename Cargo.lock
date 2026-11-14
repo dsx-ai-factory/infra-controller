@@ -4510,6 +4510,7 @@ dependencies = [
  "libredfish",
  "librms",
  "mac_address",
+ "opentelemetry",
  "prost",
  "prost-types",
  "serde",

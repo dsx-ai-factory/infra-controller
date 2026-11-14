@@ -59,14 +59,14 @@ async fn init(pool: PgPool) -> ZeroDpuEnv {
     let endpoint_explorer = Arc::new(MockEndpointExplorer::default());
     let api = test_harness.api();
     let endpoint_exploration_service = Arc::new(EndpointExplorationService::new(
-        api.database_connection.clone(),
+        api.database_connection.pool().clone(),
         endpoint_explorer.clone(),
         Arc::new(api.runtime_config.get_firmware_config()),
     ));
     let create_machines = Arc::new(AtomicBool::new(true));
     let site_explorer = TestSiteExplorer::new(
         SiteExplorer::new(
-            api.database_connection.clone(),
+            api.database_connection.pool().clone(),
             SiteExplorerConfig {
                 enabled: Arc::new(true.into()),
                 retained_boot_interface_window: None,
