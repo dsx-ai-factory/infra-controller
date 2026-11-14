@@ -1,0 +1,14 @@
+**
+!Cargo.toml
+!Cargo.lock
+!rust-toolchain.toml
+!.cargo/config.toml
+!crates/**
+!include/**
+!dev/ipmi/cmd.conf
+!dev/ipmi/ipmi_sim_chassiscontrol.sh
+!dev/certs/localhost/**
+!pxe/templates/**
+!pxe/ipxe/local/embed.ipxe
+**/.env
+**/.local_envrc

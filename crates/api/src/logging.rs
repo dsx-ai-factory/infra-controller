@@ -304,6 +304,22 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore = "requires the disposable dependency network qualification services"]
+    async fn tracing_exporter_reaches_external_collector() {
+        let endpoint = std::env::var("NICO_TEST_OTLP_ENDPOINT")
+            .expect("NICO_TEST_OTLP_ENDPOINT must name the qualification collector");
+        let span_name = std::env::var("NICO_TEST_OTLP_SPAN_NAME")
+            .expect("NICO_TEST_OTLP_SPAN_NAME must identify this qualification case");
+        let exporter = build_span_exporter(&endpoint).expect("build production tracing exporter");
+        let mut span = new_test_export_span_data();
+        span.name = span_name.into();
+        tokio::time::timeout(Duration::from_secs(10), exporter.export(vec![span]))
+            .await
+            .expect("external OTLP export deadline")
+            .expect("export span to qualification collector");
+    }
+
+    #[tokio::test]
     async fn tracing_exporter_sends_spans_over_ipv6() {
         let listener = tokio::net::TcpListener::bind((Ipv6Addr::LOCALHOST, 0))
             .await

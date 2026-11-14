@@ -78,6 +78,14 @@ mod tests {
         };
         let options = postgres_connect_options(&database_url).expect("parse PostgreSQL test URL");
         let ipv6 = options.get_host().parse::<Ipv6Addr>().is_ok();
+        let expected_family = std::env::var("NICO_TEST_POSTGRES_FAMILY")
+            .ok()
+            .map(|value| match value.as_str() {
+                "4" => 4,
+                "6" => 6,
+                _ => panic!("NICO_TEST_POSTGRES_FAMILY must be 4 or 6"),
+            })
+            .or(ipv6.then_some(6));
 
         tokio::time::timeout(Duration::from_secs(10), async {
             let mut connection = PgConnection::connect_with(&options)
@@ -94,9 +102,14 @@ mod tests {
                 .expect("close PostgreSQL connection");
 
             assert_eq!(value, 1);
-            if ipv6 {
-                assert_eq!(family, Some(6), "expected an IPv6 PostgreSQL connection");
+            if let Some(expected) = expected_family {
+                assert_eq!(
+                    family,
+                    Some(expected),
+                    "PostgreSQL connection address family"
+                );
             }
+            eprintln!("PostgreSQL exchange succeeded over address family {family:?}");
         })
         .await
         .expect("PostgreSQL query deadline");
