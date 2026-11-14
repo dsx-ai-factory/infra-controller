@@ -276,7 +276,8 @@ pub(super) async fn run_host_boot_config_stage(
                         HostBootConfigStage::WaitingForBiosJob { bios_config_info },
                     ))
                 }
-                BiosConfigOutcome::WaitingForReboot(reason) => {
+                BiosConfigOutcome::WaitingForBmc(reason)
+                | BiosConfigOutcome::WaitingForReboot(reason) => {
                     Ok(HostBootConfigOutcome::Wait(reason))
                 }
             }

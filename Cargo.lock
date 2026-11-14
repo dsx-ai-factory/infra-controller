@@ -2806,8 +2806,11 @@ dependencies = [
 name = "carbide-machine-controller"
 version = "0.0.0"
 dependencies = [
+ "arc-swap",
  "async-trait",
+ "axum",
  "bmc-backend",
+ "bmc-mock",
  "bmc-platform",
  "bmc-runtime",
  "bmc-vendor",
