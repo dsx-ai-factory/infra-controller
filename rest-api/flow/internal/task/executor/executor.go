@@ -24,7 +24,7 @@ type Executor interface {
 	// req.Info.OperationType. The operation payload must be pre-serialized
 	// into req.Info.OperationInfo before calling.
 	Execute(ctx context.Context, req *task.ExecutionRequest) (*task.ExecutionResponse, error)
-	CheckStatus(ctx context.Context, executionID string) (common.TaskStatus, error)
+	CheckStatus(ctx context.Context, executionID string) (*task.ExecutionStatus, error)
 	TerminateTask(ctx context.Context, executionID string, reason string) error
 }
 

@@ -70,7 +70,7 @@ func TestTask_UpdateTaskStatus(t *testing.T) {
 		).WillReturnResult(sqlmock.NewResult(0, 1))
 		task := &Task{ID: uuid.New()}
 
-		err = task.UpdateTaskStatus(
+		updated, err := task.UpdateTaskStatus(
 			t.Context(),
 			db,
 			taskcommon.TaskStatusWaiting,
@@ -80,6 +80,7 @@ func TestTask_UpdateTaskStatus(t *testing.T) {
 		)
 
 		require.NoError(t, err)
+		require.True(t, updated)
 		require.Equal(t, taskcommon.TaskStatusWaiting, task.Status)
 		require.Equal(t, deadline, *task.QueueExpiresAt)
 		require.NoError(t, mock.ExpectationsWereMet())
@@ -98,7 +99,7 @@ func TestTask_UpdateTaskStatus(t *testing.T) {
 		deadline := time.Now().Add(time.Hour).UTC()
 		task := &Task{ID: uuid.New(), QueueExpiresAt: &deadline}
 
-		err = task.UpdateTaskStatus(
+		updated, err := task.UpdateTaskStatus(
 			t.Context(),
 			db,
 			taskcommon.TaskStatusTerminated,
@@ -108,6 +109,7 @@ func TestTask_UpdateTaskStatus(t *testing.T) {
 		)
 
 		require.NoError(t, err)
+		require.True(t, updated)
 		require.Nil(t, task.QueueExpiresAt)
 		require.NotNil(t, task.FinishedAt)
 		require.NoError(t, mock.ExpectationsWereMet())

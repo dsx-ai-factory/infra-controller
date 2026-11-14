@@ -23,10 +23,11 @@ type mockStore struct {
 	racksWithWaiting []uuid.UUID
 	statusUpdates    []*taskdef.TaskStatusUpdate
 
-	listActiveErr   error
-	listWaitingErr  error
-	listRacksErr    error
-	updateStatusErr error
+	listActiveErr    error
+	listWaitingErr   error
+	listRacksErr     error
+	updateStatusErr  error
+	skipStatusUpdate bool
 }
 
 func newMockStore() *mockStore {
@@ -69,12 +70,12 @@ func (m *mockStore) UpdateTaskReport(_ context.Context, _ *taskdef.TaskReportUpd
 	return nil
 }
 
-func (m *mockStore) UpdateTaskStatus(ctx context.Context, arg *taskdef.TaskStatusUpdate) error {
+func (m *mockStore) UpdateTaskStatus(ctx context.Context, arg *taskdef.TaskStatusUpdate) (bool, error) {
 	if m.updateStatusErr != nil {
-		return m.updateStatusErr
+		return false, m.updateStatusErr
 	}
 	m.statusUpdates = append(m.statusUpdates, arg)
-	return nil
+	return !m.skipStatusUpdate, nil
 }
 
 // --- methods not used by the conflict package ---
@@ -185,4 +186,11 @@ func (m *mockStore) ListRackRuleAssociations(_ context.Context, _ uuid.UUID) ([]
 // ListTaskContextForRack fails unexpected context reads in conflict tests.
 func (m *mockStore) ListTaskContextForRack(_ context.Context, _ uuid.UUID) ([]taskdef.TaskContextMetadata, error) {
 	panic("unexpected task context read")
+}
+
+func (s *mockStore) ListTasksForReconciliation(context.Context, taskcommon.ExecutorType, uuid.UUID, int) ([]*taskdef.Task, error) {
+	panic("unexpected ListTasksForReconciliation")
+}
+func (s *mockStore) FinishTaskExecution(context.Context, *taskdef.Task, *taskdef.ExecutionStatus) (bool, error) {
+	panic("unexpected FinishTaskExecution")
 }
