@@ -64,14 +64,15 @@ func TestGetTaskHandler_Handle(t *testing.T) {
 
 	taskUUID := uuid.New().String()
 
+	failureReason := "switch switch-1: SDN factory reset failed: cluster is not enabled"
 	mockTask := &flowv1.Task{
 		Id:          &flowv1.UUID{Id: taskUUID},
-		Operation:   "power_on",
+		Operation:   "Restore SDN factory defaults",
 		RackId:      &flowv1.UUID{Id: uuid.New().String()},
-		Description: "Power on rack",
-		Status:      flowv1.TaskStatus_TASK_STATUS_RUNNING,
-		Message:     "Processing",
-		Report:      `{"version":1,"stages":[{"number":1,"status":"completed","steps":[{"component_type":"Compute","status":"skipped"}]}]}`,
+		Description: "Reset switch SDN",
+		Status:      flowv1.TaskStatus_TASK_STATUS_FAILED,
+		Message:     failureReason,
+		Report:      `{"error":"` + failureReason + `","version":1,"stages":[{"number":1,"status":"failed","steps":[{"component_type":"NVSwitch","status":"failed"}]}]}`,
 	}
 
 	ctx := context.Background()
@@ -192,9 +193,11 @@ func TestGetTaskHandler_Handle(t *testing.T) {
 			err = json.Unmarshal(rec.Body.Bytes(), &apiTask)
 			assert.NoError(t, err)
 			assert.Equal(t, taskUUID, apiTask.ID)
-			assert.Equal(t, "Running", apiTask.Status)
-			assert.Equal(t, "Power on rack", apiTask.Description)
-			assert.Equal(t, "Processing", apiTask.Message)
+			assert.Equal(t, "Failed", apiTask.Status)
+			assert.Equal(t, "Reset switch SDN", apiTask.Description)
+			assert.Equal(t, failureReason, apiTask.Message)
+			require.NotNil(t, apiTask.Report)
+			assert.Equal(t, failureReason, apiTask.Report.Error)
 			assertZeroTaskReportCounters(t, rec.Body.Bytes())
 		})
 	}

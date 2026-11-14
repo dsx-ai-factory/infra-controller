@@ -337,6 +337,7 @@ func executeFirmwareControlAction(actx actionExecutionContext) error {
 		targetIDs = append(targetIDs, componentID)
 	}
 	latestStatuses := make(map[string]operations.FirmwareUpdateStatus, len(expected))
+	var lastObservationError error
 
 	log.Debug().
 		Str("component_type", componentStr).
@@ -359,14 +360,20 @@ func executeFirmwareControlAction(actx actionExecutionContext) error {
 						failedComponents = append(failedComponents, componentID)
 					}
 				}
-				return fmt.Errorf(
-					"%s firmware update timed out after %v; failed components: %v; unresolved components: %v",
-					componentStr, pollTimeout, failedComponents, unresolvedComponents,
-				)
+				summary := fmt.Sprintf("%s firmware update timed out after %v; failed components: %v; unresolved components: %v",
+					componentStr, pollTimeout, failedComponents, unresolvedComponents)
+				if len(failedComponents) > 0 {
+					summary += "; " + firmwareFailureDetails(failedComponents, latestStatuses)
+				}
+				if lastObservationError != nil {
+					return fmt.Errorf("%s; last status query failed: %w", summary, singleLineError{lastObservationError})
+				}
+				return errors.New(summary)
 			}
-			return fmt.Errorf(
-				"%s firmware update timed out after %v", componentStr, pollTimeout,
-			)
+			if lastObservationError != nil {
+				return fmt.Errorf("%s firmware update timed out after %v; last status query failed: %w", componentStr, pollTimeout, singleLineError{lastObservationError})
+			}
+			return fmt.Errorf("%s firmware update timed out after %v", componentStr, pollTimeout)
 		}
 
 		var result activity.GetFirmwareStatusResult
@@ -381,6 +388,7 @@ func executeFirmwareControlAction(actx actionExecutionContext) error {
 				ctx, activity.NameGetFirmwareStatus, target,
 			).Get(ctx, &result)
 		}
+		lastObservationError = err
 		if err != nil {
 			log.Warn().Err(err).
 				Str("target", target.String()).
@@ -398,8 +406,9 @@ func executeFirmwareControlAction(actx actionExecutionContext) error {
 			}
 
 			if len(failedComponents) > 0 {
+				sort.Strings(failedComponents)
 				return fmt.Errorf(
-					"firmware update failed for components: %v", failedComponents,
+					"firmware update failed for components: %v; %s", failedComponents, firmwareFailureDetails(failedComponents, result.Statuses),
 				)
 			}
 
@@ -441,8 +450,9 @@ func executeFirmwareControlAction(actx actionExecutionContext) error {
 
 			if allTerminal {
 				if len(failedComponents) > 0 {
+					sort.Strings(failedComponents)
 					return fmt.Errorf(
-						"firmware update failed for components: %v", failedComponents,
+						"firmware update failed for components: %v; %s", failedComponents, firmwareFailureDetails(failedComponents, result.Statuses),
 					)
 				}
 
@@ -515,8 +525,13 @@ func verifyPowerStatus(
 	// Existing histories retain their original completion decision on replay.
 	checkRequested := workflow.GetVersion(ctx, "power-status-response-presence", workflow.DefaultVersion, 1) != workflow.DefaultVersion
 	boundedPolling := workflow.GetVersion(ctx, "power-status-poll-deadline", workflow.DefaultVersion, 1) != workflow.DefaultVersion
+	var lastObservationError error
 	timeoutError := func() error {
-		return fmt.Errorf("timeout after %v waiting for power status %s (attempts: %d)", timeout, expected, attempt)
+		summary := fmt.Sprintf("timeout after %v waiting for power status %s for components %v (attempts: %d)", timeout, expected, target.Identifiers, attempt)
+		if lastObservationError != nil {
+			return fmt.Errorf("%s; last status query failed: %w", summary, singleLineError{lastObservationError})
+		}
+		return errors.New(summary)
 	}
 
 	for {
@@ -537,6 +552,7 @@ func verifyPowerStatus(
 			actErr = workflow.ExecuteActivity(ctx, activity.NameGetPowerStatus, target).Get(ctx, &statusMap)
 		}
 
+		lastObservationError = actErr
 		if actErr == nil {
 			identifiers := target.Identifiers
 			allMatch := target.Len() > 0
@@ -581,12 +597,7 @@ func verifyPowerStatus(
 
 		// Check timeout
 		if workflow.Now(ctx).After(deadline) {
-			return fmt.Errorf(
-				"timeout after %v waiting for power status %s (attempts: %d)",
-				timeout,
-				expected,
-				attempt,
-			)
+			return timeoutError()
 		}
 
 		// Sleep before next poll (durable sleep in workflow)
@@ -639,12 +650,14 @@ func executeWaitBringUpAction(actx actionExecutionContext) error {
 		Msg("Waiting for compute bring-up")
 
 	deadline := workflow.Now(ctx).Add(timeout)
+	var lastObservationError error
 
 	for {
 		if workflow.Now(ctx).After(deadline) {
-			return fmt.Errorf(
-				"timed out waiting for compute bring-up (timeout %v)", timeout,
-			)
+			if lastObservationError != nil {
+				return fmt.Errorf("timed out waiting for compute bring-up for components %v (timeout %v); last status query failed: %w", target.Identifiers, timeout, singleLineError{lastObservationError})
+			}
+			return fmt.Errorf("timed out waiting for compute bring-up for components %v (timeout %v)", target.Identifiers, timeout)
 		}
 
 		if err := workflow.Sleep(ctx, pollInterval); err != nil {
@@ -655,6 +668,7 @@ func executeWaitBringUpAction(actx actionExecutionContext) error {
 		err := workflow.ExecuteActivity(
 			ctx, activity.NameGetBringUpStatus, target,
 		).Get(ctx, &result)
+		lastObservationError = err
 		if err != nil {
 			log.Warn().Err(err).Msg("Failed to get bring-up state, will retry")
 			continue
@@ -1160,4 +1174,33 @@ func extractComponentTargetVersion(rawVersion string, componentType devicetypes.
 	}
 
 	return rawVersion, true
+}
+
+// firmwareFailureDetails retains each failed component's cause in deterministic order.
+// A backend without diagnostics still produces an attributable failure.
+func firmwareFailureDetails(componentIDs []string, statuses map[string]operations.FirmwareUpdateStatus) string {
+	ids := append([]string(nil), componentIDs...)
+	sort.Strings(ids)
+	details := make([]string, 0, len(ids))
+	for _, id := range ids {
+		reason := strings.Join(strings.Fields(statuses[id].Error), " ")
+		if reason == "" {
+			reason = "no failure reason reported"
+		}
+		details = append(details, id+": "+reason)
+	}
+	return strings.Join(details, "; ")
+}
+
+// singleLineError preserves the cause while keeping diagnostics in first-line task summaries.
+type singleLineError struct {
+	cause error
+}
+
+func (e singleLineError) Error() string {
+	return strings.Join(strings.Fields(e.cause.Error()), " ")
+}
+
+func (e singleLineError) Unwrap() error {
+	return e.cause
 }
