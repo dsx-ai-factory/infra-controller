@@ -32,7 +32,9 @@ mod tests {
     use measured_boot::pcr::PcrRegisterValue;
     use measured_boot::records::MeasurementApprovedMachineRecord;
     use model::machine::{CURRENT_STATE_MODEL_VERSION, ManagedHostState};
+    use rpc::forge::forge_server::Forge;
     use rpc::protos::measured_boot as mbrpc;
+    use tonic::Request;
 
     use crate::measured_boot::convert_vec;
     use crate::measured_boot::rpc::{bundle, journal, machine, profile, report, site};
@@ -59,10 +61,20 @@ mod tests {
             extra_attrs: vec![],
         };
 
-        let resp = profile::handle_create_system_measurement_profile(api, req).await?;
+        let resp = api
+            .create_measurement_system_profile(Request::new(req.clone()))
+            .await?
+            .into_inner();
         assert!(resp.system_profile.is_some());
         let created_profile = resp.system_profile.unwrap();
         assert_eq!(created_profile.name, String::from("test-profile"));
+
+        // A rejected duplicate must keep its API status and leave the saved profile alone.
+        let error = api
+            .create_measurement_system_profile(Request::new(req))
+            .await
+            .unwrap_err();
+        assert_eq!(error.code(), tonic::Code::InvalidArgument);
 
         // And now fetch the first back by ID and make sure it works.
         /////////////////////////////////////////////////////////////
@@ -79,6 +91,10 @@ mod tests {
         let read_profile_by_id = resp.system_profile.unwrap();
         assert_eq!(read_profile_by_id.profile_id, created_profile.profile_id);
         assert_eq!(read_profile_by_id.name, created_profile.name);
+        assert_eq!(read_profile_by_id.attrs.len(), created_profile.attrs.len());
+        for attr in &created_profile.attrs {
+            assert!(read_profile_by_id.attrs.contains(attr), "{attr:?}");
+        }
 
         // And now fetch it back by name and make sure it works.
         ////////////////////////////////////////////////////////
@@ -143,7 +159,10 @@ mod tests {
                 value: String::from("U8E122J-1.51"),
             }],
         };
-        let resp = profile::handle_create_system_measurement_profile(api, req).await?;
+        let resp = api
+            .create_measurement_system_profile(Request::new(req))
+            .await?
+            .into_inner();
         assert!(resp.system_profile.is_some());
         let created_profile2 = resp.system_profile.unwrap();
         assert_eq!(created_profile2.name, String::from("test-profile-2"));
@@ -637,7 +656,10 @@ mod tests {
                 value: String::from("U8E122J-1.51"),
             }],
         };
-        let resp = profile::handle_create_system_measurement_profile(api, req).await?;
+        let resp = api
+            .create_measurement_system_profile(Request::new(req))
+            .await?
+            .into_inner();
         assert!(resp.system_profile.is_some());
         let profile = resp.system_profile.unwrap();
         assert_eq!(profile.name, String::from("test-profile-2"));
@@ -1324,7 +1346,10 @@ mod tests {
                 value: String::from("1.8.2"),
             }],
         };
-        let resp = profile::handle_create_system_measurement_profile(api, req).await?;
+        let resp = api
+            .create_measurement_system_profile(Request::new(req))
+            .await?
+            .into_inner();
         assert!(resp.system_profile.is_some());
         let profile1 = resp.system_profile.unwrap();
 
@@ -1338,7 +1363,10 @@ mod tests {
                 value: String::from("U8E122J-1.51"),
             }],
         };
-        let resp = profile::handle_create_system_measurement_profile(api, req).await?;
+        let resp = api
+            .create_measurement_system_profile(Request::new(req))
+            .await?
+            .into_inner();
         assert!(resp.system_profile.is_some());
         let profile2 = resp.system_profile.unwrap();
 

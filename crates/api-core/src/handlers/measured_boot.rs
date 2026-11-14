@@ -18,6 +18,7 @@
 use ::rpc::protos::measured_boot as pb;
 use ::rpc::{forge as rpc_forge, machine_discovery as rpc_md};
 use carbide_uuid::machine::MachineId;
+use db::WithTransaction;
 use db::attestation::secret_ak_pub;
 use sqlx::PgConnection;
 use tonic::{Request, Response, Status};
@@ -62,9 +63,12 @@ pub(crate) async fn create_system_profile(
     api: &Api,
     request: Request<pb::CreateMeasurementSystemProfileRequest>,
 ) -> Result<Response<pb::CreateMeasurementSystemProfileResponse>, Status> {
-    profile::handle_create_system_measurement_profile(api, request.into_inner())
-        .await
-        .map(Response::new)
+    api.with_write_txn(
+        profile::handle_create_system_measurement_profile,
+        request.into_inner(),
+    )
+    .await
+    .map(Response::new)
 }
 
 pub(crate) async fn delete_system_profile(

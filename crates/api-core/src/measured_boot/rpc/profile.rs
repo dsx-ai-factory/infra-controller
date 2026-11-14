@@ -41,19 +41,18 @@ use rpc::protos::measured_boot::{
     list_measurement_system_profile_machines_request, rename_measurement_system_profile_request,
     show_measurement_system_profile_request,
 };
-use sqlx::PgConnection;
+use sqlx::{PgConnection, PgTransaction};
 use tonic::Status;
 
 use crate::CarbideError;
 use crate::api::Api;
 
-/// handle_create_system_measurement_profile handles the
-/// CreateMeasurementSystemProfile API endpoint.
+/// `handle_create_system_measurement_profile` creates a measured-boot system profile
+/// in the caller's transaction. The API adapter owns the commit.
 pub(crate) async fn handle_create_system_measurement_profile(
-    api: &Api,
+    txn: &mut PgTransaction<'_>,
     req: CreateMeasurementSystemProfileRequest,
 ) -> Result<CreateMeasurementSystemProfileResponse, Status> {
-    let mut txn = api.txn_begin().await?;
     // sys_vendor and product_name are the two baseline attrs, so
     // just treat them as requirements, and then smash the
     // remaining ones on as "extra-attrs".
@@ -65,11 +64,10 @@ pub(crate) async fn handle_create_system_measurement_profile(
         vals.insert(kv_pair.key, kv_pair.value);
     }
 
-    let system_profile = db::measured_boot::profile::new(&mut txn, req.name, &vals)
+    let system_profile = db::measured_boot::profile::new(txn, req.name, &vals)
         .await
         .map_err(|e| CarbideError::InvalidArgument(e.to_string()))?;
 
-    txn.commit().await?;
     Ok(CreateMeasurementSystemProfileResponse {
         system_profile: Some(system_profile.into()),
     })
