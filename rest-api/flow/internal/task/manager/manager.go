@@ -5,6 +5,7 @@ package manager
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"slices"
@@ -587,7 +588,10 @@ func (m *ManagerImpl) createAndExecuteTask(
 		return m.createAndExecuteIdempotentTask(ctx, req, targetRack)
 	}
 
-	task := newTaskForRack(req, targetRack)
+	task, err := m.newFirmwareTaskForRack(ctx, req, targetRack)
+	if err != nil {
+		return uuid.Nil, err
+	}
 
 	// Check for conflicts inside a transaction to avoid a race between the
 	// check and the creation.
@@ -656,7 +660,10 @@ func (m *ManagerImpl) createAndExecuteIdempotentTask(
 
 			} else {
 				// No existing tasks with this idempotency key, create a new one.
-				task = newTaskForRack(req, targetRack)
+				task, err = m.newFirmwareTaskForRack(txCtx, req, targetRack)
+				if err != nil {
+					return err
+				}
 				if err := m.lockRackAndResolveConflict(txCtx, req, targetRack, &task); err != nil {
 					return err
 				}
@@ -1194,6 +1201,49 @@ func (m *ManagerImpl) executeTask(
 		return nil, fmt.Errorf("operation rule is nil")
 	}
 
+	var restartComponents []taskdef.WorkflowComponent
+	if task.Attributes.FirmwareRestartRequired != nil || len(task.Attributes.FirmwareRestartComputeIDs) > 0 {
+		var firmware operations.FirmwareControlTaskInfo
+		err := json.Unmarshal(task.Operation.Info, &firmware)
+		if err != nil {
+			return nil, fmt.Errorf("decode firmware operation: %w", err)
+		}
+		restartRequired := rule.RuleDefinition.RequiresNVOSComputeRestart(&firmware)
+		if restartRequired && task.Attributes.FirmwareRestartRequired != nil && !*task.Attributes.FirmwareRestartRequired {
+			// Never expand a queued task to compute that admission did not reserve.
+			return nil, fmt.Errorf("NVOS restart requirements changed after admission; submit a new task")
+		}
+		if restartRequired {
+			// Reload the durable union, never add devices that arrived after admission.
+			targetRack, err = m.loadRackForTask(ctx, task)
+			if err != nil {
+				return nil, err
+			}
+			if len(targetRack.Components) != len(task.Attributes.AllComponentUUIDs()) {
+				return nil, fmt.Errorf("NVOS task inventory changed: a reserved component is missing")
+			}
+			err = validateResolvedRackTargets(task.Operation, &rule.RuleDefinition,
+				map[uuid.UUID]*rack.Rack{task.RackID: targetRack})
+			if err != nil {
+				return nil, fmt.Errorf("NVOS restart targets: %w", err)
+			}
+		}
+		// A queued task's rule can change. Retain its original firmware targets
+		// even when the new rule no longer needs the saved restart-only devices.
+		firmwareRack := rack.New(targetRack.Info, targetRack.Loc)
+		for _, comp := range targetRack.Components {
+			if slices.Contains(task.Attributes.ComponentsByType[comp.Type], comp.Info.ID) {
+				firmwareRack.AddComponent(comp)
+			}
+			if restartRequired && slices.Contains(task.Attributes.FirmwareRestartComputeIDs, comp.Info.ID) {
+				restartComponents = append(restartComponents, taskdef.WorkflowComponent{
+					Type: comp.Type, ComponentID: comp.ComponentID, MACAddress: comp.ManagementMAC(),
+				})
+			}
+		}
+		targetRack = firmwareRack
+	}
+
 	err := validateResolvedRackTargets(
 		task.Operation,
 		&rule.RuleDefinition,
@@ -1218,6 +1268,8 @@ func (m *ManagerImpl) executeTask(
 		},
 		Async: true,
 	}
+
+	req.Info.FirmwareRestartComponents = restartComponents
 
 	return m.executor.Execute(ctx, &req)
 }

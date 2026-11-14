@@ -5,6 +5,7 @@ package common
 
 import (
 	"fmt"
+	"slices"
 
 	"github.com/NVIDIA/infra-controller/rest-api/flow/pkg/common/deviceinfo"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/pkg/common/devicetypes"
@@ -100,7 +101,7 @@ type TaskListOptions struct {
 	RackID   uuid.UUID
 	// ComponentID, when non-zero, restricts results to tasks whose
 	// TaskAttributes.ComponentsByType contains this UUID under any
-	// component type.
+	// component type or the NVOS compute restart scope.
 	ComponentID uuid.UUID
 	ActiveOnly  bool
 }
@@ -113,15 +114,24 @@ type OperationRuleListOptions struct {
 // TaskAttributes holds flexible task metadata stored as a single jsonb
 // column. New fields can be added here without requiring a DB migration.
 type TaskAttributes struct {
+	// FirmwareRestartRequired records the admission-time NVOS restart decision.
+	// Nil means no decision was recorded; false is an evaluated non-restart task.
+	FirmwareRestartRequired *bool `json:"firmware_restart_required,omitempty"`
+
+	// FirmwareRestartComputeIDs is the admission-time rack compute snapshot for
+	// an NVOS update. It participates in conflicts and public task membership,
+	// while ComponentsByType retains the firmware selection even for old readers.
+	FirmwareRestartComputeIDs []uuid.UUID `json:"firmware_restart_compute_ids,omitempty"`
+
 	// ComponentsByType maps each targeted component type to its UUIDs.
 	// Nil means the task targets no specific components.
 	ComponentsByType map[devicetypes.ComponentType][]uuid.UUID `json:"components_by_type,omitempty"` //nolint:lll
 }
 
-// AllComponentUUIDs returns a flat slice of all component UUIDs across every
-// component type, in no guaranteed order.
+// AllComponentUUIDs returns unique targeted and restart-only component UUIDs,
+// in no guaranteed order.
 func (a TaskAttributes) AllComponentUUIDs() []uuid.UUID {
-	total := 0
+	total := len(a.FirmwareRestartComputeIDs)
 	for _, ids := range a.ComponentsByType {
 		total += len(ids)
 	}
@@ -135,6 +145,11 @@ func (a TaskAttributes) AllComponentUUIDs() []uuid.UUID {
 		uuids = append(uuids, ids...)
 	}
 
+	for _, id := range a.FirmwareRestartComputeIDs {
+		if !slices.Contains(uuids, id) {
+			uuids = append(uuids, id)
+		}
+	}
 	return uuids //nolint:gocritic
 }
 

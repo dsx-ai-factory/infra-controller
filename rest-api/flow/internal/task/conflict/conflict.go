@@ -311,7 +311,8 @@ func hasComponentType(
 	if ct == devicetypes.ComponentTypeUnknown {
 		return true // entry wildcard
 	}
-	return len(t.Attributes.ComponentsByType[ct]) > 0
+	return len(t.Attributes.ComponentsByType[ct]) > 0 ||
+		(ct == devicetypes.ComponentTypeCompute && len(t.Attributes.FirmwareRestartComputeIDs) > 0)
 }
 
 // Resolver determines whether an incoming operation conflicts with active
