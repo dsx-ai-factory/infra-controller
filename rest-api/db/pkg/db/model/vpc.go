@@ -22,7 +22,7 @@ import (
 )
 
 const (
-	// VpcStatusPending indicates that the VPC request was received but not yet processed
+	// VpcStatusPending retains a saved creation whose original result is unresolved.
 	VpcStatusPending = "Pending"
 	// VpcStatusProvisioning indicates that the VPC is being provisioned
 	VpcStatusProvisioning = "Provisioning"
@@ -343,6 +343,13 @@ type Vpc struct {
 	Deleted                                *time.Time                              `bun:"deleted,soft_delete"`
 	CreatedBy                              uuid.UUID                               `bun:"type:uuid,notnull"`
 	Vni                                    *int                                    `bun:"vni,type:integer"`
+	// A rejected create does not give us authority to delete another Core VPC with the same ID.
+	CreationRejectedAt *time.Time `bun:"creation_rejected_at" json:"-"`
+}
+
+// IsCreationPendingOrRejected reports whether this row cannot establish ownership of Site resources.
+func (vpc *Vpc) IsCreationPendingOrRejected() bool {
+	return vpc.Status == VpcStatusPending || vpc.CreationRejectedAt != nil
 }
 
 // GetSiteID returns the VPC ID to use when communicating with the Site:
@@ -561,8 +568,10 @@ type VpcUpdateInput struct {
 	NetworkSecurityGroupPropagationDetails *NetworkSecurityGroupPropagationDetails
 	Labels                                 map[string]string
 	Status                                 *string
-	IsMissingOnSite                        *bool
-	Vni                                    *int
+	// Only RejectCreation records this proof; ordinary callers cannot set it.
+	creationRejectedAt *time.Time
+	IsMissingOnSite    *bool
+	Vni                *int
 }
 
 // VpcClearInput input parameters for Clear method
@@ -637,6 +646,12 @@ type VpcDAO interface {
 	GetCountByStatus(ctx context.Context, tx *db.Tx, infrastructureProviderID *uuid.UUID, tenantID *uuid.UUID, siteID *uuid.UUID) (map[string]int, error)
 	//
 	Create(ctx context.Context, tx *db.Tx, input VpcCreateInput) (*Vpc, error)
+	// CompleteCreation attaches a matching Core result to the original Pending row.
+	CompleteCreation(ctx context.Context, id uuid.UUID, controllerVpc *corev1.Vpc) (*Vpc, error)
+	// RejectCreation persists positive precommit rejection or a local decision not to dispatch.
+	RejectCreation(ctx context.Context, id uuid.UUID) (*Vpc, error)
+	// DeleteRejectedCreation soft-deletes a positively rejected request and reports whether this call deleted it.
+	DeleteRejectedCreation(ctx context.Context, id uuid.UUID) (bool, error)
 	//
 	Update(ctx context.Context, tx *db.Tx, input VpcUpdateInput) (*Vpc, error)
 	//
@@ -943,6 +958,10 @@ func (vsd VpcSQLDAO) Update(ctx context.Context, tx *db.Tx, input VpcUpdateInput
 		v.ControllerVpcID = input.ControllerVpcID
 		updatedFields = append(updatedFields, "controller_vpc_id")
 		cotel.SetAttribute(vpcDAOSpan, attribute.String("controller_vpc_id", input.ControllerVpcID.String()))
+	}
+	if input.creationRejectedAt != nil {
+		v.CreationRejectedAt = input.creationRejectedAt
+		updatedFields = append(updatedFields, "creation_rejected_at")
 	}
 
 	if input.RoutingProfile != nil {

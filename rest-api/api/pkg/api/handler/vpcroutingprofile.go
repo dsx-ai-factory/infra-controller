@@ -115,6 +115,13 @@ func (h UpdateVPCRoutingProfileHandler) Handle(c echo.Context) error {
 		return cutil.NewAPIErrorResponse(c, apiErr.Code, apiErr.Message, nil)
 	}
 
+	if vpc.Status == cdbm.VpcStatusPending {
+		return cutil.NewAPIErrorResponse(c, http.StatusConflict, "VPC creation is pending; routing mutations are blocked", nil)
+	}
+	if vpc.CreationRejectedAt != nil {
+		return cutil.NewAPIErrorResponse(c, http.StatusConflict, "VPC creation stopped before Core commit; routing mutations are blocked", nil)
+	}
+
 	// Next, bind and validate the destination profile and optional VNI.
 	var req model.APIVpcRoutingProfileUpdateRequest
 	err := c.Bind(&req)
@@ -199,6 +206,13 @@ func (h ReleaseVPCInactiveVniHandler) Handle(c echo.Context) error {
 		return cutil.NewAPIErrorResponse(c, apiErr.Code, apiErr.Message, nil)
 	}
 
+	if vpc.Status == cdbm.VpcStatusPending {
+		return cutil.NewAPIErrorResponse(c, http.StatusConflict, "VPC creation is pending; routing mutations are blocked", nil)
+	}
+	if vpc.CreationRejectedAt != nil {
+		return cutil.NewAPIErrorResponse(c, http.StatusConflict, "VPC creation stopped before Core commit; routing mutations are blocked", nil)
+	}
+
 	// Next, bind and validate the operator's original version and exact inactive VNI.
 	var req model.APIVpcInactiveVniReleaseRequest
 	err := c.Bind(&req)
@@ -219,6 +233,9 @@ func (h ReleaseVPCInactiveVniHandler) Handle(c echo.Context) error {
 	var raw corev1.VpcReleaseInactiveVniResult
 	apiErr = common.ExecuteCoreGRPC(ctx, stc, corev1.Forge_ReleaseVpcInactiveVni_FullMethodName, req.ToProto(), &raw, "")
 	if apiErr != nil {
+		if apiErr.Code == http.StatusPreconditionFailed {
+			apiErr.Message += "; if an earlier release timed out, this rejection does not establish whether it completed; inspect VPC routing state"
+		}
 		return vpcRoutingMutationError(c, logger, apiErr)
 	}
 

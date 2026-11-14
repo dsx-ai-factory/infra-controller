@@ -2168,3 +2168,88 @@ func TestVpc_ToProtoFromProto_RoundTrip(t *testing.T) {
 		assert.Equal(t, uint32(4), roundTripped.EffectiveRoutingProfile.AccessTier)
 	})
 }
+
+func TestVpcSQLDAO_CompleteCreation(t *testing.T) {
+	ctx := context.Background()
+	dbSession := testInitDB(t)
+	defer dbSession.Close()
+	testVpcSetupSchema(t, dbSession)
+	require.NoError(t, dbSession.DB.ResetModel(ctx, (*StatusDetail)(nil)))
+	user := testBuildUser(t, dbSession, nil, testGenerateStarfleetID(), cutil.GetPtr("creator@example.com"), nil, nil)
+	provider := testBuildInfrastructureProvider(t, dbSession, nil, "completion-provider", "Provider", user.ID)
+	tenant := testBuildTenant(t, dbSession, nil, "completion-tenant", "completion-org", user.ID)
+	site := testBuildSite(t, dbSession, nil, provider.ID, "completion-site", "Site", provider.Org, user.ID)
+	cases := []struct {
+		name            string
+		reportedOrg     string
+		differentID     bool
+		differentInputs bool
+		unexpectedVni   bool
+		wantErr         bool
+	}{
+		{name: "completion preserves caller fields and is idempotent", reportedOrg: tenant.Org},
+		{name: "another tenant cannot complete the saved request", reportedOrg: "another-org", wantErr: true},
+		{name: "another Core identity cannot complete the request", reportedOrg: tenant.Org, differentID: true, wantErr: true},
+		{name: "same identity with different creation inputs remains Pending", reportedOrg: tenant.Org, differentInputs: true, wantErr: true},
+		{name: "an omitted requested VNI cannot adopt another request", reportedOrg: tenant.Org, unexpectedVni: true, wantErr: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			saved := testBuildVpc(t, dbSession, nil, tc.name, cutil.GetPtr("caller description"), tenant.Org,
+				provider.ID, tenant.ID, site.ID, nil, cutil.GetPtr(VpcFNN), nil,
+				map[string]string{"owner": "caller"}, cutil.GetPtr(VpcStatusPending), user.ID, nil)
+			reported := saved.ToProto()
+			reported.Config.TenantOrganizationId = tc.reportedOrg
+			if tc.differentID {
+				reported.Id.Value = uuid.NewString()
+			}
+			reported.Config.RoutingProfileType = cutil.GetPtr("EXTERNAL")
+			reported.Status = &corev1.VpcStatus{Vni: cutil.GetPtr(uint32(50001))}
+			if tc.differentInputs {
+				reported.Config.SlaacEnabled = cutil.GetPtr(true)
+			}
+			if tc.unexpectedVni {
+				reported.Config.Vni = cutil.GetPtr(uint32(50001))
+			}
+			dao := NewVpcDAO(dbSession)
+			completed, err := dao.CompleteCreation(ctx, saved.ID, reported)
+			if tc.wantErr {
+				require.ErrorIs(t, err, ErrVpcCreationConflict)
+				unchanged, readErr := dao.GetByID(ctx, nil, saved.ID, nil)
+				require.NoError(t, readErr)
+				assert.Equal(t, VpcStatusPending, unchanged.Status)
+				assert.Nil(t, unchanged.ActiveVni)
+				return
+			}
+			require.NoError(t, err)
+			assert.Equal(t, saved.CreatedBy, completed.CreatedBy)
+			assert.Equal(t, saved.TenantID, completed.TenantID)
+			assert.Equal(t, saved.SiteID, completed.SiteID)
+			assert.Equal(t, saved.Name, completed.Name)
+			assert.Equal(t, saved.Description, completed.Description)
+			assert.Equal(t, saved.Labels, completed.Labels)
+			assert.Equal(t, VpcStatusReady, completed.Status)
+			require.NotNil(t, completed.ActiveVni)
+			assert.Equal(t, 50001, *completed.ActiveVni)
+			_, err = dao.CompleteCreation(ctx, saved.ID, reported)
+			require.NoError(t, err)
+			details, total, err := NewStatusDetailDAO(dbSession).GetAll(ctx, nil, StatusDetailFilterInput{EntityIDs: []string{saved.ID.String()}}, paginator.PageInput{})
+			require.NoError(t, err)
+			assert.Equal(t, 1, total)
+			require.Len(t, details, 1)
+			assert.Equal(t, VpcStatusReady, details[0].Status)
+			lateRejection, err := dao.RejectCreation(ctx, saved.ID)
+			require.NoError(t, err)
+			assert.Equal(t, VpcStatusReady, lateRejection.Status)
+			assert.Nil(t, lateRejection.CreationRejectedAt)
+			_, total, err = NewStatusDetailDAO(dbSession).GetAll(ctx, nil, StatusDetailFilterInput{EntityIDs: []string{saved.ID.String()}}, paginator.PageInput{})
+			require.NoError(t, err)
+			assert.Equal(t, 1, total)
+		})
+	}
+	t.Run("concurrent completion and late history failure", func(t *testing.T) {
+		saved := testBuildVpc(t, dbSession, nil, "atomic completion", nil, tenant.Org,
+			provider.ID, tenant.ID, site.ID, nil, nil, nil, nil, cutil.GetPtr(VpcStatusPending), user.ID, nil)
+		testVpcCompletionAtomicity(t, dbSession, saved)
+	})
+}

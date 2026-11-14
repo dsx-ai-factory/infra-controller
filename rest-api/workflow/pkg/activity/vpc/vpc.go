@@ -9,6 +9,8 @@ import (
 	"fmt"
 	"reflect"
 	"slices"
+	"strings"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -29,6 +31,7 @@ import (
 	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
 
 	cwutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
+	vpccommon "github.com/NVIDIA/infra-controller/rest-api/common/pkg/vpc"
 )
 
 // systemTenantOrganizationID is the organization Core assigns to its own admin VPC
@@ -38,9 +41,10 @@ const systemTenantOrganizationID = "carbide_internal"
 // ManageVpc is an activity wrapper for managing VPC lifecycle that allows
 // injecting DB access
 type ManageVpc struct {
-	dbSession      *cdb.Session
-	siteClientPool *sc.ClientPool
-	tc             client.Client
+	dbSession             *cdb.Session
+	siteClientPool        *sc.ClientPool
+	tc                    client.Client
+	pendingCreationCursor *sync.Map
 }
 
 // Activity functions
@@ -165,6 +169,19 @@ func (mv ManageVpc) UpdateVpcsInDB(ctx context.Context, siteID uuid.UUID, vpcInv
 		}
 
 		reportedVpcIDMap[vpc.ID] = true
+		if vpc.CreationRejectedAt != nil {
+			slogger.Warn().Msg("Core VPC shares a rejected request's ID; preserving the rejected request")
+			continue
+		}
+		if vpc.Status == cdbm.VpcStatusPending {
+			completed, completeErr := vpcDAO.CompleteCreation(ctx, vpc.ID, controllerVpc)
+			if completeErr != nil {
+				slogger.Error().Err(completeErr).Msg("failed to complete original Pending VPC from inventory")
+			} else {
+				*vpc = *completed
+			}
+			continue
+		}
 
 		// Reset missing flag if necessary
 		var isMissingOnSite *bool
@@ -405,6 +422,13 @@ func (mv ManageVpc) UpdateVpcsInDB(ctx context.Context, siteID uuid.UUID, vpcInv
 	// Loop through VPCs for deletion
 	for _, vpc := range vpcsToDelete {
 		slogger := logger.With().Str("VPC ID", vpc.ID.String()).Logger()
+		if vpc.CreationRejectedAt != nil {
+			continue
+		}
+
+		if vpc.Status == cdbm.VpcStatusPending {
+			continue
+		}
 
 		// If the VPC was already being deleted, we can proceed with removing it from the DB
 		if vpc.Status == cdbm.VpcStatusDeleting {
@@ -451,6 +475,59 @@ func (mv ManageVpc) UpdateVpcsInDB(ctx context.Context, siteID uuid.UUID, vpcInv
 			if serr != nil {
 				slogger.Error().Err(serr).Msg("failed to update status and/or create Status Detail in DB")
 			}
+		}
+	}
+
+	page := vpcInventory.GetInventoryPage()
+	if page != nil && page.GetTotalPages() > 0 && page.GetCurrentPage() != page.GetTotalPages() {
+		return vpcLifecycleEvents, nil
+	}
+	// Observe one Site-wide set on the final page so page-local lists cannot
+	// reset each other's progress. Direct inventory completion runs on every page.
+	pendingVpcs := []*cdbm.Vpc{}
+	for _, vpc := range existingVpcIDMap {
+		if vpc.Status == cdbm.VpcStatusPending && vpc.CreationRejectedAt == nil {
+			pendingVpcs = append(pendingVpcs, vpc)
+		}
+	}
+	// Rotate observations so slow unknown histories cannot consume every pass.
+	// Losing the cursor changes which row is read first; this loop never starts work.
+	slices.SortFunc(pendingVpcs, func(a, b *cdbm.Vpc) int { return strings.Compare(a.ID.String(), b.ID.String()) })
+	offset := 0
+	if mv.pendingCreationCursor != nil {
+		last, ok := mv.pendingCreationCursor.Load(siteID)
+		if ok {
+			offset = slices.IndexFunc(pendingVpcs, func(vpc *cdbm.Vpc) bool { return vpc.ID.String() > last.(string) })
+			if offset < 0 {
+				offset = 0
+			}
+		}
+	}
+	// History observation shares five seconds across the Site's Pending rows.
+	// Each observation gets at most one second; persistence uses the caller context.
+	observationCtx, cancelObservation := context.WithTimeout(ctx, 5*time.Second)
+	defer cancelObservation()
+	for i := range pendingVpcs {
+		if observationCtx.Err() != nil {
+			break
+		}
+		vpc := pendingVpcs[(offset+i)%len(pendingVpcs)]
+		slogger := logger.With().Str("VPC ID", vpc.ID.String()).Logger()
+		created, rejected, observeErr := vpccommon.ObserveCreation(observationCtx, tc, "vpc-create-"+vpc.ID.String())
+		if mv.pendingCreationCursor != nil {
+			mv.pendingCreationCursor.Store(siteID, vpc.ID.String())
+		}
+		if observeErr != nil {
+			slogger.Warn().Err(observeErr).Msg("original VPC creation remains unconfirmed")
+			continue
+		}
+		if created != nil {
+			_, observeErr = vpcDAO.CompleteCreation(ctx, vpc.ID, created)
+		} else if rejected {
+			_, observeErr = vpcDAO.RejectCreation(ctx, vpc.ID)
+		}
+		if observeErr != nil {
+			slogger.Error().Err(observeErr).Msg("failed to persist original VPC creation outcome")
 		}
 	}
 
@@ -505,6 +582,10 @@ func (mv ManageVpc) createOrUpdateVpcFromSite(
 
 		if len(matches) > 0 {
 			existingVpc := &matches[0]
+			if existingVpc.CreationRejectedAt != nil {
+				logger.Warn().Str("VPC ID", existingVpc.ID.String()).Msg("Core VPC shares a rejected request's ID; not restoring the request")
+				return nil, nil
+			}
 			if existingVpc.Deleted == nil {
 				return existingVpc, nil
 			}
@@ -660,6 +741,10 @@ func (mv ManageVpc) UpdateVpcMetadata(ctx context.Context, siteID uuid.UUID, tc 
 		logger.Error().Err(err).Msg("failed to retrieve VPC from DB by ID")
 		return err
 	}
+	if vpc.CreationRejectedAt != nil {
+		logger.Warn().Msg("not updating Core metadata for a rejected VPC creation")
+		return nil
+	}
 
 	logger.Info().Msg("retrieved VPC from DB")
 
@@ -710,9 +795,10 @@ func (mv ManageVpc) UpdateVpcMetadata(ctx context.Context, siteID uuid.UUID, tc 
 // NewManageVpc returns a new ManageVpc activity
 func NewManageVpc(dbSession *cdb.Session, siteClientPool *sc.ClientPool, tc client.Client) ManageVpc {
 	return ManageVpc{
-		dbSession:      dbSession,
-		siteClientPool: siteClientPool,
-		tc:             tc,
+		dbSession:             dbSession,
+		siteClientPool:        siteClientPool,
+		tc:                    tc,
+		pendingCreationCursor: &sync.Map{},
 	}
 }
 

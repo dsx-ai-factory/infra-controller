@@ -95,6 +95,7 @@ mod rack_health;
 mod redfish_actions;
 mod resource_pool;
 mod resource_pool_inspection;
+mod rest_vpc_completion;
 mod routing_profiles;
 mod site_explorer;
 mod site_prefix;
