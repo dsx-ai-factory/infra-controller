@@ -353,6 +353,7 @@ impl TryFrom<rpc::machine_discovery::PciDeviceProperties> for PciDevicePropertie
             numa_node: props.numa_node,
             description: props.description,
             slot: props.slot,
+            device_id: props.device_id,
         })
     }
 }
@@ -368,6 +369,7 @@ impl TryFrom<PciDeviceProperties> for rpc::machine_discovery::PciDevicePropertie
             numa_node: props.numa_node,
             description: props.description,
             slot: props.slot,
+            device_id: props.device_id,
         })
     }
 }
@@ -424,6 +426,7 @@ impl TryFrom<Gpu> for rpc::machine_discovery::Gpu {
             total_memory: gpu.total_memory,
             frequency: gpu.frequency,
             pci_bus_id: gpu.pci_bus_id,
+            pci_device_id: gpu.pci_device_id,
             platform_info,
         })
     }
@@ -448,6 +451,7 @@ impl TryFrom<rpc::machine_discovery::Gpu> for Gpu {
             total_memory: gpu.total_memory,
             frequency: gpu.frequency,
             pci_bus_id: gpu.pci_bus_id,
+            pci_device_id: gpu.pci_device_id,
             platform_info,
         })
     }
@@ -725,6 +729,7 @@ mod tests {
         numa_node: i32,
         description: Option<String>,
         slot: Option<String>,
+        device_id: Option<String>,
     }
 
     #[derive(Debug, PartialEq)]
@@ -796,6 +801,7 @@ mod tests {
         total_memory: String,
         frequency: String,
         pci_bus_id: String,
+        pci_device_id: String,
         platform_info: Option<GpuPlatformProjection>,
     }
 
@@ -863,6 +869,7 @@ mod tests {
                 numa_node: value.numa_node,
                 description: value.description.clone(),
                 slot: value.slot.clone(),
+                device_id: value.device_id.clone(),
             }
         }
     }
@@ -876,6 +883,7 @@ mod tests {
                 numa_node: value.numa_node,
                 description: value.description.clone(),
                 slot: value.slot.clone(),
+                device_id: value.device_id.clone(),
             }
         }
     }
@@ -1033,6 +1041,7 @@ mod tests {
                 total_memory: value.total_memory,
                 frequency: value.frequency,
                 pci_bus_id: value.pci_bus_id,
+                pci_device_id: value.pci_device_id,
                 platform_info: value.platform_info.map(GpuPlatformProjection::from),
             }
         }
@@ -1049,6 +1058,7 @@ mod tests {
                 total_memory: value.total_memory,
                 frequency: value.frequency,
                 pci_bus_id: value.pci_bus_id,
+                pci_device_id: value.pci_device_id,
                 platform_info: value.platform_info.map(GpuPlatformProjection::from),
             }
         }
@@ -1089,6 +1099,7 @@ mod tests {
             numa_node: 3,
             description: Some(format!("description-{marker}")),
             slot: Some(format!("slot-{marker}")),
+            device_id: Some(format!("0x{marker}")),
         }
     }
 
@@ -1100,6 +1111,7 @@ mod tests {
             numa_node: 3,
             description: Some(format!("description-{marker}")),
             slot: Some(format!("slot-{marker}")),
+            device_id: Some(format!("0x{marker}")),
         }
     }
 
@@ -1400,6 +1412,7 @@ mod tests {
                     total_memory: "96 GiB".to_string(),
                     frequency: "1 GHz".to_string(),
                     pci_bus_id: "0000:01:00.0".to_string(),
+                    pci_device_id: "0x2330".to_string(),
                     platform_info: None,
                 },
                 rpc::machine_discovery::Gpu {
@@ -1411,6 +1424,7 @@ mod tests {
                     total_memory: "192 GiB".to_string(),
                     frequency: "2 GHz".to_string(),
                     pci_bus_id: "0000:02:00.0".to_string(),
+                    pci_device_id: "0x2330".to_string(),
                     platform_info: Some(rpc::machine_discovery::GpuPlatformInfo {
                         chassis_serial: "gpu-chassis".to_string(),
                         slot_number: 4,
@@ -1518,6 +1532,7 @@ mod tests {
                     total_memory: "96 GiB".to_string(),
                     frequency: "1 GHz".to_string(),
                     pci_bus_id: "0000:01:00.0".to_string(),
+                    pci_device_id: "0x2330".to_string(),
                     platform_info: None,
                 },
                 Gpu {
@@ -1529,6 +1544,7 @@ mod tests {
                     total_memory: "192 GiB".to_string(),
                     frequency: "2 GHz".to_string(),
                     pci_bus_id: "0000:02:00.0".to_string(),
+                    pci_device_id: "0x2330".to_string(),
                     platform_info: Some(GpuPlatformInfo {
                         chassis_serial: "gpu-chassis".to_string(),
                         slot_number: 4,
@@ -1624,6 +1640,7 @@ mod tests {
                 total_memory: "96 GiB".to_string(),
                 frequency: "1 GHz".to_string(),
                 pci_bus_id: "0000:01:00.0".to_string(),
+                pci_device_id: "0x2330".to_string(),
                 platform_info: None,
             },
             GpuProjection {
@@ -1635,6 +1652,7 @@ mod tests {
                 total_memory: "192 GiB".to_string(),
                 frequency: "2 GHz".to_string(),
                 pci_bus_id: "0000:02:00.0".to_string(),
+                pci_device_id: "0x2330".to_string(),
                 platform_info: Some(GpuPlatformProjection {
                     chassis_serial: "gpu-chassis".to_string(),
                     slot_number: 4,
@@ -1687,6 +1705,7 @@ mod tests {
                     numa_node: 3,
                     description: Some("description-infiniband".to_string()),
                     slot: Some("slot-infiniband".to_string()),
+                    device_id: Some("0xinfiniband".to_string()),
                 }),
             ],
             cpu_info: populated_cpu_projection(),
@@ -1750,6 +1769,7 @@ mod tests {
                     numa_node: 3,
                     description: Some("description-infiniband".to_string()),
                     slot: Some("slot-infiniband".to_string()),
+                    device_id: Some("0xinfiniband".to_string()),
                 }),
             ],
             cpu_info: populated_cpu_projection(),

@@ -501,6 +501,7 @@ mod tests {
                 numa_node: 0,
                 description: None,
                 slot: slot.map(str::to_string),
+                device_id: None,
             }),
         }
     }
