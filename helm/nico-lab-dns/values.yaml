@@ -1,0 +1,11 @@
+# Same multi-architecture CoreDNS release as the exercised kind cluster.
+image: registry.k8s.io/coredns/coredns:v1.14.2@sha256:e7e6440cfd1e919280958f5b5a6ab2b184d385bba774c12ad2a9e1e4183f90d9
+apiService: nico-api-external
+pxeService: nico-pxe-external
+clusterDomain: cluster.local
+resources:
+  requests:
+    cpu: 10m
+    memory: 32Mi
+  limits:
+    memory: 128Mi

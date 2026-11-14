@@ -14,6 +14,11 @@ global:
       name: nico-rest-ca-issuer
       group: cert-manager.io
 
+# Use site-uuid from secrets.siteRegistration for CLUSTER_ID and the Temporal
+# subscription namespace. Explicit env values take precedence over envConfig.
+# Registration must exist before the pod starts; incompatible with bootstrap.
+siteIdentityFromRegistrationSecret: false
+
 replicaCount: 1
 
 nameOverride: ""

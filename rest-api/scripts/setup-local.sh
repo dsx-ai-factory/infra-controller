@@ -13,12 +13,23 @@ RESTART_API="${RESTART_API:-1}"
 # connects to both Temporal and Core.
 WAIT_FOR_SITE_AGENT="${WAIT_FOR_SITE_AGENT:-1}"
 
+# Pin every read/write when invoked by a deployment frontend. Standalone callers
+# retain kubectl's normal current-context behavior when no override is supplied.
+kubectl() {
+    if [[ -n "${LOCAL_DEV_KUBE_CONTEXT:-}" ]]; then
+        command kubectl --context "$LOCAL_DEV_KUBE_CONTEXT" "$@"
+    else
+        command kubectl "$@"
+    fi
+}
+
 usage() {
     echo "Usage: $0 <command>"
     echo ""
     echo "Commands:"
     echo "  pki         Setup PKI secrets and CA"
     echo "  site-agent  Setup site-agent with a real site"
+    echo "  register-site  Register a site and preserve its Secret without changing workloads"
     echo "  temporal-namespace <name>  Ensure a Temporal namespace exists"
     echo "  all         Run both pki and site-agent setup"
     echo "  verify      Verify local deployment health"
@@ -187,13 +198,20 @@ create_site() {
         PROVIDER_ID=$(echo "$PROVIDER_RESP" | jq -r '.id')
     fi
 
-    EXISTING_RESP=$(curl -sf "$API_URL/v2/org/$ORG/nico/site?infrastructureProviderId=$PROVIDER_ID" \
-        -H "Authorization: Bearer $token" 2>/dev/null || echo "[]")
-    EXISTING_SITE=$(echo "$EXISTING_RESP" | jq -r '.[] | select(.name == "local-dev-site") | .id' 2>/dev/null || echo "")
+    EXISTING_RESP=$(curl -sf "$API_URL/v2/org/$ORG/nico/site?infrastructureProviderId=$PROVIDER_ID&pageSize=100" \
+        -H "Authorization: Bearer $token") || return 1
+    EXISTING_SITE=$(echo "$EXISTING_RESP" | jq -er --arg provider "$PROVIDER_ID" '
+        if type != "array" then error("invalid site list") else
+          [.[] | select(.name == "local-dev-site" and .infrastructureProviderId == $provider)] as $matches |
+          if ($matches | length) > 1 then error("ambiguous local site")
+          elif ($matches | length) == 1 then $matches[0].id
+          elif length >= 100 then error("local site lookup exceeds one page")
+          else "" end
+        end') || return 1
 
     if [ -n "$EXISTING_SITE" ] && [ "$EXISTING_SITE" != "null" ]; then
         SITE_ID="$EXISTING_SITE"
-        SITE_REG_TOKEN=$(echo "$EXISTING_RESP" | jq -r '.[] | select(.name == "local-dev-site") | .registrationToken // empty' 2>/dev/null)
+        SITE_REG_TOKEN=$(echo "$EXISTING_RESP" | jq -r --arg id "$SITE_ID" '.[] | select(.id == $id) | .registrationToken // empty' 2>/dev/null)
         return
     fi
 
@@ -279,35 +297,11 @@ ensure_temporal_namespace() {
 
 configure_site_agent() {
     local site_id=$1
-    local current_site_id=""
-
-    ensure_temporal_namespace "$site_id"
-
     kubectl -n $NAMESPACE get configmap nico-rest-site-agent-config -o yaml | \
         sed "s/CLUSTER_ID: .*/CLUSTER_ID: \"$site_id\"/" | \
         sed "s/TEMPORAL_SUBSCRIBE_NAMESPACE: .*/TEMPORAL_SUBSCRIBE_NAMESPACE: \"$site_id\"/" | \
         sed "s/TEMPORAL_SUBSCRIBE_QUEUE: .*/TEMPORAL_SUBSCRIBE_QUEUE: \"site\"/" | \
         kubectl apply -f -
-
-    local sm_cacert
-    sm_cacert=$(kubectl -n $NAMESPACE get secret site-manager-tls -o jsonpath='{.data.ca\.crt}' 2>/dev/null | base64 -d 2>/dev/null || echo "")
-
-    if [ -n "${SITE_REG_TOKEN:-}" ] && [ "$SITE_REG_TOKEN" != "null" ]; then
-        kubectl -n $NAMESPACE create secret generic site-registration \
-            --from-literal=site-uuid="$site_id" \
-            --from-literal=otp="$SITE_REG_TOKEN" \
-            --from-literal=creds-url="https://nico-rest-site-manager:8100/v1/sitecreds" \
-            --from-literal=cacert="$sm_cacert" \
-            --dry-run=client -o yaml | kubectl apply -f -
-    else
-        current_site_id=$(kubectl -n $NAMESPACE get secret site-registration \
-            -o jsonpath='{.data.site-uuid}' 2>/dev/null | base64 -d 2>/dev/null || echo "")
-        if [ "$current_site_id" != "$site_id" ]; then
-            echo "ERROR: Registration token is unavailable and existing site credentials do not match $site_id" >&2
-            return 1
-        fi
-        echo "Registration token is no longer exposed; preserving the existing site credentials"
-    fi
 
     kubectl -n $NAMESPACE rollout restart sts/nico-rest-site-agent
     # The StatefulSet does not replace a pod that is not Ready, and the Site Agent is
@@ -318,10 +312,56 @@ configure_site_agent() {
     fi
 }
 
-setup_site_agent() {
+save_site_registration() {
+    local existing current_site_id sm_cacert
+    # A failed read must not be interpreted as an absent registration.
+    existing=$(kubectl -n "$NAMESPACE" get secret site-registration --ignore-not-found -o json) || return 1
+    if [ -n "$existing" ]; then
+        current_site_id=$(printf '%s' "$existing" | jq -er '.data["site-uuid"]' | base64 -d) || return 1
+        if [ "$current_site_id" = "$SITE_ID" ]; then
+            if ! printf '%s' "$existing" | jq -e '.data | [.["otp"], .["creds-url"], .cacert] |
+                all(.[]; type == "string" and length > 0)' >/dev/null; then
+                echo "ERROR: Existing site credentials are incomplete; restore the registration Secret" >&2
+                return 1
+            fi
+            echo "Preserving existing site credentials"
+            return
+        fi
+        if [ "${ALLOW_PLACEHOLDER_REGISTRATION:-0}" != 1 ] && \
+           [ "$current_site_id" = "00000000-0000-4000-8000-000000000001" ]; then
+            echo "ERROR: Existing registration is a setup placeholder; complete its legacy site-agent setup, or use a fresh cluster if it came from the older Tilt setup" >&2
+            return 1
+        fi
+        if [ "${ALLOW_PLACEHOLDER_REGISTRATION:-0}" != 1 ] || \
+           [ "$current_site_id" != "00000000-0000-4000-8000-000000000001" ]; then
+            echo "ERROR: Existing site registration belongs to a different site" >&2
+            return 1
+        fi
+    fi
+    if [ -z "${SITE_REG_TOKEN:-}" ] || [ "$SITE_REG_TOKEN" = null ]; then
+        echo "ERROR: Registration token is unavailable; restore the existing site credentials" >&2
+        return 1
+    fi
+    sm_cacert=$(kubectl -n "$NAMESPACE" get secret site-manager-tls -o jsonpath='{.data.ca\.crt}' | base64 -d) || return 1
+    if [ -z "$sm_cacert" ]; then
+        echo "ERROR: Site-manager CA certificate is missing" >&2
+        return 1
+    fi
+    # Keep the token out of process arguments and output. Only the legacy setup
+    # path may replace its placeholder; a new binding uses create, not upsert.
+    local operation=create
+    [ -z "$existing" ] || operation=apply
+    SITE_ID="$SITE_ID" SITE_REG_TOKEN="$SITE_REG_TOKEN" SITE_CA="$sm_cacert" SITE_NAMESPACE="$NAMESPACE" \
+      jq -n '{apiVersion: "v1", kind: "Secret", metadata: {name: "site-registration", namespace: env.SITE_NAMESPACE},
+        type: "Opaque", stringData: {"site-uuid": env.SITE_ID, otp: env.SITE_REG_TOKEN,
+          "creds-url": "https://nico-rest-site-manager:8100/v1/sitecreds", cacert: env.SITE_CA}}' | \
+      kubectl "$operation" -f -
+}
+
+setup_site_registration() {
     local site_resp
 
-    echo "Setting up site-agent..."
+    echo "Registering local development site..."
     wait_for_services
 
     echo "Allowing API and Temporal to stabilize..."
@@ -348,6 +388,14 @@ setup_site_agent() {
         echo "Registration token acquired (${#SITE_REG_TOKEN} chars)"
     fi
 
+    ensure_temporal_namespace "$SITE_ID"
+    save_site_registration
+    echo "Site registration complete."
+}
+
+setup_site_agent() {
+    ALLOW_PLACEHOLDER_REGISTRATION=1
+    setup_site_registration
     echo "Configuring site-agent..."
     configure_site_agent "$SITE_ID"
 
@@ -394,6 +442,10 @@ verify() {
 case "${1:-}" in
     pki)
         setup_pki
+        ;;
+    register-site)
+        RESTART_API=0
+        setup_site_registration
         ;;
     site-agent)
         setup_site_agent

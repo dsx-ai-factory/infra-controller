@@ -1,0 +1,61 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+suite: Local prerequisite ownership and explicit SSH key
+templates:
+  - templates/namespace.yaml
+  - templates/secrets.yaml
+tests:
+  - it: retains the managed namespace by default
+    template: templates/namespace.yaml
+    asserts:
+      - equal:
+          path: metadata.annotations["helm.sh/resource-policy"]
+          value: keep
+  - it: does not claim an externally created namespace
+    template: templates/namespace.yaml
+    set:
+      createNamespace: false
+    asserts:
+      - hasDocuments:
+          count: 0
+  - it: uses the supplied SSH key even when a previous key exists
+    template: templates/secrets.yaml
+    documentSelector:
+      path: metadata.name
+      value: ssh-host-key
+    set:
+      sshHostKey.privateKey: supplied-key
+      sshHostKey.publicKey: supplied-public-key
+    kubernetesProvider: &existingKey
+      scheme:
+        "v1/Secret":
+          gvr:
+            version: v1
+            resource: secrets
+          namespaced: true
+      objects:
+        - apiVersion: v1
+          kind: Secret
+          metadata:
+            name: ssh-host-key
+            namespace: nico-system
+          data:
+            ssh_host_ed25519_key: ZXhpc3Rpbmcta2V5
+    asserts:
+      - equal:
+          path: stringData.ssh_host_ed25519_key
+          value: "supplied-key\n"
+      - equal:
+          path: stringData.ssh_host_ed25519_key_pub
+          value: supplied-public-key
+  - it: retains an existing private key when no override is supplied
+    template: templates/secrets.yaml
+    documentSelector:
+      path: metadata.name
+      value: ssh-host-key
+    kubernetesProvider: *existingKey
+    asserts:
+      - equal:
+          path: stringData.ssh_host_ed25519_key
+          value: "existing-key\n"

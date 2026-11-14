@@ -1,0 +1,57 @@
+suite: DHCPv6 lease timing
+templates: [configmap-v6.yaml]
+set:
+  dhcp.v6Enabled: true
+  dhcp.v6ServerIdentifier: '020000000006'
+tests:
+  - it: preserves existing timing for older stored values
+    set:
+      dhcp.v6LeaseTimers: null
+    asserts:
+      - matchRegex:
+          path: data['kea_config6.json']
+          pattern: '"preferred-lifetime": 3600,\s+"valid-lifetime": 7200,\s+"renew-timer": 1800,\s+"rebind-timer": 2880'
+  - it: renders explicit short lab timers
+    set:
+      dhcp.v6LeaseTimers: {preferredLifetime: 120, validLifetime: 180, renewTimer: 30, rebindTimer: 60}
+    asserts:
+      - matchRegex:
+          path: data['kea_config6.json']
+          pattern: '"preferred-lifetime": 120,\s+"valid-lifetime": 180,\s+"renew-timer": 30,\s+"rebind-timer": 60'
+  - it: rejects a zero lifetime rather than silently defaulting
+    set:
+      dhcp.v6LeaseTimers.validLifetime: 0
+    asserts:
+      - failedTemplate:
+          errorPattern: 'validLifetime'
+  - it: rejects a fractional renewal timer
+    set:
+      dhcp.v6LeaseTimers.renewTimer: 1.5
+    asserts:
+      - failedTemplate:
+          errorPattern: 'renewTimer'
+  - it: rejects preferred lifetime beyond valid lifetime
+    set:
+      dhcp.v6LeaseTimers: {preferredLifetime: 200, validLifetime: 180, renewTimer: 30, rebindTimer: 60}
+    asserts:
+      - failedTemplate:
+          errorMessage: dhcp.v6LeaseTimers requires preferredLifetime <= validLifetime
+  - it: rejects renewal after rebinding
+    set:
+      dhcp.v6LeaseTimers: {preferredLifetime: 120, validLifetime: 180, renewTimer: 90, rebindTimer: 60}
+    asserts:
+      - failedTemplate:
+          errorMessage: dhcp.v6LeaseTimers requires renewTimer < rebindTimer < validLifetime
+  - it: rejects rebinding at lease expiry
+    set:
+      dhcp.v6LeaseTimers: {preferredLifetime: 120, validLifetime: 180, renewTimer: 30, rebindTimer: 180}
+    asserts:
+      - failedTemplate:
+          errorMessage: dhcp.v6LeaseTimers requires renewTimer < rebindTimer < validLifetime
+  - it: uses the default for a field removed by Helm null coalescing
+    set:
+      dhcp.v6LeaseTimers.validLifetime: null
+    asserts:
+      - matchRegex:
+          path: data['kea_config6.json']
+          pattern: '"valid-lifetime": 7200'

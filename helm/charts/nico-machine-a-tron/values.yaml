@@ -92,6 +92,10 @@ service:
   bmcMock:
     port: 1266
   ssh:
+    ## Optional per-pod <chart-name>-<pod-name>-ssh headless Service. Supplies
+    ## direct pod DNS for per-machine console ports reported through Redfish;
+    ## no ports are translated. Disabled by default; requires mockBmcSshServer.
+    headless: false
     port: 22
     targetPort: 2222
   metrics:
@@ -105,7 +109,7 @@ service:
 ## path in Kubernetes deployments.
 ##
 ## Prerequisites:
-##   - nico-dhcp must be deployed (default: nico-system namespace)
+##   - nico-dhcp must be reachable at an explicit IPv4:port address
 ##   - A dedicated K8s ServiceCIDR for relay IPs (e.g., mat-dhcp-services)
 ##
 ## Each pod gets a unique ClusterIP Service for receiving DHCP replies:
@@ -126,8 +130,8 @@ dhcpRelay:
   ## relay response port (typically 67).
   listenPort: 67
 
-  ## DHCP server address (host:port). Default: nico-dhcp.nico-system.svc.cluster.local:67
-  ## Override if nico-dhcp is deployed in a different namespace or uses a non-standard port.
+  ## Explicit IPv4:port for generated relay configs or the raw server placeholder.
+  ## Required in those paths; MAT does not resolve DNS names here.
   serverAddress: ""
 
 certificate:

@@ -1,3 +1,4 @@
+{{- if .Values.createNamespace }}
 ## =============================================================================
 ## nico-system namespace — created with managed label
 ## =============================================================================
@@ -13,3 +14,4 @@ metadata:
     argocd.argoproj.io/sync-options: Prune=false
   labels:
     nico.nvidia.com/managed: "true"
+{{- end }}

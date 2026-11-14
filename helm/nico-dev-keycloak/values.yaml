@@ -1,0 +1,17 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# The same multi-architecture image is used on AMD64 and ARM64.
+image: quay.io/keycloak/keycloak:24.0@sha256:f8ade94c1d0ad2f2fa7734a455fee5392764f402c43ca35e9af6bf63a2541dc9
+# Database and role must already exist. These public defaults are for local use.
+database:
+  url: jdbc:postgresql://postgres.postgres:5432/keycloak
+  username: keycloak
+  password: keycloak
+# JSON import files keyed by filename. Empty means no realm is imported.
+# Keycloak skips imports for realms already present in PostgreSQL.
+realmFiles: {}
+service:
+  nodePort:
+    enabled: true
+    port: 30082
