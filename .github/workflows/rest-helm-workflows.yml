@@ -58,7 +58,7 @@ jobs:
 
       - name: Test Temporal chart addresses
         if: matrix.chart == 'rest-api/temporal-helm/temporal'
-        uses: dsx-ai-factory/dsx-github-actions/.github/actions/helm-unittest@db3780bff4b2cbf90ba9117a63e41ddea066791b
+        uses: dsx-ai-factory/dsx-github-actions/.github/actions/helm-unittest@a86675cddd27de0cc3182d2a33db75a26c20bb90
         with:
           plugin-oci-ref: oci://nvcr.io/0837451325059433/carbide-dev/unittest:1.1.2
           registry-password: ${{ secrets.NVCR_STG_TOKEN }}
@@ -116,7 +116,7 @@ jobs:
 
       - name: Package and push Helm chart to NGC
         if: ${{ inputs.ngc_path != '' }}
-        uses: dsx-ai-factory/dsx-github-actions/.github/actions/helm-package-push@db3780bff4b2cbf90ba9117a63e41ddea066791b # v1.29.0
+        uses: dsx-ai-factory/dsx-github-actions/.github/actions/helm-package-push@a86675cddd27de0cc3182d2a33db75a26c20bb90 # v1.35.1
         with:
           chart-path: ${{ steps.prepare-umbrella.outputs.chart_path || matrix.chart }}
           chart-version: ${{ inputs.chart_version }}
