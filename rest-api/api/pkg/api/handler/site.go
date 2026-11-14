@@ -4,6 +4,7 @@
 package handler
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -314,6 +315,8 @@ func NewUpdateSiteHandler(dbSession *cdb.Session, tc tClient.Client, cfg *config
 // @Router /v2/org/{org}/nico/site/{id} [patch]
 func (ush UpdateSiteHandler) Handle(c echo.Context) error {
 	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("Site", "Update", c)
+	ctx, cancel := context.WithTimeout(ctx, cutil.WorkflowContextTimeout)
+	defer cancel()
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}
@@ -357,8 +360,11 @@ func (ush UpdateSiteHandler) Handle(c echo.Context) error {
 	// Check that Site exists
 	es, err := stDAO.GetByID(ctx, nil, siteID, nil, false, false)
 	if err != nil {
-		logger.Warn().Err(err).Msg("error retrieving Site DB entity")
-		return cutil.NewAPIErrorResponse(c, http.StatusNotFound, "Could not retrieve Site to update", nil)
+		if errors.Is(err, cdb.ErrDoesNotExist) {
+			return cutil.NewAPIErrorResponse(c, http.StatusNotFound, "Could not retrieve Site to update", nil)
+		}
+		logger.Error().Err(err).Msg("error retrieving Site DB entity")
+		return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to retrieve Site", nil)
 	}
 
 	isAssociated := false
@@ -387,6 +393,12 @@ func (ush UpdateSiteHandler) Handle(c echo.Context) error {
 	if !isAssociated {
 		logger.Warn().Msg("Site is not associated with org's Infrastructure Provider or Tenant")
 		return cutil.NewAPIErrorResponse(c, http.StatusForbidden, "Current org is not allowed to modify Site attributes", nil)
+	}
+
+	if apiRequest.Capabilities != nil && apiRequest.Capabilities.TenantSitePrefix != nil &&
+		(provider == nil || provider.ID != es.InfrastructureProviderID) {
+		logger.Warn().Msg("tenant prefix capability update requires Site ownership")
+		return cutil.NewAPIErrorResponse(c, http.StatusForbidden, "Only the Site's Infrastructure Provider can modify tenantSitePrefix", nil)
 	}
 
 	var registrationToken *string
@@ -500,6 +512,7 @@ func (ush UpdateSiteHandler) Handle(c echo.Context) error {
 
 			if apiRequest.Capabilities != nil {
 				siteUpdateInput.Config = &cdbm.SiteConfigUpdateInput{
+					TenantSitePrefix:          apiRequest.Capabilities.TenantSitePrefix,
 					NativeNetworking:          apiRequest.Capabilities.NativeNetworking,
 					NetworkSecurityGroup:      apiRequest.Capabilities.NetworkSecurityGroup,
 					Flow:                      apiRequest.Capabilities.Flow,
@@ -511,6 +524,9 @@ func (ush UpdateSiteHandler) Handle(c echo.Context) error {
 			// Update Site
 			updated, derr := stDAO.Update(ctx, tx, siteUpdateInput)
 			if derr != nil {
+				if errors.Is(derr, cdb.ErrXactAdvisoryLockFailed) {
+					return cutil.NewAPIError(http.StatusConflict, "Tenant IP Block mutation in progress; retry the request", nil)
+				}
 				logger.Error().Err(derr).Msg("error updating Site")
 				return cutil.NewAPIError(http.StatusInternalServerError, "Failed to update Site, DB error", nil)
 			}
@@ -1064,6 +1080,9 @@ func (dsh DeleteSiteHandler) Handle(c echo.Context) error {
 		// Delete Site
 		derr := stDAO.Delete(ctx, tx, stID)
 		if derr != nil {
+			if errors.Is(derr, cdb.ErrXactAdvisoryLockFailed) {
+				return cutil.NewAPIError(http.StatusConflict, "Tenant IP Block mutation in progress; retry the request", nil)
+			}
 			logger.Error().Err(derr).Msg("error deleting Site from DB")
 			return cutil.NewAPIError(http.StatusInternalServerError, "Failed to delete Site, error deleting Site in data store", nil)
 		}

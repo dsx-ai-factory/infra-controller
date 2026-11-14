@@ -21,7 +21,7 @@ import (
 // checks if the IpBlock type satisfies the MappedNullable interface at compile time
 var _ MappedNullable = &IpBlock{}
 
-// IpBlock IP block contains information about an IPv4 address pool owned by the Infrastructure Provider and assigned as an overlay network for a particular Site. It is equivalent to Network Resource in product terminology.
+// IpBlock An address range at a Site. Managed blocks are provider roots or tenant allocations; unmanaged blocks are private tenant-created Core SitePrefixes.
 type IpBlock struct {
 	// Unique UUID v4 identifier for the IP Block
 	Id *string `json:"id,omitempty"`
@@ -45,8 +45,8 @@ type IpBlock struct {
 	PrefixLength *int32 `json:"prefixLength,omitempty"`
 	// Version of the ip network IPv4 or IPv6
 	ProtocolVersion *string `json:"protocolVersion,omitempty"`
-	// Usage summary from IPAM for the IP Block
-	UsageStats *IpBlockUsageStats `json:"usageStats,omitempty"`
+	// Usage summary from IPAM for the IP Block; null when usage is not requested or unavailable for tenant-created blocks
+	UsageStats NullableIpBlockUsageStats `json:"usageStats,omitempty"`
 	// Status of the IP Block
 	Status *IpBlockStatus `json:"status,omitempty"`
 	// Chronological status history for the IP Block
@@ -448,36 +448,47 @@ func (o *IpBlock) SetProtocolVersion(v string) {
 	o.ProtocolVersion = &v
 }
 
-// GetUsageStats returns the UsageStats field value if set, zero value otherwise.
+// GetUsageStats returns the UsageStats field value if set, zero value otherwise (both if not set or set to explicit null).
 func (o *IpBlock) GetUsageStats() IpBlockUsageStats {
-	if o == nil || IsNil(o.UsageStats) {
+	if o == nil || IsNil(o.UsageStats.Get()) {
 		var ret IpBlockUsageStats
 		return ret
 	}
-	return *o.UsageStats
+	return *o.UsageStats.Get()
 }
 
 // GetUsageStatsOk returns a tuple with the UsageStats field value if set, nil otherwise
 // and a boolean to check if the value has been set.
+// NOTE: If the value is an explicit nil, `nil, true` will be returned
 func (o *IpBlock) GetUsageStatsOk() (*IpBlockUsageStats, bool) {
-	if o == nil || IsNil(o.UsageStats) {
+	if o == nil {
 		return nil, false
 	}
-	return o.UsageStats, true
+	return o.UsageStats.Get(), o.UsageStats.IsSet()
 }
 
 // HasUsageStats returns a boolean if a field has been set.
 func (o *IpBlock) HasUsageStats() bool {
-	if o != nil && !IsNil(o.UsageStats) {
+	if o != nil && o.UsageStats.IsSet() {
 		return true
 	}
 
 	return false
 }
 
-// SetUsageStats gets a reference to the given IpBlockUsageStats and assigns it to the UsageStats field.
+// SetUsageStats gets a reference to the given NullableIpBlockUsageStats and assigns it to the UsageStats field.
 func (o *IpBlock) SetUsageStats(v IpBlockUsageStats) {
-	o.UsageStats = &v
+	o.UsageStats.Set(&v)
+}
+
+// SetUsageStatsNil sets the value for UsageStats to be an explicit nil
+func (o *IpBlock) SetUsageStatsNil() {
+	o.UsageStats.Set(nil)
+}
+
+// UnsetUsageStats ensures that no value is present for UsageStats, not even an explicit nil
+func (o *IpBlock) UnsetUsageStats() {
+	o.UsageStats.Unset()
 }
 
 // GetStatus returns the Status field value if set, zero value otherwise.
@@ -651,8 +662,8 @@ func (o IpBlock) ToMap() (map[string]interface{}, error) {
 	if !IsNil(o.ProtocolVersion) {
 		toSerialize["protocolVersion"] = o.ProtocolVersion
 	}
-	if !IsNil(o.UsageStats) {
-		toSerialize["usageStats"] = o.UsageStats
+	if o.UsageStats.IsSet() {
+		toSerialize["usageStats"] = o.UsageStats.Get()
 	}
 	if !IsNil(o.Status) {
 		toSerialize["status"] = o.Status
