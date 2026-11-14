@@ -248,10 +248,12 @@ The tables below summarize the keys that must be set per site.
 
 #### Site Credentials Secret
 
-site-explorer refuses to explore anything until three credentials exist: the
-site-wide BMC root (`bmc_site_wide_root`) and the DPU and host UEFI site
-defaults (`dpu_uefi_site_default`, `host_uefi_site_default`). With
-`siteCredentials.enabled: true` the chart renders them as one Secret,
+Site Explorer requires the site-wide BMC root (`bmc_site_wide_root`) and host
+UEFI site default (`host_uefi_site_default`) before exploration. Setting
+`[site_explorer] dpu_policy = "ignore"` permits omitting the DPU UEFI site
+default (`dpu_uefi_site_default`). Every other policy, including an unset one,
+requires all three credentials. With `siteCredentials.enabled: true` the chart
+renders all three as one Secret,
 `siteCredentials.secretName` in `nico-system`, whose `credentials.yaml` key is
 the `nico-api` [credential file](../docs/configuration/credential-sources.md#file-source).
 This is the same credential-file Secret the manual recipe above creates, with

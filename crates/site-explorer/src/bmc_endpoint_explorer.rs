@@ -32,6 +32,7 @@ use carbide_secrets::credentials::{CredentialManager, Credentials};
 use libredfish::model::service_root::RedfishVendor;
 use mac_address::MacAddress;
 use model::expected_entity::{BmcCredentialsData, ExpectedEntity};
+use model::expected_machine::HostDpuPolicy;
 use model::expected_switch::ExpectedSwitch;
 use model::machine::MachineInterfaceSnapshot;
 use model::site_explorer::{
@@ -787,11 +788,12 @@ pub(crate) fn record_machine_identity(
 impl EndpointExplorer for BmcEndpointExplorer {
     async fn check_preconditions(
         &self,
+        site_dpu_policy: Option<HostDpuPolicy>,
         metrics: &mut SiteExplorationMetrics,
     ) -> Result<(), EndpointExplorationError> {
         self.bmc_client
             .credential_client
-            .check_preconditions(metrics)
+            .check_preconditions(site_dpu_policy, metrics)
             .await
     }
 

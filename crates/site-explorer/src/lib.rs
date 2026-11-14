@@ -68,6 +68,7 @@ pub use endpoint_exploration_service::{
     EndpointExplorationService, EndpointExplorationServiceError,
 };
 mod credentials;
+pub use credentials::required_site_default_credential_keys;
 mod endpoint_lock;
 mod metrics;
 pub mod suppression;
@@ -1767,7 +1768,7 @@ impl SiteExplorer {
         metrics: &mut SiteExplorationMetrics,
     ) -> SiteExplorerResult<()> {
         self.endpoint_explorer
-            .check_preconditions(metrics)
+            .check_preconditions(self.config.dpu_policy, metrics)
             .await
             .map_err(|err| SiteExplorerError::EndpointExplorationError {
                 action: "check_preconditions",
