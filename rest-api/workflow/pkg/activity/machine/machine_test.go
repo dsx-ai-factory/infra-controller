@@ -6,6 +6,7 @@ package machine
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"reflect"
@@ -1025,6 +1026,16 @@ func TestManageMachine_UpdateMachinesInDB(t *testing.T) {
 			},
 		},
 		{
+			name:   "failed inventory collection does not emit a completion receipt",
+			fields: fields{dbSession: dbSession},
+			args: args{
+				ctx: context.Background(), siteID: site4.ID,
+				machineInventory: &corev1.MachineInventory{
+					InventoryStatus: corev1.InventoryStatus_INVENTORY_STATUS_FAILED,
+				},
+			},
+		},
+		{
 			name: "test Machine inventory processing with health report success",
 			fields: fields{
 				dbSession: dbSession,
@@ -1055,8 +1066,35 @@ func TestManageMachine_UpdateMachinesInDB(t *testing.T) {
 				assert.NoError(t, err)
 			}
 
+			var logOutput bytes.Buffer
+			originalLogger := log.Logger
+			log.Logger = zerolog.New(&logOutput)
+			t.Cleanup(func() { log.Logger = originalLogger })
+
 			err := mm.UpdateMachinesInDB(tt.args.ctx, tt.args.siteID.String(), tt.args.machineInventory)
 			assert.Equal(t, tt.wantErr, err != nil)
+
+			var completions []map[string]interface{}
+			for _, line := range strings.Split(strings.TrimSpace(logOutput.String()), "\n") {
+				var entry map[string]interface{}
+				require.NoError(t, json.Unmarshal([]byte(line), &entry))
+				if entry[zerolog.MessageFieldName] == "completed activity" {
+					completions = append(completions, entry)
+				}
+			}
+			if tt.wantErr || tt.args.machineInventory.GetInventoryStatus() == corev1.InventoryStatus_INVENTORY_STATUS_FAILED {
+				assert.Empty(t, completions)
+			} else {
+				require.Len(t, completions, 1)
+				completion := completions[0]
+				page := tt.args.machineInventory.GetInventoryPage()
+				assert.Equal(t, tt.args.siteID.String(), completion["Site ID"])
+				assert.Equal(t, "UpdateMachinesInDB", completion["Activity"])
+				assert.Equal(t, float64(page.GetCurrentPage()), completion["inventory_page"])
+				assert.Equal(t, float64(page.GetTotalPages()), completion["inventory_total_pages"])
+				assert.Equal(t, float64(page.GetTotalItems()), completion["inventory_total_items"])
+				assert.Equal(t, tt.args.machineInventory.GetInventoryStatus().String(), completion["inventory_status"])
+			}
 
 			if tt.wantErr {
 				return

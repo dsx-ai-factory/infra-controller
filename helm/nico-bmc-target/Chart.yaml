@@ -1,0 +1,6 @@
+apiVersion: v2
+name: nico-bmc-target
+description: One native no-DPU guest controlled by a persistent standalone BMC
+type: application
+version: 0.1.0
+appVersion: latest

@@ -1,0 +1,132 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "type": "object",
+  "properties": {
+    "architecture": {
+      "enum": [
+        "amd64",
+        "arm64"
+      ]
+    },
+    "nodeName": {
+      "type": "string",
+      "minLength": 1
+    },
+    "clusterUID": {
+      "type": "string",
+      "minLength": 1
+    },
+    "storage": {
+      "type": "object",
+      "properties": {
+        "existingClaim": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "target": {
+      "type": "object",
+      "properties": {
+        "instanceIndex": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 255
+        },
+        "memoryMiB": {
+          "type": "integer",
+          "minimum": 1024,
+          "maximum": 65536
+        },
+        "cpus": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 32
+        },
+        "diskGiB": {
+          "type": "integer",
+          "minimum": 8,
+          "maximum": 1024
+        },
+        "hugepages": {
+          "type": "boolean"
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "hugepages": {
+                "const": true
+              }
+            },
+            "required": [
+              "hugepages"
+            ]
+          },
+          "then": {
+            "properties": {
+              "memoryMiB": {
+                "multipleOf": 2
+              }
+            }
+          }
+        }
+      ]
+    },
+    "service": {
+      "type": "object",
+      "properties": {
+        "clusterIP": {
+          "type": "string",
+          "minLength": 1
+        },
+        "targetPort": {
+          "type": "integer",
+          "minimum": 1024,
+          "maximum": 65535
+        }
+      }
+    },
+    "network": {
+      "type": "object",
+      "properties": {
+        "provisioning": {
+          "type": "object",
+          "properties": {
+            "enabled": {
+              "type": "boolean"
+            },
+            "dhcpServer": {
+              "type": "string"
+            },
+            "podCIDR": {
+              "type": "string"
+            },
+            "uplink": {
+              "type": "string",
+              "pattern": "^[a-zA-Z0-9_.:-]{1,15}$"
+            }
+          }
+        },
+        "bridgeAddressV6": {
+          "type": "string"
+        },
+        "dhcpv6": {
+          "type": "object",
+          "properties": {
+            "server": {
+              "type": "string"
+            },
+            "defaultRoute": {
+              "type": "boolean"
+            },
+            "podCIDR": {
+              "type": "string"
+            }
+          }
+        }
+      }
+    }
+  }
+}

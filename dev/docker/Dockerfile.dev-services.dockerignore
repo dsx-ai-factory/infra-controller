@@ -28,3 +28,23 @@
 !pxe/ipxe/local
 !pxe/ipxe/local/
 !pxe/ipxe/local/embed.ipxe
+
+!dev/deployment
+!dev/deployment/lab
+# Only BMC runtime modules are service image inputs.
+dev/deployment/lab/**
+!dev/deployment/lab/preflight.py
+!dev/deployment/lab/target.py
+!dev/deployment/lab/network.py
+!dev/deployment/lab/dhcp6_relay.py
+
+!Makefile-package.toml
+!Makefile-build.toml
+!scripts
+!scripts/check-aarch64-pagesize.sh
+
+!pxe/scout-firmware-scripts
+!pxe/scout-firmware-scripts/**
+
+# Generated local certificate values are Helm inputs, not image source.
+dev/deployment/tilt/.local/

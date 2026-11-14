@@ -11,6 +11,11 @@ on:
     paths:
       - 'devspace.yaml'
       - 'dev/deployment/devspace/**'
+      - 'dev/deployment/setup-kind.sh'
+      - 'dev/deployment/install-tools.py'
+      - 'dev/deployment/docker-host.sh'
+      - 'dev/deployment/core-admin.sh'
+      - 'dev/deployment/tests/test_setup_kind.py'
       - 'pxe/scout-firmware-scripts/nvidia/dgxh100/cx7/metadata.toml'
       - '.github/workflows/devspace-tests.yml'
       - '.github/ci/test_devspace_workflow.py'
@@ -20,6 +25,11 @@ on:
     paths:
       - 'devspace.yaml'
       - 'dev/deployment/devspace/**'
+      - 'dev/deployment/setup-kind.sh'
+      - 'dev/deployment/install-tools.py'
+      - 'dev/deployment/docker-host.sh'
+      - 'dev/deployment/core-admin.sh'
+      - 'dev/deployment/tests/test_setup_kind.py'
       - 'pxe/scout-firmware-scripts/nvidia/dgxh100/cx7/metadata.toml'
       - '.github/workflows/devspace-tests.yml'
       - '.github/ci/test_devspace_workflow.py'
@@ -51,10 +61,13 @@ jobs:
       - name: Install regression test dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends python3-yaml jq git coreutils
+          sudo apt-get install -y --no-install-recommends python3-yaml jq git coreutils openssh-client
 
       - name: Check advisory workflow boundaries
         run: /usr/bin/python3 -B .github/ci/test_devspace_workflow.py
 
       - name: Run DevSpace regression tests
         run: /usr/bin/python3 -B -m unittest discover -s dev/deployment/devspace/tests -t dev/deployment/devspace -v
+
+      - name: Run shared kind bootstrap tests
+        run: /usr/bin/python3 -B -m unittest discover -s dev/deployment/tests -p 'test_setup_kind.py'

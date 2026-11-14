@@ -54,6 +54,7 @@ require_bin curl
 require_bin jq
 require_bin kubectl
 require_bin base64
+require_bin python3
 
 mkdir -p "${WORK_DIR}"
 
@@ -113,7 +114,7 @@ for ((attempt = 1; attempt <= verify_attempts; attempt++)); do
     "https://${machine_a_tron_bmc_proxy}/machines/status" 2>/dev/null)"; then
     if ! expected_host_count="$(jq -er \
       'if type == "object" and (.machines | type) == "array" then
-         .machines | length
+         [.machines[] | select(.device_kind == "machine")] | length
        else 0 end' \
       <<<"${machine_status}")"; then
       printf 'machine-a-tron at %s returned invalid machine status JSON\n' \
@@ -265,134 +266,19 @@ if [[ -z "${site_id}" || "${site_id}" == "00000000-0000-4000-8000-000000000001" 
   exit 1
 fi
 
-inventory_started_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-
-# Discovery may still be adding machines after the first positive status
-# response used for endpoint recovery. Take a fresh snapshot so verification
-# expects the complete inventory rather than that earlier partial count.
-if ! machine_status="$(kubectl exec deployment/nico-api -n "${CORE_NAMESPACE}" -- \
-  curl --fail --insecure --silent --max-time 5 \
-  "https://${machine_a_tron_bmc_proxy}/machines/status" 2>/dev/null)"; then
-  printf 'machine-a-tron at %s did not return machine status before REST verification\n' \
-    "${machine_a_tron_bmc_proxy}" >&2
-  exit 1
-fi
-if ! expected_host_count="$(jq -er \
-  'if type == "object" and (.machines | type) == "array" then
-     .machines | length
-   else 0 end' \
-  <<<"${machine_status}")"; then
-  printf 'machine-a-tron at %s returned invalid machine status JSON\n' \
-    "${machine_a_tron_bmc_proxy}" >&2
-  exit 1
-fi
-if [[ ! "${expected_host_count}" =~ ^[1-9][0-9]*$ ]]; then
-  printf 'machine-a-tron at %s did not report a valid expected host count before REST verification\n' \
-    "${machine_a_tron_bmc_proxy}" >&2
-  exit 1
-fi
-
-site_ready=false
-machines_ready=false
-machine_count=0
-fresh_cycle=false
-# Site registration and the first four-minute inventory cycle can take around ten
-# minutes on a clean cluster. Allow fifteen minutes while retaining the full check.
-for ((attempt = 1; attempt <= verify_attempts; attempt++)); do
-  site_ready=false
-  machines_ready=false
-  machine_count=0
-  token="$(curl --fail --silent --max-time 5 -X POST \
-    "http://localhost:${KEYCLOAK_FORWARD_PORT}/realms/nico-dev/protocol/openid-connect/token" \
-    -H "Content-Type: application/x-www-form-urlencoded" \
-    -d "client_id=nico-api" \
-    -d "client_secret=nico-local-secret" \
-    -d "grant_type=password" \
-    -d "username=admin@example.com" \
-    -d "password=adminpassword" 2>/dev/null | jq -er '.access_token' 2>/dev/null || true)"
-  if [[ -n "${token}" ]]; then
-    site="$(curl --fail --silent --max-time 5 \
-      "http://localhost:${API_FORWARD_PORT}/v2/org/test-org/nico/site/${site_id}" \
-      -H "Authorization: Bearer ${token}" 2>/dev/null || true)"
-    machines="$(curl --fail --silent --max-time 5 \
-      "http://localhost:${API_FORWARD_PORT}/v2/org/test-org/nico/machine?siteId=${site_id}&isMissingOnSite=false&pageSize=100" \
-      -H "Authorization: Bearer ${token}" 2>/dev/null || true)"
-    site_ready="$(jq -r --arg site_id "${site_id}" \
-      '.id == $site_id and .isOnline == true and .status == "Registered"' \
-      <<<"${site}" 2>/dev/null || printf 'false')"
-    machines_ready="$(jq -r --arg site_id "${site_id}" \
-      --argjson expected_host_count "${expected_host_count}" \
-      'type == "array" and length == $expected_host_count and
-       all(.[]; .siteId == $site_id and .isUsableByTenant == true)' \
-      <<<"${machines}" 2>/dev/null || printf 'false')"
-    machine_count="$(jq -r 'if type == "array" then length else 0 end' \
-      <<<"${machines}" 2>/dev/null || printf '0')"
-  fi
-
-  site_worker_logs="$(kubectl logs deployment/nico-rest-site-worker \
-    -n "${REST_NAMESPACE}" --since-time="${inventory_started_at}" 2>/dev/null || true)"
-  fresh_cycle="$(jq -Rrs --arg site_id "${site_id}" '
-    [splits("\n") | fromjson?
-     | select(.Activity == "UpdateMachinesInDB" and .["Site ID"] == $site_id)
-     | .msg] |
-    reduce .[] as $msg (
-      {saw_last_nonempty_page: false, complete: false};
-      if ($msg | startswith("Received Machine inventory page:")) then
-        ($msg | capture("^Received Machine inventory page: (?<current>[0-9]+) of (?<pages>[0-9]+), page size: [0-9]+, total count: (?<items>[0-9]+)$")) as $page |
-        .saw_last_nonempty_page = (
-          ($page.current | tonumber) == ($page.pages | tonumber) and
-          ($page.items | tonumber) > 0
-        )
-      elif .saw_last_nonempty_page and $msg == "completed activity" then
-        .complete = true
-      else . end
-    ) | .complete
-  ' <<<"${site_worker_logs}" 2>/dev/null || printf 'false')"
-
-  core_ready=false
-  scouts_ready=false
-  if [[ "${machines_ready}" == true && "${fresh_cycle}" == true ]]; then
-    core_machines="$(bash "${SCRIPT_DIR}/core-admin.sh" -f json machine show 2>/dev/null || true)"
-    core_ready="$(jq -r --argjson rest_machines "${machines}" '
-      [.machines[] | select(.machine_type == 2) |
-       select(.state == "Ready" or .state == "Assigned/Ready")] as $hosts |
-      ([$hosts[].id] | sort) == ([$rest_machines[].controllerMachineId] | sort)
-    ' <<<"${core_machines}" 2>/dev/null || printf 'false')"
-    if [[ "${core_ready}" == true ]]; then
-      # Ping checks both connection presence and responsiveness. Assigned hosts
-      # run a tenant OS and need not have Scout connected.
-      scouts_ready=true
-      while IFS= read -r machine_id; do
-        if ! FORGE_CLIENT_REQUEST_TIMEOUT_SECS=15 bash "${SCRIPT_DIR}/core-admin.sh" scout-stream ping "${machine_id}" >/dev/null 2>&1; then
-          scouts_ready=false
-          break
-        fi
-      done < <(jq -r '.machines[] | select(.machine_type == 2 and .state == "Ready") | .id' \
-        <<<"${core_machines}")
-    fi
-  fi
-
-  if [[ "${site_ready}" == "true" && "${machines_ready}" == "true" && \
-    "${fresh_cycle}" == "true" && "${core_ready}" == true && "${scouts_ready}" == true ]]; then
-    printf 'Site %s online: all %s hosts ready in Core, usable in REST, and synced; Ready host Scout pings passed\n' \
-      "${site_id}" "${expected_host_count}"
-    break
-  fi
-  if [[ "${attempt}" == "${verify_attempts}" ]]; then
-    printf 'REST integration verification failed: site_ready=%s machines_ready=%s rest_machines=%s expected_hosts=%s fresh_cycle=%s core_ready=%s scouts_ready=%s\n' \
-      "${site_ready}" "${machines_ready}" "${machine_count}" \
-      "${expected_host_count}" "${fresh_cycle}" "${core_ready}" "${scouts_ready}" >&2
-    exit 1
-  fi
-  if ((attempt == 1 || attempt % 12 == 0)); then
-    printf 'Waiting for E2E readiness: site_ready=%s hosts=%s/%s machines_ready=%s fresh_cycle=%s core_ready=%s scouts_ready=%s (attempt %s/%s)\n' \
-      "${site_ready}" "${machine_count}" "${expected_host_count}" \
-      "${machines_ready}" "${fresh_cycle}" "${core_ready}" "${scouts_ready}" "${attempt}" "${verify_attempts}"
-  fi
-  sleep "${verify_sleep_seconds}"
-done
+python3 "${SCRIPT_DIR}/../verify-stack.py" --rest \
+  --core-namespace "${CORE_NAMESPACE}" --rest-namespace "${REST_NAMESPACE}" \
+  --mat-service "${MACHINE_A_TRON_BMC_SERVICE}" \
+  --api-url "http://localhost:${API_FORWARD_PORT}" \
+  --keycloak-url "http://localhost:${KEYCLOAK_FORWARD_PORT}"
 
 if [[ "${DSX_GATEWAY_ENABLED}" == "1" ]]; then
+  token="$(curl --fail --silent --show-error --max-time 5 -X POST \
+    "http://localhost:${KEYCLOAK_FORWARD_PORT}/realms/nico-dev/protocol/openid-connect/token" \
+    -H "Content-Type: application/x-www-form-urlencoded" \
+    -d "client_id=nico-api" -d "client_secret=nico-local-secret" \
+    -d "grant_type=password" -d "username=admin@example.com" \
+    -d "password=adminpassword" | jq -er '.access_token')"
   mcp_headers=(
     -H "Authorization: Bearer ${token}"
     -H "Accept: application/json, text/event-stream"

@@ -1,0 +1,29 @@
+suite: PXE provisioning Service
+templates:
+  - templates/service.yaml
+tests:
+  - it: preserves the default dynamically allocated single port Service
+    asserts:
+      - notExists:
+          path: spec.clusterIP
+      - equal:
+          path: spec.ports
+          value:
+            - port: 8080
+              name: http
+              protocol: TCP
+  - it: serves firmware HTTP and iPXE metadata on the same fixed address
+    set:
+      service.clusterIP: 10.96.0.30
+      service.bootPort: 80
+    asserts:
+      - equal:
+          path: spec.clusterIP
+          value: 10.96.0.30
+      - equal:
+          path: spec.ports[1]
+          value:
+            port: 80
+            name: boot
+            targetPort: 8080
+            protocol: TCP

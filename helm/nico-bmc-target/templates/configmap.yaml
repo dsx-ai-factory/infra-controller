@@ -1,0 +1,8 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ .Release.Name }}-config
+  labels:
+    {{- include "nico-bmc-target.labels" . | nindent 4 }}
+data:
+  config.json: {{ include "nico-bmc-target.config" . | quote }}
