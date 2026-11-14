@@ -6434,6 +6434,9 @@ async fn test_service_vpc_coordinator_serializes_with_orphan_force_delete(
         .expect_force_delete_host()
         .times(1)
         .returning(|_, _| Ok(()));
+    dpf_sdk
+        .expect_delete_host_bmc_credential_secrets()
+        .returning(|_, _| Ok(true));
     let env = create_service_vpc_coordinator_test_env_with_dpf_sdk(pool, Arc::new(dpf_sdk)).await;
     let fixture = create_service_vpc_coordinator_fixture(&env, "orphan-force-delete-race").await?;
     let mut activation = db::Transaction::begin(&env.pool).await?;

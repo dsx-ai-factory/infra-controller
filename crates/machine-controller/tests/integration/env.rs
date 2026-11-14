@@ -204,6 +204,7 @@ impl EnvBuilder {
                 db::credential_rotation::CredentialRotationType::DpuUefi,
             ),
             // Zero TTL for the same reason as the BMC gate above.
+            dpf_per_dpu_bmc_credentials: false,
             dpu_bmc_service_rotation_gate:
                 carbide_credential_rotation::RotationGate::with_ttl_and_family(
                     std::time::Duration::ZERO,

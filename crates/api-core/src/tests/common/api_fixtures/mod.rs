@@ -384,6 +384,7 @@ impl TestEnv {
             dpu_uefi_rotation_gate: carbide_credential_rotation::RotationGate::new_for_family(
                 db::credential_rotation::CredentialRotationType::DpuUefi,
             ),
+            dpf_per_dpu_bmc_credentials: false,
             dpu_bmc_service_rotation_gate:
                 carbide_credential_rotation::RotationGate::new_for_family(
                     db::credential_rotation::CredentialRotationType::DpuBmcService,
@@ -1718,6 +1719,7 @@ async fn create_test_env_with_overrides_inner(
                 dpu_uefi_rotation_gate: carbide_credential_rotation::RotationGate::new_for_family(
                     db::credential_rotation::CredentialRotationType::DpuUefi,
                 ),
+                dpf_per_dpu_bmc_credentials: false,
                 dpu_bmc_service_rotation_gate:
                     carbide_credential_rotation::RotationGate::new_for_family(
                         db::credential_rotation::CredentialRotationType::DpuBmcService,

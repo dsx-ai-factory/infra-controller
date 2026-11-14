@@ -1288,6 +1288,46 @@ pub(crate) async fn admin_force_delete_machine(
     }
 
     if let Some(machine) = &host_machine {
+        if let Some(ref ops) = api.dpf_sdk
+            && !dpu_machines.is_empty()
+        {
+            let cleanup_result: Result<bool, CarbideError> = async {
+                let host_dpf_id = machine.dpf_id().ok_or_else(|| {
+                    CarbideError::internal("BMC MAC not set for host".to_string())
+                })?;
+                let dpu_device_names: Vec<String> = dpu_machines
+                    .iter()
+                    .map(|dpu| {
+                        dpu.dpf_id().ok_or_else(|| {
+                            CarbideError::internal("BMC MAC not set for DPU".to_string())
+                        })
+                    })
+                    .collect::<Result<_, _>>()?;
+                ops.force_delete_host(&host_dpf_id, &dpu_device_names)
+                    .await
+                    .map_err(CarbideError::DpfError)?;
+                ops.delete_host_bmc_credential_secrets(&host_dpf_id, &dpu_device_names)
+                    .await
+                    .map_err(CarbideError::DpfError)
+            }
+            .await;
+
+            if matches!(cleanup_result, Ok(false)) && !request.allow_delete_with_orphaned_dpf_crds {
+                response.all_done = false;
+                return Ok(Response::new(response));
+            }
+            if let Err(error) = cleanup_result {
+                if !request.allow_delete_with_orphaned_dpf_crds {
+                    return Err(error.into());
+                }
+                tracing::warn!(
+                    machine_id = %machine.id,
+                    error = %error,
+                    "Continuing force deletion with explicitly orphaned DPF resources",
+                );
+            }
+        }
+
         if let Some(ip) = machine.status.bmc_info.ip {
             if let Some(bmc_mac_address) = machine.status.bmc_info.mac {
                 let ip_address = ip.to_string();
@@ -1425,39 +1465,6 @@ pub(crate) async fn admin_force_delete_machine(
                 machine_id = %machine.id,
                 "Failed to unlock host because the BMC IP address is missing",
             );
-        }
-
-        if let Some(ref ops) = api.dpf_sdk
-            && !dpu_machines.is_empty()
-        {
-            let cleanup_result: Result<(), CarbideError> = async {
-                let host_dpf_id = machine.dpf_id().ok_or_else(|| {
-                    CarbideError::internal("BMC MAC not set for host".to_string())
-                })?;
-                let dpu_device_names: Vec<String> = dpu_machines
-                    .iter()
-                    .map(|dpu| {
-                        dpu.dpf_id().ok_or_else(|| {
-                            CarbideError::internal("BMC MAC not set for DPU".to_string())
-                        })
-                    })
-                    .collect::<Result<_, _>>()?;
-                ops.force_delete_host(&host_dpf_id, &dpu_device_names)
-                    .await
-                    .map_err(CarbideError::DpfError)
-            }
-            .await;
-
-            if let Err(error) = cleanup_result {
-                if !request.allow_delete_with_orphaned_dpf_crds {
-                    return Err(error.into());
-                }
-                tracing::warn!(
-                    machine_id = %machine.id,
-                    error = %error,
-                    "Continuing force deletion with explicitly orphaned DPF resources",
-                );
-            }
         }
     }
 

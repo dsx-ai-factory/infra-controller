@@ -245,6 +245,7 @@ fn machine_state_controller(
         site_config: config.machine_state_handler_site_config().into(),
         component_manager: None,
         credential_manager: api.credential_manager().clone(),
+        dpf_per_dpu_bmc_credentials: false,
         bmc_rotation_gate: rotation_gate(db::credential_rotation::CredentialRotationType::Bmc),
         host_uefi_rotation_gate: rotation_gate(
             db::credential_rotation::CredentialRotationType::HostUefi,

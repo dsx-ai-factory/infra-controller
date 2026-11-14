@@ -2,7 +2,7 @@ suite: DPF RBAC
 templates:
   - dpf-rbac.yaml
 tests:
-  - it: scopes shared BMC Secret updates to the derived Secret
+  - it: permits credential Secret lifecycle while restricting shared Secret patches
     documentIndex: 0
     set:
       dpf.rbacCreate: true
@@ -12,7 +12,7 @@ tests:
           content:
             apiGroups: [""]
             resources: ["secrets"]
-            verbs: ["create"]
+            verbs: ["get", "list", "create", "delete"]
       - contains:
           path: rules
           content:
@@ -20,16 +20,6 @@ tests:
             resources: ["secrets"]
             resourceNames: ["bmc-shared-password"]
             verbs: ["get", "patch"]
-      - notContains:
+      - lengthEqual:
           path: rules
-          content:
-            apiGroups: [""]
-            resources: ["secrets"]
-            verbs: ["get", "create"]
-      - notContains:
-          path: rules
-          content:
-            apiGroups: [""]
-            resources: ["secrets"]
-            resourceNames: ["bmc-shared-password"]
-            verbs: ["delete"]
+          count: 17

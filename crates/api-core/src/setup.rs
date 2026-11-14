@@ -758,6 +758,12 @@ pub async fn start_runtime(runtime_inputs: RuntimeInputs<'_>) -> eyre::Result<So
         ) => result?,
     };
 
+    bmc_explorer.set_dpf_per_dpu_bmc_credentials(
+        dpf_sdk
+            .as_ref()
+            .is_some_and(|sdk| sdk.supports_per_dpu_bmc_credentials()),
+    );
+
     let component_manager = if let Some(cd_config) = &carbide_config.component_manager {
         match component_manager::component_manager::build_component_manager(
             cd_config,
@@ -1346,7 +1352,7 @@ async fn initialize_dpf_resources(
 
     // Build every validated configuration before SDK construction writes the shared BMC Secret.
     let provider = CarbideBmcPasswordProvider::new(
-        credential_manager,
+        credential_manager.clone(),
         db_pool.clone(),
         carbide_config
             .credentials
@@ -1405,6 +1411,7 @@ async fn initialize_dpf_resources(
             software_plane_route_prefix_len: astra_config.underlay_software_plane_route_prefix_len,
         },
         db_pool,
+        credential_manager,
         join_set,
     )?);
 
@@ -2246,6 +2253,9 @@ async fn initialize_and_start_controllers<'a>(
                 dpu_uefi_rotation_gate: carbide_credential_rotation::RotationGate::new_for_family(
                     db::credential_rotation::CredentialRotationType::DpuUefi,
                 ),
+                dpf_per_dpu_bmc_credentials: dpf_sdk
+                    .as_ref()
+                    .is_some_and(|sdk| sdk.supports_per_dpu_bmc_credentials()),
                 dpu_bmc_service_rotation_gate:
                     carbide_credential_rotation::RotationGate::new_for_family(
                         db::credential_rotation::CredentialRotationType::DpuBmcService,
