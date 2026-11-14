@@ -25,7 +25,7 @@ The UFM url
 
 `--token <TOKEN> [default: ]`
 
-The UFM token; omit it to use the SPIFFE default client certificate
+The UFM token; omit it to use the SPIFFE default client certificate. When credentials are stored in Postgres, an empty token is read as no credential, so set it through the environment or file credential source instead
 
 `--extended`
 
