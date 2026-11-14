@@ -38,6 +38,7 @@ struct InstrumentationSingleton {
 
     // Meter has an inner Arc.
     dpu_agent_meter: Meter,
+    event_instrumentation: carbide_instrument::Instrumentation,
 }
 
 impl InstrumentationSingleton {
@@ -80,7 +81,11 @@ impl InstrumentationSingleton {
             opentelemetry::global::set_meter_provider(meter_provider.clone());
         }
 
+        let event_instrumentation =
+            carbide_instrument::Instrumentation::from_meter_provider(&meter_provider);
+
         Ok(InstrumentationSingleton {
+            event_instrumentation,
             _meter_provider: meter_provider,
             prometheus_registry,
             dpu_agent_meter,
@@ -105,6 +110,12 @@ pub fn get_prometheus_registry() -> Registry {
 pub fn get_dpu_agent_meter() -> Meter {
     let s = SINGLETON.deref();
     s.dpu_agent_meter.clone()
+}
+
+/// Returns Event instrumentation backed by the agent’s retained SDK provider.
+/// Obtain it at composition roots and pass clones to components.
+pub fn get_event_instrumentation() -> carbide_instrument::Instrumentation {
+    SINGLETON.event_instrumentation.clone()
 }
 
 /// Configures a View for Histograms that describe retries or attempts for

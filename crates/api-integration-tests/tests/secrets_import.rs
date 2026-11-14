@@ -251,7 +251,12 @@ async fn exercise_import(test_pool: &PgPool) -> eyre::Result<()> {
         vault_cacert: Some(vault.ca_cert.clone()),
         ..Default::default()
     };
-    let vault_client = create_vault_client(&vault_config)?;
+    let vault_client = create_vault_client(
+        &vault_config,
+        carbide_instrument::Instrumentation::from_meter_provider(
+            &opentelemetry::metrics::noop::NoopMeterProvider::new(),
+        ),
+    )?;
 
     // --- Populate Vault with secrets ---
     let secrets = generate_test_secrets(100);
@@ -273,9 +278,13 @@ async fn exercise_import(test_pool: &PgPool) -> eyre::Result<()> {
     let encryption_key = make_test_key(42);
     let (routing, kms) = make_routing_and_kms(encryption_key);
     let mut work_lock_tasks = JoinSet::new();
-    let work_lock_manager =
-        db::work_lock_manager::start(&mut work_lock_tasks, test_pool.clone(), Default::default())
-            .await?;
+    let work_lock_manager = db::work_lock_manager::start(
+        &mut work_lock_tasks,
+        test_pool.clone(),
+        Default::default(),
+        carbide_instrument::Instrumentation::global(),
+    )
+    .await?;
     let work_lock = work_lock_manager
         .try_acquire_lock("secrets-import-integration-test".to_string())
         .await?;

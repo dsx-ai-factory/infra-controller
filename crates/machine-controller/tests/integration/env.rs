@@ -143,7 +143,7 @@ impl EnvBuilder {
             uefi_boot_wait: runtime_config.machine_state_controller.uefi_boot_wait,
         };
         let power_options: PowerOptionConfig = runtime_config.power_manager_options.clone().into();
-        let machine_handler = MachineStateHandlerBuilder::builder()
+        let machine_handler = MachineStateHandlerBuilder::builder(api.instrumentation().clone())
             .dpu_up_threshold(runtime_config.machine_state_controller.dpu_up_threshold)
             .dpu_nic_firmware_reprovision_update_enabled(
                 runtime_config

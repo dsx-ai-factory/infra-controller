@@ -21,7 +21,7 @@ use std::path::{Path, PathBuf};
 use std::process::Output;
 use std::time::Duration;
 
-use carbide_instrument::emit;
+use carbide_instrument::Instrumentation;
 use carbide_uuid::machine::MachineId;
 use eyre::WrapErr;
 use tokio::process::Command;
@@ -55,15 +55,15 @@ fn lldpd_restart_failure_action(attempt: u8) -> LldpdRestartFailureAction {
     }
 }
 
-pub(crate) async fn prepare_lldp() -> eyre::Result<()> {
+pub(crate) async fn prepare_lldp(instrumentation: &Instrumentation) -> eyre::Result<()> {
     let interfaces_config_disabled = disable_interfaces_config()?;
     let daemon_args_updated = ensure_lldpd_daemon_args()?;
 
     if interfaces_config_disabled || daemon_args_updated {
-        restart_lldpd().await?;
+        restart_lldpd(instrumentation).await?;
     }
 
-    ensure_lldp_med_inventory_enabled().await
+    ensure_lldp_med_inventory_enabled(instrumentation).await
 }
 
 fn disable_interfaces_config() -> eyre::Result<bool> {
@@ -205,7 +205,7 @@ async fn command_output_with_timeout(
         .wrap_err_with(|| format!("couldn't run {command_name}"))
 }
 
-async fn ensure_lldp_med_inventory_enabled() -> eyre::Result<()> {
+async fn ensure_lldp_med_inventory_enabled(instrumentation: &Instrumentation) -> eyre::Result<()> {
     let mut attempt = 1;
     loop {
         match lldp_med_inventory_disabled().await {
@@ -237,12 +237,12 @@ async fn ensure_lldp_med_inventory_enabled() -> eyre::Result<()> {
             }
         }
 
-        restart_lldpd().await?;
+        restart_lldpd(instrumentation).await?;
         attempt += 1;
     }
 }
 
-async fn restart_lldpd() -> eyre::Result<()> {
+async fn restart_lldpd(instrumentation: &Instrumentation) -> eyre::Result<()> {
     let mut attempt = 1;
     loop {
         let mut command = Command::new("systemctl");
@@ -266,14 +266,14 @@ async fn restart_lldpd() -> eyre::Result<()> {
 
         match restart_result {
             Ok(()) => {
-                emit(LldpdRestart::Succeeded {
+                instrumentation.emit(LldpdRestart::Succeeded {
                     attempt: i64::from(attempt),
                 });
                 return Ok(());
             }
             Err(error) => match lldpd_restart_failure_action(attempt) {
                 LldpdRestartFailureAction::Retry => {
-                    emit(LldpdRestart::Retrying {
+                    instrumentation.emit(LldpdRestart::Retrying {
                         error: error.to_string(),
                         attempt: i64::from(attempt),
                     });
@@ -281,7 +281,7 @@ async fn restart_lldpd() -> eyre::Result<()> {
                     attempt += 1;
                 }
                 LldpdRestartFailureAction::ReturnError => {
-                    emit(LldpdRestart::Failed {
+                    instrumentation.emit(LldpdRestart::Failed {
                         error: error.to_string(),
                         attempt_count: i64::from(attempt),
                     });

@@ -985,7 +985,7 @@ async fn test_machine_validation_disabled_waits_for_in_flight_reboot(
 
     let mut machine_validation_config = env.config.machine_validation_config.clone();
     machine_validation_config.enabled = false;
-    let handler = MachineStateHandlerBuilder::builder()
+    let handler = MachineStateHandlerBuilder::builder(env.api.instrumentation.clone())
         .hardware_models(env.config.get_firmware_config())
         .reachability_params(env.reachability_params)
         .attestation_enabled(env.attestation_enabled)

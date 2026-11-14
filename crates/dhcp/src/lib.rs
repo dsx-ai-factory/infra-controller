@@ -101,11 +101,11 @@ struct CarbideDhcpContext {
     startup_time: chrono::DateTime<chrono::Utc>,
 }
 
-// The request/drop/reply counters are `carbide-instrument` events declared in
-// `metrics.rs` and resolve from the global meter; this struct holds only the
-// state reported by the certificate-expiry gauge and its alias.
+// The initialized service owns both Event instrumentation and the state
+// reported by the certificate-expiry gauge and its alias.
 #[derive(Debug, Clone)]
 struct CarbideDhcpMetrics {
+    instrumentation: carbide_instrument::Instrumentation,
     carbide_client_config: CarbideClientConfig,
     certificate_expiration_value: Arc<AtomicI64>,
 }

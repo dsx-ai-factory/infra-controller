@@ -17,6 +17,15 @@ import (
 	flowv1 "github.com/NVIDIA/infra-controller/rest-api/proto/flow/gen/v1"
 )
 
+const (
+	// ComputeTrayIDPrefix identifies the Core machine ID namespace.
+	ComputeTrayIDPrefix = "fm100"
+	// NVSwitchTrayIDPrefix identifies the Core switch ID namespace.
+	NVSwitchTrayIDPrefix = "sw100"
+	// PowerShelfTrayIDPrefix identifies the Core power shelf ID namespace.
+	PowerShelfTrayIDPrefix = "ps100"
+)
+
 // APIToProtoComponentTypeName maps API tray type strings to protobuf ComponentType enum names.
 // These names match Flow's internal ComponentTypeFromString (case-insensitive).
 var APIToProtoComponentTypeName = map[string]string{

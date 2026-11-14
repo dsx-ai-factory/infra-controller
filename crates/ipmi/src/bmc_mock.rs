@@ -30,6 +30,7 @@ use crate::metrics::{IpmiCommand, count_ipmi_command};
 /// HTTP-based IPMI implementation for testing with bmc-mock.
 /// Sends JSON requests to bmc_proxy which routes to appropriate machine.
 pub(super) struct IPMIToolHttpImpl {
+    instrumentation: carbide_instrument::Instrumentation,
     bmc_proxy: Arc<ArcSwap<Option<HostPortPair>>>,
     credential_reader: Arc<dyn CredentialReader>,
 }
@@ -38,8 +39,10 @@ impl IPMIToolHttpImpl {
     pub(super) fn new(
         bmc_proxy: Arc<ArcSwap<Option<HostPortPair>>>,
         credential_reader: Arc<dyn CredentialReader>,
+        instrumentation: carbide_instrument::Instrumentation,
     ) -> Self {
         Self {
+            instrumentation,
             bmc_proxy,
             credential_reader,
         }
@@ -145,7 +148,7 @@ impl IPMIToolHttpImpl {
             Ok(())
         }
         .await;
-        count_ipmi_command(command, &result);
+        count_ipmi_command(command, &result, &self.instrumentation);
         result
     }
 }

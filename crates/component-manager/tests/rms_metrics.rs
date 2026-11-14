@@ -100,7 +100,14 @@ async fn rms_calls_record_the_external_call_histogram_by_outcome(pool: sqlx::PgP
         tonic::Status::unavailable("down"),
     )))
     .await;
-    let backend = RmsBackend::new(mock.clone(), None, pool, Arc::new(profiles), false);
+    let backend = RmsBackend::new(
+        mock.clone(),
+        None,
+        pool,
+        Arc::new(profiles),
+        false,
+        carbide_instrument::Instrumentation::global(),
+    );
     let mut endpoints = vec![PowerShelfEndpoint {
         pmc_ip: "10.0.0.1".parse().unwrap(),
         pmc_mac: device_mac,

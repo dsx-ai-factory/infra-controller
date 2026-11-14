@@ -49,6 +49,7 @@ impl MetaDataIdentitySigner for FmdsState {
             serving.sign_proxy_http_client.as_ref(),
             uri,
             headers,
+            &self.instrumentation,
         )
         .await
         {

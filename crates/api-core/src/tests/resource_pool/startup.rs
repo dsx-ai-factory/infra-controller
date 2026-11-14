@@ -663,7 +663,12 @@ async fn registration_cancellation_preserves_provider_acceptance(
             &fixture.env.api.work_lock_manager_handle,
         )
         .await?;
-    db::resource_pool::reconcile_pool_defs(&mut txn, &fixture.definitions).await?;
+    db::resource_pool::reconcile_pool_defs(
+        &mut txn,
+        &fixture.definitions,
+        &carbide_instrument::Instrumentation::global(),
+    )
+    .await?;
     txn.commit().await?;
     let before = pool_database_snapshot(&fixture.env.pool).await?;
     let binding = binding::load(&fixture.env.pool, REMOTE_POOL)

@@ -25,7 +25,7 @@
 //! existing logging: a final failure still propagates to callers, and the
 //! intermediate ones stay out of the logs as before.
 
-use carbide_instrument::{Event, LabelValue, Outcome, emit};
+use carbide_instrument::{Event, Instrumentation, LabelValue, Outcome};
 
 /// The IPMI command being executed, as a bounded metric label. This is the
 /// crate's whole command vocabulary, shared by the `ipmitool` and bmc-mock
@@ -67,8 +67,12 @@ struct IpmiCommandCompleted {
 
 /// Counts one completed execution of `command` from its result; the result
 /// itself is left for the caller to handle.
-pub(crate) fn count_ipmi_command<T, E>(command: IpmiCommand, result: &Result<T, E>) {
-    emit(IpmiCommandCompleted {
+pub(crate) fn count_ipmi_command<T, E>(
+    command: IpmiCommand,
+    result: &Result<T, E>,
+    instrumentation: &Instrumentation,
+) {
+    instrumentation.emit(IpmiCommandCompleted {
         command,
         outcome: result.into(),
     });
@@ -123,7 +127,9 @@ mod tests {
 
         for case in cases {
             let metrics = MetricsCapture::start();
-            let logs = capture_logs(|| count_ipmi_command(case.command, &case.result));
+            let logs = capture_logs(|| {
+                count_ipmi_command(case.command, &case.result, &Instrumentation::global())
+            });
 
             assert_eq!(
                 metrics.counter_delta(

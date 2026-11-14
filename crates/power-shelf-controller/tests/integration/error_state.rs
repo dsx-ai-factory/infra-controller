@@ -55,12 +55,14 @@ async fn services(env: &ControllerEnv) -> PowerShelfStateHandlerServices {
         Some(env.pool.clone()),
         None,
         None,
+        carbide_instrument::Instrumentation::global(),
     )
     .await
     .expect("test component manager should build");
     let component_manager = Some(Arc::new(component_manager));
 
     PowerShelfStateHandlerServices {
+        instrumentation: env.harness.api().instrumentation().clone(),
         db_pool: env.pool.clone(),
         component_manager,
         credential_manager: Arc::new(TestCredentialManager::default()),

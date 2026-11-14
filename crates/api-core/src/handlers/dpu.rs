@@ -477,6 +477,7 @@ async fn service_interfaces_for_dpu(
                     txn,
                     &dpu_id,
                     &endpoint.vpc_id,
+                    &api.instrumentation,
                 )
                 .await?;
                 tenant_loopback_ips.insert(endpoint.vpc_id, loopback_ip);
@@ -683,6 +684,7 @@ async fn get_managed_host_network_config_inner(
             use_vpc_vrf_loopback,
             routing_profile: admin_vpc_routing_profile,
         },
+        &api.instrumentation,
     )
     .await?;
 
@@ -852,6 +854,7 @@ async fn get_managed_host_network_config_inner(
                                         &mut txn,
                                         &dpu_machine_id,
                                         &vpc_id,
+                                        &api.instrumentation,
                                     )
                                     .await?;
 

@@ -231,6 +231,7 @@ fn switch_services(
     manager: MockNvSwitchManager,
 ) -> SwitchStateHandlerServices {
     SwitchStateHandlerServices {
+        instrumentation: env.api.instrumentation().clone(),
         db_pool: pool.clone(),
         component_manager: Some(mock_component_manager(Arc::new(manager))),
         credential_manager: env.test_credential_manager.clone(),

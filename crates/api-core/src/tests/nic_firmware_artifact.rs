@@ -109,10 +109,15 @@ struct CacheFixture {
 
 fn cache(capacity: u64) -> CacheFixture {
     let root = tempfile::tempdir().expect("cache fixture directory");
-    let downloader = FirmwareDownloader::with_config(FirmwareDownloadConfig {
-        max_download_bytes: 64,
-        ..Default::default()
-    })
+    let downloader = FirmwareDownloader::with_config(
+        FirmwareDownloadConfig {
+            max_download_bytes: 64,
+            ..Default::default()
+        },
+        carbide_instrument::Instrumentation::from_meter_provider(
+            &opentelemetry::metrics::noop::NoopMeterProvider::new(),
+        ),
+    )
     .expect("bounded fixture downloader");
     let cancel = CancellationToken::new();
     let mut tasks = JoinSet::new();

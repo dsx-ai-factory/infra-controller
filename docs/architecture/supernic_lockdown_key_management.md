@@ -42,19 +42,19 @@ The [nico-admin-cli credential add-nic-lockdown-ikm](../manuals/nico-admin-cli/c
 
 NICo Core derives lockdown keys and sends lock and unlock requests to Scout, which runs the hardware operation. During allocation, the DPA interface moves through `Unlocking`, firmware and profile application, and `Locking`. Reported `Unlocked` status permits configuration; reported `Locked` status permits the DPA interface to become `Assigned`.
 
-The DPA flow also unlocks SuperNICs during host decommissioning. Idle key rotation instead unlocks and re-locks cards without entering the firmware and profile assignment pipeline. Tenant release alone does not unlock cards.
+The DPA flow also unlocks SuperNICs during host decommissioning. Idle key rotation instead unlocks and re-locks cards without entering the firmware and profile assignment pipeline. The ordinary DPA tenant-release path alone does not unlock cards; the generic firmware restoration path below has its own saved policy.
 
 Successful lock and unlock calls return an inferred status, not independent hardware readback. Use a separate status query to check `Locked` or `Unlocked`. The query does not identify the installed key or establish which IKM version produced it.
 
 ### Generic NIC Firmware Recovery
 
-The [generic NIC firmware recovery implementation (#8596)](https://github.com/dsx-ai-factory/infra-controller/pull/8596) is unreleased and has no production lifecycle admission entry point. Production admission is tracked in [issue #6680](https://github.com/dsx-ai-factory/infra-controller/issues/6680). The following describes recovery of an already persisted operation, not an operator update procedure.
+The recovery engine introduced in [PR #8596](https://github.com/dsx-ai-factory/infra-controller/pull/8596) also serves the unreleased [lifecycle admission implementation](https://github.com/dsx-ai-factory/infra-controller/issues/6680). Refer to [NIC Firmware Recovery](state_machines/managedhost.md#nic-firmware-recovery) for its policy disabled by default, deployment and hardware qualification requirements, lifecycle transitions, and sender reconciliation limits.
 
-The operation preserves the original lockdown policy, including its MAC address and IKM version. NICo Core combines that identity with the operation's host MachineId using the same V1 derivation, without requiring a DPA inventory record. Restoration retains that exact IKM version; an originally unlocked card remains unlocked.
+Before admission, Core requires correlated lock-status readback for each changed card. A locked card needs its MAC and settled current IKM version; a missing version or in-progress rotation leaves the request pending. Merely observing `Locked` does not reveal the key version. An originally unlocked card remains unlocked.
 
-Derived keys are absent from persisted operations and reports. NICo Core derives the key when sending a lockdown change authorized by the persisted state. A missing requested IKM, backend error, or 30-second credential lookup timeout leaves the operation retrying observation and change. NICo Core logs "NIC lockdown credential lookup failed" for lookup failures.
+The admitted operation freezes the original lockdown policy, including MAC address and exact IKM version. Core combines that identity with the host MachineId using the same V1 derivation, without requiring a DPA inventory record. It restores and independently reads back each original policy before continuation or safely restored failure. Release baseline selection can change firmware targets without changing the saved original key identity.
 
-Refer to [NIC Firmware Recovery](state_machines/managedhost.md#nic-firmware-recovery) for policy restoration, failure handling, and diagnostics.
+Derived keys are absent from persisted operations and reports. Core derives the key only when the saved phase authorizes a change. A missing requested IKM, backend error, or 30-second credential lookup timeout returns the change to observation and retry. Core logs "NIC lockdown credential lookup failed". Disabling new admissions does not cancel an admitted restoration. Preserve every referenced IKM version and the operation's context until recovery completes. A credential or operator action must not bypass retained ownership to force another update.
 
 ## HKDF Construction
 

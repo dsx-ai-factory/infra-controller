@@ -30,6 +30,7 @@ use std::io;
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
+use carbide_instrument::Instrumentation;
 use carbide_uuid::machine::{HostMachineId, MachineId};
 use carbide_uuid::nvlink::{NvLinkDomainId, NvLinkLogicalPartitionId, NvLinkPartitionId};
 use carbide_uuid::rack::RackId;
@@ -109,8 +110,8 @@ fn idle_after_iteration(interval: Duration, iteration: Duration, num_changes: us
 }
 
 /// Samples the time one monitor stage took since `started_at`.
-fn record_stage(stage: MonitorStage, started_at: Instant) {
-    carbide_instrument::emit(NvlPartitionMonitorStageFinished {
+fn record_stage(stage: MonitorStage, started_at: Instant, instrumentation: &Instrumentation) {
+    instrumentation.emit(NvlPartitionMonitorStageFinished {
         stage,
         latency: started_at.elapsed(),
     });
@@ -385,6 +386,7 @@ fn finish_nmxc_operation(
     operation: &NmxcPartitionOperation,
     latency: Duration,
     result: Result<(), NmxcOperationError>,
+    instrumentation: &Instrumentation,
 ) -> NvLinkManagerResult<bool> {
     let succeeded = result.is_ok();
     let (failure_stage, error, nmx_c_partition_id, create_partition_request) = match result {
@@ -419,7 +421,7 @@ fn finish_nmxc_operation(
         (failure_stage == NmxcOperationFailureStage::DeleteDefaultPartition).then(|| {
             NvLinkManagerError::internal(format!("failed to delete default partition: {error}"))
         });
-    carbide_instrument::emit(NmxcOperationFinished {
+    instrumentation.emit(NmxcOperationFinished {
         operation: metric_operation,
         status,
         latency,
@@ -1295,6 +1297,7 @@ pub struct NvlPartitionMonitor {
     config: NvLinkConfig,
     host_health: HostHealthConfig,
     metric_holder: Arc<metrics::MetricHolder>,
+    instrumentation: Instrumentation,
     work_lock_manager_handle: WorkLockManagerHandle,
     /// Change-detection state per group id, held only between iterations.
     group_states: Mutex<HashMap<String, GroupReconcileState>>,
@@ -1310,6 +1313,7 @@ pub struct NvLinkManager {
     db_pool: PgPool,
     nmxc_client_pool: Arc<dyn NmxcPool>,
     meter: opentelemetry::metrics::Meter,
+    instrumentation: Instrumentation,
     config: NvLinkConfig,
     host_health: HostHealthConfig,
     component_manager: Option<Arc<ComponentManager>>,
@@ -1320,6 +1324,8 @@ pub struct NvLinkManagerArgs {
     pub db_pool: PgPool,
     pub nmxc_client_pool: Arc<dyn NmxcPool>,
     pub meter: opentelemetry::metrics::Meter,
+    /// Destination for Event metrics emitted by this manager and its monitors.
+    pub instrumentation: Instrumentation,
     pub config: NvLinkConfig,
     pub host_health: HostHealthConfig,
     pub component_manager: Option<Arc<ComponentManager>>,
@@ -1327,11 +1333,13 @@ pub struct NvLinkManagerArgs {
 }
 
 impl NvLinkManager {
+    /// Creates the manager and routes child-monitor Event metrics through its instrumentation.
     pub fn new(args: NvLinkManagerArgs) -> Self {
         Self {
             db_pool: args.db_pool,
             nmxc_client_pool: args.nmxc_client_pool,
             meter: args.meter,
+            instrumentation: args.instrumentation,
             config: args.config,
             host_health: args.host_health,
             component_manager: args.component_manager,
@@ -1351,6 +1359,7 @@ impl NvLinkManager {
             self.config.clone(),
             self.host_health,
             self.work_lock_manager_handle.clone(),
+            self.instrumentation.clone(),
         )
         .start(join_set, cancel_token.clone())?;
 
@@ -1370,6 +1379,7 @@ impl NvLinkManager {
                 self.config,
                 self.component_manager,
                 self.work_lock_manager_handle,
+                self.instrumentation,
             );
             join_set
                 .build_task()
@@ -1469,6 +1479,7 @@ impl GroupResult {
 impl NvlPartitionMonitor {
     const ITERATION_WORK_KEY: &'static str = "NvlPartitionMonitor::run_single_iteration";
 
+    /// Creates a partition monitor using the supplied Event instrumentation.
     pub fn new(
         db_pool: PgPool,
         nmxc_client_pool: Arc<dyn NmxcPool>,
@@ -1476,6 +1487,7 @@ impl NvlPartitionMonitor {
         config: NvLinkConfig,
         host_health: HostHealthConfig,
         work_lock_manager_handle: WorkLockManagerHandle,
+        instrumentation: Instrumentation,
     ) -> Self {
         let hold_period = config
             .monitor_run_interval
@@ -1500,6 +1512,7 @@ impl NvlPartitionMonitor {
             config,
             host_health,
             metric_holder,
+            instrumentation,
             work_lock_manager_handle,
             group_states: Mutex::new(HashMap::new()),
             rack_unreachable: Mutex::new(RackUnreachableTracker::default()),
@@ -1567,7 +1580,7 @@ impl NvlPartitionMonitor {
         check_nvl_partition_span.record("metrics", metrics.to_string());
         let latency = metrics.recording_started_at.elapsed();
         check_nvl_partition_span.in_scope(|| {
-            carbide_instrument::emit(match result.as_ref().err() {
+            self.instrumentation.emit(match result.as_ref().err() {
                 None => NvlPartitionMonitorIterationFinished::Succeeded { latency },
                 Some(error) => NvlPartitionMonitorIterationFinished::Failed {
                     latency,
@@ -1575,11 +1588,12 @@ impl NvlPartitionMonitor {
                 },
             });
             if latency > self.config.monitor_run_interval {
-                carbide_instrument::emit(NvlPartitionMonitorIterationOverran {
-                    latency_ms: latency.as_millis(),
-                    interval_ms: self.config.monitor_run_interval.as_millis(),
-                    groups: metrics.num_groups,
-                });
+                self.instrumentation
+                    .emit(NvlPartitionMonitorIterationOverran {
+                        latency_ms: latency.as_millis(),
+                        interval_ms: self.config.monitor_run_interval.as_millis(),
+                        groups: metrics.num_groups,
+                    });
             }
         });
         self.metric_holder.update_metrics(metrics);
@@ -1693,7 +1707,11 @@ impl NvlPartitionMonitor {
                 (row.rack_id, endpoint_url)
             })
             .collect::<HashMap<_, _>>();
-        record_stage(MonitorStage::FleetLoad, fleet_load_started);
+        record_stage(
+            MonitorStage::FleetLoad,
+            fleet_load_started,
+            &self.instrumentation,
+        );
 
         metrics.num_logical_partitions = db_nvl_logical_partitions.len();
         metrics.num_physical_partitions = db_nvl_partitions.len();
@@ -1789,7 +1807,7 @@ impl NvlPartitionMonitor {
                     });
                 if skipped {
                     let state = &group_states[&input.group_id];
-                    carbide_instrument::emit(NvlPartitionMonitorGroupFinished {
+                    self.instrumentation.emit(NvlPartitionMonitorGroupFinished {
                         outcome: GroupOutcome::SkippedUnchanged,
                     });
                     all_group_results.push(GroupResult::skipped(state.last_health().clone()));
@@ -1825,7 +1843,11 @@ impl NvlPartitionMonitor {
                     let publish_started = Instant::now();
                     self.record_rack_switch_domain_uuid(rack_id, *domain_uuid)
                         .await;
-                    record_stage(MonitorStage::GroupDomainPublish, publish_started);
+                    record_stage(
+                        MonitorStage::GroupDomainPublish,
+                        publish_started,
+                        &self.instrumentation,
+                    );
                 }
             }));
         let check_groups = future::join_all(checked_group_inputs.into_iter().map(
@@ -2116,7 +2138,7 @@ impl NvlPartitionMonitor {
                     snapshots,
                     $reason,
                 );
-                carbide_instrument::emit(NvlPartitionMonitorGroupFinished {
+                self.instrumentation.emit(NvlPartitionMonitorGroupFinished {
                     outcome: GroupOutcome::Unreachable,
                 });
                 return GroupResult {
@@ -2194,7 +2216,11 @@ impl NvlPartitionMonitor {
                 early_return!(ChassisNmxCUnreachableReason::DomainUuidParseFailed);
             }
         };
-        record_stage(MonitorStage::GroupHello, hello_started);
+        record_stage(
+            MonitorStage::GroupHello,
+            hello_started,
+            &self.instrumentation,
+        );
 
         // Current ingestion treats one rack as one NMX-C domain. Publish the
         // rack's Hello observation to the switches using that same boundary.
@@ -2202,7 +2228,11 @@ impl NvlPartitionMonitor {
             let publish_started = Instant::now();
             self.record_rack_switch_domain_uuid(rack_id, domain_uuid)
                 .await;
-            record_stage(MonitorStage::GroupDomainPublish, publish_started);
+            record_stage(
+                MonitorStage::GroupDomainPublish,
+                publish_started,
+                &self.instrumentation,
+            );
         }
 
         // Endpoint + component versions for this group, so the metric-read failures below log them.
@@ -2303,7 +2333,7 @@ impl NvlPartitionMonitor {
                     group_metrics.applied_changes.iter().all(|(change, count)| {
                         change.status == NmxcMetricOperationStatus::Completed || *count == 0
                     });
-                carbide_instrument::emit(NvlPartitionMonitorGroupFinished {
+                self.instrumentation.emit(NvlPartitionMonitorGroupFinished {
                     outcome: if !every_operation_completed {
                         GroupOutcome::OperationsFailed
                     } else if !health_recorded {
@@ -2331,7 +2361,7 @@ impl NvlPartitionMonitor {
                     snapshots,
                     ChassisNmxCUnreachableReason::PartitionMonitorWorkFailed,
                 );
-                carbide_instrument::emit(NvlPartitionMonitorGroupFinished {
+                self.instrumentation.emit(NvlPartitionMonitorGroupFinished {
                     outcome: GroupOutcome::Unreachable,
                 });
                 (0, false)
@@ -2636,7 +2666,11 @@ impl NvlPartitionMonitor {
                 "NMX-C GetComputeNodeInfoList failed; compute-node health metrics missing for this domain this iteration"
             ),
         }
-        record_stage(MonitorStage::GroupInventory, inventory_started);
+        record_stage(
+            MonitorStage::GroupInventory,
+            inventory_started,
+            &self.instrumentation,
+        );
 
         let mut partition_processing_context = PartitionProcessingContext::new(
             partition_info_list,
@@ -2691,7 +2725,11 @@ impl NvlPartitionMonitor {
                 .collect(),
         )
         .await?;
-        record_stage(MonitorStage::GroupStatusWrite, status_write_started);
+        record_stage(
+            MonitorStage::GroupStatusWrite,
+            status_write_started,
+            &self.instrumentation,
+        );
 
         let nmx_c_operations = partition_processing_context.nmx_c_operations;
 
@@ -2726,7 +2764,11 @@ impl NvlPartitionMonitor {
             && missing_partitions.is_empty()
         {
             if had_operations {
-                record_stage(MonitorStage::GroupApply, apply_started);
+                record_stage(
+                    MonitorStage::GroupApply,
+                    apply_started,
+                    &self.instrumentation,
+                );
             }
             return Ok(PartitionCheckOutcome {
                 completed_operations: num_completed_operations,
@@ -2819,7 +2861,11 @@ impl NvlPartitionMonitor {
             );
         }
         metrics.num_stale_partitions_deleted += stale_deleted.len();
-        record_stage(MonitorStage::GroupApply, apply_started);
+        record_stage(
+            MonitorStage::GroupApply,
+            apply_started,
+            &self.instrumentation,
+        );
 
         Ok(PartitionCheckOutcome {
             completed_operations: num_completed_operations,
@@ -2921,7 +2967,7 @@ impl NvlPartitionMonitor {
             // allocation block was not applied or cleared. The write is retried next pass.
             if let Err(error) = result {
                 every_write_succeeded = false;
-                carbide_instrument::emit(NvlinkUnhealthyAlertWriteFailed {
+                self.instrumentation.emit(NvlinkUnhealthyAlertWriteFailed {
                     write,
                     machine_id: machine_id.to_string(),
                     domain_uuid: domain_uuid.to_string(),
@@ -3622,7 +3668,11 @@ impl NvlPartitionMonitor {
                 "Failed to commit transaction for clearing nvlink status observations: {e}"
             ))
         })?;
-        record_stage(MonitorStage::NullObservations, clear_started);
+        record_stage(
+            MonitorStage::NullObservations,
+            clear_started,
+            &self.instrumentation,
+        );
 
         for entry in pending {
             tracing::info!(
@@ -3876,6 +3926,7 @@ impl NvlPartitionMonitor {
                     &operation,
                     start_time.elapsed(),
                     result,
+                    &self.instrumentation,
                 )?;
                 if success {
                     completed_operations
@@ -4965,7 +5016,9 @@ mod nmxc_operation_tests {
     #[test]
     fn fatal_default_partition_delete_is_recorded_before_it_propagates() {
         const METRIC_NAME: &str = "carbide_nvlink_partition_monitor_nmxc_op_latency_milliseconds";
-        let captured = MetricsCapture::start();
+        let test_meter = carbide_utils::test_support::test_meter::TestMeter::default();
+        let instrumentation = Instrumentation::new(test_meter.meter());
+        let captured = MetricsCapture::for_registry(test_meter.registry());
         let logical_partition_id = NvLinkLogicalPartitionId::default();
         let operation = NmxcPartitionOperation {
             domain_uuid: None,
@@ -4988,6 +5041,7 @@ mod nmxc_operation_tests {
                     nmx_c_partition_id: "42".to_string(),
                     create_partition_request: String::new(),
                 }),
+                &instrumentation,
             ));
         });
 
@@ -5023,9 +5077,8 @@ mod nmxc_operation_tests {
     /// behind by NVLink isolation, is recorded as a failed operation but does not abort the pass.
     #[test]
     fn rejected_unknown_partition_delete_is_not_fatal() {
-        // Emits the same latency series that the test above measures, so take the capture
-        // lock to keep the two from running concurrently.
-        let _serialized = MetricsCapture::start();
+        let test_meter = carbide_utils::test_support::test_meter::TestMeter::default();
+        let instrumentation = Instrumentation::new(test_meter.meter());
         let operation = NmxcPartitionOperation {
             domain_uuid: None,
             operation_type: NmxcPartitionOperationType::RemoveUnknownPartition(9),
@@ -5046,6 +5099,7 @@ mod nmxc_operation_tests {
                 nmx_c_partition_id: "9".to_string(),
                 create_partition_request: String::new(),
             }),
+            &instrumentation,
         );
 
         assert!(
@@ -5240,6 +5294,7 @@ mod machine_group_tests {
     use std::sync::Arc;
     use std::time::Duration;
 
+    use carbide_instrument::Instrumentation;
     use carbide_instrument::testing::MetricsCapture;
     use carbide_macros::sqlx_test;
     use carbide_test_support::{Check, check_values};
@@ -5526,15 +5581,22 @@ mod machine_group_tests {
         txn.commit().await?;
 
         let mut join_set = JoinSet::new();
-        let work_lock_manager =
-            db::work_lock_manager::start(&mut join_set, pool.clone(), Default::default()).await?;
+        let work_lock_manager = db::work_lock_manager::start(
+            &mut join_set,
+            pool.clone(),
+            Default::default(),
+            carbide_instrument::Instrumentation::global(),
+        )
+        .await?;
+        let test_meter = TestMeter::default();
         let monitor = NvlPartitionMonitor::new(
             pool.clone(),
             Arc::new(NmxcSimClient::default()),
-            TestMeter::default().meter(),
+            test_meter.meter(),
             NvLinkConfig::default(),
             HostHealthConfig::default(),
             work_lock_manager,
+            Instrumentation::new(test_meter.meter()),
         );
 
         let nmx_c_reports = |health: GpuHealth| {
@@ -5698,8 +5760,14 @@ mod machine_group_tests {
         txn.commit().await?;
 
         let mut join_set = JoinSet::new();
-        let work_lock_manager =
-            db::work_lock_manager::start(&mut join_set, pool.clone(), Default::default()).await?;
+        let work_lock_manager = db::work_lock_manager::start(
+            &mut join_set,
+            pool.clone(),
+            Default::default(),
+            carbide_instrument::Instrumentation::global(),
+        )
+        .await?;
+        let test_meter = TestMeter::default();
         let monitor = NvlPartitionMonitor::new(
             pool.clone(),
             Arc::new(NmxcSimClient::with_gpu_info_list(vec![GpuInfo {
@@ -5707,14 +5775,15 @@ mod machine_group_tests {
                 gpu_health: GpuHealth::NmxGpuHealthDegraded as i32,
                 ..Default::default()
             }])),
-            TestMeter::default().meter(),
+            test_meter.meter(),
             NvLinkConfig::default(),
             HostHealthConfig::default(),
             work_lock_manager,
+            Instrumentation::new(test_meter.meter()),
         );
 
         // Pass 1: the write is rejected.
-        let metrics = MetricsCapture::start();
+        let metrics = MetricsCapture::for_registry(test_meter.registry());
         let rejected = check_group(&monitor, load_snapshot(&pool, &id).await?).await;
         assert_eq!(
             metrics.counter_delta(GROUPS_METRIC, &[("outcome", "health_not_recorded")]),
@@ -5809,8 +5878,13 @@ mod machine_group_tests {
         txn.commit().await?;
 
         let mut join_set = JoinSet::new();
-        let work_lock_manager =
-            db::work_lock_manager::start(&mut join_set, pool.clone(), Default::default()).await?;
+        let work_lock_manager = db::work_lock_manager::start(
+            &mut join_set,
+            pool.clone(),
+            Default::default(),
+            carbide_instrument::Instrumentation::global(),
+        )
+        .await?;
         let test_meter = TestMeter::default();
         let monitor = NvlPartitionMonitor::new(
             pool.clone(),
@@ -5819,6 +5893,7 @@ mod machine_group_tests {
             NvLinkConfig::default(),
             HostHealthConfig::default(),
             work_lock_manager,
+            Instrumentation::new(test_meter.meter()),
         );
         let managed_rack_ids = HashSet::from([skipped_rack.clone(), reachable_rack.clone()]);
         let outcomes = [(reachable_rack.clone(), None)];
@@ -5884,8 +5959,13 @@ mod machine_group_tests {
         txn.commit().await?;
 
         let mut join_set = JoinSet::new();
-        let work_lock_manager =
-            db::work_lock_manager::start(&mut join_set, pool.clone(), Default::default()).await?;
+        let work_lock_manager = db::work_lock_manager::start(
+            &mut join_set,
+            pool.clone(),
+            Default::default(),
+            carbide_instrument::Instrumentation::global(),
+        )
+        .await?;
 
         let test_meter = TestMeter::default();
 
@@ -5896,6 +5976,7 @@ mod machine_group_tests {
             NvLinkConfig::default(),
             HostHealthConfig::default(),
             work_lock_manager,
+            Instrumentation::new(test_meter.meter()),
         );
 
         let domain_uuid: NvLinkDomainId = "ffffffff-ffff-ffff-ffff-ffffffffffff".parse()?;
@@ -6343,8 +6424,13 @@ mod machine_group_tests {
         pool: sqlx::PgPool,
     ) -> Result<(), Box<dyn std::error::Error>> {
         let mut join_set = JoinSet::new();
-        let work_lock_manager =
-            db::work_lock_manager::start(&mut join_set, pool.clone(), Default::default()).await?;
+        let work_lock_manager = db::work_lock_manager::start(
+            &mut join_set,
+            pool.clone(),
+            Default::default(),
+            carbide_instrument::Instrumentation::global(),
+        )
+        .await?;
         let test_meter = TestMeter::default();
 
         let domain_uuid: NvLinkDomainId = "ffffffff-ffff-ffff-ffff-ffffffffffff".parse()?;
@@ -6399,6 +6485,7 @@ mod machine_group_tests {
                 NvLinkConfig::default(),
                 HostHealthConfig::default(),
                 work_lock_manager.clone(),
+                Instrumentation::new(test_meter.meter()),
             );
 
             let result = monitor
@@ -6455,13 +6542,14 @@ mod machine_group_tests {
         const GPU_B: u64 = 0x1001;
         const OTHER_TRAY_GPU: u64 = 0x2000;
 
-        // The hosts here have no machine rows, so isolation status writes fail and each pass
-        // records a `health_not_recorded` group outcome. Take the capture lock so those counts
-        // never land in a concurrent test that measures that series.
-        let _serialized = MetricsCapture::start();
         let mut join_set = JoinSet::new();
-        let work_lock_manager =
-            db::work_lock_manager::start(&mut join_set, pool.clone(), Default::default()).await?;
+        let work_lock_manager = db::work_lock_manager::start(
+            &mut join_set,
+            pool.clone(),
+            Default::default(),
+            carbide_instrument::Instrumentation::global(),
+        )
+        .await?;
         let test_meter = TestMeter::default();
         let domain_uuid: NvLinkDomainId = "ffffffff-ffff-ffff-ffff-ffffffffffff".parse()?;
 
@@ -6559,6 +6647,7 @@ mod machine_group_tests {
                 NvLinkConfig::default(),
                 HostHealthConfig::default(),
                 work_lock_manager.clone(),
+                Instrumentation::new(test_meter.meter()),
             );
             monitor
                 .process_nmx_c_partition_monitor_group(ProcessMachineGroupInput {
@@ -6635,20 +6724,27 @@ mod machine_group_tests {
         txn.commit().await?;
 
         let mut join_set = JoinSet::new();
-        let work_lock_manager =
-            db::work_lock_manager::start(&mut join_set, pool.clone(), Default::default()).await?;
+        let work_lock_manager = db::work_lock_manager::start(
+            &mut join_set,
+            pool.clone(),
+            Default::default(),
+            carbide_instrument::Instrumentation::global(),
+        )
+        .await?;
         let nmxc = Arc::new(NmxcSimClient::with_partition(
             9,
             "tray_partition_1",
             vec![GPU_A, GPU_B],
         ));
+        let test_meter = TestMeter::default();
         let monitor = NvlPartitionMonitor::new(
             pool.clone(),
             nmxc.clone(),
-            TestMeter::default().meter(),
+            test_meter.meter(),
             NvLinkConfig::default(),
             HostHealthConfig::default(),
             work_lock_manager,
+            Instrumentation::new(test_meter.meter()),
         );
 
         // Runs one group pass over the stored machine and returns its reloaded snapshot.
@@ -6744,8 +6840,13 @@ mod machine_group_tests {
         const METRIC_NAME: &str = "carbide_nvlink_partition_monitor_iteration_overruns_total";
 
         let mut join_set = JoinSet::new();
-        let work_lock_manager =
-            db::work_lock_manager::start(&mut join_set, pool.clone(), Default::default()).await?;
+        let work_lock_manager = db::work_lock_manager::start(
+            &mut join_set,
+            pool.clone(),
+            Default::default(),
+            carbide_instrument::Instrumentation::global(),
+        )
+        .await?;
         let test_meter = TestMeter::default();
         let monitor = NvlPartitionMonitor::new(
             pool.clone(),
@@ -6757,9 +6858,10 @@ mod machine_group_tests {
             },
             HostHealthConfig::default(),
             work_lock_manager,
+            Instrumentation::new(test_meter.meter()),
         );
 
-        let metrics = MetricsCapture::start();
+        let metrics = MetricsCapture::for_registry(test_meter.registry());
         monitor.run_single_iteration().await?;
         assert_eq!(metrics.counter_delta(METRIC_NAME, &[]), 1.0);
 

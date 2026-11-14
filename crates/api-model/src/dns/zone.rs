@@ -18,7 +18,33 @@
 use std::fmt;
 use std::str::FromStr;
 
+use carbide_uuid::dns_zone::DnsZoneId;
+use carbide_uuid::vpc::VpcId;
+use chrono::{DateTime, Utc};
+use dns_record::SoaRecord;
 use thiserror::Error;
+
+use super::ZoneTtl;
+
+/// A DNS zone: its name, its SOA, and the TTL of its other records.
+#[derive(Clone, Debug)]
+pub struct DnsZone {
+    /// The zone's id.
+    pub id: DnsZoneId,
+    /// The zone's name.
+    pub name: Fqdn,
+    /// The VPC that holds this zone as its private zone. `None` for any other zone.
+    pub vpc_id: Option<VpcId>,
+    /// The zone's SOA. `refresh`, `retry` and `expire` are not stored and carry
+    /// the values of `SoaRecord::new`.
+    pub soa: SoaRecord,
+    /// TTL of the zone's records other than the SOA. `None` means the site default.
+    pub default_ttl: Option<ZoneTtl>,
+    /// When the zone was created.
+    pub created: DateTime<Utc>,
+    /// When the zone was last changed.
+    pub updated: DateTime<Utc>,
+}
 
 /// Absolute, lowercased DNS name. The trailing dot is part of the value.
 ///

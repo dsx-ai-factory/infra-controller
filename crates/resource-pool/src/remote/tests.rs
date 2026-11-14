@@ -67,6 +67,7 @@ impl Harness {
                 interval: Duration::from_secs(3600),
                 timeout: Duration::from_secs(60),
             },
+            carbide_instrument::Instrumentation::global(),
         )
         .await
         .unwrap();

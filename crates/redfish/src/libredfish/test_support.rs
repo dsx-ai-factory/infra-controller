@@ -3214,6 +3214,7 @@ impl super::BmcCredentialOps for RedfishSim {
         _access: &carbide_utils::redfish::BmcAccessInfo,
         dpu: bool,
         sitewide_uefi_credentials: carbide_secrets::credentials::Credentials,
+        _instrumentation: &carbide_instrument::Instrumentation,
     ) -> Result<Option<String>, super::CredentialOpError> {
         let pause = {
             let mut state = self.state.lock().unwrap();

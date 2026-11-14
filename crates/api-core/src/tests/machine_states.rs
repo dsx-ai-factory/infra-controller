@@ -881,7 +881,7 @@ async fn test_machine_creator_created_host_advances_through_dpu_discovery(
             .await?
     );
 
-    let handler = MachineStateHandlerBuilder::builder()
+    let handler = MachineStateHandlerBuilder::builder(env.api.instrumentation.clone())
         .dpu_up_threshold(chrono::Duration::minutes(1))
         .hardware_models(env.config.get_firmware_config())
         .reachability_params(env.reachability_params)
@@ -1666,7 +1666,7 @@ async fn test_dpu_heartbeat(pool: sqlx::PgPool) -> sqlx::Result<()> {
     );
 
     // Tell state handler to mark DPU as unhealthy after 1 second
-    let handler = MachineStateHandlerBuilder::builder()
+    let handler = MachineStateHandlerBuilder::builder(env.api.instrumentation.clone())
         .dpu_up_threshold(chrono::Duration::seconds(1))
         .reachability_params(env.reachability_params)
         .attestation_enabled(env.attestation_enabled)
@@ -5321,7 +5321,7 @@ async fn test_ready_boot_config_waits_for_observed_lockdown_before_verifying(poo
     let pending = set_pending_boot_interface(&env, &mh).await;
     let mut reachability = env.reachability_params;
     reachability.uefi_boot_wait = Duration::minutes(1);
-    let handler = MachineStateHandlerBuilder::builder()
+    let handler = MachineStateHandlerBuilder::builder(env.api.instrumentation.clone())
         .hardware_models(env.config.get_firmware_config())
         .reachability_params(reachability)
         .attestation_enabled(env.attestation_enabled)
@@ -5544,7 +5544,7 @@ async fn test_ready_boot_lockdown_deadline_parks_without_effects(pool: sqlx::PgP
         drop(txn);
         for _ in 0..2 {
             // Recreate the handler to ensure the budget comes from persisted state.
-            let handler = MachineStateHandlerBuilder::builder()
+            let handler = MachineStateHandlerBuilder::builder(env.api.instrumentation.clone())
                 .hardware_models(env.config.get_firmware_config())
                 .reachability_params(env.reachability_params)
                 .attestation_enabled(env.attestation_enabled)
@@ -5851,7 +5851,7 @@ async fn test_ready_boot_full_lockdown_captures_new_failure_without_skipping_res
     .await;
     let mut reachability = env.reachability_params;
     reachability.uefi_boot_wait = Duration::minutes(1);
-    let handler = MachineStateHandlerBuilder::builder()
+    let handler = MachineStateHandlerBuilder::builder(env.api.instrumentation.clone())
         .hardware_models(env.config.get_firmware_config())
         .reachability_params(reachability)
         .attestation_enabled(env.attestation_enabled)

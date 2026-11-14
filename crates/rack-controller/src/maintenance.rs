@@ -19,7 +19,7 @@
 
 use std::collections::HashSet;
 
-use carbide_instrument::{Event, emit};
+use carbide_instrument::Event;
 use carbide_rack::firmware_object::{
     ANY_RACK_HARDWARE_TYPE, profile_hardware_type_wire_value, rack_maintenance_access_token_key,
     rms_access_token_or_noauth,
@@ -1489,12 +1489,13 @@ struct RackMaintenanceAccessTokenCleanupFailed {
 async fn delete_rack_maintenance_access_token(
     credential_manager: &dyn CredentialManager,
     rack_id: &RackId,
+    instrumentation: &carbide_instrument::Instrumentation,
 ) {
     if let Err(error) = credential_manager
         .delete_credentials(&rack_maintenance_access_token_key(rack_id))
         .await
     {
-        emit(RackMaintenanceAccessTokenCleanupFailed {
+        instrumentation.emit(RackMaintenanceAccessTokenCleanupFailed {
             rack_id: rack_id.clone(),
             error: error.to_string(),
         });
@@ -2626,6 +2627,7 @@ async fn handle_maintenance_inner(
                         delete_rack_maintenance_access_token(
                             ctx.services.credential_manager.as_ref(),
                             id,
+                            &ctx.services.instrumentation,
                         )
                         .await;
                     }
@@ -2648,6 +2650,7 @@ async fn handle_maintenance_inner(
                         delete_rack_maintenance_access_token(
                             ctx.services.credential_manager.as_ref(),
                             id,
+                            &ctx.services.instrumentation,
                         )
                         .await;
                     }
@@ -2703,6 +2706,7 @@ async fn handle_maintenance_inner(
                         delete_rack_maintenance_access_token(
                             ctx.services.credential_manager.as_ref(),
                             id,
+                            &ctx.services.instrumentation,
                         )
                         .await;
                     }
@@ -2721,6 +2725,7 @@ async fn handle_maintenance_inner(
                         delete_rack_maintenance_access_token(
                             ctx.services.credential_manager.as_ref(),
                             id,
+                            &ctx.services.instrumentation,
                         )
                         .await;
                     }
@@ -2772,6 +2777,7 @@ async fn handle_maintenance_inner(
                     delete_rack_maintenance_access_token(
                         ctx.services.credential_manager.as_ref(),
                         id,
+                        &ctx.services.instrumentation,
                     )
                     .await;
                 }
@@ -2903,6 +2909,7 @@ async fn handle_maintenance_inner(
                     delete_rack_maintenance_access_token(
                         ctx.services.credential_manager.as_ref(),
                         id,
+                        &ctx.services.instrumentation,
                     )
                     .await;
 
@@ -2941,6 +2948,7 @@ async fn handle_maintenance_inner(
                         delete_rack_maintenance_access_token(
                             ctx.services.credential_manager.as_ref(),
                             id,
+                            &ctx.services.instrumentation,
                         )
                         .await;
                     }
@@ -3146,6 +3154,7 @@ async fn handle_maintenance_inner(
                             delete_rack_maintenance_access_token(
                                 ctx.services.credential_manager.as_ref(),
                                 id,
+                                &ctx.services.instrumentation,
                             )
                             .await;
                         }
@@ -3208,6 +3217,7 @@ async fn handle_maintenance_inner(
                     delete_rack_maintenance_access_token(
                         ctx.services.credential_manager.as_ref(),
                         id,
+                        &ctx.services.instrumentation,
                     )
                     .await;
 
@@ -3225,6 +3235,7 @@ async fn handle_maintenance_inner(
                         delete_rack_maintenance_access_token(
                             ctx.services.credential_manager.as_ref(),
                             id,
+                            &ctx.services.instrumentation,
                         )
                         .await;
                     }
@@ -3278,6 +3289,7 @@ async fn handle_maintenance_inner(
                         delete_rack_maintenance_access_token(
                             ctx.services.credential_manager.as_ref(),
                             id,
+                            &ctx.services.instrumentation,
                         )
                         .await;
                     }
@@ -3324,6 +3336,7 @@ async fn handle_maintenance_inner(
                         delete_rack_maintenance_access_token(
                             ctx.services.credential_manager.as_ref(),
                             id,
+                            &ctx.services.instrumentation,
                         )
                         .await;
                     }
@@ -3340,6 +3353,7 @@ async fn handle_maintenance_inner(
                         delete_rack_maintenance_access_token(
                             ctx.services.credential_manager.as_ref(),
                             id,
+                            &ctx.services.instrumentation,
                         )
                         .await;
                     }
@@ -3360,6 +3374,7 @@ async fn handle_maintenance_inner(
                         delete_rack_maintenance_access_token(
                             ctx.services.credential_manager.as_ref(),
                             id,
+                            &ctx.services.instrumentation,
                         )
                         .await;
                     }
@@ -3419,6 +3434,7 @@ async fn handle_maintenance_inner(
                             delete_rack_maintenance_access_token(
                                 ctx.services.credential_manager.as_ref(),
                                 id,
+                                &ctx.services.instrumentation,
                             )
                             .await;
                         }
@@ -3436,6 +3452,7 @@ async fn handle_maintenance_inner(
                     delete_rack_maintenance_access_token(
                         ctx.services.credential_manager.as_ref(),
                         id,
+                        &ctx.services.instrumentation,
                     )
                     .await;
                 }
@@ -4029,6 +4046,7 @@ mod tests {
                     runtime.block_on(delete_rack_maintenance_access_token(
                         &credential_manager,
                         &rack_id,
+                        &carbide_instrument::Instrumentation::global(),
                     ));
                 })
                 .into_iter()

@@ -25,4 +25,8 @@ data:
     ca_cert_path = "/var/run/secrets/spiffe.io/ca.crt"
     {{- end }}
     insecure_skip_verify = {{ .Values.config.insecureSkipVerify }}
+
+    # RMS forwarding to the discovered machine-a-tron instances.
+    [rms]
+    job_retention = "{{ .Values.gateway.rmsJobRetention }}"
 {{- end }}

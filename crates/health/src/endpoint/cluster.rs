@@ -30,12 +30,9 @@ use serde_json::json;
 use url::Url;
 
 use crate::HealthError;
-use crate::bmc::{
-    BmcClient, BmcLatencyInstrumentation, CredentialProvider, bmc_latency_endpoint_labels,
-};
+use crate::bmc::{BmcClient, BmcInstrumentation, CredentialProvider, bmc_latency_endpoint_labels};
 use crate::config::ClusterEndpointSourceConfig;
 use crate::endpoint::{BmcAddr, BmcCredentials, BmcEndpoint, BoxFuture, EndpointSource};
-use crate::metrics::BmcLatencyMetrics;
 
 // ── Inventory file shape ──────────────────────────────────────────────────────
 
@@ -339,7 +336,7 @@ pub struct ClusterEndpointSource {
     proxy_url: Option<Url>,
     cache_size: usize,
     bmc_request_concurrency: NonZeroUsize,
-    bmc_latency_metrics: Option<Arc<BmcLatencyMetrics>>,
+    instrumentation: BmcInstrumentation,
     /// Clients by BMC IP. The endpoint key derives from the IP, and the port
     /// is fixed per source, so an address change is a new key with new collectors.
     clients: Mutex<HashMap<IpAddr, CachedClient>>,
@@ -351,12 +348,14 @@ pub struct ClusterEndpointSource {
 }
 
 impl ClusterEndpointSource {
+    /// Builds clients using the supplied Event and optional latency destinations.
+    /// Retain their providers until the source and its clients stop.
     pub fn from_config(
         cfg: ClusterEndpointSourceConfig,
         reqwest: &ReqwestClient,
         proxy_url: Option<&Url>,
         cache_size: usize,
-        bmc_latency_metrics: Option<Arc<BmcLatencyMetrics>>,
+        instrumentation: BmcInstrumentation,
     ) -> Self {
         Self::from_config_with_request_concurrency(
             cfg,
@@ -364,7 +363,7 @@ impl ClusterEndpointSource {
             proxy_url,
             cache_size,
             NonZeroUsize::MIN,
-            bmc_latency_metrics,
+            instrumentation,
         )
     }
 
@@ -374,7 +373,7 @@ impl ClusterEndpointSource {
         proxy_url: Option<&Url>,
         cache_size: usize,
         bmc_request_concurrency: NonZeroUsize,
-        bmc_latency_metrics: Option<Arc<BmcLatencyMetrics>>,
+        instrumentation: BmcInstrumentation,
     ) -> Self {
         Self {
             cfg,
@@ -382,7 +381,7 @@ impl ClusterEndpointSource {
             proxy_url: proxy_url.cloned(),
             cache_size,
             bmc_request_concurrency,
-            bmc_latency_metrics,
+            instrumentation,
             clients: Mutex::new(HashMap::new()),
             duplicate_rows: Mutex::new(HashSet::new()),
             manager_credentials: Mutex::new(None),
@@ -557,13 +556,9 @@ impl ClusterEndpointSource {
                     cached.bmc.clone()
                 }
                 _ => {
-                    let bmc_latency_instrumentation =
-                        self.bmc_latency_metrics.clone().map(|metrics| {
-                            BmcLatencyInstrumentation::new(
-                                metrics,
-                                bmc_latency_endpoint_labels(None, rack_id.as_ref()),
-                            )
-                        });
+                    let bmc_instrumentation = self
+                        .instrumentation
+                        .for_endpoint(bmc_latency_endpoint_labels(None, rack_id.as_ref()));
                     let provider = Arc::new(InventoryCredentialProvider::new(credentials));
                     let bmc = match BmcClient::new(
                         self.reqwest.clone(),
@@ -572,7 +567,7 @@ impl ClusterEndpointSource {
                         self.proxy_url.clone(),
                         self.cache_size,
                         self.bmc_request_concurrency,
-                        bmc_latency_instrumentation,
+                        bmc_instrumentation,
                     ) {
                         Ok(c) => Arc::new(c),
                         Err(e) => {
@@ -702,7 +697,10 @@ mod tests {
             &reqwest(),
             None,
             10,
-            None,
+            crate::bmc::BmcInstrumentation::new(
+                carbide_instrument::Instrumentation::global(),
+                None,
+            ),
         );
 
         let endpoints = source.fetch_bmc_hosts().await.expect("load inventory");
@@ -762,7 +760,10 @@ mod tests {
             &reqwest(),
             None,
             10,
-            None,
+            crate::bmc::BmcInstrumentation::new(
+                carbide_instrument::Instrumentation::global(),
+                None,
+            ),
         );
 
         let endpoints = source.fetch_bmc_hosts().await.expect("load inventory");
@@ -817,7 +818,10 @@ mod tests {
             &reqwest(),
             None,
             10,
-            None,
+            crate::bmc::BmcInstrumentation::new(
+                carbide_instrument::Instrumentation::global(),
+                None,
+            ),
         );
         let load = || async {
             let endpoints = source.fetch_bmc_hosts().await.expect("load inventory");
@@ -913,7 +917,10 @@ mod tests {
             &reqwest(),
             None,
             10,
-            None,
+            crate::bmc::BmcInstrumentation::new(
+                carbide_instrument::Instrumentation::global(),
+                None,
+            ),
         );
         let password = || async {
             let endpoints: Vec<Arc<BmcEndpoint>> =

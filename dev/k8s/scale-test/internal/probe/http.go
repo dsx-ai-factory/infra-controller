@@ -215,3 +215,8 @@ func retryAfter(v string) time.Duration {
 	}
 	return time.Duration(min(max(s, 1), maxRetryAfter)) * time.Second
 }
+
+// Fixture reads only fixed discovery kinds from the run-owned probe.
+func (p *httpProbe) Fixture(ctx context.Context, kind string) (probeapi.FixtureResponse, error) {
+	return send[probeapi.FixtureResponse](ctx, p, http.MethodGet, "/v1/fixture", url.Values{"kind": {kind}}, nil, nil)
+}

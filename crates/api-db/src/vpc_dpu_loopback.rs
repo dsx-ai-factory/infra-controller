@@ -211,18 +211,24 @@ pub async fn find(
 
 /// Allocate loopback ip for a vpc and dpu if not allocated yet.
 /// If already allocated, return the value.
+/// Allocation failure events use the caller's `instrumentation`.
 pub async fn get_or_allocate_loopback_ip_for_vpc(
     common_pools: &model::resource_pool::common::CommonPools,
     txn: &mut PgConnection,
     dpu_id: &DpuMachineId,
     vpc_id: &VpcId,
+    instrumentation: &carbide_instrument::Instrumentation,
 ) -> Result<IpAddr, DatabaseError> {
     let loopback_ip = match find(txn, dpu_id, vpc_id).await? {
         Some(x) => x.loopback_ip,
         None => {
-            let loopback_ip =
-                crate::machine::allocate_vpc_dpu_loopback(common_pools, txn, &dpu_id.to_string())
-                    .await?;
+            let loopback_ip = crate::machine::allocate_vpc_dpu_loopback(
+                common_pools,
+                txn,
+                &dpu_id.to_string(),
+                instrumentation,
+            )
+            .await?;
             let vpc_dpu_loopback = VpcDpuLoopback::new(*dpu_id, *vpc_id, loopback_ip);
             persist(vpc_dpu_loopback, txn).await?;
 

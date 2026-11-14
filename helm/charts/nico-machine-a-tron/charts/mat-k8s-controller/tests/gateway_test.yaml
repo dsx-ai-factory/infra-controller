@@ -199,6 +199,21 @@ tests:
       - matchRegex:
           path: data["gateway.toml"]
           pattern: '\[sources\]\nca_cert_path = "/var/run/secrets/spiffe.io/ca.crt"\ninsecure_skip_verify = false\n'
+      - matchRegex:
+          path: data["gateway.toml"]
+          pattern: '\[rms\]\njob_retention = "24h"\n'
+
+  - it: should render the configured RMS job retention
+    set:
+      enabled: true
+      gateway:
+        enabled: true
+        rmsJobRetention: 36h
+    template: templates/gateway-configmap.yaml
+    asserts:
+      - matchRegex:
+          path: data["gateway.toml"]
+          pattern: '\[rms\]\njob_retention = "36h"\n'
 
   - it: should render an IPv6 listener with the configured gateway port
     set:

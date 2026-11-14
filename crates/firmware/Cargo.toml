@@ -39,6 +39,8 @@ tracing = { workspace = true }
 url = { workspace = true }
 
 [dev-dependencies]
+carbide-utils = { path = "../utils", features = ["test-support"] }
+opentelemetry = { workspace = true }
 carbide-test-support = { path = "../test-support" }
 carbide-instrument = { path = "../instrument", features = ["test-support"] }
 carbide-macros = { path = "../macros" }

@@ -314,11 +314,10 @@ Firmware upgrades can be triggered in two ways:
 
 ### How Upgrades Are Staged
 
-Machine Update Manager stages upgrades so the site does not take too many hosts out of service at once. Before scheduling an additional update, it evaluates:
-
-- How many managed hosts are already in a maintenance or update state.
-- How many managed hosts are currently unhealthy.
-- The configured maximum concurrent update policy for the site.
+Machine Update Manager stages automatic upgrades through a shared host
+ceiling. Refer to [Shared Host Capacity](../operations/firmware-updates.md#shared-host-capacity)
+for counted hosts and build requirements for NIC accounting and transaction
+protections.
 
 A DPU update is treated as a host-level maintenance event because the host and its DPU or DPUs are updated together. During an update, NICo applies a `HostUpdateInProgress` health alert with the `PreventAllocations` classification, which keeps tenants from acquiring the host while work is in progress.
 

@@ -163,7 +163,11 @@ async fn authenticated_callers(pool: sqlx::PgPool) {
     let firmware_artifact_cache = carbide_firmware::FirmwareArtifactCache::new(
         dir.path().join("firmware-artifacts"),
         4 * 1024 * 1024 * 1024,
-        carbide_firmware::FirmwareDownloader::new(),
+        carbide_firmware::FirmwareDownloader::new(
+            carbide_instrument::Instrumentation::from_meter_provider(
+                &opentelemetry::metrics::noop::NoopMeterProvider::new(),
+            ),
+        ),
         cancel.clone(),
         &mut tasks,
     )

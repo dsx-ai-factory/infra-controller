@@ -93,6 +93,7 @@ impl ControllerEnv {
             Some(pool.clone()),
             None,
             None,
+            carbide_instrument::Instrumentation::global(),
         )
         .await
         .expect("test component manager should build");
@@ -121,6 +122,7 @@ impl ControllerEnv {
             .processor_id(uuid::Uuid::new_v4().to_string())
             .services(
                 PowerShelfStateHandlerServices {
+                    instrumentation: harness.api().instrumentation().clone(),
                     db_pool: pool.clone(),
                     component_manager: Some(component_manager),
                     credential_manager: credential_manager.clone(),
@@ -165,6 +167,9 @@ pub(super) fn services_without_component_manager(
     // the same instance behind both handles.
     let redfish_sim: Arc<RedfishSim> = Arc::new(RedfishSim::default());
     PowerShelfStateHandlerServices {
+        instrumentation: carbide_instrument::Instrumentation::from_meter_provider(
+            &opentelemetry::metrics::noop::NoopMeterProvider::new(),
+        ),
         db_pool: pool.clone(),
         component_manager: None,
         credential_manager: Arc::new(TestCredentialManager::default()),

@@ -93,6 +93,7 @@ async fn main() -> Result<(), Error> {
     // Run metrics endpoint
     let metrics_setup = setup_metrics()?;
     let meter = metrics_setup.meter.clone();
+    let instrumentation = metrics_setup.instrumentation.clone();
     carbide_instrument::log_events::register(&meter);
     metrics::start(
         config.metrics_endpoint,
@@ -106,6 +107,7 @@ async fn main() -> Result<(), Error> {
     // Run the BMC proxy
     proxy::start(
         BmcProxyParams {
+            instrumentation,
             config: Arc::new(config),
         },
         cancel_token.clone(),

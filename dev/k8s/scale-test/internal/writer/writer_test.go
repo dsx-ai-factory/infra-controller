@@ -781,3 +781,31 @@ func TestOnlyUnclearLabelsSettleWithLiveProof(t *testing.T) {
 		})
 	}
 }
+
+func TestDispatchHookRechecksLifecycle(t *testing.T) {
+	for _, mode := range []string{"lock", "stop", "cutoff"} {
+		t.Run(mode, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				r := newRig(t)
+				call := mkCall("k1", "digest", nil)
+				call.Cutoff = time.Now().Add(time.Second)
+				call.BeforeDispatch = func() error {
+					switch mode {
+					case "lock":
+						r.gate.Close()
+					case "stop":
+						r.stop.stop()
+					case "cutoff":
+						time.Sleep(2 * time.Second)
+					}
+					return nil
+				}
+				calls := 0
+				_, err := Send(r.ctx, r.w, call, func(context.Context) Attempt { calls++; return acc() })
+				if err == nil || calls != 0 || r.states(t) != "k1=notDispatched" || r.j.Unsettled() {
+					t.Fatalf("hook bypassed lifecycle: calls=%d state=%s err=%v", calls, r.states(t), err)
+				}
+			})
+		})
+	}
+}

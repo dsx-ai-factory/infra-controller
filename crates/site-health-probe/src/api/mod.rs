@@ -92,7 +92,7 @@ impl ApiState {
         if !state.rest.skip_totals {
             intervals.insert(Family::RestTotals, readers.rest_inventory.interval);
         }
-        if state.rest.tenant.is_some() {
+        if state.rest.tenant.is_some() || state.rest.fixture.is_some() {
             for family in crate::readers::rest_instances::FAMILIES {
                 intervals.insert(family, readers.rest_inventory.interval);
             }
@@ -118,12 +118,15 @@ impl ApiState {
         });
         Self {
             store,
-            rest_inventory: readers.rest_inventory.enabled,
-            rest_totals: readers.rest_inventory.enabled && !state.rest.skip_totals,
+            rest_inventory: readers.rest_inventory.enabled && state.rest.fixture.is_none(),
+            rest_totals: readers.rest_inventory.enabled
+                && !state.rest.skip_totals
+                && state.rest.fixture.is_none(),
             intervals,
             caps: Capabilities {
                 full_host_read: state.nico_api.host_read == HostReadMode::Full,
-                rest_fixture: readers.rest_inventory.enabled && state.rest.tenant.is_some(),
+                rest_fixture: readers.rest_inventory.enabled
+                    && (state.rest.tenant.is_some() || state.rest.fixture.is_some()),
             },
             metrics,
         }

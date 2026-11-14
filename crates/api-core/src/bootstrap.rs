@@ -265,9 +265,14 @@ mod tests {
 
     async fn start_test_work_lock_manager(pool: &PgPool) -> (WorkLockManagerHandle, JoinSet<()>) {
         let mut tasks = JoinSet::new();
-        let handle = db::work_lock_manager::start(&mut tasks, pool.clone(), Default::default())
-            .await
-            .expect("start work lock manager");
+        let handle = db::work_lock_manager::start(
+            &mut tasks,
+            pool.clone(),
+            Default::default(),
+            carbide_instrument::Instrumentation::global(),
+        )
+        .await
+        .expect("start work lock manager");
         (handle, tasks)
     }
 

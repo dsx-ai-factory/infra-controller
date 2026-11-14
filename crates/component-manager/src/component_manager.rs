@@ -749,6 +749,11 @@ impl ComponentManager {
 /// product-family and vendor data required to build RMS node descriptors before
 /// startup continues. Both Core and RMS compute backends require a Redfish pool
 /// supporting direct authentication; RMS uses it to delegate compute AC cycles.
+/// Backend Events use `instrumentation`; retain its provider until backends stop.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the backend factory keeps the site runtime dependencies explicit"
+)]
 pub async fn build_component_manager(
     config: &ComponentManagerConfig,
     rack_profiles: RackProfileConfig,
@@ -757,6 +762,7 @@ pub async fn build_component_manager(
     db: Option<PgPool>,
     redfish_pool: Option<Arc<dyn RedfishClientPool>>,
     driver_connector: Option<Arc<DriverConnector>>,
+    instrumentation: carbide_instrument::Instrumentation,
 ) -> Result<ComponentManager, ComponentManagerError> {
     validate_rms_backend_rack_profiles(config, &rack_profiles)?;
 
@@ -791,6 +797,7 @@ pub async fn build_component_manager(
                 db,
                 rack_profiles.clone(),
                 config.nvos_password_rotation_enabled,
+                instrumentation.clone(),
             ))
         }
         NvSwitchBackend::Mock => Arc::new(crate::mock::MockNvSwitchManager::default()),
@@ -826,6 +833,7 @@ pub async fn build_component_manager(
                 db,
                 rack_profiles.clone(),
                 config.nvos_password_rotation_enabled,
+                instrumentation.clone(),
             ))
         }
         PowerShelfBackend::Mock => Arc::new(crate::mock::MockPowerShelfManager),
@@ -856,6 +864,7 @@ pub async fn build_component_manager(
                     db.clone(),
                     rack_profiles.clone(),
                     config.nvos_password_rotation_enabled,
+                    instrumentation,
                 )
                 .with_core_compute_manager(
                     crate::core_compute_manager::CoreComputeTrayManager::new(pool)
@@ -1545,9 +1554,18 @@ mod tests {
             ..Default::default()
         };
 
-        let cm = build_component_manager(&config, Default::default(), None, None, None, None, None)
-            .await
-            .unwrap();
+        let cm = build_component_manager(
+            &config,
+            Default::default(),
+            None,
+            None,
+            None,
+            None,
+            None,
+            carbide_instrument::Instrumentation::global(),
+        )
+        .await
+        .unwrap();
 
         assert_eq!(cm.nv_switch.name(), "mock-nsm");
         assert_eq!(cm.power_shelf.name(), "mock-psm");
@@ -1576,6 +1594,7 @@ mod tests {
             Some(db),
             None,
             None,
+            carbide_instrument::Instrumentation::global(),
         )
         .await
         .expect("RMS switch backend should build");
@@ -1606,10 +1625,18 @@ mod tests {
             ..Default::default()
         };
 
-        let err =
-            build_component_manager(&config, Default::default(), None, None, None, None, None)
-                .await
-                .unwrap_err();
+        let err = build_component_manager(
+            &config,
+            Default::default(),
+            None,
+            None,
+            None,
+            None,
+            None,
+            carbide_instrument::Instrumentation::global(),
+        )
+        .await
+        .unwrap_err();
 
         assert!(matches!(err, ComponentManagerError::InvalidArgument(_)));
     }
@@ -1623,10 +1650,18 @@ mod tests {
             ..Default::default()
         };
 
-        let err =
-            build_component_manager(&config, Default::default(), None, None, None, None, None)
-                .await
-                .unwrap_err();
+        let err = build_component_manager(
+            &config,
+            Default::default(),
+            None,
+            None,
+            None,
+            None,
+            None,
+            carbide_instrument::Instrumentation::global(),
+        )
+        .await
+        .unwrap_err();
 
         assert!(matches!(err, ComponentManagerError::InvalidArgument(_)));
     }
@@ -1647,10 +1682,18 @@ mod tests {
 
         assert_eq!(config.compute_tray_backend, ComputeBackend::Rms);
 
-        let err =
-            build_component_manager(&config, Default::default(), None, None, None, None, None)
-                .await
-                .unwrap_err();
+        let err = build_component_manager(
+            &config,
+            Default::default(),
+            None,
+            None,
+            None,
+            None,
+            None,
+            carbide_instrument::Instrumentation::global(),
+        )
+        .await
+        .unwrap_err();
 
         assert!(matches!(
             err,
@@ -1668,9 +1711,17 @@ mod tests {
             ..Default::default()
         };
 
-        let result =
-            build_component_manager(&config, Default::default(), None, None, None, None, None)
-                .await;
+        let result = build_component_manager(
+            &config,
+            Default::default(),
+            None,
+            None,
+            None,
+            None,
+            None,
+            carbide_instrument::Instrumentation::global(),
+        )
+        .await;
         let Err(error) = result else {
             panic!("missing RMS rack profiles should be rejected");
         };
@@ -1694,8 +1745,17 @@ mod tests {
             ..Default::default()
         };
 
-        let result =
-            build_component_manager(&config, rack_profiles, None, None, None, None, None).await;
+        let result = build_component_manager(
+            &config,
+            rack_profiles,
+            None,
+            None,
+            None,
+            None,
+            None,
+            carbide_instrument::Instrumentation::global(),
+        )
+        .await;
         let Err(error) = result else {
             panic!("missing RMS vendor should be rejected");
         };

@@ -89,6 +89,7 @@ pub(super) trait InstanceMetadataRouterState: Sync + Send {
 }
 
 pub(super) struct InstanceMetadataRouterStateImpl {
+    instrumentation: carbide_instrument::Instrumentation,
     latest_instance_data: ArcSwapOption<InstanceMetadata>,
     latest_network_config: ArcSwapOption<ManagedHostNetworkConfigResponse>,
     machine_id: DpuMachineId,
@@ -172,6 +173,7 @@ impl MetaDataIdentitySigner for InstanceMetadataRouterStateImpl {
             self.identity_serving.sign_proxy_http_client.as_ref(),
             uri,
             headers,
+            &self.instrumentation,
         )
         .await
         {
@@ -203,6 +205,7 @@ impl InstanceMetadataRouterStateImpl {
         forge_api: String,
         carbide_client_config: Arc<CarbideClientConfig>,
         machine_identity: MachineIdentityConfig,
+        instrumentation: carbide_instrument::Instrumentation,
     ) -> Result<Self, String> {
         let params = machine_identity::MachineIdentityParams::try_from_limits(
             machine_identity.requests_per_second,
@@ -216,6 +219,7 @@ impl InstanceMetadataRouterStateImpl {
             params,
         )?);
         Ok(Self {
+            instrumentation,
             latest_instance_data: ArcSwapOption::new(None),
             latest_network_config: ArcSwapOption::new(None),
             machine_id,

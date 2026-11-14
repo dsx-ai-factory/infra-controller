@@ -83,6 +83,8 @@ impl From<Vpc> for rpc::forge::Vpc {
                 routing_profile_overrides,
                 power_resource_group: src.config.power_resource_group.clone(),
                 slaac_enabled: Some(src.config.slaac_enabled),
+                // The zone is not part of the VPC record; the API handler fills it.
+                private_dns_zone: None,
             }),
             status: Some(rpc::forge::VpcStatus::from(src.status)),
         }

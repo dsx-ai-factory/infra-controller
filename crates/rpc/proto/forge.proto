@@ -2521,6 +2521,9 @@ message VpcConfig {
   // boundary. Core reports this field explicitly. An absent value indicates a
   // response from a Core version that predates SLAAC support.
   optional bool slaac_enabled = 10;
+  // Private DNS zone this VPC holds, as an FQDN including the trailing dot.
+  // Unset means that the VPC holds no private DNS zone.
+  optional string private_dns_zone = 12;
 }
 
 message VpcStatus {
