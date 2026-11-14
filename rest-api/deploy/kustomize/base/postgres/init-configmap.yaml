@@ -50,3 +50,13 @@ data:
     \c temporal_visibility
     GRANT ALL ON SCHEMA public TO temporal;
     ALTER SCHEMA public OWNER TO temporal;
+    \c postgres
+
+    -- flow database + user (used when KIND_FLOW=true)
+    SELECT 'CREATE DATABASE flow WITH ENCODING ''UTF8'''
+      WHERE NOT EXISTS (SELECT FROM pg_database WHERE datname = 'flow')\gexec
+    DO $$ BEGIN IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname='flow') THEN CREATE ROLE flow LOGIN PASSWORD 'flow'; END IF; END $$;
+    GRANT ALL PRIVILEGES ON DATABASE flow TO flow;
+    \c flow
+    GRANT ALL ON SCHEMA public TO flow;
+    \c postgres

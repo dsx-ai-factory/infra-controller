@@ -127,6 +127,10 @@ annotations:
 
 service:
   port: 8080
+  ## Optional list of external IPs the Service is reachable on.
+  ## In Kind, set to a reserved IP from the BMC network (reserve_first range)
+  ## so machines receiving DHCP leases can reach the PXE server.
+  externalIPs: []
 
 apiServiceName: nico-api
 
