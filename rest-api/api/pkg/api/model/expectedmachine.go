@@ -377,6 +377,21 @@ func NewAPIHostLifecycleProfile(p cdbm.HostLifecycleProfile) *APIHostLifecyclePr
 	}
 }
 
+func validateExpectedMachineDpuPolicy(policy *string) error {
+	if policy == nil {
+		return nil
+	}
+	if *policy == "" {
+		return errors.New("dpuPolicy must be manage, nic, or ignore")
+	}
+	return validation.Validate(*policy,
+		validation.In(
+			cdbm.ExpectedMachineDpuPolicyManage,
+			cdbm.ExpectedMachineDpuPolicyNic,
+			cdbm.ExpectedMachineDpuPolicyIgnore,
+		).Error("dpuPolicy must be manage, nic, or ignore"))
+}
+
 // APIExpectedMachineCreateRequest is the data structure to capture instance request to create a new ExpectedMachine
 type APIExpectedMachineCreateRequest struct {
 	// SiteID is the ID of the Site
@@ -422,6 +437,8 @@ type APIExpectedMachineCreateRequest struct {
 	HostID *int32 `json:"hostId"`
 	// IsDpfEnabled marks whether this host is eligible for DPF-based provisioning
 	IsDpfEnabled *bool `json:"isDpfEnabled"`
+	// DpuPolicy selects how NICo treats DPU hardware for this host (manage, nic, ignore)
+	DpuPolicy *string `json:"dpuPolicy"`
 	// Labels is the labels of the expected machine
 	Labels map[string]string `json:"labels"`
 	// HostLifecycleProfile is the optional per-host lifecycle profile
@@ -481,6 +498,10 @@ func (emcr *APIExpectedMachineCreateRequest) Validate() error {
 		return err
 	}
 
+	if err := validateExpectedMachineDpuPolicy(emcr.DpuPolicy); err != nil {
+		return err
+	}
+
 	return nil
 }
 
@@ -535,6 +556,8 @@ type APIExpectedMachineUpdateRequest struct {
 	HostID *int32 `json:"hostId"`
 	// IsDpfEnabled marks whether this host is eligible for DPF-based provisioning
 	IsDpfEnabled *bool `json:"isDpfEnabled"`
+	// DpuPolicy selects how NICo treats DPU hardware for this host (manage, nic, ignore)
+	DpuPolicy *string `json:"dpuPolicy"`
 	// Labels is the labels of the expected machine
 	Labels map[string]string `json:"labels"`
 	// HostLifecycleProfile is the optional per-host lifecycle profile
@@ -610,6 +633,10 @@ func (emur *APIExpectedMachineUpdateRequest) Validate() error {
 		return err
 	}
 
+	if err := validateExpectedMachineDpuPolicy(emur.DpuPolicy); err != nil {
+		return err
+	}
+
 	return nil
 }
 
@@ -658,6 +685,7 @@ func (emur *APIExpectedMachineUpdateRequest) ToProto(entity *cdbm.ExpectedMachin
 			util.ExpectedComponentUpdateField{Path: "sku_id", Present: emur.SkuID != nil},
 			util.ExpectedComponentUpdateField{Path: "server_name", Present: emur.ServerName != nil},
 			util.ExpectedComponentUpdateField{Path: "is_dpf_enabled", Present: emur.IsDpfEnabled != nil},
+			util.ExpectedComponentUpdateField{Path: "dpu_mode", Present: emur.DpuPolicy != nil},
 			util.ExpectedComponentUpdateField{Path: "host_lifecycle_profile.disable_lockdown", Present: emur.HostLifecycleProfile != nil && emur.HostLifecycleProfile.DisableLockdown != nil},
 			util.ExpectedComponentUpdateField{Path: "host_lifecycle_profile.retain_hbn_config_on_boot", Present: emur.HostLifecycleProfile != nil && emur.HostLifecycleProfile.RetainHBNConfigOnBoot != nil},
 		),
@@ -710,6 +738,8 @@ type APIExpectedMachine struct {
 	HostID *int32 `json:"hostId"`
 	// IsDpfEnabled indicates whether this host is eligible for DPF-based provisioning, defaulting to true when unset.
 	IsDpfEnabled bool `json:"isDpfEnabled"`
+	// DpuPolicy selects how NICo treats DPU hardware for this host
+	DpuPolicy *string `json:"dpuPolicy"`
 	// Labels is the labels of the expected machine
 	Labels APILabels `json:"labels"`
 	// HostLifecycleProfile is the optional per-host lifecycle profile
@@ -749,6 +779,7 @@ func NewAPIExpectedMachine(dibp *cdbm.ExpectedMachine) *APIExpectedMachine {
 		TrayIdx:                  dibp.TrayIdx,
 		HostID:                   dibp.HostID,
 		IsDpfEnabled:             dibp.IsDpfEnabled == nil || *dibp.IsDpfEnabled,
+		DpuPolicy:                dibp.DpuPolicy,
 		Labels:                   APILabels(dibp.Labels),
 		HostLifecycleProfile:     NewAPIHostLifecycleProfile(dibp.HostLifecycleProfile),
 		Created:                  dibp.Created,

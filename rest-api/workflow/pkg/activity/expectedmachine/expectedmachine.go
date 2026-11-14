@@ -226,6 +226,7 @@ func (mei ManageExpectedMachine) UpdateExpectedMachinesInDB(ctx context.Context,
 					BmcMacAddress:            reported.BmcMacAddress,
 					ChassisSerialNumber:      reported.ChassisSerialNumber,
 					Interfaces:               reported.Interfaces,
+					DpuPolicy:                reported.DpuPolicy,
 					BmcIpAddress:             reported.BmcIpAddress,
 					RackID:                   reported.RackID,
 					Name:                     reported.Name,
@@ -283,6 +284,7 @@ func (mei ManageExpectedMachine) UpdateExpectedMachinesInDB(ctx context.Context,
 		if cur.BmcMacAddress != reported.BmcMacAddress ||
 			cur.ChassisSerialNumber != reported.ChassisSerialNumber ||
 			!reflect.DeepEqual(cur.Interfaces, reported.Interfaces) ||
+			(reported.DpuPolicy != nil && !util.PtrsEqual(cur.DpuPolicy, reported.DpuPolicy)) ||
 			!util.PtrsEqual(cur.BmcIpAddress, reported.BmcIpAddress) ||
 			(reported.RackID != nil && !util.PtrsEqual(cur.RackID, reported.RackID)) ||
 			(reported.Name != nil && !util.PtrsEqual(cur.Name, reported.Name)) ||
@@ -355,6 +357,7 @@ func (mei ManageExpectedMachine) UpdateExpectedMachinesInDB(ctx context.Context,
 					MachineID:                reported.MachineID,
 					FallbackDpuSerialNumbers: reported.FallbackDpuSerialNumbers,
 					Interfaces:               reported.Interfaces,
+					DpuPolicy:                reported.DpuPolicy,
 					IsDpfEnabled:             reported.IsDpfEnabled,
 					HostLifecycleProfile:     hostLifecycleProfile,
 					Labels:                   reported.Labels,

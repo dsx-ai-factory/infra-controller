@@ -138,6 +138,22 @@ Where `expected-machines.json` is a JSON array of `ExpectedMachineCreateRequest`
 ]
 ```
 
+REST create, update and replace-all (`PUT .../expected-machine/all`) also accept **`dpuPolicy`** (`manage`, `nic`, `ignore`), which maps to Forge `dpu_mode`. **`isDpfEnabled`** is separate: it marks DPF provisioning eligibility, not the per-host DPU policy.
+
+`dpuPolicy` values:
+
+- `manage`: DPUs are expected and managed by NICo. This does not force managed DPUs: a per-host `manage` inherits the site-wide `dpu_policy`, exactly like an omitted value. On a site set to `ignore`, a host declared `manage` still runs in zero-DPU mode.
+- `nic`: the DPU is present but operates as a plain NIC; the host boots on HostInband.
+- `ignore`: NICo does not configure or attach DPU hardware; the host boots through a plain NIC on HostInband.
+
+Omission semantics:
+
+- Create and replace-all: an omitted or `null` value uses the inherited site policy.
+- PATCH: an omitted or `null` value preserves the stored setting. Sending `manage` explicitly returns the host to site inheritance.
+- The response shows the stored declaration, not a computed effective policy.
+
+See the [canonical DPU-policy contract](boot-interfaces-and-dpu-modes.md#dpu_policy) for how the effective policy is resolved.
+
 Two constraints apply to every batch request, both enforced at the API gateway:
 
 - **Maximum 100 machines per request.** For sites with more than 100 machines, send multiple `batch-create` calls.

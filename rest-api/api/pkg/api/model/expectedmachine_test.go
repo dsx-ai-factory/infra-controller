@@ -355,6 +355,39 @@ func TestAPIExpectedMachineCreateRequest_Validate(t *testing.T) {
 			},
 			expectErr: false,
 		},
+		{
+			desc: "ok with dpuPolicy ignore",
+			obj: APIExpectedMachineCreateRequest{
+				BmcMacAddress:       "00:11:22:33:44:55",
+				DefaultBmcUsername:  &validUsername,
+				DefaultBmcPassword:  &validPassword,
+				ChassisSerialNumber: validChassisSerial,
+				DpuPolicy:           cutil.GetPtr(cdbm.ExpectedMachineDpuPolicyIgnore),
+			},
+			expectErr: false,
+		},
+		{
+			desc: "error when dpuPolicy is invalid",
+			obj: APIExpectedMachineCreateRequest{
+				BmcMacAddress:       "00:11:22:33:44:55",
+				DefaultBmcUsername:  &validUsername,
+				DefaultBmcPassword:  &validPassword,
+				ChassisSerialNumber: validChassisSerial,
+				DpuPolicy:           cutil.GetPtr("bogus"),
+			},
+			expectErr: true,
+		},
+		{
+			desc: "error when dpuPolicy is empty string",
+			obj: APIExpectedMachineCreateRequest{
+				BmcMacAddress:       "00:11:22:33:44:55",
+				DefaultBmcUsername:  &validUsername,
+				DefaultBmcPassword:  &validPassword,
+				ChassisSerialNumber: validChassisSerial,
+				DpuPolicy:           cutil.GetPtr(""),
+			},
+			expectErr: true,
+		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.desc, func(t *testing.T) {
@@ -837,6 +870,8 @@ func TestNewAPIExpectedMachine(t *testing.T) {
 			if tc.wantInterfacesJSON != "" {
 				assert.JSONEq(t, tc.wantInterfacesJSON, string(fields["interfaces"]))
 			}
+			assert.Contains(t, fields, "dpuPolicy")
+			assert.Equal(t, "null", string(fields["dpuPolicy"]))
 		})
 	}
 }
