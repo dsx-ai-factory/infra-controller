@@ -46,6 +46,11 @@ use crate::types::{
 
 pub const DEFAULT_FLAVOR_NAME: &str = "dpu-flavor";
 const DELAY_HOST_OS_INIT_PARAMETER: &str = "DELAY_HOST_OS_INIT=0x3";
+// Reserve switch ports during installation; SNAP creates storage functions separately.
+const PCIE_SWITCH_EMULATION_PARAMETERS: [&str; 2] = [
+    "PCI_SWITCH_EMULATION_ENABLE=1",
+    "PCI_SWITCH_EMULATION_NUM_PORT=16",
+];
 const OVN_ENCAP_SERVICE_NAME: &str = "nico-ovn-encap-ip.service";
 const OVN_ENCAP_SCRIPT_PATH: &str = "/usr/local/sbin/nico-configure-ovn-encap-ip";
 
@@ -57,12 +62,28 @@ fn host_service_readiness() -> DpuFlavorServiceReadiness {
 
 impl DPUFlavor {
     /// Returns `"{default_flavor_name}-{hash}"` where the hash is the first 8 bytes (16 hex chars)
-    /// of a stable SHA-256 digest of the spec. The name changes whenever the spec changes, which
-    /// causes outdated DPUs to be reprovisioned by MachineUpdateManager.
+    /// of a stable SHA-256 digest of the spec. The name changes whenever the spec changes.
     pub fn unique_name(&self, default_flavor_name: &str) -> Result<String, crate::error::DpfError> {
         let json = serde_json::to_string(&self.spec)?;
         let short_hash = hex::encode(&Sha256::digest(json.as_bytes())[..8]);
         Ok(format!("{default_flavor_name}-{short_hash}"))
+    }
+
+    /// Returns the name of the same flavor before the installation-only PCIe defaults.
+    /// All other settings remain in the hash so unrelated drift still requires reprovisioning.
+    pub(crate) fn name_without_pcie_emulation(
+        &self,
+        default_flavor_name: &str,
+    ) -> Result<String, crate::error::DpfError> {
+        let mut predecessor = self.clone();
+        for entry in predecessor.spec.nvconfig.iter_mut().flatten() {
+            if let Some(parameters) = entry.parameters.as_mut() {
+                parameters.retain(|parameter| {
+                    !PCIE_SWITCH_EMULATION_PARAMETERS.contains(&parameter.as_str())
+                });
+            }
+        }
+        predecessor.unique_name(default_flavor_name)
     }
 }
 
@@ -1324,6 +1345,7 @@ fn get_bf4_nvconfig(
         "LINK_TYPE_P1=ETH".to_string(),
         "LINK_TYPE_P2=ETH".to_string(),
     ];
+    parameters.extend(PCIE_SWITCH_EMULATION_PARAMETERS.map(str::to_string));
     if enable_delay_host_init {
         parameters.push(DELAY_HOST_OS_INIT_PARAMETER.to_string());
     }
@@ -1573,6 +1595,7 @@ fn get_bf3_nvconfig(
         "LINK_TYPE_P1=ETH".to_string(),
         "LINK_TYPE_P2=ETH".to_string(),
     ];
+    parameters.extend(PCIE_SWITCH_EMULATION_PARAMETERS.map(str::to_string));
     if enable_delay_host_init {
         parameters.push(DELAY_HOST_OS_INIT_PARAMETER.to_string());
     }
@@ -1631,6 +1654,7 @@ fn get_bf4_astra_nvconfig(pf_total_sf: u32, enable_delay_host_init: bool) -> Dpu
         "LINK_TYPE_P1=ETH".to_string(),
         "LINK_TYPE_P2=ETH".to_string(),
     ];
+    parameters.extend(PCIE_SWITCH_EMULATION_PARAMETERS.map(str::to_string));
     if enable_delay_host_init {
         parameters.push(DELAY_HOST_OS_INIT_PARAMETER.to_string());
     }
@@ -3725,6 +3749,36 @@ done
     }
 
     #[test]
+    fn every_platform_reserves_sixteen_pcie_switch_ports_for_installation() {
+        value_scenarios!(
+            run = |deployment_type| {
+                let flavor = match deployment_type {
+                    DpuDeploymentType::Bf4Astra => DPUFlavor {
+                        metadata: ObjectMeta::default(),
+                        spec: astra_flavor_spec(&None, true),
+                    },
+                    _ => default_flavor_for("ns", &None, deployment_type).unwrap(),
+                };
+                let parameters = flavor.spec.nvconfig.unwrap()[0].parameters.clone().unwrap();
+                parameters
+                    .iter()
+                    .filter(|p| p.as_str() == "PCI_SWITCH_EMULATION_ENABLE=1")
+                    .count() == 1
+                    && parameters
+                        .iter()
+                        .filter(|p| p.as_str() == "PCI_SWITCH_EMULATION_NUM_PORT=16")
+                        .count() == 1
+            };
+            "installation defaults" {
+                DpuDeploymentType::Bf3 => true,
+                DpuDeploymentType::Bf3Gb200 => true,
+                DpuDeploymentType::Bf4Generic => true,
+                DpuDeploymentType::Bf4Astra => true,
+            }
+        );
+    }
+
+    #[test]
     fn host_boot_hold_is_configurable_for_zero_trust_flavors() {
         let default_spec = |deployment_type, enable_delay_host_init| {
             default_flavor_with_topology(
@@ -3832,8 +3886,8 @@ done
             })
             .collect::<Vec<_>>();
 
-        assert_eq!(bf3.len(), 17);
-        assert_eq!(gb200.len(), 33);
+        assert_eq!(bf3.len(), 19);
+        assert_eq!(gb200.len(), 35);
         assert_eq!(&gb200[..bf3.len()], expected_gb200_base.as_slice());
         assert_eq!(
             &gb200[bf3.len()..],
@@ -5105,6 +5159,46 @@ done
     // ── unique_name ────────────────────────────────────────────────────────
 
     #[test]
+    fn pcie_emulation_predecessor_hash_preserves_other_settings() {
+        let mut predecessor = default_flavor("ns", &None).unwrap();
+        predecessor.spec.nvconfig.as_mut().unwrap()[0].parameters =
+            Some(vec!["SRIOV_EN=1".to_string()]);
+        let predecessor_name = predecessor.unique_name(DEFAULT_FLAVOR_NAME).unwrap();
+
+        let mut installed_default = predecessor;
+        let parameters = installed_default.spec.nvconfig.as_mut().unwrap()[0]
+            .parameters
+            .as_mut()
+            .unwrap();
+        parameters.extend([
+            "PCI_SWITCH_EMULATION_ENABLE=1".to_string(),
+            "PCI_SWITCH_EMULATION_NUM_PORT=16".to_string(),
+        ]);
+        assert_ne!(
+            installed_default.unique_name(DEFAULT_FLAVOR_NAME).unwrap(),
+            predecessor_name,
+        );
+        assert_eq!(
+            installed_default
+                .name_without_pcie_emulation(DEFAULT_FLAVOR_NAME)
+                .unwrap(),
+            predecessor_name,
+        );
+
+        installed_default.spec.nvconfig.as_mut().unwrap()[0]
+            .parameters
+            .as_mut()
+            .unwrap()
+            .push("NUM_OF_VFS=17".to_string());
+        assert_ne!(
+            installed_default
+                .name_without_pcie_emulation(DEFAULT_FLAVOR_NAME)
+                .unwrap(),
+            predecessor_name,
+        );
+    }
+
+    #[test]
     fn unique_name_has_expected_format() {
         // "<prefix>-<16 lowercase hex chars>" for several prefixes.
         scenarios!(
@@ -5379,7 +5473,7 @@ done
             }
 
             "parameter count" {
-                nv.parameters.as_ref().map(|p| p.len()) == Some(16) => true,
+                nv.parameters.as_ref().map(|p| p.len()) == Some(18) => true,
             }
 
             "carries the SRIOV enable flag" {
