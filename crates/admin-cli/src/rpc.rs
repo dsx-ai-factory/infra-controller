@@ -857,14 +857,9 @@ impl ApiClient {
     pub(crate) async fn create_domain(
         &self,
         name: String,
-        vpc_id: Option<VpcId>,
         default_ttl: Option<u32>,
     ) -> CarbideCliResult<::rpc::protos::dns::Domain> {
-        let request = ::rpc::protos::dns::CreateDomainRequest {
-            name,
-            vpc_id,
-            default_ttl,
-        };
+        let request = ::rpc::protos::dns::CreateDomainRequest { name, default_ttl };
         Ok(self.0.create_domain(request).await?)
     }
 

@@ -1219,7 +1219,6 @@ mod tests {
             id: Some(uuid),
             name: "MyDomain".to_string(),
             default_ttl: None,
-            vpc_id: None,
             created: Some(ts.into()),
             updated: Some(ts2.into()),
             deleted: None,

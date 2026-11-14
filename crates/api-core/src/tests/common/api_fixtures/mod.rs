@@ -324,7 +324,7 @@ pub(crate) struct TestEnv {
     pub(in crate::tests) attestation_enabled: bool,
     pub(in crate::tests) site_explorer: SiteExplorer,
     pub(in crate::tests) nmxc_sim: Arc<dyn NmxcPool>,
-    /// The same simulator as `nmxc_sim`, kept concrete so tests can drive its failure modes.
+    /// The same simulator as `nmxc_sim`, kept concrete so tests can read its call counters.
     pub(in crate::tests) nmxc_sim_client: Arc<NmxcSimClient>,
     /// True when the test env uses [`NmxcSimClient::simulator_for_nvlink_config`] (gRPC proxy to a local simulator).
     pub(in crate::tests) nmxc_grpc_simulator: bool,
@@ -474,6 +474,7 @@ impl TestEnv {
                     model::machine::MachineState::SpdmMeasuring { .. } => machine_state,
 
                     model::machine::MachineState::EnableIpmiOverLan => machine_state,
+                    model::machine::MachineState::DisableOnboardNics { .. } => machine_state,
                     model::machine::MachineState::WaitingForBiosJob { .. } => machine_state,
                 };
                 ManagedHostState::HostInit { machine_state: mc }
@@ -635,6 +636,16 @@ impl TestEnv {
             .await;
     }
 
+    /// Processes each queued machine once, without requeueing state transitions.
+    pub(in crate::tests) async fn run_machine_state_controller_iteration_without_requeue(&self) {
+        self.machine_state_controller
+            .lock()
+            .await
+            .run_single_iteration_ext(false)
+            .boxed()
+            .await;
+    }
+
     /// Reports membership in the latest database object-ID list so integration
     /// tests can verify which identity the machine controller read after discovery.
     pub(in crate::tests) async fn machine_object_ids_from_database_contains(
@@ -733,6 +744,15 @@ impl TestEnv {
             .lock()
             .await
             .run_single_iteration()
+            .await;
+    }
+
+    /// Processes each rack once so assertions can inspect the immediate transition.
+    pub(in crate::tests) async fn run_rack_controller_iteration_no_requeue(&self) {
+        self.rack_controller
+            .lock()
+            .await
+            .run_single_iteration_ext(false)
             .await;
     }
 
@@ -1918,28 +1938,19 @@ async fn create_test_env_with_overrides_inner(
 
     txn.commit().await.unwrap();
 
-    // Restart tests keep their database. Reuse the domain so its name stays
-    // unique and existing segments keep the same domain ID.
-    let domain_name = "dwrt1.com";
-    let existing_domain = db::dns::domain::find_by_name(&db_pool, domain_name)
+    // Create domain
+    let domain: carbide_uuid::domain::DomainId = api
+        .create_domain(Request::new(rpc::protos::dns::CreateDomainRequest {
+            name: "dwrt1.com".to_string(),
+            default_ttl: None,
+        }))
         .await
-        .expect("fixture domain lookup succeeds")
-        .into_iter()
-        .find(|domain| domain.vpc_id.is_none());
-    let domain = match existing_domain {
-        Some(domain) => domain.id,
-        None => api
-            .create_domain(Request::new(rpc::protos::dns::CreateDomainRequest {
-                name: domain_name.to_string(),
-                default_ttl: None,
-                vpc_id: None,
-            }))
-            .await
-            .expect("fixture domain creation succeeds")
-            .into_inner()
-            .id
-            .expect("created domain has an ID"),
-    };
+        .unwrap()
+        .into_inner()
+        .id
+        .map(::carbide_uuid::domain::DomainId::try_from)
+        .unwrap()
+        .unwrap();
 
     let (admin_segments, underlay_segment) = if overrides.create_network_segments.unwrap_or(true) {
         // Create admin network

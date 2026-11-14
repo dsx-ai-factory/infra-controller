@@ -230,7 +230,19 @@ fn insert_telemetry_service(resources: &mut HashMap<String, MockResponse>) {
                 { "MetricId": "NonFinite", "MetricValue": "NaN" },
                 { "MetricId": "Infinite", "MetricValue": "inf" },
                 // No id to name a series after.
-                { "MetricValue": "1" }
+                { "MetricValue": "1" },
+                // No MetricId, so the property names the series.
+                {
+                    "MetricProperty": "/redfish/v1/Chassis/CH0/Sensors/GPU_0_Temp_0",
+                    "MetricValue": "48.0",
+                    "Oem": { "Nvidia": { "MetricValueStale": false } }
+                },
+                // Stale on the value itself, so it is dropped.
+                {
+                    "MetricProperty": "/redfish/v1/Chassis/CH0/Sensors/GPU_0_Power_0",
+                    "MetricValue": "612.5",
+                    "Oem": { "Nvidia": { "MetricValueStale": true } }
+                }
             ]
         }),
     );
@@ -719,6 +731,23 @@ impl ProjectionFixture {
     pub(in crate::collectors) async fn with_transient_metric_definitions_failure() -> Self {
         let mut resources = mock_resources();
         fail_once(&mut resources, METRIC_DEFINITIONS);
+        Self::from_resources(resources).await
+    }
+
+    pub(in crate::collectors) async fn with_malformed_metric_value_oem() -> Self {
+        let mut resources = mock_resources();
+        let Some(MockResponse::Json(report)) = resources
+            .get_mut("/redfish/v1/TelemetryService/MetricReports/PlatformEnvironmentMetrics")
+        else {
+            panic!("telemetry report should exist");
+        };
+        let reading = report["MetricValues"]
+            .as_array_mut()
+            .expect("report should contain readings")
+            .iter_mut()
+            .find(|reading| reading["MetricId"] == "FanPWM")
+            .expect("FanPWM reading should exist");
+        reading["Oem"] = json!({ "Nvidia": { "MetricValueStale": "true" } });
         Self::from_resources(resources).await
     }
 

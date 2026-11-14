@@ -47,6 +47,13 @@ use crate::libredfish::{RedfishAuth, RedfishClientCreationError, RedfishClientPo
 
 const TRIGGER_EVIDENCE_TASK_ID: &str = "SpdmTriggerEvidenceTaskId";
 
+/// An intercepted reset request whose response is supplied by the test.
+#[derive(Debug)]
+pub struct BmcFactoryResetRequest {
+    pub host: String,
+    pub respond: tokio::sync::oneshot::Sender<Result<(), RedfishError>>,
+}
+
 #[derive(Default)]
 struct RedfishSimState {
     hosts: HashMap<String, RedfishSimHostState>,
@@ -69,10 +76,12 @@ struct RedfishSimState {
     next_lockdown_bmc_error: Option<(EnabledDisabled, String)>,
     /// Fail one power-state read without changing the host's actual power.
     next_power_state_error: Option<(usize, String)>,
+    next_onboard_nics_error: Option<String>,
     /// Fail the next matching power action before changing the host's power.
     next_power_action_error: Option<(SystemPowerControl, RedfishError)>,
     /// Value of `ac_powercycle_supported_by_power`. Defaults to `false`.
     ac_powercycle_supported: bool,
+    next_bmc_factory_reset: Option<tokio::sync::oneshot::Sender<BmcFactoryResetRequest>>,
     next_ipmi_access_error: Option<String>,
     job_state_sequence: VecDeque<JobState>,
     /// Offset (in seconds) applied to the BMC `DateTime` returned by
@@ -220,6 +229,7 @@ pub struct RedfishSimAuthAttempt {
 #[derive(Debug)]
 struct RedfishSimHostState {
     power: PowerState,
+    onboard_nics: Option<EnabledDisabled>,
     lockdown: libredfish::EnabledDisabled,
     actions: Vec<RedfishSimAction>,
     boot_interface_targets: Vec<Option<RedfishSimBootInterfaceRef>>,
@@ -245,6 +255,7 @@ impl Default for RedfishSimHostState {
     fn default() -> Self {
         Self {
             power: PowerState::default(),
+            onboard_nics: None,
             lockdown: libredfish::EnabledDisabled::Disabled,
             actions: Vec::default(),
             boot_interface_targets: Vec::default(),
@@ -457,6 +468,11 @@ impl RedfishSim {
         self.state.lock().unwrap().next_ipmi_access_error = Some(error.to_string());
     }
 
+    /// Fail one onboard NIC write before applying the setting.
+    pub fn fail_next_onboard_nics_write(&self, error: &str) {
+        self.state.lock().unwrap().next_onboard_nics_error = Some(error.to_string());
+    }
+
     /// Fail the next matching power action, recording the attempt but applying no change.
     pub fn fail_next_power_action(&self, action: SystemPowerControl, error: &str) {
         self.fail_next_power_action_with(
@@ -582,6 +598,16 @@ impl RedfishSim {
     /// clearing so a retry can be asserted.
     pub fn clear_create_client_error(&self) {
         self.state.lock().unwrap().create_client_error = None;
+    }
+
+    /// Hand the next factory-reset request to the test and await its response.
+    /// Later requests succeed normally.
+    pub fn intercept_next_bmc_factory_reset(
+        &self,
+    ) -> tokio::sync::oneshot::Receiver<BmcFactoryResetRequest> {
+        let (send, receive) = tokio::sync::oneshot::channel();
+        self.state.lock().unwrap().next_bmc_factory_reset = Some(send);
+        receive
     }
 
     /// Force the sim's `uefi_setup` override to fail with
@@ -762,10 +788,18 @@ impl From<libredfish::BootInterfaceRef<'_>> for RedfishSimBootInterfaceRef {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum RedfishSimAction {
+    /// Records a successfully applied onboard NIC setting.
+    SetEnableOnboardNics(EnabledDisabled),
+    /// Records an onboard NIC write rejected before it was applied.
+    SetEnableOnboardNicsFailed(EnabledDisabled),
     Power(libredfish::SystemPowerControl),
     /// A power request rejected before its effect was applied.
     PowerFailed(libredfish::SystemPowerControl),
     BmcReset(Option<ManagerResetType>),
+    /// Records a successfully accepted BMC factory reset.
+    BmcResetToDefaults,
+    /// Records a BMC factory-reset request rejected by an injected failure.
+    BmcResetToDefaultsFailed,
     /// Records a Redfish `Chassis.Reset` call with its target and reset type.
     ChassisReset {
         chassis_id: String,
@@ -1921,7 +1955,35 @@ impl Redfish for RedfishSimClient {
     fn bmc_reset_to_defaults<'a>(
         &'a self,
     ) -> libredfish::RedfishFuture<'a, Result<(), RedfishError>> {
-        Box::pin(async move { Ok(()) })
+        Box::pin(async move {
+            let intercept = self.state.lock().unwrap().next_bmc_factory_reset.take();
+            let result = if let Some(intercept) = intercept {
+                let (respond, response) = tokio::sync::oneshot::channel();
+                intercept
+                    .send(BmcFactoryResetRequest {
+                        host: self._host.clone(),
+                        respond,
+                    })
+                    .expect("test must receive the intercepted reset request");
+                response
+                    .await
+                    .expect("test must respond to the reset request")
+            } else {
+                Ok(())
+            };
+            let mut state = self.state.lock().unwrap();
+            state
+                .hosts
+                .get_mut(&self._host)
+                .unwrap()
+                .actions
+                .push(if result.is_err() {
+                    RedfishSimAction::BmcResetToDefaultsFailed
+                } else {
+                    RedfishSimAction::BmcResetToDefaults
+                });
+            result
+        })
     }
 
     fn get_system_event_log<'a>(
@@ -2227,6 +2289,43 @@ impl Redfish for RedfishSimClient {
     ) -> libredfish::RedfishFuture<'a, Result<Vec<Drives>, RedfishError>> {
         Box::pin(async move {
             todo!();
+        })
+    }
+
+    fn set_enable_onboard_nics<'a>(
+        &'a self,
+        enable_onboard_nics: EnabledDisabled,
+    ) -> libredfish::RedfishFuture<'a, Result<(), RedfishError>> {
+        Box::pin(async move {
+            let mut state = self.state.lock().unwrap();
+            let error = state.next_onboard_nics_error.take();
+            let host = state.hosts.get_mut(&self._host).unwrap();
+            if let Some(error) = error {
+                host.actions
+                    .push(RedfishSimAction::SetEnableOnboardNicsFailed(
+                        enable_onboard_nics,
+                    ));
+                return Err(RedfishError::GenericError { error });
+            }
+            host.onboard_nics = Some(enable_onboard_nics);
+            host.actions
+                .push(RedfishSimAction::SetEnableOnboardNics(enable_onboard_nics));
+            Ok(())
+        })
+    }
+
+    fn are_onboard_nics_enabled<'a>(
+        &'a self,
+    ) -> libredfish::RedfishFuture<'a, Result<Option<EnabledDisabled>, RedfishError>> {
+        Box::pin(async move {
+            Ok(self
+                .state
+                .lock()
+                .unwrap()
+                .hosts
+                .get(&self._host)
+                .unwrap()
+                .onboard_nics)
         })
     }
 

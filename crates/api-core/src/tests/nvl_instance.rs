@@ -16,9 +16,12 @@
  */
 
 use ::rpc::machine_discovery::Gpu;
+use carbide_instrument::testing::MetricsCapture;
 use carbide_secrets::credentials::{
     BmcCredentialType, CredentialKey, CredentialWriter, Credentials,
 };
+use carbide_uuid::nvlink::{NvLinkDomainId, NvLinkPartitionId};
+use carbide_uuid::power_shelf::PowerShelfId;
 use carbide_uuid::rack::RackId;
 use carbide_uuid::switch::SwitchId;
 use common::api_fixtures::instance::{
@@ -41,6 +44,7 @@ use libnmxc::nmxc_model::{GetGpuInfoListRequest, GetPartitionInfoListRequest, Gp
 use model::expected_switch::ExpectedSwitch;
 use model::instance::config::nvlink::InstanceNvLinkConfig;
 use model::metadata::Metadata;
+use model::power_shelf::{NewPowerShelf, PowerShelfConfig};
 use model::rack::{MaintenanceActivity, RackState};
 use model::switch::{
     CONTROL_PLANE_STATE_CONFIGURED, FabricManagerState, FabricManagerStatus, NewSwitch,
@@ -64,6 +68,7 @@ const SWITCH_BMC_STATIC_IP: std::net::IpAddr =
 const SWITCH_NVOS_STATIC_IP: std::net::IpAddr =
     std::net::IpAddr::V4(std::net::Ipv4Addr::new(127, 0, 0, 1));
 const NMXC_SIMULATOR_PORT: u16 = 9601;
+const NVLINK_GROUPS_METRIC: &str = "carbide_nvlink_partition_monitor_groups_total";
 
 #[crate::sqlx_test]
 async fn test_nmx_c_partition_id_migration_deletes_legacy_nmx_m_rows(pool: sqlx::PgPool) {
@@ -315,6 +320,28 @@ async fn test_create_instance_with_nvl_config(pool: sqlx::PgPool) {
     assert_eq!(logical_partition_list.partition_ids.len(), 0);
 }
 
+/// A test env with the partition monitor enabled and, when given, a
+/// `partition_monitor_full_check_interval` other than the default.
+async fn create_partition_monitor_test_env(
+    pool: sqlx::PgPool,
+    full_check_interval: Option<std::time::Duration>,
+) -> TestEnv {
+    let mut config = common::api_fixtures::get_config();
+    let nvlink_config = config
+        .nvlink_config
+        .as_mut()
+        .expect("test config has nvlink_config");
+    nvlink_config.enabled = true;
+    if let Some(interval) = full_check_interval {
+        nvlink_config.partition_monitor_full_check_interval = interval;
+    }
+    common::api_fixtures::create_test_env_with_overrides(
+        pool,
+        TestEnvOverrides::with_config(config),
+    )
+    .await
+}
+
 /// Creates a host whose GPUs all join one logical partition. The instance
 /// builder runs the monitor until the group has nothing left to apply.
 async fn create_partitioned_host(env: &TestEnv) -> TestManagedHost {
@@ -357,6 +384,233 @@ async fn create_partitioned_host(env: &TestEnv) -> TestManagedHost {
     mh
 }
 
+/// `observed_at` of the host's stored NVLink observation. A checked group
+/// rewrites it on every pass; a skipped group leaves it alone.
+async fn nvlink_observed_at(
+    mh: &TestManagedHost,
+    pool: &sqlx::PgPool,
+) -> chrono::DateTime<chrono::Utc> {
+    let mut txn = pool
+        .begin()
+        .await
+        .expect("begin txn for nvlink observation read");
+    let observed_at = mh
+        .host()
+        .db_machine(&mut txn)
+        .await
+        .status
+        .nvlink_status_observation
+        .expect("expected nvlink_status_observation to be set")
+        .observed_at;
+    txn.commit().await.expect("commit nvlink observation read");
+    observed_at
+}
+
+/// Adds a switch to `rack_id` that is not an NMX-C endpoint.
+async fn add_rack_switch(pool: &sqlx::PgPool, rack_id: &RackId, serial: &str) -> SwitchId {
+    let switch_id = model::switch::switch_id::from_hardware_info(
+        serial,
+        "NVIDIA",
+        "Switch",
+        carbide_uuid::switch::SwitchIdSource::ProductBoardChassisSerial,
+        carbide_uuid::switch::SwitchType::NvLink,
+    )
+    .expect("switch id");
+    let mut txn = pool.begin().await.expect("begin txn");
+    db_switch::create(
+        txn.as_mut(),
+        &NewSwitch {
+            id: switch_id,
+            config: SwitchConfig {
+                name: serial.to_string(),
+                enable_nmxc: false,
+                fabric_manager_config: None,
+            },
+            bmc_mac_address: None,
+            metadata: None,
+            rack_id: Some(rack_id.clone()),
+            slot_number: Some(1),
+            tray_index: Some(0),
+        },
+    )
+    .await
+    .expect("create switch");
+    txn.commit().await.expect("commit switch");
+    switch_id
+}
+
+async fn add_rack_power_shelf(pool: &sqlx::PgPool, rack_id: &RackId) -> PowerShelfId {
+    let shelf_id = PowerShelfId::from(uuid::Uuid::new_v4());
+    let mut txn = pool.begin().await.expect("begin txn");
+    db::power_shelf::create(
+        txn.as_mut(),
+        &NewPowerShelf {
+            id: shelf_id,
+            config: PowerShelfConfig {
+                name: "Shelf1".to_string(),
+                capacity: None,
+                voltage: None,
+            },
+            bmc_mac_address: None,
+            metadata: None,
+            rack_id: Some(rack_id.clone()),
+        },
+    )
+    .await
+    .expect("create power shelf");
+    txn.commit().await.expect("commit power shelf");
+    shelf_id
+}
+
+async fn switch_nvlink_domain_uuid(
+    pool: &sqlx::PgPool,
+    switch_id: &SwitchId,
+) -> Option<NvLinkDomainId> {
+    let mut txn = pool.begin().await.expect("begin txn");
+    let switch = db_switch::find_by_id(txn.as_mut(), switch_id)
+        .await
+        .expect("load switch")
+        .expect("switch");
+    txn.commit().await.expect("commit switch read");
+    switch.nvlink_domain_uuid
+}
+
+async fn power_shelf_nvlink_domain_uuid(
+    pool: &sqlx::PgPool,
+    shelf_id: &PowerShelfId,
+) -> Option<NvLinkDomainId> {
+    let mut txn = pool.begin().await.expect("begin txn");
+    let shelf = db::power_shelf::find_by_id(txn.as_mut(), shelf_id)
+        .await
+        .expect("load power shelf")
+        .expect("power shelf");
+    txn.commit().await.expect("commit power shelf read");
+    shelf.nvlink_domain_uuid
+}
+
+/// A converged group is skipped until its full check is due: NMX-C is not
+/// contacted and the stored observation is left alone. The inputs compared
+/// are the database's, so a partition removed on the NMX-C side alone does
+/// not trigger a check either.
+#[crate::sqlx_test]
+async fn test_partition_monitor_skips_converged_group_until_full_check(pool: sqlx::PgPool) {
+    let env = create_partition_monitor_test_env(pool.clone(), None).await;
+    let mh = create_partitioned_host(&env).await;
+    let observed_at = nvlink_observed_at(&mh, &pool).await;
+    let partition_list_calls = env.nmxc_sim_client.partition_info_list_calls();
+
+    let metrics = MetricsCapture::start();
+    env.run_nvl_partition_monitor_iteration().await;
+    // Other API tests drive the same process-global counter; the exact proof
+    // is the untouched observation and simulator below.
+    assert!(
+        metrics.counter_delta(NVLINK_GROUPS_METRIC, &[("outcome", "skipped_unchanged")]) >= 1.0
+    );
+    drop(metrics);
+    assert_eq!(nvlink_observed_at(&mh, &pool).await, observed_at);
+    assert_eq!(
+        env.nmxc_sim_client.partition_info_list_calls(),
+        partition_list_calls
+    );
+
+    // Remove the tenant partition on the NMX-C side only.
+    let mut nmxc_sim_client = env
+        .nmxc_sim
+        .create_client(libnmxc::Endpoint::new("http://localhost:9601").expect("NMX-C endpoint URI"))
+        .await
+        .unwrap();
+    let nmxc_partitions = nmxc_sim_client
+        .get_partition_info_list(GetPartitionInfoListRequest {
+            context: Some(libnmxc::nmxc_model::Context {
+                context: String::new(),
+            }),
+            partition_id_list: vec![],
+            partition_name_list: vec![],
+            gateway_id: libnmxc::NMX_C_GATEWAY_ID.into(),
+        })
+        .await
+        .unwrap()
+        .partition_info_list;
+    assert_eq!(nmxc_partitions.len(), 1);
+    let partition_id = nmxc_partitions[0]
+        .partition_id
+        .as_ref()
+        .expect("simulator partition has an id")
+        .partition_id;
+    nmxc_sim_client
+        .delete_partition(libnmxc::nmxc_model::DeletePartitionRequest {
+            context: None,
+            partition_id: Some(libnmxc::nmxc_model::PartitionId { partition_id }),
+            gateway_id: libnmxc::NMX_C_GATEWAY_ID.into(),
+            name: String::new(),
+        })
+        .await
+        .unwrap();
+    let partition_list_calls = env.nmxc_sim_client.partition_info_list_calls();
+
+    env.run_nvl_partition_monitor_iteration().await;
+    assert_eq!(nvlink_observed_at(&mh, &pool).await, observed_at);
+    assert_eq!(
+        env.nmxc_sim_client.partition_info_list_calls(),
+        partition_list_calls
+    );
+}
+
+/// A skipped rack republishes the domain UUID of its last full check to a
+/// switch or power shelf added to the rack since then, so neither waits for
+/// the next full check to receive it.
+#[crate::sqlx_test]
+async fn test_partition_monitor_skipped_rack_republishes_domain_uuid(pool: sqlx::PgPool) {
+    let env = create_partition_monitor_test_env(pool.clone(), None).await;
+    let mh = create_partitioned_host(&env).await;
+
+    // Move the converged host into a rack whose primary switch is the NMX-C endpoint.
+    let rack_id: RackId = "rack_1".parse().expect("rack id");
+    let mut txn = pool.begin().await.expect("begin txn");
+    TestRackDbBuilder::new()
+        .with_rack_id(rack_id.clone())
+        .persist(&mut txn)
+        .await
+        .expect("create rack");
+    sqlx::query("UPDATE machines SET rack_id = $1 WHERE id = $2")
+        .bind(rack_id.as_str())
+        .bind(mh.id)
+        .execute(txn.as_mut())
+        .await
+        .expect("set machine rack_id");
+    txn.commit().await.expect("commit rack");
+    let endpoint_switch_id = create_rack_switch_for_nmxc_simulator(&env, &rack_id).await;
+
+    // The rack group's first pass is a full check and publishes its domain.
+    env.run_nvl_partition_monitor_iteration().await;
+    let domain_uuid = switch_nvlink_domain_uuid(&pool, &endpoint_switch_id)
+        .await
+        .expect("endpoint switch has the rack's domain UUID");
+
+    let added_switch_id = add_rack_switch(&pool, &rack_id, "SW-SN-002").await;
+    let added_shelf_id = add_rack_power_shelf(&pool, &rack_id).await;
+    let partition_list_calls = env.nmxc_sim_client.partition_info_list_calls();
+
+    let metrics = MetricsCapture::start();
+    env.run_nvl_partition_monitor_iteration().await;
+    assert!(
+        metrics.counter_delta(NVLINK_GROUPS_METRIC, &[("outcome", "skipped_unchanged")]) >= 1.0
+    );
+    drop(metrics);
+    assert_eq!(
+        env.nmxc_sim_client.partition_info_list_calls(),
+        partition_list_calls
+    );
+    assert_eq!(
+        switch_nvlink_domain_uuid(&pool, &added_switch_id).await,
+        Some(domain_uuid)
+    );
+    assert_eq!(
+        power_shelf_nvlink_domain_uuid(&pool, &added_shelf_id).await,
+        Some(domain_uuid)
+    );
+}
+
 /// The partition monitor's merge report on a rack, if it carries one.
 async fn rack_partition_monitor_report(
     pool: &sqlx::PgPool,
@@ -385,6 +639,9 @@ async fn test_partition_monitor_debounces_rack_nmxc_unreachable_alert(pool: sqlx
     nvlink_config.enabled = true;
     nvlink_config.partition_monitor_unreachable_alert_after =
         std::num::NonZeroU32::new(2).expect("non-zero");
+    // Every pass must contact NMX-C: a rack skipped by change detection is
+    // not checked, so its outage would surface only at its next full check.
+    nvlink_config.partition_monitor_full_check_interval = std::time::Duration::ZERO;
     let env = common::api_fixtures::create_test_env_with_overrides(
         pool.clone(),
         TestEnvOverrides::with_config(config),
@@ -462,6 +719,28 @@ async fn test_partition_monitor_debounces_rack_nmxc_unreachable_alert(pool: sqlx
         "the first reachable pass clears the alert"
     );
 }
+
+/// `partition_monitor_full_check_interval = "0s"` turns change detection
+/// off, so a converged group is reconciled on every pass.
+#[crate::sqlx_test]
+async fn test_partition_monitor_zero_full_check_interval_reconciles_every_pass(pool: sqlx::PgPool) {
+    let env =
+        create_partition_monitor_test_env(pool.clone(), Some(std::time::Duration::ZERO)).await;
+    let mh = create_partitioned_host(&env).await;
+    let observed_at = nvlink_observed_at(&mh, &pool).await;
+    let partition_list_calls = env.nmxc_sim_client.partition_info_list_calls();
+
+    let metrics = MetricsCapture::start();
+    env.run_nvl_partition_monitor_iteration().await;
+    assert!(metrics.counter_delta(NVLINK_GROUPS_METRIC, &[("outcome", "reconciled")]) >= 1.0);
+    drop(metrics);
+    assert!(nvlink_observed_at(&mh, &pool).await > observed_at);
+    assert_eq!(
+        env.nmxc_sim_client.partition_info_list_calls(),
+        partition_list_calls + 1
+    );
+}
+
 #[crate::sqlx_test]
 async fn test_detach_gpus_from_partition_by_clearing_nvlink_config(pool: sqlx::PgPool) {
     // In our tests so far, we detach a GPU from a partition by setting the logical partition ID in the
@@ -878,8 +1157,14 @@ async fn test_nvl_partition_monitor_adds_successful_partitions_when_some_creates
     txn.commit().await.unwrap();
 
     // The monitor should successfully create one partition, but the second creation should fail.
+    let metrics = MetricsCapture::start();
     env.run_nvl_partition_monitor_iteration().await;
     env.run_nvl_partition_monitor_iteration().await;
+    assert!(
+        metrics.counter_delta(NVLINK_GROUPS_METRIC, &[("outcome", "operations_failed")]) >= 1.0,
+        "a group whose create failed must count as operations_failed"
+    );
+    drop(metrics);
 
     let request_all = tonic::Request::new(rpc::forge::NvLinkPartitionSearchFilter {
         name: None,
@@ -1388,6 +1673,91 @@ async fn test_instance_delete_with_nvl_config(pool: sqlx::PgPool) {
         .map(|response| response.into_inner())
         .unwrap();
     assert_eq!(ids_all.partition_ids.len(), 0);
+}
+
+/// Every `nvlink_partitions` row, in no particular order.
+async fn nvl_physical_partition_rows(
+    pool: &sqlx::PgPool,
+) -> Vec<model::nvl_partition::NvlPartition> {
+    db::nvl_partition::find_by(pool, ObjectColumnFilter::<db::nvl_partition::IdColumn>::All)
+        .await
+        .expect("load nvlink_partitions")
+}
+
+/// Every `nvlink_logical_partitions` row, soft-deleted ones included.
+async fn nvl_logical_partition_rows(
+    pool: &sqlx::PgPool,
+) -> Vec<model::nvl_logical_partition::LogicalPartition> {
+    db::nvl_logical_partition::find_by(
+        pool,
+        ObjectColumnFilter::<db::nvl_logical_partition::IdColumn>::All,
+    )
+    .await
+    .expect("load nvlink_logical_partitions")
+}
+
+/// One purge transaction handles every logical partition marked as deleted:
+/// the one a physical `nvlink_partitions` row still references is kept, the
+/// unreferenced one is removed, and the pass still reconciles the host.
+#[crate::sqlx_test]
+async fn test_logical_partition_purge_skips_referenced_partition(pool: sqlx::PgPool) {
+    let env =
+        create_partition_monitor_test_env(pool.clone(), Some(std::time::Duration::ZERO)).await;
+    let mh = create_partitioned_host(&env).await;
+    let referenced_id = create_nvl_logical_partition(&env, "referenced".to_string())
+        .await
+        .id;
+    let unreferenced_id = create_nvl_logical_partition(&env, "unreferenced".to_string())
+        .await
+        .id;
+
+    // A physical row no NMX-C domain owns, like one left behind after NMX-C
+    // state loss. No group removes it, so it keeps referencing its logical
+    // partition.
+    let mut txn = pool.begin().await.unwrap();
+    let stale_row = db::nvl_partition::create(
+        &model::nvl_partition::NewNvlPartition {
+            id: NvLinkPartitionId::new(),
+            name: model::nvl_partition::NvlPartitionName::try_from("stale".to_string()).unwrap(),
+            logical_partition_id: referenced_id,
+            domain_uuid: NvLinkDomainId::new(),
+            nmx_c_partition_id: 1,
+        },
+        &mut txn,
+    )
+    .await
+    .unwrap();
+    txn.commit().await.unwrap();
+
+    // Deletion checks instances, not physical rows, so both are marked.
+    for id in [referenced_id, unreferenced_id] {
+        env.api
+            .delete_nv_link_logical_partition(tonic::Request::new(
+                rpc::forge::NvLinkLogicalPartitionDeletionRequest { id: Some(id) },
+            ))
+            .await
+            .unwrap();
+    }
+
+    let observed_at = nvlink_observed_at(&mh, &pool).await;
+    env.run_nvl_partition_monitor_iteration().await;
+
+    // The host's group was reconciled in the same pass.
+    assert!(nvlink_observed_at(&mh, &pool).await > observed_at);
+    let unreachable = env
+        .test_meter
+        .formatted_metrics("carbide_nvlink_partition_monitor_nmx_c_unreachable_chassis_count");
+    assert!(unreachable.is_empty(), "{unreachable:?}");
+
+    let marked_ids: Vec<_> = nvl_logical_partition_rows(&pool)
+        .await
+        .into_iter()
+        .filter(model::nvl_logical_partition::is_marked_as_deleted)
+        .map(|lp| lp.id)
+        .collect();
+    assert_eq!(marked_ids, vec![referenced_id]);
+    let rows = nvl_physical_partition_rows(&pool).await;
+    assert!(rows.iter().any(|row| row.id == stale_row.id), "{rows:?}");
 }
 
 #[crate::sqlx_test]
