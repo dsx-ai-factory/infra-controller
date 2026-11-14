@@ -70,7 +70,7 @@ impl InstanceControllers {
                 cancel_token.clone(),
             )),
             ib: IbFabricMonitor::new(
-                api.database_connection.clone(),
+                api.database_connection.pool().clone(),
                 config.ib_fabrics.clone(),
                 harness.test_meter.meter(),
                 clients.ib.clone(),
@@ -79,7 +79,7 @@ impl InstanceControllers {
                 api.instrumentation().clone(),
             ),
             nvl: Mutex::new(NvlPartitionMonitor::new(
-                api.database_connection.clone(),
+                api.database_connection.pool().clone(),
                 clients.nmxc.clone(),
                 harness.test_meter.meter(),
                 config
@@ -236,7 +236,7 @@ fn machine_state_controller(
     let rotation_gate = |family| RotationGate::new_for_family(family);
     let services = MachineStateHandlerServices {
         instrumentation: api.instrumentation().clone(),
-        db_pool: api.database_connection.clone(),
+        db_pool: api.database_connection.pool().clone(),
         db_reader: api.database_connection.clone().into(),
         redfish_client_pool: clients.redfish.clone(),
         bmc_connector: BmcConnector::Libredfish(clients.redfish.clone()),
@@ -269,7 +269,7 @@ fn machine_state_controller(
     };
     StateController::<MachineStateControllerIO>::builder()
         .database(
-            api.database_connection.clone(),
+            api.database_connection.pool().clone(),
             api.work_lock_manager_handle(),
         )
         .meter("carbide_machines", meter)

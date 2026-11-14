@@ -99,6 +99,7 @@ carbide-api-model = { path = "../api-model", default-features = false, features 
 carbide-instrument = { path = "../instrument", features = ["test-support"] }
 carbide-secrets = { path = "../secrets" }
 carbide-test-support = { path = "../test-support" }
+carbide-utils = { path = "../utils", features = ["test-support"] }
 lazy_static = { workspace = true }
 carbide-sqlx-testing = { path = "../sqlx-testing" }
 tracing-subscriber = { workspace = true, features = ["env-filter"] }

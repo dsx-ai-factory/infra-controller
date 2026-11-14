@@ -105,6 +105,8 @@ pub struct RackMaintenanceAccessToken<'a> {
 
 /// Atomically request rack maintenance through the rack state controller.
 ///
+/// Transactions use the instrumentation bound to `db_pool`.
+///
 /// The rack row is locked before inspecting its state and existing scope, and
 /// remains locked through the config write. Exact retries are idempotent;
 /// unrelated pending work is never overwritten. Existing work is checked
@@ -114,7 +116,7 @@ pub struct RackMaintenanceAccessToken<'a> {
 /// This is a free function because the API supports rack maintenance even when
 /// no `ComponentManager` backend is configured.
 pub async fn request_rack_maintenance_via_state_controller(
-    db_pool: &PgPool,
+    db_pool: &db::DatabaseConnection,
     rack_id: &RackId,
     scope: MaintenanceScope,
     eligibility: RackMaintenanceEligibility,
@@ -245,7 +247,7 @@ enum RackMaintenanceCredentialRecovery {
 }
 
 async fn recover_rack_maintenance_after_credential_failure(
-    db_pool: &PgPool,
+    db_pool: &db::DatabaseConnection,
     rack_id: &RackId,
     scheduled_scope: &MaintenanceScope,
 ) -> Result<RackMaintenanceCredentialRecovery, ComponentManagerError> {
@@ -306,9 +308,10 @@ async fn recover_rack_maintenance_after_credential_failure(
 }
 
 impl ComponentManager {
+    /// Requests switch maintenance using the connection's transaction instrumentation.
     pub async fn request_switch_maintenance_via_state_controller(
         &self,
-        db_pool: &PgPool,
+        db_pool: &db::DatabaseConnection,
         switch_ids: &[SwitchId],
         operation: SwitchMaintenanceOperation,
         initiator: &str,
@@ -372,9 +375,10 @@ impl ComponentManager {
             .map_err(|error| ComponentManagerError::Internal(error.to_string()))?
     }
 
+    /// Requests machine maintenance using the connection's transaction instrumentation.
     pub async fn request_machine_maintenance_via_state_controller(
         &self,
-        db_pool: &PgPool,
+        db_pool: &db::DatabaseConnection,
         machine_ids: &[HostMachineId],
         operation: MachineMaintenanceOperation,
         initiator: &str,
@@ -1206,12 +1210,18 @@ mod tests {
 
     #[carbide_macros::sqlx_test]
     async fn rack_maintenance_scheduler_is_atomic_and_idempotent(pool: PgPool) {
+        let database = db::DatabaseConnection::new(
+            pool.clone(),
+            carbide_instrument::Instrumentation::from_meter_provider(
+                &opentelemetry::metrics::noop::NoopMeterProvider::new(),
+            ),
+        );
         let ready_rack = create_rack_in_state(&pool, RackState::Ready).await;
         let scope = nmx_scope();
 
         assert_eq!(
             request_rack_maintenance_via_state_controller(
-                &pool,
+                &database,
                 &ready_rack,
                 scope.clone(),
                 RackMaintenanceEligibility::RequireReady,
@@ -1256,7 +1266,7 @@ mod tests {
         txn.commit().await.unwrap();
         assert_eq!(
             request_rack_maintenance_via_state_controller(
-                &pool,
+                &database,
                 &ready_rack,
                 scope.clone(),
                 RackMaintenanceEligibility::RequireReady,
@@ -1273,7 +1283,7 @@ mod tests {
         };
         assert_eq!(
             request_rack_maintenance_via_state_controller(
-                &pool,
+                &database,
                 &ready_rack,
                 unrelated_scope,
                 RackMaintenanceEligibility::RequireReady,
@@ -1305,7 +1315,7 @@ mod tests {
         let error_rack = create_rack_in_state(&pool, error_state.clone()).await;
         assert_eq!(
             request_rack_maintenance_via_state_controller(
-                &pool,
+                &database,
                 &error_rack,
                 nmx_scope(),
                 RackMaintenanceEligibility::RequireReady,
@@ -1317,7 +1327,7 @@ mod tests {
         );
         assert_eq!(
             request_rack_maintenance_via_state_controller(
-                &pool,
+                &database,
                 &error_rack,
                 nmx_scope(),
                 RackMaintenanceEligibility::AllowErrorRecovery,
@@ -1350,7 +1360,7 @@ mod tests {
         let credential_manager = TestCredentialManager::default();
         let (first, second) = tokio::join!(
             request_rack_maintenance_via_state_controller(
-                &pool,
+                &database,
                 &race_rack,
                 first_scope,
                 RackMaintenanceEligibility::RequireReady,
@@ -1360,7 +1370,7 @@ mod tests {
                 }),
             ),
             request_rack_maintenance_via_state_controller(
-                &pool,
+                &database,
                 &race_rack,
                 second_scope,
                 RackMaintenanceEligibility::RequireReady,
@@ -1421,7 +1431,7 @@ mod tests {
         };
         assert_eq!(
             request_rack_maintenance_via_state_controller(
-                &pool,
+                &database,
                 &firmware_rack,
                 firmware_scope,
                 RackMaintenanceEligibility::RequireReady,
@@ -1447,7 +1457,7 @@ mod tests {
         txn.commit().await.unwrap();
         assert!(matches!(
             request_rack_maintenance_via_state_controller(
-                &pool,
+                &database,
                 &deleted_rack,
                 nmx_scope(),
                 RackMaintenanceEligibility::RequireReady,
@@ -1469,7 +1479,7 @@ mod tests {
             ..Default::default()
         };
         let error = request_rack_maintenance_via_state_controller(
-            &pool,
+            &database,
             &credential_failure_rack,
             credential_failure_scope,
             RackMaintenanceEligibility::RequireReady,

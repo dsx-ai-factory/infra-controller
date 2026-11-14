@@ -612,7 +612,7 @@ impl MetricHolder {
 
 #[cfg(not(feature = "test-support"))]
 pub(crate) struct SwitchCertificateMonitor {
-    db_pool: PgPool,
+    db_pool: db::DatabaseConnection,
     config: NvLinkConfig,
     component_manager: Option<Arc<ComponentManager>>,
     metric_holder: Arc<MetricHolder>,
@@ -623,7 +623,7 @@ pub(crate) struct SwitchCertificateMonitor {
 
 #[cfg(feature = "test-support")]
 pub struct SwitchCertificateMonitor {
-    db_pool: PgPool,
+    db_pool: db::DatabaseConnection,
     config: NvLinkConfig,
     component_manager: Option<Arc<ComponentManager>>,
     metric_holder: Arc<MetricHolder>,
@@ -738,6 +738,7 @@ impl SwitchCertificateMonitor {
         work_lock_manager_handle: WorkLockManagerHandle,
         instrumentation: Instrumentation,
     ) -> Self {
+        let db_pool = db::DatabaseConnection::new(db_pool, instrumentation.clone());
         let hold_period = config
             .nmx_c_certificate_rotation
             .run_interval

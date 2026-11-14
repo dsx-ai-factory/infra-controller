@@ -31,7 +31,6 @@ use model::component_manager::FirmwareState;
 use model::machine_interface::InterfaceType;
 use model::rack_type::RackFirmwareObjectConfig;
 use model::site_explorer::{ExploredEndpoint, PreingestionState};
-use sqlx::PgPool;
 
 use super::{PreingestionManagerStatic, RackFirmwareDependencies};
 use crate::errors::PreingestionManagerResult;
@@ -50,7 +49,7 @@ impl PreingestionManagerStatic {
     /// no-op completion, and terminal failures.
     pub(super) async fn start_rack_firmware(
         &self,
-        db: &PgPool,
+        db: &db::DatabaseConnection,
         endpoint: &ExploredEndpoint,
     ) -> PreingestionManagerResult<bool> {
         let Some(dependencies) = self.rack_firmware.as_ref() else {
@@ -186,7 +185,7 @@ impl PreingestionManagerStatic {
 
     async fn submit_rack_firmware(
         &self,
-        db: &PgPool,
+        db: &db::DatabaseConnection,
         addresses: &[IpAddr],
         compute_tray: &dyn ComputeTrayManager,
         preparation: PreparedRackFirmware,
@@ -332,7 +331,7 @@ impl PreingestionManagerStatic {
     }
 
     async fn rack_firmware_identity(
-        db: &PgPool,
+        db: &db::DatabaseConnection,
         endpoint: &ExploredEndpoint,
     ) -> Result<Option<(mac_address::MacAddress, Vec<ExploredEndpoint>)>, DatabaseError> {
         let Some(interface) = db::machine_interface::find_by_ip(db, endpoint.address).await? else {
@@ -428,7 +427,7 @@ impl PreingestionManagerStatic {
     /// Polls the RMS job and applies its outcome to every BMC IP alias.
     pub(super) async fn wait_for_rack_firmware(
         &self,
-        db: &PgPool,
+        db: &db::DatabaseConnection,
         endpoint: &ExploredEndpoint,
     ) -> PreingestionManagerResult<()> {
         let Some((bmc_mac, aliases)) = Self::rack_firmware_identity(db, endpoint).await? else {
@@ -610,7 +609,7 @@ impl PreingestionManagerStatic {
 
     async fn set_rack_firmware_state(
         &self,
-        db: &PgPool,
+        db: &db::DatabaseConnection,
         addresses: &[IpAddr],
         state: PreingestionState,
     ) -> PreingestionManagerResult<()> {
@@ -625,7 +624,7 @@ impl PreingestionManagerStatic {
 
     async fn fail_rack_firmware(
         &self,
-        db: &PgPool,
+        db: &db::DatabaseConnection,
         addresses: &[IpAddr],
         reason: String,
     ) -> PreingestionManagerResult<()> {

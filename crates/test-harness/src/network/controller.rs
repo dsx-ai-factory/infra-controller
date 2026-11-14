@@ -44,14 +44,14 @@ impl TestNetworkController {
     pub(crate) fn new(api: Arc<ApiHandle>, processor_id: String, test_meter: &TestMeter) -> Self {
         let controller = StateController::builder()
             .database(
-                api.database_connection.clone(),
+                api.database_connection.pool().clone(),
                 api.work_lock_manager_handle(),
             )
             .meter("carbide_machines", test_meter.meter())
             .processor_id(processor_id)
             .services(
                 NetworkSegmentStateHandlerServices {
-                    db_pool: api.database_connection.clone(),
+                    db_pool: api.database_connection.pool().clone(),
                 }
                 .into(),
             )

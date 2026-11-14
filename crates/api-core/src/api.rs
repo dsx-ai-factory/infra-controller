@@ -17,7 +17,6 @@
 
 pub(crate) mod metrics;
 
-use std::panic::Location;
 use std::pin::Pin;
 use std::sync::{Arc, OnceLock};
 
@@ -51,13 +50,12 @@ use carbide_uuid::machine::{
 };
 use db::db_read::PgPoolReader;
 use db::work_lock_manager::WorkLockManagerHandle;
-use db::{DatabaseError, DatabaseResult, WithTransaction};
+use db::{DatabaseError, WithTransaction};
 use libnmxc::NmxcPool;
 use librms::RmsApi;
 use model::machine::AnyMachine;
 use model::machine::machine_search_config::MachineSearchConfig;
 use model::resource_pool::common::CommonPools;
-use sqlx::PgTransaction;
 use state_controller::controller::Enqueuer;
 use tokio_stream::Stream;
 use tokio_util::sync::CancellationToken;
@@ -99,7 +97,8 @@ pub struct Api {
     /// Event destination for migrated handlers; other paths retain global recording.
     pub(crate) instrumentation: carbide_instrument::Instrumentation,
     // `pub` (not `pub(crate)`): read by the `carbide-api-web` admin UI (e.g. IPAM/DNS pages).
-    pub database_connection: sqlx::PgPool,
+    /// Database pool and Event destination used by API transactions.
+    pub database_connection: db::DatabaseConnection,
     pub(crate) credential_manager: Arc<dyn CredentialManager>,
     pub(crate) certificate_provider: Arc<dyn CertificateProvider>,
     /// Ordinary BMC Redfish traffic: nico-bmc-proxy when `[bmc_proxy]` is
@@ -4540,8 +4539,7 @@ impl Api {
     pub(crate) fn txn_begin(
         &self,
     ) -> impl Future<Output = Result<db::Transaction<'_>, DatabaseError>> {
-        let loc = Location::caller();
-        db::Transaction::begin_with_location(&self.database_connection, loc)
+        db::TransactionVending::txn_begin(&self.database_connection)
     }
 
     pub fn db_reader(&self) -> PgPoolReader {
@@ -4561,11 +4559,10 @@ impl Api {
         machine_id: &MachineId,
         search_config: MachineSearchConfig,
     ) -> impl Future<Output = CarbideResult<(AnyMachine, db::Transaction<'_>)>> {
-        let loc = Location::caller();
+        let txn = self.txn_begin();
         let machine_id = machine_id.to_machine_id();
         async move {
-            let mut txn =
-                db::Transaction::begin_with_location(&self.database_connection, loc).await?;
+            let mut txn = txn.await?;
 
             let machine = match db::machine::find_one(&mut txn, &machine_id, search_config).await {
                 Err(err) => {
@@ -4591,19 +4588,8 @@ impl Api {
 }
 
 impl WithTransaction for Api {
-    #[track_caller]
-    fn with_txn<'pool, T, E>(
-        &'pool self,
-        f: impl for<'txn> FnOnce(
-            &'txn mut PgTransaction<'pool>,
-        ) -> futures::future::BoxFuture<'txn, Result<T, E>>
-        + Send,
-    ) -> impl Future<Output = DatabaseResult<Result<T, E>>>
-    where
-        T: Send,
-        E: Send,
-    {
-        self.database_connection.with_txn(f)
+    fn database_connection(&self) -> &db::DatabaseConnection {
+        &self.database_connection
     }
 }
 

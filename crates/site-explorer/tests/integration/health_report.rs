@@ -58,12 +58,12 @@ fn test_site_explorer(
     let endpoint_explorer = Arc::new(MockEndpointExplorer::default());
     let api = test_harness.api();
     let endpoint_exploration_service = Arc::new(EndpointExplorationService::new(
-        api.database_connection.clone(),
+        api.database_connection.pool().clone(),
         endpoint_explorer.clone(),
         Arc::new(api.runtime_config.get_firmware_config()),
     ));
     let site_explorer = SiteExplorer::new(
-        api.database_connection.clone(),
+        api.database_connection.pool().clone(),
         explorer_config,
         test_harness.test_meter.meter(),
         endpoint_exploration_service,

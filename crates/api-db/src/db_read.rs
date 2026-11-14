@@ -28,6 +28,7 @@ use sqlx::{
 /// - `&mut PgTransaction`
 /// - `&mut PgPoolReader`
 /// - `&PgPool`
+/// - `&crate::DatabaseConnection`
 ///
 /// To make a database function accept a DbReader, you have a few options:
 ///
@@ -227,6 +228,7 @@ impl<'a> DbReader<'a> for &'a mut PgPoolReader {}
 impl<'c> DbReader<'c> for &'c mut PgConnection {}
 impl<'c, 'txn> DbReader<'c> for &'c mut crate::Transaction<'txn> {}
 impl<'c> DbReader<'c> for &'c PgPool {}
+impl<'c> DbReader<'c> for &'c crate::DatabaseConnection {}
 impl AsMut<PgPoolReader> for PgPoolReader {
     fn as_mut(&mut self) -> &mut PgPoolReader {
         self
@@ -336,5 +338,58 @@ impl<'c, 'txn> sqlx::Executor<'c> for &'c mut crate::Transaction<'txn> {
         'c: 'e,
     {
         self.inner.describe(sql)
+    }
+}
+
+impl<'c> sqlx::Executor<'c> for &'c crate::DatabaseConnection {
+    type Database = Postgres;
+
+    fn fetch_many<'e, 'q: 'e, E>(
+        self,
+        query: E,
+    ) -> BoxStream<
+        'e,
+        Result<
+            Either<<Self::Database as Database>::QueryResult, <Self::Database as Database>::Row>,
+            sqlx::Error,
+        >,
+    >
+    where
+        'c: 'e,
+        E: 'q + Execute<'q, Self::Database>,
+    {
+        self.pool().fetch_many(query)
+    }
+
+    fn fetch_optional<'e, 'q: 'e, E>(
+        self,
+        query: E,
+    ) -> BoxFuture<'e, Result<Option<<Self::Database as Database>::Row>, sqlx::Error>>
+    where
+        'c: 'e,
+        E: 'q + Execute<'q, Self::Database>,
+    {
+        self.pool().fetch_optional(query)
+    }
+
+    fn prepare_with<'e>(
+        self,
+        sql: SqlStr,
+        parameters: &'e [<Self::Database as Database>::TypeInfo],
+    ) -> BoxFuture<'e, Result<<Self::Database as Database>::Statement, sqlx::Error>>
+    where
+        'c: 'e,
+    {
+        self.pool().prepare_with(sql, parameters)
+    }
+
+    fn describe<'e>(
+        self,
+        sql: SqlStr,
+    ) -> BoxFuture<'e, Result<Describe<Self::Database>, sqlx::Error>>
+    where
+        'c: 'e,
+    {
+        self.pool().describe(sql)
     }
 }

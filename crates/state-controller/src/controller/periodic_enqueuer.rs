@@ -40,7 +40,7 @@ use crate::per_object::PerObjectStateRecorder;
 /// enabled database object-ID reads run on every replica for local metric filtering.
 pub(super) struct PeriodicEnqueuer<IO: StateControllerIO> {
     /// A database connection pool that can be used for additional queries
-    pub(super) pool: sqlx::PgPool,
+    pub(super) pool: ::db::DatabaseConnection,
     pub(super) work_lock_manager_handle: WorkLockManagerHandle,
     pub(super) io: Arc<IO>,
     pub(super) metric_emitter: Option<EnqueuerMetricsEmitter>,

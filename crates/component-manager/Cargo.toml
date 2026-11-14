@@ -58,6 +58,7 @@ serde_json = { workspace = true }
 tracing = { workspace = true }
 
 [dev-dependencies]
+opentelemetry = { workspace = true }
 carbide-api-db = { path = "../api-db", default-features = false, features = [
   "test-support",
 ] }
