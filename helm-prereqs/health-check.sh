@@ -322,7 +322,7 @@ _check_configmap_key() {
 # _http_check DESC NS LABEL_SELECTOR URL EXPECTED_HTTP_CODE
 _http_check() {
   local desc="$1" ns="$2" selector="$3" url="$4" expected="$5"
-  local pod code
+  local pod code exec_status
   pod=$(kc get pod -n "${ns}" -l "${selector}" \
     --field-selector=status.phase=Running \
     -o jsonpath='{.items[0].metadata.name}')
@@ -334,11 +334,19 @@ _http_check() {
     skip "${desc}: curl not available in pod/${pod}"
     return
   fi
-  code=$(kubectl exec -n "${ns}" "${pod}" -- \
-    curl -sf -o /dev/null -w '%{http_code}' --max-time 5 "${url}" 2>/dev/null || printf '000')
-  if [[ "${code}" == "${expected}" ]]; then
+  if code=$(kubectl exec -n "${ns}" "${pod}" -- \
+    curl -s -o /dev/null -w '%{http_code}' --max-time 5 "${url}" 2>/dev/null); then
+    exec_status=0
+  else
+    exec_status=$?
+  fi
+  if [[ "${exec_status}" -ne 0 ]]; then
+    fail "${desc}: request failed (exec exit code ${exec_status}, HTTP ${code:-unknown})"
+  elif [[ ! "${code}" =~ ^[0-9]{3}$ ]]; then
+    fail "${desc}: invalid HTTP status '${code}' (expected ${expected})"
+  elif [[ "${code}" == "${expected}" ]]; then
     pass "${desc}: HTTP ${code}"
-  elif [[ "${expected}" == "2xx" && "${code}" =~ ^2 ]]; then
+  elif [[ "${expected}" == "2xx" && "${code}" =~ ^2[0-9]{2}$ ]]; then
     pass "${desc}: HTTP ${code}"
   else
     fail "${desc}: HTTP ${code} (expected ${expected})"
@@ -832,8 +840,8 @@ _http_check "nico-dhcp metrics"      "${NICO_NS}" \
   "app.kubernetes.io/name=nico-dhcp"            "http://localhost:1089/metrics"  "200"
 
 if kc get deployment -n "${NICO_NS}" nico-hardware-health &>/dev/null; then
-  _http_check "nico-hardware-health" "${NICO_NS}" \
-    "app.kubernetes.io/name=nico-hardware-health" "http://localhost:9009/"       "200"
+  _http_check "nico-hardware-health metrics" "${NICO_NS}" \
+    "app.kubernetes.io/name=nico-hardware-health" "http://localhost:9009/metrics" "200"
 fi
 
 # TLS: verify nico-api gRPC port presents a certificate
