@@ -13,6 +13,7 @@ import (
 	converterdao "github.com/NVIDIA/infra-controller/rest-api/flow/internal/converter/dao"
 	dbmodel "github.com/NVIDIA/infra-controller/rest-api/flow/internal/db/model"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/eventrule"
+	"github.com/google/uuid"
 	"github.com/uptrace/bun"
 )
 
@@ -204,4 +205,17 @@ func validateEventPlan(
 	}
 
 	return nil
+}
+
+// GetEventTypeForExecution resolves immutable provenance through the accepted execution.
+func (s *Store) GetEventTypeForExecution(ctx context.Context, id uuid.UUID) (eventrule.Type, error) {
+	var kind eventrule.Type
+	err := s.pg.DB.NewSelect().TableExpr("event_action_executions AS execution").
+		ColumnExpr("event.event_type").
+		Join("JOIN events AS event ON event.id = execution.event_id").
+		Where("execution.id = ?", id).Scan(ctx, &kind)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", eventrule.ErrExecutionNotFound
+	}
+	return kind, err
 }

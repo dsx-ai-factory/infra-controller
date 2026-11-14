@@ -147,6 +147,8 @@ func (t *Task) UpdateScheduledTask(
 // UpdateTaskStatus updates the status of the task. Non-nil report and
 // queueExpiresAt values replace their corresponding stored columns. Finished
 // statuses clear queueExpiresAt because the deadline applies only while waiting.
+// Terminal records are immutable: delayed worker updates must not revive a
+// preempted task or overwrite its terminal reason and completion time.
 func (t *Task) UpdateTaskStatus(
 	ctx context.Context,
 	idb bun.IDB,
@@ -184,6 +186,7 @@ func (t *Task) UpdateTaskStatus(
 		Model(t).
 		Column(columns...).
 		Where("id = ?", t.ID).
+		Where("status IN (?)", bun.In(taskcommon.NonTerminalTaskStatuses())).
 		Exec(ctx)
 
 	return err

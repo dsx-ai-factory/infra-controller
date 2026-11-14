@@ -155,6 +155,7 @@ func newProcessor(
 func newExecutorRegistry(config Config) (*eventexecutor.Registry, error) {
 	cfg := eventexecutor.Config{
 		TaskManager: config.TaskManager,
+		EventTypes:  config.Store,
 		AlertSender: config.AlertSender,
 	}
 

@@ -43,6 +43,7 @@ import (
 	"github.com/rs/zerolog/log"
 
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/nicoapi"
+	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/dispatchguard"
 )
 
 // Defaults for the polling loop. Chosen so a typical (Δt ≈ 30-45 min)
@@ -163,6 +164,10 @@ func ReprovisionHostDpus(
 		Bool("update_firmware", updateFirmware).
 		Msg("Starting DPU reprovisioning sequence")
 
+	if err := dispatchguard.Check(ctx); err != nil {
+		return err
+	}
+
 	if err := client.InsertHostUpdateInProgressHealthOverride(
 		ctx, hostMachineID, healthOverrideMessage,
 	); err != nil {
@@ -190,6 +195,10 @@ func ReprovisionHostDpus(
 			}
 		}
 	}()
+
+	if err := dispatchguard.Check(ctx); err != nil {
+		return err
+	}
 
 	if err := client.TriggerDpuReprovisioning(ctx, hostMachineID, updateFirmware); err != nil {
 		return fmt.Errorf(
@@ -249,6 +258,9 @@ func handOffPendingReprovToStateMachine(
 			Str("host_machine_id", hostMachineID).
 			Str("instance_id", instanceID).
 			Msg("Host is Assigned: approving pending DPU reprovisioning via InvokeInstancePower(apply_updates_on_reboot=true); state machine will reboot the host")
+		if err := dispatchguard.Check(ctx); err != nil {
+			return err
+		}
 		if err := client.InvokeInstancePower(ctx, instanceID, true); err != nil {
 			return fmt.Errorf(
 				"dpureprov: failed to approve pending DPU reprovisioning on instance %s (host %s): %w",
@@ -261,6 +273,9 @@ func handOffPendingReprovToStateMachine(
 	log.Info().
 		Str("host_machine_id", hostMachineID).
 		Msg("Host has no attached instance: cold-resetting via AdminPowerControl so the state machine consumes the pending reprovisioning")
+	if err := dispatchguard.Check(ctx); err != nil {
+		return err
+	}
 	if err := client.AdminPowerControl(
 		ctx, hostMachineID, nicoapi.PowerControlColdReset,
 	); err != nil {
@@ -287,6 +302,9 @@ func pollUntilNotPending(
 	interval := opts.pollInterval()
 
 	for {
+		if err := dispatchguard.Check(ctx); err != nil {
+			return err
+		}
 		pending, err := client.IsDpuReprovisioningPendingForHost(ctx, hostMachineID)
 		if err != nil {
 			return fmt.Errorf(
