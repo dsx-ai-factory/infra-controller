@@ -28,10 +28,69 @@ func TestAPIExpectedPowerShelfCreateRequest_Validate(t *testing.T) {
 	validBmcIpAddress := "192.168.1.100"
 
 	tests := []struct {
-		desc      string
-		obj       APIExpectedPowerShelfCreateRequest
-		expectErr bool
+		desc          string
+		obj           APIExpectedPowerShelfCreateRequest
+		expectErr     bool
+		expectedError string
 	}{
+		{
+			desc: "DefaultBmcUsername with 16 multibyte characters",
+			obj: APIExpectedPowerShelfCreateRequest{
+				BmcMacAddress:      "00:11:22:33:44:55",
+				ShelfSerialNumber:  "SERIAL123",
+				SiteID:             "550e8400-e29b-41d4-a716-446655440000",
+				DefaultBmcUsername: cutil.GetPtr(strings.Repeat("é", 16)),
+			},
+		},
+		{
+			desc: "DefaultBmcUsername with 17 multibyte characters",
+			obj: APIExpectedPowerShelfCreateRequest{
+				BmcMacAddress:      "00:11:22:33:44:55",
+				ShelfSerialNumber:  "SERIAL123",
+				SiteID:             "550e8400-e29b-41d4-a716-446655440000",
+				DefaultBmcUsername: cutil.GetPtr(strings.Repeat("é", 17)),
+			},
+			expectErr:     true,
+			expectedError: "defaultBmcUsername: BMC username must be 16 characters or less.",
+		},
+		{
+			desc: "DefaultBmcPassword with 20 multibyte characters",
+			obj: APIExpectedPowerShelfCreateRequest{
+				BmcMacAddress:      "00:11:22:33:44:55",
+				ShelfSerialNumber:  "SERIAL123",
+				SiteID:             "550e8400-e29b-41d4-a716-446655440000",
+				DefaultBmcPassword: cutil.GetPtr(strings.Repeat("é", 20)),
+			},
+		},
+		{
+			desc: "DefaultBmcPassword with 21 multibyte characters",
+			obj: APIExpectedPowerShelfCreateRequest{
+				BmcMacAddress:      "00:11:22:33:44:55",
+				ShelfSerialNumber:  "SERIAL123",
+				SiteID:             "550e8400-e29b-41d4-a716-446655440000",
+				DefaultBmcPassword: cutil.GetPtr(strings.Repeat("é", 21)),
+			},
+			expectErr:     true,
+			expectedError: "defaultBmcPassword: BMC password must be 20 characters or less.",
+		},
+		{
+			desc: "ShelfSerialNumber with 32 multibyte characters",
+			obj: APIExpectedPowerShelfCreateRequest{
+				BmcMacAddress:     "00:11:22:33:44:55",
+				ShelfSerialNumber: strings.Repeat("é", 32),
+				SiteID:            "550e8400-e29b-41d4-a716-446655440000",
+			},
+		},
+		{
+			desc: "ShelfSerialNumber with 33 multibyte characters",
+			obj: APIExpectedPowerShelfCreateRequest{
+				BmcMacAddress:     "00:11:22:33:44:55",
+				ShelfSerialNumber: strings.Repeat("é", 33),
+				SiteID:            "550e8400-e29b-41d4-a716-446655440000",
+			},
+			expectErr:     true,
+			expectedError: "shelfSerialNumber: Shelf serial number must be 32 characters or less.",
+		},
 		{
 			desc: "ok when all required fields are provided",
 			obj: APIExpectedPowerShelfCreateRequest{
@@ -291,6 +350,9 @@ func TestAPIExpectedPowerShelfCreateRequest_Validate(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.desc, func(t *testing.T) {
 			err := tc.obj.Validate()
+			if tc.expectedError != "" {
+				assert.EqualError(t, err, tc.expectedError)
+			}
 			assert.Equal(t, tc.expectErr, err != nil)
 			if err != nil {
 				fmt.Println(err.Error())
@@ -362,10 +424,53 @@ func TestAPIExpectedPowerShelfUpdateRequest_Validate(t *testing.T) {
 	validPassword := "password123"
 
 	tests := []struct {
-		desc      string
-		obj       APIExpectedPowerShelfUpdateRequest
-		expectErr bool
+		desc          string
+		obj           APIExpectedPowerShelfUpdateRequest
+		expectErr     bool
+		expectedError string
 	}{
+		{
+			desc: "DefaultBmcUsername with 16 multibyte characters",
+			obj: APIExpectedPowerShelfUpdateRequest{
+				DefaultBmcUsername: cutil.GetPtr(strings.Repeat("é", 16)),
+			},
+		},
+		{
+			desc: "DefaultBmcUsername with 17 multibyte characters",
+			obj: APIExpectedPowerShelfUpdateRequest{
+				DefaultBmcUsername: cutil.GetPtr(strings.Repeat("é", 17)),
+			},
+			expectErr:     true,
+			expectedError: "defaultBmcUsername: BMC Username must be 1-16 characters.",
+		},
+		{
+			desc: "DefaultBmcPassword with 20 multibyte characters",
+			obj: APIExpectedPowerShelfUpdateRequest{
+				DefaultBmcPassword: cutil.GetPtr(strings.Repeat("é", 20)),
+			},
+		},
+		{
+			desc: "DefaultBmcPassword with 21 multibyte characters",
+			obj: APIExpectedPowerShelfUpdateRequest{
+				DefaultBmcPassword: cutil.GetPtr(strings.Repeat("é", 21)),
+			},
+			expectErr:     true,
+			expectedError: "defaultBmcPassword: BMC Password must be 1-20 characters.",
+		},
+		{
+			desc: "ShelfSerialNumber with 32 multibyte characters",
+			obj: APIExpectedPowerShelfUpdateRequest{
+				ShelfSerialNumber: cutil.GetPtr(strings.Repeat("é", 32)),
+			},
+		},
+		{
+			desc: "ShelfSerialNumber with 33 multibyte characters",
+			obj: APIExpectedPowerShelfUpdateRequest{
+				ShelfSerialNumber: cutil.GetPtr(strings.Repeat("é", 33)),
+			},
+			expectErr:     true,
+			expectedError: "shelfSerialNumber: Shelf Serial Number must be 1-32 characters.",
+		},
 		{
 			desc: "ok when all fields are provided",
 			obj: APIExpectedPowerShelfUpdateRequest{
@@ -556,6 +661,9 @@ func TestAPIExpectedPowerShelfUpdateRequest_Validate(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.desc, func(t *testing.T) {
 			err := tc.obj.Validate()
+			if tc.expectedError != "" {
+				assert.EqualError(t, err, tc.expectedError)
+			}
 			assert.Equal(t, tc.expectErr, err != nil)
 			if err != nil {
 				fmt.Println(err.Error())
