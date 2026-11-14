@@ -2058,11 +2058,10 @@ func allocateMachinesForBatch(
 
 	// Get all available Machines for the Instance Type
 	filterInput := cdbm.MachineFilterInput{
-		InstanceTypeIDs:               []uuid.UUID{instancetype.ID},
-		IsAssigned:                    cutil.GetPtr(false),
-		Statuses:                      []string{cdbm.MachineStatusReady},
-		Labels:                        machineLabelSelector,
-		ExcludeForceDeletionRequested: true,
+		InstanceTypeIDs: []uuid.UUID{instancetype.ID},
+		IsAssigned:      cutil.GetPtr(false),
+		Statuses:        []string{cdbm.MachineStatusReady},
+		Labels:          machineLabelSelector,
 	}
 	machines, _, err := mcDAO.GetAll(ctx, tx, filterInput, cdbp.PageInput{Limit: cutil.GetPtr(cdbp.TotalLimit)}, nil)
 	if err != nil {
@@ -2184,7 +2183,7 @@ func allocateMachinesForBatch(
 				return common.ErrMachineUnavailable
 			}
 
-			if umc.IsAssigned || umc.IsForceDeletionQuarantined() {
+			if umc.IsAssigned {
 				return common.ErrMachineUnavailable
 			}
 
