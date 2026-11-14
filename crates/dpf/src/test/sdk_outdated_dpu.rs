@@ -31,7 +31,7 @@ use kube::core::ObjectMeta;
 
 use crate::crds::dpfoperatorconfigs_generated::DPFOperatorConfig;
 use crate::crds::dpudeployments_generated::{
-    DPUDeployment, DpuDeploymentDpusDpuSets, DpuDeploymentDpusDpuSetsDpuNodeSelector,
+    DPUDeployment, DpuDeploymentDpusDpuSets,
 };
 use crate::crds::dpus_generated::{DPU, DpuStatusPhase};
 use crate::crds::dpuservicetemplates_generated::DPUServiceTemplate;
@@ -40,7 +40,7 @@ use crate::repository::{
     DpfOperatorConfigRepository, DpuDeploymentRepository, DpuRepository,
     DpuServiceTemplateRepository, K8sConfigRepository,
 };
-use crate::sdk::{DpfSdkBuilder, ResourceLabeler};
+use crate::sdk::{build_dpu_node_selector, DpfSdkBuilder, ResourceLabeler};
 use crate::types::{DPU_ENABLED_NODE_LABEL, DpuDeploymentType, DpuPhase};
 
 const TEST_NS: &str = "test-namespace";
@@ -356,10 +356,7 @@ fn deployment_with_selector_for_fixture(
         dpu_annotations: None,
         dpu_selector: None,
         name_suffix: "default".to_string(),
-        dpu_node_selector: Some(DpuDeploymentDpusDpuSetsDpuNodeSelector {
-            match_expressions: None,
-            match_labels: Some(match_labels),
-        }),
+        dpu_node_selector: Some(build_dpu_node_selector(match_labels)),
         dpu_cluster_selector: None,
         dpu_device_selector: None,
         node_selector: None,
