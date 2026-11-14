@@ -773,6 +773,12 @@ func TestManageInstance_deleteInstanceFromDB(t *testing.T) {
 		}, []string{"V1-1234567890"}, cdbm.DpuExtensionServiceStatusReady, ipu)
 	_ = util.TestBuildDpuExtensionServiceDeployment(t, dbSession, des.ID, site.ID, tenant.ID, instance.ID, "V1-1234567890", cdbm.DpuExtensionServiceDeploymentStatusRunning, tnu)
 
+	// Deleting and replacement Interfaces together can exceed the default page limit
+	subnet := util.TestBuildSubnet(t, dbSession, tenant, vpc, "testSubnet", cdbm.SubnetStatusReady, cutil.GetPtr(uuid.New()))
+	for i := range cdbp.DefaultLimit + 1 {
+		util.TestBuildInterface(t, dbSession, &instance.ID, &subnet.ID, nil, i == 0, nil, nil, nil, &tnu.ID, cdbm.InterfaceStatusReady)
+	}
+
 	tx, err := cdb.BeginTx(ctx, dbSession, &sql.TxOptions{})
 	require.NoError(t, err)
 
@@ -808,6 +814,10 @@ func TestManageInstance_deleteInstanceFromDB(t *testing.T) {
 	assert.Equal(t, cdbm.MachineStatusReady, afterCommit.Status)
 	_, readErr = isd.GetByID(ctx, nil, instance.ID, nil, false)
 	assert.ErrorIs(t, readErr, cdb.ErrDoesNotExist)
+
+	ifcs, _, err := cdbm.NewInterfaceDAO(dbSession).GetAll(ctx, nil, cdbm.InterfaceFilterInput{InstanceIDs: []uuid.UUID{instance.ID}}, cdbp.PageInput{Limit: cutil.GetPtr(cdbp.TotalLimit)}, nil)
+	require.NoError(t, err)
+	require.Empty(t, ifcs)
 
 	ibis, _, err := ibiDAO.GetAll(ctx, nil, cdbm.InfiniBandInterfaceFilterInput{InstanceIDs: []uuid.UUID{instance.ID}}, cdbp.PageInput{Limit: cutil.GetPtr(cdbp.TotalLimit)}, nil)
 	require.NoError(t, err)
@@ -1028,8 +1038,8 @@ func TestManageInstance_UpdateInstancesInDB(t *testing.T) {
 	)
 	assert.Nil(t, err)
 
-	// Set created earlier than the inventory receipt interval
-	_, err = dbSession.DB.Exec("UPDATE instance SET updated = ? WHERE id = ?", time.Now().Add(-time.Duration(cutil.DefaultInventoryReceiptInterval)*2), instance2.ID.String())
+	// Set created and updated earlier than the inventory receipt interval
+	_, err = dbSession.DB.Exec("UPDATE instance SET created = ?, updated = ? WHERE id = ?", time.Now().Add(-time.Duration(cutil.DefaultInventoryReceiptInterval)*2), time.Now().Add(-time.Duration(cutil.DefaultInventoryReceiptInterval)*2), instance2.ID.String())
 	assert.NoError(t, err)
 
 	instance2Subnet := util.TestBuildInterface(t, dbSession, &instance2.ID, &subnet1.ID, nil, true, nil, nil, nil, &tnu.ID, cdbm.InterfaceStatusPending)
@@ -1222,8 +1232,8 @@ func TestManageInstance_UpdateInstancesInDB(t *testing.T) {
 	)
 	assert.Nil(t, err)
 
-	// Set updated earlier than the inventory receipt interval
-	_, err = dbSession.DB.Exec("UPDATE instance SET updated = ? WHERE id = ?", time.Now().Add(-time.Duration(cutil.DefaultInventoryReceiptInterval)*2), instance8.ID.String())
+	// Set created and updated earlier than the inventory receipt interval
+	_, err = dbSession.DB.Exec("UPDATE instance SET created = ?, updated = ? WHERE id = ?", time.Now().Add(-time.Duration(cutil.DefaultInventoryReceiptInterval)*2), time.Now().Add(-time.Duration(cutil.DefaultInventoryReceiptInterval)*2), instance8.ID.String())
 	assert.NoError(t, err)
 
 	// Instance 9 is in Ready state and power status is Rebooting, gets set to BootCompleted
@@ -2216,6 +2226,24 @@ func TestManageInstance_UpdateInstancesInDB(t *testing.T) {
 	_, err = dbSession.DB.Exec("UPDATE instance SET created = ? WHERE id = ?", time.Now().Add(-time.Duration(cutil.DefaultInventoryReceiptInterval)*2), instance12.ID.String())
 	assert.NoError(t, err)
 
+	// Created within the inventory interval, so the Site's inventory can predate it
+	recentTerminatingInstance, err := instanceDAO.Create(
+		ctx, nil,
+		cdbm.InstanceCreateInput{
+			Name:                     "test-instance-recent-terminating",
+			TenantID:                 tenant.ID,
+			InfrastructureProviderID: ip.ID,
+			SiteID:                   site3.ID,
+			InstanceTypeID:           &instanceType3.ID,
+			VpcID:                    vpc3.ID,
+			ControllerInstanceID:     cutil.GetPtr(uuid.New()),
+			Labels:                   map[string]string{},
+			Status:                   cdbm.InstanceStatusTerminating,
+			CreatedBy:                tnu.ID,
+		},
+	)
+	assert.NoError(t, err)
+
 	// --- Site 4: NVLink Interface deletion strategy test scenarios ---
 	site4 := util.TestBuildSite(t, dbSession, ip, "test-site-4", cdbm.SiteStatusRegistered, nil, ipu)
 	vpc4 := util.TestBuildVpc(t, dbSession, ip, site4, tenant, "test-vpc-4")
@@ -2502,8 +2530,8 @@ func TestManageInstance_UpdateInstancesInDB(t *testing.T) {
 		deletingInstance                      *cdbm.Instance
 		deletedInstances                      []*cdbm.Instance
 		missingInstances                      []*cdbm.Instance
-		// notMissingInstances are absent from the inventory but must keep their state,
-		// because the page carried no basis for calling them missing.
+		// notMissingInstances are absent from the inventory but must keep their state, because the
+		// page carried no basis for calling them missing or they may postdate the Site's inventory.
 		notMissingInstances                   []*cdbm.Instance
 		restoredInstance                      *cdbm.Instance
 		unpairedInstances                     []*cdbm.Instance
@@ -2611,7 +2639,8 @@ func TestManageInstance_UpdateInstancesInDB(t *testing.T) {
 					PageSize:    25,
 				},
 			},
-			deletedInstances: []*cdbm.Instance{instance12},
+			deletedInstances:    []*cdbm.Instance{instance12},
+			notMissingInstances: []*cdbm.Instance{recentTerminatingInstance},
 		},
 		{
 			name:             "test paged Instance inventory processing, first page",
@@ -3864,5 +3893,61 @@ func TestUpdateInstancesInDB_SpectrumXAttachmentReconciliation(t *testing.T) {
 		require.NotNil(t, persisted.BridgeName)
 		assert.Equal(t, "br-new", *persisted.BridgeName, "the reported bridge must be applied")
 		assert.Nil(t, persisted.OvnNetworkName, "an omitted ovn_network_name must clear the stale persisted value")
+	})
+}
+
+// TestUpdateInstancesInDB_InfiniBandInterfaceReconciliation covers the InfiniBand Interface branch
+// of the Instance inventory activity, on the SpectrumX fixture's Site and Instance.
+func TestUpdateInstancesInDB_InfiniBandInterfaceReconciliation(t *testing.T) {
+	// Config and status Interfaces are index-aligned by Core. A truncated status list must not
+	// panic the activity or shift another Interface's GUID onto this row.
+	t.Run("a status list shorter than the config list leaves the unmatched Interface alone", func(t *testing.T) {
+		fx := newSpectrumXInventoryFixture(t)
+		ctx := context.Background()
+		const device = "MT2910 Family [ConnectX-7]"
+		controllerPartitionID := uuid.New()
+		partition := util.TestBuildInfiniBandPartition(t, fx.dbSession, "ib-partition", fx.site, fx.tenant, &controllerPartitionID, cdbm.InfiniBandPartitionStatusReady, false)
+		first := util.TestBuildInfiniBandInterface(t, fx.dbSession, fx.instance.ID, fx.site.ID, partition.ID, device, 0, true, nil, cdbm.InfiniBandInterfaceStatusPending, false)
+		second := util.TestBuildInfiniBandInterface(t, fx.dbSession, fx.instance.ID, fx.site.ID, partition.ID, device, 1, true, nil, cdbm.InfiniBandInterfaceStatusPending, false)
+
+		configs := []*corev1.InstanceIBInterfaceConfig{}
+		for _, ibi := range []*cdbm.InfiniBandInterface{first, second} {
+			configs = append(configs, &corev1.InstanceIBInterfaceConfig{
+				Device:         device,
+				DeviceInstance: uint32(ibi.DeviceInstance),
+				FunctionType:   corev1.InterfaceFunctionType_PHYSICAL_FUNCTION,
+				IbPartitionId:  &corev1.IBPartitionId{Value: controllerPartitionID.String()},
+			})
+		}
+
+		_, err := fx.manager.UpdateInstancesInDB(ctx, fx.site.ID, &corev1.InstanceInventory{
+			InventoryStatus: corev1.InventoryStatus_INVENTORY_STATUS_SUCCESS,
+			Timestamp:       timestamppb.Now(),
+			Instances: []*corev1.Instance{{
+				Id:     &corev1.InstanceId{Value: fx.instance.ControllerInstanceID.String()},
+				Config: &corev1.InstanceConfig{Infiniband: &corev1.InstanceInfinibandConfig{IbInterfaces: configs}},
+				Status: &corev1.InstanceStatus{Infiniband: &corev1.InstanceInfinibandStatus{
+					IbInterfaces:  []*corev1.InstanceIBInterfaceStatus{{Guid: cutil.GetPtr("1070fd0300bd43ad")}},
+					ConfigsSynced: corev1.SyncState_SYNCED,
+				}},
+			}},
+			InventoryPage: &corev1.InventoryPage{
+				TotalPages: 1, CurrentPage: 1, PageSize: 1, TotalItems: 1,
+				ItemIds: []string{fx.instance.ControllerInstanceID.String()},
+			},
+		})
+		require.NoError(t, err)
+
+		ibiDAO := cdbm.NewInfiniBandInterfaceDAO(fx.dbSession)
+		firstPersisted, err := ibiDAO.GetByID(ctx, nil, first.ID, nil)
+		require.NoError(t, err)
+		require.NotNil(t, firstPersisted.GUID)
+		assert.Equal(t, "1070fd0300bd43ad", *firstPersisted.GUID)
+		assert.Equal(t, cdbm.InfiniBandInterfaceStatusReady, firstPersisted.Status)
+
+		secondPersisted, err := ibiDAO.GetByID(ctx, nil, second.ID, nil)
+		require.NoError(t, err)
+		assert.Nil(t, secondPersisted.GUID, "the second Interface has no reported status, so it must stay empty")
+		assert.Equal(t, cdbm.InfiniBandInterfaceStatusPending, secondPersisted.Status)
 	})
 }

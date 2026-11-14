@@ -289,14 +289,22 @@ func (mde ManageDpuExtensionService) UpdateDpuExtensionServicesInDB(ctx context.
 			}
 		} else if !dpuExtensionService.IsMissingOnSite {
 			// Mark DPU Extension Service as missing on Site
-			_, err := dpuExtensionServiceDAO.Update(ctx, nil, cdbm.DpuExtensionServiceUpdateInput{DpuExtensionServiceID: dpuExtensionService.ID, IsMissingOnSite: cutil.GetPtr(true)})
+			_, err := dpuExtensionServiceDAO.Update(ctx, nil, cdbm.DpuExtensionServiceUpdateInput{
+				DpuExtensionServiceID: dpuExtensionService.ID,
+				Status:                cutil.GetPtr(cdbm.DpuExtensionServiceStatusError),
+				IsMissingOnSite:       cutil.GetPtr(true),
+			})
 			if err != nil {
 				slogger.Error().Err(err).Msg("failed to mark DPU Extension Service as missing on Site in DB")
 				continue
 			}
 
 			// Create status detail for DPU Extension Service
-			_, err = sdDAO.Create(ctx, nil, cdbm.StatusDetailCreateInput{EntityID: dpuExtensionService.ID.String(), Status: cdbm.DpuExtensionServiceStatusError, Message: cutil.GetPtr("DPU Extension Service is missing on Site")})
+			_, err = sdDAO.Create(ctx, nil, cdbm.StatusDetailCreateInput{
+				EntityID: dpuExtensionService.ID.String(),
+				Status:   cdbm.DpuExtensionServiceStatusError,
+				Message:  cutil.GetPtr("DPU Extension Service is missing on Site"),
+			})
 			if err != nil {
 				slogger.Error().Err(err).Msg("failed to create status detail for DPU Extension Service in DB")
 				continue

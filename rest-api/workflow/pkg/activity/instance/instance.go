@@ -735,6 +735,10 @@ func (mi ManageInstance) UpdateInstancesInDB(ctx context.Context, siteID uuid.UU
 					continue
 				}
 
+				if idx >= len(controllerInstance.Status.Infiniband.IbInterfaces) {
+					slogger.Warn().Int("InfiniBand Interface Index", idx).Msg("Site Controller Instance is missing matching InfiniBand Interface status")
+					continue
+				}
 				interfaceStatus := controllerInstance.Status.Infiniband.IbInterfaces[idx]
 				if interfaceStatus != nil {
 
@@ -1310,6 +1314,12 @@ func (mi ManageInstance) UpdateInstancesInDB(ctx context.Context, siteID uuid.UU
 	for _, instance := range instancesToTerminate {
 		slogger := logger.With().Str("Instance ID", instance.ID.String()).Logger()
 
+		// An Instance created within the inventory interval can be absent from an inventory the Site
+		// collected before it existed. Created, unlike Updated, is not refreshed by repeated requests.
+		if site.IsTimeWithinStaleInventoryThreshold(instance.Created) {
+			continue
+		}
+
 		// If the Instance was terminating, we can proceed with removing it from the DB
 		if instance.Status == cdbm.InstanceStatusTerminating {
 			tx, err := cdb.BeginTx(ctx, mi.dbSession, &sql.TxOptions{})
@@ -1336,11 +1346,6 @@ func (mi ManageInstance) UpdateInstancesInDB(ctx context.Context, siteID uuid.UU
 				}
 			}
 		} else if instance.ControllerInstanceID != nil {
-			// Was this created within inventory receipt interval? If so, we may be processing an older inventory
-			if site.IsTimeWithinStaleInventoryThreshold(instance.Created) {
-				continue
-			}
-
 			status := cdbm.InstanceStatusError
 			statusMessage := "Instance is missing on Site"
 
@@ -1580,7 +1585,7 @@ func (mi ManageInstance) deleteInstanceFromDB(ctx context.Context, tx *cdb.Tx, i
 	// Delete interface(s) corresponding to instance
 	isDAO := cdbm.NewInterfaceDAO(mi.dbSession)
 
-	iss, _, err := isDAO.GetAll(ctx, tx, cdbm.InterfaceFilterInput{InstanceIDs: []uuid.UUID{instance.ID}}, cdbp.PageInput{}, nil)
+	iss, _, err := isDAO.GetAll(ctx, tx, cdbm.InterfaceFilterInput{InstanceIDs: []uuid.UUID{instance.ID}}, cdbp.PageInput{Limit: cwutil.GetPtr(cdbp.TotalLimit)}, nil)
 	if err != nil {
 		logger.Error().Err(err).Msg("failed to retrieve interfaces from DB")
 		terr := tx.Rollback()
