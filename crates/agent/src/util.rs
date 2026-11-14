@@ -162,6 +162,27 @@ impl UrlResolver {
     }
 }
 
+/// The PXE server's addresses, or none when `carbide-pxe.forge` doesn't resolve. Only an
+/// interface without an explicit `booturl` needs them, and the network reconcile already
+/// fails such an interface when there are none, so a DPU that doesn't need them still starts.
+fn pxe_ips_or_empty(resolved: Result<Vec<IpAddr>, eyre::Report>) -> Vec<IpAddr> {
+    match resolved {
+        Ok(ips) => {
+            // This log should be removed after some time.
+            tracing::info!(pxe_ip_addresses = ?ips, "Pxe server resolved");
+            ips
+        }
+        Err(e) => {
+            tracing::warn!(
+                error = %e,
+                "carbide-pxe could not be resolved; DHCP will offer no PXE boot address. \
+                 An interface without an explicit booturl fails the network reconcile."
+            );
+            vec![]
+        }
+    }
+}
+
 impl ServiceAddresses {
     /// Resolve all service addresses (PXE, NTP, DNS) used by the agent.
     ///
@@ -179,12 +200,7 @@ impl ServiceAddresses {
 
         let mut url_resolver = UrlResolver::try_new()?;
 
-        let pxe_ips = url_resolver
-            .resolve("carbide-pxe.forge")
-            .await
-            .wrap_err("DNS resolver for carbide-pxe")?;
-        // This log should be removed after some time.
-        tracing::info!(pxe_ip_addresses = ?pxe_ips, "Pxe server resolved");
+        let pxe_ips = pxe_ips_or_empty(url_resolver.resolve("carbide-pxe.forge").await);
 
         let ntpservers = match url_resolver.resolve("carbide-ntp.forge").await {
             Ok(x) => {
@@ -382,6 +398,16 @@ mod tests {
     use rand::SeedableRng;
 
     use super::*;
+
+    #[test]
+    fn an_unresolvable_pxe_name_leaves_no_addresses_instead_of_failing() {
+        let ip: IpAddr = "192.0.2.80".parse().unwrap();
+        assert_eq!(pxe_ips_or_empty(Ok(vec![ip])), vec![ip]);
+        assert_eq!(
+            pxe_ips_or_empty(Err(eyre::eyre!("no record for carbide-pxe.forge"))),
+            Vec::<IpAddr>::new()
+        );
+    }
 
     #[test]
     fn polling_jitter_preserves_minimum_and_bounds() {
