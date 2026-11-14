@@ -1796,3 +1796,10 @@ func TestScheduledOperationFrom(t *testing.T) {
 		})
 	}
 }
+
+func TestQueueOptionsFrom(t *testing.T) {
+	t.Run("internal preempt numeric value remains public reject", func(t *testing.T) {
+		strategy, _ := QueueOptionsFrom(&pb.QueueOptions{ConflictStrategy: pb.ConflictStrategy(operation.ConflictStrategyPreempt)})
+		require.Equal(t, operation.ConflictStrategyReject, strategy)
+	})
+}
