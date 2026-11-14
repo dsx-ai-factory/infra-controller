@@ -648,6 +648,10 @@ pub struct CarbideConfig {
     #[serde(default)]
     pub rack_state_controller: RackStateControllerConfig,
 
+    /// NVLink Domain controller scheduling, independent of the Rack controller.
+    #[serde(default)]
+    pub nvlink_domain_state_controller: NvLinkDomainStateControllerConfig,
+
     /// PowerShelfStateController related configuration parameter
     #[serde(default)]
     pub power_shelf_state_controller: PowerShelfStateControllerConfig,
@@ -4261,6 +4265,15 @@ pub struct PowerShelfStateControllerConfig {
     /// ```
     #[serde(default)]
     pub rack_firmware_reprovisioning_enabled: bool,
+}
+
+/// NVLink Domain controller scheduling configuration.
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct NvLinkDomainStateControllerConfig {
+    /// Common scheduling and concurrency settings; defaults match Rack.
+    #[serde(default)]
+    pub controller: StateControllerConfig,
 }
 
 /// RackStateController related config

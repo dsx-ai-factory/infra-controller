@@ -1309,6 +1309,7 @@ dependencies = [
  "carbide-mqtt-common",
  "carbide-network",
  "carbide-network-segment-controller",
+ "carbide-nvlink-domain-controller",
  "carbide-nvlink-manager",
  "carbide-power-shelf-controller",
  "carbide-preingestion-manager",
@@ -3047,6 +3048,23 @@ dependencies = [
  "tokio",
  "tonic",
  "tracing",
+ "uuid",
+]
+
+[[package]]
+name = "carbide-nvlink-domain-controller"
+version = "0.0.0"
+dependencies = [
+ "async-trait",
+ "carbide-api-db",
+ "carbide-api-model",
+ "carbide-macros",
+ "carbide-sqlx-testing",
+ "config-version",
+ "sqlx",
+ "state-controller",
+ "tokio",
+ "tokio-util",
  "uuid",
 ]
 
