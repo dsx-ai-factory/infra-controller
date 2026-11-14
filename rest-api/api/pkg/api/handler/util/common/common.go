@@ -1515,17 +1515,25 @@ func AuthorizeProviderSiteForCore(in AuthorizeProviderSiteForCoreInput) (tclient
 		return nil, "", apiErr
 	}
 
-	if site.Status != cdbm.SiteStatusRegistered {
-		return nil, "", cutil.NewAPIError(http.StatusBadRequest, "Site is not in Registered state, unable to execute operation on Site", nil)
+	stc, apiErr := RegisteredSiteClient(in.Logger, in.SCP, site)
+	if apiErr != nil {
+		return nil, "", apiErr
 	}
-
-	stc, err := in.SCP.GetClientByID(site.ID)
-	if err != nil {
-		in.Logger.Error().Err(err).Msg("failed to retrieve Temporal client for Site")
-		return nil, "", cutil.NewAPIError(http.StatusInternalServerError, "Failed to retrieve client for Site", nil)
-	}
-
 	return stc, site.ID.String(), nil
+}
+
+// RegisteredSiteClient checks readiness and resolves an already-authorized
+// Site's Temporal client without querying the database.
+func RegisteredSiteClient(logger zerolog.Logger, pool SiteTemporalClientPool, site *cdbm.Site) (tclient.Client, *cutil.APIError) {
+	if site.Status != cdbm.SiteStatusRegistered {
+		return nil, cutil.NewAPIError(http.StatusBadRequest, "Site is not in Registered state, unable to execute operation on Site", nil)
+	}
+	stc, err := pool.GetClientByID(site.ID)
+	if err != nil {
+		logger.Error().Err(err).Msg("failed to retrieve Temporal client for Site")
+		return nil, cutil.NewAPIError(http.StatusInternalServerError, "Failed to retrieve client for Site", nil)
+	}
+	return stc, nil
 }
 
 // IsTenant ensures that user is authorized to act as a Tenant Admin for the org.

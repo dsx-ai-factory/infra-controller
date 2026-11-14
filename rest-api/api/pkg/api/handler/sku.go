@@ -5,6 +5,8 @@ package handler
 
 import (
 	"context"
+	"crypto/sha256"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -16,6 +18,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/labstack/echo/v4"
 	"go.opentelemetry.io/otel/attribute"
+	temporalEnums "go.temporal.io/api/enums/v1"
 	tclient "go.temporal.io/sdk/client"
 	"google.golang.org/protobuf/types/known/structpb"
 
@@ -408,6 +411,9 @@ func (csh CreateSkuHandler) Handle(c echo.Context) error {
 		})
 	}
 	if err != nil {
+		if errors.Is(err, cdb.ErrXactAdvisoryLockFailed) {
+			return cutil.NewAPIErrorResponse(c, http.StatusConflict, "SKU was created in Core but another request is changing the REST record; refresh the SKU before retrying", nil)
+		}
 		errorChecker := cdb.PostgresErrorChecker{}
 		if errorChecker.IsUniqueConstraintError(err) {
 			message := fmt.Sprintf(
@@ -664,6 +670,9 @@ func (ush UpdateSkuHandler) Handle(c echo.Context) error {
 		})
 	}
 	if err != nil {
+		if errors.Is(err, cdb.ErrXactAdvisoryLockFailed) {
+			return cutil.NewAPIErrorResponse(c, http.StatusConflict, "SKU was updated in Core but another request is changing the REST record; refresh the SKU before retrying", nil)
+		}
 		logger.Error().Err(err).Str("skuID", skuID).Str("siteID", siteID).
 			Msg("SKU updated in Core but failed to update REST DB")
 		return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "SKU was updated in Core but failed to update REST DB", nil)
@@ -709,6 +718,10 @@ func (dsh DeleteSkuHandler) Handle(c echo.Context) error {
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}
+	// Lookup, lock admission, Core communication, and local cleanup share the
+	// WorkflowContextTimeout cap or the caller's earlier deadline.
+	ctx, cancel := context.WithTimeout(ctx, cutil.WorkflowContextTimeout)
+	defer cancel()
 
 	skuID := c.Param("id")
 	if skuID == "" {
@@ -719,6 +732,10 @@ func (dsh DeleteSkuHandler) Handle(c echo.Context) error {
 
 	skuDAO := cdbm.NewSkuDAO(dsh.dbSession)
 	savedSKU, err := skuDAO.Get(ctx, nil, skuID)
+	if ctx.Err() != nil {
+		logger.Warn().Err(ctx.Err()).Str("skuID", skuID).Msg("SKU deletion deadline expired during lookup")
+		return cutil.NewAPIErrorResponse(c, http.StatusGatewayTimeout, "SKU deletion timed out", nil)
+	}
 	if errors.Is(err, cdb.ErrDoesNotExist) {
 		return cutil.NewAPIErrorResponse(c, http.StatusNotFound, "Could not find SKU with the specified ID", nil)
 	}
@@ -735,35 +752,100 @@ func (dsh DeleteSkuHandler) Handle(c echo.Context) error {
 		User:      dbUser,
 		SiteID:    savedSKU.SiteID.String(),
 	}
-	if len(savedSKU.AssociatedMachineIds) > 0 {
-		// Authorize the caller before revealing associations. Rejecting an
-		// in-use SKU needs neither a Registered Site nor a Temporal client.
-		_, apiErr := common.AuthorizeProviderSite(authInput)
-		if apiErr != nil {
-			return cutil.NewAPIErrorResponse(c, apiErr.Code, apiErr.Message, apiErr.Data)
-		}
-		logger.Warn().Str("skuID", skuID).Msg("SKU is associated with machines and cannot be deleted")
-		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "SKU is associated with machines and cannot be deleted", nil)
+	// Authorization precedes association and reference disclosure. Rejecting an
+	// in-use SKU needs neither a Registered Site nor a Temporal client.
+	authorizedSite, apiErr := common.AuthorizeProviderSite(authInput)
+	if ctx.Err() != nil {
+		logger.Warn().Err(ctx.Err()).Str("skuID", skuID).Msg("SKU deletion deadline expired during authorization")
+		return cutil.NewAPIErrorResponse(c, http.StatusGatewayTimeout, "SKU deletion timed out", nil)
 	}
-
-	stc, siteID, apiErr := common.AuthorizeProviderSiteForCore(authInput)
 	if apiErr != nil {
 		return cutil.NewAPIErrorResponse(c, apiErr.Code, apiErr.Message, apiErr.Data)
 	}
-
-	logger.Info().Str("skuID", skuID).Str("siteID", siteID).Msg("deleting SKU via Core proxy")
-	apiErr = common.ExecuteCoreGRPC(ctx, stc, corev1.Forge_DeleteSku_FullMethodName, &corev1.SkuIdList{Ids: []string{skuID}}, nil, siteID)
-	if apiErr != nil {
-		if apiErr.Code != http.StatusNotFound {
-			logAPIError(logger, apiErr, "failed to delete SKU via Core proxy")
-			return cutil.NewAPIErrorResponse(c, apiErr.Code, apiErr.Message, nil)
+	siteID := savedSKU.SiteID.String()
+	// A reference committed while we wait for the SKU lock must be visible to
+	// the subsequent query even when the database's default isolation is stronger.
+	err = cdb.WithTxOpts(ctx, dsh.dbSession, &sql.TxOptions{Isolation: sql.LevelReadCommitted}, func(tx *cdb.Tx) error {
+		// The advisory lock excludes SKU mutations. UPDATE excludes KEY SHARE
+		// attachments until Core returns and local cleanup commits or rolls back.
+		err := tx.TryAcquireAdvisoryLock(ctx, cdb.GetAdvisoryLockIDFromString(skuID), nil)
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			return err
 		}
-		logger.Warn().Str("skuID", skuID).Str("siteID", siteID).Msg("SKU not found in Core, removing stale REST DB record")
-	}
-	err = skuDAO.Delete(ctx, nil, skuID)
+		if errors.Is(err, cdb.ErrXactAdvisoryLockFailed) {
+			return cutil.NewAPIError(http.StatusConflict, "Another request is changing this SKU; retry the request", nil)
+		}
+		if err != nil {
+			return err
+		}
+		current, err := skuDAO.GetForUpdate(ctx, tx, skuID)
+		if errors.Is(err, cdb.ErrDoesNotExist) {
+			return cutil.NewAPIError(http.StatusNotFound, "Could not find SKU with the specified ID", nil)
+		}
+		if err != nil {
+			return err
+		}
+		if current.SiteID != savedSKU.SiteID {
+			return cutil.NewAPIError(http.StatusConflict, "SKU Site changed during deletion; retry the request", nil)
+		}
+		site, err := cdbm.NewSiteDAO(dsh.dbSession).GetByID(ctx, tx, current.SiteID, nil, false, false)
+		if errors.Is(err, cdb.ErrDoesNotExist) {
+			return cutil.NewAPIError(http.StatusBadRequest, fmt.Sprintf("Could not find Site with ID specified in request data: %s", siteID), nil)
+		}
+		if err != nil {
+			return err
+		}
+		if site.InfrastructureProviderID != authorizedSite.InfrastructureProviderID {
+			return cutil.NewAPIError(http.StatusForbidden, "Site specified in request doesn't belong to current org's Provider", nil)
+		}
+		if len(current.AssociatedMachineIds) > 0 {
+			logger.Warn().Str("skuID", skuID).Msg("SKU is associated with machines and cannot be deleted")
+			return cutil.NewAPIError(http.StatusBadRequest, "SKU is associated with machines and cannot be deleted", nil)
+		}
+		referenced, err := skuDAO.HasExpectedMachineReferences(ctx, tx, skuID)
+		if err != nil {
+			return err
+		}
+		if referenced {
+			return cutil.NewAPIError(http.StatusBadRequest, "SKU is referenced by Expected Machines and cannot be deleted", nil)
+		}
+		stc, apiErr := common.RegisteredSiteClient(logger, dsh.scp, site)
+		if apiErr != nil {
+			return apiErr
+		}
+
+		// A retry joins a running call. After it closes, Temporal can start a new
+		// execution.
+		// Hash the pair to keep valid multibyte SKU IDs within Temporal's ID limit.
+		digest := sha256.Sum256([]byte(siteID + "\x00" + skuID))
+		workflowID := fmt.Sprintf("core-grpc-DeleteSku-%x", digest)
+		logger.Info().Str("skuID", skuID).Str("siteID", siteID).Msg("deleting SKU via Core proxy")
+		apiErr = common.ExecuteCoreGRPCWithConflictPolicy(ctx, stc, corev1.Forge_DeleteSku_FullMethodName,
+			&corev1.SkuIdList{Ids: []string{skuID}}, nil, workflowID,
+			temporalEnums.WORKFLOW_ID_CONFLICT_POLICY_USE_EXISTING, siteID)
+		if apiErr != nil && apiErr.Code != http.StatusNotFound {
+			logAPIError(logger, apiErr, "failed to delete SKU via Core proxy")
+			return cutil.NewAPIError(apiErr.Code, apiErr.Message, nil).WithCause(apiErr.Diagnosis())
+		}
+		if apiErr != nil {
+			logger.Warn().Str("skuID", skuID).Str("siteID", siteID).Msg("SKU not found in Core, removing stale REST DB record")
+		}
+		deleted, err := skuDAO.DeleteIfUnchanged(ctx, tx, skuID, current.SiteID, current.Updated)
+		if err != nil {
+			return err
+		}
+		if !deleted {
+			return cutil.NewAPIError(http.StatusConflict, "SKU changed during deletion; retry the request", nil)
+		}
+		return nil
+	})
 	if err != nil {
-		logger.Error().Err(err).Str("skuID", skuID).Msg("failed to delete SKU from REST DB")
-		return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to delete SKU from REST DB", nil)
+		var apiErr *cutil.APIError
+		if ctx.Err() != nil && !errors.As(err, &apiErr) {
+			logger.Warn().Err(err).Str("skuID", skuID).Str("siteID", siteID).Msg("SKU deletion deadline expired during transaction")
+			return cutil.NewAPIErrorResponse(c, http.StatusGatewayTimeout, "SKU deletion timed out", nil)
+		}
+		return common.HandleTxError(c, logger, err, "Failed to complete SKU deletion, DB error")
 	}
 
 	logger.Info().Str("skuID", skuID).Str("siteID", siteID).Msg("finishing API handler")

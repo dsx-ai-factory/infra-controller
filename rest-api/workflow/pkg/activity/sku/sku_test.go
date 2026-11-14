@@ -812,7 +812,7 @@ func testManageSkuDeleteErrorContinuesAndRetries(t *testing.T) {
 	}()
 	_, err = dbSession.DB.ExecContext(ctx, fmt.Sprintf("CREATE TRIGGER fail_delete BEFORE DELETE ON sku FOR EACH ROW WHEN (OLD.id = '%s') EXECUTE FUNCTION fail_sku_delete()", row.ID))
 	require.NoError(t, err)
-	deleted, err := dao.DeleteIfUnchanged(ctx, nil, row.ID, rows[0].Updated)
+	deleted, err := dao.DeleteIfUnchanged(ctx, nil, row.ID, row.SiteID, rows[0].Updated)
 	require.False(t, deleted)
 	require.ErrorContains(t, err, "injected database failure")
 	hook := &testSkuBeforeDeleteHook{rowID: row.ID}

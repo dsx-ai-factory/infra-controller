@@ -55,7 +55,7 @@ func BeginTx(ctx context.Context, dbSession *Session, txOptions *sql.TxOptions) 
 	// Set a max lock timeout to 300s for the transaction
 	// so that no blocking attempt to acquire a lock
 	// will block indefinitely.
-	_, err = tx.Exec(fmt.Sprintf("SET LOCAL lock_timeout = '%ds'", DefaultTxLockTimeoutSeconds))
+	_, err = tx.ExecContext(ctx, fmt.Sprintf("SET LOCAL lock_timeout = '%ds'", DefaultTxLockTimeoutSeconds))
 	if err != nil {
 		wrappedTx.RollbackWithLog(ctx, log.Logger)
 		return nil, err

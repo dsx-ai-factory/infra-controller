@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -28,6 +29,7 @@ import (
 	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
 	swe "github.com/NVIDIA/infra-controller/rest-api/site-workflow/pkg/error"
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/labstack/echo/v4"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
@@ -35,6 +37,7 @@ import (
 	"github.com/uptrace/bun"
 	"github.com/uptrace/bun/extra/bundebug"
 	temporalEnums "go.temporal.io/api/enums/v1"
+	tclient "go.temporal.io/sdk/client"
 	tmocks "go.temporal.io/sdk/mocks"
 	tp "go.temporal.io/sdk/temporal"
 	"google.golang.org/grpc/codes"
@@ -740,6 +743,25 @@ func TestGetSkuHandler_Handle(t *testing.T) {
 }
 
 func TestCreateSkuHandler(t *testing.T) {
+	t.Run("reports contention after Core creation succeeds", func(t *testing.T) {
+		f := newSkuManagementFixture(t, []string{authz.ProviderAdminRole})
+		session := f.createHandler.dbSession
+		before, err := cdbm.NewSkuDAO(session).Get(context.Background(), nil, "sku-1")
+		require.NoError(t, err)
+		gate, err := cdb.BeginTx(context.Background(), session, nil)
+		require.NoError(t, err)
+		defer func() { _ = gate.Rollback() }()
+		require.NoError(t, gate.TryAcquireAdvisoryLock(context.Background(), cdb.GetAdvisoryLockIDFromString("sku-1"), nil))
+		rec := f.request(t, http.MethodPost, "", validSkuCreateRequest(f.siteID), f.createHandler.Handle)
+		require.Equal(t, http.StatusConflict, rec.Code, rec.Body.String())
+		assert.JSONEq(t, `{"source":"","message":"SKU was created in Core but another request is changing the REST record; refresh the SKU before retrying","data":null}`, rec.Body.String())
+		require.Len(t, f.requests, 2)
+		assert.Equal(t, corev1.Forge_CreateSku_FullMethodName, f.requests[0].FullMethod)
+		assert.Equal(t, corev1.Forge_FindSkusByIds_FullMethodName, f.requests[1].FullMethod)
+		stored, err := cdbm.NewSkuDAO(session).Get(context.Background(), nil, "sku-1")
+		require.NoError(t, err)
+		assert.Equal(t, before, stored)
+	})
 	t.Run("proxies create and returns created SKU", func(t *testing.T) {
 		fixture := newSkuManagementFixtureWithOptions(t, []string{authz.ProviderAdminRole}, skuManagementFixtureOptions{
 			skipPersistedSKU: true,
@@ -949,6 +971,28 @@ func TestUpdateSkuHandler_Handle(t *testing.T) {
 		name string
 		run  func(*testing.T)
 	}{
+		{
+			name: "reports contention after Core metadata update succeeds",
+			run: func(t *testing.T) {
+				f := newSkuManagementFixture(t, []string{authz.ProviderAdminRole})
+				session := f.updateHandler.dbSession
+				before, err := cdbm.NewSkuDAO(session).Get(context.Background(), nil, "sku-1")
+				require.NoError(t, err)
+				gate, err := cdb.BeginTx(context.Background(), session, nil)
+				require.NoError(t, err)
+				defer func() { _ = gate.Rollback() }()
+				require.NoError(t, gate.TryAcquireAdvisoryLock(context.Background(), cdb.GetAdvisoryLockIDFromString("sku-1"), nil))
+				rec := f.request(t, http.MethodPatch, "sku-1", model.APISkuUpdateRequest{Description: cutil.GetPtr("updated in Core")}, f.updateHandler.Handle)
+				require.Equal(t, http.StatusConflict, rec.Code, rec.Body.String())
+				assert.JSONEq(t, `{"source":"","message":"SKU was updated in Core but another request is changing the REST record; refresh the SKU before retrying","data":null}`, rec.Body.String())
+				require.Len(t, f.requests, 2)
+				assert.Equal(t, corev1.Forge_FindSkusByIds_FullMethodName, f.requests[0].FullMethod)
+				assert.Equal(t, corev1.Forge_UpdateSkuMetadata_FullMethodName, f.requests[1].FullMethod)
+				stored, err := cdbm.NewSkuDAO(session).Get(context.Background(), nil, "sku-1")
+				require.NoError(t, err)
+				assert.Equal(t, before, stored)
+			},
+		},
 		{
 			name: "uses metadata RPC for metadata patch",
 			run: func(t *testing.T) {
@@ -1972,16 +2016,256 @@ func TestDeleteSkuHandler_Handle(t *testing.T) {
 			run: func(t *testing.T) {
 				fixture := newSkuManagementFixture(t, []string{authz.ProviderAdminRole})
 
+				var lockDeadline time.Time
+				fixture.deleteHandler.dbSession.DB.AddQueryHook(skuQueryContextHook(func(ctx context.Context, event *bun.QueryEvent) {
+					if strings.HasPrefix(event.Query, `SELECT "sk".`) && strings.HasSuffix(event.Query, "FOR UPDATE") {
+						var ok bool
+						lockDeadline, ok = ctx.Deadline()
+						require.True(t, ok, "SKU admission must have the request deadline")
+					}
+				}))
+				started := time.Now()
 				rec := fixture.request(t, http.MethodDelete, "sku-1", nil, fixture.deleteHandler.Handle)
+				finished := time.Now()
 				require.Equal(t, http.StatusNoContent, rec.Code, rec.Body.String())
 				require.Len(t, fixture.requests, 1)
 				assert.Equal(t, corev1.Forge_DeleteSku_FullMethodName, fixture.requests[0].FullMethod)
+				client := fixture.deleteHandler.scp.IDClientMap[fixture.siteID].(*tmocks.Client)
+				client.AssertCalled(t, "ExecuteWorkflow", mock.Anything, mock.MatchedBy(func(options tclient.StartWorkflowOptions) bool {
+					return options.ID != "" &&
+						options.WorkflowIDConflictPolicy == temporalEnums.WORKFLOW_ID_CONFLICT_POLICY_USE_EXISTING
+				}), grpcproxy.Core.WorkflowName, mock.Anything)
+				require.False(t, lockDeadline.IsZero())
+				assert.False(t, lockDeadline.Before(started.Add(cutil.WorkflowContextTimeout)))
+				assert.False(t, lockDeadline.After(finished.Add(cutil.WorkflowContextTimeout)))
+				for _, ctx := range append(fixture.startContexts, fixture.getContexts...) {
+					deadline, ok := ctx.Deadline()
+					require.True(t, ok)
+					assert.Equal(t, lockDeadline, deadline, "Core must use the remaining admission budget")
+				}
 
 				var coreReq corev1.SkuIdList
 				require.NoError(t, protojson.Unmarshal(fixture.requests[0].RequestJSON, &coreReq))
 				assert.Equal(t, []string{"sku-1"}, coreReq.Ids)
 				_, err := cdbm.NewSkuDAO(fixture.deleteHandler.dbSession).Get(context.Background(), nil, "sku-1")
 				assert.ErrorIs(t, err, cdb.ErrDoesNotExist)
+			},
+		},
+		{
+			name: "rejects Expected Machine references before Core",
+			run: func(t *testing.T) {
+				for _, tc := range []struct {
+					name    string
+					pending bool
+					prepare func(*testing.T, *skuManagementFixture)
+				}{
+					{name: "public Expected Machine on a pending Site", prepare: func(t *testing.T, f *skuManagementFixture) {
+						_, err := cdbm.NewSiteDAO(f.deleteHandler.dbSession).Update(context.Background(), nil, cdbm.SiteUpdateInput{
+							SiteID: uuid.MustParse(f.siteID), Status: cutil.GetPtr(cdbm.SiteStatusPending),
+						})
+						require.NoError(t, err)
+					}},
+					{name: "pending Expected Machine batch", pending: true},
+				} {
+					t.Run(tc.name, func(t *testing.T) {
+						f := newSkuManagementFixture(t, []string{authz.ProviderAdminRole})
+						ctx := context.Background()
+						session := f.deleteHandler.dbSession
+						siteID := uuid.MustParse(f.siteID)
+						if tc.prepare != nil {
+							tc.prepare(t, f)
+						}
+						input := cdbm.ExpectedMachineCreateInput{
+							ExpectedMachineID: uuid.New(), SiteID: siteID, SkuID: cutil.GetPtr("sku-1"),
+							BmcMacAddress: "00:11:22:33:44:55", ChassisSerialNumber: "delete-reference", CreatedBy: f.user.ID,
+						}
+						err := cdb.WithTx(ctx, session, func(tx *cdb.Tx) error {
+							if tc.pending {
+								return cdbm.NewPendingExpectedMachineBatchDAO(session).Create(ctx, tx, cdbm.PendingExpectedMachineBatch{
+									WorkflowID: "pending-create", SiteID: siteID, Inputs: []cdbm.ExpectedMachineCreateInput{input},
+								})
+							}
+							_, err := cdbm.NewExpectedMachineDAO(session).Create(ctx, tx, input)
+							return err
+						})
+						require.NoError(t, err)
+						before, err := cdbm.NewSkuDAO(session).Get(ctx, nil, "sku-1")
+						require.NoError(t, err)
+
+						rec := f.request(t, http.MethodDelete, "sku-1", nil, f.deleteHandler.Handle)
+						require.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
+						assert.Contains(t, rec.Body.String(), "referenced by Expected Machines")
+						assert.Empty(t, f.requests)
+						stored, err := cdbm.NewSkuDAO(session).Get(ctx, nil, "sku-1")
+						require.NoError(t, err)
+						assert.Equal(t, before, stored)
+					})
+				}
+			},
+		},
+		{
+			name: "attachment commits before deletion checks references",
+			run:  testSkuAttachmentBeforeDeletion,
+		},
+		{
+			name: "deletion excludes attachment until cleanup commits",
+			run:  testSkuDeletionBeforeAttachment,
+		},
+		{
+			name: "missing Core result releases locks and permits later attachment",
+			run:  testSkuDeletionTimeoutAllowsAttachment,
+		},
+		{
+			name: "rejects an unreferenced SKU on a pending Site before dispatch",
+			run: func(t *testing.T) {
+				f := newSkuManagementFixture(t, []string{authz.ProviderAdminRole})
+				session := f.deleteHandler.dbSession
+				before, err := cdbm.NewSkuDAO(session).Get(context.Background(), nil, "sku-1")
+				require.NoError(t, err)
+				_, err = cdbm.NewSiteDAO(session).Update(context.Background(), nil, cdbm.SiteUpdateInput{SiteID: before.SiteID, Status: cutil.GetPtr(cdbm.SiteStatusPending)})
+				require.NoError(t, err)
+				rec := f.request(t, http.MethodDelete, "sku-1", nil, f.deleteHandler.Handle)
+				require.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
+				assert.JSONEq(t, `{"source":"","message":"Site is not in Registered state, unable to execute operation on Site","data":null}`, rec.Body.String())
+				assert.Empty(t, f.requests)
+				stored, err := cdbm.NewSkuDAO(session).Get(context.Background(), nil, "sku-1")
+				require.NoError(t, err)
+				assert.Equal(t, before, stored)
+			},
+		},
+		{
+			name: "reports an active SKU mutation without dispatch",
+			run: func(t *testing.T) {
+				for _, tc := range []struct {
+					name              string
+					cancelDuringRetry bool
+					code              int
+					message           string
+				}{
+					{name: "busy mutation", code: http.StatusConflict, message: "Another request is changing this SKU; retry the request"},
+					{name: "caller cancels during lock retries", cancelDuringRetry: true, code: http.StatusGatewayTimeout, message: "SKU deletion timed out"},
+				} {
+					t.Run(tc.name, func(t *testing.T) {
+						f := newSkuManagementFixture(t, []string{authz.ProviderAdminRole})
+						session := f.deleteHandler.dbSession
+						before, err := cdbm.NewSkuDAO(session).Get(context.Background(), nil, "sku-1")
+						require.NoError(t, err)
+						gate, err := cdb.BeginTx(context.Background(), session, nil)
+						require.NoError(t, err)
+						defer func() { _ = gate.Rollback() }()
+						require.NoError(t, gate.TryAcquireAdvisoryLock(context.Background(), cdb.GetAdvisoryLockIDFromString("sku-1"), nil))
+						ctx, cancel := context.WithCancel(context.Background())
+						defer cancel()
+						var hook *expectedMachineQueryHook
+						if tc.cancelDuringRetry {
+							hook = &expectedMachineQueryHook{
+								queryPrefix: "SELECT pg_try_advisory_xact_lock(", armed: true,
+								afterQuery: func(event *bun.QueryEvent) {
+									require.NoError(t, event.Err)
+									cancel()
+								},
+							}
+							session.DB.AddQueryHook(hook)
+						}
+						ec, rec := f.requestContext(t, http.MethodDelete, "sku-1", nil)
+						ec.SetRequest(ec.Request().WithContext(ctx))
+						require.NoError(t, f.deleteHandler.Handle(ec))
+						if hook != nil {
+							require.True(t, hook.fired)
+							require.ErrorIs(t, ctx.Err(), context.Canceled)
+						}
+						require.Equal(t, tc.code, rec.Code, rec.Body.String())
+						assert.JSONEq(t, fmt.Sprintf(`{"source":"","message":%q,"data":null}`, tc.message), rec.Body.String())
+						assert.Empty(t, f.requests)
+						stored, err := cdbm.NewSkuDAO(session).Get(context.Background(), nil, "sku-1")
+						require.NoError(t, err)
+						assert.Equal(t, before, stored)
+					})
+				}
+			},
+		},
+		{
+			name: "bounds and separates deterministic workflow IDs",
+			run:  testSkuDeletionWorkflowIDs,
+		},
+		{
+			name: "caller deadline bounds SKU lock admission and a healthy retry succeeds",
+			run:  testSkuDeletionAdmissionDeadline,
+		},
+		{
+			name: "reloads SKU and Site changes before admission",
+			run:  testSkuDeletionAdmissionChanges,
+		},
+		{
+			name: "keeps a definitive reference rejection after caller cancellation",
+			run: func(t *testing.T) {
+				f := newSkuManagementFixture(t, []string{authz.ProviderAdminRole})
+				session := f.deleteHandler.dbSession
+				before, err := cdbm.NewSkuDAO(session).Get(context.Background(), nil, "sku-1")
+				require.NoError(t, err)
+				machine, err := cdbm.NewExpectedMachineDAO(session).Create(context.Background(), nil, cdbm.ExpectedMachineCreateInput{
+					ExpectedMachineID: uuid.New(), SiteID: before.SiteID, SkuID: &before.ID,
+					BmcMacAddress: "00:11:22:33:44:55", ChassisSerialNumber: "cancel-after-reference", CreatedBy: f.user.ID,
+				})
+				require.NoError(t, err)
+				ctx, cancel := context.WithCancel(context.Background())
+				defer cancel()
+				hook := &expectedMachineQueryHook{
+					queryPrefix: "SELECT EXISTS (SELECT 1 FROM expected_machine",
+					armed:       true,
+					afterQuery: func(event *bun.QueryEvent) {
+						require.NoError(t, event.Err)
+						cancel()
+					},
+				}
+				session.DB.AddQueryHook(hook)
+				ec, rec := f.requestContext(t, http.MethodDelete, "sku-1", nil)
+				ec.SetRequest(ec.Request().WithContext(ctx))
+				require.NoError(t, f.deleteHandler.Handle(ec))
+				require.True(t, hook.fired)
+				require.ErrorIs(t, ctx.Err(), context.Canceled)
+				require.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
+				assert.JSONEq(t, `{"source":"","message":"SKU is referenced by Expected Machines and cannot be deleted","data":null}`, rec.Body.String())
+				assert.Empty(t, f.requests)
+				stored, err := cdbm.NewSkuDAO(session).Get(context.Background(), nil, "sku-1")
+				require.NoError(t, err)
+				assert.Equal(t, before, stored)
+				retained, err := cdbm.NewExpectedMachineDAO(session).Get(context.Background(), nil, machine.ID, nil, false)
+				require.NoError(t, err)
+				assert.Equal(t, &before.ID, retained.SkuID)
+			},
+		},
+		{
+			name: "rolls back cleanup SQL failure after Core success and permits a healthy retry",
+			run: func(t *testing.T) {
+				f := newSkuManagementFixture(t, []string{authz.ProviderAdminRole})
+				session := f.deleteHandler.dbSession
+				ctx := context.Background()
+				before, err := cdbm.NewSkuDAO(session).Get(ctx, nil, "sku-1")
+				require.NoError(t, err)
+				_, err = session.DB.ExecContext(ctx, `CREATE OR REPLACE FUNCTION fail_sku_delete_cleanup() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'injected SKU cleanup failure'; END $$`)
+				require.NoError(t, err)
+				t.Cleanup(func() {
+					_, err := session.DB.ExecContext(ctx, "DROP FUNCTION fail_sku_delete_cleanup() CASCADE")
+					require.NoError(t, err)
+				})
+				_, err = session.DB.ExecContext(ctx, "CREATE TRIGGER fail_sku_delete_cleanup BEFORE DELETE ON sku FOR EACH ROW EXECUTE FUNCTION fail_sku_delete_cleanup()")
+				require.NoError(t, err)
+				rec := f.request(t, http.MethodDelete, "sku-1", nil, f.deleteHandler.Handle)
+				require.Equal(t, http.StatusInternalServerError, rec.Code, rec.Body.String())
+				assert.JSONEq(t, `{"source":"","message":"Failed to complete SKU deletion, DB error","data":null}`, rec.Body.String())
+				require.Len(t, f.requests, 1)
+				require.Len(t, f.getContexts, 1, "Core's successful result must precede the SQL failure")
+				stored, err := cdbm.NewSkuDAO(session).Get(ctx, nil, "sku-1")
+				require.NoError(t, err)
+				assert.Equal(t, before, stored)
+				_, err = session.DB.ExecContext(ctx, "DROP TRIGGER fail_sku_delete_cleanup ON sku")
+				require.NoError(t, err)
+				rec = f.request(t, http.MethodDelete, "sku-1", nil, f.deleteHandler.Handle)
+				require.Equal(t, http.StatusNoContent, rec.Code, rec.Body.String())
+				require.Len(t, f.requests, 2)
+				_, err = cdbm.NewSkuDAO(session).Get(ctx, nil, "sku-1")
+				require.ErrorIs(t, err, cdb.ErrDoesNotExist)
 			},
 		},
 		{
@@ -2052,6 +2336,14 @@ func TestDeleteSkuHandler_Handle(t *testing.T) {
 						}
 						before, err := skuDAO.Get(context.Background(), nil, "sku-1")
 						require.NoError(t, err)
+						var reference *cdbm.ExpectedMachine
+						if tc.associations != nil {
+							reference, err = cdbm.NewExpectedMachineDAO(dbSession).Create(context.Background(), nil, cdbm.ExpectedMachineCreateInput{
+								ExpectedMachineID: uuid.New(), SiteID: before.SiteID, SkuID: &before.ID,
+								BmcMacAddress: "00:11:22:33:44:55", ChassisSerialNumber: "foreign-provider-reference", CreatedBy: fixture.user.ID,
+							})
+							require.NoError(t, err)
+						}
 						fixture.org = "other-org"
 						fixture.user = common.TestBuildUser(t, dbSession, uuid.NewString(), fixture.org, []string{authz.ProviderAdminRole})
 						common.TestBuildInfrastructureProvider(t, dbSession, "Other Provider", fixture.org, fixture.user)
@@ -2064,6 +2356,11 @@ func TestDeleteSkuHandler_Handle(t *testing.T) {
 						after, err := skuDAO.Get(context.Background(), nil, "sku-1")
 						require.NoError(t, err)
 						assert.Equal(t, before, after)
+						if reference != nil {
+							retained, err := cdbm.NewExpectedMachineDAO(dbSession).Get(context.Background(), nil, reference.ID, nil, false)
+							require.NoError(t, err)
+							assert.Equal(t, &before.ID, retained.SkuID)
+						}
 					})
 				}
 			},
@@ -2110,29 +2407,32 @@ func TestDeleteSkuHandler_Handle(t *testing.T) {
 			},
 		},
 		{
-			name: "preserves record when Core delete fails",
+			name: "preserves record and null error data when dispatch or Core fails",
 			run: func(t *testing.T) {
-				deleteErr := tp.NewApplicationErrorWithCause(
-					"Core unavailable",
-					swe.ErrTypeNICoUnavailable,
-					status.Error(codes.Unavailable, "Core unavailable"),
-				)
-				fixture := newSkuManagementFixtureWithOptions(t, []string{authz.ProviderAdminRole}, skuManagementFixtureOptions{
-					deleteError: deleteErr,
-				})
-
-				skuDAO := cdbm.NewSkuDAO(fixture.deleteHandler.dbSession)
-				before, err := skuDAO.Get(context.Background(), nil, "sku-1")
-				require.NoError(t, err)
-
-				rec := fixture.request(t, http.MethodDelete, "sku-1", nil, fixture.deleteHandler.Handle)
-				require.Equal(t, http.StatusServiceUnavailable, rec.Code, rec.Body.String())
-				assert.Contains(t, rec.Body.String(), "Core unavailable")
-				require.Len(t, fixture.requests, 1)
-				assert.Equal(t, corev1.Forge_DeleteSku_FullMethodName, fixture.requests[0].FullMethod)
-				after, err := skuDAO.Get(context.Background(), nil, "sku-1")
-				require.NoError(t, err)
-				assert.Equal(t, before, after)
+				for _, tc := range []struct {
+					name    string
+					options skuManagementFixtureOptions
+					code    int
+					message string
+				}{
+					{name: "Core unavailable", options: skuManagementFixtureOptions{deleteError: tp.NewApplicationErrorWithCause("Core unavailable", swe.ErrTypeNICoUnavailable, status.Error(codes.Unavailable, "Core unavailable"))}, code: http.StatusServiceUnavailable, message: "rpc error: code = Unavailable desc = Core unavailable"},
+					{name: "workflow start failure", options: skuManagementFixtureOptions{deleteStartError: errors.New("start failed")}, code: http.StatusInternalServerError, message: "Failed to execute Core proxy workflow"},
+				} {
+					t.Run(tc.name, func(t *testing.T) {
+						fixture := newSkuManagementFixtureWithOptions(t, []string{authz.ProviderAdminRole}, tc.options)
+						skuDAO := cdbm.NewSkuDAO(fixture.deleteHandler.dbSession)
+						before, err := skuDAO.Get(context.Background(), nil, "sku-1")
+						require.NoError(t, err)
+						rec := fixture.request(t, http.MethodDelete, "sku-1", nil, fixture.deleteHandler.Handle)
+						require.Equal(t, tc.code, rec.Code, rec.Body.String())
+						assert.JSONEq(t, fmt.Sprintf(`{"source":"","message":%q,"data":null}`, tc.message), rec.Body.String())
+						require.Len(t, fixture.requests, 1)
+						assert.Equal(t, corev1.Forge_DeleteSku_FullMethodName, fixture.requests[0].FullMethod)
+						after, err := skuDAO.Get(context.Background(), nil, "sku-1")
+						require.NoError(t, err)
+						assert.Equal(t, before, after)
+					})
+				}
 			},
 		},
 		{
@@ -2152,7 +2452,7 @@ func TestDeleteSkuHandler_Handle(t *testing.T) {
 	}
 }
 
-// skuQueryContextHook observes the context used for SKU projection queries.
+// skuQueryContextHook observes query contexts and pauses selected SKU queries.
 type skuQueryContextHook func(context.Context, *bun.QueryEvent)
 
 func (h skuQueryContextHook) BeforeQuery(ctx context.Context, event *bun.QueryEvent) context.Context {
@@ -2170,6 +2470,7 @@ type skuManagementFixture struct {
 	updateHandler    UpdateSkuHandler
 	deleteHandler    DeleteSkuHandler
 	requests         []grpcproxy.Request
+	startOptions     []tclient.StartWorkflowOptions
 	startContexts    []context.Context
 	getContexts      []context.Context
 	afterWorkflowGet func(string)
@@ -2186,6 +2487,7 @@ type skuManagementFixtureOptions struct {
 	replaceComponentsError error
 	updateMetadataError    error
 	deleteError            error
+	deleteStartError       error
 	skipPersistedSKU       bool
 	afterUpdateMetadata    func(*cdb.Session)
 	afterWorkflowGet       func(string)
@@ -2201,6 +2503,8 @@ func newSkuManagementFixtureWithOptions(t *testing.T, roles []string, options sk
 	t.Cleanup(dbSession.Close)
 	common.TestSetupSchema(t, dbSession)
 	require.NoError(t, dbSession.DB.ResetModel(context.Background(), (*cdbm.SKU)(nil)))
+	require.NoError(t, dbSession.DB.ResetModel(context.Background(), (*cdbm.ExpectedMachine)(nil)))
+	require.NoError(t, dbSession.DB.ResetModel(context.Background(), (*cdbm.PendingExpectedMachine)(nil)))
 
 	org := "test-org"
 	user := common.TestBuildUser(t, dbSession, uuid.NewString(), org, roles)
@@ -2273,7 +2577,14 @@ func newSkuManagementFixtureWithOptions(t *testing.T, roles []string, options sk
 			}
 		})
 	}
-	if options.deleteError != nil {
+	if options.deleteStartError != nil {
+		client.On("ExecuteWorkflow", mock.Anything, mock.Anything, grpcproxy.Core.WorkflowName,
+			mock.MatchedBy(func(req grpcproxy.Request) bool { return req.FullMethod == corev1.Forge_DeleteSku_FullMethodName })).Run(func(args mock.Arguments) {
+			fixture.requests = append(fixture.requests, args.Get(3).(grpcproxy.Request))
+			fixture.startContexts = append(fixture.startContexts, args.Get(0).(context.Context))
+			fixture.startOptions = append(fixture.startOptions, args.Get(1).(tclient.StartWorkflowOptions))
+		}).Return(nil, options.deleteStartError).Maybe()
+	} else if options.deleteError != nil {
 		fixture.addWorkflowError(client, corev1.Forge_DeleteSku_FullMethodName, options.deleteError)
 	} else {
 		fixture.addWorkflow(t, client, corev1.Forge_DeleteSku_FullMethodName, nil)
@@ -2304,6 +2615,7 @@ func (f *skuManagementFixture) addWorkflowError(client *tmocks.Client, method st
 	).Run(func(args mock.Arguments) {
 		f.requests = append(f.requests, args.Get(3).(grpcproxy.Request))
 		f.startContexts = append(f.startContexts, args.Get(0).(context.Context))
+		f.startOptions = append(f.startOptions, args.Get(1).(tclient.StartWorkflowOptions))
 	}).Return(run, nil).Maybe()
 }
 
@@ -2337,10 +2649,18 @@ func (f *skuManagementFixture) addWorkflow(t *testing.T, client *tmocks.Client, 
 	).Run(func(args mock.Arguments) {
 		f.requests = append(f.requests, args.Get(3).(grpcproxy.Request))
 		f.startContexts = append(f.startContexts, args.Get(0).(context.Context))
+		f.startOptions = append(f.startOptions, args.Get(1).(tclient.StartWorkflowOptions))
 	}).Return(run, nil).Maybe()
 }
 
 func (f *skuManagementFixture) request(t *testing.T, method, skuID string, body any, handler func(echo.Context) error) *httptest.ResponseRecorder {
+	t.Helper()
+	ec, rec := f.requestContext(t, method, skuID, body)
+	require.NoError(t, handler(ec))
+	return rec
+}
+
+func (f *skuManagementFixture) requestContext(t *testing.T, method, skuID string, body any) (echo.Context, *httptest.ResponseRecorder) {
 	t.Helper()
 	requestJSON, err := json.Marshal(body)
 	require.NoError(t, err)
@@ -2351,8 +2671,424 @@ func (f *skuManagementFixture) request(t *testing.T, method, skuID string, body 
 	ec.SetParamNames("orgName", "id")
 	ec.SetParamValues(f.org, skuID)
 	ec.Set("user", f.user)
-	require.NoError(t, handler(ec))
-	return rec
+	return ec, rec
+}
+
+func testSkuAttachmentBeforeDeletion(t *testing.T) {
+	t.Setenv("PGOPTIONS", "-c default_transaction_isolation=serializable")
+	f := newSkuManagementFixture(t, []string{authz.ProviderAdminRole})
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	session := f.deleteHandler.dbSession
+	var defaultIsolation string
+	require.NoError(t, session.DB.NewRaw("SHOW default_transaction_isolation").Scan(ctx, &defaultIsolation))
+	require.Equal(t, "serializable", defaultIsolation)
+	dao := cdbm.NewSkuDAO(session)
+	siteID := uuid.MustParse(f.siteID)
+	attachment, err := cdb.BeginTx(ctx, session, nil)
+	require.NoError(t, err)
+	var workers sync.WaitGroup
+	defer func() {
+		_ = attachment.Rollback()
+		cancel()
+		workers.Wait()
+	}()
+	rows, err := dao.GetForAttachment(ctx, attachment, siteID, []string{"sku-1"})
+	require.NoError(t, err)
+	require.Len(t, rows, 1)
+	machine, err := cdbm.NewExpectedMachineDAO(session).Create(ctx, attachment, cdbm.ExpectedMachineCreateInput{
+		ExpectedMachineID: uuid.New(), SiteID: siteID, SkuID: cutil.GetPtr("sku-1"),
+		BmcMacAddress: "00:11:22:33:44:55", ChassisSerialNumber: "attachment-first", CreatedBy: f.user.ID,
+	})
+	require.NoError(t, err)
+
+	queryReady := make(chan string, 1)
+	var notify sync.Once
+	session.DB.AddQueryHook(skuQueryContextHook(func(_ context.Context, event *bun.QueryEvent) {
+		if strings.HasPrefix(event.Query, `SELECT "sk".`) && strings.HasSuffix(event.Query, "FOR UPDATE") {
+			notify.Do(func() { queryReady <- event.Query })
+		}
+	}))
+	ec, rec := f.requestContext(t, http.MethodDelete, "sku-1", nil)
+	ec.SetRequest(ec.Request().WithContext(ctx))
+	done := make(chan error, 1)
+	workers.Go(func() { done <- f.deleteHandler.Handle(ec) })
+	var query string
+	select {
+	case query = <-queryReady:
+	case <-ctx.Done():
+		t.Fatal("SKU deletion did not reach its row lock: ", ctx.Err())
+	}
+	require.Eventually(t, func() bool {
+		var blocked bool
+		err := session.DB.NewRaw(`SELECT EXISTS (SELECT 1 FROM pg_stat_activity WHERE query = ? AND cardinality(pg_blocking_pids(pid)) > 0)`, query).Scan(ctx, &blocked)
+		return err == nil && blocked
+	}, 5*time.Second, 10*time.Millisecond, "deletion must wait for attachment admission")
+	assert.Empty(t, f.requests)
+	require.NoError(t, attachment.Commit())
+	select {
+	case err = <-done:
+		require.NoError(t, err)
+	case <-ctx.Done():
+		t.Fatal("SKU deletion did not finish after attachment committed: ", ctx.Err())
+	}
+	require.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
+	assert.Contains(t, rec.Body.String(), "referenced by Expected Machines")
+	assert.Empty(t, f.requests)
+	stored, err := dao.Get(ctx, nil, "sku-1")
+	require.NoError(t, err)
+	assert.Equal(t, rows[0], *stored)
+	retained, err := cdbm.NewExpectedMachineDAO(session).Get(ctx, nil, machine.ID, nil, false)
+	require.NoError(t, err)
+	assert.Equal(t, cutil.GetPtr("sku-1"), retained.SkuID)
+}
+
+func testSkuDeletionBeforeAttachment(t *testing.T) {
+	f := newSkuManagementFixture(t, []string{authz.ProviderAdminRole})
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	session := f.deleteHandler.dbSession
+	dao := cdbm.NewSkuDAO(session)
+	siteID := uuid.MustParse(f.siteID)
+	ready := make(chan int, 1)
+	done := make(chan error, 1)
+	var workers sync.WaitGroup
+	defer func() {
+		cancel()
+		workers.Wait()
+	}()
+	coreReturned := false
+	f.afterWorkflowGet = func(method string) {
+		require.Equal(t, corev1.Forge_DeleteSku_FullMethodName, method)
+		// SKU deletion must leave unrelated Site writers free to proceed.
+		var id uuid.UUID
+		err := session.DB.NewSelect().Model((*cdbm.Site)(nil)).Column("id").
+			Where("st.id = ?", siteID).For("NO KEY UPDATE OF st NOWAIT").Scan(ctx, &id)
+		require.NoError(t, err)
+		workers.Go(func() {
+			done <- cdb.WithTx(ctx, session, func(tx *cdb.Tx) error {
+				var pid int
+				err := tx.GetBunTx().NewSelect().ColumnExpr("pg_backend_pid()").Scan(ctx, &pid)
+				if err != nil {
+					return err
+				}
+				ready <- pid
+				skus, err := dao.GetForAttachment(ctx, tx, siteID, []string{"sku-1"})
+				if err != nil {
+					return err
+				}
+				if len(skus) == 0 {
+					return cdb.ErrDoesNotExist
+				}
+				_, err = cdbm.NewExpectedMachineDAO(session).Create(ctx, tx, cdbm.ExpectedMachineCreateInput{
+					ExpectedMachineID: uuid.New(), SiteID: siteID, SkuID: cutil.GetPtr("sku-1"),
+					BmcMacAddress: "00:11:22:33:44:55", ChassisSerialNumber: "deletion-first", CreatedBy: f.user.ID,
+				})
+				return err
+			})
+		})
+		var pid int
+		select {
+		case pid = <-ready:
+		case <-ctx.Done():
+			t.Fatal("attachment did not start: ", ctx.Err())
+		}
+		require.Eventually(t, func() bool {
+			var blockers int
+			err := session.DB.NewSelect().ColumnExpr("cardinality(pg_blocking_pids(?))", pid).Scan(ctx, &blockers)
+			return err == nil && blockers > 0
+		}, 5*time.Second, 10*time.Millisecond, "attachment must wait while Core deletion is in progress")
+		coreReturned = true
+	}
+	cleanupChecked := false
+	session.DB.AddQueryHook(skuQueryContextHook(func(_ context.Context, event *bun.QueryEvent) {
+		if !strings.HasPrefix(event.Query, `DELETE FROM "sku"`) {
+			return
+		}
+		cleanupChecked = true
+		require.True(t, coreReturned, "cleanup must follow Core's completed result")
+		var id string
+		err := session.DB.NewSelect().Model((*cdbm.SKU)(nil)).Column("id").
+			Where("sk.id = ?", "sku-1").For("KEY SHARE NOWAIT").Scan(ctx, &id)
+		var pgErr *pgconn.PgError
+		require.ErrorAs(t, err, &pgErr, "the SKU lock must remain held after Core returns and before SQL cleanup")
+		assert.Equal(t, "55P03", pgErr.Code)
+	}))
+	ec, rec := f.requestContext(t, http.MethodDelete, "sku-1", nil)
+	ec.SetRequest(ec.Request().WithContext(ctx))
+	require.NoError(t, f.deleteHandler.Handle(ec))
+	require.Equal(t, http.StatusNoContent, rec.Code, rec.Body.String())
+	require.True(t, cleanupChecked)
+	select {
+	case err := <-done:
+		require.ErrorIs(t, err, cdb.ErrDoesNotExist)
+	case <-ctx.Done():
+		t.Fatal("attachment did not finish after deletion committed: ", ctx.Err())
+	}
+	_, err := dao.Get(ctx, nil, "sku-1")
+	require.ErrorIs(t, err, cdb.ErrDoesNotExist)
+	count, err := session.DB.NewSelect().Model((*cdbm.ExpectedMachine)(nil)).Count(ctx)
+	require.NoError(t, err)
+	assert.Zero(t, count)
+	require.Len(t, f.requests, 1)
+}
+
+func testSkuDeletionWorkflowIDs(t *testing.T) {
+	f := newSkuManagementFixtureWithOptions(t, []string{authz.ProviderAdminRole}, skuManagementFixtureOptions{
+		deleteError: tp.NewApplicationError("Core unavailable", swe.ErrTypeNICoUnavailable),
+	})
+	session := f.deleteHandler.dbSession
+	dao := cdbm.NewSkuDAO(session)
+	ctx := context.Background()
+	siteID := uuid.MustParse(f.siteID)
+	longID := strings.Repeat("🖥", 256)
+	require.Greater(t, len(longID), 1000)
+	for _, id := range []string{"sku-2", longID} {
+		_, err := dao.Create(ctx, nil, cdbm.SkuCreateInput{SkuID: id, SiteID: siteID})
+		require.NoError(t, err)
+	}
+	for _, id := range []string{"sku-1", "sku-1", "sku-2", longID} {
+		rec := f.request(t, http.MethodDelete, id, nil, f.deleteHandler.Handle)
+		require.Equal(t, http.StatusServiceUnavailable, rec.Code, rec.Body.String())
+	}
+	client := f.deleteHandler.scp.IDClientMap[f.siteID]
+	site, err := cdbm.NewSiteDAO(session).GetByID(ctx, nil, siteID, nil, false, false)
+	require.NoError(t, err)
+	other := common.TestBuildSite(t, session, &cdbm.InfrastructureProvider{ID: site.InfrastructureProviderID, Org: f.org}, "Other Site", f.user)
+	_, err = cdbm.NewSiteDAO(session).Update(ctx, nil, cdbm.SiteUpdateInput{SiteID: other.ID, Status: cutil.GetPtr(cdbm.SiteStatusRegistered)})
+	require.NoError(t, err)
+	f.deleteHandler.scp.IDClientMap[other.ID.String()] = client
+	require.NoError(t, dao.Delete(ctx, nil, "sku-1"))
+	_, err = dao.Create(ctx, nil, cdbm.SkuCreateInput{SkuID: "sku-1", SiteID: other.ID})
+	require.NoError(t, err)
+	rec := f.request(t, http.MethodDelete, "sku-1", nil, f.deleteHandler.Handle)
+	require.Equal(t, http.StatusServiceUnavailable, rec.Code, rec.Body.String())
+	require.Len(t, f.startOptions, 5)
+	assert.Equal(t, f.startOptions[0].ID, f.startOptions[1].ID)
+	for _, i := range []int{2, 3, 4} {
+		assert.NotEqual(t, f.startOptions[0].ID, f.startOptions[i].ID, "different SKU or Site must have a different workflow ID")
+	}
+	for _, options := range f.startOptions {
+		assert.NotEmpty(t, options.ID)
+		assert.LessOrEqual(t, len(options.ID), 1000, "Temporal bounds IDs in bytes")
+		assert.Equal(t, temporalEnums.WORKFLOW_ID_CONFLICT_POLICY_USE_EXISTING, options.WorkflowIDConflictPolicy)
+	}
+	var sent corev1.SkuIdList
+	require.NoError(t, protojson.Unmarshal(f.requests[3].RequestJSON, &sent))
+	assert.Equal(t, []string{longID}, sent.Ids, "hashing the workflow ID must preserve the original Core SKU ID")
+}
+
+func testSkuDeletionAdmissionDeadline(t *testing.T) {
+	f := newSkuManagementFixture(t, []string{authz.ProviderAdminRole})
+	session := f.deleteHandler.dbSession
+	dao := cdbm.NewSkuDAO(session)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	gate, err := cdb.BeginTx(ctx, session, nil)
+	require.NoError(t, err)
+	var workers sync.WaitGroup
+	defer func() {
+		_ = gate.Rollback()
+		cancel()
+		workers.Wait()
+	}()
+	before, err := dao.GetForUpdate(ctx, gate, "sku-1")
+	require.NoError(t, err)
+	ready := make(chan string, 1)
+	var notify sync.Once
+	session.DB.AddQueryHook(skuQueryContextHook(func(_ context.Context, event *bun.QueryEvent) {
+		if strings.HasPrefix(event.Query, `SELECT "sk".`) && strings.HasSuffix(event.Query, "FOR UPDATE") {
+			notify.Do(func() { ready <- event.Query })
+		}
+	}))
+	caller, cancelCaller := context.WithTimeout(ctx, time.Second)
+	defer cancelCaller()
+	ec, rec := f.requestContext(t, http.MethodDelete, "sku-1", nil)
+	ec.SetRequest(ec.Request().WithContext(caller))
+	done := make(chan error, 1)
+	workers.Go(func() { done <- f.deleteHandler.Handle(ec) })
+	var query string
+	select {
+	case query = <-ready:
+	case <-ctx.Done():
+		t.Fatal("DELETE did not reach SKU admission: ", ctx.Err())
+	}
+	require.Eventually(t, func() bool {
+		var blocked bool
+		err := session.DB.NewRaw(`SELECT EXISTS (SELECT 1 FROM pg_stat_activity WHERE query = ? AND cardinality(pg_blocking_pids(pid)) > 0)`, query).Scan(ctx, &blocked)
+		return err == nil && blocked
+	}, 5*time.Second, 10*time.Millisecond)
+	select {
+	case err = <-done:
+		require.NoError(t, err)
+	case <-ctx.Done():
+		t.Fatal("DELETE did not finish after the caller deadline: ", ctx.Err())
+	}
+	require.ErrorIs(t, caller.Err(), context.DeadlineExceeded)
+	require.Equal(t, http.StatusGatewayTimeout, rec.Code, rec.Body.String())
+	assert.JSONEq(t, `{"source":"","message":"SKU deletion timed out","data":null}`, rec.Body.String())
+	assert.Empty(t, f.requests)
+	stored, err := dao.Get(ctx, nil, "sku-1")
+	require.NoError(t, err)
+	assert.Equal(t, before, stored)
+	require.NoError(t, gate.Rollback())
+	rec = f.request(t, http.MethodDelete, "sku-1", nil, f.deleteHandler.Handle)
+	require.Equal(t, http.StatusNoContent, rec.Code, rec.Body.String())
+	require.Len(t, f.requests, 1)
+	_, err = dao.Get(ctx, nil, "sku-1")
+	require.ErrorIs(t, err, cdb.ErrDoesNotExist)
+}
+
+func testSkuDeletionTimeoutAllowsAttachment(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		cancelCaller bool
+		getErr       error
+	}{
+		{name: "caller cancellation", cancelCaller: true, getErr: context.Canceled},
+		{name: "workflow timeout with live caller", getErr: tp.NewTimeoutError(temporalEnums.TIMEOUT_TYPE_START_TO_CLOSE, nil)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			f := newSkuManagementFixtureWithOptions(t, []string{authz.ProviderAdminRole}, skuManagementFixtureOptions{
+				deleteError: tc.getErr,
+				afterWorkflowGet: func(method string) {
+					if tc.cancelCaller && method == corev1.Forge_DeleteSku_FullMethodName {
+						cancel()
+					}
+				},
+			})
+			session := f.deleteHandler.dbSession
+			dao := cdbm.NewSkuDAO(session)
+			before, err := dao.Get(context.Background(), nil, "sku-1")
+			require.NoError(t, err)
+			ec, rec := f.requestContext(t, http.MethodDelete, "sku-1", nil)
+			ec.SetRequest(ec.Request().WithContext(ctx))
+			require.NoError(t, f.deleteHandler.Handle(ec))
+			require.Equal(t, http.StatusGatewayTimeout, rec.Code, rec.Body.String())
+			assert.JSONEq(t, `{"source":"","message":"Core proxy request timed out","data":null}`, rec.Body.String())
+			if !tc.cancelCaller {
+				require.NoError(t, ctx.Err(), "the transaction context stays live through the injected workflow timeout")
+			}
+			client := f.deleteHandler.scp.IDClientMap[f.siteID].(*tmocks.Client)
+			for _, call := range client.Calls {
+				assert.NotEqual(t, "TerminateWorkflow", call.Method)
+			}
+			stored, err := dao.Get(context.Background(), nil, "sku-1")
+			require.NoError(t, err)
+			assert.Equal(t, before, stored)
+
+			// A lost reply does not reserve the REST SKU. A later attachment can commit
+			// even if Core completed deletion, and then prevents another DELETE dispatch.
+			attachmentCtx, cancelAttachment := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancelAttachment()
+			err = cdb.WithTx(attachmentCtx, session, func(tx *cdb.Tx) error {
+				skus, err := dao.GetForAttachment(attachmentCtx, tx, before.SiteID, []string{before.ID})
+				if err != nil {
+					return err
+				}
+				if len(skus) != 1 {
+					return cdb.ErrDoesNotExist
+				}
+				_, err = cdbm.NewExpectedMachineDAO(session).Create(attachmentCtx, tx, cdbm.ExpectedMachineCreateInput{
+					ExpectedMachineID: uuid.New(), SiteID: before.SiteID, SkuID: &before.ID,
+					BmcMacAddress: "00:11:22:33:44:55", ChassisSerialNumber: "after-timeout", CreatedBy: f.user.ID,
+				})
+				return err
+			})
+			require.NoError(t, err)
+			rec = f.request(t, http.MethodDelete, "sku-1", nil, f.deleteHandler.Handle)
+			require.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
+			assert.Contains(t, rec.Body.String(), "referenced by Expected Machines")
+			require.Len(t, f.requests, 1)
+			deleted, err := dao.DeleteIfUnchanged(attachmentCtx, nil, before.ID, before.SiteID, before.Updated)
+			var pgErr *pgconn.PgError
+			require.ErrorAs(t, err, &pgErr, "the reference also prevents normal inventory pruning")
+			assert.Equal(t, "23503", pgErr.Code)
+			assert.False(t, deleted)
+			stored, err = dao.Get(attachmentCtx, nil, "sku-1")
+			require.NoError(t, err)
+			assert.Equal(t, before, stored)
+		})
+	}
+}
+
+func testSkuDeletionAdmissionChanges(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		change  string
+		code    int
+		message string
+	}{
+		{name: "SKU recreated on another Site", change: "recreate", code: http.StatusConflict, message: "SKU Site changed"},
+		{name: "SKU removed before locked reload", change: "remove", code: http.StatusNotFound, message: "Could not find SKU with the specified ID"},
+		{name: "Site soft-deleted before fresh read", change: "delete Site", code: http.StatusBadRequest, message: "Could not find Site with ID specified in request data"},
+		{name: "association added after the initial read", change: "add association", code: http.StatusBadRequest, message: "SKU is associated with machines and cannot be deleted"},
+		{name: "Site becomes pending after authorization", change: "make Site pending", code: http.StatusBadRequest, message: "Site is not in Registered state, unable to execute operation on Site"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newSkuManagementFixture(t, []string{authz.ProviderAdminRole})
+			session := f.deleteHandler.dbSession
+			ctx := context.Background()
+			site, err := cdbm.NewSiteDAO(session).GetByID(ctx, nil, uuid.MustParse(f.siteID), nil, false, false)
+			require.NoError(t, err)
+			dao := cdbm.NewSkuDAO(session)
+			want, err := dao.Get(ctx, nil, "sku-1")
+			require.NoError(t, err)
+			var otherSite *cdbm.Site
+			if tc.change == "recreate" {
+				otherSite = common.TestBuildSite(t, session, &cdbm.InfrastructureProvider{ID: site.InfrastructureProviderID, Org: f.org}, "Other Site", f.user)
+			}
+			var changed sync.Once
+			fired := false
+			session.DB.AddQueryHook(skuQueryContextHook(func(_ context.Context, event *bun.QueryEvent) {
+				if !strings.HasPrefix(event.Query, `SELECT "sk".`) || !strings.HasSuffix(event.Query, "FOR UPDATE") {
+					return
+				}
+				changed.Do(func() {
+					fired = true
+					if tc.change == "add association" {
+						want, err = dao.Update(ctx, nil, cdbm.SkuUpdateInput{SkuID: "sku-1", AssociatedMachineIds: []string{"machine-after-auth"}})
+						require.NoError(t, err)
+						return
+					}
+					if tc.change == "make Site pending" {
+						_, err = cdbm.NewSiteDAO(session).Update(ctx, nil, cdbm.SiteUpdateInput{SiteID: site.ID, Status: cutil.GetPtr(cdbm.SiteStatusPending)})
+						require.NoError(t, err)
+						return
+					}
+					if tc.change == "delete Site" {
+						require.NoError(t, cdbm.NewSiteDAO(session).Delete(ctx, nil, site.ID))
+						return
+					}
+					require.NoError(t, dao.Delete(ctx, nil, "sku-1"))
+					want = nil
+					if tc.change == "recreate" {
+						want, err = dao.Create(ctx, nil, cdbm.SkuCreateInput{SkuID: "sku-1", SiteID: otherSite.ID})
+						require.NoError(t, err)
+					}
+				})
+			}))
+			rec := f.request(t, http.MethodDelete, "sku-1", nil, f.deleteHandler.Handle)
+			require.True(t, fired)
+			require.Equal(t, tc.code, rec.Code, rec.Body.String())
+			assert.Contains(t, rec.Body.String(), tc.message)
+			assert.Empty(t, f.requests)
+			stored, err := dao.Get(ctx, nil, "sku-1")
+			if want == nil {
+				require.ErrorIs(t, err, cdb.ErrDoesNotExist)
+			} else {
+				require.NoError(t, err)
+				assert.Equal(t, want, stored)
+			}
+			if tc.change == "make Site pending" {
+				retained, err := cdbm.NewSiteDAO(session).GetByID(ctx, nil, site.ID, nil, false, false)
+				require.NoError(t, err)
+				assert.Equal(t, cdbm.SiteStatusPending, retained.Status)
+			}
+		})
+	}
 }
 
 func validSkuCreateRequest(siteID string) model.APISkuCreateRequest {

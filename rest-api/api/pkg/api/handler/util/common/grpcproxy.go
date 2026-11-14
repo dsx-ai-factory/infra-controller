@@ -57,6 +57,47 @@ func ExecuteCoreGRPC(
 	return executeGRPCProxy(ctx, stc, grpcproxy.Core, fullMethod, req, resp, workflowID, temporalEnums.WORKFLOW_ID_CONFLICT_POLICY_UNSPECIFIED, secretKey, secretFields...)
 }
 
+// ExecuteCoreGRPCWithConflictPolicy proxies a Core request with a caller-supplied
+// workflow ID and conflict policy. USE_EXISTING joins a running execution.
+// After an execution closes, the fixed ALLOW_DUPLICATE reuse policy permits a
+// fresh execution. This does not recover an original attempt or prevent future
+// calls with the same ID.
+// Waiting uses WorkflowContextTimeout or the caller's earlier deadline. Expiration
+// does not terminate the execution. Secret fields follow ExecuteCoreGRPC's
+// contract. Only a typed Core NotFound reply maps to HTTP 404; missing Temporal
+// workflows or namespaces map to 503.
+func ExecuteCoreGRPCWithConflictPolicy(
+	ctx context.Context,
+	stc tclient.Client,
+	fullMethod string,
+	req proto.Message,
+	resp proto.Message,
+	workflowID string,
+	conflictPolicy temporalEnums.WorkflowIdConflictPolicy,
+	secretKey string,
+	secretFields ...string,
+) *cutil.APIError {
+	if strings.TrimSpace(workflowID) == "" {
+		return cutil.NewAPIError(http.StatusInternalServerError, "Core proxy request requires a workflow ID", nil)
+	}
+	apiErr := executeGRPCProxy(ctx, stc, grpcproxy.Core, fullMethod, req, resp, workflowID, conflictPolicy, secretKey, secretFields...)
+	if apiErr == nil {
+		return nil
+	}
+	var missingWorkflow *serviceerror.NotFound
+	var missingNamespace *serviceerror.NamespaceNotFound
+	if errors.As(apiErr, &missingWorkflow) || errors.As(apiErr, &missingNamespace) {
+		apiErr.Code = http.StatusServiceUnavailable
+	} else if apiErr.Code == http.StatusNotFound {
+		var coreErr *tp.ApplicationError
+		if !errors.As(apiErr, &coreErr) || (coreErr.Type() != swe.ErrTypeNICoObjectNotFound && coreErr.Type() != swe.ErrTypeCarbideObjectNotFound) {
+			// Missing Temporal history does not prove the Core resource is absent.
+			apiErr.Code = http.StatusServiceUnavailable
+		}
+	}
+	return apiErr
+}
+
 // ExecuteCoreGRPCWithWorkflowID starts or recovers one durably recorded Core
 // attempt. Only the caller that reserved a new attempt may set startNewAttempt.
 // Recovery retrieves the existing result without starting a workflow, including
@@ -200,18 +241,20 @@ func proxyTimedOutError(backend grpcproxy.Backend, fullMethod, detail string, ca
 	return cutil.NewAPIError(http.StatusGatewayTimeout, fmt.Sprintf("%s proxy request timed out", backend.Label), fmt.Errorf("%s proxy %s %s: %w", strings.ToLower(backend.Label), fullMethod, detail, cause))
 }
 
-// executeGRPCProxy starts one proxy workflow and translates its result. Both
-// backends share it; they differ only in the backend descriptor and in who
-// chooses the workflow ID and conflict policy.
+// executeGRPCProxy starts a Core or Flow proxy workflow using the caller's ID
+// and conflict policy, then translates its result. The conflict policy applies
+// to running executions. Closed IDs use ALLOW_DUPLICATE, allowing a new execution.
 //
 // It never terminates the execution, including when the caller stops waiting.
 // The activity does not heartbeat, so Temporal cannot deliver cancellation while
 // its backend RPC is in progress, and terminating only the workflow would
-// discard the result without stopping that RPC. For the Flow callers that pass a
+// discard the result without stopping that RPC. For Core or Flow callers with a
 // deterministic ID with USE_EXISTING it would also free that ID, so a retried
 // request would start a duplicate mutation instead of attaching to the call
 // already in flight. An abandoned execution stays bounded by
 // grpcproxy.WorkflowExecutionTimeout and grpcproxy.ActivityStartToCloseTimeout.
+// Waiting uses WorkflowContextTimeout or the caller's earlier deadline, including
+// starting and retrieving the result.
 func executeGRPCProxy(
 	ctx context.Context,
 	stc tclient.Client,
