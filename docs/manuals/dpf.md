@@ -446,10 +446,15 @@ DPUDevices, and DPUs to drain before deleting its credential Secrets. Forced
 deletion can bypass this wait with `allow_delete_with_orphaned_dpf_crds`, leaving
 resources for manual cleanup.
 
-Registration fails if a Secret with the same name already exists, even when its
-contents match. If Secret creation succeeds but DPUDevice creation fails, retries
-remain blocked until you reset or force-delete the host and let credential Secret
-cleanup finish. NICo does not automatically adopt the leftover Secret.
+If Secret creation succeeds but DPUDevice creation fails, NICo retries registration
+using the existing Secret only when its device and version labels, password, type,
+and immutability match and it is not being deleted. A conflicting Secret blocks
+registration until you reset or force-delete the host and let credential Secret
+cleanup finish.
+
+NICo skips DPU BMC root and `service` account rotation in this mode, including
+forced requests, because coordinated updates to DPF's immutable credential
+references are not supported. Host BMC rotation remains available.
 </Note>
 
 <Note>

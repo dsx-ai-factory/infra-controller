@@ -81,7 +81,15 @@ pub(crate) async fn bmc_rotation_needed(
     services: &MachineStateHandlerServices,
     mh: &ManagedHostStateSnapshot,
 ) -> Result<bool, StateHandlerError> {
-    for endpoint in managed_host_bmc_endpoints(mh) {
+    for endpoint in BmcEndpoint::from_machine(&mh.host_snapshot)
+        .into_iter()
+        .chain(
+            mh.dpu_snapshots
+                .iter()
+                .filter(|_| !services.dpf_per_dpu_bmc_credentials)
+                .filter_map(BmcEndpoint::from_machine),
+        )
+    {
         let needed = services
             .bmc_rotation_gate
             .rotation_needed(&services.db_pool, endpoint.device_mac)
@@ -170,6 +178,10 @@ pub(crate) async fn rotate_managed_host_bmcs(
     });
     for (machine_id, force, endpoint) in host.chain(dpus) {
         let is_dpu = machine_id.is_dpu();
+        // DPF's immutable credential reference must stay in sync with the hardware password.
+        if is_dpu && services.dpf_per_dpu_bmc_credentials {
+            continue;
+        }
         if !force && !is_sitewide_bmc_rotation_enabled {
             continue;
         }
@@ -185,7 +197,7 @@ pub(crate) async fn rotate_managed_host_bmcs(
                 // A DPU additionally converges its `service` account under the
                 // same force flag. Non-BF4 DPUs are never enrolled, so the engine
                 // returns `NoWork` (a cheap, settled skip).
-                if is_dpu && !services.dpf_per_dpu_bmc_credentials {
+                if is_dpu {
                     tick = tick.merge(rotate_dpu_service_endpoint(services, endpoint, force).await);
                 }
             }
@@ -369,7 +381,7 @@ mod tests {
     use super::*;
 
     #[sqlx_test]
-    async fn dpf_gate_skips_service_rotation_even_when_forced(pool: sqlx::PgPool) {
+    async fn dpf_gate_skips_dpu_root_and_service_rotation_even_when_forced(pool: sqlx::PgPool) {
         use std::sync::Arc;
         use std::time::Duration;
 
@@ -388,10 +400,13 @@ mod tests {
         sim.seed_user("service", "old-service-password");
         let store = Arc::new(MemoryCredentialStore::default());
         let gate = carbide_credential_rotation::RotationGate::new_for_family;
+        let test_meter = carbide_utils::test_support::test_meter::TestMeter::default();
         let mut services = MachineStateHandlerServices {
+            instrumentation: carbide_instrument::Instrumentation::new(test_meter.meter()),
             db_pool: pool.clone(),
             db_reader: pool.clone().into(),
             redfish_client_pool: sim.clone(),
+            bmc_connector: bmc_backend::BmcConnector::Libredfish(sim.clone()),
             bmc_credential_ops: sim.clone(),
             ipmi_tool: carbide_ipmi::test_support(),
             site_config: Arc::new(crate::config::MachineStateHandlerSiteConfig::test_default()),
@@ -421,18 +436,13 @@ mod tests {
             record_device_enrolled(&mut conn, mac(2), family, Some(0))
                 .await
                 .unwrap();
+            assert!(matches!(
+                set_next_target_version(&mut conn, family, 0, serde_json::json!({}))
+                    .await
+                    .unwrap(),
+                db::ConditionalWrite::Applied(_)
+            ));
         }
-        assert!(matches!(
-            set_next_target_version(
-                &mut conn,
-                CredentialRotationType::DpuBmcService,
-                0,
-                serde_json::json!({})
-            )
-            .await
-            .unwrap(),
-            db::ConditionalWrite::Applied(_)
-        ));
         store
             .set_credentials(
                 &CredentialKey::BmcCredentials {
@@ -441,6 +451,15 @@ mod tests {
                     },
                 },
                 &Credentials::new("admin", "admin-password"),
+            )
+            .await
+            .unwrap();
+        store
+            .set_credentials(
+                &CredentialKey::BmcCredentials {
+                    credential_type: BmcCredentialType::site_wide_root(1),
+                },
+                &Credentials::new("", "new-admin-password"),
             )
             .await
             .unwrap();
@@ -464,16 +483,25 @@ mod tests {
                 rotate_managed_host_bmcs(&services, &mh).await,
                 BmcRotationTick::Settled
             ));
-            let state = device_rotation_operation_state(
-                &pool,
+            for family in [
+                CredentialRotationType::Bmc,
                 CredentialRotationType::DpuBmcService,
-                mac(2),
-            )
-            .await
-            .unwrap()
-            .unwrap();
-            assert_eq!(state.current_version, Some(expected_version));
-            assert_eq!(state.rotate_attempts, 0);
+            ] {
+                let state = device_rotation_operation_state(&pool, family, mac(2))
+                    .await
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(state.current_version, Some(expected_version), "{family:?}");
+                assert_eq!(state.rotate_attempts, 0, "{family:?}");
+            }
+            assert_eq!(
+                sim.user_password("admin").as_deref(),
+                Some(if enabled {
+                    "admin-password"
+                } else {
+                    "new-admin-password"
+                })
+            );
             assert_eq!(
                 sim.user_password("service").as_deref(),
                 Some(expected_password)

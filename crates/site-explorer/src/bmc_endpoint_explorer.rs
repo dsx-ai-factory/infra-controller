@@ -2129,10 +2129,13 @@ mod tests {
 
     #[sqlx_test]
     async fn sitewide_password_loading_pins_version_and_password_through_fallback(pool: PgPool) {
-        let mut fixture = prepare_reingestion_fixture(DpuGeneration {
-            product: "BlueField-3 DPU",
-            username: "root",
-        }, false)
+        let mut fixture = prepare_reingestion_fixture(
+            DpuGeneration {
+                product: "BlueField-3 DPU",
+                username: "root",
+            },
+            false,
+        )
         .await
         .unwrap();
         fixture.explorer.database_connection = Some(pool.clone());
