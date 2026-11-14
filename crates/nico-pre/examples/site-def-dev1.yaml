@@ -1,0 +1,109 @@
+# site-def.yaml for the nico-dev `dev1` developer site (single UTM VM on a Mac, ContainerLab
+# fabric, MAT mock hosts, DPF simulator). Written 2026-11-08 from the site's own records:
+# ~/nico-tests/vm1/shared/sites/dc1/dev1/dev1.yaml and dev-values/*.yaml. Paths below are
+# relative to that site folder; copy this file there as site-def.yaml.
+#
+# What dev1 is not: it has no site-controller BMC, no control-plane DPU (an FRR container
+# stands in), and setup.sh does not deploy it (the nico-dev scripts do). Where the schema
+# requires a value the site does not have, the stand-in is given and marked "stand-in".
+schemaVersion: 1
+
+site:
+  name: dev1
+  datacenter: dc1
+  dnsZone: dev1.example.com
+  apiHostname: api.dev1.example.com        # resolves to the API VIP 11.133.1.17 inside the VM
+  uuidSource: "fixed: 8b3a9c0e-2d4f-4b6a-9e1c-5f7d3a2b1c0d"   # stand-in; dev1 records the REST site UUID in ./rest-site-uuid
+  description: nico-dev developer simulation profile, VM is the only control-plane node
+
+collaterals:
+  # cpDpuSiteYaml omitted: no control-plane DPU, the fabric is a ContainerLab FRR stand-in
+  helmPrereqsValues: ./dev-values/nico-prereqs.yaml
+  coreValues: ./dev-values/nico.yaml            # carries the NICo TOML under nicoApiSiteConfig
+  restValues: ./dev-values/nico-rest-dev.yaml
+  siteAgentValues: ./dev-values/nico-rest-dev.yaml   # stand-in: dev1 keeps the agent values in the REST file
+  metallbConfig: ./dev-values/nico-prereqs.yaml      # stand-in: nico-dev renders MetalLB from the net-plan, no separate file
+  # expectedMachines: not written yet; the MAT inventory lives in ./mat/mat-config.toml until step 7
+results: ./results
+
+decisions:
+  # Stated
+  staging-host: Connected
+  build-host: Yes                               # the Mac builds the images and pushes to 192.168.64.1:5000
+  dpu-in-the-site-controllers: no DPU           # FRR container stands in for the control-plane DPU
+  managed-host-kinds-in-the-fleet: [DPU hosts booting through the DPU on the Admin segment]   # MAT hosts simulate DPU hosts
+  # Derived, pinned here because dev1 is not a setup.sh site and nothing else records them
+  external-registry-access: Direct
+  source-of-the-nico-images: Pulled from a local registry
+  registry-host: Provider-run
+  optional-components: [REST group]
+  dpf: Install                                  # the DPF simulator plays the operator's half
+  core-postgres: Single instance for development
+  credential-store: Vault KV
+  rest-api-auth: Bundled dev Keycloak
+  measured-boot-attestation: Off
+
+hosts:
+  stagingHost: { address: 192.168.64.126, sshUser: nico }     # the VM itself
+  buildHost: { address: 192.168.64.1 }                        # the Mac, as the VM sees it
+  registryHost:
+    url: 192.168.64.1:5000                                    # Docker registry:2 on the Mac, plain HTTP
+  siteControllers:
+    - { hostName: dev1-vm, hostSerial: UTM-DEV1, model: UTM virtual machine (ARM64), nodeId: 1, bmc: 192.168.64.126 }   # bmc: stand-in, the VM has none
+
+network:
+  datacenterAsn: 4266050000
+  bgpAsnStart: 4268031000                      # pools.fnn_asn
+  bgpAsnEnd: 4268031099
+  asnLayout: { siteControllerRoutes: 4268030000 }   # metallb_asn in the fabric plan is outside the per-DPU range
+  siteControllerMtuSize: 9000
+  forgeControlPlanePrefix: 11.132.1.0/31       # fabric.prefixes.control_plane_link
+  forgeServiceVipPrefix: 11.133.1.0/27         # fabric.prefixes.service_vips
+  forgeDpuLoopbackPrefix: 11.131.0.0/16        # fabric.prefixes.dpu_loopbacks
+  forgeOverlayPrefixes: [12.150.0.0/16]        # fabric.prefixes.overlay (EVPN/VXLAN tenant space)
+  segments:
+    admin:           { prefix: 12.135.0.0/16, gateway: 12.135.0.1, mtu: 9000 }        # networks.admin
+    controlPlaneOob: { prefix: 192.168.64.0/24, gateway: 192.168.64.1, mtu: 1500 }    # the UTM host network; stand-in for an OOB segment
+    managedHostBmc:
+      - { switchName: leaf-mat, prefix: 11.140.2.0/24, gateway: 11.140.2.1, mtu: 1500 }   # networks.rack-mat-hosts
+  kubernetes: { podCidr: 10.244.0.0/16, serviceCidr: 10.96.0.0/12, apiVip: 192.168.64.126 }
+  nameServer: 192.168.64.1
+  unboundForwardAddresses: [192.168.64.1]
+  ntpServers: [192.168.64.1]                   # stand-in: the VM syncs from the host
+  pathMtu: 9000
+  pools:
+    vlan: { start: 100, end: 501 }
+    vni: { start: 1024500, end: 1024800 }
+    externalVpcVni: { start: 51008, end: 51011 }
+  fnn:
+    controlPlaneVni: 60000                     # fabric.evpn.control_plane_vni
+    adminVpcVni: 61000
+    vpcVrfLoopbackPrefix: 10.255.247.0/24      # pools.vpc_dpu_lo lives inside it
+    poolsVpcVni: [{ start: 60101, end: 60999 }]
+    routeTargets: { managedNodeBmc: 900, siteController: 50100, adminNetwork: 50400 }
+  serviceVips: { api: 11.133.1.17, dhcp: 11.133.1.0, dns0: 11.133.1.20, dns1: 11.133.1.19, pxe: 11.133.1.2, sshConsole: 11.133.1.4 }
+
+counts: { hosts: 2, dpus: 2, tenants: 1, racks: 1 }   # the MAT simulation; adjust to run-mat.sh
+
+fleet:
+  hosts:
+    - { model: MAT mock GB200 tray, count: 2 }
+  dpu: { model: simulated BlueField-3, generation: BF3 }
+
+versions:
+  infraController: ngc-v2.3.0-pr-291-g0a9ac0d6d
+  nicoRest: ngc-v2.3.0-pr-291-g0a9ac0d6d
+  docaPlatform: v26.4.0                        # the simulator's CRDs
+  kubernetesBaseline: v1.32
+
+credentials:
+  bmcRoot: { from: file, path: ./dev-values/nico-prereqs.yaml }   # the kvSeeds block carries the factory default; stand-in for a real source
+
+setup:
+  command: python3 tools/nico-dev/deploy-dev-nico.py --site dc1/dev1      # not setup.sh; nico-dev deploys this site
+  env:
+    KUBECONFIG: ./dc1-dev1.kubeconfig.yaml
+    NICO_IMAGE_REGISTRY: 192.168.64.1:5000
+    NICO_CORE_IMAGE_TAG: ngc-v2.3.0-pr-291-g0a9ac0d6d
+    NICO_REST_IMAGE_TAG: ngc-v2.3.0-pr-291-g0a9ac0d6d
+    NGC_API_TOKEN_DSX_CARBIDE_DEV: { from: env }
