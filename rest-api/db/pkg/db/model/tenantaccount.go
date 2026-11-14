@@ -6,6 +6,8 @@ package model
 import (
 	"context"
 	"database/sql"
+	"fmt"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -109,6 +111,12 @@ var (
 		TenantAccountStatusError:   true,
 	}
 )
+
+// GenerateAccountNumber will generate a unique account number
+// this will be deprecated - for now, use a uuid
+func GenerateAccountNumber() string {
+	return fmt.Sprintf("nico-%s", strings.ReplaceAll(uuid.New().String(), "-", ""))
+}
 
 // TenantAccountConfig holds provider-scoped configuration for a TenantAccount.
 // Fields must stay flat so jsonb partial merge works.

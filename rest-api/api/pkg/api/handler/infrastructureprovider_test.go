@@ -14,6 +14,7 @@ import (
 	"github.com/NVIDIA/infra-controller/rest-api/api/internal/config"
 	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/handler/util/common"
 	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/model"
+	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/middleware"
 	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
 	"github.com/google/uuid"
 	"github.com/labstack/echo/v4"
@@ -192,6 +193,7 @@ func TestGetCurrentInfrastructureProviderHandler_Handle(t *testing.T) {
 		wantInfrastructureProvider *cdbm.InfrastructureProvider
 		wantStatusCode             int
 		verifyChildSpanner         bool
+		skipOrgEntity              bool
 	}{
 		{
 			name: "get current Infrastructure Provider success",
@@ -222,7 +224,7 @@ func TestGetCurrentInfrastructureProviderHandler_Handle(t *testing.T) {
 			wantStatusCode:             http.StatusOK,
 		},
 		{
-			name: "get current Infrastructure Provider success, auto-created when it does not exist",
+			name: "get current Infrastructure Provider success, created by org entity middleware when it does not exist",
 			fields: fields{
 				dbSession: dbSession,
 				tc:        &tmocks.Client{},
@@ -234,6 +236,20 @@ func TestGetCurrentInfrastructureProviderHandler_Handle(t *testing.T) {
 			},
 			wantStatusCode:     http.StatusOK,
 			verifyChildSpanner: true,
+		},
+		{
+			name: "get current Infrastructure Provider failure, org entities were not resolved",
+			fields: fields{
+				dbSession: dbSession,
+				tc:        &tmocks.Client{},
+				cfg:       cfg,
+			},
+			args: args{
+				org:  ipOrg,
+				user: ipu,
+			},
+			wantStatusCode: http.StatusInternalServerError,
+			skipOrgEntity:  true,
 		},
 		{
 			name: "get current Infrastructure Provider failure, user doesn't have the right role",
@@ -269,6 +285,9 @@ func TestGetCurrentInfrastructureProviderHandler_Handle(t *testing.T) {
 			ec.Set("user", tt.args.user)
 
 			ec.SetRequest(ec.Request().WithContext(ctx))
+			if !tt.skipOrgEntity {
+				middleware.TestResolveOrgEntity(t, ec, tt.fields.dbSession, nil)
+			}
 
 			err := gciph.Handle(ec)
 			assert.NoError(t, err)

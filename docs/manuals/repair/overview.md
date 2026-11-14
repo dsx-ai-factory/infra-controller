@@ -41,7 +41,7 @@ A Provider Admin grants the capability by setting `siteCapabilities` on the Tena
 
 To read the current value, call [`GET /v2/org/{org}/nico/tenant/account`](api:GET/v2/org/:org/nico/tenant/account) and inspect `siteCapabilities`. Do not use the `capabilities` field on `GET /tenant/current`: it is a deprecated read-only aggregate scheduled for removal on October 1, 2026, and it omits `targetedInstanceCreation` rather than returning `false`. On the Tenant summaries embedded in other resources it is always omitted, so `capabilities` serializes as `{}` regardless of the real value.
 
-In Service Account mode, [`GET /v2/org/{org}/nico/service-account/current`](api:GET/v2/org/:org/nico/service-account/current) creates a `Ready` Tenant Account with the capability already enabled, so a Service Account org is privileged without a separate grant.
+In Service Account mode, the org's first request from the service account creates a `Ready` Tenant Account with the capability already enabled, so a Service Account org is privileged without a separate grant. [`GET /v2/org/{org}/nico/service-account/current`](api:GET/v2/org/:org/nico/service-account/current) returns the org's Provider and Tenant IDs.
 
 NOTE: Privileged Tenants still need Network Allocations from Provider in order to create Instances.
 

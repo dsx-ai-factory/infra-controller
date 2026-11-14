@@ -30,16 +30,13 @@ tags:
 
       ### Service Account Mode
       Depending on the auth configuration used, the NICo REST API may be configured in Service Account mode. In this mode, API users can act as both Provider and Tenant as part of the same organization.
-      If this is the case, the user must first retrieve the Service Account by making a call to the [Retrieve Service Account endpoint](#tag/Service-Account/operation/get-current-service-account).
+      The org's first request to any endpoint from a service account creates its Infrastructure Provider, its Tenant and a Ready Tenant Account between them. The [Retrieve Service Account endpoint](#tag/Service-Account/operation/get-current-service-account) reports whether a request comes from a service account and returns the IDs of both entities.
       For service accounts, the Tenant entity is initialized as a privileged Tenant when a Ready Tenant Account has `siteCapabilities` with `targetedInstanceCreation` enabled.
 
       ### Provider or Tenant Mode
-      If NICo REST API is not configured in Service Account mode, the user should retrieve the Infrastructure Provider by making a call to the [Retrieve Infrastructure Provider endpoint](#tag/Infrastructure-Provider/operation/get-current-infrastructure-provider)
-      or the Tenant by making a call to the [Retrieve Tenant endpoint](#tag/Tenant/operation/get-current-tenant).
+      If NICo REST API is not configured in Service Account mode, the org's first request to any endpoint from a user whose role has the `PROVIDER_ADMIN` or `PROVIDER_VIEWER` suffix creates the org's Infrastructure Provider. The first request from a user whose role has the `TENANT_ADMIN` suffix creates its Tenant. No endpoint has to be called first.
 
-      In both cases, these calls initialize Provider and Tenant entities for the organization. All resources created are anchored to either the Provider or Tenant entity.
-
-      Once the Provider and the Tenant are initialized, the user can create resources by making calls to the appropriate endpoints.
+      The [Retrieve Infrastructure Provider endpoint](#tag/Infrastructure-Provider/operation/get-current-infrastructure-provider) and the [Retrieve Tenant endpoint](#tag/Tenant/operation/get-current-tenant) return these entities. All resources created are anchored to either the Provider or Tenant entity.
 
       ### Creating Site-Level IP Blocks
       NICo creates a Site-level IP Block for each `site_fabric_prefixes` entry in the Site configuration TOML file when the Site reports its configuration. It names each one after its prefix, for example `site-fabric-ipv4-10-0-0-0-16` for `10.0.0.0/16`. A prefix inside an RFC 1918 or RFC 4193 private range gets a `DatacenterOnly` IP Block, and any other prefix gets a `Public` one. A prefix that already has a Site IP Block of either routing type doesn't get another one.
@@ -403,9 +400,11 @@ paths:
 
         API service must be configured for Service Account access at the time of deployment. It cannot be enabled or disabled via API.
 
+        The org's first request to any endpoint from a service account creates its Infrastructure Provider, Tenant and Tenant Account, so this endpoint doesn't have to be called first.
+
         `enabled` is returned `true` when:
         - Custom JWT issuer auth is configured and `isServiceAccount` is `true` in claim mapping for the org in request
-        - Keycloak auth is configured with `keycloak.serviceAccount` set to `true`, the token is a client credentials token, `keycloak.serviceAccountOrgs` lists the org in request, and the token carries both roles with both `PROVIDER_ADMIN` and `TENANT_ADMIN` suffix
+        - Keycloak auth is configured with `keycloak.serviceAccount` set to `true`, the token is a client credentials token, `keycloak.serviceAccountOrgs` lists the org in request, and the token carries roles in that org with both the `PROVIDER_ADMIN` and `TENANT_ADMIN` suffix
       parameters: []
       tags:
         - Service Account
@@ -440,7 +439,9 @@ paths:
       description: |-
         Retrieve Infrastructure Provider entity for current Org.
 
-        User must have authorization role with `PROVIDER_ADMIN` suffix.
+        The org's first request to any endpoint from a user whose role has the `PROVIDER_ADMIN` or `PROVIDER_VIEWER` suffix creates the Infrastructure Provider, so this endpoint doesn't have to be called first.
+
+        User must have authorization role with `PROVIDER_ADMIN` or `PROVIDER_VIEWER` suffix.
       parameters: []
       tags:
         - Infrastructure Provider
@@ -510,6 +511,8 @@ paths:
       operationId: get-current-tenant
       description: |-
         Retrieve Tenant entity for current Org.
+
+        The org's first request to any endpoint from a user whose role has the `TENANT_ADMIN` suffix creates the Tenant, so this endpoint doesn't have to be called first.
 
         `capabilities.targetedInstanceCreation` is a deprecated read-only aggregate: it is `true` when all Ready Tenant Account for this Tenant has TargetedInstanceCreation enabled in its configuration to preserve backwards compatibility. Configure the capability per Provider/per Site via PATCH `/tenant/account/{accountId}` using `siteCapabilities`. Disallowing at Provider or Site level would result in no value returned here.
 

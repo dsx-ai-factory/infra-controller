@@ -175,7 +175,7 @@ func (ctah CreateTenantAccountHandler) Handle(c echo.Context) error {
 	}
 
 	// Generate a unique account number
-	accountNumber := common.GenerateAccountNumber()
+	accountNumber := cdbm.GenerateAccountNumber()
 
 	sdDAO := cdbm.NewStatusDetailDAO(ctah.dbSession)
 
@@ -1122,7 +1122,7 @@ func (utah UpdateTenantAccountHandler) handleProviderSiteCapabilitiesUpdate(c ec
 		return common.HandleTxError(c, logger, err, "Failed to update Tenant Account capabilities")
 	}
 	for _, siteID := range newSiteIDs {
-		startTenantCreate(ctx, utah.scp, logger, ta.Tenant, siteID)
+		utah.scp.StartTenantCreate(ctx, logger, ta.Tenant, siteID)
 	}
 
 	ta, err = taDAO.GetByID(ctx, nil, taID, nil)

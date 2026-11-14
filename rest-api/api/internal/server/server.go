@@ -220,7 +220,7 @@ func InitAPIServer(cfg *config.Config, dbSession *cdb.Session, tc tsdkClient.Cli
 		e.Add(commonAPIRoute.Method, commonAPIRoute.Path, commonAPIRoute.Handler.Handle)
 	}
 
-	// Public .well-known/* tenant-identity routes — no auth, JWT verifiers
+	// Public .well-known/* tenant-identity routes (no auth, JWT verifiers)
 	wellKnownRoutes := api.NewWellKnownRoutes(dbSession, scp, cfg)
 	versionPrefix := "/" + cfg.GetAPIRouteVersion()
 	for _, r := range wellKnownRoutes {
@@ -252,6 +252,7 @@ func InitAPIServer(cfg *config.Config, dbSession *cdb.Session, tc tsdkClient.Cli
 	// Wrap the auth middleware to check readiness (optional, can be removed if panic is sufficient)
 	authMiddleware := authn.Auth(dbSession, tc, tokenOriginConfig, payloadEncryptionConfig, keycloakConfig)
 	routeGroup.Use(authMiddleware)
+	routeGroup.Use(middleware.OrgEntityMiddleware(middleware.NewOrgEntityResolver(dbSession, scp)))
 
 	apiRoutes := api.NewAPIRoutes(dbSession, tc, tnc, scp, cfg, dps)
 	for _, apiRoute := range apiRoutes {

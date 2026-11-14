@@ -174,7 +174,7 @@ TOKEN=$(curl -s -X POST "http://localhost:8082/realms/nico-dev/protocol/openid-c
 # Health check
 curl -s http://localhost:8388/healthz -H "Authorization: Bearer $TOKEN" | jq .
 
-# Get current tenant (auto-creates on first access)
+# Get current tenant (the org's first Tenant Admin request creates it)
 curl -s "http://localhost:8388/v2/org/test-org/nico/tenant/current" \
   -H "Authorization: Bearer $TOKEN" | jq .
 

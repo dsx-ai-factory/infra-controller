@@ -55,7 +55,7 @@ Service accounts have empty `email`/`firstName`/`lastName`. Human users have tho
 
 This endpoint does not return role information directly, roles are in the token and validated server-side. Confirm which roles you hold by attempting role-gated operations: `nicocli allocation list` requires Provider Admin; `nicocli tenant current` requires Tenant Admin.
 
-If your deployment is configured for service-account auth, use `nicocli service-account current` to retrieve the current org's service-account status, including the auto-created provider and tenant IDs.
+If your deployment is configured for service-account auth, use `nicocli service-account current` to retrieve the current org's service-account status, including the IDs of the provider and tenant that the org's first request created.
 
 ## Listing Tenant Members
 

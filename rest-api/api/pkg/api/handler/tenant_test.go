@@ -15,6 +15,7 @@ import (
 	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/handler/util/common"
 	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/model"
 	sc "github.com/NVIDIA/infra-controller/rest-api/api/pkg/client/site"
+	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/middleware"
 	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
 	"github.com/google/uuid"
 	"github.com/labstack/echo/v4"
@@ -205,6 +206,7 @@ func TestGetCurrentTenantHandler_Handle(t *testing.T) {
 		wantStatusCode               int
 		verifyChildSpanner           bool
 		contendSiteLock              bool
+		skipOrgEntity                bool
 	}{
 		{
 			name: "test get current Tenant success, retries association after lock contention",
@@ -223,7 +225,7 @@ func TestGetCurrentTenantHandler_Handle(t *testing.T) {
 			contendSiteLock:              true,
 		},
 		{
-			name: "test get current Tenant success, auto-created when it does not exist",
+			name: "test get current Tenant success, created by org entity middleware when it does not exist",
 			fields: fields{
 				dbSession: dbSession,
 				tc:        tc,
@@ -251,6 +253,20 @@ func TestGetCurrentTenantHandler_Handle(t *testing.T) {
 			},
 			wantStatusCode: http.StatusForbidden,
 		},
+		{
+			name: "test get current Tenant failure, org entities were not resolved",
+			fields: fields{
+				dbSession: dbSession,
+				tc:        tc,
+				cfg:       cfg,
+			},
+			args: args{
+				org:  tnOrg1,
+				user: tnu1,
+			},
+			wantStatusCode: http.StatusInternalServerError,
+			skipOrgEntity:  true,
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -265,6 +281,9 @@ func TestGetCurrentTenantHandler_Handle(t *testing.T) {
 			ec.Set("user", tt.args.user)
 
 			ec.SetRequest(ec.Request().WithContext(ctx))
+			if !tt.skipOrgEntity {
+				middleware.TestResolveOrgEntity(t, ec, tt.fields.dbSession, scp)
+			}
 
 			gctnh := NewGetCurrentTenantHandler(tt.fields.dbSession, scp, tt.fields.tc, tt.fields.cfg)
 			if tt.contendSiteLock {

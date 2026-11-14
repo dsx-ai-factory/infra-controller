@@ -1,0 +1,15 @@
+---
+tags: ["unreleased", "rest-api"]
+---
+
+## Org Provider and Tenant created on first request (unreleased)
+
+The org's first REST request from a user with a Provider or Tenant role now creates the org's Infrastructure Provider or Tenant, whichever endpoint it calls. Previously, only `GET /v2/org/{org}/nico/infrastructure-provider/current`, `GET /v2/org/{org}/nico/tenant/current` and `GET /v2/org/{org}/nico/service-account/current` created them. Other endpoints returned an error until one of them was called.
+
+### Changed behavior
+
+- A request from a Provider Admin or Provider Viewer creates the Infrastructure Provider. A request from a Tenant Admin creates the Tenant and links Tenant Account invitations sent to the org before it existed.
+- A request from a service account creates both, along with a `Ready` Tenant Account between them that has `targetedInstanceCreation` enabled.
+- Parallel first requests to a new org create one Infrastructure Provider and one Tenant.
+- The GET current endpoints still return these entities, so scripts that call them first keep working.
+- An org display name in the token replaces the stored one on the next request. A token without a display name leaves the stored one unchanged.
