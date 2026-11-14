@@ -111,6 +111,9 @@ pub fn host_state_from_snapshot(
         dpu_ids: host.associated_dpu_machine_ids(),
         update_complete: host.status.update_complete,
         firmware_autoupdate: host.config.firmware_autoupdate,
+        firmware_update_window_start: None,
+        firmware_update_window_end: None,
+        firmware_update_window_known: false,
         health_alerts: aggregate_health
             .alerts
             .into_iter()
@@ -151,6 +154,8 @@ mod tests {
         HostUpdateGateRow {
             host_id: managed_host_state_snapshot().host_snapshot.id,
             bmc_address: Some([10, 0, 0, 1].into()),
+            window_start: None,
+            window_end: None,
             report_version: Some(ConfigVersion::initial()),
             waiting_for_explorer_refresh: Some(false),
             report_vendor: Some("Dell".to_string()),
@@ -205,6 +210,9 @@ mod tests {
             dpu_ids: status.associated_dpu_machine_ids,
             update_complete: status.update_complete,
             firmware_autoupdate: config.firmware_autoupdate,
+            firmware_update_window_start: None,
+            firmware_update_window_end: None,
+            firmware_update_window_known: false,
             health_alerts: status.health.unwrap().alerts,
             quarantine: status.quarantine,
             allocation: Some(rpc::forge::HostAllocation {
@@ -295,6 +303,35 @@ mod tests {
                 Some("NotAVendor") => None,
                 None => None,
             }
+        );
+    }
+    #[test]
+    fn host_state_windows_old_client_compatibility() {
+        use prost::Message;
+        #[derive(Clone, PartialEq, Message)]
+        struct OldHostState {
+            #[prost(string, tag = "2")]
+            state: String,
+        }
+        let old = OldHostState {
+            state: "Ready".into(),
+        };
+        let decoded = rpc::forge::HostState::decode(old.encode_to_vec().as_slice()).unwrap();
+        assert!(!decoded.firmware_update_window_known);
+        assert!(
+            decoded.firmware_update_window_start.is_none()
+                && decoded.firmware_update_window_end.is_none()
+        );
+        let new = rpc::forge::HostState {
+            state: old.state.clone(),
+            firmware_update_window_known: true,
+            firmware_update_window_start: Some(chrono::DateTime::UNIX_EPOCH.into()),
+            firmware_update_window_end: Some(chrono::DateTime::UNIX_EPOCH.into()),
+            ..Default::default()
+        };
+        assert_eq!(
+            OldHostState::decode(new.encode_to_vec().as_slice()).unwrap(),
+            old
         );
     }
 }

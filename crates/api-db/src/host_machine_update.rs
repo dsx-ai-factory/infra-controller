@@ -113,6 +113,8 @@ pub async fn find_update_gates(
             AS d(vendor text, model text, versions jsonb, explicit_update_start_needed boolean)
         )
         SELECT machines.id AS host_id,
+            machines.firmware_update_time_window_start AS window_start,
+            machines.firmware_update_time_window_end AS window_end,
             machine_interface_addresses.address AS bmc_address,
             explored_endpoints.version AS report_version,
             explored_endpoints.waiting_for_explorer_refresh,

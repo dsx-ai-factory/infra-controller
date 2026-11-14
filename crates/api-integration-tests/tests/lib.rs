@@ -571,6 +571,9 @@ async fn run_integration() -> eyre::Result<()> {
     // checks unavailable gauge rendering, while `resource_pool_inspection`
     // exercises the sampler's failure and recovery paths.
     for line in [
+        "# TYPE carbide_machine_update_manager_completed_passes_total counter\n",
+        "\ncarbide_machine_update_manager_completed_passes_total ",
+        "# HELP carbide_machine_update_manager_completed_passes_total Number of successful machine update manager work passes, excluding lock skips and failed or cancelled passes\n",
         r#"carbide_resourcepool_used_count{pool="vpc-vni"}"#,
         r#"carbide_resourcepool_free_count{pool="vpc-vni"}"#,
         r#"carbide_resourcepool_stats_available{pool="vpc-vni"} 1"#,

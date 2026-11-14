@@ -37,6 +37,8 @@ pub struct HostMachineUpdate {
 pub struct HostUpdateGateRow {
     pub host_id: HostMachineId,
     pub bmc_address: Option<IpAddr>,
+    pub window_start: Option<chrono::DateTime<chrono::Utc>>,
+    pub window_end: Option<chrono::DateTime<chrono::Utc>>,
     pub report_version: Option<ConfigVersion>,
     pub waiting_for_explorer_refresh: Option<bool>,
     pub report_vendor: Option<String>,
@@ -185,6 +187,8 @@ mod tests {
         HostUpdateGateRow {
             host_id: (&host_machine_id()).into(),
             bmc_address: Some(IpAddr::from(bmc_address)),
+            window_start: None,
+            window_end: None,
             report_version: Some(ConfigVersion::initial()),
             waiting_for_explorer_refresh: Some(false),
             report_vendor: Some("Dell".to_string()),
