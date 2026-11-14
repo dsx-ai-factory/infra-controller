@@ -27,6 +27,7 @@ pub(in crate::tests) mod tests {
     use model::attestation::spdm::{SpdmAttestationState, SpdmCancellationTarget, SpdmObjectId};
     use model::attestation_scheduling::SchedulingOutcome;
     use model::controller_outcome::PersistentStateHandlerOutcome;
+    use model::machine::LoadSnapshotOptions;
     use rpc::forge::forge_server::Forge;
     use rpc::forge::list_machine_attestation_statuses_request::Target;
     use rpc::forge::{
@@ -2068,6 +2069,164 @@ pub(in crate::tests) mod tests {
                 );
             }
         }
+        Ok(())
+    }
+
+    /// What a host's allocation gate makes of the attestation source. Each
+    /// alert is stored on the machine it describes, and a DPU is a machine of
+    /// its own, so a DPU's failure only reaches allocation through the host's
+    /// aggregate. A coverage alert travels the same way and must not block,
+    /// since a machine nobody can attest is not a machine that failed.
+    #[crate::sqlx_test]
+    async fn attestation_alerts_reach_the_hosts_allocation_gate(
+        pool: sqlx::PgPool,
+    ) -> Result<(), eyre::Error> {
+        /// The host's attestation alerts, named by ID and target, and whether
+        /// the host can still be allocated.
+        async fn host_state(
+            env: &TestEnv,
+            host_id: &carbide_uuid::machine::HostMachineId,
+        ) -> Result<(Vec<String>, bool), eyre::Error> {
+            let snapshot = db::managed_host::load_snapshot(
+                &mut *env.pool.acquire().await?,
+                host_id,
+                LoadSnapshotOptions::default().with_host_health(env.config.host_health),
+            )
+            .await?
+            .expect("the managed host exists");
+            let mut alerts: Vec<String> = snapshot
+                .aggregate_health
+                .alerts
+                .iter()
+                .filter(|alert| alert.id.as_str().starts_with("Attestation"))
+                .chain(
+                    snapshot
+                        .aggregate_health
+                        .alerts
+                        .iter()
+                        .filter(|alert| alert.id.as_str() == "SpdmAttestationFailed"),
+                )
+                .map(|alert| format!("{}:{:?}", alert.id.as_str(), alert.target))
+                .collect();
+            alerts.sort();
+            Ok((alerts, snapshot.is_usable_as_instance(false).is_ok()))
+        }
+
+        let env = create_test_env_with_overrides(
+            pool,
+            TestEnvOverrides {
+                config: Some(Box::new(spdm_enabled_config())),
+                ..Default::default()
+            },
+        )
+        .await;
+        env.redfish_sim.set_evidence_collection_running(false);
+        let host = create_managed_host(&env).await;
+        let dpu_id: MachineId = **host.dpu_ids.first().expect("the fixture host has a DPU");
+
+        assert_eq!(
+            host_state(&env, &host.id).await?,
+            (Vec::new(), true),
+            "a host whose attestation passed carries no alert and can be allocated"
+        );
+
+        // The DPU is attested against its own class, so give that class a
+        // profile selecting the attester whose result is written below.
+        let mut txn = env.pool.begin().await?;
+        let dpu_class = "nvidia_bluefield-3";
+        let profile = db::attestation_profile::create(
+            &mut txn,
+            dpu_class,
+            &AttestationPolicyDocument::new(AttesterSelection {
+                mode: AttesterSelectionMode::Allowlist,
+                component_ids: vec![ComponentIdMatch::Prefix("DPU_IRoT".to_string())],
+            }),
+            "test",
+        )
+        .await?;
+        let job_id = uuid::Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO spdm_machine_devices_attestation \
+             (machine_id, device_id, nonce, state, job_id, started_at, completed_at) \
+             VALUES ($1, 'DPU_IRoT_0', gen_random_uuid(), $2, $3, now(), now())",
+        )
+        .bind(dpu_id)
+        .bind(sqlx::types::Json(SpdmAttestationState::Failed(
+            "verification failed".to_string(),
+        )))
+        .bind(job_id)
+        .execute(&mut *txn)
+        .await?;
+        db::machine::set_attestation_scheduling(
+            &mut txn,
+            &dpu_id,
+            &model::attestation_scheduling::AttestationScheduling {
+                outcome: SchedulingOutcome::Scheduled,
+                hardware_class: Some(dpu_class.to_string()),
+                used_any_fallback: false,
+                profile_version: Some(profile.version.to_string()),
+                unsatisfied: None,
+                job_id: Some(job_id),
+            },
+        )
+        .await?;
+        let report = db::attestation::health::build_health_report(&mut txn, &dpu_id).await?;
+        db::machine::update_attestation_health_report(&mut txn, &dpu_id, &report).await?;
+        txn.commit().await?;
+
+        assert_eq!(
+            host_state(&env, &host.id).await?,
+            (
+                vec!["SpdmAttestationFailed:Some(\"DPU_IRoT_0\")".to_string()],
+                false
+            ),
+            "a failed DPU attester has to reach the host's gate and close it"
+        );
+
+        // Leave the DPU nothing to report, then give the host a profile asking
+        // for an attester its BMC does not offer, which is a coverage gap
+        // rather than a failure.
+        let mut txn = env.pool.begin().await?;
+        sqlx::query("DELETE FROM spdm_machine_devices_attestation WHERE machine_id = $1")
+            .bind(dpu_id)
+            .execute(&mut *txn)
+            .await?;
+        let report = db::attestation::health::build_health_report(&mut txn, &dpu_id).await?;
+        db::machine::update_attestation_health_report(&mut txn, &dpu_id, &report).await?;
+        sqlx::query("DELETE FROM attestation_profiles WHERE hardware_class = $1")
+            .bind(MOCK_HOST_HARDWARE_CLASS)
+            .execute(&mut *txn)
+            .await?;
+        let mut selection = gpu_allowlist();
+        selection
+            .component_ids
+            .push(ComponentIdMatch::Exact("NOT_PRESENT".to_string()));
+        db::attestation_profile::create(
+            &mut txn,
+            MOCK_HOST_HARDWARE_CLASS,
+            &AttestationPolicyDocument::new(selection),
+            "test",
+        )
+        .await?;
+        txn.commit().await?;
+
+        env.api
+            .trigger_machine_attestation(Request::new(SpdmMachineAttestationTriggerRequest {
+                machine_id: Some(MachineId::from(host.id).into()),
+                redfish_timeout_secs: u32::MAX,
+            }))
+            .await?;
+
+        assert_eq!(
+            host_state(&env, &host.id).await?,
+            (
+                vec![format!(
+                    "AttestationPolicyUnsatisfied:Some({MOCK_HOST_HARDWARE_CLASS:?})"
+                )],
+                true
+            ),
+            "a coverage alert has to be reported without closing the gate"
+        );
         Ok(())
     }
 

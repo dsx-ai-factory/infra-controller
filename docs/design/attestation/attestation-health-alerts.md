@@ -411,8 +411,8 @@ Six steps, each one commit. All have landed.
 | Waiving a job that already failed drops its alerts, failing one that already passed raises them, and neither disturbs the rest of the list | `api-core` tests            | Landed      |
 | A cancellation request names each machine it updated once, however many devices it covered                                          | `api-db` tests                        | Landed      |
 | A rebuild makes a second rebuild of the same machine wait, rather than both building from one snapshot                              | `api-db` tests                        | Landed      |
-| A failed attester on a DPU stores its alert on the DPU's row and blocks allocation of the DPU's host                                 | `api-core` integration test           | Outstanding |
-| Coverage alerts do not prevent allocation                                                                                            | `api-core` health aggregation tests   | Outstanding |
+| A failed attester on a DPU stores its alert on the DPU's row and blocks allocation of the DPU's host                                 | `api-core` integration test           | Landed      |
+| Coverage alerts do not prevent allocation                                                                                            | `api-core` integration test           | Landed      |
 | The trigger RPC updates the source just as a state-machine trigger does                                                             | `api-core` integration test           | Outstanding |
 | Scheduling a new job keeps the failure alert for an attester it selects again, and drops it for one the new profile excludes        | `api-core` integration test           | Outstanding |
 | The `attestation` source merges with `site-explorer` and `forge-dpu-agent` without replacing either                                  | `api-core` health aggregation tests   | Outstanding |
