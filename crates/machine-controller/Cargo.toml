@@ -72,6 +72,7 @@ opentelemetry = { workspace = true }
 prometheus = { workspace = true }
 prost = { workspace = true }
 prost-types = { workspace = true }
+regex = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 sha2 = { workspace = true }
@@ -96,7 +97,6 @@ carbide-utils = { path = "../utils", default-features = false, features = [
 ] }
 
 figment = { workspace = true, features = ["env", "test", "toml"] }
-regex = { workspace = true }
 lazy_static = { workspace = true }
 tempfile = { workspace = true }
 tokio-util = { workspace = true }

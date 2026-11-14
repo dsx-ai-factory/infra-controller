@@ -4,8 +4,8 @@
 
 An SPDM attestation job records one attempt to check a machine's selected
 devices. The [profile design](attestation-profiles.md)
-explains how those devices are selected. The job gives that attempt its own
-identity, progress, and results.
+explains the default selection; manual triggers can override it with a regex.
+The job gives that attempt its own identity, progress, and results.
 
 ## Job identity
 
@@ -97,6 +97,27 @@ The commands below belong to `nico-admin-cli attestation spdm`. They use the
 `TriggerMachineAttestation`. On success, it prints the job ID when devices
 were scheduled, or `none` when no job was created. Keep that ID to inspect or
 fail or waive the run.
+
+By default, selection uses the machine's hardware-class profile. Supplying
+`--attester-id-regex` replaces that selection for this request, including when
+the profile is missing or its mode is `NONE`, without modifying the stored
+profile. The pattern uses Rust regex syntax and searches within each reported
+attester ID, case-sensitive by default: `GPU_` selects IDs containing that text;
+`GPU_0$` selects IDs ending in `GPU_0`; `^HGX_IRoT_GPU_0$` selects exactly that ID.
+Empty or invalid patterns are rejected before contacting the BMC. Device
+enablement, SPDM type/version checks, and site-wide SPDM enablement still apply.
+
+The trigger prints the applied regex for an override, the scheduled attester IDs
+in ascending order, and the job ID. A matching override reports
+`IndividualAttesterTriggerScheduled`. No eligible match creates no job:
+`NoAttestersFound` means discovery found no eligible devices, while
+`IndividualAttesterTriggerMatchedNothing` means eligible devices existed but
+none matched the regex. Manual overrides apply no profile, so their scheduling
+events report `profile_source=unprofiled` even when a profile exists. The distinct
+manual outcomes separate successful selection and unmatched regexes from
+profile-driven `Scheduled` and `PolicyMatchedNothing` attempts. Inspect the
+targeted run through its job ID; machine assessment still uses the current
+profile's selection.
 
 ### Inspect, fail, or waive a run: `job`
 

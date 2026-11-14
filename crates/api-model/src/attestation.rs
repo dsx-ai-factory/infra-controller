@@ -538,9 +538,10 @@ pub mod profile {
         /// Applies the selection to the attesters a BMC reported that already
         /// passed eligibility, in the order it reported them.
         ///
-        /// A selection is a requirement rather than a filter, so an allowlist
-        /// pattern matching nothing fails the whole selection while a denylist
-        /// pattern matching nothing excludes nothing.
+        /// An allowlist with unmatched patterns still selects the attesters that
+        /// matched. It returns `PartiallySatisfied` if any matched, or
+        /// `PolicyMatchedNothing` if none did. A denylist pattern matching
+        /// nothing excludes nothing.
         pub fn evaluate(&self, eligible: &[&str]) -> SelectionOutcome {
             match self.mode {
                 AttesterSelectionMode::None => SelectionOutcome::AttestationDisabled,

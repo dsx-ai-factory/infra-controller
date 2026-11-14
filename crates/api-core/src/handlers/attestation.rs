@@ -26,6 +26,7 @@ use itertools::Itertools;
 use model::attestation::spdm as model_spdm;
 use model::bmc_info::BmcInfo;
 use model::machine::machine_search_config::MachineSearchConfig;
+use regex::Regex;
 use sqlx::PgPool;
 use state_controller::state_handler::StateHandlerError;
 use tokio::time as tt;
@@ -60,6 +61,21 @@ pub(crate) async fn trigger_machine_attestation(
         .ok_or(Status::from(CarbideError::Internal {
             message: "No machine id supplied".to_string(),
         }))?;
+    // Validate before any BMC access; callers other than the CLI can supply this field too.
+    let attester_id_regex = request_payload
+        .attester_id_regex
+        .as_deref()
+        .map(|pattern| {
+            if pattern.is_empty() {
+                return Err(CarbideError::InvalidArgument(
+                    "attester ID regex must not be empty".to_string(),
+                ));
+            }
+            Regex::new(pattern).map_err(|error| {
+                CarbideError::InvalidArgument(format!("invalid attester ID regex: {error}"))
+            })
+        })
+        .transpose()?;
     let redfish_timeout_duration =
         std::time::Duration::from_secs(request_payload.redfish_timeout_secs as u64);
 
@@ -96,9 +112,8 @@ pub(crate) async fn trigger_machine_attestation(
             .await?;
     drop(db_reader);
 
-    // Called only if the machine's profile turns out to need the BMC: creating
-    // a client authenticates against it, which the profile-only outcomes
-    // report without.
+    // Called only if selection needs BMC inventory: creating a client authenticates
+    // against it, which profile-only outcomes report without.
     let connect = async || {
         let redfish_client_future = api.redfish_pool.client_by_info(&bmc_access_info);
         match tt::timeout(redfish_timeout_duration, redfish_client_future).await {
@@ -118,6 +133,7 @@ pub(crate) async fn trigger_machine_attestation(
         &machine_id,
         redfish_timeout_duration,
         false, // A gRPC request does not originate from the managed-host controller.
+        attester_id_regex.as_ref(),
     )
     .await
     .map_err(|error| match error {
@@ -143,6 +159,8 @@ pub(crate) async fn trigger_machine_attestation(
         job_id: result.job_id.map(|job_id| ::rpc::common::Uuid {
             value: job_id.to_string(),
         }),
+        attester_ids: result.attester_ids,
+        attester_id_regex: request_payload.attester_id_regex.clone(),
     }))
 }
 
@@ -158,6 +176,12 @@ fn reported_outcome(outcome: SchedulingOutcome) -> rpc::SpdmSchedulingOutcome {
         SchedulingOutcome::PolicyMatchedNothing => rpc::SpdmSchedulingOutcome::PolicyMatchedNothing,
         SchedulingOutcome::ClassNotRecorded => rpc::SpdmSchedulingOutcome::ClassNotRecorded,
         SchedulingOutcome::NoProfile => rpc::SpdmSchedulingOutcome::NoProfile,
+        SchedulingOutcome::IndividualAttesterTriggerMatchedNothing => {
+            rpc::SpdmSchedulingOutcome::IndividualAttesterTriggerMatchedNothing
+        }
+        SchedulingOutcome::IndividualAttesterTriggerScheduled => {
+            rpc::SpdmSchedulingOutcome::IndividualAttesterTriggerScheduled
+        }
     }
 }
 
@@ -422,11 +446,17 @@ async fn assess_machine_attestation(
     };
     // Selection success reports what was selected, without implying a job was scheduled.
     let attester_selection_status = match selection.outcome {
-        SchedulingOutcome::Scheduled => AttesterSelectionStatus::Selected,
+        // Assessment uses profile selection; keep its statuses independent of trigger origin.
+        SchedulingOutcome::Scheduled | SchedulingOutcome::IndividualAttesterTriggerScheduled => {
+            AttesterSelectionStatus::Selected
+        }
         SchedulingOutcome::PartiallySatisfied => AttesterSelectionStatus::PartiallySatisfied,
         SchedulingOutcome::AttestationDisabled => AttesterSelectionStatus::Disabled,
         SchedulingOutcome::NoAttestersFound => AttesterSelectionStatus::NoAttestersFound,
-        SchedulingOutcome::PolicyMatchedNothing => AttesterSelectionStatus::PolicyMatchedNothing,
+        SchedulingOutcome::PolicyMatchedNothing
+        | SchedulingOutcome::IndividualAttesterTriggerMatchedNothing => {
+            AttesterSelectionStatus::PolicyMatchedNothing
+        }
         SchedulingOutcome::ClassNotRecorded => AttesterSelectionStatus::ClassNotRecorded,
         SchedulingOutcome::NoProfile => AttesterSelectionStatus::NoProfile,
     };
@@ -837,6 +867,8 @@ mod tests {
             SchedulingOutcome::PolicyMatchedNothing,
             SchedulingOutcome::ClassNotRecorded,
             SchedulingOutcome::NoProfile,
+            SchedulingOutcome::IndividualAttesterTriggerMatchedNothing,
+            SchedulingOutcome::IndividualAttesterTriggerScheduled,
         ]
         .map(|outcome| {
             let wire = reported_outcome(outcome);

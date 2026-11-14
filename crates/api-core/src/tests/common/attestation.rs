@@ -114,6 +114,7 @@ pub(crate) async fn spdm_attestation_run_to_failed_then_to_success(
             rpc::forge::SpdmMachineAttestationTriggerRequest {
                 machine_id: Some(host.id.into()),
                 redfish_timeout_secs: u32::MAX,
+                attester_id_regex: None,
             },
         ))
         .await
