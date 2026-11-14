@@ -1713,3 +1713,57 @@ func sanitizeRegressionOutput(output string) string {
 	}
 	return output
 }
+
+func TestRoutingProfileDefinitionSelector_RealTerminal(t *testing.T) {
+	binaryPath := buildRegressionCLI(t)
+	for _, cancel := range []bool{false, true} {
+		name := "select profile"
+		if cancel {
+			name = "cancel profile selection"
+		}
+		t.Run(name, func(t *testing.T) {
+			recorder := &cliRegressionRecorder{}
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				recorder.append(cliRegressionRequest{Method: r.Method, Path: r.URL.Path, Query: r.URL.RawQuery})
+				w.Header().Set("Content-Type", "application/json")
+				switch r.URL.Path {
+				case "/v2/org/acme/nico/site":
+					_, _ = io.WriteString(w, `[{"id":"site-one","name":"Site One","status":"Registered"}]`)
+				case "/v2/org/acme/nico/vpc/routing-profile":
+					assert.Equal(t, "site-one", r.URL.Query().Get("siteId"))
+					_, _ = io.WriteString(w, `[{"name":"EXTERNAL","config":{}},{"name":"tenant-edge","config":{}}]`)
+				case "/v2/org/acme/nico/vpc/routing-profile/tenant-edge":
+					assert.Equal(t, "site-one", r.URL.Query().Get("siteId"))
+					_, _ = io.WriteString(w, `{"name":"tenant-edge","config":{"accessTier":3}}`)
+				default:
+					_, _ = io.WriteString(w, `{}`)
+				}
+			}))
+			defer server.Close()
+			command := exec.Command(binaryPath, "--config", writeRegressionConfig(t, server.URL), "tui")
+			command.Env = regressionEnvironment(map[string]string{"NICO_TOKEN": ptyAuthToken, "TERM": "xterm-256color"})
+			terminal := startRegressionPTY(t, command)
+			defer terminal.close()
+			terminal.waitFor(t, "Type a command or")
+			terminal.send(t, "vpc routing-profile-definition get\r")
+			terminal.waitFor(t, "tenant-edge")
+			if cancel {
+				terminal.sendBytes(t, []byte{KeyEscape})
+				terminal.waitFor(t, "selection cancelled")
+			} else {
+				terminal.send(t, "tenant-edge\r")
+				terminal.waitFor(t, `"accessTier": 3`)
+			}
+			terminal.send(t, "scope\r")
+			terminal.waitFor(t, "Site One")
+			terminal.send(t, "exit\r")
+			terminal.waitForExit(t)
+			gets := recorder.matching(http.MethodGet, "/v2/org/acme/nico/vpc/routing-profile/tenant-edge")
+			if cancel {
+				assert.Empty(t, gets)
+			} else {
+				require.Len(t, gets, 1)
+			}
+		})
+	}
+}

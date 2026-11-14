@@ -74,6 +74,9 @@ func GeneratedPathResourceDescriptor(commandName, parameter string) GeneratedRes
 	}
 
 	switch {
+	case commandName == "vpc routing-profile-definition get" && parameter == "profileName":
+		descriptor.ResourceType = "vpc-routing-profile-definition"
+		descriptor.ScopeParameter = "siteId"
 	case commandName == "allocation constraint update" && strings.EqualFold(parameter, "allocationConstraintId"):
 		descriptor.ResourceType = "allocation-constraint"
 		descriptor.ParentParameter = "allocationId"
@@ -135,7 +138,10 @@ func (s *Session) ResolveGeneratedResource(
 		return nil, supported, err
 	}
 
-	value = strings.TrimSpace(value)
+	// Configured routing profile names are exact map keys, including whitespace.
+	if descriptor.ResourceType != "vpc-routing-profile-definition" {
+		value = strings.TrimSpace(value)
+	}
 	if value == "" {
 		if s.Resolver == nil {
 			return nil, true, fmt.Errorf(
@@ -163,15 +169,15 @@ func (s *Session) ResolveGeneratedResource(
 }
 
 // matchingGeneratedResourceItems matches value against item IDs, then names.
-// NVLink domain IDs can differ only in case, so domains match exactly; other
-// resources match case-insensitively.
+// NVLink domain IDs and configured routing profile names are case-sensitive;
+// other resources match case-insensitively.
 func matchingGeneratedResourceItems(
 	descriptor GeneratedResourceDescriptor,
 	items []NamedItem,
 	value string,
 ) []NamedItem {
 	equal := strings.EqualFold
-	if descriptor.ResourceType == "domain" {
+	if descriptor.ResourceType == "domain" || descriptor.ResourceType == "vpc-routing-profile-definition" {
 		equal = func(a, b string) bool { return a == b }
 	}
 	var idMatches []NamedItem
@@ -204,6 +210,13 @@ func (s *Session) GeneratedResourceItems(
 		return nil, false, nil
 	}
 	switch descriptor.ResourceType {
+	case "vpc-routing-profile-definition":
+		siteID := strings.TrimSpace(resolvedValues[descriptor.ScopeParameter])
+		if siteID == "" {
+			siteID = strings.TrimSpace(s.Scope.SiteID)
+		}
+		items, err := s.fetchVPCRoutingProfileDefinitionsForSite(ctx, siteID)
+		return items, true, err
 	case "allocation-constraint":
 		parent, err := requiredResolvedValue(descriptor, resolvedValues)
 		if err != nil {
@@ -325,6 +338,31 @@ func (s *Session) fetchNVLinkDomainsForSite(ctx context.Context, siteID string) 
 			Name: name, ID: str(domain, "id"),
 			Extra: map[string]string{"siteId": siteID},
 			Raw:   domain,
+		}
+	}
+	return items, nil
+}
+
+func (s *Session) fetchVPCRoutingProfileDefinitions(ctx context.Context) ([]NamedItem, error) {
+	return s.fetchVPCRoutingProfileDefinitionsForSite(ctx, strings.TrimSpace(s.Scope.SiteID))
+}
+
+func (s *Session) fetchVPCRoutingProfileDefinitionsForSite(_ context.Context, siteID string) ([]NamedItem, error) {
+	if siteID == "" {
+		return nil, fmt.Errorf("siteId must be resolved before VPC routing profile definitions")
+	}
+	profiles, err := s.fetchAll(apiPath(s, "vpc/routing-profile"), map[string]string{"siteId": siteID})
+	if err != nil {
+		return nil, err
+	}
+	items := make([]NamedItem, len(profiles))
+	for i, profile := range profiles {
+		name := str(profile, "name")
+		items[i] = NamedItem{
+			Name:  name,
+			ID:    name,
+			Extra: map[string]string{"siteId": siteID},
+			Raw:   profile,
 		}
 	}
 	return items, nil
