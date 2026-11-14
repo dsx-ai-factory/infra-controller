@@ -39,7 +39,7 @@ carbide-instrument = { path = "../instrument" }
 carbide-network = { path = "../network", features = ["sqlx"] }
 carbide-version = { path = "../version" }
 carbide-health-report = { path = "../health-report" }
-carbide-utils = { path = "../utils", features = ["sqlx"] }
+carbide-utils = { path = "../utils" }
 carbide-uuid = { path = "../uuid", features = ["sqlx"] }
 carbide-measured-boot = { path = "../measured-boot", features = ["sqlx"] }
 dns-record = { path = "../dns-record" }

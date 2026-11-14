@@ -19,7 +19,6 @@ carbide-api-db = { path = "../api-db" }
 carbide-api-model = { path = "../api-model" }
 carbide-dpa = { path = "../dpa" }
 carbide-instrument = { path = "../instrument" }
-carbide-secrets = { path = "../secrets" }
 carbide-utils = { path = "../utils" }
 carbide-uuid = { path = "../uuid" }
 config-version = { path = "../config-version" }
@@ -46,6 +45,7 @@ uuid = { features = ["v4", "serde"], workspace = true }
 [dev-dependencies]
 carbide-instrument = { path = "../instrument", features = ["test-support"] }
 carbide-macros = { path = "../macros" }
+carbide-secrets = { path = "../secrets" }
 carbide-sqlx-testing = { path = "../sqlx-testing" }
 carbide-test-support = { path = "../test-support" }
 

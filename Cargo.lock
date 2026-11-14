@@ -2972,7 +2972,6 @@ dependencies = [
  "clap",
  "mqttea",
  "prost",
- "prost-build",
  "rumqttc",
  "serde",
  "serde_json",
