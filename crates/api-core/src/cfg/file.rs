@@ -2094,6 +2094,13 @@ pub struct DpfConfig {
     /// Enables DPF deployment.
     #[serde(default)]
     pub enabled: bool,
+    /// Uses DPUService-based Service names and peer addresses in NICo's DHCP, FMDS,
+    /// DPU-agent, and OTel charts. Defaults to false to preserve legacy naming.
+    /// Enable only with DPF 30.0 rc.4 or newer and HBN and NICo chart versions
+    /// that support this naming scheme.
+    /// This site-wide value overrides per-service Helm values and is read at startup.
+    #[serde(default, rename = "multiClusterSupport")]
+    pub multi_cluster_support: bool,
     /// Opts the DPF namespace into deployment-scoped DPUServiceInterfaces.
     /// BF3 sites (including BF3 GB200) and generic BF4 use the default
     /// unscoped mode; BF4 Astra requires this to be enabled. When enabled, initialization
@@ -2180,6 +2187,7 @@ impl Default for DpfConfig {
     fn default() -> Self {
         Self {
             enabled: false,
+            multi_cluster_support: false,
             deployment_scoped_service_interfaces: false,
             pf_total_sf_reserved: default_dpf_pf_total_sf_reserved(),
             dpu_service_sync_enabled: default_to_true(),

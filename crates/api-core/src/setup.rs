@@ -1085,6 +1085,7 @@ fn build_dpf_interfaces_and_services(
         service_vpc_slots,
         &carbide_config.node_auth,
         carbide_config.ewethers_config.as_ref(),
+        carbide_config.dpf.multi_cluster_support,
     );
     (interfaces, mandatory_services)
 }
@@ -2771,6 +2772,50 @@ mod tests {
         InitialObjectsConfig, VmaasConfig, default_hbn_bridge,
     };
     use crate::cfg::load::parse_carbide_config;
+
+    #[test]
+    fn dpf_multi_cluster_support_reaches_all_nico_helm_templates() {
+        for (input, expected) in [
+            ("", false),
+            ("multiClusterSupport = false", false),
+            ("multiClusterSupport = true", true),
+        ] {
+            let mut config = crate::test_support::default_config::get();
+            config.dpf = toml::from_str(input).unwrap();
+            let services = &mut config.dpf.services;
+            for service in [
+                &mut services.dhcp_server,
+                &mut services.dpu_agent,
+                &mut services.fmds,
+                &mut services.otel,
+            ] {
+                service.extra_helm_values = serde_json::json!({
+                    "multiClusterSupport": !expected,
+                    "dpf": { "preserved": "value" }
+                })
+                .as_object()
+                .cloned();
+            }
+            let (_, services) = build_dpf_interfaces_and_services(
+                &config,
+                &config.dpf.deployments.bf3,
+                DpuDeploymentType::Bf3,
+                ServiceVpcSlots::default(),
+                None,
+            );
+            let templates: Vec<_> = services
+                .iter()
+                .map(|service| carbide_dpf::build_service_template(service, "test-ns", "bf3"))
+                .filter_map(|template| template.spec.helm_chart.values)
+                .filter(|values| values.get("multiClusterSupport").is_some())
+                .collect();
+            assert_eq!(templates.len(), 4, "{input}");
+            for values in templates {
+                assert_eq!(values["multiClusterSupport"], expected, "{input}");
+                assert_eq!(values["dpf"]["preserved"], "value", "{input}");
+            }
+        }
+    }
 
     /// The startup factory shares configured capacity across legacy and NIC transfers.
     #[tokio::test]

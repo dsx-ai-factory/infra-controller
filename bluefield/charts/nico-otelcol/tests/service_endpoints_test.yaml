@@ -1,0 +1,41 @@
+suite: DPF metrics service endpoints
+templates:
+  - daemonset.yaml
+release:
+  name: another-cluster-otel
+  namespace: release-namespace
+tests:
+  - it: scrapes the DPUService-named agent and FMDS Services
+    set:
+      multiClusterSupport: true
+      dpf.dpuService.namespace: service-namespace
+      nico_dpu_agent: agent-abc123
+      nico_fmds: fmds-abc123
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: NICO_DPU_AGENT_METRICS_TARGET
+            value: agent-abc123.service-namespace.svc.cluster.local:8888
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: NICO_FMDS_METRICS_TARGET
+            value: fmds-abc123.service-namespace.svc.cluster.local:8888
+  - it: preserves legacy metrics endpoints by default even when DPF supplies identity
+    set:
+      dpf.dpuService.name: otel-abc123
+      dpf.dpuService.namespace: service-namespace
+      nico_dpu_agent: agent-abc123
+      nico_fmds: fmds-abc123
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: NICO_DPU_AGENT_METRICS_TARGET
+            value: carbide-dpf-cluster-agent-abc123.dpf-operator-system.svc.cluster.local:8888
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: NICO_FMDS_METRICS_TARGET
+            value: carbide-dpf-cluster-fmds-abc123.dpf-operator-system.svc.cluster.local:8888

@@ -1176,6 +1176,7 @@ pub(crate) fn mandatory_services(
     service_vpc_slots: ServiceVpcSlots,
     node_auth: &NodeAuthConfig,
     ewethers_config: Option<&EwEthersConfig>,
+    multi_cluster_support: bool,
 ) -> Vec<ServiceDefinition> {
     // Slot listeners attach directly to their own bridge, so each needs its own NAD.
     let mut dhcp = dhcp_server_service(&resolved.base.dhcp_server, interfaces);
@@ -1192,6 +1193,28 @@ pub(crate) fn mandatory_services(
             .expect("DPU agent has generated Helm values")["xplaneMaintenance"] =
             serde_json::json!({ "enabled": true });
     }
+    let mut fmds = fmds_service(
+        &resolved.base.fmds,
+        interfaces,
+        node_auth.fmds_use_node_tokens(),
+    );
+    let mut otel = otelcol_service(&resolved.base.otel);
+    let naming_values = serde_json::json!({
+        "multiClusterSupport": multi_cluster_support
+    });
+    // Apply one naming mode after service overrides so publishers and clients stay aligned.
+    for service in [&mut dhcp, &mut agent, &mut fmds, &mut otel] {
+        merge_helm_values(
+            service
+                .helm_values
+                .as_mut()
+                .and_then(serde_json::Value::as_object_mut)
+                .expect("NICo services have generated Helm values"),
+            naming_values
+                .as_object()
+                .expect("naming values are an object"),
+        );
+    }
     let mut service_vec = vec![
         dts_service(&resolved.base.dts),
         doca_hbn_service(&resolved.base.doca_hbn, interfaces, service_vpc_slots),
@@ -1199,12 +1222,8 @@ pub(crate) fn mandatory_services(
         agent,
         // Not `node_auth.enabled` directly: an operator staging a disable
         // moves fmds off tokens first, while the API still accepts them.
-        fmds_service(
-            &resolved.base.fmds,
-            interfaces,
-            node_auth.fmds_use_node_tokens(),
-        ),
-        otelcol_service(&resolved.base.otel),
+        fmds,
+        otel,
     ];
 
     for (service, cfg) in &resolved.extra {
@@ -2174,6 +2193,7 @@ mod tests {
                 service_vpc_slots,
                 &NodeAuthConfig::default(),
                 None,
+                config.multi_cluster_support,
             );
             carbide_dpf::InitDpfResourcesConfigBuilder::default()
                 .deployment_type(DpuDeploymentType::Bf3)
@@ -2611,6 +2631,7 @@ mod tests {
             ServiceVpcSlots::default(),
             &NodeAuthConfig::default(),
             Some(&ewethers_config),
+            false,
         )
         .into_iter()
         .find(|service| service.name == DPU_AGENT_SERVICE_NAME)
@@ -2755,6 +2776,7 @@ mod tests {
             ServiceVpcSlots::default(),
             &NodeAuthConfig::default(),
             Some(&ewethers_config),
+            false,
         )
         .into_iter()
         .find(|service| service.name == DOCA_WEAVE_FLOW_CONTROLLER_SERVICE_NAME)
@@ -3037,6 +3059,7 @@ mod tests {
                 ServiceVpcSlots::default(),
                 node_auth,
                 None,
+                false,
             )
             .into_iter()
             .find(|s| s.name == FMDS_SERVICE_NAME)

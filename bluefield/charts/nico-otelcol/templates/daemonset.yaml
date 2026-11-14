@@ -61,9 +61,9 @@ spec:
           {{- end }}
           env:
             - name: NICO_DPU_AGENT_METRICS_TARGET
-              value: carbide-dpf-cluster-{{ .Values.nico_dpu_agent }}.dpf-operator-system.svc.cluster.local:8888
+              value: {{ include "nico-otelcol.serviceHost" (dict "context" . "name" .Values.nico_dpu_agent) }}:8888
             - name: NICO_FMDS_METRICS_TARGET
-              value: carbide-dpf-cluster-{{ .Values.nico_fmds }}.dpf-operator-system.svc.cluster.local:8888
+              value: {{ include "nico-otelcol.serviceHost" (dict "context" . "name" .Values.nico_fmds) }}:8888
             - name: NICO_DTS_METRICS_TARGET
               value: carbide-dpf-cluster-{{ .Values.nico_dts }}-doca-telemetry.dpf-operator-system.svc.cluster.local:9189
             - name: NICO_OTLP_SITE_ENDPOINT
