@@ -16,7 +16,7 @@
  */
 
 //! Makes tenant SitePrefixes usable after the required DPUs apply protection,
-//! and retires them after their exact children have been physically removed.
+//! and retires SitePrefixes after their children drain or transfer operator coverage.
 
 use carbide_uuid::site_prefix::SitePrefixId;
 use chrono::{DateTime, Utc};
@@ -97,15 +97,18 @@ impl StateControllerIO for SitePrefixReadiness {
         txn: &mut PgConnection,
     ) -> Result<Vec<SitePrefixId>, DatabaseError> {
         let mut ids = Vec::new();
-        for lifecycle_state in [
-            SitePrefixLifecycleState::Provisioning,
-            SitePrefixLifecycleState::Deleting,
+        for (authority, lifecycle_state) in [
+            (
+                Some(SitePrefixAuthority::TenantManaged),
+                SitePrefixLifecycleState::Provisioning,
+            ),
+            (None, SitePrefixLifecycleState::Deleting),
         ] {
             ids.extend(
                 db::site_prefix::find_ids(
                     &mut *txn,
                     SitePrefixSearchFilter {
-                        authority: Some(SitePrefixAuthority::TenantManaged),
+                        authority,
                         lifecycle_state: Some(lifecycle_state),
                         ..Default::default()
                     },
@@ -219,7 +222,7 @@ impl StateHandler for SitePrefixReadiness {
             return Ok(StateHandlerOutcome::do_nothing());
         }
         let mut txn = ctx.services.begin().await?;
-        // Retirement only drains exact child references; it neither waits for
+        // Retirement drains retained children; it neither waits for
         // another DPU acknowledgement nor generates a new isolation request.
         let requested_at = if state.status.lifecycle_state == SitePrefixLifecycleState::Provisioning
         {
@@ -245,9 +248,7 @@ impl StateHandler for SitePrefixReadiness {
         else {
             return Ok(StateHandlerOutcome::deleted().with_txn(txn));
         };
-        if current.status.authority != SitePrefixAuthority::TenantManaged
-            || current.status.lifecycle_state != state.status.lifecycle_state
-        {
+        if current.status.lifecycle_state != state.status.lifecycle_state {
             return Ok(StateHandlerOutcome::do_nothing().with_txn(txn));
         }
         if current.version != state.version {
@@ -257,16 +258,33 @@ impl StateHandler for SitePrefixReadiness {
         }
 
         if current.status.lifecycle_state == SitePrefixLifecycleState::Deleting {
-            let vpc_prefix_count =
-                db::vpc_prefix::count_vpc_prefixes_by_site_prefix_id(&mut *txn, *object_id).await?;
-            if vpc_prefix_count > 0 {
-                return Ok(StateHandlerOutcome::wait(format!(
-                    "waiting for {vpc_prefix_count} VPC prefix references to be physically removed"
-                ))
-                .with_txn(txn));
+            if current.status.authority == SitePrefixAuthority::OperatorManaged {
+                if db::site_prefix::operator_managed_prefix_has_retained_children(
+                    &mut *txn, *object_id,
+                )
+                .await?
+                {
+                    return Ok(StateHandlerOutcome::wait(
+                        "waiting for retained VPC prefixes or direct network prefixes without ready operator coverage".to_string(),
+                    )
+                    .with_txn(txn));
+                }
+            } else {
+                let vpc_prefix_count =
+                    db::vpc_prefix::count_vpc_prefixes_by_site_prefix_id(&mut *txn, *object_id)
+                        .await?;
+                if vpc_prefix_count > 0 {
+                    return Ok(StateHandlerOutcome::wait(format!(
+                        "waiting for {vpc_prefix_count} VPC prefix references to be physically removed"
+                    ))
+                    .with_txn(txn));
+                }
             }
             db::site_prefix::final_delete(*object_id, &mut txn).await?;
             return Ok(StateHandlerOutcome::deleted().with_txn(txn));
+        }
+        if current.status.authority != SitePrefixAuthority::TenantManaged {
+            return Ok(StateHandlerOutcome::do_nothing().with_txn(txn));
         }
 
         let isolation_required = matches!(
