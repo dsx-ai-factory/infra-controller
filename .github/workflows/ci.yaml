@@ -2719,6 +2719,12 @@ jobs:
       - name: Test DPF single Core deployment
         run: bash helm-prereqs/tests/setup-dpf-single-core-deploy_test.sh
 
+      - name: Test Core legacy alias namespaces
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends python3-yaml
+          PATH="/usr/bin:${PATH}" bash helm-prereqs/tests/setup-legacy-alias-namespaces_test.sh
+
       - name: Test pinned submodule sync
         run: bash helm-prereqs/tests/setup-pinned-submodule-sync_test.sh
 

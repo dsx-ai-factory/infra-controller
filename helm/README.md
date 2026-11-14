@@ -53,6 +53,25 @@ kubectl get pods -n forge-system
 kubectl get svc -n forge-system
 ```
 
+### Legacy alias namespaces
+
+API and PXE legacy aliases are enabled by default in `forge-system`.
+`--create-namespace` creates only the release namespace. When deploying into
+another namespace, such as `nico-system`, prepare every enabled alias namespace
+before applying its Services. For plain Helm and GitOps deployments, use your
+site's namespace management so each namespace has one owner.
+
+`nico-api.legacyAlias.aliases[].createNamespace` defaults to `false`. Set it to
+`true` only for a new namespace that no other release or GitOps application
+manages. PXE has no namespace creation option: prepare its alias namespaces
+separately or share a namespace explicitly created by an API alias. Enabling API
+aliases alone does not create namespaces.
+
+[`helm-prereqs/setup.sh`](../helm-prereqs/README.md#setup-options) creates missing
+alias namespaces after Core deployment is accepted, without Helm ownership
+metadata. Changing an API alias to `createNamespace: true` later does not
+automatically adopt a setup-created namespace and can fail Helm ownership checks.
+
 ## Configuration
 
 ### Global Values
@@ -560,8 +579,9 @@ follow the
 ### Upgrading from pre-2.0.0 (carbide/forge naming)
 
 Starting with v2.0.0 the chart defaults changed from the legacy `carbide`/`forge` naming
-to `nico`. A **fresh install** works out of the box with no overrides — all default service
-names, SPIFFE identities, and trust domains are already `nico`-prefixed.
+to `nico`. A **fresh install** uses these names without naming overrides — all default
+service names, SPIFFE identities, and trust domains are already `nico`-prefixed.
+Prepare the [legacy alias namespaces](#legacy-alias-namespaces) before installing.
 
 > **Cutting over to nico naming on an existing site:** if you want to fully migrate an
 > existing site from `carbide`/`forge` naming to `nico` naming rather than preserving the
@@ -569,7 +589,8 @@ names, SPIFFE identities, and trust domains are already `nico`-prefixed.
 >
 > 1. Back up the PostgreSQL database (`pg_dump`).
 > 2. Uninstall the current release (`helm uninstall nico -n forge-system`).
-> 3. Re-install from scratch with the new defaults and your target namespace
+> 3. Prepare the [legacy alias namespaces](#legacy-alias-namespaces), then
+>    re-install from scratch with the new defaults and your target namespace
 >    (`helm upgrade --install nico ./helm -n nico-system --create-namespace -f values-production.yaml`).
 > 4. Restore the database into the new cluster (`pg_restore`).
 >
