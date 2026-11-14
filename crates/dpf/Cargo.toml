@@ -21,6 +21,8 @@ default = []
 driver = ["dep:clap", "dep:tracing-subscriber", "dep:libredfish"]
 
 [dependencies]
+chrono = { workspace = true }
+config-version = { path = "../config-version", default-features = false }
 hex = { workspace = true }
 indoc = { workspace = true }
 kube = { default-features = false, features = [

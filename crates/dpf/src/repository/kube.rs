@@ -26,7 +26,7 @@ use async_trait::async_trait;
 use futures::StreamExt;
 use k8s_openapi::api::core::v1::{ConfigMap, Secret};
 use kube::api::{DeleteParams, ListParams, Patch, PatchParams, PostParams, Preconditions};
-use kube::core::{ApiResource, DynamicObject};
+use kube::core::{ApiResource, DynamicObject, ObjectList};
 use kube::runtime::controller::Action;
 use kube::runtime::{Controller, watcher};
 use kube::{Api, Client, Resource};
@@ -90,6 +90,22 @@ impl KubeRepository {
         <K as Resource>::DynamicType: Default,
     {
         Api::namespaced(self.client.clone(), namespace)
+    }
+
+    /// Rejects continuations on unpaginated requests so callers never receive a partial inventory.
+    fn complete_list<K: Clone>(
+        list: ObjectList<K>,
+        kind: &'static str,
+    ) -> Result<Vec<K>, DpfError> {
+        if list
+            .metadata
+            .continue_
+            .as_deref()
+            .is_some_and(|token| !token.is_empty())
+        {
+            return Err(DpfError::InvalidState(format!("incomplete {kind} list")));
+        }
+        Ok(list.items)
     }
 
     /// Converts only Kubernetes HTTP 409 responses into PatchConflict so handlers retry stale
@@ -179,7 +195,7 @@ impl DpuRepository for KubeRepository {
             None => ListParams::default(),
         };
         let list = api.list(&params).await?;
-        Ok(list.items)
+        Self::complete_list(list, "DPU")
     }
 
     async fn patch_status(
@@ -636,7 +652,7 @@ impl DpuServiceChainRepository for KubeRepository {
             None => ListParams::default(),
         };
         let list = api.list(&params).await?;
-        Ok(list.items)
+        Self::complete_list(list, "DPUServiceChain")
     }
 
     async fn create(&self, chain: &DPUServiceChain) -> Result<DPUServiceChain, DpfError> {

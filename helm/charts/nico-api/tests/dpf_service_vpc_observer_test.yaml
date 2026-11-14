@@ -1,0 +1,72 @@
+suite: Service VPC observer credentials
+templates:
+  - dpf-service-vpc-observer.yaml
+tests:
+  # Ordinary deployments must not provision remote credentials implicitly.
+  - it: creates no requests without configured clusters
+    asserts:
+      - hasDocuments:
+          count: 0
+
+  # Every configured cluster gets its own request and rotating Secret.
+  - it: creates distinct requests for configured clusters
+    set:
+      dpf.serviceVpcObserverClusters: [carbide-dpf-cluster, another-cluster]
+    asserts:
+      - hasDocuments:
+          count: 2
+      - documentIndex: 0
+        equal:
+          path: metadata.name
+          value: nico-service-vpc-observer-19205ee90d2f8fe2
+      - documentIndex: 1
+        equal:
+          path: metadata.name
+          value: nico-service-vpc-observer-8af3e43aeae637f1
+
+  # The DPF request must target the observer rather than an administrator account.
+  - it: binds the kubeconfig to the cluster and remote observer ServiceAccount
+    set:
+      dpf.serviceVpcObserverClusters: [carbide-dpf-cluster]
+    asserts:
+      - isKind:
+          of: DPUServiceCredentialRequest
+      - equal:
+          path: metadata.namespace
+          value: dpf-operator-system
+      - equal:
+          path: spec
+          value:
+            type: kubeconfig
+            duration: 1h
+            targetCluster:
+              name: carbide-dpf-cluster
+              namespace: dpf-operator-system
+            serviceAccount:
+              name: nico-service-vpc-observer
+              namespace: dpf-operator-system
+            secret:
+              name: nico-service-vpc-observer-19205ee90d2f8fe2
+              namespace: dpf-operator-system
+
+  # Reusing a cluster name in a different namespace must not reuse its credentials.
+  - it: includes the operator namespace in credential identity
+    set:
+      dpf.operatorNamespace: other-dpf
+      dpf.serviceVpcObserverClusters: [carbide-dpf-cluster]
+    asserts:
+      - equal:
+          path: metadata.name
+          value: nico-service-vpc-observer-330d35817d6aa2ad
+      - equal:
+          path: metadata.namespace
+          value: other-dpf
+      - equal:
+          path: spec.targetCluster.namespace
+          value: other-dpf
+      - equal:
+          path: spec.serviceAccount.namespace
+          value: other-dpf
+      - equal:
+          path: spec.secret.namespace
+          value: other-dpf
