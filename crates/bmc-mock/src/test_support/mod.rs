@@ -543,6 +543,19 @@ pub async fn liteon_powershelf_bmc() -> TestBmcHandle {
     .await
 }
 
+/// Builds a Delta power shelf router, which lists a manager but no computer
+/// systems. Serve the router with [`serve_https`].
+pub fn delta_powershelf_router() -> Router {
+    let (router, _state) = create_test_bmc(
+        &host_info(HardwareType::DeltaPowerShelf),
+        TestBmcConfig::default(),
+        "test-host-id".to_string(),
+        false,
+        MachineRouterOptions::default(),
+    );
+    router
+}
+
 pub async fn delta_powershelf_bmc() -> TestBmcHandle {
     test_bmc(create_test_bmc(
         &host_info(HardwareType::DeltaPowerShelf),

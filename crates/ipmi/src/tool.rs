@@ -27,13 +27,19 @@ use crate::IPMITool;
 use crate::metrics::{IpmiCommand, count_ipmi_command};
 
 pub(super) struct IPMIToolImpl {
+    instrumentation: carbide_instrument::Instrumentation,
     credential_reader: Arc<dyn CredentialReader>,
     attempts: u32,
 }
 
 impl IPMIToolImpl {
-    pub(super) fn new(credential_reader: Arc<dyn CredentialReader>, attempts: Option<u32>) -> Self {
+    pub(super) fn new(
+        credential_reader: Arc<dyn CredentialReader>,
+        attempts: Option<u32>,
+        instrumentation: carbide_instrument::Instrumentation,
+    ) -> Self {
         IPMIToolImpl {
+            instrumentation,
             credential_reader,
             attempts: attempts.unwrap_or(3),
         }
@@ -157,7 +163,7 @@ impl IPMIToolImpl {
 
         tracing::info!(command = ?cmd, "Running IPMI command");
         let result = cmd.env("IPMITOOL_PASSWORD", password).output().await;
-        count_ipmi_command(command, &result);
+        count_ipmi_command(command, &result, &self.instrumentation);
         result
     }
 }
@@ -176,7 +182,8 @@ mod test {
             username: "user".to_string(),
             password: "password".to_string(),
         }));
-        let tool = super::IPMIToolImpl::new(cp, Some(1));
+        let tool =
+            super::IPMIToolImpl::new(cp, Some(1), carbide_instrument::Instrumentation::global());
 
         assert_eq!(tool.attempts, 1);
     }

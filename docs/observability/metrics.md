@@ -530,6 +530,9 @@ provisioning.
 | API Performance | `nico-api-performance.json` | control plane request rate and latency |
 | HW Health - BMC Performance | `nico-bmc-performance.json` | Redfish and BMC call behavior |
 
+Site Detail and Fleet include metrics from every NICo scrape job. Use separate Kubernetes
+dashboards for pod CPU, memory, restarts, and readiness.
+
 ### Site overview dashboard
 
 The site overview (`nico-overview.json`) is the main operational dashboard showing fleet status at a glance:
@@ -553,10 +556,15 @@ PreventHostStateChanges, etc.).
 
 ### Site detail dashboard
 
-The site detail board (`nico-site-detail.json`) carries every subsystem a site
-operator needs when the overview shows a problem but not its cause. It uses the same
-`$job` variable as the overview, plus a `$namespace` variable for the Kubernetes
-workload panels at the end.
+The site detail board (`nico-site-detail.json`) carries every NICo subsystem a site
+operator needs when the overview shows a problem but not its cause.
+
+On a central Prometheus datasource, select a **Site** to filter every panel by its
+`forge_site` label across all NICo scrape jobs. The selector discovers sites from
+NICo metrics, including serial console metrics, without requiring API metrics.
+The default **All** includes every site and metrics without `forge_site`; leave it
+selected for site-local datasources that do not expose that label. On a central
+datasource, **All** combines sites rather than isolating one site.
 
 **Service health** - API status, build version, open tracing spans, Postgres connection
 pool and resource pool utilization. A pool at 100% utilization means new allocations from it fail.
@@ -613,9 +621,7 @@ rates, dropped requests, DNS negative cache, and DHCP certificate expiry.
 **Serial console proxy** - BMC console connections tracked compared with healthy,
 connected clients, and stream errors.
 
-**Logs and Kubernetes workloads** - Log event rate by level, the noisiest components at
-WARN and ERROR, and per-container CPU, memory, restarts, and readiness. The Kubernetes
-panels need kube-state-metrics and cAdvisor.
+**Logs** - Log event rate by level and the noisiest NICo components at WARN and ERROR.
 
 ### Fleet dashboard
 
@@ -650,8 +656,7 @@ hosts missing a BIOS password, and unhealthy DPUs.
 mismatches per site.
 
 **API service level** - Availability, request and error rate, mean and p95 latency,
-controller iteration latency, Vault availability, warning and error log rate, and the
-busiest pods.
+controller iteration latency, Vault availability, and warning and error log rate.
 
 **Site explorer** - Hosts explored, managed hosts identified, failures, missing expected
 inventory, serial number mismatches, and incomplete preingestions per site.

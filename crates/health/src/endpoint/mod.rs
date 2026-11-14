@@ -62,7 +62,10 @@ pub(crate) mod test_support {
                 None,
                 10,
                 std::num::NonZeroUsize::MIN,
-                None,
+                crate::bmc::BmcInstrumentation::new(
+                    carbide_instrument::Instrumentation::global(),
+                    None,
+                ),
             )
             .expect("fixed-credential BmcClient construction is infallible"),
         );

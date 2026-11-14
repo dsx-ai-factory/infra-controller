@@ -33,14 +33,14 @@ var version = "dev"
 // line, bad config or a refused lock.
 const exitNotRun = result.ExitNotRun
 
-const usage = "usage: scale-test version | scale-test fleet-up|ingestion [--config <path>]"
+const usage = "usage: scale-test version | scale-test fleet-up|ingestion|instance-create|instance-delete|instance-lifecycle [--config <path>]"
 
 func main() {
 	os.Exit(run(os.Args[1:], os.Stdout, os.Stderr))
 }
 
 func run(args []string, stdout, stderr io.Writer) int {
-	if len(args) > 0 && (args[0] == "fleet-up" || args[0] == "ingestion") {
+	if len(args) > 0 && (args[0] == "fleet-up" || args[0] == "ingestion" || args[0] == "instance-create" || args[0] == "instance-delete" || args[0] == "instance-lifecycle") {
 		return command(args[0], args[1:], stdout, stderr)
 	}
 	switch command := strings.Join(args, " "); command {
@@ -88,13 +88,21 @@ func setUp(ctx context.Context, name, path string) (runner.Deps, runner.Test, er
 		return runner.Deps{}, nil, err
 	}
 	cfg.ExecutionID = os.Getenv("SCALE_TEST_EXECUTION_ID")
-	if err := errors.Join(cfg.CheckExecutionID(), cfg.CheckDryRun(name == "ingestion")); err != nil {
+	if err := errors.Join(cfg.CheckExecutionID(), cfg.CheckDryRun(name != "fleet-up")); err != nil {
 		return runner.Deps{}, nil, err
 	}
-	is, err := ingestion.ParseSettings(cfg.Settings)
-	s := is.Settings
-	if name == "fleet-up" {
+	var is ingestion.Settings
+	var instances ingestion.InstanceSettings
+	var s fleetup.Settings
+	switch name {
+	case "fleet-up":
 		s, err = fleetup.ParseSettings(cfg.Settings)
+	case "ingestion":
+		is, err = ingestion.ParseSettings(cfg.Settings)
+		s = is.Settings
+	default:
+		instances, err = ingestion.ParseInstanceSettings(cfg.Settings, name)
+		s = instances.Settings
 	}
 	if err != nil {
 		return runner.Deps{}, nil, err
@@ -111,6 +119,10 @@ func setUp(ctx context.Context, name, path string) (runner.Deps, runner.Test, er
 	deps := runner.Deps{Config: cfg, Lock: site, CM: kube, Outside: ctx}
 	if name == "fleet-up" {
 		return deps, fleetup.New(cfg, d), nil
+	}
+	if name == "instance-create" || name == "instance-delete" || name == "instance-lifecycle" {
+		t, err := ingestion.ProductionInstances(cfg, instances, d)
+		return deps, t, err
 	}
 	t, err := ingestion.Production(cfg, is, d)
 	return deps, t, err

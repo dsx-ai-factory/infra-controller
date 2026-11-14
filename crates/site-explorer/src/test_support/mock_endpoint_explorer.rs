@@ -20,9 +20,10 @@ use std::net::{IpAddr, SocketAddr};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use bmc_platform::{PowerState, ResetType};
 use carbide_redfish::boot_interface::BootInterfaceTarget;
+use libredfish::RoleId;
 use libredfish::model::service_root::RedfishVendor;
-use libredfish::{PowerState, RoleId, SystemPowerControl};
 use model::expected_entity::ExpectedEntity;
 use model::machine::MachineInterfaceSnapshot;
 use model::site_explorer::{
@@ -76,14 +77,14 @@ pub struct MockEndpointExplorer {
     pub power_states: Arc<Mutex<HashMap<IpAddr, PowerState>>>,
     /// Addresses whose power state was read live, in call order.
     pub redfish_get_power_state_calls: Arc<Mutex<Vec<SocketAddr>>>,
-    pub redfish_power_control_calls: Arc<Mutex<Vec<(SocketAddr, SystemPowerControl)>>>,
+    pub redfish_power_control_calls: Arc<Mutex<Vec<(SocketAddr, ResetType)>>>,
     /// Records every `redfish_chassis_reset` call (BMC address, chassis id, and
     /// requested action) so tests can assert the reset was routed correctly.
-    pub redfish_chassis_reset_calls: Arc<Mutex<Vec<(SocketAddr, String, SystemPowerControl)>>>,
+    pub redfish_chassis_reset_calls: Arc<Mutex<Vec<(SocketAddr, String, ResetType)>>>,
     /// Power-control actions that `redfish_power_control` should reject (the
     /// call is still recorded). Lets tests exercise the PowerCycle ->
     /// ACPowercycle fallback for a vendor that refuses `PowerCycle`.
-    pub power_control_failures: Arc<Mutex<Vec<SystemPowerControl>>>,
+    pub power_control_failures: Arc<Mutex<Vec<ResetType>>>,
     /// Records every call to `set_nic_mode` (BMC address + requested target
     /// mode) so tests can assert the auto-correct path fired with the
     /// right arguments.
@@ -138,7 +139,7 @@ impl MockEndpointExplorer {
 
     /// Make `redfish_power_control` reject the given action, so tests can
     /// simulate a vendor that refuses `PowerCycle`.
-    pub fn fail_power_control(&self, action: SystemPowerControl) {
+    pub fn fail_power_control(&self, action: ResetType) {
         self.power_control_failures.lock().unwrap().push(action);
     }
 
@@ -233,7 +234,8 @@ impl AuthenticatedBmc for MockEndpointExplorer {
         &self,
         _address: SocketAddr,
         _interface: &MachineInterfaceSnapshot,
-        _reset_type: Option<libredfish::ManagerResetType>,
+        _report: Option<&EndpointExplorationReport>,
+        _reset_type: Option<ResetType>,
     ) -> Result<(), EndpointExplorationError> {
         Ok(())
     }
@@ -250,7 +252,8 @@ impl AuthenticatedBmc for MockEndpointExplorer {
         &self,
         address: SocketAddr,
         _interface: &MachineInterfaceSnapshot,
-    ) -> Result<PowerState, EndpointExplorationError> {
+        _report: Option<&EndpointExplorationReport>,
+    ) -> Result<Option<PowerState>, EndpointExplorationError> {
         self.redfish_get_power_state_calls
             .lock()
             .unwrap()
@@ -261,14 +264,16 @@ impl AuthenticatedBmc for MockEndpointExplorer {
             .unwrap()
             .get(&address.ip())
             .copied()
-            .unwrap_or(PowerState::On))
+            .unwrap_or(PowerState::On)
+            .into())
     }
 
     async fn redfish_power_control(
         &self,
         address: SocketAddr,
         _interface: &MachineInterfaceSnapshot,
-        action: SystemPowerControl,
+        _report: Option<&EndpointExplorationReport>,
+        action: ResetType,
     ) -> Result<(), EndpointExplorationError> {
         self.redfish_power_control_calls
             .lock()
@@ -291,8 +296,9 @@ impl AuthenticatedBmc for MockEndpointExplorer {
         &self,
         address: SocketAddr,
         _interface: &MachineInterfaceSnapshot,
+        _report: Option<&EndpointExplorationReport>,
         chassis_id: &str,
-        action: SystemPowerControl,
+        action: ResetType,
     ) -> Result<(), EndpointExplorationError> {
         self.redfish_chassis_reset_calls.lock().unwrap().push((
             address,

@@ -281,7 +281,7 @@ func (c ComponentsByType) SortedComponentTypes() []devicetypes.ComponentType {
 // caller input should be deduplicated first.
 func (c ComponentsByType) Validate() error {
 	if len(c) == 0 {
-		return fmt.Errorf("Non-empty ComponentsByType is required")
+		return fmt.Errorf("non-empty ComponentsByType is required")
 	}
 
 	seenComponents := make(map[uuid.UUID]devicetypes.ComponentType)

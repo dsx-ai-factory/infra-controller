@@ -186,29 +186,39 @@ async fn artifact_route_uses_tls_machine_identity(pool: sqlx::PgPool) {
     }
     assert!(!cache.namespace().exists());
     assert!(origin.paths().is_empty());
-    let response = tokio::time::timeout(Duration::from_secs(10), async {
-        loop {
-            let response = authenticated
-                .get(&url)
-                .header("x-artifact-request-secret", "do-not-forward")
-                .send()
-                .await
-                .expect("owned artifact response");
-            assert_eq!(response.version(), Version::HTTP_2);
-            if response.status() != StatusCode::ACCEPTED {
-                break response;
+
+    // Publish both inputs here so `supervisor_stages_from_core` only waits for
+    // cache readiness when it removes the image to exercise recovery.
+    for (role, bytes) in [("image", IMAGE), ("configuration", CONFIGURATION)] {
+        let artifact_url = format!(
+            "https://localhost:{}{}",
+            address.port(),
+            uri(&operation, &digest(bytes), role)
+        );
+        let response = tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                let response = authenticated
+                    .get(&artifact_url)
+                    .header("x-artifact-request-secret", "do-not-forward")
+                    .send()
+                    .await
+                    .expect("owned artifact response");
+                assert_eq!(response.version(), Version::HTTP_2);
+                if response.status() != StatusCode::ACCEPTED {
+                    break response;
+                }
+                tokio::task::yield_now().await;
             }
-            tokio::task::yield_now().await;
-        }
-    })
-    .await
-    .expect("owned artifact publication");
-    assert_eq!(response.status(), StatusCode::OK);
-    assert_eq!(response.bytes().await.expect("TLS artifact bytes"), IMAGE);
-    assert_eq!(
-        std::fs::read(cache.namespace().join(digest(IMAGE))).expect("published cache file"),
-        IMAGE
-    );
+        })
+        .await
+        .unwrap_or_else(|error| panic!("{role} artifact publication timed out: {error}"));
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.bytes().await.expect("TLS artifact bytes"), bytes);
+        assert_eq!(
+            std::fs::read(cache.namespace().join(digest(bytes))).expect("published cache file"),
+            bytes
+        );
+    }
 
     let client_sec1 = p256::SecretKey::from_pkcs8_pem(&client_key.serialize_pem())
         .expect("client PKCS8")
@@ -261,7 +271,7 @@ async fn artifact_route_uses_tls_machine_identity(pool: sqlx::PgPool) {
         .bytes()
         .await
         .expect("consume retired operation denial");
-    assert_eq!(origin.paths(), ["/image", "/image", "/configuration"]);
+    assert_eq!(origin.paths(), ["/image", "/configuration", "/image"]);
     drop(anonymous);
     drop(authenticated);
     drop(foreign);
@@ -392,7 +402,11 @@ async fn supervisor_stages_from_core(
         assert_eq!(rejected_record["mutation_started"], false);
         assert!(rejected_record["prepared_inputs"].is_null());
         assert!(!fixture.join("mutations").exists());
-        assert_eq!(origin.paths(), ["/image"], "TLS failure must not fall back to the source");
+        assert_eq!(
+            origin.paths(),
+            ["/image", "/configuration"],
+            "TLS failure must not fall back to the source"
+        );
         timeout(WATCHDOG, async {
             while fixture.join("state/mutation.json").exists() {
                 sleep(Duration::from_millis(10)).await;
@@ -434,7 +448,7 @@ async fn supervisor_stages_from_core(
             assert_eq!(fs::read(cache_namespace.join(digest(bytes))).expect("Core cached bytes"), bytes);
         }
         assert_eq!(fs::read_to_string(fixture.join("mutations")).expect("vendor mutations"), "configure\nburn\n");
-        assert_eq!(origin.paths(), ["/image", "/image", "/configuration"]);
+        assert_eq!(origin.paths(), ["/image", "/configuration", "/image"]);
 
         // The fetch address is Core's digest route, but the original source
         // remains part of the immutable request identity.

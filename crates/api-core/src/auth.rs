@@ -18,6 +18,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use carbide_authn::middleware::{ExternalUserInfo, Principal};
+use carbide_instrument::Instrumentation;
 use carbide_uuid::machine::MachineId;
 
 use crate::{CarbideError, CarbideResult};
@@ -165,12 +166,16 @@ type PolicyEngineObject = dyn PolicyEngine + Send + Sync;
 
 #[derive(Clone)]
 pub(crate) struct CasbinAuthorizer {
+    instrumentation: Instrumentation,
     policy_engine: Arc<PolicyEngineObject>,
 }
 
 impl CasbinAuthorizer {
-    fn new(policy_engine: Arc<PolicyEngineObject>) -> Self {
-        Self { policy_engine }
+    fn new(policy_engine: Arc<PolicyEngineObject>, instrumentation: Instrumentation) -> Self {
+        Self {
+            policy_engine,
+            instrumentation,
+        }
     }
 
     fn authorize<R: PrincipalExtractor>(
@@ -192,21 +197,24 @@ impl CasbinAuthorizer {
     // TODO: config this out in release mode?
     fn enable_permissive(&mut self) {
         let inner_engine = self.policy_engine.clone();
-        let permissive_engine: Arc<PolicyEngineObject> =
-            Arc::new(PermissiveWrapper::new(inner_engine));
+        let permissive_engine: Arc<PolicyEngineObject> = Arc::new(PermissiveWrapper::new(
+            inner_engine,
+            self.instrumentation.clone(),
+        ));
         self.policy_engine = permissive_engine;
     }
 
     pub(crate) async fn build_casbin(
         policy_path: &Path,
         permissive_mode: bool,
+        instrumentation: Instrumentation,
     ) -> Result<Self, CasbinAuthorizerError> {
         use casbin_engine::{CasbinEngine, ModelType};
         let engine = CasbinEngine::new(ModelType::Rbac, policy_path)
             .await
             .map_err(|e| CasbinAuthorizerError::InitializationError(e.to_string()))?;
         let engine_object: Arc<PolicyEngineObject> = Arc::new(engine);
-        let mut authorizer = Self::new(engine_object);
+        let mut authorizer = Self::new(engine_object, instrumentation);
         // TODO: config this out in release mode?
         if permissive_mode {
             authorizer.enable_permissive();
@@ -247,12 +255,16 @@ struct AuthorizationPermissiveOverride {
 }
 
 struct PermissiveWrapper {
+    instrumentation: Instrumentation,
     inner: Arc<PolicyEngineObject>,
 }
 
 impl PermissiveWrapper {
-    fn new(inner: Arc<PolicyEngineObject>) -> Self {
-        Self { inner }
+    fn new(inner: Arc<PolicyEngineObject>, instrumentation: Instrumentation) -> Self {
+        Self {
+            inner,
+            instrumentation,
+        }
     }
 }
 
@@ -264,7 +276,7 @@ impl PolicyEngine for PermissiveWrapper {
     ) -> Result<Authorization, AuthorizationError> {
         let result = self.inner.authorize(principals, predicate.clone());
         result.or_else(|e| {
-            carbide_instrument::emit(AuthorizationPermissiveOverride {
+            self.instrumentation.emit(AuthorizationPermissiveOverride {
                 principal_class: PrincipalClass::classify(principals),
                 principals: principals
                     .iter()
@@ -325,8 +337,10 @@ mod tests {
     /// the existing warning and increments the caller's bounded metric series.
     #[test]
     fn permissive_override_logs_counts_and_authorizes() {
-        let metrics = MetricsCapture::start();
-        let wrapper = PermissiveWrapper::new(Arc::new(DenyAll));
+        let test_meter = carbide_utils::test_support::test_meter::TestMeter::default();
+        let instrumentation = Instrumentation::new(test_meter.meter());
+        let metrics = MetricsCapture::for_registry(test_meter.registry());
+        let wrapper = PermissiveWrapper::new(Arc::new(DenyAll), instrumentation);
         let principals = vec![
             Principal::SpiffeServiceIdentifier("scout".to_string()),
             Principal::TrustedCertificate,
@@ -441,6 +455,7 @@ mod tests {
                 machine_base_path: String::from("/carbide-system/machine/"),
                 additional_issuer_cns: ["usercert-ca.example.com".to_string()].into(),
             },
+            carbide_instrument::Instrumentation::global(),
         );
 
         for test in table {

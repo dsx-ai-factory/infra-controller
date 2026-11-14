@@ -165,7 +165,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         "localhost",
         1883,
         "pet-tracker",
-        Some(ClientOptions::default().with_qos(QoS::AtLeastOnce))
+        Some(ClientOptions::default().with_qos(QoS::AtLeastOnce)),
+        carbide_instrument::Instrumentation::global(),
     ).await?;
 
     // Register your custom JSON message type
@@ -220,7 +221,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         "localhost",
         1883,
         "pet-monitor",
-        Some(ClientOptions::default().with_qos(QoS::AtLeastOnce))
+        Some(ClientOptions::default().with_qos(QoS::AtLeastOnce)),
+        carbide_instrument::Instrumentation::global(),
     ).await?;
 
     // Register your custom JSON message types
@@ -291,7 +293,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Some(ClientOptions::default()
             .with_qos(QoS::AtLeastOnce)
             .with_keep_alive(Duration::from_secs(60))
-        )
+        ),
+        carbide_instrument::Instrumentation::global(),
     ).await?;
 
     // Register your custom JSON message type with specific QoS
@@ -426,7 +429,8 @@ let client = MqtteaClient::new(
     "localhost",
     1883,
     "my-client",
-    Some(client_options)
+    Some(client_options),
+    carbide_instrument::Instrumentation::global(),
 ).await?;
 ```
 

@@ -23,6 +23,7 @@ use carbide_api_core::start_runtime;
 use carbide_secrets::CredentialConfig;
 use eyre::WrapErr;
 use ipnetwork::IpNetwork;
+use metrics_endpoint::MetricsSetup;
 use opentelemetry::metrics::Meter;
 use tokio::net::TcpListener;
 use tokio::sync::oneshot::Sender;
@@ -32,7 +33,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::subscriber::NoSubscriber;
 
 use crate::logging::setup_logging;
-use crate::metrics::{Metrics, setup_metrics};
+use crate::metrics::register_runtime_metrics;
 use crate::resources::{RuntimeResources, setup_resources};
 
 /// Effective addresses owned by a running carbide-api server.
@@ -58,12 +59,16 @@ pub struct ApiServerReady {
 /// Once startup completes, `ready_channel` receives the effective API and metrics listener
 /// addresses and the server's metric registration handle. This includes OS-selected ports when
 /// either endpoint is configured with port zero.
+///
+/// Uses the supplied metrics setup without installing a global provider. Retains
+/// its provider until shutdown and exports its registry through the metrics listener.
 #[allow(clippy::too_many_arguments)]
 pub async fn run(
     debug: u8,
     config_path: PathBuf,
     site_config_path: Option<PathBuf>,
     credential_config: CredentialConfig,
+    metrics: MetricsSetup,
     skip_logging_setup: bool,
     cancel_token: CancellationToken,
     ready_channel: Sender<ApiServerReady>,
@@ -126,11 +131,14 @@ pub async fn run(
     };
     carbide_api_core::validate_resource_pool_config(&carbide_config, initial_objects.as_ref())?;
 
-    let Metrics {
+    let MetricsSetup {
+        instrumentation,
         registry,
         meter,
-        _meter_provider,
-    } = setup_metrics(logging.spancount_reader.clone())?;
+        meter_provider: _meter_provider,
+        ..
+    } = metrics;
+    register_runtime_metrics(&meter, logging.spancount_reader.clone());
 
     // All background tasks that run "forever" (until canceled) are added to this JoinSet. When
     // initialization is complete, we use [`JoinSet::join_all`] to wait for them all to complete,
@@ -147,10 +155,15 @@ pub async fn run(
         registry,
         cancel_token.clone(),
         health_controller.clone(),
+        instrumentation.clone(),
     )
     .await?;
-    let per_object_metrics =
-        start_per_object_metrics_endpoint(&mut join_set, &carbide_config, cancel_token.clone())?;
+    let per_object_metrics = start_per_object_metrics_endpoint(
+        &mut join_set,
+        &carbide_config,
+        cancel_token.clone(),
+        instrumentation.clone(),
+    )?;
 
     let runtime_prelude =
         start_runtime_prelude(&carbide_config, logging, &mut join_set, &cancel_token);
@@ -166,16 +179,19 @@ pub async fn run(
         &credential_config,
         &mut join_set,
         &cancel_token,
+        &instrumentation,
     )
     .await?;
 
     let shutdown_timeout = carbide_config.shutdown_timeout;
     let panic_on_early_task_return = carbide_config.panic_on_early_task_return;
 
-    let database_readiness_probe = crate::readiness::DatabaseReadinessProbe::new(&db_pool);
+    let database_readiness_probe =
+        crate::readiness::DatabaseReadinessProbe::new(&db_pool, instrumentation.clone());
     let listen_address = await_api_runtime_and_database_before_marking_ready(
         &health_controller,
         start_runtime(RuntimeInputs {
+            instrumentation,
             carbide_config,
             initial_objects,
             meter: meter.clone(),
@@ -297,6 +313,7 @@ async fn start_metrics_endpoint(
     registry: prometheus::Registry,
     cancel_token: CancellationToken,
     health_controller: metrics_endpoint::HealthController,
+    instrumentation: carbide_instrument::Instrumentation,
 ) -> eyre::Result<Option<SocketAddr>> {
     let Some(metrics_address) = carbide_config.metrics_endpoint else {
         return Ok(None);
@@ -327,6 +344,7 @@ async fn start_metrics_endpoint(
         .spawn(async move {
             if let Err(error) = metrics_endpoint::run_metrics_endpoint_with_listener(
                 &metrics_endpoint::MetricsEndpointConfig {
+                    instrumentation,
                     address: metrics_address,
                     registry,
                     health_controller: Some(health_controller),
@@ -359,6 +377,7 @@ fn start_per_object_metrics_endpoint(
     join_set: &mut JoinSet<()>,
     carbide_config: &carbide_api_core::cfg::file::CarbideConfig,
     cancel_token: CancellationToken,
+    instrumentation: carbide_instrument::Instrumentation,
 ) -> eyre::Result<Option<prometheus::Registry>> {
     let per_object_config = &carbide_config.observability.per_object_state_metrics;
     if per_object_config.enabled && per_object_config.object_types.is_empty() {
@@ -380,6 +399,7 @@ fn start_per_object_metrics_endpoint(
                 async move {
                     if let Err(error) = metrics_endpoint::run_metrics_endpoint_with_cancellation(
                         &metrics_endpoint::MetricsEndpointConfig {
+                            instrumentation,
                             address,
                             registry,
                             health_controller: None,

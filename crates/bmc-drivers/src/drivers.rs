@@ -17,7 +17,7 @@ use std::str::FromStr;
 
 use bmc_platform::{
     Accounts, Attestation, Bios, BmcControl, BootOrder, Capability, Console, Dpu, Firmware,
-    Lockdown, PlatformIdentity, Power, SecureBoot, Storage, SuperNic,
+    Lockdown, PlatformError, PlatformIdentity, Power, SecureBoot, Storage, SuperNic,
 };
 use nv_redfish::core::{ActionError, Bmc};
 use thiserror::Error;
@@ -456,6 +456,15 @@ pub enum CatalogError {
         capability: Capability,
         id: PluginId,
     },
+}
+
+/// Every variant leaves the capability without a driver on this BMC. Startup
+/// validation rejects rules naming the wrong or an unknown driver, and the
+/// runtime logs the specific cause when it binds.
+impl From<CatalogError> for PlatformError {
+    fn from(_: CatalogError) -> Self {
+        Self::Unsupported
+    }
 }
 
 #[cfg(test)]

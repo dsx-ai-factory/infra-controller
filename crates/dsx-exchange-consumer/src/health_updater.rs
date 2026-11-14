@@ -19,7 +19,7 @@
 
 use std::sync::Arc;
 
-use carbide_instrument::emit;
+use carbide_instrument::Instrumentation;
 use health_report::{HealthAlertClassification, HealthProbeAlert, HealthReport};
 use moka::future::Cache;
 use moka::ops::compute::Op;
@@ -37,13 +37,22 @@ use crate::mqtt_consumer::MqttMessage;
 /// Health status updater that processes MQTT messages and updates the API.
 pub struct HealthUpdater<S: RackHealthReportSink> {
     topic_prefix: String,
+    instrumentation: Instrumentation,
     api: Arc<S>,
     metadata_cache: Cache<String, LeakMetadata>,
     value_state_cache: Cache<String, FaultValue>,
 }
 
 impl<S: RackHealthReportSink> HealthUpdater<S> {
-    pub fn new(topic_prefix: String, cache_config: CacheConfig, api: Arc<S>, meter: Meter) -> Self {
+    /// Creates an updater with cache gauges on `meter` and Event metrics on
+    /// `instrumentation`. Retain their provider while the updater is running.
+    pub fn new(
+        topic_prefix: String,
+        cache_config: CacheConfig,
+        api: Arc<S>,
+        meter: Meter,
+        instrumentation: Instrumentation,
+    ) -> Self {
         let metadata_cache: Cache<String, LeakMetadata> = Cache::builder()
             .time_to_live(cache_config.metadata_ttl)
             .build();
@@ -57,6 +66,7 @@ impl<S: RackHealthReportSink> HealthUpdater<S> {
 
         Self {
             topic_prefix,
+            instrumentation,
             api,
             metadata_cache,
             value_state_cache,
@@ -111,7 +121,7 @@ impl<S: RackHealthReportSink> HealthUpdater<S> {
         let age = (chrono::Utc::now() - msg.timestamp)
             .to_std()
             .unwrap_or_default();
-        emit(MessageAge { age });
+        self.instrumentation.emit(MessageAge { age });
 
         let point_path = match extract_point_path(topic, &self.topic_prefix) {
             Some(path) => path,
@@ -162,7 +172,7 @@ impl<S: RackHealthReportSink> HealthUpdater<S> {
                     if let Some(entry) = &maybe_entry
                         && *entry.value() == value
                     {
-                        emit(MessageDeduplicated {
+                        self.instrumentation.emit(MessageDeduplicated {
                             point_path: point_path.to_string(),
                             point_type: leak_type,
                             value: format!("{value:?}"),
@@ -172,7 +182,7 @@ impl<S: RackHealthReportSink> HealthUpdater<S> {
 
                     // Value differs or no entry - send API update
                     let send_result = if matches!(value, FaultValue::Faulting) {
-                        emit(LeakAlertDetected {
+                        self.instrumentation.emit(LeakAlertDetected {
                             point_type: leak_type,
                             point_path: point_path.to_string(),
                             rack_id: metadata.rack_id.clone(),
@@ -206,13 +216,13 @@ impl<S: RackHealthReportSink> HealthUpdater<S> {
 
         match result {
             Ok(_) => {
-                emit(MessageProcessed);
+                self.instrumentation.emit(MessageProcessed);
             }
             Err(e) => {
                 // Surface the persist failure and count it. The value re-arrives
                 // on the next message, so processing still retries -- but the
                 // drop is now visible instead of silently discarded.
-                emit(HealthReportPersistFailed {
+                self.instrumentation.emit(HealthReportPersistFailed {
                     rack_id: metadata.rack_id.clone(),
                     error: e.to_string(),
                 });
@@ -281,15 +291,14 @@ mod tests {
 
     use async_trait::async_trait;
     use chrono::Utc;
-    use opentelemetry::global;
 
     use super::*;
     use crate::DsxConsumerError;
 
     const TEST_PREFIX: &str = "BMS/v1";
 
-    fn test_meter() -> Meter {
-        global::meter("test")
+    fn test_metrics_setup() -> metrics_endpoint::MetricsSetup {
+        metrics_endpoint::new_metrics_setup("dsx-consumer-tests", "carbide", false).unwrap()
     }
 
     fn test_cache_config() -> CacheConfig {
@@ -470,11 +479,15 @@ mod tests {
     #[tokio::test]
     async fn test_faulting_value_triggers_insert() {
         let sink = RecordingSink::new();
+        let metrics_setup = test_metrics_setup();
+        let metrics =
+            carbide_instrument::testing::MetricsCapture::for_registry(&metrics_setup.registry);
         let updater = HealthUpdater::new(
             TEST_PREFIX.to_string(),
             test_cache_config(),
             sink.clone(),
-            test_meter(),
+            metrics_setup.meter.clone(),
+            Instrumentation::from_meter_provider(&metrics_setup.meter_provider),
         );
 
         // First, cache metadata
@@ -502,16 +515,25 @@ mod tests {
 
         let removes = sink.take_remove_calls();
         assert!(removes.is_empty());
+        assert_eq!(
+            metrics.counter_delta(
+                "carbide_dsx_exchange_consumer_messages_processed_total",
+                &[]
+            ),
+            1.0
+        );
     }
 
     #[tokio::test]
     async fn test_clear_value_triggers_remove() {
         let sink = RecordingSink::new();
+        let metrics_setup = test_metrics_setup();
         let updater = HealthUpdater::new(
             TEST_PREFIX.to_string(),
             test_cache_config(),
             sink.clone(),
-            test_meter(),
+            metrics_setup.meter.clone(),
+            Instrumentation::from_meter_provider(&metrics_setup.meter_provider),
         );
 
         // Cache metadata
@@ -543,11 +565,13 @@ mod tests {
     #[tokio::test]
     async fn test_value_without_metadata_is_skipped() {
         let sink = RecordingSink::new();
+        let metrics_setup = test_metrics_setup();
         let updater = HealthUpdater::new(
             TEST_PREFIX.to_string(),
             test_cache_config(),
             sink.clone(),
-            test_meter(),
+            metrics_setup.meter.clone(),
+            Instrumentation::from_meter_provider(&metrics_setup.meter_provider),
         );
 
         // Send value without caching metadata first
@@ -567,11 +591,13 @@ mod tests {
     #[tokio::test]
     async fn test_unsupported_point_type_metadata_not_cached() {
         let sink = RecordingSink::new();
+        let metrics_setup = test_metrics_setup();
         let updater = HealthUpdater::new(
             TEST_PREFIX.to_string(),
             test_cache_config(),
             sink.clone(),
-            test_meter(),
+            metrics_setup.meter.clone(),
+            Instrumentation::from_meter_provider(&metrics_setup.meter_provider),
         );
 
         // Cache unsupported metadata
@@ -598,11 +624,13 @@ mod tests {
     #[tokio::test]
     async fn test_deduplication_same_value_skipped() {
         let sink = RecordingSink::new();
+        let metrics_setup = test_metrics_setup();
         let updater = HealthUpdater::new(
             TEST_PREFIX.to_string(),
             test_cache_config(),
             sink.clone(),
-            test_meter(),
+            metrics_setup.meter.clone(),
+            Instrumentation::from_meter_provider(&metrics_setup.meter_provider),
         );
 
         // Cache metadata
@@ -638,11 +666,13 @@ mod tests {
     #[tokio::test]
     async fn test_value_change_not_deduplicated() {
         let sink = RecordingSink::new();
+        let metrics_setup = test_metrics_setup();
         let updater = HealthUpdater::new(
             TEST_PREFIX.to_string(),
             test_cache_config(),
             sink.clone(),
-            test_meter(),
+            metrics_setup.meter.clone(),
+            Instrumentation::from_meter_provider(&metrics_setup.meter_provider),
         );
 
         // Cache metadata
@@ -681,11 +711,15 @@ mod tests {
 
     #[tokio::test]
     async fn test_api_failure_does_not_cache_state() {
+        let metrics_setup = test_metrics_setup();
+        let metrics =
+            carbide_instrument::testing::MetricsCapture::for_registry(&metrics_setup.registry);
         let updater = HealthUpdater::new(
             TEST_PREFIX.to_string(),
             test_cache_config(),
             Arc::new(FailingSink),
-            test_meter(),
+            metrics_setup.meter.clone(),
+            Instrumentation::from_meter_provider(&metrics_setup.meter_provider),
         );
 
         // Cache metadata
@@ -713,16 +747,25 @@ mod tests {
                 .await
                 .is_none()
         );
+        assert_eq!(
+            metrics.counter_delta(
+                "carbide_dsx_exchange_consumer_health_report_persist_failures_total",
+                &[]
+            ),
+            1.0
+        );
     }
 
     #[tokio::test]
     async fn test_multiple_racks_independent() {
         let sink = RecordingSink::new();
+        let metrics_setup = test_metrics_setup();
         let updater = HealthUpdater::new(
             TEST_PREFIX.to_string(),
             test_cache_config(),
             sink.clone(),
-            test_meter(),
+            metrics_setup.meter.clone(),
+            Instrumentation::from_meter_provider(&metrics_setup.meter_provider),
         );
 
         // Cache metadata for two racks
@@ -767,11 +810,13 @@ mod tests {
     #[tokio::test]
     async fn test_run_processes_messages_until_channel_closed() {
         let sink = RecordingSink::new();
+        let metrics_setup = test_metrics_setup();
         let updater = HealthUpdater::new(
             TEST_PREFIX.to_string(),
             test_cache_config(),
             sink.clone(),
-            test_meter(),
+            metrics_setup.meter.clone(),
+            Instrumentation::from_meter_provider(&metrics_setup.meter_provider),
         );
 
         let (tx, rx) = mpsc::channel(16);

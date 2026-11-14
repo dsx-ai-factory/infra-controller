@@ -197,6 +197,7 @@ async fn test_max_outstanding_updates(
             Arc::new(config),
             vec![module1.clone(), module2.clone()],
             env.api.work_lock_manager_handle.clone(),
+            env.api.instrumentation.clone(),
         );
 
         manager.run_single_iteration().await?;
@@ -270,6 +271,7 @@ async fn test_percentage_update_budget_accounts_for_unhealthy_and_updating_hosts
         Arc::new(config),
         vec![module.clone()],
         env.api.work_lock_manager_handle.clone(),
+        env.api.instrumentation.clone(),
     );
 
     manager.run_single_iteration().await?;
@@ -342,10 +344,14 @@ fn test_start(pool: sqlx::PgPool) {
     let test_module = Box::new(TestUpdateModule::new(vec![], HashSet::default()));
     let mut join_set = JoinSet::new();
     let cancel_token = CancellationToken::new();
-    let work_lock_manager_handle =
-        db::work_lock_manager::start(&mut join_set, pool.clone(), Default::default())
-            .await
-            .unwrap();
+    let work_lock_manager_handle = db::work_lock_manager::start(
+        &mut join_set,
+        pool.clone(),
+        Default::default(),
+        carbide_instrument::Instrumentation::global(),
+    )
+    .await
+    .unwrap();
 
     let mut config: Arc<CarbideConfig> = Arc::new(
         Figment::new()
@@ -357,11 +363,13 @@ fn test_start(pool: sqlx::PgPool) {
     Arc::get_mut(&mut config)
         .unwrap()
         .machine_update_run_interval = Some(1);
+    let instrumentation_meter = carbide_utils::test_support::test_meter::TestMeter::default();
     let update_manager = MachineUpdateManager::new_with_modules(
         pool,
         config,
         vec![test_module.clone()],
         work_lock_manager_handle,
+        carbide_instrument::Instrumentation::new(instrumentation_meter.meter()),
     );
 
     update_manager
@@ -390,10 +398,14 @@ fn test_start(pool: sqlx::PgPool) {
 fn test_run_single_iteration_propagates_lock_infrastructure_failure(pool: sqlx::PgPool) {
     let test_module = Box::new(TestUpdateModule::new(vec![], HashSet::default()));
     let mut join_set = JoinSet::new();
-    let work_lock_manager_handle =
-        db::work_lock_manager::start(&mut join_set, pool.clone(), Default::default())
-            .await
-            .unwrap();
+    let work_lock_manager_handle = db::work_lock_manager::start(
+        &mut join_set,
+        pool.clone(),
+        Default::default(),
+        carbide_instrument::Instrumentation::global(),
+    )
+    .await
+    .unwrap();
     join_set.shutdown().await;
 
     let config: Arc<CarbideConfig> = Arc::new(
@@ -402,11 +414,13 @@ fn test_run_single_iteration_propagates_lock_infrastructure_failure(pool: sqlx::
             .extract()
             .unwrap(),
     );
+    let instrumentation_meter = carbide_utils::test_support::test_meter::TestMeter::default();
     let update_manager = MachineUpdateManager::new_with_modules(
         pool,
         config,
         vec![test_module],
         work_lock_manager_handle,
+        carbide_instrument::Instrumentation::new(instrumentation_meter.meter()),
     );
 
     let err = update_manager
@@ -428,10 +442,14 @@ fn test_run_single_iteration_propagates_lock_infrastructure_failure(pool: sqlx::
 #[crate::sqlx_test()]
 fn update_manager_uses_policy_interval(pool: sqlx::PgPool) {
     let mut join_set = JoinSet::new();
-    let work_lock_manager_handle =
-        db::work_lock_manager::start(&mut join_set, pool.clone(), Default::default())
-            .await
-            .unwrap();
+    let work_lock_manager_handle = db::work_lock_manager::start(
+        &mut join_set,
+        pool.clone(),
+        Default::default(),
+        carbide_instrument::Instrumentation::global(),
+    )
+    .await
+    .unwrap();
 
     for configured in [None, Some(0), Some(7)] {
         let mut config = crate::test_support::default_config::get();
@@ -439,12 +457,14 @@ fn update_manager_uses_policy_interval(pool: sqlx::PgPool) {
         let policy = rpc::forge::RuntimeConfig::from(config.clone())
             .machine_update_policy
             .expect("Version reports the update policy");
+        let instrumentation_meter = carbide_utils::test_support::test_meter::TestMeter::default();
         let update_manager = MachineUpdateManager::new(
             pool.clone(),
             Arc::new(config),
             opentelemetry::global::meter("test"),
             work_lock_manager_handle.clone(),
             None,
+            carbide_instrument::Instrumentation::new(instrumentation_meter.meter()),
         );
         assert_eq!(
             update_manager.run_interval(),
@@ -527,6 +547,7 @@ async fn admitted_nic_recovery_shares_the_host_budget(
         meter.meter(),
         env.api.work_lock_manager_handle.clone(),
         None,
+        env.api.instrumentation.clone(),
     );
     manager.run_single_iteration().await?;
 
@@ -593,6 +614,7 @@ async fn admitted_nic_recovery_shares_the_host_budget(
         meter.meter(),
         env.api.work_lock_manager_handle.clone(),
         None,
+        env.api.instrumentation.clone(),
     );
     manager.run_single_iteration().await?;
 
@@ -659,6 +681,7 @@ async fn manager_cleanup_keeps_ownership_until_marker_commit(
         Arc::new(config),
         vec![Box::new(module)],
         env.api.work_lock_manager_handle.clone(),
+        env.api.instrumentation.clone(),
     );
     let mut blocker = env.pool.begin().await?;
     db::machine::lock_by_id_for_update(blocker.as_mut(), &host.id.into()).await?;

@@ -28,6 +28,7 @@ use crate::config::OtlpTargetConfig;
 use crate::sink::otlp::{OtlpMetricsQueue, QueuedMetric};
 
 pub(crate) struct OtlpMetricsDrainTask {
+    instrumentation: carbide_instrument::Instrumentation,
     queue: Arc<OtlpMetricsQueue>,
     target: OtlpTargetConfig,
     metric_name_prefix: String,
@@ -38,8 +39,10 @@ impl OtlpMetricsDrainTask {
         queue: Arc<OtlpMetricsQueue>,
         target: OtlpTargetConfig,
         metric_name_prefix: String,
+        instrumentation: carbide_instrument::Instrumentation,
     ) -> Self {
         Self {
+            instrumentation,
             queue,
             target,
             metric_name_prefix,
@@ -56,6 +59,7 @@ impl OtlpMetricsDrainTask {
                 client: MetricsServiceClient::new(channel),
                 metric_name_prefix: metric_name_prefix.clone(),
             },
+            self.instrumentation,
         )
         .await;
     }

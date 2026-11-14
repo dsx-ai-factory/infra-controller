@@ -171,6 +171,7 @@ fn manager(
         credential_reader,
         env.api.work_lock_manager_handle.clone(),
         env.config.ntp_servers.clone(),
+        env.api.instrumentation.clone(),
     )
 }
 

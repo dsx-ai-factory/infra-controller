@@ -34,7 +34,6 @@ mod dpu_remote;
 mod dpu_reprovisioning;
 mod expected_component_patch;
 mod expected_machine;
-mod expected_nvlink_domain;
 mod expected_rack;
 mod expected_rack_group;
 mod expected_switch;
@@ -88,6 +87,7 @@ mod nic_firmware_artifact;
 mod nic_firmware_operation;
 mod nvl_instance;
 mod nvl_logical_partition;
+mod nvlink_domain;
 mod preingestion_bfb_identity;
 mod preingestion_dpu_nic_mode;
 mod primary_interface;
@@ -127,3 +127,5 @@ pub(crate) use crate::tests::common::sqlx_fixtures::sqlx_fixture_from_str;
 fn setup_test_logging() {
     crate::test_support::setup_test_logging()
 }
+
+mod machine_tracing;

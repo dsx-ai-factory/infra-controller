@@ -199,6 +199,7 @@ async fn rotate_switch_bmc(
         services.bmc_credential_ops.as_ref(),
         &target,
         force,
+        &services.instrumentation,
     )
     .await
     {

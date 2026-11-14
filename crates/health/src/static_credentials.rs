@@ -72,10 +72,13 @@ impl StaticCredentialProvider {
     pub(crate) async fn new(
         path: PathBuf,
         configs: Vec<(MacAddress, Option<String>)>,
+        instrumentation: carbide_instrument::Instrumentation,
     ) -> Result<Self, HealthError> {
         let reader = Reader::new(FileCredentialsConfig {
             path: Some(path.clone()), poll_interval: Some(Duration::from_secs(60)), ..Default::default()
-        }).await.map_err(|error| {
+        },
+            instrumentation,
+        ).await.map_err(|error| {
             tracing::error!(path = %path.display(), %error, "failed to load static credential file at startup");
             HealthError::from(error)
         })?;
@@ -122,10 +125,15 @@ mod tests {
     async fn fetch_preserves_resolution_error_sources() {
         let file = tempfile::NamedTempFile::new().unwrap();
         std::fs::write(file.path(), "{}").unwrap();
-        let reader = Reader::new(FileCredentialsConfig {
-            path: Some(file.path().into()),
-            ..Default::default()
-        })
+        let reader = Reader::new(
+            FileCredentialsConfig {
+                path: Some(file.path().into()),
+                ..Default::default()
+            },
+            carbide_instrument::Instrumentation::from_meter_provider(
+                &opentelemetry::metrics::noop::NoopMeterProvider::new(),
+            ),
+        )
         .await
         .unwrap();
         let mac = "00:11:22:33:44:55".parse().unwrap();
@@ -183,11 +191,16 @@ pub(crate) mod test_support {
         addr: BmcAddr,
         path: PathBuf,
     ) -> Arc<StaticCredentialProvider> {
-        let reader = Reader::new(FileCredentialsConfig {
-            path: Some(path.clone()),
-            poll_interval: Some(Duration::from_millis(50)),
-            ..Default::default()
-        })
+        let reader = Reader::new(
+            FileCredentialsConfig {
+                path: Some(path.clone()),
+                poll_interval: Some(Duration::from_millis(50)),
+                ..Default::default()
+            },
+            carbide_instrument::Instrumentation::from_meter_provider(
+                &opentelemetry::metrics::noop::NoopMeterProvider::new(),
+            ),
+        )
         .await
         .expect("test reader");
         Arc::new(StaticCredentialProvider {

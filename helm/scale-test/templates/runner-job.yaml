@@ -1,6 +1,8 @@
 {{- if .Values.runner.enabled }}
 {{- $r := .Values.runner }}
 {{- $s := .Values.store }}
+{{- $instances := has $r.command (list "instance-create" "instance-delete" "instance-lifecycle") }}
+{{- $fixture := and $instances (ne (toString $r.fixture.name) "") }}
 {{- $name := include "scale-test.jobName" (dict "root" . "suite" "runner") }}
 {{- $runId := required "runner.runId is required when the runner is enabled" $r.runId | toString }}
 {{- if not (regexMatch "^[a-z0-9]([a-z0-9-]{0,38}[a-z0-9])?$" $runId) }}
@@ -55,6 +57,29 @@ spec:
         fsGroup: {{ .Values.persistence.fsGroup }}
         seccompProfile:
           type: RuntimeDefault
+      {{- if $fixture }}
+      initContainers:
+        - name: fixture-probe
+          image: {{ required "runner.fixture.probeImage is required" $r.fixture.probeImage | quote }}
+          restartPolicy: Always
+          command: [/site-health-probe, --config, /etc/scale-test/fixture-probe.yaml]
+          startupProbe:
+            httpGet: {path: /health, port: 19011}
+            periodSeconds: 2
+            failureThreshold: 30
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: {drop: [ALL]}
+          resources: {requests: {cpu: 100m, memory: 128Mi}, limits: {memory: 1Gi}}
+          volumeMounts:
+            - {name: config, mountPath: /etc/scale-test, readOnly: true}
+            - {name: fixture-identity, mountPath: /run/scale-test-identity, readOnly: true}
+            - {name: tmp, mountPath: /tmp}
+            {{- if $r.rest.caSecret.name }}
+            - {name: rest-ca, mountPath: /var/run/secrets/rest-ca, readOnly: true}
+            {{- end }}
+      {{- end }}
       containers:
         - name: {{ $r.command }}
           image: {{ include "scale-test.image" . | quote }}
@@ -79,10 +104,27 @@ spec:
               readOnly: true
             - name: run-data
               mountPath: {{ .Values.persistence.mountPath | quote }}
+            {{- if not $instances }}
             # The nico-api client certificate, referenced (never inline).
             - name: nico-client-cert
               mountPath: /var/run/secrets/spiffe.io
               readOnly: true
+            {{- end }}
+            {{- if $instances }}
+            {{- if $r.rest.caSecret.name }}
+            - {name: rest-ca, mountPath: /var/run/secrets/rest-ca, readOnly: true}
+            {{- end }}
+            {{- if $fixture }}
+            - {name: fixture-identity, mountPath: /run/scale-test-identity}
+            - {name: fixture-provider, mountPath: /var/run/secrets/rest-provider, readOnly: true}
+            - {name: fixture-tenant, mountPath: /var/run/secrets/rest-tenant, readOnly: true}
+            {{- else }}
+            - {name: rest-token, mountPath: /var/run/secrets/rest-token, readOnly: true}
+            {{- if ne $r.command "instance-delete" }}
+            - {name: instance-ipxe, mountPath: /var/run/secrets/instance-ipxe, readOnly: true}
+            {{- end }}
+            {{- end }}
+            {{- end }}
             {{- if and $r.checkStore $s.tokenSecret }}
             - name: store-token
               mountPath: /var/run/secrets/store-token
@@ -102,9 +144,42 @@ spec:
         - name: run-data
           persistentVolumeClaim:
             claimName: {{ include "scale-test.runDataClaim" . }}
+        {{- if not $instances }}
         - name: nico-client-cert
           secret:
             secretName: {{ required "inventory.clientSecret is required when the runner is enabled" .Values.inventory.clientSecret | quote }}
+        {{- end }}
+        {{- if $instances }}
+        {{- if $r.rest.caSecret.name }}
+        - name: rest-ca
+          secret:
+            secretName: {{ $r.rest.caSecret.name | quote }}
+            items:
+              - key: {{ required "runner.rest.caSecret.key is required with a CA Secret" $r.rest.caSecret.key | quote }}
+                path: ca.crt
+        {{- end }}
+        {{- if $fixture }}
+        - name: fixture-identity
+          emptyDir: {medium: Memory, sizeLimit: 1Mi}
+        - name: fixture-provider
+          secret:
+            secretName: {{ required "runner.rest.auth.providerSecret is required" $r.rest.auth.providerSecret | quote }}
+            items: [{key: client-id, path: client-id}, {key: client-secret, path: client-secret}]
+        - name: fixture-tenant
+          secret:
+            secretName: {{ required "runner.rest.auth.tenantSecret is required for fixture setup" $r.rest.auth.tenantSecret | quote }}
+            items: [{key: client-id, path: client-id}, {key: client-secret, path: client-secret}]
+        {{- else }}
+        - name: rest-token
+          secret:
+            secretName: {{ required "runner.rest.tokenSecret is required" $r.rest.tokenSecret | quote }}
+        {{- if ne $r.command "instance-delete" }}
+        - name: instance-ipxe
+          secret:
+            secretName: {{ required "runner.instance.ipxeSecret is required for create" $r.instance.ipxeSecret | quote }}
+        {{- end }}
+        {{- end }}
+        {{- end }}
         {{- if and $r.checkStore $s.tokenSecret }}
         - name: store-token
           secret:

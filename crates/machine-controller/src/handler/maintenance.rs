@@ -17,7 +17,8 @@
 
 //! Handler for [`ManagedHostState::Maintenance`].
 
-use carbide_redfish::libredfish::error::state_handler_redfish_error as redfish_error;
+use bmc_platform::{PlatformError, ResetType};
+use carbide_redfish::state_handler::state_handler_platform_error as platform_error;
 use carbide_secrets::credentials::{
     BmcCredentialType, CredentialKey, CredentialManager, Credentials,
 };
@@ -29,8 +30,9 @@ use mac_address::MacAddress;
 use model::component_manager::PowerAction;
 use model::controller_outcome::PersistentStateHandlerOutcome;
 use model::machine::{
-    FailureCause, FailureDetails, FailureSource, HostMachine, MachineMaintenanceOperation,
-    MachineMaintenanceRequest, ManagedHostState, ManagedHostStateSnapshot, StateMachineArea,
+    AcPowercycleState, DisableOnboardNicsState, FailureCause, FailureDetails, FailureSource,
+    HostMachine, MachineMaintenanceOperation, MachineMaintenanceRequest, ManagedHostState,
+    ManagedHostStateSnapshot, StateMachineArea,
 };
 use state_controller::state_handler::{
     StateHandlerContext, StateHandlerError, StateHandlerOutcome,
@@ -89,6 +91,9 @@ pub(super) async fn handle_maintenance(
             )
             .await
         }
+        MachineMaintenanceOperation::AcPowercycle { state } => {
+            handle_ac_powercycle(host_machine_id, mh_snapshot, request, ctx, state).await
+        }
         MachineMaintenanceOperation::ChassisReset { chassis_id } => {
             handle_chassis_reset(host_machine_id, mh_snapshot, request, ctx, chassis_id).await
         }
@@ -137,6 +142,55 @@ async fn handle_reset(
     invoke_power_operation(host_machine_id, mh_snapshot, request, ctx, action).await
 }
 
+async fn handle_ac_powercycle(
+    host_machine_id: &HostMachineId,
+    snapshot: &ManagedHostStateSnapshot,
+    request: Option<&MachineMaintenanceRequest>,
+    ctx: &mut StateHandlerContext<'_, MachineStateHandlerContextObjects>,
+    state: &AcPowercycleState,
+) -> Result<StateHandlerOutcome<ManagedHostState>, StateHandlerError> {
+    use super::onboard_nics;
+    let next = match state {
+        AcPowercycleState::PowerCycle => {
+            return invoke_power_operation(
+                host_machine_id,
+                snapshot,
+                request,
+                ctx,
+                PowerAction::AcPowercycle,
+            )
+            .await;
+        }
+        AcPowercycleState::DisableOnboardNics { state } => {
+            match onboard_nics::advance(state, snapshot, ctx).await? {
+                onboard_nics::Progress::Wait => {
+                    return Ok(StateHandlerOutcome::wait(
+                        onboard_nics::WAIT_REASON.to_string(),
+                    ));
+                }
+                onboard_nics::Progress::Next(state) => {
+                    AcPowercycleState::DisableOnboardNics { state }
+                }
+                onboard_nics::Progress::Complete => {
+                    return finish_maintenance(
+                        host_machine_id,
+                        request,
+                        ctx,
+                        ManagedHostState::Ready,
+                    )
+                    .await;
+                }
+            }
+        }
+    };
+    Ok(StateHandlerOutcome::transition(
+        ManagedHostState::Maintenance {
+            operation: MachineMaintenanceOperation::AcPowercycle { state: next },
+            request: request.cloned(),
+        },
+    ))
+}
+
 async fn handle_chassis_reset(
     host_machine_id: &HostMachineId,
     mh_snapshot: &ManagedHostStateSnapshot,
@@ -176,15 +230,14 @@ async fn handle_chassis_reset(
         "Machine maintenance: ChassisReset",
     );
 
-    let redfish_client = ctx
-        .services
-        .create_redfish_client_from_machine(&mh_snapshot.host_snapshot)
-        .await?;
-
-    redfish_client
-        .chassis_reset(chassis_id, libredfish::SystemPowerControl::ForceRestart)
-        .await
-        .map_err(|error| redfish_error("chassis_reset", error))?;
+    let bmc = ctx.services.connect_bmc(&mh_snapshot.host_snapshot).await?;
+    async {
+        bmc.power()?
+            .chassis_reset(chassis_id, ResetType::ForceRestart)
+            .await
+    }
+    .await
+    .map_err(|error: PlatformError| platform_error("chassis_reset", error))?;
 
     tracing::info!(
         machine_id = %host_machine_id,
@@ -222,6 +275,20 @@ async fn invoke_power_operation(
         ))
     })?;
 
+    // An AC Powercycle of Vera Rubin Compute Trays enables all onboard NICs even after we disable
+    // them as part of ingesting the compute trays. Resolve cleanup before issuing the command
+    // so a failed platform check cannot cause a successfully issued AC cycle to be repeated.
+    let restore_onboard_nics =
+        if action == PowerAction::AcPowercycle && mh_snapshot.has_managed_dpus() {
+            let client = ctx
+                .services
+                .create_redfish_client_from_machine(machine)
+                .await?;
+            super::is_vera_rubin_host(client.as_ref()).await?
+        } else {
+            false
+        };
+
     match component_manager
         .compute_tray
         .power_control(std::slice::from_ref(&endpoint), action)
@@ -237,6 +304,21 @@ async fn invoke_power_operation(
             });
 
             if result.success {
+                if restore_onboard_nics {
+                    return Ok(StateHandlerOutcome::transition(
+                        ManagedHostState::Maintenance {
+                            operation: MachineMaintenanceOperation::AcPowercycle {
+                                state: AcPowercycleState::DisableOnboardNics {
+                                    state: DisableOnboardNicsState::ConfigureOnboardNics {
+                                        enable: true,
+                                    },
+                                },
+                            },
+                            request: request.cloned(),
+                        },
+                    ));
+                }
+
                 tracing::info!(
                     machine_id = %host_machine_id,
                     operation = ?action,

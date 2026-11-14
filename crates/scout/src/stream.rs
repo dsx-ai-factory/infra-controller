@@ -17,7 +17,7 @@
 
 use std::time::Duration;
 
-use carbide_instrument::{Outcome, emit};
+use carbide_instrument::{Instrumentation, Outcome};
 use carbide_uuid::machine::MachineId;
 use libmlx::profile::error::MlxProfileError;
 use rpc::forge::ScoutStreamApiBoundMessage;
@@ -55,6 +55,7 @@ enum ScoutStreamError {
 pub(super) fn start_scout_stream(
     machine_id: MachineId,
     options: &Options,
+    instrumentation: Instrumentation,
 ) -> tokio::task::JoinHandle<()> {
     let options = options.clone();
     tokio::spawn(async move {
@@ -65,7 +66,7 @@ pub(super) fn start_scout_stream(
                 "scout stream starting",
             );
 
-            match run_scout_stream_loop(machine_id, &options).await {
+            match run_scout_stream_loop(machine_id, &options, &instrumentation).await {
                 Ok(_) => {
                     tracing::info!(
                         api_endpoint = %options.api,
@@ -82,7 +83,7 @@ pub(super) fn start_scout_stream(
                     );
                 }
             }
-            emit(ScoutStreamReconnect {
+            instrumentation.emit(ScoutStreamReconnect {
                 api_endpoint: options.api.clone(),
                 machine_id,
             });
@@ -96,9 +97,10 @@ pub(super) fn start_scout_stream(
 async fn run_scout_stream_loop(
     machine_id: MachineId,
     options: &Options,
+    instrumentation: &Instrumentation,
 ) -> Result<(), ScoutStreamError> {
     let mut client = client::create_forge_client(options).await.map_err(|e| {
-        emit(ScoutStreamConnection {
+        instrumentation.emit(ScoutStreamConnection {
             outcome: Outcome::Error,
         });
         ScoutStreamError::ClientError(e.to_string())
@@ -128,14 +130,14 @@ async fn run_scout_stream_loop(
         .scout_stream(request_stream)
         .await
         .map_err(|e| {
-            emit(ScoutStreamConnection {
+            instrumentation.emit(ScoutStreamConnection {
                 outcome: Outcome::Error,
             });
             ScoutStreamError::from(e)
         })?
         .into_inner();
 
-    emit(ScoutStreamConnection {
+    instrumentation.emit(ScoutStreamConnection {
         outcome: Outcome::Ok,
     });
 
@@ -160,11 +162,16 @@ async fn run_scout_stream_loop(
 
             // Handle the oneof message type from the ScoutStreamScoutBoundMessage,
             // generating a follow-up ScoutStreamApiBoundMessage "response".
-            let payload = handle_scout_stream_api_bound_message(flow_uuid, machine_id, request);
+            let payload = handle_scout_stream_api_bound_message(
+                flow_uuid,
+                machine_id,
+                request,
+                instrumentation,
+            );
 
             // And then send the response back to carbide-api.
             if let Err(e) = tx.send(payload).await {
-                emit(ScoutStreamResponseDropped {
+                instrumentation.emit(ScoutStreamResponseDropped {
                     api_endpoint: options.api.clone(),
                     machine_id,
                     error: e.to_string(),
@@ -183,6 +190,7 @@ fn handle_scout_stream_api_bound_message(
     flow_uuid: uuid::Uuid,
     machine_id: MachineId,
     request: scout_stream_scout_bound_message::Payload,
+    instrumentation: &Instrumentation,
 ) -> ScoutStreamApiBoundMessage {
     tracing::info!(
         %flow_uuid,
@@ -199,7 +207,7 @@ fn handle_scout_stream_api_bound_message(
         scout_stream_scout_bound_message::Payload::MlxDeviceProfileSyncRequest(req) => {
             let device = req.device_id.clone();
             let response = with_direct_mlx_access(&device, |access| {
-                mlx_device::handle_profile_sync(req, access)
+                mlx_device::handle_profile_sync(req, access, instrumentation)
             })
             .unwrap_or_else(|error| mlx_device_pb::MlxDeviceProfileSyncResponse {
                 reply: Some(mlx_device_pb::mlx_device_profile_sync_response::Reply::Error(error)),
@@ -212,7 +220,7 @@ fn handle_scout_stream_api_bound_message(
         scout_stream_scout_bound_message::Payload::MlxDeviceProfileCompareRequest(req) => {
             let device = req.device_id.clone();
             let response = with_direct_mlx_access(&device, |access| {
-                mlx_device::handle_profile_compare(req, access)
+                mlx_device::handle_profile_compare(req, access, instrumentation)
             })
             .unwrap_or_else(|error| mlx_device_pb::MlxDeviceProfileCompareResponse {
                 reply: Some(
@@ -227,7 +235,7 @@ fn handle_scout_stream_api_bound_message(
         scout_stream_scout_bound_message::Payload::MlxDeviceLockdownLockRequest(req) => {
             let device = req.device_id.clone();
             let response = with_direct_mlx_access(&device, |access| {
-                mlx_device::handle_lockdown_lock(req, access)
+                mlx_device::handle_lockdown_lock(req, access, instrumentation)
             })
             .unwrap_or_else(|error| mlx_device_pb::MlxDeviceLockdownResponse {
                 reply: Some(mlx_device_pb::mlx_device_lockdown_response::Reply::Error(
@@ -242,7 +250,7 @@ fn handle_scout_stream_api_bound_message(
         scout_stream_scout_bound_message::Payload::MlxDeviceLockdownUnlockRequest(req) => {
             let device = req.device_id.clone();
             let response = with_direct_mlx_access(&device, |access| {
-                mlx_device::handle_lockdown_unlock(req, access)
+                mlx_device::handle_lockdown_unlock(req, access, instrumentation)
             })
             .unwrap_or_else(|error| mlx_device_pb::MlxDeviceLockdownResponse {
                 reply: Some(mlx_device_pb::mlx_device_lockdown_response::Reply::Error(
@@ -257,7 +265,7 @@ fn handle_scout_stream_api_bound_message(
         scout_stream_scout_bound_message::Payload::MlxDeviceLockdownStatusRequest(req) => {
             let device = req.device_id.clone();
             let response = with_direct_mlx_access(&device, |access| {
-                mlx_device::handle_lockdown_status(req, access)
+                mlx_device::handle_lockdown_status(req, access, instrumentation)
             })
             .unwrap_or_else(|error| mlx_device_pb::MlxDeviceLockdownResponse {
                 reply: Some(mlx_device_pb::mlx_device_lockdown_response::Reply::Error(
@@ -272,7 +280,7 @@ fn handle_scout_stream_api_bound_message(
         scout_stream_scout_bound_message::Payload::MlxDeviceInfoDeviceRequest(req) => {
             let device = req.device_id.clone();
             let response = with_direct_mlx_access(&device, |access| {
-                mlx_device::handle_info_device(req, access)
+                mlx_device::handle_info_device(req, access, instrumentation)
             })
             .unwrap_or_else(|error| mlx_device_pb::MlxDeviceInfoDeviceResponse {
                 reply: Some(mlx_device_pb::mlx_device_info_device_response::Reply::Error(error)),
@@ -284,7 +292,7 @@ fn handle_scout_stream_api_bound_message(
         }
         scout_stream_scout_bound_message::Payload::MlxDeviceInfoReportRequest(req) => {
             let response = with_direct_mlx_access("inventory", |access| {
-                mlx_device::handle_info_report(req, access)
+                mlx_device::handle_info_report(req, access, instrumentation)
             })
             .unwrap_or_else(|error| mlx_device_pb::MlxDeviceInfoReportResponse {
                 reply: Some(mlx_device_pb::mlx_device_info_report_response::Reply::Error(error)),
@@ -302,7 +310,7 @@ fn handle_scout_stream_api_bound_message(
             )
         }
         scout_stream_scout_bound_message::Payload::MlxDeviceRegistryShowRequest(req) => {
-            let response = mlx_device::handle_registry_show(req);
+            let response = mlx_device::handle_registry_show(req, instrumentation);
             ScoutStreamApiBoundMessage::from_flow(
                 flow_uuid,
                 scout_stream_api_bound_message::Payload::MlxDeviceRegistryShowResponse(response),
@@ -311,7 +319,7 @@ fn handle_scout_stream_api_bound_message(
         scout_stream_scout_bound_message::Payload::MlxDeviceConfigQueryRequest(req) => {
             let device = req.device_id.clone();
             let response = with_direct_mlx_access(&device, |access| {
-                mlx_device::handle_config_query(req, access)
+                mlx_device::handle_config_query(req, access, instrumentation)
             })
             .unwrap_or_else(|error| mlx_device_pb::MlxDeviceConfigQueryResponse {
                 reply: Some(mlx_device_pb::mlx_device_config_query_response::Reply::Error(error)),
@@ -324,7 +332,7 @@ fn handle_scout_stream_api_bound_message(
         scout_stream_scout_bound_message::Payload::MlxDeviceConfigSetRequest(req) => {
             let device = req.device_id.clone();
             let response = with_direct_mlx_access(&device, |access| {
-                mlx_device::handle_config_set(req, access)
+                mlx_device::handle_config_set(req, access, instrumentation)
             })
             .unwrap_or_else(|error| mlx_device_pb::MlxDeviceConfigSetResponse {
                 reply: Some(mlx_device_pb::mlx_device_config_set_response::Reply::Error(
@@ -339,7 +347,7 @@ fn handle_scout_stream_api_bound_message(
         scout_stream_scout_bound_message::Payload::MlxDeviceConfigSyncRequest(req) => {
             let device = req.device_id.clone();
             let response = with_direct_mlx_access(&device, |access| {
-                mlx_device::handle_config_sync(req, access)
+                mlx_device::handle_config_sync(req, access, instrumentation)
             })
             .unwrap_or_else(|error| mlx_device_pb::MlxDeviceConfigSyncResponse {
                 reply: Some(mlx_device_pb::mlx_device_config_sync_response::Reply::Error(error)),
@@ -352,7 +360,7 @@ fn handle_scout_stream_api_bound_message(
         scout_stream_scout_bound_message::Payload::MlxDeviceConfigCompareRequest(req) => {
             let device = req.device_id.clone();
             let response = with_direct_mlx_access(&device, |access| {
-                mlx_device::handle_config_compare(req, access)
+                mlx_device::handle_config_compare(req, access, instrumentation)
             })
             .unwrap_or_else(|error| mlx_device_pb::MlxDeviceConfigCompareResponse {
                 reply: Some(mlx_device_pb::mlx_device_config_compare_response::Reply::Error(error)),
@@ -529,8 +537,12 @@ exit 1
                 key: "0123456789abcdef".into(),
             },
         );
-        let response =
-            handle_scout_stream_api_bound_message(flow_uuid, machine_id, request.clone());
+        let response = handle_scout_stream_api_bound_message(
+            flow_uuid,
+            machine_id,
+            request.clone(),
+            &carbide_instrument::Instrumentation::global(),
+        );
 
         assert_eq!(response.flow_uuid, Some(flow_uuid.into()));
         let Some(scout_stream_api_bound_message::Payload::MlxDeviceLockdownResponse(response)) =
@@ -557,7 +569,12 @@ exit 1
 
         // Releasing the owner must allow this same request to reach flint.
         // A settled vendor failure must then remove the new direct claim.
-        let response = handle_scout_stream_api_bound_message(flow_uuid, machine_id, request);
+        let response = handle_scout_stream_api_bound_message(
+            flow_uuid,
+            machine_id,
+            request,
+            &carbide_instrument::Instrumentation::global(),
+        );
         assert_eq!(response.flow_uuid, Some(flow_uuid.into()));
         let Some(scout_stream_api_bound_message::Payload::MlxDeviceLockdownResponse(response)) =
             response.payload

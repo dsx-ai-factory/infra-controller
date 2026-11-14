@@ -19,7 +19,6 @@ use std::net::IpAddr;
 use std::str::FromStr;
 
 use ::rpc::forge as rpc;
-use carbide_instrument::emit;
 use lazy_static::lazy_static;
 use mac_address::MacAddress;
 use model::expected_machine::{
@@ -38,10 +37,8 @@ use crate::handlers::expected_component_patch::{
     ExpectedComponent, UpdateField, UpdateMask, parse_bmc_ip, required_id, required_value,
     validate_bmc_mac, validate_single_interface_address,
 };
-use crate::handlers::machine_interface_address::update_preallocated_expected_machine_interface;
-use crate::handlers::static_address_metrics::{
-    PreallocationSuccess, StaticAddressPreallocationCompleted,
-};
+use crate::handlers::interface_preallocator::InterfacePreallocator;
+use crate::handlers::static_address_metrics::PreallocationSuccess;
 
 lazy_static! {
     // Keep the maximum at 32 to match `expected_machines.serial_number`.
@@ -536,6 +533,10 @@ pub(crate) async fn update(
     api: &Api,
     request: tonic::Request<rpc::ExpectedMachine>,
 ) -> Result<tonic::Response<()>, tonic::Status> {
+    let preallocator = InterfacePreallocator::new(
+        &api.instrumentation,
+        api.runtime_config.retained_boot_interface_window,
+    );
     log_request_data(&request);
 
     let mut request = request.into_inner();
@@ -581,12 +582,9 @@ pub(crate) async fn update(
     normalize_host_bmc_configuration(&mut machine, existing.as_ref(), overrides)?;
     validate_expected_machine(&mut txn, &api.common_pools, &machine).await?;
 
-    let preallocations = update_preallocated_interfaces(
-        &mut txn,
-        &machine,
-        api.runtime_config.retained_boot_interface_window,
-    )
-    .await?;
+    let preallocations = preallocator
+        .update_machine_interfaces(&mut txn, &machine)
+        .await?;
 
     db::expected_machine::update(&mut txn, &machine)
         .await
@@ -594,9 +592,7 @@ pub(crate) async fn update(
 
     txn.commit().await?;
 
-    for outcome in preallocations {
-        emit(StaticAddressPreallocationCompleted::from(outcome));
-    }
+    preallocator.record_committed(preallocations);
 
     Ok(tonic::Response::new(()))
 }
@@ -743,6 +739,10 @@ async fn apply_machine_patches(
     api: &Api,
     mut patches: Vec<ExpectedMachinePatch>,
 ) -> Result<(), CarbideError> {
+    let preallocator = InterfacePreallocator::new(
+        &api.instrumentation,
+        api.runtime_config.retained_boot_interface_window,
+    );
     log_request_data_redacted(match patches.as_slice() {
         [patch] => format!("expected_machine_id: {}", patch.expected_machine_id),
         _ => format!("expected-machine patches: {}", patches.len()),
@@ -761,14 +761,7 @@ async fn apply_machine_patches(
     let mut txn = api.txn_begin().await?;
     let mut preallocations = Vec::new();
     for patch in patches {
-        match apply_machine_patch(
-            &mut txn,
-            &api.common_pools,
-            patch,
-            api.runtime_config.retained_boot_interface_window,
-        )
-        .await
-        {
+        match apply_machine_patch(&mut txn, &api.common_pools, patch, &preallocator).await {
             Ok(applied) => preallocations.extend(applied),
             Err(error) => {
                 txn.rollback_or_log("expected-machine patch failure").await;
@@ -777,9 +770,7 @@ async fn apply_machine_patches(
         }
     }
     txn.commit().await?;
-    for preallocation in preallocations {
-        emit(StaticAddressPreallocationCompleted::from(preallocation));
-    }
+    preallocator.record_committed(preallocations);
     Ok(())
 }
 
@@ -787,7 +778,7 @@ async fn apply_machine_patch(
     txn: &mut sqlx::PgConnection,
     common_pools: &CommonPools,
     request: ExpectedMachinePatch,
-    retained_window: Option<chrono::Duration>,
+    preallocator: &InterfacePreallocator<'_>,
 ) -> Result<Vec<PreallocationSuccess>, CarbideError> {
     let ExpectedMachinePatch {
         expected_machine_id,
@@ -900,7 +891,9 @@ async fn apply_machine_patch(
         .map_err(|error| CarbideError::InvalidArgument(error.to_string()))?;
     validate_expected_machine_for_insert(&machine)?;
     validate_reservation_pool_membership(txn, common_pools, &machine).await?;
-    let preallocations = update_preallocated_interfaces(txn, &machine, retained_window).await?;
+    let preallocations = preallocator
+        .update_machine_interfaces(txn, &machine)
+        .await?;
     db::expected_machine::update(txn, &machine).await?;
     Ok(preallocations)
 }
@@ -1368,51 +1361,6 @@ fn preserve_omitted_rpc_role_and_allocation(
     }
 }
 
-/// `update_preallocated_interfaces` applies the update-time fixed-address
-/// behavior shared by the single and batch APIs.
-///
-/// The lower-level helpers create a missing reservation or fill an addressless
-/// row before that family's first stateful allocation, but leave existing
-/// addresses alone. An associated row may receive its configured fixed address,
-/// but its role-derived type and primary setting remain managed state.
-/// Operators still use the machine-interface address APIs to replace a live
-/// address. The effective Host BMC is applied separately so legacy-only rows
-/// use the same path without storing a nested declaration.
-async fn update_preallocated_interfaces(
-    txn: &mut sqlx::PgConnection,
-    machine: &ExpectedMachine,
-    retained_window: Option<chrono::Duration>,
-) -> Result<Vec<PreallocationSuccess>, CarbideError> {
-    let mut preallocations = Vec::new();
-    let host_bmc = machine.effective_host_bmc();
-    if host_bmc.fixed_ip.is_some() {
-        preallocations.push(
-            update_preallocated_expected_machine_interface(&mut *txn, &host_bmc, retained_window)
-                .await?,
-        );
-    }
-
-    for interface in machine.data.interfaces.iter().filter(|interface| {
-        !interface.role.is_dpu_loopback()
-            && interface
-                .mac_address
-                .is_some_and(|mac| mac != machine.bmc_mac_address)
-    }) {
-        if interface.fixed_ip.is_some() {
-            preallocations.push(
-                update_preallocated_expected_machine_interface(
-                    &mut *txn,
-                    interface,
-                    retained_window,
-                )
-                .await?,
-            );
-        }
-    }
-
-    Ok(preallocations)
-}
-
 /// Preserve the request representation used by batch results and replace only
 /// the ID with its parsed value. Older clients expect their payload back rather
 /// than a model-normalized copy.
@@ -1506,7 +1454,7 @@ async fn update_expected_machine(
     mut machine: rpc::ExpectedMachine,
     id: Uuid,
     parsed_mac: MacAddress,
-    retained_window: Option<chrono::Duration>,
+    preallocator: &InterfacePreallocator<'_>,
 ) -> Result<(rpc::ExpectedMachine, Vec<PreallocationSuccess>), CarbideError> {
     let result_machine = batch_result_with_id(machine.clone(), id);
     let existing = db::expected_machine::find_for_update(
@@ -1530,8 +1478,9 @@ async fn update_expected_machine(
     };
     normalize_host_bmc_configuration(&mut expected_machine, existing.as_ref(), overrides)?;
     validate_expected_machine(&mut *txn, common_pools, &expected_machine).await?;
-    let preallocations =
-        update_preallocated_interfaces(txn, &expected_machine, retained_window).await?;
+    let preallocations = preallocator
+        .update_machine_interfaces(txn, &expected_machine)
+        .await?;
 
     db::expected_machine::update(txn, &expected_machine).await?;
 
@@ -1585,15 +1534,14 @@ async fn apply_operation(
     machine: rpc::ExpectedMachine,
     id: Uuid,
     parsed_mac: MacAddress,
-    retained_window: Option<chrono::Duration>,
+    preallocator: &InterfacePreallocator<'_>,
 ) -> Result<(rpc::ExpectedMachine, Vec<PreallocationSuccess>), CarbideError> {
     match op {
         BatchOperation::Create => {
             create_expected_machine(txn, common_pools, machine, id, parsed_mac).await
         }
         BatchOperation::Update => {
-            update_expected_machine(txn, common_pools, machine, id, parsed_mac, retained_window)
-                .await
+            update_expected_machine(txn, common_pools, machine, id, parsed_mac, preallocator).await
         }
     }
 }
@@ -1604,6 +1552,10 @@ async fn process_batch_operations(
     accept_partial: bool,
     op: BatchOperation,
 ) -> Result<Vec<rpc::ExpectedMachineOperationResult>, CarbideError> {
+    let preallocator = InterfacePreallocator::new(
+        &api.instrumentation,
+        api.runtime_config.retained_boot_interface_window,
+    );
     let mut results = Vec::new();
 
     if accept_partial {
@@ -1644,15 +1596,13 @@ async fn process_batch_operations(
                 machine,
                 id,
                 parsed_mac,
-                api.runtime_config.retained_boot_interface_window,
+                &preallocator,
             )
             .await
             {
                 Ok((result_machine, preallocations)) => match txn.commit().await {
                     Ok(_) => {
-                        for outcome in preallocations {
-                            emit(StaticAddressPreallocationCompleted::from(outcome));
-                        }
+                        preallocator.record_committed(preallocations);
                         results.push(build_success_result(result_machine));
                     }
                     Err(e) => {
@@ -1695,7 +1645,7 @@ async fn process_batch_operations(
             machine,
             id,
             parsed_mac,
-            api.runtime_config.retained_boot_interface_window,
+            &preallocator,
         )
         .await
         {
@@ -1712,9 +1662,7 @@ async fn process_batch_operations(
 
     txn.commit().await?;
 
-    for outcome in preallocations {
-        emit(StaticAddressPreallocationCompleted::from(outcome));
-    }
+    preallocator.record_committed(preallocations);
 
     ordered_results.sort_by_key(|(request_index, _)| *request_index);
     Ok(ordered_results

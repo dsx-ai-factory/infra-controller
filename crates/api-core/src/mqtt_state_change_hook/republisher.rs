@@ -19,9 +19,10 @@
 
 use std::time::Duration;
 
+use carbide_instrument::Instrumentation;
 use carbide_mqtt_common::hook::{MqttPublisher, publish_with_deadline};
 use carbide_mqtt_common::metrics::{MqttHookMetrics, PublishComponent};
-use carbide_utils::managed_loop::{self, LoopManager};
+use carbide_utils::managed_loop::{LoopManager, ManagedLoopIteration};
 use chrono::{DateTime, Utc};
 use db::work_lock_manager::{AcquireLockError, WorkLockManagerHandle};
 use health_report::HealthReport;
@@ -46,6 +47,7 @@ const REPUBLISH_WORK_KEY: &str = "managed_host_state_republisher::iteration";
 /// publishing directly keeps the two paths independent and lets
 /// `max_publishes_per_second` bound the burst.
 pub(crate) struct ManagedHostStateRepublisher<P: MqttPublisher> {
+    instrumentation: Instrumentation,
     publisher: P,
     db_pool: sqlx::PgPool,
     work_lock_manager_handle: WorkLockManagerHandle,
@@ -58,6 +60,7 @@ pub(crate) struct ManagedHostStateRepublisher<P: MqttPublisher> {
 
 /// Constructor parameters for [`ManagedHostStateRepublisher`].
 pub(crate) struct ManagedHostStateRepublisherParams {
+    pub(crate) instrumentation: Instrumentation,
     pub(crate) db_pool: sqlx::PgPool,
     pub(crate) work_lock_manager_handle: WorkLockManagerHandle,
     pub(crate) topic_prefix: String,
@@ -72,8 +75,12 @@ impl<P: MqttPublisher> ManagedHostStateRepublisher<P> {
     /// `component="managed_host_republish"` label keeps periodic sweeps
     /// distinct from change-driven publishes on dashboards.
     pub(crate) fn new(publisher: P, params: ManagedHostStateRepublisherParams) -> Self {
-        let metrics = MqttHookMetrics::without_queue_depth(PublishComponent::ManagedHostRepublish);
+        let metrics = MqttHookMetrics::without_queue_depth(
+            PublishComponent::ManagedHostRepublish,
+            params.instrumentation.clone(),
+        );
         Self {
+            instrumentation: params.instrumentation,
             publisher,
             db_pool: params.db_pool,
             work_lock_manager_handle: params.work_lock_manager_handle,
@@ -134,7 +141,10 @@ impl<P: MqttPublisher> ManagedHostStateRepublisher<P> {
                 sweep,
             );
             let result = self.run_sweep(publish_healthy, &cancel_token).await;
-            managed_loop::record_iteration(LoopManager::ManagedHostStateRepublisher, &result);
+            self.instrumentation.emit(ManagedLoopIteration::from_result(
+                LoopManager::ManagedHostStateRepublisher,
+                &result,
+            ));
             sweep = sweep.wrapping_add(1);
         }
     }
@@ -343,8 +353,13 @@ mod tests {
     use super::*;
     use crate::cfg::file::PublishRate;
 
-    fn test_metrics() -> MqttHookMetrics {
-        MqttHookMetrics::without_queue_depth(PublishComponent::ManagedHostRepublish)
+    fn test_metrics(
+        test_meter: &carbide_utils::test_support::test_meter::TestMeter,
+    ) -> MqttHookMetrics {
+        MqttHookMetrics::without_queue_depth(
+            PublishComponent::ManagedHostRepublish,
+            Instrumentation::new(test_meter.meter()),
+        )
     }
 
     fn test_machine_id() -> carbide_uuid::machine::HostMachineId {
@@ -434,12 +449,19 @@ mod tests {
         assert_eq!(db::managed_host::load_host_ids(&pool).await?, host_ids);
 
         let mut join_set = JoinSet::new();
-        let work_lock_manager_handle =
-            db::work_lock_manager::start(&mut join_set, pool.clone(), Default::default()).await?;
+        let work_lock_manager_handle = db::work_lock_manager::start(
+            &mut join_set,
+            pool.clone(),
+            Default::default(),
+            carbide_instrument::Instrumentation::global(),
+        )
+        .await?;
         let (publisher, mut receiver) = SignalingPublisher::new();
+        let test_meter = carbide_utils::test_support::test_meter::TestMeter::default();
         let republisher = ManagedHostStateRepublisher::new(
             publisher,
             ManagedHostStateRepublisherParams {
+                instrumentation: Instrumentation::new(test_meter.meter()),
                 db_pool: pool.clone(),
                 work_lock_manager_handle,
                 topic_prefix: "NICO/v1/machine".to_string(),
@@ -552,7 +574,8 @@ mod tests {
     #[tokio::test]
     async fn publish_state_uses_state_topic_and_payload() {
         let (publisher, mut receiver) = SignalingPublisher::new();
-        let metrics = test_metrics();
+        let test_meter = carbide_utils::test_support::test_meter::TestMeter::default();
+        let metrics = test_metrics(&test_meter);
         let id = test_machine_id();
         let state = ManagedHostState::Ready;
 
@@ -611,7 +634,8 @@ mod tests {
             call_count: call_count.clone(),
             complete_count: complete_count.clone(),
         };
-        let metrics = test_metrics();
+        let test_meter = carbide_utils::test_support::test_meter::TestMeter::default();
+        let metrics = test_metrics(&test_meter);
         let id = test_machine_id();
         let state = ManagedHostState::Ready;
 

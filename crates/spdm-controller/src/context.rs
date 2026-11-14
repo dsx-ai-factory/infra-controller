@@ -17,6 +17,7 @@
 
 use std::sync::Arc;
 
+use bmc_backend::BmcConnector;
 use carbide_redfish::libredfish::RedfishClientPool;
 use sqlx::PgPool;
 use state_controller::state_handler::StateHandlerContextObjects;
@@ -27,8 +28,13 @@ pub struct SpdmStateHandlerContextObjects {}
 
 #[derive(Clone)]
 pub struct SpdmStateHandlerServices {
+    /// Event destination shared by controller operations.
+    /// Retain its provider until the controller stops.
+    pub instrumentation: carbide_instrument::Instrumentation,
     pub db_pool: PgPool,
     pub redfish_client_pool: Arc<dyn RedfishClientPool>,
+    /// Connects moved BMC operations through the site's `bmc_backend`.
+    pub bmc_connector: BmcConnector,
 }
 
 impl StateHandlerContextObjects for SpdmStateHandlerContextObjects {

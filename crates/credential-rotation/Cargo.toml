@@ -48,6 +48,7 @@ carbide-secrets = { path = "../secrets", features = ["test-support"] }
 carbide-macros = { path = "../macros" }
 carbide-sqlx-testing = { path = "../sqlx-testing" }
 carbide-test-support = { path = "../test-support" }
+carbide-utils = { path = "../utils", features = ["test-support"] }
 
 serde_json = { workspace = true }
 tokio = { workspace = true }

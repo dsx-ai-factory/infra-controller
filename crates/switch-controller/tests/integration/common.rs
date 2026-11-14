@@ -86,6 +86,8 @@ impl ControllerEnv {
             None,
             Some(pool.clone()),
             None,
+            None,
+            carbide_instrument::Instrumentation::global(),
         )
         .await
         .expect("test component manager should build");
@@ -114,12 +116,14 @@ impl ControllerEnv {
             .processor_id(uuid::Uuid::new_v4().to_string())
             .services(
                 SwitchStateHandlerServices {
+                    instrumentation: api.instrumentation().clone(),
                     db_pool: pool.clone(),
                     component_manager: Some(component_manager),
                     credential_manager: test_credential_manager.clone(),
                     switch_mtls_services: default_switch_mtls_services(),
                     per_object_metrics_registry: per_object_metrics_registry.clone(),
                     redfish_client_pool: redfish_sim.clone(),
+                    bmc_connector: bmc_backend::BmcConnector::Libredfish(redfish_sim.clone()),
                     bmc_credential_ops: redfish_sim.clone(),
                     bmc_rotation_gate: carbide_credential_rotation::RotationGate::new_for_family(
                         db::credential_rotation::CredentialRotationType::Bmc,

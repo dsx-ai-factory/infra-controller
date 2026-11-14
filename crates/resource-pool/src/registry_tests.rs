@@ -642,8 +642,13 @@ async fn remote_runtime(
     tasks: &mut JoinSet<()>,
     authority_id: &str,
 ) -> Result<RemoteResourcePool, Box<dyn std::error::Error>> {
-    let work_locks =
-        work_lock_manager::start(tasks, database.clone(), KeepaliveConfig::default()).await?;
+    let work_locks = work_lock_manager::start(
+        tasks,
+        database.clone(),
+        KeepaliveConfig::default(),
+        carbide_instrument::Instrumentation::global(),
+    )
+    .await?;
     let provider = GrpcResourcePoolBackend::new("http://127.0.0.1:1".parse()?, None)?;
     Ok(RemoteResourcePool::new(
         database.clone(),

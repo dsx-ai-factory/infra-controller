@@ -18,6 +18,9 @@ path = "tests/integration/main.rs"
 test-support = []
 
 [dependencies]
+bmc-backend = { path = "../bmc-backend" }
+bmc-platform = { path = "../bmc-platform" }
+bmc-runtime = { path = "../bmc-runtime" }
 bmc-vendor = { path = "../bmc-vendor" }
 carbide-api-db = { path = "../api-db" }
 carbide-api-model = { path = "../api-model" }

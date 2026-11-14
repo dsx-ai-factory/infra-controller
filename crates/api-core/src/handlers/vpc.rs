@@ -20,6 +20,7 @@ use std::time::Duration;
 use ::rpc::errors::RpcDataConversionError;
 use ::rpc::forge as rpc;
 use ::rpc::network::vpc_virtualization_type_try_from_rpc;
+use carbide_instrument::Instrumentation;
 use carbide_network::virtualization::{DEFAULT_NETWORK_VIRTUALIZATION_TYPE, VpcVirtualizationType};
 use carbide_resource_pool::remote::RemoteResourcePoolError;
 use carbide_resource_pool::{
@@ -29,9 +30,11 @@ use carbide_resource_pool::{
 use carbide_uuid::network_security_group::NetworkSecurityGroupId;
 use carbide_uuid::vpc::VpcId;
 use config_version::ConfigVersion;
+use db::db_read::DbReader;
 use db::resource_pool::{ResourcePoolAllocationNotOwned, ResourcePoolDatabaseError};
 use db::vpc::{self};
 use db::{self, ConditionalWrite, ObjectColumnFilter, network_security_group};
+use model::dns::DnsZone;
 use model::resource_pool;
 use model::tenant::{InvalidTenantOrg, Tenant};
 use model::vpc::{
@@ -94,17 +97,21 @@ impl VpcCreation {
 
     fn allocation_error(
         &self,
+        instrumentation: &Instrumentation,
         pool: &resource_pool::ResourcePool<i32>,
         owner_id: &str,
         requested: Option<i32>,
         error: ResourcePoolDatabaseError,
     ) -> CarbideError {
         match self {
-            Self::Api(_) => map_vpc_allocation_error(pool, owner_id, requested, error),
+            Self::Api(_) => {
+                map_vpc_allocation_error(instrumentation, pool, owner_id, requested, error)
+            }
             Self::Configured(_) => {
                 // Keep startup's existing error variants and allocation-failure
                 // event; API requests use their own status and event mapping.
                 db::resource_pool::emit_allocation_failure(
+                    instrumentation,
                     pool.value_type,
                     owner_id,
                     requested.is_some(),
@@ -140,7 +147,7 @@ async fn create_vpc(
     }
     let map_error = |error| match error {
         ResourcePoolBackendError::Integrated(error) => {
-            creation.allocation_error(pool, &owner_id, requested_vni, error)
+            creation.allocation_error(&api.instrumentation, pool, &owner_id, requested_vni, error)
         }
         error => CarbideError::from(error),
     };
@@ -149,6 +156,7 @@ async fn create_vpc(
         Ok(Some(selected)) => selected,
         Ok(None) => {
             return Err(creation.allocation_error(
+                &api.instrumentation,
                 pool,
                 &owner_id,
                 requested_vni,
@@ -160,7 +168,13 @@ async fn create_vpc(
             ));
         }
         Err(ResourcePoolRegistryError::Database(error)) => {
-            return Err(creation.allocation_error(pool, &owner_id, requested_vni, error.into()));
+            return Err(creation.allocation_error(
+                &api.instrumentation,
+                pool,
+                &owner_id,
+                requested_vni,
+                error.into(),
+            ));
         }
         Err(error) => return Err(error.into()),
     };
@@ -222,6 +236,7 @@ async fn create_vpc(
                 // Resolve the selected profile before committing its allocated VNI.
                 vpc_to_rpc(
                     db::vpc::persist(new_vpc, VpcStatus { vni: Some(vni) }, &mut txn).await?,
+                    None,
                     api.runtime_config.fnn.as_ref(),
                     EffectiveProfileErrorPolicy::Reject(RouteTargetResolutionSource::ServerState),
                 )?
@@ -403,6 +418,7 @@ async fn finish_create(
     )?;
     vpc_to_rpc(
         vpc,
+        None,
         api.runtime_config.fnn.as_ref(),
         EffectiveProfileErrorPolicy::Reject(resolution_source),
     )
@@ -528,8 +544,10 @@ pub(crate) async fn update(
     } else {
         EffectiveProfileErrorPolicy::OmitRetained
     };
+    let private_dns_zone = find_private_dns_zone(&mut txn, vpc.id).await?;
     let rpc_vpc = vpc_to_rpc(
         vpc,
+        private_dns_zone,
         api.runtime_config.fnn.as_ref(),
         effective_profile_error_policy,
     )?;
@@ -704,6 +722,7 @@ pub(crate) async fn change_routing_profile(
                         Ok(Some(selected)) => selected,
                         Ok(None) => {
                             return Err(map_vpc_allocation_error(
+                                &api.instrumentation,
                                 destination_pool,
                                 &change_request.id.to_string(),
                                 change_request.vni,
@@ -717,6 +736,7 @@ pub(crate) async fn change_routing_profile(
                         }
                         Err(ResourcePoolRegistryError::Database(error)) => {
                             return Err(map_vpc_allocation_error(
+                                &api.instrumentation,
                                 destination_pool,
                                 &change_request.id.to_string(),
                                 change_request.vni,
@@ -743,6 +763,7 @@ pub(crate) async fn change_routing_profile(
             // Preserve exact VNI selection's native pool/value diagnostic.
             // These events count failures from the Integrated allocator.
             db::resource_pool::emit_requested_vni_unavailable(
+                &api.instrumentation,
                 destination_pool.value_type,
                 &owner_id,
                 vni,
@@ -750,9 +771,13 @@ pub(crate) async fn change_routing_profile(
             );
             (*error).into()
         }
-        (ResourcePoolBackendError::Integrated(error), requested) => {
-            map_vpc_allocation_error(destination_pool, &owner_id, requested, error)
-        }
+        (ResourcePoolBackendError::Integrated(error), requested) => map_vpc_allocation_error(
+            &api.instrumentation,
+            destination_pool,
+            &owner_id,
+            requested,
+            error,
+        ),
         (error, _) => CarbideError::from(error),
     };
     let allocation = match selected {
@@ -997,6 +1022,7 @@ async fn routing_change_admission<'a>(
         .await
     {
         return Err(map_vpc_allocation_error(
+            &api.instrumentation,
             destination_pool,
             &vpc.id.to_string(),
             change.vni,
@@ -1201,8 +1227,10 @@ pub(crate) async fn release_inactive_vni(
             vpc.version =
                 db::vpc::increment_vpc_version(&mut txn, vpc_id, expected_version).await?;
 
+            let private_dns_zone = find_private_dns_zone(&mut txn, vpc_id).await?;
             let rpc_vpc = vpc_to_rpc(
                 vpc,
+                private_dns_zone,
                 api.runtime_config.fnn.as_ref(),
                 EffectiveProfileErrorPolicy::OmitRetained,
             )?;
@@ -1666,13 +1694,17 @@ pub(crate) async fn find_by_ids(
         &api.database_connection,
         ObjectColumnFilter::List(vpc::IdColumn, &vpc_ids),
     )
-    .await;
+    .await?;
 
-    let vpcs = db_vpcs?
+    let mut private_dns_zones =
+        db::vpc::find_private_dns_zones_by_vpc_ids(&api.database_connection, &vpc_ids).await?;
+    let vpcs = db_vpcs
         .into_iter()
         .map(|vpc| {
+            let private_dns_zone = private_dns_zones.remove(&vpc.id);
             vpc_to_rpc(
                 vpc,
+                private_dns_zone,
                 api.runtime_config.fnn.as_ref(),
                 EffectiveProfileErrorPolicy::OmitRetained,
             )
@@ -1849,13 +1881,25 @@ fn route_target_vpc_vni(vpc: &model::vpc::Vpc) -> Result<Option<u32>, CarbideErr
         })
 }
 
-/// Converts a persisted VPC to RPC and populates its runtime-derived effective routing profile.
+/// Returns the private DNS zone the VPC holds, or `None` if it holds none.
+async fn find_private_dns_zone(
+    txn: impl DbReader<'_>,
+    vpc_id: VpcId,
+) -> Result<Option<DnsZone>, CarbideError> {
+    Ok(db::vpc::find_private_dns_zones_by_vpc_ids(txn, &[vpc_id])
+        .await?
+        .remove(&vpc_id))
+}
+
+/// Converts a persisted VPC to RPC and populates its private DNS zone and its
+/// runtime-derived effective routing profile.
 ///
 /// The effective profile is omitted when routing profiles are unsupported, FNN
 /// is disabled, the named profile is missing, or retained policy is incompatible
 /// and the caller permits omission.
 fn vpc_to_rpc(
     vpc: model::vpc::Vpc,
+    private_dns_zone: Option<DnsZone>,
     fnn_config: Option<&FnnConfig>,
     error_policy: EffectiveProfileErrorPolicy,
 ) -> Result<rpc::Vpc, CarbideError> {
@@ -1894,6 +1938,8 @@ fn vpc_to_rpc(
     };
 
     let mut rpc_vpc = rpc::Vpc::from(vpc);
+    rpc_vpc.config.get_or_insert_default().private_dns_zone =
+        private_dns_zone.map(|zone| zone.name.to_string());
     rpc_vpc
         .status
         .get_or_insert_default()
@@ -1906,6 +1952,7 @@ fn vpc_to_rpc(
 /// return their status without a count until remote allocation-failure events
 /// land with remote activation (v2.5, #7129).
 fn map_vpc_allocation_error(
+    instrumentation: &Instrumentation,
     pool: &resource_pool::ResourcePool<i32>,
     owner_id: &str,
     requested_vni: Option<i32>,
@@ -1918,6 +1965,7 @@ fn map_vpc_allocation_error(
             requested_vni,
         ) => {
             db::resource_pool::emit_allocation_failure(
+                instrumentation,
                 pool.value_type,
                 owner_id,
                 requested_vni.is_some(),
@@ -1930,6 +1978,7 @@ fn map_vpc_allocation_error(
             if db::resource_pool::is_requested_value_unavailable(&error) =>
         {
             db::resource_pool::emit_requested_vni_unavailable(
+                instrumentation,
                 pool.value_type,
                 owner_id,
                 requested_vni,
@@ -1942,6 +1991,7 @@ fn map_vpc_allocation_error(
         }
         (ResourcePoolDatabaseError::Database(error), Some(_)) => {
             db::resource_pool::emit_database_allocation_failure(
+                instrumentation,
                 pool.value_type,
                 owner_id,
                 true,
@@ -1952,6 +2002,7 @@ fn map_vpc_allocation_error(
         }
         (error, requested_vni) => {
             db::resource_pool::emit_allocation_failure(
+                instrumentation,
                 pool.value_type,
                 owner_id,
                 requested_vni.is_some(),
@@ -2253,6 +2304,7 @@ mod tests {
         // Convert the retained row through the effective-profile response path.
         let error = vpc_to_rpc(
             retained_vpc,
+            None,
             Some(&fnn_config),
             EffectiveProfileErrorPolicy::OmitRetained,
         )

@@ -313,6 +313,7 @@ fn services_with_component_manager(
     component_manager: Option<Arc<component_manager::component_manager::ComponentManager>>,
 ) -> PowerShelfStateHandlerServices {
     PowerShelfStateHandlerServices {
+        instrumentation: env.harness.api().instrumentation().clone(),
         db_pool: env.pool.clone(),
         component_manager,
         // Force a credential manager that always resolves BMC creds via the
@@ -325,6 +326,7 @@ fn services_with_component_manager(
         per_object_metrics_registry: env.per_object_metrics_registry.clone(),
         rack_firmware_reprovisioning_enabled: false,
         redfish_client_pool: env.redfish_sim.clone(),
+        bmc_connector: bmc_backend::BmcConnector::Libredfish(env.redfish_sim.clone()),
         bmc_credential_ops: env.redfish_sim.clone(),
         bmc_rotation_gate: carbide_credential_rotation::RotationGate::new_for_family(
             db::credential_rotation::CredentialRotationType::Bmc,
@@ -355,6 +357,8 @@ async fn build_test_component_manager(
         None,
         Some(env.pool.clone()),
         None,
+        None,
+        carbide_instrument::Instrumentation::global(),
     )
     .await
     .expect("test component manager should build");

@@ -177,6 +177,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         cli.port,
         &client_id,
         Some(ClientOptions::default().with_qos(qos)),
+        carbide_instrument::Instrumentation::global(),
     )
     .await?;
 

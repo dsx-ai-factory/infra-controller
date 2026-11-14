@@ -27,11 +27,11 @@ use crate::rpc::ApiClient;
 
 fn parse(args: &[&str]) -> Result<Cmd, clap::Error> {
     let options = CliOptions::try_parse_from(
-        ["nico-admin-cli", "expected-nvlink-domain"]
+        ["nico-admin-cli", "nvlink-domain"]
             .into_iter()
             .chain(args.iter().copied()),
     )?;
-    let Some(CliCommand::ExpectedNvlinkDomain(command)) = options.commands else {
+    let Some(CliCommand::NvlinkDomain(command)) = options.commands else {
         panic!("expected domain command")
     };
     Ok(command)
@@ -48,7 +48,7 @@ fn help_omits_unused_output_flags() {
             expect: (clap::error::ErrorKind::DisplayHelp, false, false),
         }),
         |subcommand| {
-            let mut args = vec!["nico-admin-cli", "expected-nvlink-domain"];
+            let mut args = vec!["nico-admin-cli", "nvlink-domain"];
             if !subcommand.is_empty() {
                 args.push(subcommand);
             }
@@ -90,11 +90,14 @@ fn invalid_invocations() {
 
 #[tokio::test]
 async fn public_commands_and_output() {
-    let domain = forge::ExpectedNvLinkDomain {
+    let domain = forge::NvLinkDomain {
         id: Some(Uuid::new_v4().into()),
         rack_group_id: Some(RackGroupId::new("group")),
         name: Some("mini-a".into()),
-        member_bmc_mac_addresses: vec!["00:11:22:33:44:55".into(), "00:11:22:33:44:66".into()],
+        members: vec![
+            parse_member("0:0:Compute").unwrap(),
+            parse_member("0:0:Switch").unwrap(),
+        ],
     };
     let id = domain.id.as_ref().unwrap().value.as_str();
     let (output, calls) = dispatch(
@@ -104,26 +107,23 @@ async fn public_commands_and_output() {
             "--name",
             "mini-a",
             "--member",
-            "00:11:22:33:44:55",
+            "0:0:Compute",
             "--member",
-            "00:11:22:33:44:66",
+            "0:0:Switch",
         ],
         OutputFormat::Json,
         domain.clone(),
     )
     .await;
-    let request = forge::CreateExpectedNvLinkDomainRequest::decode(calls[0].1.as_slice()).unwrap();
+    let request = forge::CreateNvLinkDomainRequest::decode(calls[0].1.as_slice()).unwrap();
     assert_eq!(request.name, domain.name);
     assert_eq!(request.rack_group_id, domain.rack_group_id);
-    assert_eq!(
-        request.member_bmc_mac_addresses,
-        domain.member_bmc_mac_addresses
-    );
+    assert_eq!(request.members, domain.members);
     assert!(output.contains(id));
 
     for format in [OutputFormat::AsciiTable, OutputFormat::Csv] {
         for name in [Some("mini-a".into()), None] {
-            let expected = forge::ExpectedNvLinkDomain {
+            let expected = forge::NvLinkDomain {
                 name: name.clone(),
                 ..domain.clone()
             };
@@ -132,11 +132,11 @@ async fn public_commands_and_output() {
                 "Domain ID",
                 "Rack Group ID",
                 "Name",
-                "Member BMC MACs",
+                "Member Positions",
                 id,
                 "group",
-                "00:11:22:33:44:55",
-                "00:11:22:33:44:66",
+                "0:0:Compute",
+                "0:0:Switch",
             ] {
                 assert!(output.contains(value), "missing {value}: {output}");
             }
@@ -162,18 +162,18 @@ async fn public_commands_and_output() {
         domain.clone(),
     )
     .await;
-    assert_eq!(calls[0].0, "/forge.Forge/FindExpectedNvLinkDomainIds");
+    assert_eq!(calls[0].0, "/forge.Forge/FindNvLinkDomainIds");
     assert_eq!(
-        forge::ExpectedNvLinkDomainSearchFilter::decode(calls[0].1.as_slice())
+        forge::NvLinkDomainSearchFilter::decode(calls[0].1.as_slice())
             .unwrap()
             .rack_group_id,
         domain.rack_group_id
     );
-    assert_eq!(calls[1].0, "/forge.Forge/FindExpectedNvLinkDomainsByIds");
+    assert_eq!(calls[1].0, "/forge.Forge/FindNvLinkDomainsByIds");
     let (_, calls) = dispatch(&["delete", id], OutputFormat::AsciiTable, domain.clone()).await;
-    assert_eq!(calls[0].0, "/forge.Forge/DeleteExpectedNvLinkDomain");
+    assert_eq!(calls[0].0, "/forge.Forge/DeleteNvLinkDomain");
     assert_eq!(
-        forge::ExpectedNvLinkDomainRequest::decode(calls[0].1.as_slice())
+        forge::NvLinkDomainRequest::decode(calls[0].1.as_slice())
             .unwrap()
             .id,
         domain.id
@@ -183,7 +183,7 @@ async fn public_commands_and_output() {
 async fn dispatch(
     args: &[&str],
     format: OutputFormat,
-    domain: forge::ExpectedNvLinkDomain,
+    domain: forge::NvLinkDomain,
 ) -> (String, Vec<(String, Vec<u8>)>) {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
@@ -208,21 +208,17 @@ async fn dispatch(
                                 .unwrap()
                                 .push((path.clone(), body[5..].to_vec()));
                             match path.as_str() {
-                                "/forge.Forge/CreateExpectedNvLinkDomain"
-                                | "/forge.Forge/GetExpectedNvLinkDomain" => domain.encode_to_vec(),
-                                "/forge.Forge/DeleteExpectedNvLinkDomain" => vec![],
-                                "/forge.Forge/FindExpectedNvLinkDomainIds" => {
-                                    forge::ExpectedNvLinkDomainIdList {
-                                        ids: vec![domain.id.unwrap()],
-                                    }
-                                    .encode_to_vec()
+                                "/forge.Forge/CreateNvLinkDomain"
+                                | "/forge.Forge/GetNvLinkDomain" => domain.encode_to_vec(),
+                                "/forge.Forge/DeleteNvLinkDomain" => vec![],
+                                "/forge.Forge/FindNvLinkDomainIds" => forge::NvLinkDomainIdList {
+                                    ids: vec![domain.id.unwrap()],
                                 }
-                                "/forge.Forge/FindExpectedNvLinkDomainsByIds" => {
-                                    forge::ExpectedNvLinkDomainList {
-                                        domains: vec![domain],
-                                    }
-                                    .encode_to_vec()
+                                .encode_to_vec(),
+                                "/forge.Forge/FindNvLinkDomainsByIds" => forge::NvLinkDomainList {
+                                    domains: vec![domain],
                                 }
+                                .encode_to_vec(),
                                 _ => panic!("unexpected RPC {path}"),
                             }
                         };

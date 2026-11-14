@@ -66,10 +66,12 @@ tracing = { workspace = true }
 #these are alphabetized
 
 [dev-dependencies]
+carbide-instrument = { path = "../instrument" }
 carbide-macros = { path = "../macros" }
 carbide-sqlx-testing = { path = "../sqlx-testing" }
 carbide-utils = { path = "../utils", features = ["test-support"] }
 tokio = { workspace = true, features = ["test-util"] }
+tracing-subscriber = { workspace = true }
 uuid = { features = ["v4"], workspace = true }
 
 [lints]

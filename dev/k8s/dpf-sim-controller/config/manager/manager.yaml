@@ -41,6 +41,7 @@ spec:
             - --dpf-namespace=dpf-operator-system
             - --phase-dwell=3s
             - --redfish-os-install=false
+            - --reconcile-concurrency=16
           ports:
             - name: metrics
               containerPort: 8080
@@ -52,10 +53,12 @@ spec:
             httpGet:
               path: /readyz
               port: 8081
+          # Sized for small fleets. `make deploy` substitutes CPU_REQUEST,
+          # MEM_REQUEST, CPU_LIMIT and MEM_LIMIT here (README, sizing section).
           resources:
             requests:
-              cpu: 500m
-              memory: 1Gi
+              cpu: "500m"
+              memory: "1Gi"
             limits:
               cpu: "2"
-              memory: 4Gi
+              memory: "4Gi"

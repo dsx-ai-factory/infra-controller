@@ -24,7 +24,7 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::str::FromStr;
 use std::sync::Arc;
 
-use carbide_instrument::{Event, LabelValue, MetricFamily, emit};
+use carbide_instrument::{Event, Instrumentation, LabelValue, MetricFamily, emit};
 use config_version::ConfigVersion;
 use ipnetwork::Ipv6Network;
 use model::resource_pool;
@@ -963,7 +963,8 @@ pub fn emit_best_effort_dpu_asn_allocation_failure(
     });
 }
 
-/// Emit a generic resource-pool allocation failure at its API mapping boundary.
+/// Emits a generic allocation failure through the supplied instrumentation at
+/// its API mapping boundary.
 ///
 /// `allocate` returns a deliberately detailed error so each caller can retain
 /// its existing status mapping. Recording it here keeps that boundary as the
@@ -974,6 +975,7 @@ pub fn emit_best_effort_dpu_asn_allocation_failure(
 /// diagnostics use a stable alias such as `lo-ip` instead of the configured
 /// pool name, and adopting an Event must preserve those structured log fields.
 pub fn emit_allocation_failure(
+    instrumentation: &Instrumentation,
     value_type: ValueType,
     owner_id: &str,
     requested: bool,
@@ -982,6 +984,7 @@ pub fn emit_allocation_failure(
 ) {
     let failure = classify_resource_pool_failure(error);
     emit_classified_allocation_failure(
+        instrumentation,
         value_type,
         owner_id,
         requested,
@@ -991,11 +994,13 @@ pub fn emit_allocation_failure(
     );
 }
 
-/// Emit an allocation failure after a caller has unwrapped its database error.
+/// Emits an allocation failure through the supplied instrumentation after a
+/// caller has unwrapped its database error.
 ///
 /// VPC and SPX allocation preserve their existing database-error status
 /// mapping, so those callers retain ownership of the inner [`DatabaseError`].
 pub fn emit_database_allocation_failure(
+    instrumentation: &Instrumentation,
     value_type: ValueType,
     owner_id: &str,
     requested: bool,
@@ -1003,6 +1008,7 @@ pub fn emit_database_allocation_failure(
     error: &DatabaseError,
 ) {
     emit_classified_allocation_failure(
+        instrumentation,
         value_type,
         owner_id,
         requested,
@@ -1013,6 +1019,7 @@ pub fn emit_database_allocation_failure(
 }
 
 fn emit_classified_allocation_failure(
+    instrumentation: &Instrumentation,
     value_type: ValueType,
     owner_id: &str,
     requested: bool,
@@ -1028,7 +1035,7 @@ fn emit_classified_allocation_failure(
     let value_type = value_type.into();
 
     match failure {
-        ResourcePoolFailure::Exhausted => emit(ResourcePoolExhausted {
+        ResourcePoolFailure::Exhausted => instrumentation.emit(ResourcePoolExhausted {
             operation: ResourcePoolOperation::Allocate,
             failure,
             failure_policy: ResourcePoolFailurePolicy::Required,
@@ -1041,7 +1048,7 @@ fn emit_classified_allocation_failure(
         | ResourcePoolFailure::RequestedValueUnavailable
         | ResourcePoolFailure::Parse
         | ResourcePoolFailure::Database => {
-            emit(ResourcePoolAllocationFailed {
+            instrumentation.emit(ResourcePoolAllocationFailed {
                 operation: ResourcePoolOperation::Allocate,
                 failure,
                 failure_policy: ResourcePoolFailurePolicy::Required,
@@ -1055,18 +1062,20 @@ fn emit_classified_allocation_failure(
     }
 }
 
-/// Emit the requested-VNI diagnostic retained by VPC and SPX allocation APIs.
+/// Emits the requested-VNI diagnostic through the supplied instrumentation for
+/// VPC and SPX allocation APIs.
 ///
 /// This Event shares the normalized lifecycle counter labels with generic pool
 /// failures while preserving the APIs' existing message and `requested_vni`
 /// structured field.
 pub fn emit_requested_vni_unavailable(
+    instrumentation: &Instrumentation,
     value_type: ValueType,
     owner_id: &str,
     requested_vni: i32,
     diagnostic_pool: &str,
 ) {
-    emit(ResourcePoolRequestedVniUnavailable {
+    instrumentation.emit(ResourcePoolRequestedVniUnavailable {
         operation: ResourcePoolOperation::Allocate,
         failure: ResourcePoolFailure::RequestedValueUnavailable,
         failure_policy: ResourcePoolFailurePolicy::Required,
@@ -1138,9 +1147,11 @@ pub async fn pool_has_rows(txn: &mut PgConnection, name: &str) -> Result<bool, D
 /// not removed.
 /// Remote pools save the same seed snapshot and drift diagnostics without
 /// creating local inventory; provider registration uses that saved seed later.
+/// Drift Events use `instrumentation`; retain its provider until reconciliation finishes.
 pub async fn reconcile_pool_defs(
     txn: &mut PgConnection,
     declared: &HashMap<String, ResourcePoolDef>,
+    instrumentation: &carbide_instrument::Instrumentation,
 ) -> Result<(), DefineResourcePoolError> {
     let stored = all_stored_defs(&mut *txn).await?;
     let remote_pools: HashSet<_> = binding::all(&mut *txn)
@@ -1169,7 +1180,7 @@ pub async fn reconcile_pool_defs(
             (Some(stored_def), true) if stored_def == def => {}
             // Declaration has drifted since seed. Warn, don't reapply.
             (Some(stored_def), true) => {
-                emit(ConfigDefinitionDrifted {
+                instrumentation.emit(ConfigDefinitionDrifted {
                     resource_kind: ConfigResourceKind::ResourcePool,
                     drift_kind: ConfigDriftKind::Changed,
                     name: name.clone(),
@@ -1197,7 +1208,7 @@ pub async fn reconcile_pool_defs(
 
     for name in stored.keys() {
         if !declared.contains_key(name) {
-            emit(ConfigDefinitionDrifted {
+            instrumentation.emit(ConfigDefinitionDrifted {
                 resource_kind: ConfigResourceKind::ResourcePool,
                 drift_kind: ConfigDriftKind::Dropped,
                 name: name.clone(),
@@ -1977,7 +1988,13 @@ mod tests {
     fn requested_vni_unavailable_preserves_diagnostic_and_counter_schema() {
         let metrics = MetricsCapture::start();
         let logs = capture_logs(|| {
-            emit_requested_vni_unavailable(ValueType::Integer, "vpc-1", 42, "vpc-vni");
+            emit_requested_vni_unavailable(
+                &Instrumentation::global(),
+                ValueType::Integer,
+                "vpc-1",
+                42,
+                "vpc-vni",
+            );
         });
 
         assert_eq!(logs.len(), 1);
@@ -3450,7 +3467,12 @@ mod tests {
             .into_iter()
             .collect();
 
-        reconcile_pool_defs(&mut txn, &declared).await?;
+        reconcile_pool_defs(
+            &mut txn,
+            &declared,
+            &carbide_instrument::Instrumentation::global(),
+        )
+        .await?;
 
         let stored = stored_def(txn.as_mut(), "brand-new").await?;
         assert_eq!(
@@ -3497,7 +3519,12 @@ mod tests {
             .into_iter()
             .collect();
 
-        reconcile_pool_defs(&mut txn, &declared).await?;
+        reconcile_pool_defs(
+            &mut txn,
+            &declared,
+            &carbide_instrument::Instrumentation::global(),
+        )
+        .await?;
 
         let stored = stored_def(txn.as_mut(), "preexisting").await?;
         assert_eq!(stored.as_ref(), Some(&def), "snapshot must be backfilled");
@@ -3551,9 +3578,13 @@ mod tests {
             ("prospective".to_owned(), original),
         ]);
         let mut txn = pool.begin().await?;
-        let error = reconcile_pool_defs(&mut txn, &declared)
-            .await
-            .expect_err("a failed binding read must fail reconciliation");
+        let error = reconcile_pool_defs(
+            &mut txn,
+            &declared,
+            &carbide_instrument::Instrumentation::global(),
+        )
+        .await
+        .expect_err("a failed binding read must fail reconciliation");
         let DefineResourcePoolError::DatabaseError(DatabaseError::Sqlx(query_error)) = &error
         else {
             panic!("expected a binding query failure, got {error:?}");
@@ -3609,7 +3640,12 @@ mod tests {
             [("stable".to_string(), def.clone())].into_iter().collect();
 
         let mut txn = pool.begin().await?;
-        let (result, logs) = capture_logs_async(reconcile_pool_defs(&mut txn, &declared)).await;
+        let (result, logs) = capture_logs_async(reconcile_pool_defs(
+            &mut txn,
+            &declared,
+            &carbide_instrument::Instrumentation::global(),
+        ))
+        .await;
         result?;
         txn.commit().await?;
 
@@ -3666,7 +3702,12 @@ mod tests {
             .collect();
 
         let mut txn = pool.begin().await?;
-        let (result, logs) = capture_logs_async(reconcile_pool_defs(&mut txn, &declared)).await;
+        let (result, logs) = capture_logs_async(reconcile_pool_defs(
+            &mut txn,
+            &declared,
+            &carbide_instrument::Instrumentation::global(),
+        ))
+        .await;
         result?;
         txn.commit().await?;
 
@@ -3719,7 +3760,12 @@ mod tests {
 
         // Reconciliation succeeds but leaves an error diagnostic for the operator.
         let mut txn = pool.begin().await?;
-        let (result, logs) = capture_logs_async(reconcile_pool_defs(&mut txn, &declared)).await;
+        let (result, logs) = capture_logs_async(reconcile_pool_defs(
+            &mut txn,
+            &declared,
+            &carbide_instrument::Instrumentation::global(),
+        ))
+        .await;
         result?;
         txn.commit().await?;
 

@@ -34,6 +34,7 @@ path = "tests/integration/main.rs"
 
 [dev-dependencies]
 # Internal dependencies. PLEASE KEEP ALPHABETIZED ORDER.
+bmc-backend = { path = "../bmc-backend" }
 carbide-api-core = { path = "../api-core", default-features = false, features = [
   "test-support",
 ] }

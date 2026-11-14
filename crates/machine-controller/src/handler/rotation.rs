@@ -271,6 +271,7 @@ async fn rotate_endpoint(
         services.bmc_credential_ops.as_ref(),
         &target,
         force,
+        &services.instrumentation,
     )
     .await
     {
@@ -325,6 +326,7 @@ async fn rotate_dpu_service_endpoint(
         services.bmc_credential_ops.as_ref(),
         &endpoint,
         force,
+        &services.instrumentation,
     )
     .await
     {

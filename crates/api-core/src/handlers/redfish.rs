@@ -14,12 +14,12 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+
 use std::collections::HashMap;
 use std::net::IpAddr;
 use std::str::FromStr;
 
 use arc_swap::ArcSwap;
-use carbide_instrument::emit;
 use carbide_secrets::credentials::CredentialReader;
 use carbide_utils::HostPortPair;
 use carbide_utils::redfish::{
@@ -321,6 +321,7 @@ pub(crate) async fn redfish_apply_action(
         // Spawn off the task to send the request, open a transaction, and store the result.
         tokio::spawn({
             let pool = api.database_connection.clone();
+            let instrumentation = api.instrumentation.clone();
             let credential_reader = api.credential_manager.clone();
             let bmc_proxy = api.dynamic_settings.bmc_proxy.clone();
             let core_proxy = api.bmc_proxy_passthrough.clone();
@@ -345,7 +346,7 @@ pub(crate) async fn redfish_apply_action(
                 update_response_in_tx(&pool, request, index, response)
                     .await
                     .inspect_err(|e| {
-                        emit(RedfishActionResultPersistenceFailed {
+                        instrumentation.emit(RedfishActionResultPersistenceFailed {
                             request_id: request.request_id,
                             result_index: index,
                             error: e.to_string(),
@@ -1009,8 +1010,12 @@ mod tests {
     #[crate::sqlx_test]
     async fn passthrough_via_core_proxy_rejects_uninventoried_targets(pool: sqlx::PgPool) {
         let dir = tempfile::tempdir().expect("tempdir");
-        let passthrough = PassthroughClient::new(&test_config_with_generated_pems(&dir))
-            .expect("passthrough client builds from generated PEMs");
+        let test_meter = carbide_utils::test_support::test_meter::TestMeter::default();
+        let passthrough = PassthroughClient::new(
+            &test_config_with_generated_pems(&dir),
+            carbide_instrument::Instrumentation::new(test_meter.meter()),
+        )
+        .expect("passthrough client builds from generated PEMs");
         let reader = TestCredentialManager::default();
         let dynamic = ArcSwap::from_pointee(None);
 
@@ -1076,8 +1081,12 @@ mod tests {
         .expect("address seeds");
 
         let dir = tempfile::tempdir().expect("tempdir");
-        let passthrough = PassthroughClient::new(&test_config_with_generated_pems(&dir))
-            .expect("passthrough client builds from generated PEMs");
+        let test_meter = carbide_utils::test_support::test_meter::TestMeter::default();
+        let passthrough = PassthroughClient::new(
+            &test_config_with_generated_pems(&dir),
+            carbide_instrument::Instrumentation::new(test_meter.meter()),
+        )
+        .expect("passthrough client builds from generated PEMs");
         let reader = TestCredentialManager::default();
         // The dynamic dev redirect is set; the static proxy must still win.
         let dynamic = ArcSwap::from_pointee(Some(HostPortPair::HostAndPort(

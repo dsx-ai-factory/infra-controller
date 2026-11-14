@@ -36,7 +36,11 @@ const DOWNLOAD_DURATION_METRIC: &str = "carbide_firmware_download_duration_secon
 /// Polls until the download-duration histogram has recorded `expect`
 /// observations under `outcome` -- the completion event is the signal that a
 /// background download attempt finished.
-async fn wait_for_downloads(metrics: &MetricsCapture, outcome: &str, expect: u64) {
+async fn wait_for_downloads(
+    metrics: &carbide_instrument::testing::RegistryMetricsCapture,
+    outcome: &str,
+    expect: u64,
+) {
     let mut count = 0;
     while metrics.histogram_count_delta(DOWNLOAD_DURATION_METRIC, &[("outcome", outcome)]) < expect
     {
@@ -74,7 +78,10 @@ async fn repeated_available_calls_share_one_download() {
     let temp_dir = tempfile::tempdir().unwrap();
     let filename = temp_dir.path().join("fw.bin");
     let url = format!("{}/fw.bin", server.url());
-    let downloader = FirmwareDownloader::new();
+    let downloader =
+        FirmwareDownloader::new(carbide_instrument::Instrumentation::from_meter_provider(
+            &opentelemetry::metrics::noop::NoopMeterProvider::new(),
+        ));
 
     assert_eq!(
         downloader.available(&filename, &url, "").await,
@@ -104,6 +111,7 @@ async fn repeated_available_calls_share_one_download() {
 /// HTTP byte limit, even when the source is larger than that configured limit.
 #[tokio::test]
 async fn test_download_without_checksum() -> Result<(), std::io::Error> {
+    let instrumentation_test_meter = carbide_utils::test_support::test_meter::TestMeter::default();
     let temp_dir = tempfile::tempdir()?;
     let filename = temp_dir.path().join("firmware.bin");
     let src_filename = temp_dir.path().join("source.bin");
@@ -115,12 +123,15 @@ async fn test_download_without_checksum() -> Result<(), std::io::Error> {
     }
     srcfile.flush().await?;
 
-    let downloader = FirmwareDownloader::with_config(FirmwareDownloadConfig {
-        max_download_bytes: 1,
-        ..Default::default()
-    })
+    let downloader = FirmwareDownloader::with_config(
+        FirmwareDownloadConfig {
+            max_download_bytes: 1,
+            ..Default::default()
+        },
+        carbide_instrument::Instrumentation::new(instrumentation_test_meter.meter()),
+    )
     .unwrap();
-    let metrics = MetricsCapture::start();
+    let metrics = MetricsCapture::for_registry(instrumentation_test_meter.registry());
 
     let mut count = 0;
     loop {
@@ -154,7 +165,10 @@ async fn test_available_verifies_sha256_checksum() -> Result<(), std::io::Error>
     srcfile.write_all(contents).await?;
     srcfile.flush().await?;
 
-    let downloader = FirmwareDownloader::new();
+    let downloader =
+        FirmwareDownloader::new(carbide_instrument::Instrumentation::from_meter_provider(
+            &opentelemetry::metrics::noop::NoopMeterProvider::new(),
+        ));
     let checksum = format!(
         " {} ",
         hex::encode(sha2::Sha256::digest(contents)).to_ascii_uppercase()
@@ -199,7 +213,10 @@ async fn test_available_rejects_stale_cache_with_wrong_sha256() -> Result<(), st
     srcfile.flush().await?;
     drop(srcfile);
 
-    let downloader = FirmwareDownloader::new();
+    let downloader =
+        FirmwareDownloader::new(carbide_instrument::Instrumentation::from_meter_provider(
+            &opentelemetry::metrics::noop::NoopMeterProvider::new(),
+        ));
     let checksum = hex::encode(sha2::Sha256::digest(contents));
 
     assert_eq!(
@@ -225,6 +242,7 @@ async fn test_available_rejects_stale_cache_with_wrong_sha256() -> Result<(), st
 /// Checksum failures clean up staging and release the destination for a repaired source.
 #[tokio::test]
 async fn test_available_checksum_failure_does_not_publish_file() -> Result<(), std::io::Error> {
+    let instrumentation_test_meter = carbide_utils::test_support::test_meter::TestMeter::default();
     let temp_dir = tempfile::tempdir()?;
     let filename = temp_dir.path().join("firmware.bin");
     let src_filename = temp_dir.path().join("source.bin");
@@ -234,9 +252,11 @@ async fn test_available_checksum_failure_does_not_publish_file() -> Result<(), s
     let checksum = hex::encode(sha2::Sha256::digest(contents));
     tokio::fs::write(&src_filename, b"incorrect firmware artifact").await?;
 
-    let downloader = FirmwareDownloader::new();
+    let downloader = FirmwareDownloader::new(carbide_instrument::Instrumentation::new(
+        instrumentation_test_meter.meter(),
+    ));
 
-    let metrics = MetricsCapture::start();
+    let metrics = MetricsCapture::for_registry(instrumentation_test_meter.registry());
     assert_eq!(
         downloader.available(&filename, &url, &checksum).await,
         ArtifactStatus::Downloading,
@@ -267,14 +287,17 @@ async fn test_available_checksum_failure_does_not_publish_file() -> Result<(), s
 /// under `outcome="fetch"` and publishes nothing.
 #[tokio::test]
 async fn test_available_fetch_failure_counts() -> Result<(), std::io::Error> {
+    let instrumentation_test_meter = carbide_utils::test_support::test_meter::TestMeter::default();
     let temp_dir = tempfile::tempdir()?;
     let filename = temp_dir.path().join("firmware.bin");
     let src_filename = temp_dir.path().join("missing-source.bin");
     let url = format!("file://{}", src_filename.display());
 
-    let downloader = FirmwareDownloader::new();
+    let downloader = FirmwareDownloader::new(carbide_instrument::Instrumentation::new(
+        instrumentation_test_meter.meter(),
+    ));
 
-    let metrics = MetricsCapture::start();
+    let metrics = MetricsCapture::for_registry(instrumentation_test_meter.registry());
     assert_eq!(
         downloader.available(&filename, &url, "").await,
         ArtifactStatus::Downloading,
@@ -313,13 +336,15 @@ async fn status_after_download(
 /// that starts a new attempt, so a caller retries by asking again.
 #[tokio::test]
 async fn failed_download_is_reported_once_then_retried() {
-    // Fetch-failure assertions in other tests use this shared capture lock.
-    let _metrics = MetricsCapture::start();
+    let instrumentation_test_meter = carbide_utils::test_support::test_meter::TestMeter::default();
+    let _metrics = MetricsCapture::for_registry(instrumentation_test_meter.registry());
     let temp_dir = tempfile::tempdir().unwrap();
     let filename = temp_dir.path().join("fw.bin");
     let src_filename = temp_dir.path().join("src.bin");
     let url = format!("file://{}", src_filename.display());
-    let downloader = FirmwareDownloader::new();
+    let downloader = FirmwareDownloader::new(carbide_instrument::Instrumentation::new(
+        instrumentation_test_meter.meter(),
+    ));
 
     assert_eq!(
         downloader.available(&filename, &url, "").await,
@@ -350,9 +375,10 @@ async fn failed_download_is_reported_once_then_retried() {
 /// A broken HTTP body leaves no published or partial file, and the next attempt can succeed.
 #[tokio::test]
 async fn truncated_http_body_is_removed_before_a_successful_retry() {
+    let instrumentation_test_meter = carbide_utils::test_support::test_meter::TestMeter::default();
     // This test emits the transfer metric. Serialize its observations with
     // the metric-contract tests, which assert exact deltas.
-    let metrics = MetricsCapture::start();
+    let metrics = MetricsCapture::for_registry(instrumentation_test_meter.registry());
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let url = format!("http://{}/fw.bin", listener.local_addr().unwrap());
     let server = tokio::spawn(async move {
@@ -372,7 +398,9 @@ async fn truncated_http_body_is_removed_before_a_successful_retry() {
     });
     let temp_dir = tempfile::tempdir().unwrap();
     let filename = temp_dir.path().join("fw.bin");
-    let downloader = FirmwareDownloader::new();
+    let downloader = FirmwareDownloader::new(carbide_instrument::Instrumentation::new(
+        instrumentation_test_meter.meter(),
+    ));
 
     let ArtifactStatus::Failed { error } =
         status_after_download(&downloader, &filename, &url, "").await
@@ -413,14 +441,18 @@ async fn accept_http_request(listener: &tokio::net::TcpListener) -> tokio::net::
 /// consumes its recorded failure, and only a later explicit poll starts work.
 #[tokio::test]
 async fn saturated_public_downloads_require_an_explicit_retry() {
-    let metrics = MetricsCapture::start();
+    let instrumentation_test_meter = carbide_utils::test_support::test_meter::TestMeter::default();
+    let metrics = MetricsCapture::for_registry(instrumentation_test_meter.registry());
     let temp_dir = tempfile::tempdir().unwrap();
     let first_filename = temp_dir.path().join("first.bin");
     let deferred_filename = temp_dir.path().join("deferred.bin");
-    let downloader = FirmwareDownloader::with_config(FirmwareDownloadConfig {
-        max_concurrent_downloads: 1,
-        ..Default::default()
-    })
+    let downloader = FirmwareDownloader::with_config(
+        FirmwareDownloadConfig {
+            max_concurrent_downloads: 1,
+            ..Default::default()
+        },
+        carbide_instrument::Instrumentation::new(instrumentation_test_meter.meter()),
+    )
     .unwrap();
     let other_caller = downloader.clone();
 
@@ -506,6 +538,7 @@ async fn saturated_public_downloads_require_an_explicit_retry() {
 /// a server keeps supplying bytes often enough to avoid the read-idle timeout.
 #[tokio::test]
 async fn http_deadlines_remove_partial_files_and_allow_retry() {
+    let instrumentation_test_meter = carbide_utils::test_support::test_meter::TestMeter::default();
     #[derive(Clone, Copy, Debug)]
     enum ResponsePhase {
         TlsHandshake,
@@ -547,7 +580,7 @@ async fn http_deadlines_remove_partial_files_and_allow_retry() {
         },
     ] {
         // Fetch and transfer failures share the exact metric capture window.
-        let metrics = MetricsCapture::start();
+        let metrics = MetricsCapture::for_registry(instrumentation_test_meter.registry());
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let phase = case.phase;
         let scheme = if matches!(phase, ResponsePhase::TlsHandshake) {
@@ -624,13 +657,16 @@ async fn http_deadlines_remove_partial_files_and_allow_retry() {
         });
         let temp_dir = tempfile::tempdir().unwrap();
         let filename = temp_dir.path().join("fw.bin");
-        let downloader = FirmwareDownloader::with_config(FirmwareDownloadConfig {
-            max_concurrent_downloads: 1,
-            connect_timeout_seconds: 1,
-            read_timeout_seconds: case.read_timeout_seconds,
-            request_timeout_seconds: case.request_timeout_seconds,
-            ..Default::default()
-        })
+        let downloader = FirmwareDownloader::with_config(
+            FirmwareDownloadConfig {
+                max_concurrent_downloads: 1,
+                connect_timeout_seconds: 1,
+                read_timeout_seconds: case.read_timeout_seconds,
+                request_timeout_seconds: case.request_timeout_seconds,
+                ..Default::default()
+            },
+            carbide_instrument::Instrumentation::new(instrumentation_test_meter.meter()),
+        )
         .unwrap();
 
         // Connect and read-idle cases have a five-second request deadline.
@@ -684,6 +720,7 @@ async fn http_deadlines_remove_partial_files_and_allow_retry() {
 /// overflow cannot publish partial bytes or prevent a repaired-source retry.
 #[tokio::test]
 async fn http_bodies_enforce_the_cumulative_byte_limit() {
+    let instrumentation_test_meter = carbide_utils::test_support::test_meter::TestMeter::default();
     struct Case {
         scenario: &'static str,
         response_start: &'static [u8],
@@ -722,7 +759,7 @@ async fn http_bodies_enforce_the_cumulative_byte_limit() {
         },
     ] {
         let scenario = case.scenario;
-        let metrics = MetricsCapture::start();
+        let metrics = MetricsCapture::for_registry(instrumentation_test_meter.registry());
         let temp_dir = tempfile::tempdir().unwrap();
         let filename = temp_dir.path().join("fw.bin");
         let staged_filename = temp_dir.path().join("fw.bin.download");
@@ -760,11 +797,14 @@ async fn http_bodies_enforce_the_cumulative_byte_limit() {
                 connection.shutdown().await.unwrap();
             }
         });
-        let downloader = FirmwareDownloader::with_config(FirmwareDownloadConfig {
-            max_concurrent_downloads: 1,
-            max_download_bytes: 8,
-            ..Default::default()
-        })
+        let downloader = FirmwareDownloader::with_config(
+            FirmwareDownloadConfig {
+                max_concurrent_downloads: 1,
+                max_download_bytes: 8,
+                ..Default::default()
+            },
+            carbide_instrument::Instrumentation::new(instrumentation_test_meter.meter()),
+        )
         .unwrap();
 
         let status = status_after_download(&downloader, &filename, &url, "").await;
@@ -797,6 +837,7 @@ async fn http_bodies_enforce_the_cumulative_byte_limit() {
 /// Filesystem failures before fetch and after transfer both release staging and permit retry.
 #[tokio::test]
 async fn filesystem_failures_release_the_destination_for_retry() {
+    let instrumentation_test_meter = carbide_utils::test_support::test_meter::TestMeter::default();
     #[derive(Clone, Copy, Debug)]
     enum Failure {
         Staging,
@@ -810,7 +851,7 @@ async fn filesystem_failures_release_the_destination_for_retry() {
         // publication only after the response body has been downloaded.
         Failure::Publish,
     ] {
-        let metrics = MetricsCapture::start();
+        let metrics = MetricsCapture::for_registry(instrumentation_test_meter.registry());
         let temp_dir = tempfile::tempdir().unwrap();
         let cache_dir = temp_dir.path().join("cache");
         let filename = cache_dir.join("fw.bin");
@@ -844,7 +885,9 @@ async fn filesystem_failures_release_the_destination_for_retry() {
             .create_async()
             .await;
         let url = format!("{}/fw.bin", server.url());
-        let downloader = FirmwareDownloader::new();
+        let downloader = FirmwareDownloader::new(carbide_instrument::Instrumentation::new(
+            instrumentation_test_meter.meter(),
+        ));
 
         if matches!(failure, Failure::Staging) {
             std::fs::write(&cache_dir, b"not a directory").unwrap();
@@ -905,13 +948,16 @@ async fn filesystem_failures_release_the_destination_for_retry() {
 /// Public failures and completion events retain source context without URL credentials.
 #[tokio::test]
 async fn download_failure_and_completion_event_redact_source_credentials() {
+    let instrumentation_test_meter = carbide_utils::test_support::test_meter::TestMeter::default();
     // Fetch failures share the metric capture lock even when this test only logs.
-    let _metrics = MetricsCapture::start();
+    let _metrics = MetricsCapture::for_registry(instrumentation_test_meter.registry());
     let temp_dir = tempfile::tempdir().unwrap();
     let filename = temp_dir.path().join("fw.bin");
     // Nothing listens on port 1, so the connection is refused immediately.
     let url = "http://user:password@127.0.0.1:1/fw.bin?X-Amz-Signature=secret#fragment-secret";
-    let downloader = FirmwareDownloader::new();
+    let downloader = FirmwareDownloader::new(carbide_instrument::Instrumentation::new(
+        instrumentation_test_meter.meter(),
+    ));
 
     let (status, logs) = capture_logs_async(async {
         downloader.available(&filename, url, "").await;
@@ -1030,10 +1076,13 @@ fn artifact_unavailable_events_preserve_log_contracts_and_count_reasons() {
 /// An absent artifact with no download source reports its blocker and existing metric.
 #[tokio::test]
 async fn unavailable_absent_artifact_without_url_counts_the_blocker() {
+    let instrumentation_test_meter = carbide_utils::test_support::test_meter::TestMeter::default();
     let temp_dir = tempfile::tempdir().unwrap();
     let filename = temp_dir.path().join("missing.fwpkg");
-    let downloader = FirmwareDownloader::new();
-    let metrics = MetricsCapture::start();
+    let downloader = FirmwareDownloader::new(carbide_instrument::Instrumentation::new(
+        instrumentation_test_meter.meter(),
+    ));
+    let metrics = MetricsCapture::for_registry(instrumentation_test_meter.registry());
 
     let ((), logs) = capture_logs_async(async {
         assert!(matches!(
@@ -1074,11 +1123,14 @@ async fn unavailable_absent_artifact_without_url_counts_the_blocker() {
 /// A stale cache entry that cannot be removed reports the filesystem error before fetching.
 #[tokio::test]
 async fn unavailable_stale_artifact_removal_failure_counts_the_blocker() {
+    let instrumentation_test_meter = carbide_utils::test_support::test_meter::TestMeter::default();
     let temp_dir = tempfile::tempdir().unwrap();
     let filename = temp_dir.path().join("stale.fwpkg");
     std::fs::create_dir(&filename).unwrap();
-    let downloader = FirmwareDownloader::new();
-    let metrics = MetricsCapture::start();
+    let downloader = FirmwareDownloader::new(carbide_instrument::Instrumentation::new(
+        instrumentation_test_meter.meter(),
+    ));
+    let metrics = MetricsCapture::for_registry(instrumentation_test_meter.registry());
 
     let ((), logs) = capture_logs_async(async {
         assert!(matches!(

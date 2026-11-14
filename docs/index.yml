@@ -427,12 +427,24 @@ navigation:
               path: manuals/nico-admin-cli/commands/attestation/attestation-spdm-machines.md
             - page: SPDM Machine Attestation Status
               path: manuals/nico-admin-cli/commands/attestation/attestation-spdm-machines-list.md
+            - link: Machine Lifecycle States
+              href: https://github.com/dsx-ai-factory/infra-controller/blob/main/docs/manuals/nico-admin-cli/commands/machine/machine-states.md
+            - link: Create a Domain
+              href: https://github.com/dsx-ai-factory/infra-controller/blob/main/docs/manuals/nico-admin-cli/commands/domain/domain-create.md
+            - link: Add a Network Segment Prefix
+              href: https://github.com/dsx-ai-factory/infra-controller/blob/main/docs/manuals/nico-admin-cli/commands/network-segment/network-segment-add-prefix.md
             - section: Routing Profile CLI Reference
               contents:
                 - link: Routing Profile Overview
                   href: https://github.com/dsx-ai-factory/infra-controller/blob/main/docs/manuals/nico-admin-cli/commands/routing-profile/routing-profile.md
                 - link: Show Routing Profiles
                   href: https://github.com/dsx-ai-factory/infra-controller/blob/main/docs/manuals/nico-admin-cli/commands/routing-profile/routing-profile-show.md
+            - section: Network Segment CLI Reference
+              contents:
+                - link: Network Segment Overview
+                  href: https://github.com/dsx-ai-factory/infra-controller/blob/main/docs/manuals/nico-admin-cli/commands/network-segment/network-segment.md
+                - link: Add a Missing Address Family
+                  href: https://github.com/dsx-ai-factory/infra-controller/blob/main/docs/manuals/nico-admin-cli/commands/network-segment/network-segment-add-prefix.md
             - section: Component Reset CLI Reference
               contents:
                 - link: Reset Components

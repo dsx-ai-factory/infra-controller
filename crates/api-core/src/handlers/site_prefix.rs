@@ -16,7 +16,7 @@
  */
 
 use ::rpc::forge as rpc;
-use carbide_instrument::{DynamicLog, Event, LabelValue, LogAt, emit};
+use carbide_instrument::{DynamicLog, Event, Instrumentation, LabelValue, LogAt};
 use carbide_network::ip::ipset::aggregate_prefixes;
 use carbide_network::ip::prefix::IpPrefix;
 use ipnetwork::IpNetwork;
@@ -231,13 +231,14 @@ fn validate_isolation_admission(
 }
 
 fn emit_admission(
+    instrumentation: &Instrumentation,
     result: SitePrefixAdmissionResult,
     site_prefix_id: &str,
     tenant_organization_id: &str,
     prefix: &str,
     error: impl ToString,
 ) {
-    emit(SitePrefixAdmission {
+    instrumentation.emit(SitePrefixAdmission {
         result,
         site_prefix_id: site_prefix_id.to_string(),
         tenant_organization_id: tenant_organization_id.to_string(),
@@ -342,6 +343,7 @@ pub(crate) async fn create(
         Ok(site_prefix) => site_prefix,
         Err(error) => {
             emit_admission(
+                &api.instrumentation,
                 SitePrefixAdmissionResult::Rejected,
                 &site_prefix_id,
                 &tenant_organization_id,
@@ -358,6 +360,7 @@ pub(crate) async fn create(
         Ok(txn) => txn,
         Err(error) => {
             emit_admission(
+                &api.instrumentation,
                 SitePrefixAdmissionResult::Failed,
                 &site_prefix_id,
                 &tenant_organization_id,
@@ -405,6 +408,7 @@ pub(crate) async fn create(
         Ok(result) => result,
         Err(error) => {
             emit_admission(
+                &api.instrumentation,
                 admission_result_for_error(&error),
                 &site_prefix_id,
                 &tenant_organization_id,
@@ -420,6 +424,7 @@ pub(crate) async fn create(
         Ok(used) => used,
         Err(error) => {
             emit_admission(
+                &api.instrumentation,
                 SitePrefixAdmissionResult::Failed,
                 &site_prefix_id,
                 &tenant_organization_id,
@@ -432,6 +437,7 @@ pub(crate) async fn create(
     let response = rpc::SitePrefix::from(result.site_prefix).with_quota(used, quota_limit);
     if let Err(error) = txn.commit().await {
         emit_admission(
+            &api.instrumentation,
             SitePrefixAdmissionResult::Failed,
             &site_prefix_id,
             &tenant_organization_id,
@@ -446,6 +452,7 @@ pub(crate) async fn create(
         db::site_prefix::CreateDisposition::Existing => SitePrefixAdmissionResult::Idempotent,
     };
     emit_admission(
+        &api.instrumentation,
         admission_result,
         &site_prefix_id,
         &tenant_organization_id,
@@ -515,7 +522,7 @@ pub(crate) async fn delete(
     txn.commit().await?;
 
     if previous_state != SitePrefixLifecycleState::Deleting {
-        emit(SitePrefixRetirement {
+        api.instrumentation.emit(SitePrefixRetirement {
             previous_state: previous_state.into(),
             site_prefix_id: retire.id.to_string(),
             tenant_organization_id: retire.tenant_organization_id.to_string(),

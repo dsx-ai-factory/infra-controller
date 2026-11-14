@@ -3214,7 +3214,7 @@ async fn create_manual_slaac_segment_fixture(
 /// explicit in each test.
 async fn seed_empty_instance_for_network_allocation(
     env: &TestEnv,
-) -> (InstanceId, HostMachine, ConfigVersion) {
+) -> (InstanceId, Box<HostMachine>, ConfigVersion) {
     let managed_host = create_managed_host(env).await;
     let instance_id = InstanceId::new();
     let network_config_version = ConfigVersion::initial();
@@ -3890,7 +3890,7 @@ async fn allocate_auto_vpc_instance(
     fixture: &AutoVpcSelectionFixture,
     family_mode: rpc::forge::InstanceInterfaceIpFamilyMode,
     name: &str,
-) -> (TestManagedHost, rpc::Instance) {
+) -> (TestManagedHost, Box<rpc::Instance>) {
     let managed_host = create_managed_host(&fixture.env).await;
     let (_, instance) = managed_host
         .instance_builer(&fixture.env)
@@ -10842,7 +10842,7 @@ fn service_vpc_force_delete_request(
 struct ServiceVpcCoordinatorFixture {
     instance_id: InstanceId,
     parent_id: VpcPrefixId,
-    host_snapshot: ManagedHostStateSnapshot,
+    host_snapshot: Box<ManagedHostStateSnapshot>,
     instance_snapshot: InstanceSnapshot,
     extension_config: InstanceExtensionServicesConfig,
     request: RequestedInstanceExtensionServicesConfig,

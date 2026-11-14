@@ -20,7 +20,7 @@ use std::time::Duration;
 
 use arc_swap::ArcSwap;
 use async_trait::async_trait;
-use carbide_instrument::{Event, LabelValue, emit};
+use carbide_instrument::{Event, Instrumentation, LabelValue};
 use notify::{PollWatcher, RecommendedWatcher, RecursiveMode, Watcher};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -165,7 +165,11 @@ type WatchEventSender = mpsc::Sender<notify::Event>;
 
 /// Arms the kernel-backed watcher that forwards create and modify events for
 /// `path` to `tx` as they happen.
-fn start_primary_watcher(path: &Path, tx: WatchEventSender) -> notify::Result<RecommendedWatcher> {
+fn start_primary_watcher(
+    path: &Path,
+    tx: WatchEventSender,
+    instrumentation: Instrumentation,
+) -> notify::Result<RecommendedWatcher> {
     let mut primary = RecommendedWatcher::new(
         move |res: notify::Result<notify::Event>| match res {
             Ok(event) if event.kind.is_create() || event.kind.is_modify() => {
@@ -173,7 +177,7 @@ fn start_primary_watcher(path: &Path, tx: WatchEventSender) -> notify::Result<Re
             }
             Ok(_) => {}
             Err(err) => {
-                emit(StaticCredentialWatcherFailed::PrimaryWatch {
+                instrumentation.emit(StaticCredentialWatcherFailed::PrimaryWatch {
                     error: err.to_string(),
                 });
             }
@@ -206,8 +210,12 @@ impl<T: DeserializeOwned + Send + Sync + 'static> StructuredCredentialReader<T> 
     }
 
     /// Loads JSON or YAML; reloads when the existing watchers report changes.
-    pub async fn new(config: FileCredentialsConfig) -> Result<Self, SecretsError> {
-        Self::new_with_primary_watcher(config, start_primary_watcher).await
+    /// Watcher failure metrics use `instrumentation`; retain its provider while watching.
+    pub async fn new(
+        config: FileCredentialsConfig,
+        instrumentation: Instrumentation,
+    ) -> Result<Self, SecretsError> {
+        Self::new_with_primary_watcher(config, start_primary_watcher, instrumentation).await
     }
 
     /// `start_primary` arms the kernel-backed watcher. Its failure is not
@@ -219,7 +227,12 @@ impl<T: DeserializeOwned + Send + Sync + 'static> StructuredCredentialReader<T> 
     /// startup with its own error rather than a polling warning.
     async fn new_with_primary_watcher(
         config: FileCredentialsConfig,
-        start_primary: impl FnOnce(&Path, WatchEventSender) -> notify::Result<RecommendedWatcher>,
+        start_primary: impl FnOnce(
+            &Path,
+            WatchEventSender,
+            Instrumentation,
+        ) -> notify::Result<RecommendedWatcher>,
+        instrumentation: Instrumentation,
     ) -> Result<Self, SecretsError> {
         let path = config.path();
         let poll_interval = config.poll_interval();
@@ -239,12 +252,13 @@ impl<T: DeserializeOwned + Send + Sync + 'static> StructuredCredentialReader<T> 
         })?;
         let (tx, mut rx) = mpsc::channel(4);
 
-        let primary = start_primary(&path, tx.clone());
+        let primary = start_primary(&path, tx.clone(), instrumentation.clone());
+        let poll_instrumentation = instrumentation.clone();
 
         let mut secondary = PollWatcher::new(
             move |res: notify::Result<notify::Event>| match res {
                 Ok(event) => forward_watch_event(WatchEventDelivery::Poll, &tx, event),
-                Err(err) => emit(StaticCredentialWatcherFailed::PollWatch {
+                Err(err) => poll_instrumentation.emit(StaticCredentialWatcherFailed::PollWatch {
                     error: err.to_string(),
                 }),
             },
@@ -274,7 +288,7 @@ impl<T: DeserializeOwned + Send + Sync + 'static> StructuredCredentialReader<T> 
         let primary = match primary {
             Ok(primary) => Some(primary),
             Err(err) => {
-                emit(StaticCredentialWatcherFailed::PrimaryWatchSetup {
+                instrumentation.emit(StaticCredentialWatcherFailed::PrimaryWatchSetup {
                     error: err.to_string(),
                     poll_interval_secs: poll_interval.as_secs_f64(),
                 });
@@ -299,7 +313,7 @@ impl<T: DeserializeOwned + Send + Sync + 'static> StructuredCredentialReader<T> 
                         credentials_clone.store(Arc::new(updated));
                     }
                     Err(err) => {
-                        emit(StaticCredentialWatcherFailed::Reload {
+                        instrumentation.emit(StaticCredentialWatcherFailed::Reload {
                             error: err.to_string(),
                         });
                     }
@@ -351,6 +365,7 @@ impl CredentialReader for FileCredentialsWatcher {
 
 #[cfg(test)]
 mod tests {
+    use carbide_instrument::emit;
     use carbide_instrument::testing::{MetricsCapture, capture_logs, capture_logs_async};
     use carbide_test_support::{Check, check_values};
     use tempfile::tempdir;
@@ -365,14 +380,18 @@ mod tests {
         let dir = tempdir().unwrap();
         let path = dir.path().join("snapshot.json");
         tokio::fs::write(&path, r#"{"version":1}"#).await.unwrap();
-        let reader =
-            StructuredCredentialReader::<HashMap<String, u64>>::new(FileCredentialsConfig {
+        let reader = StructuredCredentialReader::<HashMap<String, u64>>::new(
+            FileCredentialsConfig {
                 path: Some(path.clone()),
                 poll_interval: Some(Duration::from_millis(25)),
                 ..Default::default()
-            })
-            .await
-            .unwrap();
+            },
+            carbide_instrument::Instrumentation::from_meter_provider(
+                &opentelemetry::metrics::noop::NoopMeterProvider::new(),
+            ),
+        )
+        .await
+        .unwrap();
         let previous = reader.snapshot();
         let replacement = dir.path().join("next.json");
         tokio::fs::write(&replacement, "version: 2\n")
@@ -412,11 +431,16 @@ mod tests {
         .await
         .expect("write initial json file");
 
-        let provider = FileCredentialsWatcher::new(FileCredentialsConfig {
-            path: Some(file_path.clone()),
-            poll_interval: Some(Duration::from_secs(1)),
-            ..Default::default()
-        })
+        let provider = FileCredentialsWatcher::new(
+            FileCredentialsConfig {
+                path: Some(file_path.clone()),
+                poll_interval: Some(Duration::from_secs(1)),
+                ..Default::default()
+            },
+            carbide_instrument::Instrumentation::from_meter_provider(
+                &opentelemetry::metrics::noop::NoopMeterProvider::new(),
+            ),
+        )
         .await
         .expect("create file provider");
 
@@ -477,11 +501,16 @@ mod tests {
         .await
         .expect("write initial credentials file");
 
-        let provider = FileCredentialsWatcher::new(FileCredentialsConfig {
-            path: Some(file_path.clone()),
-            poll_interval: Some(Duration::from_millis(50)),
-            ..Default::default()
-        })
+        let provider = FileCredentialsWatcher::new(
+            FileCredentialsConfig {
+                path: Some(file_path.clone()),
+                poll_interval: Some(Duration::from_millis(50)),
+                ..Default::default()
+            },
+            carbide_instrument::Instrumentation::from_meter_provider(
+                &opentelemetry::metrics::noop::NoopMeterProvider::new(),
+            ),
+        )
         .await
         .expect("create file provider");
         let key = CredentialKey::UfmAuth {
@@ -527,6 +556,7 @@ mod tests {
     fn primary_watcher_unavailable(
         _path: &Path,
         _tx: WatchEventSender,
+        _instrumentation: Instrumentation,
     ) -> notify::Result<RecommendedWatcher> {
         // EMFILE: what `inotify_init1` returns once the per-user instance
         // limit `fs.inotify.max_user_instances` is exhausted.
@@ -536,7 +566,8 @@ mod tests {
     #[derive(Clone, Copy)]
     struct PrimaryWatcherCase {
         scenario: &'static str,
-        start_primary: fn(&Path, WatchEventSender) -> notify::Result<RecommendedWatcher>,
+        start_primary:
+            fn(&Path, WatchEventSender, Instrumentation) -> notify::Result<RecommendedWatcher>,
         /// Substring of the single fallback warning's `error` field, or
         /// `None` when the healthy path must stay silent.
         expect_fallback_error: Option<&'static str>,
@@ -547,7 +578,9 @@ mod tests {
 
     #[tokio::test]
     async fn primary_watcher_failure_falls_back_to_polling() {
-        let metrics = MetricsCapture::start();
+        let test_meter = carbide_utils::test_support::test_meter::TestMeter::default();
+        let instrumentation = Instrumentation::new(test_meter.meter());
+        let metrics = MetricsCapture::for_registry(test_meter.registry());
         let key = CredentialKey::DpuUefi {
             credential_type: CredentialType::SiteDefault,
         };
@@ -584,6 +617,7 @@ mod tests {
                         ..Default::default()
                     },
                     case.start_primary,
+                    instrumentation.clone(),
                 ))
                 .await;
             let provider = provider
@@ -665,13 +699,18 @@ mod tests {
 
     #[tokio::test]
     async fn missing_file_fails_startup_without_watcher_diagnostics() {
-        let metrics = MetricsCapture::start();
+        let test_meter = carbide_utils::test_support::test_meter::TestMeter::default();
+        let instrumentation = Instrumentation::new(test_meter.meter());
+        let metrics = MetricsCapture::for_registry(test_meter.registry());
         let dir = tempdir().expect("create temp dir");
         let file_path = dir.path().join("does-not-exist.yaml");
-        let result = FileCredentialsWatcher::new(FileCredentialsConfig {
-            path: Some(file_path),
-            ..Default::default()
-        })
+        let result = FileCredentialsWatcher::new(
+            FileCredentialsConfig {
+                path: Some(file_path),
+                ..Default::default()
+            },
+            instrumentation.clone(),
+        )
         .await;
         assert!(result.is_err(), "a missing file must fail startup");
         assert_eq!(
@@ -695,10 +734,15 @@ mod tests {
         .await
         .expect("write invalid credentials file");
 
-        let error = FileCredentialsWatcher::new(FileCredentialsConfig {
-            path: Some(file_path),
-            ..Default::default()
-        })
+        let error = FileCredentialsWatcher::new(
+            FileCredentialsConfig {
+                path: Some(file_path),
+                ..Default::default()
+            },
+            carbide_instrument::Instrumentation::from_meter_provider(
+                &opentelemetry::metrics::noop::NoopMeterProvider::new(),
+            ),
+        )
         .await
         .err()
         .expect("invalid initial file must fail");
@@ -717,11 +761,16 @@ mod tests {
             .await
             .expect("write credentials file");
 
-        let error = FileCredentialsWatcher::new(FileCredentialsConfig {
-            path: Some(file_path),
-            poll_interval: Some(Duration::ZERO),
-            ..Default::default()
-        })
+        let error = FileCredentialsWatcher::new(
+            FileCredentialsConfig {
+                path: Some(file_path),
+                poll_interval: Some(Duration::ZERO),
+                ..Default::default()
+            },
+            carbide_instrument::Instrumentation::from_meter_provider(
+                &opentelemetry::metrics::noop::NoopMeterProvider::new(),
+            ),
+        )
         .await
         .err()
         .expect("zero poll interval must fail");
@@ -743,11 +792,16 @@ mod tests {
         .await
         .expect("write yaml file");
 
-        let provider = FileCredentialsWatcher::new(FileCredentialsConfig {
-            path: Some(file_path.clone()),
-            poll_interval: Some(Duration::from_secs(1)),
-            ..Default::default()
-        })
+        let provider = FileCredentialsWatcher::new(
+            FileCredentialsConfig {
+                path: Some(file_path.clone()),
+                poll_interval: Some(Duration::from_secs(1)),
+                ..Default::default()
+            },
+            carbide_instrument::Instrumentation::from_meter_provider(
+                &opentelemetry::metrics::noop::NoopMeterProvider::new(),
+            ),
+        )
         .await
         .expect("create yaml file provider");
 
@@ -783,11 +837,16 @@ mod tests {
         .await
         .expect("write yaml file");
 
-        let provider = FileCredentialsWatcher::new(FileCredentialsConfig {
-            path: Some(file_path),
-            poll_interval: Some(Duration::from_secs(1)),
-            ..Default::default()
-        })
+        let provider = FileCredentialsWatcher::new(
+            FileCredentialsConfig {
+                path: Some(file_path),
+                poll_interval: Some(Duration::from_secs(1)),
+                ..Default::default()
+            },
+            carbide_instrument::Instrumentation::from_meter_provider(
+                &opentelemetry::metrics::noop::NoopMeterProvider::new(),
+            ),
+        )
         .await
         .expect("create file provider");
 
@@ -838,7 +897,7 @@ mod tests {
         error: Option<String>,
     }
 
-    fn watcher_failure_delta(metrics: &MetricsCapture) -> f64 {
+    fn watcher_failure_delta(metrics: &carbide_instrument::testing::RegistryMetricsCapture) -> f64 {
         [
             "primary_watch",
             "primary_watch_setup",

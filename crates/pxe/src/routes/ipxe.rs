@@ -22,8 +22,7 @@ use axum::Router;
 use axum::extract::State;
 use axum::response::IntoResponse;
 use axum::routing::get;
-use carbide_instrument::emit;
-use forge_tls::client_config::ClientCert;
+use carbide_tls::client_config::ClientCert;
 use rpc::carbide_tls_client::CarbideClientConfig;
 
 use crate::common::{AppState, Machine, MachineInterface};
@@ -61,14 +60,14 @@ async fn whoami(machine: Machine, state: State<AppState>) -> impl IntoResponse {
                     template_data.insert("fqdn".to_string(), interface.hostname);
                     template_data.insert("mac_address".to_string(), interface.mac_address);
 
-                    emit(PxeBootOutcome {
+                    state.instrumentation.emit(PxeBootOutcome {
                         endpoint: BootEndpoint::Whoami,
                         reason: OutcomeReason::Ok,
                     });
                     ("whoami".to_string(), template_data)
                 }
                 None => {
-                    emit(PxeBootOutcome {
+                    state.instrumentation.emit(PxeBootOutcome {
                         endpoint: BootEndpoint::Whoami,
                         reason: OutcomeReason::InterfaceNotFound,
                     });
@@ -82,7 +81,7 @@ async fn whoami(machine: Machine, state: State<AppState>) -> impl IntoResponse {
                 }
             }
         } else {
-            emit(PxeBootOutcome {
+            state.instrumentation.emit(PxeBootOutcome {
                 endpoint: BootEndpoint::Whoami,
                 reason: OutcomeReason::InstructionsEmpty,
             });
@@ -158,7 +157,7 @@ async fn boot(contents: MachineInterface, state: State<AppState>) -> impl IntoRe
             // `carbide_pxe_boot_outcomes_total` increment.
             let instructions = match pxe_response {
                 Ok(resp) => {
-                    emit(PxeBootOutcome {
+                    state.instrumentation.emit(PxeBootOutcome {
                         endpoint: BootEndpoint::Boot,
                         reason: OutcomeReason::Ok,
                     });
@@ -171,7 +170,7 @@ echo Failed to fetch custom_ipxe: {err} ||
 exit 101 ||
 "#
                     );
-                    emit(PxeCustomIpxeFetchFailed {
+                    state.instrumentation.emit(PxeCustomIpxeFetchFailed {
                         endpoint: BootEndpoint::Boot,
                         reason: OutcomeReason::UpstreamApiError,
                         error: err,
@@ -224,7 +223,8 @@ mod tests {
 
     #[tokio::test]
     async fn whoami_renders_an_interface_without_a_domain() {
-        let metrics = MetricsCapture::start();
+        let state = test_app_state_with_templates();
+        let metrics = MetricsCapture::for_registry(&state.otel_metrics.registry);
         let response = whoami(
             Machine {
                 instructions: rpc::forge::CloudInitInstructions {
@@ -239,7 +239,7 @@ mod tests {
                     ..Default::default()
                 },
             },
-            State(test_app_state_with_templates()),
+            State(state.clone()),
         )
         .await
         .into_response();
@@ -266,13 +266,14 @@ mod tests {
     /// left no trace anywhere.
     #[tokio::test]
     async fn whoami_without_instructions_counts_instructions_empty() {
-        let metrics = MetricsCapture::start();
+        let state = test_app_state();
+        let metrics = MetricsCapture::for_registry(&state.otel_metrics.registry);
 
         let _ = whoami(
             Machine {
                 instructions: Default::default(),
             },
-            State(test_app_state()),
+            State(state.clone()),
         )
         .await;
 
@@ -291,14 +292,15 @@ mod tests {
     async fn invalid_buildarch_is_rejected_and_counted_at_the_extractor() {
         use axum::extract::FromRequestParts;
 
-        let metrics = MetricsCapture::start();
+        let state = test_app_state();
+        let metrics = MetricsCapture::for_registry(&state.otel_metrics.registry);
 
         let request = axum::http::Request::builder()
             .uri("/boot?buildarch=not-an-architecture")
             .body(())
             .expect("request");
         let (mut parts, _) = request.into_parts();
-        let rejection = MachineInterface::from_request_parts(&mut parts, &test_app_state()).await;
+        let rejection = MachineInterface::from_request_parts(&mut parts, &state).await;
 
         assert!(
             rejection.is_err(),

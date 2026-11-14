@@ -1306,6 +1306,16 @@ func NewAPIRoutes(dbSession *cdb.Session, tc tClient.Client, tnc tClient.Namespa
 			Method:  http.MethodPost,
 			Handler: apiHandler.NewCancelTaskRunHandler(dbSession, tc, scp, cfg),
 		},
+		{
+			Path:    apiPathPrefix + "/domain/nvlink/:id/factory-reset",
+			Method:  http.MethodPost,
+			Handler: apiHandler.NewFactoryResetNVLinkDomainHandler(dbSession, scp),
+		},
+		{
+			Path:    apiPathPrefix + "/tray/:id/factory-reset",
+			Method:  http.MethodPost,
+			Handler: apiHandler.NewFactoryResetTrayHandler(dbSession, scp),
+		},
 		// NVLink Domain endpoints (Flow).
 		{
 			Path:    apiPathPrefix + "/domain/nvlink",
@@ -1412,7 +1422,7 @@ func NewAPIRoutes(dbSession *cdb.Session, tc tClient.Client, tnc tClient.Namespa
 			Method:  http.MethodGet,
 			Handler: apiHandler.NewGetRackTasksHandler(dbSession, tc, scp, cfg),
 		},
-		// Tray endpoints (Flow)
+		// Tray endpoints
 		{
 			Path:    apiPathPrefix + "/tray",
 			Method:  http.MethodGet,
@@ -1437,6 +1447,11 @@ func NewAPIRoutes(dbSession *cdb.Session, tc tClient.Client, tnc tClient.Namespa
 			Path:    apiPathPrefix + "/tray/:id",
 			Method:  http.MethodGet,
 			Handler: apiHandler.NewGetTrayHandler(dbSession, tc, scp, cfg),
+		},
+		{
+			Path:    apiPathPrefix + "/tray/:id/decommission",
+			Method:  http.MethodPost,
+			Handler: apiHandler.NewDecommissionTrayHandler(dbSession, scp),
 		},
 		{
 			Path:    apiPathPrefix + "/tray/:id/health-report",

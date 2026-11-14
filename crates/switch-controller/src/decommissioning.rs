@@ -17,12 +17,11 @@
 
 //! Managed-switch decommissioning.
 
-use carbide_redfish::libredfish::RedfishAuth;
+use bmc_platform::{PlatformError, ResetType};
 use carbide_secrets::credentials::{BmcCredentialType, CredentialKey, CredentialWriter};
 use carbide_uuid::switch::SwitchId;
 use component_manager::error::ComponentManagerError;
 use component_manager::nv_switch_manager::SwitchFactoryResetState;
-use libredfish::model::service_root::RedfishVendor;
 use mac_address::MacAddress;
 use model::bmc_suppression::{BmcSuppressionSource, BmcSuppressionSubsystem, NewBmcSuppression};
 use model::switch::{Switch, SwitchControllerState, SwitchDecommissioningState};
@@ -104,18 +103,14 @@ pub(super) async fn handle_decommissioning(
                 "NVOS factory reset requires operator recovery: {error}"
             )))
         }
-        SwitchDecommissioningState::RebootingSwitch => {
-            handle_rebooting_switch(switch_id, switch, ctx).await
-        }
+        SwitchDecommissioningState::RebootingSwitch => handle_rebooting_switch(switch, ctx).await,
         SwitchDecommissioningState::WaitingForNvosDhcpAcknowledgement => {
             handle_waiting_for_nvos_dhcp_acknowledgement(switch_id, ctx).await
         }
         SwitchDecommissioningState::SuppressingBmcDhcp => {
             handle_suppressing_bmc_dhcp(switch_id, switch, ctx).await
         }
-        SwitchDecommissioningState::FactoryResetBmc => {
-            handle_factory_reset_bmc(switch_id, switch, ctx).await
-        }
+        SwitchDecommissioningState::FactoryResetBmc => handle_factory_reset_bmc(switch, ctx).await,
         SwitchDecommissioningState::WaitingForBmcDhcpAcknowledgement => {
             handle_waiting_for_bmc_dhcp_acknowledgement(switch_id, switch, ctx).await
         }
@@ -240,35 +235,13 @@ async fn handle_waiting_for_nvos_factory_reset(
 }
 
 async fn handle_rebooting_switch(
-    switch_id: &SwitchId,
     switch: &Switch,
     ctx: &mut StateHandlerContext<'_, SwitchStateHandlerContextObjects>,
 ) -> Result<StateHandlerOutcome<SwitchControllerState>, StateHandlerError> {
-    let bmc_info = switch
-        .bmc_info
-        .as_ref()
-        .ok_or_else(|| missing_data(switch_id, "bmc_info"))?;
-    let bmc_ip_address = bmc_info
-        .ip
-        .ok_or_else(|| missing_data(switch_id, "bmc_ip"))?;
-    let bmc_mac_address = bmc_info
-        .mac
-        .ok_or_else(|| missing_data(switch_id, "bmc_mac"))?;
-    let redfish_client = ctx
-        .services
-        .redfish_client_pool
-        .create_client(
-            &bmc_ip_address.to_string(),
-            bmc_info.port,
-            RedfishAuth::for_bmc_mac(bmc_mac_address),
-            Some(RedfishVendor::NvidiaGBSwitch),
-        )
+    let bmc = ctx.services.connect_bmc(switch).await?;
+    async { bmc.power()?.set(ResetType::ForceRestart).await }
         .await
-        .map_err(|error| external_error("failed to create switch BMC Redfish client", error))?;
-    redfish_client
-        .power(libredfish::SystemPowerControl::ForceRestart)
-        .await
-        .map_err(|error| external_error("failed to reboot switch", error))?;
+        .map_err(|error: PlatformError| external_error("failed to reboot switch", error))?;
     Ok(StateHandlerOutcome::transition(decommissioning(
         SwitchDecommissioningState::WaitingForNvosDhcpAcknowledgement,
     )))
@@ -319,36 +292,15 @@ async fn handle_suppressing_bmc_dhcp(
 }
 
 async fn handle_factory_reset_bmc(
-    switch_id: &SwitchId,
     switch: &Switch,
     ctx: &mut StateHandlerContext<'_, SwitchStateHandlerContextObjects>,
 ) -> Result<StateHandlerOutcome<SwitchControllerState>, StateHandlerError> {
-    let bmc_info = switch
-        .bmc_info
-        .as_ref()
-        .ok_or_else(|| missing_data(switch_id, "bmc_info"))?;
-    let bmc_ip_address = bmc_info
-        .ip
-        .ok_or_else(|| missing_data(switch_id, "bmc_ip"))?;
-    let bmc_mac_address = bmc_info
-        .mac
-        .ok_or_else(|| missing_data(switch_id, "bmc_mac"))?;
-
-    let redfish_client = ctx
-        .services
-        .redfish_client_pool
-        .create_client(
-            &bmc_ip_address.to_string(),
-            bmc_info.port,
-            RedfishAuth::for_bmc_mac(bmc_mac_address),
-            Some(RedfishVendor::NvidiaGBSwitch),
-        )
+    let bmc = ctx.services.connect_bmc(switch).await?;
+    async { bmc.bmc_control()?.reset_to_factory_defaults().await }
         .await
-        .map_err(|error| external_error("failed to create switch BMC Redfish client", error))?;
-    redfish_client
-        .bmc_reset_to_defaults()
-        .await
-        .map_err(|error| external_error("failed to factory reset switch BMC", error))?;
+        .map_err(|error: PlatformError| {
+            external_error("failed to factory reset switch BMC", error)
+        })?;
 
     Ok(StateHandlerOutcome::transition(decommissioning(
         SwitchDecommissioningState::WaitingForBmcDhcpAcknowledgement,
