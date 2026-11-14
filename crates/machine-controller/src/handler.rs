@@ -5499,6 +5499,7 @@ impl DpuMachineStateHandler {
                         dpu_redfish_client.as_ref(),
                         boot_interface,
                         state.host_snapshot.associated_dpu_machine_ids().len(),
+                        &ctx.services.site_config.bios_profiles,
                         &ctx.services.site_config,
                     )
                     .await
@@ -14264,6 +14265,7 @@ pub async fn call_machine_setup_and_handle_no_dpu_error(
     redfish_client: &dyn Redfish,
     boot_interface: Option<&BootInterfaceTarget>,
     expected_dpu_count: usize,
+    bios_profiles: &libredfish::BiosProfileVendor,
     site_config: &MachineStateHandlerSiteConfig,
 ) -> Result<Option<String>, RedfishError> {
     let setup_result = match boot_interface {
@@ -14272,7 +14274,7 @@ pub async fn call_machine_setup_and_handle_no_dpu_error(
                 .run(|bi| {
                     redfish_client.machine_setup(
                         Some(bi),
-                        &site_config.bios_profiles,
+                        bios_profiles,
                         site_config.selected_profile,
                         &site_config.oem_manager_profiles,
                     )
@@ -14283,7 +14285,7 @@ pub async fn call_machine_setup_and_handle_no_dpu_error(
             redfish_client
                 .machine_setup(
                     None,
-                    &site_config.bios_profiles,
+                    bios_profiles,
                     site_config.selected_profile,
                     &site_config.oem_manager_profiles,
                 )

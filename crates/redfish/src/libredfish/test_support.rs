@@ -199,8 +199,11 @@ struct RedfishSimState {
     /// is otherwise unimplemented. Lets unit tests drive the default
     /// `BmcCredentialOps::uefi_setup` DPU body past its attribute probe.
     bios_attributes: Option<HashMap<String, serde_json::Value>>,
+    pending_bios_attributes: HashMap<String, serde_json::Value>,
     /// Optional ComputerSystem identifier used to drive platform classification.
     system_id: Option<String>,
+    system_model: Option<String>,
+    next_system_error: Option<String>,
     /// Physical-port MAC addresses exposed through the adapter Ports collection.
     network_adapter_port_mac_addresses: Vec<MacAddress>,
     /// Chassis linked from the simulated ComputerSystem.
@@ -823,6 +826,10 @@ impl RedfishSim {
         self.state.lock().unwrap().bios_attributes = Some(attributes);
     }
 
+    pub fn set_pending_bios_attributes(&self, attributes: HashMap<String, serde_json::Value>) {
+        self.state.lock().unwrap().pending_bios_attributes = attributes;
+    }
+
     /// Override the `Vendor` reported by `get_service_root`. Set it to an
     /// unrecognized value to force `probe_bmc_vendor` past the anonymous
     /// service-root probe and into the Chassis `Manufacturer` fallback.
@@ -846,6 +853,14 @@ impl RedfishSim {
     /// Explorer classifies identifiers containing `bluefield` as DPUs.
     pub fn set_system_id(&self, system_id: impl Into<String>) {
         self.state.lock().unwrap().system_id = Some(system_id.into());
+    }
+
+    pub fn set_system_model(&self, model: impl Into<String>) {
+        self.state.lock().unwrap().system_model = Some(model.into());
+    }
+
+    pub fn fail_next_system_read(&self, error: &str) {
+        self.state.lock().unwrap().next_system_error = Some(error.to_string());
     }
 
     /// Configure the physical-port MAC addresses returned by the simulated
@@ -957,6 +972,7 @@ pub enum RedfishSimAction {
     SetUtcTimezone,
     SetNtpServers(Vec<String>),
     MachineSetup {
+        bios_profiles: libredfish::BiosProfileVendor,
         oem_manager_profiles: libredfish::BiosProfileVendor,
         /// The boot interface the setup call targeted (`None` when the caller
         /// ran setup without one, e.g. DPU setup), letting tests assert which
@@ -1217,7 +1233,7 @@ impl Redfish for RedfishSimClient {
     fn machine_setup<'a>(
         &'a self,
         boot_interface: Option<libredfish::BootInterfaceRef<'a>>,
-        _bios_profiles: &'a HashMap<
+        bios_profiles: &'a HashMap<
             libredfish::model::service_root::RedfishVendor,
             HashMap<
                 String,
@@ -1247,6 +1263,7 @@ impl Redfish for RedfishSimClient {
                 .boot_interface_targets
                 .push(boot_interface.map(RedfishSimBootInterfaceRef::from));
             host_state.actions.push(RedfishSimAction::MachineSetup {
+                bios_profiles: bios_profiles.clone(),
                 oem_manager_profiles: oem_manager_profiles.clone(),
                 boot_interface_mac: boot_interface.map(boot_interface_ref_to_string),
             });
@@ -1394,7 +1411,7 @@ impl Redfish for RedfishSimClient {
         &'a self,
     ) -> libredfish::RedfishFuture<'a, Result<HashMap<String, serde_json::Value>, RedfishError>>
     {
-        Box::pin(async move { todo!() })
+        Box::pin(async move { Ok(self.state.lock().unwrap().pending_bios_attributes.clone()) })
     }
 
     fn clear_pending<'a>(&'a self) -> libredfish::RedfishFuture<'a, Result<(), RedfishError>> {
@@ -1820,6 +1837,9 @@ impl Redfish for RedfishSimClient {
     ) -> libredfish::RedfishFuture<'a, Result<libredfish::model::ComputerSystem, RedfishError>>
     {
         Box::pin(async move {
+            if let Some(error) = self.state.lock().unwrap().next_system_error.take() {
+                return Err(RedfishError::GenericError { error });
+            }
             let id = self
                 .state
                 .lock()
@@ -1837,12 +1857,14 @@ impl Redfish for RedfishSimClient {
                     odata_id: format!("/redfish/v1/Chassis/{id}"),
                 })
                 .collect::<Vec<_>>();
+            let model = self.state.lock().unwrap().system_model.clone();
             Ok(libredfish::model::ComputerSystem {
                 odata: libredfish::model::OData {
                     odata_id: format!("/redfish/v1/Systems/{id}"),
                     ..Default::default()
                 },
                 id,
+                model,
                 links: (!chassis.is_empty()).then_some(
                     libredfish::model::system::ComputerSystemLinks {
                         chassis: Some(chassis),
