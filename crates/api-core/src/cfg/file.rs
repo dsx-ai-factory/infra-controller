@@ -488,6 +488,9 @@ pub struct CarbideConfig {
     #[serde(default)]
     pub scout_boot_interface_correction_enabled: bool,
 
+    #[serde(default)]
+    pub maintenance_end_boot_config_recheck_enabled: bool,
+
     /// `ib_fabrics` defines the InfiniBand fabrics managed by the site.
     /// When `ib_config.enabled` is true, v2.4 accepts at most one fabric,
     /// named `default`. Each fabric accepts `backend` and `remote_pool`
@@ -7569,6 +7572,7 @@ path = "credentials.yaml"
         assert_eq!(config.dhcpv6_server_preference, None);
         assert!(!config.allow_insecure_discovery);
         assert!(!config.scout_boot_interface_correction_enabled);
+        assert!(!config.maintenance_end_boot_config_recheck_enabled);
         assert!(config.route_servers.is_empty());
         assert!(config.tls.is_none());
         assert!(config.auth.is_none());
