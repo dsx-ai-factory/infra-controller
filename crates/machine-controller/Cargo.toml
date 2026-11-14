@@ -83,6 +83,9 @@ uuid = { workspace = true, features = ["v4", "serde"] }
 version-compare = { workspace = true }
 
 [dev-dependencies]
+arc-swap = { workspace = true }
+axum = { workspace = true }
+bmc-mock = { path = "../bmc-mock" }
 carbide-api-model = { path = "../api-model", default-features = false, features = [
   "test-support",
 ] }

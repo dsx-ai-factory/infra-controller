@@ -2637,9 +2637,9 @@ pub enum UefiSetupState {
 /// Tracks progress waiting for the Dell BIOS config job (from machine_setup PATCH) to complete
 /// before configuring boot order. Same pattern as SetBootOrderInfo / SetBootOrderState.
 ///
-/// `bios_job_id` is `Some` while polling a vendor BIOS job (e.g. Dell). `None` only during
-/// `HandleBiosJobFailure` recovery from stuck PollingBiosSetup; non-Dell hosts reboot in
-/// `configure_host_bios` and never enter job-polling substates.
+/// `bios_job_id` is `Some` while polling a vendor BIOS job (e.g. Dell). `None` when the BMC
+/// returns no job, where the host restarts in `RebootHost`, and during `HandleBiosJobFailure`
+/// recovery from stuck PollingBiosSetup.
 ///
 /// Derived ordering is used by enclosing reprovision states to report the least advanced DPU.
 #[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq, PartialOrd, Ord)]
