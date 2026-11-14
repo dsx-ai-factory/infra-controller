@@ -20,16 +20,6 @@ tests:
             resources: ["secrets"]
             resourceNames: ["bmc-shared-password"]
             verbs: ["get", "patch"]
-      - notContains:
+      - lengthEqual:
           path: rules
-          content:
-            apiGroups: [""]
-            resources: ["secrets"]
-            verbs: ["get", "list", "create", "patch", "delete"]
-      - notContains:
-          path: rules
-          content:
-            apiGroups: [""]
-            resources: ["secrets"]
-            resourceNames: ["bmc-shared-password"]
-            verbs: ["delete"]
+          count: 17

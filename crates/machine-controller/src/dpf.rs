@@ -916,7 +916,7 @@ impl DpfOperations for DpfSdkOps {
                 .await?;
                 let secret_name = self
                     .sdk
-                    .create_bmc_credential_secret(&info.device_id, version, &password)
+                    .ensure_bmc_credential_secret(&info.device_id, version, &password)
                     .await?;
                 return self
                     .sdk

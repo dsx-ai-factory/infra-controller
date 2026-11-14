@@ -93,13 +93,13 @@ fn secret_path(name: &str) -> String {
 
 const NODE_PATH: &str =
     "/apis/provisioning.dpu.nvidia.com/v1alpha1/namespaces/test-ns/dpunodes/node-host";
-const DPUS_PATH: &str = "/apis/provisioning.dpu.nvidia.com/v1alpha1/namespaces/test-ns/dpus";
+const DPU_PATH: &str = "/apis/provisioning.dpu.nvidia.com/v1alpha1/namespaces/test-ns/dpus/node-host-device-01-02-03-04-05-06";
 const SECRETS_PATH: &str = "/api/v1/namespaces/test-ns/secrets";
 
 async fn drained_host(handle: &mut ApiHandle) {
     exchange(handle, "GET", NODE_PATH, 404, missing()).await;
     exchange(handle, "GET", DEVICE_PATH, 404, missing()).await;
-    exchange(handle, "GET", DPUS_PATH, 200, json!({"kind": "DPUList", "apiVersion": "provisioning.dpu.nvidia.com/v1alpha1", "items": []})).await;
+    exchange(handle, "GET", DPU_PATH, 404, missing()).await;
 }
 
 fn secret_list(items: Vec<Value>) -> Value {
@@ -172,10 +172,10 @@ async fn host_credential_cleanup_waits_for_resources_and_secret_finalizers() {
 
         exchange(&mut handle, "GET", NODE_PATH, 404, missing()).await;
         exchange(&mut handle, "GET", DEVICE_PATH, 404, missing()).await;
-        exchange(&mut handle, "GET", DPUS_PATH, 200, json!({"apiVersion": "provisioning.dpu.nvidia.com/v1alpha1", "kind": "DPUList", "items": [{
+        exchange(&mut handle, "GET", DPU_PATH, 200, json!({"apiVersion": "provisioning.dpu.nvidia.com/v1alpha1", "kind": "DPU",
             "metadata": {"name": "still-deleting"},
             "spec": {"dpuNodeName": "node-host", "dpuDeviceName": dpu_device_cr_name(DEVICE), "dpuFlavor": "test", "nodeEffect": {}, "serialNumber": "serial-1"},
-        }]})).await;
+        })).await;
 
         drained_host(&mut handle).await;
         let mut versioned_secret = secret(Some(1), "v1");

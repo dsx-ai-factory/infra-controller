@@ -259,16 +259,17 @@ impl<R: BmcCredentialRepository + DpuNodeRepository + DpuDeviceRepository + DpuR
                 return Ok(false);
             }
         }
-        let dpus = DpuRepository::list(&*self.repo, &self.namespace, None).await?;
-        if dpus.iter().any(|dpu| {
-            dpu.spec.dpu_node_name == node_name
-                || dpu.spec.dpu_node_name == node_id
-                || device_ids.iter().any(|id| {
-                    dpu.spec.dpu_device_name == *id
-                        || dpu.spec.dpu_device_name == dpu_device_cr_name(id)
-                })
-        }) {
-            return Ok(false);
+        for id in device_ids {
+            if DpuRepository::get(
+                &*self.repo,
+                &super::dpu_cr_name(id, node_id),
+                &self.namespace,
+            )
+            .await?
+            .is_some()
+            {
+                return Ok(false);
+            }
         }
         let mut complete = true;
         for id in device_ids {
