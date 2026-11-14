@@ -127,12 +127,15 @@ jobs:
         run: bash .github/ci/test-resolve-secret-scan-range.sh
 
       - name: Test DevSpace REST integration addresses
+        if: startsWith(github.ref, 'refs/heads/pull-request/')
         run: bash dev/deployment/devspace/setup-rest-integration_test.sh
 
       - name: Test development bootstrap addresses
+        if: startsWith(github.ref, 'refs/heads/pull-request/')
         run: python3 -B dev/bin/test_bootstrap_addresses.py
 
       - name: Test MAT dual-stack packet-test helpers
+        if: startsWith(github.ref, 'refs/heads/pull-request/')
         run: python3 -B -m unittest discover -s dev/machine-a-tron/network -v
 
       - name: Test HBN management startup patches
@@ -1515,7 +1518,20 @@ jobs:
             --build-arg KEA_VERSION="$KEA_VERSION" \
             --tag "$service_image" .
           test "$(docker image inspect --format '{{.Architecture}}' "$service_image")" = "$ARCH"
-          bash dev/docker/tests/smoke_dhcp_image.sh "$service_image"
+          package_dir=$(mktemp -d)
+          trap 'rm -rf "$package_dir"' EXIT
+          if docker run --rm --entrypoint sh "$compiler_image" -ec \
+            'if [ -e /opt/kea/kea-common.deb ]; then cat /opt/kea/kea-common.deb; else exit 3; fi' \
+            > "$package_dir/kea-common.deb"; then
+            bash dev/docker/tests/smoke_dhcp_image.sh "$service_image" "$package_dir/kea-common.deb"
+          else
+            status=$?
+            if [[ "$status" != 3 || -f dev/docker/build-kea.sh ]]; then
+              echo "Could not extract the required build-image Kea package (status $status)" >&2
+              exit 1
+            fi
+            bash dev/docker/tests/smoke_dhcp_image.sh "$service_image"
+          fi
 
       - name: Remove development DHCP job images
         if: always() && steps.dev-build.outputs.compiler_image != ''
@@ -2572,10 +2588,40 @@ jobs:
 
       # Uses python3-yaml installed by the configuration check above.
       - name: Test DevSpace bootstrap manifests
+        if: startsWith(github.ref, 'refs/heads/pull-request/')
         run: /usr/bin/python3 -B dev/deployment/devspace/test_bootstrap_prereqs.py
 
+      - name: Install development test dependencies
+        if: startsWith(github.ref, 'refs/heads/pull-request/')
+        run: sudo apt-get install -y --no-install-recommends jq openssh-client
+
+      - name: Test shared deployment and provider suites
+        if: startsWith(github.ref, 'refs/heads/pull-request/')
+        run: |
+          # Kind and DevSpace regressions belong to the advisory workflow.
+          for test_file in dev/deployment/tests/test_*.py; do
+            case "$test_file" in */test_setup_kind.py) continue ;; esac
+            /usr/bin/python3 -B -m unittest discover -s dev/deployment/tests -p "${test_file##*/}"
+          done
+
+      - name: Install the shared kubectl version for rendering tests
+        if: startsWith(github.ref, 'refs/heads/pull-request/')
+        run: |
+          /usr/bin/python3 dev/deployment/install-tools.py --bin-dir "$RUNNER_TEMP/nico-tools" kubectl
+          echo "$RUNNER_TEMP/nico-tools" >> "$GITHUB_PATH"
+
       - name: Test local native development image builds
+        if: startsWith(github.ref, 'refs/heads/pull-request/')
         run: /usr/bin/python3 -B -m unittest discover -s dev/docker/tests
+
+      - name: Run development Helm unit tests
+        if: startsWith(github.ref, 'refs/heads/pull-request/')
+        uses: dsx-ai-factory/dsx-github-actions/.github/actions/helm-unittest@db3780bff4b2cbf90ba9117a63e41ddea066791b
+        with:
+          plugin-oci-ref: oci://nvcr.io/0837451325059433/carbide-dev/unittest:1.1.2
+          registry-password: ${{ secrets.NVCR_TOKEN }}
+          charts: >-
+            helm/nico-dev-keycloak
 
       # Charts with tests must be listed explicitly.
       - name: Run Helm unit tests

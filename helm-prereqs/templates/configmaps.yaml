@@ -4,6 +4,9 @@
 ##   nico-system-nico-database-config — database host, port, and name; always
 ##                                      rendered, with or without Vault
 ## =============================================================================
+{{- if and .Values.postgresql.enabled (or (ne (toString .Values.postgresql.port) "5432") (ne .Values.postgresql.database "nico_system_nico")) }}
+{{- fail "Non-default postgresql.port or postgresql.database requires postgresql.enabled=false" }}
+{{- end }}
 {{- if .Values.vault.enabled }}
 ---
 apiVersion: v1
@@ -27,5 +30,5 @@ metadata:
   namespace: {{ .Values.namespace }}
 data:
   DB_HOST: {{ .Values.postgresql.host | quote }}
-  DB_PORT: "5432"
-  DB_NAME: "nico_system_nico"
+  DB_PORT: {{ .Values.postgresql.port | quote }}
+  DB_NAME: {{ .Values.postgresql.database | quote }}

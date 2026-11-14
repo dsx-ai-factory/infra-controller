@@ -28,3 +28,9 @@
 !pxe/ipxe/local
 !pxe/ipxe/local/
 !pxe/ipxe/local/embed.ipxe
+
+!pxe/scout-firmware-scripts
+!pxe/scout-firmware-scripts/**
+
+# Generated local certificate values are Helm inputs, not image source.
+dev/deployment/tilt/.local/

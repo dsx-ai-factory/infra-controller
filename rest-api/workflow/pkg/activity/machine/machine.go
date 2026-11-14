@@ -870,7 +870,12 @@ func (mm *ManageMachine) UpdateMachinesInDB(ctx context.Context, siteIDStr strin
 		}
 	}
 
-	logger.Info().Msg("completed activity")
+	logger.Info().
+		Int32("inventory_page", machineInventory.GetInventoryPage().GetCurrentPage()).
+		Int32("inventory_total_pages", machineInventory.GetInventoryPage().GetTotalPages()).
+		Int32("inventory_total_items", machineInventory.GetInventoryPage().GetTotalItems()).
+		Str("inventory_status", machineInventory.GetInventoryStatus().String()).
+		Msg("completed activity")
 
 	return nil
 }
