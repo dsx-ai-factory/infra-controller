@@ -98,9 +98,12 @@ fn identities_are_optional_canonical_and_can_be_resolved_later() {
     assert_eq!(child.parent_span_id, operation.span_context.span_id());
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "current_thread")]
 async fn concurrent_machine_subtrees_keep_identity_only_on_their_operations() {
     let (_provider, exporter, dispatch) = capture();
+    // WithSubscriber only scopes polling; child spans also need this dispatcher
+    // during task teardown to close their iteration parent.
+    let _subscriber = tracing::dispatcher::set_default(&dispatch);
     async {
         let root = tracing::info_span!("iteration");
         async {
