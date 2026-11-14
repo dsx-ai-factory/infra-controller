@@ -6260,6 +6260,58 @@ func TestUpdateInstanceHandler_Handle(t *testing.T) {
 			verifyChildSpanner:          true,
 		},
 		{
+			name: "test Instance update API endpoint success with omitted InfiniBandInterfaces preserves existing READY interfaces",
+			fields: fields{
+				dbSession: dbSession,
+				tc:        tc,
+				scp:       scp,
+				cfg:       cfg,
+			},
+			args: args{
+				reqData: &model.APIInstanceUpdateRequest{
+					Name:       cutil.GetPtr("Test Instance IB omit"),
+					IpxeScript: os2.IpxeScript,
+					Labels: map[string]string{
+						"new_key": "new_value",
+					},
+				},
+				reqInstance:                           inst1.ID.String(),
+				cleanInstanceToStatus:                 inst1.Status,
+				reqOrg:                                tnOrg1,
+				reqUser:                               tnu1,
+				respCode:                              http.StatusOK,
+				expectInfiniBandInterfacesRemainReady: []uuid.UUID{ibi1.ID},
+			},
+			wantErr:                     false,
+			verifySiteControllerRequest: true,
+			verifyChildSpanner:          true,
+		},
+		{
+			name: "test Instance update API endpoint success with explicit empty InfiniBandInterfaces list clears all interfaces",
+			fields: fields{
+				dbSession: dbSession,
+				tc:        tc,
+				scp:       scp,
+				cfg:       cfg,
+			},
+			args: args{
+				reqData: &model.APIInstanceUpdateRequest{
+					Name:                 cutil.GetPtr("Test Instance IB clear"),
+					IpxeScript:           os2.IpxeScript,
+					InfiniBandInterfaces: []model.APIInfiniBandInterfaceCreateOrUpdateRequest{},
+				},
+				reqInstance:           inst1.ID.String(),
+				cleanInstanceToStatus: inst1.Status,
+				reqOrg:                tnOrg1,
+				reqUser:               tnu1,
+				respCode:              http.StatusOK,
+				ibInterfaceToDelete:   []cdbm.InfiniBandInterface{*ibi1},
+			},
+			wantErr:                     false,
+			verifySiteControllerRequest: true,
+			verifyChildSpanner:          true,
+		},
+		{
 			name: "test Instance update API endpoint success with InfiniBand Interface when partition differs on same device instance (not a no-op; keyed by partition+device+instance)",
 			fields: fields{
 				dbSession: dbSession,
@@ -9301,7 +9353,9 @@ func TestUpdateInstanceHandler_Handle(t *testing.T) {
 				assert.Equal(t, *tt.args.expectedPropagationStatus, rst.NetworkSecurityGroupPropagationDetails.Status)
 			}
 
-			if len(tt.args.ibInterfaceToDelete) > 0 && len(tt.args.reqData.InfiniBandInterfaces) > 0 {
+			// An explicit InfiniBandInterfaces list (including empty []) triggers replacement logic.
+			// Check Deleting status for interfaces that should be removed.
+			if len(tt.args.ibInterfaceToDelete) > 0 && tt.args.reqData.InfiniBandInterfaces != nil {
 				// Make sure the InfiniBand Interfaces are deleting
 				ibiDAO := cdbm.NewInfiniBandInterfaceDAO(tt.fields.dbSession)
 				for _, ibifc := range tt.args.ibInterfaceToDelete {
@@ -9318,7 +9372,7 @@ func TestUpdateInstanceHandler_Handle(t *testing.T) {
 					}
 				}
 
-				// Make sure the InfiniBand Interfaces are pending
+				// Make sure the InfiniBand Interfaces are pending (for non-empty request lists)
 				// It should be in order of the request received
 				// Get all InfiniBand Interfaces for the Instance in creation and assert they are in order and status is pending
 				ibifcs, _, _ := ibiDAO.GetAll(ec.Request().Context(), nil,
@@ -9488,11 +9542,12 @@ func TestUpdateInstanceHandler_Handle(t *testing.T) {
 						}
 					}
 
-					// Verify the InfiniBand Interfaces are in the Site Controller request
-					if len(tt.args.reqData.InfiniBandInterfaces) > 0 {
+					// Verify the InfiniBand Interfaces are in the Site Controller request.
+					// An explicit list (including empty []) replaces the config; nil omits the field and preserves existing.
+					if tt.args.reqData.InfiniBandInterfaces != nil {
 						assert.Equal(t, len(siteReq.Config.Infiniband.IbInterfaces), len(tt.args.reqData.InfiniBandInterfaces))
 
-						// Make sure order to should be same as the request received
+						// Make sure order is the same as the request received
 						for i := range siteReq.Config.Infiniband.IbInterfaces {
 							assert.Equal(t, siteReq.Config.Infiniband.IbInterfaces[i].IbPartitionId.Value, tt.args.reqData.InfiniBandInterfaces[i].InfiniBandPartitionID)
 						}

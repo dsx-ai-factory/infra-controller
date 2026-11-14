@@ -26669,8 +26669,20 @@ components:
             - 'null'
           description: 'When set, asks NICo to auto-resolve the Instance''s network interfaces from the host''s underlay (HostInband) segments. `null` leaves the value unchanged; `true` (re-)resolves; `false` returns to explicit interface configuration. When `true`, the Instance''s VPC MUST already have `networkVirtualizationType: FLAT`, `interfaces` MUST be empty or omitted, and `secondaryVpcIds` MUST be empty or omitted.'
         infinibandInterfaces:
-          type: array
-          description: Update InfiniBand Interfaces of the Instance
+          type:
+            - array
+            - 'null'
+          description: |-
+            Update InfiniBand Interfaces of the Instance. Omission or null leaves interfaces unchanged;
+            an explicit list (including an empty list []) replaces them entirely. An empty list removes
+            all InfiniBand interfaces without capability validation. A nonempty list is validated against
+            the Instance Type's InfiniBand capabilities; if the Instance Type has none, the Machine's
+            capabilities are used instead. Missing capabilities or invalid selectors return 400. Final Site
+            validation remains authoritative because persisted inventory can lag behind the Site. Each
+            `device`, `deviceInstance`, and `isPhysical` combination may appear only once. An unchanged
+            complete Ready list preserves existing assignments without inserting replacement Pending rows.
+            Removing interfaces from a running Instance immediately detaches the corresponding InfiniBand
+            partitions.
           items:
             $ref: '#/components/schemas/InfiniBandInterfaceCreateRequest'
         spectrumXAttachments:
