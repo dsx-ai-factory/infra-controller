@@ -28,12 +28,19 @@ EXAMPLES:
 Add a UFM credential with a token:
     $ nico-admin-cli credential add-ufm --url https://192.0.2.10 --token mypassword
 
+Add a UFM credential with the SPIFFE default client certificate:
+    $ nico-admin-cli credential add-ufm --url https://192.0.2.10
+
 ")]
 pub(crate) struct Args {
     #[clap(long, required(true), help = "The UFM url")]
     url: String,
 
-    #[clap(long, default_value(""), help = "The UFM token")]
+    #[clap(
+        long,
+        default_value(""),
+        help = "The UFM token; omit it to use the SPIFFE default client certificate"
+    )]
     token: String,
 }
 

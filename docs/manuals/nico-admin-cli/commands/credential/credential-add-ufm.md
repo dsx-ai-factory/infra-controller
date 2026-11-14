@@ -25,7 +25,7 @@ The UFM url
 
 `--token <TOKEN> [default: ]`
 
-The UFM token
+The UFM token; omit it to use the SPIFFE default client certificate
 
 `--extended`
 
@@ -53,6 +53,7 @@ Print help (see a summary with '-h')
 
 ```sh
 nico-admin-cli credential add-ufm --url https://192.0.2.10 --token mypassword
+nico-admin-cli credential add-ufm --url https://192.0.2.10
 ```
 
 ---
