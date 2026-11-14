@@ -370,8 +370,6 @@ func (cah CreateAllocationHandler) Handle(c echo.Context) error {
 		// Create the Allocation Constraints in DB
 		acDAO := cdbm.NewAllocationConstraintDAO(cah.dbSession)
 		dbacsRet = []cdbm.AllocationConstraint{}
-		imAcAdd := []cdbm.AllocationConstraint{}
-		imAcUpd := []cdbm.AllocationConstraint{}
 		for _, ac := range dbacs {
 			retac, serr := acDAO.Create(ctx, tx, cdbm.AllocationConstraintCreateInput{
 				AllocationID:      a.ID,
@@ -387,15 +385,10 @@ func (cah CreateAllocationHandler) Handle(c echo.Context) error {
 				return cutil.NewAPIError(http.StatusInternalServerError, "Failed to create Allocation Constraint entry for Allocation", nil)
 			}
 			dbacsRet = append(dbacsRet, *retac)
-			_, cnt, derr := common.GetAllAllocationConstraintsForInstanceType(ctx, tx, cah.dbSession, ip, site, tenant, &ac.ResourceTypeID)
+			_, _, derr := common.GetAllAllocationConstraintsForInstanceType(ctx, tx, cah.dbSession, ip, site, tenant, &ac.ResourceTypeID)
 			if derr != nil {
 				logger.Error().Err(derr).Msg("error getting Allocation Constraints")
 				return cutil.NewAPIError(http.StatusInternalServerError, "Failed to create Allocation, db error", nil)
-			}
-			if cnt > 1 {
-				imAcUpd = append(imAcUpd, *retac)
-			} else if cnt == 1 {
-				imAcAdd = append(imAcAdd, *retac)
 			}
 
 			switch ac.ResourceType {
@@ -1262,9 +1255,6 @@ func (dah DeleteAllocationHandler) Handle(c echo.Context) error {
 		vpDAO := cdbm.NewVpcPrefixDAO(dah.dbSession)
 		ipbDAO := cdbm.NewIPBlockDAO(dah.dbSession)
 
-		imAcDel := []cdbm.AllocationConstraint{}
-		imAcUpd := []cdbm.AllocationConstraint{}
-
 		ipamStorage := ipam.NewIpamStorage(dah.dbSession.DB, tx.GetBunTx())
 
 		// Since we are going to lock on multiple AllocationConstraints, we need a consistent order
@@ -1349,15 +1339,10 @@ func (dah DeleteAllocationHandler) Handle(c echo.Context) error {
 						nil,
 					)
 				}
-				_, acCnt, serr := common.GetAllAllocationConstraintsForInstanceType(ctx, tx, dah.dbSession, a.InfrastructureProvider, a.Site, a.Tenant, &ac.ResourceTypeID)
+				_, _, serr = common.GetAllAllocationConstraintsForInstanceType(ctx, tx, dah.dbSession, a.InfrastructureProvider, a.Site, a.Tenant, &ac.ResourceTypeID)
 				if serr != nil {
 					logger.Error().Err(serr).Msg("error getting Allocation Constraints")
 					return cutil.NewAPIError(http.StatusInternalServerError, "Failed to delete Allocation, DB error", nil)
-				}
-				if acCnt > 1 {
-					imAcUpd = append(imAcUpd, ac)
-				} else if acCnt == 1 {
-					imAcDel = append(imAcDel, ac)
 				}
 			case cdbm.AllocationResourceTypeIPBlock:
 				// check if the tenant has subnets or VpcPrefixes using this ipblock
