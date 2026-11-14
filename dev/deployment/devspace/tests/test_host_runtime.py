@@ -193,6 +193,42 @@ start_core_postgres() {''' + function + '\n}\nstart_core_postgres\n'
 
 
 class PurgeTests(unittest.TestCase):
+    def test_reset_checks_the_setup_kubeconfig_before_removing_user_state(self):
+        script = (SCRIPT_DIR / "reset-devspace-on-host.sh").read_text()
+        runner = script[script.index("run_as_user() {"):
+                        script.index("\nresolve_docker_root() {")]
+        cleanup = script[script.index("remove_user_state() {"):
+                         script.index("\nremove_checkout() {")]
+        for contexts in ("", "unrelated-cluster\n"):
+            with self.subTest(contexts=contexts), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                home = root / "user home"
+                config = home / ".kube/config"
+                config.parent.mkdir(parents=True)
+                config.write_text(contexts)
+                inherited = root / "inherited config"
+                inherited.write_text("")
+                kubectl = home / ".local/bin/kubectl"
+                kubectl.parent.mkdir(parents=True)
+                kubectl.write_text('#!/bin/sh\n[ "$*" = "config get-contexts -o name" ] || exit 1\ncat "$KUBECONFIG"\n')
+                kubectl.chmod(0o755)
+                result = subprocess.run(
+                    ["bash", "-c", """set -euo pipefail
+log() { :; }
+remove_shell_block() { :; }
+runuser() { shift 3; "$@"; }
+id() { printf fixture; }
+""" + runner + cleanup + "\nremove_user_state\n"],
+                    env={**os.environ, "USER_HOME": str(home), "DEV_USER": "fixture",
+                         "KUBECONFIG": str(inherited)},
+                    capture_output=True, text=True, timeout=10,
+                )
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(config.exists(), bool(contexts))
+                if contexts:
+                    self.assertEqual(config.read_text(), contexts)
+                self.assertEqual(inherited.read_text(), "")
+
     def test_reset_stops_before_any_action_when_docker_root_is_unknown(self):
         script = (SCRIPT_DIR / "reset-devspace-on-host.sh").read_text()
         resolve = script[script.index("resolve_docker_root() {"):

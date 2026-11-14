@@ -1,8 +1,7 @@
 # Local development with Tilt
 
 Tilt runs the complete local NICo development stack from the repository's Helm
-charts and Kubernetes sources. DevSpace remains available as a separate
-workflow.
+charts and Kubernetes sources.
 
 > [!WARNING]
 > This workflow is intended only for local development and is
@@ -13,11 +12,78 @@ workflow.
 - Docker connected to a Linux AMD64 or ARM64 daemon, with BuildKit available
 - Tilt
 - Helm 3 or Helm 4, plus Python 3 for Tilt's `helm_resource` extension
-- `kubectl` connected to a kind cluster
+- `kubectl` connected to a native kind cluster; the setup helper below requires
+  kind 0.32.0 or newer and `jq`
 
 The Tiltfile refuses to load unless the active Kubernetes context starts with
 `kind-`. This is stricter than Tilt's built-in local-cluster safety check and
 prevents this development stack from targeting another cluster type.
+
+## Create the development cluster
+
+Start a local Docker runtime and select its Docker context. Run the shared
+cluster helper with Docker, kind, `kubectl` and `jq` on `PATH`. The runtime must
+provide Linux AMD64 or ARM64 containers through a local Docker Unix socket.
+
+From the repository root:
+
+```bash
+bash dev/deployment/setup-kind.sh --name nico-tilt
+export KUBECONFIG="$HOME/.kube/kind-nico-tilt.yaml"
+kubectl --context kind-nico-tilt get nodes
+```
+
+Select an unused cluster for Tilt.
+
+For an isolated dual-stack cluster, select a different name:
+
+```bash
+bash dev/deployment/setup-kind.sh --name nico-dual --ip-family dual
+export KUBECONFIG="$HOME/.kube/kind-nico-dual.yaml"
+kubectl --context kind-nico-dual get nodes -o wide
+```
+
+Both architectures use the same helper and configuration. Dual stack configures
+Kubernetes pod/service networking and requires IPv6 support in the container
+runtime's Linux kernel and Docker network, but not Internet IPv6.
+
+The helper accepts these options; repeated options use the last value:
+
+| Option | Default | Contract |
+| --- | --- | --- |
+| `--name NAME` | `nico-tilt` | Lowercase DNS label, 1–49 characters. Selects one cluster with one `NAME-control-plane` node. |
+| `--ip-family FAMILY` | `ipv4` | `ipv4` or `dual`. An existing cluster's pod CIDRs must match. IPv6-only clusters are not accepted by this helper. |
+| `--image IMAGE` | The digest-pinned Kubernetes 1.36.1 node image from the [kind 0.32.0 release](https://github.com/kubernetes-sigs/kind/releases/tag/v0.32.0) | Used only when creating a cluster; existing nodes are never upgraded. Custom images must work with the installed kind version and selected daemon architecture. |
+| `--kubeconfig PATH` | `$HOME/.kube/kind-NAME.yaml` | Exported after node readiness, architecture and pod-family validation. Kind merges an existing file and selects the cluster context in that file. Relative paths resolve from the working directory. |
+| `--help`, `-h` | — | Print usage and exit without host changes. |
+
+Missing values, invalid names/families and unknown options fail before contacting
+Docker. The helper requires kind 0.32.0 or newer for the pinned node image. It
+captures the active Docker context, requires a local Unix socket and a Linux
+AMD64/ARM64 daemon, and forces kind's Docker provider. Node images use the daemon
+architecture. On Linux, the client and daemon architectures must also match.
+The helper does not detect runtime hardware emulation. SSH/TCP
+Docker endpoints are rejected because this helper does not arrange remote API
+access; run it on that Docker host instead.
+A `DOCKER_HOST` Unix socket is honored with Docker's default context.
+
+Validation uses a private temporary kubeconfig with explicit context selection;
+inherited `KUBECONFIG` is ignored. Your normal kubeconfig and current context
+remain unchanged unless you explicitly select that file with `--kubeconfig`.
+New clusters publish their API on `127.0.0.1`, on a port chosen by kind. Run Tilt
+from the same client, using the exported kubeconfig and the same
+Docker context.
+
+Setup reuses compatible clusters without pulling a node image, restarting nodes
+or changing installed workloads. It rejects multiple-node clusters and mismatched
+pod families or architectures. It passes `--wait 180s` to kind and
+`--timeout=180s` to the node readiness check; these do not impose an overall
+timeout on image downloads or setup. Failure returns nonzero, removes temporary
+files and lets kind clean up a failed creation. A cluster that was created
+successfully but fails subsequent validation remains available for diagnosis.
+The helper does not delete/recreate preexisting clusters or repair incompatible
+settings. Choose another name or explicitly remove an unused
+cluster through kind after accounting for its workloads and data.
 
 ## Start
 
@@ -387,24 +453,6 @@ An earlier draft of this Tilt setup deployed Core as one Helm release named
 
 ```bash
 helm uninstall nico -n nico-system
-```
-
-Tilt and DevSpace deploy the same application object names and should not manage
-the same cluster simultaneously. Before switching an existing DevSpace kind
-cluster to Tilt, run:
-
-```bash
-LOCAL_DEV_INSTALL_REST_PREREQS=0 devspace purge -n nico-system
-```
-
-To switch back to DevSpace, remove the Tilt stack (with the session's profile
-flags, as described under **Stop and remove**) and use the existing DevSpace
-bootstrap and deploy commands:
-
-```bash
-tilt down -f dev/deployment/tilt/Tiltfile
-dev/deployment/devspace/bootstrap-prereqs.sh
-devspace deploy -n nico-system
 ```
 
 ## Stop and remove
