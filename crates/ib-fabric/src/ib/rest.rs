@@ -39,25 +39,22 @@ pub(super) struct RestIBFabric {
 
 const DEFAULT_INDEX0: bool = true;
 const DEFAULT_MEMBERSHIP: PortMembership = PortMembership::Full;
+/// Directory containing the SPIFFE files used for UFM client authentication.
+pub(super) const SPIFFE_CERT_DIR: &str = "/var/run/secrets/spiffe.io";
 
 /// Detects the authentication method `auth` selects: a bearer token, or
-/// client-certificate files on disk. Certificate authentication is chosen for
-/// an empty `auth` string (the SPIFFE default paths) or one naming an existing
-/// path. The [`AuthMethod::Cert`] paths are exactly what [`new_client`] loads
-/// when given this result, so a caller resolves once, watches those paths for
-/// rotation, and builds from the same result.
-pub(super) fn auth_method(auth: &str) -> AuthMethod {
+/// client-certificate files on disk. An empty or whitespace-only `auth` string
+/// selects the SPIFFE certificate files under `spiffe_cert_dir`; every other
+/// value is a token. The [`AuthMethod::Cert`] paths are exactly what
+/// [`new_client`] loads when given this result, so a caller resolves once,
+/// watches those paths for rotation, and builds from the same result.
+pub(super) fn auth_method(auth: &str, spiffe_cert_dir: &Path) -> AuthMethod {
     if auth.trim().is_empty() {
+        let path = |file| spiffe_cert_dir.join(file).to_string_lossy().into_owned();
         AuthMethod::Cert(UFMCert {
-            ca_crt: "/var/run/secrets/spiffe.io/ca.crt".to_string(),
-            tls_key: "/var/run/secrets/spiffe.io/tls.key".to_string(),
-            tls_crt: "/var/run/secrets/spiffe.io/tls.crt".to_string(),
-        })
-    } else if Path::new(auth).exists() {
-        AuthMethod::Cert(UFMCert {
-            ca_crt: format!("{auth}/ca.crt"),
-            tls_key: format!("{auth}/tls.key"),
-            tls_crt: format!("{auth}/tls.crt"),
+            ca_crt: path("ca.crt"),
+            tls_key: path("tls.key"),
+            tls_crt: path("tls.crt"),
         })
     } else {
         AuthMethod::Token(auth.to_string())
@@ -419,7 +416,7 @@ impl From<PortMembership> for IBPortMembership {
 
 #[cfg(test)]
 mod tests {
-    use carbide_test_support::value_scenarios;
+    use carbide_test_support::{Check, check_values};
     use model::errors::ModelError;
     use opentelemetry::global;
     use ufm_mock::{
@@ -429,27 +426,74 @@ mod tests {
 
     use super::*;
 
+    /// Verifies authentication selection depends only on the credential value,
+    /// so filesystem state cannot change a token into certificate authentication.
     #[test]
-    fn auth_method_resolves_empty_and_missing_credentials() {
-        value_scenarios!(
-            run = |auth: &str| match auth_method(auth) {
+    fn auth_method_depends_only_on_the_credential() {
+        let existing_dir = tempfile::tempdir().expect("temp dir");
+        // Populate the names formerly loaded from a certificate directory, so
+        // this case proves even complete material does not affect selection.
+        for file in ["ca.crt", "tls.key", "tls.crt"] {
+            std::fs::write(existing_dir.path().join(file), "").expect("write material");
+        }
+        let existing_path = existing_dir.path().to_string_lossy().into_owned();
+        let missing_path = existing_dir
+            .path()
+            .join("missing")
+            .to_string_lossy()
+            .into_owned();
+
+        check_values(
+            vec![
+                // Empty credentials select the established SPIFFE certificate files.
+                Check {
+                    scenario: "empty credential selects SPIFFE certificates",
+                    input: String::new(),
+                    expect: (
+                        "cert",
+                        vec![
+                            format!("{SPIFFE_CERT_DIR}/ca.crt"),
+                            format!("{SPIFFE_CERT_DIR}/tls.key"),
+                            format!("{SPIFFE_CERT_DIR}/tls.crt"),
+                        ],
+                    ),
+                },
+                // Whitespace is equivalent to an omitted token.
+                Check {
+                    scenario: "whitespace-only credential selects SPIFFE certificates",
+                    input: " \t".to_string(),
+                    expect: (
+                        "cert",
+                        vec![
+                            format!("{SPIFFE_CERT_DIR}/ca.crt"),
+                            format!("{SPIFFE_CERT_DIR}/tls.key"),
+                            format!("{SPIFFE_CERT_DIR}/tls.crt"),
+                        ],
+                    ),
+                },
+                // An ordinary nonempty credential remains a bearer token.
+                Check {
+                    scenario: "ordinary credential is a token",
+                    input: "test-token".to_string(),
+                    expect: ("token", vec!["test-token".to_string()]),
+                },
+                // A missing slash-prefixed path remains a token without a disk lookup.
+                Check {
+                    scenario: "missing slash-prefixed credential is a token",
+                    input: missing_path.clone(),
+                    expect: ("token", vec![missing_path]),
+                },
+                // An existing directory remains a token, proving disk state is irrelevant.
+                Check {
+                    scenario: "existing slash-prefixed credential is a token",
+                    input: existing_path.clone(),
+                    expect: ("token", vec![existing_path]),
+                },
+            ],
+            |auth| match auth_method(&auth, Path::new(SPIFFE_CERT_DIR)) {
                 AuthMethod::Token(token) => ("token", vec![token]),
                 AuthMethod::Cert(cert) => ("cert", vec![cert.ca_crt, cert.tls_key, cert.tls_crt]),
-            };
-            "an empty credential selects the SPIFFE default certificate files" {
-                "" => ("cert", vec![
-                    "/var/run/secrets/spiffe.io/ca.crt".to_string(),
-                    "/var/run/secrets/spiffe.io/tls.key".to_string(),
-                    "/var/run/secrets/spiffe.io/tls.crt".to_string(),
-                ]),
-            }
-
-            "a path that does not exist is a token" {
-                // A certificate directory missing mid-rotation resolves to a
-                // token, which the manager relies on to keep a cached client.
-                "/nonexistent/ufm-credentials" =>
-                    ("token", vec!["/nonexistent/ufm-credentials".to_string()]),
-            }
+            },
         );
     }
 

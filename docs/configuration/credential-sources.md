@@ -124,7 +124,9 @@ machine_identity:
     kv1: <base64-encoded 32-byte key>
 ```
 
-The remaining top-level keys take a single `username` and `password` pair: `host_redfish_site_default`, `dpu_redfish_site_default`, `dpu_redfish_factory_default` (the legacy catch-all used when no per-model entry exists), `host_uefi_site_default`, `dpu_uefi_site_default`, and `dpu_uefi_factory_default`. For UFM, the password is the bearer token, and an empty password selects the default SPIFFE client certificate.
+The remaining top-level keys take a single `username` and `password` pair: `host_redfish_site_default`, `dpu_redfish_site_default`, `dpu_redfish_factory_default` (the legacy catch-all used when no per-model entry exists), `host_uefi_site_default`, `dpu_uefi_site_default`, and `dpu_uefi_factory_default`.
+
+UFM passwords have two supported forms: a nonempty value is the bearer token, and an empty value selects the default SPIFFE client certificate. Postgres treats an empty password as an absent credential, so a deployment that stores credentials in Postgres must supply the empty UFM password through the environment or file source. Native Postgres support for that value is tracked by [#9232](https://github.com/dsx-ai-factory/infra-controller/issues/9232). With `ufm_source = "local_first"`, a UFM entry in the environment or file source takes precedence over the backend, so set that entry's password to an empty value to select the SPIFFE certificate; see [UFM Ownership Policy](#ufm-ownership-policy).
 
 The watcher reloads the file on filesystem events and on every `poll_interval`, so a Kubernetes projected Secret that is replaced atomically takes effect without restarting NICo. A valid reload replaces the whole snapshot, and entries removed from the file stop resolving. A reload that is malformed or unreadable keeps the last valid snapshot and logs the failure with the secret values redacted. A file that is missing, unreadable, or malformed at startup, or a zero `poll_interval`, fails startup with an error that redacts the secret values in the same way.
 

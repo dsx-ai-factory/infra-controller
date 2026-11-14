@@ -336,7 +336,11 @@ env:
 ## from an existing Secret and configures nico-api to watch it; no credential
 ## content is rendered into this chart's ConfigMaps or values. The selected key
 ## must contain JSON or YAML. UFM entries have this shape (both fields are
-## required; an empty password selects the default SPIFFE client certificate):
+## required). A nonempty password is the bearer token; an empty password selects
+## the default SPIFFE client certificate. Postgres treats an empty password as
+## an absent credential, so deployments using Postgres must supply that value
+## through the environment or file source. Native Postgres support is tracked by
+## #9232 (https://github.com/dsx-ai-factory/infra-controller/issues/9232).
 ##
 ## ufm_auth_by_fabric:
 ##   default:

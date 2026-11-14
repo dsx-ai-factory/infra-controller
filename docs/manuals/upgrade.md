@@ -394,6 +394,15 @@ Moving a site off Vault entirely, including certificate issuance and the Vault i
 
 ## Version-specific upgrade notes
 
+### UFM Certificate-Directory Passwords Are No Longer Supported
+
+A UFM password that names a certificate directory is no longer supported and is
+now sent to UFM as a token, so UFM rejects it. Before upgrading, replace that
+credential with an empty password to select the default SPIFFE client certificate,
+or set a UFM bearer token. When credentials are stored in Postgres, supply the
+empty UFM password through the environment or file source as described in
+[Credential Sources](../configuration/credential-sources.md).
+
 ### Upgrades That Introduce Asynchronous Peering Deletion
 
 Follow these steps the first time you upgrade to the peering deletion behavior

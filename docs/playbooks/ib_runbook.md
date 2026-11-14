@@ -246,8 +246,16 @@ No additional steps are required to enable Infiniband in NVIDIA Infra Controller
 
 #### UFM Credential
 
-One of two options can be selected for UFM authentication: `token authentication` or `client authentication`.
-Follow the instructions in the section that applies to the selected option.
+One of two options can be selected for UFM authentication: token authentication
+uses a nonempty password as the bearer token, while client authentication uses
+an empty password to select the default SPIFFE client certificate. Follow the
+instructions in the section that applies to the selected option.
+
+Postgres treats an empty password as an absent credential. When credentials are
+stored there, supply the empty UFM password through the environment or file
+source described in [Credential Sources](../configuration/credential-sources.md).
+Native Postgres support for that value is tracked by
+[#9232](https://github.com/dsx-ai-factory/infra-controller/issues/9232).
 
 ##### Token Authentication
 
@@ -314,6 +322,8 @@ Existing NICo certificates such as `/run/secrets/spiffe.io/{tls.crt,tls.key,ca.c
 ```bash
 nico-admin-cli credential add-ufm --url=<ufm host name>
 ```
+
+Omitting `--token` stores the empty password that selects these SPIFFE files.
 
 **Generate UFM server certificate using Vault.**
 

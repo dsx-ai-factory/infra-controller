@@ -25,7 +25,10 @@ The UFM url
 
 `--token <TOKEN> [default: ]`
 
-The UFM token
+The UFM token; omit it to store an empty password, which selects the
+SPIFFE default client certificate. Postgres storage and local credential
+sources change this; see
+https://github.com/dsx-ai-factory/infra-controller/blob/main/docs/configuration/credential-sources.md#ufm-ownership-policy
 
 `--extended`
 
@@ -53,6 +56,7 @@ Print help (see a summary with '-h')
 
 ```sh
 nico-admin-cli credential add-ufm --url https://192.0.2.10 --token mypassword
+nico-admin-cli credential add-ufm --url https://192.0.2.10
 ```
 
 ---

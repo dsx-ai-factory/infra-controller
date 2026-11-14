@@ -28,12 +28,19 @@ EXAMPLES:
 Add a UFM credential with a token:
     $ nico-admin-cli credential add-ufm --url https://192.0.2.10 --token mypassword
 
+Add a UFM credential with the SPIFFE default client certificate:
+    $ nico-admin-cli credential add-ufm --url https://192.0.2.10
+
 ")]
 pub(crate) struct Args {
     #[clap(long, required(true), help = "The UFM url")]
     url: String,
 
-    #[clap(long, default_value(""), help = "The UFM token")]
+    #[clap(
+        long,
+        default_value(""),
+        help = "The UFM token; omit it to store an empty password, which selects the SPIFFE default client certificate. Postgres storage and local credential sources change this; see https://github.com/dsx-ai-factory/infra-controller/blob/main/docs/configuration/credential-sources.md#ufm-ownership-policy"
+    )]
     token: String,
 }
 
