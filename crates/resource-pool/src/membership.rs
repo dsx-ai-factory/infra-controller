@@ -216,6 +216,7 @@ mod tests {
             "eligible values" {
                 Entries::Range(v1::ValueRange { start: Some(1_i64.into()), end: Some(1_i64.into()) }) => Yields(false),
                 Entries::Range(v1::ValueRange { start: Some(1_i64.into()), end: Some(2_i64.into()) }) => Yields(true),
+                Entries::Range(v1::ValueRange { start: Some(std::net::Ipv6Addr::LOCALHOST.into()), end: Some(std::net::Ipv6Addr::LOCALHOST.into()) }) => Yields(false),
                 Entries::AddressPrefix(v1::AddressPrefix { prefix: Some(Prefix::Ipv4(v1::Ipv4Prefix { network: vec![0; 4], prefix_len: 32 })) }) => Yields(false),
                 Entries::AddressPrefix(v1::AddressPrefix { prefix: Some(Prefix::Ipv4(v1::Ipv4Prefix { network: vec![0; 4], prefix_len: 31 })) }) => Yields(true),
                 Entries::AddressPrefix(v1::AddressPrefix { prefix: Some(Prefix::Ipv6(v1::Ipv6Prefix { network: vec![0; 16], prefix_len: 128 })) }) => Yields(true),

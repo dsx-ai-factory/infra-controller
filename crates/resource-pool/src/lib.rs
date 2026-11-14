@@ -49,6 +49,7 @@ mod tests;
 
 mod allocation;
 mod cleanup;
+mod growth;
 pub mod grpc;
 mod membership;
 mod owned;
@@ -64,6 +65,7 @@ pub use allocation::{Allocation, PreparedAllocationRequest};
 pub use cleanup::AllocationCleanup;
 use db::resource_pool::{ResourcePoolAllocationNotOwned, ResourcePoolDatabaseError};
 use db::{ConditionalWrite, DatabaseError};
+pub use growth::ResourcePoolGrowthError;
 use model::resource_pool::{OwnerType, ResourcePool};
 pub use owned::{AllocationCleanupStatus, AllocationStatus, OwnedAllocation};
 use registration::RegistrationError;

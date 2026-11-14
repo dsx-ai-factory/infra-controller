@@ -66,6 +66,7 @@ use carbide_redfish::libredfish::{BmcCredentialOps, RedfishClientPool};
 use carbide_redfish::nv_redfish::NvRedfishClientPool;
 use carbide_resource_pool::PoolDefinitionSource;
 use carbide_secrets::credentials::{CredentialManager, CredentialReader};
+use carbide_site_explorer::dpu_loopback::update_dpu_loopback_ips_v6;
 use carbide_site_explorer::{AuthenticatedBmcClient, EndpointExplorationService, SiteExplorer};
 use carbide_spdm_controller::context::SpdmStateHandlerServices;
 use carbide_spdm_controller::handler::SpdmAttestationStateHandler;
@@ -78,7 +79,6 @@ use carbide_vpc_prefix_controller::context::VpcPrefixStateHandlerServices;
 use carbide_vpc_prefix_controller::handler::VpcPrefixStateHandler;
 use carbide_vpc_prefix_controller::io::VpcPrefixStateControllerIO;
 use db::Transaction;
-use db::machine::update_dpu_loopback_ips_v6;
 use db::resource_pool::DefineResourcePoolError;
 use eyre::WrapErr;
 use futures_util::TryFutureExt;
@@ -1989,7 +1989,15 @@ async fn initialize_and_start_controllers<'a>(
     )
     .await?;
 
-    if let Err(error) = update_dpu_loopback_ips_v6(db_pool, common_pools).await {
+    if let Err(error) = update_dpu_loopback_ips_v6(
+        db_pool,
+        &api_service.resource_pool_registry,
+        common_pools,
+        &cancel_token,
+        &api_service.instrumentation,
+    )
+    .await
+    {
         tracing::error!(
             error = %error,
             "Failed to update IPv6 loopback IPs for DPUs",

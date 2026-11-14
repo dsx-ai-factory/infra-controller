@@ -146,6 +146,89 @@ impl RemotePoolFixture {
         .await
     }
 
+    /// `start_ipv6` moves the optional DPU IPv6 loopback pool to the provider.
+    /// The three provisioned values can be exposed incrementally by growth.
+    pub(in crate::tests) async fn start_ipv6(database: PgPool) -> eyre::Result<Self> {
+        let mut fixture = Self::start_with_typed_values(
+            database,
+            &[RemotePool {
+                name: model::resource_pool::common::LOOPBACK_IP_V6,
+                start: 0xa,
+                auto_assign: true,
+            }],
+            [0xa, 0xb, 0xc]
+                .into_iter()
+                .map(|last| std::net::Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, last).into())
+                .collect(),
+            v1::ValueDomain::IpAddress,
+            None,
+        )
+        .await?;
+        // Address fixtures are not registered until initialize; replace the
+        // generic fixture's IPv4 declaration with this pool's actual family.
+        fixture.definitions.insert(
+            model::resource_pool::common::LOOPBACK_IP_V6.to_owned(),
+            ResourcePoolDef {
+                pool_type: ResourcePoolType::Ipv6,
+                prefix: None,
+                ranges: vec![Range {
+                    start: "2001:db8::a".to_owned(),
+                    end: "2001:db8::d".to_owned(),
+                    auto_assign: true,
+                }],
+                delegate_prefix_len: None,
+            },
+        );
+        Ok(fixture)
+    }
+
+    /// `start_loopbacks` gives each family its own eligibility over one IP
+    /// provider, so sibling preparation failures can prove exact cleanup.
+    pub(in crate::tests) async fn start_loopbacks(database: PgPool) -> eyre::Result<Self> {
+        let first = std::net::Ipv4Addr::new(198, 51, 100, 10);
+        let mut values = vec![
+            first.into(),
+            std::net::Ipv4Addr::new(198, 51, 100, 11).into(),
+        ];
+        values.extend(
+            [0xa, 0xb, 0xc]
+                .map(|last| std::net::Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, last).into()),
+        );
+        let mut fixture = Self::start_with_typed_values(
+            database,
+            &[
+                RemotePool {
+                    name: model::resource_pool::common::LOOPBACK_IP,
+                    start: i64::from(u32::from(first)),
+                    auto_assign: true,
+                },
+                RemotePool {
+                    name: model::resource_pool::common::LOOPBACK_IP_V6,
+                    start: 0xa,
+                    auto_assign: true,
+                },
+            ],
+            values,
+            v1::ValueDomain::IpAddress,
+            None,
+        )
+        .await?;
+        fixture.definitions.insert(
+            model::resource_pool::common::LOOPBACK_IP_V6.to_owned(),
+            ResourcePoolDef {
+                pool_type: ResourcePoolType::Ipv6,
+                prefix: None,
+                ranges: vec![Range {
+                    start: "2001:db8::a".to_owned(),
+                    end: "2001:db8::d".to_owned(),
+                    auto_assign: true,
+                }],
+                delegate_prefix_len: None,
+            },
+        );
+        Ok(fixture)
+    }
+
     /// `start_asn` moves only the DPU ASN pool, retaining discovery's networks.
     pub(in crate::tests) async fn start_asn(database: PgPool) -> eyre::Result<Self> {
         Self::start_asn_with_policy(database, None).await
