@@ -21,6 +21,7 @@ use std::time::{Duration, Instant};
 
 use carbide_firmware::{FirmwareConfig, FirmwareConfigSnapshot};
 use carbide_redfish::boot_interface::BootInterfaceTarget;
+use chrono::Utc;
 use db::ConditionalWrite;
 use db::explored_endpoints::EndpointReportNotCurrent;
 use mac_address::MacAddress;
@@ -125,6 +126,7 @@ impl EndpointExplorationService {
     ) -> Option<EndpointProbeResult> {
         let guard = self.locks.try_claim(address.ip())?;
 
+        let started_at = Utc::now();
         let redfish_explore_started_at = Instant::now();
         let mut result = self
             .endpoint_explorer
@@ -148,6 +150,10 @@ impl EndpointExplorationService {
                 }) => previous.saturating_add(1),
                 _ => 1,
             };
+        }
+
+        if let Ok(report) = &mut result {
+            report.probe_started_at = Some(started_at);
         }
 
         Some(EndpointProbeResult {
