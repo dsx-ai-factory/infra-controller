@@ -40,6 +40,7 @@ pub(crate) struct Args {
     /// clears all groups.
     ///
     /// Each rack has rack_id and members; each member requires type, manufacturer, id, and cartridge_index.
+    /// cartridge_index must be an integer from 0 to 4294967295.
     /// Metadata contains name,
     /// description, and labels as an array of {key, value} objects. Export a
     /// compatible file with --format json expected-rack-group show.

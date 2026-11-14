@@ -18,8 +18,8 @@ nico-admin-cli expected-rack-group delete [--extended]
 
 Delete an expected rack group
 
-Deletion fails while expected NVLink domain declarations reference the
-group. Delete its declarations with expected-nvlink-domain delete first.
+Deletion fails while NVLink domain declarations reference the group.
+Delete its declarations with nvlink-domain delete first.
 
 ## OPTIONS
 
