@@ -53,6 +53,7 @@ pub(super) mod ib_fabric;
 pub(super) mod ib_partition;
 pub(super) mod instance;
 pub(super) mod instance_type;
+mod interface_preallocator;
 pub(super) mod lldp;
 pub(super) mod logical_partition;
 pub(super) mod machine;
