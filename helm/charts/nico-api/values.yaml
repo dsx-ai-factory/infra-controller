@@ -229,6 +229,7 @@ certificate:
   # at WaitingForNetworkConfig). See issue #2823.
   extraDnsNames:
     - carbide-api.forge
+    - grpc.nico
   extraUris: []
   # Dev/sim only: IP SANs for direct-IP TLS (e.g. API VIP). Leave empty in production.
   ipAddresses: []
