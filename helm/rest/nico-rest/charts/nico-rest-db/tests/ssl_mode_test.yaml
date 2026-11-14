@@ -1,0 +1,149 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+suite: db.sslMode (PGSSLMODE in migration and pg_isready containers)
+templates:
+  - migration-job.yaml
+values:
+  - ../values.yaml
+tests:
+  - it: omits PGSSLMODE from both containers by default
+    set:
+      global:
+        image:
+          repository: test
+          tag: t1
+    asserts:
+      - notContains:
+          any: true
+          path: spec.template.spec.containers[0].env
+          content:
+            name: PGSSLMODE
+      - notExists:
+          path: spec.template.spec.initContainers[0].env
+
+  - it: sets PGSSLMODE in both containers when configured
+    set:
+      global:
+        image:
+          repository: test
+          tag: t1
+      db:
+        sslMode: require
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: PGSSLMODE
+            value: require
+      - contains:
+          path: spec.template.spec.initContainers[0].env
+          content:
+            name: PGSSLMODE
+            value: require
+
+  - it: mounts the CA Secret and sets PGSSLROOTCERT in both containers when configured
+    set:
+      global:
+        image:
+          repository: test
+          tag: t1
+      db:
+        sslMode: verify-full
+        caCertSecret: pg-server-ca
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: PGSSLROOTCERT
+            value: /etc/nico-rest-db/ca-certificate/ca.crt
+      - contains:
+          path: spec.template.spec.initContainers[0].env
+          content:
+            name: PGSSLROOTCERT
+            value: /etc/nico-rest-db/ca-certificate/ca.crt
+      - contains:
+          path: spec.template.spec.containers[0].volumeMounts
+          content:
+            name: ca-certificate
+            mountPath: /etc/nico-rest-db/ca-certificate
+            readOnly: true
+      - contains:
+          path: spec.template.spec.initContainers[0].volumeMounts
+          content:
+            name: ca-certificate
+            mountPath: /etc/nico-rest-db/ca-certificate
+            readOnly: true
+      - contains:
+          path: spec.template.spec.volumes
+          content:
+            name: ca-certificate
+            secret:
+              secretName: pg-server-ca
+              defaultMode: 0444
+              items:
+                - key: ca.crt
+                  path: ca.crt
+
+  - it: uses the configured CA Secret key in PGSSLROOTCERT
+    set:
+      global:
+        image:
+          repository: test
+          tag: t1
+      db:
+        caCertSecret: pg-server-ca
+        caCertKey: tls.crt
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: PGSSLROOTCERT
+            value: /etc/nico-rest-db/ca-certificate/tls.crt
+
+  - it: omits the CA mount and PGSSLROOTCERT by default
+    set:
+      global:
+        image:
+          repository: test
+          tag: t1
+    asserts:
+      - notContains:
+          any: true
+          path: spec.template.spec.containers[0].env
+          content:
+            name: PGSSLROOTCERT
+      - notContains:
+          any: true
+          path: spec.template.spec.containers[0].volumeMounts
+          content:
+            name: ca-certificate
+      - notContains:
+          any: true
+          path: spec.template.spec.volumes
+          content:
+            name: ca-certificate
+
+  - it: rejects an invalid db.sslMode at render time
+    set:
+      global:
+        image:
+          repository: test
+          tag: t1
+      db:
+        sslMode: strict
+    asserts:
+      - failedTemplate:
+          errorMessage: 'invalid db.sslMode "strict": must be one of disable, allow, prefer, require, verify-ca, verify-full'
+
+  - it: rejects a verifying db.sslMode without a CA Secret
+    set:
+      global:
+        image:
+          repository: test
+          tag: t1
+      db:
+        sslMode: verify-full
+    asserts:
+      - failedTemplate:
+          errorMessage: 'db.sslMode "verify-full" requires db.caCertSecret: neither pgx nor pg_isready reads the system trust store, so the server certificate can only be verified through a mounted CA bundle'

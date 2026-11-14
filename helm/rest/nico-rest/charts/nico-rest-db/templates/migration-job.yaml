@@ -2,6 +2,14 @@
 # SPDX-License-Identifier: Apache-2.0
 
 {{- $tag := .Values.global.image.tag | default "latest" | replace "." "-" | replace "+" "-" }}
+{{- with .Values.db.sslMode }}
+{{- if not (has . (list "disable" "allow" "prefer" "require" "verify-ca" "verify-full")) }}
+{{- fail (printf "invalid db.sslMode %q: must be one of disable, allow, prefer, require, verify-ca, verify-full" .) }}
+{{- end }}
+{{- if and (has . (list "verify-ca" "verify-full")) (not $.Values.db.caCertSecret) }}
+{{- fail (printf "db.sslMode %q requires db.caCertSecret: neither pgx nor pg_isready reads the system trust store, so the server certificate can only be verified through a mounted CA bundle" .) }}
+{{- end }}
+{{- end }}
 apiVersion: batch/v1
 kind: Job
 metadata:
@@ -46,6 +54,23 @@ spec:
             capabilities:
               drop:
                 - ALL
+          {{- if or .Values.db.sslMode .Values.db.caCertSecret }}
+          env:
+            {{- with .Values.db.sslMode }}
+            - name: PGSSLMODE
+              value: {{ . | quote }}
+            {{- end }}
+            {{- if .Values.db.caCertSecret }}
+            - name: PGSSLROOTCERT
+              value: /etc/nico-rest-db/ca-certificate/{{ .Values.db.caCertKey }}
+            {{- end }}
+          {{- end }}
+          {{- if .Values.db.caCertSecret }}
+          volumeMounts:
+            - name: ca-certificate
+              mountPath: /etc/nico-rest-db/ca-certificate
+              readOnly: true
+          {{- end }}
           command:
             - pg_isready
             - -h
@@ -78,9 +103,22 @@ spec:
                 secretKeyRef:
                   name: {{ .Values.secrets.dbCreds }}
                   key: password
+            {{- with .Values.db.sslMode }}
+            - name: PGSSLMODE
+              value: {{ . | quote }}
+            {{- end }}
+            {{- if .Values.db.caCertSecret }}
+            - name: PGSSLROOTCERT
+              value: /etc/nico-rest-db/ca-certificate/{{ .Values.db.caCertKey }}
+            {{- end }}
           volumeMounts:
             - name: tmp
               mountPath: /tmp
+            {{- if .Values.db.caCertSecret }}
+            - name: ca-certificate
+              mountPath: /etc/nico-rest-db/ca-certificate
+              readOnly: true
+            {{- end }}
           resources:
             {{- toYaml .Values.resources | nindent 12 }}
       volumes:
@@ -88,3 +126,15 @@ spec:
         # under /tmp.
         - name: tmp
           emptyDir: {}
+        {{- if .Values.db.caCertSecret }}
+        # CA bundle for PGSSLROOTCERT when db.sslMode verifies the server
+        # certificate (verify-ca, verify-full). Only the configured key is
+        # projected so other keys in the Secret are not exposed.
+        - name: ca-certificate
+          secret:
+            secretName: {{ .Values.db.caCertSecret }}
+            defaultMode: 0444
+            items:
+              - key: {{ .Values.db.caCertKey }}
+                path: {{ .Values.db.caCertKey }}
+        {{- end }}

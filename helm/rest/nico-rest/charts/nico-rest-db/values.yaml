@@ -21,6 +21,25 @@ db:
   port: "5432"
   name: nico_rest
   user: nico-rest.nico
+  ## libpq TLS mode for the migration connection (PGSSLMODE in the migration
+  ## container and the pg_isready init container). Valid values: disable,
+  ## allow, prefer, require, verify-ca, verify-full. Empty (default) keeps
+  ## the binary's "prefer" default. require encrypts without verifying the
+  ## server certificate, but behaves like verify-ca when a root certificate
+  ## is present (see db.caCertSecret). Use verify-ca or verify-full when
+  ## certificate validation is required; verify-full additionally checks
+  ## the server hostname.
+  sslMode: ""
+  ## Name of a Secret holding the PEM CA bundle that signed the PostgreSQL
+  ## server certificate. When set, the Secret is mounted in the pg_isready
+  ## init container and the migration container, and PGSSLROOTCERT points at
+  ## the bundle. Required when db.sslMode is verify-ca or verify-full: the
+  ## migration (pgx) and pg_isready (libpq) do not read the system trust
+  ## store, so the server certificate can only be verified through this
+  ## bundle. Leave empty for modes that do not verify the server certificate.
+  caCertSecret: ""
+  ## Key within db.caCertSecret holding the PEM CA bundle.
+  caCertKey: ca.crt
 
 secrets:
   dbCreds: db-creds
