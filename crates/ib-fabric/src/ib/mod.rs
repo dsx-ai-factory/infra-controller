@@ -654,6 +654,52 @@ mod tests {
         manager
     }
 
+    /// Verifies missing SPIFFE material names the absent file and fails client
+    /// creation, so certificate authentication cannot silently become token authentication.
+    #[tokio::test]
+    async fn missing_cert_material_fails_with_the_file_name() {
+        check_cases_async(
+            [
+                // A missing trust root must identify the CA certificate.
+                Case {
+                    scenario: "missing CA certificate",
+                    input: "ca.crt",
+                    expect: Yields(()),
+                },
+                // A missing client certificate must identify the identity certificate.
+                Case {
+                    scenario: "missing client certificate",
+                    input: "tls.crt",
+                    expect: Yields(()),
+                },
+                // A missing private key must identify the client key.
+                Case {
+                    scenario: "missing client key",
+                    input: "tls.key",
+                    expect: Yields(()),
+                },
+            ],
+            |missing| async move {
+                let dir = cert_material_dir();
+                std::fs::remove_file(dir.path().join(missing))
+                    .map_err(|error| format!("remove {missing}: {error}"))?;
+                let manager = cert_manager(&dir);
+
+                let error = manager
+                    .new_client("f1")
+                    .await
+                    .err()
+                    .ok_or_else(|| format!("missing {missing} unexpectedly built a client"))?;
+                let message = error.to_string();
+                if !message.contains(missing) {
+                    return Err(format!("error does not name {missing}: {message}"));
+                }
+                Ok::<_, String>(())
+            },
+        )
+        .await;
+    }
+
     /// Each certificate file the credentials select is watched: rotating any
     /// one of them rebuilds the cached client.
     #[tokio::test]
