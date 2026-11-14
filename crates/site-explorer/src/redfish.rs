@@ -473,7 +473,7 @@ impl RedfishClient {
             return manager.reset(reset_type).await.map(drop).map_err(|err| {
                 map_nv_redfish_explore_error(bmc_explorer::Error::NvRedfish {
                     context: "manager reset",
-                    err,
+                    err: Box::new(err),
                 })
             });
         }
@@ -520,7 +520,7 @@ impl RedfishClient {
             return system.reset(Some(action)).await.map(drop).map_err(|err| {
                 map_nv_redfish_explore_error(bmc_explorer::Error::NvRedfish {
                     context: "system reset",
-                    err,
+                    err: Box::new(err),
                 })
             });
         }
@@ -952,7 +952,12 @@ async fn primary_system(
 fn nv_error(
     context: &'static str,
 ) -> impl FnOnce(nv_redfish::Error<RedfishBmc>) -> EndpointExplorationError {
-    move |err| map_nv_redfish_explore_error(bmc_explorer::Error::NvRedfish { context, err })
+    move |err| {
+        map_nv_redfish_explore_error(bmc_explorer::Error::NvRedfish {
+            context,
+            err: Box::new(err),
+        })
+    }
 }
 
 /// The libredfish `Manager.Reset` type for `reset_type`; libredfish supports
@@ -1094,7 +1099,7 @@ fn map_nv_redfish_explore_error(
     type BmcError = carbide_redfish::nv_redfish::BmcError;
     use carbide_redfish::nv_redfish::Error;
     match err {
-        bmc_explorer::Error::NvRedfish { context, err } => match err {
+        bmc_explorer::Error::NvRedfish { context, err } => match *err {
             Error::Bmc(err) => match err {
                 BmcError::ReqwestError(err) => {
                     let details = format!(

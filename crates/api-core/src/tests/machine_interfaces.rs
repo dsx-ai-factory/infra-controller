@@ -1278,7 +1278,7 @@ async fn find_all_interfaces_test_cases(
         );
         // The newer vendor wins
         assert_eq!(
-            response.interfaces[idx].vendor.clone().unwrap().to_string(),
+            response.interfaces[idx].vendor.as_deref().unwrap(),
             format!("NVIDIA {idx} 2")
         );
         assert_eq!(

@@ -66,7 +66,7 @@ impl RackMemberRegistration {
             | HardwareType::GenericAmi
             | HardwareType::HpeProliantDl380aGen11
             | HardwareType::GenericSupermicro => {
-                eyre::bail!("{} is not a rack member hardware type", self.hardware_type)
+                eyre::bail!("{} is not a rack member hardware type", self.hardware_type);
             }
         };
         Ok(ExpectedRackGroupMember {

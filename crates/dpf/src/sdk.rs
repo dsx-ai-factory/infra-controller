@@ -4685,7 +4685,7 @@ impl<R: DpuNodeRepository + DpuDeviceRepository + DpuRepository, L> DpfSdk<R, L>
                     labels: dev.metadata.labels.clone().unwrap_or_default(),
                     bmc_ip: dev.spec.bmc_ip.clone(),
                     bmc_port: dev.spec.bmc_port,
-                    serial_number: dev.spec.serial_number.clone(),
+                    serial_number: dev.spec.serial_number,
                 });
             }
 

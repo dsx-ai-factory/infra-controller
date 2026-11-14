@@ -145,7 +145,7 @@ async fn fixture_with_config(
             reads.fetch_add(1, Ordering::SeqCst);
             deployments.lock().unwrap().push(deployment);
             if reject_reads
-                .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |remaining| {
+                .try_update(Ordering::SeqCst, Ordering::SeqCst, |remaining| {
                     remaining.checked_sub(1)
                 })
                 .is_ok()

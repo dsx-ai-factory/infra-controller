@@ -965,7 +965,7 @@ impl From<forgerpc::Machine> for MachineDetail<'_> {
                 if let Some(props) = iface.pci_properties {
                     iface_display.device = props.device;
                     iface_display.vendor = props.vendor;
-                    iface_display.slot = props.slot.clone().unwrap_or_default();
+                    iface_display.slot = props.slot.unwrap_or_default();
                 }
                 if let Some(ib_status) = status.infiniband.as_ref() {
                     iface_display.observed_at =

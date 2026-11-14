@@ -395,7 +395,7 @@ macro_rules! version {
              option_env!("FORGE_BUILD_RUSTC_VERSION").unwrap_or_default(),
              option_env!("FORGE_BUILD_USER").unwrap_or_default(),
              option_env!("FORGE_BUILD_HOSTNAME").unwrap_or_default(),
-         );
+         )
      };
  }
 

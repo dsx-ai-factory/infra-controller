@@ -33,6 +33,7 @@ pub(crate) type SotDocument = Map<String, Value>;
 
 /// Report the catalog. NICo lists it unfiltered and reads only the ids, so
 /// the request's filters are not applied.
+#[allow(clippy::unused_async)] // needs async for `rack_manager_impl!` macro support
 pub(crate) async fn list_firmware_objects(
     mock: &RmsMock,
     _request: tonic::Request<rms::ListFirmwareObjectsRequest>,
@@ -57,6 +58,7 @@ pub(crate) async fn list_firmware_objects(
 /// The document is checked before any job is issued. Each matched node gets
 /// a child job keyed by its own node id; an unmatched node is a per-node
 /// failure with no child.
+#[allow(clippy::unused_async)] // needs async for `rack_manager_impl!` macro support
 pub(crate) async fn apply_firmware_object(
     mock: &RmsMock,
     request: tonic::Request<rms::ApplyFirmwareObjectRequest>,
@@ -87,6 +89,7 @@ pub(crate) async fn apply_firmware_object(
 
 /// Report progress of a firmware job, parent or child. A job this process
 /// never issued is `RETURN_CODE_FAILURE`, as the proto specifies.
+#[allow(clippy::unused_async)] // needs async for `rack_manager_impl!` macro support
 pub(crate) async fn get_firmware_job_status(
     mock: &RmsMock,
     request: tonic::Request<rms::GetFirmwareJobStatusRequest>,

@@ -605,7 +605,7 @@ async fn test_site_explorer_power_shelf_creation_limit(
             ip_address = %response.address,
             "DHCP assigned ip"
         );
-        power_shelf.ip = response.address.clone();
+        power_shelf.ip = response.address;
     }
     // Create expected power shelf entries in the database
     let mut txn = env.pool.begin().await?;

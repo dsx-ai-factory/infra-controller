@@ -72,8 +72,12 @@ pub(super) async fn restart_ovs(
     .await;
     let restart = match restart {
         Ok(Ok(output)) => output,
-        Ok(Err(e)) => eyre::bail!("failed to execute systemctl restart: {}", e),
-        Err(_) => eyre::bail!("timeout (180s) waiting for ovs-vswitchd.service restart"),
+        Ok(Err(e)) => {
+            eyre::bail!("failed to execute systemctl restart: {}", e);
+        }
+        Err(_) => {
+            eyre::bail!("timeout (180s) waiting for ovs-vswitchd.service restart");
+        }
     };
 
     if !restart.status.success() {

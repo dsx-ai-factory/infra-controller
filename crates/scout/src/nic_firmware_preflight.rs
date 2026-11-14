@@ -76,12 +76,20 @@ impl FirmwareAction {
         tokio::select! {
             biased;
             received = interrupt.recv() => match received {
-                Some(()) => eyre::bail!("firmware preflight cancelled by SIGINT"),
-                None => eyre::bail!("firmware preflight SIGINT handler closed"),
+                Some(()) => {
+                    eyre::bail!("firmware preflight cancelled by SIGINT");
+                }
+                None => {
+                    eyre::bail!("firmware preflight SIGINT handler closed");
+                }
             },
             received = terminate.recv() => match received {
-                Some(()) => eyre::bail!("firmware preflight cancelled by SIGTERM"),
-                None => eyre::bail!("firmware preflight SIGTERM handler closed"),
+                Some(()) => {
+                    eyre::bail!("firmware preflight cancelled by SIGTERM");
+                }
+                None => {
+                    eyre::bail!("firmware preflight SIGTERM handler closed");
+                }
             },
             result = async {
                 match self {
@@ -231,7 +239,9 @@ impl PreflightArgs {
                 sha256.as_str(),
             )),
             (None, None) => None,
-            _ => eyre::bail!("device-config URL and SHA-256 digest must be supplied together"),
+            _ => {
+                eyre::bail!("device-config URL and SHA-256 digest must be supplied together");
+            }
         };
         Ok((image_url, device_config_source))
     }
