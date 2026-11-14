@@ -137,6 +137,10 @@ impl ComputeTrayManager for RecordingComputeTrayManager {
         &self,
         endpoints: &[ComputeTrayEndpoint],
     ) -> Result<Vec<ComputeTrayFirmwareUpdateStatus>, ComponentManagerError> {
+        self.submitted_credentials
+            .lock()
+            .unwrap()
+            .extend(endpoints.iter().map(|ep| ep.bmc_credentials.clone()));
         self.inner.get_firmware_status(endpoints).await
     }
 
@@ -203,6 +207,11 @@ impl NvSwitchManager for RecordingNvSwitchManager {
         &self,
         endpoints: &[SwitchEndpoint],
     ) -> Result<Vec<SwitchFirmwareUpdateStatus>, ComponentManagerError> {
+        self.submitted_credentials.lock().unwrap().extend(
+            endpoints
+                .iter()
+                .flat_map(|ep| [ep.bmc_credentials.clone(), ep.nvos_credentials.clone()]),
+        );
         self.inner.get_firmware_status(endpoints).await
     }
 
@@ -300,6 +309,10 @@ impl PowerShelfManager for RecordingPowerShelfManager {
         &self,
         endpoints: &[PowerShelfEndpoint],
     ) -> Result<Vec<PowerShelfFirmwareUpdateStatus>, ComponentManagerError> {
+        self.submitted_credentials
+            .lock()
+            .unwrap()
+            .extend(endpoints.iter().map(|ep| ep.pmc_credentials.clone()));
         self.inner.get_firmware_status(endpoints).await
     }
 
@@ -1249,6 +1262,17 @@ async fn direct_dispatch_credential_overrides_reach_power_and_firmware_backends(
                 FirmwareTarget::Racks(_) => unreachable!(),
             };
             firmware.credential_overrides = Some(request_credentials(true));
+            use rpc::get_component_firmware_status_request::Target as StatusTarget;
+            let status_target = match &power_target {
+                PowerTarget::MachineIds(ids) => StatusTarget::MachineIds(ids.clone()),
+                PowerTarget::SwitchIds(ids) => StatusTarget::SwitchIds(ids.clone()),
+                PowerTarget::PowerShelfIds(ids) => StatusTarget::PowerShelfIds(ids.clone()),
+                PowerTarget::ComputeBmcMacs(macs) => StatusTarget::ComputeBmcMacs(macs.clone()),
+                PowerTarget::SwitchBmcMacs(macs) => StatusTarget::SwitchBmcMacs(macs.clone()),
+                PowerTarget::PowerShelfPmcMacs(macs) => {
+                    StatusTarget::PowerShelfPmcMacs(macs.clone())
+                }
+            };
             let power = rpc::ComponentPowerControlRequest {
                 target: Some(power_target),
                 action: ::rpc::common::SystemPowerControl::On as i32,
@@ -1279,6 +1303,27 @@ async fn direct_dispatch_credential_overrides_reach_power_and_firmware_backends(
                     "{results:?}"
                 );
             }
+            let statuses = crate::handlers::component_manager::get_component_firmware_status(
+                &fixture.env.api,
+                Request::new(rpc::GetComponentFirmwareStatusRequest {
+                    target: Some(status_target),
+                    credential_overrides: Some(request_credentials(true)),
+                }),
+            )
+            .await?
+            .into_inner()
+            .statuses;
+            assert!(!statuses.is_empty(), "{mac}, ingested={ingested}");
+            assert!(
+                statuses
+                    .iter()
+                    .all(|status| status
+                        .result
+                        .as_ref()
+                        .is_some_and(|result| result.status
+                            == rpc::ComponentManagerStatusCode::Success as i32)),
+                "{statuses:?}"
+            );
             let expected: Vec<_> = [expected.bmc, expected.nvos]
                 .into_iter()
                 .flatten()
@@ -1286,7 +1331,7 @@ async fn direct_dispatch_credential_overrides_reach_power_and_firmware_backends(
                 .collect();
             assert_eq!(
                 *recorded.lock().unwrap(),
-                [expected.clone(), expected].concat(),
+                [expected.clone(), expected.clone(), expected].concat(),
                 "{mac}, ingested={ingested}"
             );
             recorded.lock().unwrap().clear();

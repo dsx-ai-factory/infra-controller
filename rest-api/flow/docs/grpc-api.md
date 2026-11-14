@@ -52,7 +52,9 @@
   - [DeleteRackResponse](#v1-DeleteRackResponse)
   - [DeleteTaskScheduleRequest](#v1-DeleteTaskScheduleRequest)
   - [DetachRacksFromNVLDomainRequest](#v1-DetachRacksFromNVLDomainRequest)
+  - [DeviceCredentialOverrides](#v1-DeviceCredentialOverrides)
   - [DeviceInfo](#v1-DeviceInfo)
+  - [DeviceLogin](#v1-DeviceLogin)
   - [DeviceSerialInfo](#v1-DeviceSerialInfo)
   - [DisableEventRuleRequest](#v1-DisableEventRuleRequest)
   - [DisassociateRuleFromRackRequest](#v1-DisassociateRuleFromRackRequest)
@@ -772,6 +774,18 @@ scope entries. In-flight tasks are not cancelled.
 | ----- | ---- | ----- | ----------- |
 | rack_identifiers | [Identifier](#v1-Identifier) | repeated |  |
 
+<a name="v1-DeviceCredentialOverrides"></a>
+
+### DeviceCredentialOverrides
+
+DeviceCredentialOverrides selects credentials for device access, independently
+of firmware download authentication. At least one complete pair is required.
+
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| bmc | [DeviceLogin](#v1-DeviceLogin) |  |  |
+| nvos | [DeviceLogin](#v1-DeviceLogin) |  |  |
+
 <a name="v1-DeviceInfo"></a>
 
 ### DeviceInfo
@@ -784,6 +798,17 @@ scope entries. In-flight tasks are not cancelled.
 | model | [string](#string) | optional |  |
 | serial_number | [string](#string) |  |  |
 | description | [string](#string) | optional |  |
+
+<a name="v1-DeviceLogin"></a>
+
+### DeviceLogin
+
+DeviceLogin contains a nonempty username and password for device access.
+
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| username | [string](#string) |  |  |
+| password | [string](#string) |  |  |
 
 <a name="v1-DeviceSerialInfo"></a>
 
@@ -2814,6 +2839,7 @@ UpdateTaskScheduleScopeResponse returns the complete scope after reconciliation.
 | override_readiness_check | [bool](#bool) |  | When true, proceed with the firmware update even if one or more target components (or, for rack-scoped components, any host on the owning rack) are reported as not ready for the operation by their persisted ComponentOperationStatus. The flag is intended for operator-supervised maintenance windows where the tenant impact has been acknowledged out-of-band; setting it bypasses the readiness gate that would otherwise block disruptive operations against tenanted hardware. The bypass is recorded in the server log. |
 | authentication_data | [FirmwareAuthenticationData](#v1-FirmwareAuthenticationData) |  | Optional, write-only authentication data for firmware downloads. It is not supported for DPU-only updates or by the legacy NICo compute firmware controller. |
 | override_version_check | [bool](#bool) |  | Overrides firmware version-based checks when deciding whether to apply the update. This allows same-version reapplication and downgrade when the selected component backend supports those operations. It does not bypass readiness checks or state-controller routing. |
+| device_credential_overrides | [DeviceCredentialOverrides](#v1-DeviceCredentialOverrides) |  | Write-only device login overrides for direct firmware dispatch. Requires override_readiness_check. Unsupported for DPU updates and legacy compute controllers. Omitted pairs retain configured lookup. |
 
 <a name="v1-ValidateComponentsRequest"></a>
 

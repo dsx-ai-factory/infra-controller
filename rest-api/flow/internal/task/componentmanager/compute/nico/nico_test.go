@@ -169,14 +169,18 @@ func TestMACTargetRequests(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, macs, client.LastGetComponentInventoryRequest().GetComputeBmcMacs().GetMacAddresses())
 
+	credentials := &corev1.ComponentCredentialOverrides{Bmc: &corev1.UsernamePassword{Username: "operator", Password: "device-value"}}
 	require.NoError(t, m.FirmwareControl(context.Background(), target, operations.FirmwareControlTaskInfo{
+		OverrideReadinessCheck: true, CredentialOverrides: credentials,
 		TargetVersion: "fw-bundle-id-v1",
 	}))
 	assert.Equal(t, macs, client.LastUpdateComponentFirmwareRequest().GetComputeTrays().GetBmcMacs().GetMacAddresses())
 
-	_, err = m.GetFirmwareStatus(context.Background(), target)
+	require.Equal(t, credentials, client.LastUpdateComponentFirmwareRequest().GetCredentialOverrides())
+	_, err = m.GetFirmwareStatusWithCredentials(context.Background(), target, credentials)
 	require.NoError(t, err)
 	assert.Equal(t, macs, client.LastGetComponentFirmwareStatusRequest().GetComputeBmcMacs().GetMacAddresses())
+	require.Equal(t, credentials, client.LastGetComponentFirmwareStatusRequest().GetCredentialOverrides())
 }
 
 func TestPowerControl_RejectsUnsupportedOperation(t *testing.T) {

@@ -110,7 +110,7 @@ func TaskOperationTo(operation operations.Operation) (*pb.TaskOperation, error) 
 			},
 		}, nil
 	case *operations.FirmwareControlTaskInfo:
-		if typed.AuthenticationData != nil || typed.AccessToken != "" {
+		if typed.AuthenticationData != nil || typed.AccessToken != "" || typed.DeviceCredentials != nil || typed.CredentialOverrides != nil {
 			return nil, fmt.Errorf("firmware credentials are not supported in task operations")
 		}
 		firmwareOperation, err := firmwareControlOperationTo(typed.Operation)

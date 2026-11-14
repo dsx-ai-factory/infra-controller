@@ -18,14 +18,18 @@ func TestObfuscateRequestBody(t *testing.T) {
 		{
 			name: "obfuscates authenticationData and preserves non-secret fields",
 			body: map[string]interface{}{
-				"siteId": "site-1",
+				"siteId":                    "site-1",
+				"firmwareDownloadAuth":      map[string]interface{}{"shared": "download-value"},
+				"deviceCredentialOverrides": map[string]interface{}{"bmc": map[string]interface{}{"username": "operator", "password": "device-value"}},
 				"authenticationData": map[string]interface{}{
 					"shared": "download-token",
 				},
 			},
 			want: map[string]interface{}{
-				"siteId":             "site-1",
-				"authenticationData": auditObfuscatedValue,
+				"siteId":                    "site-1",
+				"authenticationData":        auditObfuscatedValue,
+				"firmwareDownloadAuth":      auditObfuscatedValue,
+				"deviceCredentialOverrides": auditObfuscatedValue,
 			},
 		},
 		{

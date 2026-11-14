@@ -2210,6 +2210,7 @@ func ExecuteFirmwareUpdateWorkflow(
 	version *string,
 	targets []string,
 	authenticationData *flowv1.FirmwareAuthenticationData,
+	deviceCredentialOverrides *flowv1.DeviceCredentialOverrides,
 	siteID string,
 	ruleID *string,
 	overrideReadinessCheck bool,
@@ -2218,21 +2219,22 @@ func ExecuteFirmwareUpdateWorkflow(
 	entityName string,
 ) (*flowv1.SubmitTaskResponse, *cutil.APIError) {
 	flowRequest := &flowv1.UpgradeFirmwareRequest{
-		TargetSpec:             targetSpec,
-		TargetVersion:          version,
-		SubTargets:             targets,
-		Description:            fmt.Sprintf("API firmware update %s", entityName),
-		RuleId:                 GetFlowUUIDPtr(ruleID),
-		OverrideReadinessCheck: overrideReadinessCheck,
-		OverrideVersionCheck:   overrideVersionCheck,
-		AuthenticationData:     authenticationData,
+		TargetSpec:                targetSpec,
+		TargetVersion:             version,
+		SubTargets:                targets,
+		Description:               fmt.Sprintf("API firmware update %s", entityName),
+		RuleId:                    GetFlowUUIDPtr(ruleID),
+		OverrideReadinessCheck:    overrideReadinessCheck,
+		OverrideVersionCheck:      overrideVersionCheck,
+		AuthenticationData:        authenticationData,
+		DeviceCredentialOverrides: deviceCredentialOverrides,
 	}
 	if overrideVersionCheck {
 		workflowID += "-override-version-check"
 	}
 
 	conflictPolicy := temporalEnums.WORKFLOW_ID_CONFLICT_POLICY_USE_EXISTING
-	if authenticationData != nil {
+	if authenticationData != nil || deviceCredentialOverrides != nil {
 		// A deterministic ID could attach a request carrying different
 		// credentials to an in-flight execution for the same target. A random,
 		// non-secret suffix prevents credential substitution without exposing a
@@ -2247,7 +2249,7 @@ func ExecuteFirmwareUpdateWorkflow(
 		flowv1.Flow_UpgradeFirmware_FullMethodName,
 		flowRequest, &flowResponse,
 		workflowID, conflictPolicy,
-		siteID, "authenticationData",
+		siteID, "authenticationData", "deviceCredentialOverrides",
 	)
 	if proxyErr != nil {
 		return nil, proxyErr

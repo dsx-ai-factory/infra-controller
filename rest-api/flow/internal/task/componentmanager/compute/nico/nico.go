@@ -367,6 +367,11 @@ func (m *Manager) FirmwareControl(
 	target common.Target,
 	info operations.FirmwareControlTaskInfo,
 ) error {
+	err := m.ValidateFirmwareControl(info)
+	if err != nil {
+		return err
+	}
+
 	log.Debug().
 		Str("components", target.String()).
 		Str("target_version", info.TargetVersion).
@@ -415,7 +420,7 @@ func (m *Manager) FirmwareControl(
 			computeTraySubs,
 			info.AccessToken,
 			info.OverrideVersionCheck,
-			info.OverrideReadinessCheck,
+			info.OverrideReadinessCheck, info.CredentialOverrides,
 		); err != nil {
 			return err
 		}
@@ -447,6 +452,7 @@ func (m *Manager) firmwareControlComputeTrays(
 	accessToken string,
 	overrideVersionCheck bool,
 	bypassStateController bool,
+	credentials *corev1.ComponentCredentialOverrides,
 ) error {
 	subComponents, err := firmwarecomponents.ParseNICoComputeTray(computeTraySubs)
 	if err != nil {
@@ -464,6 +470,7 @@ func (m *Manager) firmwareControlComputeTrays(
 		TargetVersion:         targetVersion,
 		ForceUpdate:           overrideVersionCheck,
 		BypassStateController: bypassStateController,
+		CredentialOverrides:   credentials,
 	}
 	if accessToken != "" {
 		req.AccessToken = &accessToken
@@ -471,11 +478,17 @@ func (m *Manager) firmwareControlComputeTrays(
 
 	resp, err := m.nicoClient.UpdateComponentFirmware(ctx, req)
 	if err != nil {
+		if credentials != nil {
+			return fmt.Errorf("credential-bearing firmware dispatch failed")
+		}
 		return fmt.Errorf("UpdateComponentFirmware failed: %w", err)
 	}
 
 	for _, r := range resp.GetResults() {
 		if r.GetStatus() != corev1.ComponentManagerStatusCode_COMPONENT_MANAGER_STATUS_CODE_SUCCESS {
+			if credentials != nil {
+				return fmt.Errorf("credential-bearing firmware dispatch was rejected")
+			}
 			return fmt.Errorf("firmware update failed for %s: %s", nicoprovider.ResultIdentifier(r, target.UsesMACAddresses()), r.GetError())
 		}
 	}
@@ -504,9 +517,15 @@ func (m *Manager) firmwareControlDpus(
 // BIOS, CEC, NIC, CPLD_*, GPU, CX7, ...) for the same tray, so the
 // per-tray result aggregates them: any failure -> Failed; all completed
 // -> Completed; otherwise still in progress.
-func (m *Manager) GetFirmwareStatus(
+func (m *Manager) GetFirmwareStatus(ctx context.Context, target common.Target) (map[string]operations.FirmwareUpdateStatus, error) {
+	return m.GetFirmwareStatusWithCredentials(ctx, target, nil)
+}
+
+// GetFirmwareStatusWithCredentials forwards the dispatch credentials for polling.
+func (m *Manager) GetFirmwareStatusWithCredentials(
 	ctx context.Context,
 	target common.Target,
+	credentials *corev1.ComponentCredentialOverrides,
 ) (map[string]operations.FirmwareUpdateStatus, error) {
 	log.Debug().
 		Str("components", target.String()).
@@ -516,7 +535,7 @@ func (m *Manager) GetFirmwareStatus(
 		return nil, fmt.Errorf("target is invalid: %w", err)
 	}
 
-	req := &corev1.GetComponentFirmwareStatusRequest{}
+	req := &corev1.GetComponentFirmwareStatusRequest{CredentialOverrides: credentials}
 	if target.UsesMACAddresses() {
 		req.Target = &corev1.GetComponentFirmwareStatusRequest_ComputeBmcMacs{
 			ComputeBmcMacs: &corev1.MacAddressList{MacAddresses: target.Identifiers},
@@ -529,11 +548,17 @@ func (m *Manager) GetFirmwareStatus(
 
 	resp, err := m.nicoClient.GetComponentFirmwareStatus(ctx, req)
 	if err != nil {
+		if credentials != nil {
+			return nil, fmt.Errorf("credential-bearing firmware status query failed")
+		}
 		return nil, fmt.Errorf("GetComponentFirmwareStatus failed: %w", err)
 	}
 
 	grouped := make(map[string][]*corev1.FirmwareUpdateStatus)
 	for _, s := range resp.GetStatuses() {
+		if credentials != nil && s.GetResult().GetError() != "" {
+			s.Result.Error = "firmware status query failed"
+		}
 		compID := nicoprovider.ResultIdentifier(s.GetResult(), target.UsesMACAddresses())
 		grouped[compID] = append(grouped[compID], s)
 	}
@@ -753,4 +778,24 @@ func normalizeDecommissionState(raw string) string {
 		return "Decommissioned"
 	}
 	return "Decommissioning/" + state.DecommissioningState.State
+}
+
+// ValidateFirmwareControl rejects device credentials that this execution path
+// would otherwise ignore. It runs before any device operation.
+func (m *Manager) ValidateFirmwareControl(info operations.FirmwareControlTaskInfo) error {
+	if info.DeviceCredentials == nil && info.CredentialOverrides == nil {
+		return nil
+	}
+	if !info.OverrideReadinessCheck {
+		return fmt.Errorf("device credential overrides require readiness override for direct dispatch")
+	}
+	for _, subTarget := range info.SubTargets {
+		if subTarget == "dpu" {
+			return fmt.Errorf("DPU updates do not support device credential overrides")
+		}
+	}
+	if info.CredentialOverrides.GetNvos() != nil {
+		return fmt.Errorf("NVOS credentials are supported only for switches")
+	}
+	return nil
 }

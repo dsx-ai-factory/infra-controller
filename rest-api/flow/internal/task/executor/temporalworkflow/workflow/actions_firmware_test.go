@@ -16,6 +16,7 @@ import (
 	"go.temporal.io/sdk/testsuite"
 	temporalworkflow "go.temporal.io/sdk/workflow"
 
+	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/secret"
 	activitypkg "github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/executor/temporalworkflow/activity"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/executor/temporalworkflow/common"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/operationrules"
@@ -228,6 +229,55 @@ func TestExecuteFirmwareControlAction(t *testing.T) {
 			defer statusMu.Unlock()
 			require.GreaterOrEqual(t, statusCalls, tc.wantMinimumPolls)
 			env.AssertExpectations(t)
+		})
+	}
+}
+
+func credentialFirmwareTestWorkflow(ctx temporalworkflow.Context, target common.Target, info operations.FirmwareControlTaskInfo) error {
+	ctx = temporalworkflow.WithActivityOptions(ctx, temporalworkflow.ActivityOptions{StartToCloseTimeout: time.Second})
+	return executeFirmwareControlAction(actionExecutionContext{workflowContext: ctx, target: target, operationInfo: info, config: operationrules.ActionConfig{Parameters: map[string]any{}}})
+}
+
+func TestExecuteFirmwareControlActionDeviceCredentials(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		credentials *secret.EncryptedData
+	}{
+		{"legacy request", nil},
+		{"encrypted request", &secret.EncryptedData{Version: 1, KeyID: "test-key", Ciphertext: []byte("ciphertext-only")}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var suite testsuite.WorkflowTestSuite
+			env := suite.NewTestWorkflowEnvironment()
+			target := common.Target{Type: devicetypes.ComponentTypeNVSwitch, Identifiers: []string{"switch-1"}}
+			controlName := activitypkg.NameFirmwareControl
+			statusName := activitypkg.NameGetFirmwareStatus
+			if tc.credentials != nil {
+				controlName = activitypkg.NameFirmwareControlWithCredentials
+				statusName = activitypkg.NameGetFirmwareStatusWithCredentials
+			}
+			control := func(_ context.Context, _ common.Target, info operations.FirmwareControlTaskInfo) error {
+				require.Equal(t, tc.credentials, info.DeviceCredentials)
+				require.Nil(t, info.CredentialOverrides)
+				return nil
+			}
+			env.RegisterActivityWithOptions(control, activity.RegisterOptions{Name: controlName})
+			result := &activitypkg.GetFirmwareStatusResult{Statuses: map[string]operations.FirmwareUpdateStatus{"switch-1": firmwareStatus("switch-1", operations.FirmwareUpdateStateCompleted)}}
+			if tc.credentials != nil {
+				poll := func(_ context.Context, _ common.Target, envelope *secret.EncryptedData) (*activitypkg.GetFirmwareStatusResult, error) {
+					require.Equal(t, tc.credentials, envelope)
+					return result, nil
+				}
+				env.RegisterActivityWithOptions(poll, activity.RegisterOptions{Name: statusName})
+			} else {
+				poll := func(_ context.Context, _ common.Target) (*activitypkg.GetFirmwareStatusResult, error) {
+					return result, nil
+				}
+				env.RegisterActivityWithOptions(poll, activity.RegisterOptions{Name: statusName})
+			}
+			env.ExecuteWorkflow(credentialFirmwareTestWorkflow, target, operations.FirmwareControlTaskInfo{Operation: operations.FirmwareOperationUpgrade, DeviceCredentials: tc.credentials})
+			require.True(t, env.IsWorkflowCompleted())
+			require.NoError(t, env.GetWorkflowError())
 		})
 	}
 }

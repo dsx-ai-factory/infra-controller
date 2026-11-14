@@ -14,6 +14,7 @@ import (
 
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/secret"
 	taskcommon "github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/common"
+	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
 )
 
 // ExtractRuleID peeks at the "rule_id" field in a serialized operation info
@@ -317,6 +318,10 @@ type FirmwareControlTaskInfo struct {
 	// it and sets AccessToken only on its in-memory copy.
 	AuthenticationData *secret.EncryptedData `json:"authentication_data,omitempty"`
 	AccessToken        string                `json:"-"`
+	// DeviceCredentials stays encrypted in persisted tasks and workflow histories.
+	DeviceCredentials *secret.EncryptedData `json:"device_credentials,omitempty"`
+	// CredentialOverrides is populated only in the activity's in-memory copy.
+	CredentialOverrides *corev1.ComponentCredentialOverrides `json:"-"`
 }
 
 func (t *FirmwareControlTaskInfo) Validate() error {
@@ -340,6 +345,11 @@ func (t *FirmwareControlTaskInfo) Clone() Operation {
 		authenticationData := *t.AuthenticationData
 		authenticationData.Ciphertext = slices.Clone(t.AuthenticationData.Ciphertext)
 		cloned.AuthenticationData = &authenticationData
+	}
+	if t.DeviceCredentials != nil {
+		envelope := *t.DeviceCredentials
+		envelope.Ciphertext = slices.Clone(envelope.Ciphertext)
+		cloned.DeviceCredentials = &envelope
 	}
 	return &cloned
 }

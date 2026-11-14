@@ -30,8 +30,11 @@ type BatchRackFirmwareUpdateRequest struct {
 	Filter *RackFilter `json:"filter,omitempty"`
 	// Target firmware input serialized as a string. Its format is a contract between the caller and the component backend selected for the target. The REST API and Flow orchestration otherwise preserve this value. Flow only unwraps the optional per-tray mapping described below before passing the value to the selected component manager.  Flow's built-in firmware rule includes Compute and NVSwitch stages. Do not use a compute-specific host-catalog component map as shared input for other backends. For mixed backends, use the per-tray mapping below with values appropriate to each selected backend.  For RMS-backed rack-scale firmware updates, use the complete SOT firmware-object JSON document, not a release version such as `24.11.0`. A SOT document is an object with `ProductName` and `Milestones` at the top level. Each milestone contains `Name`, `State`, and `BoardSKUs`; each board SKU contains `Name`, `Type`, and `Components`. Component groups contain `Software` and `Firmware` entries describing `Component`, `Version`, `Type`, `FileNames`, artifact `Locations`, and optional `SubComponents`. Obtain the complete document from the SOT release process; the abbreviated examples are not executable input. Supply a complete document covering all component types selected by the operation rule.  The string can contain either one shared firmware input for all selected trays or a JSON mapping from tray type (`compute`, `nvswitch`, `powershelf`) to firmware input. Each mapping value must satisfy its selected backend's contract. Flow forwards object values as raw JSON and unquotes string values. These exact lowercase top-level keys are reserved for per-tray mappings; a shared JSON object must not contain any of them. A missing tray type in the mapping skips that component type. A non-empty, non-layered value is forwarded unchanged. For rack-scale RMS components, an omitted, null, empty, or whitespace-only value uses the owning rack profile's configured firmware object. Resolution or fetch failures are reported by the asynchronous task.
 	Version NullableString `json:"version,omitempty"`
-	// Optional, write-only authentication data for firmware downloads. Not supported for DPU-only updates or by the legacy NICo compute firmware controller.
+	// Deprecated alias of firmwareDownloadAuth. Supply at most one non-null alias. Retained for existing clients.
+	// Deprecated
 	AuthenticationData NullableFirmwareAuthenticationData `json:"authenticationData,omitempty"`
+	// Optional authentication for downloading firmware files, independent of device login credentials. Mutually exclusive with a non-null authenticationData. Omitted or null means no download authentication. Not supported for DPU-only updates or by the legacy NICo compute firmware controller.
+	FirmwareDownloadAuth NullableFirmwareAuthenticationData `json:"firmwareDownloadAuth,omitempty"`
 	// Optional Operation Rule UUID. When set, pins every task spawned by this batch to the named rule and overrides Flow's default rule resolution.
 	RuleId *string `json:"ruleId,omitempty"`
 	// When true, request that the selected component backend override firmware version-based checks when deciding whether to apply the update. This permits same-version reapplication and downgrade when supported. It does not bypass readiness checks or state-controller routing.
@@ -168,6 +171,7 @@ func (o *BatchRackFirmwareUpdateRequest) UnsetVersion() {
 }
 
 // GetAuthenticationData returns the AuthenticationData field value if set, zero value otherwise (both if not set or set to explicit null).
+// Deprecated
 func (o *BatchRackFirmwareUpdateRequest) GetAuthenticationData() FirmwareAuthenticationData {
 	if o == nil || IsNil(o.AuthenticationData.Get()) {
 		var ret FirmwareAuthenticationData
@@ -179,6 +183,7 @@ func (o *BatchRackFirmwareUpdateRequest) GetAuthenticationData() FirmwareAuthent
 // GetAuthenticationDataOk returns a tuple with the AuthenticationData field value if set, nil otherwise
 // and a boolean to check if the value has been set.
 // NOTE: If the value is an explicit nil, `nil, true` will be returned
+// Deprecated
 func (o *BatchRackFirmwareUpdateRequest) GetAuthenticationDataOk() (*FirmwareAuthenticationData, bool) {
 	if o == nil {
 		return nil, false
@@ -196,6 +201,7 @@ func (o *BatchRackFirmwareUpdateRequest) HasAuthenticationData() bool {
 }
 
 // SetAuthenticationData gets a reference to the given NullableFirmwareAuthenticationData and assigns it to the AuthenticationData field.
+// Deprecated
 func (o *BatchRackFirmwareUpdateRequest) SetAuthenticationData(v FirmwareAuthenticationData) {
 	o.AuthenticationData.Set(&v)
 }
@@ -208,6 +214,49 @@ func (o *BatchRackFirmwareUpdateRequest) SetAuthenticationDataNil() {
 // UnsetAuthenticationData ensures that no value is present for AuthenticationData, not even an explicit nil
 func (o *BatchRackFirmwareUpdateRequest) UnsetAuthenticationData() {
 	o.AuthenticationData.Unset()
+}
+
+// GetFirmwareDownloadAuth returns the FirmwareDownloadAuth field value if set, zero value otherwise (both if not set or set to explicit null).
+func (o *BatchRackFirmwareUpdateRequest) GetFirmwareDownloadAuth() FirmwareAuthenticationData {
+	if o == nil || IsNil(o.FirmwareDownloadAuth.Get()) {
+		var ret FirmwareAuthenticationData
+		return ret
+	}
+	return *o.FirmwareDownloadAuth.Get()
+}
+
+// GetFirmwareDownloadAuthOk returns a tuple with the FirmwareDownloadAuth field value if set, nil otherwise
+// and a boolean to check if the value has been set.
+// NOTE: If the value is an explicit nil, `nil, true` will be returned
+func (o *BatchRackFirmwareUpdateRequest) GetFirmwareDownloadAuthOk() (*FirmwareAuthenticationData, bool) {
+	if o == nil {
+		return nil, false
+	}
+	return o.FirmwareDownloadAuth.Get(), o.FirmwareDownloadAuth.IsSet()
+}
+
+// HasFirmwareDownloadAuth returns a boolean if a field has been set.
+func (o *BatchRackFirmwareUpdateRequest) HasFirmwareDownloadAuth() bool {
+	if o != nil && o.FirmwareDownloadAuth.IsSet() {
+		return true
+	}
+
+	return false
+}
+
+// SetFirmwareDownloadAuth gets a reference to the given NullableFirmwareAuthenticationData and assigns it to the FirmwareDownloadAuth field.
+func (o *BatchRackFirmwareUpdateRequest) SetFirmwareDownloadAuth(v FirmwareAuthenticationData) {
+	o.FirmwareDownloadAuth.Set(&v)
+}
+
+// SetFirmwareDownloadAuthNil sets the value for FirmwareDownloadAuth to be an explicit nil
+func (o *BatchRackFirmwareUpdateRequest) SetFirmwareDownloadAuthNil() {
+	o.FirmwareDownloadAuth.Set(nil)
+}
+
+// UnsetFirmwareDownloadAuth ensures that no value is present for FirmwareDownloadAuth, not even an explicit nil
+func (o *BatchRackFirmwareUpdateRequest) UnsetFirmwareDownloadAuth() {
+	o.FirmwareDownloadAuth.Unset()
 }
 
 // GetRuleId returns the RuleId field value if set, zero value otherwise.
@@ -325,6 +374,9 @@ func (o BatchRackFirmwareUpdateRequest) ToMap() (map[string]interface{}, error) 
 	}
 	if o.AuthenticationData.IsSet() {
 		toSerialize["authenticationData"] = o.AuthenticationData.Get()
+	}
+	if o.FirmwareDownloadAuth.IsSet() {
+		toSerialize["firmwareDownloadAuth"] = o.FirmwareDownloadAuth.Get()
 	}
 	if !IsNil(o.RuleId) {
 		toSerialize["ruleId"] = o.RuleId

@@ -41,8 +41,10 @@ See [Flow Operations](../operations/flow/overview.md) for operator workflows and
 |----------|-------------|---------|
 | `FLOW_DATA_ENCRYPTION_KEY_PATH` | Path to the base64-encoded 32-byte key used to protect persisted sensitive Flow data | Unset; the Helm chart mounts a key automatically |
 
-Flow encrypts firmware authentication data before task, schedule, operation-run,
-or Temporal persistence. Ciphertext envelope version 1 records the encryption
+Flow encrypts firmware download authentication data before task, schedule,
+operation-run, or Temporal persistence. Device login overrides on tray firmware
+tasks use the same key and a separate authenticated purpose. Device overrides
+are unsupported in schedule and operation-run templates. Ciphertext envelope version 1 records the encryption
 key's non-secret SHA-256 fingerprint so a mismatched key fails explicitly. The
 AES-GCM additional authenticated data provides firmware-authentication domain
 separation and authenticates the envelope version and key ID. It does not bind
@@ -54,13 +56,21 @@ preserved key and does not provide a key-rotation operation.
 
 When `FLOW_DATA_ENCRYPTION_KEY_PATH` is unset, Flow starts with a warning and
 continues to serve operations that do not contain firmware authentication data.
-Requests with non-empty `authentication_data` fail with `FailedPrecondition`
+Requests with non-empty `authentication_data` or device login overrides fail
+with `FailedPrecondition`
 before Flow persists or submits the operation. If the variable is set but its
 file is unreadable, empty, or does not contain a valid key, Flow fails at
 startup. Existing encrypted operations also require the original key when their
-final firmware-control activity executes. Operators can enable encryption later
+firmware-control or credential-aware status activity executes. Operators can enable encryption later
 by configuring a persistent key and restarting Flow before submitting firmware
 authentication data.
+
+The REST API's generic API-to-site Temporal proxy uses encryption derived from
+`siteId` before Flow receives the request. A site ID is not a secret, so this
+proxy layer does not provide cryptographic confidentiality from readers who can
+inspect Temporal payloads and know the site ID. Flow's secret-key envelopes
+protect its own persisted tasks and worker payloads after receipt; they do not
+replace the generic proxy's key management.
 
 ## Developer references
 

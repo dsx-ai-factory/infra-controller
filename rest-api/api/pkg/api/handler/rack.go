@@ -992,7 +992,7 @@ func (furh UpdateRackFirmwareHandler) Handle(c echo.Context) error {
 	cotel.SetAttribute(handlerSpan, attribute.String("rack_id", rackStrID))
 
 	// Parse and validate request body
-	apiRequest := model.APIUpdateFirmwareRequest{}
+	apiRequest := model.APIRackFirmwareUpdateRequest{}
 	if err := c.Bind(&apiRequest); err != nil {
 		return firmwareRequestBindError(c, err)
 	}
@@ -1039,7 +1039,7 @@ func (furh UpdateRackFirmwareHandler) Handle(c echo.Context) error {
 	}
 
 	flowResp, proxyErr := common.ExecuteFirmwareUpdateWorkflow(ctx, logger, stc, targetSpec, apiRequest.Version,
-		nil, apiRequest.AuthenticationData.ToProto(), apiRequest.SiteID, apiRequest.RuleID,
+		nil, apiRequest.DownloadAuth(), nil, apiRequest.SiteID, apiRequest.RuleID,
 		apiRequest.OverrideReadinessCheck, apiRequest.OverrideVersionCheck,
 		fmt.Sprintf("rack-firmware-update-%s", rackStrID), "Rack")
 	if proxyErr != nil {
@@ -1159,7 +1159,7 @@ func (furbh BatchUpdateRackFirmwareHandler) Handle(c echo.Context) error {
 	targetSpec := request.Filter.ToTargetSpec()
 
 	flowResp, proxyErr := common.ExecuteFirmwareUpdateWorkflow(ctx, logger, stc, targetSpec, request.Version,
-		nil, request.AuthenticationData.ToProto(), request.SiteID, request.RuleID,
+		nil, request.DownloadAuth(), nil, request.SiteID, request.RuleID,
 		request.OverrideReadinessCheck, request.OverrideVersionCheck,
 		fmt.Sprintf("rack-firmware-batch-update-%s", common.RequestHash(request.Filter)), "Rack")
 	if proxyErr != nil {

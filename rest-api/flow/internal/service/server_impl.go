@@ -1576,6 +1576,20 @@ func (rs *FlowServerImpl) UpgradeFirmware(
 	if ruleID != nil {
 		info.RuleID = ruleID.String()
 	}
+	if req.GetDeviceCredentialOverrides() != nil {
+		if !req.GetOverrideReadinessCheck() {
+			return nil, status.Error(codes.InvalidArgument, "device credential overrides require override_readiness_check")
+		}
+		for _, subTarget := range req.GetSubTargets() {
+			if subTarget == "dpu" {
+				return nil, status.Error(codes.InvalidArgument, "device credential overrides do not support DPU updates")
+			}
+		}
+		info.DeviceCredentials, err = firmwareauth.EncryptDeviceCredentials(rs.dataCipher, req.GetDeviceCredentialOverrides())
+		if err != nil {
+			return nil, firmwareAuthenticationStatusError(err)
+		}
+	}
 	err = rs.encryptFirmwareAuthenticationData(info, req.GetAuthenticationData())
 	if err != nil {
 		return nil, firmwareAuthenticationStatusError(err)

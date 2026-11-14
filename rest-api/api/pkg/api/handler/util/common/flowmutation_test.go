@@ -181,7 +181,7 @@ func TestFlowMutationHelpersProxyRequests(t *testing.T) {
 		{
 			name: "firmware update",
 			execute: func(ctx context.Context, stc tclient.Client) (*flowv1.SubmitTaskResponse, *cutil.APIError) {
-				return ExecuteFirmwareUpdateWorkflow(ctx, zerolog.Nop(), stc, mutationTargetSpec(rackID), &version, []string{"bmc", "nvos"}, nil, siteID, nil, false, true, workflowID, entityName)
+				return ExecuteFirmwareUpdateWorkflow(ctx, zerolog.Nop(), stc, mutationTargetSpec(rackID), &version, []string{"bmc", "nvos"}, nil, nil, siteID, nil, false, true, workflowID, entityName)
 			},
 			wantFullMethod: flowv1.Flow_UpgradeFirmware_FullMethodName,
 			wantWorkflowID: workflowID + "-override-version-check",
@@ -246,7 +246,7 @@ func TestExecuteFirmwareUpdateWorkflowEncryptsAuthenticationData(t *testing.T) {
 
 	got, apiErr := ExecuteFirmwareUpdateWorkflow(
 		context.Background(), zerolog.Nop(), temporalClient,
-		mutationTargetSpec(rackID), nil, nil, authenticationData, siteID, nil, false, false,
+		mutationTargetSpec(rackID), nil, nil, authenticationData, nil, siteID, nil, false, false,
 		workflowID, "rack r1",
 	)
 
@@ -280,4 +280,30 @@ func TestExecutePowerControlWorkflowRejectsUnknownState(t *testing.T) {
 	assert.Equal(t, http.StatusBadRequest, apiErr.Code)
 	assert.Equal(t, "Invalid power control state: hibernate", apiErr.Message)
 	temporalClient.AssertNotCalled(t, "ExecuteWorkflow", mock.Anything, mock.Anything, mock.Anything, mock.Anything)
+}
+
+func TestExecuteFirmwareUpdateWorkflowDeviceCredentials(t *testing.T) {
+	const siteID = "58fe7a29-58b7-4d61-9b64-e355eaff6024"
+	credentials := &flowv1.DeviceCredentialOverrides{Bmc: &flowv1.DeviceLogin{Username: "operator", Password: "device-secret-value"}}
+	target := &flowv1.OperationTargetSpec{Targets: &flowv1.OperationTargetSpec_Components{Components: &flowv1.ComponentTargets{Targets: []*flowv1.ComponentTarget{{Identifier: &flowv1.ComponentTarget_External{External: &flowv1.ExternalRef{Id: "aa:bb:cc:dd:ee:01"}}}}}}}
+	for _, tc := range []struct {
+		name   string
+		target *flowv1.OperationTargetSpec
+	}{
+		{"tray credentials encrypted", target}, {"rack-filtered tray selection", mutationTargetSpec("6f1b7c4e-9c2a-4d1e-8f3b-2a5c7d9e1b04")},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			client, call := newMutationProxyClient(t, &flowv1.SubmitTaskResponse{})
+			_, apiErr := ExecuteFirmwareUpdateWorkflow(context.Background(), zerolog.Nop(), client, tc.target, nil, nil, nil, credentials, siteID, nil, true, false, "tray-fw", "Tray")
+			require.Nil(t, apiErr)
+			require.NotContains(t, string(call.request.RequestJSON), "device-secret-value")
+			require.NotContains(t, string(call.request.RequestJSON), "operator")
+			restored, err := grpcproxy.MergeSecrets(call.request.RequestJSON, cutil.DecryptData(call.request.EncryptedSecrets, siteID))
+			require.NoError(t, err)
+			var request flowv1.UpgradeFirmwareRequest
+			require.NoError(t, protojson.Unmarshal(restored, &request))
+			require.True(t, proto.Equal(credentials, request.GetDeviceCredentialOverrides()))
+			require.True(t, request.GetOverrideReadinessCheck())
+		})
+	}
 }

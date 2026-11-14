@@ -1228,7 +1228,7 @@ func (futh UpdateTrayFirmwareHandler) Handle(c echo.Context) error {
 	}
 
 	flowResp, proxyErr := common.ExecuteFirmwareUpdateWorkflow(ctx, logger, stc, targetSpec, apiRequest.Version,
-		apiRequest.Targets, apiRequest.AuthenticationData.ToProto(), apiRequest.SiteID,
+		apiRequest.Targets, apiRequest.DownloadAuth(), apiRequest.DeviceCredentialOverrides.ToProto(), apiRequest.SiteID,
 		apiRequest.RuleID, apiRequest.OverrideReadinessCheck, apiRequest.OverrideVersionCheck,
 		fmt.Sprintf("tray-firmware-update-%s", trayStrID), "Tray")
 	if proxyErr != nil {
@@ -1365,7 +1365,7 @@ func (futbh BatchUpdateTrayFirmwareHandler) Handle(c echo.Context) error {
 	}
 
 	flowResp, proxyErr := common.ExecuteFirmwareUpdateWorkflow(ctx, logger, stc, targetSpec, request.Version,
-		request.Targets, request.AuthenticationData.ToProto(), request.SiteID, request.RuleID,
+		request.Targets, request.DownloadAuth(), request.DeviceCredentialOverrides.ToProto(), request.SiteID, request.RuleID,
 		request.OverrideReadinessCheck, request.OverrideVersionCheck,
 		fmt.Sprintf("tray-firmware-batch-update-%s", common.RequestHash(request.Filter)), "Tray")
 	if proxyErr != nil {

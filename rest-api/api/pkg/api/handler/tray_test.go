@@ -1874,6 +1874,7 @@ func TestUpdateTrayFirmwareHandler_Handle(t *testing.T) {
 		body           string
 		mockTaskIDs    []*flowv1.UUID
 		mockResultErr  error
+		expectedDevice bool
 		expectedAuth   string
 		expectedError  string
 		expectedStatus int
@@ -1894,6 +1895,17 @@ func TestUpdateTrayFirmwareHandler_Handle(t *testing.T) {
 			trayID:         trayID,
 			body:           fmt.Sprintf(`{"siteId":"%s","version":"24.11.0","authenticationData":{"shared":"tray-token"},"overrideVersionCheck":true}`, site.ID.String()),
 			mockTaskIDs:    []*flowv1.UUID{{Id: uuid.NewString()}},
+			expectedAuth:   "tray-token",
+			expectedStatus: http.StatusOK,
+		},
+		{
+			name:           "success - firmware update with device and download credentials",
+			reqOrg:         org,
+			user:           providerUser,
+			trayID:         trayID,
+			body:           fmt.Sprintf(`{"siteId":"%s","version":"24.11.0","firmwareDownloadAuth":{"shared":"tray-token"},"overrideReadinessCheck":true,"deviceCredentialOverrides":{"bmc":{"username":"operator","password":"device-secret"}},"overrideVersionCheck":true}`, site.ID.String()),
+			mockTaskIDs:    []*flowv1.UUID{{Id: uuid.NewString()}},
+			expectedDevice: true,
 			expectedAuth:   "tray-token",
 			expectedStatus: http.StatusOK,
 		},
@@ -1951,6 +1963,10 @@ func TestUpdateTrayFirmwareHandler_Handle(t *testing.T) {
 					flowReq := &flowv1.UpgradeFirmwareRequest{}
 					testFlowProxyRequestWithSecrets(t, args, site.ID.String(), tt.expectedAuth, flowReq)
 					assert.Equal(t, tt.expectedAuth, flowReq.GetAuthenticationData().GetShared())
+					if tt.expectedDevice {
+						require.Equal(t, "device-secret", flowReq.GetDeviceCredentialOverrides().GetBmc().GetPassword())
+						require.True(t, flowReq.GetOverrideReadinessCheck())
+					}
 					assert.True(t, flowReq.GetOverrideVersionCheck())
 				}).
 				Return(mockWorkflowRun, nil)
@@ -2025,6 +2041,7 @@ func TestBatchUpdateTrayFirmwareHandler_Handle(t *testing.T) {
 		mockResultErr  error
 		lookupErr      error
 		noMatches      bool
+		expectedDevice bool
 		expectedAuth   string
 		expectedError  string
 		expectedStatus int
@@ -2082,6 +2099,26 @@ func TestBatchUpdateTrayFirmwareHandler_Handle(t *testing.T) {
 			user:           providerUser,
 			body:           fmt.Sprintf(`{"siteId":"%s","authenticationData":{"shared":"batch-tray-token"}}`, site.ID.String()),
 			mockTaskIDs:    []*flowv1.UUID{{Id: uuid.NewString()}, {Id: uuid.NewString()}},
+			expectedAuth:   "batch-tray-token",
+			expectedStatus: http.StatusOK,
+		},
+		{
+			name:           "success - firmware update all trays with device and download credentials",
+			reqOrg:         org,
+			user:           providerUser,
+			body:           fmt.Sprintf(`{"siteId":"%s","firmwareDownloadAuth":{"shared":"batch-tray-token"},"overrideReadinessCheck":true,"deviceCredentialOverrides":{"bmc":{"username":"operator","password":"device-secret"}}}`, site.ID.String()),
+			mockTaskIDs:    []*flowv1.UUID{{Id: uuid.NewString()}, {Id: uuid.NewString()}},
+			expectedDevice: true,
+			expectedAuth:   "batch-tray-token",
+			expectedStatus: http.StatusOK,
+		},
+		{
+			name:           "success - firmware update rack-filtered trays with device and download credentials",
+			reqOrg:         org,
+			user:           providerUser,
+			body:           fmt.Sprintf(`{"siteId":"%s","filter":{"rackId":"rack-1"},"firmwareDownloadAuth":{"shared":"batch-tray-token"},"overrideReadinessCheck":true,"deviceCredentialOverrides":{"bmc":{"username":"operator","password":"device-secret"}}}`, site.ID.String()),
+			mockTaskIDs:    []*flowv1.UUID{{Id: uuid.NewString()}, {Id: uuid.NewString()}},
+			expectedDevice: true,
 			expectedAuth:   "batch-tray-token",
 			expectedStatus: http.StatusOK,
 		},

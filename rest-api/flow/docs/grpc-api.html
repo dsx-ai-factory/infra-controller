@@ -367,7 +367,15 @@
                 </li>
 
                 <li>
+                  <a href="#v1.DeviceCredentialOverrides"><span class="badge">M</span>DeviceCredentialOverrides</a>
+                </li>
+
+                <li>
                   <a href="#v1.DeviceInfo"><span class="badge">M</span>DeviceInfo</a>
+                </li>
+
+                <li>
+                  <a href="#v1.DeviceLogin"><span class="badge">M</span>DeviceLogin</a>
                 </li>
 
                 <li>
@@ -2777,6 +2785,37 @@ registered by Flow. Supported value: &#34;hardware.leak.detected&#34;. </p></td>
 
 
 
+        <h3 id="v1.DeviceCredentialOverrides">DeviceCredentialOverrides</h3>
+        <p>DeviceCredentialOverrides selects credentials for device access, independently</p><p>of firmware download authentication. At least one complete pair is required.</p>
+
+
+          <table class="field-table">
+            <thead>
+              <tr><td>Field</td><td>Type</td><td>Label</td><td>Description</td></tr>
+            </thead>
+            <tbody>
+
+                <tr>
+                  <td>bmc</td>
+                  <td><a href="#v1.DeviceLogin">DeviceLogin</a></td>
+                  <td></td>
+                  <td><p> </p></td>
+                </tr>
+
+                <tr>
+                  <td>nvos</td>
+                  <td><a href="#v1.DeviceLogin">DeviceLogin</a></td>
+                  <td></td>
+                  <td><p> </p></td>
+                </tr>
+
+            </tbody>
+          </table>
+
+
+
+
+
         <h3 id="v1.DeviceInfo">DeviceInfo</h3>
         <p></p>
 
@@ -2826,6 +2865,37 @@ registered by Flow. Supported value: &#34;hardware.leak.detected&#34;. </p></td>
                   <td>description</td>
                   <td><a href="#string">string</a></td>
                   <td>optional</td>
+                  <td><p> </p></td>
+                </tr>
+
+            </tbody>
+          </table>
+
+
+
+
+
+        <h3 id="v1.DeviceLogin">DeviceLogin</h3>
+        <p>DeviceLogin contains a nonempty username and password for device access.</p>
+
+
+          <table class="field-table">
+            <thead>
+              <tr><td>Field</td><td>Type</td><td>Label</td><td>Description</td></tr>
+            </thead>
+            <tbody>
+
+                <tr>
+                  <td>username</td>
+                  <td><a href="#string">string</a></td>
+                  <td></td>
+                  <td><p> </p></td>
+                </tr>
+
+                <tr>
+                  <td>password</td>
+                  <td><a href="#string">string</a></td>
+                  <td></td>
                   <td><p> </p></td>
                 </tr>
 
@@ -9669,6 +9739,15 @@ firmware controller. </p></td>
 the update. This allows same-version reapplication and downgrade when
 the selected component backend supports those operations. It does not
 bypass readiness checks or state-controller routing. </p></td>
+                </tr>
+
+                <tr>
+                  <td>device_credential_overrides</td>
+                  <td><a href="#v1.DeviceCredentialOverrides">DeviceCredentialOverrides</a></td>
+                  <td></td>
+                  <td><p>Write-only device login overrides for direct firmware dispatch. Requires
+override_readiness_check. Unsupported for DPU updates and
+legacy compute controllers. Omitted pairs retain configured lookup. </p></td>
                 </tr>
 
             </tbody>

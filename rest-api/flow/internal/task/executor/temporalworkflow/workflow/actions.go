@@ -298,8 +298,12 @@ func executeFirmwareControlAction(actx actionExecutionContext) error {
 	// Component selection belongs to the versioned firmware parent.
 	fwInfo.TargetVersion, _ = extractComponentTargetVersion(fwInfo.TargetVersion, target.Type)
 
+	controlActivity := activity.NameFirmwareControl
+	if fwInfo.DeviceCredentials != nil {
+		controlActivity = activity.NameFirmwareControlWithCredentials
+	}
 	if err := workflow.ExecuteActivity(
-		ctx, activity.NameFirmwareControl, target, fwInfo,
+		ctx, controlActivity, target, fwInfo,
 	).Get(ctx, nil); err != nil {
 		return fmt.Errorf("failed to start firmware update: %w", err)
 	}
@@ -371,14 +375,20 @@ func executeFirmwareControlAction(actx actionExecutionContext) error {
 
 		var result activity.GetFirmwareStatusResult
 		var err error
+		statusActivity := activity.NameGetFirmwareStatus
+		statusArgs := []any{target}
+		if fwInfo.DeviceCredentials != nil {
+			statusActivity = activity.NameGetFirmwareStatusWithCredentials
+			statusArgs = append(statusArgs, fwInfo.DeviceCredentials)
+		}
 		if boundedPolling {
-			err = executeActivityBeforeDeadline(ctx, deadline, &result, activity.NameGetFirmwareStatus, target)
+			err = executeActivityBeforeDeadline(ctx, deadline, &result, statusActivity, statusArgs...)
 			if ctx.Err() != nil {
 				return ctx.Err()
 			}
 		} else {
 			err = workflow.ExecuteActivity(
-				ctx, activity.NameGetFirmwareStatus, target,
+				ctx, statusActivity, statusArgs...,
 			).Get(ctx, &result)
 		}
 		if err != nil {

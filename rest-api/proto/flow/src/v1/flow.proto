@@ -644,6 +644,10 @@ message UpgradeFirmwareRequest {
     // the selected component backend supports those operations. It does not
     // bypass readiness checks or state-controller routing.
     bool override_version_check = 11;
+    // Write-only device login overrides for direct firmware dispatch. Requires
+    // override_readiness_check. Unsupported for DPU updates and
+    // legacy compute controllers. Omitted pairs retain configured lookup.
+    DeviceCredentialOverrides device_credential_overrides = 12;
 }
 
 // FirmwareAuthenticationData selects either one value shared by every target
@@ -2398,4 +2402,17 @@ message TrayStatusCounts {
     uint32 error = 4; // Trays in Error.
     uint32 deleting = 5; // Trays in Deleting.
     uint32 unknown = 6; // Trays with unknown, missing or unrecognized status.
+}
+
+// DeviceCredentialOverrides selects credentials for device access, independently
+// of firmware download authentication. At least one complete pair is required.
+message DeviceCredentialOverrides {
+    DeviceLogin bmc = 1;
+    DeviceLogin nvos = 2;
+}
+
+// DeviceLogin contains a nonempty username and password for device access.
+message DeviceLogin {
+    string username = 1;
+    string password = 2;
 }
