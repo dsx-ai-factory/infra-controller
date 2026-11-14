@@ -484,6 +484,7 @@ section Per-pod Services). NICo dials each BMC IP directly, with no
 | `machine-a-tron-10racks.yaml` | 10 GB200 NVL72 racks, one per pod, behind the protocol gateway (180 hosts x 2 DPUs, 90 switches, 80 power shelves) |
 | `machine-a-tron-250racks.yaml` | 250 GB200 NVL72 racks, 25 per pod across 10 pods, behind the protocol gateway (4,500 hosts x 2 DPUs, 2,250 switches, 2,000 power shelves) |
 | `machine-a-tron-556racks.yaml` | 556 GB200 NVL72 racks, 24 or 25 per pod across 23 pods, behind the protocol gateway with per-pod Services (10,008 hosts x 2 DPUs, 5,004 switches, 4,448 power shelves). Core values: `nico-core-10k-hosts.yaml` |
+| `machine-a-tron-1112racks.yaml` | 1,112 GB200 NVL72 racks, 24 or 25 per pod across 45 pods, behind the protocol gateway with per-pod Services and two BMC segments (20,016 hosts x 2 DPUs, 10,008 switches, 8,896 power shelves). Core values: `nico-core-20k-hosts.yaml`. Needs the cluster changes in [20,000-Host Simulated Fleet](machine-a-tron-scale-testing.md#cluster-prerequisites) |
 | `machine-a-tron-scale-4500.yaml` | 4,500 hosts x 2 DPUs across 3 pods, one BMC segment per pod |
 | `machine-a-tron-scale-4500-proxy.yaml` | 4,500 hosts x 2 DPUs in one pod behind one shared proxy Service, without the controller |
 
@@ -726,7 +727,13 @@ DPUs (13,500 BMCs). A 250-rack site needs 17,750 BMC addresses, so widen
 556-rack fleet needs 39,476, which `nico-core-10k-hosts.yaml` ships as a
 `/16`. Do not widen further than needed. The allocator materializes the whole
 host space per request while holding the fleet-wide admin-segment lock, about
-three times slower at a `/16` than at a `/18`.
+three times slower at a `/16` than at a `/18`. The 1,112-rack fleet needs
+78,952, more than one `/16` holds, so `nico-core-20k-hosts.yaml` declares a
+second `/16` BMC segment and `machine-a-tron-1112racks.yaml` relays the BMC
+DHCP of its first 23 pods to one gateway and of the other 22 to the other.
+nico-api serves a relayed request from the segment whose prefix contains the
+relay address, so the two prefixes must be disjoint and each gateway must lie
+in exactly one of them.
 
 Symptoms of overflow: `No IP addresses left in prefix ...` with machines stuck
 in `BmcInit` (OOB), `No IP addresses left in prefix <admin-cidr>` at creation

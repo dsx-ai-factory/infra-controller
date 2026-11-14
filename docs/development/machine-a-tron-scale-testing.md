@@ -1,7 +1,7 @@
-# Scaling NICo with machine-a-tron: 100 → 1000 → 4500 → 10,000 simulated hosts
+# Scaling NICo with machine-a-tron: 100 → 1000 → 4500 → 10,000 → 20,000 simulated hosts
 
-> **Status:** Scale testing validated with up to 39,476 BMC endpoints (556 GB200
-> NVL72 racks). Refer to
+> **Status:** Scale testing validated with up to 78,952 BMC endpoints (1,112
+> GB200 NVL72 racks). Refer to
 > [Sizing and Scale Guidance](../getting-started/sizing-and-scale.md) for the
 > fleet-level scale table.
 
@@ -385,6 +385,342 @@ converged at 10.5 h.
   controller-managed Services approach the BMC count does not apply at pod
   granularity.
 
+## 20,000-Host Simulated Fleet
+
+`helm-prereqs/values/machine-a-tron-1112racks.yaml` and
+`helm-prereqs/values/nico-core-20k-hosts.yaml` define a fleet of 1,112 GB200
+NVL72 racks: 20,016 hosts with 2 DPUs each, 10,008 NVLink switch trays, and
+8,896 power shelves, which is 78,952 BMC endpoints and 60,048 NICo machines,
+twice the 556-rack fleet. It runs as 45 machine-a-tron pods behind the
+protocol gateway with per-pod Services, 90 Services in total, and its BMC
+leases split between two `/16` segments because they exceed one. The figures
+in this section come from two completed runs of that fleet on the same
+three-node site controller as the 556-rack runs: the first converged 14 h
+after fleet-up and the second, three days later with the DPF simulator at a
+higher CPU limit and a clean start, 11 h 30 min. Both ran a build of the v2.5
+line taken from `main` after the 10,000-host values merged, which carries
+[pull request 8142](https://github.com/dsx-ai-factory/infra-controller/pull/8142)
+and every scaling fix named on
+[Sizing and Scale Guidance](../getting-started/sizing-and-scale.md), all
+merged to `main`, with no unmerged Core change. The machine-a-tron and controller images carried
+the RMS mock job-retention change of
+[issue 8998](https://github.com/dsx-ai-factory/infra-controller/issues/8998),
+which is not on `main` yet. Refer to the caveats. Read the figures as
+expectations rather than as a reproduction target. Times count from fleet-up,
+as defined in the 10,000-host section. This section is the 20,000-host fleet
+definition behind the
+[site controller sizing table](../getting-started/sizing-and-scale.md#site-controller-sizing-by-fleet-size).
+
+### Hardware Baseline
+
+The same three nodes as the 10,000-host fleet, 96 logical CPUs and 251 GiB of
+allocatable memory each, carrying NICo, its Postgres, the 45 simulator pods,
+and the DPF simulator. The Core values keep nico-api off the Postgres
+primary's node with a required anti-affinity, so the two heaviest components
+never share a node. The scheduler placed nico-hardware-health with the
+Postgres primary in the first run and on the third node in the second.
+
+Measured from fleet-up to convergence, the nodes averaged 16 to 42 cores. The
+first run peaked at 20, 50, and 63 cores and 91, 118, and 142 GiB of working
+set per node, with both the 63-core and the 142 GiB peaks on the node that
+carried the Postgres primary and hardware-health. The second run peaked at
+31, 51, and 52 cores and 97, 121, and 117 GiB, with no node carrying two of
+the three heavy components. By component, summed over the nodes:
+
+| Component | Mean cores | Peak cores | Peak working set |
+|---|---|---|---|
+| nico-api, 64 CPU and 64 GiB limits, 64 Tokio workers | 25 to 26 | 36 | 46 GiB |
+| Postgres primary, 48 CPU and 128 GiB limits | 23 to 24 | 33 to 38 | 56 to 68 GiB |
+| nico-hardware-health | 6 to 7 | 7 | 17 to 18 GiB |
+| 45 simulator pods together | 9 | 13 to 14 | 60 to 76 GiB |
+| DPF simulator at 8 CPU | 3.7 | 7.9 | 2 GiB |
+| calico-node, three nodes together | 7 | 8 | 1 GiB |
+| kube-proxy, three nodes together | 3 | 3.7 | 0.5 GiB |
+
+A converged fleet is not idle for the site controller. Sampled for 52 hours
+after the first run converged, with nothing changing in the inventory,
+nico-api averaged 35 cores with a 43-core peak and a 51 GiB working set, the
+Postgres primary 27 cores with a 40-core peak and 70 GiB, and hardware-health
+7 cores and 25 GiB, which kept the nico-api and Postgres nodes at 47 and 46
+cores mean. Size a 20,000-host site for that resting load, not only for
+ingestion. Smaller nodes were not run.
+
+### Cluster Prerequisites
+
+Two limits of the Kubernetes cluster itself are reached before the fleet
+converges. Both are properties of the simulator's Service model, which
+publishes every BMC and switch NVOS address as a Service `externalIP`, and
+neither applies to a site with real hardware. Apply both changes before the
+simulator is deployed.
+
+- **kube-proxy ipset size.** In IP Virtual Server (IPVS) mode kube-proxy records every
+  Service `externalIP` and port in the `KUBE-EXTERNAL-IP` ipset on each node,
+  and it creates that set with `maxelem 65536`, a value compiled into
+  kube-proxy with no flag or configuration field (kube-proxy v1.30 was
+  measured, and the upstream request to make it configurable,
+  [kubernetes/kubernetes issue 129389](https://github.com/kubernetes/kubernetes/issues/129389),
+  was closed without a change). This fleet needs 98,968 entries per node, 89
+  per rack: 71 BMC addresses on one port and 9 switch NVOS addresses on two
+  ports. A stock kube-proxy logs `Hash is full` once the set is full and
+  leaves the remaining addresses unprogrammed on that node, so the same BMC
+  answers from one node and refuses connections from another. On the first
+  attempt at this fleet machine creation plateaued at 55,110 of 60,048 and no
+  rack converged until kube-proxy was rebuilt on the live cluster. The
+  arithmetic puts the ceiling of a stock kube-proxy at about 736 GB200 NVL72
+  racks with per-pod Services, and the 556-rack fleet fits under it. The measured runs ran a kube-proxy rebuilt from the cluster's
+  Kubernetes version with `MaxElem` raised to 1,048,576 and `HashSize` to
+  65,536 in `pkg/proxy/ipvs/ipset/ipset.go`, rolled out one node at a time
+  with `kube-proxy --cleanup` run on the node before its new pod started, so
+  that the set is recreated with the new size. The first full sync after a
+  cleanup took 14 to 16 minutes per node at this fleet size. Verify the limit
+  and the fill on each node once every lease is out:
+
+  ```bash
+  ipset list -t KUBE-EXTERNAL-IP   # Header: maxelem, and "Number of entries"
+  ```
+
+  Every node should report 98,968 entries. kube-proxy in iptables or nftables
+  mode was not measured.
+  [Issue 9003](https://github.com/dsx-ai-factory/infra-controller/issues/9003)
+  tracks the documentation of this limit.
+- **calico-node probes.** With about 89,000 addresses on each node's
+  `kube-ipvs0` interface, the BIRD daemon in calico-node takes longer than
+  the default probe timeout of 10 s to answer, the kubelet kills calico-node,
+  and that node's data plane and the machine creation that depends on it stop
+  until the pod is back. Before the simulator is deployed, switch the
+  DaemonSet to `OnDelete`, so that running pods are not restarted by the
+  change, raise both probes to a 120 s timeout and 60 failures, then replace
+  the calico-node pods one at a time, waiting for each replacement to be
+  Ready:
+
+  ```bash
+  kubectl -n kube-system patch daemonset calico-node --type=merge \
+    -p '{"spec":{"updateStrategy":{"type":"OnDelete","rollingUpdate":null}}}'
+  kubectl -n kube-system patch daemonset calico-node --type=json -p='[
+    {"op":"replace","path":"/spec/template/spec/containers/0/livenessProbe/timeoutSeconds","value":120},
+    {"op":"replace","path":"/spec/template/spec/containers/0/livenessProbe/failureThreshold","value":60},
+    {"op":"replace","path":"/spec/template/spec/containers/0/readinessProbe/timeoutSeconds","value":120},
+    {"op":"replace","path":"/spec/template/spec/containers/0/readinessProbe/failureThreshold","value":60}]'
+  ```
+
+  Container 0 of the DaemonSet is `calico-node` on a kubeadm or Kubespray
+  cluster. The measured runs had no calico-node restart with this override.
+  Restore the `RollingUpdate` strategy after the run. A re-apply of the
+  Calico manifest reverts the probes.
+  [Issue 7805](https://github.com/dsx-ai-factory/infra-controller/issues/7805)
+  tracks a preflight for it.
+
+### Commands
+
+Export the variables listed in the 10,000-host section and run every command
+from the repository root. The steps are those of the 10,000-host fleet with
+the 20,000-host values and limits.
+
+1. Size Postgres and enable the site credentials Secret in
+   `helm-prereqs/values.yaml`. The database of the 556-rack fleet measured
+   4.4 GiB, so the 10Gi default volume leaves no room for twice the rows and
+   the write-ahead log. The limits apply to each of the three Patroni
+   instances:
+
+   ```yaml
+   siteCredentials:
+     enabled: true
+   postgresql:
+     volumeSize: "20Gi"
+     resources:
+       limits:
+         cpu: "48"
+         memory: "128Gi"
+       requests:
+         cpu: "2"
+         memory: "4Gi"
+   ```
+
+1. Apply the two cluster prerequisites above.
+1. Copy the Core template and fill in the fields marked `REQUIRED`. The copy
+   holds site addresses, so keep it out of version control:
+
+   ```bash
+   cp helm-prereqs/values/nico-core-20k-hosts.yaml helm-prereqs/values/nico-core-20k-hosts.site.yaml
+   ```
+
+   The template carries everything the 10,000-host template carries, with
+   the `[site_explorer]` budget raised to 4500 explorations, 450 hosts, 680
+   concurrent explorations, and `machine_creation_concurrency = 12` per run,
+   `max_concurrency = 120`, `partition_monitor_max_concurrent_groups = 96`,
+   nico-api limits of 64 CPU and 64 GiB with `TOKIO_WORKER_THREADS=64` and
+   a required anti-affinity from the Postgres primary, two BMC segments
+   (`simulated-oob` at `10.200.0.0/16` and `simulated-oob-b` at
+   `10.202.0.0/16`), `simulated-admin` and `simulated-underlay` as a `/16`
+   each, 60,000 ASNs, a 10 s liveness probe timeout for nico-hardware-health,
+   and probe and request settings for nico-ssh-console-rs. The 65,534
+   loopback addresses stay, with 60,048 used. Two `/16` BMC segments rather
+   than one `/15`: a `/15` at `10.200.0.0` would contain `simulated-underlay`,
+   and the allocator cost grows with the prefix
+   ([DHCP Address Space](machine-a-tron-deployment.md#dhcp-address-space)).
+1. Deploy the DPF simulator, raise its limits, then install NICo. The
+   simulator ships with limits of 2 CPU and 4Gi, and at 40,032 DPUs it runs at
+   its CPU limit through the DPU phase: at 2 CPU the DPF objects of this fleet
+   were all created 5 h 26 min after fleet-up, at 8 CPU 5 h 00 min, and at 8
+   CPU it still held 7.9 cores through the first five hours, so the limit
+   shortens the phase without removing the bottleneck
+   ([issue 9002](https://github.com/dsx-ai-factory/infra-controller/issues/9002)).
+   Create the pull Secret as in the 10,000-host section when the registry
+   needs one:
+
+   ```bash
+   kubectl create namespace dpf-operator-system --dry-run=client -o yaml | kubectl apply -f -
+   make -C dev/k8s/dpf-sim-controller deploy DPF_NAMESPACE=dpf-operator-system \
+     IMG="${NICO_IMAGE_REGISTRY}/dpf-sim-controller:${DPF_SIM_IMAGE_TAG}" PULL_SECRET=dpf-sim-pull
+   kubectl -n dpf-operator-system set resources deployment/dpf-sim-controller \
+     --requests=cpu=1,memory=2Gi --limits=cpu=8,memory=8Gi
+   kubectl -n dpf-operator-system rollout status deployment/dpf-sim-controller
+   (cd helm-prereqs && ./setup.sh --skip-dpf --skip-rms --core-values values/nico-core-20k-hosts.site.yaml)
+   ```
+
+   After `setup.sh`, confirm that nico-api and the Postgres primary are on
+   different nodes. The anti-affinity is checked at scheduling only, so a
+   Patroni failover during a run can put the primary on nico-api's node:
+
+   ```bash
+   kubectl -n nico-system get pods -l app.kubernetes.io/name=nico-api -o wide
+   kubectl -n postgres get pods -l cluster-name=nico-pg-cluster,spilo-role=master -o wide
+   ```
+
+1. Create the labeled `nico-mat` namespace and its pull Secret as in the
+   10,000-host section, run the ServiceCIDR check against both BMC segments,
+   and install the fleet:
+
+   ```bash
+   python3 helm-prereqs/check-mat-service-cidr.py helm-prereqs/values/machine-a-tron-1112racks.yaml \
+     --site-config helm-prereqs/values/nico-core-20k-hosts.site.yaml &&
+   helm upgrade --install nico-machine-a-tron helm/charts/nico-machine-a-tron \
+     -n nico-mat --qps 15 --burst-limit 30 --set createNamespace=false \
+     --set image.repository="${NICO_IMAGE_REGISTRY}/machine-a-tron" \
+     --set image.tag="${MAT_IMAGE_TAG}" \
+     --set mat-k8s-controller.image.repository="${NICO_IMAGE_REGISTRY}/mat-k8s-controller" \
+     --set mat-k8s-controller.image.tag="${MAT_IMAGE_TAG}" \
+     -f helm-prereqs/values/machine-a-tron-1112racks.yaml
+   ```
+
+   The check prints the three networks it resolved, `10.200.0.0/16`,
+   `10.201.0.0/16`, and `10.202.0.0/16`, and fails when the site config does
+   not declare the second BMC segment. The controller publishes two Services
+   per pod, 90 in total, once the pods hold leases:
+
+   ```bash
+   kubectl -n nico-mat get svc -l app.kubernetes.io/managed-by=mat-k8s-controller --no-headers | wc -l
+   ```
+
+### What to Expect
+
+From `helm upgrade` to fleet-up took 16 minutes on the second run, with all
+45 pods Ready within 14 minutes. The first run's deploy was interrupted by a
+client-side outage and is not a measure. Measured from fleet-up on the second
+run, with the first run's figure in parentheses where it differs by more than
+a few minutes:
+
+| Milestone | Time after fleet-up |
+|---|---|
+| First machines created | 20 min |
+| First machines `ready` | 1 h 30 min |
+| All power shelves `ready` | 3 h 30 min |
+| All 60,048 machines created | 4 h 00 min (4 h 15 min) |
+| All 40,032 DPF objects created | about 5 h (5 h 26 min) |
+| First racks `ready` | 7 h 40 min (5 h 30 min) |
+| All switches `ready` | 8 h 50 min |
+| Half of the racks `ready` | 9 h 30 min (10 h 45 min) |
+| All machines `ready` | 10 h 30 min (13 h 05 min) |
+| All 1,112 racks `ready` | 11 h 30 min (14 h 00 min) |
+
+Against the 556-rack fleet, twice the hosts took 2.1 times as long to create
+every machine, 2.0 times as long to bring every switch `ready`, and 1.5 to
+1.8 times as long to converge. Plan for 12 to 14 hours from fleet-up to
+convergence with these settings, plus about an hour and a half of teardown,
+install, and simulator deploy before fleet-up. Machine creation ran at 71 to
+87 machines a minute averaged over the run, with peaks of 240 to 475 a
+minute, and hosts reached `ready` at a steady 25 to 33 a minute after
+creation finished.
+
+### What to Watch
+
+The commands of the 10,000-host section apply. The figures to compare against
+change as follows.
+
+- nico-api and Postgres primary placement, with the commands above. The two
+  must stay on different nodes for the whole run.
+- Postgres primary memory and CPU. The working set rose to 56 and 68 GiB of
+  the 128 GiB limit on the two runs and to 70 GiB at rest, and the primary ran
+  27 to 34 cores from the fourth hour after fleet-up to convergence, with a
+  peak of 38. Both are expected. A non-zero `oom_kill` count is not. Expect the
+  nico-api connection pool to approach its 900 cap.
+- nico-api CPU. 25 to 26 cores mean and 36 at peak during ingestion, then 35
+  mean and 43 peak with the fleet converged. nico-api did not restart on
+  either run.
+- nico-hardware-health restarts. None on either run with the 10 s liveness
+  timeout in the Core values. At the chart's 1 s timeout the collector was
+  killed 10 times in about 12 hours at this host count.
+- Partition monitor pass time. The monitor averaged 17 to 19 s per pass from
+  fleet-up to convergence, with 30-minute means up to 30 to 33 s as the racks
+  came `ready`, and overran its 60 s interval once in the first run and never
+  in the second. Read
+  `carbide_nvlink_partition_monitor_iteration_overruns_total` on the nico-api
+  metrics endpoint, since the pass-time histogram tops out at 10 s.
+- The kube-proxy ipset fill, with the `ipset` command above. Every node must
+  hold 98,968 entries once every lease is out. A lower count on one node is
+  the cap, and machine creation stalls short of 60,048 when it is hit.
+- Restarts of nico-ssh-console-rs and the nico-rest site workers. Both crash
+  loop at this machine count for the reasons in the caveats, and neither is on
+  the convergence path.
+
+### Caveats
+
+The caveats of the 10,000-host section apply, with these additions.
+
+- machine-a-tron's RMS mock keeps a job's status for one hour on `main`. One
+  switch controller pass over 10,008 switches takes about 39 minutes at the
+  default switch controller concurrency, and a certificate job needs three
+  touches one pass apart, so the mock forgot 48 of about 1,550 certificate
+  jobs in flight on the first attempt at this fleet, and the 48 switches stayed
+  in `error` with their 48 racks in `discovering`. The switch controller does
+  not retry from `error` on its own
+  ([issue 5883](https://github.com/dsx-ai-factory/infra-controller/issues/5883)).
+  Both completed runs carried the retention change of
+  [issue 8998](https://github.com/dsx-ai-factory/infra-controller/issues/8998),
+  which keeps jobs for 24 hours, and saw no switch in `error`. Build the
+  simulator with that change until it is on `main`.
+- nico-ssh-console-rs crash loops at this machine count. Its BMC connection
+  pool opens one connection per machine and exhausts the container's 65,535
+  file descriptors once about 22,000 machines are `ready`, after which the
+  process exits every few minutes
+  ([issue 9001](https://github.com/dsx-ai-factory/infra-controller/issues/9001)).
+  The probe and request settings in the Core values let it start and stay
+  Ready for the first hours instead of being killed before it binds port 22,
+  and they do not fix it. The console is not on the convergence path.
+- The nico-rest site workers crash loop at their chart default of 1Gi. Their
+  inventory sync loads every machine of a page with up to 1,000 pages in
+  flight, so the working set tracks the machine count: the 1Gi default is
+  exceeded near 1,800 machines, and an 8Gi limit
+  (`nico-rest-workflow.siteWorker.resources` in
+  `helm-prereqs/values/nico-rest.yaml`) reaches about 35,000 before the
+  restarts return
+  ([issue 9000](https://github.com/dsx-ai-factory/infra-controller/issues/9000)).
+  Sizing by limit does not reach 60,048 machines. The workers are not on the
+  convergence path.
+- The DPF simulator runs at its CPU limit through the DPU phase at any limit
+  measured, 2 and 8 CPU. Its reconcile concurrency is the next lever
+  ([issue 9002](https://github.com/dsx-ai-factory/infra-controller/issues/9002)).
+- nico-hardware-health's chart default liveness timeout of 1 s kills the
+  collector at this host count. The Core values set 10 s, and
+  [issue 8999](https://github.com/dsx-ai-factory/infra-controller/issues/8999)
+  tracks the chart default.
+- Resetting the DPF custom resources leaves tens of thousands of `dpudevices`
+  and `dpus` objects behind the inventory truncate. Run the collection
+  delete of
+  [Inventory Reset](machine-a-tron-deployment.md#inventory-reset) until every
+  kind lists no objects.
+- The Service count is 90, not the BMC count.
+
 ## What this work delivers
 
 1. **Controller Mode** in the `nico-machine-a-tron` chart, with the
@@ -393,13 +729,15 @@ converged at 10.5 h.
    `machine-a-tron-multipod.yaml`, `machine-a-tron-scale-4500.yaml`, and
    `machine-a-tron-scale-4500-proxy.yaml`. `machine-a-tron-10racks.yaml` adds
    the ten-rack GB200 NVL72 example with the Rack Management Service (RMS)
-   mock behind the protocol gateway. `machine-a-tron-250racks.yaml` and
-   `machine-a-tron-556racks.yaml` add the 250- and 556-rack fleets.
+   mock behind the protocol gateway. `machine-a-tron-250racks.yaml`,
+   `machine-a-tron-556racks.yaml`, and `machine-a-tron-1112racks.yaml` add the
+   250-, 556-, and 1,112-rack fleets.
 1. **`helm-prereqs/values/nico-core-simulation.yaml`**, the NICo Core values
    for a simulation site: `allow_insecure_discovery`, the site-explorer
    throughput knobs, the three simulated networks, and the pool sizes.
    `nico-core-10k-hosts.yaml` is the same template sized for the 556-rack
-   fleet (a `/16` OOB segment).
+   fleet (a `/16` OOB segment), and `nico-core-20k-hosts.yaml` for the
+   1,112-rack fleet (two `/16` OOB segments).
 1. **`helm-prereqs/check-mat-service-cidr.py`**, the BMC network versus
    ServiceCIDR preflight, and **`helm-prereqs/ingestion-rate-report.sh`**,
    the per-run ingestion curves from the database timestamps.
@@ -500,6 +838,7 @@ equivalent. An operator clears a latched endpoint with
 | Stage 2 | 1000 hosts × 2 DPUs = 3000 BMCs | ✅ **END TO END OK - 3000/3000 machines** in one unattended run. About 25 min total, creation about 240 machines/min. |
 | Stage 3 | 4500 hosts × 2 DPUs = 13,500 BMCs | ✅ **13,500/13,500 machines - 100% fleet.** The first run explored 13,500 endpoints and created over 10,000 machines. A rerun on the ClusterIP chart and a fresh cluster reached every counter: 13,500 explored, 13,500 preingestion-complete, 4,500 hosts, 13,500 machines, about 15 h unattended. |
 | Stage 4 | 556 GB200 NVL72 racks = 10,008 hosts × 2 DPUs, 39,476 BMCs (Controller Mode, per-pod Services) | ✅ **30,024/30,024 machines and 556/556 racks ready** 7.9 h after fleet-up on the later run, with no nico-api or simulator restart. The first convergence of this fleet, on the earlier run with nico-api and Postgres at 16 cores each, took 10.5 h. Refer to the section [10,000-Host Simulated Fleet](#10000-host-simulated-fleet) on this page. |
+| Stage 5 | 1,112 GB200 NVL72 racks = 20,016 hosts × 2 DPUs, 78,952 BMCs (Controller Mode, per-pod Services, two BMC segments) | ✅ **60,048/60,048 machines and 1,112/1,112 racks ready** 11.5 h after fleet-up on the second run and 14 h on the first, with no nico-api, Postgres, simulator, or gateway restart. Needs the kube-proxy and calico-node changes of the cluster prerequisites. Refer to the section [20,000-Host Simulated Fleet](#20000-host-simulated-fleet) on this page. |
 
 Stage-3 observations worth reviewers' attention:
 

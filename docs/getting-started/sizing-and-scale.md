@@ -45,7 +45,7 @@ The NICo version column names the release line the figure was measured on. The f
 field fits in [Site Controller Sizing by Fleet
 Size](#site-controller-sizing-by-fleet-size) mix the three lines of the
 dataset, with 25 of the 33 sites on the v0.10 line. The simulated fleets of
-400 and 556 racks ran on pre-release builds. The 400-rack run and the earlier
+400, 556, and 1,112 racks ran on pre-release builds. The 400-rack run and the earlier
 556-rack run ran a build of the v2.4 line: `main` before the v2.4 release
 branch was cut, with scaling fixes applied. The later 556-rack run ran a build
 of the v2.5 line, taken from `main` after the v2.4 release branch was cut,
@@ -71,31 +71,47 @@ keys and the `admin_lock_admission_permits` configuration key, which the later
 8142](https://github.com/dsx-ai-factory/infra-controller/pull/8142). The v2.4
 build also carried changes that were dropped before release. The v2.5 build is
 `main` plus the listed fixes and pull request 8142, with nothing dropped. The
-figures from either build cannot be reproduced from a release, and each
-release's notes state which of these changes it includes.
+simulated fleet of 1,112 racks ran to completion twice on a build of the v2.5
+line taken from `main` after the 10,000-host values merged, which carries
+pull request 8142 and every fix listed above, all merged to `main`, with no
+unmerged Core change. Its simulator carried the RMS mock job-retention
+change of
+[issue 8998](https://github.com/dsx-ai-factory/infra-controller/issues/8998).
+Its figures below are from the second run unless the first run is named. The
+figures from any of these builds cannot be reproduced from a release, and
+each release's notes state which of these changes it includes.
 
 ## Single Site Controller Scale Table
 
 | Dimension | Figure | Status | Validation method | NICo version |
 |---|---|---|---|---|
+| Hosts under management | 20,016 | Simulation, pre-release build | Two completed runs of 1,112 GB200 NVL72 racks with 2 DPUs per tray, on 45 simulator pods with their BMC leases split between two `/16` segments. In the second run all 60,048 machines were created 4.0 hours after fleet-up and every host, DPU, switch tray, and power shelf reached `ready`, the last rack at 11.5 hours. In the first run the figures were 4.3 and 14.0 hours. Neither run restarted nico-api, Postgres, a simulator pod, or the protocol gateway. The fleet needed two changes to the Kubernetes cluster that a site with real hardware does not: a kube-proxy with a larger IP Virtual Server (IPVS) ipset and longer calico-node probes. Refer to [What Limits Scale](#what-limits-scale). | v2.5 pre-release build |
 | Hosts under management | 10,008 | Simulation, pre-release build | Two completed runs of 556 GB200 NVL72 racks with 2 DPUs per tray. In the later run all 30,024 machines were created 2.3 hours after fleet-up, and every host, DPU, switch tray, and power shelf reached `ready`, the last rack at 7.9 hours, with no nico-api restart. That run did not read the Postgres `oom_kill` counter, but the primary's working set never reset to baseline and the same pod stayed primary throughout. The earlier run of the same fleet, on the v2.4 build with 16 CPU limits on the Postgres primary and nico-api, had its last rack `ready` at 10.5 hours with no nico-api restart and no Postgres out-of-memory kill. | v2.5 pre-release build for the later run and v2.4 for the earlier run |
 | Hosts under management | 7,200 | Simulation, pre-release build | One run of 400 GB200 NVL72 racks. All 21,600 machines were created 1.7 hours after fleet-up and the last rack was `ready` at 6.9 hours. | v2.4 pre-release build |
 | Hosts under management | 4,500 | Simulation | 250 GB200 NVL72 racks, measured in several runs. All racks were `ready` 3.9 to 5.1 hours after fleet-up at machine state controller concurrency 80 to 140, and 20 hours at the default concurrency. Refer to [Large Site Sizing and Settings](../development/large-site-sizing-and-settings.md#time-to-ready-is-a-concurrency-setting). | v2.3 line |
 | Hosts under management | 1,930 | Field deployment | The largest single site in the dataset. It is a CPU and storage site with one DPU per host and no GPUs, on 3 site controller nodes with 256 logical CPUs and 1 TiB of memory each. | v2.0 line |
+| Machines (hosts plus DPUs) | 60,048 | Simulation, pre-release build | The 1,112-rack fleet: 20,016 hosts and 40,032 DPUs, all `ready` 10.5 hours after fleet-up in the second run and 13.1 hours in the first. | v2.5 pre-release build |
 | Machines (hosts plus DPUs) | 30,024 | Simulation, pre-release build | The 556-rack fleet: 10,008 hosts and 20,016 DPUs. NICo manages each host and each DPU as a machine. | v2.5 pre-release build |
+| DPUs | 40,032 | Simulation, pre-release build | The 1,112-rack fleet, through the DPF simulator as in the 556-rack runs. All 40,032 DPF objects existed about 5 hours after fleet-up, with the simulator at its CPU limit for the whole DPU phase. | v2.5 pre-release build |
 | DPUs | 20,016 | Simulation, pre-release build | The 556-rack fleet. DPU provisioning went through the DPF simulator, so the DPU control path was exercised and the Host Based Networking (HBN) data plane was not. | v2.5 pre-release build |
 | DPUs | 1,913 | Field deployment | DPUs reporting up at the largest single site. | v2.0 line |
 | DPUs in one HBN fabric | 10,000 | Roadmap | Target of [issue 2940](https://github.com/dsx-ai-factory/infra-controller/issues/2940). The fabric-side limits are confirmed with the HBN and DPF owners before NICo publishes a figure. | Not released |
+| GPUs | 80,064 | Simulation, pre-release build | The 1,112-rack fleet: 4 GPUs per compute tray in the simulated discovery inventory, 72 per rack, with one NVLink partition created per host through the NMX-C mock. GPU health and telemetry were not exercised. | v2.5 pre-release build |
 | GPUs | 40,032 | Simulation, pre-release build | The 556-rack fleet: 4 GPUs per compute tray in the simulated discovery inventory, 72 per rack, with one NVLink partition created per host through the NMX-C mock. GPU health and telemetry were not exercised. | v2.5 pre-release build |
 | GPUs | 2,037 | Field deployment | GPUs reported by the largest GPU site in the dataset, on 388 hosts. | v2.0 line |
+| NVLink switch trays | 10,008 | Simulation, pre-release build | The 1,112-rack fleet, 9 per rack, all `ready` 8.8 hours after fleet-up in the second run and 8.9 hours in the first, with no switch in `error` at any sample. | v2.5 pre-release build |
 | NVLink switch trays | 5,004 | Simulation, pre-release build | The 556-rack fleet, 9 per rack, all `ready` 4.3 hours after fleet-up in the later run and 4.9 hours in the earlier run. | v2.5 pre-release build for the later run and v2.4 for the earlier run |
 | NVLink switch trays | TBD | Field deployment | Not collected in the dataset. | |
+| Power shelves | 8,896 | Simulation, pre-release build | The 1,112-rack fleet, 8 per rack, all `ready` 3.5 hours after fleet-up in both runs. | v2.5 pre-release build |
 | Power shelves | 4,448 | Simulation, pre-release build | The 556-rack fleet, 8 per rack, all `ready` 1.8 hours after fleet-up in both runs. | v2.5 pre-release build for the later run and v2.4 for the earlier run |
 | Power shelves | TBD | Field deployment | Not collected in the dataset. | |
+| Physical racks | 1,112 | Simulation, pre-release build | The 1,112-rack runs. | v2.5 pre-release build |
 | Physical racks | 556 | Simulation, pre-release build | The 556-rack runs. | v2.5 pre-release build for the later run and v2.4 for the earlier run |
 | Physical racks | 250 | Simulation | The 250-rack runs behind the 4,500-host row. | v2.3 line |
 | Physical racks | TBD | Field deployment | Not collected in the dataset. | |
+| NVLink partitions | 20,016 | Simulation, pre-release build | The 1,112-rack runs: one partition per host created through the NMX-C mock, 0 failed, 0 timed out, and the 1,112 default partitions removed, with `partition_monitor_max_concurrent_groups` 96. From fleet-up to convergence the partition monitor averaged 16.7 seconds per pass in the second run and 19.2 in the first, with 30-minute means of up to 30 and 33 seconds as the racks went `ready`, against its 60-second interval. It overran the interval once in the first run and never in the second. The longest pass is not known because the pass-time histogram tops out at 10 seconds. | v2.5 pre-release build |
 | NVLink partitions | 10,008 | Simulation, pre-release build | The later 556-rack run: one partition per host created through the NMX-C mock, 0 failed, 0 timed out, and the 556 default partitions removed. The partition monitor averaged 10.4 seconds per pass over the run and 14 to 19 seconds per pass with 164 to 505 racks `ready`, with a peak 10-minute mean of 24 seconds as the last racks went `ready`, against its 60-second interval. No pass overran the interval. The longest pass is not known because the pass-time histogram tops out at 10 seconds. In the earlier run the monitor averaged 17.1 seconds per pass, ran 27 to 33 seconds per pass with 554 to 555 racks `ready`, reached 10-minute window means of up to 42 seconds, and overran the interval 8 times. | v2.5 pre-release build for the later run and v2.4 for the earlier run |
+| BMC endpoints explored | 78,952 | Simulation, pre-release build | The 1,112-rack fleet: 71 BMC endpoints per rack. | v2.5 pre-release build |
 | BMC endpoints explored | 39,476 | Simulation, pre-release build | The 556-rack fleet: 71 BMC endpoints per rack. | v2.5 pre-release build |
 | Concurrent tenant VPCs | TBD | Field deployment | Not collected in the dataset, and no tenant virtual private cloud (VPC) or instance journey has run in a simulation at scale. The count is bounded by the Virtual Extensible LAN (VXLAN) network identifier (VNI) pool ranges the operator configures. Refer to [Related Limits](#related-limits). | |
 
@@ -137,7 +153,13 @@ Three things set the pace and the ceiling in the measurements:
   limits. Raise the nico-api CPU limit and its Tokio worker thread count
   together: the runs set the thread count with the `TOKIO_WORKER_THREADS`
   environment variable, through the nico-api chart's `extraEnv`, to match the
-  CPU limit.
+  CPU limit. The 1,112-rack simulations raised the limits to 64 CPUs with 64
+  worker threads for nico-api and 48 CPUs for the Postgres primary, and kept
+  the two on different nodes with a required anti-affinity, because the two
+  limits together exceed a 96 logical CPU node. Neither limit was reached:
+  nico-api averaged 25 to 26 cores and peaked at 36 from fleet-up to
+  convergence, and the primary averaged 23 to 24 and peaked at 33 and 38 on
+  the two runs.
 - **Postgres memory** is measured as the kubelet working set, resident memory
   plus active page cache, which grows toward the memory limit over a long run
   by design, so a working set at the limit is not by itself evidence of need.
@@ -148,7 +170,9 @@ Three things set the pace and the ceiling in the measurements:
   on 7 of the 33 sites. In the 400-rack simulation the primary reached 27.3
   GiB under a 32 GiB limit during the ramp, then 48.7 GiB of a 64 GiB limit 47
   hours after fleet-up. In the two 556-rack simulations it peaked at 36.5 GiB
-  and 36.9 GiB of a 96 GiB limit. The 400-rack run and the earlier 556-rack
+  and 36.9 GiB of a 96 GiB limit, and in the two 1,112-rack simulations at
+  68.3 GiB and 55.9 GiB of a 128 GiB limit, then 70.1 GiB over two idle days
+  after the first of them converged. The 400-rack run and the earlier 556-rack
   run recorded `oom_kill` 0. The later 556-rack run did not read the counter,
   but its primary's working set never reset to baseline and the same pod
   stayed primary throughout. The first complete 250-rack run finished at the
@@ -156,10 +180,37 @@ Three things set the pace and the ceiling in the measurements:
   guidance, and treat a rising `oom_kill` count in the Postgres cgroup, not a
   working set at the limit, as the signal to raise it.
 
+A converged fleet keeps the site controller busy. Sampled for 52 hours after
+the first 1,112-rack run converged, with nothing changing in the inventory,
+nico-api averaged 35 cores against 25 to 26 during ingestion, with a 43-core
+peak and a 51 GiB working set, and the Postgres primary averaged 27 cores
+against 23 to 24, with a 40-core peak and a 70 GiB working set, while
+nico-hardware-health held 7 cores and 25 GiB. The source of that load
+was not isolated; the candidates are the periodic controllers that re-verify
+every `ready` machine, hardware-health collection from 78,952 BMCs through
+nico-api, the DNS zone serial updates, and the partition monitor over 20,016
+NVLink members. Whatever its source, the resting load of a fleet, not its
+ingestion peak, is the figure to size for.
+
 The BMC network is a sizing input too: every endpoint needs one address, so a
-250-rack GB200 site needs 17,750 BMC addresses and a 556-rack site needs
-39,476. Refer to
+250-rack GB200 site needs 17,750 BMC addresses, a 556-rack site needs
+39,476, and a 1,112-rack site needs 78,952, more than one `/16` holds. Refer
+to
 [IP and Network Configuration](../provisioning/ip-and-network-configuration.md).
+
+The simulator has a limit of its own that a site with real hardware does not
+share. It publishes every simulated BMC and switch NVOS address as a Service
+`externalIP`, and kube-proxy in IPVS mode records every such address and
+port in one ipset per node that holds at most 65,536 entries, a value
+compiled into kube-proxy. A GB200 NVL72 rack with 2 DPUs per tray costs 89
+entries, so a stock kube-proxy serves about 736 simulated racks. Above that
+the set fills, part of the fleet is unreachable from some nodes, and machine
+creation stalls. The 1,112-rack simulations ran a kube-proxy rebuilt with a
+larger set and longer calico-node probes, since the BIRD daemon in calico-node
+exceeds its default probe timeout with about 89,000 addresses on each node's
+IPVS interface. Refer to
+[Cluster Prerequisites](../development/machine-a-tron-scale-testing.md#cluster-prerequisites)
+on the scale testing page.
 
 API admission control is a nico-api setting to know at this scale. It bounds
 the business requests nico-api executes and queues, in total and per client.
@@ -203,6 +254,7 @@ in the later 556-rack run.
 | 4,500 (250 GB200 racks) | 3 baseline nodes | 54 logical CPUs and 62 GiB, the highest per-node peaks across the runs. The CPU and memory peaks are from different runs and not necessarily the same node | 16 CPUs and 32 GiB limits, about 10 CPUs used, working set 14 to 17 GiB with a two-sample spike to 26 GiB | 8 CPUs, 5 to 6 used | Simulation, v2.3 line. Refer to [Large Site Sizing and Settings](../development/large-site-sizing-and-settings.md#site-controller-sizing) |
 | 7,200 (400 GB200 racks) | 3 baseline nodes | 61 logical CPUs on one node and 76 GiB on another over the first 245 minutes of the 6.9-hour run, after which node sampling stopped | 16 CPUs, 32 GiB limit raised to 64 GiB during the run. 27.3 GiB used under 32 GiB, 48.7 GiB after 47 hours | 16 CPUs and 32 GiB limits, 12.3 CPUs and 9.7 GiB used at 245 minutes | Simulation, pre-release build |
 | 10,008 (556 GB200 racks) | 3 baseline nodes | 43 logical CPUs, 40 at the 90th percentile, and 99 GiB, both on the node that carried the Postgres primary and nico-api in the later run. The earlier run peaked at 75 logical CPUs on one node and 99 GiB on another, with one sample of 97 logical CPUs on the third node, a sampling artifact on a 96 logical CPU node | Give it 32 CPUs: at that limit it averaged 14 to 15 cores an hour from 2 hours after fleet-up on, under a 96 GiB limit with a 36.9 GiB peak. At 16 CPUs in the earlier run it was CPU-bound for the last 4.7 hours, with a 36.5 GiB peak | Give it 32 CPUs and 32 Tokio worker threads with the 32 GiB chart default: 49 percent of the workers busy over the run and 59 to 68 percent in the ready ramp, 18.9 CPUs and 22.8 GiB at peak. At 16 CPUs in the earlier run it held 10 to 12 CPUs and 15 GiB | Simulation, pre-release builds of the v2.4 and v2.5 lines, two completed runs |
+| 20,016 (1,112 GB200 racks) | 3 baseline nodes | 63 logical CPUs and 142 GiB in the first run, both on the node that carried the Postgres primary and nico-hardware-health, and 52 logical CPUs and 121 GiB in the second run, in which no node carried two of nico-api, the Postgres primary, and hardware-health. The nodes averaged 16 to 42 logical CPUs over the runs and 46 to 47 on the nico-api and Postgres nodes with the converged fleet idle | Give it 48 CPUs and 128 GiB: 23 to 24 cores mean and 33 to 38 at peak from fleet-up to convergence, 27 mean and 40 peak at rest, with a 68 GiB peak working set during ingestion and 70 GiB at rest | Give it 64 CPUs and 64 GiB with 64 Tokio worker threads, on a different node from the Postgres primary: 25 to 26 cores mean and 36 at peak during ingestion, 35 mean and 43 peak at rest, with a 46 GiB peak working set during ingestion and 51 GiB at rest | Simulation, pre-release build of the v2.5 line, two completed runs |
 
 At 556 racks the later run's highest per-node CPU peak was 43 of 96 logical
 CPUs, on the node that carried both the Postgres primary and nico-api at 32
@@ -213,6 +265,17 @@ fleet of that size therefore leaves little CPU headroom on 3 baseline nodes
 once both limits are raised, which supports the existing recommendation in
 the hardware prerequisites of 5 nodes, or nodes with more cores, for large
 GB200-class sites.
+
+At 1,112 racks the two heavy components were kept on different nodes by a
+required anti-affinity in the nico-api chart values, and the busiest node
+peaked at 63 of 96 logical CPUs in the first run, when the scheduler placed
+nico-hardware-health with the Postgres primary, and at 52 in the second, when
+it did not. The three nodes carried the fleet with CPU headroom, but a 20,000
+host site has three components that each want a node of their own, nico-api
+at 35 cores at rest, the Postgres primary at 27, and hardware-health at 7,
+plus the simulator pods that a real site does not run, so the 5-node
+recommendation holds. Postgres volumes were 20 GiB instead of the 10 GiB
+default, since the 556-rack database measured 4.4 GiB.
 
 The field dataset gives straight-line fits across the 33 sites, 25 of them on
 the v0.10 line, 6 on the v2.0 line, and 2 on the v2.1 line. They interpolate
@@ -230,10 +293,11 @@ hosts is 5 times the largest measured site:
   almost all of it one index, so disk is not the scaling constraint.
 
 The simulated 556-rack fleet's highest per-node memory peak was 99 GiB against
-a 387 GiB field extrapolation. The two figures measure different things: the
+a 387 GiB field extrapolation, and the 1,112-rack fleet's was 142 GiB against
+734 GiB. The two figures measure different things: the
 field fit is a 7-day peak of a working set that grows toward the Postgres
 memory limit, extrapolated 5 times past the largest measured site, and the
-simulation is an ingestion of 7.9 to 10.5 hours. Use the field fits for the
+simulation is an ingestion of 7.9 to 14 hours. Use the field fits for the
 long-running steady state of a site, and the simulated rows for the ingestion
 of a large fleet with the settings on
 [Large Site Sizing and Settings](../development/large-site-sizing-and-settings.md#settings-changed-from-the-defaults).
@@ -249,6 +313,16 @@ hosts at a time, `admin_lock_admission_permits` 32, and
 `switch_and_power_shelf_pass_interval` 5m, so switches and power shelves are
 created every 5 minutes during the host creation phase. Those three keys are
 in [pull request 8142](https://github.com/dsx-ai-factory/infra-controller/pull/8142).
+The 1,112-rack runs scaled the budget for twice the endpoints:
+`explorations_per_run` 4500, `machines_created_per_run` 450,
+`concurrent_explorations` 680, and `machine_creation_concurrency` 12, with
+`max_concurrency` 120 and `partition_monitor_max_concurrent_groups` 96. The
+shipped values are `helm-prereqs/values/nico-core-10k-hosts.yaml` and
+`helm-prereqs/values/nico-core-20k-hosts.yaml`, and the runbooks are the
+[10,000-host](../development/machine-a-tron-scale-testing.md#10000-host-simulated-fleet)
+and
+[20,000-host](../development/machine-a-tron-scale-testing.md#20000-host-simulated-fleet)
+sections of the scale testing page.
 
 ## Multiple Site Controllers
 
@@ -282,6 +356,7 @@ split in these cases:
 | VPCs per site | One active VNI per VPC from the `vpc-vni` or `external-vpc-vni` pool, so the configured ranges bound the count. A VPC with an unreleased routing-profile transition holds two allocations, one in each pool, until the operator releases the previous one. Grow an established pool with `nico-admin-cli resource-pool grow`. | [VNI Resource Pools](../manuals/vpc/vni_resource_pools.md) |
 | Network security group size | `max_network_security_group_size` 200 expanded rules per group, with a DPU agent ceiling on the order of 10,000 | [Network Security Groups](../manuals/networking/network_security_groups.md) |
 | NVLink domain | One NVL72 rack or two NVL36 racks cabled together. Partition monitor pass time grows with configured racks. | [NVLink Partitioning](../manuals/nvlink_partitioning.md) |
+| Simulated BMC and NVOS addresses per node | 65,536 Service `externalIP` and port entries with kube-proxy in IPVS mode, about 736 GB200 NVL72 racks in the simulator's per-pod Service model. A simulator limit, not a NICo limit | [Cluster Prerequisites](../development/machine-a-tron-scale-testing.md#cluster-prerequisites) |
 | HBN route and VXLAN tunnel endpoint (VTEP) limits | Not published by NICo. Refer to the [DOCA HBN Service documentation](https://docs.nvidia.com/doca/sdk/doca-hbn-service-guide/index.html). | [Glossary](../glossary.md#hbn-in-nico) |
 
 ## Release Notes
