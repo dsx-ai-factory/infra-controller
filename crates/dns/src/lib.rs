@@ -886,7 +886,7 @@ impl DnsServer {
         let api_uri = config.api_uri.to_string();
         let api_config = ApiConfig::new(api_uri.as_str(), &carbide_client_config);
 
-        info!(%api_uri, "Connecting to carbide-api");
+        info!(%api_uri, "Connecting to API service");
 
         let client = Mutex::new(CarbideTlsClient::retry_build(&api_config).await?);
 
