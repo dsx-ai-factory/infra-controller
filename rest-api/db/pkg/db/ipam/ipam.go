@@ -251,8 +251,8 @@ func LockAndValidateParentIPBlockForAllocation(ctx context.Context, tx *cdb.Tx, 
 		return fmt.Errorf("%w %s: %w", ErrParentIPBlockReload, parentIPBlock.ID, err)
 	}
 	*parentIPBlock = *locked
-	if parentIPBlock.SitePrefixID != nil && parentIPBlock.Status != cdbm.IPBlockStatusReady {
-		return fmt.Errorf("parent IP Block %s linked to an OperatorManaged SitePrefix is not Ready", parentIPBlock.ID)
+	if parentIPBlock.Status != cdbm.IPBlockStatusReady && (parentIPBlock.SitePrefixID != nil || parentIPBlock.TenantID == nil) {
+		return fmt.Errorf("parent IP Block %s is not Ready", parentIPBlock.ID)
 	}
 	return nil
 }

@@ -15,7 +15,7 @@ import (
 // DiscoverSiteConfigInventory collects Core build metadata, advertised
 // capabilities, and runtime configuration. It publishes that snapshot to the
 // Cloud workflow, which stores the Core version and SLAAC capability and
-// creates IP Blocks for the Site fabric prefixes.
+// records the Site Agent build info. SitePrefix inventory reconciles Site fabric IP Blocks.
 func DiscoverSiteConfigInventory(ctx workflow.Context) error {
 	logger := temporallog.With(workflow.GetLogger(ctx), "Workflow", "DiscoverSiteConfigInventory")
 
