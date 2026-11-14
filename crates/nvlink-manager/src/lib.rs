@@ -3543,7 +3543,7 @@ impl NvlPartitionMonitor {
                         gpu_guid: gpu.guid,
                         domain_uuid: nvlink_info.domain_uuid,
                         partition_id: db_partition_id,
-                        partition_name: db_partition_name.clone(),
+                        partition_name: db_partition_name,
                         logical_partition_id: db_logical_partition_id,
                         partition_nmx_c_id: db_partition_nmx_c_id,
                     };

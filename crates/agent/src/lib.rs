@@ -909,7 +909,9 @@ async fn register(
                 e
             )
         })?,
-        None => eyre::bail!("missing DPU info, should be impossible"),
+        None => {
+            eyre::bail!("missing DPU info, should be impossible");
+        }
     };
 
     let (registration_data, ..) = register_machine(

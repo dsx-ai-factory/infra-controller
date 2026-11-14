@@ -39,3 +39,6 @@ tracing = { workspace = true }
 tokio = { features = ["full"], workspace = true }
 axum = { features = ["http2"], workspace = true }
 carbide-test-support = { path = "../test-support" }
+
+[lints]
+workspace = true

@@ -46,7 +46,7 @@ impl TryFrom<rpc::Metadata> for Metadata {
 
         for label in metadata.labels {
             let key = label.key.clone();
-            let value = label.value.clone().unwrap_or_default();
+            let value = label.value.unwrap_or_default();
 
             if labels.contains_key(&key) {
                 return Err(RpcDataConversionError::InvalidLabel(format!(

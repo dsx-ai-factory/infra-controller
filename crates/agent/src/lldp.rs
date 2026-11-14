@@ -183,7 +183,9 @@ fn parse_lldp_med_inventory_disabled(configuration: &[u8]) -> eyre::Result<bool>
     match inventory_disabled {
         "yes" => Ok(true),
         "no" => Ok(false),
-        value => eyre::bail!("lldpcli returned unexpected LLDP-MED inventory value {value:?}"),
+        value => {
+            eyre::bail!("lldpcli returned unexpected LLDP-MED inventory value {value:?}");
+        }
     }
 }
 
@@ -260,7 +262,7 @@ async fn restart_lldpd(instrumentation: &Instrumentation) -> eyre::Result<()> {
                 eyre::bail!(
                     "systemctl restart lldpd.service failed with status {status}",
                     status = output.status
-                )
+                );
             }
         });
 

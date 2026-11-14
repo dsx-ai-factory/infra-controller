@@ -323,6 +323,10 @@ async fn show(
     (StatusCode::OK, Html(tmpl.render().unwrap())).into_response()
 }
 
+#[expect(
+    clippy::result_large_err,
+    reason = "page-loading failures carry HTTP responses returned directly to Axum"
+)]
 async fn fetch_machine(
     api: &Api,
     machine_id: MachineId,
@@ -366,6 +370,10 @@ async fn fetch_machine(
 }
 
 /// Fetches Instance Type Names for the given Instance Type IDs
+#[expect(
+    clippy::result_large_err,
+    reason = "page-loading failures carry HTTP responses returned directly to Axum"
+)]
 async fn fetch_instance_type_names(
     api: &Api,
     instance_type_ids: Vec<String>,
@@ -965,7 +973,7 @@ impl From<forgerpc::Machine> for MachineDetail<'_> {
                 if let Some(props) = iface.pci_properties {
                     iface_display.device = props.device;
                     iface_display.vendor = props.vendor;
-                    iface_display.slot = props.slot.clone().unwrap_or_default();
+                    iface_display.slot = props.slot.unwrap_or_default();
                 }
                 if let Some(ib_status) = status.infiniband.as_ref() {
                     iface_display.observed_at =

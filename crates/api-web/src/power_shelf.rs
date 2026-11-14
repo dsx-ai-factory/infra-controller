@@ -220,6 +220,10 @@ pub(super) async fn detail(
     (StatusCode::OK, Html(detail.render().unwrap())).into_response()
 }
 
+#[expect(
+    clippy::result_large_err,
+    reason = "page-loading failures carry HTTP responses returned directly to Axum"
+)]
 async fn fetch_power_shelf(
     api: &Api,
     power_shelf_id: &str,

@@ -138,7 +138,7 @@ impl BucketLimiter {
                 .is_ok()
             {
                 self.tokens
-                    .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+                    .try_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
                         Some(
                             current
                                 .saturating_add(tokens_to_add_fixed)

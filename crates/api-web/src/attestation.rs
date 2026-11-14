@@ -248,7 +248,7 @@ pub(super) async fn show_attestation_results(
     for val in report.pcr_values() {
         let idx = val.pcr_register as usize;
         report_table[idx].pcr_slot = idx as i16;
-        report_table[idx].report_value = val.sha_any.clone();
+        report_table[idx].report_value = val.sha_any;
         report_table[idx].bundle_value = get_bundle_value_for_pcr_slot(&bundle, idx);
         report_table[idx].description = if idx < PCR_SLOT_DESCRIPTIONS.len() {
             PCR_SLOT_DESCRIPTIONS[idx].to_string()

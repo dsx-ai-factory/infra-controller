@@ -26,6 +26,7 @@ use crate::jobs::{JobState, JobStatus};
 use crate::{RmsMock, rms};
 
 /// Begin applying a switch system image to the given switches.
+#[allow(clippy::unused_async)] // needs async for `rack_manager_impl!` macro support
 pub(crate) async fn apply_switch_system_image(
     mock: &RmsMock,
     request: tonic::Request<rms::ApplySwitchSystemImageRequest>,
@@ -57,6 +58,7 @@ pub(crate) async fn apply_switch_system_image(
 
 /// Report progress of a switch system image job, parent or child. A job this
 /// process never issued is `RETURN_CODE_FAILURE`, as the proto specifies.
+#[allow(clippy::unused_async)] // needs async for `rack_manager_impl!` macro support
 pub(crate) async fn get_switch_system_image_job_status(
     mock: &RmsMock,
     request: tonic::Request<rms::GetSwitchSystemImageJobStatusRequest>,

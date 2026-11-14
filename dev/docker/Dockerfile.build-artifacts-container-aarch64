@@ -14,7 +14,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-FROM arm64v8/rust:1.97.1-slim-bullseye
+FROM arm64v8/rust:1.100.0-slim-bookworm@sha256:84fb9722598fd9f4851a3d8afa3f55cd8a9b1ccd35444a405f25b666a8b93963
 
 # Bullseye does not package mold. Keep this image on Bullseye for artifact
 # compatibility and install the pinned upstream ARM64 binary instead.
@@ -26,7 +26,7 @@ ARG CI_COMMIT_SHORT_SHA
 ENV CI_COMMIT_SHORT_SHA $CI_COMMIT_SHORT_SHA
 
 # Bullseye security package downloads return 404 from deb.debian.org.
-# Use Debian's archive so Rust 1.97.1 builds can upgrade CA certificates
+# Use Debian's archive so Rust 1.100.0 builds can upgrade CA certificates
 # and install PostgreSQL 13 without changing the base image version.
 RUN sed -i \
     's|http://deb.debian.org/debian-security|https://archive.debian.org/debian-security|g' \
@@ -89,7 +89,6 @@ ENV CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=/usr/local/bin/clang-mold
 
 RUN rustup component add rustfmt
 RUN cargo install cargo-cache cargo-make sccache --locked && \
-	cargo install mdbook@0.4.52 mdbook-plantuml@0.8.0 mdbook-mermaid@0.16.2 && \
 	cargo cache -r registry-index,registry-sources
 
 # install stuff that's not in debian

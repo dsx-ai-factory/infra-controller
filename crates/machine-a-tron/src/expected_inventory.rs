@@ -360,7 +360,9 @@ impl DeviceRecord {
                 shelf_serial_number: self.serial.clone(),
                 rack_id,
             },
-            DeviceKind::Dpu => eyre::bail!("DPU {} has no expected record", self.bmc_mac),
+            DeviceKind::Dpu => {
+                eyre::bail!("DPU {} has no expected record", self.bmc_mac);
+            }
         })
     }
 }

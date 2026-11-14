@@ -287,6 +287,10 @@ fn root_url() -> &'static str {
 /// A returned same-BMC redirect can legitimately name `/`; a request carrying
 /// `Forwarded` must therefore enter the proxy path and receive normal ACL
 /// handling. Malformed `Forwarded` values also fail closed in that path.
+#[expect(
+    clippy::result_large_err,
+    reason = "both outcomes carry an HTTP response directly into Axum"
+)]
 async fn root_or_proxy(
     State(state): State<BmcProxyState>,
     request: Request<Body>,
@@ -311,6 +315,10 @@ async fn root_or_proxy(
     Ok(response)
 }
 
+#[expect(
+    clippy::result_large_err,
+    reason = "both outcomes carry an HTTP response directly into Axum"
+)]
 async fn proxy_request(
     State(state): State<BmcProxyState>,
     request: Request<Body>,
@@ -359,6 +367,10 @@ fn span_status(status: StatusCode) -> &'static str {
     }
 }
 
+#[expect(
+    clippy::result_large_err,
+    reason = "both outcomes carry an HTTP response directly into Axum"
+)]
 async fn proxy_request_inner(
     state: BmcProxyState,
     request: Request<Body>,
@@ -585,7 +597,7 @@ fn answer_failed_attempt(
     if let Some(ended) = ended {
         report(slot, class, ended);
     }
-    failed.response
+    *failed.response
 }
 
 /// Counts an exchange that ended as `ended` against `class`'s breaker at the

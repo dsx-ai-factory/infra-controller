@@ -38,7 +38,7 @@ carbide-version = { path = "../version" }
 carbide-health-report = { path = "../health-report" }
 carbide-instrument = { path = "../instrument" }
 carbide-ipxe-renderer = { path = "../ipxe-renderer" }
-carbide-utils = { path = "../utils", features = ["sqlx"] }
+carbide-utils = { path = "../utils" }
 carbide-uuid = { path = "../uuid", features = ["sqlx"] }
 dns-record = { path = "../dns-record" }
 libnmxm = { path = "../libnmxm" }
@@ -86,9 +86,6 @@ version-compare = { workspace = true }
 
 [features]
 test-support = []
-
-[build-dependencies]
-carbide-version = { path = "../version" }
 
 [dev-dependencies]
 carbide-instrument = { path = "../instrument", features = ["test-support"] }
