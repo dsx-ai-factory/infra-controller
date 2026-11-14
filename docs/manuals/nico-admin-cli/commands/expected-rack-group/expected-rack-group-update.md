@@ -20,10 +20,10 @@ nico-admin-cli expected-rack-group update <--protocol>
 
 Replace all fields of an existing expected rack group
 
-While the group has expected NVLink domain declarations, its racks field
-must remain unchanged. Topology, protocol, and metadata updates are
-still allowed. Delete its declarations with expected-nvlink-domain
-delete before changing racks.
+While the group has NVLink domain declarations, its racks field must
+remain unchanged. Topology, protocol, and metadata updates are still
+allowed. Delete its declarations with nvlink-domain delete before
+changing racks.
 
 ## OPTIONS
 
@@ -38,7 +38,7 @@ Replacement topology identifier (required)
 `--rack <RACKS>`
 
 Rack JSON; repeat for each rack. Example:
-{"rack_id":"rack-01","members":[{"type":"Switch","manufacturer":"NVIDIA","id":"switch-01"}]}
+{"rack_id":"rack-01","members":[{"type":"Switch","manufacturer":"NVIDIA","id":"switch-01","cartridge_index":0}]}
 Both fields are required; use "members": [] for a rack without
 devices. Member type must be Compute, Switch, or PowerShelf. Omitting
 --rack supplies no racks
@@ -70,9 +70,9 @@ Sort output by specified field
 
 *Possible values:*
 
-> - primary-id: Sort by the primary ID
->
-> - state: Sort by state
+- primary-id: Sort by the primary ID
+
+- state: Sort by state
 
 `-h, --help`
 
@@ -85,7 +85,7 @@ Existing external group ID
 ## Examples
 
 ```sh
-nico-admin-cli expected-rack-group update nvl5-gp1-jhb01 --protocol NVLINK_V6 --topology gb200_nvl72r1_c2g4 --rack '{"rack_id":"rack-01","members":[{"type":"Switch","manufacturer":"NVIDIA","id":"switch-01"}]}' --meta-name nvl5-gp1-jhb01 --label location.datacenter:JHB01
+nico-admin-cli expected-rack-group update nvl5-gp1-jhb01 --protocol NVLINK_V6 --topology gb200_nvl72r1_c2g4 --rack '{"rack_id":"rack-01","members":[{"type":"Switch","manufacturer":"NVIDIA","id":"switch-01","cartridge_index":0}]}' --meta-name nvl5-gp1-jhb01 --label location.datacenter:JHB01
 nico-admin-cli expected-rack-group update nvl5-gp1-jhb01 --protocol NVLINK_V6 --topology gb200_nvl72r1_c2g4
 ```
 
