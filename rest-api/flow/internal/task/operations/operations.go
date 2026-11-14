@@ -297,8 +297,10 @@ type FirmwareControlTaskInfo struct {
 	// colliding with the carbide tray-level Component vocabulary used for
 	// OperationTargetSpec / ExecutionInfo.Components, which select tray
 	// INSTANCES rather than sub-parts of a tray.
-	// Names are lowercase and case-sensitive. Empty or nil means "update
-	// everything in the bundle" (the historical default). Mapping from
+	// Explicit names are partitioned by tray type before new executions. Types
+	// with no intersection skip their rule steps; unmatched names reject admission.
+	// Empty or nil retains backend defaults and does not opt into DPU updates.
+	// Mapping from
 	// these strings to component-manager-specific enums is done in each
 	// FirmwareControl implementation (see pkg/common/firmwarecomponents).
 	SubTargets []string `json:"sub_targets,omitempty"`

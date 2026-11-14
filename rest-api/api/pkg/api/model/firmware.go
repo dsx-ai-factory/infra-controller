@@ -23,13 +23,16 @@ type APIUpdateFirmwareRequest struct {
 	Version            *string                        `json:"version"`
 	AuthenticationData *APIFirmwareAuthenticationData `json:"authenticationData"`
 	// Targets, when non-empty, restricts the update to a subset of
-	// firmware sub-parts within the targeted tray (e.g. ["bmc", "nvos"]
+	// firmware sub-parts within the targeted trays (e.g. ["bmc", "nvos"]
 	// for switch trays). Names are lowercase. The authoritative supported
 	// set per tray type is derived from the Flow service's NICo proto
 	// bindings (mirroring Core's per-tray-type enums in
 	// carbide-core/crates/rpc/proto/forge.proto); see
 	// flow/pkg/common/firmwarecomponents for the resolution logic and
 	// helpers like SupportedNICoNVSwitchNames.
+	// Each selected tray receives only applicable names. Types with no matching
+	// sub-part skip all their rule steps; every name must match within the
+	// rule, inventory and version scope before dispatch.
 	// Empty/nil means "update the default targets" for the
 	// compute-tray-internal targets.
 	//
@@ -232,6 +235,9 @@ type APIBatchRackFirmwareUpdateRequest struct {
 	Filter             *RackFilter                    `json:"filter"`
 	Version            *string                        `json:"version"`
 	AuthenticationData *APIFirmwareAuthenticationData `json:"authenticationData"`
+	// Targets restricts firmware sub-parts within each tray selected by the
+	// operation rule. See APIUpdateFirmwareRequest for names and defaults.
+	Targets []string `json:"targets"`
 	// RuleID, when set, pins every task spawned by this batch to the named
 	// Operation Rule.
 	RuleID *string `json:"ruleId"`
@@ -245,11 +251,15 @@ type APIBatchRackFirmwareUpdateRequest struct {
 
 // Validate checks required fields.
 func (r *APIBatchRackFirmwareUpdateRequest) Validate() error {
-	return validation.ValidateStruct(r,
+	err := validation.ValidateStruct(r,
 		validation.Field(&r.SiteID, validation.Required.Error("siteId is required")),
 		validation.Field(&r.RuleID, validationis.UUID.Error(validationErrorInvalidUUID)),
 		validation.Field(&r.AuthenticationData),
 	)
+	if err != nil {
+		return err
+	}
+	return validateFirmwareTargets(r.Targets)
 }
 
 // ========== Batch Tray Firmware Update Request ==========

@@ -42,6 +42,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/NVIDIA/infra-controller/rest-api/flow/pkg/common/devicetypes"
 	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
 )
 
@@ -187,4 +188,28 @@ func lookup[E any](names []string, table map[string]E, sortedNames []string, kin
 		out = append(out, v)
 	}
 	return out, nil
+}
+
+// ForType returns the requested sub-parts applicable to a tray type, in request
+// order. An empty intersection means the type must be skipped, never dispatched
+// with backend defaults. Names are normalized as in the component parsers.
+func ForType(names []string, typ devicetypes.ComponentType) []string {
+	var selected []string
+	for _, raw := range names {
+		name := strings.ToLower(strings.TrimSpace(raw))
+		var supported bool
+		switch typ {
+		case devicetypes.ComponentTypeCompute:
+			_, supported = nicoComputeTrayByName[name]
+			supported = supported || name == DpuComponentName
+		case devicetypes.ComponentTypeNVSwitch:
+			_, supported = nicoNVSwitchByName[name]
+		case devicetypes.ComponentTypePowerShelf:
+			_, supported = nicoPowerShelfByName[name]
+		}
+		if supported {
+			selected = append(selected, name)
+		}
+	}
+	return selected
 }
