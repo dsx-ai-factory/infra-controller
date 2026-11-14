@@ -86,6 +86,13 @@ type SSHKeyFilterInput struct {
 	Fingerprints   []string
 	Expires        *time.Time
 	SearchQuery    *string
+	IncludeDeleted bool
+}
+
+// SSHKeyClearInput identifies nullable SSH Key fields to clear.
+type SSHKeyClearInput struct {
+	SSHKeyID uuid.UUID
+	Deleted  bool
 }
 
 var _ bun.BeforeAppendModelHook = (*SSHKey)(nil)
@@ -120,6 +127,8 @@ type SSHKeyDAO interface {
 	GetAll(ctx context.Context, tx *db.Tx, filter SSHKeyFilterInput, page paginator.PageInput, includeRelations []string) ([]SSHKey, int, error)
 	//
 	Update(ctx context.Context, tx *db.Tx, input SSHKeyUpdateInput) (*SSHKey, error)
+	//
+	Clear(ctx context.Context, tx *db.Tx, input SSHKeyClearInput) (*SSHKey, error)
 	//
 	Delete(ctx context.Context, tx *db.Tx, id uuid.UUID) error
 }
@@ -205,6 +214,9 @@ func (sksd SSHKeySQLDAO) GetAll(ctx context.Context, tx *db.Tx, filter SSHKeyFil
 	sks := []SSHKey{}
 
 	query := db.GetIDB(tx, sksd.dbSession).NewSelect().Model(&sks)
+	if filter.IncludeDeleted {
+		query = query.WhereAllWithDeleted()
+	}
 
 	if filter.Names != nil {
 		query = query.Where("sk.name IN (?)", bun.In(filter.Names))
@@ -320,6 +332,40 @@ func (sksd SSHKeySQLDAO) Update(ctx context.Context, tx *db.Tx, input SSHKeyUpda
 	return nv, nil
 }
 
+// Clear clears selected nullable fields on an SSHKey.
+func (sksd SSHKeySQLDAO) Clear(ctx context.Context, tx *db.Tx, input SSHKeyClearInput) (_ *SSHKey, retErr error) {
+	ctx, sshKeyDAOSpan := cotel.StartSpan(ctx, "SSHKeyDAO.Clear")
+	defer func() { cotel.EndSpan(sshKeyDAOSpan, retErr) }()
+	cotel.SetAttribute(sshKeyDAOSpan, attribute.String("id", input.SSHKeyID.String()))
+
+	sshKey := &SSHKey{ID: input.SSHKeyID}
+	updatedFields := []string{}
+	if input.Deleted {
+		updatedFields = append(updatedFields, "deleted")
+	}
+	if len(updatedFields) > 0 {
+		updatedFields = append(updatedFields, "updated")
+		query := db.GetIDB(tx, sksd.dbSession).
+			NewUpdate().
+			Model(sshKey).
+			Column(updatedFields...).
+			Where("sk.id = ?", input.SSHKeyID)
+		if input.Deleted {
+			query = query.WhereAllWithDeleted()
+		}
+		_, err := query.Exec(ctx)
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	updated, err := sksd.GetByID(ctx, tx, input.SSHKeyID, nil)
+	if err != nil {
+		return nil, err
+	}
+	return updated, nil
+}
+
 // Delete deletes an SSHKey by ID
 // error is returned only if there is a db error
 // if the object being deleted doesnt exist, error is not returned
@@ -348,6 +394,12 @@ func (sksd SSHKeySQLDAO) Delete(ctx context.Context, tx *db.Tx, id uuid.UUID) (r
 	}
 
 	return nil
+}
+
+// SSHKeyTenantLockID returns the Tenant-scoped advisory lock that serializes
+// SSH Key Group recovery from Site inventory with SSH Key create and delete.
+func SSHKeyTenantLockID(tenantID uuid.UUID) uint64 {
+	return db.GetAdvisoryLockIDFromString("ssh-key-group-recovery-" + tenantID.String())
 }
 
 // NewSSHKeyDAO returns a new SSHKeyDAO

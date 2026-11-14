@@ -107,6 +107,13 @@ type SSHKeyGroupSiteAssociationFilterInput struct {
 	SiteID         *uuid.UUID
 	Version        *string
 	Status         *string
+	IncludeDeleted bool
+}
+
+// SSHKeyGroupSiteAssociationClearInput identifies nullable association fields to clear.
+type SSHKeyGroupSiteAssociationClearInput struct {
+	ID      uuid.UUID
+	Deleted bool
 }
 
 // ToKeysetIdentifierProto builds the workflow proto identifier for this
@@ -147,11 +154,9 @@ func (skgsa *SSHKeyGroupSiteAssociation) ToProto(content *corev1.TenantKeysetCon
 
 // FromProto populates this association from its workflow proto
 // representation. A nil proto is a no-op. This is the inverse of
-// `ToProto` and exists for convention symmetry — currently no code
-// path on the cloud side reconstructs a full association entity
-// from a `corev1.TenantKeyset` (the site is the destination, not
-// the source), but the method is provided so future reconciliation
-// flows have a single canonical entry point.
+// `ToProto` and exists for convention symmetry. Inventory recovery
+// reconstructs the association together with its parent and key rows,
+// rather than using this field-only conversion in isolation.
 //
 // Field-level contract:
 //   - `skgsa.SSHKeyGroupID` is preserved on a missing or unparseable
@@ -250,6 +255,8 @@ type SSHKeyGroupSiteAssociationDAO interface {
 	GenerateAndUpdateVersion(ctx context.Context, tx *db.Tx, ID uuid.UUID) (*SSHKeyGroupSiteAssociation, error)
 	//
 	Update(ctx context.Context, tx *db.Tx, input SSHKeyGroupSiteAssociationUpdateInput) (*SSHKeyGroupSiteAssociation, error)
+	//
+	Clear(ctx context.Context, tx *db.Tx, input SSHKeyGroupSiteAssociationClearInput) (*SSHKeyGroupSiteAssociation, error)
 	//
 	Delete(ctx context.Context, tx *db.Tx, id uuid.UUID) error
 }
@@ -358,6 +365,9 @@ func (skgsasd SSHKeyGroupSiteAssociationSQLDAO) GetAll(ctx context.Context, tx *
 	skgsas := []SSHKeyGroupSiteAssociation{}
 
 	query := db.GetIDB(tx, skgsasd.dbSession).NewSelect().Model(&skgsas)
+	if filter.IncludeDeleted {
+		query = query.WhereAllWithDeleted()
+	}
 	if filter.SSHKeyGroupIDs != nil {
 		query = query.Where("skgsa.sshkey_group_id IN (?)", bun.In(filter.SSHKeyGroupIDs))
 	}
@@ -496,6 +506,40 @@ func (skgsasd SSHKeyGroupSiteAssociationSQLDAO) Update(
 		return nil, err
 	}
 	return nv, nil
+}
+
+// Clear clears selected nullable fields on an SSHKeyGroupSiteAssociation.
+func (skgsasd SSHKeyGroupSiteAssociationSQLDAO) Clear(ctx context.Context, tx *db.Tx, input SSHKeyGroupSiteAssociationClearInput) (_ *SSHKeyGroupSiteAssociation, retErr error) {
+	ctx, sshKeyGroupSiteAssociationDAOSpan := cotel.StartSpan(ctx, "SSHKeyGroupSiteAssociationDAO.Clear")
+	defer func() { cotel.EndSpan(sshKeyGroupSiteAssociationDAOSpan, retErr) }()
+	cotel.SetAttribute(sshKeyGroupSiteAssociationDAOSpan, attribute.String("id", input.ID.String()))
+
+	skgsa := &SSHKeyGroupSiteAssociation{ID: input.ID}
+	updatedFields := []string{}
+	if input.Deleted {
+		updatedFields = append(updatedFields, "deleted")
+	}
+	if len(updatedFields) > 0 {
+		updatedFields = append(updatedFields, "updated")
+		query := db.GetIDB(tx, skgsasd.dbSession).
+			NewUpdate().
+			Model(skgsa).
+			Column(updatedFields...).
+			Where("skgsa.id = ?", input.ID)
+		if input.Deleted {
+			query = query.WhereAllWithDeleted()
+		}
+		_, err := query.Exec(ctx)
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	updated, err := skgsasd.GetByID(ctx, tx, input.ID, nil)
+	if err != nil {
+		return nil, err
+	}
+	return updated, nil
 }
 
 // Delete deletes an SSHKeyGroupSiteAssociation by ID

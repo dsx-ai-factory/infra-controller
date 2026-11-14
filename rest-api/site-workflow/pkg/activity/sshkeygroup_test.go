@@ -108,6 +108,7 @@ func TestManageSSHKeyGroupInventory_DiscoverSSHKeyGroupInventory(t *testing.T) {
 				assert.Equal(t, 0, len(inventory.TenantKeysets))
 			} else {
 				assert.Equal(t, tt.fields.cloudPageSize, len(inventory.TenantKeysets))
+				assert.NotNil(t, inventory.TenantKeysets[0].KeysetContent)
 			}
 
 			assert.Equal(t, corev1.InventoryStatus_INVENTORY_STATUS_SUCCESS, inventory.InventoryStatus)
