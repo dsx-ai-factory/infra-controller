@@ -314,7 +314,8 @@ func (rs *FlowServerImpl) UpdateTaskSchedule(
 			if nextRunAtChanging &&
 				locked.SpecType == dbmodel.SpecTypeOneTime &&
 				locked.NextRunAt == nil {
-				return errors.New(
+				return status.Error(
+					codes.FailedPrecondition,
 					"cannot change the spec of a one-time schedule that has already fired; create a new one instead", //nolint:lll
 				)
 			}
@@ -380,7 +381,7 @@ func (rs *FlowServerImpl) ResumeTaskSchedule(
 ) (*pb.TaskSchedule, error) {
 	id := protobuf.UUIDFrom(req.GetId())
 	if id == uuid.Nil {
-		return nil, errors.New("id is required")
+		return nil, status.Error(codes.InvalidArgument, "id must be a valid non-zero UUID")
 	}
 
 	// Lock the row before reading state: a concurrent dispatcher firing could
@@ -405,7 +406,8 @@ func (rs *FlowServerImpl) ResumeTaskSchedule(
 			// cannot be re-armed.
 			if locked.SpecType == dbmodel.SpecTypeOneTime &&
 				locked.NextRunAt == nil {
-				return errors.New(
+				return status.Error(
+					codes.FailedPrecondition,
 					"cannot resume a one-time schedule that has already fired",
 				)
 			}
@@ -442,7 +444,7 @@ func (rs *FlowServerImpl) DeleteTaskSchedule(
 ) (*emptypb.Empty, error) {
 	id := protobuf.UUIDFrom(req.GetId())
 	if id == uuid.Nil {
-		return nil, errors.New("id is required")
+		return nil, status.Error(codes.InvalidArgument, "id must be a valid non-zero UUID")
 	}
 
 	if err := rs.taskScheduleStore.Delete(ctx, id); err != nil {
@@ -461,12 +463,15 @@ func (rs *FlowServerImpl) TriggerTaskSchedule(
 ) (*pb.SubmitTaskResponse, error) {
 	id := protobuf.UUIDFrom(req.GetId())
 	if id == uuid.Nil {
-		return nil, errors.New("id is required")
+		return nil, status.Error(codes.InvalidArgument, "id must be a valid non-zero UUID")
 	}
 
 	taskIDs, err := rs.taskScheduleDispatcher.FireNow(ctx, id)
 	if err != nil {
-		return nil, err
+		if errors.Is(err, taskschedule.ErrScheduleConsumed) {
+			return nil, status.Error(codes.FailedPrecondition, err.Error())
+		}
+		return nil, taskSubmissionStatusError(err)
 	}
 
 	return &pb.SubmitTaskResponse{TaskIds: protobuf.UUIDsTo(taskIDs)}, nil
@@ -484,7 +489,7 @@ func (rs *FlowServerImpl) AddTaskScheduleScope(
 ) (*pb.AddTaskScheduleScopeResponse, error) {
 	scheduleID := protobuf.UUIDFrom(req.GetScheduleId())
 	if scheduleID == uuid.Nil {
-		return nil, errors.New("schedule_id is required")
+		return nil, status.Error(codes.InvalidArgument, "schedule_id must be a valid non-zero UUID")
 	}
 
 	incoming, err := rs.resolveScheduleScope(ctx, scheduleID, req.GetTargetSpec())
@@ -532,7 +537,7 @@ func (rs *FlowServerImpl) UpdateTaskScheduleScope(
 ) (*pb.UpdateTaskScheduleScopeResponse, error) {
 	scheduleID := protobuf.UUIDFrom(req.GetScheduleId())
 	if scheduleID == uuid.Nil {
-		return nil, errors.New("schedule_id is required")
+		return nil, status.Error(codes.InvalidArgument, "schedule_id must be a valid non-zero UUID")
 	}
 
 	desired, err := rs.resolveScheduleScope(ctx, scheduleID, req.GetDesiredScope())
@@ -571,7 +576,7 @@ func (rs *FlowServerImpl) RemoveTaskScheduleScope(
 ) (*emptypb.Empty, error) {
 	scopeID := protobuf.UUIDFrom(req.GetScopeId())
 	if scopeID == uuid.Nil {
-		return nil, errors.New("scope_id is required")
+		return nil, status.Error(codes.InvalidArgument, "scope_id must be a valid non-zero UUID")
 	}
 
 	// Resolve the parent schedule ID so we can acquire the same row lock used
@@ -605,7 +610,8 @@ func (rs *FlowServerImpl) RemoveTaskScheduleScope(
 				return fmt.Errorf("list scopes: %w", err)
 			}
 			if len(existing) <= 1 {
-				return errors.New(
+				return status.Error(
+					codes.FailedPrecondition,
 					"cannot remove the last scope: a schedule must have at least one rack target; delete the schedule instead",
 				)
 			}
@@ -658,7 +664,7 @@ func (rs *FlowServerImpl) CheckScheduleConflicts(
 	}
 
 	if len(scopes) == 0 {
-		return nil, errors.New("target_spec resolved to no rack scopes; at least one rack target is required")
+		return nil, status.Error(codes.InvalidArgument, "target_spec resolved to no rack scopes; at least one rack target is required")
 	}
 
 	proposedOp := operation.Wrapper{
@@ -734,7 +740,7 @@ func (rs *FlowServerImpl) ListTaskScheduleScopes(
 ) (*pb.ListTaskScheduleScopesResponse, error) {
 	scheduleID := protobuf.UUIDFrom(req.GetScheduleId())
 	if scheduleID == uuid.Nil {
-		return nil, errors.New("schedule_id is required")
+		return nil, status.Error(codes.InvalidArgument, "schedule_id must be a valid non-zero UUID")
 	}
 
 	scopes, err := rs.taskScheduleStore.ListScopes(ctx, scheduleID)
@@ -784,13 +790,15 @@ func (rs *FlowServerImpl) buildUpdateFields(
 	existing *dbmodel.TaskSchedule,
 ) (taskschedule.UpdateFields, bool, error) {
 	var fields taskschedule.UpdateFields
+	specChanging := false
+	timezoneChanging := false
 
 	if len(paths) == 0 {
 		return fields, false, status.Error(codes.InvalidArgument, "update_mask is required")
 	}
 
 	if sched == nil {
-		return fields, false, errors.New("schedule is required")
+		return fields, false, status.Error(codes.InvalidArgument, "schedule is required")
 	}
 
 	spec := sched.GetSpec()
@@ -799,7 +807,8 @@ func (rs *FlowServerImpl) buildUpdateFields(
 		switch path {
 		case "schedule.name":
 			if len(sched.GetName()) == 0 {
-				return fields, false, errors.New(
+				return fields, false, status.Error(
+					codes.InvalidArgument,
 					`update_mask path "schedule.name" requires a non-empty name`,
 				)
 			}
@@ -809,8 +818,10 @@ func (rs *FlowServerImpl) buildUpdateFields(
 				sched.GetOverlapPolicy(),
 			)
 		case "schedule.spec.timezone":
+			timezoneChanging = true
 			if spec == nil {
-				return fields, false, errors.New(
+				return fields, false, status.Error(
+					codes.InvalidArgument,
 					`update_mask path "schedule.spec.timezone" requires schedule.spec to be set`,
 				)
 			}
@@ -820,19 +831,22 @@ func (rs *FlowServerImpl) buildUpdateFields(
 			}
 			fields.Timezone = tz
 		case "schedule.spec":
+			specChanging = true
 			if spec == nil {
-				return fields, false, errors.New(
+				return fields, false, status.Error(
+					codes.InvalidArgument,
 					`update_mask path "schedule.spec" requires schedule.spec to be set`,
 				)
 			}
-			if spec.GetType() ==
-				pb.ScheduleSpecType_SCHEDULE_SPEC_TYPE_UNSPECIFIED {
-				return fields, false, errors.New(
-					`update_mask path "schedule.spec" requires spec.type to be set`,
+			if protoSpecTypeToModel(spec.GetType()) == "" {
+				return fields, false, status.Error(
+					codes.InvalidArgument,
+					`update_mask path "schedule.spec" requires a supported spec.type`,
 				)
 			}
 			if len(spec.GetSpec()) == 0 {
-				return fields, false, errors.New(
+				return fields, false, status.Error(
+					codes.InvalidArgument,
 					`update_mask path "schedule.spec" requires a non-empty spec.spec`,
 				)
 			}
@@ -843,7 +857,7 @@ func (rs *FlowServerImpl) buildUpdateFields(
 			fields.SpecType = protoSpecTypeToModel(spec.GetType())
 			fields.Spec = spec.GetSpec()
 		default:
-			return fields, false, fmt.Errorf("unsupported update_mask path: %q", path)
+			return fields, false, status.Errorf(codes.InvalidArgument, "unsupported update_mask path: %q", path)
 		}
 	}
 
@@ -907,7 +921,11 @@ func (rs *FlowServerImpl) buildUpdateFields(
 			recompute.timezone,
 		)
 		if err != nil {
-			return fields, false, fmt.Errorf("compute next_run_at: %w", err)
+			if (specChanging && errors.Is(err, taskschedule.ErrInvalidSpec)) ||
+				(timezoneChanging && errors.Is(err, taskschedule.ErrInvalidTimezone)) {
+				return fields, false, status.Errorf(codes.InvalidArgument, "compute next_run_at: %v", err)
+			}
+			return fields, false, status.Error(codes.Internal, "stored schedule configuration is invalid")
 		}
 
 		fields.NextRunAt = &next
@@ -971,7 +989,7 @@ func (rs *FlowServerImpl) resolveScheduleScope(
 
 	ts, err := protobuf.TargetSpecFrom(targetSpec)
 	if err != nil {
-		return nil, fmt.Errorf("invalid target_spec: %w", err)
+		return nil, status.Errorf(codes.InvalidArgument, "invalid target_spec: %v", err)
 	}
 
 	resolved, err := rs.resolveScope(ctx, ts)
@@ -1030,7 +1048,7 @@ func (rs *FlowServerImpl) applyScopeChanges(
 			// that removes all remaining scopes would leave the schedule in the
 			// same invalid state the create path already rejects.
 			if remaining := len(existing) - len(toRemove) + len(toCreate); remaining == 0 {
-				return errors.New("target_spec resolved to no rack scopes; at least one rack target is required")
+				return status.Error(codes.InvalidArgument, "target_spec resolved to no rack scopes; at least one rack target is required")
 			}
 
 			if len(toCreate) > 0 {
@@ -1097,7 +1115,7 @@ func (rs *FlowServerImpl) resolveRackScope(
 			// Each scope row maps one-to-one with a rack. A duplicate would
 			// produce two scope rows for the same rack, firing two tasks per
 			// trigger — almost certainly a caller mistake.
-			return nil, fmt.Errorf("target_spec: duplicate rack %s", scope.RackID)
+			return nil, status.Errorf(codes.InvalidArgument, "target_spec: duplicate rack %s", scope.RackID)
 		}
 		seen[scope.RackID] = struct{}{}
 
@@ -1134,7 +1152,8 @@ func (rs *FlowServerImpl) resolveComponentTarget(
 	ct operation.ComponentTarget,
 ) (uuid.UUID, uuid.UUID, error) {
 	if ct.UUID == uuid.Nil && ct.External == nil {
-		return uuid.Nil, uuid.Nil, fmt.Errorf(
+		return uuid.Nil, uuid.Nil, status.Error(
+			codes.InvalidArgument,
 			"component target has neither UUID nor external ref",
 		)
 	}
@@ -1187,7 +1206,8 @@ func (rs *FlowServerImpl) resolveComponentScope(
 		}
 
 		if _, ok := seenComponentIDs[compID]; ok {
-			return nil, fmt.Errorf(
+			return nil, status.Errorf(
+				codes.InvalidArgument,
 				"target_spec: duplicate component %s",
 				compID,
 			)
