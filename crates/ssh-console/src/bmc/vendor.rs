@@ -126,7 +126,7 @@ impl BmcVendor {
 }
 
 #[derive(thiserror::Error, Debug)]
-pub(in crate::bmc) enum BmcVendorDetectionError {
+pub(crate) enum BmcVendorDetectionError {
     #[error("unknown or unsupported sys_vendor string: {sys_vendor}")]
     UnknownSysVendor { sys_vendor: String },
 }

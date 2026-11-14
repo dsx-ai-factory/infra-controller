@@ -285,6 +285,30 @@ TOML file; configure the corresponding `openssh_certificate_ca_fingerprints`
 and `admin_certificate_role` fields in that file instead. Operator certificate
 access is unaffected by removing Tenant key-group attachments.
 
+## Connection Pool Sizing
+
+SSH Console keeps a standing connection to each managed BMC so that it can log
+console output, up to `max_bmc_connections` connections (16384 by default).
+Each connection holds about three file descriptors, so the default fits within
+three quarters of the chart's `fileDescriptorLimit` of 65536. A Site with fewer
+machines than the bound is unaffected by it.
+
+On a Site with more machines than the bound, the remaining machines have no
+standing connection and no console log. SSH Console connects to such a machine
+when a console session asks for it. If the pool is full, it first closes the
+pooled connection that has been without a session the longest, and it closes
+the on-demand connection `on_demand_bmc_idle_timeout` (600 seconds by default)
+after the session ends. Reachability probes to BMCs that are not listening are
+limited to `max_concurrent_bmc_probes` (512 by default) at a time.
+
+The chart writes these settings into the packaged configuration when
+`sshConsole.bmcPool.maxConnections`, `sshConsole.bmcPool.onDemandIdleTimeout`,
+or `sshConsole.bmcPool.maxConcurrentProbes` is set. Raise `maxConnections`
+only together with `fileDescriptorLimit` and the container runtime's hard
+limit, because the chart clamps the soft limit to the hard limit. The log line
+`BMC connection pool is full` at each API poll reports how many machines have
+no pooled connection.
+
 ## Troubleshooting
 
 | Symptom | What to check |

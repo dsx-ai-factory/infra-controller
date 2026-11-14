@@ -259,7 +259,7 @@ fn nonzero_serial_console_ssh_port(
 }
 
 #[derive(thiserror::Error, Debug)]
-pub(super) enum LookupError {
+pub(crate) enum LookupError {
     #[error("configuration error: {0}")]
     Config(#[from] ConfigError),
     #[error("error looking up instance ID {instance_id}: {tonic_status}")]

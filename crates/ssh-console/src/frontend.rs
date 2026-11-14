@@ -198,12 +198,7 @@ impl russh::server::Handler for Handler {
         let channel_id = channel.id();
         let bmc_connection = self
             .bmc_connection_store
-            .get_connection(
-                machine,
-                &self.config,
-                &self.carbide_api_client,
-                self.metrics.clone(),
-            )
+            .get_connection(machine, self.metrics.clone())
             .await
             .map_err(|error| GettingBmcConnection {
                 machine: machine.to_owned(),
