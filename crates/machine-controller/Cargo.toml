@@ -83,6 +83,7 @@ uuid = { workspace = true, features = ["v4", "serde"] }
 version-compare = { workspace = true }
 
 [dev-dependencies]
+trace-propagation = { path = "../trace-propagation" }
 carbide-api-model = { path = "../api-model", default-features = false, features = [
   "test-support",
 ] }

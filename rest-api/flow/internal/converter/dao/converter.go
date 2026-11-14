@@ -424,6 +424,7 @@ func OperationRunFrom(dao *model.OperationRun) *operationrun.OperationRun {
 	}
 
 	return &operationrun.OperationRun{
+		Metadata:          dao.Metadata,
 		ID:                dao.ID,
 		Name:              dao.Name,
 		Description:       dao.Description,
@@ -451,6 +452,7 @@ func OperationRunTo(run *operationrun.OperationRun) *model.OperationRun {
 	}
 
 	return &model.OperationRun{
+		Metadata:          run.Metadata,
 		ID:                run.ID,
 		Name:              run.Name,
 		Description:       run.Description,

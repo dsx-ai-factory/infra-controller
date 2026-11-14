@@ -3300,10 +3300,11 @@ where
 ///
 /// The caller supplies `new_version` for every machine and its history entry.
 /// `NotApplied(ControllerStateNotCurrent)` means the host is missing or its
-/// version changed, or a captured maintenance request is no longer pending;
+/// version changed, or a new maintenance admission is no longer pending;
 /// no state or history changes remain. Successful writes return
 /// `Applied(())` and remain in the caller's transaction. Database failures remain
-/// errors.
+/// errors. Already-admitted maintenance can save its own progress after its
+/// pending request has been replaced or cleared.
 pub async fn try_update_controller_state(
     txn: &mut PgConnection,
     host_id: &HostMachineId,
@@ -3325,7 +3326,7 @@ pub async fn try_update_controller_state(
     )
     .await?;
 
-    // A replaced or cancelled request cannot be admitted from an old snapshot.
+    // Fence admission from stale snapshots without blocking accepted work's progress.
     let maintenance_request = match new_state {
         ManagedHostState::Maintenance { request, .. } => request.as_ref(),
         _ => None,
@@ -3334,7 +3335,8 @@ pub async fn try_update_controller_state(
         UPDATE machines
         SET controller_state_version = $1, controller_state = $2
         WHERE id = $3 AND controller_state_version = $4
-          AND ($5::jsonb IS NULL OR machine_maintenance_requested = $5)
+          AND ($5::jsonb IS NULL OR machine_maintenance_requested = $5::jsonb - 'action_id'
+               OR (controller_state->>'state' = 'maintenance' AND controller_state->'request' = $5::jsonb))
         RETURNING id
     "#;
     let updated: Option<HostMachineId> = sqlx::query_scalar(query)
@@ -3978,18 +3980,17 @@ pub async fn set_machine_maintenance_requested(
     operation: MachineMaintenanceOperation,
 ) -> DatabaseResult<()> {
     let req = model::machine::MachineMaintenanceRequest {
+        action_id: None,
         requested_at: Utc::now(),
         initiator: initiator.to_string(),
         operation,
     };
-    let query = "UPDATE machines SET machine_maintenance_requested = $1 WHERE id = $2 RETURNING id";
-    sqlx::query_as::<_, MachineId>(query)
-        .bind(sqlx::types::Json(req))
-        .bind(machine_id)
-        .fetch_one(txn)
-        .await
-        .map_err(|e| DatabaseError::new("set_machine_maintenance_requested", e))?;
-    Ok(())
+    crate::cm_action::set_maintenance(
+        txn,
+        crate::cm_action::Target::Machine(&machine_id.into()),
+        &req,
+    )
+    .await
 }
 
 /// Claims maintenance on an unallocated machine at a maintenance admission boundary.
@@ -4014,6 +4015,7 @@ pub async fn try_set_machine_maintenance_requested(
     };
     // A separate statement observes an allocation committed while the lock was awaited.
     let request = model::machine::MachineMaintenanceRequest {
+        action_id: None,
         requested_at: Utc::now(),
         initiator: initiator.to_string(),
         operation,
@@ -4025,11 +4027,25 @@ pub async fn try_set_machine_maintenance_requested(
     let claimed = sqlx::query_as::<_, MachineId>(query)
         .bind(sqlx::types::Json(&request))
         .bind(machine_id)
-        .fetch_optional(txn)
+        .fetch_optional(&mut *txn)
         .await
         .map_err(|error| DatabaseError::new("try_set_machine_maintenance_requested", error))?
         .is_some();
     if claimed {
+        let requested_at = serde_json::to_value(request.requested_at)
+            .map_err(|error| DatabaseError::internal(error.to_string()))?;
+        crate::cm_action::create(
+            txn,
+            crate::cm_action::Target::Machine(&machine_id.into()),
+            requested_at.as_str().ok_or_else(|| {
+                DatabaseError::internal("maintenance request timestamp is not a string".into())
+            })?,
+            trace_propagation::correlation::current_id()
+                .unwrap_or_else(trace_propagation::correlation::TraceId::generate),
+        )
+        .await?;
+        crate::cm_action::reconcile(txn, crate::cm_action::Target::Machine(&machine_id.into()))
+            .await?;
         tracing::info!(
             machine_id = %machine_id.as_machine_id(),
             initiator,
@@ -4056,7 +4072,7 @@ pub async fn clear_unclaimed_machine_restart_request(
           AND machine_maintenance_requested->>'initiator' = $2
           AND machine_maintenance_requested->'operation' IN ($3, $4, $5)
         RETURNING id"#;
-    Ok(sqlx::query_as::<_, MachineId>(query)
+    let cleared = sqlx::query_as::<_, MachineId>(query)
         .bind(machine_id)
         .bind(initiator)
         .bind(sqlx::types::Json(MachineMaintenanceOperation::Reset {
@@ -4066,10 +4082,18 @@ pub async fn clear_unclaimed_machine_restart_request(
             graceful: true,
         }))
         .bind(sqlx::types::Json(MachineMaintenanceOperation::Reboot))
-        .fetch_optional(txn)
+        .fetch_optional(&mut *txn)
         .await
         .map_err(|error| DatabaseError::query(query, error))?
-        .is_some())
+        .is_some();
+    if cleared {
+        crate::cm_action::reconcile(
+            txn,
+            crate::cm_action::Target::Machine(machine_id.as_machine_id()),
+        )
+        .await?;
+    }
+    Ok(cleared)
 }
 
 pub async fn set_decommission_requested(
@@ -4105,17 +4129,13 @@ pub async fn clear_machine_maintenance_requested(
     machine_id: impl MachineIdSubtypeTrait,
     request: &model::machine::MachineMaintenanceRequest,
 ) -> DatabaseResult<ConditionalWrite<(), crate::MaintenanceRequestNotCurrent>> {
-    let query = "UPDATE machines SET machine_maintenance_requested = NULL WHERE id = $1 AND machine_maintenance_requested = $2 RETURNING id";
-    let cleared = sqlx::query_as::<_, MachineId>(query)
-        .bind(machine_id)
-        .bind(sqlx::types::Json(request))
-        .fetch_optional(txn)
-        .await
-        .map_err(|e| DatabaseError::new("clear_machine_maintenance_requested", e))?;
-    Ok(match cleared {
-        Some(_) => ConditionalWrite::Applied(()),
-        None => ConditionalWrite::NotApplied(crate::MaintenanceRequestNotCurrent),
-    })
+    crate::cm_action::clear_maintenance(
+        txn,
+        crate::cm_action::Target::Machine(&machine_id.into()),
+        request,
+        request.action_id,
+    )
+    .await
 }
 
 /// Record an operator "force-converge this BMC now" request on the machine that
@@ -8208,6 +8228,15 @@ mod test {
                 "{name}"
             );
             if eligible {
+                let action_id = stored
+                    .machine_maintenance_requested
+                    .as_ref()
+                    .unwrap()
+                    .action_id;
+                assert!(
+                    action_id.is_some(),
+                    "{name}: claimed work retains log context"
+                );
                 assert!(
                     super::clear_unclaimed_machine_restart_request(
                         txn.as_mut(),
@@ -8223,6 +8252,13 @@ mod test {
                 assert!(cancelled.machine_maintenance_requested.is_none(), "{name}");
                 assert_eq!(cancelled.state.value, stored.state.value, "{name}");
                 assert_eq!(cancelled.state.version, stored.state.version, "{name}");
+                let completed: bool = sqlx::query_scalar(
+                    "SELECT completed_at IS NOT NULL FROM cm_actions WHERE id = $1",
+                )
+                .bind(action_id)
+                .fetch_one(txn.as_mut())
+                .await?;
+                assert!(completed, "{name}: cancellation retires log context");
             }
             txn.rollback().await?;
         }
