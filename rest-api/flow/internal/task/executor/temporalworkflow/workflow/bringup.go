@@ -57,6 +57,7 @@ func bringUp(
 		typeToTargets,
 		info,
 		reqInfo.RuleDefinition,
+		reqInfo.TargetResolution,
 	)
 
 	return updateFinishedTaskStatus(ctx, reqInfo.TaskID, err, report)

@@ -26,6 +26,8 @@ type APIBatchUpdateNVLinkDomainPowerStateRequest struct {
 	// OverrideReadinessCheck applies the readiness bypass to every spawned task.
 	// See APIUpdatePowerStateRequest for semantics.
 	OverrideReadinessCheck bool `json:"overrideReadinessCheck"`
+	// SkipUnaddressableTargets opts in to skipping unaddressable targets; omission defaults to false.
+	SkipUnaddressableTargets *bool `json:"skipUnaddressableTargets,omitempty"`
 }
 
 // Validate checks the NVLink Domain IDs and power-control fields.
@@ -59,6 +61,8 @@ type APINVLinkDomainFirmwareUpdateRequest struct {
 	// OverrideReadinessCheck bypasses readiness checks for the operation.
 	// See APIUpdateFirmwareRequest for semantics.
 	OverrideReadinessCheck bool `json:"overrideReadinessCheck"`
+	// SkipUnaddressableTargets opts in to skipping unaddressable targets; omission defaults to false.
+	SkipUnaddressableTargets *bool `json:"skipUnaddressableTargets,omitempty"`
 	// OverrideVersionCheck overrides firmware version-based checks for the
 	// operation. See APIUpdateFirmwareRequest for semantics.
 	OverrideVersionCheck bool `json:"overrideVersionCheck"`
@@ -88,6 +92,8 @@ type APIBatchNVLinkDomainFirmwareUpdateRequest struct {
 	// OverrideReadinessCheck applies the readiness bypass to every spawned task.
 	// See APIUpdateFirmwareRequest for semantics.
 	OverrideReadinessCheck bool `json:"overrideReadinessCheck"`
+	// SkipUnaddressableTargets opts in to skipping unaddressable targets; omission defaults to false.
+	SkipUnaddressableTargets *bool `json:"skipUnaddressableTargets,omitempty"`
 	// OverrideVersionCheck applies the firmware version-check override to every
 	// spawned task. See APIUpdateFirmwareRequest for semantics.
 	OverrideVersionCheck bool `json:"overrideVersionCheck"`

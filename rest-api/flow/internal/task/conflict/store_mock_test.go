@@ -186,3 +186,10 @@ func (m *mockStore) ListRackRuleAssociations(_ context.Context, _ uuid.UUID) ([]
 func (m *mockStore) ListTaskContextForRack(_ context.Context, _ uuid.UUID) ([]taskdef.TaskContextMetadata, error) {
 	panic("unexpected task context read")
 }
+
+func (m *mockStore) ListPendingBatchDispatches(context.Context) ([]*taskdef.Task, error) {
+	return nil, nil
+}
+func (m *mockStore) ClaimBatchDispatch(context.Context, uuid.UUID) (bool, error) {
+	panic("unexpected batch dispatch claim")
+}

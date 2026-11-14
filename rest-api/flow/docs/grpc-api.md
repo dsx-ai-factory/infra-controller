@@ -288,6 +288,7 @@
 | queue_options | [QueueOptions](#v1-QueueOptions) | optional |  |
 | rule_id | [UUID](#v1-UUID) | optional | optional: override rule resolution with a specific rule |
 | override_readiness_check | [bool](#bool) |  | When true, proceed with the AC power cycle even if one or more target components (or, for rack-scoped components, any host on the owning rack) are reported as not ready for the operation by their persisted ComponentOperationStatus. Intended for operator-supervised maintenance where tenant impact has been acknowledged out-of-band; the bypass is recorded in the server log. |
+| skip_unaddressable_targets | [bool](#bool) | optional | Opt in to skipping unaddressable targets after component-type filtering. Omitted or false requires every selected target to be addressable. Each selected rack must retain a target; readiness and step failure policy are unchanged. |
 
 <a name="v1-AddComponentRequest"></a>
 
@@ -386,6 +387,7 @@ AddTaskScheduleScopeResponse returns the newly created scope entries.
 | description | [string](#string) |  | optional task description |
 | rule_id | [UUID](#v1-UUID) | optional | optional: override rule resolution with a specific rule |
 | override_readiness_check | [bool](#bool) |  | When true, allow the bring-up sequence (which may power-cycle hosts and reset rack-scoped components) to proceed even if any host in scope is reported as not ready for the operation by its persisted ComponentOperationStatus. Intended for operator-supervised maintenance where tenant impact has been acknowledged out-of-band; the bypass is recorded in the server log. |
+| skip_unaddressable_targets | [bool](#bool) | optional | Opt in to skipping unaddressable targets after component-type filtering. Omitted or false requires every selected target to be addressable. Each selected rack must retain a target; readiness and step failure policy are unchanged. |
 
 <a name="v1-BuildInfo"></a>
 
@@ -699,6 +701,7 @@ Use AddTaskScheduleScope / RemoveTaskScheduleScope to modify the scope after cre
 | description | [string](#string) |  | optional task description |
 | queue_options | [QueueOptions](#v1-QueueOptions) | optional | optional queue policy overrides |
 | rule_id | [UUID](#v1-UUID) | optional | optional: override rule resolution with a specific rule |
+| skip_unaddressable_targets | [bool](#bool) | optional | Opt in to skipping unaddressable targets after component-type filtering. Omitted or false requires every selected target to be addressable. Each selected rack must retain a target; readiness and step failure policy are unchanged. |
 
 <a name="v1-DeleteComponentRequest"></a>
 
@@ -1370,6 +1373,7 @@ HealthReport is Flow&#39;s latest synchronized snapshot of Core aggregate health
 | filters | [Filter](#v1-Filter) | repeated | Filter conditions for component queries (e.g. by type, name) |
 | description | [string](#string) |  | optional task description |
 | rule_id | [UUID](#v1-UUID) | optional | optional: override rule resolution with a specific rule |
+| skip_unaddressable_targets | [bool](#bool) | optional | Opt in to skipping unaddressable targets after component-type filtering. Omitted or false requires every selected target to be addressable. Each selected rack must retain a target; readiness and step failure policy are unchanged. |
 
 <a name="v1-ListEventRulesRequest"></a>
 
@@ -2082,6 +2086,7 @@ Stored Core policy, including NotApplicable/Unavailable, or a Flow read failure.
 | queue_options | [QueueOptions](#v1-QueueOptions) | optional |  |
 | rule_id | [UUID](#v1-UUID) | optional | optional: override rule resolution with a specific rule |
 | override_readiness_check | [bool](#bool) |  | When true, proceed with the power-off even if one or more target components (or, for rack-scoped components, any host on the owning rack) are reported as not ready for the operation by their persisted ComponentOperationStatus. Intended for operator-supervised maintenance where tenant impact has been acknowledged out-of-band; the bypass is recorded in the server log. |
+| skip_unaddressable_targets | [bool](#bool) | optional | Opt in to skipping unaddressable targets after component-type filtering. Omitted or false requires every selected target to be addressable. Each selected rack must retain a target; readiness and step failure policy are unchanged. |
 
 <a name="v1-PowerOnRackRequest"></a>
 
@@ -2094,6 +2099,7 @@ Stored Core policy, including NotApplicable/Unavailable, or a Flow read failure.
 | queue_options | [QueueOptions](#v1-QueueOptions) | optional |  |
 | rule_id | [UUID](#v1-UUID) | optional | optional: override rule resolution with a specific rule |
 | override_readiness_check | [bool](#bool) |  | When true, proceed with the power-on even if one or more target components (or, for rack-scoped components, any host on the owning rack) are reported as not ready for the operation by their persisted ComponentOperationStatus. Intended for operator-supervised maintenance where tenant impact has been acknowledged out-of-band; the bypass is recorded in the server log. |
+| skip_unaddressable_targets | [bool](#bool) | optional | Opt in to skipping unaddressable targets after component-type filtering. Omitted or false requires every selected target to be addressable. Each selected rack must retain a target; readiness and step failure policy are unchanged. |
 
 <a name="v1-PowerOperations"></a>
 
@@ -2118,6 +2124,7 @@ Core maintenance and Flow tasks are separate records without a correlation ID.
 | queue_options | [QueueOptions](#v1-QueueOptions) | optional |  |
 | rule_id | [UUID](#v1-UUID) | optional | optional: override rule resolution with a specific rule |
 | override_readiness_check | [bool](#bool) |  | When true, proceed with the reset even if one or more target components (or, for rack-scoped components, any host on the owning rack) are reported as not ready for the operation by their persisted ComponentOperationStatus. Intended for operator-supervised maintenance where tenant impact has been acknowledged out-of-band; the bypass is recorded in the server log. |
+| skip_unaddressable_targets | [bool](#bool) | optional | Opt in to skipping unaddressable targets after component-type filtering. Omitted or false requires every selected target to be addressable. Each selected rack must retain a target; readiness and step failure policy are unchanged. |
 
 <a name="v1-PowerTaskDetails"></a>
 
@@ -2814,6 +2821,7 @@ UpdateTaskScheduleScopeResponse returns the complete scope after reconciliation.
 | override_readiness_check | [bool](#bool) |  | When true, proceed with the firmware update even if one or more target components (or, for rack-scoped components, any host on the owning rack) are reported as not ready for the operation by their persisted ComponentOperationStatus. The flag is intended for operator-supervised maintenance windows where the tenant impact has been acknowledged out-of-band; setting it bypasses the readiness gate that would otherwise block disruptive operations against tenanted hardware. The bypass is recorded in the server log. |
 | authentication_data | [FirmwareAuthenticationData](#v1-FirmwareAuthenticationData) |  | Optional, write-only authentication data for firmware downloads. It is not supported for DPU-only updates or by the legacy NICo compute firmware controller. |
 | override_version_check | [bool](#bool) |  | Overrides firmware version-based checks when deciding whether to apply the update. This allows same-version reapplication and downgrade when the selected component backend supports those operations. It does not bypass readiness checks or state-controller routing. |
+| skip_unaddressable_targets | [bool](#bool) | optional | Opt in to skipping unaddressable targets after component-type filtering. Omitted or false requires every selected target to be addressable. Each selected rack must retain a target; readiness and step failure policy are unchanged. |
 
 <a name="v1-ValidateComponentsRequest"></a>
 

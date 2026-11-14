@@ -99,6 +99,13 @@ type Store interface {
 		componentIDs []uuid.UUID,
 	) (map[uuid.UUID]taskcommon.TaskStatus, error)
 
+	// ListPendingBatchDispatches returns unattempted admitted work in FIFO order.
+	ListPendingBatchDispatches(ctx context.Context) ([]*taskdef.Task, error)
+
+	// ClaimBatchDispatch atomically reserves a pending, unscheduled ready task.
+	// False means another owner, cancellation, or scheduling already won.
+	ClaimBatchDispatch(ctx context.Context, id uuid.UUID) (bool, error)
+
 	// UpdateScheduledTask updates task scheduling information (execution ID, executor type).
 	UpdateScheduledTask(ctx context.Context, task *taskdef.Task) error
 

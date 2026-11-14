@@ -22,6 +22,7 @@ import (
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/operation"
 	taskcommon "github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/common"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/operations"
+	taskdef "github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/task"
 )
 
 func TestPostgresStore_LatestLeakageShutdownTaskStatuses(t *testing.T) {
@@ -171,4 +172,99 @@ func TestTaskComponentsAnyPredicate(t *testing.T) {
 		`(t.attributes @? '$.components_by_type.*[*] ? (@ == "11111111-2222-3333-4444-555555555555")'::jsonpath OR t.attributes @? '$.components_by_type.*[*] ? (@ == "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee")'::jsonpath)`,
 		got,
 	)
+}
+
+func TestPostgresStore_UpdateTaskStatus(t *testing.T) {
+	if os.Getenv("DB_PORT") == "" {
+		t.Skip("requires runner-managed PostgreSQL")
+	}
+	config, err := cdb.ConfigFromEnv()
+	require.NoError(t, err)
+	session, err := utils.UnitTestDB(t.Context(), t, config)
+	require.NoError(t, err)
+	t.Cleanup(session.Close)
+	store := NewPostgres(session)
+	for _, tc := range []struct {
+		name        string
+		status      taskcommon.TaskStatus
+		executionID string
+		want        taskcommon.TaskStatus
+	}{
+		{name: "unscheduled pending can requeue", status: taskcommon.TaskStatusPending, want: taskcommon.TaskStatusWaiting},
+		{name: "cancellation cannot be overwritten", status: taskcommon.TaskStatusTerminated, want: taskcommon.TaskStatusTerminated},
+		{name: "scheduled pending cannot requeue", status: taskcommon.TaskStatusPending, executionID: "workflow", want: taskcommon.TaskStatusPending},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			info, marshalErr := (&operations.PowerControlTaskInfo{Operation: operations.PowerOperationPowerOn}).Marshal()
+			require.NoError(t, marshalErr)
+			task := &taskdef.Task{ID: uuid.New(), RackID: uuid.New(), Status: tc.status, ExecutionID: tc.executionID, ExecutorType: taskcommon.ExecutorTypeUnknown,
+				Operation: operation.Wrapper{Type: taskcommon.TaskTypePowerControl, Code: taskcommon.OpCodePowerControlPowerOn, Info: info}}
+			require.NoError(t, store.CreateTask(t.Context(), task))
+			deadline := time.Now().UTC().Add(time.Minute).Truncate(time.Microsecond)
+			require.NoError(t, store.UpdateTaskStatus(t.Context(), &taskdef.TaskStatusUpdate{ID: task.ID,
+				Status: taskcommon.TaskStatusWaiting, QueueExpiresAt: &deadline, OnlyIfPendingUnscheduled: true}))
+			saved, loadErr := store.GetTask(t.Context(), task.ID)
+			require.NoError(t, loadErr)
+			require.Equal(t, tc.want, saved.Status)
+			require.Equal(t, tc.executionID, saved.ExecutionID)
+			if tc.want == taskcommon.TaskStatusWaiting {
+				require.True(t, deadline.Equal(*saved.QueueExpiresAt))
+			} else {
+				require.Nil(t, saved.QueueExpiresAt)
+			}
+		})
+	}
+}
+
+func TestPostgresStore_ClaimBatchDispatch(t *testing.T) {
+	if os.Getenv("DB_PORT") == "" {
+		t.Skip("requires runner-managed PostgreSQL")
+	}
+	config, err := cdb.ConfigFromEnv()
+	require.NoError(t, err)
+	session, err := utils.UnitTestDB(t.Context(), t, config)
+	require.NoError(t, err)
+	t.Cleanup(session.Close)
+	store := NewPostgres(session)
+	for _, tc := range []struct {
+		name      string
+		state     taskcommon.BatchDispatchState
+		status    taskcommon.TaskStatus
+		execution string
+		want      bool
+	}{
+		{"ready can be claimed once", taskcommon.BatchDispatchReady, taskcommon.TaskStatusPending, "", true},
+		{"cancelled ready is untouched", taskcommon.BatchDispatchReady, taskcommon.TaskStatusTerminated, "", false},
+		{"started missing handle is not replayed", taskcommon.BatchDispatchStarted, taskcommon.TaskStatusPending, "", false},
+		{"scheduled ready is untouched", taskcommon.BatchDispatchReady, taskcommon.TaskStatusPending, "workflow", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			info, marshalErr := (&operations.PowerControlTaskInfo{Operation: operations.PowerOperationPowerOn}).Marshal()
+			require.NoError(t, marshalErr)
+			task := &taskdef.Task{ID: uuid.New(), RackID: uuid.New(), Status: tc.status, ExecutionID: tc.execution, ExecutorType: taskcommon.ExecutorTypeUnknown,
+				Attributes: taskcommon.TaskAttributes{BatchDispatch: tc.state}, Operation: operation.Wrapper{Type: taskcommon.TaskTypePowerControl, Code: taskcommon.OpCodePowerControlPowerOn, Info: info}}
+			require.NoError(t, store.CreateTask(t.Context(), task))
+			claimed, claimErr := store.ClaimBatchDispatch(t.Context(), task.ID)
+			require.NoError(t, claimErr)
+			require.Equal(t, tc.want, claimed)
+			claimed, claimErr = store.ClaimBatchDispatch(t.Context(), task.ID)
+			require.NoError(t, claimErr)
+			require.False(t, claimed)
+			saved, loadErr := store.GetTask(t.Context(), task.ID)
+			require.NoError(t, loadErr)
+			require.Equal(t, tc.status, saved.Status)
+			require.Equal(t, tc.execution, saved.ExecutionID)
+			if tc.want {
+				require.Equal(t, taskcommon.BatchDispatchStarted, saved.Attributes.BatchDispatch)
+				deadline := time.Now().UTC().Add(time.Minute).Truncate(time.Microsecond)
+				require.NoError(t, store.UpdateTaskStatus(t.Context(), &taskdef.TaskStatusUpdate{ID: task.ID, Status: taskcommon.TaskStatusWaiting,
+					QueueExpiresAt: &deadline, RetryBatchDispatch: true}))
+				saved, loadErr = store.GetTask(t.Context(), task.ID)
+				require.NoError(t, loadErr)
+				require.Equal(t, taskcommon.TaskStatusWaiting, saved.Status)
+				require.Equal(t, taskcommon.BatchDispatchReady, saved.Attributes.BatchDispatch)
+				require.True(t, deadline.Equal(*saved.QueueExpiresAt))
+			}
+		})
+	}
 }

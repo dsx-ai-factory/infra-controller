@@ -2012,7 +2012,7 @@ func TestRackHandlers_RequestPassThrough(t *testing.T) {
 		{
 			name: "power - PowerOnRackRequest carries rule_id",
 			path: fmt.Sprintf("/v2/org/%s/nico/rack/%s/power", org, rackID),
-			body: fmt.Sprintf(`{"siteId":%q,"state":"on","ruleId":%q}`, site.ID.String(), ruleID),
+			body: fmt.Sprintf(`{"siteId":%q,"state":"on","ruleId":%q,"skipUnaddressableTargets":true}`, site.ID.String(), ruleID),
 			handler: func() echo.HandlerFunc {
 				return NewUpdateRackPowerStateHandler(dbSession, nil, scp, cfg).Handle
 			}(),
@@ -2027,7 +2027,7 @@ func TestRackHandlers_RequestPassThrough(t *testing.T) {
 		{
 			name: "firmware - UpgradeFirmwareRequest carries rule_id",
 			path: fmt.Sprintf("/v2/org/%s/nico/rack/%s/firmware", org, rackID),
-			body: fmt.Sprintf(`{"siteId":%q,"ruleId":%q}`, site.ID.String(), ruleID),
+			body: fmt.Sprintf(`{"siteId":%q,"ruleId":%q,"skipUnaddressableTargets":true}`, site.ID.String(), ruleID),
 			handler: func() echo.HandlerFunc {
 				return NewUpdateRackFirmwareHandler(dbSession, nil, scp, cfg).Handle
 			}(),
@@ -2042,7 +2042,7 @@ func TestRackHandlers_RequestPassThrough(t *testing.T) {
 		{
 			name: "bring-up - BringUpRackRequest carries rule_id",
 			path: fmt.Sprintf("/v2/org/%s/nico/rack/%s/bringup", org, rackID),
-			body: fmt.Sprintf(`{"siteId":%q,"ruleId":%q}`, site.ID.String(), ruleID),
+			body: fmt.Sprintf(`{"siteId":%q,"ruleId":%q,"skipUnaddressableTargets":true}`, site.ID.String(), ruleID),
 			handler: func() echo.HandlerFunc {
 				return NewBringUpRackHandler(dbSession, nil, scp, cfg).Handle
 			}(),
@@ -2088,6 +2088,10 @@ func TestRackHandlers_RequestPassThrough(t *testing.T) {
 			require.Equal(t, http.StatusOK, rec.Code, "body=%s", rec.Body.String())
 
 			require.True(t, dispatched, "the Flow proxy workflow was not started")
+			modeRequest := tc.flowReq.(interface {
+				GetSkipUnaddressableTargets() bool
+			})
+			assert.True(t, modeRequest.GetSkipUnaddressableTargets())
 			assert.Equal(t, ruleID, tc.extractRID(tc.flowReq))
 			assert.Equal(t, rackID, tc.extractRackID(tc.flowReq))
 		})

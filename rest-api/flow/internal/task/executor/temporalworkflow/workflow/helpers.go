@@ -437,6 +437,7 @@ func executeRuleBasedOperation(
 	allTargets map[devicetypes.ComponentType]common.Target,
 	operationInfo any,
 	ruleDef *operationrules.RuleDefinition,
+	resolutions ...*taskcommon.TargetResolution,
 ) (*report.Report, error) {
 	if ruleDef == nil {
 		return nil, fmt.Errorf(
@@ -453,6 +454,10 @@ func executeRuleBasedOperation(
 	// returns. Tracker advances those slots as the workflow progresses.
 	tracker := &report.Tracker{
 		Report: report.NewInitial(ruleDef, componentTotalsByType(typeToTargets)),
+	}
+
+	if len(resolutions) > 0 {
+		tracker.Report.TargetResolution = resolutions[0]
 	}
 
 	updateTaskReportBestEffort(ctx, taskID, tracker.Report)

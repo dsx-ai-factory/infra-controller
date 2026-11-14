@@ -1340,3 +1340,10 @@ func TestFireNow(t *testing.T) {
 func (m *mockTaskStore) ListTaskContextForRack(_ context.Context, _ uuid.UUID) ([]taskdef.TaskContextMetadata, error) {
 	panic("unexpected task context read")
 }
+
+func (m *mockTaskStore) ListPendingBatchDispatches(context.Context) ([]*taskdef.Task, error) {
+	panic("unexpected batch recovery query")
+}
+func (m *mockTaskStore) ClaimBatchDispatch(context.Context, uuid.UUID) (bool, error) {
+	panic("unexpected batch claim")
+}

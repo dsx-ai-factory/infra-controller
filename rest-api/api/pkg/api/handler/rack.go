@@ -791,7 +791,7 @@ func (pcrh UpdateRackPowerStateHandler) Handle(c echo.Context) error {
 	}
 
 	flowResp, proxyErr := common.ExecutePowerControlWorkflow(ctx, logger, stc, targetSpec, apiRequest.State,
-		apiRequest.RuleID, apiRequest.OverrideReadinessCheck, fmt.Sprintf("rack-power-state-update-%s-%s", model.PowerControlStateWorkflowToken(apiRequest.State), rackStrID), "Rack")
+		apiRequest.RuleID, apiRequest.OverrideReadinessCheck, fmt.Sprintf("rack-power-state-update-%s-%s", model.PowerControlStateWorkflowToken(apiRequest.State), rackStrID), "Rack", apiRequest.SkipUnaddressableTargets)
 	if proxyErr != nil {
 		return cutil.NewAPIErrorResponse(c, proxyErr.Code, proxyErr.Message, nil)
 	}
@@ -909,7 +909,7 @@ func (pcrbh BatchUpdateRackPowerStateHandler) Handle(c echo.Context) error {
 	targetSpec := request.Filter.ToTargetSpec()
 
 	flowResp, proxyErr := common.ExecutePowerControlWorkflow(ctx, logger, stc, targetSpec, request.State,
-		request.RuleID, request.OverrideReadinessCheck, fmt.Sprintf("rack-power-state-batch-update-%s-%s", model.PowerControlStateWorkflowToken(request.State), common.RequestHash(request.Filter)), "Rack")
+		request.RuleID, request.OverrideReadinessCheck, fmt.Sprintf("rack-power-state-batch-update-%s-%s", model.PowerControlStateWorkflowToken(request.State), common.RequestHash(request.Filter)), "Rack", request.SkipUnaddressableTargets)
 	if proxyErr != nil {
 		return cutil.NewAPIErrorResponse(c, proxyErr.Code, proxyErr.Message, nil)
 	}
@@ -1041,7 +1041,7 @@ func (furh UpdateRackFirmwareHandler) Handle(c echo.Context) error {
 	flowResp, proxyErr := common.ExecuteFirmwareUpdateWorkflow(ctx, logger, stc, targetSpec, apiRequest.Version,
 		nil, apiRequest.AuthenticationData.ToProto(), apiRequest.SiteID, apiRequest.RuleID,
 		apiRequest.OverrideReadinessCheck, apiRequest.OverrideVersionCheck,
-		fmt.Sprintf("rack-firmware-update-%s", rackStrID), "Rack")
+		fmt.Sprintf("rack-firmware-update-%s", rackStrID), "Rack", apiRequest.SkipUnaddressableTargets)
 	if proxyErr != nil {
 		return cutil.NewAPIErrorResponse(c, proxyErr.Code, proxyErr.Message, nil)
 	}
@@ -1161,7 +1161,7 @@ func (furbh BatchUpdateRackFirmwareHandler) Handle(c echo.Context) error {
 	flowResp, proxyErr := common.ExecuteFirmwareUpdateWorkflow(ctx, logger, stc, targetSpec, request.Version,
 		nil, request.AuthenticationData.ToProto(), request.SiteID, request.RuleID,
 		request.OverrideReadinessCheck, request.OverrideVersionCheck,
-		fmt.Sprintf("rack-firmware-batch-update-%s", common.RequestHash(request.Filter)), "Rack")
+		fmt.Sprintf("rack-firmware-batch-update-%s", common.RequestHash(request.Filter)), "Rack", request.SkipUnaddressableTargets)
 	if proxyErr != nil {
 		return cutil.NewAPIErrorResponse(c, proxyErr.Code, proxyErr.Message, nil)
 	}
@@ -1297,7 +1297,7 @@ func (burh BringUpRackHandler) Handle(c echo.Context) error {
 	}
 
 	flowResp, proxyErr := common.ExecuteBringUpRackWorkflow(ctx, logger, stc, targetSpec, description,
-		apiRequest.RuleID, apiRequest.OverrideReadinessCheck, fmt.Sprintf("rack-bringup-%s", rackStrID), "Rack")
+		apiRequest.RuleID, apiRequest.OverrideReadinessCheck, fmt.Sprintf("rack-bringup-%s", rackStrID), "Rack", apiRequest.SkipUnaddressableTargets)
 	if proxyErr != nil {
 		return cutil.NewAPIErrorResponse(c, proxyErr.Code, proxyErr.Message, nil)
 	}
@@ -1420,7 +1420,7 @@ func (bbuh BatchBringUpRackHandler) Handle(c echo.Context) error {
 	}
 
 	flowResp, proxyErr := common.ExecuteBringUpRackWorkflow(ctx, logger, stc, targetSpec, description,
-		request.RuleID, request.OverrideReadinessCheck, fmt.Sprintf("rack-bringup-batch-%s", common.RequestHash(request.Filter)), "Rack")
+		request.RuleID, request.OverrideReadinessCheck, fmt.Sprintf("rack-bringup-batch-%s", common.RequestHash(request.Filter)), "Rack", request.SkipUnaddressableTargets)
 	if proxyErr != nil {
 		return cutil.NewAPIErrorResponse(c, proxyErr.Code, proxyErr.Message, nil)
 	}

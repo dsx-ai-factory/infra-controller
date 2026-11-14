@@ -559,6 +559,8 @@ type APIBringUpRackRequest struct {
 	// as not ready by their persisted status. Intended for operator-supervised
 	// maintenance.
 	OverrideReadinessCheck bool `json:"overrideReadinessCheck,omitempty"`
+	// SkipUnaddressableTargets opts in to skipping unaddressable targets; omission defaults to false.
+	SkipUnaddressableTargets *bool `json:"skipUnaddressableTargets,omitempty"`
 }
 
 // Validate validates the bring up request
@@ -608,6 +610,8 @@ type APIBatchBringUpRackRequest struct {
 	// OverrideReadinessCheck applies the readiness-gate bypass to every task
 	// spawned by this batch. See APIBringUpRackRequest for semantics.
 	OverrideReadinessCheck bool `json:"overrideReadinessCheck,omitempty"`
+	// SkipUnaddressableTargets opts in to skipping unaddressable targets; omission defaults to false.
+	SkipUnaddressableTargets *bool `json:"skipUnaddressableTargets,omitempty"`
 }
 
 // Validate checks required fields.

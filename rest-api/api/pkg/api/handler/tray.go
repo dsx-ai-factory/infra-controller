@@ -966,7 +966,7 @@ func (pcth UpdateTrayPowerStateHandler) Handle(c echo.Context) error {
 	}
 
 	flowResp, proxyErr := common.ExecutePowerControlWorkflow(ctx, logger, stc, targetSpec, apiRequest.State,
-		apiRequest.RuleID, apiRequest.OverrideReadinessCheck, fmt.Sprintf("tray-power-state-update-%s-%s", model.PowerControlStateWorkflowToken(apiRequest.State), trayStrID), "Tray")
+		apiRequest.RuleID, apiRequest.OverrideReadinessCheck, fmt.Sprintf("tray-power-state-update-%s-%s", model.PowerControlStateWorkflowToken(apiRequest.State), trayStrID), "Tray", apiRequest.SkipUnaddressableTargets)
 	if proxyErr != nil {
 		return cutil.NewAPIErrorResponse(c, proxyErr.Code, proxyErr.Message, nil)
 	}
@@ -1101,7 +1101,7 @@ func (pctbh BatchUpdateTrayPowerStateHandler) Handle(c echo.Context) error {
 	}
 
 	flowResp, proxyErr := common.ExecutePowerControlWorkflow(ctx, logger, stc, targetSpec, request.State,
-		request.RuleID, request.OverrideReadinessCheck, fmt.Sprintf("tray-power-state-batch-update-%s-%s", model.PowerControlStateWorkflowToken(request.State), common.RequestHash(request.Filter)), "Tray")
+		request.RuleID, request.OverrideReadinessCheck, fmt.Sprintf("tray-power-state-batch-update-%s-%s", model.PowerControlStateWorkflowToken(request.State), common.RequestHash(request.Filter)), "Tray", request.SkipUnaddressableTargets)
 	if proxyErr != nil {
 		return cutil.NewAPIErrorResponse(c, proxyErr.Code, proxyErr.Message, nil)
 	}
@@ -1230,7 +1230,7 @@ func (futh UpdateTrayFirmwareHandler) Handle(c echo.Context) error {
 	flowResp, proxyErr := common.ExecuteFirmwareUpdateWorkflow(ctx, logger, stc, targetSpec, apiRequest.Version,
 		apiRequest.Targets, apiRequest.AuthenticationData.ToProto(), apiRequest.SiteID,
 		apiRequest.RuleID, apiRequest.OverrideReadinessCheck, apiRequest.OverrideVersionCheck,
-		fmt.Sprintf("tray-firmware-update-%s", trayStrID), "Tray")
+		fmt.Sprintf("tray-firmware-update-%s", trayStrID), "Tray", apiRequest.SkipUnaddressableTargets)
 	if proxyErr != nil {
 		return cutil.NewAPIErrorResponse(c, proxyErr.Code, proxyErr.Message, nil)
 	}
@@ -1367,7 +1367,7 @@ func (futbh BatchUpdateTrayFirmwareHandler) Handle(c echo.Context) error {
 	flowResp, proxyErr := common.ExecuteFirmwareUpdateWorkflow(ctx, logger, stc, targetSpec, request.Version,
 		request.Targets, request.AuthenticationData.ToProto(), request.SiteID, request.RuleID,
 		request.OverrideReadinessCheck, request.OverrideVersionCheck,
-		fmt.Sprintf("tray-firmware-batch-update-%s", common.RequestHash(request.Filter)), "Tray")
+		fmt.Sprintf("tray-firmware-batch-update-%s", common.RequestHash(request.Filter)), "Tray", request.SkipUnaddressableTargets)
 	if proxyErr != nil {
 		return cutil.NewAPIErrorResponse(c, proxyErr.Code, proxyErr.Message, nil)
 	}

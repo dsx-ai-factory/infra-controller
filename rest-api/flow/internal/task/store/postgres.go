@@ -448,6 +448,8 @@ func (s *PostgresStore) UpdateTaskStatus(
 		arg.Message,
 		arg.Report,
 		arg.QueueExpiresAt,
+		arg.OnlyIfPendingUnscheduled,
+		arg.RetryBatchDispatch,
 	)
 	if err != nil {
 		return errors.GRPCErrorInternal(err.Error())
@@ -963,4 +965,26 @@ func (s *PostgresStore) ListRackRuleAssociations(
 	}
 
 	return result, nil
+}
+
+// ListPendingBatchDispatches finds admitted batch members never dispatched.
+func (s *PostgresStore) ListPendingBatchDispatches(ctx context.Context) ([]*taskdef.Task, error) {
+	rows, err := model.ListPendingBatchDispatches(ctx, s.idb(ctx))
+	if err != nil {
+		return nil, err
+	}
+	result := make([]*taskdef.Task, 0, len(rows))
+	for i := range rows {
+		t, convertErr := taskFromDAO(&rows[i])
+		if convertErr != nil {
+			return nil, convertErr
+		}
+		result = append(result, t)
+	}
+	return result, nil
+}
+
+// ClaimBatchDispatch prevents foreground and recovery dispatch from racing.
+func (s *PostgresStore) ClaimBatchDispatch(ctx context.Context, id uuid.UUID) (bool, error) {
+	return model.ClaimBatchDispatch(ctx, s.idb(ctx), id)
 }

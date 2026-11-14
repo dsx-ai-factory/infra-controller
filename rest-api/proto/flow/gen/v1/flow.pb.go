@@ -5265,8 +5265,12 @@ type UpgradeFirmwareRequest struct {
 	// the selected component backend supports those operations. It does not
 	// bypass readiness checks or state-controller routing.
 	OverrideVersionCheck bool `protobuf:"varint,11,opt,name=override_version_check,json=overrideVersionCheck,proto3" json:"override_version_check,omitempty"`
-	unknownFields        protoimpl.UnknownFields
-	sizeCache            protoimpl.SizeCache
+	// Opt in to skipping unaddressable targets after component-type filtering.
+	// Omitted or false requires every selected target to be addressable. Each
+	// selected rack must retain a target; readiness and step failure policy are unchanged.
+	SkipUnaddressableTargets *bool `protobuf:"varint,12,opt,name=skip_unaddressable_targets,json=skipUnaddressableTargets,proto3,oneof" json:"skip_unaddressable_targets,omitempty"`
+	unknownFields            protoimpl.UnknownFields
+	sizeCache                protoimpl.SizeCache
 }
 
 func (x *UpgradeFirmwareRequest) Reset() {
@@ -5372,6 +5376,13 @@ func (x *UpgradeFirmwareRequest) GetAuthenticationData() *FirmwareAuthentication
 func (x *UpgradeFirmwareRequest) GetOverrideVersionCheck() bool {
 	if x != nil {
 		return x.OverrideVersionCheck
+	}
+	return false
+}
+
+func (x *UpgradeFirmwareRequest) GetSkipUnaddressableTargets() bool {
+	if x != nil && x.SkipUnaddressableTargets != nil {
+		return *x.SkipUnaddressableTargets
 	}
 	return false
 }
@@ -6623,8 +6634,12 @@ type PowerOnRackRequest struct {
 	// maintenance where tenant impact has been acknowledged out-of-band;
 	// the bypass is recorded in the server log.
 	OverrideReadinessCheck bool `protobuf:"varint,5,opt,name=override_readiness_check,json=overrideReadinessCheck,proto3" json:"override_readiness_check,omitempty"`
-	unknownFields          protoimpl.UnknownFields
-	sizeCache              protoimpl.SizeCache
+	// Opt in to skipping unaddressable targets after component-type filtering.
+	// Omitted or false requires every selected target to be addressable. Each
+	// selected rack must retain a target; readiness and step failure policy are unchanged.
+	SkipUnaddressableTargets *bool `protobuf:"varint,6,opt,name=skip_unaddressable_targets,json=skipUnaddressableTargets,proto3,oneof" json:"skip_unaddressable_targets,omitempty"`
+	unknownFields            protoimpl.UnknownFields
+	sizeCache                protoimpl.SizeCache
 }
 
 func (x *PowerOnRackRequest) Reset() {
@@ -6688,6 +6703,13 @@ func (x *PowerOnRackRequest) GetRuleId() *UUID {
 func (x *PowerOnRackRequest) GetOverrideReadinessCheck() bool {
 	if x != nil {
 		return x.OverrideReadinessCheck
+	}
+	return false
+}
+
+func (x *PowerOnRackRequest) GetSkipUnaddressableTargets() bool {
+	if x != nil && x.SkipUnaddressableTargets != nil {
+		return *x.SkipUnaddressableTargets
 	}
 	return false
 }
@@ -6769,8 +6791,12 @@ type PowerOffRackRequest struct {
 	// maintenance where tenant impact has been acknowledged out-of-band;
 	// the bypass is recorded in the server log.
 	OverrideReadinessCheck bool `protobuf:"varint,6,opt,name=override_readiness_check,json=overrideReadinessCheck,proto3" json:"override_readiness_check,omitempty"`
-	unknownFields          protoimpl.UnknownFields
-	sizeCache              protoimpl.SizeCache
+	// Opt in to skipping unaddressable targets after component-type filtering.
+	// Omitted or false requires every selected target to be addressable. Each
+	// selected rack must retain a target; readiness and step failure policy are unchanged.
+	SkipUnaddressableTargets *bool `protobuf:"varint,7,opt,name=skip_unaddressable_targets,json=skipUnaddressableTargets,proto3,oneof" json:"skip_unaddressable_targets,omitempty"`
+	unknownFields            protoimpl.UnknownFields
+	sizeCache                protoimpl.SizeCache
 }
 
 func (x *PowerOffRackRequest) Reset() {
@@ -6845,6 +6871,13 @@ func (x *PowerOffRackRequest) GetOverrideReadinessCheck() bool {
 	return false
 }
 
+func (x *PowerOffRackRequest) GetSkipUnaddressableTargets() bool {
+	if x != nil && x.SkipUnaddressableTargets != nil {
+		return *x.SkipUnaddressableTargets
+	}
+	return false
+}
+
 type PowerResetRackRequest struct {
 	state        protoimpl.MessageState `protogen:"open.v1"`
 	TargetSpec   *OperationTargetSpec   `protobuf:"bytes,1,opt,name=target_spec,json=targetSpec,proto3" json:"target_spec,omitempty"` // Target racks or NVLink domains with an optional type filter, or specific components
@@ -6859,8 +6892,12 @@ type PowerResetRackRequest struct {
 	// maintenance where tenant impact has been acknowledged out-of-band;
 	// the bypass is recorded in the server log.
 	OverrideReadinessCheck bool `protobuf:"varint,6,opt,name=override_readiness_check,json=overrideReadinessCheck,proto3" json:"override_readiness_check,omitempty"`
-	unknownFields          protoimpl.UnknownFields
-	sizeCache              protoimpl.SizeCache
+	// Opt in to skipping unaddressable targets after component-type filtering.
+	// Omitted or false requires every selected target to be addressable. Each
+	// selected rack must retain a target; readiness and step failure policy are unchanged.
+	SkipUnaddressableTargets *bool `protobuf:"varint,7,opt,name=skip_unaddressable_targets,json=skipUnaddressableTargets,proto3,oneof" json:"skip_unaddressable_targets,omitempty"`
+	unknownFields            protoimpl.UnknownFields
+	sizeCache                protoimpl.SizeCache
 }
 
 func (x *PowerResetRackRequest) Reset() {
@@ -6935,6 +6972,13 @@ func (x *PowerResetRackRequest) GetOverrideReadinessCheck() bool {
 	return false
 }
 
+func (x *PowerResetRackRequest) GetSkipUnaddressableTargets() bool {
+	if x != nil && x.SkipUnaddressableTargets != nil {
+		return *x.SkipUnaddressableTargets
+	}
+	return false
+}
+
 type ACPowerCycleRackRequest struct {
 	state        protoimpl.MessageState `protogen:"open.v1"`
 	TargetSpec   *OperationTargetSpec   `protobuf:"bytes,1,opt,name=target_spec,json=targetSpec,proto3" json:"target_spec,omitempty"` // Target racks or NVLink domains with an optional type filter, or specific components
@@ -6948,8 +6992,12 @@ type ACPowerCycleRackRequest struct {
 	// maintenance where tenant impact has been acknowledged out-of-band;
 	// the bypass is recorded in the server log.
 	OverrideReadinessCheck bool `protobuf:"varint,5,opt,name=override_readiness_check,json=overrideReadinessCheck,proto3" json:"override_readiness_check,omitempty"`
-	unknownFields          protoimpl.UnknownFields
-	sizeCache              protoimpl.SizeCache
+	// Opt in to skipping unaddressable targets after component-type filtering.
+	// Omitted or false requires every selected target to be addressable. Each
+	// selected rack must retain a target; readiness and step failure policy are unchanged.
+	SkipUnaddressableTargets *bool `protobuf:"varint,6,opt,name=skip_unaddressable_targets,json=skipUnaddressableTargets,proto3,oneof" json:"skip_unaddressable_targets,omitempty"`
+	unknownFields            protoimpl.UnknownFields
+	sizeCache                protoimpl.SizeCache
 }
 
 func (x *ACPowerCycleRackRequest) Reset() {
@@ -7017,6 +7065,13 @@ func (x *ACPowerCycleRackRequest) GetOverrideReadinessCheck() bool {
 	return false
 }
 
+func (x *ACPowerCycleRackRequest) GetSkipUnaddressableTargets() bool {
+	if x != nil && x.SkipUnaddressableTargets != nil {
+		return *x.SkipUnaddressableTargets
+	}
+	return false
+}
+
 type BringUpRackRequest struct {
 	state       protoimpl.MessageState `protogen:"open.v1"`
 	TargetSpec  *OperationTargetSpec   `protobuf:"bytes,1,opt,name=target_spec,json=targetSpec,proto3" json:"target_spec,omitempty"` // Target racks, NVLink domains, or components for bring-up
@@ -7029,8 +7084,12 @@ type BringUpRackRequest struct {
 	// tenant impact has been acknowledged out-of-band; the bypass is
 	// recorded in the server log.
 	OverrideReadinessCheck bool `protobuf:"varint,4,opt,name=override_readiness_check,json=overrideReadinessCheck,proto3" json:"override_readiness_check,omitempty"`
-	unknownFields          protoimpl.UnknownFields
-	sizeCache              protoimpl.SizeCache
+	// Opt in to skipping unaddressable targets after component-type filtering.
+	// Omitted or false requires every selected target to be addressable. Each
+	// selected rack must retain a target; readiness and step failure policy are unchanged.
+	SkipUnaddressableTargets *bool `protobuf:"varint,5,opt,name=skip_unaddressable_targets,json=skipUnaddressableTargets,proto3,oneof" json:"skip_unaddressable_targets,omitempty"`
+	unknownFields            protoimpl.UnknownFields
+	sizeCache                protoimpl.SizeCache
 }
 
 func (x *BringUpRackRequest) Reset() {
@@ -7091,14 +7150,25 @@ func (x *BringUpRackRequest) GetOverrideReadinessCheck() bool {
 	return false
 }
 
+func (x *BringUpRackRequest) GetSkipUnaddressableTargets() bool {
+	if x != nil && x.SkipUnaddressableTargets != nil {
+		return *x.SkipUnaddressableTargets
+	}
+	return false
+}
+
 type IngestRackRequest struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	TargetSpec    *OperationTargetSpec   `protobuf:"bytes,1,opt,name=target_spec,json=targetSpec,proto3" json:"target_spec,omitempty"` // Target racks, NVLink domains, or components for ingestion
-	Filters       []*Filter              `protobuf:"bytes,2,rep,name=filters,proto3" json:"filters,omitempty"`                         // Filter conditions for component queries (e.g. by type, name)
-	Description   string                 `protobuf:"bytes,3,opt,name=description,proto3" json:"description,omitempty"`                 // optional task description
-	RuleId        *UUID                  `protobuf:"bytes,4,opt,name=rule_id,json=ruleId,proto3,oneof" json:"rule_id,omitempty"`       // optional: override rule resolution with a specific rule
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	state       protoimpl.MessageState `protogen:"open.v1"`
+	TargetSpec  *OperationTargetSpec   `protobuf:"bytes,1,opt,name=target_spec,json=targetSpec,proto3" json:"target_spec,omitempty"` // Target racks, NVLink domains, or components for ingestion
+	Filters     []*Filter              `protobuf:"bytes,2,rep,name=filters,proto3" json:"filters,omitempty"`                         // Filter conditions for component queries (e.g. by type, name)
+	Description string                 `protobuf:"bytes,3,opt,name=description,proto3" json:"description,omitempty"`                 // optional task description
+	RuleId      *UUID                  `protobuf:"bytes,4,opt,name=rule_id,json=ruleId,proto3,oneof" json:"rule_id,omitempty"`       // optional: override rule resolution with a specific rule
+	// Opt in to skipping unaddressable targets after component-type filtering.
+	// Omitted or false requires every selected target to be addressable. Each
+	// selected rack must retain a target; readiness and step failure policy are unchanged.
+	SkipUnaddressableTargets *bool `protobuf:"varint,5,opt,name=skip_unaddressable_targets,json=skipUnaddressableTargets,proto3,oneof" json:"skip_unaddressable_targets,omitempty"`
+	unknownFields            protoimpl.UnknownFields
+	sizeCache                protoimpl.SizeCache
 }
 
 func (x *IngestRackRequest) Reset() {
@@ -7159,14 +7229,25 @@ func (x *IngestRackRequest) GetRuleId() *UUID {
 	return nil
 }
 
+func (x *IngestRackRequest) GetSkipUnaddressableTargets() bool {
+	if x != nil && x.SkipUnaddressableTargets != nil {
+		return *x.SkipUnaddressableTargets
+	}
+	return false
+}
+
 type DecommissionRackRequest struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	TargetSpec    *OperationTargetSpec   `protobuf:"bytes,1,opt,name=target_spec,json=targetSpec,proto3" json:"target_spec,omitempty"`             // Target racks for decommissioning
-	Description   string                 `protobuf:"bytes,2,opt,name=description,proto3" json:"description,omitempty"`                             // optional task description
-	QueueOptions  *QueueOptions          `protobuf:"bytes,3,opt,name=queue_options,json=queueOptions,proto3,oneof" json:"queue_options,omitempty"` // optional queue policy overrides
-	RuleId        *UUID                  `protobuf:"bytes,4,opt,name=rule_id,json=ruleId,proto3,oneof" json:"rule_id,omitempty"`                   // optional: override rule resolution with a specific rule
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	state        protoimpl.MessageState `protogen:"open.v1"`
+	TargetSpec   *OperationTargetSpec   `protobuf:"bytes,1,opt,name=target_spec,json=targetSpec,proto3" json:"target_spec,omitempty"`             // Target racks for decommissioning
+	Description  string                 `protobuf:"bytes,2,opt,name=description,proto3" json:"description,omitempty"`                             // optional task description
+	QueueOptions *QueueOptions          `protobuf:"bytes,3,opt,name=queue_options,json=queueOptions,proto3,oneof" json:"queue_options,omitempty"` // optional queue policy overrides
+	RuleId       *UUID                  `protobuf:"bytes,4,opt,name=rule_id,json=ruleId,proto3,oneof" json:"rule_id,omitempty"`                   // optional: override rule resolution with a specific rule
+	// Opt in to skipping unaddressable targets after component-type filtering.
+	// Omitted or false requires every selected target to be addressable. Each
+	// selected rack must retain a target; readiness and step failure policy are unchanged.
+	SkipUnaddressableTargets *bool `protobuf:"varint,5,opt,name=skip_unaddressable_targets,json=skipUnaddressableTargets,proto3,oneof" json:"skip_unaddressable_targets,omitempty"`
+	unknownFields            protoimpl.UnknownFields
+	sizeCache                protoimpl.SizeCache
 }
 
 func (x *DecommissionRackRequest) Reset() {
@@ -7225,6 +7306,13 @@ func (x *DecommissionRackRequest) GetRuleId() *UUID {
 		return x.RuleId
 	}
 	return nil
+}
+
+func (x *DecommissionRackRequest) GetSkipUnaddressableTargets() bool {
+	if x != nil && x.SkipUnaddressableTargets != nil {
+		return *x.SkipUnaddressableTargets
+	}
+	return false
 }
 
 // ListTasks - list Tasks with optional filters.
@@ -16913,7 +17001,7 @@ const file_flow_proto_rawDesc = "" +
 	"\x1bGetRacksForNVLDomainRequest\x12B\n" +
 	"\x15nvl_domain_identifier\x18\x01 \x01(\v2\x0e.v1.IdentifierR\x13nvlDomainIdentifier\">\n" +
 	"\x1cGetRacksForNVLDomainResponse\x12\x1e\n" +
-	"\x05racks\x18\x01 \x03(\v2\b.v1.RackR\x05racks\"\xaf\x05\n" +
+	"\x05racks\x18\x01 \x03(\v2\b.v1.RackR\x05racks\"\x91\x06\n" +
 	"\x16UpgradeFirmwareRequest\x128\n" +
 	"\vtarget_spec\x18\x01 \x01(\v2\x17.v1.OperationTargetSpecR\n" +
 	"targetSpec\x12*\n" +
@@ -16929,13 +17017,15 @@ const file_flow_proto_rawDesc = "" +
 	"\x18override_readiness_check\x18\t \x01(\bR\x16overrideReadinessCheck\x12O\n" +
 	"\x13authentication_data\x18\n" +
 	" \x01(\v2\x1e.v1.FirmwareAuthenticationDataR\x12authenticationData\x124\n" +
-	"\x16override_version_check\x18\v \x01(\bR\x14overrideVersionCheckB\x11\n" +
+	"\x16override_version_check\x18\v \x01(\bR\x14overrideVersionCheck\x12A\n" +
+	"\x1askip_unaddressable_targets\x18\f \x01(\bH\x05R\x18skipUnaddressableTargets\x88\x01\x01B\x11\n" +
 	"\x0f_target_versionB\r\n" +
 	"\v_start_timeB\v\n" +
 	"\t_end_timeB\x10\n" +
 	"\x0e_queue_optionsB\n" +
 	"\n" +
-	"\b_rule_id\"\x92\x01\n" +
+	"\b_rule_idB\x1d\n" +
+	"\x1b_skip_unaddressable_targets\"\x92\x01\n" +
 	"\x1aFirmwareAuthenticationData\x12\x18\n" +
 	"\x06shared\x18\x01 \x01(\tH\x00R\x06shared\x12Q\n" +
 	"\rper_component\x18\x02 \x01(\v2*.v1.PerComponentFirmwareAuthenticationDataH\x00R\fperComponentB\a\n" +
@@ -17038,22 +17128,24 @@ const file_flow_proto_rawDesc = "" +
 	"\btask_ids\x18\x01 \x03(\v2\b.v1.UUIDR\ataskIds\"\x85\x01\n" +
 	"\fQueueOptions\x12A\n" +
 	"\x11conflict_strategy\x18\x01 \x01(\x0e2\x14.v1.ConflictStrategyR\x10conflictStrategy\x122\n" +
-	"\x15queue_timeout_seconds\x18\x02 \x01(\x05R\x13queueTimeoutSeconds\"\xac\x02\n" +
+	"\x15queue_timeout_seconds\x18\x02 \x01(\x05R\x13queueTimeoutSeconds\"\x8e\x03\n" +
 	"\x12PowerOnRackRequest\x128\n" +
 	"\vtarget_spec\x18\x01 \x01(\v2\x17.v1.OperationTargetSpecR\n" +
 	"targetSpec\x12 \n" +
 	"\vdescription\x18\x02 \x01(\tR\vdescription\x12:\n" +
 	"\rqueue_options\x18\x03 \x01(\v2\x10.v1.QueueOptionsH\x00R\fqueueOptions\x88\x01\x01\x12&\n" +
 	"\arule_id\x18\x04 \x01(\v2\b.v1.UUIDH\x01R\x06ruleId\x88\x01\x01\x128\n" +
-	"\x18override_readiness_check\x18\x05 \x01(\bR\x16overrideReadinessCheckB\x10\n" +
+	"\x18override_readiness_check\x18\x05 \x01(\bR\x16overrideReadinessCheck\x12A\n" +
+	"\x1askip_unaddressable_targets\x18\x06 \x01(\bH\x02R\x18skipUnaddressableTargets\x88\x01\x01B\x10\n" +
 	"\x0e_queue_optionsB\n" +
 	"\n" +
-	"\b_rule_id\"\x9c\x01\n" +
+	"\b_rule_idB\x1d\n" +
+	"\x1b_skip_unaddressable_targets\"\x9c\x01\n" +
 	"\x1bFactoryResetSwitchesRequest\x128\n" +
 	"\vtarget_spec\x18\x01 \x01(\v2\x17.v1.OperationTargetSpecR\n" +
 	"targetSpec\x12 \n" +
 	"\vdescription\x18\x02 \x01(\tR\vdescription\x12!\n" +
-	"\freset_target\x18\x03 \x01(\tR\vresetTarget\"\xc5\x02\n" +
+	"\freset_target\x18\x03 \x01(\tR\vresetTarget\"\xa7\x03\n" +
 	"\x13PowerOffRackRequest\x128\n" +
 	"\vtarget_spec\x18\x01 \x01(\v2\x17.v1.OperationTargetSpecR\n" +
 	"targetSpec\x12\x16\n" +
@@ -17061,10 +17153,12 @@ const file_flow_proto_rawDesc = "" +
 	"\vdescription\x18\x03 \x01(\tR\vdescription\x12:\n" +
 	"\rqueue_options\x18\x04 \x01(\v2\x10.v1.QueueOptionsH\x00R\fqueueOptions\x88\x01\x01\x12&\n" +
 	"\arule_id\x18\x05 \x01(\v2\b.v1.UUIDH\x01R\x06ruleId\x88\x01\x01\x128\n" +
-	"\x18override_readiness_check\x18\x06 \x01(\bR\x16overrideReadinessCheckB\x10\n" +
+	"\x18override_readiness_check\x18\x06 \x01(\bR\x16overrideReadinessCheck\x12A\n" +
+	"\x1askip_unaddressable_targets\x18\a \x01(\bH\x02R\x18skipUnaddressableTargets\x88\x01\x01B\x10\n" +
 	"\x0e_queue_optionsB\n" +
 	"\n" +
-	"\b_rule_id\"\xc7\x02\n" +
+	"\b_rule_idB\x1d\n" +
+	"\x1b_skip_unaddressable_targets\"\xa9\x03\n" +
 	"\x15PowerResetRackRequest\x128\n" +
 	"\vtarget_spec\x18\x01 \x01(\v2\x17.v1.OperationTargetSpecR\n" +
 	"targetSpec\x12\x16\n" +
@@ -17072,46 +17166,56 @@ const file_flow_proto_rawDesc = "" +
 	"\vdescription\x18\x03 \x01(\tR\vdescription\x12:\n" +
 	"\rqueue_options\x18\x04 \x01(\v2\x10.v1.QueueOptionsH\x00R\fqueueOptions\x88\x01\x01\x12&\n" +
 	"\arule_id\x18\x05 \x01(\v2\b.v1.UUIDH\x01R\x06ruleId\x88\x01\x01\x128\n" +
-	"\x18override_readiness_check\x18\x06 \x01(\bR\x16overrideReadinessCheckB\x10\n" +
+	"\x18override_readiness_check\x18\x06 \x01(\bR\x16overrideReadinessCheck\x12A\n" +
+	"\x1askip_unaddressable_targets\x18\a \x01(\bH\x02R\x18skipUnaddressableTargets\x88\x01\x01B\x10\n" +
 	"\x0e_queue_optionsB\n" +
 	"\n" +
-	"\b_rule_id\"\xb1\x02\n" +
+	"\b_rule_idB\x1d\n" +
+	"\x1b_skip_unaddressable_targets\"\x93\x03\n" +
 	"\x17ACPowerCycleRackRequest\x128\n" +
 	"\vtarget_spec\x18\x01 \x01(\v2\x17.v1.OperationTargetSpecR\n" +
 	"targetSpec\x12 \n" +
 	"\vdescription\x18\x02 \x01(\tR\vdescription\x12:\n" +
 	"\rqueue_options\x18\x03 \x01(\v2\x10.v1.QueueOptionsH\x00R\fqueueOptions\x88\x01\x01\x12&\n" +
 	"\arule_id\x18\x04 \x01(\v2\b.v1.UUIDH\x01R\x06ruleId\x88\x01\x01\x128\n" +
-	"\x18override_readiness_check\x18\x05 \x01(\bR\x16overrideReadinessCheckB\x10\n" +
+	"\x18override_readiness_check\x18\x05 \x01(\bR\x16overrideReadinessCheck\x12A\n" +
+	"\x1askip_unaddressable_targets\x18\x06 \x01(\bH\x02R\x18skipUnaddressableTargets\x88\x01\x01B\x10\n" +
 	"\x0e_queue_optionsB\n" +
 	"\n" +
-	"\b_rule_id\"\xde\x01\n" +
+	"\b_rule_idB\x1d\n" +
+	"\x1b_skip_unaddressable_targets\"\xc0\x02\n" +
 	"\x12BringUpRackRequest\x128\n" +
 	"\vtarget_spec\x18\x01 \x01(\v2\x17.v1.OperationTargetSpecR\n" +
 	"targetSpec\x12 \n" +
 	"\vdescription\x18\x02 \x01(\tR\vdescription\x12&\n" +
 	"\arule_id\x18\x03 \x01(\v2\b.v1.UUIDH\x00R\x06ruleId\x88\x01\x01\x128\n" +
-	"\x18override_readiness_check\x18\x04 \x01(\bR\x16overrideReadinessCheckB\n" +
+	"\x18override_readiness_check\x18\x04 \x01(\bR\x16overrideReadinessCheck\x12A\n" +
+	"\x1askip_unaddressable_targets\x18\x05 \x01(\bH\x01R\x18skipUnaddressableTargets\x88\x01\x01B\n" +
 	"\n" +
-	"\b_rule_id\"\xc9\x01\n" +
+	"\b_rule_idB\x1d\n" +
+	"\x1b_skip_unaddressable_targets\"\xab\x02\n" +
 	"\x11IngestRackRequest\x128\n" +
 	"\vtarget_spec\x18\x01 \x01(\v2\x17.v1.OperationTargetSpecR\n" +
 	"targetSpec\x12$\n" +
 	"\afilters\x18\x02 \x03(\v2\n" +
 	".v1.FilterR\afilters\x12 \n" +
 	"\vdescription\x18\x03 \x01(\tR\vdescription\x12&\n" +
-	"\arule_id\x18\x04 \x01(\v2\b.v1.UUIDH\x00R\x06ruleId\x88\x01\x01B\n" +
+	"\arule_id\x18\x04 \x01(\v2\b.v1.UUIDH\x00R\x06ruleId\x88\x01\x01\x12A\n" +
+	"\x1askip_unaddressable_targets\x18\x05 \x01(\bH\x01R\x18skipUnaddressableTargets\x88\x01\x01B\n" +
 	"\n" +
-	"\b_rule_id\"\xf7\x01\n" +
+	"\b_rule_idB\x1d\n" +
+	"\x1b_skip_unaddressable_targets\"\xd9\x02\n" +
 	"\x17DecommissionRackRequest\x128\n" +
 	"\vtarget_spec\x18\x01 \x01(\v2\x17.v1.OperationTargetSpecR\n" +
 	"targetSpec\x12 \n" +
 	"\vdescription\x18\x02 \x01(\tR\vdescription\x12:\n" +
 	"\rqueue_options\x18\x03 \x01(\v2\x10.v1.QueueOptionsH\x00R\fqueueOptions\x88\x01\x01\x12&\n" +
-	"\arule_id\x18\x04 \x01(\v2\b.v1.UUIDH\x01R\x06ruleId\x88\x01\x01B\x10\n" +
+	"\arule_id\x18\x04 \x01(\v2\b.v1.UUIDH\x01R\x06ruleId\x88\x01\x01\x12A\n" +
+	"\x1askip_unaddressable_targets\x18\x05 \x01(\bH\x02R\x18skipUnaddressableTargets\x88\x01\x01B\x10\n" +
 	"\x0e_queue_optionsB\n" +
 	"\n" +
-	"\b_rule_id\"\x8f\x02\n" +
+	"\b_rule_idB\x1d\n" +
+	"\x1b_skip_unaddressable_targets\"\x8f\x02\n" +
 	"\x10ListTasksRequest\x12&\n" +
 	"\arack_id\x18\x01 \x01(\v2\b.v1.UUIDH\x00R\x06rackId\x88\x01\x01\x12\x1f\n" +
 	"\vactive_only\x18\x02 \x01(\bR\n" +

@@ -1302,6 +1302,15 @@ maintenance where tenant impact has been acknowledged out-of-band;
 the bypass is recorded in the server log. </p></td>
                 </tr>
 
+                <tr>
+                  <td>skip_unaddressable_targets</td>
+                  <td><a href="#bool">bool</a></td>
+                  <td>optional</td>
+                  <td><p>Opt in to skipping unaddressable targets after component-type filtering.
+Omitted or false requires every selected target to be addressable. Each
+selected rack must retain a target; readiness and step failure policy are unchanged. </p></td>
+                </tr>
+
             </tbody>
           </table>
 
@@ -1584,6 +1593,15 @@ scope is reported as not ready for the operation by its persisted
 ComponentOperationStatus. Intended for operator-supervised maintenance where
 tenant impact has been acknowledged out-of-band; the bypass is
 recorded in the server log. </p></td>
+                </tr>
+
+                <tr>
+                  <td>skip_unaddressable_targets</td>
+                  <td><a href="#bool">bool</a></td>
+                  <td>optional</td>
+                  <td><p>Opt in to skipping unaddressable targets after component-type filtering.
+Omitted or false requires every selected target to be addressable. Each
+selected rack must retain a target; readiness and step failure policy are unchanged. </p></td>
                 </tr>
 
             </tbody>
@@ -2578,6 +2596,15 @@ execution policy, and operation template. </p></td>
                   <td><a href="#v1.UUID">UUID</a></td>
                   <td>optional</td>
                   <td><p>optional: override rule resolution with a specific rule </p></td>
+                </tr>
+
+                <tr>
+                  <td>skip_unaddressable_targets</td>
+                  <td><a href="#bool">bool</a></td>
+                  <td>optional</td>
+                  <td><p>Opt in to skipping unaddressable targets after component-type filtering.
+Omitted or false requires every selected target to be addressable. Each
+selected rack must retain a target; readiness and step failure policy are unchanged. </p></td>
                 </tr>
 
             </tbody>
@@ -4818,6 +4845,15 @@ and returns OperationRun.stats. </p></td>
                   <td><a href="#v1.UUID">UUID</a></td>
                   <td>optional</td>
                   <td><p>optional: override rule resolution with a specific rule </p></td>
+                </tr>
+
+                <tr>
+                  <td>skip_unaddressable_targets</td>
+                  <td><a href="#bool">bool</a></td>
+                  <td>optional</td>
+                  <td><p>Opt in to skipping unaddressable targets after component-type filtering.
+Omitted or false requires every selected target to be addressable. Each
+selected rack must retain a target; readiness and step failure policy are unchanged. </p></td>
                 </tr>
 
             </tbody>
@@ -7288,6 +7324,15 @@ maintenance where tenant impact has been acknowledged out-of-band;
 the bypass is recorded in the server log. </p></td>
                 </tr>
 
+                <tr>
+                  <td>skip_unaddressable_targets</td>
+                  <td><a href="#bool">bool</a></td>
+                  <td>optional</td>
+                  <td><p>Opt in to skipping unaddressable targets after component-type filtering.
+Omitted or false requires every selected target to be addressable. Each
+selected rack must retain a target; readiness and step failure policy are unchanged. </p></td>
+                </tr>
+
             </tbody>
           </table>
 
@@ -7343,6 +7388,15 @@ rack) are reported as not ready for the operation by their
 persisted ComponentOperationStatus. Intended for operator-supervised
 maintenance where tenant impact has been acknowledged out-of-band;
 the bypass is recorded in the server log. </p></td>
+                </tr>
+
+                <tr>
+                  <td>skip_unaddressable_targets</td>
+                  <td><a href="#bool">bool</a></td>
+                  <td>optional</td>
+                  <td><p>Opt in to skipping unaddressable targets after component-type filtering.
+Omitted or false requires every selected target to be addressable. Each
+selected rack must retain a target; readiness and step failure policy are unchanged. </p></td>
                 </tr>
 
             </tbody>
@@ -7438,6 +7492,15 @@ rack) are reported as not ready for the operation by their
 persisted ComponentOperationStatus. Intended for operator-supervised
 maintenance where tenant impact has been acknowledged out-of-band;
 the bypass is recorded in the server log. </p></td>
+                </tr>
+
+                <tr>
+                  <td>skip_unaddressable_targets</td>
+                  <td><a href="#bool">bool</a></td>
+                  <td>optional</td>
+                  <td><p>Opt in to skipping unaddressable targets after component-type filtering.
+Omitted or false requires every selected target to be addressable. Each
+selected rack must retain a target; readiness and step failure policy are unchanged. </p></td>
                 </tr>
 
             </tbody>
@@ -9669,6 +9732,15 @@ firmware controller. </p></td>
 the update. This allows same-version reapplication and downgrade when
 the selected component backend supports those operations. It does not
 bypass readiness checks or state-controller routing. </p></td>
+                </tr>
+
+                <tr>
+                  <td>skip_unaddressable_targets</td>
+                  <td><a href="#bool">bool</a></td>
+                  <td>optional</td>
+                  <td><p>Opt in to skipping unaddressable targets after component-type filtering.
+Omitted or false requires every selected target to be addressable. Each
+selected rack must retain a target; readiness and step failure policy are unchanged. </p></td>
                 </tr>
 
             </tbody>
