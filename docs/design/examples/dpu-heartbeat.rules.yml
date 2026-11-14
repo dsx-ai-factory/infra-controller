@@ -1,0 +1,9 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+groups:
+  - name: dpu-heartbeat
+    rules:
+      - alert: DpuHeartbeatFailures
+        expr: carbide_dpu_health_check_failed_count{probe_id="HeartbeatTimeout",probe_target="forge-dpu-agent"} > 0
+        for: 5m
