@@ -165,6 +165,15 @@ pub mod spdm {
         Waived,
     }
 
+    impl SpdmAttestationState {
+        /// Whether attestation has settled, so no later iteration changes the
+        /// result. These are the states the newest-finished read counts as
+        /// finished, so entering one changes what a machine's health report says.
+        pub fn is_terminal(&self) -> bool {
+            matches!(self, Self::Passed | Self::Failed(_) | Self::Waived)
+        }
+    }
+
     impl<'r> sqlx::FromRow<'r, PgRow> for SpdmAttestationState {
         fn from_row(row: &'r PgRow) -> Result<Self, sqlx::Error> {
             let controller_state: sqlx::types::Json<SpdmAttestationState> = row.try_get("state")?;
@@ -339,11 +348,13 @@ pub mod spdm {
     }
 
     impl SpdmDeviceAttestationDetails {
-        /// Describes an effective terminal failure, preserving its stored reason unless waived.
-        /// An operator failure supplies a reason only when the stored state has not failed.
-        pub fn get_failure_cause(&self) -> Option<String> {
+        /// Why the device effectively failed, or `None` when it did not. An
+        /// operator override outranks the stored result, so this is not the
+        /// same question as whether [`Self::state`] is
+        /// [`SpdmAttestationState::Failed`].
+        pub fn failure_reason(&self) -> Option<&str> {
             // A waiver suppresses the failure; an operator failure must not hide its original cause.
-            let reason = match (&self.state, self.cancellation_target) {
+            match (&self.state, self.cancellation_target) {
                 (_, Some(SpdmCancellationTarget::Waive)) => None,
                 (SpdmAttestationState::Failed(reason), _) => Some(reason.as_str()),
                 (
@@ -351,8 +362,14 @@ pub mod spdm {
                     Some(SpdmCancellationTarget::Fail),
                 ) => Some("Failed by operator"),
                 _ => None,
-            };
-            reason.map(|msg| format!("Device: {}, failed reason: {}", self.device_id, msg))
+            }
+        }
+
+        /// Describes an effective terminal failure, preserving its stored reason unless waived.
+        /// An operator failure supplies a reason only when the stored state has not failed.
+        pub fn get_failure_cause(&self) -> Option<String> {
+            self.failure_reason()
+                .map(|msg| format!("Device: {}, failed reason: {}", self.device_id, msg))
         }
     }
 
@@ -484,7 +501,8 @@ pub mod profile {
     }
 
     /// Which requirement went unsatisfied, so a caller can say which.
-    #[derive(Clone, Debug, Eq, PartialEq)]
+    #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+    #[serde(rename_all = "snake_case")]
     pub enum UnsatisfiedRequirement {
         /// These patterns matched no eligible attester. A caller holding the
         /// attesters that failed eligibility can name the ones a pattern

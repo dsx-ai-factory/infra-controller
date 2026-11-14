@@ -18,12 +18,13 @@ use ::rpc::forge::{self as rpc};
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use carbide_machine_controller::handler::attestation::{
-    SchedulingOutcome, select_machine_attesters, trigger_attestation,
+    select_machine_attesters, trigger_attestation,
 };
 use carbide_uuid::machine::{MachineId, MachineType};
 use db::ObjectFilter;
 use itertools::Itertools;
 use model::attestation::spdm as model_spdm;
+use model::attestation_scheduling::SchedulingOutcome;
 use model::bmc_info::BmcInfo;
 use model::machine::machine_search_config::MachineSearchConfig;
 use sqlx::PgPool;
@@ -172,15 +173,34 @@ pub(crate) async fn waive_attestation(
 
     let mut txn = api.txn_begin().await?;
     // Record waiver intent while the SPDM controller cleans up evidence collection.
-    db::attestation::spdm::request_attestation_cancellation(
+    let machine_ids = db::attestation::spdm::request_attestation_cancellation(
         &mut txn,
         &job_id,
         model_spdm::SpdmCancellationTarget::Waive,
     )
     .await?;
+    republish_attestation_alerts(&mut txn, &machine_ids).await?;
     txn.commit().await?;
 
     Ok(Response::new(()))
+}
+
+/// Rebuilds each machine's attestation alerts from its stored results.
+///
+/// An override on a device that already finished leaves the SPDM controller
+/// nothing to transition, so it never republishes. Without this the alerts
+/// would keep reporting the result the operator just overrode until some
+/// later attestation of that machine rebuilt them. A DPU is attested only
+/// when an operator asks, so for one there may be no later attestation.
+async fn republish_attestation_alerts(
+    txn: &mut sqlx::PgConnection,
+    machine_ids: &[MachineId],
+) -> Result<(), db::DatabaseError> {
+    for machine_id in machine_ids {
+        let report = db::attestation::health::build_health_report(&mut *txn, machine_id).await?;
+        db::machine::update_attestation_health_report(&mut *txn, machine_id, &report).await?;
+    }
+    Ok(())
 }
 
 pub(crate) async fn fail_attestation(
@@ -193,12 +213,13 @@ pub(crate) async fn fail_attestation(
 
     // Terminal status reads apply this target directly; unfinished devices still need cleanup.
     let mut txn = api.txn_begin().await?;
-    db::attestation::spdm::request_attestation_cancellation(
+    let machine_ids = db::attestation::spdm::request_attestation_cancellation(
         &mut txn,
         &job_id,
         model_spdm::SpdmCancellationTarget::Fail,
     )
     .await?;
+    republish_attestation_alerts(&mut txn, &machine_ids).await?;
     txn.commit().await?;
     Ok(Response::new(()))
 }
