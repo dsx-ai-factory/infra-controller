@@ -511,6 +511,12 @@ SPIFFE URI). Controller Mode adds the following requirements:
    `SCALE_BMC_PREFIXES="<cidr> ..."` for a relay whose network the site config
    does not declare yet.
 
+1. **kube-proxy in IPVS mode caps the published addresses per cluster.** It
+   keeps every externalIP and port of every Service in one ipset of 65,536
+   entries, which holds 736 GB200 NVL72 racks at per-pod granularity. Refer
+   to [kube-proxy IPVS Capacity](#kube-proxy-ipvs-capacity) for the
+   arithmetic, the symptoms, the options, and the preflight.
+
 1. **NICo siteConfig requirements.** `nico-core-simulation.yaml` declares
    them: `allow_insecure_discovery = true`, `[networks.simulated-oob]`
    (`10.200.0.0/18`, gateway `10.200.0.1`, the `bmcDhcpRelayAddress` of the
@@ -685,6 +691,171 @@ kubectl -n nico-mat get svc -l app.kubernetes.io/managed-by=mat-k8s-controller -
 
 A reset between runs must also clear the rack inventory. Refer to
 [Inventory Reset](#inventory-reset).
+
+### kube-proxy IPVS Capacity
+
+kube-proxy in IPVS mode keeps the externalIP and port of every Service in the
+ipset `KUBE-EXTERNAL-IP`, one entry per address, protocol, and port. It
+creates the set with `maxelem` 65,536 and `hashsize` 1,024, the defaults of
+`setIPSetDefaults` in kube-proxy's ipset package
+(`pkg/proxy/ipvs/ipset/ipset.go` in the v1.30 line, `pkg/util/ipset/ipset.go`
+in the v1.26 line), and no kube-proxy flag or configuration field changes
+them.
+[kubernetes/kubernetes issue 129389](https://github.com/kubernetes/kubernetes/issues/129389)
+asked for a setting and closed without one. Every node programs the same set,
+so the limit bounds the fleet of one cluster. kube-proxy in iptables mode
+programs no ipset, and the preflight below reports the set as absent there;
+that mode was not measured at this scale.
+
+Count the entries the controller publishes before a large fleet is deployed:
+
+- At per-pod granularity (`mat-k8s-controller.config.serviceGranularity: pod`)
+  a GB200 NVL72 rack needs 89 entries: its 71 BMC addresses (18 compute trays
+  with one host BMC and two DPU BMCs each, 9 NVLink switches, and 8 power
+  shelves) on port 443, plus its 9 switch NVOS addresses on ports 9370 and
+  443. The default `maxelem` holds 736 racks (65,504 entries), and 1,112
+  racks need 98,968.
+- At `device` granularity the same addresses are published, and a BMC
+  Service adds one entry per extra port it carries. With the chart default
+  `machineATron.mockBmcSshServer: true` the 36 DPU BMCs and the 8 power
+  shelves of a rack carry an SSH port; the host and switch BMCs do not. The
+  UDP IPMI port is added with `machineATron.enableIpmiSimulation: true`. With
+  the chart defaults a rack needs 133 entries, so the set holds 492 racks.
+- A host-count fleet needs one entry per BMC address and port,
+  `hostCount x (1 + dpuPerHostCount)` addresses per machine group, and no
+  NVOS entries.
+
+When the fleet exceeds the set, each node holds a different subset of the
+addresses, and the rest are refused from that node only. On a 1,112-rack
+fleet with the stock kube-proxy about a third of the addresses were missing
+on each node, machine creation plateaued at 55,110 of 60,048, switch and
+power shelf creation stopped, and no rack reached `ready`. Recognize it by:
+
+- `Hash is full, cannot add more elements` in the kube-proxy log of every
+  node, repeated on every sync:
+
+  ```bash
+  kubectl -n kube-system logs <kube-proxy-pod> --tail=2000 | grep -c 'Hash is full'
+  ```
+
+- `ipset list -t KUBE-EXTERNAL-IP` in a kube-proxy pod reports
+  `Number of entries` at or slightly above the `maxelem` of its `Header` line,
+  while the IPVS virtual servers themselves are complete (`/proc/net/ip_vs` on
+  the node): the gap is in the ipset that the iptables rules consult, not in
+  IPVS.
+- `connection refused` for a BMC address from a pod on one node while a pod
+  on another node gets HTTP 200 from the same address. The exploration report
+  of such an endpoint in nico-api shows `ConnectionRefused`.
+
+Options, in the order to consider them:
+
+1. Keep the fleet of one cluster within the set. At per-pod granularity that
+   is 736 GB200 NVL72 racks; a larger fleet runs as several sites, each with
+   its own cluster and kube-proxy. Refer to
+   [Multiple Site Controllers](../getting-started/sizing-and-scale.md#multiple-site-controllers).
+   At `device` granularity, `machineATron.mockBmcSshServer: false` removes the
+   44 SSH entries of each rack.
+1. Rebuild kube-proxy with a larger default. Raise `MaxElem` and `HashSize`
+   in `setIPSetDefaults`, build the image for the cluster's kube-proxy
+   version, and roll it onto every node. `MaxElem` 1,048,576 and `HashSize`
+   65,536 carried a 1,112-rack fleet with 98,968 entries on every node.
+   kube-proxy does not recreate a set that exists with another `maxelem`, so
+   run `kube-proxy --cleanup` on each node before its new pod starts. The
+   first full sync after a cleanup takes about 15 minutes per node at that
+   size, and the Services are not reachable through that node until it
+   finishes. This changes a cluster component outside NICo and the chart, so
+   use it on test clusters only.
+1. Publish the addresses without Service externalIPs. Routing the BMC and
+   NVOS prefixes to the simulator pods (static node routes or the CNI) and
+   having the pods accept those addresses locally removes the ipset limit and
+   the ServiceCIDR limit together. The chart does not implement this model.
+
+Before a fleet is deployed, compare the planned entry count, plus the entries
+other Services already hold, with the live `maxelem` on every node. The loop
+assumes kube-proxy runs as the kubeadm DaemonSet in `kube-system` with the
+label `k8s-app=kube-proxy`; on a distribution that runs kube-proxy outside a
+pod, run `ipset list -t KUBE-EXTERNAL-IP` on each node instead. Set `racks`
+to the rack count of the values file and `granularity` to the chart's
+`serviceGranularity`, or replace `planned` with the count from the arithmetic
+above. Run it before the fleet is deployed: once the fleet is up, the live
+count already contains its entries. The block is bash. It returns non-zero
+when a node does not fit, a check fails, a node has no kube-proxy pod, or a
+node has no set while the kube-proxy ConfigMap does not put it in `iptables`
+or `nftables` mode, so it can gate a deploy script.
+
+```bash
+# GB200 NVL72 racks in the values file, and the chart's
+# mat-k8s-controller.config.serviceGranularity (device, the chart default, or pod).
+racks=1112
+granularity=device
+ipvs_preflight() {
+  local per_rack planned failed=0 checked=0 seen=" " conf mode pod node header maxelem entries total verdict
+  case "$granularity" in
+    # 71 BMC addresses x 1 port + 9 NVOS addresses x 2 ports
+    pod) per_rack=89 ;;
+    # 71 Redfish + 44 SSH (36 DPU BMCs, 8 power shelves) + 18 NVOS;
+    # fewer without mockBmcSshServer, more with enableIpmiSimulation
+    device) per_rack=133 ;;
+    *) echo "unknown granularity: $granularity" >&2; return 2 ;;
+  esac
+  planned=$((racks * per_rack))
+  # kube-proxy mode from the kubeadm ConfigMap; an unset mode means iptables
+  if conf=$(kubectl -n kube-system get configmap kube-proxy -o jsonpath='{.data.config\.conf}' 2>/dev/null); then
+    mode=$(sed -n 's/^mode: *"\{0,1\}\([a-z]*\)"\{0,1\}.*/\1/p' <<<"$conf")
+    mode=${mode:-iptables}
+  else
+    mode=unknown
+  fi
+  while read -r pod node; do
+    checked=$((checked + 1))
+    seen="$seen$node "
+    if ! header=$(kubectl -n kube-system exec "$pod" -- ipset list -t KUBE-EXTERNAL-IP 2>&1); then
+      case "$header" in
+        *"The set with the given name does not exist"*)
+          case "$mode" in
+            iptables|nftables)
+              echo "$node: no KUBE-EXTERNAL-IP set, kube-proxy mode is $mode and the limit does not apply" ;;
+            *) echo "$node: ERROR, no KUBE-EXTERNAL-IP set and kube-proxy mode is $mode; rerun after kube-proxy has synced"; failed=1 ;;
+          esac ;;
+        *) echo "$node: ERROR, the ipset check failed: $header"; failed=1 ;;
+      esac
+      continue
+    fi
+    maxelem=$(sed -n 's/.*maxelem \([0-9]*\).*/\1/p' <<<"$header")
+    entries=$(sed -n 's/^Number of entries: \([0-9]*\).*/\1/p' <<<"$header")
+    if [ -z "$maxelem" ] || [ -z "$entries" ]; then
+      echo "$node: ERROR, no maxelem or entry count in the ipset header: $header"; failed=1; continue
+    fi
+    total=$((planned + entries))
+    if [ "$total" -le "$maxelem" ]; then
+      verdict=fits
+    else
+      verdict="exceeds maxelem by $((total - maxelem))"; failed=1
+    fi
+    echo "$node: planned $planned + existing $entries = $total entries, maxelem $maxelem, $verdict"
+  done < <(kubectl -n kube-system get pods -l k8s-app=kube-proxy \
+    -o jsonpath='{range .items[*]}{.metadata.name} {.spec.nodeName}{"\n"}{end}')
+  if [ "$checked" -eq 0 ]; then
+    echo "no kube-proxy pod matched k8s-app=kube-proxy; run ipset list -t KUBE-EXTERNAL-IP on each node instead" >&2
+    failed=1
+  fi
+  for node in $(kubectl get nodes -o jsonpath='{.items[*].metadata.name}'); do
+    case "$seen" in
+      *" $node "*) ;;
+      *) echo "$node: ERROR, no kube-proxy pod on this node, its ipset was not checked"; failed=1 ;;
+    esac
+  done
+  [ "$failed" -eq 0 ] || echo "do not deploy until every node fits and every check succeeded" >&2
+  return "$failed"
+}
+ipvs_preflight
+```
+
+After the fleet is up, run the same block with `racks=0` to read the live entry count without
+counting the fleet twice. Once every
+device has its lease it reaches the planned count, plus the externalIPs that
+other Services in the cluster publish, on every node; a node below that is
+missing addresses.
 
 ## Verifying Startup
 
@@ -973,6 +1144,7 @@ namespace.
 | `Resource pool lo-ip is empty` or `FNN configured but DPU ... has not been assigned an ASN` | Pool smaller than the fleet. Pool declarations are seed-once, so a widened `[pools.*]` block is ignored on an established site | `nico-admin-cli resource-pool grow` (Established Sites). Diagnose with `SELECT name, count(*) FILTER (WHERE allocated IS NULL) AS free FROM resource_pool WHERE auto_assign GROUP BY name;` |
 | Hosts park in `dpuinit`; nico-api logs `SVI IP is not allocated` | The simulated segments have no `svi_ip`, which the FNN network-config builder requires | Set `svi_ip = gateway` on the simulated prefixes (SVI IPs on the Simulated Segments) |
 | Redfish `connection refused` on every endpoint despite bmc_proxy set | Bare service name resolves against nico-system, not nico-mat | Use the cross-namespace FQDN in `bmc_proxy` |
+| Redfish `connection refused` for some BMC addresses from one node while another node reaches them; kube-proxy logs `Hash is full` | The `KUBE-EXTERNAL-IP` ipset is at its `maxelem` of 65,536 entries, 736 GB200 NVL72 racks at per-pod granularity | Fewer racks per cluster, or a kube-proxy rebuilt with a larger `maxelem`. Refer to [kube-proxy IPVS Capacity](#kube-proxy-ipvs-capacity) |
 | Redfish redirect ignored; `endpoint_explorations=0` | Wrong config field (`override_target_host` is not real) | Use `bmc_proxy = "nico-machine-a-tron-default-bmc-mock.nico-mat.svc.cluster.local:1266"` under `[site_explorer]` |
 | `Refusing to create managed host, expected machines entry not found` | No `expected_machines` row for the discovered BMC MAC | Set `machineATron.registerExpectedMachines: true` (default) so machine-a-tron auto-registers them |
 | `Refusing to create managed host`; machine-a-tron logs `PermissionDenied` on registration | nico-api release predates the `Machineatron` → `AddExpectedMachine` RBAC grant | Upgrade nico-api. There is no fallback |
