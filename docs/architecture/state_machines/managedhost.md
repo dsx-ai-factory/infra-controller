@@ -573,10 +573,10 @@ stateDiagram-v2
     HI_WaitingForBiosJob --> HI_WBJ_HandleBiosJobFailure : BIOS job failed
     HI_WaitingForBiosJob --> Failed : Retry budget exhausted (BiosSetupFailed)
     HI_WBJ_HandleBiosJobFailure --> HI_WaitingForPlatformConfiguration : Power off + BMC reset + power on
-    HI_PollingBiosSetup --> HI_PollingBiosSetup : Wait for BIOS setup
-    HI_PollingBiosSetup --> HI_WBJ_HandleBiosJobFailure : Stuck > 15 min, retry budget left
-    HI_PollingBiosSetup --> Failed : Stuck > 15 min, retry budget exhausted (BiosSetupFailed)
-    HI_PollingBiosSetup --> HI_SBO_SetBootOrder : BIOS is setup
+    HI_PollingBiosSetup --> HI_PollingBiosSetup : Wait for BIOS setup, then for the host to boot after the BIOS reboot
+    HI_PollingBiosSetup --> HI_WBJ_HandleBiosJobFailure : BIOS not setup > 15 min, retry budget left
+    HI_PollingBiosSetup --> Failed : BIOS not setup > 15 min, retry budget exhausted (BiosSetupFailed)
+    HI_PollingBiosSetup --> HI_SBO_SetBootOrder : BIOS is setup AND (host booted OR no usable BootProgress OR settle timeout)
 
     HI_SBO_SetBootOrder --> hi_sbo_if_zero_dpu
     hi_sbo_if_zero_dpu --> HI_SBO_WaitForSetBootOrderJobCompletion : No DPU
@@ -922,10 +922,10 @@ stateDiagram-v2
     A_HPC_WaitingForBiosJob --> A_HPC_WBJ_HandleBiosJobFailure : BIOS job failed
     A_HPC_WaitingForBiosJob --> A_Failed : Retry budget exhausted (BiosSetupFailed)
     A_HPC_WBJ_HandleBiosJobFailure --> A_HPC_ConfigureBios : Power off + BMC reset + power on
-    A_HPC_PollingBiosSetup --> A_HPC_PollingBiosSetup : Wait for BIOS setup
-    A_HPC_PollingBiosSetup --> A_HPC_WBJ_HandleBiosJobFailure : Stuck > 15 min, retry budget left
-    A_HPC_PollingBiosSetup --> A_Failed : Stuck > 15 min, retry budget exhausted (BiosSetupFailed)
-    A_HPC_PollingBiosSetup --> A_HPC_SBO_SetBootOrder : BIOS is setup
+    A_HPC_PollingBiosSetup --> A_HPC_PollingBiosSetup : Wait for BIOS setup, then for the host to boot after the BIOS reboot
+    A_HPC_PollingBiosSetup --> A_HPC_WBJ_HandleBiosJobFailure : BIOS not setup > 15 min, retry budget left
+    A_HPC_PollingBiosSetup --> A_Failed : BIOS not setup > 15 min, retry budget exhausted (BiosSetupFailed)
+    A_HPC_PollingBiosSetup --> A_HPC_SBO_SetBootOrder : BIOS is setup AND (host booted OR no usable BootProgress OR settle timeout)
     A_HPC_SBO_SetBootOrder --> A_HPC_SBO_WaitForSetBootOrderJobScheduled : Set boot order job scheduled
     A_HPC_SBO_WaitForSetBootOrderJobScheduled --> A_HPC_SBO_RebootHost : Job scheduled
     A_HPC_SBO_RebootHost --> A_HPC_SBO_WaitForSetBootOrderJobCompletion : Reboot

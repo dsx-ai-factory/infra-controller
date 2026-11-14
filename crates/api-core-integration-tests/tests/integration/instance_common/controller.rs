@@ -219,6 +219,7 @@ fn machine_state_controller(
             .machine_state_controller
             .waiting_for_measurements_timeout,
         uefi_boot_wait: chrono::Duration::zero(),
+        dpu_first_restart_delay: config.machine_state_controller.dpu_first_restart_delay,
     };
     let power_options: PowerOptionConfig = config.power_manager_options.clone().into();
     let handler = MachineStateHandlerBuilder::builder(api.instrumentation().clone())
