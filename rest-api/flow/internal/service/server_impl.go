@@ -1783,7 +1783,8 @@ func (rs *FlowServerImpl) GetComponents(
 // so this API returns quickly without calling external systems.
 //
 // If target_spec is provided, only drifts for the specified components are returned.
-// If target_spec is not provided, all drifts are returned.
+// Rack filters select parent racks; component filters narrow their components.
+// Without targets or filters, all drifts are returned.
 func (rs *FlowServerImpl) ValidateComponents(
 	ctx context.Context,
 	req *pb.ValidateComponentsRequest,
@@ -1803,10 +1804,15 @@ func (rs *FlowServerImpl) ValidateComponents(
 	var manufacturerFilter *dbquery.StringQueryInfo
 	var modelFilter *dbquery.StringQueryInfo
 	var componentTypes []devicetypes.ComponentType
+	var rackFilters []*pb.Filter
 
 	if len(req.GetFilters()) > 0 {
 		for _, filter := range req.GetFilters() {
 			if filter == nil {
+				continue
+			}
+			if _, isRackFilter := filter.GetField().(*pb.Filter_RackField); isRackFilter {
+				rackFilters = append(rackFilters, filter)
 				continue
 			}
 			fieldName, queryInfo, err := protobuf.FilterFrom(filter)
@@ -1852,17 +1858,17 @@ func (rs *FlowServerImpl) ValidateComponents(
 	hasFilters := len(req.GetFilters()) > 0
 
 	targetSpec := req.GetTargetSpec()
+	isScoped := targetSpec != nil || hasFilters
 
 	var storeDrifts []inventorymanager.ComponentDrift
 	var componentIDs []uuid.UUID
 	var filteredComponentCount int32
 	var err error
 
-	if targetSpec != nil {
-		// Extract component UUIDs from target spec
-		components, extractErr := rs.extractComponentsFromTargetSpec(ctx, targetSpec)
-		if extractErr != nil {
-			return nil, fmt.Errorf("failed to extract components from target_spec: %w", extractErr)
+	if isScoped {
+		components, selectErr := rs.validationCandidates(ctx, targetSpec, rackFilters)
+		if selectErr != nil {
+			return nil, fmt.Errorf("failed to select validation components: %w", selectErr)
 		}
 
 		// Apply filters to narrow down components
@@ -1892,14 +1898,14 @@ func (rs *FlowServerImpl) ValidateComponents(
 	}
 
 	componentOrder := make(map[uuid.UUID]int, len(storeDrifts))
-	if targetSpec != nil {
+	if isScoped {
 		for index, componentID := range componentIDs {
 			componentOrder[componentID] = index
 		}
 	}
 	sort.Slice(storeDrifts, func(i, j int) bool {
 		left, right := storeDrifts[i], storeDrifts[j]
-		if left.ComponentID != nil && right.ComponentID != nil && targetSpec != nil {
+		if left.ComponentID != nil && right.ComponentID != nil && isScoped {
 			leftIndex, leftFound := componentOrder[*left.ComponentID]
 			rightIndex, rightFound := componentOrder[*right.ComponentID]
 			if leftFound && rightFound && leftIndex != rightIndex {
@@ -1972,7 +1978,7 @@ func (rs *FlowServerImpl) ValidateComponents(
 	}
 
 	// Calculate match count: if we have targeted components, matches = targeted - mismatches
-	if targetSpec != nil {
+	if isScoped {
 		matchCount = filteredComponentCount - missingCount - mismatchCount
 		if matchCount < 0 {
 			matchCount = 0

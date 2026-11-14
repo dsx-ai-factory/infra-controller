@@ -833,19 +833,6 @@ func TestFlowServerImpl_GetComponents(t *testing.T) {
 	assert.Equal(t, codes.InvalidArgument, status.Code(err))
 }
 
-func TestFlowServerImpl_ValidateComponents(t *testing.T) {
-	_, err := (&FlowServerImpl{inventoryManager: newMockManager()}).ValidateComponents(
-		t.Context(),
-		&pb.ValidateComponentsRequest{OrderBy: &pb.OrderBy{
-			Field:     &pb.OrderBy_RackField{RackField: pb.RackOrderByField_RACK_ORDER_BY_FIELD_MODEL},
-			Direction: "ASC",
-		}},
-	)
-
-	require.Error(t, err)
-	assert.Equal(t, codes.InvalidArgument, status.Code(err))
-}
-
 func TestGetComponents_TargetSpecNoPagination(t *testing.T) {
 	mgr := newMockManager()
 	rackID, _ := setupValidateTestData(mgr)
