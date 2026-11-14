@@ -309,4 +309,32 @@ impl NicoApi for GrpcNico {
             .map_err(grpc)?;
         Ok(reply.into_inner().endpoints)
     }
+
+    async fn runtime_config(&self) -> Result<Option<forge::RuntimeConfig>, CallError> {
+        let request = forge::VersionRequest {
+            display_config: true,
+        };
+        let reply = self.client().version(request).await.map_err(grpc)?;
+        Ok(reply.into_inner().runtime_config)
+    }
+
+    async fn desired_firmware_versions(
+        &self,
+    ) -> Result<Vec<forge::DesiredFirmwareVersionEntry>, CallError> {
+        let reply = self
+            .client()
+            .get_desired_firmware_versions(forge::GetDesiredFirmwareVersionsRequest {})
+            .await
+            .map_err(grpc)?;
+        Ok(reply.into_inner().entries)
+    }
+
+    async fn host_firmware(&self) -> Result<Vec<forge::AvailableHostFirmware>, CallError> {
+        let reply = self
+            .client()
+            .list_host_firmware(forge::ListHostFirmwareRequest {})
+            .await
+            .map_err(grpc)?;
+        Ok(reply.into_inner().available)
+    }
 }
