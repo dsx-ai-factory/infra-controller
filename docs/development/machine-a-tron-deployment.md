@@ -707,6 +707,15 @@ so the limit bounds the fleet of one cluster. kube-proxy in iptables mode
 programs no ipset, and the preflight below reports the set as absent there;
 that mode was not measured at this scale.
 
+kube-proxy's `nftables` mode, GA since Kubernetes 1.33, programs no ipset
+either and has no compiled-in entry limit. IPVS mode is deprecated since
+Kubernetes 1.35 and scheduled for removal in 1.43, so `nftables` mode is the
+forward path rather than a larger ipset. A 250-rack fleet, 22,250 entries per
+node, converged with kube-proxy in `nftables` mode on a 1.30 cluster with the
+`NFTablesProxyMode` feature gate; the 1,112-rack size has not been measured in
+that mode, so the rebuilt kube-proxy in option 2 remains the documented path
+for IPVS clusters until it is.
+
 Count the entries the controller publishes before a large fleet is deployed:
 
 - At per-pod granularity (`mat-k8s-controller.config.serviceGranularity: pod`)
@@ -789,7 +798,7 @@ or `nftables` mode, so it can gate a deploy script.
 racks=1112
 granularity=device
 ipvs_preflight() {
-  local per_rack planned failed=0 checked=0 seen=" " conf mode pod node header maxelem entries total verdict
+  local per_rack planned failed=0 checked=0 seen=" " conf mode nodes pod node header maxelem entries total verdict
   case "$granularity" in
     # 71 BMC addresses x 1 port + 9 NVOS addresses x 2 ports
     pod) per_rack=89 ;;
@@ -801,7 +810,7 @@ ipvs_preflight() {
   planned=$((racks * per_rack))
   # kube-proxy mode from the kubeadm ConfigMap; an unset mode means iptables
   if conf=$(kubectl -n kube-system get configmap kube-proxy -o jsonpath='{.data.config\.conf}' 2>/dev/null); then
-    mode=$(sed -n 's/^mode: *"\{0,1\}\([a-z]*\)"\{0,1\}.*/\1/p' <<<"$conf")
+    mode=$(sed -n "s/^mode: *[\"']\{0,1\}\([a-z]*\)[\"']\{0,1\}.*/\1/p" <<<"$conf")
     mode=${mode:-iptables}
   else
     mode=unknown
@@ -839,12 +848,16 @@ ipvs_preflight() {
     echo "no kube-proxy pod matched k8s-app=kube-proxy; run ipset list -t KUBE-EXTERNAL-IP on each node instead" >&2
     failed=1
   fi
-  for node in $(kubectl get nodes -o jsonpath='{.items[*].metadata.name}'); do
-    case "$seen" in
-      *" $node "*) ;;
-      *) echo "$node: ERROR, no kube-proxy pod on this node, its ipset was not checked"; failed=1 ;;
-    esac
-  done
+  if nodes=$(kubectl get nodes -o jsonpath='{.items[*].metadata.name}'); then
+    for node in $nodes; do
+      case "$seen" in
+        *" $node "*) ;;
+        *) echo "$node: ERROR, no kube-proxy pod on this node, its ipset was not checked"; failed=1 ;;
+      esac
+    done
+  else
+    echo "ERROR, could not list the nodes; node coverage was not checked" >&2; failed=1
+  fi
   [ "$failed" -eq 0 ] || echo "do not deploy until every node fits and every check succeeded" >&2
   return "$failed"
 }
