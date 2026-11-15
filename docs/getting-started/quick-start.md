@@ -516,7 +516,7 @@ contour + envoy            (optional - Ingress controller for REST API FQDN/TLS)
 postgres-operator          (zalando/postgres-operator 1.11.0 - manages nico-pg-cluster)
 cert-manager               (jetstack/cert-manager v1.17.1)
 vault                      (hashicorp/vault 0.25.0, 3-node HA Raft, TLS - default; --skip-vault to opt out)
-external-secrets           (external-secrets/external-secrets 0.14.3)
+external-secrets           (external-secrets/external-secrets 2.9.0)
 DPF stack                  (default; --skip-dpf to opt out: argo-cd, kamaji, NFD,
                             maintenance-operator, dpf-operator from the pinned
                             doca-platform commit: the submodule in a git checkout

@@ -1210,7 +1210,7 @@ metallb                    (metallb/metallb 0.14.5 - LoadBalancer IPs via BGP or
 postgres-operator          (zalando/postgres-operator 1.11.0 - manages nico-pg-cluster)
 cert-manager               (jetstack/cert-manager v1.17.1)
 vault                      (hashicorp/vault 0.25.0, 3-node HA Raft, TLS - default; --skip-vault to opt out)
-external-secrets           (external-secrets/external-secrets 0.14.3)
+external-secrets           (external-secrets/external-secrets 2.9.0)
 DPF stack (default — --skip-dpf to opt out, all in dpf-operator-system)
   ├── argo-cd               (argo/argo-cd 9.4.1)
   ├── kamaji                (ghcr.io/nvidia/charts/kamaji 1.2.0 - DPU cluster control planes)

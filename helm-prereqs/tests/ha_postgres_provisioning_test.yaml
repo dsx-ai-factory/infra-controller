@@ -37,13 +37,13 @@ tests:
         template: templates/postgresql.yaml
         documentSelector: *cluster
       - containsDocument: &temporalEso
-          apiVersion: external-secrets.io/v1beta1
+          apiVersion: external-secrets.io/v1
           kind: ClusterExternalSecret
           name: nico-temporal-db-eso
           any: true
         template: templates/eso-external-secrets.yaml
       - containsDocument: &keycloakEso
-          apiVersion: external-secrets.io/v1beta1
+          apiVersion: external-secrets.io/v1
           kind: ClusterExternalSecret
           name: nico-keycloak-db-eso
           any: true
