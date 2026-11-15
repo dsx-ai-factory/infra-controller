@@ -606,6 +606,17 @@ mod tests {
         uses_clap_synopsis,
     };
 
+    /// Clap's usage line for the command at `path`, which starts with `BIN`.
+    fn clap_usage(path: &[String]) -> String {
+        let root = command_tree();
+        let command = path[1..].iter().fold(&root, |command, name| {
+            command
+                .find_subcommand(name)
+                .unwrap_or_else(|| panic!("`{}` exists in the CLI tree", path.join(" ")))
+        });
+        command.clone().render_usage().to_string()
+    }
+
     #[test]
     fn man_read_error_includes_filename_and_cause() {
         let dir = tempfile::tempdir().unwrap();
@@ -735,13 +746,7 @@ An inline `HostInband` value and `mac=<mac>` selector.
     /// Generated usage must retain the full command path and required token operand.
     #[test]
     fn nic_profile_synopsis_preserves_the_command_path_and_required_version() {
-        let root = command_tree();
         let path = [BIN, "firmware", "nic", "profile", "update"].map(String::from);
-        let command = path[1..].iter().fold(&root, |command, name| {
-            command
-                .find_subcommand(name)
-                .expect("command path exists in the CLI tree")
-        });
 
         // Both group pages and the leaf need Clap's complete command path.
         for depth in 3..=path.len() {
@@ -752,55 +757,39 @@ An inline `HostInband` value and `mac=<mac>` selector.
             &[BIN, "firmware", "show"].map(String::from)
         ));
         assert_eq!(
-            command.clone().render_usage().to_string(),
+            clap_usage(&path),
             "Usage: nico-admin-cli firmware nic profile update [OPTIONS] --if-version-match <VERSION> <ID>"
         );
     }
 
     #[test]
     fn machine_states_synopsis_preserves_repeated_optional_ids() {
-        let root = command_tree();
         let path = [BIN, "machine", "states"].map(String::from);
-        let command = path[1..].iter().fold(&root, |command, name| {
-            command
-                .find_subcommand(name)
-                .expect("machine states exists in the CLI tree")
-        });
 
         assert!(uses_clap_synopsis(&path));
         assert_eq!(
-            command.clone().render_usage().to_string(),
+            clap_usage(&path),
             "Usage: nico-admin-cli machine states [OPTIONS] [MACHINE_ID]..."
         );
     }
 
     #[test]
     fn network_segment_prefix_synopsis_preserves_required_option_values() {
-        let root = command_tree();
         let path = [BIN, "network-segment", "add-prefix"].map(String::from);
-        let command = path[1..].iter().fold(&root, |command, name| {
-            command
-                .find_subcommand(name)
-                .expect("prefix append exists in the CLI tree")
-        });
 
         assert!(uses_clap_synopsis(&path));
         assert_eq!(
-            command.clone().render_usage().to_string(),
+            clap_usage(&path),
             "Usage: nico-admin-cli network-segment add-prefix [OPTIONS] --id <NetworkSegmentId> --prefix <CIDR-prefix>"
         );
     }
 
     #[test]
     fn nvlink_domain_synopses_preserve_value_arguments() {
-        let root = command_tree();
         value_scenarios!(run = |subcommand| {
             let path = [BIN, "nvlink-domain", subcommand].map(String::from);
-            let command = path[1..].iter().fold(&root, |command, name| {
-                command.find_subcommand(name).expect("NVLink domain command exists")
-            });
             assert!(uses_clap_synopsis(&path));
-            command.clone().render_usage().to_string()
+            clap_usage(&path)
         };
             "required member value and rack group" {
                 "create" => "Usage: nico-admin-cli nvlink-domain create [OPTIONS] --member <MEMBERS> <RACK_GROUP_ID>".to_owned(),
@@ -813,16 +802,12 @@ An inline `HostInband` value and `mac=<mac>` selector.
 
     #[test]
     fn reset_synopses_preserve_required_parent_action_and_target_choice() {
-        let root = command_tree();
         value_scenarios!(run = |subcommand| {
             let path = [BIN, "component-manager", subcommand, "switch"].map(String::from);
             for depth in 3..=path.len() {
                 assert!(uses_clap_synopsis(&path[..depth]));
             }
-            let command = path[1..].iter().fold(&root, |command, name| {
-                command.find_subcommand(name).expect("reset command exists")
-            });
-            command.clone().render_usage().to_string()
+            clap_usage(&path)
         };
             "required action precedes switch and exactly one selector is required" {
                 "component-reset" => "Usage: nico-admin-cli component-manager component-reset \
