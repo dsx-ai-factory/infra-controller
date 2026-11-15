@@ -477,6 +477,12 @@ mod tests {
                     input: "test-token".to_string(),
                     expect: ("token", vec!["test-token".to_string()]),
                 },
+                // Surrounding whitespace is preserved when the credential is not whitespace-only.
+                Check {
+                    scenario: "token with surrounding whitespace is unchanged",
+                    input: " test-token ".to_string(),
+                    expect: ("token", vec![" test-token ".to_string()]),
+                },
                 // A missing slash-prefixed path remains a token without a disk lookup.
                 Check {
                     scenario: "missing slash-prefixed credential is a token",

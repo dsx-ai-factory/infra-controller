@@ -277,6 +277,8 @@ mod tests {
     use carbide_secrets::SecretsError;
     use carbide_test_support::Outcome::*;
     use carbide_test_support::{Case, check_cases_async, scenarios};
+    use opentelemetry::global;
+    use ufm_mock::{UfmAuthToken, UfmMock, UfmMockConfig};
 
     use super::*;
 
@@ -483,6 +485,117 @@ mod tests {
         create_ib_fabric_manager(reader, config).unwrap()
     }
 
+    /// Verifies manager-built token clients authenticate real mock requests,
+    /// including unchanged directory-shaped tokens and rejected stale credentials.
+    #[tokio::test]
+    async fn manager_token_authentication_works_with_the_ufm_mock() {
+        #[derive(Debug, PartialEq)]
+        enum RequestOutcome {
+            Accepted,
+            AuthenticationFailed,
+        }
+
+        let existing_dir = tempfile::tempdir().expect("temp dir");
+        let existing_path = existing_dir.path().to_string_lossy().into_owned();
+        check_cases_async(
+            [
+                // An ordinary token accepted by UFM must authenticate the request.
+                Case {
+                    scenario: "accepted ordinary token",
+                    input: ("accepted-token".to_string(), "accepted-token".to_string()),
+                    expect: Yields(RequestOutcome::Accepted),
+                },
+                // An existing directory path must be sent unchanged as an accepted token.
+                Case {
+                    scenario: "accepted existing directory path token",
+                    input: (existing_path.clone(), existing_path),
+                    expect: Yields(RequestOutcome::Accepted),
+                },
+                // A stale directory credential must surface UFM's authentication rejection.
+                Case {
+                    scenario: "rejected stale credential",
+                    input: ("stale-credential".to_string(), "accepted-token".to_string()),
+                    expect: Yields(RequestOutcome::AuthenticationFailed),
+                },
+            ],
+            |(credential, accepted_token)| async move {
+                let auth_token =
+                    UfmAuthToken::new(accepted_token).map_err(|error| error.to_string())?;
+                let ufm_mock = UfmMock::new(
+                    &UfmMockConfig::default(),
+                    &auth_token,
+                    &global::meter("ib-fabric-manager-token-authentication-test"),
+                )
+                .map_err(|error| error.to_string())?;
+                let listener = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+                    .await
+                    .map_err(|error| format!("bind UFM mock: {error}"))?;
+                let address = listener
+                    .local_addr()
+                    .map_err(|error| format!("read UFM mock address: {error}"))?;
+                let server =
+                    tokio::spawn(async move { axum::serve(listener, ufm_mock.router()).await });
+                let config = IBFabricManagerConfig {
+                    manager_type: IBFabricManagerType::Rest,
+                    endpoints: HashMap::from([(
+                        "f1".to_string(),
+                        vec![format!("http://{address}")],
+                    )]),
+                    ..Default::default()
+                };
+                let manager = create_ib_fabric_manager(
+                    Arc::new(SwappableCredentialReader::new(&credential)),
+                    config,
+                )
+                .map_err(|error| format!("create manager: {error}"))?;
+                let client = manager
+                    .new_client("f1")
+                    .await
+                    .map_err(|error| format!("create client: {error}"))?;
+
+                let result = client.versions().await;
+                server.abort();
+                match result {
+                    Ok(_) => Ok(RequestOutcome::Accepted),
+                    Err(error) if error.to_string().contains("HTTP error code 401") => {
+                        Ok(RequestOutcome::AuthenticationFailed)
+                    }
+                    Err(error) => Err(format!("unexpected request failure: {error}")),
+                }
+            },
+        )
+        .await;
+    }
+
+    /// Verifies a production manager resolves an empty credential to the fixed
+    /// SPIFFE files, because default authentication must not depend on disk state.
+    #[test]
+    fn production_manager_resolves_the_default_spiffe_material() {
+        let config = IBFabricManagerConfig {
+            manager_type: IBFabricManagerType::Rest,
+            ..Default::default()
+        };
+        let manager =
+            create_ib_fabric_manager(Arc::new(SwappableCredentialReader::new("")), config)
+                .expect("create manager");
+
+        assert_eq!(
+            manager.spiffe_cert_dir,
+            PathBuf::from(rest::SPIFFE_CERT_DIR)
+        );
+        let rest::AuthMethod::Cert(cert) = rest::auth_method("", &manager.spiffe_cert_dir) else {
+            panic!("empty credential must select certificate authentication");
+        };
+        assert_eq!(
+            [cert.ca_crt, cert.tls_key, cert.tls_crt],
+            [
+                format!("{}/ca.crt", rest::SPIFFE_CERT_DIR),
+                format!("{}/tls.key", rest::SPIFFE_CERT_DIR),
+                format!("{}/tls.crt", rest::SPIFFE_CERT_DIR),
+            ]
+        );
+    }
+
     struct BlockedUfmCredentialReader;
 
     #[async_trait]
@@ -500,6 +613,20 @@ mod tests {
         }
     }
 
+    struct FailingCredentialReader;
+
+    #[async_trait]
+    impl CredentialReader for FailingCredentialReader {
+        async fn get_credentials(
+            &self,
+            _key: &CredentialKey,
+        ) -> Result<Option<Credentials>, SecretsError> {
+            Err(SecretsError::GenericError(eyre::eyre!(
+                "simulated credential read failure"
+            )))
+        }
+    }
+
     #[tokio::test]
     async fn blocked_ufm_credential_is_a_configuration_error() {
         let manager = rest_manager(Arc::new(BlockedUfmCredentialReader));
@@ -512,6 +639,76 @@ mod tests {
 
         assert!(matches!(error, IbError::CredentialConfigurationError(_)));
         assert!(error.to_string().contains("credentials.ufm_source"));
+    }
+
+    /// Verifies each remaining REST setup failure keeps its error variant and
+    /// useful context, so callers can distinguish endpoint and credential failures.
+    #[tokio::test]
+    async fn rest_client_setup_failures_preserve_their_context() {
+        #[derive(Clone, Copy, Debug)]
+        enum FailureCase {
+            MissingEndpoint,
+            CredentialReadFailure,
+            MissingCredential,
+        }
+
+        check_cases_async(
+            [
+                // An unknown fabric must report that its endpoint is missing.
+                Case {
+                    scenario: "fabric endpoint is not configured",
+                    input: (FailureCase::MissingEndpoint, "ib_fabric_endpoint not found"),
+                    expect: Yields(("not-found", true)),
+                },
+                // A general secret-manager failure must remain an internal client-creation error.
+                Case {
+                    scenario: "credential reader fails",
+                    input: (
+                        FailureCase::CredentialReadFailure,
+                        "Cannot create UFM client: secret manager error",
+                    ),
+                    expect: Yields(("internal", true)),
+                },
+                // An absent credential must explain that the key or token was not set.
+                Case {
+                    scenario: "credential is absent",
+                    input: (
+                        FailureCase::MissingCredential,
+                        "vault key not found or token is not set",
+                    ),
+                    expect: Yields(("internal", true)),
+                },
+            ],
+            |(case, stable_message)| async move {
+                let (manager, fabric_name) = match case {
+                    FailureCase::MissingEndpoint => (
+                        rest_manager(Arc::new(SwappableCredentialReader::new("token"))),
+                        "missing-fabric",
+                    ),
+                    FailureCase::CredentialReadFailure => {
+                        (rest_manager(Arc::new(FailingCredentialReader)), "f1")
+                    }
+                    FailureCase::MissingCredential => {
+                        (rest_manager(Arc::new(NoopCredentialReader)), "f1")
+                    }
+                };
+                let error = manager
+                    .new_client(fabric_name)
+                    .await
+                    .err()
+                    .ok_or_else(|| format!("{case:?} unexpectedly built a client"))?;
+                let (variant, message) = match error {
+                    IbError::NotFoundError { kind, id } => {
+                        ("not-found", format!("{kind} not found: {id}"))
+                    }
+                    IbError::Internal { message } => ("internal", message),
+                    error => return Err(format!("unexpected error variant: {error}")),
+                };
+
+                Ok::<_, String>((variant, message.contains(stable_message)))
+            },
+        )
+        .await;
     }
 
     #[tokio::test]
