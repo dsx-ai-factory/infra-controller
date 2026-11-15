@@ -79,7 +79,7 @@ func (scr *APISubnetCreateRequest) Validate() error {
 // ToProto builds the workflow request that asks a Site to create a new
 // Subnet under the given parent VPC. `subnet` is the just-persisted DB
 // record; its `ToProto()` is the source of the canonical wire fields
-// (Id/Name/Mtu/SubdomainId/Prefixes). `vpc` provides the Site-facing
+// (Id/Name/Mtu/Prefixes). `vpc` provides the Site-facing
 // parent VPC ID. `reservedIPCount` is a deployment-policy value applied
 // to each prefix that does not live on the entity, so it is threaded
 // through here.
@@ -98,19 +98,16 @@ func (scr *APISubnetCreateRequest) ToProto(subnet *cdbm.Subnet, vpc *cdbm.Vpc, r
 	for _, p := range prefixes {
 		p.ReserveFirst = reservedIPCount
 	}
-	var subdomainID *corev1.DomainId
 	var mtu *int32
 	if cfg != nil {
-		subdomainID = cfg.SubdomainId
 		mtu = cfg.Mtu
 	}
 	return &corev1.NetworkSegmentCreationRequest{
-		Id:          subnetProto.Id,
-		Name:        subnetProto.GetMetadata().GetName(),
-		SubdomainId: subdomainID,
-		VpcId:       &corev1.VpcId{Value: vpc.GetSiteID().String()},
-		Mtu:         mtu,
-		Prefixes:    prefixes,
+		Id:       subnetProto.Id,
+		Name:     subnetProto.GetMetadata().GetName(),
+		VpcId:    &corev1.VpcId{Value: vpc.GetSiteID().String()},
+		Mtu:      mtu,
+		Prefixes: prefixes,
 	}
 }
 

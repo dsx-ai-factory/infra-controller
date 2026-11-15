@@ -259,6 +259,9 @@ tags:
   - name: Domain
     description: |-
       Domain endpoints expose fabric inventory and operations by domain type. The `nvlink` subpath provides NVLink Domain detail and list reads, power control, and firmware updates.
+  - name: DNS Domain
+    description: |-
+      A DNS Domain is a DNS zone on a Site. NICo Core owns DNS Domains; these endpoints pass requests through to Core and keep no copy.
   - name: Tray
     description: |-
       Tray represents a component within a Rack.
@@ -13826,6 +13829,246 @@ paths:
           name: orderBy
           description: |-
             Ordering for pagination query. TYPE_ASC orders capability type ascending and TYPE_DESC orders it descending. Defaults to TYPE_ASC. Ties are ordered by name, frequency, capacity, vendor, count, deviceType, inactiveDevices, and internal ID, all ascending with null values last.
+  '/v2/org/{org}/nico/domain/dns':
+    parameters:
+      - name: org
+        in: path
+        required: true
+        description: Name of the Org
+        schema:
+          type: string
+    post:
+      summary: Create DNS Domain
+      operationId: create-dns-domain
+      description: |-
+        Create a Domain (DNS zone) on a Site. NICo Core owns Domains; the request is passed through and no copy is kept outside Core. Core rejects reverse DNS zone names.
+
+        Org must have an Infrastructure Provider entity that owns the Site. User must have authorization role with `PROVIDER_ADMIN` suffix.
+      tags:
+        - DNS Domain
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/DNSDomainCreateRequest'
+            examples:
+              Create a Domain with a default TTL:
+                value:
+                  siteId: 0b7c1d1e-6a52-4c53-9d6b-2f1c7f0a1b11
+                  name: tenant-a.example.com
+                  defaultTtl: 600
+      responses:
+        '201':
+          description: Domain was created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DNSDomain'
+              examples:
+                Created Domain:
+                  value:
+                    id: 5c2f5d0a-9d3e-4f0b-8a57-0d8c5b0f6a21
+                    siteId: 0b7c1d1e-6a52-4c53-9d6b-2f1c7f0a1b11
+                    name: tenant-a.example.com
+                    defaultTtl: 600
+                    created: '2026-11-13T10:00:00Z'
+                    updated: '2026-11-13T10:00:00Z'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '403':
+          $ref: '#/components/responses/ForbiddenError'
+        '404':
+          $ref: '#/components/responses/NotFoundError'
+        '500':
+          $ref: '#/components/responses/GenericHttpError'
+    get:
+      summary: Retrieve All DNS Domains
+      operationId: get-all-dns-domain
+      description: |-
+        Retrieve the Domains (DNS zones) on a Site. Deleted Domains are not returned. The reverse DNS zones Core keeps for Network Segment prefixes are not Domains and are not returned.
+
+        Org must have an Infrastructure Provider entity that owns the Site. User must have authorization role with `PROVIDER_ADMIN` suffix.
+      tags:
+        - DNS Domain
+      parameters:
+        - name: siteId
+          in: query
+          required: true
+          description: ID of the Site
+          schema:
+            type: string
+            format: uuid
+        - name: name
+          in: query
+          description: Return only Domains with exactly this name. Domain names are not unique, so more than one Domain can match.
+          schema:
+            type: string
+            minLength: 1
+        - name: pageNumber
+          in: query
+          description: Page number
+          schema:
+            $ref: '#/components/schemas/PageNumber'
+        - name: pageSize
+          in: query
+          description: Number of results per page
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 20
+        - name: orderBy
+          in: query
+          description: Order by name. Domain names are not unique; Domain ID ascending breaks ties.
+          schema:
+            type: string
+            enum: [NAME_ASC, NAME_DESC]
+            default: NAME_ASC
+      responses:
+        '200':
+          description: OK
+          headers:
+            X-Pagination:
+              schema:
+                type: string
+              description: JSON-encoded pagination metadata
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/DNSDomain'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '403':
+          $ref: '#/components/responses/ForbiddenError'
+        '404':
+          $ref: '#/components/responses/NotFoundError'
+        '500':
+          $ref: '#/components/responses/GenericHttpError'
+  '/v2/org/{org}/nico/domain/dns/{id}':
+    parameters:
+      - name: org
+        in: path
+        required: true
+        description: Name of the Org
+        schema:
+          type: string
+      - name: id
+        in: path
+        required: true
+        description: ID of the Domain
+        schema:
+          type: string
+          format: uuid
+    get:
+      summary: Retrieve DNS Domain
+      operationId: get-dns-domain
+      description: |-
+        Retrieve a Domain (DNS zone) on a Site by ID. A deleted Domain is not found. A reverse DNS zone Core keeps for a Network Segment prefix is not a Domain and is not found.
+
+        Org must have an Infrastructure Provider entity that owns the Site. User must have authorization role with `PROVIDER_ADMIN` suffix.
+      tags:
+        - DNS Domain
+      parameters:
+        - name: siteId
+          in: query
+          required: true
+          description: ID of the Site
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DNSDomain'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '403':
+          $ref: '#/components/responses/ForbiddenError'
+        '404':
+          $ref: '#/components/responses/NotFoundError'
+        '500':
+          $ref: '#/components/responses/GenericHttpError'
+    patch:
+      summary: Update DNS Domain
+      operationId: update-dns-domain
+      description: |-
+        Update the default record TTL of a Domain (DNS zone) on a Site. The Domain name cannot be changed. Core rejects the update for a deleted Domain and for a reverse DNS zone.
+
+        Org must have an Infrastructure Provider entity that owns the Site. User must have authorization role with `PROVIDER_ADMIN` suffix.
+      tags:
+        - DNS Domain
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/DNSDomainUpdateRequest'
+            examples:
+              Change the default TTL:
+                value:
+                  siteId: 0b7c1d1e-6a52-4c53-9d6b-2f1c7f0a1b11
+                  defaultTtl: 900
+      responses:
+        '200':
+          description: Domain was updated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DNSDomain'
+              examples:
+                Updated Domain:
+                  value:
+                    id: 5c2f5d0a-9d3e-4f0b-8a57-0d8c5b0f6a21
+                    siteId: 0b7c1d1e-6a52-4c53-9d6b-2f1c7f0a1b11
+                    name: tenant-a.example.com
+                    defaultTtl: 900
+                    created: '2026-11-13T10:00:00Z'
+                    updated: '2026-11-13T11:00:00Z'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '403':
+          $ref: '#/components/responses/ForbiddenError'
+        '404':
+          $ref: '#/components/responses/NotFoundError'
+        '500':
+          $ref: '#/components/responses/GenericHttpError'
+    delete:
+      summary: Delete DNS Domain
+      operationId: delete-dns-domain
+      description: |-
+        Delete a Domain (DNS zone) from a Site. Core rejects the deletion while a Subnet or Machine interface still uses the Domain, and for a reverse DNS zone. Deleting a Domain that is already deleted succeeds.
+
+        Org must have an Infrastructure Provider entity that owns the Site. User must have authorization role with `PROVIDER_ADMIN` suffix.
+      tags:
+        - DNS Domain
+      parameters:
+        - name: siteId
+          in: query
+          required: true
+          description: ID of the Site
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '204':
+          description: Domain was deleted
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '403':
+          $ref: '#/components/responses/ForbiddenError'
+        '404':
+          $ref: '#/components/responses/NotFoundError'
+        '412':
+          description: Domain is still used by a Subnet or Machine interface.
+          $ref: '#/components/responses/GenericHttpError'
+        '500':
+          $ref: '#/components/responses/GenericHttpError'
   '/v2/org/{org}/nico/domain/nvlink':
     parameters:
       - name: org
@@ -20201,6 +20444,91 @@ components:
       minimum: 1
       maximum: 21474836
       description: One-indexed page number.
+    DNSDomainCreateRequest:
+      type: object
+      title: DNSDomainCreateRequest
+      description: Request to create a Domain (DNS zone) on a Site.
+      required:
+        - siteId
+        - name
+      properties:
+        siteId:
+          type: string
+          format: uuid
+          description: ID of the Site where the Domain is created.
+        name:
+          type: string
+          minLength: 1
+          description: DNS zone name. Reverse DNS zone names are rejected.
+        defaultTtl:
+          type: integer
+          minimum: 30
+          maximum: 86400
+          description: Default record TTL in seconds. The Site default applies when omitted.
+    DNSDomainUpdateRequest:
+      type: object
+      title: DNSDomainUpdateRequest
+      description: Request to update a Domain (DNS zone) on a Site.
+      required:
+        - siteId
+        - defaultTtl
+      properties:
+        siteId:
+          type: string
+          format: uuid
+          description: ID of the Site the Domain belongs to.
+        defaultTtl:
+          type: integer
+          minimum: 30
+          maximum: 86400
+          description: New default record TTL in seconds.
+    DNSDomain:
+      type: object
+      title: DNSDomain
+      description: A Domain (DNS zone) on a Site.
+      required:
+        - id
+        - siteId
+        - name
+        - defaultTtl
+        - created
+        - updated
+      x-go-has-nullable-required-properties: true
+      x-go-nullable-required-properties:
+        - defaultTtl
+        - created
+        - updated
+      properties:
+        id:
+          type: string
+          format: uuid
+          description: Unique Domain ID.
+        siteId:
+          type: string
+          format: uuid
+          description: ID of the Site the Domain belongs to.
+        name:
+          type: string
+          description: DNS zone name.
+        defaultTtl:
+          type:
+            - integer
+            - 'null'
+          minimum: 30
+          maximum: 86400
+          description: Default record TTL in seconds, or null when the Domain uses the Site default.
+        created:
+          type:
+            - string
+            - 'null'
+          format: date-time
+          description: Time when the Domain was created, or null when Core did not return a timestamp.
+        updated:
+          type:
+            - string
+            - 'null'
+          format: date-time
+          description: Time when the Domain was last updated, or null when Core did not return a timestamp.
     MeasuredBootTrustedMachineCreateRequest:
       type: object
       title: MeasuredBootTrustedMachineCreateRequest

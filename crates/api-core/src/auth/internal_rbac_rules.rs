@@ -64,14 +64,14 @@ impl InternalRBACRules {
         // Add additional permissions to the list below.
         x.perm("Version", vec![Anonymous]);
         x.perm("StreamConsoleLogs", vec![ForgeAdminCLI]);
-        x.perm("CreateDomain", vec![]);
+        x.perm("CreateDomain", vec![SiteAgent]);
         x.perm("CreateDomainLegacy", vec![]);
         x.perm("UpdateDomainLegacy", vec![]);
         x.perm("DeleteDomainLegacy", vec![]);
         x.perm("FindDomainLegacy", vec![ForgeAdminCLI]);
-        x.perm("UpdateDomain", vec![]);
-        x.perm("DeleteDomain", vec![]);
-        x.perm("FindDomain", vec![ForgeAdminCLI]);
+        x.perm("UpdateDomain", vec![SiteAgent]);
+        x.perm("DeleteDomain", vec![SiteAgent]);
+        x.perm("FindDomain", vec![ForgeAdminCLI, SiteAgent]);
         x.perm("CreateVpc", vec![SiteAgent, Machineatron]);
         x.perm("CancelVpcCreation", vec![SiteAgent]);
         x.perm("UpdateVpc", vec![ForgeAdminCLI, SiteAgent]);
@@ -1697,13 +1697,16 @@ mod rbac_rule_tests {
             "CancelVpcCreation",
             "CreateAttestationProfile",
             "CreateCredential",
+            "CreateDomain",
             "CreateSku",
             "DecommissionManagedHost",
             "DecommissionPowerShelf",
             "DecommissionSwitch",
             "DeleteAttestationProfile",
+            "DeleteDomain",
             "DeleteSku",
             "FailAttestation",
+            "FindDomain",
             "GetAttestation",
             "GetAttestationCoverage",
             "GetAttestationProfile",
@@ -1725,6 +1728,7 @@ mod rbac_rule_tests {
             "RotateCredential",
             "TriggerMachineAttestation",
             "UpdateAttestationProfile",
+            "UpdateDomain",
             "UpdateSkuMetadata",
             "WaiveAttestation",
         ] {
