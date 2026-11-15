@@ -245,7 +245,6 @@ func TestInterfaceSQLDAO_Create(t *testing.T) {
 	)
 	assert.Nil(t, err)
 	assert.NotNil(t, i1)
-	domain := testSubnetBuildDomain(t, dbSession, "testDomain")
 	ipv4Block := testSubnetBuildIPBlock(t, dbSession, &site.ID, &ip.ID, "ipv4Block", cutil.GetPtr(user.ID))
 	ipv6Block := testSubnetBuildIPBlock(t, dbSession, &site.ID, &ip.ID, "ipv6Block", cutil.GetPtr(user.ID))
 
@@ -260,7 +259,6 @@ func TestInterfaceSQLDAO_Create(t *testing.T) {
 		Org:                        "test",
 		SiteID:                     site.ID,
 		VpcID:                      vpc.ID,
-		DomainID:                   &domain.ID,
 		TenantID:                   tenant.ID,
 		ControllerNetworkSegmentID: &dummyUUID,
 		RoutingType:                &ipv4Block.RoutingType,
@@ -514,7 +512,6 @@ func TestInterfaceSQLDAO_GetByID(t *testing.T) {
 	)
 	assert.Nil(t, err)
 	assert.NotNil(t, i1)
-	domain := testSubnetBuildDomain(t, dbSession, "testDomain")
 	ipv4Block := testSubnetBuildIPBlock(t, dbSession, &site.ID, &ip.ID, "ipv4Block", &user.ID)
 	ipv6Block := testSubnetBuildIPBlock(t, dbSession, &site.ID, &ip.ID, "ipv6Block", &user.ID)
 
@@ -529,7 +526,6 @@ func TestInterfaceSQLDAO_GetByID(t *testing.T) {
 		Org:                        "test",
 		SiteID:                     site.ID,
 		VpcID:                      vpc.ID,
-		DomainID:                   &domain.ID,
 		TenantID:                   tenant.ID,
 		ControllerNetworkSegmentID: &dummyUUID,
 		RoutingType:                &ipv4Block.RoutingType,
@@ -731,7 +727,6 @@ func TestInterfaceSQLDAO_GetAll(t *testing.T) {
 		assert.NoError(t, err)
 		instances = append(instances, *instance)
 	}
-	domain := testSubnetBuildDomain(t, dbSession, "testDomain")
 	ipv4Block := testSubnetBuildIPBlock(t, dbSession, &site.ID, &ip.ID, "ipv4Block", cutil.GetPtr(user.ID))
 	ipv6Block := testSubnetBuildIPBlock(t, dbSession, &site.ID, &ip.ID, "ipv6Block", cutil.GetPtr(user.ID))
 
@@ -746,7 +741,6 @@ func TestInterfaceSQLDAO_GetAll(t *testing.T) {
 		Org:                        "test",
 		SiteID:                     site.ID,
 		VpcID:                      vpc.ID,
-		DomainID:                   &domain.ID,
 		TenantID:                   tenant.ID,
 		ControllerNetworkSegmentID: &dummyUUID,
 		RoutingType:                &ipv4Block.RoutingType,
@@ -768,7 +762,6 @@ func TestInterfaceSQLDAO_GetAll(t *testing.T) {
 		Org:                        "test",
 		SiteID:                     site.ID,
 		VpcID:                      vpc.ID,
-		DomainID:                   &domain.ID,
 		TenantID:                   tenant.ID,
 		ControllerNetworkSegmentID: &dummyUUID,
 		RoutingType:                &ipv4Block.RoutingType,
@@ -1426,7 +1419,6 @@ func TestInterfaceSQLDAO_Clear(t *testing.T) {
 	)
 	assert.Nil(t, err)
 
-	domain := testSubnetBuildDomain(t, dbSession, "testDomain")
 	ipv4Block := testSubnetBuildIPBlock(t, dbSession, &site.ID, &ip.ID, "ipv4Block", cutil.GetPtr(user.ID))
 	ipv6Block := testSubnetBuildIPBlock(t, dbSession, &site.ID, &ip.ID, "ipv6Block", cutil.GetPtr(user.ID))
 	dummyUUID := uuid.New()
@@ -1442,7 +1434,6 @@ func TestInterfaceSQLDAO_Clear(t *testing.T) {
 		Org:                        "test",
 		SiteID:                     site.ID,
 		VpcID:                      vpc.ID,
-		DomainID:                   &domain.ID,
 		TenantID:                   tenant.ID,
 		ControllerNetworkSegmentID: &dummyUUID,
 		RoutingType:                &ipv4Block.RoutingType,
@@ -1634,7 +1625,6 @@ func TestInterfaceSQLDAO_Update(t *testing.T) {
 	)
 	assert.Nil(t, err)
 	assert.NotNil(t, i2)
-	domain := testSubnetBuildDomain(t, dbSession, "testDomain")
 	ipv4Block := testSubnetBuildIPBlock(t, dbSession, &site.ID, &ip.ID, "ipv4Block", cutil.GetPtr(user.ID))
 	ipv6Block := testSubnetBuildIPBlock(t, dbSession, &site.ID, &ip.ID, "ipv6Block", cutil.GetPtr(user.ID))
 
@@ -1649,7 +1639,6 @@ func TestInterfaceSQLDAO_Update(t *testing.T) {
 		Org:                        "test",
 		SiteID:                     site.ID,
 		VpcID:                      vpc.ID,
-		DomainID:                   &domain.ID,
 		TenantID:                   tenant.ID,
 		ControllerNetworkSegmentID: &dummyUUID,
 		RoutingType:                &ipv4Block.RoutingType,
@@ -1671,7 +1660,6 @@ func TestInterfaceSQLDAO_Update(t *testing.T) {
 		Org:                        "test",
 		SiteID:                     site.ID,
 		VpcID:                      vpc.ID,
-		DomainID:                   &domain.ID,
 		TenantID:                   tenant.ID,
 		ControllerNetworkSegmentID: &dummyUUID,
 		RoutingType:                &ipv4Block.RoutingType,
@@ -2040,7 +2028,6 @@ func TestInterfaceSQLDAO_Delete(t *testing.T) {
 	)
 	assert.Nil(t, err)
 	assert.NotNil(t, i1)
-	domain := testSubnetBuildDomain(t, dbSession, "testDomain")
 	ipv4Block := testSubnetBuildIPBlock(t, dbSession, &site.ID, &ip.ID, "ipv4Block", cutil.GetPtr(user.ID))
 	ipv6Block := testSubnetBuildIPBlock(t, dbSession, &site.ID, &ip.ID, "ipv6Block", cutil.GetPtr(user.ID))
 
@@ -2055,7 +2042,6 @@ func TestInterfaceSQLDAO_Delete(t *testing.T) {
 		Org:                        "test",
 		SiteID:                     site.ID,
 		VpcID:                      vpc.ID,
-		DomainID:                   &domain.ID,
 		TenantID:                   tenant.ID,
 		ControllerNetworkSegmentID: &dummyUUID,
 		RoutingType:                &ipv4Block.RoutingType,

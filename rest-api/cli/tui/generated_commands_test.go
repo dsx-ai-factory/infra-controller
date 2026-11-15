@@ -742,6 +742,9 @@ func TestGeneratedPathResourcePolicy_CoversEveryParameter(t *testing.T) {
 		}
 	}
 	assert.ElementsMatch(t, []string{
+		"dns-domain delete|id",
+		"dns-domain get|id",
+		"dns-domain update|id",
 		"measured-boot machine remove|id",
 		"measured-boot profile remove|id",
 		"measured-boot-trusted-machine delete|id",
