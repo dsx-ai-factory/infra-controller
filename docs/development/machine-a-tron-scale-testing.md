@@ -393,20 +393,26 @@ NVL72 racks: 20,016 hosts with 2 DPUs each, 10,008 NVLink switch trays, and
 8,896 power shelves, which is 78,952 BMC endpoints and 60,048 NICo machines,
 twice the 556-rack fleet. It runs as 45 machine-a-tron pods behind the
 protocol gateway with per-pod Services, 90 Services in total, and its BMC
-leases split between two `/16` segments because they exceed one. The figures
-in this section come from two completed runs of that fleet on the same
-three-node site controller as the 556-rack runs: the first converged 14 h
+leases split between two `/16` segments because they exceed one.
+
+The figures in this section come from two completed runs of that fleet on the
+same three-node site controller as the 556-rack runs: the first converged 14 h
 after fleet-up and the second, three days later with the DPF simulator at a
-higher CPU limit and a clean start, 11 h 30 min. Both ran a build of the v2.5
-line taken from `main` after the 10,000-host values merged, which carries
+higher CPU limit and a clean start, 11 h 30 min.
+
+Both ran a build of the v2.5 line taken from `main` at commit `38a05157c`,
+after the 10,000-host values merged, which carries
 [pull request 8142](https://github.com/dsx-ai-factory/infra-controller/pull/8142)
 and every scaling fix named on
 [Sizing and Scale Guidance](../getting-started/sizing-and-scale.md), all
-merged to `main`, with no unmerged Core change. The machine-a-tron and controller images carried
-the RMS mock job-retention change of
+merged to `main`, with no unmerged Core change. The machine-a-tron and
+controller images carried the RMS mock job-retention change for
 [issue 8998](https://github.com/dsx-ai-factory/infra-controller/issues/8998),
-which is not on `main` yet. Refer to the caveats. Read the figures as
-expectations rather than as a reproduction target. Times count from fleet-up,
+merged in
+[pull request 9117](https://github.com/dsx-ai-factory/infra-controller/pull/9117).
+Use simulator images built from a revision that includes that fix. Refer to
+the caveats. Read the figures as expectations rather than as a reproduction
+target. Times count from fleet-up,
 as defined in the 10,000-host section. This section is the 20,000-host fleet
 definition behind the
 [site controller sizing table](../getting-started/sizing-and-scale.md#site-controller-sizing-by-fleet-size).
@@ -677,7 +683,8 @@ change as follows.
 
 The caveats of the 10,000-host section apply, with these additions.
 
-- machine-a-tron's RMS mock keeps a job's status for one hour on `main`. One
+- Before the retention fix, machine-a-tron's RMS mock kept a job's status for
+  one hour. One
   switch controller pass over 10,008 switches takes about 39 minutes at the
   default switch controller concurrency, and a certificate job needs three
   touches one pass apart, so the mock forgot 48 of about 1,550 certificate
@@ -685,10 +692,12 @@ The caveats of the 10,000-host section apply, with these additions.
   in `error` with their 48 racks in `discovering`. The switch controller does
   not retry from `error` on its own
   ([issue 5883](https://github.com/dsx-ai-factory/infra-controller/issues/5883)).
-  Both completed runs carried the retention change of
+  Both completed runs carried the retention fix for
   [issue 8998](https://github.com/dsx-ai-factory/infra-controller/issues/8998),
-  which keeps jobs for 24 hours, and saw no switch in `error`. Build the
-  simulator with that change until it is on `main`.
+  merged in
+  [pull request 9117](https://github.com/dsx-ai-factory/infra-controller/pull/9117),
+  which sets the default retention to 24 hours, and saw no switch in `error`.
+  Use simulator images built from a revision that includes that fix.
 - nico-ssh-console-rs crash loops at this machine count. Its BMC connection
   pool opens one connection per machine and exhausts the container's 65,535
   file descriptors once about 22,000 machines are `ready`, after which the
