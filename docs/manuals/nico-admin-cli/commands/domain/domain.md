@@ -46,7 +46,7 @@ Print help (see a summary with '-h')
 | Subcommand | Description |
 |---|---|
 | [`show`](./domain-show.md) | Display Domain information |
-| [`create`](./domain-create.md) | Create a Domain |
+| [`create`](./domain-create.md) | Create a Domain, optionally owned by a VPC |
 | [`update`](./domain-update.md) | Update domain default TTL |
 
 ---
