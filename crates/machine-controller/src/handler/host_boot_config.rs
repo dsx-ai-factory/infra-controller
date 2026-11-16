@@ -484,6 +484,7 @@ mod tests {
     use carbide_redfish::libredfish::{RedfishAuth, RedfishClientPool};
     use carbide_secrets::test_support::credentials::TestCredentialManager;
     use carbide_test_support::value_scenarios;
+    use carbide_utils::test_support::test_meter::TestMeter;
     use libredfish::BiosProfileType;
     use libredfish::model::service_root::RedfishVendor;
     use model::machine_boot_interface::MachineBootInterface;
@@ -524,15 +525,16 @@ mod tests {
     fn test_services(
         redfish_sim: Arc<RedfishSim>,
         site_config: MachineStateHandlerSiteConfig,
-    ) -> MachineStateHandlerServices {
+    ) -> (MachineStateHandlerServices, TestMeter) {
         // Explicit-target stages do not need prediction data. A short-timeout
         // unreachable pool makes an accidental lookup fail promptly.
         let db_pool = sqlx::postgres::PgPoolOptions::new()
             .acquire_timeout(Duration::from_millis(50))
             .connect_lazy("postgres://unused:unused@127.0.0.1:1/unused")
             .unwrap();
-        MachineStateHandlerServices {
-            instrumentation: carbide_instrument::Instrumentation::global(),
+        let test_meter = TestMeter::default();
+        let services = MachineStateHandlerServices {
+            instrumentation: carbide_instrument::Instrumentation::new(test_meter.meter()),
             db_pool: db_pool.clone(),
             db_reader: db_pool.into(),
             redfish_client_pool: redfish_sim.clone(),
@@ -563,7 +565,8 @@ mod tests {
             nic_lockdown_rotation_gate: carbide_credential_rotation::RotationGate::new_for_family(
                 db::credential_rotation::CredentialRotationType::LockdownIkm,
             ),
-        }
+        };
+        (services, test_meter)
     }
 
     #[tokio::test]
@@ -586,7 +589,7 @@ mod tests {
             .unwrap();
         redfish_sim.set_machine_setup_bios_job_id(Some("bios-job".to_string()));
 
-        let mut services = test_services(
+        let (mut services, _test_meter) = test_services(
             redfish_sim.clone(),
             MachineStateHandlerSiteConfig::test_default(),
         );
@@ -730,7 +733,7 @@ mod tests {
                 )]),
             },
         )]);
-        let mut services = test_services(redfish_sim.clone(), site_config);
+        let (mut services, _test_meter) = test_services(redfish_sim.clone(), site_config);
         let mut metrics = MachineMetrics::default();
         let mut pending_db_writes = DbWriteBatch::new();
         let mut ctx = StateHandlerContext {
@@ -794,7 +797,7 @@ mod tests {
                 attributes: HashMap::new(),
             },
         )]);
-        let mut services = test_services(redfish_sim.clone(), site_config);
+        let (mut services, _test_meter) = test_services(redfish_sim.clone(), site_config);
         let mut metrics = MachineMetrics::default();
         let mut pending_db_writes = DbWriteBatch::new();
         let mut ctx = StateHandlerContext {
