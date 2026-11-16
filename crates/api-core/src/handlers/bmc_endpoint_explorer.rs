@@ -825,10 +825,24 @@ pub(crate) async fn set_dpu_first_boot_order(
         )
     })?;
 
-    api.bmc_client
-        .set_boot_order_dpu_first(bmc_addr, &machine_interface, &boot_interface)
-        .await
-        .map_err(|e| CarbideError::internal(e.to_string()))?;
+    let access = BmcAccessInfo {
+        host: bmc_addr.ip().to_string(),
+        port: Some(bmc_addr.port()),
+        mac_address: bmc_mac_address,
+    };
+    match api.connect_drivers(&access).await? {
+        Some(bmc) => {
+            platform_config::configure_boot_order(&PlatformBmc::Drivers(bmc), &boot_interface)
+                .await
+                .map_err(|e| CarbideError::internal(e.to_string()))?;
+        }
+        None => {
+            api.bmc_client
+                .set_boot_order_dpu_first(bmc_addr, &machine_interface, &boot_interface)
+                .await
+                .map_err(|e| CarbideError::internal(e.to_string()))?;
+        }
+    }
 
     tracing::info!(
         bmc_ip_address = %endpoint_address,
