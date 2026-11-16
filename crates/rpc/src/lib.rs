@@ -77,8 +77,8 @@ pub use crate::protos::machine_discovery::{
 pub use crate::protos::{agent_local, fmds, health, scout_firmware_upgrade, site_explorer};
 
 pub mod admission_retry;
+pub mod carbide_tls_client;
 pub mod errors;
-pub mod forge_tls_client;
 mod grpc_client_tracing;
 pub mod libmlx;
 pub mod lldp_snapshot;
@@ -97,7 +97,7 @@ pub mod model;
 #[cfg(feature = "cli")]
 pub mod admin_cli;
 
-pub mod forge_api_client;
+pub mod carbide_api_client;
 pub mod forge_resolver;
 pub mod nmx_c_client;
 
@@ -1224,7 +1224,6 @@ mod tests {
             id: Some(uuid),
             name: "MyDomain".to_string(),
             default_ttl: None,
-            vpc_id: None,
             created: Some(ts.into()),
             updated: Some(ts2.into()),
             deleted: None,

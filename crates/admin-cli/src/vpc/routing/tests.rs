@@ -32,11 +32,11 @@ use hyper::service::service_fn;
 use hyper::{Response, header};
 use hyper_util::rt::{TokioExecutor, TokioIo};
 use prost::Message as _;
+use rpc::carbide_api_client::CarbideApiClient;
+use rpc::carbide_tls_client::{ApiConfig, CarbideClientConfig};
 use rpc::forge::{
     BuildInfo, Vpc, VpcConfig, VpcRetainedVniAllocation, VpcRoutingStateRequest, VpcStatus,
 };
-use rpc::forge_api_client::ForgeApiClient;
-use rpc::forge_tls_client::{ApiConfig, ForgeClientConfig};
 use tokio::net::TcpListener;
 
 use super::*;
@@ -124,13 +124,13 @@ async fn dispatch_routing_state(state: VpcRoutingState) -> Vec<u8> {
         .expect("mock routing listener binds");
     let address = listener.local_addr().expect("mock listener has an address");
     let request_timeout = Duration::from_secs(5);
-    let client_config = ForgeClientConfig {
+    let client_config = CarbideClientConfig {
         request_timeout: Some(request_timeout),
         ..Default::default()
     };
     let mut captured = CapturedOutput::new();
     let ctx = RuntimeContext {
-        api_client: ApiClient(ForgeApiClient::new(&ApiConfig::new(
+        api_client: ApiClient(CarbideApiClient::new(&ApiConfig::new(
             &format!("http://{address}"),
             &client_config,
         ))),
@@ -927,9 +927,9 @@ fn release_acknowledgements_require_the_exact_cleanup_and_unchanged_active_confi
 #[tokio::test]
 async fn mutation_run_paths_require_cloud_unsafe_acknowledgement_before_io() {
     let mut ctx = RuntimeContext {
-        api_client: ApiClient(ForgeApiClient::new(&ApiConfig::new(
+        api_client: ApiClient(CarbideApiClient::new(&ApiConfig::new(
             "invalid-unconnected-url",
-            &ForgeClientConfig::default(),
+            &CarbideClientConfig::default(),
         ))),
         config: RuntimeConfig {
             format: OutputFormat::Json,

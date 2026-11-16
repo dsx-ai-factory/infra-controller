@@ -230,6 +230,7 @@ mod tests {
                         .enumerate()
                         .map(
                             |(index, (device_type, manufacturer))| ExpectedRackGroupMember {
+                                cartridge_index: None,
                                 device_type,
                                 manufacturer: manufacturer.into(),
                                 id: index.to_string(),
@@ -242,6 +243,7 @@ mod tests {
             group.racks.push(ExpectedRackGroupRack {
                 rack_id: RackId::new("other-rack"),
                 members: vec![ExpectedRackGroupMember {
+                    cartridge_index: None,
                     device_type: Compute,
                     manufacturer: "WIWYNN".into(),
                     id: "other-device".into(),
@@ -269,6 +271,7 @@ mod tests {
                     .into_iter()
                     .enumerate()
                     .map(|(index, device_type)| ExpectedRackGroupMember {
+                        cartridge_index: None,
                         device_type,
                         manufacturer: "NVIDIA".into(),
                         id: index.to_string(),

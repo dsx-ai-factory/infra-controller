@@ -65,6 +65,7 @@ use crate::expected_machines::common::HostDpuPolicy;
 "default_pause_ingestion_and_poweron",
 "interfaces",
 "disable_lockdown",
+"retain_hbn_config_on_boot",
 ])))]
 #[command(after_long_help = "\
 EXAMPLES:
@@ -113,6 +114,16 @@ Clear the interface list, including loopback reservations:
 Reset a stored physical-interface role to Host and infer Fixed allocation from fixed_ip:
     $ nico-admin-cli expected-machine patch --bmc-mac-address 00:11:22:33:44:55 \
     --interfaces '[{\"mac_address\":\"02:00:00:00:20:01\",\"role\":\"unspecified\",\"ip_allocation\":\"unspecified\",\"fixed_ip\":\"192.0.2.10\"}]'
+
+Designate the machine to retain-hbn-config-on-boot. It must already declare a DPU
+BMC and a DPU OS interface, and the host BMC and both DPU interfaces must use a
+fixed or retained IP allocation:
+    $ nico-admin-cli expected-machine patch --bmc-mac-address 00:11:22:33:44:55 \
+    --retain-hbn-config-on-boot true
+
+Remove the retain-hbn-config-on-boot designation:
+    $ nico-admin-cli expected-machine patch --bmc-mac-address 00:11:22:33:44:55 \
+    --retain-hbn-config-on-boot false
 
 ")]
 pub(crate) struct Args {
@@ -255,6 +266,14 @@ pub(crate) struct Args {
         help = "Set true to skip server lockdown during lifecycle management, or false to lock down after BIOS configuration. Omission preserves the stored setting"
     )]
     pub(super) disable_lockdown: Option<bool>,
+
+    #[clap(
+        long = "retain-hbn-config-on-boot",
+        value_name = "RETAIN_HBN_CONFIG_ON_BOOT",
+        group = "group",
+        help = "If true, designate the machine to retain its HBN config on boot. This allows the machine to boot while NICO's DHCP and gRPC services are unavailable. The machine must declare a DPU BMC and a DPU OS interface, and the host BMC and both DPU interfaces must then use a fixed or retained IP allocation. A machine whose DPU policy attaches no DPU declares neither. If unset or false, the machine will need NICo to be up in order to boot."
+    )]
+    pub(super) retain_hbn_config_on_boot: Option<bool>,
 }
 
 impl Args {

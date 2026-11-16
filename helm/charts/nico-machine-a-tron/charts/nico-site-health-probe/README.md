@@ -52,7 +52,7 @@ namespace segment defaults to the release namespace (nico-api accepts SPIFFE
 identities under its own namespace; set `certificate.identityNamespace` when
 nico-api runs elsewhere). nico-api's internal RBAC grants exactly this
 service identity read-only access to `FindMachineIds`, `FindMachinesByIds`
-and `FindHostStatesByIds`.
+`FindHostStatesByIds`, `GetDesiredFirmwareVersions` and `ListHostFirmware`.
 
 ## Metrics
 
@@ -133,7 +133,7 @@ one snapshot per family.
 The state readers need a nico-api client certificate that maps to an external
 user (`nicoApiClientCert.existingSecret`, keys `ca.crt`, `tls.crt`,
 `tls.key`): the SPIFFE identity may call only `FindMachineIds`,
-`FindMachinesByIds` and `FindHostStatesByIds`. REST identities take client
+`FindMachinesByIds` `FindHostStatesByIds`, `GetDesiredFirmwareVersions` and `ListHostFirmware`. REST identities take client
 credentials, a bearer token in a Secret, or a token file.
 
 The nico-api reader runs by default once state is on; the REST reader stays
@@ -319,3 +319,10 @@ no transaction. Repeat full agreement after writes settle, and never infer
 late-create settlement from an empty listing. The fixture adds two allocation
 GETs plus Machine/instance pages to the shared API gate. Existing inventory
 calls remain. Calibrate the complete reader workload before timing a run.
+
+`state.readers.nicoConfig.enabled` opts into read-only NICo configuration
+reads with `interval: 60s` and `timeout: 120s`. Pin an image supporting this
+reader before enabling it. Disabled charts omit `nico_config` so older
+probe images still parse their configuration. Config-only reads require
+`nicoApiClientCert.existingSecret`, using the existing `state.nicoApi`
+target, TLS and call caps. Deploy compatible NICo permissions first.

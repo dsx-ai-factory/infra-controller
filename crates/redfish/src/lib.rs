@@ -18,3 +18,4 @@
 pub mod boot_interface;
 pub mod libredfish;
 pub mod nv_redfish;
+pub mod state_handler;

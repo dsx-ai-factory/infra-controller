@@ -59,7 +59,7 @@ pub fn redfish_basic_authorization_context(
     (authorization, sensitive_values)
 }
 
-/// Logs the diagnostic fields shared by HTTP failures from both Redfish clients.
+/// Logs HTTP failure fields with a bounded, sanitized DMTF message.
 ///
 /// The complete response body and DMTF `MessageArgs` are deliberately excluded.
 /// Only a bounded message extracted from the DMTF error envelope is recorded,

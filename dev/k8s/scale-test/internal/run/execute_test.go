@@ -6,12 +6,14 @@ package run
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"go.uber.org/goleak"
 
@@ -165,5 +167,33 @@ func TestFoundReasonsAndDetailReachTheResult(t *testing.T) {
 	status := d.CM.(*cmFake).written("r1-result")
 	if _, has := status["detail"]; has || !strings.Contains(string(status["reasons"]), "probe: down") {
 		t.Errorf("status = %v, want the reasons and no detail", status)
+	}
+}
+
+func TestAcceptedUnfinishedWorkRetainsLease(t *testing.T) {
+	for _, settled := range []bool{false, true} {
+		t.Run(fmt.Sprint(settled), func(t *testing.T) {
+			seq := &sequence{}
+			d := deps(t, seq, held(seq))
+			res := Execute(d, fakeTest{run: func(rc RunCtx, w *writer.Writer) (result.Outcome, error) {
+				if err := w.Pending(rc.Ctx, true); err != nil {
+					return result.Outcome{}, err
+				}
+				_, err := writer.Send(rc.Ctx, w, writer.Call{WriteCall: journal.WriteCall{Key: "create", Kind: "instance"}, Retry: writer.RetryPolicy{MaxAttempts: 1, AttemptTimeout: time.Second}}, func(context.Context) writer.Attempt {
+					return writer.Attempt{IDs: []string{"00000000-0000-4000-8000-000000000001"}}
+				})
+				if err == nil && settled {
+					err = w.Pending(rc.Ctx, false)
+				}
+				return result.OutcomeOf(result.Passed), err
+			}})
+			want, state := result.Unresolved, "needsCleanup"
+			if settled {
+				want, state = result.Passed, "final"
+			}
+			if res.Verdict != want || res.Lock.FinalState == nil || *res.Lock.FinalState != state {
+				t.Fatalf("verdict=%s lease=%v", res.Verdict, res.Lock.FinalState)
+			}
+		})
 	}
 }

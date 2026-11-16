@@ -1,105 +1,77 @@
-<table class="sortable overview">
+<table class="sortable overview managed-host-table">
 	<thead>
 		<tr>
-			<th>Host ID</th>
-			<th>DPU ID</th>
-			{% if active_maintenance_filter == "maintenance" %}
-				<th>Maintenance Ref</th>
-				<th>Maintenance Start</th>
-			{% endif %}
+			<th>Machine</th>
 			<th>State</th>
-			<th>Health Alerts</th>
-			<th>Health Reports #</th>
-			<th>IPs</th>
-			<th>MACs</th>
-			{% if active_maintenance_filter != "maintenance" %}
-				<th>GPU #</th>
-				<th>IB IFs #</th>
-				<th>Host Memory</th>
+			<th>Health</th>
+			<th class="no-sort">BMC</th>
+			<th class="no-sort">Admin</th>
+			{% if active_maintenance_filter == "maintenance" %}
+			<th>Maintenance</th>
 			{% endif %}
-			<th>DPF Enabled</th>
-			<th>DPF Used For Ingestion</th>
-		<tr/>
+			<th>Hardware</th>
+		</tr>
 	</thead>
 	<tbody>
 	{% if hosts.is_empty() %}
-		{% if active_maintenance_filter == "maintenance" %}
-			<tr><td colspan="11">No machines match the selected filters.</td></tr>
-		{% else %}
-			<tr><td colspan="12">No machines match the selected filters.</td></tr>
-		{% endif %}
+		<tr><td colspan="{% if active_maintenance_filter == "maintenance" %}7{% else %}6{% endif %}">No machines match the selected filters.</td></tr>
 	{% endif %}
 	{% for host in hosts %}
 		<tr>
-			<td>{{ host.machine_id|machine_id_link|safe }}</td>
-			<td>{{ host.dpu_properties(DpuProperty::MachineId)|safe }}</td>
-			{% if active_maintenance_filter == "maintenance" %}
-				<td>{% if host.is_link_ref %}<a href="{{ host.maintenance_reference }}">{{ host.maintenance_reference }}</a>{% else %}{{ host.maintenance_reference }}{% endif %}</td>
-				<td>{{ host.maintenance_start_time }}</td>
-			{% endif %}
-						<td title="{{ host.state_reason }}">
-				{% if host.state.to_lowercase().contains("failed") %}
-					<span class="bubble error">{{ host.state }}{% if host.time_in_state_above_sla %} ⏱️{% endif %}</span>
-				{% else if host.time_in_state_above_sla %}
-					<span class="bubble warning">{{ host.state }} ⏱️</span>
-				{% else if host.state == "Ready" || host.state == "Assigned/Ready" %}
-					<span class="bubble success">{{ host.state }}</span>
-				{% else %}
-					<span class="bubble">{{ host.state }}</span>
-				{% endif %}
-			</td>
 			<td>
-				<a href="/admin/machine/{{ host.machine_id }}/health">
-					{{ host.health_probe_alerts|health_alerts_fmt(true, true)|safe }}
+				{{ host.machine_id|machine_id_link|safe }}
+				{% for dpu in host.dpus %}
+				<div class="cell-dpu" title="DPU{% if host.dpus.len() > 1 %} {{ loop.index }}{% endif %}">{{ dpu.machine_id|machine_id_link|safe }}</div>
+				{% endfor %}
+			</td>
+			{% let state_title = host.state_title() %}
+			<td>
+				<span class="bubble{% if host.state.to_lowercase().contains("failed") %} error{% else if host.time_in_state_above_sla %} warning{% else if host.state == "Ready" || host.state == "Assigned/Ready" %} success{% endif %} state-bubble"{% if let Some(state_title) = state_title %} title="{{ state_title }}"{% endif %}>{{ host.state|slash_breaks|safe }}{% if host.time_in_state_above_sla %} ⏱️{% endif %}</span>
+			</td>
+			<td data-sort="{{ host.health_probe_alerts.len() }}">
+				<a class="health-cell" href="/admin/machine/{{ host.machine_id }}?tab=health">
+					{{ host.health_probe_alerts|health_alerts_compact|safe }}
 				</a>
 			</td>
-			<td><a href="/admin/machine/{{ host.machine_id }}/health">{{ host.health_sources.len() }}</a></td>
-			<td style="padding: 0;">
-				<table>
-					<tr><th>Host BMC</th><td><a href="/admin/explored-endpoint/{{ host.host_bmc_ip }}">{{ host.host_bmc_ip }}</a></td></tr>
-					<tr><th>DPU BMC</th><td>{{ host.dpu_properties(DpuProperty::BmcIp)|safe }}</td></tr>
-					<tr><th>Host Admin</th><td>{{ host.host_admin_ip }}</td></tr>
-					<tr><th>DPU OOB</th><td>{{ host.dpu_properties(DpuProperty::OobIp)|safe }}</td></tr>
-				</table>
+			<td>
+				<dl class="addr-list">
+					<dt>Host</dt><dd><a href="/admin/explored-endpoint/{{ host.host_bmc_ip }}">{{ host.host_bmc_ip }}</a><code class="addr-mac">{{ host.host_bmc_mac }}</code></dd>
+					{% for dpu in host.dpus %}
+					<dt>DPU{% if host.dpus.len() > 1 %} {{ loop.index }}{% endif %}</dt><dd><a href="/admin/explored-endpoint/{{ dpu.bmc_ip }}">{{ dpu.bmc_ip }}</a><code class="addr-mac">{{ dpu.bmc_mac }}</code></dd>
+					{% endfor %}
+				</dl>
 			</td>
-			<td style="padding: 0;">
-				<table>
-					<tr><th>Host BMC</th><td>{{ host.host_bmc_mac }}</td></tr>
-					<tr><th>DPU BMC</th><td>{{ host.dpu_properties(DpuProperty::BmcMac)|safe  }}</td></tr>
-					<tr><th>Host PF</th><td>{{ host.host_admin_mac }}</td></tr>
-					<tr><th>DPU OOB</th><td>{{ host.dpu_properties(DpuProperty::OobMac)|safe  }}</td></tr>
-				</table>
+			<td>
+				<dl class="addr-list">
+					<dt title="Host admin interface">Host</dt><dd><span>{{ host.host_admin_ip }}</span><code class="addr-mac">{{ host.host_admin_mac }}</code></dd>
+					{% for dpu in host.dpus %}
+					<dt title="DPU out-of-band interface">DPU{% if host.dpus.len() > 1 %} {{ loop.index }}{% endif %}</dt><dd><span>{{ dpu.oob_ip }}</span><code class="addr-mac">{{ dpu.oob_mac }}</code></dd>
+					{% endfor %}
+				</dl>
 			</td>
-			{% if active_maintenance_filter != "maintenance" %}
-				<td>{{ host.num_gpus }}</td>
-				<td>{{ host.num_ib_ifs }}</td>
-				<td>{{ host.host_memory }}</td>
+			{% if active_maintenance_filter == "maintenance" %}
+			<td>
+				{% if host.is_link_ref %}<a href="{{ host.maintenance_reference }}">{{ host.maintenance_reference }}</a>{% else %}{{ host.maintenance_reference }}{% endif %}
+				<span class="cell-sub">since {{ host.maintenance_start_time }}</span>
+			</td>
 			{% endif %}
-			<td>{{ host.dpf_enabled }}</td>
-			<td>{% if !host.dpf_used_for_ingestion %}<span class="bubble warning">false</span>{% else %}true{% endif %}</td>
+			<td class="cell-nowrap">
+				{{ host.num_gpus }} GPU · {{ host.num_ib_ifs }} IB
+				{% if !host.host_memory.is_empty() %}<span class="cell-sub" title="{{ host.host_memory }}">{{ host.memory_total() }}</span>{% endif %}
+				{% if !host.dpf_used_for_ingestion %}<span class="cell-sub text-warning" title="This host was not ingested with DPF">Non-DPF</span>{% endif %}
+			</td>
 		</tr>
 	{% endfor %}
-		<tfoot>
-			<tr>
-				<th>{{ hosts.len() }} item{% if hosts.len() != 1 %}s{% endif %}</th>
-				<th></th>
-				{% if active_maintenance_filter == "maintenance" %}
-					<th></th>
-					<th></th>
-				{% endif %}
-				<th></th>
-				<th></th>
-				<th></th>
-				<th></th>
-				<th></th>
-				{% if active_maintenance_filter != "maintenance" %}
-					<th></th>
-					<th></th>
-					<th></th>
-				{% endif %}
-				<th></th>
-				<th></th>
-			</tr>
-		</tfoot>
 	</tbody>
+	<tfoot>
+		<tr>
+			<th>{{ hosts.len() }} item{% if hosts.len() != 1 %}s{% endif %}</th>
+			<th></th>
+			<th></th>
+			<th></th>
+			<th></th>
+			<th></th>
+			{% if active_maintenance_filter == "maintenance" %}<th></th>{% endif %}
+		</tr>
+	</tfoot>
 </table>

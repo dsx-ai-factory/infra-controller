@@ -331,12 +331,12 @@ mod tests {
     use std::panic::AssertUnwindSafe;
     use std::time::Duration;
 
+    use ::rpc::carbide_api_client::CarbideApiClient;
+    use ::rpc::carbide_tls_client::{ApiConfig, CarbideClientConfig};
     use ::rpc::forge::{
         BuildInfo, MachineValidationPlugin, MachineValidationTest,
         MachineValidationTestsGetRequest, MachineValidationTestsGetResponse,
     };
-    use ::rpc::forge_api_client::ForgeApiClient;
-    use ::rpc::forge_tls_client::{ApiConfig, ForgeClientConfig};
     use clap::Parser;
     use futures::{FutureExt, stream};
     use http_body_util::combinators::UnsyncBoxBody;
@@ -404,13 +404,13 @@ mod tests {
             .local_addr()
             .expect("mock Machine Validation listener has an address");
         let request_timeout = Duration::from_secs(5);
-        let client_config = ForgeClientConfig {
+        let client_config = CarbideClientConfig {
             request_timeout: Some(request_timeout),
             ..Default::default()
         };
         let mut captured = CapturedOutput::new();
         let ctx = RuntimeContext {
-            api_client: ApiClient(ForgeApiClient::new(&ApiConfig::new(
+            api_client: ApiClient(CarbideApiClient::new(&ApiConfig::new(
                 &format!("http://{address}"),
                 &client_config,
             ))),

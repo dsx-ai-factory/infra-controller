@@ -17,9 +17,7 @@
 
 //! Managed power-shelf decommissioning handlers.
 
-use carbide_credential_rotation::BmcEndpoint;
 use carbide_secrets::credentials::{BmcCredentialType, CredentialKey, CredentialWriter};
-use carbide_utils::redfish::BmcAccessInfo;
 use carbide_uuid::power_shelf::PowerShelfId;
 use model::bmc_suppression::{BmcSuppressionSource, BmcSuppressionSubsystem, NewBmcSuppression};
 use model::power_shelf::{PowerShelf, PowerShelfControllerState, PowerShelfDecommissioningState};
@@ -141,27 +139,8 @@ async fn handle_factory_reset_bmc(
     power_shelf: &PowerShelf,
     ctx: &mut StateHandlerContext<'_, PowerShelfStateHandlerContextObjects>,
 ) -> Result<StateHandlerOutcome<PowerShelfControllerState>, StateHandlerError> {
-    let endpoint = BmcEndpoint::from_power_shelf(power_shelf).ok_or_else(|| {
-        StateHandlerError::MissingData {
-            object_id: power_shelf_id.to_string(),
-            missing: "addressable_bmc",
-        }
-    })?;
-    let access = BmcAccessInfo {
-        host: endpoint.host,
-        port: endpoint.port,
-        mac_address: endpoint.device_mac,
-    };
-    ctx.services
-        .redfish_client_pool
-        .client_by_info(&access)
-        .await
-        .map_err(|error| {
-            StateHandlerError::GenericError(eyre::eyre!(
-                "failed to create redfish client for power shelf {power_shelf_id}: {error}"
-            ))
-        })?
-        .bmc_reset_to_defaults()
+    let bmc = ctx.services.connect_bmc(power_shelf).await?;
+    async { bmc.bmc_control()?.reset_to_factory_defaults().await }
         .await
         .map_err(|error| {
             StateHandlerError::GenericError(eyre::eyre!(

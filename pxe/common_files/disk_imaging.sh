@@ -283,6 +283,19 @@ function add_cloud_init() {
 	done
 }
 
+function disable_orphan_file() {
+	# resize2fs before e2fsprogs 1.47.2 does not update the checksums of the
+	# orphan file blocks it moves while growing the file system. Images built
+	# with the orphan_file feature (e.g. Ubuntu 26.04) then fail to mount on
+	# first boot with "orphan file block 0: bad checksum". orphan_file only
+	# speeds up parallel unlink/truncate.
+	# TODO: Remove once the qcow imager ships e2fsprogs >= 1.47.2
+	if dumpe2fs -h "$root_dev" 2>/dev/null | grep '^Filesystem features:' | grep -qw orphan_file; then
+		echo "Disabling orphan_file on $root_dev before resize" | tee $log_output
+		tune2fs -O ^orphan_file "$root_dev" 2>&1 | tee $log_output
+	fi
+}
+
 function expand_root_fs() {
 	is_nvme=$(echo $root_dev | grep nvme)
 	if [ ! -z "$is_nvme" ]; then
@@ -290,6 +303,7 @@ function expand_root_fs() {
 		growpart "$image_disk" "$part_num" 2>&1 | tee $log_output
 		partprobe $image_disk 2>&1 | tee $log_output
 		udevadm trigger 2>&1 | tee $log_output
+		disable_orphan_file
 		resize2fs -fF "$root_dev" 2>&1 | tee $log_output
 	fi
 	# not handling lvm resize currently
@@ -1215,8 +1229,17 @@ function parse_kernel_cmdline_argument() {
 
 # Writes the downloaded image to image_disk and returns qemu-img's status, not tee's.
 function write_image_to_disk() {
+	# OCI registries serve blobs at .../blobs/sha256:<hash>, so the downloaded
+	# image can be named sha256:<hash>. qemu-img parses the text before a colon
+	# as a protocol and fails with "Unknown protocol 'sha256'", so anchor a
+	# bare filename to the working directory.
+	local image_path=$file
+	case "$image_path" in
+		/* | ./*) ;;
+		*) image_path="./$image_path" ;;
+	esac
 	echo "Imaging $file to $image_disk" | tee $log_output
-	qemu-img convert -p -O raw -S 0 "$file" "$image_disk" 2>&1 | tee $log_output
+	qemu-img convert -p -O raw -S 0 "$image_path" "$image_disk" 2>&1 | tee $log_output
 	local ret=${PIPESTATUS[0]}
 	if [ $ret -ne 0 ]; then
 		echo "Imaging failed $ret" | tee $log_output

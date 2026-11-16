@@ -134,6 +134,7 @@ workspace = false
 # what is committed (regenerate locally with `cargo make gen-cli-docs`).
 script = '''
 cargo test -p nico-admin-cli cfg::cli_options::tests
+cargo test -p nico-admin-cli generate_docs::cmd::tests::man_conversion_preserves_apostrophes -- --ignored
 cargo run -p nico-admin-cli -- generate-cli-docs --out-dir docs/manuals/nico-admin-cli
 git diff --exit-code -- docs/manuals/nico-admin-cli
 '''
@@ -397,6 +398,7 @@ script = '''
 docker run --rm -v $REPO_ROOT:/carbide --user $(id -u):$(id -g) \
     --env CARGO_HOME=/cargo \
     -v $CARGO_HOME:/cargo \
+    --env CARGO_BUILD_BUILD_DIR=/carbide/target/cross-aarch64-build \
     build-artifacts-container-cross-aarch64:latest \
     "cargo" \
     "build" \
@@ -793,6 +795,8 @@ export NICO_TEST_TEMPLATE_DB="${NICO_TEST_TEMPLATE_DB-sqlx_ci_template_db}"
 cargo test --profile=ci-tests --no-run
 "${CARGO_TARGET_DIR:-target}/ci-tests/prepare-test-template"
 cargo test --profile=ci-tests
+# This test exhausts process-wide DPU admission, so run it in its own process.
+cargo test --profile=ci-tests tests::dpu_remote::remote_dpu_asn_post_preparation_admission_stops_retain_cleanup -- --exact --ignored --test-threads=1
 '''
 
 [tasks.build-and-test-release-container-services]

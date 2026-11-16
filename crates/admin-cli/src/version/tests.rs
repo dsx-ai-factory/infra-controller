@@ -29,9 +29,9 @@ use hyper::{Response, header};
 use hyper_util::rt::{TokioExecutor, TokioIo};
 use prost::Message as _;
 use rpc::admin_cli::OutputFormat;
+use rpc::carbide_api_client::CarbideApiClient;
+use rpc::carbide_tls_client::{ApiConfig, CarbideClientConfig, RetryConfig};
 use rpc::forge::{BuildInfo, RuntimeConfig as RpcRuntimeConfig, VersionRequest};
-use rpc::forge_api_client::ForgeApiClient;
-use rpc::forge_tls_client::{ApiConfig, ForgeClientConfig, RetryConfig};
 use tokio::net::TcpListener;
 
 use crate::async_write::CapturedOutput;
@@ -60,13 +60,13 @@ async fn run_version(site_fabric_null_routes: Option<Vec<String>>) -> String {
         .expect("mock version listener binds");
     let address = listener.local_addr().expect("mock listener has an address");
     let request_timeout = Duration::from_secs(5);
-    let client_config = ForgeClientConfig {
+    let client_config = CarbideClientConfig {
         request_timeout: Some(request_timeout),
         ..Default::default()
     };
     let mut captured = CapturedOutput::new();
     let ctx = RuntimeContext {
-        api_client: ApiClient(ForgeApiClient::new(&ApiConfig::new(
+        api_client: ApiClient(CarbideApiClient::new(&ApiConfig::new(
             &format!("http://{address}"),
             &client_config,
         ))),
@@ -137,7 +137,7 @@ async fn mock_version_request(
             ..Default::default()
         }
     } else {
-        // ForgeApiClient probes Version without runtime config while establishing
+        // CarbideApiClient probes Version without runtime config while establishing
         // the connection before issuing the command's authoritative request.
         BuildInfo::default()
     }))
@@ -247,7 +247,7 @@ async fn version_falls_back_when_the_verified_attempt_fails() {
     });
 
     let request_timeout = Duration::from_secs(5);
-    let client_config = ForgeClientConfig {
+    let client_config = CarbideClientConfig {
         request_timeout: Some(request_timeout),
         connect_retries_max: Some(0),
         ..Default::default()
@@ -258,7 +258,7 @@ async fn version_falls_back_when_the_verified_attempt_fails() {
     };
     let mut captured = CapturedOutput::new();
     let ctx = RuntimeContext {
-        api_client: ApiClient(ForgeApiClient::new(
+        api_client: ApiClient(CarbideApiClient::new(
             &ApiConfig::new(&format!("http://{refused}"), &client_config)
                 .with_retry_config(no_retries),
         )),
@@ -273,7 +273,7 @@ async fn version_falls_back_when_the_verified_attempt_fails() {
         output_file: std::mem::replace(captured.writer(), Box::new(tokio::io::sink())),
     };
     let fallback = VerificationFallback {
-        api_client: ApiClient(ForgeApiClient::new(&ApiConfig::new(
+        api_client: ApiClient(CarbideApiClient::new(&ApiConfig::new(
             &format!("http://{served}"),
             &client_config,
         ))),

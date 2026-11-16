@@ -7,11 +7,14 @@ This file contains a list of metrics exported by NVIDIA Infra Controller (NICo).
 <tr><td>carbide_active_host_firmware_update_count</td><td>gauge</td><td>Number of host machines in the system currently working on updating their firmware.</td></tr>
 <tr><td>carbide_alerts_suppressed_count</td><td>gauge</td><td>Whether external metrics based alerting is suppressed for a specific object</td></tr>
 <tr><td>carbide_api_admission_admitted_total</td><td>counter</td><td>Number of API requests admitted for execution</td></tr>
+<tr><td>carbide_api_admission_execution_timeouts_total</td><td>counter</td><td>Number of admitted API requests whose handler exceeded the execution deadline</td></tr>
 <tr><td>carbide_api_admission_handler_execution_duration_seconds</td><td>histogram</td><td>Duration of admitted API request handler execution</td></tr>
+<tr><td>carbide_api_admission_oldest_execution_age_seconds</td><td>gauge</td><td>Age in seconds of the oldest API request currently holding an execution slot</td></tr>
 <tr><td>carbide_api_admission_pending_requests</td><td>gauge</td><td>Number of API requests currently waiting for an execution slot</td></tr>
 <tr><td>carbide_api_admission_pending_wait_duration_seconds</td><td>histogram</td><td>Duration API requests spent waiting for admission</td></tr>
 <tr><td>carbide_api_admission_rejected_total</td><td>counter</td><td>Number of API requests rejected before handler execution</td></tr>
 <tr><td>carbide_api_admission_work_in_flight</td><td>gauge</td><td>Number of API requests currently holding an execution slot</td></tr>
+<tr><td>carbide_api_admission_work_in_flight_by_client_kind</td><td>gauge</td><td>Number of API requests currently holding an execution slot, grouped by client kind</td></tr>
 <tr><td>carbide_api_bmc_proxy_client_reload_failures_total</td><td>counter</td><td>Number of failed rebuilds of the nico-bmc-proxy-facing client from on-disk certificates.</td></tr>
 <tr><td>carbide_api_db_queries_total</td><td>counter</td><td>Number of database queries that occurred inside a span</td></tr>
 <tr><td>carbide_api_db_span_query_time_milliseconds</td><td>histogram</td><td>Total time the request spent inside a span on database transactions</td></tr>
@@ -114,8 +117,10 @@ This file contains a list of metrics exported by NVIDIA Infra Controller (NICo).
 <tr><td>carbide_endpoint_exploration_duration_milliseconds</td><td>histogram</td><td>The time it took to explore an endpoint</td></tr>
 <tr><td>carbide_endpoint_exploration_expected_machines_missing_overall_count</td><td>gauge</td><td>Number of machines expected but not identified</td></tr>
 <tr><td>carbide_endpoint_exploration_expected_power_shelves_missing_overall_count</td><td>gauge</td><td>Number of power shelves expected but not identified</td></tr>
+<tr><td>carbide_endpoint_exploration_failures_count</td><td>gauge</td><td>Number of failed endpoint explorations, by error</td></tr>
 <tr><td>carbide_endpoint_exploration_identified_managed_hosts_overall_count</td><td>gauge</td><td>Number of managed hosts identified by expectation</td></tr>
 <tr><td>carbide_endpoint_exploration_machines_explored_overall_count</td><td>gauge</td><td>Number of BMC endpoint records, by expectation and machine type</td></tr>
+<tr><td>carbide_endpoint_exploration_preingestions_incomplete_overall_count</td><td>gauge</td><td>Number of machines in a preingestion state by expectation and machine type</td></tr>
 <tr><td>carbide_endpoint_exploration_step_latency_milliseconds</td><td>histogram</td><td>The time it took to perform one endpoint exploration step</td></tr>
 <tr><td>carbide_endpoint_exploration_success_count</td><td>gauge</td><td>Number of successful endpoint explorations</td></tr>
 <tr><td>carbide_endpoint_explorations_count</td><td>gauge</td><td>Number of attempted endpoint explorations</td></tr>
@@ -319,6 +324,7 @@ This file contains a list of metrics exported by NVIDIA Infra Controller (NICo).
 <tr><td>carbide_machine_identity_token_exchange_failures_total</td><td>counter</td><td>Number of machine identity token exchange failures, by failure stage</td></tr>
 <tr><td>carbide_machine_instance_info</td><td>gauge</td><td>Association between a host machine and its tenant instance. Exposed only on the opt-in per-object endpoint.</td></tr>
 <tr><td>carbide_machine_reboot_duration_seconds</td><td>histogram</td><td>Time taken for machine/host to reboot in seconds</td></tr>
+<tr><td>carbide_machine_update_manager_completed_passes_total</td><td>counter</td><td>Number of successful machine update manager work passes, excluding lock skips and failed or cancelled passes</td></tr>
 <tr><td>carbide_machine_updates_started_count</td><td>gauge</td><td>Number of machines in the system in the process of updating</td></tr>
 <tr><td>carbide_machine_validation_completed</td><td>gauge</td><td>Number of successfully completed machine validation runs</td></tr>
 <tr><td>carbide_machine_validation_failed</td><td>gauge</td><td>Number of failed machine validation runs</td></tr>
@@ -416,6 +422,7 @@ This file contains a list of metrics exported by NVIDIA Infra Controller (NICo).
 <tr><td>carbide_object_manual_intervention_required</td><td>gauge</td><td>Indicates that an object currently requires manual operator intervention. Exposed only on the opt-in per-object endpoint.</td></tr>
 <tr><td>carbide_object_state_entered_timestamp_seconds</td><td>gauge</td><td>Unix timestamp at which an object entered its current state. Exposed only on the opt-in per-object endpoint.</td></tr>
 <tr><td>carbide_object_state_sla_seconds</td><td>gauge</td><td>Resolved SLA in seconds for an objects current state. Exposed only on the opt-in per-object endpoint.</td></tr>
+<tr><td>carbide_object_unhealthy_by_classification_count</td><td>gauge</td><td>Per-object indication that an object (host, switch, rack, ...) is marked with a health alert classification due to being unhealthy. Labeled with object_type, object_id and classification; machine series also carry in_use. Only classifications configured via observability.per_object_metrics_for_classifications are emitted, bounding metric cardinality.</td></tr>
 <tr><td>carbide_pending_dpu_nic_firmware_update_count</td><td>gauge</td><td>Number of machines in the system that need a DPU/NIC firmware update</td></tr>
 <tr><td>carbide_pending_host_firmware_update_count</td><td>gauge</td><td>Number of host machines in the system that need a firmware update.</td></tr>
 <tr><td>carbide_power_shelves_count</td><td>gauge</td><td>Number of carbide_power_shelves in the system</td></tr>
@@ -539,6 +546,8 @@ This file contains a list of metrics exported by NVIDIA Infra Controller (NICo).
 <tr><td>carbide_switches_state_exited_total</td><td>counter</td><td>Number of times objects of type carbide_switches have exited a certain state</td></tr>
 <tr><td>carbide_switches_time_in_state_seconds</td><td>histogram</td><td>The amount of time objects of type carbide_switches have spent in a certain state</td></tr>
 <tr><td>carbide_switches_total</td><td>gauge</td><td>Number of carbide_switches in the system</td></tr>
+<tr><td>carbide_switches_unhealthy_by_classification_count</td><td>gauge</td><td>Number of objects marked with a certain classification due to being unhealthy</td></tr>
+<tr><td>carbide_switches_unhealthy_by_probe_id_count</td><td>gauge</td><td>Number of objects which reported a certain Health Probe Alert</td></tr>
 <tr><td>carbide_switches_with_state_handling_errors_per_state</td><td>gauge</td><td>Number of carbide_switches whose most recent state handler run returned an error, by state, substate, and error; the error=any series is the total across all errors for that state and substate, so exclude it when summing over error</td></tr>
 <tr><td>carbide_tokio_runtime_workers</td><td>gauge</td><td>Number of worker threads in the Tokio runtime</td></tr>
 <tr><td>carbide_tokio_worker_busy_seconds_total</td><td>counter</td><td>Number of seconds each Tokio runtime worker thread has spent running tasks</td></tr>

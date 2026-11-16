@@ -990,6 +990,37 @@ func TestManageDpuExtensionService_UpdateDpuExtensionServicesInDB(t *testing.T) 
 		})
 	}
 
+	t.Run("DPF inventory retains deleting service until terminal absence", func(t *testing.T) {
+		site := util.TestBuildSite(t, dbSession, ip, uuid.NewString(), cdbm.SiteStatusRegistered, nil, user)
+		service := util.TestBuildDpuExtensionService(t, dbSession, uuid.NewString(), site, tenant,
+			cdbm.DpuExtensionServiceServiceTypeDpfHelmChart, nil, nil, nil, cdbm.DpuExtensionServiceStatusDeleting, user)
+		manager := NewManageDpuExtensionService(dbSession, tSiteClientPool)
+		inventory := &corev1.DpuExtensionServiceInventory{
+			InventoryStatus: corev1.InventoryStatus_INVENTORY_STATUS_SUCCESS,
+			InventoryPage: &corev1.InventoryPage{
+				CurrentPage: 1, TotalPages: 1, TotalItems: 1, ItemIds: []string{service.ID.String()},
+			},
+			DpuExtensionServices: []*corev1.DpuExtensionService{{
+				ServiceId:       service.ID.String(),
+				ServiceType:     corev1.DpuExtensionServiceType_DPF_HELM_CHART,
+				LifecycleStatus: &corev1.LifecycleStatus{State: `{"state":"deleting"}`},
+			}},
+		}
+		require.NoError(t, manager.UpdateDpuExtensionServicesInDB(ctx, site.ID, inventory))
+		stored, getErr := dpuExtensionServiceDAO.GetByID(ctx, nil, service.ID, nil)
+		require.NoError(t, getErr)
+		assert.Nil(t, stored.Deleted)
+		assert.Equal(t, cdbm.DpuExtensionServiceStatusDeleting, stored.Status)
+		assert.False(t, stored.IsMissingOnSite)
+
+		// The next complete inventory excludes the terminal Deleted Core object.
+		inventory.InventoryPage = &corev1.InventoryPage{CurrentPage: 1, TotalPages: 0, TotalItems: 0}
+		inventory.DpuExtensionServices = nil
+		require.NoError(t, manager.UpdateDpuExtensionServicesInDB(ctx, site.ID, inventory))
+		_, getErr = dpuExtensionServiceDAO.GetByID(ctx, nil, service.ID, nil)
+		require.ErrorIs(t, getErr, cdb.ErrDoesNotExist)
+	})
+
 	t.Run("recent updates during deletion reconciliation", func(t *testing.T) {
 		cases := []struct {
 			name        string

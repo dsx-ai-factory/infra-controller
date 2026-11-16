@@ -52,6 +52,7 @@ async fn v4_and_v6_listeners_serve_concurrent_requests() {
         get_socket(
             SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, 0),
             "lo".to_string(),
+            config.instrumentation(),
         )
         .await
         .expect("DHCPv4 listener binds"),

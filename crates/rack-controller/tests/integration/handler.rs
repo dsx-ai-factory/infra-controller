@@ -255,7 +255,7 @@ fn config_with_nmx_cluster_profile() -> carbide_test_harness::CarbideConfig {
 async fn create_single_compute_rack(
     env: &TestEnv,
     pool: &sqlx::PgPool,
-) -> Result<(RackId, model::machine::ManagedHostStateSnapshot), Box<dyn std::error::Error>> {
+) -> Result<(RackId, Box<model::machine::ManagedHostStateSnapshot>), Box<dyn std::error::Error>> {
     let rack_id = new_rack_id();
     let mut txn = pool.acquire().await?;
     db_rack::create(
@@ -356,8 +356,8 @@ async fn create_two_compute_rack(
 ) -> Result<
     (
         RackId,
-        model::machine::ManagedHostStateSnapshot,
-        model::machine::ManagedHostStateSnapshot,
+        Box<model::machine::ManagedHostStateSnapshot>,
+        Box<model::machine::ManagedHostStateSnapshot>,
     ),
     Box<dyn std::error::Error>,
 > {
@@ -391,6 +391,160 @@ async fn create_two_compute_rack(
     .await?;
 
     Ok((rack_id, host_a, host_b))
+}
+
+#[sqlx_test]
+async fn test_rack_firmware_health_lifecycle(
+    pool: sqlx::PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let env = create_test_env_with_overrides(
+        pool.clone(),
+        TestEnvOverrides::with_config(config_with_rack_profiles()),
+    )
+    .await;
+    let (rack_id, host_a, host_b) = create_two_compute_rack(&env, &pool).await?;
+    let addresses = [
+        host_a.host_snapshot.status.bmc_info.ip.unwrap(),
+        host_b.host_snapshot.status.bmc_info.ip.unwrap(),
+    ];
+    for (address, version) in addresses.into_iter().zip(["1", "2"]) {
+        let mut connection = pool.acquire().await?;
+        let endpoint = db::explored_endpoints::find_by_ips(connection.as_mut(), vec![address])
+            .await?
+            .pop()
+            .unwrap();
+        let mut report = endpoint.report;
+        report.service = vec![model::site_explorer::Service {
+            id: "UpdateService".to_string(),
+            inventories: ["BMC", "BIOS"]
+                .into_iter()
+                .map(|id| model::site_explorer::Inventory {
+                    id: id.to_string(),
+                    version: Some(version.to_string()),
+                    ..Default::default()
+                })
+                .collect(),
+        }];
+        let result = db::explored_endpoints::try_update(
+            address,
+            endpoint.report_version,
+            &report,
+            false,
+            connection.as_mut(),
+        )
+        .await?;
+        assert!(matches!(result, db::ConditionalWrite::Applied(())));
+    }
+    run_rack_handler_and_apply_writes(&env, &pool, &rack_id, RackState::Created).await?;
+    let first = get_db_rack(env.db_reader().as_mut(), &rack_id).await;
+    let report = &first.health_reports.merges["rack-firmware"];
+    assert_eq!(report.alerts.len(), 2);
+    assert_eq!(report.alerts[0].id.as_str(), "RackFirmwareMismatch");
+    assert_eq!(
+        report.alerts[0].classifications,
+        vec![HealthAlertClassification::hardware()]
+    );
+    assert!(report.alerts[0].in_alert_since.is_some());
+    let host = db::managed_host::load_snapshot(
+        &mut env.db_reader(),
+        &host_a.host_snapshot.id,
+        LoadSnapshotOptions::default(),
+    )
+    .await?
+    .unwrap();
+    assert!(
+        !host
+            .aggregate_health
+            .alerts
+            .iter()
+            .any(|alert| alert.id.as_str() == "RackFirmwareMismatch")
+    );
+    assert_eq!(host.is_usable_as_instance(false), Ok(()));
+    for (bmc_version, bios_version, waiting, expected_components) in [
+        ("2", "2", false, 2),
+        ("1", "2", false, 1),
+        ("1", "1", true, 1),
+        ("1", "1", false, 0),
+    ] {
+        let mut connection = pool.acquire().await?;
+        let endpoint = db::explored_endpoints::find_by_ips(connection.as_mut(), vec![addresses[1]])
+            .await?
+            .pop()
+            .unwrap();
+        let mut updated_report = endpoint.report;
+        updated_report.service[0].inventories[0].version = Some(bmc_version.to_string());
+        updated_report.service[0].inventories[1].version = Some(bios_version.to_string());
+        let result = db::explored_endpoints::try_update(
+            addresses[1],
+            endpoint.report_version,
+            &updated_report,
+            waiting,
+            connection.as_mut(),
+        )
+        .await?;
+        assert!(matches!(result, db::ConditionalWrite::Applied(())));
+        drop(connection);
+        run_rack_handler_and_apply_writes(&env, &pool, &rack_id, RackState::Created).await?;
+        let rack = get_db_rack(env.db_reader().as_mut(), &rack_id).await;
+        if expected_components > 0 {
+            let evidence = &rack.health_reports.merges["rack-firmware"].alerts;
+            assert_eq!(evidence.len(), expected_components);
+            for alert in evidence {
+                assert_eq!(
+                    alert.in_alert_since,
+                    report
+                        .alerts
+                        .iter()
+                        .find(|previous| previous.target == alert.target)
+                        .unwrap()
+                        .in_alert_since
+                );
+            }
+        } else {
+            assert!(!rack.health_reports.merges.contains_key("rack-firmware"));
+        }
+        let response = env
+            .api
+            .find_racks_by_ids(Request::new(rpc::forge::RacksByIdsRequest {
+                rack_ids: vec![rack_id.clone()],
+            }))
+            .await?
+            .into_inner();
+        let health = response.racks[0]
+            .status
+            .as_ref()
+            .unwrap()
+            .health
+            .as_ref()
+            .unwrap();
+        let alerts = health
+            .alerts
+            .iter()
+            .filter(|alert| alert.id == "RackFirmwareMismatch")
+            .collect::<Vec<_>>();
+        assert_eq!(alerts.len(), usize::from(expected_components > 0));
+        if let Some(alert) = alerts.first() {
+            assert!(alert.target.is_none());
+            assert!(
+                alert
+                    .message
+                    .contains(&format!("{expected_components} rack component(s)"))
+            );
+            assert!(alert.message.contains("BIOS"));
+            assert_eq!(alert.message.contains("for BMC:"), expected_components == 2);
+            for (device_id, address) in [
+                (host_a.host_snapshot.id, addresses[0]),
+                (host_b.host_snapshot.id, addresses[1]),
+            ] {
+                assert!(
+                    alert
+                        .message
+                        .contains(&format!("{device_id} (bmc ip: {address})"))
+                );
+            }
+        }
+    }
+    Ok(())
 }
 
 async fn attach_switches_with_nvos_credentials(
@@ -506,7 +660,7 @@ async fn test_expected_no_definition_stays_parked(
     let env = create_test_env_with_overrides(
         pool.clone(),
         TestEnvOverrides {
-            config: Some(config),
+            config: Some(Box::new(config)),
             ..Default::default()
         },
     )
@@ -559,7 +713,7 @@ async fn test_created_waits_for_missing_switches(
     let env = create_test_env_with_overrides(
         pool.clone(),
         TestEnvOverrides {
-            config: Some(config),
+            config: Some(Box::new(config)),
             ..Default::default()
         },
     )
@@ -952,7 +1106,7 @@ async fn test_component_health_waits_for_successful_handler(
     let env = create_test_env_with_overrides(
         pool.clone(),
         TestEnvOverrides {
-            config: Some(config),
+            config: Some(Box::new(config)),
             firmware_object_fetcher: Some(fetcher.clone()),
             ..Default::default()
         },
@@ -1085,7 +1239,7 @@ async fn test_expected_zero_topology_transitions_to_discovering(
     let env = create_test_env_with_overrides(
         pool.clone(),
         TestEnvOverrides {
-            config: Some(config),
+            config: Some(Box::new(config)),
             ..Default::default()
         },
     )
@@ -1201,7 +1355,7 @@ async fn test_discovering_waits_for_missing_switches(
     let env = create_test_env_with_overrides(
         pool.clone(),
         TestEnvOverrides {
-            config: Some(config),
+            config: Some(Box::new(config)),
             ..Default::default()
         },
     )
@@ -1359,7 +1513,7 @@ async fn test_discovering_empty_rack_transitions_to_maintenance(
     let env = create_test_env_with_overrides(
         pool.clone(),
         TestEnvOverrides {
-            config: Some(config),
+            config: Some(Box::new(config)),
             ..Default::default()
         },
     )
@@ -1430,7 +1584,7 @@ async fn test_error_state_does_nothing(
     let env = create_test_env_with_overrides(
         pool.clone(),
         TestEnvOverrides {
-            config: Some(config_with_rack_profiles()),
+            config: Some(Box::new(config_with_rack_profiles())),
             ..Default::default()
         },
     )
@@ -1558,7 +1712,7 @@ async fn test_compute_restart_rejects_desired_off_host_outside_scope(
     let env = create_test_env_with_overrides(
         pool.clone(),
         TestEnvOverrides {
-            config: Some(config_with_rack_profiles()),
+            config: Some(Box::new(config_with_rack_profiles())),
             ..Default::default()
         },
     )
@@ -1651,7 +1805,7 @@ async fn test_nmx_configuration_skips_empty_inventory_and_rejects_invalid_topolo
     let env = create_test_env_with_overrides(
         pool.clone(),
         TestEnvOverrides {
-            config: Some(config),
+            config: Some(Box::new(config)),
             ..Default::default()
         },
     )
@@ -1743,7 +1897,7 @@ async fn compute_hosts_restart_before_nmx_workflow(
     let env = create_test_env_with_overrides(
         pool.clone(),
         TestEnvOverrides {
-            config: Some(config),
+            config: Some(Box::new(config)),
             ..Default::default()
         },
     )
@@ -2078,7 +2232,7 @@ async fn test_existing_nmx_job_completes_without_inserting_resets(
     let env = create_test_env_with_overrides(
         pool.clone(),
         TestEnvOverrides {
-            config: Some(config_with_rack_profiles()),
+            config: Some(Box::new(config_with_rack_profiles())),
             ..Default::default()
         },
     )
@@ -2141,7 +2295,7 @@ async fn test_legacy_power_reset_submits_and_resumes_batch(
     let env = create_test_env_with_overrides(
         pool.clone(),
         TestEnvOverrides {
-            config: Some(config_with_rack_profiles()),
+            config: Some(Box::new(config_with_rack_profiles())),
             ..Default::default()
         },
     )
@@ -2270,7 +2424,7 @@ async fn test_terminate_compute_restarts_uses_saved_targets(
     let env = create_test_env_with_overrides(
         pool.clone(),
         TestEnvOverrides {
-            config: Some(config_with_rack_profiles()),
+            config: Some(Box::new(config_with_rack_profiles())),
             ..Default::default()
         },
     )
@@ -2408,7 +2562,7 @@ async fn test_firmware_upgrade_start_skips_without_json(
     let env = create_test_env_with_overrides(
         pool.clone(),
         TestEnvOverrides {
-            config: Some(config_with_rack_profiles()),
+            config: Some(Box::new(config_with_rack_profiles())),
             ..Default::default()
         },
     )
@@ -2529,7 +2683,7 @@ async fn test_ingestion_transitions_to_firmware_upgrade_and_submits_rack_profile
     let env = create_test_env_with_overrides(
         pool.clone(),
         TestEnvOverrides {
-            config: Some(config),
+            config: Some(Box::new(config)),
             firmware_object_fetcher: Some(firmware_object_fetcher.clone()),
             ..Default::default()
         },
@@ -2786,7 +2940,7 @@ async fn test_firmware_upgrade_start_rejects_desired_off_machine_before_rms_subm
     let env = create_test_env_with_overrides(
         pool.clone(),
         TestEnvOverrides {
-            config: Some(config_with_rack_profiles()),
+            config: Some(Box::new(config_with_rack_profiles())),
             ..Default::default()
         },
     )
@@ -2916,7 +3070,7 @@ async fn test_firmware_upgrade_start_submits_json_and_deletes_access_token(
     let env = create_test_env_with_overrides(
         pool.clone(),
         TestEnvOverrides {
-            config: Some(config),
+            config: Some(Box::new(config)),
             firmware_object_fetcher: Some(firmware_object_fetcher.clone()),
             ..Default::default()
         },
@@ -3040,7 +3194,7 @@ async fn test_firmware_upgrade_start_missing_profile_deletes_access_token(
     let env = create_test_env_with_overrides(
         pool.clone(),
         TestEnvOverrides {
-            config: Some(config_with_rack_profiles()),
+            config: Some(Box::new(config_with_rack_profiles())),
             ..Default::default()
         },
     )
@@ -3138,7 +3292,7 @@ async fn test_firmware_upgrade_wait_for_complete_recovers_power_blocked_machine(
     let env = create_test_env_with_overrides(
         pool.clone(),
         TestEnvOverrides {
-            config: Some(config_with_rack_profiles()),
+            config: Some(Box::new(config_with_rack_profiles())),
             ..Default::default()
         },
     )
@@ -3317,7 +3471,7 @@ async fn test_rack_maintenance_termination_unwinds_all_scoped_device_state_body(
     let env = create_test_env_with_overrides(
         pool.clone(),
         TestEnvOverrides {
-            config: Some(config_with_rack_profiles()),
+            config: Some(Box::new(config_with_rack_profiles())),
             ..Default::default()
         },
     )
@@ -3688,7 +3842,7 @@ async fn test_ingestion_reconciles_late_compute_firmware_body(
     let env = create_test_env_with_overrides(
         pool.clone(),
         TestEnvOverrides {
-            config: Some(config),
+            config: Some(Box::new(config)),
             firmware_object_fetcher: Some(fetcher),
             ..Default::default()
         },
@@ -4054,7 +4208,7 @@ async fn ingestion_reopens_firmware_workflow(
     let env = create_test_env_with_overrides(
         pool.clone(),
         TestEnvOverrides {
-            config: Some(config),
+            config: Some(Box::new(config)),
             firmware_object_fetcher: Some(Arc::new(StaticFirmwareObjectFetcher {
                 response: Mutex::new(Ok(r#"{"Id":"ingestion"}"#.to_string())),
                 requested_urls: Mutex::new(Vec::new()),
@@ -4324,7 +4478,7 @@ async fn test_firmware_upgrade_wait_for_complete_waits_while_jobs_running(
     let env = create_test_env_with_overrides(
         pool.clone(),
         TestEnvOverrides {
-            config: Some(config_with_rack_profiles()),
+            config: Some(Box::new(config_with_rack_profiles())),
             ..Default::default()
         },
     )
@@ -4419,7 +4573,7 @@ async fn test_firmware_upgrade_wait_for_complete_transitions_to_error_on_job_fai
     let env = create_test_env_with_overrides(
         pool.clone(),
         TestEnvOverrides {
-            config: Some(config_with_rack_profiles()),
+            config: Some(Box::new(config_with_rack_profiles())),
             ..Default::default()
         },
     )
@@ -4609,7 +4763,7 @@ async fn test_firmware_upgrade_wait_for_complete_waits_for_all_nodes_to_be_termi
     let env = create_test_env_with_overrides(
         pool.clone(),
         TestEnvOverrides {
-            config: Some(config_with_rack_profiles()),
+            config: Some(Box::new(config_with_rack_profiles())),
             ..Default::default()
         },
     )
@@ -4838,7 +4992,7 @@ async fn test_firmware_upgrade_wait_for_complete_retries_when_job_lookup_fails(
     let env = create_test_env_with_overrides(
         pool.clone(),
         TestEnvOverrides {
-            config: Some(config_with_rack_profiles()),
+            config: Some(Box::new(config_with_rack_profiles())),
             ..Default::default()
         },
     )
@@ -4929,7 +5083,7 @@ async fn test_firmware_upgrade_wait_for_complete_retries_on_transient_poll_error
     let env = create_test_env_with_overrides(
         pool.clone(),
         TestEnvOverrides {
-            config: Some(config_with_rack_profiles()),
+            config: Some(Box::new(config_with_rack_profiles())),
             ..Default::default()
         },
     )
@@ -5027,7 +5181,7 @@ async fn test_firmware_completion_enters_profile_driven_nvos_for_default_scope(
     let env = create_test_env_with_overrides(
         pool.clone(),
         TestEnvOverrides {
-            config: Some(config),
+            config: Some(Box::new(config)),
             ..Default::default()
         },
     )
@@ -5176,7 +5330,7 @@ async fn test_profile_driven_nvos_start_retries_fetch_and_uses_noauth(
     let env = create_test_env_with_overrides(
         pool.clone(),
         TestEnvOverrides {
-            config: Some(config),
+            config: Some(Box::new(config)),
             firmware_object_fetcher: Some(firmware_object_fetcher.clone()),
             ..Default::default()
         },
@@ -5356,7 +5510,7 @@ async fn test_explicit_nvos_with_no_selected_switches_cleans_token_and_advances(
     let env = create_test_env_with_overrides(
         pool.clone(),
         TestEnvOverrides {
-            config: Some(config_with_rack_profiles()),
+            config: Some(Box::new(config_with_rack_profiles())),
             firmware_object_fetcher: Some(firmware_object_fetcher.clone()),
             ..Default::default()
         },
@@ -5457,7 +5611,7 @@ async fn test_profile_sot_removal_errors_when_switch_waits_for_nvos(
     let env = create_test_env_with_overrides(
         pool.clone(),
         TestEnvOverrides {
-            config: Some(config_with_rack_profiles()),
+            config: Some(Box::new(config_with_rack_profiles())),
             ..Default::default()
         },
     )
@@ -5548,7 +5702,7 @@ async fn test_nvos_update_start_retries_rejection_with_access_token(
     let env = create_test_env_with_overrides(
         pool.clone(),
         TestEnvOverrides {
-            config: Some(config_with_nmx_cluster_profile()),
+            config: Some(Box::new(config_with_nmx_cluster_profile())),
             ..Default::default()
         },
     )
@@ -5835,7 +5989,7 @@ async fn test_compute_reset_policy_after_nvos(
     let env = create_test_env_with_overrides(
         pool.clone(),
         TestEnvOverrides {
-            config: Some(config_with_rack_profiles()),
+            config: Some(Box::new(config_with_rack_profiles())),
             ..Default::default()
         },
     )
@@ -5990,7 +6144,7 @@ async fn test_nvos_update_recovers_password_after_rms_restart(
     let env = create_test_env_with_overrides(
         pool.clone(),
         TestEnvOverrides {
-            config: Some(config_with_rack_profiles()),
+            config: Some(Box::new(config_with_rack_profiles())),
             ..Default::default()
         },
     )
@@ -6194,7 +6348,7 @@ async fn test_nvos_update_waits_for_all_images_before_failure_and_starts_passwor
     let env = create_test_env_with_overrides(
         pool.clone(),
         TestEnvOverrides {
-            config: Some(config_with_rack_profiles()),
+            config: Some(Box::new(config_with_rack_profiles())),
             ..Default::default()
         },
     )
@@ -6362,7 +6516,7 @@ async fn test_nvos_update_failed_password_recovery_enters_error_without_resubmis
     let env = create_test_env_with_overrides(
         pool.clone(),
         TestEnvOverrides {
-            config: Some(config_with_rack_profiles()),
+            config: Some(Box::new(config_with_rack_profiles())),
             ..Default::default()
         },
     )
@@ -6565,7 +6719,7 @@ async fn create_configure_nmx_cluster_test_rack(
 ) -> Result<(TestEnv, RackId, Vec<SwitchId>), Box<dyn std::error::Error>> {
     overrides
         .config
-        .get_or_insert_with(config_with_nmx_cluster_profile);
+        .get_or_insert_with(|| Box::new(config_with_nmx_cluster_profile()));
 
     let env = create_test_env_with_overrides(pool.clone(), overrides).await;
 
@@ -6884,7 +7038,7 @@ async fn test_configure_nmx_cluster_v1_config_rotates_certificates_through_v2_wo
     let (env, rack_id, switch_ids) = create_configure_nmx_cluster_test_rack(
         &pool,
         TestEnvOverrides {
-            config: Some(config),
+            config: Some(Box::new(config)),
             ..Default::default()
         },
     )
@@ -6936,7 +7090,7 @@ async fn test_configure_nmx_cluster_requires_primary_nvos_credentials_for_teleme
     let (env, rack_id, switch_ids) = create_configure_nmx_cluster_test_rack(
         &pool,
         TestEnvOverrides {
-            config: Some(config),
+            config: Some(Box::new(config)),
             ..Default::default()
         },
     )
@@ -7031,7 +7185,7 @@ async fn test_configure_nmx_cluster_default_binds_primary_telemetry_after_v2(
     let (env, rack_id, switch_ids) = create_configure_nmx_cluster_test_rack(
         &pool,
         TestEnvOverrides {
-            config: Some(config),
+            config: Some(Box::new(config)),
             ..Default::default()
         },
     )
@@ -7939,7 +8093,7 @@ async fn test_configure_nmx_cluster_unknown_profile_stops_before_certificate_sub
     let env = create_test_env_with_overrides(
         pool.clone(),
         TestEnvOverrides {
-            config: Some(config_with_nmx_cluster_profile()),
+            config: Some(Box::new(config_with_nmx_cluster_profile())),
             ..Default::default()
         },
     )
@@ -8963,7 +9117,7 @@ async fn test_error_recovers_while_switch_initializes(
     let env = create_test_env_with_overrides(
         pool.clone(),
         TestEnvOverrides {
-            config: Some(config_with_rack_profiles()),
+            config: Some(Box::new(config_with_rack_profiles())),
             ..Default::default()
         },
     )
@@ -9050,15 +9204,17 @@ fn assert_logged_error_transition(logs: &[CapturedLog], cause: &str) {
     assert_eq!(transitions[0].field("cause"), Some(cause));
 }
 
-async fn get_db_rack<DB>(conn: &mut DB, rack_id: &RackId) -> Rack
+async fn get_db_rack<DB>(conn: &mut DB, rack_id: &RackId) -> Box<Rack>
 where
     for<'db> &'db mut DB: DbReader<'db>,
 {
-    db_rack::find_by(conn, ObjectColumnFilter::One(db_rack::IdColumn, rack_id))
-        .await
-        .unwrap()
-        .pop()
-        .unwrap()
+    Box::new(
+        db_rack::find_by(conn, ObjectColumnFilter::One(db_rack::IdColumn, rack_id))
+            .await
+            .unwrap()
+            .pop()
+            .unwrap(),
+    )
 }
 
 async fn run_rack_handler_and_apply_writes(
@@ -9066,7 +9222,7 @@ async fn run_rack_handler_and_apply_writes(
     pool: &sqlx::PgPool,
     rack_id: &RackId,
     controller_state: RackState,
-) -> Result<Rack, Box<dyn std::error::Error>> {
+) -> Result<Box<Rack>, Box<dyn std::error::Error>> {
     let mut rack = get_db_rack(env.db_reader().as_mut(), rack_id).await;
     let handler = RackStateHandler::default();
     let mut services = env.rack_state_handler_services();
@@ -9104,7 +9260,7 @@ async fn ingestion_restart_removed_targets_workflow(
     let env = create_test_env_with_overrides(
         pool.clone(),
         TestEnvOverrides {
-            config: Some(config_with_rack_profiles()),
+            config: Some(Box::new(config_with_rack_profiles())),
             ..Default::default()
         },
     )
@@ -9243,7 +9399,7 @@ async fn ingestion_restart_saved_targets_workflow(
     let env = create_test_env_with_overrides(
         pool.clone(),
         TestEnvOverrides {
-            config: Some(config_with_rack_profiles()),
+            config: Some(Box::new(config_with_rack_profiles())),
             ..Default::default()
         },
     )

@@ -53,17 +53,23 @@ struct DpfExplorationDeferred {
     bmc_ip: IpAddr,
 }
 
-pub(crate) fn record_deferred(bmc_ip: IpAddr, request: ExplorationRequest) {
-    carbide_instrument::emit(DpfExplorationDeferred { request, bmc_ip });
+pub(crate) fn record_deferred(
+    bmc_ip: IpAddr,
+    request: ExplorationRequest,
+    instrumentation: &carbide_instrument::Instrumentation,
+) {
+    instrumentation.emit(DpfExplorationDeferred { request, bmc_ip });
 }
 
 /// Checks suppression before a manual exploration. DPF suppression records a
-/// deferred-request metric; refresh callers queue the request instead of rejecting it.
+/// deferred-request metric through `instrumentation`; refresh callers queue the request
+/// instead of rejecting it.
 pub async fn check_exploration_allowed(
     conn: &mut PgConnection,
     bmc_ip: IpAddr,
     bmc_mac_address: MacAddress,
     request: ExplorationRequest,
+    instrumentation: &carbide_instrument::Instrumentation,
 ) -> Result<(), EndpointExplorationServiceError> {
     let sources = db::bmc_suppression::find_for_bmc(
         conn,
@@ -72,7 +78,7 @@ pub async fn check_exploration_allowed(
     )
     .await?;
     if sources.contains(&BmcSuppressionSource::DpfProvisioning) {
-        record_deferred(bmc_ip, request);
+        record_deferred(bmc_ip, request, instrumentation);
         return Err(EndpointExplorationServiceError::DpfProvisioning {
             bmc_ip,
             bmc_mac_address,

@@ -122,7 +122,7 @@ async fn vpc_pages_show_status_vni(pool: sqlx::PgPool) {
     assert!(
         response_body(response)
             .await
-            .contains(&format!("<tr><th>VNI</th><td>{vni}</td></tr>"))
+            .contains(&format!("<dt>VNI</dt><dd>{vni}</dd>"))
     );
 
     // Verify the IPAM overlay overview renders status.vni.
@@ -157,6 +157,6 @@ async fn vpc_pages_show_status_vni(pool: sqlx::PgPool) {
     assert!(
         response_body(response)
             .await
-            .contains(&format!("<tr><td>VNI</td><td>{vni}</td></tr>"))
+            .contains(&format!("<dt>VNI</dt><dd>{vni}</dd>"))
     );
 }

@@ -80,7 +80,7 @@ use std::time::Duration;
 
 use axum::body::Body;
 use bytes::Bytes;
-use carbide_instrument::{Event, LabelValue, emit};
+use carbide_instrument::{Event, Instrumentation, LabelValue};
 use http::StatusCode;
 use hyper::body::{Body as HttpBody, Frame, SizeHint};
 use nv_redfish_dispatcher::schedulers::{
@@ -371,6 +371,7 @@ impl Bmc {
 }
 
 pub(super) struct Admission {
+    instrumentation: Instrumentation,
     /// Every class whose requests take slots.
     classes: Vec<SlotClass>,
     max_in_flight_per_bmc: NonZeroUsize,
@@ -391,6 +392,7 @@ impl Admission {
         config: &AdmissionConfig,
         shutdown: CancellationToken,
         join_set: &mut JoinSet<()>,
+        instrumentation: Instrumentation,
     ) -> Arc<Self> {
         let per_bmc = config.max_in_flight_per_bmc;
         let classes: Vec<SlotClass> = classes
@@ -408,6 +410,7 @@ impl Admission {
             })
             .collect();
         let admission = Arc::new(Self {
+            instrumentation,
             max_in_flight_per_bmc: per_bmc.map_or(NonZeroUsize::MAX, |max| {
                 NonZeroUsize::try_from(max).expect("a u32 fits in a usize")
             }),
@@ -451,11 +454,11 @@ impl Admission {
             .wait_for_slot(bmc, index, arrived, deadline, hold_for)
             .await;
         match &granted {
-            Ok(_) => emit(AdmissionGranted {
+            Ok(_) => self.instrumentation.emit(AdmissionGranted {
                 class: class.name.clone(),
                 waited: started.elapsed(),
             }),
-            Err(reason) => emit(AdmissionRefused {
+            Err(reason) => self.instrumentation.emit(AdmissionRefused {
                 class: class.name.clone(),
                 reason: *reason,
             }),
@@ -582,8 +585,13 @@ impl Admission {
     /// The queues of the BMC at `address`, and its runtime started on its
     /// own task.
     fn start_bmc(&self, address: IpAddr) -> Bmc {
-        let (root, queues) =
-            BmcClasses::new(address, &self.classes, self.max_in_flight_per_bmc, self.slo);
+        let (root, queues) = BmcClasses::new(
+            address,
+            &self.classes,
+            self.max_in_flight_per_bmc,
+            self.slo,
+            self.instrumentation.clone(),
+        );
         let others_limit = root.share.as_ref().map(Share::published);
         let runtime = Runtime::new(
             RuntimeConfig {
@@ -736,6 +744,7 @@ async fn drive(mut runtime: Runtime<(), ExchangeFailed, Waiting>, stop: Cancella
 /// polling the classes at the limit, and a breaker opens for its cool-down
 /// from the time it was last polled; it also hides the classes' breakers.
 struct BmcClasses {
+    instrumentation: Instrumentation,
     address: IpAddr,
     /// In the order of [`Admission::classes`].
     classes: Vec<ClassAtBmc>,
@@ -773,6 +782,7 @@ impl BmcClasses {
         classes: &[SlotClass],
         max_in_flight: NonZeroUsize,
         slo: SloConfig,
+        instrumentation: Instrumentation,
     ) -> (Self, Vec<ClassProducer>) {
         let (nodes, queues) = classes
             .iter()
@@ -817,6 +827,7 @@ impl BmcClasses {
             )
         });
         let root = Self {
+            instrumentation,
             address,
             classes: nodes,
             tiers,
@@ -930,7 +941,7 @@ impl Scheduler<Work> for BmcClasses {
                 if let Some(latency) = latency
                     && share.record(index, latency, self.now) == Some(Verdict::Missed)
                 {
-                    emit(SloMissed {
+                    self.instrumentation.emit(SloMissed {
                         class: self.classes[index].name.clone(),
                     });
                 }
@@ -942,7 +953,7 @@ impl Scheduler<Work> for BmcClasses {
         let was_open = matches!(class.node.state(), BreakerState::Open { .. });
         class.node.on_complete(completion);
         if !was_open && matches!(class.node.state(), BreakerState::Open { .. }) {
-            emit(BreakerOpened {
+            self.instrumentation.emit(BreakerOpened {
                 class: class.name.clone(),
                 bmc_ip_address: self.address.to_string(),
             });
@@ -1490,7 +1501,14 @@ mod tests {
                 global_max_in_flight: NonZeroUsize::MIN,
                 clock: ClockConfig::Wallclock,
             },
-            BmcClasses::new(bmc(0), &[], NonZeroUsize::MIN, SloConfig::default()).0,
+            BmcClasses::new(
+                bmc(0),
+                &[],
+                NonZeroUsize::MIN,
+                SloConfig::default(),
+                carbide_instrument::Instrumentation::global(),
+            )
+            .0,
         );
         {
             let mut bmcs = state.admission.bmcs.lock().unwrap();
@@ -1528,6 +1546,7 @@ mod tests {
             &config.admission,
             shutdown.clone(),
             &mut tasks,
+            carbide_instrument::Instrumentation::global(),
         );
         let class = config.classes.classify(&http::Method::GET, METRICS, &[]);
         let acquire = || {

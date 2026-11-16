@@ -249,7 +249,7 @@ kubectl apply -k deploy/kustomize/base/keycloak -n nico-rest
 
 `nico-rest-cert-manager` is the internal PKI microservice (also referred as `credsmgr`). It uses native Go PKI to vend mTLS certificates for components over HTTPS, primarily for dynamic/external entities e.g. Site Agents. When the `site-manager` receives a new site registration, it calls `nico-rest-cert-manager` service to issue the client certificates `site-agent` will use to authenticate. It exposes two ports:
 
-- **8000** (HTTPS) — certificate issuance API
+- **8000** (HTTPS) — authenticated certificate issuance API; see [Certificate issuance authentication](#certificate-issuance-authentication)
 - **8001** (HTTP) — health and liveness endpoint
 
 ### Manifests
@@ -258,7 +258,7 @@ kubectl apply -k deploy/kustomize/base/keycloak -n nico-rest
 |---|---|
 | `base/cert-manager/deployment.yaml` | Deployment `nico-rest-cert-manager` — mounts `ca-signing-secret` |
 | `base/cert-manager/service.yaml` | ClusterIP Service — ports 8000 (https) and 8001 (http) |
-| `base/cert-manager/rbac.yaml` | ServiceAccount only — `credsmgr` never calls the Kubernetes API, so it carries no Role and disables token automount |
+| `base/cert-manager/rbac.yaml` | ServiceAccount with API token mounting disabled; no Kubernetes API permissions |
 
 ### CLI flags (set in `deployment.yaml`)
 
@@ -281,9 +281,9 @@ consults only the certificate's SANs. The manifests pass
 `nico-rest-cert-manager`, `nico-rest-cert-manager.nico-rest`,
 `nico-rest-cert-manager.nico-rest.svc`,
 `nico-rest-cert-manager.nico-rest.svc.cluster.local`, and `localhost`. Deploying
-into a namespace other than `nico-rest` means editing these to match, otherwise
-clients using the namespace-qualified hostname fail verification with
-`no alternative certificate subject name matches target hostname`.
+into a namespace other than `nico-rest` requires updating these names and Site
+Manager's `--creds-manager-url` in `base/site-manager/deployment.yaml` together.
+A client dialing a hostname absent from the SANs fails TLS hostname verification.
 
 ### Apply
 
@@ -501,6 +501,7 @@ kubectl wait --for=condition=complete job/nico-rest-db-migration -n nico-rest --
 |---|---|
 | `base/site-manager/site-crd.yaml` | CRD `sites.forge.nvidia.io` — the `Site` custom resource |
 | `base/site-manager/deployment.yaml` | Deployment `nico-rest-site-manager` |
+| `base/site-manager/client-certificate.yaml` | Separate client-only SPIFFE certificate for issuance admission |
 | `base/site-manager/certificate.yaml` | cert-manager `Certificate` `site-manager-tls` — TLS cert for the HTTPS server |
 | `base/site-manager/rbac.yaml` | ServiceAccount + Role/RoleBinding + ClusterRole/ClusterRoleBinding |
 | `base/site-manager/service.yaml` | ClusterIP Service on port 8100 — DNS: `nico-rest-site-manager.nico-rest` |
@@ -530,7 +531,7 @@ status:
 | `--creds-manager-ca-path` | `/etc/credsmgr-ca/ca.crt` | CA bundle verifying nico-rest-cert-manager (`tls.crt` from `ca-signing-secret`) |
 | `--tls-cert-path` | `/etc/tls/tls.crt` | TLS cert path (from `site-manager-tls` secret) |
 | `--tls-key-path` | `/etc/tls/tls.key` | TLS key path (from `site-manager-tls` secret) |
-| `--namespace` | `nico-rest` | Kubernetes namespace to watch for Site CRs |
+| `--namespace` | Pod namespace | Kubernetes namespace to watch for Site CRs |
 
 Connections to nico-rest-cert-manager are verified, so `--creds-manager-ca-path`
 must point at a readable PEM bundle containing the CA that signed that service's
@@ -538,7 +539,8 @@ listener. Site Manager exits at startup if the file is missing or holds no
 certificates, rather than falling back to an unverified connection.
 
 That bundle is `ca-signing-secret`, the CA nico-rest-cert-manager signs with,
-projected into the pod at `/etc/credsmgr-ca/ca.crt`. Only `tls.crt` is mounted,
+projected into the pod at `/etc/credsmgr-ca/ca.crt`. Helm selects the Secret with
+`nico-rest-site-manager.credsManagerCa.secretName`. Only `tls.crt` is mounted,
 so the signing key stays in the secret. Note that this is deliberately not the
 issuer of Site Manager's own `site-manager-tls` certificate: the two are
 configured independently, and pointing `site-manager-tls` at a different issuer
@@ -596,12 +598,150 @@ picks up the new CA and ignores the trailing old one. `/v1/pki/ca/pem` serves
 the file verbatim, so it returns both certificates while the bundle is in place,
 whereas `/v1/pki/ca` decodes it and returns only the leading one.
 
-Once both have rolled out, re-apply the secret with `new-ca.crt` alone and
-restart both again, in the same order, to drop trust in the old CA.
-Certificates already issued by the old CA stay valid until they expire, so plan
-the second step after the longest `duration` in use. If a short outage is
-acceptable, skip the bundle and restart nico-rest-cert-manager followed by Site
-Manager.
+Before removing the old CA, explicitly renew Site Manager's client
+`Certificate`, `site-manager-client-tls` by default, and verify that its replacement
+chains to the new client CA. Updating the issuer's CA Secret alone does not
+trigger cert-manager.io to reissue existing certificates. Allow the new Secret
+to reach Site Manager and its client certificate to reload before proceeding;
+otherwise `ENFORCE` rejects the old client certificate with HTTP 401.
+
+Replace or wait out every certificate that still depends on the old CA,
+including the 2160-hour client certificate. Then re-apply the Secret with
+`new-ca.crt` alone and restart both deployments in the same order to drop old CA
+trust. A dedicated client CA has its own rotation: overlap its trust bundle in
+REST Cert Manager, restart it, renew the client certificate, and remove the
+old client CA only after the replacement is in use.
+
+### Certificate issuance authentication
+
+REST Cert Manager (`nico-rest-cert-manager`) checks the client certificate and
+exact SPIFFE URI of callers to `POST /v1/pki/cloud-cert`. Its mode determines
+whether a failed check blocks issuance:
+
+- `AUDIT`, the binary and deployment default, logs callers it would reject but
+  still issues their certificates. It supports mixed-version upgrades but
+  **does not protect the endpoint**.
+- `ENFORCE` returns HTTP 401 for missing or invalid client credentials and
+  HTTP 403 for a trusted certificate whose URI is outside the allowlist.
+
+The CA endpoints (`/v1/pki/ca` and `/v1/pki/ca/pem`) and health checks do not
+require a client certificate. Both modes apply the certificate lifetime bounds
+below.
+
+Site Manager uses a separate client-only certificate in `site-manager-client-tls`,
+created by the Helm chart or `base/site-manager/client-certificate.yaml`.
+cert-manager.io issues it for 90 days and renews it 15 days before expiry.
+Site Manager polls the mounted certificate and key every 30 seconds; Kubernetes
+Secret projection adds delay, and new TLS connections use the replacement.
+CA trust changes still require a restart.
+
+#### Turn on enforcement
+
+1. Deploy or upgrade with authorization in `AUDIT`. The umbrella chart rolls
+   both services without ordering guarantees. Wait for the client certificate
+   and both deployments to become ready. For an externally managed client
+   certificate, provision its Secret before upgrading.
+2. Complete a Site Agent credential handshake using a valid, unexpired OTP
+   (`POST /v1/sitecreds`). Creating or registering a Site alone does not request
+   a certificate. Inspect issuance logs from every REST Cert Manager replica
+   over a window that includes this handshake; for the default namespace:
+
+   ```bash
+   kubectl -n nico-rest logs -l app=nico-rest-cert-manager --since=1h --tail=-1 \
+     | grep 'certificate issuance'
+   ```
+
+   Adjust the namespace and time window to your deployment. Require an
+   `authorized caller` entry with Site Manager's configured `service_identity`;
+   no matching log lines is not evidence of success. Investigate every
+   `rejected caller` entry and any unexpected authorized identity before continuing.
+3. Set `CERT_AUTH_MODE=ENFORCE`, or Helm's
+   `nico-rest-cert-manager.authorization.mode: ENFORCE`, and roll out REST Cert
+   Manager again. Enabling it during the initial upgrade rejects older Site
+   Manager pods and can interrupt Site Agent handshakes.
+
+Before rolling back to a release without client authentication, return to
+`AUDIT` and wait for REST Cert Manager's rollout. This avoids rejecting older
+Site Manager pods during a mixed-version or partial rollback.
+
+#### Settings
+
+CLI flags take precedence over environment variables, then binary defaults.
+Helm and Kustomize set the new authentication settings through environment
+variables so older images can ignore them. Helm rejects reserved authentication
+keys in `extraEnv`; use the dedicated values instead.
+
+| Environment variable (CLI flag) | Helm value | Default and behavior |
+|---|---|---|
+| `CERT_AUTH_MODE` (`--authorization-mode`) | `nico-rest-cert-manager.authorization.mode` | `AUDIT`. Set `ENFORCE` to reject unauthorized callers. |
+| `CERT_AUTH_ALLOWED_IDENTITIES` (`--allowed-identities`) | `nico-rest-cert-manager.authorization.allowedIdentities` | Site Manager's ID in Helm and Kustomize, empty in the binary. `ENFORCE` won't start with an empty list. |
+| `CERT_AUTH_CLIENT_CA_FILE` (`--client-ca-file`) | `nico-rest-cert-manager.authorization.clientCaSecretName` or `nico-rest-cert-manager.authorization.clientCaFile` | Empty trusts the effective signing CA. The Secret option mounts `ca.crt` at `/etc/pki/client-ca/ca.crt`; the path option reads an existing mount. Set only one. |
+| `CREDS_MANAGER_CLIENT_CERT_PATH` / `CREDS_MANAGER_CLIENT_KEY_PATH` (`--creds-manager-client-cert-path` / `--creds-manager-client-key-path`) | `nico-rest-site-manager.clientCertificate.secretName` | Helm and Kustomize mount `/etc/credsmgr-client/tls.crt` and `/etc/credsmgr-client/tls.key` from `site-manager-client-tls`. The binary defaults to neither, which only works with `AUDIT` or an older REST Cert Manager. |
+
+Modes must be uppercase `AUDIT` or `ENFORCE`; surrounding whitespace is ignored.
+Identities must be exact, unique SPIFFE URIs with a nonempty path, without
+wildcards. Helm takes a list; repeat the CLI flag or comma-separate the flag or
+environment value. Invalid modes or identities prevent startup. Set both client
+certificate paths or neither; a partial, unreadable, or invalid pair prevents
+Site Manager from starting.
+
+Helm generates the client URI as
+`spiffe://<global.spiffe.trustDomain>/<namespace>/sa/<service-account>`; the trust
+domain defaults to `nico.local`. `nico-rest-site-manager.clientCertificate.spiffeID`
+overrides that URI. It must match REST Cert Manager's allowlist; the umbrella
+chart rejects a mismatch when both subcharts are enabled. Kustomize uses
+`spiffe://nico.local/nico-rest/sa/nico-rest-site-manager`; change both
+`base/site-manager/client-certificate.yaml` and `base/cert-manager/deployment.yaml`
+when changing the namespace or identity.
+
+Under `nico-rest-site-manager.clientCertificate`, `duration` defaults to `2160h`,
+`renewBefore` to `360h`, and `enabled` to `true`. `issuerRef` overrides the client
+certificate issuer only; an empty map uses `global.certificate.issuerRef`.
+An override replaces the whole reference rather than merging with the global one.
+Set its `name`, `kind`, and `group` to select a dedicated client issuer without
+changing the serving or Temporal certificate issuers. With `enabled: false`,
+provision the required Secret yourself: it needs `tls.crt` and `tls.key`, client-auth usage, exactly one
+allowed SPIFFE URI, and a chain to REST Cert Manager's trusted client CA.
+
+Site Manager requires an HTTPS `--creds-manager-url` and connects to it
+directly. It doesn't follow redirects or use proxy environment variables.
+
+#### Trust and certificate lifetimes
+
+The client certificate issuer must match REST Cert Manager's trusted client
+CA. With Helm, set `nico-rest-site-manager.clientCertificate.issuerRef` and
+either the client CA Secret or an already mounted PEM bundle above. When the signing CA is
+external, such as Vault, use these client CA settings to trust the client issuer
+independently of the signing CA. A missing Secret or `ca.crt` key prevents the
+pod from starting. Restart REST Cert Manager after changing its
+client CA bundle, and Site Manager after changing its server CA bundle. Follow
+the CA rotation procedure above before dropping an old CA.
+
+With Kustomize, change `spec.issuerRef` in
+`base/site-manager/client-certificate.yaml`. In `base/cert-manager/deployment.yaml`,
+mount the client CA bundle and set `CERT_AUTH_CLIENT_CA_FILE` to its path.
+
+The default cert-manager.io installation auto-approves requests to the
+`nico-rest-ca-issuer` ClusterIssuer, so anyone able to request certificates from
+it can request Site Manager's URI and other identities signed by that CA.
+Restrict issuance with
+[approval policy](https://cert-manager.io/docs/policy/approval/). A dedicated
+client CA with restricted issuance isolates this endpoint, but does not prevent
+an unrestricted ClusterIssuer from issuing Site Agent or Temporal certificates
+directly. A namespaced Issuer sharing the same CA does not close that path.
+Certificates issued by REST Cert Manager have DNS identities and no SPIFFE URI,
+so they cannot pass this identity check.
+
+The request's `ttl` is an integer number of hours; zero or omission selects
+2160 hours (90 days). Requests with a nonempty `app`, including Site Agent
+credentials, accept 1 to 2160 hours. Other requests accept 1 to 8760 hours
+(365 days). Values outside these ranges return HTTP 400. These limits do not
+revoke existing certificates.
+
+REST Cert Manager's serving certificate lasts one year and renews on the first
+TLS handshake within seven days of expiry. Failed renewals retain an unexpired
+certificate and retry on a handshake after one hour; expired certificates are
+rejected until renewal succeeds.
 
 ### Apply
 
@@ -982,7 +1122,7 @@ kubectl kustomize --load-restrictor LoadRestrictionsNone \
 
 | Overlay | What it deploys |
 |---|---|
-| `overlays/cert-manager` | `nico-rest-cert-manager` Deployment + Service + ServiceAccount |
+| `overlays/cert-manager` | `nico-rest-cert-manager` Deployment + Service + ServiceAccount without API token mounting |
 | `overlays/api` | `nico-rest-api` Deployment + Services + ConfigMap |
 | `overlays/workflow` | `nico-rest-cloud-worker` + `nico-rest-site-worker` Deployments + ConfigMap |
 | `overlays/site-manager` | `nico-rest-site-manager` Deployment + Service + Certificate + RBAC |

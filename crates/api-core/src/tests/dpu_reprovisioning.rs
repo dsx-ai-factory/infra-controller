@@ -139,7 +139,7 @@ async fn assert_dpu_reprovision_host_boot_repair<ID>(
     env: &TestEnv,
     machine: &TestMachine<ID>,
     expected_states: Vec<ManagedHostState>,
-) -> Machine<ID>
+) -> Box<Machine<ID>>
 where
     ID: MachineIdSubtypeTrait,
     db::DatabaseError: From<<ID as TryFrom<MachineId>>::Error>,
@@ -1322,8 +1322,24 @@ async fn assert_reprov_tenant_state(
     );
 }
 
-#[crate::sqlx_test]
-async fn test_instance_reprov_without_firmware_upgrade(pool: sqlx::PgPool) {
+#[test]
+fn test_instance_reprov_without_firmware_upgrade() {
+    let args = sqlx::testing::TestArgs::new(concat!(
+        module_path!(),
+        "::test_instance_reprov_without_firmware_upgrade"
+    ));
+    let test_fn: fn(sqlx::PgPool) -> _ = instance_reprov_without_firmware_upgrade;
+    // Match Core's worker stack: driving the machine state handler through
+    // reprovisioning in a debug build exceeds libtest's default.
+    std::thread::Builder::new()
+        .stack_size(8 * 1024 * 1024)
+        .spawn(move || sqlx_testing::TestFn::run_test(test_fn, args))
+        .unwrap()
+        .join()
+        .expect("instance reprovisioning test panicked");
+}
+
+async fn instance_reprov_without_firmware_upgrade(pool: sqlx::PgPool) {
     let env = create_test_env(pool).await;
     let segment_id = env.create_vpc_and_tenant_segment().await;
     let mh = create_managed_host(&env).await;
@@ -1691,7 +1707,7 @@ async fn test_reboot_no_retry_during_firmware_update(pool: sqlx::PgPool) {
 
     let last_reboot_requested_time = dpu.status.last_reboot_requested.as_ref();
 
-    let handler = MachineStateHandlerBuilder::builder()
+    let handler = MachineStateHandlerBuilder::builder(env.api.instrumentation.clone())
         .hardware_models(env.config.get_firmware_config())
         .dpu_up_threshold(chrono::Duration::minutes(5))
         .dpu_nic_firmware_initial_update_enabled(true)

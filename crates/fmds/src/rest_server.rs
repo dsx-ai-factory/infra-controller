@@ -23,7 +23,7 @@ use axum::http::header::HeaderMap;
 use axum::http::{StatusCode, Uri};
 use axum::response::Response;
 use axum::routing::{get, post};
-use forge_dpu_fmds_shared::machine_identity;
+use carbide_dpu_fmds_shared::machine_identity;
 
 use crate::state::FmdsState;
 
@@ -386,8 +386,8 @@ mod tests {
     use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
 
     use axum::http;
+    use carbide_dpu_fmds_shared::machine_identity::MachineIdentityParams;
     use carbide_instrument::testing::MetricsCapture;
-    use forge_dpu_fmds_shared::machine_identity::MachineIdentityParams;
     use http_body_util::{BodyExt, Full};
     use hyper::body::Bytes;
     use hyper_util::rt::TokioExecutor;
@@ -396,7 +396,14 @@ mod tests {
     use crate::state::{FmdsConfig, IBDeviceConfig, IBInstanceConfig};
 
     fn make_test_state() -> Arc<FmdsState> {
-        Arc::new(FmdsState::try_new("https://api.test".to_string(), None).unwrap())
+        Arc::new(
+            FmdsState::try_new(
+                "https://api.test".to_string(),
+                None,
+                carbide_instrument::Instrumentation::global(),
+            )
+            .unwrap(),
+        )
     }
 
     fn make_test_config() -> FmdsConfig {

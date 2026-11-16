@@ -19,6 +19,7 @@
 
 use std::time::Duration;
 
+use carbide_instrument::Instrumentation;
 use carbide_mqtt_common::hook::{MqttPublisher, QueuedMessage, process_events};
 use carbide_mqtt_common::metrics::{MqttHookMetrics, PublishComponent};
 use carbide_uuid::machine::HostMachineId;
@@ -52,6 +53,7 @@ impl MqttStateChangeHook {
     /// publisher task. Publish outcomes feed
     /// `carbide_dsx_event_bus_publish_count_total`; queue occupancy remains in
     /// `carbide_dsx_event_bus_queue_depth`.
+    #[allow(clippy::too_many_arguments)] // Runtime dependencies and queue settings are supplied at startup.
     pub(crate) fn new<P: MqttPublisher>(
         client: P,
         join_set: &mut JoinSet<()>,
@@ -60,10 +62,15 @@ impl MqttStateChangeHook {
         queue_capacity: usize,
         meter: &Meter,
         cancel_token: CancellationToken,
+        instrumentation: Instrumentation,
     ) -> Self {
         let (sender, receiver) = mpsc::channel(queue_capacity);
-        let metrics =
-            MqttHookMetrics::new(meter, sender.downgrade(), PublishComponent::ManagedHost);
+        let metrics = MqttHookMetrics::new(
+            meter,
+            sender.downgrade(),
+            PublishComponent::ManagedHost,
+            instrumentation,
+        );
         join_set.spawn(process_events(
             receiver,
             client,
@@ -122,14 +129,9 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     use mqttea::MqtteaClientError;
-    use opentelemetry::global;
     use tokio::sync::Barrier;
 
     use super::*;
-
-    fn test_meter() -> opentelemetry::metrics::Meter {
-        global::meter("test")
-    }
 
     fn test_machine_id() -> HostMachineId {
         use carbide_uuid::machine::{MachineIdSource, MachineType};
@@ -182,14 +184,16 @@ mod tests {
         let (publisher, mut receiver) = SignalingPublisher::new();
         let mut join_set = JoinSet::new();
         let cancel_token = CancellationToken::new();
+        let test_meter = carbide_utils::test_support::test_meter::TestMeter::default();
         let hook = MqttStateChangeHook::new(
             publisher,
             &mut join_set,
             Duration::from_secs(1),
             "NICO/v1/machine".to_string(),
             16,
-            &test_meter(),
+            &test_meter.meter(),
             cancel_token.clone(),
+            Instrumentation::new(test_meter.meter()),
         );
 
         let id = test_machine_id();
@@ -242,14 +246,16 @@ mod tests {
 
         let mut join_set = JoinSet::new();
         let cancel_token = CancellationToken::new();
+        let test_meter = carbide_utils::test_support::test_meter::TestMeter::default();
         let hook = MqttStateChangeHook::new(
             publisher,
             &mut join_set,
             Duration::from_millis(1),
             "NICO/v1/machine".to_string(),
             16,
-            &test_meter(),
+            &test_meter.meter(),
             cancel_token.clone(),
+            Instrumentation::new(test_meter.meter()),
         );
 
         let id = test_machine_id();
@@ -294,14 +300,16 @@ mod tests {
 
         let mut join_set = JoinSet::new();
         let cancel_token = CancellationToken::new();
+        let test_meter = carbide_utils::test_support::test_meter::TestMeter::default();
         let hook = MqttStateChangeHook::new(
             publisher,
             &mut join_set,
             Duration::from_secs(10),
             "NICO/v1/machine".to_string(),
             QUEUE_SIZE,
-            &test_meter(),
+            &test_meter.meter(),
             cancel_token.clone(),
+            Instrumentation::new(test_meter.meter()),
         );
 
         let id = test_machine_id();
@@ -336,14 +344,16 @@ mod tests {
         let (publisher, mut receiver) = SignalingPublisher::new();
         let mut join_set = JoinSet::new();
         let cancel_token = CancellationToken::new();
+        let test_meter = carbide_utils::test_support::test_meter::TestMeter::default();
         let hook = MqttStateChangeHook::new(
             publisher,
             &mut join_set,
             Duration::from_secs(1),
             "custom/prefix".to_string(),
             16,
-            &test_meter(),
+            &test_meter.meter(),
             cancel_token.clone(),
+            Instrumentation::new(test_meter.meter()),
         );
 
         let id = test_machine_id();

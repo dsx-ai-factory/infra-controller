@@ -26,6 +26,7 @@ use carbide_uuid::machine::MachineId;
 use carbide_uuid::power_shelf::PowerShelfId;
 use carbide_uuid::rack::RackId;
 use carbide_uuid::switch::SwitchId;
+use chrono::{DateTime, Utc};
 use hyper::http::StatusCode;
 use rpc::forge::forge_server::Forge;
 use rpc::forge::{
@@ -47,10 +48,78 @@ struct StateHistory {
     history: StateHistoryTable,
 }
 
+/// State history, newest record first.
 #[derive(Template)]
 #[template(path = "state_history_table.html")]
 pub(super) struct StateHistoryTable {
     pub(super) records: Vec<StateHistoryRecord>,
+}
+
+/// One state history record prepared for display.
+struct StateHistoryEntry<'a> {
+    record: &'a StateHistoryRecord,
+    entered_at: String,
+    duration: String,
+    is_current: bool,
+}
+
+impl StateHistoryTable {
+    fn entries(&self) -> Vec<StateHistoryEntry<'_>> {
+        let entered_at: Vec<_> = self
+            .records
+            .iter()
+            .map(|record| {
+                record
+                    .version
+                    .parse::<::config_version::ConfigVersion>()
+                    .ok()
+                    .map(|version| version.timestamp())
+            })
+            .collect();
+        let durations = history_durations(&entered_at);
+        self.records
+            .iter()
+            .zip(entered_at)
+            .zip(durations)
+            .enumerate()
+            .map(
+                |(index, ((record, entered_at), duration))| StateHistoryEntry {
+                    record,
+                    entered_at: entered_at
+                        .map(format_history_time)
+                        .unwrap_or_else(|| record.version.clone()),
+                    duration,
+                    is_current: index == 0,
+                },
+            )
+            .collect()
+    }
+}
+
+/// How long each newest-first record lasted: until the next newer record, or
+/// until now for the newest. Empty where a time is unknown.
+pub(super) fn history_durations(entered_at: &[Option<DateTime<Utc>>]) -> Vec<String> {
+    entered_at
+        .iter()
+        .enumerate()
+        .map(|(index, start)| {
+            let end = if index == 0 {
+                Some(Utc::now())
+            } else {
+                entered_at[index - 1]
+            };
+            match (start, end) {
+                (Some(start), Some(end)) if end >= *start => {
+                    ::config_version::format_duration(end - *start)
+                }
+                _ => String::new(),
+            }
+        })
+        .collect()
+}
+
+pub(super) fn format_history_time(time: DateTime<Utc>) -> String {
+    time.format("%Y-%m-%d %H:%M:%S UTC").to_string()
 }
 
 #[derive(Debug, serde::Serialize)]

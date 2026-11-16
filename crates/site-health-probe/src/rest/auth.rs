@@ -69,14 +69,17 @@ impl Auth {
     /// Builds the identity a validated config names.
     pub(crate) fn new(creds: &config::RestCredentials, client: reqwest::Client) -> Self {
         if creds.token_file.is_empty() {
-            Auth::ClientCredentials(TokenSource::new(
+            let mut source = TokenSource::new(
                 ClientCredentials {
                     token_url: creds.token_url.clone(),
                     client_id: creds.client_id.clone(),
                     client_secret_path: creds.client_secret_path.clone(),
                 },
                 client,
-            ))
+            );
+            source.credentials_file = (!creds.credentials_file.is_empty())
+                .then(|| PathBuf::from(&creds.credentials_file));
+            Auth::ClientCredentials(source)
         } else {
             Auth::TokenFile(PathBuf::from(&creds.token_file))
         }
@@ -113,6 +116,7 @@ impl Auth {
 /// refresh (rotation-safe). Tokens and secrets are never logged.
 pub(crate) struct TokenSource {
     auth: ClientCredentials,
+    credentials_file: Option<PathBuf>,
     client: reqwest::Client,
     // Held only for cache reads and writes, never across an await. Two
     // overlapping refreshes would both hit the token endpoint; the last one
@@ -138,6 +142,7 @@ impl TokenSource {
     pub(crate) fn new(auth: ClientCredentials, client: reqwest::Client) -> Self {
         Self {
             auth,
+            credentials_file: None,
             client,
             cached: std::sync::Mutex::new(None),
         }
@@ -151,12 +156,48 @@ impl TokenSource {
             return Ok(cached);
         }
 
-        let secret = tokio::fs::read_to_string(&self.auth.client_secret_path)
-            .await
-            .map_err(|e| CallError::Transport(format!("read client secret: {e}")))?;
+        let (id, secret) = if let Some(path) = &self.credentials_file {
+            use tokio::io::AsyncReadExt;
+            #[derive(serde::Deserialize)]
+            #[serde(rename_all = "camelCase", deny_unknown_fields)]
+            struct Identity {
+                client_id: String,
+                client_secret: String,
+            }
+            let metadata = tokio::fs::metadata(path)
+                .await
+                .map_err(|_| CallError::Transport("credential file unavailable".into()))?;
+            if !metadata.is_file() || metadata.len() > 16384 {
+                return Err(CallError::Decode(
+                    "credential file must be regular and bounded".into(),
+                ));
+            }
+            let file = tokio::fs::File::open(path)
+                .await
+                .map_err(|_| CallError::Transport("credential file unavailable".into()))?;
+            let mut bytes = Vec::new();
+            file.take(16385)
+                .read_to_end(&mut bytes)
+                .await
+                .map_err(|_| CallError::Transport("credential file unreadable".into()))?;
+            if bytes.len() > 16384 {
+                return Err(CallError::Decode("credential file too large".into()));
+            }
+            let value: Identity = serde_json::from_slice(&bytes)
+                .map_err(|_| CallError::Decode("credential file invalid".into()))?;
+            if value.client_id.is_empty() || value.client_secret.is_empty() {
+                return Err(CallError::Decode("credential file empty".into()));
+            }
+            (value.client_id, value.client_secret)
+        } else {
+            let secret = tokio::fs::read_to_string(&self.auth.client_secret_path)
+                .await
+                .map_err(|e| CallError::Transport(format!("read client secret: {e}")))?;
+            (self.auth.client_id.clone(), secret)
+        };
         let form = url::form_urlencoded::Serializer::new(String::new())
             .append_pair("grant_type", "client_credentials")
-            .append_pair("client_id", &self.auth.client_id)
+            .append_pair("client_id", &id)
             .append_pair("client_secret", secret.trim())
             .finish();
         let response = self
@@ -244,6 +285,7 @@ mod tests {
     #[derive(Default)]
     struct FakeIdp {
         token_status: AtomicU16,
+        token_body: std::sync::Mutex<String>,
         token_requests: AtomicU32,
         api_requests: AtomicU32,
     }
@@ -260,8 +302,11 @@ mod tests {
                 "/token",
                 post(|State(idp): State<Arc<FakeIdp>>| async move {
                     idp.token_requests.fetch_add(1, Ordering::SeqCst);
-                    axum::http::StatusCode::from_u16(idp.token_status.load(Ordering::SeqCst))
-                        .expect("valid status")
+                    (
+                        axum::http::StatusCode::from_u16(idp.token_status.load(Ordering::SeqCst))
+                            .expect("valid status"),
+                        idp.token_body.lock().unwrap().clone(),
+                    )
                 }),
             )
             .route(
@@ -385,5 +430,25 @@ mod tests {
             client,
         );
         assert!(matches!(from_keycloak, Auth::ClientCredentials(_)));
+    }
+    #[tokio::test]
+    async fn atomic_identity_file_is_reread_without_leaking_credentials() {
+        let (idp, client, mut auth, secret) = idp_with(200).await;
+        *idp.token_body.lock().unwrap() = r#"{"access_token":"token","expires_in":300}"#.into();
+        std::fs::write(
+            secret.path(),
+            r#"{"clientId":"probe","clientSecret":"secret-value"}"#,
+        )
+        .unwrap();
+        if let Auth::ClientCredentials(source) = &mut auth {
+            source.credentials_file = Some(secret.path().into());
+        }
+        get_machines(&client, &auth).await.unwrap();
+        assert_eq!(idp.token_requests.load(Ordering::SeqCst), 1);
+        auth.rejected();
+        std::fs::write(secret.path(), "secret-value-invalid-json").unwrap();
+        let error = get_machines(&client, &auth).await.unwrap_err();
+        assert!(!error.to_string().contains("secret-value"));
+        assert_eq!(idp.token_requests.load(Ordering::SeqCst), 1);
     }
 }

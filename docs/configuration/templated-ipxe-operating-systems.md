@@ -263,17 +263,19 @@ the template requires multiple occurrences.
 NICo does not provide the process that downloads artifacts into a Site-local
 cache and populates `cachedUrl`. To use `CachedOnly`, operators must provide an
 external process that downloads each artifact and records its Site-local URL
-through Core's cache-management API. Without that process, a definition that
-contains a `CachedOnly` artifact cannot become ready or render its iPXE script.
+through Core's cache-management API. An uncached `CachedOnly` artifact keeps
+the definition from becoming ready. Rendering also fails if the template
+requires that artifact.
 
 Artifact `authToken` values are accepted on create and update but are
 structurally omitted from REST API responses. Treat them as write-only
 credentials.
 
 The per-Site `cachedUrl` value is managed by NICo Core and is not stored or
-returned by NICo REST. Core's cache-management gRPC operations are the only
-supported way to set or clear it. A `CachedOnly` artifact without a cached URL
-keeps the Core definition from becoming ready.
+returned by NICo REST. Core's cache-management gRPC operations set or explicitly
+clear it. Definition changes also clear cached URLs, as described in
+[Update a Definition](#update-a-definition). A `CachedOnly` artifact without a
+cached URL keeps the Core definition from becoming ready.
 
 ### Populate `CachedOnly` Artifacts
 
@@ -449,7 +451,40 @@ Instance workflow.
 Update only the fields that should change. Omitted fields retain their current
 values. Supplying a parameter or artifact array replaces the complete
 corresponding list; an explicit empty array clears it if the resulting
-definition remains valid. Save the update body:
+definition remains valid.
+
+Cache preservation on unchanged updates depends on the
+[Operating System cache update fix](https://github.com/dsx-ai-factory/infra-controller/pull/8825).
+Before relying on it, check a disposable definition: populate its cached URLs,
+change only its `description`, then inspect its cached URLs using the
+[cache-management procedure](#populate-cachedonly-artifacts). If the URLs were
+cleared, plan to repopulate them after every update on that build.
+
+Core preserves cached URLs when the incoming template, parameter list, and
+artifact list exactly match its stored values, excluding cached URLs.
+Changes to other fields, such as `name`, `description`, or `userData`, preserve
+the cache. Core also preserves it when correcting only a stored definition hash.
+
+Changing the template or either list clears every cached URL. This includes
+reordering entries, changing name capitalization, and changing any artifact
+field: `name`, `url`, `sha`, `authType`, `authToken`, or `cacheStrategy`.
+Core sets the definition's `status` to `PROVISIONING` while any `CachedOnly`
+artifact lacks a cached URL. Otherwise, it sets `READY`. Inspect that status
+with the `operating-system show` command in the cache-management procedure.
+`CacheAsNeeded` artifacts fall back to their supplied `url` until new cached
+URLs are recorded.
+
+Definition updates cannot set cached URLs, even when Core's
+`UpdateOperatingSystem` request includes `cached_url`. Use the cache-management
+operations to set or explicitly clear them.
+
+Before changing the template or either list, ensure the cache process cannot
+publish downloads from the previous definition afterward. Core matches cache
+updates by artifact name and occurrence; it does not check the definition
+version or source URL.
+
+Save the update body. This example changes `kernel_params`, so it clears cached
+URLs:
 
 ```bash
 cat > templated-os-update.json <<'EOF'
@@ -540,8 +575,8 @@ When Core reports a previously unknown Operating System:
 | Missing or reserved parameter error | Compare the request with `requiredParams` and `reservedParams` from `ipxe-template get`. |
 | Missing artifact error | Supply every occurrence in `requiredArtifacts`; names are matched case-insensitively. |
 | Operating System is not synchronized to the Instance's Site | Wait for the Site association to become `Synced`, or create the definition for the Instance's Site. |
-| Definition remains non-ready with `CachedOnly` | NICo does not populate the cache. Provide an external process that downloads every `CachedOnly` artifact and records its Site-local URL through Core's cache-management API, or use another strategy. |
-| `authToken` is absent from GET responses | This is intentional redaction. Submit a replacement token on update when credentials rotate. |
+| Definition remains non-ready with `CachedOnly` | NICo does not populate the cache. Changes to the template, parameter list, or artifact list clear cached URLs. [Populate the cache](#populate-cachedonly-artifacts) through an external process, or use another strategy. |
+| `authToken` is absent from GET responses | This is intentional redaction. Submit a replacement token on update when credentials rotate. Changing the token clears cached URLs; [populate them again](#populate-cachedonly-artifacts) afterward. |
 | Tenant cannot select a provider-owned definition | Confirm the definition is associated and `Synced` with the Instance's Site and that the Tenant has access to that Site. |
 
 Use `nicocli --debug` to inspect REST requests and responses, and inspect the

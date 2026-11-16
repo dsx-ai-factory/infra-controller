@@ -30,6 +30,7 @@ pub(crate) const FAMILIES: [Family; 3] = [
 // unavailable, never a truncated census. There is no snapshot across REST pages.
 const MAX_ROWS: usize = 200_000;
 const MAX_BYTES: usize = 64 << 20;
+const MAX_SCANS: usize = 3;
 
 pub(crate) struct Fixture {
     pub config: TenantAccount,
@@ -70,22 +71,32 @@ struct Machine {
     labels: BTreeMap<String, String>,
     is_usable_by_tenant: bool,
     status: String,
+    #[serde(default, deserialize_with = "nullable_capabilities")]
+    machine_capabilities: Vec<carbide_site_health_probe_api::MachineCapability>,
+}
+fn nullable_capabilities<'de, D: serde::Deserializer<'de>>(
+    d: D,
+) -> Result<Vec<carbide_site_health_probe_api::MachineCapability>, D::Error> {
+    Ok(
+        Option::<Vec<carbide_site_health_probe_api::MachineCapability>>::deserialize(d)?
+            .unwrap_or_default(),
+    )
 }
 fn nullable_labels<'de, D: serde::Deserializer<'de>>(
     d: D,
 ) -> Result<BTreeMap<String, String>, D::Error> {
     Ok(Option::<BTreeMap<String, String>>::deserialize(d)?.unwrap_or_default())
 }
-fn invalid() -> Failure {
-    Failure::unresolved(
-        "REST fixture identity, paging or allocation evidence is incomplete".to_string(),
-    )
+fn invalid(why: impl std::fmt::Display) -> Failure {
+    Failure::unresolved(format!("REST fixture evidence is incomplete: {why}"))
 }
 
 // Shared capped pagination checks identity, totals and exact page lengths.
+// REST recounts per request, so a growing list changes the total mid-scan.
+// The scan then restarts from page 1, and a mixed scan is never returned.
 // REST owns collation. Matching totals cannot prove a transactional snapshot,
 // so the runner must require settled repeated agreement before clearing work.
-async fn pages<T: DeserializeOwned>(
+pub(super) async fn pages<T: DeserializeOwned>(
     client: &RestClient,
     rec: &ObservationRecorder,
     auth: &Auth,
@@ -94,6 +105,26 @@ async fn pages<T: DeserializeOwned>(
     path: &str,
     id: fn(&T) -> &str,
 ) -> Result<Vec<T>, Failure> {
+    for _ in 0..MAX_SCANS {
+        if let Some(rows) = scan(client, rec, auth, org, site, path, id).await? {
+            return Ok(rows);
+        }
+    }
+    Err(Failure::unresolved(format!(
+        "REST {path} total changed during paging"
+    )))
+}
+
+/// One scan from page 1, or `None` when the total changed under it.
+async fn scan<T: DeserializeOwned>(
+    client: &RestClient,
+    rec: &ObservationRecorder,
+    auth: &Auth,
+    org: &str,
+    site: &str,
+    path: &str,
+    id: fn(&T) -> &str,
+) -> Result<Option<Vec<T>>, Failure> {
     let mut rows = Vec::new();
     let mut ids = BTreeSet::new();
     let mut total = None;
@@ -105,51 +136,61 @@ async fn pages<T: DeserializeOwned>(
                 "fixture_page",
                 auth,
                 org,
-                &[path],
-                &[
-                    ("siteId", site.to_string()),
-                    ("pageSize", "100".into()),
-                    ("pageNumber", page.to_string()),
-                    (
-                        "orderBy",
-                        if path == "instance" {
-                            "NAME_ASC".into()
-                        } else {
-                            "ID_ASC".into()
-                        },
-                    ),
-                ],
+                &path.split('/').collect::<Vec<_>>(),
+                &{
+                    let mut query = vec![
+                        ("siteId", site.to_string()),
+                        ("pageSize", "100".into()),
+                        ("pageNumber", page.to_string()),
+                    ];
+                    if path == "machine" || path == "instance" {
+                        query.push((
+                            "orderBy",
+                            if path == "instance" {
+                                "NAME_ASC".into()
+                            } else {
+                                "ID_ASC".into()
+                            },
+                        ));
+                    }
+                    query
+                },
             )
             .await
             .map_err(|e| Failure::call("fixture_page", &e))?;
         bytes += reply.body.len();
         if bytes > MAX_BYTES {
-            return Err(invalid());
+            return Err(invalid("pages over the byte cap"));
         }
         let n = pagination_total(&reply).map_err(|e| Failure::call("fixture_page", &e))?;
-        if n > MAX_ROWS as u64 || total.is_some_and(|old| old != n) {
-            return Err(invalid());
+        if n > MAX_ROWS as u64 {
+            return Err(invalid("total over the row cap"));
+        }
+        if total.is_some_and(|old| old != n) {
+            return Ok(None);
         }
         total = Some(n);
         let batch: Vec<T> = reply
             .json()
             .map_err(|e| Failure::call("fixture_page", &e))?;
-        let remaining = (n as usize).checked_sub(rows.len()).ok_or_else(invalid)?;
+        let remaining = (n as usize)
+            .checked_sub(rows.len())
+            .ok_or_else(|| invalid("more rows than the total"))?;
         if batch.len() != remaining.min(100) {
-            return Err(invalid());
+            return Err(invalid(format_args!("page {page} has the wrong length")));
         }
         for row in &batch {
             let key = id(row);
             if key.is_empty() || !ids.insert(key.to_string()) {
-                return Err(invalid());
+                return Err(invalid("empty or duplicate id"));
             }
         }
         rows.extend(batch);
         if rows.len() == n as usize {
-            return Ok(rows);
+            return Ok(Some(rows));
         }
     }
-    Err(invalid())
+    Err(invalid("paging did not complete"))
 }
 
 fn unit(id: String, kind: UnitType, status: String) -> Unit {
@@ -188,7 +229,7 @@ impl Fixture {
         previous.insert(family, data.units.clone());
         data
     }
-    async fn instances(
+    pub(super) async fn instances(
         &self,
         client: &RestClient,
         rec: &ObservationRecorder,
@@ -207,7 +248,7 @@ impl Fixture {
         let mut out = Vec::with_capacity(rows.len());
         for r in rows {
             if r.site_id != site || r.tenant_id != self.config.tenant_id || r.name.is_empty() {
-                return Err(invalid());
+                return Err(invalid("instance site, tenant or name mismatch"));
             }
             let mut u = unit(r.id, UnitType::Instance, r.status.clone());
             // REST's id and controllerInstanceId may differ. Keep both for reconciliation.
@@ -224,7 +265,7 @@ impl Fixture {
         }
         Ok(self.build(Family::RestInstances, out))
     }
-    async fn machines(
+    pub(super) async fn machines(
         &self,
         client: &RestClient,
         rec: &ObservationRecorder,
@@ -249,7 +290,7 @@ impl Fixture {
                 || r.controller_machine_id.is_empty()
                 || !controllers.insert(r.controller_machine_id.clone())
             {
-                return Err(invalid());
+                return Err(invalid("machine site or controller id mismatch"));
             }
             let mut u = unit(r.id, UnitType::Host, r.status);
             u.rest_machine = Some(RestMachineFields {
@@ -259,6 +300,7 @@ impl Fixture {
                 tenant_id: r.tenant_id,
                 labels: r.labels,
                 is_usable_by_tenant: r.is_usable_by_tenant,
+                machine_capabilities: r.machine_capabilities,
             });
             out.push(u);
         }
@@ -291,8 +333,17 @@ impl Fixture {
             .json()
             .map_err(|e| Failure::call("fixture_tenant", &e))?;
         if t.id != self.config.tenant_id || t.org != self.config.org {
-            return Err(invalid());
+            return Err(invalid("tenant mismatch"));
         }
+        self.allocation_for_site(client, rec, site, provider).await
+    }
+    pub(super) async fn allocation_for_site(
+        &self,
+        client: &RestClient,
+        rec: &ObservationRecorder,
+        site: &str,
+        provider: &str,
+    ) -> Result<TenantAllocation, Failure> {
         #[derive(Deserialize)]
         #[serde(rename_all = "camelCase")]
         struct Stats {
@@ -346,10 +397,10 @@ impl Fixture {
             || a.total - a.used != a.unused
             || a.unused_usable > a.unused
         {
-            return Err(invalid());
+            return Err(invalid("allocation mismatch"));
         }
         Ok(TenantAllocation {
-            tenant: t.id,
+            tenant: self.config.tenant_id.clone(),
             instance_type: r.id,
             assigned: a.assigned,
             total: a.total,
@@ -457,7 +508,6 @@ mod tests {
             "missing labels",
             "null labels",
             "wrong site",
-            "changing total",
         ] {
             let rest = FakeRest::start().await;
             let mut rows: Vec<_> = (0..101).map(machine).collect();
@@ -481,10 +531,6 @@ mod tests {
                     101
                 },
             );
-            if case == "changing total" {
-                rows.push(machine(101));
-                rest.set_total("machine?pageNumber=2", 102);
-            }
             rest.set_pages("machine", rows.chunks(100).map(|c| c.to_vec()).collect());
             let out = fixture(&rest)
                 .machines(
@@ -511,6 +557,50 @@ mod tests {
                 assert!(out.is_err(), "{case}");
             }
         }
+    }
+
+    // REST recounts per request, so the total can change while a scan runs.
+    // Each of the first `changes` scans sees it change on page 2 and restarts.
+    async fn machines_with_changing_total(changes: usize) -> (Result<UnitsData, Failure>, usize) {
+        let rest = FakeRest::start().await;
+        let rows: Vec<_> = (0..102).map(machine).collect();
+        rest.set_total("machine", 102);
+        for _ in 0..changes {
+            rest.queue_total("machine?pageNumber=2", 103);
+        }
+        rest.set_pages("machine", rows.chunks(100).map(|c| c.to_vec()).collect());
+        let out = fixture(&rest)
+            .machines(
+                &rest.client(),
+                &ObservationRecorder::default(),
+                "site-1",
+                &rest.auth(),
+                "provider-org",
+            )
+            .await;
+        let scans = rest
+            .requests()
+            .iter()
+            .filter(|(_, _, q)| q.contains("pageNumber=1&"))
+            .count();
+        (out, scans)
+    }
+
+    #[tokio::test]
+    async fn changed_total_restarts_the_scan_from_page_one() {
+        let (out, scans) = machines_with_changing_total(1).await;
+        assert_eq!(out.unwrap().units.len(), 102);
+        assert_eq!(scans, 2);
+    }
+
+    #[tokio::test]
+    async fn total_that_keeps_changing_fails_after_three_scans() {
+        let (out, scans) = machines_with_changing_total(3).await;
+        assert_eq!(
+            out.unwrap_err().error,
+            "REST machine total changed during paging"
+        );
+        assert_eq!(scans, 3);
     }
 
     // The REST API sends null (or "") until the site controller reconciles

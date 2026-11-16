@@ -20,7 +20,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 use std::{fmt, io};
 
-use carbide_instrument::Event;
+use carbide_instrument::{Event, Instrumentation};
 use carbide_utils::metrics::SharedMetricsHolder;
 use carbide_utils::periodic_timer::PeriodicTimer;
 use carbide_uuid::machine::MachineId;
@@ -616,6 +616,7 @@ pub(crate) struct SwitchCertificateMonitor {
     config: NvLinkConfig,
     component_manager: Option<Arc<ComponentManager>>,
     metric_holder: Arc<MetricHolder>,
+    instrumentation: Instrumentation,
     work_lock_manager_handle: WorkLockManagerHandle,
     unchanged_rotations: UnchangedRotationTracker,
 }
@@ -626,6 +627,7 @@ pub struct SwitchCertificateMonitor {
     config: NvLinkConfig,
     component_manager: Option<Arc<ComponentManager>>,
     metric_holder: Arc<MetricHolder>,
+    instrumentation: Instrumentation,
     work_lock_manager_handle: WorkLockManagerHandle,
     unchanged_rotations: UnchangedRotationTracker,
 }
@@ -696,6 +698,7 @@ impl SwitchCertificateMonitor {
         config: NvLinkConfig,
         component_manager: Option<Arc<ComponentManager>>,
         work_lock_manager_handle: WorkLockManagerHandle,
+        instrumentation: Instrumentation,
     ) -> Self {
         Self::new_inner(
             db_pool,
@@ -703,9 +706,11 @@ impl SwitchCertificateMonitor {
             config,
             component_manager,
             work_lock_manager_handle,
+            instrumentation,
         )
     }
 
+    /// Creates a switch certificate monitor with the supplied Event instrumentation.
     #[cfg(feature = "test-support")]
     pub fn new(
         db_pool: PgPool,
@@ -713,6 +718,7 @@ impl SwitchCertificateMonitor {
         config: NvLinkConfig,
         component_manager: Option<Arc<ComponentManager>>,
         work_lock_manager_handle: WorkLockManagerHandle,
+        instrumentation: Instrumentation,
     ) -> Self {
         Self::new_inner(
             db_pool,
@@ -720,6 +726,7 @@ impl SwitchCertificateMonitor {
             config,
             component_manager,
             work_lock_manager_handle,
+            instrumentation,
         )
     }
 
@@ -729,6 +736,7 @@ impl SwitchCertificateMonitor {
         config: NvLinkConfig,
         component_manager: Option<Arc<ComponentManager>>,
         work_lock_manager_handle: WorkLockManagerHandle,
+        instrumentation: Instrumentation,
     ) -> Self {
         let hold_period = config
             .nmx_c_certificate_rotation
@@ -740,6 +748,7 @@ impl SwitchCertificateMonitor {
             config,
             component_manager,
             metric_holder,
+            instrumentation,
             work_lock_manager_handle,
             unchanged_rotations: UnchangedRotationTracker::default(),
         }
@@ -807,7 +816,7 @@ impl SwitchCertificateMonitor {
         switch_cert_monitor_span.record("metrics", metrics.to_string());
         let iteration_result = make_result(&metrics);
         switch_cert_monitor_span.in_scope(|| {
-            carbide_instrument::emit(match result.as_ref().err() {
+            self.instrumentation.emit(match result.as_ref().err() {
                 None => SwitchCertificateMonitorIterationFinished::Succeeded {
                     latency_ms: metrics.recording_started_at.elapsed().as_millis() as f64,
                 },

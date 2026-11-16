@@ -197,6 +197,8 @@ pub(crate) struct RestCredentials {
     pub client_secret_path: String,
     /// A bearer token re-read from this file on every call.
     pub token_file: String,
+    /// Atomic JSON credentials, mounted in memory by the owning runner.
+    pub credentials_file: String,
 }
 
 /// The provider org identity reads site-wide totals.
@@ -230,6 +232,15 @@ pub(crate) struct RestStateConfig {
     /// Skips the machine, rack and tray totals (family `rest_totals`), for a
     /// site whose REST API cannot answer them in time.
     pub skip_totals: bool,
+    pub fixture: Option<FixtureConfig>,
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct FixtureConfig {
+    pub name: String,
+    pub tenant_org: String,
+    pub auth: RestCredentials,
 }
 
 /// One reader's schedule. A sweep may outlast its interval: the next tick is
@@ -558,6 +569,20 @@ impl StateConfig {
                 errs.push("state.rest.provider.org is required".to_string());
             }
             validate_credentials("state.rest.provider.auth", &rest.provider.auth, errs);
+            if let Some(f) = &rest.fixture {
+                if rest.tenant.is_some()
+                    || f.name.is_empty()
+                    || f.name.len() > 40
+                    || f.tenant_org.is_empty()
+                    || f.tenant_org == rest.provider.org
+                {
+                    errs.push(
+                        "state.rest.fixture needs a name, distinct tenant org and no static tenant"
+                            .into(),
+                    );
+                }
+                validate_credentials("state.rest.fixture.auth", &f.auth, errs);
+            }
             if let Some(t) = &rest.tenant {
                 if t.org.is_empty()
                     || t.org == rest.provider.org
@@ -631,6 +656,18 @@ impl StateMetricsConfig {
 
 /// A REST identity is either client credentials or a token file, never both.
 fn validate_credentials(key: &str, auth: &RestCredentials, errs: &mut Vec<String>) {
+    if !auth.credentials_file.is_empty() {
+        if !auth.token_file.is_empty()
+            || !auth.client_id.is_empty()
+            || !auth.client_secret_path.is_empty()
+            || !is_https_url(&auth.token_url)
+        {
+            errs.push(format!(
+                "{key} requires a canonical token URL and only credentials_file"
+            ));
+        }
+        return;
+    }
     let client = [&auth.token_url, &auth.client_id, &auth.client_secret_path];
     if !auth.token_file.is_empty() {
         if client.iter().any(|field| !field.is_empty()) {

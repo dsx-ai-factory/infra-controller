@@ -332,6 +332,12 @@ type APIHostLifecycleProfile struct {
 	// DisableLockdown, when true, skips locking down the server during host
 	// lifecycle management. When omitted, the existing value is preserved.
 	DisableLockdown *bool `json:"disableLockdown"`
+	// RetainHBNConfigOnBoot, when true, designates the machine to retain HBN
+	// config on boot even if NICo is unavailable. The
+	// machine must declare a DPU BMC and a DPU OS interface, and the host BMC
+	// and both DPU interfaces must then use a fixed or retained IP allocation. When
+	// omitted, the existing value is preserved.
+	RetainHBNConfigOnBoot *bool `json:"retainHbnConfigOnBoot"`
 }
 
 // ToDBModel converts the API profile into its DB model form. A nil receiver
@@ -340,7 +346,10 @@ func (p *APIHostLifecycleProfile) ToDBModel() cdbm.HostLifecycleProfile {
 	if p == nil {
 		return cdbm.HostLifecycleProfile{}
 	}
-	return cdbm.HostLifecycleProfile{DisableLockdown: p.DisableLockdown}
+	return cdbm.HostLifecycleProfile{
+		DisableLockdown:       p.DisableLockdown,
+		RetainHBNConfigOnBoot: p.RetainHBNConfigOnBoot,
+	}
 }
 
 // ToDBModelPtr converts the API profile into a DB model pointer, returning nil
@@ -359,10 +368,13 @@ func (p *APIHostLifecycleProfile) ToDBModelPtr() *cdbm.HostLifecycleProfile {
 // NewAPIHostLifecycleProfile builds the API profile from its DB model form,
 // returning nil when no setting is present so the field is omitted in responses.
 func NewAPIHostLifecycleProfile(p cdbm.HostLifecycleProfile) *APIHostLifecycleProfile {
-	if p.DisableLockdown == nil {
+	if !p.HasSetFields() {
 		return nil
 	}
-	return &APIHostLifecycleProfile{DisableLockdown: p.DisableLockdown}
+	return &APIHostLifecycleProfile{
+		DisableLockdown:       p.DisableLockdown,
+		RetainHBNConfigOnBoot: p.RetainHBNConfigOnBoot,
+	}
 }
 
 // APIExpectedMachineCreateRequest is the data structure to capture instance request to create a new ExpectedMachine
@@ -434,13 +446,13 @@ func (emcr *APIExpectedMachineCreateRequest) Validate() error {
 			validation.Required.Error(validationErrorValueRequired),
 			validationis.MAC),
 		validation.Field(&emcr.DefaultBmcUsername,
-			validation.Length(0, 16).Error("BMC username must be 16 characters or less")),
+			validation.RuneLength(0, 16).Error("BMC username must be 16 characters or less")),
 		validation.Field(&emcr.DefaultBmcPassword,
-			validation.Length(0, 20).Error("BMC password must be 20 characters or less")),
+			validation.RuneLength(0, 20).Error("BMC password must be 20 characters or less")),
 		validation.Field(&emcr.ChassisSerialNumber,
 			validation.Required.Error(validationErrorValueRequired),
 			validation.Match(util.NotAllWhitespaceRegexp).Error("Chassis serial number consists only of whitespace"),
-			validation.Length(1, 32).Error("Chassis serial number must be 32 characters or less")),
+			validation.RuneLength(1, 32).Error("Chassis serial number must be 32 characters or less")),
 		validation.Field(&emcr.SkuID,
 			validation.NilOrNotEmpty.Error("SkuID cannot be empty")),
 		validation.Field(&emcr.RackID,
@@ -562,17 +574,17 @@ func (emur *APIExpectedMachineUpdateRequest) Validate() error {
 			validation.NilOrNotEmpty.Error("BMC Username cannot be empty"),
 			validation.When(emur.DefaultBmcUsername != nil && *emur.DefaultBmcUsername != "",
 				validation.Match(util.NotAllWhitespaceRegexp).Error("BMC Username consists only of whitespace")),
-			validation.Length(1, 16).Error("BMC Username must be 1-16 characters")),
+			validation.RuneLength(1, 16).Error("BMC Username must be 1-16 characters")),
 		validation.Field(&emur.DefaultBmcPassword,
 			validation.NilOrNotEmpty.Error("BMC Password cannot be empty"),
 			validation.When(emur.DefaultBmcPassword != nil && *emur.DefaultBmcPassword != "",
 				validation.Match(util.NotAllWhitespaceRegexp).Error("BMC Password consists only of whitespace")),
-			validation.Length(1, 20).Error("BMC Password must be 1-20 characters")),
+			validation.RuneLength(1, 20).Error("BMC Password must be 1-20 characters")),
 		validation.Field(&emur.ChassisSerialNumber,
 			validation.NilOrNotEmpty.Error("Chassis Serial Number cannot be empty"),
 			validation.When(emur.ChassisSerialNumber != nil && *emur.ChassisSerialNumber != "",
 				validation.Match(util.NotAllWhitespaceRegexp).Error("Chassis Serial Number consists only of whitespace")),
-			validation.Length(1, 32).Error("Chassis Serial Number must be 1-32 characters")),
+			validation.RuneLength(1, 32).Error("Chassis Serial Number must be 1-32 characters")),
 		validation.Field(&emur.SkuID,
 			validation.NilOrNotEmpty.Error("SkuID cannot be empty")),
 		validation.Field(&emur.RackID,
@@ -647,6 +659,7 @@ func (emur *APIExpectedMachineUpdateRequest) ToProto(entity *cdbm.ExpectedMachin
 			util.ExpectedComponentUpdateField{Path: "server_name", Present: emur.ServerName != nil},
 			util.ExpectedComponentUpdateField{Path: "is_dpf_enabled", Present: emur.IsDpfEnabled != nil},
 			util.ExpectedComponentUpdateField{Path: "host_lifecycle_profile.disable_lockdown", Present: emur.HostLifecycleProfile != nil && emur.HostLifecycleProfile.DisableLockdown != nil},
+			util.ExpectedComponentUpdateField{Path: "host_lifecycle_profile.retain_hbn_config_on_boot", Present: emur.HostLifecycleProfile != nil && emur.HostLifecycleProfile.RetainHBNConfigOnBoot != nil},
 		),
 	}
 }

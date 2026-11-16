@@ -4,7 +4,7 @@
 
 ## NAME
 
-nico-admin-cli-sku-bulk-update-metadata - Update multiple SKUs metadata
+nico-admin-cli-sku-bulk-update-metadata - Update multiple SKU's metadata
 from a file
 
 ## SYNOPSIS
@@ -16,7 +16,7 @@ nico-admin-cli sku bulk-update-metadata [--extended]
 
 ## DESCRIPTION
 
-Update multiple SKUs metadata from a file
+Update multiple SKU's metadata from a file
 
 ## OPTIONS
 
@@ -40,7 +40,7 @@ Sort output by specified field
 
 `-h, --help`
 
-Print help (see a summary with -h)
+Print help (see a summary with '-h')
 
 `<FILENAME>`
 

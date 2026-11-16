@@ -13,12 +13,12 @@ use tower_http::classify::GrpcFailureClass;
 use tower_http::trace::TraceLayer;
 use tracing::Span;
 
-use crate::forge_tls_client::TransportError;
+use crate::carbide_tls_client::TransportError;
 
 /// Trace each HTTP/2 request, including connection probes, under its own client
 /// span. TraceLayer keeps it alive through response trailers, so a gRPC failure
 /// after HTTP 200 is still reported as an error. Connection tasks stay detached
-/// by ForgeTlsClient's executor.
+/// by CarbideTlsClient's executor.
 pub(crate) fn traced_transport<S, B>(
     service: S,
     timeout: Duration,

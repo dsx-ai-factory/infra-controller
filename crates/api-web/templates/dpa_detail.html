@@ -1,27 +1,61 @@
-{% extends "base.html" %}
+{% extends "detail_base.html" %}
 
-{% block title %}DPA Detail{% endblock %}
+{% block title %}DPA {{ dpa.id|option_fmt }}{% endblock %}
+{% block entity_label %}DPA{% endblock %}
+{% block entity_id %}{{ dpa.id|option_fmt }}{% endblock %}
 
-{% block content %}
-<div id="json"><a id="json-link" href="">JSON</a></div>
-<h1>DPA Detail</h1>
+{% block detail_content %}
+<section class="entity-summary">
+	<div class="entity-summary-groups">
+		<div class="entity-summary-group">
+			<h4>Interface</h4>
+			<dl>
+				<dt>Machine</dt>
+				<dd>{% if let Some(machine_id) = dpa.machine_id %}{{ machine_id|machine_id_link|safe }}{% else %}<span class="text-muted">None</span>{% endif %}</dd>
+				<dt>MAC Address</dt>
+				<dd><code class="mac">{{ dpa.mac_addr }}</code></dd>
+				<dt>Underlay IP</dt>
+				<dd>{{ dpa.underlay_ip }}</dd>
+				<dt>Overlay IP</dt>
+				<dd>{{ dpa.overlay_ip }}</dd>
+			</dl>
+		</div>
+		<div class="entity-summary-group">
+			<h4>Timestamps</h4>
+			<dl>
+				<dt>Created</dt>
+				<dd>{{ dpa.created|option_fmt }}</dd>
+				<dt>Updated</dt>
+				<dd>{{ dpa.updated|option_fmt }}</dd>
+				<dt>Deleted</dt>
+				<dd>{% if dpa.deleted.is_some() %}{{ dpa.deleted|option_fmt }}{% else %}<span class="text-muted">Not deleted</span>{% endif %}</dd>
+			</dl>
+		</div>
+	</div>
+</section>
 
-<table class="detailsview">
-	<tr><th>ID</th><td>{{ dpa.id|option_fmt }}</td></tr>
-	<tr><th>Machine ID</th><td>{{ dpa.machine_id|option_fmt }}</td></tr>
-	<tr><th>MacAddr</th><td>{{ dpa.mac_addr }}</td></tr>
-	<tr><th>Created</th><td>{{ dpa.created|option_fmt }}</td></tr>
-	<tr><th>Updated</th><td>{{ dpa.updated|option_fmt }}</td></tr>
-	<tr><th>Deleted</th><td>{{ dpa.deleted|option_fmt }}</td></tr>
-	<tr><th>State</th><td>{{ dpa.controller_state }}</td></tr>
-	<tr><th>Underlay IP</th><td>{{ dpa.underlay_ip }}</td></tr>
-	<tr><th>Overlay IP</th><td>{{ dpa.overlay_ip }}</td></tr>
-	<tr><th>State Version</th><td>{{ dpa.controller_state_version }}</td></tr>
-	<tr><th>Network Config</th><td>{{ dpa.network_config }}</td></tr>
-	<tr><th>Network Config Version</th><td>{{ dpa.network_config_version }}</td></tr>
-</table>
+<h2>State</h2>
+<section class="entity-summary">
+	<div class="entity-summary-groups">
+		<div class="entity-summary-group">
+			<dl>
+				<dt>State Version</dt>
+				<dd>{{ dpa.controller_state_version }}</dd>
+				<dt>Network Config Version</dt>
+				<dd>{{ dpa.network_config_version }}</dd>
+			</dl>
+		</div>
+	</div>
+	<div class="entity-summary-table">
+		<h4>Controller State</h4>
+		<pre class="entity-summary-pre"><code>{{ dpa.controller_state }}</code></pre>
+	</div>
+	<div class="entity-summary-table">
+		<h4>Network Config</h4>
+		<pre class="entity-summary-pre"><code>{{ dpa.network_config }}</code></pre>
+	</div>
+</section>
 
-<h3>History</h3>
+<h2>State History</h2>
 {{ history|safe }}
-
 {% endblock %}

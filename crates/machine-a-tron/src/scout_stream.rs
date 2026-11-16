@@ -19,13 +19,13 @@ use std::future::Future;
 use std::time::Duration;
 
 use carbide_uuid::machine::MachineId;
+use rpc::carbide_tls_client::{ApiConfig, CarbideClientConfig};
 use rpc::forge::{
     ScoutStreamAgentPingResponse, ScoutStreamApiBoundMessage, ScoutStreamInitRequest,
     scout_stream_agent_ping_response, scout_stream_api_bound_message,
     scout_stream_scout_bound_message,
 };
-use rpc::forge_tls_client::{ApiConfig, ForgeClientConfig};
-use rpc::protos::forge_api_client::ForgeApiClient;
+use rpc::protos::carbide_api_client::CarbideApiClient;
 use rpc::protos::mlx_device::{
     MlxDeviceConfigCompareResponse, MlxDeviceConfigQueryResponse, MlxDeviceConfigSetResponse,
     MlxDeviceConfigSyncResponse, MlxDeviceInfoDeviceResponse, MlxDeviceInfoReportResponse,
@@ -67,7 +67,7 @@ impl Handle {
     pub(super) fn start(
         machine_id: MachineId,
         api_endpoint: String,
-        client_config: ForgeClientConfig,
+        client_config: CarbideClientConfig,
         reconnect_interval: Duration,
     ) -> Self {
         let cancellation = CancellationToken::new();
@@ -96,7 +96,7 @@ impl Drop for Handle {
 async fn run(
     machine_id: MachineId,
     api_endpoint: String,
-    client_config: ForgeClientConfig,
+    client_config: CarbideClientConfig,
     reconnect_interval: Duration,
     cancellation: CancellationToken,
 ) {
@@ -163,13 +163,13 @@ async fn supervise<Connect, Connection>(
 async fn run_connection(
     machine_id: MachineId,
     api_endpoint: &str,
-    client_config: &ForgeClientConfig,
+    client_config: &CarbideClientConfig,
     cancellation: &CancellationToken,
 ) -> Result<(), Error> {
     // A fresh wrapper and underlying HTTP/2 channel per connection model the
     // independent process and transport lifecycle of each simulated Scout.
     let api_config = ApiConfig::new(api_endpoint, client_config);
-    let mut client = ForgeApiClient::new(&api_config).connection().await?;
+    let mut client = CarbideApiClient::new(&api_config).connection().await?;
     let (tx, rx) = mpsc::channel(STREAM_CHANNEL_CAPACITY);
     tx.send(ScoutStreamApiBoundMessage {
         flow_uuid: None,

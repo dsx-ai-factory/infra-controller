@@ -27,10 +27,31 @@ func TestAPIExpectedSwitchCreateRequest_Validate(t *testing.T) {
 	validPassword := "password123"
 
 	tests := []struct {
-		desc      string
-		obj       APIExpectedSwitchCreateRequest
-		expectErr bool
+		desc          string
+		obj           APIExpectedSwitchCreateRequest
+		expectErr     bool
+		expectedError string
 	}{
+		{
+			desc: "SwitchSerialNumber with 32 multibyte characters",
+			obj: APIExpectedSwitchCreateRequest{
+				BmcMacAddress:      "00:11:22:33:44:55",
+				SwitchSerialNumber: strings.Repeat("é", 32),
+				SiteID:             "550e8400-e29b-41d4-a716-446655440000",
+				NvosInterfaces:     APINvosInterfaces{{MacAddress: "02:00:00:00:10:01"}},
+			},
+		},
+		{
+			desc: "SwitchSerialNumber with 33 multibyte characters",
+			obj: APIExpectedSwitchCreateRequest{
+				BmcMacAddress:      "00:11:22:33:44:55",
+				SwitchSerialNumber: strings.Repeat("é", 33),
+				SiteID:             "550e8400-e29b-41d4-a716-446655440000",
+				NvosInterfaces:     APINvosInterfaces{{MacAddress: "02:00:00:00:10:01"}},
+			},
+			expectErr:     true,
+			expectedError: "switchSerialNumber: Switch serial number must be 32 characters or less.",
+		},
 		{
 			desc: "ok when all required fields are provided",
 			obj: APIExpectedSwitchCreateRequest{
@@ -532,6 +553,9 @@ func TestAPIExpectedSwitchCreateRequest_Validate(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.desc, func(t *testing.T) {
 			err := tc.obj.Validate()
+			if tc.expectedError != "" {
+				assert.EqualError(t, err, tc.expectedError)
+			}
 			assert.Equal(t, tc.expectErr, err != nil)
 			if err != nil {
 				fmt.Println(err.Error())
@@ -674,10 +698,25 @@ func TestAPIExpectedSwitchUpdateRequest_Validate(t *testing.T) {
 	validPassword := "password123"
 
 	tests := []struct {
-		desc      string
-		obj       APIExpectedSwitchUpdateRequest
-		expectErr bool
+		desc          string
+		obj           APIExpectedSwitchUpdateRequest
+		expectErr     bool
+		expectedError string
 	}{
+		{
+			desc: "SwitchSerialNumber with 32 multibyte characters",
+			obj: APIExpectedSwitchUpdateRequest{
+				SwitchSerialNumber: cutil.GetPtr(strings.Repeat("é", 32)),
+			},
+		},
+		{
+			desc: "SwitchSerialNumber with 33 multibyte characters",
+			obj: APIExpectedSwitchUpdateRequest{
+				SwitchSerialNumber: cutil.GetPtr(strings.Repeat("é", 33)),
+			},
+			expectErr:     true,
+			expectedError: "switchSerialNumber: Switch Serial Number must be 1-32 characters.",
+		},
 		{
 			desc:      "empty NVOS pair",
 			obj:       APIExpectedSwitchUpdateRequest{NvOsUsername: cutil.GetPtr(""), NvOsPassword: cutil.GetPtr("")},
@@ -966,6 +1005,9 @@ func TestAPIExpectedSwitchUpdateRequest_Validate(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.desc, func(t *testing.T) {
 			err := tc.obj.Validate()
+			if tc.expectedError != "" {
+				assert.EqualError(t, err, tc.expectedError)
+			}
 			assert.Equal(t, tc.expectErr, err != nil)
 			if err != nil {
 				fmt.Println(err.Error())

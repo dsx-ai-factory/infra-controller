@@ -66,6 +66,7 @@ fn machine(id: Uuid, suffix: u8) -> forge::ExpectedMachine {
         dpu_mode: Some(forge::DpuMode::NicMode as i32),
         host_lifecycle_profile: Some(forge::HostLifecycleProfile {
             disable_lockdown: Some(true),
+            retain_hbn_config_on_boot: None,
         }),
         host_nics: vec![
             forge::ExpectedInterface {
@@ -273,6 +274,7 @@ async fn patch_expected_machine_preserves_unselected_fields(pool: PgPool) {
                 dpu_mode: Some(forge::DpuMode::NoDpu as i32),
                 host_lifecycle_profile: Some(forge::HostLifecycleProfile {
                     disable_lockdown: Some(false),
+                    retain_hbn_config_on_boot: None,
                 }),
                 ..Default::default()
             }),
@@ -294,7 +296,30 @@ async fn patch_expected_machine_preserves_unselected_fields(pool: PgPool) {
     expected["default_pause_ingestion_and_poweron"] = json!(false);
     expected["bmc_retain_credentials"] = json!(false);
     expected["dpu_mode"] = json!("no_dpu");
-    expected["host_lifecycle_profile"] = json!({"disable_lockdown": false});
+    // The profile is one JSONB column, so an unselected sibling is still
+    // serialized; it stays null rather than being dropped from the object.
+    expected["host_lifecycle_profile"] =
+        json!({"disable_lockdown": false, "retain_hbn_config_on_boot": null});
+    assert_eq!(machine_row(&env.pool, id).await, expected);
+
+    // Selecting one nested profile path must not disturb the other, which is
+    // the failure mode a shared JSONB column invites.
+    env.api
+        .patch_expected_machine(Request::new(forge::PatchExpectedMachineRequest {
+            expected_machine: Some(forge::ExpectedMachine {
+                id: rpc_id(id),
+                host_lifecycle_profile: Some(forge::HostLifecycleProfile {
+                    disable_lockdown: None,
+                    retain_hbn_config_on_boot: Some(false),
+                }),
+                ..Default::default()
+            }),
+            update_mask: mask(&["host_lifecycle_profile.retain_hbn_config_on_boot"]),
+        }))
+        .await
+        .unwrap();
+    expected["host_lifecycle_profile"] =
+        json!({"disable_lockdown": false, "retain_hbn_config_on_boot": false});
     assert_eq!(machine_row(&env.pool, id).await, expected);
 
     env.api
@@ -601,6 +626,101 @@ async fn patch_expected_machine_dpu_loopback_reservation_restore_owned(pool: PgP
     assert_eq!(
         reservations_of(&env, id).await,
         vec![reservation("02:00:00:00:00:01", "192.0.2.30")]
+    );
+}
+
+/// The designation rule is enforced on the patch path, not only on insert, and
+/// a rejected patch leaves the stored row untouched. The fixture declares no
+/// `dpu_bmc`, so the declaration requirement rejects the patch before the
+/// allocation rule runs.
+#[crate::sqlx_test]
+async fn patch_rejects_retain_hbn_config_on_boot_designation_without_a_declared_dpu_bmc(
+    pool: PgPool,
+) {
+    let env = create_test_env(pool).await;
+    let id = Uuid::new_v4();
+    env.api
+        .add_expected_machine(Request::new(machine(id, 1)))
+        .await
+        .unwrap();
+    let before = machine_row(&env.pool, id).await;
+
+    let error = env
+        .api
+        .patch_expected_machine(Request::new(forge::PatchExpectedMachineRequest {
+            expected_machine: Some(forge::ExpectedMachine {
+                id: rpc_id(id),
+                host_lifecycle_profile: Some(forge::HostLifecycleProfile {
+                    disable_lockdown: None,
+                    retain_hbn_config_on_boot: Some(true),
+                }),
+                ..Default::default()
+            }),
+            update_mask: mask(&["host_lifecycle_profile.retain_hbn_config_on_boot"]),
+        }))
+        .await
+        .expect_err("an undeclared DPU BMC must reject the designation");
+
+    assert_eq!(error.code(), tonic::Code::InvalidArgument, "{error}");
+    assert!(
+        error.message().contains("must declare a dpu_bmc interface"),
+        "the declaration requirement must be the reason: {error}"
+    );
+    assert_eq!(
+        machine_row(&env.pool, id).await,
+        before,
+        "a rejected patch must not change the stored row"
+    );
+}
+
+/// With both DPU roles declared, the patch reaches the allocation rule, which
+/// rejects the dynamic `dpu_os` the fixture carries. This keeps the two
+/// criteria distinguishable, because both answer `InvalidArgument`.
+#[crate::sqlx_test]
+async fn patch_rejects_retain_hbn_config_on_boot_designation_with_a_dynamic_declared_dpu(
+    pool: PgPool,
+) {
+    let env = create_test_env(pool).await;
+    let id = Uuid::new_v4();
+    let mut declared = machine(id, 2);
+    declared.host_nics.push(forge::ExpectedInterface {
+        mac_address: Some("02:00:00:02:59:02".to_string()),
+        role: Some(forge::ExpectedInterfaceRole::DpuBmc as i32),
+        ip_allocation: Some(forge::ExpectedInterfaceIpAllocation::Retained as i32),
+        ..Default::default()
+    });
+    env.api
+        .add_expected_machine(Request::new(declared))
+        .await
+        .unwrap();
+    let before = machine_row(&env.pool, id).await;
+
+    let error = env
+        .api
+        .patch_expected_machine(Request::new(forge::PatchExpectedMachineRequest {
+            expected_machine: Some(forge::ExpectedMachine {
+                id: rpc_id(id),
+                host_lifecycle_profile: Some(forge::HostLifecycleProfile {
+                    disable_lockdown: None,
+                    retain_hbn_config_on_boot: Some(true),
+                }),
+                ..Default::default()
+            }),
+            update_mask: mask(&["host_lifecycle_profile.retain_hbn_config_on_boot"]),
+        }))
+        .await
+        .expect_err("a dynamic DPU OS interface must reject the designation");
+
+    assert_eq!(error.code(), tonic::Code::InvalidArgument, "{error}");
+    let message = error.message();
+    assert!(
+        message.contains("dpu_os") && message.contains("not dynamic"),
+        "the allocation rule must be the reason: {error}"
+    );
+    assert_eq!(
+        machine_row(&env.pool, id).await,
+        before,
+        "a rejected patch must not change the stored row"
     );
 }
 

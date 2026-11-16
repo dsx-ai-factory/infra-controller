@@ -35,10 +35,9 @@ pub(crate) async fn update_expected_rack_group(
     api: &Api,
     request: Request<rpc::ExpectedRackGroup>,
 ) -> Result<Response<()>, Status> {
-    let group: ExpectedRackGroup = request
-        .into_inner()
-        .try_into()
-        .map_err(CarbideError::from)?;
+    let group =
+        ::rpc::model::expected_rack_group::updated_expected_rack_group(request.into_inner())
+            .map_err(CarbideError::from)?;
     let mut txn = api.txn_begin().await?;
     db_expected_rack_group::update(&mut txn, &group)
         .await

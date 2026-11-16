@@ -19,12 +19,12 @@ use std::net::IpAddr;
 use std::str::FromStr;
 
 use ::rpc::forge as rpc;
-use carbide_instrument::emit;
 use lazy_static::lazy_static;
 use mac_address::MacAddress;
 use model::expected_machine::{
-    BmcIpAllocationType, DpuLoopbackReservation, ExpectedInterface, ExpectedMachine,
-    ExpectedMachineData, ExpectedMachineRequest, HostDpuPolicy, LegacyHostBmcOverrides,
+    BmcIpAllocationType, DpuLoopbackReservation, ExpectedInterface, ExpectedInterfaceIpAllocation,
+    ExpectedInterfaceRole, ExpectedMachine, ExpectedMachineData, ExpectedMachineRequest,
+    HostDpuPolicy, LegacyHostBmcOverrides,
 };
 use model::resource_pool::ResourcePool;
 use model::resource_pool::common::CommonPools;
@@ -37,10 +37,8 @@ use crate::handlers::expected_component_patch::{
     ExpectedComponent, UpdateField, UpdateMask, parse_bmc_ip, required_id, required_value,
     validate_bmc_mac, validate_single_interface_address,
 };
-use crate::handlers::machine_interface_address::update_preallocated_expected_machine_interface;
-use crate::handlers::static_address_metrics::{
-    PreallocationSuccess, StaticAddressPreallocationCompleted,
-};
+use crate::handlers::interface_preallocator::InterfacePreallocator;
+use crate::handlers::static_address_metrics::PreallocationSuccess;
 
 lazy_static! {
     // Keep the maximum at 32 to match `expected_machines.serial_number`.
@@ -187,7 +185,79 @@ fn validate_expected_machine_for_insert(machine: &ExpectedMachine) -> Result<(),
         .validate(machine.data.bmc_ip_address.is_some())
         .map_err(|msg| CarbideError::InvalidArgument(msg.to_string()))?;
     validate_fixed_addresses(&machine.data)?;
+    validate_retain_hbn_config_on_boot_designation(machine)?;
 
+    Ok(())
+}
+
+/// Validate retain-hbn-config-on-boot configuration rules.
+///
+/// A machine with a retain-hbn-config-on-boot is meant to be able to perform
+/// a full power cycle while NICo, including its DHCP service, is entirely offline. A control-plane machine must complete a full power-on cycle while the
+/// Therefore, the host BMC, and DPU BMC, and BMC must all be configured as
+/// `Fixed` or `Retained` interfaces.
+///
+/// The Host BMC is judged through `effective_host_bmc`, because
+/// `normalize_host_bmc` deliberately leaves a legacy-only declaration in the
+/// compatibility columns instead of `interfaces`.
+fn validate_retain_hbn_config_on_boot_designation(
+    machine: &ExpectedMachine,
+) -> Result<(), CarbideError> {
+    if machine
+        .data
+        .host_lifecycle_profile
+        .retain_hbn_config_on_boot
+        != Some(true)
+    {
+        return Ok(());
+    }
+
+    let host_bmc = machine.effective_host_bmc();
+    if host_bmc.resolved_ip_allocation() == ExpectedInterfaceIpAllocation::Dynamic {
+        return Err(CarbideError::InvalidArgument(format!(
+            "host bmc {}: a control-plane machine requires a fixed or retained \
+             ip_allocation on every {} interface, not dynamic",
+            host_bmc.identity(),
+            host_bmc.role,
+        )));
+    }
+
+    // An undeclared DPU interface never reaches the allocation check below, and
+    // takes a dynamic lease when its MAC first appears through DHCP. Require the
+    // declaration so the designation covers every management address. A machine
+    // that attaches no DPU has nothing to declare.
+    if machine.data.dpu_policy != HostDpuPolicy::Ignore {
+        for required in [ExpectedInterfaceRole::DpuBmc, ExpectedInterfaceRole::DpuOs] {
+            if !machine
+                .data
+                .interfaces
+                .iter()
+                .any(|interface| interface.role == required)
+            {
+                return Err(CarbideError::InvalidArgument(format!(
+                    "a control-plane machine must declare a {required} interface with a fixed or \
+                     retained ip_allocation, because an undeclared one uses dynamic"
+                )));
+            }
+        }
+    }
+
+    for interface in &machine.data.interfaces {
+        if !matches!(
+            interface.role,
+            ExpectedInterfaceRole::DpuBmc | ExpectedInterfaceRole::DpuOs
+        ) {
+            continue;
+        }
+        if interface.resolved_ip_allocation() == ExpectedInterfaceIpAllocation::Dynamic {
+            return Err(CarbideError::InvalidArgument(format!(
+                "interfaces entry {}: a control-plane machine requires a fixed or retained \
+                 ip_allocation on every {} interface, not dynamic",
+                interface.identity(),
+                interface.role,
+            )));
+        }
+    }
     Ok(())
 }
 
@@ -463,6 +533,10 @@ pub(crate) async fn update(
     api: &Api,
     request: tonic::Request<rpc::ExpectedMachine>,
 ) -> Result<tonic::Response<()>, tonic::Status> {
+    let preallocator = InterfacePreallocator::new(
+        &api.instrumentation,
+        api.runtime_config.retained_boot_interface_window,
+    );
     log_request_data(&request);
 
     let mut request = request.into_inner();
@@ -508,12 +582,9 @@ pub(crate) async fn update(
     normalize_host_bmc_configuration(&mut machine, existing.as_ref(), overrides)?;
     validate_expected_machine(&mut txn, &api.common_pools, &machine).await?;
 
-    let preallocations = update_preallocated_interfaces(
-        &mut txn,
-        &machine,
-        api.runtime_config.retained_boot_interface_window,
-    )
-    .await?;
+    let preallocations = preallocator
+        .update_machine_interfaces(&mut txn, &machine)
+        .await?;
 
     db::expected_machine::update(&mut txn, &machine)
         .await
@@ -521,9 +592,7 @@ pub(crate) async fn update(
 
     txn.commit().await?;
 
-    for outcome in preallocations {
-        emit(StaticAddressPreallocationCompleted::from(outcome));
-    }
+    preallocator.record_committed(preallocations);
 
     Ok(tonic::Response::new(()))
 }
@@ -577,6 +646,14 @@ impl TryFrom<rpc::PatchExpectedMachineRequest> for ExpectedMachinePatch {
                     .as_ref()
                     .and_then(|profile| profile.disable_lockdown),
                 "host_lifecycle_profile.disable_lockdown",
+            ),
+            (
+                UpdateField::RetainHBNConfigOnBoot,
+                patch
+                    .host_lifecycle_profile
+                    .as_ref()
+                    .and_then(|profile| profile.retain_hbn_config_on_boot),
+                "host_lifecycle_profile.retain_hbn_config_on_boot",
             ),
             (
                 UpdateField::DefaultPauseIngestionAndPoweron,
@@ -662,6 +739,10 @@ async fn apply_machine_patches(
     api: &Api,
     mut patches: Vec<ExpectedMachinePatch>,
 ) -> Result<(), CarbideError> {
+    let preallocator = InterfacePreallocator::new(
+        &api.instrumentation,
+        api.runtime_config.retained_boot_interface_window,
+    );
     log_request_data_redacted(match patches.as_slice() {
         [patch] => format!("expected_machine_id: {}", patch.expected_machine_id),
         _ => format!("expected-machine patches: {}", patches.len()),
@@ -680,14 +761,7 @@ async fn apply_machine_patches(
     let mut txn = api.txn_begin().await?;
     let mut preallocations = Vec::new();
     for patch in patches {
-        match apply_machine_patch(
-            &mut txn,
-            &api.common_pools,
-            patch,
-            api.runtime_config.retained_boot_interface_window,
-        )
-        .await
-        {
+        match apply_machine_patch(&mut txn, &api.common_pools, patch, &preallocator).await {
             Ok(applied) => preallocations.extend(applied),
             Err(error) => {
                 txn.rollback_or_log("expected-machine patch failure").await;
@@ -696,9 +770,7 @@ async fn apply_machine_patches(
         }
     }
     txn.commit().await?;
-    for preallocation in preallocations {
-        emit(StaticAddressPreallocationCompleted::from(preallocation));
-    }
+    preallocator.record_committed(preallocations);
     Ok(())
 }
 
@@ -706,7 +778,7 @@ async fn apply_machine_patch(
     txn: &mut sqlx::PgConnection,
     common_pools: &CommonPools,
     request: ExpectedMachinePatch,
-    retained_window: Option<chrono::Duration>,
+    preallocator: &InterfacePreallocator<'_>,
 ) -> Result<Vec<PreallocationSuccess>, CarbideError> {
     let ExpectedMachinePatch {
         expected_machine_id,
@@ -799,7 +871,16 @@ async fn apply_machine_patch(
     if fields.contains(UpdateField::DisableLockdown) {
         machine.data.host_lifecycle_profile.disable_lockdown = patch
             .host_lifecycle_profile
+            .as_ref()
             .and_then(|profile| profile.disable_lockdown);
+    }
+    if fields.contains(UpdateField::RetainHBNConfigOnBoot) {
+        machine
+            .data
+            .host_lifecycle_profile
+            .retain_hbn_config_on_boot = patch
+            .host_lifecycle_profile
+            .and_then(|profile| profile.retain_hbn_config_on_boot);
     }
     fields.update_metadata(patch.metadata, &mut machine.data.metadata)?;
     // Match the replacement RPC's validation of the complete metadata.
@@ -810,7 +891,9 @@ async fn apply_machine_patch(
         .map_err(|error| CarbideError::InvalidArgument(error.to_string()))?;
     validate_expected_machine_for_insert(&machine)?;
     validate_reservation_pool_membership(txn, common_pools, &machine).await?;
-    let preallocations = update_preallocated_interfaces(txn, &machine, retained_window).await?;
+    let preallocations = preallocator
+        .update_machine_interfaces(txn, &machine)
+        .await?;
     db::expected_machine::update(txn, &machine).await?;
     Ok(preallocations)
 }
@@ -1278,51 +1361,6 @@ fn preserve_omitted_rpc_role_and_allocation(
     }
 }
 
-/// `update_preallocated_interfaces` applies the update-time fixed-address
-/// behavior shared by the single and batch APIs.
-///
-/// The lower-level helpers create a missing reservation or fill an addressless
-/// row before that family's first stateful allocation, but leave existing
-/// addresses alone. An associated row may receive its configured fixed address,
-/// but its role-derived type and primary setting remain managed state.
-/// Operators still use the machine-interface address APIs to replace a live
-/// address. The effective Host BMC is applied separately so legacy-only rows
-/// use the same path without storing a nested declaration.
-async fn update_preallocated_interfaces(
-    txn: &mut sqlx::PgConnection,
-    machine: &ExpectedMachine,
-    retained_window: Option<chrono::Duration>,
-) -> Result<Vec<PreallocationSuccess>, CarbideError> {
-    let mut preallocations = Vec::new();
-    let host_bmc = machine.effective_host_bmc();
-    if host_bmc.fixed_ip.is_some() {
-        preallocations.push(
-            update_preallocated_expected_machine_interface(&mut *txn, &host_bmc, retained_window)
-                .await?,
-        );
-    }
-
-    for interface in machine.data.interfaces.iter().filter(|interface| {
-        !interface.role.is_dpu_loopback()
-            && interface
-                .mac_address
-                .is_some_and(|mac| mac != machine.bmc_mac_address)
-    }) {
-        if interface.fixed_ip.is_some() {
-            preallocations.push(
-                update_preallocated_expected_machine_interface(
-                    &mut *txn,
-                    interface,
-                    retained_window,
-                )
-                .await?,
-            );
-        }
-    }
-
-    Ok(preallocations)
-}
-
 /// Preserve the request representation used by batch results and replace only
 /// the ID with its parsed value. Older clients expect their payload back rather
 /// than a model-normalized copy.
@@ -1416,7 +1454,7 @@ async fn update_expected_machine(
     mut machine: rpc::ExpectedMachine,
     id: Uuid,
     parsed_mac: MacAddress,
-    retained_window: Option<chrono::Duration>,
+    preallocator: &InterfacePreallocator<'_>,
 ) -> Result<(rpc::ExpectedMachine, Vec<PreallocationSuccess>), CarbideError> {
     let result_machine = batch_result_with_id(machine.clone(), id);
     let existing = db::expected_machine::find_for_update(
@@ -1440,8 +1478,9 @@ async fn update_expected_machine(
     };
     normalize_host_bmc_configuration(&mut expected_machine, existing.as_ref(), overrides)?;
     validate_expected_machine(&mut *txn, common_pools, &expected_machine).await?;
-    let preallocations =
-        update_preallocated_interfaces(txn, &expected_machine, retained_window).await?;
+    let preallocations = preallocator
+        .update_machine_interfaces(txn, &expected_machine)
+        .await?;
 
     db::expected_machine::update(txn, &expected_machine).await?;
 
@@ -1495,15 +1534,14 @@ async fn apply_operation(
     machine: rpc::ExpectedMachine,
     id: Uuid,
     parsed_mac: MacAddress,
-    retained_window: Option<chrono::Duration>,
+    preallocator: &InterfacePreallocator<'_>,
 ) -> Result<(rpc::ExpectedMachine, Vec<PreallocationSuccess>), CarbideError> {
     match op {
         BatchOperation::Create => {
             create_expected_machine(txn, common_pools, machine, id, parsed_mac).await
         }
         BatchOperation::Update => {
-            update_expected_machine(txn, common_pools, machine, id, parsed_mac, retained_window)
-                .await
+            update_expected_machine(txn, common_pools, machine, id, parsed_mac, preallocator).await
         }
     }
 }
@@ -1514,6 +1552,10 @@ async fn process_batch_operations(
     accept_partial: bool,
     op: BatchOperation,
 ) -> Result<Vec<rpc::ExpectedMachineOperationResult>, CarbideError> {
+    let preallocator = InterfacePreallocator::new(
+        &api.instrumentation,
+        api.runtime_config.retained_boot_interface_window,
+    );
     let mut results = Vec::new();
 
     if accept_partial {
@@ -1554,15 +1596,13 @@ async fn process_batch_operations(
                 machine,
                 id,
                 parsed_mac,
-                api.runtime_config.retained_boot_interface_window,
+                &preallocator,
             )
             .await
             {
                 Ok((result_machine, preallocations)) => match txn.commit().await {
                     Ok(_) => {
-                        for outcome in preallocations {
-                            emit(StaticAddressPreallocationCompleted::from(outcome));
-                        }
+                        preallocator.record_committed(preallocations);
                         results.push(build_success_result(result_machine));
                     }
                     Err(e) => {
@@ -1605,7 +1645,7 @@ async fn process_batch_operations(
             machine,
             id,
             parsed_mac,
-            api.runtime_config.retained_boot_interface_window,
+            &preallocator,
         )
         .await
         {
@@ -1622,9 +1662,7 @@ async fn process_batch_operations(
 
     txn.commit().await?;
 
-    for outcome in preallocations {
-        emit(StaticAddressPreallocationCompleted::from(outcome));
-    }
+    preallocator.record_committed(preallocations);
 
     ordered_results.sort_by_key(|(request_index, _)| *request_index);
     Ok(ordered_results
@@ -1767,6 +1805,251 @@ mod tests {
                     ..Default::default()
                 });
                 (bmc_ip_address, fixed_ip)
+            },
+        );
+    }
+
+    /// The control-plane designation requires an address NICo knows up front on
+    /// every interface that must answer while the control plane is down. The
+    /// rows cover the boundary: the designation off, each constrained role
+    /// resolving to `Dynamic` (explicitly and by default), each constrained
+    /// role resolving away from `Dynamic`, and an unconstrained host NIC.
+    #[test]
+    fn retain_hbn_config_on_boot_designation_requires_non_dynamic_management_addresses() {
+        let mac: MacAddress = "7A:7B:7C:7D:7E:85".parse().unwrap();
+        check_cases(
+            [
+                Case {
+                    scenario: "undesignated machine keeps a dynamic DPU BMC",
+                    input: (None, ExpectedInterfaceRole::DpuBmc, None, false),
+                    expect: Yields(()),
+                },
+                Case {
+                    scenario: "designation removed keeps a dynamic DPU BMC",
+                    input: (Some(false), ExpectedInterfaceRole::DpuBmc, None, false),
+                    expect: Yields(()),
+                },
+                Case {
+                    scenario: "host BMC defaults to retained",
+                    input: (Some(true), ExpectedInterfaceRole::HostBmc, None, false),
+                    expect: Yields(()),
+                },
+                Case {
+                    scenario: "host BMC explicitly dynamic",
+                    input: (
+                        Some(true),
+                        ExpectedInterfaceRole::HostBmc,
+                        Some(ExpectedInterfaceIpAllocation::Dynamic),
+                        false,
+                    ),
+                    expect: Fails,
+                },
+                Case {
+                    scenario: "DPU BMC defaults to dynamic",
+                    input: (Some(true), ExpectedInterfaceRole::DpuBmc, None, false),
+                    expect: Fails,
+                },
+                Case {
+                    scenario: "DPU OS defaults to dynamic",
+                    input: (Some(true), ExpectedInterfaceRole::DpuOs, None, false),
+                    expect: Fails,
+                },
+                Case {
+                    scenario: "DPU OS with a fixed address",
+                    input: (Some(true), ExpectedInterfaceRole::DpuOs, None, true),
+                    expect: Yields(()),
+                },
+                Case {
+                    scenario: "DPU BMC explicitly retained",
+                    input: (
+                        Some(true),
+                        ExpectedInterfaceRole::DpuBmc,
+                        Some(ExpectedInterfaceIpAllocation::Retained),
+                        false,
+                    ),
+                    expect: Yields(()),
+                },
+                Case {
+                    scenario: "host data NIC stays unconstrained",
+                    input: (Some(true), ExpectedInterfaceRole::Host, None, false),
+                    expect: Yields(()),
+                },
+            ],
+            |(retain_hbn_config_on_boot, role, ip_allocation, fixed)| {
+                // `normalize_host_bmc` syncs the compatibility columns before
+                // this validator runs, so mirror a Host BMC declaration onto
+                // them here rather than leaving them at their default.
+                let bmc_ip_allocation = if role.is_host_bmc() {
+                    ip_allocation.map_or(BmcIpAllocationType::Auto, Into::into)
+                } else {
+                    BmcIpAllocationType::Auto
+                };
+                validate_retain_hbn_config_on_boot_designation(&ExpectedMachine {
+                    id: None,
+                    bmc_mac_address: mac,
+                    data: ExpectedMachineData {
+                        bmc_ip_allocation,
+                        // Isolate the allocation rule from the DPU declaration
+                        // requirement, which a separate test covers.
+                        dpu_policy: HostDpuPolicy::Ignore,
+                        host_lifecycle_profile: model::expected_machine::HostLifecycleProfile {
+                            disable_lockdown: None,
+                            retain_hbn_config_on_boot,
+                        },
+                        interfaces: vec![ExpectedInterface {
+                            mac_address: Some(mac),
+                            role,
+                            ip_allocation,
+                            fixed_ip: fixed.then(|| "192.0.2.85".parse().unwrap()),
+                            ..Default::default()
+                        }],
+                        ..Default::default()
+                    },
+                })
+                .map_err(drop)
+            },
+        );
+    }
+
+    /// A DPU interface that is never declared takes a dynamic lease when its MAC
+    /// first appears through DHCP, which the allocation rule above would never
+    /// see. A designated machine must declare both DPU roles, unless its
+    /// `dpu_policy` attaches no DPU at all.
+    #[test]
+    fn retain_hbn_config_on_boot_designation_requires_declared_dpu_interfaces() {
+        let mac: MacAddress = "7A:7B:7C:7D:7E:87".parse().unwrap();
+        let declare = |roles: &[ExpectedInterfaceRole]| {
+            roles
+                .iter()
+                .map(|role| ExpectedInterface {
+                    mac_address: Some(mac),
+                    role: *role,
+                    ip_allocation: Some(ExpectedInterfaceIpAllocation::Retained),
+                    ..Default::default()
+                })
+                .collect::<Vec<_>>()
+        };
+        check_cases(
+            [
+                Case {
+                    scenario: "managed DPU with both roles declared",
+                    input: (
+                        Some(true),
+                        HostDpuPolicy::Manage,
+                        vec![ExpectedInterfaceRole::DpuBmc, ExpectedInterfaceRole::DpuOs],
+                    ),
+                    expect: Yields(()),
+                },
+                Case {
+                    scenario: "managed DPU declaring neither role",
+                    input: (Some(true), HostDpuPolicy::Manage, Vec::new()),
+                    expect: Fails,
+                },
+                Case {
+                    scenario: "managed DPU missing the DPU OS declaration",
+                    input: (
+                        Some(true),
+                        HostDpuPolicy::Manage,
+                        vec![ExpectedInterfaceRole::DpuBmc],
+                    ),
+                    expect: Fails,
+                },
+                Case {
+                    scenario: "managed DPU missing the DPU BMC declaration",
+                    input: (
+                        Some(true),
+                        HostDpuPolicy::Manage,
+                        vec![ExpectedInterfaceRole::DpuOs],
+                    ),
+                    expect: Fails,
+                },
+                Case {
+                    scenario: "NIC-mode DPU still attaches hardware",
+                    input: (Some(true), HostDpuPolicy::Nic, Vec::new()),
+                    expect: Fails,
+                },
+                Case {
+                    scenario: "no DPU attached has nothing to declare",
+                    input: (Some(true), HostDpuPolicy::Ignore, Vec::new()),
+                    expect: Yields(()),
+                },
+                Case {
+                    scenario: "undesignated machine is unconstrained",
+                    input: (None, HostDpuPolicy::Manage, Vec::new()),
+                    expect: Yields(()),
+                },
+            ],
+            |(retain_hbn_config_on_boot, dpu_policy, roles)| {
+                validate_retain_hbn_config_on_boot_designation(&ExpectedMachine {
+                    id: None,
+                    bmc_mac_address: mac,
+                    data: ExpectedMachineData {
+                        dpu_policy,
+                        host_lifecycle_profile: model::expected_machine::HostLifecycleProfile {
+                            disable_lockdown: None,
+                            retain_hbn_config_on_boot,
+                        },
+                        interfaces: declare(&roles),
+                        ..Default::default()
+                    },
+                })
+                .map_err(drop)
+            },
+        );
+    }
+
+    /// A Host BMC declared only through the legacy `bmc_ip_allocation` and
+    /// `bmc_ip_address` columns never reaches `interfaces`, so the designation
+    /// check has to resolve it from the compatibility columns. Without this,
+    /// an explicit legacy `Dynamic` is stored on a control-plane machine.
+    #[test]
+    fn retain_hbn_config_on_boot_designation_checks_legacy_host_bmc_columns() {
+        let mac: MacAddress = "7A:7B:7C:7D:7E:86".parse().unwrap();
+        check_cases(
+            [
+                Case {
+                    scenario: "legacy dynamic host BMC with no interface entry",
+                    input: (Some(true), BmcIpAllocationType::Dynamic, false),
+                    expect: Fails,
+                },
+                Case {
+                    scenario: "omitted legacy allocation resolves to retained",
+                    input: (Some(true), BmcIpAllocationType::Auto, false),
+                    expect: Yields(()),
+                },
+                Case {
+                    scenario: "legacy retained host BMC",
+                    input: (Some(true), BmcIpAllocationType::Retained, false),
+                    expect: Yields(()),
+                },
+                Case {
+                    scenario: "legacy fixed host BMC with an address",
+                    input: (Some(true), BmcIpAllocationType::Fixed, true),
+                    expect: Yields(()),
+                },
+                Case {
+                    scenario: "undesignated machine keeps a legacy dynamic host BMC",
+                    input: (None, BmcIpAllocationType::Dynamic, false),
+                    expect: Yields(()),
+                },
+            ],
+            |(retain_hbn_config_on_boot, bmc_ip_allocation, addressed)| {
+                validate_retain_hbn_config_on_boot_designation(&ExpectedMachine {
+                    id: None,
+                    bmc_mac_address: mac,
+                    data: ExpectedMachineData {
+                        bmc_ip_allocation,
+                        bmc_ip_address: addressed.then(|| "192.0.2.86".parse().unwrap()),
+                        dpu_policy: HostDpuPolicy::Ignore,
+                        host_lifecycle_profile: model::expected_machine::HostLifecycleProfile {
+                            disable_lockdown: None,
+                            retain_hbn_config_on_boot,
+                        },
+                        interfaces: Vec::new(),
+                        ..Default::default()
+                    },
+                })
+                .map_err(drop)
             },
         );
     }

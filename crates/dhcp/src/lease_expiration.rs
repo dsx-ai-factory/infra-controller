@@ -17,8 +17,8 @@
 
 use std::ffi::CStr;
 
+use ::rpc::carbide_tls_client::{self, ApiConfig, CarbideClientConfig};
 use ::rpc::forge as rpc;
-use ::rpc::forge_tls_client::{self, ApiConfig, ForgeClientConfig};
 use libc::c_char;
 
 use crate::{CONFIG, CarbideDhcpContext, tls};
@@ -69,26 +69,26 @@ pub unsafe extern "C" fn carbide_expire_lease(
     };
 
     let url = &CONFIG.read().unwrap().api_endpoint;
-    let forge_client_config = tls::build_forge_client_config();
+    let carbide_client_config = tls::build_carbide_client_config();
 
     // Roots a trace for the nico-api call the expiration makes.
     let span = tracing::info_span!("dhcp_lease_expiration");
     let _guard = span.enter();
 
-    expire_lease_at(ip_str, mac_str, url, &forge_client_config)
+    expire_lease_at(ip_str, mac_str, url, &carbide_client_config)
 }
 
 fn expire_lease_at(
     ip_str: &str,
     mac_str: Option<&str>,
     url: &str,
-    client_config: &ForgeClientConfig,
+    client_config: &CarbideClientConfig,
 ) -> LeaseExpirationResult {
     let runtime = CarbideDhcpContext::get_tokio_runtime();
 
     let result = runtime.block_on(async {
         let api_config = ApiConfig::new(url, client_config);
-        let mut client = forge_tls_client::ForgeTlsClient::retry_build(&api_config)
+        let mut client = carbide_tls_client::CarbideTlsClient::retry_build(&api_config)
             .await
             .map_err(|e| format!("unable to connect to Carbide API: {e:?}"))?;
         client
@@ -135,7 +135,7 @@ mod tests {
     fn test_expire_lease_success() {
         let rt = CarbideDhcpContext::get_tokio_runtime();
         let api_server = rt.block_on(mock_api_server::MockAPIServer::start());
-        let client_config = tls::build_forge_client_config();
+        let client_config = tls::build_carbide_client_config();
 
         let result = expire_lease_at(
             "10.0.0.1",
@@ -155,7 +155,7 @@ mod tests {
     fn test_expire_lease_idempotent() {
         let rt = CarbideDhcpContext::get_tokio_runtime();
         let api_server = rt.block_on(mock_api_server::MockAPIServer::start());
-        let client_config = tls::build_forge_client_config();
+        let client_config = tls::build_carbide_client_config();
 
         let result1 = expire_lease_at(
             "10.0.0.1",
@@ -182,7 +182,7 @@ mod tests {
     fn test_expire_lease_ipv6() {
         let rt = CarbideDhcpContext::get_tokio_runtime();
         let api_server = rt.block_on(mock_api_server::MockAPIServer::start());
-        let client_config = tls::build_forge_client_config();
+        let client_config = tls::build_carbide_client_config();
 
         let result = expire_lease_at(
             "fd00::42",
@@ -198,7 +198,7 @@ mod tests {
     fn test_expire_lease_with_mac() {
         let rt = CarbideDhcpContext::get_tokio_runtime();
         let api_server = rt.block_on(mock_api_server::MockAPIServer::start());
-        let client_config = tls::build_forge_client_config();
+        let client_config = tls::build_carbide_client_config();
 
         let result = expire_lease_at(
             "10.0.0.1",
