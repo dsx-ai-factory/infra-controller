@@ -217,6 +217,7 @@ impl Target {
                 &self.password,
             ))),
             None,
+            carbide_instrument::Instrumentation::global(),
         );
         Arc::new(EndpointIpmiOps::new(
             tool,

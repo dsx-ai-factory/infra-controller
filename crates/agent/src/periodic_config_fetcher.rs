@@ -38,6 +38,7 @@ use crate::service_network;
 use crate::util::{get_periodic_dpu_config, get_sitename, jittered_interval};
 
 struct PeriodicFetcherState {
+    instrumentation: carbide_instrument::Instrumentation,
     config: PeriodicConfigFetcherConfig,
     netconf: ArcSwapOption<rpc::ManagedHostNetworkConfigResponse>,
     instmeta: ArcSwapOption<InstanceMetadata>,
@@ -130,7 +131,10 @@ impl Drop for PeriodicConfigFetcher {
 }
 
 impl PeriodicConfigFetcher {
-    pub(super) async fn new(config: PeriodicConfigFetcherConfig) -> Self {
+    pub(super) async fn new(
+        config: PeriodicConfigFetcherConfig,
+        instrumentation: carbide_instrument::Instrumentation,
+    ) -> Self {
         let carbide_client_config = Arc::clone(&config.carbide_client_config);
         // Fetch the sitename from Carbide at the start and keep it in State
         // so that it can be made available as instance metadata.
@@ -143,6 +147,7 @@ impl PeriodicConfigFetcher {
         };
 
         let state = Arc::new(PeriodicFetcherState {
+            instrumentation,
             netconf: ArcSwapOption::default(),
             instmeta: ArcSwapOption::default(),
             sitename,
@@ -254,7 +259,7 @@ async fn single_fetch(
     match result {
         Ok(config) => {
             state.instmeta.store(config.map(Arc::new));
-            ConfigFetch::Succeeded.emit();
+            ConfigFetch::Succeeded.emit(&state.instrumentation);
         }
         Err(err) => match err.downcast_ref::<tonic::Status>() {
             Some(grpc_status) if grpc_status.code() == tonic::Code::NotFound => {
@@ -263,13 +268,13 @@ async fn single_fetch(
                 ConfigFetch::NotFound {
                     machine_id: state.config.machine_id.to_string(),
                 }
-                .emit();
+                .emit(&state.instrumentation);
             }
             _ => ConfigFetch::Failed {
                 error: format!("{err:?}"),
                 retry_interval_seconds: next_fetch_delay.as_secs_f64(),
             }
-            .emit(),
+            .emit(&state.instrumentation),
         },
     }
 

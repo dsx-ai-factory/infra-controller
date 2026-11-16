@@ -22,6 +22,9 @@ import (
 	tClient "go.temporal.io/sdk/client"
 	tmocks "go.temporal.io/sdk/mocks"
 	tp "go.temporal.io/sdk/temporal"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
+	"google.golang.org/protobuf/proto"
 
 	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/handler/util/common"
 	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/model"
@@ -67,24 +70,38 @@ func TestGetTaskHandler_Handle(t *testing.T) {
 	failureReason := "switch switch-1: SDN factory reset failed: cluster is not enabled"
 	mockTask := &flowv1.Task{
 		Id:          &flowv1.UUID{Id: taskUUID},
-		Operation:   "Restore SDN factory defaults",
+		Operation:   "power_on",
 		RackId:      &flowv1.UUID{Id: uuid.New().String()},
-		Description: "Reset switch SDN",
-		Status:      flowv1.TaskStatus_TASK_STATUS_FAILED,
-		Message:     failureReason,
-		Report:      `{"error":"` + failureReason + `","version":1,"stages":[{"number":1,"status":"failed","steps":[{"component_type":"NVSwitch","status":"failed"}]}]}`,
+		Description: "Power on rack",
+		Status:      flowv1.TaskStatus_TASK_STATUS_COMPLETED,
+		Message:     "Processing",
+		Report:      `{"version":1,"stages":[{"number":1,"status":"completed","steps":[{"component_type":"Compute","status":"skipped"}]}]}`,
 	}
+
+	failedTask := proto.Clone(mockTask).(*flowv1.Task)
+	failedTask.Status = flowv1.TaskStatus_TASK_STATUS_FAILED
+	failedTask.Operation = "Restore SDN factory defaults"
+	failedTask.Description = "Reset switch SDN"
+	failedTask.Message = failureReason
+	failedTask.Report = `{"error":"` + failureReason + `","version":1,"stages":[{"number":1,"status":"failed","steps":[{"component_type":"NVSwitch","status":"failed"}]}]}`
+
+	failureConverter := tp.GetDefaultFailureConverter()
+	missingTaskError := failureConverter.FailureToError(failureConverter.ErrorToFailure(
+		swe.WrapErr(status.Error(codes.NotFound, "task not found")),
+	))
 
 	ctx := context.Background()
 
 	tests := []struct {
-		name           string
-		reqOrg         string
-		user           *cdbm.User
-		taskUUID       string
-		queryParams    map[string]string
-		mockTasks      []*flowv1.Task
-		expectedStatus int
+		name               string
+		reqOrg             string
+		user               *cdbm.User
+		taskUUID           string
+		queryParams        map[string]string
+		mockTasks          []*flowv1.Task
+		mockResultErr      error
+		expectedStatus     int
+		expectedTaskStatus string
 	}{
 		{
 			name:     "success - get task by ID",
@@ -94,8 +111,19 @@ func TestGetTaskHandler_Handle(t *testing.T) {
 			queryParams: map[string]string{
 				"siteId": site.ID.String(),
 			},
-			mockTasks:      []*flowv1.Task{mockTask},
-			expectedStatus: http.StatusOK,
+			mockTasks:          []*flowv1.Task{mockTask},
+			expectedStatus:     http.StatusOK,
+			expectedTaskStatus: "Succeeded",
+		},
+		{
+			name:               "success - failed task remains readable",
+			reqOrg:             org,
+			user:               providerUser,
+			taskUUID:           taskUUID,
+			queryParams:        map[string]string{"siteId": site.ID.String()},
+			mockTasks:          []*flowv1.Task{failedTask},
+			expectedStatus:     http.StatusOK,
+			expectedTaskStatus: "Failed",
 		},
 		{
 			name:     "failure - task not found (empty result)",
@@ -107,6 +135,24 @@ func TestGetTaskHandler_Handle(t *testing.T) {
 			},
 			mockTasks:      []*flowv1.Task{},
 			expectedStatus: http.StatusNotFound,
+		},
+		{
+			name:           "failure - missing task from Flow",
+			reqOrg:         org,
+			user:           providerUser,
+			taskUUID:       taskUUID,
+			queryParams:    map[string]string{"siteId": site.ID.String()},
+			mockResultErr:  missingTaskError,
+			expectedStatus: http.StatusNotFound,
+		},
+		{
+			name:           "failure - database error from Flow",
+			reqOrg:         org,
+			user:           providerUser,
+			taskUUID:       taskUUID,
+			queryParams:    map[string]string{"siteId": site.ID.String()},
+			mockResultErr:  tp.NewApplicationError(status.Error(codes.Internal, "database unavailable").Error(), "Error"),
+			expectedStatus: http.StatusInternalServerError,
 		},
 		{
 			name:     "failure - Flow not enabled on site",
@@ -157,6 +203,8 @@ func TestGetTaskHandler_Handle(t *testing.T) {
 			mockWorkflowRun.On("GetID").Return("test-workflow-id")
 			if tt.mockTasks != nil {
 				testFlowProxyReply(t, mockWorkflowRun, &flowv1.GetTasksByIDsResponse{Tasks: tt.mockTasks})
+			} else if tt.mockResultErr != nil {
+				mockWorkflowRun.On("Get", mock.Anything, mock.Anything).Return(tt.mockResultErr)
 			}
 			testFlowProxyDispatch(t, mockTemporalClient, mockWorkflowRun, flowv1.Flow_GetTasksByIDs_FullMethodName, nil)
 			scp.IDClientMap[site.ID.String()] = mockTemporalClient
@@ -185,6 +233,19 @@ func TestGetTaskHandler_Handle(t *testing.T) {
 			}
 
 			require.Equal(t, tt.expectedStatus, rec.Code)
+			if tt.mockResultErr != nil {
+				expectedError := tt.mockResultErr
+				if tt.expectedStatus == http.StatusNotFound {
+					expectedError = errors.New("Task not found")
+					var appErr *tp.ApplicationError
+					require.ErrorAs(t, tt.mockResultErr, &appErr)
+					require.True(t, appErr.NonRetryable())
+					require.Contains(t, rec.Body.String(), "Task not found")
+					require.NotContains(t, rec.Body.String(), "sql:")
+					require.NotContains(t, rec.Body.String(), "retryable: true")
+				}
+				assertSingleFlowProxyErrorResponse(t, ec, rec, err, expectedError)
+			}
 			if tt.expectedStatus != http.StatusOK {
 				return
 			}
@@ -193,11 +254,16 @@ func TestGetTaskHandler_Handle(t *testing.T) {
 			err = json.Unmarshal(rec.Body.Bytes(), &apiTask)
 			assert.NoError(t, err)
 			assert.Equal(t, taskUUID, apiTask.ID)
-			assert.Equal(t, "Failed", apiTask.Status)
-			assert.Equal(t, "Reset switch SDN", apiTask.Description)
-			assert.Equal(t, failureReason, apiTask.Message)
-			require.NotNil(t, apiTask.Report)
-			assert.Equal(t, failureReason, apiTask.Report.Error)
+			assert.Equal(t, tt.expectedTaskStatus, apiTask.Status)
+			if tt.expectedTaskStatus == "Failed" {
+				assert.Equal(t, "Reset switch SDN", apiTask.Description)
+				assert.Equal(t, failureReason, apiTask.Message)
+				require.NotNil(t, apiTask.Report)
+				assert.Equal(t, failureReason, apiTask.Report.Error)
+			} else {
+				assert.Equal(t, "Power on rack", apiTask.Description)
+				assert.Equal(t, "Processing", apiTask.Message)
+			}
 			assertZeroTaskReportCounters(t, rec.Body.Bytes())
 		})
 	}
@@ -640,6 +706,11 @@ func TestCancelTaskHandler_Handle(t *testing.T) {
 		Message:     "Cancelled by user",
 	}
 
+	failureConverter := tp.GetDefaultFailureConverter()
+	missingTaskError := failureConverter.FailureToError(failureConverter.ErrorToFailure(
+		swe.WrapErr(status.Error(codes.NotFound, "task not found")),
+	))
+
 	ctx := context.Background()
 
 	tests := []struct {
@@ -727,6 +798,16 @@ func TestCancelTaskHandler_Handle(t *testing.T) {
 			expectNullData: true,
 		},
 		{
+			name:           "failure - missing task cannot be cancelled",
+			reqOrg:         org,
+			user:           providerUser,
+			taskUUID:       taskUUID,
+			body:           model.APICancelTaskRequest{SiteID: site.ID.String()},
+			mockResultErr:  missingTaskError,
+			expectedStatus: http.StatusNotFound,
+			expectNullData: true,
+		},
+		{
 			name:     "failure - completed task cannot be cancelled",
 			reqOrg:   org,
 			user:     providerUser,
@@ -783,6 +864,13 @@ func TestCancelTaskHandler_Handle(t *testing.T) {
 				var apiErr map[string]any
 				require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &apiErr))
 				require.NotEmpty(t, apiErr["message"])
+				if tt.expectedStatus == http.StatusNotFound {
+					var appErr *tp.ApplicationError
+					require.ErrorAs(t, tt.mockResultErr, &appErr)
+					require.True(t, appErr.NonRetryable())
+					require.Equal(t, "Task not found", apiErr["message"])
+					require.NotContains(t, rec.Body.String(), "retryable: true")
+				}
 				if tt.expectNullData {
 					require.Contains(t, apiErr, "data")
 					assert.Nil(t, apiErr["data"])

@@ -387,19 +387,25 @@ control the automatic paths; they do not define component target versions.
 
 ### Managed-machine scheduling
 
-Machine Update Manager uses one capacity budget for managed-host and DPU
-firmware work:
+Machine Update Manager uses a shared ceiling for new automatic requests.
+Refer to [Shared Host Capacity](../firmware-updates.md#shared-host-capacity)
+for the calculation, legacy configuration precedence, and build requirements
+for NIC accounting and transaction protections.
+
+The following table lists Core field defaults; Helm can supply values as
+described in the shared capacity policy:
 
 | Setting | Default | Meaning |
 |---|---|---|
 | `machine_update_run_interval` | `300` | Seconds between Machine Update Manager passes. |
-| `machine_updater.max_concurrent_machine_updates_absolute` | unset | Fixed ceiling on the number of distinct hosts in machine-update workflows. Used directly when the percentage is unset; otherwise caps the percentage budget after unhealthy hosts are subtracted. |
-| `machine_updater.max_concurrent_machine_updates_percent` | unset | Percentage of all managed hosts, rounded up, minus unhealthy hosts, with a minimum of zero. An absolute limit, if set, further caps this budget. Zero or negative percentages disable automatic machine updates. |
+| `machine_updater.max_concurrent_machine_updates_absolute` | unset | Absolute input to the shared ceiling for new automatic requests. Legacy configuration can supply or reduce the effective value; refer to the shared capacity policy above. |
+| `machine_updater.max_concurrent_machine_updates_percent` | unset | Percentage input to the shared ceiling for new automatic requests. Nonpositive values prevent new automatic requests; existing workflows continue. Refer to the shared capacity policy above. |
 | `machine_updater.instance_autoreboot_period.start` | unset | Start of a one-time UTC window in which an assigned host may consume an existing update request without tenant approval. |
 | `machine_updater.instance_autoreboot_period.end` | unset | End of that one-time UTC window. |
 
-For example, this allows at most five managed hosts to be in update workflows
-and gives assigned hosts a four-hour automatic reboot window:
+With no percentage limit configured, this example sets a ceiling of five hosts
+for new automatic requests, unless a lower legacy limit applies. It also gives
+assigned hosts a four-hour automatic reboot window:
 
 ```toml
 machine_update_run_interval = 300

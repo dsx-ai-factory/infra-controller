@@ -138,6 +138,7 @@ async fn run_iteration(env: &ControllerEnv, mock: &Arc<MockNvSwitchManager>) {
         env.pool.clone(),
         env.api.work_lock_manager_handle(),
         SwitchStateHandlerServices {
+            instrumentation: env.api.instrumentation().clone(),
             db_pool: env.pool.clone(),
             component_manager: Some(mock_component_manager(mock.clone())),
             credential_manager: env.test_credential_manager.clone(),

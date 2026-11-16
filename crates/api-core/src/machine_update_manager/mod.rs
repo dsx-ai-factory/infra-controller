@@ -319,6 +319,7 @@ impl MachineUpdateManager {
                 .store(max_concurrent_updates as u64, Ordering::Relaxed);
         }
 
+        self.instrumentation.emit(metrics::CompletedPass);
         Ok(())
     }
 

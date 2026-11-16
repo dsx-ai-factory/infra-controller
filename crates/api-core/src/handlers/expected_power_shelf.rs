@@ -27,10 +27,8 @@ use crate::handlers::expected_component_patch::{
     ExpectedComponent, UpdateField, UpdateMask, parse_bmc_ip, required_id, required_value,
     validate_bmc_mac, validate_single_interface_address,
 };
-use crate::handlers::machine_interface_address::update_preallocated_machine_interface;
-use crate::handlers::static_address_metrics::{
-    PreallocationSuccess, StaticAddressPreallocationCompleted,
-};
+use crate::handlers::interface_preallocator::InterfacePreallocator;
+use crate::handlers::static_address_metrics::PreallocationSuccess;
 
 /// Validate the power shelf fields carried by a write.
 fn validate_expected_power_shelf(power_shelf: &ExpectedPowerShelf) -> Result<(), CarbideError> {
@@ -104,6 +102,10 @@ pub(crate) async fn update_expected_power_shelf(
     api: &Api,
     request: Request<rpc::ExpectedPowerShelf>,
 ) -> Result<Response<()>, Status> {
+    let preallocator = InterfacePreallocator::new(
+        &api.instrumentation,
+        api.runtime_config.retained_boot_interface_window,
+    );
     let power_shelf: ExpectedPowerShelf =
         request
             .into_inner()
@@ -120,21 +122,14 @@ pub(crate) async fn update_expected_power_shelf(
             message: format!("Database error: {}", e),
         })?;
 
-    let preallocation = update_power_shelf_in_transaction(
-        &mut txn,
-        &power_shelf,
-        api.runtime_config.retained_boot_interface_window,
-    )
-    .await?;
+    let preallocation =
+        update_power_shelf_in_transaction(&mut txn, &power_shelf, &preallocator).await?;
 
     txn.commit().await.map_err(|e| CarbideError::Internal {
         message: format!("Failed to commit transaction: {}", e),
     })?;
 
-    if let Some(outcome) = preallocation {
-        api.instrumentation
-            .emit(StaticAddressPreallocationCompleted::from(outcome));
-    }
+    preallocator.record_committed(preallocation);
 
     Ok(Response::new(()))
 }
@@ -143,6 +138,10 @@ pub(crate) async fn patch_expected_power_shelf(
     api: &Api,
     request: Request<rpc::PatchExpectedPowerShelfRequest>,
 ) -> Result<Response<()>, Status> {
+    let preallocator = InterfacePreallocator::new(
+        &api.instrumentation,
+        api.runtime_config.retained_boot_interface_window,
+    );
     let request = request.into_inner();
     let fields = UpdateMask::parse(
         request.update_mask.map(|mask| mask.paths),
@@ -195,24 +194,17 @@ pub(crate) async fn patch_expected_power_shelf(
         power_shelf.rack_id = patch.rack_id;
     }
     fields.update_metadata(patch.metadata, &mut power_shelf.metadata)?;
-    let preallocation = update_power_shelf_in_transaction(
-        &mut txn,
-        &power_shelf,
-        api.runtime_config.retained_boot_interface_window,
-    )
-    .await?;
+    let preallocation =
+        update_power_shelf_in_transaction(&mut txn, &power_shelf, &preallocator).await?;
     txn.commit().await?;
-    if let Some(preallocation) = preallocation {
-        api.instrumentation
-            .emit(StaticAddressPreallocationCompleted::from(preallocation));
-    }
+    preallocator.record_committed(preallocation);
     Ok(Response::new(()))
 }
 
 async fn update_power_shelf_in_transaction(
     txn: &mut sqlx::PgConnection,
     power_shelf: &ExpectedPowerShelf,
-    retained_window: Option<chrono::Duration>,
+    preallocator: &InterfacePreallocator<'_>,
 ) -> Result<Option<PreallocationSuccess>, CarbideError> {
     validate_expected_power_shelf(power_shelf)?;
 
@@ -222,13 +214,9 @@ async fn update_power_shelf_in_transaction(
 
     let preallocation = if let Some(bmc_ip) = power_shelf.bmc_ip_address {
         Some(
-            update_preallocated_machine_interface(
-                &mut *txn,
-                power_shelf.bmc_mac_address,
-                bmc_ip,
-                retained_window,
-            )
-            .await?,
+            preallocator
+                .update_interface(&mut *txn, power_shelf.bmc_mac_address, bmc_ip)
+                .await?,
         )
     } else {
         None

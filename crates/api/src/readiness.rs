@@ -22,7 +22,7 @@
 
 use std::time::Duration;
 
-use carbide_instrument::emit;
+use carbide_instrument::Instrumentation;
 use metrics_endpoint::HealthController;
 use sqlx::postgres::PgPoolOptions;
 use sqlx::{PgConnection, PgPool};
@@ -68,21 +68,28 @@ struct DatabaseReadinessCheckFailed {
 /// Reusing one pool preserves identical writability and connection-replacement behavior across
 /// the startup handoff.
 pub(crate) struct DatabaseReadinessProbe {
+    instrumentation: Instrumentation,
     db_pool: PgPool,
 }
 
 impl DatabaseReadinessProbe {
     /// Creates the lazy dedicated pool so preparing the probe does not touch the network before
     /// the API listener starts.
-    pub(crate) fn new(db_pool: &PgPool) -> Self {
+    pub(crate) fn new(db_pool: &PgPool, instrumentation: Instrumentation) -> Self {
         Self {
+            instrumentation,
             db_pool: dedicated_probe_pool(db_pool),
         }
     }
 
     /// Performs the fresh startup check so readiness never inherits stale resource-setup success.
     pub(crate) async fn check(&self) -> bool {
-        check_database_readiness(&self.db_pool, READINESS_CHECK_TIMEOUT).await
+        check_database_readiness(
+            &self.db_pool,
+            READINESS_CHECK_TIMEOUT,
+            &self.instrumentation,
+        )
+        .await
     }
 
     /// Continues periodic checks with the same pool so startup and steady-state readiness cannot
@@ -101,6 +108,7 @@ impl DatabaseReadinessProbe {
                 health_controller,
                 cancel_token,
                 READINESS_CHECK_INTERVAL,
+                self.instrumentation,
             ))?;
         Ok(())
     }
@@ -169,6 +177,7 @@ async fn run_database_readiness_probe(
     health_controller: HealthController,
     cancel_token: CancellationToken,
     interval: Duration,
+    instrumentation: Instrumentation,
 ) {
     let mut ticker = tokio::time::interval(interval);
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -178,7 +187,8 @@ async fn run_database_readiness_probe(
             _ = ticker.tick() => {}
         }
 
-        let ready = check_database_readiness(&db_pool, READINESS_CHECK_TIMEOUT).await;
+        let ready =
+            check_database_readiness(&db_pool, READINESS_CHECK_TIMEOUT, &instrumentation).await;
         if ready != health_controller.is_ready() {
             if ready {
                 tracing::warn!("database readiness check recovered; marking Core ready");
@@ -196,18 +206,22 @@ async fn run_database_readiness_probe(
 /// reachable-but-read-only endpoint -- e.g. the configured endpoint routing to
 /// a standby after a failed promotion -- surfaces here as an acquire error,
 /// same as an unreachable one, rather than a successful `SELECT`.
-async fn check_database_readiness(db_pool: &PgPool, timeout: Duration) -> bool {
+async fn check_database_readiness(
+    db_pool: &PgPool,
+    timeout: Duration,
+    instrumentation: &Instrumentation,
+) -> bool {
     let check = sqlx::query("SELECT 1").execute(db_pool);
     match tokio::time::timeout(timeout, check).await {
         Ok(Ok(_)) => true,
         Ok(Err(error)) => {
-            emit(DatabaseReadinessCheckFailed {
+            instrumentation.emit(DatabaseReadinessCheckFailed {
                 error: error.to_string(),
             });
             false
         }
         Err(_elapsed) => {
-            emit(DatabaseReadinessCheckFailed {
+            instrumentation.emit(DatabaseReadinessCheckFailed {
                 error: "timed out".to_string(),
             });
             false
@@ -250,9 +264,18 @@ mod tests {
 
     #[tokio::test]
     async fn check_database_readiness_fails_against_unreachable_pool() {
+        let test_meter = carbide_utils::test_support::test_meter::TestMeter::default();
+        let instrumentation = Instrumentation::new(test_meter.meter());
         let pool = unreachable_pool();
 
-        assert!(!check_database_readiness(&pool, Duration::from_millis(200)).await);
+        assert!(
+            !check_database_readiness(&pool, Duration::from_millis(200), &instrumentation,).await
+        );
+
+        assert_eq!(
+            test_meter.formatted_metric("carbide_database_readiness_check_failures_total"),
+            Some("1".to_string())
+        );
     }
 
     /// Drives the probe loop -- not just the single check -- against an
@@ -272,6 +295,9 @@ mod tests {
             health_controller.clone(),
             cancel_token.clone(),
             Duration::from_millis(20),
+            carbide_instrument::Instrumentation::from_meter_provider(
+                &opentelemetry::metrics::noop::NoopMeterProvider::new(),
+            ),
         ));
 
         let deadline = Instant::now() + Duration::from_secs(5);
@@ -305,6 +331,9 @@ mod tests {
             health_controller.clone(),
             cancel_token.clone(),
             Duration::from_millis(20),
+            carbide_instrument::Instrumentation::from_meter_provider(
+                &opentelemetry::metrics::noop::NoopMeterProvider::new(),
+            ),
         ));
 
         let deadline = Instant::now() + Duration::from_secs(5);

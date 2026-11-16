@@ -30,7 +30,7 @@ use carbide_dhcpv6::{
     DecodeError as WireDecodeError, DecodedPacket as WirePacket, DuidMac, RELAY_REPLY,
     RelayEnvelope, decode as decode_wire_packet, extract_mac_from_duid, extract_mac_from_option79,
 };
-use carbide_instrument::emit;
+use carbide_instrument::Instrumentation;
 use dhcproto::v6::{
     Architecture, DhcpOption, DhcpOptions, IAAddr, IANA, Message, MessageType, NtpSuboption,
     OptionCode, Status, StatusCode, UnknownOption, VendorClass,
@@ -60,6 +60,7 @@ struct DecodedPacketV6 {
 /// An encoded DHCPv6 response and the bounded response type used for metrics.
 #[derive(Debug)]
 pub struct PacketV6 {
+    instrumentation: Instrumentation,
     encoded_packet: Vec<u8>,
     pub message_type: V6ReplyMessageType,
     reply_retirement: ReplyRetirement,
@@ -84,7 +85,7 @@ impl PacketV6 {
             .await?;
         // Count only completed socket writes so retired generations never appear as successful replies.
         if status == ReplyStatus::Sent {
-            emit(DhcpV6ReplySent {
+            self.instrumentation.emit(DhcpV6ReplySent {
                 message_type: self.message_type,
                 destination_address: destination,
             });
@@ -847,6 +848,7 @@ fn encode_packet(
         encoded_packet: encoded,
         message_type,
         reply_retirement: config.reply_retirement.clone(),
+        instrumentation: config.instrumentation.clone(),
     })
 }
 
@@ -899,20 +901,25 @@ mod tests {
     /// transport failure cannot appear successful.
     #[tokio::test]
     async fn send_accounts_for_active_and_retired_generations() {
+        let test_meter = carbide_utils::test_support::test_meter::TestMeter::default();
+        let instrumentation = Instrumentation::new(test_meter.meter());
         // Build one active REPLY and one cancelled ADVERTISE so metric labels keep the outcomes independent.
         let active = PacketV6 {
+            instrumentation: instrumentation.clone(),
             encoded_packet: vec![1, 2, 3],
             message_type: V6ReplyMessageType::Reply,
             reply_retirement: ReplyRetirement::new(tokio_util::sync::CancellationToken::new()),
         };
         let cancellation = tokio_util::sync::CancellationToken::new();
         let retired = PacketV6 {
+            instrumentation: instrumentation.clone(),
             encoded_packet: vec![4, 5, 6],
             message_type: V6ReplyMessageType::Advertise,
             reply_retirement: ReplyRetirement::new(cancellation.clone()),
         };
         // An oversized UDP payload forces the real socket path to return an I/O error.
         let failed = PacketV6 {
+            instrumentation: instrumentation.clone(),
             encoded_packet: vec![0; usize::from(u16::MAX) + 1],
             message_type: V6ReplyMessageType::Reply,
             reply_retirement: ReplyRetirement::new(tokio_util::sync::CancellationToken::new()),
@@ -930,7 +937,7 @@ mod tests {
         };
 
         // Send the active packet before attempting transport from the retired generation.
-        let metrics = MetricsCapture::start();
+        let metrics = MetricsCapture::for_registry(test_meter.registry());
         let (active_status, active_logs) =
             capture_logs_async(active.send(&sender, destination)).await;
         let (retired_status, retired_logs) =
@@ -1055,6 +1062,9 @@ mod tests {
             None,
             67,
             CarbideClientConfig::new(String::new(), None),
+            carbide_instrument::Instrumentation::from_meter_provider(
+                &opentelemetry::metrics::noop::NoopMeterProvider::new(),
+            ),
         );
         let server_id = server_identifier(&config).unwrap();
         let other_server_id = vec![0xff];
@@ -1145,48 +1155,49 @@ mod tests {
     #[test]
     fn preference_is_emitted_only_in_advertise() {
         value_scenarios!(run = |(message_type, preference): (MessageType, Option<u8>)| {
-                let request = DecodedPacketV6 {
-                    message: Message::new_with_id(MessageType::Solicit, [0, 0, 0]),
-                    relay: None,
-                    duid: vec![0, 3, 0, 1, 2, 3, 4, 5, 6, 7],
-                    duid_mac: DuidMac::NoLinkLayerMac,
-                };
-                let config = Config::new(
-                    DhcpConfig {
-                        dhcpv6_server_preference: preference,
-                        dhcpv6_server_id: Some(
-                            carbide_rpc_utils::dhcp::DhcpV6ServerId::from_remote_id("test-dpu")
-                                .unwrap(),
-                        ),
-                        ..Default::default()
-                    },
-                    None,
-                    67,
-                    CarbideClientConfig::new(String::new(), None),
-                );
-
-                match base_reply(&request, message_type, &config)
-                    .unwrap()
-                    .opts()
-                    .get(OptionCode::Preference)
-                {
-                    Some(DhcpOption::Preference(value)) => Some(*value),
-                    _ => None,
-                }
-            };
-            "ADVERTISE configuration" {
-                // Legacy omission leaves the protocol fallback implicit.
-                (MessageType::Advertise, None) => None,
-                // Explicit zero must remain present despite matching the fallback value.
-                (MessageType::Advertise, Some(0)) => Some(0),
-                // The protocol maximum remains a valid explicit preference.
-                (MessageType::Advertise, Some(255)) => Some(255),
-            }
-            "REPLY configuration" {
-                // Preference selects among ADVERTISE messages and never belongs in REPLY.
-                (MessageType::Reply, Some(255)) => None,
-            }
+                        let request = DecodedPacketV6 {
+                            message: Message::new_with_id(MessageType::Solicit, [0, 0, 0]),
+                            relay: None,
+                            duid: vec![0, 3, 0, 1, 2, 3, 4, 5, 6, 7],
+                            duid_mac: DuidMac::NoLinkLayerMac,
+                        };
+                        let config = Config::new(
+                            DhcpConfig {
+                                dhcpv6_server_preference: preference,
+                                dhcpv6_server_id: Some(
+                                    carbide_rpc_utils::dhcp::DhcpV6ServerId::from_remote_id("test-dpu")
+                                        .unwrap(),
+                                ),
+                                ..Default::default()
+                            },
+                            None,
+                            67,
+                            CarbideClientConfig::new(String::new(), None),
+            carbide_instrument::Instrumentation::from_meter_provider(&opentelemetry::metrics::noop::NoopMeterProvider::new()),
         );
+
+                        match base_reply(&request, message_type, &config)
+                            .unwrap()
+                            .opts()
+                            .get(OptionCode::Preference)
+                        {
+                            Some(DhcpOption::Preference(value)) => Some(*value),
+                            _ => None,
+                        }
+                    };
+                    "ADVERTISE configuration" {
+                        // Legacy omission leaves the protocol fallback implicit.
+                        (MessageType::Advertise, None) => None,
+                        // Explicit zero must remain present despite matching the fallback value.
+                        (MessageType::Advertise, Some(0)) => Some(0),
+                        // The protocol maximum remains a valid explicit preference.
+                        (MessageType::Advertise, Some(255)) => Some(255),
+                    }
+                    "REPLY configuration" {
+                        // Preference selects among ADVERTISE messages and never belongs in REPLY.
+                        (MessageType::Reply, Some(255)) => None,
+                    }
+                );
     }
 
     /// Verifies the DNS name's 255-byte limit includes its root but excludes option-39 flags.
@@ -1206,6 +1217,9 @@ mod tests {
             None,
             67,
             CarbideClientConfig::new(String::new(), None),
+            carbide_instrument::Instrumentation::from_meter_provider(
+                &opentelemetry::metrics::noop::NoopMeterProvider::new(),
+            ),
         );
 
         // Render through the option-39 production path so the flags/name boundary is covered.

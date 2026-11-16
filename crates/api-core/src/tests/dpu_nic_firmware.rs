@@ -720,8 +720,13 @@ async fn contended_dpu_admission_releases_another_work_manager(
         .connect_with(env.pool.connect_options().as_ref().clone())
         .await?;
     let mut tasks = tokio::task::JoinSet::new();
-    let contender =
-        db::work_lock_manager::start(&mut tasks, env.pool.clone(), Default::default()).await?;
+    let contender = db::work_lock_manager::start(
+        &mut tasks,
+        env.pool.clone(),
+        Default::default(),
+        carbide_instrument::Instrumentation::global(),
+    )
+    .await?;
     let work_key = "contended-dpu-admission";
     let work_lock = env
         .api

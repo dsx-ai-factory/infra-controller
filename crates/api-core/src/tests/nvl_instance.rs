@@ -499,10 +499,8 @@ async fn test_partition_monitor_skips_converged_group_until_full_check(pool: sql
     let observed_at = nvlink_observed_at(&mh, &pool).await;
     let partition_list_calls = env.nmxc_sim_client.partition_info_list_calls();
 
-    let metrics = MetricsCapture::start();
+    let metrics = MetricsCapture::for_registry(env.test_meter.registry());
     env.run_nvl_partition_monitor_iteration().await;
-    // Other API tests drive the same process-global counter; the exact proof
-    // is the untouched observation and simulator below.
     assert!(
         metrics.counter_delta(NVLINK_GROUPS_METRIC, &[("outcome", "skipped_unchanged")]) >= 1.0
     );
@@ -591,7 +589,7 @@ async fn test_partition_monitor_skipped_rack_republishes_domain_uuid(pool: sqlx:
     let added_shelf_id = add_rack_power_shelf(&pool, &rack_id).await;
     let partition_list_calls = env.nmxc_sim_client.partition_info_list_calls();
 
-    let metrics = MetricsCapture::start();
+    let metrics = MetricsCapture::for_registry(env.test_meter.registry());
     env.run_nvl_partition_monitor_iteration().await;
     assert!(
         metrics.counter_delta(NVLINK_GROUPS_METRIC, &[("outcome", "skipped_unchanged")]) >= 1.0
@@ -730,7 +728,7 @@ async fn test_partition_monitor_zero_full_check_interval_reconciles_every_pass(p
     let observed_at = nvlink_observed_at(&mh, &pool).await;
     let partition_list_calls = env.nmxc_sim_client.partition_info_list_calls();
 
-    let metrics = MetricsCapture::start();
+    let metrics = MetricsCapture::for_registry(env.test_meter.registry());
     env.run_nvl_partition_monitor_iteration().await;
     assert!(metrics.counter_delta(NVLINK_GROUPS_METRIC, &[("outcome", "reconciled")]) >= 1.0);
     drop(metrics);
@@ -1157,7 +1155,7 @@ async fn test_nvl_partition_monitor_adds_successful_partitions_when_some_creates
     txn.commit().await.unwrap();
 
     // The monitor should successfully create one partition, but the second creation should fail.
-    let metrics = MetricsCapture::start();
+    let metrics = MetricsCapture::for_registry(env.test_meter.registry());
     env.run_nvl_partition_monitor_iteration().await;
     env.run_nvl_partition_monitor_iteration().await;
     assert!(

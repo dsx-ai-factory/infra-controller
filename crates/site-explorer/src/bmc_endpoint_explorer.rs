@@ -986,7 +986,8 @@ impl AuthenticatedBmc for AuthenticatedBmcClient {
         &self,
         bmc_ip_address: SocketAddr,
         interface: &MachineInterfaceSnapshot,
-        reset_type: Option<libredfish::ManagerResetType>,
+        report: Option<&EndpointExplorationReport>,
+        reset_type: Option<ResetType>,
     ) -> Result<(), EndpointExplorationError> {
         let bmc_mac_address = interface.mac_address;
 
@@ -999,6 +1000,7 @@ impl AuthenticatedBmc for AuthenticatedBmcClient {
                             bmc_mac_address,
                             credentials,
                         },
+                        report,
                         reset_type,
                     )
                     .await

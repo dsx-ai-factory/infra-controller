@@ -1,3 +1,9 @@
+# HELP carbide_ib_monitor_ufm_changes_applied_total Number of changes performed at UFM
+# TYPE carbide_ib_monitor_ufm_changes_applied_total counter
+carbide_ib_monitor_ufm_changes_applied_total{fabric="default",operation="bind_guid_to_pkey",status="error"} 0
+carbide_ib_monitor_ufm_changes_applied_total{fabric="default",operation="bind_guid_to_pkey",status="ok"} 0
+carbide_ib_monitor_ufm_changes_applied_total{fabric="default",operation="unbind_guid_from_pkey",status="error"} 0
+carbide_ib_monitor_ufm_changes_applied_total{fabric="default",operation="unbind_guid_from_pkey",status="ok"} 0
 # HELP carbide_machines_count Number of carbide_machines in the system
 # TYPE carbide_machines_count gauge
 carbide_machines_count{fresh="true"} 1

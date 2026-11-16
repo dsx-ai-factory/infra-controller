@@ -1549,6 +1549,7 @@ async fn test_managed_host_network_config_projects_dual_stack_admin_addresses(po
             use_vpc_vrf_loopback: false,
             routing_profile: None,
         },
+        &env.api.instrumentation,
     )
     .await
     .unwrap();
@@ -1590,6 +1591,7 @@ async fn test_managed_host_network_config_projects_dual_stack_admin_addresses(po
             use_vpc_vrf_loopback: false,
             routing_profile: None,
         },
+        &env.api.instrumentation,
     )
     .await
     .unwrap_err();
@@ -1818,6 +1820,7 @@ async fn test_managed_host_network_config_supports_ipv6_only_admin(pool: sqlx::P
             use_vpc_vrf_loopback: false,
             routing_profile: None,
         },
+        &env.api.instrumentation,
     )
     .await
     .unwrap_err();

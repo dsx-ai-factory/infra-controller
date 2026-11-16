@@ -569,7 +569,7 @@ tests:
     template: runner-config.yaml
     asserts:
       - failedTemplate:
-          errorMessage: runner.command must be fleet-up, ingestion, instance-create or instance-delete
+          errorMessage: runner.command must be fleet-up, ingestion, instance-create, instance-delete or instance-lifecycle
 
   - it: renders a five-host instance create with one runner Job and referenced credentials
     template: runner-config.yaml
@@ -724,3 +724,87 @@ tests:
     set: {<<: *instanceValues, runner.instance.topologyOptimized: invalid}
     asserts:
       - failedTemplate: {errorMessage: runner.instance.topologyOptimized must be a boolean}
+  - it: starts a run-owned sidecar without static tokens or a second Job
+    template: runner-job.yaml
+    set: &setupValues
+      <<: *instanceValues
+      runner.rest.tokenSecret: ""
+      runner.instance.ipxeSecret: ""
+      runner.rest.auth: {tokenUrl: https://identity.example/token, providerSecret: provider-client, tenantClientId: tenant-client, tenantSecret: tenant-client}
+      runner.fixture: {name: fixture, siteId: site-id, machineCapabilities: [{type: GPU, name: gpu, count: 4}], ipBlockCIDR: 10.210.0.0/16, fabricPrefixCIDRs: [10.210.0.0/16], ipxeScript: "#!ipxe\nexit\n", probeImage: registry.example/probe@sha256:0000000000000000000000000000000000000000000000000000000000000000}
+    asserts:
+      - hasDocuments: {count: 1}
+      - equal: {path: 'spec.template.spec.initContainers[0].name', value: fixture-probe}
+      - equal: {path: 'spec.template.spec.initContainers[0].restartPolicy', value: Always}
+      - equal: {path: 'spec.template.spec.initContainers[0].startupProbe.httpGet.path', value: /health}
+      - contains:
+          path: spec.template.spec.volumes
+          content: {name: fixture-identity, emptyDir: {medium: Memory, sizeLimit: 1Mi}}
+      - contains:
+          path: spec.template.spec.containers[0].volumeMounts
+          content: {name: fixture-provider, mountPath: /var/run/secrets/rest-provider, readOnly: true}
+      - notContains: {path: spec.template.spec.volumes, content: {name: rest-token}, any: true}
+      - contains:
+          path: spec.template.spec.volumes
+          content: {name: fixture-tenant, secret: {secretName: tenant-client, items: [{key: client-id, path: client-id}, {key: client-secret, path: client-secret}]}}
+
+  - it: requires tenant credentials for fixture setup
+    template: runner-job.yaml
+    set:
+      <<: *setupValues
+      runner.rest.auth: {tokenUrl: https://identity.example/token, providerSecret: provider-client, tenantClientId: tenant-client, tenantSecret: ""}
+    asserts:
+      - failedTemplate: {errorMessage: runner.rest.auth.tenantSecret is required for fixture setup}
+
+  - it: configures independent REST-only discovery without a tenant startup gate
+    template: runner-config.yaml
+    set: *setupValues
+    asserts:
+      - matchRegex: {path: 'data["config.yaml"]', pattern: 'probeUrl: http://127.0.0.1:19010'}
+      - matchRegex: {path: 'data["fixture-probe.yaml"]', pattern: 'credentials_file: /run/scale-test-identity/provider.json'}
+      - matchRegex: {path: 'data["fixture-probe.yaml"]', pattern: 'tenant_org: '}
+      - notMatchRegex: {path: 'data["config.yaml"]', pattern: 'tokenFile:'}
+      - notMatchRegex: {path: 'data["fixture-probe.yaml"]', pattern: 'nico_api|rack|tray|tenant_id'}
+
+  - it: renders a partial owned delete count
+    template: runner-config.yaml
+    set:
+      <<: *setupValues
+      runner.command: instance-delete
+      runner.instance.deleteCount: 2
+      runner.instance.ownedManifest: create-five.owned.json
+    asserts:
+      - matchRegex: {path: 'data["config.yaml"]', pattern: 'deleteCount: 2'}
+      - matchRegex: {path: 'data["config.yaml"]', pattern: 'ownedManifest: "create-five.owned.json"'}
+
+  - it: renders a lifecycle with setup and no input owned manifest
+    template: runner-config.yaml
+    set:
+      <<: *setupValues
+      runner.command: instance-lifecycle
+    asserts:
+      - matchRegex: {path: 'data["config.yaml"]', pattern: 'command: instance-lifecycle'}
+      - matchRegex: {path: 'data["config.yaml"]', pattern: 'ipxeFile: /etc/scale-test/fixture.ipxe'}
+      - exists: {path: 'data["fixture.ipxe"]'}
+      - notMatchRegex: {path: 'data["config.yaml"]', pattern: 'ownedManifest:'}
+
+  - it: starts one lifecycle Job and its REST sidecar
+    template: runner-job.yaml
+    set:
+      <<: *setupValues
+      runner.command: instance-lifecycle
+    asserts:
+      - hasDocuments: {count: 1}
+      - equal: {path: "spec.template.spec.containers[0].command", value: [/scale-test, instance-lifecycle, --config, /etc/scale-test/config.yaml]}
+      - equal: {path: "spec.template.spec.initContainers[0].name", value: fixture-probe}
+
+  - it: rejects a negative partial delete count
+    template: runner-config.yaml
+    set:
+      <<: *setupValues
+      runner.command: instance-delete
+      runner.instance.deleteCount: -1
+      runner.instance.ownedManifest: create-five.owned.json
+    asserts:
+      - failedTemplate:
+          errorMessage: runner.instance.deleteCount must be a whole count of 0 or more

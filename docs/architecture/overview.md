@@ -160,15 +160,14 @@ In some rare cases - e.g. with very old host or DPU BMCs - the host ingestion pr
 
 Machine Update Manager is a scheduler for Host and DPU firmware updates. It selects Machines with outdated software versions for automated updates.
 
-Machine Update Manager looks at various criteria to determine whether a Machine should get updated:
+Machine Update Manager applies module-specific eligibility checks and a shared
+host ceiling before creating automatic requests. Refer to
+[Shared Host Capacity](../operations/firmware-updates.md#shared-host-capacity)
+for counted hosts and build requirements for NIC accounting and transaction
+protections.
 
-- The current Machine state: for example, whether it is occupied by a tenant. Only Machines in the `Ready` state are selected for automated software updates.
-- Whether the Machine is healthy: no health alerts recorded on the Machine.
-- How many Machines are already updating, and the overall amount of healthy hosts in the Machine. Machine Update Manager never updates all Machines at once, and will not schedule additional updates in case the temporary loss of Machines would move the site under the Machine health SLA.
-
-Machine Update Manager does not perform the actual updates - it only performs scheduling/selection. The updates are instead applied within the ManagedHost state machine. This approach is chosen in order to assure that only a single component (managedhost state machine) is managing a host’s lifecycle at any point in time.
-
-Machine Update Manager is an optional component and can be disabled.
+Machine Update Manager schedules the work; the ManagedHost state machine
+performs the updates and owns the host's lifecycle.
 
 ### Host Power Manager
 
@@ -209,7 +208,5 @@ Some site controller node services require persistent, durable storage to mainta
 
 ## Optional services
 
-The following NICo Core components can be disabled when their capabilities are not required:
-
-- [Machine Update Manager](#machine-update-manager), which schedules automated Host and DPU firmware updates
-- [IB Fabric Monitor](#ib-infiniband-fabric-monitor), which manages InfiniBand fabrics through UFM
+The [IB Fabric Monitor](#ib-infiniband-fabric-monitor) is optional for sites
+that do not need to manage InfiniBand fabrics through UFM.

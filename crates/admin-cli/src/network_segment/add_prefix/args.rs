@@ -40,7 +40,7 @@ pub(crate) struct Args {
     #[clap(
         long,
         value_name = "CIDR-prefix",
-        help = "Network CIDR with an explicit numeric prefix length and no host bits; IPv4 must be shorter than /32. Adds the segment's missing family or matches existing settings without a write"
+        help = "Network CIDR with an explicit numeric prefix length and no host bits; IPv4 must be shorter than /32. Adds the missing family to the segment or matches existing settings without a write"
     )]
     prefix: IpNet,
 
@@ -63,7 +63,7 @@ pub(crate) struct Args {
     #[clap(
         long,
         value_name = "IPv6-address",
-        help = "Optional IPv6 DHCP relay link-address selector for an IPv6 prefix; it can be outside the prefix. Omit for prefix-based selection. Exact matches take precedence: choose a selector that does not redirect another network's requests"
+        help = "Optional IPv6 DHCP relay link-address selector for an IPv6 prefix; it can be outside the prefix. Omit for prefix-based selection. Exact matches take precedence: choose a selector that does not redirect requests from another network"
     )]
     dhcpv6_link_address: Option<Ipv6Addr>,
 }

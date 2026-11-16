@@ -905,10 +905,11 @@ impl DnsServer {
 
         // Must keep meter_provider alive for the lifetime of the server;
         // dropping it shuts down the Prometheus exporter.
-        let instrumentation = Instrumentation::from_meter_provider(&metrics_setup.meter_provider);
+        let instrumentation = metrics_setup.instrumentation.clone();
         let _metrics_guard = metrics_setup.meter_provider;
 
         let metrics_config = MetricsEndpointConfig {
+            instrumentation: instrumentation.clone(),
             address: config.metrics_listen_address,
             registry: metrics_setup.registry,
             health_controller: Some(metrics_setup.health_controller),

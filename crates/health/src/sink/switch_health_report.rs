@@ -17,7 +17,7 @@
 
 use std::sync::Arc;
 
-use carbide_instrument::{Outcome, emit};
+use carbide_instrument::{Instrumentation, Outcome};
 use carbide_uuid::switch::SwitchId;
 
 use super::dedup_queue::DedupQueue;
@@ -41,7 +41,12 @@ pub struct SwitchHealthReportSink {
 }
 
 impl SwitchHealthReportSink {
-    pub fn new(config: &SwitchHealthReportSinkConfig) -> Result<Self, HealthError> {
+    /// Starts report workers using the supplied Event destination.
+    /// Retain the instrumentation provider until the workers stop.
+    pub fn new(
+        config: &SwitchHealthReportSinkConfig,
+        instrumentation: Instrumentation,
+    ) -> Result<Self, HealthError> {
         let handle = tokio::runtime::Handle::try_current().map_err(|error| {
             HealthError::GenericError(format!(
                 "switch health report sink requires active Tokio runtime: {error}"
@@ -61,6 +66,7 @@ impl SwitchHealthReportSink {
         for worker_id in 0..config.workers {
             let worker_client = Arc::clone(&client);
             let worker_queue = Arc::clone(&queue);
+            let instrumentation = instrumentation.clone();
             handle.spawn(async move {
                 loop {
                     let (key, report) = worker_queue.next().await;
@@ -70,7 +76,7 @@ impl SwitchHealthReportSink {
                             let result = worker_client
                                 .submit_switch_health_report(&key.id, converted)
                                 .await;
-                            emit(HealthReportSubmitted {
+                            instrumentation.emit(HealthReportSubmitted {
                                 target: HealthReportTarget::Switch,
                                 outcome: Outcome::from(&result),
                                 id: key.id.to_string(),

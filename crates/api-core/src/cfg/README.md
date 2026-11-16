@@ -149,8 +149,7 @@ compatibility parsing does not restore their former behavior.
 | `default_tenant_routing_profile_type` | `String` | `EXTERNAL` | `networking` | The default routing profile used when a tenant is created. |
 | `initial_objects_file` | `Option<PathBuf>` | — | `server` | Path to the `initial_objects.toml` file for seeding the database. |
 | `enable_admin_ui` | `bool` | `true` | `server` | Whether to serve the admin web UI (the HTML pages under `/admin`). Set to `false` to run only the gRPC API; the gRPC service is unaffected either way. |
-| `web_ui_sidebar_tools` | `Vec<ToolLink>` | `[]` | `server` | External tool links surfaced in the admin web UI's "Tools" sidebar. Each entry's `name` must be unique; the section is hidden when the list is empty. |
-| `web_ui_logs_link_template` | `String` | `""` | `server` | URL template for the "Logs" link on machine and endpoint detail pages. The placeholder `{search}` is replaced with the machine ID or BMC IP. When empty, the link is hidden. |
+| `web_ui` | `WebUiConfig` | *(default)* | `server` | Admin web UI links (see [WebUiConfig](#webuiconfig)). |
 | `log_history` | `LogHistoryConfig` | *(default)* | `integrations` | In-memory log history for the admin web live log viewer at `/admin/logs` (see [LogHistoryConfig](#loghistoryconfig)). |
 | `tracing` | `TracingConfig` | *(default)* | `integrations` | OTLP trace export settings (see [TracingConfig](#tracingconfig)). |
 | `secrets` | `Option<SecretsConfig>` | — | `security` | Secrets backend configuration. When present, the credential reader chain and write target are operator-configured (see [SecretsConfig](#secretsconfig)). |
@@ -345,6 +344,32 @@ available for topology-specific flows.
 
 ## Sub-Structs
 
+### `WebUiConfig`
+
+These settings control the Tools section and Logs links in the admin web UI.
+Both are hidden by default. Settings are read at startup, so changes require a
+restart.
+
+| Field | Type | Default | Description |
+| ------- | ------ | --------- | ------------- |
+| `sidebar_tools` | `Vec<ToolLink>` | `[]` | Links shown in the Tools section, in list order. Each entry needs a unique `name`, a `display_name`, and an absolute HTTP or HTTPS `url`. An empty list hides the section. Duplicate names or invalid URLs prevent startup. |
+| `logs_link_template` | `String` | `""` | URL template for Logs links on machine and endpoint detail pages. `{search}` is replaced with the machine ID or BMC IP. An empty string hides the link. |
+
+```toml
+[web_ui]
+logs_link_template = "https://logs.example.com/?query={search}"
+
+[[web_ui.sidebar_tools]]
+name = "grafana"
+display_name = "Grafana"
+url = "https://grafana.example.com"
+```
+
+The deprecated top-level fields `web_ui_sidebar_tools` and
+`web_ui_logs_link_template` still work, and startup logs a warning for each one.
+If a config sets both forms, the `[web_ui]` value is used. See
+[issue #4994](https://github.com/dsx-ai-factory/infra-controller/issues/4994).
+
 ### `BmcProxyConfig` — `bmc_proxy`
 
 Routes `nico-api` BMC Redfish traffic through `nico-bmc-proxy`. The proxy
@@ -434,19 +459,22 @@ different share without allowing it to exceed either global bound.
 | `max_work_in_flight_per_client` | `usize` | `8` | Default maximum business requests from one client that may execute concurrently. Must be greater than zero, no greater than `max_work_in_flight`, and representable as a `u32`. |
 | `max_pending_per_client` | `usize` | `64` | Default hard bound on pending business requests from one client. Must be greater than zero and no greater than `max_pending`. |
 | `pending_timeout` | `Duration` | `5s` | Default maximum time a client's pending request may wait for execution. Admission can reject earlier when its queue-delay estimate exceeds this value. Must be greater than zero. |
+| `max_execution_time` | `Duration` | `300s` | Maximum time an admitted request may execute its handler. The default matches the Rust client's `300s` request timeout. Must cover the longest legitimate unary RPC, and must be at least twice `certificates.cert_manager.request_timeout_secs` when `use_cert_manager` or `use_cert_manager_ufm` is set. Must be greater than zero. |
 | `client_idle_timeout` | `Duration` | `5m` | How long an empty, inactive client's scheduler state is cached before cleanup. Must be greater than zero. |
 | `service_limits` | `BTreeMap<String, ApiAdmissionServiceLimitsConfig>` | `{}` | Per-service overrides keyed by the exact SPIFFE service identifier described below. Unlisted services use the default per-client limits. |
 
 #### `ApiAdmissionServiceLimitsConfig`
 
-Every field is required for each service override; the nested structure has no
-field-level defaults.
+`max_work_in_flight`, `max_pending`, and `pending_timeout` are required for each
+service override. `max_execution_time` is optional and falls back to the global
+`max_execution_time` when omitted.
 
 | Field | Type | Default | Description |
 | ------- | ------ | --------- | ------------- |
 | `max_work_in_flight` | `usize` | **required** | Maximum requests from this service that may execute concurrently. Must be greater than zero, no greater than the global `max_work_in_flight`, and representable as a `u32`. |
 | `max_pending` | `usize` | **required** | Hard bound on this service's pending requests. Must be greater than zero and no greater than the global `max_pending`. |
 | `pending_timeout` | `Duration` | **required** | Maximum time this service's pending request may wait for execution. Admission can reject earlier when its queue-delay estimate exceeds this value. Must be greater than zero. |
+| `max_execution_time` | `Duration` | *(optional)* | Overrides the global `max_execution_time` for this service. Must be greater than zero when set. |
 
 The map key is the identifier extracted by removing one of
 `auth.trust.spiffe_service_base_paths` from the certificate's SPIFFE path. For
@@ -960,8 +988,8 @@ TOML section: `[extension_service_state_controller]`.
 | Field | Type | Default | Description |
 | ------- | ------ | --------- | ------------- |
 | `autoupdate` | `bool` | `false` | Enable automatic host firmware updates. |
-| `host_enable_autoupdate` | `Vec<String>` | `[]` | Host models to force-enable autoupdate. |
-| `host_disable_autoupdate` | `Vec<String>` | `[]` | Host models to force-disable autoupdate. |
+| `host_enable_autoupdate` | `Vec<String>` | `[]` | Legacy field; automatic host selection does not read it. |
+| `host_disable_autoupdate` | `Vec<String>` | `[]` | Host machine IDs excluded from automatic host selection. |
 | `run_interval` | `Duration` | `30s` | Firmware manager polling interval. |
 | `max_uploads` | `usize` | `4` | Max concurrent firmware uploads. |
 | `concurrency_limit` | `usize` | `16` | Max concurrent firmware flashing operations. |
@@ -969,7 +997,7 @@ TOML section: `[extension_service_state_controller]`.
 | `firmware_download_cache_directory` | `PathBuf` | `/mnt/persistence/fw/download-cache` | Writable directory used to cache downloaded firmware artifacts. |
 | `downloads` | `FirmwareDownloadConfig` | *(see below)* | Shared downloader limits, applied at Core startup. |
 | `nic_firmware_cache_capacity_bytes` | `u64` | `17179869184` (16 GiB) | Maximum payload bytes in `<firmware_download_cache_directory>/digest-v1`, including partial files and active download reservations. Accepts `1` through `1099511627776` (1 TiB), at least `downloads.max_download_bytes`. Active operations and readers prevent eviction. Verified files already present remain readable after a capacity reduction; new reservations require free space. Legacy URL-cache files are outside this limit. Each Core process must use its own cache directory; sharing it between processes is unsupported. Changes require a Core restart. |
-| `nic_firmware_delivery_mode` | `FirmwareDeliveryMode` | `site_cache` | Site policy for new NIC firmware operations. Accepts `site_cache` for authenticated Core delivery or `direct` for anonymous origin HTTP(S). Changes require a Core restart; admission integration is tracked below. |
+| `nic_firmware_delivery_mode` | `FirmwareDeliveryMode` | `site_cache` | Site policy for new NIC firmware operations. Accepts `site_cache` for authenticated Core delivery or `direct` for anonymous origin HTTP(S). Changes require a Core restart; each admitted operation freezes its mode. |
 | `host_firmware_upgrade_retry_interval` | `Duration` | `60m` | Retry delay for failed host firmware upgrades. |
 | `instance_updates_manual_tagging` | `bool` | `true` | Require manual tagging before firmware updates. |
 | `no_reset_retries` | `bool` | `false` | Disable retry logic after BMC resets. |
@@ -977,7 +1005,17 @@ TOML section: `[extension_service_state_controller]`.
 | `requires_manual_upgrade` | `bool` | `false` | Force all firmware upgrades to require admin approval. |
 | `max_concurrent_bfb_copies` | `usize` | `10` | Maximum number of concurrent BFB copy operations. |
 
-Core loads `firmware_global.nic_firmware_delivery_mode` at startup. Copying this policy into newly admitted production operations is future work tracked in [NIC firmware lifecycle integration](https://github.com/dsx-ai-factory/infra-controller/issues/6680). Changing the setting does not start an update. Saved operations retain their frozen delivery mode, and an omitted mode in an older operation means `Direct`, independently of the site's `site_cache` default. Legacy host-script and DPU firmware updates do not use this setting. Refer to [supervised firmware operations](../../../libmlx/README.md#supervised-firmware-operations) for transfer, authentication, and retry behavior.
+Core loads these settings at startup using base configuration, site configuration, then `CARBIDE_API_` environment overrides. Admission freezes `firmware_global.nic_firmware_delivery_mode` in each operation. Changing that setting alone does not start an update. Saved operations retain their mode; an omitted mode in an older operation means `Direct`, independently of the site's `site_cache` default. Legacy host-script and DPU firmware updates do not use this setting. Refer to [supervised firmware operations](../../../libmlx/README.md#supervised-firmware-operations) for delivery behavior.
+
+`firmware_global.nic_firmware_admission_enabled` and `firmware_global.nic_firmware_platforms` require a Core build and schema containing the unreleased [lifecycle admission implementation](https://github.com/dsx-ai-factory/infra-controller/issues/6680). Admission defaults to disabled, and no platform entries ship. Apply the same admission policy to all Core replicas. Refer to [NIC Firmware Recovery](../../../../docs/architecture/state_machines/managedhost.md#nic-firmware-recovery) for supporting deployments, hardware qualification, lifecycle behavior, shared capacity, recovery after disablement, and the unsupported rollback boundary.
+
+Each `nic_firmware_platforms` entry requires `sys_vendor`, `product_name`, `part_number`, `psid`, and `options`. Identities are literal, case-sensitive strings of 1–256 UTF-8 bytes, without surrounding whitespace or control characters. Duplicate four-field identities are rejected. The DMI pair comes from stored host discovery; the PN/PSID pair comes from fresh whole-host NIC inventory. Every changed card must match an entry, and all changed cards on a host must use identical options. Retain entries needed by recorded restoration obligations until those obligations clear.
+
+In TOML, entries use `[[firmware_global.nic_firmware_platforms]]` with an `[firmware_global.nic_firmware_platforms.options]` table. The `verify_image`, `verify_version`, and `activation` options are required. Encode host reboot as `activation = "HostReboot"` in the `options` table. Encode card reset with a `[firmware_global.nic_firmware_platforms.options.activation.CardReset]` table containing required `reset_level` (`0`–`255`). Card reset also accepts optional `post_reset_verify_retry_interval_seconds` and `post_reset_verify_timeout_seconds`, each `1`–`1800` seconds. Omission uses the supervisor defaults of 10 and 1800 seconds. These timings apply only to card reset with at least one verification enabled; explicit values are validated even when verification is disabled.
+
+Enabling admission also refuses untracked admin power and BFB manual recovery. Refer to [Other Senders and Operator Reconciliation](../../../../docs/architecture/state_machines/managedhost.md#other-senders-and-operator-reconciliation) for these power restrictions and recovery behavior.
+
+The catalog selects profiles, versions, artifacts, and digests; the platform list does not select them. Accepted configuration syntax does not establish that a reset level or platform is safe. Keep admission disabled until the [hardware qualification and deployment prerequisites](../../../../docs/architecture/state_machines/managedhost.md#nic-firmware-recovery) are satisfied.
 
 ### `FirmwareDownloadConfig`
 
@@ -1025,8 +1063,8 @@ concurrency have separate owners and limits.
 | Field | Type | Default | Description |
 | ------- | ------ | --------- | ------------- |
 | `instance_autoreboot_period` | `Option<TimePeriod>` | — | UTC time window for automatic machine reboots. |
-| `max_concurrent_machine_updates_absolute` | `Option<i32>` | — | Hard cap on concurrent machine updates. |
-| `max_concurrent_machine_updates_percent` | `Option<i32>` | — | Percentage cap on concurrent updates (lesser of absolute/percent is used). |
+| `max_concurrent_machine_updates_absolute` | `Option<i32>` | — | Absolute input to the [shared ceiling for new automatic requests](../../../../docs/operations/firmware-updates.md#shared-host-capacity), including legacy configuration precedence. |
+| `max_concurrent_machine_updates_percent` | `Option<i32>` | — | Percentage input to the [shared ceiling for new automatic requests](../../../../docs/operations/firmware-updates.md#shared-host-capacity); refer to that policy for health subtraction and precedence. |
 
 ### `PowerManagerOptions`
 
@@ -2175,7 +2213,7 @@ use_cert_manager_ufm = false
 | `namespace` | `String` | `forge-system` | Non-empty namespace for CertificateRequests. The API service account needs `create`, `get`, and `delete` on `certificaterequests` in this namespace. Helm sets it to the deployed API namespace. |
 | `issuer_name` | `String` | `site-issuer` | Non-empty name of an existing issuer in `cert-manager.io`, chaining to the same site CA trusted by the API, Scout, and DPU agents. |
 | `issuer_kind` | `IssuerKind` | `ClusterIssuer` | Accepts `ClusterIssuer` or `Issuer`; an `Issuer` must be in `namespace`. |
-| `request_timeout_secs` | `u64` | `120` | Issuance deadline including Kubernetes creation, in seconds; accepts `1` through `600`. Cleanup has a separate wait bounded by the same duration. |
+| `request_timeout_secs` | `u64` | `120` | Issuance deadline including Kubernetes creation, in seconds; accepts `1` through `600`. Cleanup has a separate wait bounded by the same duration, so with API admission enabled, `api_admission_control.max_execution_time` must be at least twice this value. |
 | `max_ttl` | `Duration` | `720h` | Whole-second duration of at least the maximum agent renewal interval plus one day of grace (`8d` with the seven-day renewal maximum), in human-readable format (for example `720h`). Caps machine and explicit UFM lifetimes; set it to the existing Vault PKI role's maximum when migrating. |
 
 The two flags are independent and require an API restart to change provider

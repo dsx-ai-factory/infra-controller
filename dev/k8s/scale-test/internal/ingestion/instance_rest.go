@@ -31,6 +31,14 @@ import (
 
 // InstanceSettings extends the existing runner fixture. Secrets are mounted files.
 type InstanceSettings struct {
+	Fixture       FixtureSettings   `yaml:"fixture"`
+	sidecar       fixtureProbe      `yaml:"-"`
+	restEpoch     float64           `yaml:"-"`
+	lifecycleBase *instanceBaseline `yaml:"-"`
+	journalRunID  string            `yaml:"-"`
+	tenantCensus  bool              `yaml:"-"`
+	preparing     bool              `yaml:"-"`
+
 	fleetup.Settings `yaml:",inline"`
 	Rest             struct {
 		URL         string `yaml:"url"`
@@ -38,6 +46,8 @@ type InstanceSettings struct {
 		ProviderOrg string `yaml:"providerOrg"`
 		TokenFile   string `yaml:"tokenFile"`
 		CAFile      string `yaml:"caFile"`
+
+		Auth fixtureAuth `yaml:"auth"`
 	} `yaml:"rest"`
 	Observation struct {
 		IntervalSeconds      uint64 `yaml:"intervalSeconds"`
@@ -55,6 +65,9 @@ type InstanceSettings struct {
 		OwnedManifest     string            `yaml:"ownedManifest"`
 		APIPoolReplicas   uint64            `yaml:"apiPoolReplicas"`
 		APIPoolSelector   map[string]string `yaml:"apiPoolSelector"`
+
+		OperatingSystemID string `yaml:"operatingSystemId"`
+		DeleteCount       uint64 `yaml:"deleteCount"`
 	} `yaml:"instance"`
 }
 
@@ -70,7 +83,7 @@ func ParseInstanceSettings(n yaml.Node, command string) (InstanceSettings, error
 	if err != nil || u.Scheme != "https" || u.Hostname() == "" || u.User != nil || u.RawQuery != "" || u.Fragment != "" || strings.ContainsAny(s.Rest.URL, "?#") || u.Path != "" && u.Path != "/" {
 		return s, instanceIssue("REST needs an HTTPS origin without credentials, query or path")
 	}
-	if s.Rest.Org == "" || s.Rest.ProviderOrg == "" || s.Rest.Org == s.Rest.ProviderOrg || s.Rest.TokenFile == "" || !s.CheckStore || len(s.Instance.APIPoolSelector) == 0 || s.Instance.APIPoolReplicas == 0 {
+	if s.Rest.Org == "" || s.Rest.ProviderOrg == "" || s.Rest.Org == s.Rest.ProviderOrg || s.Rest.TokenFile == "" && s.Rest.Auth.TokenURL == "" || !s.CheckStore || len(s.Instance.APIPoolSelector) == 0 || s.Instance.APIPoolReplicas == 0 {
 		return s, instanceIssue("instance fixture needs distinct tenant/provider orgs, a token file and API-pool store selector")
 	}
 	if s.Observation.LabelReadbackSeconds < 30 || s.Observation.LabelReadbackSeconds > 86400 {
@@ -79,12 +92,24 @@ func ParseInstanceSettings(n yaml.Node, command string) (InstanceSettings, error
 	if s.Observation.IntervalSeconds < 30 || s.Observation.IntervalSeconds > 86400 || s.Instance.N == 0 || s.Instance.BurstSize < 2 {
 		return s, instanceIssue("instance fixture needs positive N, bursts of at least two and a 30 to 86400 second cadence")
 	}
+	if command != "instance-delete" && s.Instance.DeleteCount != 0 {
+		return s, instanceIssue("deleteCount is only valid for instance-delete")
+	}
+	if s.Fixture.Name != "" {
+		if command != "instance-delete" && (s.Instance.N < 2 || s.Instance.IPXEFile == "") || command == "instance-delete" && s.Instance.OwnedManifest == "" {
+			return s, instanceIssue("fixture command needs create iPXE or an owned delete manifest")
+		}
+		return s, validateFixture(s)
+	}
+	if s.Rest.Auth != (fixtureAuth{}) {
+		return s, instanceIssue("credential auth requires fixture mode")
+	}
 	for _, id := range []string{s.Instance.TenantID, s.Instance.InstanceTypeID} {
 		if uuid.Validate(id) != nil {
 			return s, instanceIssue("tenant and instance type must be UUIDs")
 		}
 	}
-	if command == "instance-create" {
+	if command != "instance-delete" {
 		if s.Instance.N < 2 || uuid.Validate(s.Instance.VPCID) != nil || uuid.Validate(s.Instance.SubnetID) != nil || s.Instance.IPXEFile == "" {
 			return s, instanceIssue("create needs at least two hosts, VPC/subnet UUIDs and a pinned iPXE file")
 		}
@@ -99,13 +124,18 @@ type restWrites struct {
 	client   *http.Client
 	settings InstanceSettings
 	pace     *rate.Limiter
+	until    time.Time
 	token    string
+
+	auth       restAuth
+	authClient *http.Client
 }
 
 func newREST(s InstanceSettings) (*restWrites, error) {
 	protocols := new(http.Protocols)
 	protocols.SetHTTP1(true)
 	transport := &http.Transport{DisableKeepAlives: true, Protocols: protocols}
+	var identityRoots *x509.CertPool
 	if s.Rest.CAFile != "" {
 		f, err := os.OpenFile(s.Rest.CAFile, os.O_RDONLY|syscall.O_NONBLOCK, 0)
 		if err != nil {
@@ -125,8 +155,26 @@ func newREST(s InstanceSettings) (*restWrites, error) {
 			return nil, instanceIssue("REST CA file holds no PEM certificate")
 		}
 		transport.TLSClientConfig = &tls.Config{RootCAs: roots, MinVersion: tls.VersionTLS12}
+		if s.Rest.Auth.TokenURL != "" {
+			identityRoots, _ = x509.SystemCertPool()
+			if identityRoots == nil {
+				identityRoots = x509.NewCertPool()
+			}
+			identityRoots.AppendCertsFromPEM(pem)
+		}
 	}
 	r := &restWrites{client: &http.Client{Transport: transport, Timeout: time.Minute, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}, settings: s, pace: rate.NewLimiter(2, 1)}
+	if s.Fixture.Name != "" {
+		r.client.Timeout = 300 * time.Second
+	}
+	if s.Rest.Auth.TokenURL != "" {
+		identityTransport := transport.Clone()
+		identityTransport.TLSClientConfig = &tls.Config{RootCAs: identityRoots, MinVersion: tls.VersionTLS12}
+		client := *r.client
+		client.Transport = identityTransport
+		r.authClient = &client
+		return r, nil
+	}
 	return r, r.refreshToken()
 }
 func (r *restWrites) refreshToken() error {
@@ -151,10 +199,10 @@ func (r *restWrites) refreshToken() error {
 func digest(body []byte) string { h := sha256.Sum256(body); return hex.EncodeToString(h[:]) }
 
 // attempt is one bounded mutation. Even a malformed 2xx is unclear.
-func (r *restWrites) attempt(ctx context.Context, method, path string, body []byte, count int) writer.Attempt {
+func (r *restWrites) attempt(ctx context.Context, method, path string, body []byte, count int, provider ...bool) writer.Attempt {
 	lost := writer.Attempt{NoReply: true}
 	org := r.settings.Rest.Org
-	if method == http.MethodPatch {
+	if method == http.MethodPatch && len(provider) == 0 || len(provider) > 0 && provider[0] {
 		org = r.settings.Rest.ProviderOrg
 	}
 	target := strings.TrimRight(r.settings.Rest.URL, "/") + "/v2/org/" + url.PathEscape(org) + "/nico/" + path
@@ -171,6 +219,9 @@ func (r *restWrites) attempt(ctx context.Context, method, path string, body []by
 	defer func() { _ = reply.Body.Close() }()
 	if reply.StatusCode < 200 || reply.StatusCode >= 300 {
 		reason := journal.Reason("http-rejected")
+		if reply.StatusCode >= 500 && r.settings.Fixture.Name != "" {
+			return lost
+		}
 		if reply.StatusCode >= 500 {
 			reason = journal.ServerError
 		}
@@ -198,6 +249,15 @@ func (r *restWrites) attempt(ctx context.Context, method, path string, body []by
 	raw, err := io.ReadAll(io.LimitReader(reply.Body, (1<<20)+1))
 	if err != nil || len(raw) > 1<<20 {
 		return lost
+	}
+	if count < 0 {
+		var row struct {
+			ID string `json:"id"`
+		}
+		if jsonx.Decode(raw, &row) != nil || len(row.ID) != 36 || uuid.Validate(row.ID) != nil {
+			return lost
+		}
+		return writer.Attempt{IDs: []string{row.ID}}
 	}
 	var rows []struct {
 		ID string `json:"id"`

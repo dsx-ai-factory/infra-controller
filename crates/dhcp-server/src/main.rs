@@ -37,7 +37,7 @@ use carbide_dhcp_server::{
     Config, ReplyStatus, packet_handler, packet_handler_v6, util,
     validate_stateful_lifetimes_for_host,
 };
-use carbide_instrument::emit;
+use carbide_instrument::Instrumentation;
 use carbide_rpc_utils::dhcp::{DhcpConfig, DhcpTimestamps, DhcpTimestampsFilePath, ServiceConfig};
 use carbide_tls::client_config::ClientCert;
 use carbide_tls::default::{default_client_cert, default_client_key, default_root_ca};
@@ -127,13 +127,16 @@ impl std::fmt::Display for ListenerFailure {
 
 /// Loads durable host activity when possible while keeping DHCP listeners available after
 /// timestamp-file damage.
-fn initialize_dhcp_timestamps(path: DhcpTimestampsFilePath) -> DhcpTimestamps {
+fn initialize_dhcp_timestamps(
+    path: DhcpTimestampsFilePath,
+    instrumentation: &Instrumentation,
+) -> DhcpTimestamps {
     let path_context = path.path_str().to_string();
     let mut timestamps = DhcpTimestamps::new(path);
 
     // Timestamp history is advisory, so corruption must not take packet service down.
     if let Err(error) = timestamps.initialize_file() {
-        emit(DhcpTimestampFileFailed::Initialization {
+        instrumentation.emit(DhcpTimestampFileFailed::Initialization {
             dhcp_timestamps_path: path_context,
             error: error.to_string(),
         });
@@ -174,11 +177,14 @@ async fn get_ipv4_socket_before_cancellation(
     listen_address: core::net::SocketAddrV4,
     interface: String,
     cancel: &CancellationToken,
+    instrumentation: &Instrumentation,
 ) -> Option<Result<UdpSocket, DhcpError>> {
     tokio::select! {
         biased;
         _ = cancel.cancelled() => None,
-        result = get_socket(listen_address, interface) => Some(result),
+        result = get_socket(listen_address, interface,
+            instrumentation,
+        ) => Some(result),
     }
 }
 
@@ -209,6 +215,7 @@ async fn run_dhcp_generation(
         } else {
             DhcpTimestampsFilePath::NotSet
         },
+        config__.instrumentation(),
     )));
 
     // Each family has an independent packet-processing limit across all interfaces.
@@ -246,7 +253,8 @@ async fn run_dhcp_generation(
                     listen_address,
                     interface.clone(),
                     &cancel,
-                )
+    config_.instrumentation(),
+)
                 .await
                 else {
                     return;
@@ -318,7 +326,8 @@ async fn run_dhcp_generation(
                                         listen_address,
                                         interface.clone(),
                                         &cancel,
-                                    )
+    config_.instrumentation(),
+)
                                     .await
                                     else {
                                         break;
@@ -345,7 +354,7 @@ async fn run_dhcp_generation(
                             // TryAcquireError::NoPermits; Not checking explicitly.
                             let Ok(permit) = rate_limiter.clone().try_acquire_owned() else {
                                 // drop packet.
-                                emit(DhcpPacketDropped {
+                                config_.instrumentation().emit(DhcpPacketDropped {
                                     reason: DropReason::RateLimited,
                                     error: "parallel packet handling limit reached".to_string(),
                                 });
@@ -354,7 +363,7 @@ async fn run_dhcp_generation(
 
                             // Not a valid packet.
                             if len < MINIMUM_DHCP_PKT_SIZE {
-                                emit(DhcpPacketDropped {
+                                config_.instrumentation().emit(DhcpPacketDropped {
                                     reason: DropReason::TooShort,
                                     error: format!(
                                         "{len} bytes is below the {MINIMUM_DHCP_PKT_SIZE}-byte minimum"
@@ -505,12 +514,13 @@ fn admit_v6_packet(
     packet: &[u8],
     source_address: SocketAddr,
     rate_limiter: &Arc<tokio::sync::Semaphore>,
+    instrumentation: &Instrumentation,
 ) -> Option<tokio::sync::OwnedSemaphorePermit> {
-    record_v6_request_received(packet, source_address);
+    record_v6_request_received(packet, source_address, instrumentation);
     match rate_limiter.clone().try_acquire_owned() {
         Ok(permit) => Some(permit),
         Err(_) => {
-            emit(DhcpV6RequestDropped {
+            instrumentation.emit(DhcpV6RequestDropped {
                 reason: V6DropReason::RateLimited,
                 error: "parallel packet handling limit reached".to_string(),
             });
@@ -563,10 +573,12 @@ async fn run_dhcp_v6_listener(
         Err(error) => {
             // Supervision decides whether the remaining listeners can keep
             // serving the enabled address family after this interface fails.
-            emit(DhcpV6ListenerUnavailable::InitialSocketSetup {
-                interface_name: interface,
-                error: error.to_string(),
-            });
+            config
+                .instrumentation()
+                .emit(DhcpV6ListenerUnavailable::InitialSocketSetup {
+                    interface_name: interface,
+                    error: error.to_string(),
+                });
             return;
         }
     };
@@ -598,58 +610,60 @@ async fn run_dhcp_v6_listener(
     let mut buffer = vec![0; usize::from(u16::MAX)];
     'receive: loop {
         tokio::select! {
-            biased;
-            _ = cancel.cancelled() => {
-                tracing::info!(
-                    interface_name = context.interface,
-                    "DHCPv6 server received cancellation, shutting down"
-                );
-                break;
-            }
-            result = context.socket.recv_from(&mut buffer) => {
-                let (length, source) = match result {
-                    Ok(received) => received,
-                    Err(error) => {
-                        tracing::error!(
+                    biased;
+                    _ = cancel.cancelled() => {
+                        tracing::info!(
                             interface_name = context.interface,
-                            error = %error,
-                            "DHCPv6 socket receive failed"
+                            "DHCPv6 server received cancellation, shutting down"
                         );
-                        let recreated = tokio::select! {
-                            _ = cancel.cancelled() => break 'receive,
-                            result = get_socket_v6(
-                                listen_address,
-                                &context.interface,
-                                join_site_scoped_group,
-                            ) => result,
-                        };
-                        match recreated {
-                            Ok(recreated) => context.socket = Arc::new(recreated),
-                            Err(error) => {
-                                emit(DhcpV6ListenerUnavailable::SocketRecreation {
-                                    interface_name: context.interface.clone(),
-                                    error: error.to_string(),
-                                });
-                                break 'receive;
-                            }
-                        }
-                        continue;
+                        break;
                     }
-                };
+                    result = context.socket.recv_from(&mut buffer) => {
+                        let (length, source) = match result {
+                            Ok(received) => received,
+                            Err(error) => {
+                                tracing::error!(
+                                    interface_name = context.interface,
+                                    error = %error,
+                                    "DHCPv6 socket receive failed"
+                                );
+                                let recreated = tokio::select! {
+                                    _ = cancel.cancelled() => break 'receive,
+                                    result = get_socket_v6(
+                                        listen_address,
+                                        &context.interface,
+                                        join_site_scoped_group,
+                                    ) => result,
+                                };
+                                match recreated {
+                                    Ok(recreated) => context.socket = Arc::new(recreated),
+                                    Err(error) => {
+                                        context.config.instrumentation().emit(DhcpV6ListenerUnavailable::SocketRecreation {
+                                            interface_name: context.interface.clone(),
+                                            error: error.to_string(),
+                                        });
+                                        break 'receive;
+                                    }
+                                }
+                                continue;
+                            }
+                        };
 
-                let Some(permit) = admit_v6_packet(&buffer[..length], source, &rate_limiter) else {
-                    continue;
-                };
-                reap_packet_tasks(&mut packet_tasks, "IPv6", &context.interface);
+                        let Some(permit) = admit_v6_packet(&buffer[..length], source, &rate_limiter,
+            context.config.instrumentation(),
+        ) else {
+                            continue;
+                        };
+                        reap_packet_tasks(&mut packet_tasks, "IPv6", &context.interface);
 
-                let packet = buffer[..length].to_vec();
-                let packet_context = context.clone();
-                packet_tasks.spawn(async move {
-                    process_v6(source, &packet, packet_context).await;
-                    drop(permit);
-                });
-            }
-        }
+                        let packet = buffer[..length].to_vec();
+                        let packet_context = context.clone();
+                        packet_tasks.spawn(async move {
+                            process_v6(source, &packet, packet_context).await;
+                            drop(permit);
+                        });
+                    }
+                }
     }
     // Cancellation closes admission before aborting and joining every accepted packet.
     abort_and_join_packet_tasks(&mut packet_tasks, "IPv6", &context.interface).await;
@@ -821,6 +835,7 @@ async fn handle_reload_with_service_config(
     force_start: bool,
     service_config: ServiceConfig,
     v6_port: u16,
+    instrumentation: &Instrumentation,
 ) -> Result<(), DhcpError> {
     if args.interfaces.is_empty() {
         // Keep the running generation until a later update supplies interfaces
@@ -854,7 +869,7 @@ async fn handle_reload_with_service_config(
             path.clone()
         }
     });
-    let config = load_config(args, candidate_dhcp, candidate_host, true)
+    let config = load_config(args, candidate_dhcp, candidate_host, true, instrumentation)
         .await?
         .with_service_config(service_config);
     let identity = config.server_identifier()?;
@@ -892,6 +907,9 @@ async fn handle_reload(
         force_start,
         ServiceConfig::default(),
         v6_port,
+        &carbide_instrument::Instrumentation::from_meter_provider(
+            &opentelemetry::metrics::noop::NoopMeterProvider::new(),
+        ),
     )
     .await
 }
@@ -943,6 +961,7 @@ async fn promote_configs(paths: &[String]) -> Result<(), DhcpError> {
 /// Keeps every field from one configuration replacement together while the control loop validates
 /// and applies it.
 struct ConfigReplacement {
+    instrumentation: Instrumentation,
     dhcp_yaml: String,
     host_yaml: Option<String>,
     interfaces: Vec<String>,
@@ -961,6 +980,7 @@ async fn apply_update_with_service_config(
     v6_port: u16,
 ) -> Result<(), ApplyError> {
     let ConfigReplacement {
+        instrumentation,
         dhcp_yaml,
         host_yaml,
         interfaces,
@@ -983,10 +1003,16 @@ async fn apply_update_with_service_config(
                 generation_args.interfaces.clone_from(active_interfaces);
                 let live_dhcp = generation_args.dhcp_config.clone();
                 let live_host = generation_args.host_config.clone();
-                let config = load_config(&generation_args, &live_dhcp, live_host, true)
-                    .await
-                    .map_err(ApplyError::Internal)?
-                    .with_service_config(service_config.clone());
+                let config = load_config(
+                    &generation_args,
+                    &live_dhcp,
+                    live_host,
+                    true,
+                    &instrumentation,
+                )
+                .await
+                .map_err(ApplyError::Internal)?
+                .with_service_config(service_config.clone());
                 replace_generation(&generation_args, config, cancel_token, dhcp_handle, v6_port)
                     .await;
             }
@@ -1006,6 +1032,7 @@ async fn apply_update_with_service_config(
         force,
         service_config.clone(),
         v6_port,
+        &instrumentation,
     )
     .await
     .map_err(|error| match error {
@@ -1035,6 +1062,9 @@ async fn apply_update(
     apply_update_with_service_config(
         args,
         ConfigReplacement {
+            instrumentation: carbide_instrument::Instrumentation::from_meter_provider(
+                &opentelemetry::metrics::noop::NoopMeterProvider::new(),
+            ),
             dhcp_yaml,
             host_yaml,
             interfaces,
@@ -1061,6 +1091,7 @@ async fn run_with_grpc_control(
     mut args: Args,
     grpc_listen_addr: SocketAddr,
     v6_port: u16,
+    instrumentation: Instrumentation,
 ) -> Result<(), Box<dyn Error>> {
     // Apply default for host_config path when running in gRPC mode.
     args.host_config
@@ -1093,11 +1124,18 @@ async fn run_with_grpc_control(
         None
     };
 
+    let grpc_instrumentation = instrumentation.clone();
     tokio::spawn(async move {
-        run_grpc_server(grpc_listen_addr, ctrl_tx, retained_host_config_path).await;
+        run_grpc_server(
+            grpc_listen_addr,
+            ctrl_tx,
+            retained_host_config_path,
+            grpc_instrumentation,
+        )
+        .await;
     });
 
-    run_control_loop(args, ctrl_rx, v6_port).await
+    run_control_loop(args, ctrl_rx, v6_port, instrumentation.clone()).await
 }
 
 /// Own the running generation and serialize accepted control requests.
@@ -1107,6 +1145,7 @@ async fn run_control_loop(
     mut args: Args,
     mut ctrl_rx: tokio::sync::mpsc::Receiver<ControlRequest>,
     v6_port: u16,
+    instrumentation: Instrumentation,
 ) -> Result<(), Box<dyn Error>> {
     // Both `cancel_token` and `dhcp_handle` are Option so the select! arm
     // that watches the handle pends forever while the server is not yet running.
@@ -1121,7 +1160,7 @@ async fn run_control_loop(
         && !args.interfaces.is_empty()
     {
         tracing::info!("Config file and interfaces found at startup – starting DHCP server");
-        match init(args.clone()).await {
+        match init(args.clone(), &instrumentation).await {
             Ok(config) => {
                 let ct = CancellationToken::new();
                 dhcp_handle = Some(tokio::spawn(run_dhcp_generation(
@@ -1193,6 +1232,7 @@ async fn run_control_loop(
                         let result = apply_update_with_service_config(
                             &mut args,
                             ConfigReplacement {
+        instrumentation: instrumentation.clone(),
                                 dhcp_yaml,
                                 host_yaml,
                                 interfaces,
@@ -1237,7 +1277,14 @@ async fn main() -> Result<(), Box<dyn Error>> {
     args.validate_interfaces()?;
 
     if let Some(candidate) = &args.validate_config {
-        load_config(&args, candidate, args.host_config.clone(), false).await?;
+        load_config(
+            &args,
+            candidate,
+            args.host_config.clone(),
+            false,
+            &Instrumentation::global(),
+        )
+        .await?;
         return Ok(());
     }
 
@@ -1246,6 +1293,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     // served below.
     let metrics_setup = new_metrics_setup("carbide-dhcp-server", "forge-system", true)
         .map_err(|e| format!("Failed to set up metrics: {e}"))?;
+    let instrumentation = metrics_setup.instrumentation.clone();
     carbide_instrument::log_events::register(&metrics_setup.meter);
 
     // Must keep meter_provider alive for the lifetime of the server;
@@ -1257,6 +1305,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
             .parse()
             .map_err(|e| format!("Invalid --metrics-listen-addr '{}': {}", addr_str, e))?;
         let metrics_config = MetricsEndpointConfig {
+            instrumentation: instrumentation.clone(),
             address: metrics_listen_addr,
             registry: metrics_setup.registry,
             health_controller: Some(metrics_setup.health_controller),
@@ -1278,10 +1327,16 @@ async fn main() -> Result<(), Box<dyn Error>> {
         let grpc_listen_addr: SocketAddr = addr_str
             .parse()
             .map_err(|e| format!("Invalid --grpc-listen-addr '{}': {}", addr_str, e))?;
-        result = run_with_grpc_control(args, grpc_listen_addr, dhcproto::v6::SERVER_PORT).await;
+        result = run_with_grpc_control(
+            args,
+            grpc_listen_addr,
+            dhcproto::v6::SERVER_PORT,
+            instrumentation.clone(),
+        )
+        .await;
     } else {
         pin_server_identity(&args).await?;
-        let config = init(args.clone()).await?;
+        let config = init(args.clone(), &instrumentation).await?;
         run_dhcp_generation(
             args,
             CancellationToken::new(),
@@ -1304,8 +1359,15 @@ fn get_mode(args_mode: &ServerMode) -> Box<dyn DhcpMode> {
     }
 }
 
-async fn init(args: Args) -> Result<Config, DhcpError> {
-    load_config(&args, &args.dhcp_config, args.host_config.clone(), false).await
+async fn init(args: Args, instrumentation: &Instrumentation) -> Result<Config, DhcpError> {
+    load_config(
+        &args,
+        &args.dhcp_config,
+        args.host_config.clone(),
+        false,
+        instrumentation,
+    )
+    .await
 }
 
 async fn read_dhcp_config(live_path: &str, candidate_path: &str) -> Result<DhcpConfig, DhcpError> {
@@ -1345,6 +1407,7 @@ async fn load_config(
     candidate_dhcp: &str,
     candidate_host: Option<String>,
     allow_missing_host: bool,
+    instrumentation: &Instrumentation,
 ) -> Result<Config, DhcpError> {
     let carbide_client_config = carbide_client_config(args)?;
     let dhcp_config = read_dhcp_config(&args.dhcp_config, candidate_dhcp).await?;
@@ -1382,6 +1445,7 @@ async fn load_config(
         host_config,
         args.relay_response_port,
         carbide_client_config,
+        instrumentation.clone(),
     ))
 }
 
@@ -1425,7 +1489,7 @@ async fn process(
     dhcp_timestamps: Arc<Mutex<DhcpTimestamps>>,
 ) {
     if !addr.is_ipv4() {
-        emit(DhcpPacketDropped {
+        config.instrumentation().emit(DhcpPacketDropped {
             reason: DropReason::NotIpv4,
             error: format!("source address {addr} is not IPv4"),
         });
@@ -1433,7 +1497,7 @@ async fn process(
     }
 
     let Some(&bootp_op) = buf.first() else {
-        emit(DhcpPacketDropped {
+        config.instrumentation().emit(DhcpPacketDropped {
             reason: DropReason::TooShort,
             error: format!("0 bytes is below the {MINIMUM_DHCP_PKT_SIZE}-byte minimum"),
         });
@@ -1456,7 +1520,7 @@ async fn process(
     {
         Ok(packet) => packet,
         Err(err) => {
-            emit(DhcpPacketDropped {
+            config.instrumentation().emit(DhcpPacketDropped {
                 reason: DropReason::from(&err),
                 error: err.to_string(),
             });
@@ -1470,7 +1534,7 @@ async fn process(
         Ok(ReplyStatus::Sent) => records_host_activity,
         Ok(ReplyStatus::Retired | ReplyStatus::NoReply) => false,
         Err(err) => {
-            emit(DhcpPacketDropped {
+            config.instrumentation().emit(DhcpPacketDropped {
                 reason: DropReason::SendFailed,
                 error: err,
             });
@@ -1488,14 +1552,14 @@ async fn process(
 async fn process_v6(source: SocketAddr, packet: &[u8], mut context: V6ListenerContext) {
     let SocketAddr::V6(source) = source else {
         let error = format!("source address {source} is not IPv6");
-        emit(DhcpV6RequestDropped {
+        context.config.instrumentation().emit(DhcpV6RequestDropped {
             reason: V6DropReason::InvalidPacket,
             error,
         });
         return;
     };
     if let Err(error) = validate_v6_source_port(packet, &source) {
-        emit(DhcpV6RequestDropped {
+        context.config.instrumentation().emit(DhcpV6RequestDropped {
             reason: V6DropReason::from(&error),
             error: error.to_string(),
         });
@@ -1515,7 +1579,7 @@ async fn process_v6(source: SocketAddr, packet: &[u8], mut context: V6ListenerCo
     {
         Ok(response) => response,
         Err(error) => {
-            emit(DhcpV6RequestDropped {
+            context.config.instrumentation().emit(DhcpV6RequestDropped {
                 reason: V6DropReason::from(&error),
                 error: error.to_string(),
             });
@@ -1534,7 +1598,7 @@ async fn process_v6(source: SocketAddr, packet: &[u8], mut context: V6ListenerCo
         Ok(ReplyStatus::Sent) => true,
         Ok(ReplyStatus::Retired | ReplyStatus::NoReply) => false,
         Err(error) => {
-            emit(DhcpV6RequestDropped {
+            context.config.instrumentation().emit(DhcpV6RequestDropped {
                 reason: V6DropReason::SendFailed,
                 error: error.to_string(),
             });
@@ -1555,11 +1619,13 @@ async fn record_dhcp_timestamp(config: &Config, dhcp_timestamps: Arc<Mutex<DhcpT
     let mut dhcp_timestamps = dhcp_timestamps.lock().await;
     dhcp_timestamps.add_timestamp(host_config.host_interface_id, Utc::now().to_rfc3339());
     if let Err(error) = dhcp_timestamps.write() {
-        emit(DhcpTimestampFileFailed::Write {
-            dhcp_timestamps_path: DhcpTimestampsFilePath::HbnTmp.path_str().to_string(),
-            host_interface_id: host_config.host_interface_id.to_string(),
-            error: error.to_string(),
-        });
+        config
+            .instrumentation()
+            .emit(DhcpTimestampFileFailed::Write {
+                dhcp_timestamps_path: DhcpTimestampsFilePath::HbnTmp.path_str().to_string(),
+                host_interface_id: host_config.host_interface_id.to_string(),
+                error: error.to_string(),
+            });
     }
 }
 
@@ -1574,6 +1640,7 @@ mod test {
     use carbide_dhcp_server::errors::DhcpError;
     use carbide_dhcp_server::modes::V6Outcome;
     use carbide_dhcp_server::modes::dpu::Dpu;
+    use carbide_instrument::Instrumentation;
     use carbide_instrument::testing::{MetricsCapture, capture_logs_async};
     use carbide_rpc_utils::dhcp::{
         DhcpTimestamps, DhcpTimestampsFilePath, ServiceConfig, ServiceDhcpInterfaceReservations,
@@ -1686,7 +1753,16 @@ mod test {
         let subscriber = tracing_subscriber::registry().with(PacketSpan(fields.clone()));
         let context = super::V6ListenerContext {
             socket: Arc::new(UdpSocket::bind((Ipv6Addr::LOCALHOST, 0)).await.unwrap()),
-            config: Arc::new(init(get_test_args()).await.unwrap()),
+            config: Arc::new(
+                init(
+                    get_test_args(),
+                    &carbide_instrument::Instrumentation::from_meter_provider(
+                        &opentelemetry::metrics::noop::NoopMeterProvider::new(),
+                    ),
+                )
+                .await
+                .unwrap(),
+            ),
             handler: Arc::new(Box::new(Test {})),
             interface: "vlan200".to_string(),
             machine_cache: Arc::new(Mutex::new(LruCache::new(
@@ -1927,7 +2003,8 @@ mod test {
                         None,
                         67,
                         carbide_client_config(&args).unwrap(),
-                    );
+    carbide_instrument::Instrumentation::from_meter_provider(&opentelemetry::metrics::noop::NoopMeterProvider::new()),
+);
                     let cancel = CancellationToken::new();
                     // Port zero isolates the socket from other test binaries.
                     let generation = super::run_dhcp_generation(args, cancel.clone(), config, 0);
@@ -1962,7 +2039,15 @@ mod test {
         let mut dhcp = ipv6_only_config();
         dhcp.carbide_dhcp_server = Some(Ipv4Addr::LOCALHOST);
         dhcp.carbide_provisioning_server_ipv4 = Some(Ipv4Addr::LOCALHOST);
-        let config = Config::new(dhcp, None, 67, carbide_client_config(&args).unwrap());
+        let config = Config::new(
+            dhcp,
+            None,
+            67,
+            carbide_client_config(&args).unwrap(),
+            carbide_instrument::Instrumentation::from_meter_provider(
+                &opentelemetry::metrics::noop::NoopMeterProvider::new(),
+            ),
+        );
 
         // Cancel before startup so socket setup and retirement are simultaneously eligible.
         let cancel = CancellationToken::new();
@@ -2206,7 +2291,14 @@ mod test {
 
         // Reopen the promoted files through the real DPU mode, so neither the
         // selected address nor the reply identity comes from an in-memory fixture.
-        let config = init(args).await.unwrap();
+        let config = init(
+            args,
+            &carbide_instrument::Instrumentation::from_meter_provider(
+                &opentelemetry::metrics::noop::NoopMeterProvider::new(),
+            ),
+        )
+        .await
+        .unwrap();
         let mut request = V6Message::new(MessageTypeV6::Solicit);
         request.opts_mut().insert(V6Option::ClientId(
             [vec![0, 3, 0, 1], TEST_CLIENT_MAC.to_vec()].concat(),
@@ -2267,7 +2359,14 @@ mod test {
         tokio::fs::write(&saved_path, saved.as_bytes())
             .await
             .unwrap();
-        let config = init(args.clone()).await.unwrap();
+        let config = init(
+            args.clone(),
+            &carbide_instrument::Instrumentation::from_meter_provider(
+                &opentelemetry::metrics::noop::NoopMeterProvider::new(),
+            ),
+        )
+        .await
+        .unwrap();
 
         let mut request = V6Message::new(MessageTypeV6::Solicit);
         request.opts_mut().insert(V6Option::ClientId(
@@ -2577,12 +2676,20 @@ mod test {
     /// both received and dropped, preserving the metric subset relationship.
     #[test]
     fn rate_limited_v6_packet_is_counted_at_ingress() {
-        let metrics = MetricsCapture::start();
+        let test_meter = carbide_utils::test_support::test_meter::TestMeter::default();
+        let instrumentation = Instrumentation::new(test_meter.meter());
+        let metrics = MetricsCapture::for_registry(test_meter.registry());
         let packet = [u8::from(MessageTypeV6::Renew), 0, 0, 1];
         let rate_limiter = Arc::new(tokio::sync::Semaphore::new(0));
 
         assert!(
-            admit_v6_packet(&packet, "[fe80::1]:546".parse().unwrap(), &rate_limiter,).is_none()
+            admit_v6_packet(
+                &packet,
+                "[fe80::1]:546".parse().unwrap(),
+                &rate_limiter,
+                &instrumentation,
+            )
+            .is_none()
         );
         assert_eq!(
             metrics.counter_delta(
@@ -2739,10 +2846,18 @@ mod test {
             }])
             .unwrap();
         let mut active_interfaces = args.interfaces.clone();
-        let old_config = super::load_config(&args, &args.dhcp_config, None, true)
-            .await
-            .unwrap()
-            .with_service_config(active_service_config.clone());
+        let old_config = super::load_config(
+            &args,
+            &args.dhcp_config,
+            None,
+            true,
+            &carbide_instrument::Instrumentation::from_meter_provider(
+                &opentelemetry::metrics::noop::NoopMeterProvider::new(),
+            ),
+        )
+        .await
+        .unwrap()
+        .with_service_config(active_service_config.clone());
         drop(listener_reservation);
         let mut handle = Some(tokio::spawn(super::run_dhcp_generation(
             args.clone(),
@@ -2780,6 +2895,9 @@ mod test {
         super::apply_update_with_service_config(
             &mut args,
             super::ConfigReplacement {
+                instrumentation: carbide_instrument::Instrumentation::from_meter_provider(
+                    &opentelemetry::metrics::noop::NoopMeterProvider::new(),
+                ),
                 dhcp_yaml: candidate.clone(),
                 host_yaml: None,
                 interfaces: vec![],
@@ -2971,11 +3089,19 @@ mod test {
         .unwrap();
         let mut active_interfaces = args.interfaces.clone();
         // Prepare one response from the same immutable snapshot passed to the old generation.
-        let old_config = super::load_config(&args, &args.dhcp_config, None, true)
-            .await
-            .unwrap()
-            .with_service_config(active_service_config.clone())
-            .with_reply_retirement(old_cancel.clone());
+        let old_config = super::load_config(
+            &args,
+            &args.dhcp_config,
+            None,
+            true,
+            &carbide_instrument::Instrumentation::from_meter_provider(
+                &opentelemetry::metrics::noop::NoopMeterProvider::new(),
+            ),
+        )
+        .await
+        .unwrap()
+        .with_service_config(active_service_config.clone())
+        .with_reply_retirement(old_cancel.clone());
         let mut machine_cache = Arc::new(Mutex::new(LruCache::new(
             std::num::NonZeroUsize::new(cache::MACHINE_CACHE_SIZE).unwrap(),
         )));
@@ -3001,6 +3127,9 @@ mod test {
         super::apply_update_with_service_config(
             &mut args,
             super::ConfigReplacement {
+                instrumentation: carbide_instrument::Instrumentation::from_meter_provider(
+                    &opentelemetry::metrics::noop::NoopMeterProvider::new(),
+                ),
                 dhcp_yaml: live,
                 host_yaml: None,
                 interfaces: vec!["lo".to_string()],
@@ -3109,6 +3238,8 @@ mod test {
     /// listener shutdown cannot return with stale transport work.
     #[tokio::test]
     async fn packet_task_drain_joins_prepared_service_response() {
+        let test_meter = carbide_utils::test_support::test_meter::TestMeter::default();
+        let instrumentation = Instrumentation::new(test_meter.meter());
         // The exact MAC and IPv4 link drive packet selection; the remaining identities only satisfy validation.
         let service_config = ServiceConfig::try_new(vec![ServiceDhcpInterfaceReservations {
             receiving_interface: "vlan200".to_string(),
@@ -3125,7 +3256,7 @@ mod test {
             }],
         }])
         .unwrap();
-        let config = init(get_test_args())
+        let config = init(get_test_args(), &instrumentation)
             .await
             .unwrap()
             .with_service_config(service_config);
@@ -3150,7 +3281,7 @@ mod test {
         // Pause the accepted packet task before transport so shutdown must cancel rather than merely reap it.
         let (started_tx, started_rx) = oneshot::channel();
         let (release_tx, release_rx) = oneshot::channel();
-        let metrics = MetricsCapture::start();
+        let metrics = MetricsCapture::for_registry(test_meter.registry());
         let mut packet_tasks = JoinSet::new();
         packet_tasks.spawn(async move {
             started_tx.send(()).unwrap();
@@ -3202,9 +3333,17 @@ mod test {
         )
         .await
         .unwrap();
-        let config = super::load_config(&args, &args.dhcp_config, None, true)
-            .await
-            .unwrap();
+        let config = super::load_config(
+            &args,
+            &args.dhcp_config,
+            None,
+            true,
+            &carbide_instrument::Instrumentation::from_meter_provider(
+                &opentelemetry::metrics::noop::NoopMeterProvider::new(),
+            ),
+        )
+        .await
+        .unwrap();
         drop(listener_reservation);
 
         // Pause the exact packet admitted from this source inside the listener-owned JoinSet task.
@@ -3384,7 +3523,17 @@ mod test {
             };
             let ((result, ()), logs) = capture_logs_async(async {
                 timeout(Duration::from_secs(5), async {
-                    tokio::join!(super::run_control_loop(args, receiver, 0), exercise)
+                    tokio::join!(
+                        super::run_control_loop(
+                            args,
+                            receiver,
+                            0,
+                            carbide_instrument::Instrumentation::from_meter_provider(
+                                &opentelemetry::metrics::noop::NoopMeterProvider::new()
+                            ),
+                        ),
+                        exercise
+                    )
                 })
                 .await
                 .expect("control requests did not finish")
@@ -3450,7 +3599,17 @@ mod test {
             drop(sender);
         };
         let (result, ()) = timeout(Duration::from_secs(5), async {
-            tokio::join!(super::run_control_loop(args, receiver, 0), exercise)
+            tokio::join!(
+                super::run_control_loop(
+                    args,
+                    receiver,
+                    0,
+                    carbide_instrument::Instrumentation::from_meter_provider(
+                        &opentelemetry::metrics::noop::NoopMeterProvider::new()
+                    ),
+                ),
+                exercise
+            )
         })
         .await
         .expect("control loop did not reject the barrier request");
@@ -3483,7 +3642,14 @@ mod test {
 
     #[tokio::test]
     async fn test_init() {
-        init(get_test_args()).await.unwrap();
+        init(
+            get_test_args(),
+            &carbide_instrument::Instrumentation::from_meter_provider(
+                &opentelemetry::metrics::noop::NoopMeterProvider::new(),
+            ),
+        )
+        .await
+        .unwrap();
     }
 
     #[test]
@@ -3516,7 +3682,14 @@ mod test {
         let byte_stream =
             get_byte_stream(Ipv4Addr::new(0, 0, 0, 0), None, MessageType::Request, None);
         let handler: Box<dyn DhcpMode> = Box::new(TestArm {});
-        let config = init(get_test_args()).await.unwrap();
+        let config = init(
+            get_test_args(),
+            &carbide_instrument::Instrumentation::from_meter_provider(
+                &opentelemetry::metrics::noop::NoopMeterProvider::new(),
+            ),
+        )
+        .await
+        .unwrap();
         let mut machine_cache = Arc::new(Mutex::new(LruCache::new(
             std::num::NonZeroUsize::new(cache::MACHINE_CACHE_SIZE).unwrap(),
         )));
@@ -3543,7 +3716,14 @@ mod test {
             None,
         );
         let handler: Box<dyn DhcpMode> = Box::new(TestArm {});
-        let config = init(get_test_args()).await.unwrap();
+        let config = init(
+            get_test_args(),
+            &carbide_instrument::Instrumentation::from_meter_provider(
+                &opentelemetry::metrics::noop::NoopMeterProvider::new(),
+            ),
+        )
+        .await
+        .unwrap();
         let mut machine_cache = Arc::new(Mutex::new(LruCache::new(
             std::num::NonZeroUsize::new(cache::MACHINE_CACHE_SIZE).unwrap(),
         )));
@@ -3575,7 +3755,14 @@ mod test {
         let handler: Box<dyn DhcpMode> = Box::new(Test {});
         let mut args = get_test_args();
         args.relay_response_port = 6768;
-        let config = init(args).await.unwrap();
+        let config = init(
+            args,
+            &carbide_instrument::Instrumentation::from_meter_provider(
+                &opentelemetry::metrics::noop::NoopMeterProvider::new(),
+            ),
+        )
+        .await
+        .unwrap();
         let mut machine_cache = Arc::new(Mutex::new(LruCache::new(
             std::num::NonZeroUsize::new(cache::MACHINE_CACHE_SIZE).unwrap(),
         )));
@@ -3613,19 +3800,22 @@ mod test {
     /// packet at DEBUG, and ticks the counter even when later processing fails.
     #[tokio::test]
     async fn process_packet_logs_and_counts_the_decoded_request() {
+        let test_meter = carbide_utils::test_support::test_meter::TestMeter::default();
+        let instrumentation = Instrumentation::new(test_meter.meter());
         // No other test in this binary processes an Inform, so this label's
         // delta is immune to tests running in parallel.
         let byte_stream =
             get_byte_stream(Ipv4Addr::new(0, 0, 0, 0), None, MessageType::Inform, None);
         let handler: Box<dyn DhcpMode> = Box::new(Test {});
-        let config = init(get_test_args()).await.unwrap();
+        let config = init(get_test_args(), &instrumentation).await.unwrap();
         let mut machine_cache = Arc::new(Mutex::new(LruCache::new(
             std::num::NonZeroUsize::new(cache::MACHINE_CACHE_SIZE).unwrap(),
         )));
         let expected_received_packet = Message::decode(&mut Decoder::new(&byte_stream)).unwrap();
         let expected_received_packet_text = expected_received_packet.to_string();
 
-        let metrics = carbide_instrument::testing::MetricsCapture::start();
+        let metrics =
+            carbide_instrument::testing::MetricsCapture::for_registry(test_meter.registry());
         let (result, logs) = capture_logs_async(packet_handler::process_packet(
             &byte_stream,
             TEST_SOURCE_ADDRESS,
@@ -3701,7 +3891,14 @@ mod test {
             get_byte_stream(Ipv4Addr::new(0, 0, 0, 0), None, MessageType::Request, None);
         byte_stream[2] = 17;
         let handler: Box<dyn DhcpMode> = Box::new(Test {});
-        let config = init(get_test_args()).await.unwrap();
+        let config = init(
+            get_test_args(),
+            &carbide_instrument::Instrumentation::from_meter_provider(
+                &opentelemetry::metrics::noop::NoopMeterProvider::new(),
+            ),
+        )
+        .await
+        .unwrap();
         let mut machine_cache = Arc::new(Mutex::new(LruCache::new(
             std::num::NonZeroUsize::new(cache::MACHINE_CACHE_SIZE).unwrap(),
         )));
@@ -3726,7 +3923,14 @@ mod test {
     #[tokio::test]
     async fn process_packet_rejects_an_empty_buffer() {
         let handler: Box<dyn DhcpMode> = Box::new(Test {});
-        let config = init(get_test_args()).await.unwrap();
+        let config = init(
+            get_test_args(),
+            &carbide_instrument::Instrumentation::from_meter_provider(
+                &opentelemetry::metrics::noop::NoopMeterProvider::new(),
+            ),
+        )
+        .await
+        .unwrap();
         let mut machine_cache = Arc::new(Mutex::new(LruCache::new(
             std::num::NonZeroUsize::new(cache::MACHINE_CACHE_SIZE).unwrap(),
         )));
@@ -3756,7 +3960,14 @@ mod test {
         let byte_stream =
             get_byte_stream(Ipv4Addr::new(0, 0, 0, 0), None, MessageType::Request, None);
         let handler: Box<dyn DhcpMode> = Box::new(Test {});
-        let config = init(get_test_args()).await.unwrap();
+        let config = init(
+            get_test_args(),
+            &carbide_instrument::Instrumentation::from_meter_provider(
+                &opentelemetry::metrics::noop::NoopMeterProvider::new(),
+            ),
+        )
+        .await
+        .unwrap();
         let mut machine_cache = Arc::new(Mutex::new(LruCache::new(
             std::num::NonZeroUsize::new(cache::MACHINE_CACHE_SIZE).unwrap(),
         )));
@@ -3840,7 +4051,14 @@ mod test {
             None,
         );
         let handler: Box<dyn DhcpMode> = Box::new(Test {});
-        let config = init(get_test_args()).await.unwrap();
+        let config = init(
+            get_test_args(),
+            &carbide_instrument::Instrumentation::from_meter_provider(
+                &opentelemetry::metrics::noop::NoopMeterProvider::new(),
+            ),
+        )
+        .await
+        .unwrap();
         let mut machine_cache = Arc::new(Mutex::new(LruCache::new(
             std::num::NonZeroUsize::new(cache::MACHINE_CACHE_SIZE).unwrap(),
         )));
@@ -3875,7 +4093,14 @@ mod test {
         let byte_stream =
             get_byte_stream(Ipv4Addr::new(0, 0, 0, 0), None, MessageType::Discover, None);
         let handler: Box<dyn DhcpMode> = Box::new(Test {});
-        let config = init(get_test_args()).await.unwrap();
+        let config = init(
+            get_test_args(),
+            &carbide_instrument::Instrumentation::from_meter_provider(
+                &opentelemetry::metrics::noop::NoopMeterProvider::new(),
+            ),
+        )
+        .await
+        .unwrap();
         let mut machine_cache = Arc::new(Mutex::new(LruCache::new(
             std::num::NonZeroUsize::new(cache::MACHINE_CACHE_SIZE).unwrap(),
         )));
@@ -3983,7 +4208,12 @@ mod test {
 
         // Initialize through the generation helper that owns the nonfatal failure policy.
         let (mut timestamps, logs) = capture_logs_async(async {
-            super::initialize_dhcp_timestamps(DhcpTimestampsFilePath::Test)
+            super::initialize_dhcp_timestamps(
+                DhcpTimestampsFilePath::Test,
+                &carbide_instrument::Instrumentation::from_meter_provider(
+                    &opentelemetry::metrics::noop::NoopMeterProvider::new(),
+                ),
+            )
         })
         .await;
 
@@ -4035,10 +4265,15 @@ mod test {
         };
         let mut args = get_test_args();
         args.relay_response_port = relay_destination.port();
-        let config = init(args)
-            .await
-            .unwrap()
-            .with_service_config(service_config);
+        let config = init(
+            args,
+            &carbide_instrument::Instrumentation::from_meter_provider(
+                &opentelemetry::metrics::noop::NoopMeterProvider::new(),
+            ),
+        )
+        .await
+        .unwrap()
+        .with_service_config(service_config);
         let host_interface_id = config.host_config().unwrap().host_interface_id;
         let timestamps = Arc::new(Mutex::new(DhcpTimestamps::new(
             DhcpTimestampsFilePath::NotSet,
@@ -4085,9 +4320,11 @@ mod test {
     /// must not influence lifecycle decisions.
     #[tokio::test]
     async fn retired_host_response_does_not_record_activity() {
+        let test_meter = carbide_utils::test_support::test_meter::TestMeter::default();
+        let instrumentation = Instrumentation::new(test_meter.meter());
         // Retire an otherwise valid host generation before its DISCOVER reaches the final socket write.
         let cancellation = CancellationToken::new();
-        let config = init(get_test_args())
+        let config = init(get_test_args(), &instrumentation)
             .await
             .unwrap()
             .with_reply_retirement(cancellation.clone());
@@ -4103,7 +4340,7 @@ mod test {
         cancellation.cancel();
 
         // Process through the binary send and timestamp path rather than calling the packet transport directly.
-        let metrics = MetricsCapture::start();
+        let metrics = MetricsCapture::for_registry(test_meter.registry());
         let (_, logs) = capture_logs_async(process(
             TEST_SOURCE_ADDRESS,
             Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap()),
@@ -4139,7 +4376,14 @@ mod test {
 
     #[tokio::test]
     async fn validate_test_host_config() {
-        let config = init(get_test_args()).await.unwrap();
+        let config = init(
+            get_test_args(),
+            &carbide_instrument::Instrumentation::from_meter_provider(
+                &opentelemetry::metrics::noop::NoopMeterProvider::new(),
+            ),
+        )
+        .await
+        .unwrap();
 
         let host_config = config.host_config().unwrap();
         assert_eq!(host_config.host_ip_addresses.len(), 2);
@@ -4180,7 +4424,14 @@ mod test {
     async fn validate_basic_ack() {
         let packet = get_byte_stream(Ipv4Addr::new(0, 0, 0, 0), None, MessageType::Request, None);
 
-        let config = init(get_test_args()).await.unwrap();
+        let config = init(
+            get_test_args(),
+            &carbide_instrument::Instrumentation::from_meter_provider(
+                &opentelemetry::metrics::noop::NoopMeterProvider::new(),
+            ),
+        )
+        .await
+        .unwrap();
         let handler: Box<dyn DhcpMode> = Box::new(Test {});
         let mut machine_cache = Arc::new(Mutex::new(LruCache::new(
             std::num::NonZeroUsize::new(cache::MACHINE_CACHE_SIZE).unwrap(),
@@ -4222,7 +4473,14 @@ mod test {
     async fn validate_nak() {
         let packet = get_byte_stream(Ipv4Addr::new(10, 0, 0, 1), None, MessageType::Request, None);
 
-        let config = init(get_test_args()).await.unwrap();
+        let config = init(
+            get_test_args(),
+            &carbide_instrument::Instrumentation::from_meter_provider(
+                &opentelemetry::metrics::noop::NoopMeterProvider::new(),
+            ),
+        )
+        .await
+        .unwrap();
         let handler: Box<dyn DhcpMode> = Box::new(Test {});
         let mut machine_cache = Arc::new(Mutex::new(LruCache::new(
             std::num::NonZeroUsize::new(cache::MACHINE_CACHE_SIZE).unwrap(),

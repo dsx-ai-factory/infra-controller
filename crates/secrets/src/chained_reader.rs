@@ -409,11 +409,16 @@ mod tests {
                 .expect("create env provider"),
             ) as Box<dyn CredentialReader>,
             Box::new(
-                FileCredentialsWatcher::new(FileCredentialsConfig {
-                    path: Some(file_path.clone()),
-                    poll_interval: Some(Duration::from_millis(250)),
-                    ..Default::default()
-                })
+                FileCredentialsWatcher::new(
+                    FileCredentialsConfig {
+                        path: Some(file_path.clone()),
+                        poll_interval: Some(Duration::from_millis(250)),
+                        ..Default::default()
+                    },
+                    carbide_instrument::Instrumentation::from_meter_provider(
+                        &opentelemetry::metrics::noop::NoopMeterProvider::new(),
+                    ),
+                )
                 .await
                 .expect("create file provider"),
             ),
@@ -463,11 +468,16 @@ mod tests {
 
         let chain: ChainedCredentialReader = vec![
             Box::new(
-                FileCredentialsWatcher::new(FileCredentialsConfig {
-                    path: Some(file_path),
-                    poll_interval: Some(Duration::from_millis(250)),
-                    ..Default::default()
-                })
+                FileCredentialsWatcher::new(
+                    FileCredentialsConfig {
+                        path: Some(file_path),
+                        poll_interval: Some(Duration::from_millis(250)),
+                        ..Default::default()
+                    },
+                    carbide_instrument::Instrumentation::from_meter_provider(
+                        &opentelemetry::metrics::noop::NoopMeterProvider::new(),
+                    ),
+                )
                 .await
                 .expect("create file provider"),
             ) as Box<dyn CredentialReader>,

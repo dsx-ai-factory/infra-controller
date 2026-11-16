@@ -449,8 +449,13 @@ mod tests {
         assert_eq!(db::managed_host::load_host_ids(&pool).await?, host_ids);
 
         let mut join_set = JoinSet::new();
-        let work_lock_manager_handle =
-            db::work_lock_manager::start(&mut join_set, pool.clone(), Default::default()).await?;
+        let work_lock_manager_handle = db::work_lock_manager::start(
+            &mut join_set,
+            pool.clone(),
+            Default::default(),
+            carbide_instrument::Instrumentation::global(),
+        )
+        .await?;
         let (publisher, mut receiver) = SignalingPublisher::new();
         let test_meter = carbide_utils::test_support::test_meter::TestMeter::default();
         let republisher = ManagedHostStateRepublisher::new(

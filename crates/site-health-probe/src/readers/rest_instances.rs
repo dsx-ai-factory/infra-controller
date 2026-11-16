@@ -71,6 +71,16 @@ struct Machine {
     labels: BTreeMap<String, String>,
     is_usable_by_tenant: bool,
     status: String,
+    #[serde(default, deserialize_with = "nullable_capabilities")]
+    machine_capabilities: Vec<carbide_site_health_probe_api::MachineCapability>,
+}
+fn nullable_capabilities<'de, D: serde::Deserializer<'de>>(
+    d: D,
+) -> Result<Vec<carbide_site_health_probe_api::MachineCapability>, D::Error> {
+    Ok(
+        Option::<Vec<carbide_site_health_probe_api::MachineCapability>>::deserialize(d)?
+            .unwrap_or_default(),
+    )
 }
 fn nullable_labels<'de, D: serde::Deserializer<'de>>(
     d: D,
@@ -86,7 +96,7 @@ fn invalid(why: impl std::fmt::Display) -> Failure {
 // The scan then restarts from page 1, and a mixed scan is never returned.
 // REST owns collation. Matching totals cannot prove a transactional snapshot,
 // so the runner must require settled repeated agreement before clearing work.
-async fn pages<T: DeserializeOwned>(
+pub(super) async fn pages<T: DeserializeOwned>(
     client: &RestClient,
     rec: &ObservationRecorder,
     auth: &Auth,
@@ -126,20 +136,25 @@ async fn scan<T: DeserializeOwned>(
                 "fixture_page",
                 auth,
                 org,
-                &[path],
-                &[
-                    ("siteId", site.to_string()),
-                    ("pageSize", "100".into()),
-                    ("pageNumber", page.to_string()),
-                    (
-                        "orderBy",
-                        if path == "instance" {
-                            "NAME_ASC".into()
-                        } else {
-                            "ID_ASC".into()
-                        },
-                    ),
-                ],
+                &path.split('/').collect::<Vec<_>>(),
+                &{
+                    let mut query = vec![
+                        ("siteId", site.to_string()),
+                        ("pageSize", "100".into()),
+                        ("pageNumber", page.to_string()),
+                    ];
+                    if path == "machine" || path == "instance" {
+                        query.push((
+                            "orderBy",
+                            if path == "instance" {
+                                "NAME_ASC".into()
+                            } else {
+                                "ID_ASC".into()
+                            },
+                        ));
+                    }
+                    query
+                },
             )
             .await
             .map_err(|e| Failure::call("fixture_page", &e))?;
@@ -214,7 +229,7 @@ impl Fixture {
         previous.insert(family, data.units.clone());
         data
     }
-    async fn instances(
+    pub(super) async fn instances(
         &self,
         client: &RestClient,
         rec: &ObservationRecorder,
@@ -250,7 +265,7 @@ impl Fixture {
         }
         Ok(self.build(Family::RestInstances, out))
     }
-    async fn machines(
+    pub(super) async fn machines(
         &self,
         client: &RestClient,
         rec: &ObservationRecorder,
@@ -285,6 +300,7 @@ impl Fixture {
                 tenant_id: r.tenant_id,
                 labels: r.labels,
                 is_usable_by_tenant: r.is_usable_by_tenant,
+                machine_capabilities: r.machine_capabilities,
             });
             out.push(u);
         }
@@ -319,6 +335,15 @@ impl Fixture {
         if t.id != self.config.tenant_id || t.org != self.config.org {
             return Err(invalid("tenant mismatch"));
         }
+        self.allocation_for_site(client, rec, site, provider).await
+    }
+    pub(super) async fn allocation_for_site(
+        &self,
+        client: &RestClient,
+        rec: &ObservationRecorder,
+        site: &str,
+        provider: &str,
+    ) -> Result<TenantAllocation, Failure> {
         #[derive(Deserialize)]
         #[serde(rename_all = "camelCase")]
         struct Stats {
@@ -375,7 +400,7 @@ impl Fixture {
             return Err(invalid("allocation mismatch"));
         }
         Ok(TenantAllocation {
-            tenant: t.id,
+            tenant: self.config.tenant_id.clone(),
             instance_type: r.id,
             assigned: a.assigned,
             total: a.total,
