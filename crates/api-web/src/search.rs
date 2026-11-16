@@ -32,7 +32,7 @@ use rpc::forge::IdentifySerialResponse;
 use rpc::forge::forge_server::Forge;
 use uuid::Uuid;
 
-use super::Base;
+use super::{Base, filters};
 
 pub(super) async fn find(
     AxumState(state): AxumState<Arc<Api>>,
@@ -66,7 +66,16 @@ pub(super) async fn find(
         return Redirect::to(&format!("/admin/machine/{machine_id}")).into_response();
     }
 
-    (StatusCode::NOT_FOUND, "No matches").into_response()
+    no_matches(query)
+}
+
+/// The results page with nothing found, as a 404.
+fn no_matches(query: &str) -> Response {
+    let tmpl = SearchResults {
+        query: query.to_string(),
+        found: Vec::new(),
+    };
+    (StatusCode::NOT_FOUND, Html(tmpl.render().unwrap())).into_response()
 }
 
 /// Quick jumps for keyboard navigation
@@ -74,7 +83,7 @@ fn shortcodes(q: &str) -> Option<&'static str> {
     match q {
         "i" => Some("/admin/instance"),
         "d" => Some("/admin/dpu"),
-        "h" => Some("/admin/host"),
+        "h" => Some("/admin/managed-host"),
         "mh" => Some("/admin/managed-host"),
         "ns" => Some("/admin/network-segment"),
         "nd" => Some("/admin/network-device"),
@@ -109,7 +118,7 @@ async fn find_by_uuid(state: Arc<Api>, u: uuid::Uuid) -> Response {
     {
         Ok(m) => m,
         Err(status) if status.code() == tonic::Code::NotFound => {
-            return (StatusCode::NOT_FOUND, "UUID does not match anything").into_response();
+            return no_matches(&u.to_string());
         }
         Err(err) => {
             tracing::error!(error = %err, "find_by_uuid error calling grpc identify_uuid");
@@ -152,7 +161,7 @@ async fn find_by_mac(state: Arc<Api>, mac: mac_address::MacAddress) -> impl Into
     {
         Ok(m) => m,
         Err(status) if status.code() == tonic::Code::NotFound => {
-            return (StatusCode::NOT_FOUND, "MAC does not match anything").into_response();
+            return no_matches(&mac.to_string()).into_response();
         }
         Err(err) => {
             tracing::error!(error = %err, "find_by_mac error calling grpc identify_mac");
@@ -205,16 +214,35 @@ async fn find_by_serial(state: Arc<Api>, serial_number: &str) -> Option<MachineI
 }
 
 #[derive(Template)]
-#[template(path = "ip_finder.html")]
-struct IpFinder {
-    ip: String,
+#[template(path = "search_results.html")]
+struct SearchResults {
+    query: String,
     found: Vec<IpMatch>,
 }
 
 struct IpMatch {
     name: &'static str,
     url: String,
+    /// ID of the object holding the address; empty for static configuration.
+    owner: String,
+    /// Shown as a machine ID chip rather than a plain link.
+    owner_is_machine: bool,
+    /// The API's explanation, without the leading address.
     message: String,
+}
+
+/// Drops the leading "<ip> is " / "<ip>'s " the API puts on every match message,
+/// since the page title already names the address, and capitalizes what remains.
+fn without_subject(message: &str, ip: &str) -> String {
+    let rest = message
+        .strip_prefix(&format!("{ip} is "))
+        .or_else(|| message.strip_prefix(&format!("{ip}'s ")))
+        .unwrap_or(message);
+    let mut chars = rest.chars();
+    match chars.next() {
+        Some(first) => first.to_uppercase().chain(chars).collect(),
+        None => String::new(),
+    }
 }
 
 /// Renders the IP search page via the API `find_ip_address` handler, including `StaticBmcIp`
@@ -229,13 +257,7 @@ async fn find_ip(state: Arc<Api>, ip: &str) -> impl IntoResponse {
         .map(|response| response.into_inner())
     {
         Ok(m) => m,
-        Err(_) => {
-            let tmpl = IpFinder {
-                ip: ip.to_string(),
-                found: Vec::new(),
-            };
-            return (StatusCode::OK, Html(tmpl.render().unwrap()));
-        }
+        Err(_) => return no_matches(ip),
     };
     for m in out.matches {
         let ip_type = match forgerpc::IpType::try_from(m.ip_type) {
@@ -264,20 +286,49 @@ async fn find_ip(state: Arc<Api>, ip: &str) -> impl IntoResponse {
             ),
             LoopbackIp => ("Loopback IP", format!("/admin/machine/{owner}")),
             NetworkSegment => ("Network Segment", format!("/admin/network-segment/{owner}")),
-            DpaInterface => ("Dpa Interface", format!("/admin/dpa/{owner}")),
+            DpaInterface => ("DPA Interface", format!("/admin/dpa/{owner}")),
         };
         found.push(IpMatch {
             name,
             url,
-            message: m.message,
+            owner_is_machine: MachineId::from_str(&owner).is_ok(),
+            owner,
+            message: without_subject(&m.message, ip),
         });
     }
 
-    let tmpl = IpFinder {
-        ip: ip.to_string(),
+    if found.is_empty() {
+        return no_matches(ip);
+    }
+    let tmpl = SearchResults {
+        query: ip.to_string(),
         found,
     };
-    (StatusCode::OK, Html(tmpl.render().unwrap()))
+    (StatusCode::OK, Html(tmpl.render().unwrap())).into_response()
 }
 
-impl super::Base for IpFinder {}
+impl super::Base for SearchResults {}
+
+#[cfg(test)]
+mod tests {
+    use super::without_subject;
+
+    #[test]
+    fn match_messages_drop_the_searched_address() {
+        let ip = "10.71.148.114";
+        for (message, expected) in [
+            (
+                "10.71.148.114 is in prefix 10.71.148.112/28 of segment s1, gateway 10.71.148.113",
+                "In prefix 10.71.148.112/28 of segment s1, gateway 10.71.148.113",
+            ),
+            (
+                "10.71.148.114's Redfish was explored by site explorer",
+                "Redfish was explored by site explorer",
+            ),
+            ("DHCP server for the site", "DHCP server for the site"),
+            ("", ""),
+        ] {
+            assert_eq!(without_subject(message, ip), expected, "{message}");
+        }
+    }
+}

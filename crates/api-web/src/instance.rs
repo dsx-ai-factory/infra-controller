@@ -228,7 +228,7 @@ struct InstanceDetail {
     nvlink_gpus: Vec<InstanceNvLinkGpu>,
     nvlink_config_synced: String,
     nvlink_config_version: String,
-    metadata: rpc::forge::Metadata,
+    metadata_detail: super::MetadataDetail,
 }
 
 #[derive(Default)]
@@ -433,7 +433,10 @@ impl From<forgerpc::Instance> for InstanceDetail {
                 .and_then(|status| forgerpc::SyncState::try_from(status.configs_synced).ok())
                 .map(|state| format!("{state:?}"))
                 .unwrap_or_default(),
-            metadata: instance.metadata.unwrap_or_default(),
+            metadata_detail: super::MetadataDetail {
+                metadata: instance.metadata.unwrap_or_default(),
+                metadata_version: String::new(),
+            },
             network_config_version: instance.network_config_version,
             config_version: instance.config_version,
             ib_config_version: instance.ib_config_version,
