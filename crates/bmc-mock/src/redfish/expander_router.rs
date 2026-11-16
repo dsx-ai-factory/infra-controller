@@ -62,7 +62,7 @@ async fn process(State(mut state): State<Expander>, request: Request<Body>) -> R
     let (parts, response_bytes) = match json_bytes(response).await {
         Ok(buffered) => buffered,
         // Expansion is defined for JSON collections, never streaming bodies.
-        Err(BufferError::NotJson(response)) => return response,
+        Err(BufferError::NotJson(response)) => return *response,
         Err(BufferError::Read(e)) => {
             // Pretty sure this would only fail if body > usize::MAX.
             return (
@@ -195,8 +195,8 @@ struct Expander {
 
 pub(super) enum BufferError {
     /// The response does not declare JSON; it is returned untouched.
-    NotJson(Response),
-    Read(axum::Error),
+    NotJson(Box<Response>),
+    Read(Box<axum::Error>),
 }
 
 /// Buffer a JSON response body. Streaming and other non-JSON bodies are never
@@ -205,13 +205,13 @@ pub(super) async fn json_bytes(
     response: Response,
 ) -> Result<(axum::http::response::Parts, bytes::Bytes), BufferError> {
     if !carbide_axum_utils::is_json_response(&response) {
-        return Err(BufferError::NotJson(response));
+        return Err(BufferError::NotJson(response.into()));
     }
     let (parts, body) = response.into_parts();
     axum::body::to_bytes(body, usize::MAX)
         .await
         .map(|bytes| (parts, bytes))
-        .map_err(BufferError::Read)
+        .map_err(|e| BufferError::Read(e.into()))
 }
 
 /// The JSON document a member request answered with, once it is known to
@@ -225,12 +225,12 @@ pub(super) async fn member_json(
         Err(BufferError::NotJson(response)) => {
             return Err(MemberRequestError::NotJson(uri, response.status()));
         }
-        Err(BufferError::Read(e)) => return Err(MemberRequestError::Axum(uri, e)),
+        Err(BufferError::Read(e)) => return Err(MemberRequestError::Axum(uri, *e)),
     };
     if !parts.status.is_success() {
         return Err(MemberRequestError::UnsuccessfulResponse(
             uri,
-            parts,
+            parts.into(),
             String::from_utf8_lossy(&bytes).into_owned(),
         ));
     }
@@ -244,7 +244,7 @@ pub(super) enum MemberRequestError {
     #[error("member @odata.id {0} is not a request URI: {1}")]
     InvalidUri(String, axum::http::Error),
     #[error("inner request to URI {0} returned failure: {1:?}, body: {2}")]
-    UnsuccessfulResponse(String, axum::http::response::Parts, String),
+    UnsuccessfulResponse(String, Box<axum::http::response::Parts>, String),
     #[error("inner request to URI {0} returned a non-JSON {1} response")]
     NotJson(String, StatusCode),
     #[error("inner request to URI {0} returned a malformed response: {1}")]

@@ -1096,7 +1096,7 @@ fn emit_object_metrics_as_log<IO: StateControllerIO>(iteration_metrics: &Iterati
 
         states.insert(full_state_name.clone(), state_metrics.num_objects);
         if state_metrics.num_objects_above_sla > 0 {
-            states_above_sla.insert(full_state_name.clone(), state_metrics.num_objects_above_sla);
+            states_above_sla.insert(full_state_name, state_metrics.num_objects_above_sla);
         }
     }
 

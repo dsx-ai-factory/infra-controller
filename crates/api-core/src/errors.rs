@@ -506,7 +506,7 @@ impl From<DatabaseError> for CarbideError {
             }
             DatabaseError::ResourcePoolError(e) => e.into(),
             DatabaseError::RpcUuidConversionError(e) => RpcUuidConversionError(e),
-            DatabaseError::Sqlx(e) => DBError(e),
+            DatabaseError::Sqlx(e) => DBError(*e),
             DatabaseError::TenantError(e) => TenantError(e),
             DatabaseError::UuidConversionError(e) => UuidConversionError(e),
             DatabaseError::MaxOneInterfaceAssociation => MaxOneInterfaceAssociation,
