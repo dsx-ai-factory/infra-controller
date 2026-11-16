@@ -542,6 +542,7 @@ stateDiagram-v2
     state "WaitingForPlatformConfiguration" as HI_WaitingForPlatformConfiguration
     state "WaitingForBiosJob" as HI_WaitingForBiosJob {
         state "HandleBiosJobFailure" as HI_WBJ_HandleBiosJobFailure
+        state "RebootHost" as HI_WBJ_RebootHost
     }
     state "PollingBiosSetup" as HI_PollingBiosSetup
     state "WaitingForDiscovery" as HI_WaitingForDiscovery
@@ -567,7 +568,8 @@ stateDiagram-v2
     HI_DON_Disable --> HI_DON_Disable : Host not On or write fails (retry)
     HI_DON_WaitEnabled --> HI_DON_WaitEnabled : Less than 10 seconds (wait)
     HI_DON_WaitDisabled --> HI_DON_WaitDisabled : Less than 10 seconds (wait)
-    HI_WaitingForPlatformConfiguration --> HI_PollingBiosSetup : Call machine setup/Restart Host
+    HI_WaitingForPlatformConfiguration --> HI_WBJ_RebootHost : Call machine setup, no BIOS job
+    HI_WBJ_RebootHost --> HI_PollingBiosSetup : Restart Host
     HI_WaitingForPlatformConfiguration --> HI_WaitingForBiosJob : Dell BIOS job scheduled
     HI_WaitingForBiosJob --> HI_PollingBiosSetup : BIOS job completed
     HI_WaitingForBiosJob --> HI_WBJ_HandleBiosJobFailure : BIOS job failed
@@ -844,6 +846,7 @@ stateDiagram-v2
         state "ConfigureBios" as A_HPC_ConfigureBios
         state "WaitingForBiosJob" as A_HPC_WaitingForBiosJob {
             state "HandleBiosJobFailure" as A_HPC_WBJ_HandleBiosJobFailure
+            state "RebootHost" as A_HPC_WBJ_RebootHost
         }
         state "PollingBiosSetup" as A_HPC_PollingBiosSetup
         state "SetBootOrder" as A_HPC_SetBootOrder {
@@ -916,7 +919,8 @@ stateDiagram-v2
     A_HPC_CheckHostConfig --> A_HPC_CheckHostConfig : Wait DPU Up
     A_HPC_CheckHostConfig --> A_HPC_ConfigureBios : Need config host boot order
     A_HPC_CheckHostConfig --> A_HPC_LockHost : No need config host boot order
-    A_HPC_ConfigureBios --> A_HPC_PollingBiosSetup : Config BIOS
+    A_HPC_ConfigureBios --> A_HPC_WBJ_RebootHost : Config BIOS, no BIOS job
+    A_HPC_WBJ_RebootHost --> A_HPC_PollingBiosSetup : Restart Host
     A_HPC_ConfigureBios --> A_HPC_WaitingForBiosJob : Dell BIOS job scheduled
     A_HPC_WaitingForBiosJob --> A_HPC_PollingBiosSetup : BIOS job completed
     A_HPC_WaitingForBiosJob --> A_HPC_WBJ_HandleBiosJobFailure : BIOS job failed
