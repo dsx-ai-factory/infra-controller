@@ -50,6 +50,7 @@ func (e *preemptionExecutor) Execute(ctx context.Context, req *taskdef.Execution
 }
 
 func testPreemptingAdmission(t *testing.T) {
+	const traceID = "1234567890abcdef1234567890abcdef"
 	if os.Getenv("DB_PORT") == "" {
 		t.Skip("PostgreSQL environment is required")
 	}
@@ -113,8 +114,10 @@ func testPreemptingAdmission(t *testing.T) {
 			require.NoError(t, err)
 			req := &operation.Request{Operation: operation.Wrapper{Type: info.Type(), Code: info.CodeString(), Info: raw}, IdempotencyKey: "leak-emergency", RequiredRackID: rackID, ConflictStrategy: operation.ConflictStrategyPreempt, TargetSpec: operation.TargetSpec{Racks: []operation.RackTarget{{Identifier: identifier.Identifier{ID: rackID}}}}}
 			var predecessorID uuid.UUID
+			req.TraceID = traceID
 			if tc.waitingReservation {
-				predecessor := newTaskForRack(req, target)
+				predecessor := newTaskForRack(t.Context(), req, target)
+				predecessor.Attributes.TraceID = traceID
 				predecessor.Status = taskcommon.TaskStatusWaiting
 				predecessorID = predecessor.ID
 				require.NoError(t, persisted.CreateTask(t.Context(), &predecessor))
@@ -129,6 +132,7 @@ func testPreemptingAdmission(t *testing.T) {
 				require.ErrorIs(t, err, failure)
 			} else {
 				require.NoError(t, err)
+				req.TraceID = "abcdef1234567890abcdef1234567890"
 				again, err := manager.SubmitTask(t.Context(), req)
 				require.NoError(t, err)
 				require.Len(t, ids, 1)
@@ -138,6 +142,10 @@ func testPreemptingAdmission(t *testing.T) {
 				require.Equal(t, ids, again)
 				require.Equal(t, 1, executor.executeCalls)
 				require.NotEmpty(t, executor.lastRequest.Info.RuleDefinition.Steps)
+				require.Equal(t, traceID, executor.lastRequest.Info.TraceID)
+				accepted, err := persisted.GetTask(t.Context(), ids[0])
+				require.NoError(t, err)
+				require.Equal(t, traceID, accepted.Attributes.TraceID)
 			}
 			for _, original := range old {
 				got, err := persisted.GetTask(t.Context(), original.ID)

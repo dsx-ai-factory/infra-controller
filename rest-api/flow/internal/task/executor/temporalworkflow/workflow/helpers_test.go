@@ -28,13 +28,14 @@ func TestBuildTargets(t *testing.T) {
 		{"pre ingestion", []string{"", ""}, []string{"mac-1", "mac-2"}, common.IdentifierTypeMACAddress},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			info := &task.ExecutionInfo{Components: []task.WorkflowComponent{
+			info := &task.ExecutionInfo{TraceID: "1234567890abcdef1234567890abcdef", Components: []task.WorkflowComponent{
 				{Type: devicetypes.ComponentTypeCompute, ComponentID: tc.ids[0], MACAddress: "mac-1"},
 				{Type: devicetypes.ComponentTypeCompute, ComponentID: tc.ids[1], MACAddress: "mac-2"},
 			}}
 			target := buildTargets(info)[devicetypes.ComponentTypeCompute]
 			assert.Equal(t, tc.wantIDs, target.Identifiers)
 			assert.Equal(t, tc.wantType, target.IdentifierType)
+			assert.Equal(t, info.TraceID, target.TraceID)
 		})
 	}
 }

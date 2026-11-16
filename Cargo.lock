@@ -1515,6 +1515,7 @@ dependencies = [
  "tokio",
  "tokio-util",
  "tonic",
+ "trace-propagation",
  "tracing",
  "tracing-subscriber",
  "uuid",
@@ -7572,6 +7573,7 @@ dependencies = [
  "criterion",
  "opentelemetry",
  "opentelemetry_sdk",
+ "tokio",
  "trace-propagation",
  "tracing",
  "tracing-opentelemetry",
@@ -12491,11 +12493,14 @@ dependencies = [
  "opentelemetry",
  "opentelemetry-http",
  "opentelemetry_sdk",
+ "serde",
+ "serde_json",
  "tokio",
  "tower",
  "tracing",
  "tracing-opentelemetry",
  "tracing-subscriber",
+ "uuid",
 ]
 
 [[package]]

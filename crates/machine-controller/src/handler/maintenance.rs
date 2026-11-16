@@ -71,33 +71,42 @@ pub(super) async fn handle_maintenance(
         ));
     }
 
-    match operation {
-        MachineMaintenanceOperation::PowerOn => {
-            handle_power_on(host_machine_id, mh_snapshot, request, ctx).await
-        }
-        MachineMaintenanceOperation::PowerOff { graceful } => {
-            handle_power_off(host_machine_id, mh_snapshot, request, ctx, *graceful).await
-        }
-        MachineMaintenanceOperation::Reset { graceful } => {
-            handle_reset(host_machine_id, mh_snapshot, request, ctx, *graceful).await
-        }
-        MachineMaintenanceOperation::Reboot => {
-            invoke_power_operation(
-                host_machine_id,
-                mh_snapshot,
-                request,
-                ctx,
-                PowerAction::GracefulRestart,
-            )
-            .await
-        }
-        MachineMaintenanceOperation::AcPowercycle { state } => {
-            handle_ac_powercycle(host_machine_id, mh_snapshot, request, ctx, state).await
-        }
-        MachineMaintenanceOperation::ChassisReset { chassis_id } => {
-            handle_chassis_reset(host_machine_id, mh_snapshot, request, ctx, chassis_id).await
-        }
-    }
+    let pool = ctx.services.db_pool.clone();
+    db::cm_action::resume(
+        &pool,
+        request.and_then(|request| request.action_id),
+        async {
+            match operation {
+                MachineMaintenanceOperation::PowerOn => {
+                    handle_power_on(host_machine_id, mh_snapshot, request, ctx).await
+                }
+                MachineMaintenanceOperation::PowerOff { graceful } => {
+                    handle_power_off(host_machine_id, mh_snapshot, request, ctx, *graceful).await
+                }
+                MachineMaintenanceOperation::Reset { graceful } => {
+                    handle_reset(host_machine_id, mh_snapshot, request, ctx, *graceful).await
+                }
+                MachineMaintenanceOperation::Reboot => {
+                    invoke_power_operation(
+                        host_machine_id,
+                        mh_snapshot,
+                        request,
+                        ctx,
+                        PowerAction::GracefulRestart,
+                    )
+                    .await
+                }
+                MachineMaintenanceOperation::AcPowercycle { state } => {
+                    handle_ac_powercycle(host_machine_id, mh_snapshot, request, ctx, state).await
+                }
+                MachineMaintenanceOperation::ChassisReset { chassis_id } => {
+                    handle_chassis_reset(host_machine_id, mh_snapshot, request, ctx, chassis_id)
+                        .await
+                }
+            }
+        },
+    )
+    .await
 }
 
 async fn handle_power_on(

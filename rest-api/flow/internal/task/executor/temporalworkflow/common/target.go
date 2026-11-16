@@ -23,7 +23,9 @@ const (
 
 // Target represents one homogeneous identifier batch for activity execution.
 type Target struct {
-	Type devicetypes.ComponentType
+	// TraceID retains the task's originating log context in activity payloads.
+	TraceID string `json:"trace_id,omitempty"`
+	Type    devicetypes.ComponentType
 	// Keep the JSON names stable for persisted Temporal activity payloads.
 	IdentifierType IdentifierType `json:"ComponentIDType,omitempty"`
 	Identifiers    []string       `json:"ComponentIDs"`

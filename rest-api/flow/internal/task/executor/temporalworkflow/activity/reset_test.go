@@ -14,6 +14,7 @@ import (
 	"go.temporal.io/sdk/temporal"
 	"go.temporal.io/sdk/testsuite"
 	"go.temporal.io/sdk/workflow"
+	"google.golang.org/grpc/metadata"
 	"google.golang.org/protobuf/proto"
 
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/nicoapi"
@@ -32,14 +33,17 @@ import (
 
 type resetOwnershipStore struct {
 	task.TaskStatusUpdater
-	current task.Task
-	readID  uuid.UUID
-	reads   int
+	current  task.Task
+	readID   uuid.UUID
+	reads    int
+	traceIDs [][]string
 }
 
-func (s *resetOwnershipStore) GetTask(_ context.Context, id uuid.UUID) (*task.Task, error) {
+func (s *resetOwnershipStore) GetTask(ctx context.Context, id uuid.UUID) (*task.Task, error) {
 	s.readID = id
 	s.reads++
+	md, _ := metadata.FromOutgoingContext(ctx)
+	s.traceIDs = append(s.traceIDs, md.Get("x-nico-trace-id"))
 	return &s.current, nil
 }
 
@@ -84,6 +88,7 @@ func TestActivities_SubmitFactoryReset(t *testing.T) {
 
 func checkResetActivityOwnership(t *testing.T, activityName string) {
 	t.Helper()
+	const traceID = "1234567890abcdef1234567890abcdef"
 	for _, tc := range []struct {
 		name    string
 		preempt bool
@@ -111,7 +116,7 @@ func checkResetActivityOwnership(t *testing.T, activityName string) {
 			env.RegisterActivity(activities.SubmitFactoryReset)
 			env.ExecuteWorkflow(func(ctx workflow.Context) error {
 				ctx = workflow.WithActivityOptions(ctx, workflow.ActivityOptions{StartToCloseTimeout: time.Minute, RetryPolicy: &temporal.RetryPolicy{MaximumAttempts: 1}})
-				target := workflowcommon.Target{Type: devicetypes.ComponentTypeNVSwitch, Identifiers: []string{"switch-1"}}
+				target := workflowcommon.Target{TraceID: traceID, Type: devicetypes.ComponentTypeNVSwitch, Identifiers: []string{"switch-1"}}
 				if activityName == NamePrepareFactoryReset {
 					return workflow.ExecuteActivity(ctx, activityName, target).Get(ctx, nil)
 				}
@@ -125,6 +130,9 @@ func checkResetActivityOwnership(t *testing.T, activityName string) {
 			}
 			require.Equal(t, taskID, store.readID)
 			require.GreaterOrEqual(t, store.reads, 2, "ownership must be read both before and after readiness")
+			for _, ids := range store.traceIDs {
+				require.Equal(t, []string{traceID}, ids, "dispatch checks must retain restored correlation")
+			}
 			require.Equal(t, 1, gate.calls)
 			wantCalls := 0
 			if activityName == NameSubmitFactoryReset && !tc.preempt {
