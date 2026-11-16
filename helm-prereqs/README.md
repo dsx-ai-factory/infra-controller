@@ -1212,8 +1212,17 @@ cannot upgrade a release whose recorded objects the API server no longer serves.
 
 Before making any cluster changes, `setup.sh` stops when the installed
 `external-secrets` chart is older than 0.16.2 and the pinned chart is newer.
+
 ESO 0.16.2 serves both `v1beta1` and `v1`, so upgrade to it first, keeping the
-release's values:
+release's values. Before running the upgrade, verify that none of the ESO CRDs
+still list `v1alpha1` in `status.storedVersions` (Kubernetes rejects removing a
+version from a CRD while it remains in `storedVersions`):
+
+```bash
+kubectl get crd externalsecrets.external-secrets.io secretstores.external-secrets.io \
+    clustersecretstores.external-secrets.io clusterexternalsecrets.external-secrets.io \
+    -o jsonpath='{range .items[*]}{.metadata.name}{"\t"}{.status.storedVersions}{"\n"}{end}'
+```
 
 ```bash
 helm upgrade external-secrets external-secrets \

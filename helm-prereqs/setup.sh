@@ -1547,8 +1547,13 @@ if ! "${INSTALL_VAULT}"; then
     fi
 fi
 export NICO_PREREQS_VAULT_ENABLED
+
 # re-sync ESO/v1beta1 nico-prereqs to v1.
-if helm status nico-prereqs -n nico-system &>/dev/null; then
+if ! _NICO_PREREQS_LIST=$(helm list -n nico-system -q --filter '^nico-prereqs$'); then
+    echo "Error: could not list releases in nico-system; fix cluster access and rerun" >&2
+    exit 1
+fi
+if [[ -n "${_NICO_PREREQS_LIST}" ]]; then
     if ! _NICO_PREREQS_MANIFEST="$(helm get manifest nico-prereqs -n nico-system)"; then
         echo "Error: could not read the nico-prereqs release manifest; fix cluster access and rerun" >&2
         exit 1
@@ -1559,6 +1564,8 @@ if helm status nico-prereqs -n nico-system &>/dev/null; then
     fi
     unset _NICO_PREREQS_MANIFEST
 fi
+unset _NICO_PREREQS_LIST
+
 helmfile sync -l name=external-secrets
 helmfile sync -l name=nico-prereqs ${_NICO_PREREQS_SYNC_ARGS[@]+"${_NICO_PREREQS_SYNC_ARGS[@]}"}
 unset NICO_PREREQS_APPROLE_ROLE_ID NICO_PREREQS_APPROLE_SECRET_ID NICO_PREREQS_VAULT_TOKEN_B64
