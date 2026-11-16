@@ -846,6 +846,90 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn configure_bios_keeps_the_profile_alert_until_machine_setup_succeeds() {
+        async fn queued_writes(fail_machine_setup: bool, alert_raised: bool) -> String {
+            let redfish_sim = Arc::new(RedfishSim::default());
+            let redfish_client = redfish_sim
+                .create_client("named-bios-profile", None, RedfishAuth::Anonymous, None)
+                .await
+                .unwrap();
+            redfish_sim.set_machine_setup_bios_job_id(Some("bios-job".to_string()));
+            redfish_sim.set_service_root_vendor(Some("Dell".to_string()));
+            redfish_sim.set_system_model("PowerEdge XE9680");
+            if fail_machine_setup {
+                redfish_sim.fail_next_machine_setup("BMC busy");
+            }
+            let mut site_config = MachineStateHandlerSiteConfig::test_default();
+            site_config.named_bios_profiles = HashMap::from([(
+                "gpu-perf".to_string(),
+                NamedBiosProfile {
+                    vendor: RedfishVendor::Dell,
+                    model: "PowerEdge_XE9680".to_string(),
+                    attributes: HashMap::new(),
+                },
+            )]);
+            let (mut services, _test_meter) = test_services(redfish_sim.clone(), site_config);
+            let mut metrics = MachineMetrics::default();
+            let mut pending_db_writes = DbWriteBatch::new();
+            let mut ctx = StateHandlerContext {
+                services: &mut services,
+                metrics: &mut metrics,
+                pending_db_writes: &mut pending_db_writes,
+            };
+            let mut mh_snapshot = managed_host_state_snapshot();
+            mh_snapshot
+                .host_snapshot
+                .metadata
+                .labels
+                .insert("bios-profile".to_string(), "gpu-perf".to_string());
+            mh_snapshot.host_snapshot.state.version = config_version::ConfigVersion::new(2);
+            mh_snapshot.host_snapshot.status.last_reboot_requested =
+                Some(model::machine::MachineLastRebootRequested {
+                    time: chrono::Utc::now(),
+                    ..Default::default()
+                });
+            if alert_raised {
+                mh_snapshot.host_snapshot.health_reports.merges.insert(
+                    "bios-profile".to_string(),
+                    health_report::HealthReport {
+                        source: "bios-profile".to_string(),
+                        triggered_by: None,
+                        observed_at: None,
+                        alerts: vec![],
+                        successes: vec![],
+                    },
+                );
+            }
+            let explicit_target = BootInterfaceTarget::Pair(MachineBootInterface {
+                mac_address: "10:00:00:00:00:01".parse().unwrap(),
+                interface_id: "NIC.Slot.5-1".to_string(),
+            });
+            run_host_boot_config_stage(
+                &mut ctx,
+                &reachability_params(),
+                redfish_client.as_ref(),
+                &mh_snapshot,
+                Some(&explicit_target),
+                HostBootConfigStage::ConfigureBios { retry_count: 0 },
+            )
+            .await
+            .unwrap();
+            format!("{pending_db_writes:?}")
+        }
+
+        assert_eq!(
+            queued_writes(true, true).await,
+            queued_writes(true, false).await,
+            "a failed machine_setup must leave the BiosProfileNotApplied alert in place"
+        );
+        assert_ne!(
+            queued_writes(false, true).await,
+            queued_writes(false, false).await,
+            "a successful machine_setup clears the BiosProfileNotApplied alert"
+        );
+    }
+
     #[test]
     fn boot_config_decision_chooses_the_smallest_remediation() {
         value_scenarios!(decide_host_boot_config:

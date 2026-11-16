@@ -203,6 +203,7 @@ struct RedfishSimState {
     system_id: Option<String>,
     system_model: Option<String>,
     next_system_error: Option<String>,
+    next_machine_setup_error: Option<String>,
     /// Physical-port MAC addresses exposed through the adapter Ports collection.
     network_adapter_port_mac_addresses: Vec<MacAddress>,
     /// Chassis linked from the simulated ComputerSystem.
@@ -858,6 +859,10 @@ impl RedfishSim {
         self.state.lock().unwrap().next_system_error = Some(error.to_string());
     }
 
+    pub fn fail_next_machine_setup(&self, error: &str) {
+        self.state.lock().unwrap().next_machine_setup_error = Some(error.to_string());
+    }
+
     /// Configure the physical-port MAC addresses returned by the simulated
     /// `Chassis/.../NetworkAdapters/.../Ports` collection. A non-empty value
     /// also advertises the parent `NetworkAdapters` link on `Card1`.
@@ -1246,6 +1251,9 @@ impl Redfish for RedfishSimClient {
     ) -> libredfish::RedfishFuture<'a, Result<Option<String>, RedfishError>> {
         Box::pin(async move {
             let mut state = self.state.lock().unwrap();
+            if let Some(error) = state.next_machine_setup_error.take() {
+                return Err(RedfishError::GenericError { error });
+            }
             let job_id = state.machine_setup_bios_job_id.clone();
             let host_state = state.hosts.get_mut(&self._host).unwrap();
             // `machine_setup` re-asserts the platform BIOS config, which
