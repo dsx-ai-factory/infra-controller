@@ -29,7 +29,7 @@ use tracing::Span;
 pub mod config;
 use carbide_instrument::{MetricFamily, Outcome};
 use carbide_uuid::machine::DpuMachineId;
-pub use config::{get_dpu_agent_meter, get_prometheus_registry};
+pub use config::{get_dpu_agent_meter, get_event_instrumentation, get_prometheus_registry};
 
 /// LLDP and OVS expose one enum per restart flow, while the private Event
 /// structs keep each existing log level, message, and field set intact. Every
@@ -403,13 +403,13 @@ struct LldpCollectionFailed {
 }
 
 impl InventoryReport {
-    pub(crate) fn emit(self) {
+    pub(crate) fn emit(self, instrumentation: &carbide_instrument::Instrumentation) {
         match self {
-            Self::Succeeded => carbide_instrument::emit(InventoryReportSucceeded {
+            Self::Succeeded => instrumentation.emit(InventoryReportSucceeded {
                 report_loop: ReportLoop::Inventory,
                 outcome: Outcome::Ok,
             }),
-            Self::Failed => carbide_instrument::emit(InventoryReportFailed {
+            Self::Failed => instrumentation.emit(InventoryReportFailed {
                 report_loop: ReportLoop::Inventory,
                 outcome: Outcome::Error,
             }),
@@ -418,22 +418,22 @@ impl InventoryReport {
 }
 
 impl ConfigFetch {
-    pub(crate) fn emit(self) {
+    pub(crate) fn emit(self, instrumentation: &carbide_instrument::Instrumentation) {
         match self {
-            Self::Succeeded => carbide_instrument::emit(ConfigFetchSucceeded {
+            Self::Succeeded => instrumentation.emit(ConfigFetchSucceeded {
                 report_loop: ReportLoop::ConfigFetch,
                 outcome: Outcome::Ok,
             }),
             Self::Failed {
                 error,
                 retry_interval_seconds,
-            } => carbide_instrument::emit(ConfigFetchFailed {
+            } => instrumentation.emit(ConfigFetchFailed {
                 report_loop: ReportLoop::ConfigFetch,
                 outcome: Outcome::Error,
                 error,
                 retry_interval_seconds,
             }),
-            Self::NotFound { machine_id } => carbide_instrument::emit(ConfigNotFound {
+            Self::NotFound { machine_id } => instrumentation.emit(ConfigNotFound {
                 report_loop: ReportLoop::ConfigFetch,
                 outcome: Outcome::Error,
                 machine_id,
@@ -443,16 +443,16 @@ impl ConfigFetch {
 }
 
 impl FmdsPush {
-    pub(crate) fn emit(self) {
+    pub(crate) fn emit(self, instrumentation: &carbide_instrument::Instrumentation) {
         match self {
-            Self::Succeeded => carbide_instrument::emit(FmdsPushSucceeded {
+            Self::Succeeded => instrumentation.emit(FmdsPushSucceeded {
                 report_loop: ReportLoop::FmdsPush,
                 outcome: Outcome::Ok,
             }),
             Self::Failed {
                 error,
                 fmds_address,
-            } => carbide_instrument::emit(FmdsPushFailed {
+            } => instrumentation.emit(FmdsPushFailed {
                 report_loop: ReportLoop::FmdsPush,
                 outcome: Outcome::Error,
                 error,
@@ -463,21 +463,21 @@ impl FmdsPush {
 }
 
 impl NetworkStatus {
-    pub(crate) fn emit(self) {
+    pub(crate) fn emit(self, instrumentation: &carbide_instrument::Instrumentation) {
         match self {
-            Self::Succeeded => carbide_instrument::emit(NetworkStatusSucceeded {
+            Self::Succeeded => instrumentation.emit(NetworkStatusSucceeded {
                 report_loop: ReportLoop::NetworkStatus,
                 outcome: Outcome::Ok,
             }),
             Self::ConnectionFailed { forge_api, error } => {
-                carbide_instrument::emit(NetworkStatusConnectionFailed {
+                instrumentation.emit(NetworkStatusConnectionFailed {
                     report_loop: ReportLoop::NetworkStatus,
                     outcome: Outcome::Error,
                     forge_api,
                     error,
                 });
             }
-            Self::RpcFailed { error } => carbide_instrument::emit(NetworkStatusRpcFailed {
+            Self::RpcFailed { error } => instrumentation.emit(NetworkStatusRpcFailed {
                 report_loop: ReportLoop::NetworkStatus,
                 outcome: Outcome::Error,
                 error,
@@ -487,13 +487,13 @@ impl NetworkStatus {
 }
 
 impl LldpCollection {
-    pub(crate) fn emit(self) {
+    pub(crate) fn emit(self, instrumentation: &carbide_instrument::Instrumentation) {
         match self {
-            Self::Succeeded => carbide_instrument::emit(LldpCollectionSucceeded {
+            Self::Succeeded => instrumentation.emit(LldpCollectionSucceeded {
                 report_loop: ReportLoop::Lldp,
                 outcome: Outcome::Ok,
             }),
-            Self::Failed { error } => carbide_instrument::emit(LldpCollectionFailed {
+            Self::Failed { error } => instrumentation.emit(LldpCollectionFailed {
                 report_loop: ReportLoop::Lldp,
                 outcome: Outcome::Error,
                 error,
@@ -503,6 +503,7 @@ impl LldpCollection {
 }
 
 pub struct AgentMetricsState {
+    pub(crate) instrumentation: carbide_instrument::Instrumentation,
     meter: Meter,
 }
 
@@ -555,8 +556,16 @@ impl AgentMetricsState {
     }
 }
 
-pub fn create_metrics(meter: Meter) -> Arc<AgentMetricsState> {
-    Arc::new(AgentMetricsState { meter })
+/// Creates native and Event metric state using the supplied destinations.
+/// Retain their providers while the state or its tracing layers are in use.
+pub fn create_metrics(
+    meter: Meter,
+    instrumentation: carbide_instrument::Instrumentation,
+) -> Arc<AgentMetricsState> {
+    Arc::new(AgentMetricsState {
+        meter,
+        instrumentation,
+    })
 }
 
 pub struct NetworkMonitorMetricsState {
@@ -764,22 +773,22 @@ impl DpuAgentHttpResponseGenerated {
     }
 }
 
-/// `WithTracingLayer` keeps `AgentMetricsState` in its public API for existing
-/// callers. The HTTP Events resolve their instruments through the global meter
-/// provider, so the implementation does not need to read the handle.
+/// Records HTTP Events through the instrumentation owned by `AgentMetricsState`.
 pub trait WithTracingLayer {
     fn with_tracing_layer(self, metrics: Arc<AgentMetricsState>) -> Router;
 }
 
 impl WithTracingLayer for Router {
-    fn with_tracing_layer(self, _metrics: Arc<AgentMetricsState>) -> Router {
+    fn with_tracing_layer(self, metrics: Arc<AgentMetricsState>) -> Router {
+        let instrumentation = metrics.instrumentation.clone();
+        let response_instrumentation = instrumentation.clone();
         let layer = tower_http::trace::TraceLayer::new_for_http()
             .on_request(move |request: &Request<AxumBody>, _span: &Span| {
-                carbide_instrument::emit(DpuAgentHttpRequestStarted::new(request));
+                instrumentation.emit(DpuAgentHttpRequestStarted::new(request));
             })
             .on_response(
                 move |_response: &Response<AxumBody>, latency: Duration, _span: &Span| {
-                    carbide_instrument::emit(DpuAgentHttpResponseGenerated::new(latency));
+                    response_instrumentation.emit(DpuAgentHttpResponseGenerated::new(latency));
                 },
             );
 
@@ -886,7 +895,10 @@ mod report_loop_tests {
                 Check {
                     scenario: "inventory success logs at debug",
                     input: EventCase {
-                        emit: || InventoryReport::Succeeded.emit(),
+                        emit: || {
+                            InventoryReport::Succeeded
+                                .emit(&carbide_instrument::Instrumentation::global())
+                        },
                         report_loop: "inventory",
                         outcome: "ok",
                     },
@@ -906,7 +918,10 @@ mod report_loop_tests {
                 Check {
                     scenario: "inventory failure remains metric-only",
                     input: EventCase {
-                        emit: || InventoryReport::Failed.emit(),
+                        emit: || {
+                            InventoryReport::Failed
+                                .emit(&carbide_instrument::Instrumentation::global())
+                        },
                         report_loop: "inventory",
                         outcome: "error",
                     },
@@ -918,7 +933,10 @@ mod report_loop_tests {
                 Check {
                     scenario: "config fetch success logs at info",
                     input: EventCase {
-                        emit: || ConfigFetch::Succeeded.emit(),
+                        emit: || {
+                            ConfigFetch::Succeeded
+                                .emit(&carbide_instrument::Instrumentation::global())
+                        },
                         report_loop: "config_fetch",
                         outcome: "ok",
                     },
@@ -943,7 +961,7 @@ mod report_loop_tests {
                                 error: "config failed".to_string(),
                                 retry_interval_seconds: 30.5,
                             }
-                            .emit()
+                            .emit(&carbide_instrument::Instrumentation::global())
                         },
                         report_loop: "config_fetch",
                         outcome: "error",
@@ -967,7 +985,9 @@ mod report_loop_tests {
                 Check {
                     scenario: "FMDS success logs at info",
                     input: EventCase {
-                        emit: || FmdsPush::Succeeded.emit(),
+                        emit: || {
+                            FmdsPush::Succeeded.emit(&carbide_instrument::Instrumentation::global())
+                        },
                         report_loop: "fmds_push",
                         outcome: "ok",
                     },
@@ -992,7 +1012,7 @@ mod report_loop_tests {
                                 error: "FMDS failed".to_string(),
                                 fmds_address: "http://fmds:50051".to_string(),
                             }
-                            .emit()
+                            .emit(&carbide_instrument::Instrumentation::global())
                         },
                         report_loop: "fmds_push",
                         outcome: "error",
@@ -1016,7 +1036,10 @@ mod report_loop_tests {
                 Check {
                     scenario: "network status success logs at info",
                     input: EventCase {
-                        emit: || NetworkStatus::Succeeded.emit(),
+                        emit: || {
+                            NetworkStatus::Succeeded
+                                .emit(&carbide_instrument::Instrumentation::global())
+                        },
                         report_loop: "network_status",
                         outcome: "ok",
                     },
@@ -1040,7 +1063,7 @@ mod report_loop_tests {
                             NetworkStatus::RpcFailed {
                                 error: "RPC failed".to_string(),
                             }
-                            .emit()
+                            .emit(&carbide_instrument::Instrumentation::global())
                         },
                         report_loop: "network_status",
                         outcome: "error",
@@ -1065,7 +1088,7 @@ mod report_loop_tests {
                             ConfigFetch::NotFound {
                                 machine_id: MACHINE_ID.to_string(),
                             }
-                            .emit()
+                            .emit(&carbide_instrument::Instrumentation::global())
                         },
                         report_loop: "config_fetch",
                         outcome: "error",
@@ -1091,7 +1114,7 @@ mod report_loop_tests {
                                 forge_api: "https://forge:50051".to_string(),
                                 error: "connection refused".to_string(),
                             }
-                            .emit()
+                            .emit(&carbide_instrument::Instrumentation::global())
                         },
                         report_loop: "network_status",
                         outcome: "error",
@@ -1252,14 +1275,17 @@ mod http_request_tests {
 
     #[test]
     fn tracing_layer_emits_one_start_and_completion_event_per_request() {
-        let metrics = MetricsCapture::start();
+        let setup = metrics_endpoint::new_metrics_setup("http-request-test", "forge-system", false)
+            .unwrap();
+        let metrics = MetricsCapture::for_registry(&setup.registry);
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
             .expect("test runtime should build");
         let logs = capture_logs(|| {
             runtime.block_on(async {
-                let metrics_state = create_metrics(opentelemetry::global::meter("test"));
+                let metrics_state =
+                    create_metrics(setup.meter.clone(), setup.instrumentation.clone());
                 let router = Router::new()
                     .route("/health", get(|| async { StatusCode::NO_CONTENT }))
                     .with_tracing_layer(metrics_state);

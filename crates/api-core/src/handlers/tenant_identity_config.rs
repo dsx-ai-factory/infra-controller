@@ -30,6 +30,7 @@ use ::rpc::forge::{
     TenantIdentityConfigResponse, TenantIdentitySigningKey, TokenDelegationRequest,
     TokenDelegationResponse, token_delegation,
 };
+use carbide_instrument::Instrumentation;
 use carbide_secrets::credentials::CredentialReader;
 use carbide_secrets::key_encryption;
 use carbide_utils::none_if_empty::NoneIfEmpty;
@@ -57,6 +58,7 @@ use crate::machine_identity::{
 /// Decrypts DB ciphertext into [`TenantIdentityConfigDecrypted`]: `row` keeps envelope in
 /// `encrypted_auth_method_config`; plaintext JSON is only in `auth_method_config`.
 async fn tenant_identity_with_decrypted_token_delegation(
+    instrumentation: &Instrumentation,
     credentials: &dyn CredentialReader,
     cfg: TenantIdentityConfig,
 ) -> Result<TenantIdentityConfigDecrypted, Status> {
@@ -66,7 +68,7 @@ async fn tenant_identity_with_decrypted_token_delegation(
     )
     .await
     .inspect_err(|e| {
-        carbide_instrument::emit(
+        instrumentation.emit(
             MachineIdentityStoredSecretDecryptionFailed::TokenDelegationAuth {
                 organization_id: cfg.organization_id.to_string(),
                 error: e.message().to_string(),
@@ -434,7 +436,12 @@ pub(crate) async fn get_token_delegation(
         }));
     }
 
-    let cfg = tenant_identity_with_decrypted_token_delegation(&api.credential_manager, cfg).await?;
+    let cfg = tenant_identity_with_decrypted_token_delegation(
+        &api.instrumentation,
+        &api.credential_manager,
+        cfg,
+    )
+    .await?;
     Ok(Response::new(cfg.try_into().map_err(CarbideError::from)?))
 }
 
@@ -525,7 +532,12 @@ pub(crate) async fn set_token_delegation(
         })
         .await??;
 
-    let cfg = tenant_identity_with_decrypted_token_delegation(&api.credential_manager, cfg).await?;
+    let cfg = tenant_identity_with_decrypted_token_delegation(
+        &api.instrumentation,
+        &api.credential_manager,
+        cfg,
+    )
+    .await?;
     Ok(Response::new(cfg.try_into().map_err(CarbideError::from)?))
 }
 

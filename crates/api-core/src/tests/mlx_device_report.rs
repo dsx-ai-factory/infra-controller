@@ -110,6 +110,7 @@ async fn firmware_test_card(
             pci_name: pci_name.into(),
             device_description: None,
             interface_type: DpaInterfaceType::Svpc,
+            interface_name: None,
         },
         &mut txn,
     )
@@ -499,6 +500,7 @@ async fn firmware_operation_reports_only_complete_the_matching_attempt(pool: sql
             pci_name: "0000:cc:00.0".into(),
             device_description: None,
             interface_type: DpaInterfaceType::Svpc,
+            interface_name: None,
         },
         &mut txn,
     )
@@ -550,7 +552,6 @@ async fn firmware_operation_reports_only_complete_the_matching_attempt(pool: sql
     let config = env.config.ewethers_config.clone().unwrap();
     let mut monitor = DpaMonitor::new(
         env.pool.clone(),
-        env.pool.clone().into(),
         Arc::new(DpaInfo {
             subnet_ip: config.subnet_ip,
             subnet_mask: config.subnet_mask,
@@ -561,6 +562,7 @@ async fn firmware_operation_reports_only_complete_the_matching_attempt(pool: sql
         config,
         env.config.host_health,
         env.api.work_lock_manager_handle.clone(),
+        env.api.instrumentation.clone(),
     );
     monitor.run_single_iteration().await.unwrap();
     let cards =

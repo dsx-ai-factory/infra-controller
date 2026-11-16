@@ -46,6 +46,7 @@ pub(crate) fn spawn(
     config: Arc<Config>,
     carbide_api_client: CarbideApiClient,
     meter: &Meter,
+    instrumentation: carbide_instrument::Instrumentation,
     cancel_token: CancellationToken,
 ) -> Handle {
     let (cancel_token, drop_guard) = fork_cancel_token(cancel_token);
@@ -57,7 +58,7 @@ pub(crate) fn spawn(
             cancel_token,
             config,
             carbide_api_client,
-            metrics: Arc::new(BmcPoolMetrics::new(meter, members.clone())),
+            metrics: Arc::new(BmcPoolMetrics::new(meter, instrumentation, members.clone())),
         }
         .run_loop(ready_tx),
     );
@@ -212,6 +213,7 @@ struct BmcPool {
 }
 
 pub(super) struct BmcPoolMetrics {
+    pub(super) instrumentation: carbide_instrument::Instrumentation,
     grpc_total_hosts: Gauge<u64>,
     total_machines: Gauge<u64>,
     _failed_machines: ObservableGauge<u64>,
@@ -226,15 +228,19 @@ pub(super) struct BmcPoolMetrics {
 }
 
 impl BmcPoolMetrics {
-    fn new(meter: &Meter, members: Arc<RwLock<HashMap<MachineId, ClientHandle>>>) -> Self {
-        // Bind the cached Event to SSH Console's installed global provider and
-        // expose its zero before any BMC client connects.
-        let initialized = carbide_instrument::initialize_counter_series(&BmcRecoveryAttempted);
+    fn new(
+        meter: &Meter,
+        instrumentation: carbide_instrument::Instrumentation,
+        members: Arc<RwLock<HashMap<MachineId, ClientHandle>>>,
+    ) -> Self {
+        // Expose the zero series in this pool's registry before any BMC client connects.
+        let initialized = instrumentation.initialize_counter_series(&BmcRecoveryAttempted);
         debug_assert!(
             initialized,
             "BMC recovery Event must initialize its counter"
         );
         Self {
+            instrumentation,
             grpc_total_hosts: meter
                 .u64_gauge("ssh_console_grpc_total_machines")
                 .with_description("Number of hosts reported by the Site Controller to the SSH Console service").build(),
@@ -306,11 +312,11 @@ impl BmcPoolMetrics {
     }
 
     #[cfg(test)]
-    pub(super) fn for_test() -> Self {
-        Self::new(
-            &opentelemetry::global::meter("ssh-console-ipmi-test"),
-            Arc::default(),
-        )
+    pub(super) fn for_test(
+        meter: &Meter,
+        instrumentation: carbide_instrument::Instrumentation,
+    ) -> Self {
+        Self::new(meter, instrumentation, Arc::default())
     }
 }
 

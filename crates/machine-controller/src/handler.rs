@@ -129,7 +129,7 @@ use crate::health_report::{
 };
 use crate::redfish::{
     did_dpu_finish_booting, host_power_control, host_power_control_with_location, power_state,
-    power_state_name, reboot_requested_mode, set_power,
+    power_state_name, reboot_requested_mode, reset_bmc, set_power,
 };
 use crate::{
     MeasuringOutcome, get_measuring_prerequisites, handle_measuring_state,
@@ -154,6 +154,7 @@ mod machine_validation;
 mod maintenance;
 mod nic_firmware;
 mod nic_lockdown_rotation;
+mod onboard_nics;
 mod power;
 mod reset;
 mod rotation;
@@ -161,7 +162,7 @@ mod sku;
 #[cfg(test)]
 mod test_machine_setup;
 
-use bios_config::handle_bios_setup_failed_recovery;
+use bios_config::{handle_bios_setup_failed_recovery, platform_settings_in_effect};
 use extension_services::{cleanup_terminated_extension_services, get_extension_services_status};
 use helpers::{
     DpuDiscoveringStateHelper, DpuInitStateHelper, ManagedHostStateHelper, NextState,
@@ -294,6 +295,7 @@ pub struct MachineStateHandler {
 }
 
 pub struct MachineStateHandlerBuilder {
+    instrumentation: carbide_instrument::Instrumentation,
     dpu_up_threshold: chrono::Duration,
     dpu_nic_firmware_initial_update_enabled: bool,
     // TODO: Cleanup needed for this flag.
@@ -316,8 +318,12 @@ pub struct MachineStateHandlerBuilder {
 }
 
 impl MachineStateHandlerBuilder {
-    pub fn builder() -> Self {
+    /// Creates a builder whose default firmware downloader uses `instrumentation`.
+    /// A supplied downloader retains its own destination. Keep the provider alive
+    /// while the handler's firmware operations run.
+    pub fn builder(instrumentation: carbide_instrument::Instrumentation) -> Self {
         Self {
+            instrumentation,
             dpu_up_threshold: chrono::Duration::minutes(5),
             dpu_nic_firmware_initial_update_enabled: true,
             dpu_nic_firmware_reprovision_update_enabled: true,
@@ -494,9 +500,12 @@ impl MachineStateHandlerBuilder {
 
 impl MachineStateHandler {
     fn new(builder: MachineStateHandlerBuilder) -> Self {
+        let downloader = builder
+            .firmware_downloader
+            .unwrap_or_else(|| FirmwareDownloader::new(builder.instrumentation.clone()));
         let host_upgrade = Arc::new(HostUpgradeState {
             parsed_hosts: Arc::new(builder.hardware_models.clone().unwrap_or_default()),
-            downloader: builder.firmware_downloader.unwrap_or_default(),
+            downloader,
             upload_limiter: builder
                 .upload_limiter
                 .unwrap_or(Arc::new(Semaphore::new(5))),
@@ -1944,10 +1953,7 @@ impl MachineStateHandler {
                             SecureEraseBossState::HandleJobFailure {
                                 failure: _,
                                 power_state: _,
-                            } => {
-                                handle_boss_job_failure(redfish_client.as_ref(), mh_snapshot, ctx)
-                                    .await
-                            }
+                            } => handle_boss_job_failure(mh_snapshot, ctx).await,
                         }
                     }
                     CleanupState::HostCleanup { boss_controller_id } => {
@@ -2086,10 +2092,7 @@ impl MachineStateHandler {
                             CreateBossVolumeState::HandleJobFailure {
                                 failure: _,
                                 power_state: _,
-                            } => {
-                                handle_boss_job_failure(redfish_client.as_ref(), mh_snapshot, ctx)
-                                    .await
-                            }
+                            } => handle_boss_job_failure(mh_snapshot, ctx).await,
                         }
                     }
                     CleanupState::DisableBIOSBMCLockdown => {
@@ -2657,40 +2660,44 @@ impl MachineStateHandler {
         let cage_mpo_encoded_string =
             model::machine::astra::astra_get_cage_mpo_encoded_string(nic_index);
 
-        let (fixed_ip, dpu_pci_address) = if let Some(nic) = legacy_nic {
+        let (fixed_ip, dpu_pci_address, logical_ifname) = if let Some(nic) = legacy_nic {
             // Preserve the MAC/IP inventory's original indexed DPA registration.
             let fixed_ip = nic.fixed_ip.ok_or_else(|| {
                 StateHandlerError::GenericError(eyre!(
                     "fixed IP not found for legacy astra NIC {nic_index}"
                 ))
             })?;
-            (fixed_ip, format!("CX_{nic_index}"))
+            // Legacy inventory declares no lanes, so it names no interface.
+            (fixed_ip, format!("CX_{nic_index}"), None)
         } else {
-            // Every declared lane has a validated fixed IP. Use one lane's address
-            // for the card-level DPA registration.
-            let lane_prefix = format!("{cage_mpo_encoded_string}-L");
-            let fixed_ip = cx9_nics
+            // The card-level DPA registration stands for lane L1, so a single
+            // declaration supplies its address, locator, and interface name.
+            let l1_physical_ifname = format!("{cage_mpo_encoded_string}-L1");
+            let l1_lane = cx9_nics
                 .iter()
-                .filter(|nic| {
-                    nic.physical_ifname
-                        .as_deref()
-                        .is_some_and(|name| name.starts_with(&lane_prefix))
-                })
-                .find_map(|nic| nic.fixed_ip)
+                .find(|nic| nic.physical_ifname.as_deref() == Some(l1_physical_ifname.as_str()))
                 .ok_or_else(|| {
                     StateHandlerError::GenericError(eyre!(
-                        "fixed IP not found for astra card {cage_mpo_encoded_string}"
+                        "astra lane {l1_physical_ifname} is not declared"
                     ))
                 })?;
+            // Every declared lane has a validated fixed IP.
+            let fixed_ip = l1_lane.fixed_ip.ok_or_else(|| {
+                StateHandlerError::GenericError(eyre!(
+                    "fixed IP not found for astra lane {l1_physical_ifname}"
+                ))
+            })?;
+            // A lane may be declared without a logical name, so this stays optional.
+            let logical_ifname = l1_lane.logical_ifname.clone();
             let dpu_pci_address = model::machine::astra::astra_dpu_pci_address_for_physical_ifname(
-                &format!("{cage_mpo_encoded_string}-L1"),
+                &l1_physical_ifname,
             )
             .ok_or_else(|| {
                 StateHandlerError::GenericError(eyre!(
                     "DPU PCI address not found for astra card {cage_mpo_encoded_string}"
                 ))
             })?;
-            (fixed_ip, dpu_pci_address.to_string())
+            (fixed_ip, dpu_pci_address.to_string(), logical_ifname)
         };
 
         // Now enable EastWestControlEnabled on this card.
@@ -2716,6 +2723,7 @@ impl MachineStateHandler {
                 pci_name: dpu_pci_address,
                 device_description: Some("NVIDIA Dual ConnectX-9 SuperNIC C9280V for Vera Rubin NVL 144 systems, Crypto Enabled, Secure Boot Enabled, Liquid Cooled".to_string()),
                 interface_type: DpaInterfaceType::Astra,
+                interface_name: logical_ifname,
             },
             &mut txn,
         )
@@ -3387,11 +3395,7 @@ fn is_dpu_up(state: &ManagedHostStateSnapshot, dpu_snapshot: &DpuMachine) -> boo
         .unwrap_or(DateTime::<Utc>::MIN_UTC);
     let state_change_time = state.host_snapshot.state.version.timestamp();
 
-    if observation_time < state_change_time {
-        return false;
-    }
-
-    true
+    observation_time >= state_change_time
 }
 
 fn is_dpu_observed_since(dpu_snapshot: &DpuMachine, minimum_observed_at: DateTime<Utc>) -> bool {
@@ -3444,6 +3448,20 @@ impl StateHandler for MachineStateHandler {
         _mh_state: &Self::ControllerState, // mh_snapshot above already contains it
         ctx: &mut StateHandlerContext<Self::ContextObjects>,
     ) -> Result<StateHandlerOutcome<ManagedHostState>, StateHandlerError> {
+        let id = host_machine_id.to_string();
+        let predicted = host_machine_id
+            .to_machine_id()
+            .machine_type()
+            .is_predicted_host();
+        trace_propagation::MachineTraceAttributes {
+            machine_id: (!predicted).then_some(id.as_str()),
+            predicted_id: predicted.then_some(id.as_str()),
+            bmc_ip: mh_snapshot.host_snapshot.status.bmc_info.ip,
+            managed_host_id: Some(&id),
+            managed_host_bmc_ip: mh_snapshot.host_snapshot.status.bmc_info.ip,
+        }
+        .record_on(&tracing::Span::current());
+
         let was_dpf_provisioning = mh_snapshot.managed_state.suppresses_exploration_for_dpf();
 
         // Refresh the per-object info/association series before any early
@@ -4454,12 +4472,14 @@ async fn handle_dpu_reprovision(
                     "Initiating BMC reset of lenovo machine"
                 );
 
-                let redfish_client = ctx
-                    .services
-                    .create_redfish_client_from_machine(&state.host_snapshot)
-                    .await?;
+                // Connecting can itself need the Redfish service this works around, so a
+                // failed connection falls back to IPMI like a failed reset.
+                let redfish_result = match ctx.services.connect_bmc(&state.host_snapshot).await {
+                    Ok(bmc) => reset_bmc(&bmc).await.map_err(|error| error.to_string()),
+                    Err(error) => Err(error.to_string()),
+                };
 
-                if let Err(redfish_error) = redfish_client.bmc_reset(None).await {
+                if let Err(redfish_error) = redfish_result {
                     tracing::warn!(
                         machine_id = %state.host_snapshot.id,
                         error = %redfish_error,
@@ -5517,7 +5537,12 @@ impl DpuMachineStateHandler {
                 let credentials_updated = match ctx
                     .services
                     .bmc_credential_ops
-                    .uefi_setup(&dpu_bmc_access, true, dpu_uefi_credentials)
+                    .uefi_setup(
+                        &dpu_bmc_access,
+                        true,
+                        dpu_uefi_credentials,
+                        &ctx.services.instrumentation,
+                    )
                     .await
                 {
                     Err(e) => {
@@ -7920,6 +7945,7 @@ async fn handle_ready_boot_config(
                     // This state is restartable, so re-observe after lockdown is
                     // restored rather than trusting an earlier pre-crash read.
                     let inspection = inspect_host_boot_config(
+                        ctx.services,
                         redfish_client.as_ref(),
                         mh_snapshot,
                         &captured_boot_interface,
@@ -8127,6 +8153,7 @@ async fn complete_host_init_lockdown(
     };
     let boot_interface: BootInterfaceTarget = desired.value.clone().into();
     let inspection = match inspect_host_boot_config(
+        ctx.services,
         redfish_client.as_ref(),
         mh_snapshot,
         &boot_interface,
@@ -8308,7 +8335,12 @@ async fn handle_host_uefi_setup(
             match ctx
                 .services
                 .bmc_credential_ops
-                .uefi_setup(&host_bmc_access, false, host_uefi_credentials)
+                .uefi_setup(
+                    &host_bmc_access,
+                    false,
+                    host_uefi_credentials,
+                    &ctx.services.instrumentation,
+                )
                 .await
             {
                 Ok(job_id) => Ok(StateHandlerOutcome::transition(
@@ -8502,35 +8534,31 @@ impl StateHandler for HostMachineStateHandler {
                     Box::new(mh_snapshot.managed_state.clone()),
                 )),
                 MachineState::EnableIpmiOverLan => {
-                    let host_redfish_client = ctx
-                        .services
-                        .create_redfish_client_from_machine(&mh_snapshot.host_snapshot)
-                        .await?;
-
-                    if !host_redfish_client
-                        .is_ipmi_over_lan_enabled()
+                    let bmc = ctx.services.connect_bmc(&mh_snapshot.host_snapshot).await?;
+                    let bmc_control = bmc
+                        .bmc_control()
+                        .map_err(|e| platform_error("enable_ipmi_over_lan", e.into()))?;
+                    if !bmc_control
+                        .ipmi_over_lan_enabled()
                         .await
-                        .map_err(|e| redfish_error("enable_ipmi_over_lan", e))?
+                        .map_err(|e| platform_error("enable_ipmi_over_lan", e))?
                     {
                         tracing::info!(
                             machine_id = %host_machine_id,
                             "IPMI over LAN is currently disabled on this host--enabling IPMI over LAN");
 
-                        host_redfish_client
-                            .enable_ipmi_over_lan(libredfish::EnabledDisabled::Enabled)
+                        bmc_control
+                            .set_ipmi_over_lan(true)
                             .await
-                            .map_err(|e| redfish_error("enable_ipmi_over_lan", e))?;
+                            .map_err(|e| platform_error("enable_ipmi_over_lan", e))?;
                     }
 
-                    let machine_state = if mh_snapshot.has_managed_dpus()
-                        && is_vera_rubin_host(host_redfish_client.as_ref()).await?
-                    {
+                    let machine_state = if onboard_nics::isolate(&bmc_control, mh_snapshot).await? {
                         MachineState::DisableOnboardNics {
                             disable_onboard_nics_state:
                                 DisableOnboardNicsState::ConfigureOnboardNics { enable: true },
                         }
                     } else {
-                        // Other platforms and no-DPU hosts retain their onboard NIC settings.
                         MachineState::WaitingForPlatformConfiguration { retry_count: 0 }
                     };
 
@@ -8541,54 +8569,24 @@ impl StateHandler for HostMachineStateHandler {
                 MachineState::DisableOnboardNics {
                     disable_onboard_nics_state,
                 } => {
-                    let next_state = match disable_onboard_nics_state {
-                        DisableOnboardNicsState::ConfigureOnboardNics { enable } => {
-                            let redfish_client = ctx
-                                .services
-                                .create_redfish_client_from_machine(&mh_snapshot.host_snapshot)
-                                .await?;
-                            let (operation, target) = if *enable {
-                                ("enable_onboard_nics", libredfish::EnabledDisabled::Enabled)
-                            } else {
-                                (
-                                    "disable_onboard_nics",
-                                    libredfish::EnabledDisabled::Disabled,
-                                )
-                            };
-                            redfish_client
-                                .set_enable_onboard_nics(target)
-                                .await
-                                .map_err(|e| redfish_error(operation, e))?;
-                            MachineState::DisableOnboardNics {
-                                disable_onboard_nics_state:
-                                    DisableOnboardNicsState::WaitForConfigToBeApplied {
-                                        onboard_nics_disabled: !enable,
-                                    },
-                            }
-                        }
-                        DisableOnboardNicsState::WaitForConfigToBeApplied {
-                            onboard_nics_disabled,
-                        } => {
-                            if mh_snapshot.host_snapshot.state.version.since_state_change()
-                                < Duration::seconds(10)
-                            {
+                    let next_state =
+                        match onboard_nics::advance(disable_onboard_nics_state, mh_snapshot, ctx)
+                            .await?
+                        {
+                            onboard_nics::Progress::Wait => {
                                 return Ok(StateHandlerOutcome::wait(
-                                    "Waiting for onboard NIC configuration to be applied"
-                                        .to_string(),
+                                    onboard_nics::WAIT_REASON.to_string(),
                                 ));
                             }
-                            if *onboard_nics_disabled {
-                                MachineState::WaitingForPlatformConfiguration { retry_count: 0 }
-                            } else {
+                            onboard_nics::Progress::Next(state) => {
                                 MachineState::DisableOnboardNics {
-                                    disable_onboard_nics_state:
-                                        DisableOnboardNicsState::ConfigureOnboardNics {
-                                            enable: false,
-                                        },
+                                    disable_onboard_nics_state: state,
                                 }
                             }
-                        }
-                    };
+                            onboard_nics::Progress::Complete => {
+                                MachineState::WaitingForPlatformConfiguration { retry_count: 0 }
+                            }
+                        };
                     Ok(StateHandlerOutcome::transition(
                         ManagedHostState::HostInit {
                             machine_state: next_state,
@@ -11462,11 +11460,13 @@ impl HostUpgradeState {
                         .host_firmware_upgrade_retry_interval;
 
                 if can_retry && waited_enough {
-                    carbide_instrument::emit(HostFirmwareUpgradeRetried {
-                        machine_id: *machine_id,
-                        attempt: retry_count + 1,
-                        error: reason.clone().unwrap_or_default(),
-                    });
+                    ctx.services
+                        .instrumentation
+                        .emit(HostFirmwareUpgradeRetried {
+                            machine_id: *machine_id,
+                            attempt: retry_count + 1,
+                            error: reason.clone().unwrap_or_default(),
+                        });
 
                     let reprovision_state = HostReprovisionState::CheckingFirmwareV2 {
                         firmware_type: None,
@@ -12141,10 +12141,9 @@ impl HostUpgradeState {
                         state.host_snapshot.id
                     )));
                 }
-                redfish_client
-                    .bmc_reset(None)
+                reset_bmc(&bmc)
                     .await
-                    .map_err(|e| redfish_error("BMC reset", e))?;
+                    .map_err(|e| platform_error("BMC reset", e))?;
 
                 Ok(StateHandlerOutcome::transition(scenario.actual_new_state(
                     HostReprovisionState::InitialReset {
@@ -12878,12 +12877,9 @@ impl HostUpgradeState {
                 bmc_ip_address = %endpoint.address,
                 "Upgrade task has completed but needs BMC reboot, initiating one"
             );
-            let redfish_client = ctx
-                .services
-                .create_redfish_client_from_machine(&state.host_snapshot)
-                .await?;
+            let bmc = ctx.services.connect_bmc(&state.host_snapshot).await?;
 
-            if let Err(e) = redfish_client.bmc_reset(None).await {
+            if let Err(e) = reset_bmc(&bmc).await {
                 tracing::warn!(bmc_ip_address = %endpoint.address, error = %e, "Failed to reboot");
                 return Ok(StateHandlerOutcome::do_nothing());
             }
@@ -13333,15 +13329,6 @@ fn handler_restart_dpu(
 
         Ok(())
     }
-}
-
-/// Use libredfish's vendor detection to identify Vera Rubin compute-tray BMCs.
-async fn is_vera_rubin_host(redfish_client: &dyn Redfish) -> Result<bool, StateHandlerError> {
-    redfish_client
-        .get_service_root()
-        .await
-        .map(|root| root.is_vera_rubin())
-        .map_err(|error| redfish_error("get_service_root", error))
 }
 
 /// Returns true if the host's current Redfish power state is `Off`.
@@ -13816,7 +13803,6 @@ async fn wait_for_boss_controller_job_to_complete(
 }
 
 async fn handle_boss_job_failure(
-    redfish_client: &dyn Redfish,
     mh_snapshot: &ManagedHostStateSnapshot,
     ctx: &mut StateHandlerContext<'_, MachineStateHandlerContextObjects>,
 ) -> Result<StateHandlerOutcome<ManagedHostState>, StateHandlerError> {
@@ -13839,10 +13825,9 @@ async fn handle_boss_job_failure(
                 )));
             }
 
-            redfish_client
-                .bmc_reset(None)
+            reset_bmc(&bmc)
                 .await
-                .map_err(|e| redfish_error("bmc_reset", e))?;
+                .map_err(|e| platform_error("bmc_reset", e))?;
 
             Ok(StateHandlerOutcome::transition(next_state))
         }
@@ -14902,10 +14887,13 @@ async fn set_host_boot_order(
             // `SYS011`). If the HTTP device drifted since the owning lifecycle's
             // inspection, return to the shared BIOS/job stages before attempting
             // the order write.
-            let is_bios_setup = boot_interface
-                .run(|bi| redfish_client.is_bios_setup(Some(bi)))
-                .await
-                .map_err(|e| redfish_error("is_bios_setup", e))?;
+            let is_bios_setup = platform_settings_in_effect(
+                ctx.services,
+                redfish_client,
+                mh_snapshot,
+                Some(&boot_interface),
+            )
+            .await?;
 
             if !is_bios_setup {
                 // The HTTP-boot device drifted after the owning lifecycle's
@@ -15032,10 +15020,13 @@ async fn set_host_boot_order(
                 RequiredBootInterface::Wait(outcome) => return Ok(outcome),
             };
 
-            let is_bios_setup = boot_interface
-                .run(|bi| redfish_client.is_bios_setup(Some(bi)))
-                .await
-                .map_err(|e| redfish_error("is_bios_setup", e))?;
+            let is_bios_setup = platform_settings_in_effect(
+                ctx.services,
+                redfish_client,
+                mh_snapshot,
+                Some(&boot_interface),
+            )
+            .await?;
 
             if is_bios_setup {
                 tracing::info!(
@@ -15256,10 +15247,9 @@ async fn set_host_boot_order(
                         "HandleJobFailure: Resetting BMC after failure"
                     );
 
-                    redfish_client
-                        .bmc_reset(None)
+                    reset_bmc(&bmc)
                         .await
-                        .map_err(|e| redfish_error("bmc_reset", e))?;
+                        .map_err(|e| platform_error("bmc_reset", e))?;
 
                     // Transition to ExpectedPowerState::On to wait for BMC to come back
                     Ok(SetBootOrderOutcome::Continue(SetBootOrderInfo {
@@ -15346,10 +15336,13 @@ async fn set_host_boot_order(
             // device or another managed BIOS attribute. Verify BIOS first for
             // every platform and return to the shared job-aware repair before
             // declaring the overall boot configuration complete.
-            let is_bios_setup = boot_interface
-                .run(|bi| redfish_client.is_bios_setup(Some(bi)))
-                .await
-                .map_err(|e| redfish_error("is_bios_setup", e))?;
+            let is_bios_setup = platform_settings_in_effect(
+                ctx.services,
+                redfish_client,
+                mh_snapshot,
+                Some(&boot_interface),
+            )
+            .await?;
 
             if !is_bios_setup {
                 tracing::warn!(
@@ -16158,9 +16151,11 @@ mod tests {
                 .try_into()
                 .unwrap();
 
-        let metrics = MetricsCapture::start();
+        let test_meter = carbide_utils::test_support::test_meter::TestMeter::default();
+        let instrumentation = carbide_instrument::Instrumentation::new(test_meter.meter());
+        let metrics = MetricsCapture::for_registry(test_meter.registry());
         let logs = capture_logs(|| {
-            carbide_instrument::emit(HostFirmwareUpgradeRetried {
+            instrumentation.emit(HostFirmwareUpgradeRetried {
                 machine_id,
                 attempt: 1,
                 error: "scout upgrade failed".to_string(),

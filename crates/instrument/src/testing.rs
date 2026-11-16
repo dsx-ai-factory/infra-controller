@@ -226,7 +226,7 @@ impl tracing::field::Visit for CaptureVisitor {
 
 /// A histogram sum delta with approximate equality for floating-point drift.
 ///
-/// [`MetricsCapture::histogram_sum_delta`] subtracts two cumulative `f64`
+/// [`RegistryMetricsCapture::histogram_sum_delta`] subtracts two cumulative `f64`
 /// snapshots. A fractional observation recorded before the capture can make
 /// that subtraction differ from the expected delta by a few low-order bits.
 /// Values compare equal when their absolute difference is less than `1e-9`.
@@ -244,14 +244,17 @@ impl PartialEq for ApproxHistogramSum {
 
 /// A serialized window onto the process-global test meter.
 ///
-/// The first capture installs a Prometheus-backed meter provider as the
-/// global OpenTelemetry meter (instruments are cached per event type, so
-/// tests share one provider for the whole process); the mutex serializes
-/// metric-asserting tests, and deltas are measured against the snapshot taken
-/// at [`MetricsCapture::start`].
+/// Uses a Prometheus-backed provider installed before tests start. The global
+/// compatibility instrumentation retains its meter and cached instruments,
+/// so captures share one provider. The mutex serializes captures, and deltas
+/// are measured against the snapshot taken at [`MetricsCapture::start`].
+/// Unrelated emitters can still contribute during a capture; this helper does
+/// not isolate them. Independently owned [`crate::Instrumentation`] instances
+/// need their own providers and registries; use [`Self::for_registry`] to capture
+/// one without acquiring the global capture mutex.
 pub struct MetricsCapture {
     _serialized: MutexGuard<'static, ()>,
-    baseline: Snapshot,
+    capture: RegistryMetricsCapture,
 }
 
 impl MetricsCapture {
@@ -259,27 +262,55 @@ impl MetricsCapture {
     pub fn start() -> Self {
         static SERIAL: Mutex<()> = Mutex::new(());
         let guard = SERIAL.lock().unwrap_or_else(|p| p.into_inner());
-        let registry = test_registry();
         Self {
             _serialized: guard,
-            baseline: snapshot(registry),
+            capture: Self::for_registry(test_registry()),
         }
     }
 
+    /// Snapshots the supplied registry without installing a provider or taking
+    /// the global capture mutex. Keep its provider alive through the capture.
+    /// Other recording tasks using this registry legitimately contribute to it;
+    /// finish or synchronize their work before asserting exact values.
+    pub fn for_registry(registry: &prometheus::Registry) -> RegistryMetricsCapture {
+        RegistryMetricsCapture {
+            registry: registry.clone(),
+            baseline: snapshot(registry),
+        }
+    }
+}
+
+impl std::ops::Deref for MetricsCapture {
+    type Target = RegistryMetricsCapture;
+
+    fn deref(&self) -> &Self::Target {
+        &self.capture
+    }
+}
+
+/// A snapshot window over one supplied registry, created with
+/// [`MetricsCapture::for_registry`]. Holds no global capture mutex and can be
+/// moved into spawned work. The caller retains the registry's meter provider.
+pub struct RegistryMetricsCapture {
+    registry: prometheus::Registry,
+    baseline: Snapshot,
+}
+
+impl RegistryMetricsCapture {
     /// How much the named counter (with exactly these label pairs) moved
-    /// since [`MetricsCapture::start`]. Zero if it never appeared.
+    /// since capture creation. Zero if it never appeared.
     pub fn counter_delta(&self, name: &str, labels: &[(&str, &str)]) -> f64 {
-        let now = snapshot(test_registry());
+        let now = snapshot(&self.registry);
         now.value(name, labels) - self.baseline.value(name, labels)
     }
 
     /// How many observations the named histogram (with exactly these label
-    /// pairs) recorded since [`MetricsCapture::start`].
+    /// pairs) recorded since capture creation.
     pub fn histogram_count_delta(&self, name: &str, labels: &[(&str, &str)]) -> u64 {
         self.counter_delta(&format!("{name}#count"), labels) as u64
     }
 
-    /// The named histogram's sum delta since [`MetricsCapture::start`], wrapped
+    /// The named histogram's sum delta since capture creation, wrapped
     /// so values with an absolute difference below `1e-9` compare equal.
     pub fn histogram_sum_delta(&self, name: &str, labels: &[(&str, &str)]) -> ApproxHistogramSum {
         ApproxHistogramSum(self.counter_delta(&format!("{name}#sum"), labels))
@@ -287,9 +318,9 @@ impl MetricsCapture {
 
     /// The named gauge's current value (with exactly these label pairs). A
     /// gauge holds a level rather than accumulating, so this reads the value
-    /// as it stands rather than the movement since [`MetricsCapture::start`].
+    /// as it stands rather than the movement since capture creation.
     pub fn gauge_value(&self, name: &str, labels: &[(&str, &str)]) -> f64 {
-        snapshot(test_registry()).value(name, labels)
+        snapshot(&self.registry).value(name, labels)
     }
 
     /// The current registry contents in Prometheus text exposition format --
@@ -298,7 +329,7 @@ impl MetricsCapture {
         use prometheus::Encoder as _;
         let mut buffer = Vec::new();
         prometheus::TextEncoder::new()
-            .encode(&test_registry().gather(), &mut buffer)
+            .encode(&self.registry.gather(), &mut buffer)
             .expect("encode test registry");
         String::from_utf8(buffer).expect("prometheus text is utf-8")
     }
@@ -362,10 +393,10 @@ fn snapshot(registry: &prometheus::Registry) -> Snapshot {
 }
 
 /// Installs the test meter at test-binary load, before any test (and so any
-/// `emit()`) runs. Instruments are cached per event type on first emit, so a
-/// test that emits without a `MetricsCapture` must still find the real
-/// provider installed -- otherwise that event type would bind to the no-op
-/// global meter and later counter assertions would sit at zero.
+/// `emit()`) runs. The global compatibility instance retains its meter on the
+/// first metric recording, so a test that emits without a `MetricsCapture`
+/// must still find the real provider installed. Otherwise compatibility
+/// recording would retain the no-op meter and later assertions would see zero.
 #[ctor::ctor(unsafe)]
 fn install_test_meter_eagerly() {
     let _ = test_registry();

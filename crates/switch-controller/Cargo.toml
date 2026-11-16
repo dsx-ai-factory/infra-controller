@@ -24,6 +24,7 @@ repository.workspace = true
 
 [dependencies]
 bmc-backend = { path = "../bmc-backend" }
+bmc-platform = { path = "../bmc-platform" }
 carbide-api-db = { path = "../api-db", default-features = false }
 carbide-api-model = { path = "../api-model", default-features = false }
 carbide-credential-rotation = { path = "../credential-rotation", default-features = false }

@@ -62,6 +62,21 @@
 //! is a plain structured log. See `docs/observability/instrumentation.md`
 //! for the standard (naming, cardinality rules, when to use which mode).
 //!
+//! # Owned instrumentation
+//!
+//! Pass an [`Instrumentation`] handle to components that need an independent
+//! metric destination. Construct it with [`Instrumentation::new`] from the
+//! service's existing meter and retain its provider for all recording tasks
+//! and scrapes. Clones share the meter and instrument cache. Independent tests
+//! need independent providers and registries, without replacing the global
+//! provider.
+//!
+//! [`Instrumentation::global`] is a lazy compatibility alias for incremental
+//! migration to handles. All free recording functions delegate to that alias;
+//! install the global provider before the first metric recording. Log-only
+//! events do not initialize it. The RED helper and log-event counts remain
+//! process-global. This API does not install or propagate an ambient scope.
+//!
 //! # Cardinality is enforced by the types
 //!
 //! A `#[label]` field must implement [`LabelValue`], which is derivable only
@@ -313,9 +328,11 @@
 
 use std::time::Duration;
 
+mod instrumentation;
 /// The derive macros: `#[derive(Event)]`, `#[derive(LabelValue)]`, and
 /// `#[derive(MetricFamily)]`.
 pub use carbide_instrument_macros::{Event, LabelValue, MetricFamily};
+pub use instrumentation::Instrumentation;
 use opentelemetry::{KeyValue, StringValue};
 
 /// Whether (and at which level) an event writes a log line.
@@ -476,7 +493,8 @@ pub trait Event {
     #[doc(hidden)]
     fn __log(&self, level: tracing::Level);
     #[doc(hidden)]
-    fn __instrument(&self) -> &'static __private::CachedInstrument;
+    // The derive selects the inline Event type or its shared MetricFamily.
+    fn __metric_key() -> __private::MetricKey;
 }
 
 /// A Prometheus metric family: one name, one instrument kind, one description,
@@ -517,72 +535,35 @@ pub trait MetricFamily {
     /// The family's bounded labels, attached to the metric and, through the
     /// declaring Event, to the log line.
     fn labels(&self) -> Self::Labels;
-
-    #[doc(hidden)]
-    fn __instrument() -> &'static __private::CachedInstrument;
 }
 
-/// Emits an event: a log line and/or a metric, per the event's knobs.
+/// Emits an event through [`Instrumentation::global`].
 ///
-/// Never panics. The metric side resolves its instrument once per event type
-/// -- or once per [`MetricFamily`], for an Event that names one -- from the
-/// global OpenTelemetry meter. Install the meter provider at startup, before
-/// the first emit, as every NICo binary already does for its existing metrics.
+/// Produces a log line and/or a metric per the event's knobs. Install the
+/// global OpenTelemetry meter provider before the first metric recording;
+/// the compatibility instance retains that meter and its cached instruments.
+/// Use [`Instrumentation::emit`] to select an independently owned destination.
 pub fn emit<E: Event>(event: E) {
-    if let LogAt::Level(level) = event.log_at() {
-        event.__log(level);
-    }
-    match event.__instrument() {
-        __private::CachedInstrument::Counter(counter) => {
-            counter.add(1, event.labels().as_ref());
-        }
-        __private::CachedInstrument::Histogram(histogram) => {
-            histogram.record(event.observation(), event.labels().as_ref());
-        }
-        __private::CachedInstrument::Gauge(gauge) => {
-            gauge.record(event.observation(), event.labels().as_ref());
-        }
-        __private::CachedInstrument::None => {}
-    }
+    Instrumentation::global().emit(event);
 }
 
-/// Emits one counter event with an explicit delta.
+/// Emits one counter event with an explicit delta through
+/// [`Instrumentation::global`].
 ///
-/// Use this when one observed event represents several occurrences that must
-/// be reflected exactly. Non-counter declarations are ignored rather than
-/// panicking, matching [`emit`]'s failure behavior.
+/// Writes at most one log line per call, regardless of `count`. Non-counter events do not
+/// record a metric. See [`Instrumentation::emit_count`].
 pub fn emit_count<E: Event>(event: E, count: u64) {
-    if let LogAt::Level(level) = event.log_at() {
-        event.__log(level);
-    }
-    if let __private::CachedInstrument::Counter(counter) = event.__instrument() {
-        counter.add(count, event.labels().as_ref());
-    }
+    Instrumentation::global().emit_count(event, count);
 }
 
-/// `initialize_counter_series` exposes one Event counter label set at zero
-/// without writing the Event's log line. It uses the same cached instrument as
-/// [`emit`], so the global meter provider must already be installed before this
-/// call. Context fields are ignored; only the Event's bounded labels select the
-/// series.
+/// Exposes a counter label set at zero through [`Instrumentation::global`]
+/// without logging an occurrence.
 ///
-/// Returns `false` without registering anything when `event` does not declare
-/// `metric = counter`.
+/// Returns `false` without registering anything for non-counter events.
+/// See [`Instrumentation::initialize_counter_series`].
 #[must_use = "a false result means the Event is not a counter"]
 pub fn initialize_counter_series<E: Event>(event: &E) -> bool {
-    if !matches!(E::METRIC, MetricKind::Counter) {
-        return false;
-    }
-
-    match event.__instrument() {
-        __private::CachedInstrument::Counter(counter) => {
-            counter.add(0, event.labels().as_ref());
-            true
-        }
-        __private::CachedInstrument::Histogram(_)
-        | __private::CachedInstrument::Gauge(_)
-        | __private::CachedInstrument::None => false,
-    }
+    Instrumentation::global().initialize_counter_series(event)
 }
 
 /// The success-or-failure of an operation, as a bounded label.
@@ -629,83 +610,15 @@ pub mod __private {
     pub use opentelemetry;
     pub use tracing;
 
-    /// The per-event-type instrument, resolved once and cached in a
-    /// `OnceLock` by the generated `__instrument()`.
-    pub enum CachedInstrument {
-        Counter(opentelemetry::metrics::Counter<u64>),
-        Histogram(opentelemetry::metrics::Histogram<f64>),
-        Gauge(opentelemetry::metrics::Gauge<f64>),
-        None,
-    }
-
-    /// Builds the instrument a declaration names, from the global meter. Both
-    /// the `Event` derive (for a metric declared inline) and the
-    /// `MetricFamily` derive resolve through here, so one metric registers the
-    /// same way however it was declared.
-    ///
-    /// `metric_name` is the *exposed* name, verbatim. The Prometheus exporter
-    /// appends the conventional suffix itself (`_total` for counters, the unit
-    /// for histograms), so the instrument registers under the name with that
-    /// suffix stripped -- what lands on `/metrics` is exactly `metric_name`.
-    pub fn new_instrument(
-        metric_name: Option<&'static str>,
-        metric: crate::MetricKind,
-        describe: &'static str,
-    ) -> CachedInstrument {
-        let meter = opentelemetry::global::meter("carbide-instrument");
-        let Some(metric_name) = metric_name else {
-            return CachedInstrument::None;
-        };
-        match metric {
-            crate::MetricKind::Counter => {
-                let name = metric_name.strip_suffix("_total").unwrap_or(metric_name);
-                let mut builder = meter.u64_counter(name);
-                if !describe.is_empty() {
-                    builder = builder.with_description(describe);
-                }
-                CachedInstrument::Counter(builder.build())
-            }
-            crate::MetricKind::Histogram { unit } => {
-                let name = strip_unit_suffix(metric_name, unit);
-                let mut builder = meter.f64_histogram(name);
-                if !unit.is_empty() {
-                    builder = builder.with_unit(unit);
-                }
-                if !describe.is_empty() {
-                    builder = builder.with_description(describe);
-                }
-                CachedInstrument::Histogram(builder.build())
-            }
-            crate::MetricKind::Gauge { unit } => {
-                let name = strip_unit_suffix(metric_name, unit);
-                let mut builder = meter.f64_gauge(name);
-                if !unit.is_empty() {
-                    builder = builder.with_unit(unit);
-                }
-                if !describe.is_empty() {
-                    builder = builder.with_description(describe);
-                }
-                CachedInstrument::Gauge(builder.build())
-            }
-            crate::MetricKind::None => CachedInstrument::None,
-        }
-    }
-
-    /// The exporter appends a unit's conventional suffix itself, so the
-    /// instrument registers without it and `/metrics` shows `metric_name`.
-    fn strip_unit_suffix(metric_name: &'static str, unit: &'static str) -> &'static str {
-        let suffix = match unit {
-            "s" => "_seconds",
-            "ms" => "_milliseconds",
-            "us" => "_microseconds",
-            "By" => "_bytes",
-            _ => "",
-        };
-        if suffix.is_empty() {
-            metric_name
-        } else {
-            metric_name.strip_suffix(suffix).unwrap_or(metric_name)
-        }
+    /// A declaration's identity, independent of its labels and destination.
+    /// The variants keep inline and family declarations distinct even when
+    /// one Rust type derives both Event and MetricFamily.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+    pub enum MetricKey {
+        /// A metric declared inline on an Event.
+        Event(std::any::TypeId),
+        /// A metric declared by a shared MetricFamily.
+        Family(std::any::TypeId),
     }
 
     /// Whether a declared metric takes its value from [`Event::observation`]

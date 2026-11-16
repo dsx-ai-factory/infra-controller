@@ -26,6 +26,9 @@ pub(crate) async fn create(
     api: &Api,
     request: Request<::rpc::forge::DpaInterfaceCreationRequest>,
 ) -> Result<Response<::rpc::forge::DpaInterface>, Status> {
+    if let Some(machine_id) = request.get_ref().machine_id {
+        crate::api::log_machine_id(&machine_id);
+    }
     if !api.runtime_config.is_ewethers_enabled() {
         return Err(CarbideError::InvalidArgument(
             "CreateDpaInterface cannot be done as ewethers_enabled is false".to_string(),
@@ -53,6 +56,9 @@ pub(crate) async fn ensure(
     api: &Api,
     request: Request<::rpc::forge::DpaInterfaceCreationRequest>,
 ) -> Result<Response<::rpc::forge::DpaInterface>, Status> {
+    if let Some(machine_id) = request.get_ref().machine_id {
+        crate::api::log_machine_id(&machine_id);
+    }
     if !api.runtime_config.is_ewethers_enabled() {
         return Err(CarbideError::InvalidArgument(
             "EnsureDpaInterface cannot be done as ewethers_enabled is false".to_string(),

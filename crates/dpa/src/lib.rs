@@ -21,7 +21,7 @@ use std::net::Ipv4Addr;
 use std::sync::Arc;
 use std::time::Instant;
 
-use carbide_instrument::emit;
+use carbide_instrument::Instrumentation;
 use mqttea::client::MqtteaClient;
 
 use crate::metrics::{DpaCommandSendFailed, DpaCommandSent};
@@ -37,12 +37,15 @@ pub struct DpaInfo {
 
 // Send a SetVni command to the DPA specified by the given macaddress.
 // The SetVni command to contain the given vni and revision string.
+/// Sends one SetVni command and records its result through `instrumentation`.
+/// Retain its provider until this future finishes.
 pub async fn send_dpa_command(
     client: Arc<MqtteaClient>,
     dpa_info: &Arc<DpaInfo>,
     macaddr: String,
     revision: String,
     vni: i32,
+    instrumentation: &Instrumentation,
 ) -> Result<(), eyre::Report> {
     let pfvni = rpc::Pfvni {
         pf_id: 0,
@@ -76,14 +79,14 @@ pub async fn send_dpa_command(
 
     match send_result {
         Ok(()) => {
-            emit(DpaCommandSent {
+            instrumentation.emit(DpaCommandSent {
                 latency: send_latency,
                 revision,
                 vni: i64::from(vni),
             });
         }
         Err(e) => {
-            emit(DpaCommandSendFailed {
+            instrumentation.emit(DpaCommandSendFailed {
                 latency: send_latency,
                 error: format!("{e:?}"),
                 payload: format!("{svni:?}"),

@@ -115,6 +115,8 @@ pub struct RuntimeInputs<'a> {
     pub carbide_config: Arc<CarbideConfig>,
     pub initial_objects: Option<InitialObjectsConfig>,
     pub meter: opentelemetry::metrics::Meter,
+    /// Explicit Event destination for migrated API handlers.
+    pub instrumentation: carbide_instrument::Instrumentation,
     pub per_object_metrics: Option<prometheus::Registry>,
     pub join_set: &'a mut JoinSet<()>,
     pub runtime_prelude: RuntimePrelude,
@@ -263,9 +265,14 @@ mod tests {
 
     async fn start_test_work_lock_manager(pool: &PgPool) -> (WorkLockManagerHandle, JoinSet<()>) {
         let mut tasks = JoinSet::new();
-        let handle = db::work_lock_manager::start(&mut tasks, pool.clone(), Default::default())
-            .await
-            .expect("start work lock manager");
+        let handle = db::work_lock_manager::start(
+            &mut tasks,
+            pool.clone(),
+            Default::default(),
+            carbide_instrument::Instrumentation::global(),
+        )
+        .await
+        .expect("start work lock manager");
         (handle, tasks)
     }
 

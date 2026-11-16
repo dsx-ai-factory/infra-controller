@@ -352,6 +352,7 @@ async fn api(
         reader.clone(),
         Arc::new(config.rack_profiles.clone()),
         false,
+        carbide_instrument::Instrumentation::global(),
     ));
     let manager = ComponentManager::new(
         backend.clone(),

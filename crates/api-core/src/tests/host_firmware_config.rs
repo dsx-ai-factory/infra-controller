@@ -344,6 +344,7 @@ async fn upsert_host_firmware_config_drives_machine_update_manager(
         env.test_meter.meter(),
         env.api.work_lock_manager_handle.clone(),
         None,
+        env.api.instrumentation.clone(),
     );
 
     update_manager.run_single_iteration().await?;
@@ -603,6 +604,7 @@ pub(super) fn update_manager(env: &TestEnv, config: Arc<CarbideConfig>) -> Machi
         env.test_meter.meter(),
         env.api.work_lock_manager_handle.clone(),
         None,
+        env.api.instrumentation.clone(),
     )
 }
 

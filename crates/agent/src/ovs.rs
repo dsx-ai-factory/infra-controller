@@ -59,7 +59,9 @@ pub(super) async fn set_vswitchd_yield() -> eyre::Result<()> {
 }
 
 /// Restart the OVS service (ovs-vswitchd) via systemctl.
-pub(super) async fn restart_ovs() -> eyre::Result<()> {
+pub(super) async fn restart_ovs(
+    instrumentation: &carbide_instrument::Instrumentation,
+) -> eyre::Result<()> {
     let restart = tokio::time::timeout(
         Duration::from_secs(180),
         tokio::process::Command::new("systemctl")
@@ -70,8 +72,12 @@ pub(super) async fn restart_ovs() -> eyre::Result<()> {
     .await;
     let restart = match restart {
         Ok(Ok(output)) => output,
-        Ok(Err(e)) => eyre::bail!("failed to execute systemctl restart: {}", e),
-        Err(_) => eyre::bail!("timeout (180s) waiting for ovs-vswitchd.service restart"),
+        Ok(Err(e)) => {
+            eyre::bail!("failed to execute systemctl restart: {}", e);
+        }
+        Err(_) => {
+            eyre::bail!("timeout (180s) waiting for ovs-vswitchd.service restart");
+        }
     };
 
     if !restart.status.success() {
@@ -81,6 +87,6 @@ pub(super) async fn restart_ovs() -> eyre::Result<()> {
         );
     }
 
-    carbide_instrument::emit(OvsRestart::Succeeded {});
+    instrumentation.emit(OvsRestart::Succeeded {});
     Ok(())
 }

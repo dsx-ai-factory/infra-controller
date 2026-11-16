@@ -175,7 +175,9 @@ async fn with_netlink_connection(
 ) -> eyre::Result<()> {
     tokio::select! {
         biased;
-        () = connection => eyre::bail!("netlink connection stopped during metadata setup"),
+        () = connection => {
+            eyre::bail!("netlink connection stopped during metadata setup");
+        }
         result = operation => result,
     }
 }

@@ -102,7 +102,7 @@ impl TryFrom<OperatingSystem> for rpc::forge::InstanceOperatingSystemConfig {
             phone_home_enabled: config.phone_home_enabled,
             run_provisioning_instructions_on_every_boot: config
                 .run_provisioning_instructions_on_every_boot,
-            user_data: config.user_data.clone(),
+            user_data: config.user_data,
         })
     }
 }

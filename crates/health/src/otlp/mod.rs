@@ -26,7 +26,7 @@ use std::ops::Range;
 use std::sync::Arc;
 use std::time::Duration;
 
-use carbide_instrument::{LabelValue, emit, emit_count};
+use carbide_instrument::LabelValue;
 use opentelemetry::StringValue;
 use tokio::task::JoinSet;
 use tonic::transport::{Channel, ClientTlsConfig, Endpoint};
@@ -122,7 +122,13 @@ pub(crate) struct OtlpExportResponse {
 impl OtlpExportResponse {
     /// Counts acknowledged records, excluding rejections reported by the receiver.
     /// Invalid rejection counts produce a warning and no counter increment.
-    fn record(&self, target: &OtlpTargetConfig, signal: OtlpSignal, record_count: usize) {
+    fn record(
+        &self,
+        target: &OtlpTargetConfig,
+        signal: OtlpSignal,
+        record_count: usize,
+        instrumentation: &carbide_instrument::Instrumentation,
+    ) {
         let accepted = usize::try_from(self.rejected_records)
             .ok()
             .and_then(|rejected| record_count.checked_sub(rejected));
@@ -150,7 +156,7 @@ impl OtlpExportResponse {
             );
         }
 
-        emit_count(
+        instrumentation.emit_count(
             OtlpRecordsExported {
                 target: ConfiguredOtlpTarget(target.endpoint.clone()),
                 signal,
@@ -356,6 +362,7 @@ pub(crate) async fn export_items<E: OtlpExport>(
     items: &[E::Item],
     target: &OtlpTargetConfig,
     signal: OtlpSignal,
+    instrumentation: &carbide_instrument::Instrumentation,
 ) {
     let observed_nanos = convert::export_time_nanos();
     // Ranges waiting to be sent, the next one last.
@@ -386,7 +393,7 @@ pub(crate) async fn export_items<E: OtlpExport>(
 
             match export.send(request).await {
                 Ok(response) => {
-                    response.record(target, signal, record_count);
+                    response.record(target, signal, record_count, instrumentation);
 
                     tracing::debug!(
                         endpoint = %target.endpoint,
@@ -423,7 +430,7 @@ pub(crate) async fn export_items<E: OtlpExport>(
                     tokio::time::sleep(delay).await;
                 }
                 Err(status) => {
-                    emit(OtlpExportFailed {
+                    instrumentation.emit(OtlpExportFailed {
                         signal,
                         code: status.code().into(),
                         error: status.message().to_string(),
@@ -456,6 +463,7 @@ async fn run_drain<K, Q, E>(
     target: OtlpTargetConfig,
     signal: OtlpSignal,
     make_export: impl Fn(Channel) -> E,
+    instrumentation: carbide_instrument::Instrumentation,
 ) where
     K: Eq + Hash + Clone,
     Q: IntoExportItem<E::Item>,
@@ -531,7 +539,13 @@ async fn run_drain<K, Q, E>(
             }
             let ready = std::mem::replace(&mut batch, Vec::with_capacity(target.batch_size));
             metric_indices.clear();
-            in_flight.spawn(export_batch(export.clone(), ready, target.clone(), signal));
+            in_flight.spawn(export_batch(
+                export.clone(),
+                ready,
+                target.clone(),
+                signal,
+                instrumentation.clone(),
+            ));
             if !full {
                 break;
             }
@@ -545,8 +559,9 @@ async fn export_batch<E: OtlpExport>(
     batch: Vec<E::Item>,
     target: Arc<OtlpTargetConfig>,
     signal: OtlpSignal,
+    instrumentation: carbide_instrument::Instrumentation,
 ) {
-    export_items(&mut export, &batch, &target, signal).await;
+    export_items(&mut export, &batch, &target, signal, &instrumentation).await;
 }
 
 /// Tops `batch` up to `batch_size`, consuming at most that many queue entries.
@@ -1053,7 +1068,14 @@ mod tests {
             include_alert_details: false,
         };
         let started = tokio::time::Instant::now();
-        export_items(&mut export, &case.items, &target, OtlpSignal::Logs).await;
+        export_items(
+            &mut export,
+            &case.items,
+            &target,
+            OtlpSignal::Logs,
+            &carbide_instrument::Instrumentation::global(),
+        )
+        .await;
 
         assert_eq!(
             metrics.counter_delta(
@@ -1100,7 +1122,14 @@ mod tests {
                 error_message: error_message.to_string(),
             };
 
-            let logs = capture_logs(|| response.record(&target, OtlpSignal::Logs, 3));
+            let logs = capture_logs(|| {
+                response.record(
+                    &target,
+                    OtlpSignal::Logs,
+                    3,
+                    &carbide_instrument::Instrumentation::global(),
+                )
+            });
 
             assert_eq!(
                 metrics.counter_delta("carbide_health_otlp_egress_records_total", &labels) - before,
@@ -1139,7 +1168,14 @@ mod tests {
                 sent: Vec::new(),
             };
 
-            export_items(&mut export, &[1, 2, 3], &target, OtlpSignal::Logs).await;
+            export_items(
+                &mut export,
+                &[1, 2, 3],
+                &target,
+                OtlpSignal::Logs,
+                &carbide_instrument::Instrumentation::global(),
+            )
+            .await;
 
             assert_eq!(export.sent.len(), attempts, "{code:?}");
 

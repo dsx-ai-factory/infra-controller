@@ -21,7 +21,7 @@ use std::time::Duration;
 
 use ::rpc::forge::MachineIdentityResponse;
 use base64::Engine;
-use carbide_instrument::{Event, LabelValue, MetricFamily, emit};
+use carbide_instrument::{Event, Instrumentation, LabelValue, MetricFamily};
 use carbide_utils::none_if_empty::NoneIfEmpty;
 use serde::Deserialize;
 use tonic::Status;
@@ -192,6 +192,7 @@ pub(crate) async fn token_exchange_request(
     subject_jwt: &str,
     workload_audiences: &[String],
     basic_credentials: Option<&(String, String)>,
+    instrumentation: &Instrumentation,
 ) -> Result<MachineIdentityResponse, Status> {
     let body = rfc8693_token_exchange_form(subject_jwt, workload_audiences);
 
@@ -210,7 +211,7 @@ pub(crate) async fn token_exchange_request(
     }
 
     let resp = req.send().await.map_err(|e| {
-        emit(TokenExchangeRequestFailed {
+        instrumentation.emit(TokenExchangeRequestFailed {
             failure_stage: TokenExchangeFailureStage::Request,
             error: e.to_string(),
             token_endpoint: token_endpoint.to_string(),
@@ -220,7 +221,7 @@ pub(crate) async fn token_exchange_request(
 
     let status = resp.status();
     let bytes = resp.bytes().await.map_err(|e| {
-        emit(TokenExchangeResponseReadFailed {
+        instrumentation.emit(TokenExchangeResponseReadFailed {
             failure_stage: TokenExchangeFailureStage::ResponseBody,
             error: e.to_string(),
             token_endpoint: token_endpoint.to_string(),
@@ -229,7 +230,7 @@ pub(crate) async fn token_exchange_request(
     })?;
 
     if !status.is_success() {
-        emit(TokenExchangeEndpointRejected {
+        instrumentation.emit(TokenExchangeEndpointRejected {
             failure_stage: TokenExchangeFailureStage::HttpStatus,
             http_status: status.to_string(),
             response_body_length: bytes.len(),
@@ -242,7 +243,7 @@ pub(crate) async fn token_exchange_request(
     }
 
     let parsed: TokenExchangeHttpResponseBody = serde_json::from_slice(&bytes).map_err(|_| {
-        emit(TokenExchangeResponseInvalid {
+        instrumentation.emit(TokenExchangeResponseInvalid {
             failure_stage: TokenExchangeFailureStage::ResponseJson,
             error: TOKEN_EXCHANGE_RESPONSE_SCHEMA_ERROR.to_string(),
             response_body_length: bytes.len(),
@@ -326,6 +327,8 @@ mod tests {
 
     #[tokio::test]
     async fn token_exchange_request_maps_endpoint_response() {
+        let test_meter = carbide_utils::test_support::test_meter::TestMeter::default();
+        let instrumentation = Instrumentation::new(test_meter.meter());
         // What the mocked `token_endpoint` returns for one request.
         struct Reply {
             status: usize,
@@ -370,7 +373,9 @@ mod tests {
                     }),
                 },
             ],
-            |reply| async move {
+            |reply| {
+                let instrumentation = instrumentation.clone();
+                async move {
                 let mut server = mockito::Server::new_async().await;
                 let _m = server
                     .mock("POST", "/token")
@@ -391,6 +396,7 @@ mod tests {
                     "sub.jwt",
                     &["spiffe://workload".to_string()],
                     None,
+                    &instrumentation,
                 )
                 .await
                 .map(|out| Exchanged {
@@ -400,6 +406,7 @@ mod tests {
                     expires_in_sec: out.expires_in_sec,
                 })
                 .map_err(drop)
+                }
             },
         )
         .await;
@@ -447,11 +454,13 @@ mod tests {
 
     #[test]
     fn token_exchange_failures_emit_metrics_and_structured_logs() {
+        let test_meter = carbide_utils::test_support::test_meter::TestMeter::default();
+        let instrumentation = Instrumentation::new(test_meter.meter());
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
             .expect("test runtime should build");
-        let metrics = MetricsCapture::start();
+        let metrics = MetricsCapture::for_registry(test_meter.registry());
         let logs = capture_logs(|| {
             runtime.block_on(async {
                 let client = reqwest_middleware::ClientBuilder::new(reqwest::Client::new())
@@ -464,6 +473,7 @@ mod tests {
                     "subject.jwt",
                     &[],
                     None,
+                    &instrumentation,
                 )
                 .await
                 .expect_err("an invalid URL must fail before receiving a response");
@@ -489,6 +499,7 @@ mod tests {
                         "subject.jwt",
                         &[],
                         None,
+                        &instrumentation,
                     )
                     .await
                     .expect_err("the mocked response must fail token exchange");
@@ -516,7 +527,9 @@ mod tests {
                         .expect("partial response should write");
                     stream.shutdown().await.expect("response should close");
                 });
-                token_exchange_request(&client, &endpoint, "subject.jwt", &[], None)
+                token_exchange_request(&client, &endpoint, "subject.jwt", &[], None,
+                    &instrumentation,
+                )
                     .await
                     .expect_err("an incomplete response body must fail token exchange");
                 responder.await.expect("raw HTTP responder should finish");
@@ -639,6 +652,8 @@ mod tests {
 
     #[tokio::test]
     async fn token_exchange_request_sends_basic_auth() {
+        let test_meter = carbide_utils::test_support::test_meter::TestMeter::default();
+        let instrumentation = Instrumentation::new(test_meter.meter());
         let mut server = mockito::Server::new_async().await;
         let _m = server
             .mock("POST", "/token")
@@ -653,7 +668,7 @@ mod tests {
             .build();
         let url = format!("{}/token", server.url());
         let creds = ("foo".to_string(), "bar".to_string());
-        let out = token_exchange_request(&client, &url, "j", &[], Some(&creds))
+        let out = token_exchange_request(&client, &url, "j", &[], Some(&creds), &instrumentation)
             .await
             .unwrap();
         assert_eq!(out.access_token, "t");
