@@ -161,6 +161,16 @@ impl FabricManagerStatus {
     }
 }
 
+/// The last observed running NVOS version and its pending refresh request.
+#[derive(Default, Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NvosVersion {
+    /// Version reported by the switch firmware inventory, or absent before collection succeeds.
+    pub version: Option<String>,
+    /// Requests collection in Ready; defaults to false and clears after a successful observation.
+    #[serde(default)]
+    pub refresh_nvos_version: bool,
+}
+
 #[derive(Debug, Clone)]
 pub struct Switch {
     pub id: SwitchId,
@@ -205,6 +215,9 @@ pub struct Switch {
     /// NVOS update status set by the rack state machine.
     pub nvos_update_status: Option<SwitchNvosUpdateStatus>,
 
+    /// Last collected NVOS version and pending refresh; defaults to an absent version and false.
+    pub nvos_version: NvosVersion,
+
     /// FabricManager / NMX-C status set by the rack state machine.
     pub fabric_manager_status: Option<FabricManagerStatus>,
 
@@ -245,6 +258,7 @@ impl<'r> FromRow<'r, PgRow> for Switch {
             row.try_get("firmware_upgrade_status")?;
         let nvos_update_status: Option<sqlx::types::Json<SwitchNvosUpdateStatus>> =
             row.try_get("nvos_update_status")?;
+        let nvos_version: Option<sqlx::types::Json<NvosVersion>> = row.try_get("nvos_version")?;
         let fabric_manager_status: Option<sqlx::types::Json<FabricManagerStatus>> =
             row.try_get("fabric_manager_status")?;
 
@@ -279,6 +293,7 @@ impl<'r> FromRow<'r, PgRow> for Switch {
             switch_reprovisioning_requested: switch_reprovisioning_requested.map(|j| j.0),
             firmware_upgrade_status: firmware_upgrade_status.map(|j| j.0),
             nvos_update_status: nvos_update_status.map(|j| j.0),
+            nvos_version: nvos_version.map(|j| j.0).unwrap_or_default(),
             fabric_manager_status: fabric_manager_status.map(|j| j.0),
             nvlink_domain_uuid: row.try_get("nvlink_domain_uuid")?,
             metadata,
@@ -658,6 +673,22 @@ mod tests {
     use carbide_test_support::{scenarios, value_scenarios};
 
     use super::*;
+
+    #[test]
+    fn nvos_version_defaults_unobserved_and_unrequested() {
+        scenarios!(
+            run = |json| serde_json::from_str::<NvosVersion>(json).map_err(drop);
+            "absent observation" {
+                "{}" => Yields(NvosVersion::default()),
+            }
+            "refresh flag defaults false" {
+                r#"{"version":"nvos-25.02.4440"}"# => Yields(NvosVersion {
+                    version: Some("nvos-25.02.4440".to_string()),
+                    refresh_nvos_version: false,
+                }),
+            }
+        );
+    }
 
     /// Build a `FabricManagerStatus` with only the two fields `display_status`
     /// inspects; the rest are irrelevant to its logic.

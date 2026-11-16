@@ -33,6 +33,7 @@ pub mod io;
 pub mod maintenance;
 pub mod metrics;
 pub mod nvos_password_rotation;
+mod nvos_version;
 pub mod ready;
 pub mod reprovisioning;
 pub mod rotating_bmc;

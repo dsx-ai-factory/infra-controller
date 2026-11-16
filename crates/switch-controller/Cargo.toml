@@ -49,6 +49,7 @@ tracing = { workspace = true }
 
 [dev-dependencies]
 carbide-api-model = { path = "../api-model", features = ["test-support"] }
+carbide-api-test-helper = { path = "../api-test-helper" }
 carbide-instrument = { path = "../instrument", features = ["test-support"] }
 carbide-rack = { path = "../rack", features = ["test-support"] }
 carbide-redfish = { path = "../redfish", features = ["test-support"] }

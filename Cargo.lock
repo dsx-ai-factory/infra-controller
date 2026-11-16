@@ -3940,6 +3940,7 @@ dependencies = [
  "bmc-platform",
  "carbide-api-db",
  "carbide-api-model",
+ "carbide-api-test-helper",
  "carbide-credential-rotation",
  "carbide-health-metrics",
  "carbide-health-report",

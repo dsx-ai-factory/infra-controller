@@ -36,6 +36,8 @@ use crate::rotating_bmc::should_enter_bmc_rotation;
 /// transitions to `Maintenance` with the requested operation. If rack-level
 /// reprovisioning has been requested, transitions to `ReProvisioning`.
 /// Otherwise, actionable NVOS convergence work transitions back to `Configuring`.
+/// Once otherwise idle, a pending NVOS version refresh updates the observation
+/// without leaving `Ready`; unavailable evidence remains pending for a later pass.
 pub async fn handle_ready(
     switch_id: &SwitchId,
     state: &mut Switch,
@@ -122,7 +124,7 @@ pub async fn handle_ready(
         ));
     }
 
-    // Lowest precedence: only converge the BMC credential once the switch is
+    // Only converge the BMC credential once the switch is
     // otherwise idle in Ready, so rotation never contends with NVOS
     // reconfiguration, maintenance, or reprovisioning. The site-flag gate and
     // the operator force-converge override live in `should_enter_bmc_rotation`.
@@ -130,6 +132,10 @@ pub async fn handle_ready(
         return Ok(StateHandlerOutcome::transition(
             SwitchControllerState::RotatingBmc { retry_count: 0 },
         ));
+    }
+
+    if state.nvos_version.refresh_nvos_version {
+        return crate::nvos_version::refresh(switch_id, state, ctx).await;
     }
 
     Ok(StateHandlerOutcome::do_nothing())

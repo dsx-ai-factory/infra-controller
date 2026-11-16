@@ -3471,6 +3471,7 @@ pub async fn handle_maintenance(
                 let images_terminal = job
                     .all_switches()
                     .all(|switch| matches!(switch.status.as_str(), "completed" | "failed"));
+                let mut password_recovery_failure = None;
 
                 if images_terminal {
                     let Some(profile) = super::resolve_profile(id, rack_profile_id, ctx) else {
@@ -3512,16 +3513,13 @@ pub async fn handle_maintenance(
                                     }
 
                                     SwitchPasswordRotationState::Failed => {
-                                        return transition_to_rack_error(
-                                            id,
-                                            state,
-                                            format!(
-                                                "NVOS password recovery job {job_id} failed for switch {}",
-                                                switch.node_id
-                                            ),
-                                            ctx,
-                                        )
-                                        .await;
+                                        password_recovery_failure = Some(format!(
+                                            "NVOS password recovery job {job_id} failed for switch {}",
+                                            switch.node_id
+                                        ));
+                                        // Stop external work on failure, but persist already
+                                        // recovered peers and their refresh requests first.
+                                        break;
                                     }
 
                                     SwitchPasswordRotationState::NotFound
@@ -3652,6 +3650,30 @@ pub async fn handle_maintenance(
                     };
                     if let Some(switch_id) = switch_id {
                         let nvos_status = build_status(switch);
+                        let previously_finished = current_job.switches.iter().any(|previous| {
+                            previous.node_id == switch.node_id
+                                && previous.mac == switch.mac
+                                && previous.password_update == NvosPasswordUpdateState::Completed
+                                && matches!(previous.status.as_str(), "completed" | "failed")
+                        });
+                        // Even a failed image operation may have changed the running
+                        // image. Request one observation once credentials are usable;
+                        // later polls must not requeue a refresh already completed.
+                        if nvos_status.is_terminal() && !previously_finished {
+                            match db_switch::request_nvos_version_refresh(txn.as_mut(), switch_id)
+                                .await
+                            {
+                                Ok(()) => {}
+                                Err(db::DatabaseError::NotFoundError { .. }) => {
+                                    tracing::debug!(
+                                        %switch_id,
+                                        "Switch deleted before NVOS version refresh request"
+                                    );
+                                    continue;
+                                }
+                                Err(error) => return Err(error.into()),
+                            }
+                        }
                         db_switch::update_nvos_update_status(
                             txn.as_mut(),
                             switch_id,
@@ -3679,6 +3701,34 @@ pub async fn handle_maintenance(
                     .filter(|switch| switch.password_update == NvosPasswordUpdateState::Completed)
                     .count();
 
+                let failure_cause = password_recovery_failure.or_else(|| {
+                    (images_terminal && password_updates_completed == total && failed > 0).then(
+                        || {
+                            format!(
+                                "NVOS update failed: {}/{} switches failed; failed switches: [{}]",
+                                failed,
+                                total,
+                                failed_switch_ids.join(", ")
+                            )
+                        },
+                    )
+                });
+                if let Some(cause) = failure_cause {
+                    db_rack::update_nvos_update_job(txn.as_mut(), id, Some(&job)).await?;
+                    state.nvos_update_job = Some(job);
+                    if state.config.maintenance_requested.is_some() {
+                        state.config.maintenance_requested = None;
+                        db_rack::update(txn.as_mut(), id, &state.config).await?;
+                    }
+                    tracing::warn!(rack_id = %id, %cause, "Rack maintenance failed, transitioning to Error");
+                    return Ok(StateHandlerOutcome::transition(RackState::Error {
+                        certificate_failure: None,
+                        cause,
+                        recovery_policy: RackErrorRecoveryPolicy::MaintenanceRequestRequired,
+                    })
+                    .with_txn(txn));
+                }
+
                 if images_terminal && password_updates_completed < total {
                     db_rack::update_nvos_update_job(txn.as_mut(), id, Some(&job)).await?;
 
@@ -3688,28 +3738,6 @@ pub async fn handle_maintenance(
                         "nvos password recovery: {}/{} switches completed",
                         password_updates_completed, total
                     ))
-                    .with_txn(txn));
-                }
-
-                if images_terminal && failed > 0 {
-                    db_rack::update_nvos_update_job(txn.as_mut(), id, Some(&job)).await?;
-                    state.nvos_update_job = Some(job);
-                    if state.config.maintenance_requested.is_some() {
-                        state.config.maintenance_requested = None;
-                        db_rack::update(txn.as_mut(), id, &state.config).await?;
-                    }
-                    let cause = format!(
-                        "NVOS update failed: {}/{} switches failed; failed switches: [{}]",
-                        failed,
-                        total,
-                        failed_switch_ids.join(", ")
-                    );
-                    tracing::warn!(rack_id = %id, %cause, "Rack maintenance failed, transitioning to Error");
-                    return Ok(StateHandlerOutcome::transition(RackState::Error {
-                        certificate_failure: None,
-                        cause,
-                        recovery_policy: RackErrorRecoveryPolicy::MaintenanceRequestRequired,
-                    })
                     .with_txn(txn));
                 }
 

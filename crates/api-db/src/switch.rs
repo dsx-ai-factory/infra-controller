@@ -30,8 +30,8 @@ use model::metadata::Metadata;
 use model::rack::RackFirmwareUpgradeStatus;
 use model::switch::{
     CONTROL_PLANE_STATE_CONFIGURED, FabricManagerState, FabricManagerStatus, NewSwitch,
-    SWITCH_CONTROLLER_STATE_READY, Switch, SwitchControllerState, SwitchMaintenanceOperation,
-    SwitchMaintenanceRequest, SwitchReprovisionRequest,
+    NvosVersion, SWITCH_CONTROLLER_STATE_READY, Switch, SwitchControllerState,
+    SwitchMaintenanceOperation, SwitchMaintenanceRequest, SwitchReprovisionRequest,
 };
 use sqlx::PgConnection;
 
@@ -45,6 +45,8 @@ use crate::{
 mod test_explicit_columns;
 #[cfg(test)]
 mod test_metadata;
+#[cfg(test)]
+mod test_nvos_version;
 
 // Prefer the operator-declared primary NVOS port (eth0), then an addressed port,
 // IPv4, lowest segment ID, address, and MAC as tiebreaks. Requires the joined
@@ -153,6 +155,7 @@ pub async fn create(txn: &mut PgConnection, new_switch: &NewSwitch) -> DatabaseR
         switch_reprovisioning_requested: None,
         firmware_upgrade_status: None,
         nvos_update_status: None,
+        nvos_version: NvosVersion::default(),
         fabric_manager_status: None,
         nvlink_domain_uuid: None,
         metadata,
@@ -332,7 +335,7 @@ const SWITCHES_WITH_BMC_INFO: &str = r#"SELECT
     bmc_credential_rotation_requested, decommission_requested,
     controller_state, controller_state_version, controller_state_outcome,
     switch_maintenance_requested, switch_reprovisioning_requested,
-    firmware_upgrade_status, nvos_update_status, fabric_manager_status,
+    firmware_upgrade_status, nvos_update_status, nvos_version, fabric_manager_status,
     nvlink_domain_uuid, name, description, labels, version, is_primary,
     rack_id, slot_number, tray_index, health_reports
 FROM (
@@ -400,6 +403,87 @@ pub async fn try_update_controller_state(
     Ok(match query_result {
         Some(_) => ConditionalWrite::Applied(()),
         None => ConditionalWrite::NotApplied(ControllerStateNotCurrent),
+    })
+}
+
+/// Requests an NVOS version refresh while preserving the last observed version.
+///
+/// The caller must provide an active transaction and commit it before external I/O.
+/// Locks the switch row and advances its version even when a refresh is already
+/// pending, so an earlier observation cannot consume this request. A missing
+/// switch returns `DatabaseError::NotFoundError`.
+pub async fn request_nvos_version_refresh(
+    txn: &mut PgConnection,
+    switch_id: SwitchId,
+) -> DatabaseResult<()> {
+    let version: ConfigVersion =
+        sqlx::query_scalar("SELECT version FROM switches WHERE id = $1 FOR UPDATE")
+            .bind(switch_id)
+            .fetch_optional(&mut *txn)
+            .await
+            .map_err(|error| DatabaseError::new("request_nvos_version_refresh", error))?
+            .ok_or_else(|| DatabaseError::NotFoundError {
+                kind: "switch",
+                id: switch_id.to_string(),
+            })?;
+
+    sqlx::query(
+        "UPDATE switches
+         SET nvos_version = jsonb_set(COALESCE(nvos_version, '{}'::jsonb),
+                                     '{refresh_nvos_version}', 'true'::jsonb),
+             version = $1
+         WHERE id = $2",
+    )
+    .bind(version.increment())
+    .bind(switch_id)
+    .execute(txn)
+    .await
+    .map_err(|error| DatabaseError::new("request_nvos_version_refresh", error))?;
+
+    Ok(())
+}
+
+/// A refresh completion was rejected because the switch is missing, its version
+/// changed, it has no pending refresh, it is deleted, or it is no longer Ready.
+/// These outcomes share one rejection and leave the saved observation unchanged.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NvosVersionRefreshNotCurrent;
+
+/// Saves an NVOS observation and clears the matching pending refresh atomically.
+///
+/// Requires the current switch version, a pending refresh, a non-deleted switch,
+/// and Ready state. An unmet condition returns
+/// `NotApplied(NvosVersionRefreshNotCurrent)`; the conditions are not distinguished.
+/// An applied write advances the switch version and remains in the caller's transaction.
+pub async fn try_complete_nvos_version_refresh(
+    txn: &mut PgConnection,
+    switch_id: SwitchId,
+    expected_version: ConfigVersion,
+    version: &str,
+) -> DatabaseResult<ConditionalWrite<(), NvosVersionRefreshNotCurrent>> {
+    let observation = NvosVersion {
+        version: Some(version.to_string()),
+        refresh_nvos_version: false,
+    };
+    let result = sqlx::query_as::<_, SwitchId>(
+        "UPDATE switches SET nvos_version = $1, version = $2
+         WHERE id = $3 AND version = $4 AND deleted IS NULL
+           AND controller_state->>'state' = $5
+           AND nvos_version->'refresh_nvos_version' = 'true'::jsonb
+         RETURNING id",
+    )
+    .bind(sqlx::types::Json(observation))
+    .bind(expected_version.increment())
+    .bind(switch_id)
+    .bind(expected_version)
+    .bind(SWITCH_CONTROLLER_STATE_READY)
+    .fetch_optional(txn)
+    .await
+    .map_err(|error| DatabaseError::new("try_complete_nvos_version_refresh", error))?;
+
+    Ok(match result {
+        Some(_) => ConditionalWrite::Applied(()),
+        None => ConditionalWrite::NotApplied(NvosVersionRefreshNotCurrent),
     })
 }
 

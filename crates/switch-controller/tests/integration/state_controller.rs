@@ -1142,6 +1142,7 @@ async fn test_switch_entire_state_transition_flow(
             "initial state should be Created, got {:?}",
             switch.controller_state.value
         );
+        assert_eq!(switch.nvos_version, model::switch::NvosVersion::default());
     }
 
     // Start the state controller with the real handler
@@ -1199,6 +1200,11 @@ async fn test_switch_entire_state_transition_flow(
         "expected Ready, got {:?}",
         switch.controller_state.value
     );
+    assert!(
+        switch.nvos_version.refresh_nvos_version,
+        "completing ingestion must request the first NVOS observation"
+    );
+    assert_eq!(switch.nvos_version.version, None);
 
     Ok(())
 }

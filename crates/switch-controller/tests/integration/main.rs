@@ -21,4 +21,5 @@ mod health;
 mod maintenance;
 mod mtls_disable;
 mod nvos_password_rotation;
+mod nvos_version;
 mod state_controller;

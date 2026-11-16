@@ -81,6 +81,12 @@ async fn exercise_switch_reader(
     )
     .await?;
 
+    assert_eq!(expected.nvos_version, NvosVersion::default());
+    let initial = find_by_id(&mut txn, &expected.id)
+        .await?
+        .expect("created switch");
+    assert_eq!(initial.nvos_version, NvosVersion::default());
+
     let timestamp = "2026-09-01T12:00:00Z".parse()?;
     expected.status = Some(SwitchStatus {
         switch_name: "projection switch".to_string(),
@@ -117,6 +123,10 @@ async fn exercise_switch_reader(
         started_at: Some(timestamp),
         ended_at: None,
     });
+    expected.nvos_version = NvosVersion {
+        version: Some("nvos-25.02.4440".to_string()),
+        refresh_nvos_version: true,
+    };
     expected.fabric_manager_status = Some(FabricManagerStatus {
         fabric_manager_state: FabricManagerState::Ok,
         addition_info: Some(CONTROL_PLANE_STATE_CONFIGURED.to_string()),
@@ -138,7 +148,7 @@ async fn exercise_switch_reader(
          firmware_upgrade_status = $7, nvos_update_status = $8,
          fabric_manager_status = $9, nvlink_domain_uuid = $10, health_reports = $11,
          bmc_credential_rotation_requested = $12, decommission_requested = $13,
-         is_primary = $14, deleted = $15, version = $16 WHERE id = $17",
+         is_primary = $14, deleted = $15, version = $16, nvos_version = $18 WHERE id = $17",
     )
     .bind(sqlx::types::Json(&expected.status))
     .bind(sqlx::types::Json(&expected.controller_state.value))
@@ -157,6 +167,7 @@ async fn exercise_switch_reader(
     .bind(expected.deleted)
     .bind(expected.version)
     .bind(expected.id)
+    .bind(sqlx::types::Json(&expected.nvos_version))
     .execute(txn.as_mut())
     .await?;
 
@@ -228,6 +239,7 @@ async fn exercise_switch_reader(
         expected.firmware_upgrade_status
     );
     assert_eq!(actual.nvos_update_status, expected.nvos_update_status);
+    assert_eq!(actual.nvos_version, expected.nvos_version);
     assert_eq!(actual.fabric_manager_status, expected.fabric_manager_status);
     assert_eq!(actual.nvlink_domain_uuid, expected.nvlink_domain_uuid);
     assert_eq!(actual.rack_id, expected.rack_id);

@@ -93,6 +93,10 @@ impl TryFrom<Switch> for rpc::Switch {
 
     fn try_from(src: Switch) -> Result<Self, Self::Error> {
         let health = derive_switch_aggregate_health(&src.health_reports);
+        let nvos_version = Some(rpc::SwitchNvosVersion {
+            version: src.nvos_version.version,
+            refresh_nvos_version: src.nvos_version.refresh_nvos_version,
+        });
         let fabric_manager_status = src
             .fabric_manager_status
             .as_ref()
@@ -146,6 +150,7 @@ impl TryFrom<Switch> for rpc::Switch {
                         fabric_manager_status_details,
                         nvos_ports: Vec::new(),
                         serial_number: None,
+                        nvos_version,
                     }
                 }
                 (None, fabric_manager_status, fabric_manager_status_details) => rpc::SwitchStatus {
@@ -162,6 +167,7 @@ impl TryFrom<Switch> for rpc::Switch {
                     fabric_manager_status_details,
                     nvos_ports: Vec::new(),
                     serial_number: None,
+                    nvos_version,
                 },
             },
         );
@@ -260,6 +266,10 @@ mod tests {
             switch_reprovisioning_requested: None,
             firmware_upgrade_status: None,
             nvos_update_status: None,
+            nvos_version: model::switch::NvosVersion {
+                version: Some("nvos-25.02.4440".to_string()),
+                refresh_nvos_version: true,
+            },
             fabric_manager_status: Some(FabricManagerStatus {
                 fabric_manager_state: FabricManagerState::Ok,
                 addition_info: Some("CONTROL_PLANE_STATE_CONFIGURED".to_string()),
@@ -286,6 +296,13 @@ mod tests {
         assert_eq!(status.power_state, Some("on".to_string()));
         assert_eq!(status.health_status, Some("ok".to_string()));
         assert_eq!(status.fabric_manager_status, Some("running".to_string()));
+        assert_eq!(
+            status.nvos_version,
+            Some(rpc::SwitchNvosVersion {
+                version: Some("nvos-25.02.4440".to_string()),
+                refresh_nvos_version: true,
+            })
+        );
 
         let details = status
             .fabric_manager_status_details
@@ -330,6 +347,7 @@ mod tests {
             switch_reprovisioning_requested: None,
             firmware_upgrade_status: None,
             nvos_update_status: None,
+            nvos_version: model::switch::NvosVersion::default(),
             fabric_manager_status: None,
             nvlink_domain_uuid: None,
             metadata: Metadata::default(),
@@ -353,6 +371,7 @@ mod tests {
         assert_eq!(status.health_status, None);
         assert_eq!(status.fabric_manager_status, None);
         assert_eq!(status.fabric_manager_status_details, None);
+        assert_eq!(status.nvos_version, Some(rpc::SwitchNvosVersion::default()));
         assert!(!rpc_switch.is_primary);
         assert_eq!(rpc_switch.nvlink_domain_uuid, None);
     }

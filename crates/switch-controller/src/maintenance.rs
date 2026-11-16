@@ -409,7 +409,7 @@ pub(super) async fn build_switch_endpoint(
 
     let (Some(nvos_mac), Some(nvos_ip)) = (endpoint.nvos_mac, endpoint.nvos_ip) else {
         return Err(format!(
-            "switch {} is missing NVOS MAC or IP required for power control",
+            "switch {} is missing NVOS MAC or IP required for component manager operations",
             switch_id
         ));
     };

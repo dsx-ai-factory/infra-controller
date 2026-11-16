@@ -6192,6 +6192,12 @@ async fn test_nvos_update_recovers_password_after_rms_restart(
     let mut txn = pool.begin().await?;
     db_rack::update(txn.as_mut(), &rack_id, &config).await?;
     db_rack::update_nvos_update_job(txn.as_mut(), &rack_id, Some(&job)).await?;
+    set_switch_state(
+        txn.as_mut(),
+        &switch_id,
+        model::switch::SwitchControllerState::Ready,
+    )
+    .await;
     txn.commit().await?;
 
     env.rms_sim
@@ -6240,6 +6246,13 @@ async fn test_nvos_update_recovers_password_after_rms_restart(
         model::rack::NvosPasswordUpdateState::InProgress { job_id }
             if job_id == "rms-sim-password-update"
     ));
+    let recovering_switch = db_switch::find_by_id(pool.acquire().await?.as_mut(), &switch_id)
+        .await?
+        .expect("switch should exist during password recovery");
+    assert!(
+        !recovering_switch.nvos_version.refresh_nvos_version,
+        "version collection waits until the NVOS credential is restored"
+    );
 
     env.rms_sim
         .queue_get_job_status_response(Err(librms::RackManagerError::ApiInvocationError(
@@ -6327,6 +6340,12 @@ async fn test_nvos_update_recovers_password_after_rms_restart(
         .await?
         .expect("switch should exist");
 
+    assert!(switch.nvos_version.refresh_nvos_version);
+    assert_eq!(switch.nvos_version.version, None);
+    assert_eq!(
+        switch.controller_state.value,
+        model::switch::SwitchControllerState::Ready
+    );
     let switch_status = switch
         .nvos_update_status
         .expect("completed switch NVOS status should be persisted");
@@ -6337,6 +6356,38 @@ async fn test_nvos_update_recovers_password_after_rms_restart(
         switch_status.status,
         SwitchNvosUpdateState::Completed
     ));
+
+    drop(txn);
+    let mut txn = pool.begin().await?;
+    assert!(matches!(
+        db_switch::try_complete_nvos_version_refresh(
+            txn.as_mut(),
+            switch_id,
+            switch.version,
+            "nvos-25.02.4440",
+        )
+        .await?,
+        db::ConditionalWrite::Applied(())
+    ));
+    txn.commit().await?;
+
+    // A peer may keep the rack polling this job after this switch has already
+    // refreshed. Observing the same terminal result must not request it again.
+    let mut rack = get_db_rack(env.db_reader().as_mut(), &rack_id).await;
+    let mut outcome = handler_instance
+        .handle_object_state(&rack_id, &mut rack, &nvos_state, &mut ctx)
+        .await?;
+    if let Some(txn) = outcome.take_transaction() {
+        txn.commit().await?;
+    }
+    let switch = db_switch::find_by_id(pool.acquire().await?.as_mut(), &switch_id)
+        .await?
+        .expect("switch should exist after repeated status poll");
+    assert!(!switch.nvos_version.refresh_nvos_version);
+    assert_eq!(
+        switch.nvos_version.version.as_deref(),
+        Some("nvos-25.02.4440")
+    );
 
     Ok(())
 }
@@ -6489,6 +6540,16 @@ async fn test_nvos_update_waits_for_all_images_before_failure_and_starts_passwor
     );
     assert!(rack.config.maintenance_requested.is_none());
 
+    for switch_id in &switch_ids {
+        let switch = db_switch::find_by_id(pool.acquire().await?.as_mut(), switch_id)
+            .await?
+            .expect("updated switch should exist");
+        assert!(
+            switch.nvos_version.refresh_nvos_version,
+            "successful and failed image operations both require a fresh observation"
+        );
+    }
+
     let response = env
         .api
         .get_rack(Request::new(rpc::forge::GetRackRequest {
@@ -6510,7 +6571,7 @@ async fn test_nvos_update_waits_for_all_images_before_failure_and_starts_passwor
 }
 
 #[sqlx_test]
-async fn test_nvos_update_failed_password_recovery_enters_error_without_resubmission(
+async fn test_nvos_update_failed_password_recovery_preserves_recovered_peer(
     pool: sqlx::PgPool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let env = create_test_env_with_overrides(
@@ -6522,14 +6583,127 @@ async fn test_nvos_update_failed_password_recovery_enters_error_without_resubmis
     )
     .await;
 
-    let (rack_id, switch_id) = create_ready_rack_with_switch(&env, &pool).await?;
-    let password_job_id = "password-job-1";
+    let (rack_id, switch_ids) = create_ready_rack_with_switches(&env, &pool, 2).await?;
+    let password_job_ids = ["password-job-completed", "password-job-failed"];
 
     let config = RackConfig {
         maintenance_requested: Some(MaintenanceScope::default()),
         ..Default::default()
     };
+    let job = NvosUpdateJob {
+        switches: switch_ids
+            .iter()
+            .zip(password_job_ids)
+            .map(|(switch_id, job_id)| NvosUpdateSwitchStatus {
+                node_id: switch_id.to_string(),
+                status: "completed".to_string(),
+                password_update: NvosPasswordUpdateState::InProgress {
+                    job_id: job_id.to_string(),
+                },
+                ..Default::default()
+            })
+            .collect(),
+        ..Default::default()
+    };
 
+    let mut txn = pool.begin().await?;
+    db_rack::update(txn.as_mut(), &rack_id, &config).await?;
+    db_rack::update_nvos_update_job(txn.as_mut(), &rack_id, Some(&job)).await?;
+    crate::fixtures::rack::set_rack_controller_state(
+        txn.as_mut(),
+        &rack_id,
+        RackState::Maintenance {
+            maintenance_state: RackMaintenanceState::NVOSUpdate {
+                nvos_update: NvosUpdateState::WaitForComplete,
+            },
+        },
+    )
+    .await?;
+    txn.commit().await?;
+
+    for (job_id, execution_state) in password_job_ids.into_iter().zip([
+        rms::JobExecutionState::Completed,
+        rms::JobExecutionState::Failed,
+    ]) {
+        env.rms_sim
+            .queue_get_job_status_response(Ok(rms::GetJobStatusResponse {
+                job_states: vec![rms::JobStatus {
+                    job_id: job_id.to_string(),
+                    execution_state: execution_state as i32,
+                    ..Default::default()
+                }],
+            }))
+            .await;
+    }
+    env.run_rack_controller_iteration().await;
+
+    let rack = get_db_rack(env.db_reader().as_mut(), &rack_id).await;
+    let RackState::Error {
+        cause,
+        recovery_policy,
+        ..
+    } = rack.controller_state.value
+    else {
+        panic!("failed NVOS password recovery should transition the rack to Error");
+    };
+    assert_eq!(
+        cause,
+        format!(
+            "NVOS password recovery job {} failed for switch {}",
+            password_job_ids[1], switch_ids[1]
+        )
+    );
+    assert_eq!(
+        recovery_policy,
+        RackErrorRecoveryPolicy::MaintenanceRequestRequired
+    );
+    assert!(rack.config.maintenance_requested.is_none());
+    assert_eq!(
+        rack.nvos_update_job.unwrap().switches[0].password_update,
+        NvosPasswordUpdateState::Completed,
+        "the recovered peer must remain persisted when a later peer fails"
+    );
+
+    for (index, switch_id) in switch_ids.iter().enumerate() {
+        let switch = db_switch::find_by_id(pool.acquire().await?.as_mut(), switch_id)
+            .await?
+            .expect("updated switch should exist");
+        assert_eq!(switch.nvos_version.refresh_nvos_version, index == 0);
+        assert_eq!(
+            switch.nvos_update_status.unwrap().status,
+            if index == 0 {
+                SwitchNvosUpdateState::Completed
+            } else {
+                SwitchNvosUpdateState::InProgress
+            },
+        );
+    }
+    Ok(())
+}
+
+#[sqlx_test]
+async fn test_nvos_update_refresh_skips_deleted_switch(
+    pool: sqlx::PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let env = create_test_env_with_overrides(
+        pool.clone(),
+        TestEnvOverrides {
+            config: Some(config_with_rack_profiles()),
+            ..Default::default()
+        },
+    )
+    .await;
+    let (rack_id, switch_id) = create_ready_rack_with_switch(&env, &pool).await?;
+    let password_job_id = "password-job-deleted-switch";
+    let config = RackConfig {
+        maintenance_requested: Some(MaintenanceScope {
+            activities: vec![MaintenanceActivity::NvosUpdate {
+                config_json: r#"{"Id":"fw-nvos-default"}"#.to_string(),
+            }],
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
     let job = NvosUpdateJob {
         switches: vec![NvosUpdateSwitchStatus {
             node_id: switch_id.to_string(),
@@ -6541,11 +6715,9 @@ async fn test_nvos_update_failed_password_recovery_enters_error_without_resubmis
         }],
         ..Default::default()
     };
-
     let mut txn = pool.begin().await?;
     db_rack::update(txn.as_mut(), &rack_id, &config).await?;
     db_rack::update_nvos_update_job(txn.as_mut(), &rack_id, Some(&job)).await?;
-
     crate::fixtures::rack::set_rack_controller_state(
         txn.as_mut(),
         &rack_id,
@@ -6556,34 +6728,36 @@ async fn test_nvos_update_failed_password_recovery_enters_error_without_resubmis
         },
     )
     .await?;
-
+    db_switch::final_delete(switch_id, &mut txn).await?;
     txn.commit().await?;
-
     env.rms_sim
         .queue_get_job_status_response(Ok(rms::GetJobStatusResponse {
             job_states: vec![rms::JobStatus {
                 job_id: password_job_id.to_string(),
-                execution_state: rms::JobExecutionState::Failed as i32,
+                execution_state: rms::JobExecutionState::Completed as i32,
                 ..Default::default()
             }],
         }))
         .await;
 
-    env.run_rack_controller_iteration().await;
+    env.run_rack_controller_iteration_no_requeue().await;
 
     let rack = get_db_rack(env.db_reader().as_mut(), &rack_id).await;
-
-    let RackState::Error { cause, .. } = rack.controller_state.value else {
-        panic!("failed NVOS password recovery should transition the rack to Error");
-    };
-
     assert_eq!(
-        cause,
-        format!("NVOS password recovery job {password_job_id} failed for switch {switch_id}")
+        rack.controller_state.value,
+        RackState::Maintenance {
+            maintenance_state: RackMaintenanceState::Completed,
+        }
     );
-
-    assert!(rack.config.maintenance_requested.is_none());
-
+    assert_eq!(
+        rack.nvos_update_job.unwrap().switches[0].password_update,
+        NvosPasswordUpdateState::Completed,
+    );
+    assert!(
+        db_switch::find_by_id(pool.acquire().await?.as_mut(), &switch_id)
+            .await?
+            .is_none()
+    );
     Ok(())
 }
 

@@ -3258,6 +3258,9 @@ message SwitchStatus {
   // Chassis serial from the cached BMC exploration report. Absent when no
   // usable switch chassis serial has been discovered.
   optional string serial_number = 13;
+
+  // NVOS observation and pending refresh. Populated even before the first read.
+  SwitchNvosVersion nvos_version = 14;
 }
 
 message PlacementInRack {
@@ -14152,4 +14155,15 @@ message ComponentFirmwareLocalStage {
   ComponentFirmwareLocalStageState state = 1;
   // Exact preceding system-image handle, not a whole-update identity.
   string system_image_job_id = 2;
+}
+
+// Last observed running NVOS version and pending collection state.
+message SwitchNvosVersion {
+  // RMS-reported current NVOS build ID. Absent until a successful observation.
+  optional string version = 1;
+  // Defaults to false. Ingestion and completed rack NVOS update workflows request
+  // collection by setting this flag. The switch controller reads RMS while
+  // Ready and clears it after successfully storing the observation. Failed
+  // reads preserve both the previous version and the pending request.
+  bool refresh_nvos_version = 2;
 }

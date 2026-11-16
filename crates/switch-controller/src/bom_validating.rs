@@ -27,9 +27,9 @@ use crate::context::SwitchStateHandlerContextObjects;
 
 /// Handles the BomValidating state for a switch.
 pub async fn handle_bom_validating(
-    _switch_id: &SwitchId,
+    switch_id: &SwitchId,
     state: &mut Switch,
-    _ctx: &mut StateHandlerContext<'_, SwitchStateHandlerContextObjects>,
+    ctx: &mut StateHandlerContext<'_, SwitchStateHandlerContextObjects>,
 ) -> Result<StateHandlerOutcome<SwitchControllerState>, StateHandlerError> {
     let bom_validating_state = match &state.controller_state.value {
         SwitchControllerState::BomValidating {
@@ -41,9 +41,9 @@ pub async fn handle_bom_validating(
     match bom_validating_state {
         BomValidatingState::BomValidationComplete => {
             tracing::info!("BOM Validating Switch: BomValidationComplete, moving to Ready");
-            Ok(StateHandlerOutcome::transition(
-                SwitchControllerState::Ready,
-            ))
+            let mut txn = ctx.services.db_pool.begin().await?;
+            db::switch::request_nvos_version_refresh(&mut txn, *switch_id).await?;
+            Ok(StateHandlerOutcome::transition(SwitchControllerState::Ready).with_txn(txn))
         }
     }
 }

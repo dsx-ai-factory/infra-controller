@@ -20,7 +20,7 @@ use carbide_test_support::{Case, check_cases_async};
 use carbide_uuid::switch::{SwitchId, SwitchIdSource, SwitchType};
 use sqlx::FromRow;
 
-use super::Switch;
+use super::{NvosVersion, Switch};
 
 #[crate::sqlx_test]
 async fn switch_preserves_decode_errors_and_nullable_fields(pool: sqlx::PgPool) {
@@ -201,6 +201,7 @@ async fn switch_preserves_decode_errors_and_nullable_fields(pool: sqlx::PgPool) 
                 NULL::jsonb AS switch_maintenance_requested,
                 NULL::jsonb AS switch_reprovisioning_requested,
                 NULL::jsonb AS firmware_upgrade_status, NULL::jsonb AS nvos_update_status,
+                NULL::jsonb AS nvos_version,
                 NULL::jsonb AS fabric_manager_status,
                 NULL::jsonb AS health_reports,
                 '{{}}'::jsonb AS labels, ''::text AS name, ''::text AS description,
@@ -230,6 +231,7 @@ async fn switch_preserves_decode_errors_and_nullable_fields(pool: sqlx::PgPool) 
                 assert_eq!(switch.switch_reprovisioning_requested, None);
                 assert_eq!(switch.firmware_upgrade_status, None);
                 assert_eq!(switch.nvos_update_status, None);
+                assert_eq!(switch.nvos_version, NvosVersion::default());
                 assert_eq!(switch.fabric_manager_status, None);
                 assert_eq!(switch.health_reports, Default::default());
             }
@@ -246,6 +248,7 @@ async fn switch_preserves_lifecycle_json_decode_errors(pool: sqlx::PgPool) {
         "switch_reprovisioning_requested",
         "firmware_upgrade_status",
         "nvos_update_status",
+        "nvos_version",
         "fabric_manager_status",
         "health_reports",
     ];
@@ -275,6 +278,7 @@ async fn switch_preserves_lifecycle_json_decode_errors(pool: sqlx::PgPool) {
             "42",
         ),
         ("nvos_update_status=42", "nvos_update_status", "42"),
+        ("nvos_version=42", "nvos_version", "42"),
         ("fabric_manager_status=42", "fabric_manager_status", "42"),
         ("health_reports=42", "health_reports", "42"),
         (
@@ -298,6 +302,7 @@ async fn switch_preserves_lifecycle_json_decode_errors(pool: sqlx::PgPool) {
             "null",
         ),
         ("nvos_update_status=null", "nvos_update_status", "null"),
+        ("nvos_version=null", "nvos_version", "null"),
         (
             "fabric_manager_status=null",
             "fabric_manager_status",

@@ -86,6 +86,7 @@ fn switch_fixture() -> Switch {
         switch_reprovisioning_requested: None,
         firmware_upgrade_status: None,
         nvos_update_status: None,
+        nvos_version: Default::default(),
         fabric_manager_status: None,
         nvlink_domain_uuid: None,
         rack_id: Some(RackId::new("firmware-rack")),
