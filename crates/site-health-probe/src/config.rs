@@ -272,6 +272,7 @@ impl ReaderConfig {
 pub(crate) struct Readers {
     pub devices: ReaderConfig,
     pub rest_inventory: ReaderConfig,
+    pub nico_config: ReaderConfig,
 }
 
 impl Default for Readers {
@@ -279,16 +280,21 @@ impl Default for Readers {
         Self {
             devices: ReaderConfig::new(120, 600),
             rest_inventory: ReaderConfig::new(120, 600),
+            nico_config: ReaderConfig {
+                enabled: false,
+                ..ReaderConfig::new(60, 120)
+            },
         }
     }
 }
 
 impl Readers {
     /// Every reader with its config key, in a fixed order.
-    pub(crate) fn all(&self) -> [(&'static str, &ReaderConfig); 2] {
+    pub(crate) fn all(&self) -> [(&'static str, &ReaderConfig); 3] {
         [
             ("devices", &self.devices),
             ("rest_inventory", &self.rest_inventory),
+            ("nico_config", &self.nico_config),
         ]
     }
 }
@@ -540,7 +546,7 @@ impl StateConfig {
             errs.push("state.readers enables no reader".to_string());
         }
 
-        if self.readers.devices.enabled {
+        if self.readers.devices.enabled || self.readers.nico_config.enabled {
             let nico = &self.nico_api;
             if !is_host_port(&nico.target) {
                 errs.push(
@@ -549,7 +555,7 @@ impl StateConfig {
                         .to_string(),
                 );
             }
-            if !(1..=100).contains(&nico.batch_size) {
+            if self.readers.devices.enabled && !(1..=100).contains(&nico.batch_size) {
                 errs.push("state.nico_api.batch_size must be between 1 and 100".to_string());
             }
             if nico.max_decoding_message_size == 0 {
