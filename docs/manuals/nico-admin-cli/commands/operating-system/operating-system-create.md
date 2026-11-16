@@ -14,7 +14,7 @@ nico-admin-cli operating-system create <-n|--name>
 [-o|--org] [--id] [-d|--description]
 [--is-active] [--allow-override]
 [--phone-home-enabled] [--user-data] [--ipxe-script]
-[--ipxe-template-id] [--param] [--extended]
+[--extended] [--ipxe-template-id] [--param]
 [--sort-by] [-h|--help]
 ```
 
@@ -82,14 +82,6 @@ Optional cloud-init / user-data script.
 
 Raw iPXE boot script (mutually exclusive with --ipxe-template-id).
 
-`--ipxe-template-id <IPXE_TEMPLATE_ID>`
-
-ID of the iPXE template to use (mutually exclusive with --ipxe-script).
-
-`--param <KEY=VALUE>`
-
-iPXE parameter in KEY=VALUE format. May be repeated.
-
 `--extended`
 
 Extended result output.
@@ -97,6 +89,14 @@ Extended result output.
 This is used by measured boot, where basic output contains just what you
 probably care about, and "extended" output also dumps out all the
 internal UUIDs that are used to associate instances.
+
+`--ipxe-template-id <IPXE_TEMPLATE_ID>`
+
+ID of the iPXE template to use (mutually exclusive with --ipxe-script).
+
+`--param <KEY=VALUE>`
+
+iPXE parameter in KEY=VALUE format. May be repeated.
 
 `--sort-by <SORT_BY> [default: primary-id]`
 

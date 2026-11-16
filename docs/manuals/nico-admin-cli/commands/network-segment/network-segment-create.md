@@ -12,7 +12,7 @@ nico-admin-cli-network-segment-create - Create Network Segment
 nico-admin-cli network-segment create <--name> [--id]
 [--vpc-id] [--subdomain-id] [--mtu] <--prefix>
 [--gateway] [--reserve-first] [--segment-type]
-[--infer-slaac-eui64-addresses] [--extended]
+[--extended] [--infer-slaac-eui64-addresses]
 [--sort-by] [-h|--help]
 ```
 
@@ -71,14 +71,6 @@ Network segment type
 >
 > - host-inband
 
-`--infer-slaac-eui64-addresses`
-
-Infer modified EUI-64 SLAAC addresses for stateless DHCPv6 clients and
-add them to interface address state. Off by default; use only when
-clients derive SLAAC addresses from their MAC addresses, and only on a
-dynamic segment with exactly one IPv6 /64. Existing IPv6 addresses are
-not replaced
-
 `--extended`
 
 Extended result output.
@@ -86,6 +78,14 @@ Extended result output.
 This is used by measured boot, where basic output contains just what you
 probably care about, and "extended" output also dumps out all the
 internal UUIDs that are used to associate instances.
+
+`--infer-slaac-eui64-addresses`
+
+Infer modified EUI-64 SLAAC addresses for stateless DHCPv6 clients and
+add them to interface address state. Off by default; use only when
+clients derive SLAAC addresses from their MAC addresses, and only on a
+dynamic segment with exactly one IPv6 /64. Existing IPv6 addresses are
+not replaced
 
 `--sort-by <SORT_BY> [default: primary-id]`
 
