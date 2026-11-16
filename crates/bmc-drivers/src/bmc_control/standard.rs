@@ -154,6 +154,22 @@ where
             differences: Vec::new(),
         })
     }
+
+    /// Redfish has no standard control over the host's onboard NICs.
+    async fn host_management_network_access(
+        &self,
+        _cx: &OpCx<'_, B>,
+    ) -> Result<Option<bool>, PlatformError> {
+        Err(PlatformError::Unsupported)
+    }
+
+    async fn set_host_management_network_access(
+        &self,
+        _cx: &OpCx<'_, B>,
+        _enabled: bool,
+    ) -> Result<DriverOutcome, PlatformError> {
+        Err(PlatformError::Unsupported)
+    }
 }
 
 #[cfg(test)]
