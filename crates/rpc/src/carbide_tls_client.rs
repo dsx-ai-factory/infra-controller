@@ -19,11 +19,11 @@ use std::str::FromStr;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use carbide_http_connector::connector::CarbideHttpConnector;
+use carbide_http_connector::resolver::{CarbideResolver, CarbideResolverOpts};
 use carbide_tls::client_config::ClientCert;
 use carbide_tls::dummy_tls_verifier::DummyTlsVerifier;
 use eyre::Result;
-use forge_http_connector::connector::ForgeHttpConnector;
-use forge_http_connector::resolver::{ForgeResolver, ForgeResolverOpts};
 use hickory_resolver::config::ResolverConfig;
 use hyper_util::client::legacy;
 use hyper_util::rt::TokioTimer;
@@ -240,7 +240,7 @@ impl CarbideClientConfig {
             // We can change this if needed, or just make it
             // easier to set at initialization time (callers
             // can also call set_connect_retries_max and
-            // set_connect_retries_interval on the ForgeHttpConnector
+            // set_connect_retries_interval on the CarbideHttpConnector
             // to override).
             //
             // TODO(chet): Really, what would be nice here is,
@@ -731,7 +731,7 @@ impl<'a> CarbideTlsClient<'a> {
     pub async fn build_https_client<S: AsRef<str>>(
         &self,
         url: S,
-    ) -> CarbideHttpsClientResult<hyper_rustls::HttpsConnector<ForgeHttpConnector>> {
+    ) -> CarbideHttpsClientResult<hyper_rustls::HttpsConnector<CarbideHttpConnector>> {
         let mut roots = RootCertStore::empty();
         let uri = Uri::from_str(url.as_ref()).map_err(|e| ConfigurationError::InvalidUri {
             uri_string: url.as_ref().to_string(),
@@ -833,19 +833,19 @@ impl<'a> CarbideTlsClient<'a> {
             forge_resolver_config.0.inner,
         );
         // Five seconds is the default, but setting anyway for documentation and future proofing
-        let mut resolver_opts = ForgeResolverOpts::default().timeout(Duration::from_secs(5));
+        let mut resolver_opts = CarbideResolverOpts::default().timeout(Duration::from_secs(5));
         if self.carbide_client_config.use_mgmt_vrf {
             resolver_opts = resolver_opts.use_mgmt_vrf();
         }
-        let resolver = ForgeResolver::with_config_and_options(resolver_config, resolver_opts);
-        let mut http = ForgeHttpConnector::new_with_resolver(resolver);
+        let resolver = CarbideResolver::with_config_and_options(resolver_config, resolver_opts);
+        let mut http = CarbideHttpConnector::new_with_resolver(resolver);
         if self.carbide_client_config.use_mgmt_vrf {
             http.set_interface("mgmt".to_string());
         }
         http.set_socks5_proxy(self.carbide_client_config.socks_proxy.clone());
         http.enforce_http(false);
 
-        // Configure the TCP timeout; ForgeHttpConnector::set_connect_timeout
+        // Configure the TCP timeout; CarbideHttpConnector::set_connect_timeout
         // documents how pending DNS and address families share that budget.
         // DNS queries and retry backoff have separate limits, so callers needing
         // an overall deadline must bound the request, as the site probe and DHCP do.
@@ -1056,8 +1056,8 @@ mod tests {
     use std::error::Error as _;
     use std::net::SocketAddr;
 
+    use carbide_http_connector::connector::ConnectorMetrics;
     use carbide_test_support::value_scenarios;
-    use forge_http_connector::connector::ConnectorMetrics;
     use hyper::rt::Executor as _;
     use hyper_rustls::HttpsConnector;
     use hyper_util::rt::TokioExecutor;
@@ -1478,13 +1478,13 @@ mod tests {
 
         // Create the ConnectorMetrics instance used for
         // collecting some stats for connections that go
-        // through the ForgeHttpConnector.
+        // through the CarbideHttpConnector.
         let mut metrics = ConnectorMetrics::default();
 
-        // Now create the ForgeHttpConnector, setting our
+        // Now create the CarbideHttpConnector, setting our
         // test-specific `max_retries` with a 1 second interval,
         // and passing it our Connectormetrics.
-        let mut http = ForgeHttpConnector::new_with_resolver(ForgeResolver::default());
+        let mut http = CarbideHttpConnector::new_with_resolver(CarbideResolver::default());
         http.set_connect_retries_max(Some(max_retries));
         http.set_connect_retries_interval(Some(Duration::from_secs(1)));
         http.set_metrics(metrics.clone());
@@ -1511,7 +1511,7 @@ mod tests {
             .service(http);
 
         // And then create a new hyper HTTP client with the connector.
-        let hyper_client: legacy::Client<HttpsConnector<ForgeHttpConnector>, Body> =
+        let hyper_client: legacy::Client<HttpsConnector<CarbideHttpConnector>, Body> =
             legacy::Client::builder(TokioExecutor::new()).build(connector);
 
         // Reserve the destination without listening so every attempt is refused,
