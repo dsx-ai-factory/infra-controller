@@ -1202,6 +1202,31 @@ rollback or recovery, but the chart no longer manages them or their
 credentials. Retain any credentials needed for that recovery before choosing
 the overwrite path.
 
+## Upgrading from External Secrets Operator before 0.16.2
+
+The `external-secrets` release installs the chart version pinned in
+`helmfile.yaml`, which no longer serves `external-secrets.io/v1beta1`. A
+`nico-prereqs` release installed alongside an earlier ESO records its
+`ClusterSecretStore` and `ClusterExternalSecret` objects as `v1beta1`, and Helm
+cannot upgrade a release whose recorded objects the API server no longer serves.
+
+Before making any cluster changes, `setup.sh` stops when the installed
+`external-secrets` chart is older than 0.16.2 and the pinned chart is newer.
+ESO 0.16.2 serves both `v1beta1` and `v1`, so upgrade to it first, keeping the
+release's values:
+
+```bash
+helm upgrade external-secrets external-secrets \
+    --repo https://charts.external-secrets.io \
+    --version 0.16.2 -n external-secrets --reuse-values --wait --timeout 10m
+```
+
+Then rerun `setup.sh`. When the `nico-prereqs` release manifest still contains
+`external-secrets.io/v1beta1` objects, phase 5 syncs `nico-prereqs` once before
+the `external-secrets` sync, which rewrites them as `v1`, and syncs it again after
+ESO is upgraded. A fresh install, or a `nico-prereqs` release that already
+records `v1`, skips the extra sync.
+
 ## What gets deployed
 
 ```text

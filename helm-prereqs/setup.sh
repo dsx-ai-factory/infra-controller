@@ -457,6 +457,60 @@ _reject_bundled_flow_manager_upgrade() {
 
 _reject_bundled_flow_manager_upgrade
 
+# Succeeds when version $1 is lower than $2, comparing <major>.<minor>.<patch>
+# only: a leading "v" and any "-<suffix>" or "+<build>" are ignored.
+_version_lt() {
+    local _a="${1#v}" _b="${2#v}"
+    local -a _av _bv
+    local _i
+    IFS=. read -r -a _av <<< "${_a%%[-+]*}"
+    IFS=. read -r -a _bv <<< "${_b%%[-+]*}"
+    for _i in 0 1 2; do
+        (( 10#${_av[_i]:-0} < 10#${_bv[_i]:-0} )) && return 0
+        (( 10#${_av[_i]:-0} > 10#${_bv[_i]:-0} )) && return 1
+    done
+    return 1
+}
+
+# External Secrets Operator stops serving external-secrets.io/v1beta1 after
+# 0.16.2. The nico-prereqs release manifest of an older install records its
+# ClusterSecretStore and ClusterExternalSecret objects as v1beta1, and Helm
+# cannot build that manifest once the API server no longer serves v1beta1, so
+# phase 5 would fail after the ESO upgrade. ESO 0.16.2 serves both versions;
+# phase 5 re-syncs nico-prereqs to v1 before upgrading ESO past it.
+# Read from helmfile.yaml so this check and the release stay on one version.
+_ESO_STAGING_VERSION="0.16.2"
+_ESO_CHART_VERSION=$(awk '/chart:[[:space:]]*external-secrets\/external-secrets/{found=1} found && /^[[:space:]]*version:/{gsub(/["'\'']/, "", $2); print $2; exit}' "${SCRIPT_DIR}/helmfile.yaml")
+if [[ -z "${_ESO_CHART_VERSION}" ]]; then
+    echo "ERROR: could not read the external-secrets chart version from helmfile.yaml" >&2
+    exit 1
+fi
+
+_reject_unstaged_eso_upgrade() {
+    local _helm_out _installed
+    if ! _helm_out=$(helm list -n external-secrets -o json --filter '^external-secrets$'); then
+        echo "ERROR: unable to inspect the external-secrets Helm release; exiting." >&2
+        return 1
+    fi
+    _installed=$(jq -r '.[0].chart? // "" | sub("^external-secrets-"; "")' <<< "${_helm_out}")
+
+    # Fresh install
+    [[ -n "${_installed}" ]] || return 0
+
+    # Upgrade verification
+    if _version_lt "${_installed}" "${_ESO_STAGING_VERSION}" && \
+       _version_lt "${_ESO_STAGING_VERSION}" "${_ESO_CHART_VERSION}"; then
+        echo "ERROR: external-secrets ${_installed} cannot be upgraded directly to ${_ESO_CHART_VERSION}." >&2
+        echo "  ESO ${_ESO_CHART_VERSION} no longer serves external-secrets.io/v1beta1, which the nico-prereqs" >&2
+        echo "  release still records, so Helm could not upgrade nico-prereqs afterwards." >&2
+        echo "  Fix: Upgrade ESO to ${_ESO_STAGING_VERSION}, which serves both v1beta1 and v1:" >&2
+        echo "         1) helm upgrade external-secrets external-secrets --repo https://charts.external-secrets.io \\" >&2
+        echo "          --version ${_ESO_STAGING_VERSION} -n external-secrets --reuse-values --wait --timeout 10m" >&2
+        echo "         2) Rerun setup.sh: phase 5 moves nico-prereqs to v1 before upgrading ESO to ${_ESO_CHART_VERSION}." >&2
+        return 1
+    fi
+}
+
 # shellcheck source=preflight.sh
 source "${SCRIPT_DIR}/preflight.sh"
 
@@ -894,6 +948,8 @@ if ! command -v helmfile &>/dev/null; then
     fi
     echo "helmfile $(helmfile --version) installed"
 fi
+
+_reject_unstaged_eso_upgrade
 
 # ---------------------------------------------------------------------------
 # DNS check — verify cluster DNS is working before proceeding.
@@ -1491,6 +1547,18 @@ if ! "${INSTALL_VAULT}"; then
     fi
 fi
 export NICO_PREREQS_VAULT_ENABLED
+# re-sync ESO/v1beta1 nico-prereqs to v1.
+if helm status nico-prereqs -n nico-system &>/dev/null; then
+    if ! _NICO_PREREQS_MANIFEST="$(helm get manifest nico-prereqs -n nico-system)"; then
+        echo "Error: could not read the nico-prereqs release manifest; fix cluster access and rerun" >&2
+        exit 1
+    fi
+    if grep -q '^apiVersion: external-secrets\.io/v1beta1$' <<< "${_NICO_PREREQS_MANIFEST}"; then
+        echo "nico-prereqs still records external-secrets.io/v1beta1 objects: moving them to v1 before upgrading ESO..."
+        helmfile sync -l name=nico-prereqs ${_NICO_PREREQS_SYNC_ARGS[@]+"${_NICO_PREREQS_SYNC_ARGS[@]}"}
+    fi
+    unset _NICO_PREREQS_MANIFEST
+fi
 helmfile sync -l name=external-secrets
 helmfile sync -l name=nico-prereqs ${_NICO_PREREQS_SYNC_ARGS[@]+"${_NICO_PREREQS_SYNC_ARGS[@]}"}
 unset NICO_PREREQS_APPROLE_ROLE_ID NICO_PREREQS_APPROLE_SECRET_ID NICO_PREREQS_VAULT_TOKEN_B64
