@@ -1,88 +1,71 @@
-{% extends "base.html" %}
+{% extends "detail_base.html" %}
 
-{% block title %}Machine Validation{% endblock %}
+{% block title %}Machine Validation Test{% if let Some(first) = validation_tests.first() %} {{ first.test_id }}{% endif %}{% endblock %}
+{% block entity_label %}Validation Test{% endblock %}
+{% block entity_id %}{% if let Some(first) = validation_tests.first() %}{{ first.test_id }}{% endif %}{% endblock %}
+{% block header_links %}{% endblock %}
 
-{% block content %}
-<h1>Machine Validation Tests</h1>
-<table class="sortable overview">
-	{% for test in validation_tests %}
-	<tr>
-		<th>Test ID</th>
-		<td>{{ test.test_id }}</td>
-	</tr>
-	<tr>
-		<th>Name</th>
-		<td>{{ test.name }}</td>
-	</tr>
-	<tr>
-		<th>Description</th>
-		<td>{{ test.description }}</td>
-	</tr>
-	<tr>
-		<th>Version</th>
-		<td>{{ test.version }}</td>
-	</tr>
-	<tr>
-		<th>Command</th>
-		<td>{{ test.command }}</td>
-	</tr>
-	<tr>
-		<th>Args</th>
-		<td>{{ test.args }}</td>
-	</tr>
-	<tr>
-		<th>Contexts</th>
-		<td>{{ test.contexts }}</td>
-	</tr>
-	<tr>
-		<th>Supported Platforms</th>
-		<td>{{ test.supported_platforms }}</td>
-	</tr>
-	<tr>
-		<th>Is Verified</th>
-		<td>{{ test.is_verified }}</td>
-	</tr>
-	<tr>
-		<th>Is Enabled</th>
-		<td>{{ test.is_enabled }}</td>
-	</tr>
-	<tr>
-		<th>Timeout</th>
-		<td>{{ test.timeout }}</td>
-	</tr>
-	<tr>
-		<th>Custom Tags</th>
-		<td>{{ test.tags }}</td>
-	</tr>
-	<tr>
-		<th>Output file</th>
-		<td>{{ test.extra_output_file }}</td>
-	</tr>
-	<tr>
-		<th>Error file</th>
-		<td>{{ test.extra_err_file }}</td>
-	</tr>
-	<tr>
-		<th>Pre condition</th>
-		<td>{{ test.pre_condition }}</td>
-	</tr>
-	<tr>
-		<th>Image name</th>
-		<td>{{ test.img_name }}</td>
-	</tr>
-	<tr>
-		<th>Container args</th>
-		<td>{{ test.container_arg }}</td>
-	</tr>
-	<tr>
-		<th>External Config File</th>
-		<td>{{ test.external_config_file }}</td>
-	</tr>
-	<tr>
-		<th>Components</th>
-		<td>{{ test.components }}</td>
-	</tr>
-	{% endfor %}
-</table>
-
+{% block detail_content %}
+{% for test in validation_tests %}
+<section class="entity-summary">
+	<h3 class="entity-summary-title">{{ test.name }} <span class="text-muted">· version {{ test.version }}</span></h3>
+	<div class="entity-summary-status">
+		<div class="entity-summary-stat">
+			<span class="entity-summary-label">Enabled</span>
+			<span class="bubble{% if test.is_enabled %} success{% endif %}">{% if test.is_enabled %}Yes{% else %}No{% endif %}</span>
+		</div>
+		<div class="entity-summary-stat">
+			<span class="entity-summary-label">Verified</span>
+			<span class="bubble{% if test.is_verified %} success{% endif %}">{% if test.is_verified %}Yes{% else %}No{% endif %}</span>
+		</div>
+	</div>
+	<div class="entity-summary-groups">
+		<div class="entity-summary-group">
+			<h4>Test</h4>
+			<dl>
+				<dt>Description</dt>
+				<dd>{{ test.description }}</dd>
+				<dt>Contexts</dt>
+				<dd>{{ test.contexts }}</dd>
+				<dt>Platforms</dt>
+				<dd>{{ test.supported_platforms }}</dd>
+				<dt>Components</dt>
+				<dd>{{ test.components }}</dd>
+				<dt>Tags</dt>
+				<dd>{{ test.tags }}</dd>
+				<dt>Timeout</dt>
+				<dd>{{ test.timeout }}</dd>
+			</dl>
+		</div>
+		<div class="entity-summary-group">
+			<h4>Execution</h4>
+			<dl>
+				<dt>Command</dt>
+				<dd><code>{{ test.command }}</code></dd>
+				<dt>Args</dt>
+				<dd>{{ test.args }}</dd>
+				<dt>Pre-condition</dt>
+				<dd>{{ test.pre_condition }}</dd>
+				<dt>Image</dt>
+				<dd>{{ test.img_name }}</dd>
+				<dt>Container Args</dt>
+				<dd>{{ test.container_arg }}</dd>
+			</dl>
+		</div>
+		<div class="entity-summary-group">
+			<h4>Files</h4>
+			<dl>
+				<dt>Output File</dt>
+				<dd>{{ test.extra_output_file }}</dd>
+				<dt>Error File</dt>
+				<dd>{{ test.extra_err_file }}</dd>
+				<dt>External Config</dt>
+				<dd>{{ test.external_config_file }}</dd>
+			</dl>
+		</div>
+	</div>
+</section>
+{% else %}
+<section class="entity-summary"><p class="entity-summary-empty">No test found.</p></section>
+{% endfor %}
 {% endblock %}

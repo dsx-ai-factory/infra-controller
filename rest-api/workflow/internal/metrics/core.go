@@ -5,23 +5,26 @@ package metrics
 
 import (
 	"github.com/prometheus/client_golang/prometheus"
+
+	"github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/metadata"
 )
 
 type coreMetrics struct {
 	Info *prometheus.GaugeVec
 }
 
-// NewCoreMetrics creates a new coreMetrics struct and registers the metrics with the provided registerer
-func NewCoreMetrics(reg prometheus.Registerer, namespace string) *coreMetrics {
+// NewCoreMetrics creates and registers worker information metrics.
+func NewCoreMetrics(reg prometheus.Registerer, metricsNamespace, workerNamespace string) *coreMetrics {
 	m := &coreMetrics{
 		Info: prometheus.NewGaugeVec(prometheus.GaugeOpts{
-			Namespace: namespace,
+			Namespace: metricsNamespace,
 			Name:      "info",
 			Help:      "Information about the Cloud/Site worker",
 		}, []string{"version", "namespace"}),
 	}
 
 	reg.MustRegister(m.Info)
+	m.Info.WithLabelValues(metadata.Version, workerNamespace).Set(1)
 
 	return m
 }

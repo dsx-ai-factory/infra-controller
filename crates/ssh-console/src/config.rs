@@ -21,12 +21,12 @@ use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::time::Duration;
 
+use carbide_tls::client_config::ClientCert;
 use carbide_utils::ListenAddr;
 use carbide_uuid::machine::MachineIdParseError;
 use duration_str::deserialize_duration;
-use forge_tls::client_config::ClientCert;
-use rpc::forge_api_client::ForgeApiClient;
-use rpc::forge_tls_client::{ApiConfig, ForgeClientConfig};
+use rpc::carbide_api_client::CarbideApiClient;
+use rpc::carbide_tls_client::{ApiConfig, CarbideClientConfig};
 use russh::keys::ssh_key::Fingerprint;
 use serde::ser::SerializeSeq;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
@@ -416,14 +416,14 @@ role_separator = {cert_authorization_keyid_format_role_separator:?}
         )
     }
 
-    pub fn make_forge_api_client(&self) -> ForgeApiClient {
+    pub fn make_carbide_api_client(&self) -> CarbideApiClient {
         let carbide_uri_string = self.carbide_uri.to_string();
         tracing::info!(
             carbide_uri = carbide_uri_string.as_str(),
             "Configured Carbide API URI"
         );
 
-        // TODO: The API's for ClientCert/ForgeClientConfig/etc really ought to take PathBufs, not Strings.
+        // TODO: The API's for ClientCert/CarbideClientConfig/etc really ought to take PathBufs, not Strings.
         let client_cert = ClientCert {
             cert_path: self
                 .client_cert_path
@@ -436,7 +436,7 @@ role_separator = {cert_authorization_keyid_format_role_separator:?}
                 .expect("Invalid utf-8 in client_key_path")
                 .to_string(),
         };
-        let client_config = ForgeClientConfig::new(
+        let client_config = CarbideClientConfig::new(
             self.forge_root_ca_path
                 .to_str()
                 .expect("Invalid utf-8 in forge_root_ca_path")
@@ -445,7 +445,7 @@ role_separator = {cert_authorization_keyid_format_role_separator:?}
         );
 
         let api_config = ApiConfig::new(&carbide_uri_string, &client_config);
-        ForgeApiClient::new(&api_config)
+        CarbideApiClient::new(&api_config)
     }
 }
 

@@ -38,6 +38,8 @@ type Rack struct {
 	Description *string `json:"description,omitempty"`
 	// Operability phase aggregated from tray operationStatus values.
 	OperationStatus string `json:"operationStatus"`
+	// Explanation of operationStatus. Null when the upstream Flow server does not provide tray counts. Available on both list and detail responses, independently of includeComponents. This is an inventory snapshot, not a guarantee that an operation is permitted.
+	OperationStatusDetails NullableRackOperationStatusDetails `json:"operationStatusDetails"`
 	// Domain external IDs (rack group IDs) containing this Rack. Empty when no rack-group Domain is assigned.
 	NvLinkDomainIds []string `json:"nvLinkDomainIds"`
 	// Physical or logical location of the Rack
@@ -55,9 +57,10 @@ type _Rack Rack
 // This constructor will assign default values to properties that have it defined,
 // and makes sure properties required by API are set, but the set of arguments
 // will change when the set of required properties is changed
-func NewRack(operationStatus string, nvLinkDomainIds []string, taskStats TaskStats, health NullableAggregateHealth) *Rack {
+func NewRack(operationStatus string, operationStatusDetails NullableRackOperationStatusDetails, nvLinkDomainIds []string, taskStats TaskStats, health NullableAggregateHealth) *Rack {
 	this := Rack{}
 	this.OperationStatus = operationStatus
+	this.OperationStatusDetails = operationStatusDetails
 	this.NvLinkDomainIds = nvLinkDomainIds
 	this.TaskStats = taskStats
 	this.Health = health
@@ -288,6 +291,32 @@ func (o *Rack) SetOperationStatus(v string) {
 	o.OperationStatus = v
 }
 
+// GetOperationStatusDetails returns the OperationStatusDetails field value
+// If the value is explicit nil, the zero value for RackOperationStatusDetails will be returned
+func (o *Rack) GetOperationStatusDetails() RackOperationStatusDetails {
+	if o == nil || o.OperationStatusDetails.Get() == nil {
+		var ret RackOperationStatusDetails
+		return ret
+	}
+
+	return *o.OperationStatusDetails.Get()
+}
+
+// GetOperationStatusDetailsOk returns a tuple with the OperationStatusDetails field value
+// and a boolean to check if the value has been set.
+// NOTE: If the value is an explicit nil, `nil, true` will be returned
+func (o *Rack) GetOperationStatusDetailsOk() (*RackOperationStatusDetails, bool) {
+	if o == nil {
+		return nil, false
+	}
+	return o.OperationStatusDetails.Get(), o.OperationStatusDetails.IsSet()
+}
+
+// SetOperationStatusDetails sets field value
+func (o *Rack) SetOperationStatusDetails(v RackOperationStatusDetails) {
+	o.OperationStatusDetails.Set(&v)
+}
+
 // GetNvLinkDomainIds returns the NvLinkDomainIds field value
 func (o *Rack) GetNvLinkDomainIds() []string {
 	if o == nil {
@@ -455,6 +484,7 @@ func (o Rack) ToMap() (map[string]interface{}, error) {
 		toSerialize["description"] = o.Description
 	}
 	toSerialize["operationStatus"] = o.OperationStatus
+	toSerialize["operationStatusDetails"] = o.OperationStatusDetails.Get()
 	toSerialize["nvLinkDomainIds"] = o.NvLinkDomainIds
 	if !IsNil(o.Location) {
 		toSerialize["location"] = o.Location
@@ -473,6 +503,7 @@ func (o *Rack) UnmarshalJSON(data []byte) (err error) {
 	// that every required field exists as a key in the generic map.
 	requiredProperties := []string{
 		"operationStatus",
+		"operationStatusDetails",
 		"nvLinkDomainIds",
 		"taskStats",
 		"health",
@@ -486,8 +517,13 @@ func (o *Rack) UnmarshalJSON(data []byte) (err error) {
 		return err
 	}
 
+	nullableRequiredProperties := map[string]struct{}{
+		"health":                 {},
+		"operationStatusDetails": {},
+	}
 	for _, requiredProperty := range requiredProperties {
-		if value, exists := allProperties[requiredProperty]; !exists || value == nil {
+		_, nullable := nullableRequiredProperties[requiredProperty]
+		if value, exists := allProperties[requiredProperty]; !exists || (value == nil && !nullable) {
 			return fmt.Errorf("no value given for required property %v", requiredProperty)
 		}
 	}

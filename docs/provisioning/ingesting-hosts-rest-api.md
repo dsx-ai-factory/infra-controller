@@ -102,6 +102,8 @@ During DPU matching, every nonempty serial in `fallbackDPUSerialNumbers` must be
 
 `hostLifecycleProfile` is also JSON-only. Set `disableLockdown` to `true` only when the host must remain unlocked during lifecycle management. When the profile is omitted or `disableLockdown` is `false`, NICo applies UEFI lockdown during `HostInit`.
 
+Set `retainHbnConfigOnBoot` to `true` to designate the machine to retain its HBN config on boot. This requires the machine to declare a DpuBmc and a DpuOs interface, and enforces a Fixed or Retained IpAllocation configuration for its HostBmc and both DPU management addresses. Declaring the DPU interfaces is required because an undeclared one gets a DHCP address. A machine whose dpuPolicy attaches no DPU declares neither. This allows the machine to boot while NICO's DHCP and gRPC services are unavailable.
+
 ### Batch (Recommended for Full-Rack Onboarding)
 
 For multiple machines, prefer `batch-create`. The endpoint accepts up to 100 Expected Machines per request and validates the whole batch atomically:

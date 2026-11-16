@@ -40,6 +40,7 @@ pub mod health_report;
 pub mod io;
 pub mod metrics;
 pub mod per_object;
+pub mod platform_config;
 pub mod redfish;
 pub(crate) mod rpc;
 pub(crate) mod scout_firmware_scripts;

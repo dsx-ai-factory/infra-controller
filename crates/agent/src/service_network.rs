@@ -52,7 +52,9 @@ pub(super) fn validate_and_build_ports(
     let inventory = match config.service_vpc_slot_inventory.as_ref() {
         Some(inventory) => inventory,
         None if config.service_interfaces.is_empty() => return Ok(Vec::new()),
-        None => eyre::bail!("service interfaces require a fixed-slot inventory"),
+        None => {
+            eyre::bail!("service interfaces require a fixed-slot inventory");
+        }
     };
 
     // Validate configured topology even when no endpoint currently occupies a slot.
@@ -127,28 +129,34 @@ pub(super) fn validate_and_build_ports(
         })?;
 
         match slot_vpcs.get(&interface.slot_index) {
-            Some(existing) if *existing != vpc_id => eyre::bail!(
-                "service slot {} is bound to both VPC {existing} and VPC {vpc_id}",
-                interface.slot_index
-            ),
+            Some(existing) if *existing != vpc_id => {
+                eyre::bail!(
+                    "service slot {} is bound to both VPC {existing} and VPC {vpc_id}",
+                    interface.slot_index
+                );
+            }
             _ => {
                 slot_vpcs.insert(interface.slot_index, vpc_id);
             }
         }
         match vpc_slots.get(&vpc_id) {
-            Some(existing) if *existing != interface.slot_index => eyre::bail!(
-                "service VPC {vpc_id} is bound to both slot {existing} and slot {}",
-                interface.slot_index
-            ),
+            Some(existing) if *existing != interface.slot_index => {
+                eyre::bail!(
+                    "service VPC {vpc_id} is bound to both slot {existing} and slot {}",
+                    interface.slot_index
+                );
+            }
             _ => {
                 vpc_slots.insert(vpc_id, interface.slot_index);
             }
         }
         match vni_vpcs.get(&interface.vpc_vni) {
-            Some(existing) if *existing != vpc_id => eyre::bail!(
-                "service VNI {} is associated with both VPC {existing} and VPC {vpc_id}",
-                interface.vpc_vni
-            ),
+            Some(existing) if *existing != vpc_id => {
+                eyre::bail!(
+                    "service VNI {} is associated with both VPC {existing} and VPC {vpc_id}",
+                    interface.vpc_vni
+                );
+            }
             _ => {
                 vni_vpcs.insert(interface.vpc_vni, vpc_id);
             }
@@ -590,13 +598,37 @@ fn validate_routing_profile(profile: &rpc::RoutingProfile) -> eyre::Result<()> {
 }
 
 /// Sorts routing collections whose order does not affect the generated NVUE policy.
-fn normalize_routing_profile(profile: &mut rpc::RoutingProfile) {
+/// Keeps HBN fingerprints and shared host/service VPC comparisons consistent.
+pub(super) fn normalize_routing_profile(profile: &mut rpc::RoutingProfile) {
     profile
         .route_target_imports
         .sort_by_key(|target| (target.asn, target.vni, target.vni_self));
     profile
         .route_targets_on_exports
         .sort_by_key(|target| (target.asn, target.vni, target.vni_self));
+    // Cumulative rules have no precedence, including the targets inside each rule.
+    for entry in &mut profile.route_targets_on_exports_by_prefix {
+        entry
+            .route_targets
+            .sort_by_key(|target| (target.asn, target.vni, target.vni_self));
+    }
+    profile
+        .route_targets_on_exports_by_prefix
+        .sort_by(|left, right| {
+            (&left.prefix, left.match_type, left.max_prefix_length)
+                .cmp(&(&right.prefix, right.match_type, right.max_prefix_length))
+                .then_with(|| {
+                    left.route_targets
+                        .iter()
+                        .map(|target| (target.asn, target.vni, target.vni_self))
+                        .cmp(
+                            right
+                                .route_targets
+                                .iter()
+                                .map(|target| (target.asn, target.vni, target.vni_self)),
+                        )
+                })
+        });
     profile
         .accepted_leaks_from_underlay
         .sort_by(|left, right| left.prefix.cmp(&right.prefix));

@@ -53,12 +53,26 @@ type Settings struct {
 	Store store.Config `yaml:"store"`
 }
 
-// ParseSettings reads the config's settings mapping with the defaults filled in. An unknown key or a wrong type is
-// refused, in fixed text that never repeats the YAML. So is a float anywhere, which yaml.v3 would truncate into an
-// integer: quote a text value that looks like one.
+// ParseSettings reads the config's settings mapping with the defaults filled in.
 func ParseSettings(n yaml.Node) (Settings, error) {
+	s := DefaultSettings()
+	if err := DecodeSettings(n, &s); err != nil {
+		return Settings{}, err
+	}
+	return s, nil
+}
+
+// DefaultSettings are fleet-up's settings when the config sets none.
+func DefaultSettings() Settings {
 	s := Settings{CheckStore: true}
 	s.Mat.Selector, s.Mat.ControlPort = "app.kubernetes.io/component=machine-a-tron", 1266
+	return s
+}
+
+// DecodeSettings reads n into v over its defaults. An unknown key or a wrong type is refused, in fixed text that never
+// repeats the YAML. So is a float anywhere, which yaml.v3 would truncate into an integer: quote a text value that looks
+// like one.
+func DecodeSettings(n yaml.Node, v any) error {
 	var float func(*yaml.Node) bool
 	float = func(n *yaml.Node) bool { return n.ShortTag() == "!!float" || slices.ContainsFunc(n.Content, float) }
 	raw, err := yaml.Marshal(&n)
@@ -68,12 +82,18 @@ func ParseSettings(n yaml.Node) (Settings, error) {
 	if err == nil {
 		dec := yaml.NewDecoder(bytes.NewReader(raw))
 		dec.KnownFields(true)
-		err = dec.Decode(&s)
+		err = dec.Decode(v)
 	}
 	if err != nil {
-		return Settings{}, &config.Error{Field: "settings", Reason: "unknown key, wrong value type or bad YAML"}
+		return &config.Error{Field: "settings", Reason: "unknown key, wrong value type or bad YAML"}
 	}
-	return s, nil
+	return nil
+}
+
+// Nico is the nico-api client settings: the mounted certificate, its SPIFFE rules and the server name.
+func (s Settings) Nico() forge.Settings {
+	n := s.NicoAPI
+	return forge.Settings{CertDir: cmp.Or(n.CertDir, forge.DefaultCertDir), Spiffe: n.Spiffe, ServerName: n.ServerName}
 }
 
 // Production wires the live site: the probe, the MAT pods and Services through kube, the MAT records over HTTPS,
@@ -83,8 +103,7 @@ func Production(cfg *config.Config, s Settings, kube *cluster.Kube) (readiness.D
 	if err != nil {
 		return readiness.Deps{}, err
 	}
-	n := s.NicoAPI
-	nico := forge.Settings{CertDir: cmp.Or(n.CertDir, forge.DefaultCertDir), Spiffe: n.Spiffe, ServerName: n.ServerName}
+	nico := s.Nico()
 	d := readiness.Deps{Probe: p, Pods: kube, Records: inventory.NewHTTPReader(), Services: kube,
 		Identity: func() (string, error) {
 			crt := filepath.Join(nico.CertDir, "tls.crt")

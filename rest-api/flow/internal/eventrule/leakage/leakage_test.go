@@ -35,6 +35,7 @@ func TestDefaultRuleValidates(t *testing.T) {
 	operation, ok := spec.Operation.(*operations.PowerControlTaskInfo)
 	require.True(t, ok)
 	assert.Equal(t, operations.PowerOperationForcePowerOff, operation.Operation)
+	assert.True(t, operation.OverrideReadinessCheck)
 	assert.Equal(t, eventrule.TargetStrategyAffectedComponents, spec.TargetStrategy)
 }
 

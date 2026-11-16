@@ -500,6 +500,9 @@ async fn spdm_job_creation_is_atomic_with_polling_state(pool: PgPool) -> eyre::R
     .execute(&pool)
     .await?;
 
+    let metrics = carbide_instrument::testing::MetricsCapture::for_registry(
+        env.test_harness.test_meter.registry(),
+    );
     env.run_single_iteration().await;
     let attempted_writes: i64 =
         sqlx::query_scalar("SELECT COALESCE(pg_sequence_last_value('spdm_poll_state_writes'), 0)")
@@ -508,6 +511,14 @@ async fn spdm_job_creation_is_atomic_with_polling_state(pool: PgPool) -> eyre::R
     assert_eq!(
         attempted_writes, 1,
         "the polling-state write must be attempted"
+    );
+    assert_eq!(
+        metrics.counter_delta(
+            "carbide_attestation_scheduling_total",
+            &[("outcome", "scheduled"), ("profile_source", "class")],
+        ),
+        1.0,
+        "scheduling attempts are counted even when their state transition rolls back",
     );
 
     // Reload both sides of the transaction: neither the transition nor job rows survive.
@@ -533,6 +544,13 @@ async fn spdm_job_creation_is_atomic_with_polling_state(pool: PgPool) -> eyre::R
         .execute(&pool)
         .await?;
     env.run_single_iteration().await;
+    assert_eq!(
+        metrics.counter_delta(
+            "carbide_attestation_scheduling_total",
+            &[("outcome", "scheduled"), ("profile_source", "class")],
+        ),
+        2.0,
+    );
     let mut txn = env.test_harness.db_txn().await;
     let machine = mh.host.db_machine(&mut txn).await;
     let ManagedHostState::HostInit {

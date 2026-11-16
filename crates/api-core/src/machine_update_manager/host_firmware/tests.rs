@@ -25,7 +25,10 @@ use super::*;
 
 type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
 
-fn updater(version: &str) -> Result<HostFirmwareUpdate, Box<dyn std::error::Error>> {
+fn updater(
+    version: &str,
+    test_meter: &carbide_utils::test_support::test_meter::TestMeter,
+) -> Result<HostFirmwareUpdate, Box<dyn std::error::Error>> {
     let config: Arc<CarbideConfig> = Arc::new(
         Figment::new()
             .merge(Toml::file(concat!(
@@ -57,8 +60,9 @@ fn updater(version: &str) -> Result<HostFirmwareUpdate, Box<dyn std::error::Erro
     );
     Ok(HostFirmwareUpdate::new(
         config,
-        opentelemetry::global::meter("host-firmware-fence-test"),
+        test_meter.meter(),
         firmware_config,
+        carbide_instrument::Instrumentation::new(test_meter.meter()),
     )
     .expect("host update module is enabled"))
 }
@@ -199,6 +203,7 @@ fn assert_commit_failure(error: crate::CarbideError) {
 async fn automatic_admission_preserves_a_concurrent_request_and_fills_capacity(
     pool: sqlx::PgPool,
 ) -> TestResult {
+    let test_meter = carbide_utils::test_support::test_meter::TestMeter::default();
     let occupied = outdated_host(&pool, 1, ManagedHostState::Ready).await?;
     let candidate = outdated_host(
         &pool,
@@ -208,12 +213,18 @@ async fn automatic_admission_preserves_a_concurrent_request_and_fills_capacity(
         },
     )
     .await?;
-    let mut updater = updater("2.0")?;
+    let mut updater = updater("2.0", &test_meter)?;
     Arc::make_mut(&mut updater.config)
         .firmware_global
         .instance_updates_manual_tagging = false;
     let mut tasks = JoinSet::new();
-    let locks = db::work_lock_manager::start(&mut tasks, pool.clone(), Default::default()).await?;
+    let locks = db::work_lock_manager::start(
+        &mut tasks,
+        pool.clone(),
+        Default::default(),
+        carbide_instrument::Instrumentation::global(),
+    )
+    .await?;
     let work_lock = locks.try_acquire_lock("host-request-race".into()).await?;
     let updating = HashSet::new();
     let snapshots = HashMap::new();
@@ -357,6 +368,7 @@ async fn automatic_admission_preserves_a_concurrent_request_and_fills_capacity(
 /// Skips leave capacity for one later host, and excess candidates stay unadmitted.
 #[crate::sqlx_test]
 async fn skipped_candidates_leave_capacity_for_later_hosts(pool: sqlx::PgPool) -> TestResult {
+    let test_meter = carbide_utils::test_support::test_meter::TestMeter::default();
     let skipped = outdated_host(&pool, 3, ManagedHostState::Ready).await?;
     let mut candidates = Vec::new();
     for index in [4, 8] {
@@ -373,12 +385,18 @@ async fn skipped_candidates_leave_capacity_for_later_hosts(pool: sqlx::PgPool) -
     }
     let candidate_ids: HashSet<_> = candidates.iter().copied().collect();
     let mut tasks = JoinSet::new();
-    let locks = db::work_lock_manager::start(&mut tasks, pool.clone(), Default::default()).await?;
+    let locks = db::work_lock_manager::start(
+        &mut tasks,
+        pool.clone(),
+        Default::default(),
+        carbide_instrument::Instrumentation::global(),
+    )
+    .await?;
     let work_lock = locks
         .try_acquire_lock("host-candidate-skips".into())
         .await?;
     let snapshots = HashMap::new();
-    let mut updater = updater("2.0")?;
+    let mut updater = updater("2.0", &test_meter)?;
     Arc::make_mut(&mut updater.config)
         .firmware_global
         .instance_updates_manual_tagging = false;
@@ -521,8 +539,16 @@ async fn completion_markers(
 /// Completion events follow the manager's shared commit and stay absent on rollback.
 #[crate::sqlx_test]
 async fn completed_events_follow_the_manager_cleanup_commit(pool: sqlx::PgPool) -> TestResult {
+    let test_meter = carbide_utils::test_support::test_meter::TestMeter::default();
+    let metrics = carbide_instrument::testing::MetricsCapture::for_registry(test_meter.registry());
+    let completed_count = || {
+        metrics.counter_delta(
+            "carbide_firmware_updates_total",
+            &[("target", "host"), ("phase", "completed")],
+        )
+    };
     let host_id = outdated_host(&pool, 5, ManagedHostState::Ready).await?;
-    let updater = updater("2.0")?;
+    let updater = updater("2.0", &test_meter)?;
     let mut config = (*updater.config).clone();
     // Keep the completion proof independent of new admission after cleanup.
     config
@@ -543,7 +569,13 @@ async fn completed_events_follow_the_manager_cleanup_commit(pool: sqlx::PgPool) 
     db::machine::update_update_complete(&host_id, false, &mut txn).await?;
     txn.commit().await?;
     let mut tasks = JoinSet::new();
-    let locks = db::work_lock_manager::start(&mut tasks, pool.clone(), Default::default()).await?;
+    let locks = db::work_lock_manager::start(
+        &mut tasks,
+        pool.clone(),
+        Default::default(),
+        carbide_instrument::Instrumentation::global(),
+    )
+    .await?;
     let manager = MachineUpdateManager::new_with_modules(
         pool.clone(),
         Arc::new(config),
@@ -554,6 +586,7 @@ async fn completed_events_follow_the_manager_cleanup_commit(pool: sqlx::PgPool) 
             }),
         ],
         locks.clone(),
+        carbide_instrument::Instrumentation::new(test_meter.meter()),
     );
     // Host cleanup succeeds before the later module fails. Both writes and
     // the completion event must wait for the manager's shared commit.
@@ -562,6 +595,7 @@ async fn completed_events_follow_the_manager_cleanup_commit(pool: sqlx::PgPool) 
     assert!(error.to_string().contains("injected cleanup failure"));
     assert_eq!(completion_markers(&pool, host_id).await?, (false, true));
     assert_eq!(host_progress_count(&logs, "completed", host_id), 0);
+    assert_eq!(completed_count(), 0.0);
 
     // Every module can now succeed, but the deferred key rejects only COMMIT
     // after host cleanup removes the report and sets completion to true.
@@ -578,6 +612,7 @@ async fn completed_events_follow_the_manager_cleanup_commit(pool: sqlx::PgPool) 
     assert_commit_failure(result.expect_err("cleanup writes must fail at commit"));
     assert_eq!(completion_markers(&pool, host_id).await?, (false, true));
     assert_eq!(host_progress_count(&logs, "completed", host_id), 0);
+    assert_eq!(completed_count(), 0.0);
 
     sqlx::query("INSERT INTO allowed_host_update_completion VALUES (true)")
         .execute(&pool)
@@ -587,12 +622,14 @@ async fn completed_events_follow_the_manager_cleanup_commit(pool: sqlx::PgPool) 
     result?;
     assert_eq!(completion_markers(&pool, host_id).await?, (true, false));
     assert_eq!(host_progress_count(&logs, "completed", host_id), 1);
+    assert_eq!(completed_count(), 1.0);
 
     // Committed markers prevent the next pass from reporting completion again.
     let (result, logs) = capture_logs_async(manager.run_single_iteration()).await;
     result?;
     assert_eq!(completion_markers(&pool, host_id).await?, (true, false));
     assert_eq!(host_progress_count(&logs, "completed", host_id), 0);
+    assert_eq!(completed_count(), 1.0);
     drop(manager);
     drop(locks);
     tasks.shutdown().await;
@@ -604,11 +641,12 @@ async fn completed_events_follow_the_manager_cleanup_commit(pool: sqlx::PgPool) 
 async fn nic_work_excludes_host_admission_even_with_spare_capacity(
     pool: sqlx::PgPool,
 ) -> TestResult {
+    let test_meter = carbide_utils::test_support::test_meter::TestMeter::default();
     let operation = model::test_support::nic_firmware::operation();
     let nic_state = ManagedHostState::NicFirmwareUpdating { operation };
     let occupied = outdated_host(&pool, 6, nic_state).await?;
     let candidate = outdated_host(&pool, 7, ManagedHostState::Ready).await?;
-    let mut updater = updater("2.0")?;
+    let mut updater = updater("2.0", &test_meter)?;
     let config = Arc::make_mut(&mut updater.config);
     config.firmware_global.instance_updates_manual_tagging = false;
     config
@@ -619,12 +657,19 @@ async fn nic_work_excludes_host_admission_even_with_spare_capacity(
         .max_concurrent_machine_updates_percent = None;
     let config = updater.config.clone();
     let mut tasks = JoinSet::new();
-    let locks = db::work_lock_manager::start(&mut tasks, pool.clone(), Default::default()).await?;
+    let locks = db::work_lock_manager::start(
+        &mut tasks,
+        pool.clone(),
+        Default::default(),
+        carbide_instrument::Instrumentation::global(),
+    )
+    .await?;
     let manager = MachineUpdateManager::new_with_modules(
         pool.clone(),
         config,
         vec![Box::new(updater), Box::new(NicFirmwareUpdate)],
         locks.clone(),
+        carbide_instrument::Instrumentation::new(test_meter.meter()),
     );
 
     let requested_after = Utc::now();
@@ -714,6 +759,7 @@ fn assert_host_completed(events: &[FirmwareUpdateProgress], host: HostMachineId)
 async fn completion_rechecks_host_request_after_waiting_for_writer(
     pool: sqlx::PgPool,
 ) -> TestResult {
+    let test_meter = carbide_utils::test_support::test_meter::TestMeter::default();
     let host = host_awaiting_cleanup(&pool, 23).await?;
     let unaffected = host_awaiting_cleanup(&pool, 24).await?;
     let (_, _, health_before) = completion_state(&pool, host).await?;
@@ -722,7 +768,7 @@ async fn completion_rechecks_host_request_after_waiting_for_writer(
             .get(HOST_FW_UPDATE_HEALTH_REPORT_SOURCE)
             .is_some()
     );
-    let updater = updater("1.0")?;
+    let updater = updater("1.0", &test_meter)?;
 
     // Keep the real request writer uncommitted so selection sees the old
     // completed candidate and has to wait before deciding it is eligible.
@@ -772,8 +818,9 @@ async fn completion_rechecks_host_request_after_waiting_for_writer(
 /// commits with `update_complete=false`.
 #[crate::sqlx_test]
 async fn completion_holds_host_lock_until_cleanup_commits(pool: sqlx::PgPool) -> TestResult {
+    let test_meter = carbide_utils::test_support::test_meter::TestMeter::default();
     let host = host_awaiting_cleanup(&pool, 23).await?;
-    let updater = updater("1.0")?;
+    let updater = updater("1.0", &test_meter)?;
     let mut cleanup = pool.begin().await?;
     // Select before any cleanup writes so the request writer must wait for
     // the selection lock itself, rather than a later UPDATE's row lock.
@@ -832,8 +879,9 @@ async fn completion_holds_host_lock_until_cleanup_commits(pool: sqlx::PgPool) ->
 /// Completion can commit while an uncommitted console row references its machine.
 #[crate::sqlx_test]
 async fn completion_allows_an_open_machine_foreign_key_check(pool: sqlx::PgPool) -> TestResult {
+    let test_meter = carbide_utils::test_support::test_meter::TestMeter::default();
     let host = host_awaiting_cleanup(&pool, 25).await?;
-    let updater = updater("1.0")?;
+    let updater = updater("1.0", &test_meter)?;
     let mut reference = pool.begin().await?;
     sqlx::query(
         "INSERT INTO machine_console_metadata (machine_id, username, role, password)
@@ -872,13 +920,20 @@ async fn completion_allows_an_open_machine_foreign_key_check(pool: sqlx::PgPool)
 async fn stale_work_lock_cannot_publish_host_firmware(
     pool: sqlx::PgPool,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    let test_meter = carbide_utils::test_support::test_meter::TestMeter::default();
     let mut tasks = JoinSet::new();
-    let locks = db::work_lock_manager::start(&mut tasks, pool.clone(), Default::default()).await?;
+    let locks = db::work_lock_manager::start(
+        &mut tasks,
+        pool.clone(),
+        Default::default(),
+        carbide_instrument::Instrumentation::global(),
+    )
+    .await?;
     let work_key = "host-firmware-admission";
     let work_lock = locks.try_acquire_lock(work_key.into()).await?;
     let updating = HashSet::new();
     let snapshots = HashMap::new();
-    updater("1.0")?
+    updater("1.0", &test_meter)?
         .start_updates(&pool, &work_lock, 1, &updating, &snapshots)
         .await?;
     let before = catalog(&pool).await?;
@@ -891,7 +946,7 @@ async fn stale_work_lock_cannot_publish_host_firmware(
             .execute(&pool)
             .await?;
     assert_eq!(changed.rows_affected(), 1);
-    let fresh_updater = updater("2.0")?;
+    let fresh_updater = updater("2.0", &test_meter)?;
     let error = fresh_updater
         .start_updates(&pool, &work_lock, 1, &updating, &snapshots)
         .await
@@ -917,6 +972,7 @@ async fn stale_work_lock_cannot_publish_host_firmware(
 async fn catalog_retry_keeps_ownership_through_publication_commit(
     pool: sqlx::PgPool,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    let test_meter = carbide_utils::test_support::test_meter::TestMeter::default();
     let writer_pool = PgPoolOptions::new()
         .max_connections(1)
         .after_connect(|connection, _| {
@@ -929,9 +985,15 @@ async fn catalog_retry_keeps_ownership_through_publication_commit(
         })
         .connect_with(pool.connect_options().as_ref().clone())
         .await?;
-    let updater = updater("2.0")?;
+    let updater = updater("2.0", &test_meter)?;
     let mut tasks = JoinSet::new();
-    let locks = db::work_lock_manager::start(&mut tasks, pool.clone(), Default::default()).await?;
+    let locks = db::work_lock_manager::start(
+        &mut tasks,
+        pool.clone(),
+        Default::default(),
+        carbide_instrument::Instrumentation::global(),
+    )
+    .await?;
     let work_key = "host-catalog-publication";
     let work_lock = locks.try_acquire_lock(work_key.into()).await?;
     let updating = HashSet::new();

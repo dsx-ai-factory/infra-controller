@@ -428,6 +428,8 @@ impl DataSink for PrometheusSink {
             CollectorEvent::CollectorRemoved => return self.remove_collector_metrics(context),
             CollectorEvent::Log(_)
             | CollectorEvent::Firmware(_)
+            | CollectorEvent::ResourceStatusObservation(_)
+            | CollectorEvent::ResourceStatus(_)
             | CollectorEvent::HealthReport(_) => {}
         }
 

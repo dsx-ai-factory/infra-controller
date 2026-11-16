@@ -54,18 +54,22 @@ async fn services(env: &ControllerEnv) -> PowerShelfStateHandlerServices {
         None,
         Some(env.pool.clone()),
         None,
+        None,
+        carbide_instrument::Instrumentation::global(),
     )
     .await
     .expect("test component manager should build");
     let component_manager = Some(Arc::new(component_manager));
 
     PowerShelfStateHandlerServices {
+        instrumentation: env.harness.api().instrumentation().clone(),
         db_pool: env.pool.clone(),
         component_manager,
         credential_manager: Arc::new(TestCredentialManager::default()),
         per_object_metrics_registry: env.per_object_metrics_registry.clone(),
         rack_firmware_reprovisioning_enabled: false,
         redfish_client_pool: env.redfish_sim.clone(),
+        bmc_connector: bmc_backend::BmcConnector::Libredfish(env.redfish_sim.clone()),
         bmc_credential_ops: env.redfish_sim.clone(),
         bmc_rotation_gate: carbide_credential_rotation::RotationGate::new_for_family(
             db::credential_rotation::CredentialRotationType::Bmc,

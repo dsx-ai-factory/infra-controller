@@ -31,12 +31,12 @@ use hyper::{Request, Response};
 use hyper_util::rt::{TokioExecutor, TokioIo};
 use prost::Message;
 use rpc::admin_cli::OutputFormat;
+use rpc::carbide_api_client::CarbideApiClient;
+use rpc::carbide_tls_client::{ApiConfig, CarbideClientConfig};
 use rpc::forge::{
     BuildInfo, NamedRoutingProfile, NamedRoutingProfileConfig, NamedRoutingProfileList,
     RoutingProfileNameList, RoutingProfileSearchFilter, RoutingProfilesByNamesRequest,
 };
-use rpc::forge_api_client::ForgeApiClient;
-use rpc::forge_tls_client::{ApiConfig, ForgeClientConfig};
 use tokio::net::TcpListener;
 
 use super::Cmd;
@@ -126,13 +126,13 @@ async fn dispatch_routing_profile_request(
     let command = parse(args).unwrap();
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
-    let client_config = ForgeClientConfig {
+    let client_config = CarbideClientConfig {
         request_timeout: Some(Duration::from_secs(5)),
         ..Default::default()
     };
     let mut captured = CapturedOutput::new();
     let ctx = RuntimeContext {
-        api_client: ApiClient(ForgeApiClient::new(&ApiConfig::new(
+        api_client: ApiClient(CarbideApiClient::new(&ApiConfig::new(
             &format!("http://{address}"),
             &client_config,
         ))),

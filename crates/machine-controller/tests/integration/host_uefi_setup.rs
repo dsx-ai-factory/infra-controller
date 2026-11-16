@@ -19,6 +19,7 @@
 //! version selected before dispatch. Saved jobs use their persisted version;
 //! older jobs without one finish enrollment without claiming a site version.
 
+use carbide_redfish::libredfish::test_support::RedfishSimAction;
 use carbide_secrets::credentials::{CredentialKey, Credentials};
 use carbide_test_harness::prelude::*;
 use carbide_test_harness::test_support::fixture_config::FixtureDefault as _;
@@ -117,6 +118,62 @@ async fn lenovo_uefi_setup_unlocks_supported_bmc_controls(pool: PgPool) {
             applies,
         );
     }
+}
+
+/// A Partial status must trigger unlock/reboot before password setup.
+#[sqlx_test]
+async fn lenovo_ami_platform_setup_unlocks_and_reboots_before_password_setup(pool: PgPool) {
+    let mut env = Env::builder(pool.clone()).build().await;
+    let mh = setup_host_with_vendor(&env, bmc_vendor::BMCVendor::LenovoAMI).await;
+    // Start locked so the final state proves that the unlock call ran.
+    env.redfish_sim
+        .set_lockdown(libredfish::EnabledDisabled::Enabled);
+    mh.advance_state(ManagedHostState::HostInit {
+        machine_state: MachineState::WaitingForPlatformConfiguration { retry_count: 0 },
+    })
+    .await;
+    env.redfish_sim
+        .set_next_lockdown_status(libredfish::Status::build_fake_partial());
+    let checkpoint = env.redfish_sim.timepoint();
+
+    env.run_single_iteration().await;
+    assert_eq!(
+        mh.host.machine().await.current_state(),
+        &ManagedHostState::HostInit {
+            machine_state: MachineState::WaitingForLockdown {
+                lockdown_info: LockdownInfo {
+                    state: LockdownState::SetLockdown,
+                    mode: LockdownMode::Disable,
+                },
+            },
+        }
+    );
+
+    env.run_single_iteration().await;
+    assert_eq!(
+        mh.host.machine().await.current_state(),
+        &ManagedHostState::HostInit {
+            machine_state: MachineState::WaitingForLockdown {
+                lockdown_info: LockdownInfo {
+                    state: LockdownState::TimeWaitForDPUDown,
+                    mode: LockdownMode::Disable,
+                },
+            },
+        }
+    );
+    assert!(
+        env.redfish_sim
+            .lockdown_states()
+            .contains(&libredfish::EnabledDisabled::Disabled)
+    );
+    assert!(
+        env.redfish_sim
+            .actions_since(&checkpoint)
+            .all_hosts()
+            .contains(&RedfishSimAction::Power(
+                libredfish::SystemPowerControl::ForceRestart
+            ))
+    );
 }
 
 /// A client-creation failure while setting the ingestion BIOS password is

@@ -138,4 +138,25 @@ pub trait BmcControl<B: Bmc>: Send + Sync {
     ) -> Result<ManagerSettingsStatus, PlatformError> {
         self.standard().settings_status(cx).await
     }
+
+    /// Whether the host's onboard NICs can reach the management network;
+    /// `None` when the BMC does not report it.
+    async fn host_management_network_access(
+        &self,
+        cx: &OpCx<'_, B>,
+    ) -> Result<Option<bool>, PlatformError> {
+        self.standard().host_management_network_access(cx).await
+    }
+
+    /// Lets the host's onboard NICs reach the management network, or cuts
+    /// them off when DPUs carry the host's traffic instead.
+    async fn set_host_management_network_access(
+        &self,
+        cx: &OpCx<'_, B>,
+        enabled: bool,
+    ) -> Result<DriverOutcome, PlatformError> {
+        self.standard()
+            .set_host_management_network_access(cx, enabled)
+            .await
+    }
 }

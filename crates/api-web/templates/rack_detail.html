@@ -1,86 +1,121 @@
-{% extends "base.html" %}
+{% extends "detail_base.html" %}
+{% import "detail_ui.html" as ui %}
 
 {% block title %}Rack {{ id }}{% endblock %}
+{% block entity_label %}Rack{% endblock %}
+{% block entity_id %}{{ id }}{% endblock %}
 
-{% block content %}
-<div id="json">
-	<a id="json-link" href="">JSON</a>
+{% block detail_content %}
+<div class="tab-nav">
+	<button class="tab-button active" data-tab="overview">Overview</button>
+	<button class="tab-button" data-tab="health">Health</button>
+	<button class="tab-button" data-tab="components">Components</button>
+	<button class="tab-button" data-tab="history">History</button>
+	<div class="tab-indicator"></div>
 </div>
-<h1>Rack {{ id }}</h1>
 
-<h2>Info</h2>
-<table class="detailsview">
-	<tr>
-		<th>ID</th>
-		<td>{{ id }}</td>
-	</tr>
-	<tr>
-		<th>Version</th>
-		<td>{{ version }}</td>
-	</tr>
-</table>
+<!-- Overview Tab -->
+<div class="tab-content active" id="tab-overview">
+	<section class="entity-summary">
+		<div class="entity-summary-status">
+			{% call ui::state_stat(lifecycle_detail) %}{% endcall %}
+			{% call ui::health_stat(health_detail) %}{% endcall %}
+		</div>
+		<div class="entity-summary-groups">
+			<div class="entity-summary-group">
+				<h4>Components</h4>
+				<dl>
+					<dt>Compute Trays</dt>
+					<dd><a href="#rack_components">{{ associated_machines.len() }}</a></dd>
+					<dt>Switches</dt>
+					<dd><a href="#rack_components">{{ associated_switches.len() }}</a></dd>
+					<dt>Power Shelves</dt>
+					<dd><a href="#rack_components">{{ associated_power_shelves.len() }}</a></dd>
+				</dl>
+			</div>
+			<div class="entity-summary-group">
+				<h4>Rack</h4>
+				<dl>
+					<dt>Version</dt>
+					<dd>{{ version }}</dd>
+				</dl>
+			</div>
+		</div>
+	</section>
 
-{{ lifecycle_detail|safe }}
+	{{ lifecycle_detail|safe }}
 
-<h2>Metadata</h2>
-{{ metadata_detail|safe }}
+	<h2>Metadata</h2>
+	{{ metadata_detail|safe }}
+</div>
 
-{{ health_detail|safe }}
+<!-- Health Tab -->
+<div class="tab-content" id="tab-health">
+	{% call ui::health_tab(health_panel) %}{% endcall %}
+</div>
 
-<h2>Managed Rack Components</h2>
+<!-- Components Tab -->
+<div class="tab-content" id="tab-components">
+	<h2 id="rack_components">Compute Trays</h2>
+	<section class="entity-summary">
+		{% if associated_machines.is_empty() %}
+		<p class="entity-summary-empty">No compute trays.</p>
+		{% else %}
+		<div class="data-table-scroll">
+		<table class="data-table">
+			<thead><tr><th>Machine</th></tr></thead>
+			<tbody>
+			{% for machine_id in associated_machines %}
+				<tr><td>{{ machine_id|machine_id_link|safe }}</td></tr>
+			{% endfor %}
+			</tbody>
+		</table>
+		</div>
+		{% endif %}
+	</section>
 
-<h3>Compute Trays (Host machines)</h3>
-<table class="detailsview">
-	<thead>
-		<tr>
-			<th>ID</th>
-		</tr>
-	</thead>
-	<tbody>
-	{% for machine_id in associated_machines %}
-		<tr>
-			<td>{{ machine_id|machine_id_link|safe }}</td>
-		</tr>
-	{% endfor %}
-	</tbody>
-</table>
+	<h2>Switches</h2>
+	<section class="entity-summary">
+		{% if associated_switches.is_empty() %}
+		<p class="entity-summary-empty">No switches.</p>
+		{% else %}
+		<div class="data-table-scroll">
+		<table class="data-table">
+			<thead><tr><th>Switch</th><th>Role</th></tr></thead>
+			<tbody>
+			{% for switch in associated_switches %}
+				<tr>
+					<td>{{ switch.id|switch_id_link|safe }}</td>
+					<td>{% if switch.is_primary %}<span class="bubble success">Primary</span>{% else %}<span class="text-muted">—</span>{% endif %}</td>
+				</tr>
+			{% endfor %}
+			</tbody>
+		</table>
+		</div>
+		{% endif %}
+	</section>
 
-<h3>Switches</h3>
-<table class="detailsview">
-	<thead>
-		<tr>
-			<th>ID</th>
-			<th>Primary</th>
-		</tr>
-	</thead>
-	<tbody>
-	{% for switch in associated_switches %}
-		<tr>
-			<td>{{ switch.id|switch_id_link|safe }}</td>
-			<td>{% if switch.is_primary %}Primary{% endif %}</td>
-		</tr>
-	{% endfor %}
-	</tbody>
-</table>
+	<h2>Power Shelves</h2>
+	<section class="entity-summary">
+		{% if associated_power_shelves.is_empty() %}
+		<p class="entity-summary-empty">No power shelves.</p>
+		{% else %}
+		<div class="data-table-scroll">
+		<table class="data-table">
+			<thead><tr><th>Power Shelf</th></tr></thead>
+			<tbody>
+			{% for ps_id in associated_power_shelves %}
+				<tr><td>{{ ps_id|power_shelf_id_link|safe }}</td></tr>
+			{% endfor %}
+			</tbody>
+		</table>
+		</div>
+		{% endif %}
+	</section>
+</div>
 
-<h3>Power Shelves</h3>
-<table class="detailsview">
-	<thead>
-		<tr>
-			<th>ID</th>
-		</tr>
-	</thead>
-	<tbody>
-	{% for ps_id in associated_power_shelves %}
-		<tr>
-			<td>{{ ps_id|power_shelf_id_link|safe }}</td>
-		</tr>
-	{% endfor %}
-	</tbody>
-</table>
-
-<h2>History</h2>
-<a href="/admin/rack/{{ id }}/state-history">Open State History on separate page</a>
-{{ history|safe }}
-
+<!-- History Tab -->
+<div class="tab-content" id="tab-history">
+	{% call ui::state_history(history, format!("/admin/rack/{}/state-history", self.id)) %}{% endcall %}
+</div>
 {% endblock %}

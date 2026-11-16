@@ -426,7 +426,8 @@ pub(crate) struct RedirectConfig {
 /// OpenTelemetry trace export settings for proxied BMC requests.
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 pub(crate) struct TracingConfig {
-    /// Whether to record and export OTLP spans. Default: false.
+    /// Whether to record and export OTLP spans for sampled caller traces.
+    /// Requests without valid inbound trace context remain unsampled. Default: false.
     #[serde(default)]
     pub(crate) enabled: bool,
     /// Collector endpoint for OTLP/gRPC traces. Overridden by the standard

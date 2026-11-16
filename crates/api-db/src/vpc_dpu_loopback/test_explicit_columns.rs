@@ -136,8 +136,14 @@ async fn exercise_loopback_queries(
             .bind(ConfigVersion::initial())
             .execute(&mut *txn)
             .await?;
-        let loopback_ip =
-            get_or_allocate_loopback_ip_for_vpc(&common_pools, &mut txn, &dpu_id, &vpc_id).await?;
+        let loopback_ip = get_or_allocate_loopback_ip_for_vpc(
+            &common_pools,
+            &mut txn,
+            &dpu_id,
+            &vpc_id,
+            &carbide_instrument::Instrumentation::global(),
+        )
+        .await?;
         loopbacks.push(VpcDpuLoopback::new(dpu_id, vpc_id, loopback_ip));
     }
     sqlx::query(

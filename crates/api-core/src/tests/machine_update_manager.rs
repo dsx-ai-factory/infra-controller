@@ -31,6 +31,7 @@ use model::machine_update_module::{
     AutomaticFirmwareUpdateReference, DpuReprovisionInitiator, HOST_UPDATE_HEALTH_REPORT_SOURCE,
 };
 use sqlx::PgConnection;
+use tokio::sync::Notify;
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 
@@ -49,8 +50,11 @@ struct TestUpdateModule {
     pub(in crate::tests) updates_in_progress: Vec<HostMachineId>,
     pub(in crate::tests) updates_started: HashSet<HostMachineId>,
     start_update_budgets: Arc<Mutex<Vec<i32>>>,
+    start_updates_notified: Arc<Notify>,
     clear_completed_updates_called: Arc<Mutex<i32>>,
     cleanup_marker: Option<HostMachineId>,
+    fail_metrics: bool,
+    pause_metrics: bool,
 }
 
 #[async_trait]
@@ -74,6 +78,7 @@ impl MachineUpdateModule for TestUpdateModule {
             .lock()
             .unwrap()
             .push(available_updates);
+        self.start_updates_notified.notify_one();
         Ok(self.updates_started.clone())
     }
 
@@ -101,6 +106,13 @@ impl MachineUpdateModule for TestUpdateModule {
         _pool: &sqlx::Pool<sqlx::Postgres>,
         _snapshots: &HashMap<HostMachineId, ManagedHostStateSnapshot>,
     ) -> CarbideResult<()> {
+        if self.fail_metrics {
+            return Err(CarbideError::internal("injected module failure".into()));
+        }
+        if self.pause_metrics {
+            self.start_updates_notified.notify_one();
+            std::future::pending::<()>().await;
+        }
         Ok(())
     }
 }
@@ -114,8 +126,11 @@ impl TestUpdateModule {
             updates_in_progress,
             updates_started,
             start_update_budgets: Arc::new(Mutex::new(Vec::new())),
+            start_updates_notified: Arc::new(Notify::new()),
             clear_completed_updates_called: Arc::new(Mutex::new(0)),
             cleanup_marker: None,
+            fail_metrics: false,
+            pause_metrics: false,
         }
     }
     pub(in crate::tests) fn get_start_updates_called(&self) -> usize {
@@ -124,6 +139,28 @@ impl TestUpdateModule {
 
     pub(in crate::tests) fn get_clear_completed_updates_called(&self) -> i32 {
         *self.clear_completed_updates_called.lock().unwrap()
+    }
+
+    async fn wait_for_start_updates(&self, minimum_calls: usize) -> usize {
+        tokio::time::timeout(Duration::from_secs(30), async {
+            loop {
+                let calls = self.get_start_updates_called();
+                if calls >= minimum_calls {
+                    return calls;
+                }
+
+                // `notify_one` retains a permit if an iteration runs between
+                // the count check and this wait. The count handles coalescing.
+                self.start_updates_notified.notified().await;
+            }
+        })
+        .await
+        .unwrap_or_else(|_| {
+            panic!(
+                "expected at least {minimum_calls} update iterations, observed {}",
+                self.get_start_updates_called()
+            )
+        })
     }
 }
 
@@ -171,6 +208,7 @@ async fn test_max_outstanding_updates(
             Arc::new(config),
             vec![module1.clone(), module2.clone()],
             env.api.work_lock_manager_handle.clone(),
+            env.api.instrumentation.clone(),
         );
 
         manager.run_single_iteration().await?;
@@ -244,6 +282,7 @@ async fn test_percentage_update_budget_accounts_for_unhealthy_and_updating_hosts
         Arc::new(config),
         vec![module.clone()],
         env.api.work_lock_manager_handle.clone(),
+        env.api.instrumentation.clone(),
     );
 
     manager.run_single_iteration().await?;
@@ -316,10 +355,14 @@ fn test_start(pool: sqlx::PgPool) {
     let test_module = Box::new(TestUpdateModule::new(vec![], HashSet::default()));
     let mut join_set = JoinSet::new();
     let cancel_token = CancellationToken::new();
-    let work_lock_manager_handle =
-        db::work_lock_manager::start(&mut join_set, pool.clone(), Default::default())
-            .await
-            .unwrap();
+    let work_lock_manager_handle = db::work_lock_manager::start(
+        &mut join_set,
+        pool.clone(),
+        Default::default(),
+        carbide_instrument::Instrumentation::global(),
+    )
+    .await
+    .unwrap();
 
     let mut config: Arc<CarbideConfig> = Arc::new(
         Figment::new()
@@ -331,38 +374,31 @@ fn test_start(pool: sqlx::PgPool) {
     Arc::get_mut(&mut config)
         .unwrap()
         .machine_update_run_interval = Some(1);
+    let instrumentation_meter = carbide_utils::test_support::test_meter::TestMeter::default();
     let update_manager = MachineUpdateManager::new_with_modules(
         pool,
         config,
         vec![test_module.clone()],
         work_lock_manager_handle,
+        carbide_instrument::Instrumentation::new(instrumentation_meter.meter()),
     );
 
     update_manager
         .start(&mut join_set, cancel_token.clone())
         .expect("Start failed");
 
-    tokio::time::sleep(Duration::from_secs(4)).await;
-
-    let start_count = test_module.get_start_updates_called();
-
-    tokio::time::sleep(Duration::from_secs(4)).await;
-
-    let end_count = test_module.get_start_updates_called();
-
-    assert_ne!(start_count, end_count);
+    let start_count = test_module.wait_for_start_updates(1).await;
+    let end_count = test_module.wait_for_start_updates(start_count + 1).await;
+    assert!(end_count > start_count);
 
     cancel_token.cancel();
 
-    join_set.join_all().await;
-
-    let start_count = test_module.get_start_updates_called();
-
-    tokio::time::sleep(Duration::from_secs(4)).await;
-
-    let end_count = test_module.get_start_updates_called();
-
-    assert_eq!(start_count, end_count);
+    // Joining both tasks proves the manager and its work-lock service have
+    // stopped; neither can start another iteration after the join.
+    let completed_tasks = tokio::time::timeout(Duration::from_secs(30), join_set.join_all())
+        .await
+        .expect("machine update tasks did not stop after cancellation");
+    assert_eq!(completed_tasks.len(), 2);
 }
 
 /// A lock acquisition that fails for infrastructure reasons (here: the work
@@ -373,10 +409,14 @@ fn test_start(pool: sqlx::PgPool) {
 fn test_run_single_iteration_propagates_lock_infrastructure_failure(pool: sqlx::PgPool) {
     let test_module = Box::new(TestUpdateModule::new(vec![], HashSet::default()));
     let mut join_set = JoinSet::new();
-    let work_lock_manager_handle =
-        db::work_lock_manager::start(&mut join_set, pool.clone(), Default::default())
-            .await
-            .unwrap();
+    let work_lock_manager_handle = db::work_lock_manager::start(
+        &mut join_set,
+        pool.clone(),
+        Default::default(),
+        carbide_instrument::Instrumentation::global(),
+    )
+    .await
+    .unwrap();
     join_set.shutdown().await;
 
     let config: Arc<CarbideConfig> = Arc::new(
@@ -385,17 +425,24 @@ fn test_run_single_iteration_propagates_lock_infrastructure_failure(pool: sqlx::
             .extract()
             .unwrap(),
     );
+    let instrumentation_meter = carbide_utils::test_support::test_meter::TestMeter::default();
     let update_manager = MachineUpdateManager::new_with_modules(
         pool,
         config,
         vec![test_module],
         work_lock_manager_handle,
+        carbide_instrument::Instrumentation::new(instrumentation_meter.meter()),
     );
 
     let err = update_manager
         .run_single_iteration()
         .await
         .expect_err("a dead work lock manager is an infrastructure failure, not a yield");
+    assert!(
+        instrumentation_meter
+            .formatted_metric("carbide_machine_update_manager_completed_passes_total")
+            .is_none()
+    );
     assert!(
         matches!(err, CarbideError::Internal { .. }),
         "expected CarbideError::Internal, got {err:?}"
@@ -411,10 +458,14 @@ fn test_run_single_iteration_propagates_lock_infrastructure_failure(pool: sqlx::
 #[crate::sqlx_test()]
 fn update_manager_uses_policy_interval(pool: sqlx::PgPool) {
     let mut join_set = JoinSet::new();
-    let work_lock_manager_handle =
-        db::work_lock_manager::start(&mut join_set, pool.clone(), Default::default())
-            .await
-            .unwrap();
+    let work_lock_manager_handle = db::work_lock_manager::start(
+        &mut join_set,
+        pool.clone(),
+        Default::default(),
+        carbide_instrument::Instrumentation::global(),
+    )
+    .await
+    .unwrap();
 
     for configured in [None, Some(0), Some(7)] {
         let mut config = crate::test_support::default_config::get();
@@ -422,12 +473,14 @@ fn update_manager_uses_policy_interval(pool: sqlx::PgPool) {
         let policy = rpc::forge::RuntimeConfig::from(config.clone())
             .machine_update_policy
             .expect("Version reports the update policy");
+        let instrumentation_meter = carbide_utils::test_support::test_meter::TestMeter::default();
         let update_manager = MachineUpdateManager::new(
             pool.clone(),
             Arc::new(config),
             opentelemetry::global::meter("test"),
             work_lock_manager_handle.clone(),
             None,
+            carbide_instrument::Instrumentation::new(instrumentation_meter.meter()),
         );
         assert_eq!(
             update_manager.run_interval(),
@@ -510,6 +563,7 @@ async fn admitted_nic_recovery_shares_the_host_budget(
         meter.meter(),
         env.api.work_lock_manager_handle.clone(),
         None,
+        env.api.instrumentation.clone(),
     );
     manager.run_single_iteration().await?;
 
@@ -576,6 +630,7 @@ async fn admitted_nic_recovery_shares_the_host_budget(
         meter.meter(),
         env.api.work_lock_manager_handle.clone(),
         None,
+        env.api.instrumentation.clone(),
     );
     manager.run_single_iteration().await?;
 
@@ -642,6 +697,7 @@ async fn manager_cleanup_keeps_ownership_until_marker_commit(
         Arc::new(config),
         vec![Box::new(module)],
         env.api.work_lock_manager_handle.clone(),
+        env.api.instrumentation.clone(),
     );
     let mut blocker = env.pool.begin().await?;
     db::machine::lock_by_id_for_update(blocker.as_mut(), &host.id.into()).await?;
@@ -678,4 +734,81 @@ async fn manager_cleanup_keeps_ownership_until_marker_commit(
         .await?;
     assert!(committed);
     Ok(())
+}
+
+#[crate::sqlx_test]
+async fn completed_pass_counter_excludes_skips(pool: sqlx::PgPool) {
+    let env = create_test_env(pool).await;
+    let mut config = (*env.config).clone();
+    config
+        .machine_updater
+        .max_concurrent_machine_updates_absolute = Some(0);
+    for scenario in [
+        "success",
+        "locked",
+        "module error",
+        "SQL error",
+        "cancelled",
+    ] {
+        let meter = carbide_utils::test_support::test_meter::TestMeter::default();
+        let mut module = TestUpdateModule::new(vec![], HashSet::new());
+        module.fail_metrics = scenario == "module error";
+        module.pause_metrics = scenario == "cancelled";
+        let manager = MachineUpdateManager::new_with_modules(
+            env.pool.clone(),
+            Arc::new(config.clone()),
+            vec![Box::new(module.clone())],
+            env.api.work_lock_manager_handle.clone(),
+            carbide_instrument::Instrumentation::new(meter.meter()),
+        );
+        let _lock = if scenario == "locked" {
+            Some(
+                env.api
+                    .work_lock_manager_handle
+                    .try_acquire_lock("MachineUpdateManager::run_single_iteration".into())
+                    .await
+                    .unwrap(),
+            )
+        } else {
+            None
+        };
+        if scenario == "SQL error" {
+            sqlx::query("ALTER TABLE machines RENAME TO hidden_machines")
+                .execute(&env.pool)
+                .await
+                .unwrap();
+        }
+        if scenario == "cancelled" {
+            let mut iteration = Box::pin(manager.run_single_iteration());
+            tokio::select! {
+                result = &mut iteration => panic!("pending pass completed: {result:?}"),
+                _ = module.start_updates_notified.notified() => {}
+            }
+            drop(iteration);
+        } else {
+            let result = manager.run_single_iteration().await;
+            assert_eq!(
+                result.is_ok(),
+                matches!(scenario, "success" | "locked"),
+                "{scenario}"
+            );
+        }
+        if scenario == "SQL error" {
+            sqlx::query("ALTER TABLE hidden_machines RENAME TO machines")
+                .execute(&env.pool)
+                .await
+                .unwrap();
+        }
+        assert_eq!(
+            meter
+                .formatted_metric("carbide_machine_update_manager_completed_passes_total")
+                .as_deref(),
+            if scenario == "success" {
+                Some("1")
+            } else {
+                None
+            },
+            "{scenario}"
+        );
+    }
 }

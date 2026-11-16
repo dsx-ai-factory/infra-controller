@@ -209,7 +209,7 @@ type ApiBatchUpdateExpectedMachinesRequest struct {
 	expectedMachineUpdateRequest *[]ExpectedMachineUpdateRequest
 }
 
-// Array of Expected Machine update requests.  Provide defaultBmcUsername, defaultBmcPassword, or both to update BMC credentials. Each supplied value must be non-empty. Omitted credential fields and JSON null preserve the stored values. Credential removal is not supported. Every item must use the same field set except bmcIpAddress; values may differ between items.
+// Array of Expected Machine update requests.  Provide defaultBmcUsername, defaultBmcPassword, or both to update BMC credentials. Each supplied value must be non-empty. Omitted credential fields and JSON null preserve the stored values. Credential removal is not supported. Every item must use the same field set except bmcIpAddress and replaceDpuLoopbacks; values may differ between items.
 func (r ApiBatchUpdateExpectedMachinesRequest) ExpectedMachineUpdateRequest(expectedMachineUpdateRequest []ExpectedMachineUpdateRequest) ApiBatchUpdateExpectedMachinesRequest {
 	r.expectedMachineUpdateRequest = &expectedMachineUpdateRequest
 	return r
@@ -224,7 +224,7 @@ BatchUpdateExpectedMachines Batch Update Expected Machines
 
 Update multiple Expected Machines in a single request. All machines must belong to the same site.
 
-All items in a batch update must provide the same set of fields, except that `bmcIpAddress` may be omitted or set to `null` to preserve that machine's current BMC IP address.
+All items in a batch update must provide the same set of fields, except that `bmcIpAddress` may be omitted or set to `null` to preserve that machine's current BMC IP address, and `replaceDpuLoopbacks` is independent per machine.
 
 Org must have an Infrastructure Provider entity. User must have authorization role with `PROVIDER_ADMIN` suffix.
 
@@ -1560,6 +1560,8 @@ func (r ApiReplaceAllExpectedMachineRequest) Execute() ([]ExpectedMachine, *http
 ReplaceAllExpectedMachine Replace all Expected Machines
 
 Replace the complete Expected Machine set for one Site. Entries omitted from the request are deleted, and entries in the request are created with new REST IDs. The `expectedMachines` array may be empty to clear the Site's set.
+
+For a BMC MAC retained in the replacement set, stored DPU loopbacks are preserved unless its `interfaces` include a `DpuLoopback` declaration (including one whose omitted role is preserved), or its `replaceDpuLoopbacks` is true. Either case replaces the complete loopback subset. Physical interfaces are always replaced; omitted, null, or empty `interfaces` clears the physical subset.
 
 Every entry must use the top-level `siteId`. BMC MAC addresses and chassis serial numbers must be unique within the replacement set. Referenced SKUs must exist at the Site.
 

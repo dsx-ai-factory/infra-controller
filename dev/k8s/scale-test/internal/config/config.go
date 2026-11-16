@@ -25,14 +25,14 @@ import (
 const (
 	runIDMaxLen           = 40
 	resultMaxBytesMin     = 262_144
-	resultMaxBytesMax     = 1_000_000
-	maxNameBytes          = 253 // a pod name, and the journal claim
+	resultMaxBytesMax     = 16 << 20 // PVC file only; the ConfigMap holds a small status.
+	maxNameBytes          = 253      // a pod name, and the journal claim
 	maxJournalDirBytes    = 512
 	maxProbeTimeoutSecs   = 600
 	maxProbePollSecs      = 3_600
 	maxProbeContactSecs   = 86_400
 	maxWholeRunSecs       = 7 * 86_400
-	defaultResultMaxBytes = 900_000
+	defaultResultMaxBytes = 8 << 20
 )
 
 var (
@@ -250,6 +250,10 @@ func (c *Config) validate(command string) error {
 	rule(t.ReadinessSeconds > 0, "timeouts.readinessSeconds", "must be over 0")
 	rule(t.ReadinessSeconds < t.FinalizeSeconds && t.FinalizeSeconds < t.WholeRunSeconds, "timeouts", "need readinessSeconds < finalizeSeconds < wholeRunSeconds")
 	rule(t.WholeRunSeconds <= maxWholeRunSecs, "timeouts.wholeRunSeconds", fmt.Sprintf("must be at most %d", maxWholeRunSecs))
+	// Ingestion's ten stage summaries, each bounded by the store's 90 s summary timeout, and its end reads all run in
+	// the finalize budget: 10 x 90 s + 60 s fits in 1800 s.
+	rule(command != "ingestion" || t.WholeRunSeconds > 1800, "timeouts.wholeRunSeconds", "must be over 1800 for ingestion")
+	rule(command != "ingestion" || t.FinalizeSeconds >= 1800, "timeouts.finalizeSeconds", "must be at least 1800 for ingestion")
 
 	for i, s := range c.ControlPlane {
 		rule(dnsLabel.MatchString(s.Namespace), fmt.Sprintf("controlPlane[%d].namespace", i), "must be a DNS label")

@@ -22,6 +22,7 @@ const (
 	SitePhoneHomePost      = "post"
 	SitePhoneHomePostAll   = "all"
 	SitePhoneHomeUrl       = "url"
+	SitePhoneHomeTries     = "tries"
 	SiteCloudConfig        = "#cloud-config"
 	SiteCloudConfigArchive = "#cloud-config-archive"
 	autoinstallName        = "autoinstall"
@@ -331,10 +332,13 @@ func insertPhoneHome(documentRoot *yaml.Node, url string) error {
 	}
 
 	phoneHomeValueNode := &yaml.Node{}
-	if err := phoneHomeValueNode.Encode(map[string]string{
-		SitePhoneHomeUrl:  url,
-		SitePhoneHomePost: SitePhoneHomePostAll,
-	}); err != nil {
+	// cloud-init warns when tries is omitted even though it falls back to 10.
+	err := phoneHomeValueNode.Encode(map[string]any{
+		SitePhoneHomeUrl:   url,
+		SitePhoneHomePost:  SitePhoneHomePostAll,
+		SitePhoneHomeTries: 10,
+	})
+	if err != nil {
 		return fmt.Errorf("failed to encode phone-home block: %w", err)
 	}
 

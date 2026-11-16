@@ -146,7 +146,9 @@ func incrementMAC(mac net.HardwareAddr) {
 // MockCoreGrpcService is a mock implementation of Core gRPC protobuf Service
 type MockCoreGrpcServiceClient struct {
 	corev1.ForgeClient
-	BuildCapabilities []corev1.BuildCapability
+	BuildCapabilities                 []corev1.BuildCapability
+	DeleteDpuExtensionServiceFunc     func(context.Context, *corev1.DeleteDpuExtensionServiceRequest) (*corev1.DeleteDpuExtensionServiceResponse, error)
+	FindDpuExtensionServicesByIdsFunc func(context.Context, *corev1.DpuExtensionServicesByIdsRequest) (*corev1.DpuExtensionServiceList, error)
 }
 
 /* Version mock methods */
@@ -1643,6 +1645,9 @@ func (mcgsc *MockCoreGrpcServiceClient) UpdateDpuExtensionService(ctx context.Co
 }
 
 func (mcgsc *MockCoreGrpcServiceClient) DeleteDpuExtensionService(ctx context.Context, in *corev1.DeleteDpuExtensionServiceRequest, opts ...grpc.CallOption) (*corev1.DeleteDpuExtensionServiceResponse, error) {
+	if mcgsc.DeleteDpuExtensionServiceFunc != nil {
+		return mcgsc.DeleteDpuExtensionServiceFunc(ctx, in)
+	}
 	out := new(corev1.DeleteDpuExtensionServiceResponse)
 	return out, nil
 }
@@ -1663,6 +1668,9 @@ func (mcgsc *MockCoreGrpcServiceClient) FindDpuExtensionServiceIds(ctx context.C
 }
 
 func (mcgsc *MockCoreGrpcServiceClient) FindDpuExtensionServicesByIds(ctx context.Context, in *corev1.DpuExtensionServicesByIdsRequest, opts ...grpc.CallOption) (*corev1.DpuExtensionServiceList, error) {
+	if mcgsc.FindDpuExtensionServicesByIdsFunc != nil {
+		return mcgsc.FindDpuExtensionServicesByIdsFunc(ctx, in)
+	}
 	out := &corev1.DpuExtensionServiceList{}
 	if in != nil {
 		for _, id := range in.ServiceIds {
@@ -2282,4 +2290,8 @@ func NewMockFlowGrpcClient() *FlowGrpcClient {
 	return &FlowGrpcClient{
 		grpcServiceClient: &MockFlowGrpcServiceClient{},
 	}
+}
+
+func (mfgsc *MockFlowGrpcServiceClient) FactoryResetSwitches(ctx context.Context, in *flowv1.FactoryResetSwitchesRequest, opts ...grpc.CallOption) (*flowv1.SubmitTaskResponse, error) {
+	return &flowv1.SubmitTaskResponse{TaskIds: []*flowv1.UUID{{Id: uuid.NewString()}}}, nil
 }

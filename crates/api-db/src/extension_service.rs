@@ -746,7 +746,8 @@ pub async fn update_controller_state_outcome(
 /// * `service_type` - Optional filter on the type of the extension service
 /// * `service_name` - Optional filter by case-insensitive exact match on service name
 /// * `tenant_organization_id` - Optional filter by tenant organization ID
-/// * `include_deleted` - Whether soft-deleted services should be included
+/// * `include_deleted` - Whether terminal soft-deleted services should also be included.
+///   In-progress deletion remains visible regardless of this flag.
 /// * `for_update`   - A boolean flag to acquire DB locks for synchronization
 ///
 /// # Returns
@@ -762,7 +763,10 @@ pub async fn find_ids(
     let mut builder = sqlx::QueryBuilder::new("SELECT id FROM extension_services WHERE true");
 
     if !include_deleted {
-        builder.push(" AND deleted IS NULL");
+        // A service is soft-deleted before the controller finishes cleanup.
+        // Keep it in the ID list until cleanup completes, matching snapshots so
+        // inventory does not remove it from REST too early.
+        builder.push(" AND (deleted IS NULL OR controller_state ->> 'state' <> 'deleted')");
     }
 
     if let Some(service_type) = service_type {
@@ -2261,6 +2265,111 @@ mod test_batched_lookups {
             "extension_service version lookup: find_version_info={probed_count} \
              find_version_info_of_known_service={unprobed_count}"
         );
+    }
+
+    /// Inventory enumeration and exact snapshots retain deletion intent until the
+    /// controller confirms finalization, while ordinary active services remain visible.
+    #[crate::sqlx_test]
+    async fn inventory_ids_retain_in_progress_deletion(pool: sqlx::PgPool) {
+        let [(active_id, _), (deleting_id, version)] =
+            seed_services(&pool, 2).await.try_into().unwrap();
+        let mut txn = pool.begin().await.expect("begin inventory lifecycle test");
+        sqlx::query(
+            "UPDATE extension_services SET type = 'dpf_helm_chart', dpu_target = 'all_active',
+             controller_state = '{\"state\":\"creating\"}'::jsonb WHERE id = $1",
+        )
+        .bind(deleting_id)
+        .execute(&mut *txn)
+        .await
+        .expect("prepare DPF registration");
+        let controller_version = find_by_ids(&mut txn, &[deleting_id], false, false)
+            .await
+            .expect("load DPF registration")
+            .pop()
+            .expect("registration exists")
+            .status
+            .controller_state
+            .version;
+        sqlx::query(
+            "UPDATE extension_services SET created = '2026-01-01'::timestamptz WHERE id = $1",
+        )
+        .bind(active_id)
+        .execute(&mut *txn)
+        .await
+        .expect("order active service before DPF registration");
+        request_dpf_helm_chart_deletion(
+            &mut txn,
+            deleting_id,
+            version,
+            &ExtensionServiceLifecycleState::Creating,
+            controller_version,
+        )
+        .await
+        .expect("record deletion intent");
+
+        for finalized in [false, true] {
+            if finalized {
+                let deleting_version = find_by_ids(&mut txn, &[deleting_id], true, false)
+                    .await
+                    .expect("load deleting registration")
+                    .pop()
+                    .expect("registration retained")
+                    .status
+                    .controller_state
+                    .version;
+                assert_eq!(
+                    try_update_controller_state(
+                        &mut txn,
+                        deleting_id,
+                        deleting_version,
+                        deleting_version.increment(),
+                        &ExtensionServiceLifecycleState::Deleted,
+                    )
+                    .await
+                    .expect("finalize DPF deletion"),
+                    ConditionalWrite::Applied(())
+                );
+            }
+            let ids = find_ids(&mut txn, None, None, None, false, false)
+                .await
+                .expect("enumerate inventory");
+            assert_eq!(
+                ids,
+                if finalized {
+                    vec![active_id]
+                } else {
+                    vec![deleting_id, active_id]
+                }
+            );
+            let controller_ids = find_ids(&mut txn, None, None, None, true, false)
+                .await
+                .expect("enumerate controller records including terminal deletion");
+            assert_eq!(controller_ids, vec![deleting_id, active_id]);
+            let snapshots = find_snapshots_by_ids(&mut txn, &[active_id, deleting_id])
+                .await
+                .expect("read exact inventory snapshots");
+            assert_eq!(snapshots.len(), ids.len());
+            assert!(
+                snapshots
+                    .iter()
+                    .all(|snapshot| ids.contains(&snapshot.service_id))
+            );
+
+            // Lifecycle visibility must not bypass type/name/tenant filters.
+            let tenant = TENANT_ORG.parse().expect("tenant organization id");
+            let filtered = find_ids(
+                &mut txn,
+                Some(ExtensionServiceType::DpfHelmChart),
+                Some("SVC-1"),
+                Some(&tenant),
+                false,
+                false,
+            )
+            .await
+            .expect("enumerate filtered inventory");
+            assert_eq!(filtered, if finalized { vec![] } else { vec![deleting_id] });
+        }
+        txn.rollback().await.expect("discard lifecycle test");
     }
 
     #[crate::sqlx_test]

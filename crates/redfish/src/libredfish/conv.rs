@@ -18,7 +18,7 @@
 use bmc_vendor::BMCVendor;
 use model::attestation::spdm::{CaCertificate, Evidence};
 use model::firmware::FirmwareComponentType;
-use model::machine::{MachineLastRebootRequestedMode, PowerState as MachinePowerState};
+use model::machine::PowerState as MachinePowerState;
 use model::site_explorer::{
     BlueFieldOperatingMode, BootOption, PCIeDevice, PowerState, SystemStatus,
 };
@@ -131,22 +131,6 @@ impl IntoLibredfish<libredfish::model::oem::nvidia_dpu::NicMode> for BlueFieldOp
             Self::Dpu => libredfish::model::oem::nvidia_dpu::NicMode::Dpu,
             Self::Nic => libredfish::model::oem::nvidia_dpu::NicMode::Nic,
         }
-    }
-}
-
-pub fn machine_last_reboot_requested_mode(
-    action: libredfish::SystemPowerControl,
-) -> MachineLastRebootRequestedMode {
-    match action {
-        libredfish::SystemPowerControl::On => MachineLastRebootRequestedMode::PowerOn,
-        libredfish::SystemPowerControl::GracefulShutdown => {
-            MachineLastRebootRequestedMode::PowerOff
-        }
-        libredfish::SystemPowerControl::ForceOff => MachineLastRebootRequestedMode::PowerOff,
-        libredfish::SystemPowerControl::GracefulRestart => MachineLastRebootRequestedMode::Reboot,
-        libredfish::SystemPowerControl::ForceRestart => MachineLastRebootRequestedMode::Reboot,
-        libredfish::SystemPowerControl::ACPowercycle => MachineLastRebootRequestedMode::Reboot,
-        libredfish::SystemPowerControl::PowerCycle => MachineLastRebootRequestedMode::Reboot,
     }
 }
 

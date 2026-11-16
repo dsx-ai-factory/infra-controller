@@ -5,7 +5,7 @@
 ## NAME
 
 nico-admin-cli-redfish-machine-setup-status - Is everything MachineSetup
-does already done? Whats missing?
+does already done? What's missing?
 
 ## SYNOPSIS
 
@@ -17,7 +17,7 @@ nico-admin-cli redfish machine-setup-status
 
 ## DESCRIPTION
 
-Is everything MachineSetup does already done? Whats missing?
+Is everything MachineSetup does already done? What's missing?
 
 ## OPTIONS
 
@@ -45,7 +45,7 @@ Sort output by specified field
 
 `-h, --help`
 
-Print help (see a summary with -h)
+Print help (see a summary with '-h')
 
 ## Examples
 

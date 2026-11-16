@@ -53,6 +53,7 @@ type ResponseStream = Pin<Box<dyn Stream<Item = Result<ConsoleLogLine, Status>> 
 
 #[derive(Clone)]
 struct Service {
+    instrumentation: carbide_instrument::Instrumentation,
     connections: BmcConnectionStore,
     allowed_spiffe_id: Arc<str>,
     cancel_token: CancellationToken,
@@ -172,6 +173,7 @@ impl ConsoleLogService for Service {
             snapshot.watermark,
             self.cancel_token.clone(),
             access,
+            self.instrumentation.clone(),
         ));
 
         // Finally, this task will gather all from `snapshot` and send it to `response_tx`, and then
@@ -263,6 +265,7 @@ async fn pump_live(
     watermark: u64,
     cancel_token: CancellationToken,
     access: console_logger::ConsoleLogClient,
+    instrumentation: carbide_instrument::Instrumentation,
 ) {
     let mut expected = watermark.saturating_add(1);
     let mut pending_drops = 0_u64;
@@ -304,7 +307,7 @@ async fn pump_live(
             let count = line.sequence - expected;
             pending_drops += count;
             let reason = StreamDropReason::CompletedLineBroadcastLag;
-            carbide_instrument::emit_count(StreamLinesDropped { reason }, count);
+            instrumentation.emit_count(StreamLinesDropped { reason }, count);
         }
 
         expected = line.sequence.saturating_add(1);
@@ -318,7 +321,7 @@ async fn pump_live(
             // ... because it's too slow
             pending_drops += 1;
             let reason = StreamDropReason::ClientQueueFull;
-            carbide_instrument::emit_count(StreamLinesDropped { reason }, 1);
+            instrumentation.emit_count(StreamLinesDropped { reason }, 1);
             continue;
         }
         match destination.try_send(Ok(line.data.clone())) {
@@ -327,7 +330,7 @@ async fn pump_live(
                 // The queue is full, the receiver is not picking up messages fast enough
                 pending_drops += 1;
                 let reason = StreamDropReason::ClientQueueFull;
-                carbide_instrument::emit_count(StreamLinesDropped { reason }, 1);
+                instrumentation.emit_count(StreamLinesDropped { reason }, 1);
             }
             Err(mpsc::error::TrySendError::Closed(_)) => break,
         }
@@ -440,6 +443,7 @@ impl ShutdownHandle<()> for Handle {
 pub(crate) async fn spawn(
     config: Arc<Config>,
     connections: BmcConnectionStore,
+    instrumentation: carbide_instrument::Instrumentation,
     cancel_token: CancellationToken,
 ) -> Result<Handle, SpawnError> {
     let (cancel_token, drop_guard) = fork_cancel_token(cancel_token);
@@ -521,6 +525,7 @@ pub(crate) async fn spawn(
     let join_handle = tokio::spawn({
         let cancel_token = cancel_token.clone();
         let service = Service {
+            instrumentation,
             connections,
             allowed_spiffe_id: Arc::from(config.api_allowed_client_spiffe_id.as_str()),
             cancel_token: cancel_token.clone(),
@@ -661,6 +666,7 @@ mod tests {
 
     #[tokio::test]
     async fn client_queues_are_independent() {
+        let metrics = crate::metrics::MetricsState::new();
         let dir = temp_dir::TempDir::new().unwrap();
         let config = Arc::new(Config {
             console_logs_path: dir.path().to_path_buf(),
@@ -690,6 +696,7 @@ mod tests {
             snapshot_a.watermark,
             cancel_token.clone(),
             access.clone(),
+            metrics.instrumentation.clone(),
         ));
         let pump_b = tokio::spawn(pump_live(
             source_b,
@@ -697,6 +704,7 @@ mod tests {
             snapshot_b.watermark,
             cancel_token.clone(),
             access,
+            metrics.instrumentation.clone(),
         ));
 
         assert!(

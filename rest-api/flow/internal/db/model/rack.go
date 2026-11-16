@@ -450,19 +450,17 @@ func GetRacksByIDsIncludingDeleted(
 	return racks, nil
 }
 
-// GetRackOperationStatuses derives each requested rack's operability phase
-// from its active Compute, NVSwitch, and PowerShelf components. Racks with no
-// supported active components, or with any missing/unrecognized participating
-// component status, fail closed as Unknown.
-func GetRackOperationStatuses(
+// GetRackOperationStatusCounts counts each requested rack's operability phases
+// from its active Compute, NVSwitch, and PowerShelf components. Empty membership
+// produces zero counts; missing or unrecognized status increments Unknown.
+func GetRackOperationStatusCounts(
 	ctx context.Context,
 	idb bun.IDB,
 	rackIDs []uuid.UUID,
-) (map[uuid.UUID]types.Phase, error) {
-	result := make(map[uuid.UUID]types.Phase, len(rackIDs))
-	statusesByRack := make(map[uuid.UUID][]*types.ComponentOperationStatus, len(rackIDs))
+) (map[uuid.UUID]types.TrayStatusCountsByType, error) {
+	result := make(map[uuid.UUID]types.TrayStatusCountsByType, len(rackIDs))
 	for _, rackID := range rackIDs {
-		result[rackID] = types.PhaseUnknown
+		result[rackID] = types.TrayStatusCountsByType{}
 	}
 	if len(rackIDs) == 0 {
 		return result, nil
@@ -476,7 +474,7 @@ func GetRackOperationStatuses(
 	}
 	err := idb.NewSelect().
 		Model(&components).
-		Column("rack_id", "status").
+		Column("rack_id", "type", "status").
 		Where("rack_id IN (?)", bun.In(rackIDs)).
 		Where("type IN (?)", bun.In(supportedTypes)).
 		Scan(ctx)
@@ -486,10 +484,16 @@ func GetRackOperationStatuses(
 
 	for i := range components {
 		component := &components[i]
-		statusesByRack[component.RackID] = append(statusesByRack[component.RackID], component.Status)
-	}
-	for rackID, statuses := range statusesByRack {
-		result[rackID] = types.AggregateComponentOperationStatus(statuses)
+		counts := result[component.RackID]
+		switch component.Type {
+		case devicetypes.ComponentTypeToString(devicetypes.ComponentTypeCompute):
+			counts.Compute.Add(component.Status)
+		case devicetypes.ComponentTypeToString(devicetypes.ComponentTypeNVSwitch):
+			counts.NVSwitch.Add(component.Status)
+		case devicetypes.ComponentTypeToString(devicetypes.ComponentTypePowerShelf):
+			counts.PowerShelf.Add(component.Status)
+		}
+		result[component.RackID] = counts
 	}
 
 	return result, nil

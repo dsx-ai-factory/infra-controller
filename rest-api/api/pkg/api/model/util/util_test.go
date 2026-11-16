@@ -110,6 +110,10 @@ autoinstall:
 			require.NotNil(t, targetPhoneHome)
 			assert.Equal(t, phoneHomeURL, mappingNodeValue(targetPhoneHome, SitePhoneHomeUrl).Value)
 			assert.Equal(t, SitePhoneHomePostAll, mappingNodeValue(targetPhoneHome, SitePhoneHomePost).Value)
+			tries := mappingNodeValue(targetPhoneHome, SitePhoneHomeTries)
+			require.NotNil(t, tries)
+			assert.Equal(t, "!!int", tries.Tag)
+			assert.Equal(t, "10", tries.Value)
 		})
 	}
 }
@@ -457,6 +461,7 @@ func TestPhoneHomeInAnArchiveEntryFormat(t *testing.T) {
   user-data:
     phone_home:
       post: all
+      tries: 10
       url: `+phoneHomeURL+`
 `, mappingNodeValue(archiveRoot.Content[0], archiveEntryContent).Value,
 			"the block belongs under the autoinstall in the entry, which stays as authored")
@@ -1202,6 +1207,7 @@ func TestPhoneHomeTogglesInAnArchive(t *testing.T) {
     #cloud-config
     phone_home:
       post: all
+      tries: 10
       url: `+phoneHomeURL+`
 `, *userData, "the entry must be written out, not in the flow style `[]` reads back as")
 	})
@@ -1416,7 +1422,7 @@ func TestPhoneHomeInUserDataWithNothingInIt(t *testing.T) {
 	for _, userData := range []*string{nil, new("")} {
 		enabled, err := EnablePhoneHomeInUserData(userData, phoneHomeURL)
 		require.NoError(t, err)
-		assert.Equal(t, "#cloud-config\nphone_home:\n  post: all\n  url: "+phoneHomeURL+"\n", *enabled)
+		assert.Equal(t, "#cloud-config\nphone_home:\n  post: all\n  tries: 10\n  url: "+phoneHomeURL+"\n", *enabled)
 
 		disabled, err := DisablePhoneHomeInUserData(userData, phoneHomeURL)
 		require.NoError(t, err)
@@ -1557,7 +1563,7 @@ write_files:
 	t.Run("nested document keeps the indent it was written with", func(t *testing.T) {
 		userData, err := EnablePhoneHomeInUserData(new(nested), phoneHomeURL)
 		require.NoError(t, err)
-		assert.Equal(t, nested+"phone_home:\n  post: all\n  url: "+phoneHomeURL+"\n", *userData,
+		assert.Equal(t, nested+"phone_home:\n  post: all\n  tries: 10\n  url: "+phoneHomeURL+"\n", *userData,
 			"nothing but the block may change")
 	})
 
@@ -1573,6 +1579,7 @@ write_files:
     #cloud-config
     phone_home:
       post: all
+      tries: 10
       url: `+phoneHomeURL+`
 `, *userData)
 	})
@@ -1601,6 +1608,7 @@ write_files:
       user-data:
         phone_home:
           post: all
+          tries: 10
           url: `+phoneHomeURL+`
 `, *userData)
 	})

@@ -35,6 +35,7 @@ async fn main() -> eyre::Result<()> {
     let setup = metrics_endpoint::new_metrics_setup("nico-postgres-exporter", "nico", false)?;
     let metrics = metrics::Metrics::new(&setup.meter);
     let endpoint = metrics_endpoint::MetricsEndpointConfig {
+        instrumentation: setup.instrumentation.clone(),
         address: config.listen,
         registry: setup.registry.clone(),
         health_controller: Some(setup.health_controller.clone()),

@@ -21,7 +21,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use opentelemetry::metrics::{Counter, Meter, ObservableGauge, UpDownCounter};
-use rpc::forge_api_client::ForgeApiClient;
+use rpc::carbide_api_client::CarbideApiClient;
 use russh::server::{Server as RusshServer, run_stream};
 use russh::{MethodKind, MethodSet};
 use tokio::net::TcpListener;
@@ -36,7 +36,7 @@ use crate::{fork_cancel_token, tcp_listener};
 
 pub(crate) async fn spawn(
     config: Arc<Config>,
-    forge_api_client: ForgeApiClient,
+    carbide_api_client: CarbideApiClient,
     bmc_connection_store: BmcConnectionStore,
     meter: &Meter,
     cancel_token: CancellationToken,
@@ -65,7 +65,7 @@ pub(crate) async fn spawn(
 
     let server = SshServer {
         config,
-        forge_api_client,
+        carbide_api_client,
         bmc_connection_store,
         russh_config,
         metrics,
@@ -125,7 +125,7 @@ impl ShutdownHandle<()> for Handle {
 struct SshServer {
     config: Arc<Config>,
     russh_config: Arc<russh::server::Config>,
-    forge_api_client: ForgeApiClient,
+    carbide_api_client: CarbideApiClient,
     bmc_connection_store: BmcConnectionStore,
     metrics: Arc<ServerMetrics>,
 }
@@ -261,7 +261,7 @@ impl russh::server::Server for SshServer {
         Self::Handler::new(
             self.bmc_connection_store.clone(),
             self.config.clone(),
-            self.forge_api_client.clone(),
+            self.carbide_api_client.clone(),
             self.metrics.clone(),
             addr,
         )

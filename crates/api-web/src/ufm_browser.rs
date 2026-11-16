@@ -25,6 +25,7 @@ use hyper::http::StatusCode;
 use rpc::forge::forge_server::Forge;
 use serde::Deserialize;
 
+use super::browser_response::{ResponseHeader, response_headers, status_reason};
 use super::{Base, filters};
 
 #[derive(Template)]
@@ -37,12 +38,7 @@ struct UfmBrowser {
     error: String,
     status_code: u16,
     status_string: String,
-    response_headers: Vec<Header>,
-}
-
-struct Header {
-    name: String,
-    value: String,
+    response_headers: Vec<ResponseHeader>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -106,13 +102,9 @@ pub(super) async fn query(
 
     browser.response = response.body;
     browser.status_code = response.code as _;
-    browser.status_string = http::StatusCode::from_u16(browser.status_code)
-        .map(|code| code.canonical_reason().unwrap_or_default().to_string())
-        .unwrap_or_default();
+    browser.status_string = status_reason(browser.status_code);
 
-    for (name, value) in response.headers {
-        browser.response_headers.push(Header { name, value })
-    }
+    browser.response_headers = response_headers(response.headers);
 
     (StatusCode::OK, Html(browser.render().unwrap())).into_response()
 }

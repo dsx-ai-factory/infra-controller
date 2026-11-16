@@ -380,7 +380,7 @@ fn build_apply_firmware_command<'a>(
             return None;
         }
 
-        carbide_instrument::emit(FirmwareUpdateProgress {
+        api.instrumentation.emit(FirmwareUpdateProgress {
             target: FirmwareUpdateTarget::SuperNic,
             phase: FirmwareUpdatePhase::Started,
             machine_id,
@@ -789,6 +789,9 @@ pub(crate) async fn publish_mlx_device_report(
 ) -> Result<Response<mlx_device_pb::PublishMlxDeviceReportResponse>, Status> {
     log_request_data(&request);
     let authenticated_machine_id = crate::auth::authenticated_machine_id(&request)?;
+    if let Some(machine_id) = authenticated_machine_id {
+        crate::api::log_machine_id(&machine_id);
+    }
     let req = request.into_inner();
 
     // Generic observations do not depend on SVPC. Legacy admin/simulator
@@ -974,6 +977,9 @@ pub(crate) async fn publish_mlx_observation_report(
     log_request_data(&request);
 
     let authenticated_machine_id = crate::auth::authenticated_machine_id(&request);
+    if let Ok(Some(machine_id)) = &authenticated_machine_id {
+        crate::api::log_machine_id(machine_id);
+    }
     if let Some(report) = request.get_ref().report.as_ref() {
         let has_generic = report
             .observations

@@ -461,6 +461,7 @@ func TestServiceCatalog(t *testing.T) {
 			implementation:    nvswitchnico.ImplementationName,
 			requiredProviders: []string{nicoprovider.ProviderName},
 			capabilities: capability.CapabilitySet{
+				capability.CapabilityComponentReset,
 				capability.CapabilityDecommissionControl,
 				capability.CapabilityDecommissionStatus,
 				capability.CapabilityFirmwareConsistencyCheck,

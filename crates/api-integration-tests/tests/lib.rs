@@ -48,6 +48,9 @@ use config_version::ConfigVersion;
 use eyre::{ContextCompat, WrapErr};
 use futures::FutureExt;
 use futures::future::join_all;
+use health_report::{
+    HealthAlertClassification, HealthProbeAlert, HealthReport, HealthReportApplyMode,
+};
 use itertools::Itertools;
 use mac_address::MacAddress;
 use model::extension_service::{DpuTarget, ExtensionServiceDeploymentType, ExtensionServiceType};
@@ -146,10 +149,11 @@ async fn run_integration() -> eyre::Result<()> {
         None,
     )
     .await?;
+    let switch_id = SwitchId::new(SwitchIdSource::Tpm, [1u8; 32], SwitchType::NvLink);
     db::switch::create(
         &mut txn,
         &NewSwitch {
-            id: SwitchId::new(SwitchIdSource::Tpm, [1u8; 32], SwitchType::NvLink),
+            id: switch_id,
             config: SwitchConfig {
                 name: "metric-catalogue-switch".to_string(),
                 enable_nmxc: false,
@@ -160,6 +164,30 @@ async fn run_integration() -> eyre::Result<()> {
             rack_id: None,
             slot_number: None,
             tray_index: None,
+        },
+    )
+    .await?;
+    // The per-object classification gauge only exports objects carrying an
+    // opted-in classification, so give the switch an alert classified
+    // `Hardware` (opted in by the test API server config).
+    db::switch::insert_health_report(
+        &mut txn,
+        &switch_id,
+        HealthReportApplyMode::Merge,
+        &HealthReport {
+            source: "metric-catalogue".to_string(),
+            triggered_by: None,
+            observed_at: None,
+            successes: vec![],
+            alerts: vec![HealthProbeAlert {
+                id: "MetricCatalogue".parse()?,
+                target: None,
+                in_alert_since: None,
+                message: "Raised so the metric catalogue scrape includes per-object health"
+                    .to_string(),
+                tenant_message: None,
+                classifications: vec![HealthAlertClassification::hardware()],
+            }],
         },
     )
     .await?;
@@ -282,8 +310,16 @@ async fn run_integration() -> eyre::Result<()> {
 
     // Observable MQTT instruments export their initial zeros without a broker
     // connection. Register them on the server's meter for the catalogue scrape.
-    let mqtt_client =
-        mqttea::MqtteaClient::new("localhost", 1883, "test-metric-catalogue", None).await?;
+    let mqtt_client = mqttea::MqtteaClient::new(
+        "localhost",
+        1883,
+        "test-metric-catalogue",
+        None,
+        carbide_instrument::Instrumentation::from_meter_provider(
+            &opentelemetry::metrics::noop::NoopMeterProvider::new(),
+        ),
+    )
+    .await?;
     mqtt_client.register_metrics(&server_handle_2.ready.meter, "test_catalogue");
 
     assert_ne!(test_env.carbide_api_addrs[0], test_env.carbide_api_addrs[1]);
@@ -525,12 +561,19 @@ async fn run_integration() -> eyre::Result<()> {
     exercise_ib_partition_mtu_fallback(&test_env).await?;
     exercise_nvlink_partition_monitor(&test_env, server_handle_2.ready.meter.clone()).await?;
 
-    carbide_api_core::test_support::poll_resource_pool_stats(test_env.db_pool.clone()).await?;
+    carbide_api_core::test_support::poll_resource_pool_stats(
+        test_env.db_pool.clone(),
+        &carbide_instrument::Instrumentation::from_meter_provider(&test_env.metrics.meter_provider),
+    )
+    .await?;
     // The live exporters supply local gauges; the direct poll emits the failure
     // counter without updating their samples. `test_service_health_metrics`
     // checks unavailable gauge rendering, while `resource_pool_inspection`
     // exercises the sampler's failure and recovery paths.
     for line in [
+        "# TYPE carbide_machine_update_manager_completed_passes_total counter\n",
+        "\ncarbide_machine_update_manager_completed_passes_total ",
+        "# HELP carbide_machine_update_manager_completed_passes_total Number of successful machine update manager work passes, excluding lock skips and failed or cancelled passes\n",
         r#"carbide_resourcepool_used_count{pool="vpc-vni"}"#,
         r#"carbide_resourcepool_free_count{pool="vpc-vni"}"#,
         r#"carbide_resourcepool_stats_available{pool="vpc-vni"} 1"#,
@@ -630,11 +673,19 @@ async fn run_integration() -> eyre::Result<()> {
         )
         .await?;
     }
+    metrics::wait_for_metric_line(
+        &test_env.carbide_metrics_addrs,
+        "# TYPE carbide_object_unhealthy_by_classification_count gauge\n",
+    )
+    .await?;
     let mut metric_infos = metrics::collect_metric_infos(&test_env.carbide_metrics_addrs)?;
     metric_infos.push(collect_ssh_console_metric_info().await?);
     metric_infos.extend(collect_dhcp_metric_infos().await?);
     metric_infos.extend(metrics::parse_metric_infos(
         &carbide_health::test_support::hardware_metric_exposition()?,
+    ));
+    metric_infos.extend(metrics::parse_metric_infos(
+        &carbide_site_explorer::test_support::exploration_metric_exposition(),
     ));
     for name in [
         "carbide_dpu_client_certificate_expiration_time",
@@ -734,6 +785,7 @@ async fn collect_dhcp_metric_infos() -> eyre::Result<Vec<metrics::MetricInfo>> {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
     let address = listener.local_addr()?;
     let config = MetricsEndpointConfig {
+        instrumentation: setup.instrumentation.clone(),
         address,
         registry: setup.registry.clone(),
         health_controller: None,
@@ -877,8 +929,8 @@ async fn exercise_dpf_exploration_suppression(
     use model::bmc_suppression::{
         BmcSuppressionSource, BmcSuppressionSubsystem, NewBmcSuppression,
     };
-    use rpc::forge_api_client::ForgeApiClient;
-    use rpc::forge_tls_client::{ApiConfig, ForgeClientConfig};
+    use rpc::carbide_api_client::CarbideApiClient;
+    use rpc::carbide_tls_client::{ApiConfig, CarbideClientConfig};
 
     let (address, mac): (std::net::IpAddr, MacAddress) = sqlx::query_as(
         "SELECT e.address, mi.mac_address FROM explored_endpoints e
@@ -901,14 +953,14 @@ async fn exercise_dpf_exploration_suppression(
     .await?;
     txn.commit().await?;
     let certs = &api_test_helper::utils::LOCALHOST_CERTS;
-    let config = ForgeClientConfig::new(
+    let config = CarbideClientConfig::new(
         certs.ca_cert.to_string_lossy().into_owned(),
-        Some(forge_tls::client_config::ClientCert {
+        Some(carbide_tls::client_config::ClientCert {
             cert_path: certs.client_cert.to_string_lossy().into_owned(),
             key_path: certs.client_key.to_string_lossy().into_owned(),
         }),
     );
-    let client = ForgeApiClient::new(&ApiConfig::new(
+    let client = CarbideApiClient::new(&ApiConfig::new(
         &format!("https://{}", test_env.carbide_api_addrs[0]),
         &config,
     ));
@@ -944,8 +996,8 @@ async fn exercise_admin_address_reconcile_failures(
 ) -> eyre::Result<()> {
     use carbide_uuid::machine::{MachineId, MachineInterfaceId};
     use model::machine::machine_search_config::MachineSearchConfig;
-    use rpc::forge_api_client::ForgeApiClient;
-    use rpc::forge_tls_client::{ApiConfig, ForgeClientConfig};
+    use rpc::carbide_api_client::CarbideApiClient;
+    use rpc::carbide_tls_client::{ApiConfig, CarbideClientConfig};
     use rpc::{DiscoveryData, DiscoveryInfo, MachineDiscoveryInfo};
 
     // A DPU's own OOB interface is primary and attached to itself; a host's
@@ -1003,14 +1055,14 @@ async fn exercise_admin_address_reconcile_failures(
     txn.commit().await?;
 
     let certs = &api_test_helper::utils::LOCALHOST_CERTS;
-    let config = ForgeClientConfig::new(
+    let config = CarbideClientConfig::new(
         certs.ca_cert.to_string_lossy().into_owned(),
-        Some(forge_tls::client_config::ClientCert {
+        Some(carbide_tls::client_config::ClientCert {
             cert_path: certs.client_cert.to_string_lossy().into_owned(),
             key_path: certs.client_key.to_string_lossy().into_owned(),
         }),
     );
-    let client = ForgeApiClient::new(&ApiConfig::new(
+    let client = CarbideApiClient::new(&ApiConfig::new(
         &format!("https://{}", test_env.carbide_api_addrs[0]),
         &config,
     ));
@@ -1049,8 +1101,8 @@ async fn exercise_ib_partition_mtu_fallback(
     test_env: &IntegrationTestEnvironment,
 ) -> eyre::Result<()> {
     use carbide_uuid::infiniband::IBPartitionId;
-    use rpc::forge_api_client::ForgeApiClient;
-    use rpc::forge_tls_client::{ApiConfig, ForgeClientConfig};
+    use rpc::carbide_api_client::CarbideApiClient;
+    use rpc::carbide_tls_client::{ApiConfig, CarbideClientConfig};
 
     let id = IBPartitionId::new();
     sqlx::query(
@@ -1065,14 +1117,14 @@ async fn exercise_ib_partition_mtu_fallback(
     .await?;
 
     let certs = &api_test_helper::utils::LOCALHOST_CERTS;
-    let config = ForgeClientConfig::new(
+    let config = CarbideClientConfig::new(
         certs.ca_cert.to_string_lossy().into_owned(),
-        Some(forge_tls::client_config::ClientCert {
+        Some(carbide_tls::client_config::ClientCert {
             cert_path: certs.client_cert.to_string_lossy().into_owned(),
             key_path: certs.client_key.to_string_lossy().into_owned(),
         }),
     );
-    let client = ForgeApiClient::new(&ApiConfig::new(
+    let client = CarbideApiClient::new(&ApiConfig::new(
         &format!("https://{}", test_env.carbide_api_addrs[0]),
         &config,
     ));
@@ -1128,6 +1180,7 @@ async fn exercise_nvlink_partition_monitor(
         &mut work_lock_tasks,
         test_env.db_pool.clone(),
         db::work_lock_manager::KeepaliveConfig::default(),
+        carbide_instrument::Instrumentation::global(),
     )
     .await?;
     let nmxc_client_pool = libnmxc::NmxcClientPool::builder()
@@ -1143,6 +1196,7 @@ async fn exercise_nvlink_partition_monitor(
         },
         HostHealthConfig::default(),
         work_lock_manager_handle,
+        test_env.metrics.instrumentation.clone(),
     );
     monitor.run_single_iteration().await?;
     for line in [

@@ -28,7 +28,6 @@ use axum::Router;
 use axum::extract::State;
 use axum::response::IntoResponse;
 use axum::routing::get;
-use carbide_instrument::emit;
 
 use super::log_and_generate_generic_error;
 use crate::common::{AppState, Machine};
@@ -59,7 +58,7 @@ async fn user_data(machine: Machine, state: State<AppState>) -> impl IntoRespons
             .map(|data| user_data_without_network(&data).unwrap_or(data))
             .unwrap_or_else(|| "{}".to_string()),
     );
-    emit(PxeBootOutcome {
+    state.instrumentation.emit(PxeBootOutcome {
         endpoint: ENDPOINT,
         reason: OutcomeReason::Ok,
     });
@@ -216,6 +215,7 @@ fn split_archive_network(custom_cloud_init: &str) -> Option<NetworkConfigSplit> 
 async fn meta_data(machine: Machine, state: State<AppState>) -> impl IntoResponse {
     let (template_key, template_data) = match machine.instructions.metadata {
         None => log_and_generate_generic_error(
+            &state.instrumentation,
             format!("No metadata was found for machine {machine:?}"),
             OutcomeReason::MetadataNotFound,
             ENDPOINT,
@@ -230,7 +230,7 @@ async fn meta_data(machine: Machine, state: State<AppState>) -> impl IntoRespons
                 template_data.insert("local_hostname".to_string(), local_hostname);
             }
 
-            emit(PxeBootOutcome {
+            state.instrumentation.emit(PxeBootOutcome {
                 endpoint: ENDPOINT,
                 reason: OutcomeReason::Ok,
             });
@@ -313,7 +313,7 @@ async fn network_config(machine: Machine, state: State<AppState>) -> impl IntoRe
 }
 
 async fn vendor_data(state: State<AppState>) -> impl IntoResponse {
-    emit(PxeBootOutcome {
+    state.instrumentation.emit(PxeBootOutcome {
         endpoint: ENDPOINT,
         reason: OutcomeReason::Ok,
     });
@@ -382,7 +382,6 @@ mod tests {
 
     #[tokio::test]
     async fn tenant_cloud_config_separates_network_from_user_data() {
-        let _metrics = MetricsCapture::start();
         for custom_cloud_init in [
             "#cloud-config\nnetwork:\n  version: 2\n  ethernets:\n    eth0:\n      dhcp6: true\n      dhcp4: false\nhostname: 'on'\nusers: [default]\nwrite_files:\n  - path: /etc/example.yaml\n    content: 'off'\n  - path: /etc/nested.yaml\n    content: |\n      network: keep this nested content\n",
             "#cloud-config\nnetwork:\n  version: 2\n  ethernets: {}\n",
@@ -433,7 +432,6 @@ mod tests {
 
     #[tokio::test]
     async fn tenant_cloud_config_archive_separates_network_from_user_data() {
-        let _metrics = MetricsCapture::start();
         let input = r#"#cloud-config-archive
 - type: text/x-shellscript
   filename: 'on'
@@ -612,7 +610,6 @@ mod tests {
 
     #[tokio::test]
     async fn user_data_preserves_documents_that_do_not_need_splitting() {
-        let _metrics = MetricsCapture::start();
         for (name, input) in [
             ("absent", None),
             (
@@ -801,11 +798,6 @@ mod tests {
     /// cloud-init sets the OS hostname via the NoCloud datasource.
     #[tokio::test]
     async fn meta_data_includes_local_hostname_when_instance_has_name() {
-        // Serializes against the tests that assert exact counter deltas: driving
-        // a handler emits into the shared registry, and MetricsCapture::start is
-        // what takes the lock that keeps those deltas meaningful.
-        let _metrics = MetricsCapture::start();
-
         let response = meta_data(
             Machine {
                 instructions: forge::CloudInitInstructions {
@@ -837,11 +829,6 @@ mod tests {
     /// so cloud-init falls back to its default hostname derivation.
     #[tokio::test]
     async fn meta_data_omits_local_hostname_when_instance_has_no_name() {
-        // Serializes against the tests that assert exact counter deltas: driving
-        // a handler emits into the shared registry, and MetricsCapture::start is
-        // what takes the lock that keeps those deltas meaningful.
-        let _metrics = MetricsCapture::start();
-
         let response = meta_data(
             Machine {
                 instructions: forge::CloudInitInstructions {
@@ -875,13 +862,14 @@ mod tests {
     /// counter.
     #[tokio::test]
     async fn meta_data_without_metadata_counts_metadata_not_found() {
-        let metrics = MetricsCapture::start();
+        let state = test_app_state();
+        let metrics = MetricsCapture::for_registry(&state.otel_metrics.registry);
 
         let _ = meta_data(
             Machine {
                 instructions: Default::default(),
             },
-            State(test_app_state()),
+            State(state.clone()),
         )
         .await;
 
@@ -901,7 +889,8 @@ mod tests {
     /// counts as a served outcome.
     #[tokio::test]
     async fn user_data_with_custom_cloud_init_counts_ok() {
-        let metrics = MetricsCapture::start();
+        let state = test_app_state();
+        let metrics = MetricsCapture::for_registry(&state.otel_metrics.registry);
 
         let _ = user_data(
             Machine {
@@ -910,7 +899,7 @@ mod tests {
                     ..Default::default()
                 },
             },
-            State(test_app_state()),
+            State(state.clone()),
         )
         .await;
 

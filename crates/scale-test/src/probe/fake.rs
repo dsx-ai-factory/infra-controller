@@ -265,6 +265,8 @@ impl FakeProbe {
             read_at: stored.sweep.read_at,
             sweep_age_seconds: seconds(now - stored.sweep.read_at),
             sweep_interval_seconds: stored.sweep.interval.as_secs_f64(),
+            last_attempt_succeeded: None,
+            last_attempt_error: None,
         }
     }
 
@@ -668,6 +670,8 @@ pub fn unit(unit_type: UnitType, id: &str, done: bool) -> Unit {
         dpu: None,
         instance: None,
         expected: None,
+        controller_instance_id: None,
+        rest_machine: None,
     }
 }
 

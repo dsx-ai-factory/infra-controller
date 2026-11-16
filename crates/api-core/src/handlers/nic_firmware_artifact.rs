@@ -58,12 +58,14 @@ use tokio_util::sync::CancellationToken;
 
 use crate::auth::AuthContext;
 
-// Bound DB work and open response streams together, with no admission queue.
-// The cache independently bounds physical readers and background downloads.
+// Bound admitted requests and response streams, with no admission queue.
+// After cancellation, registered cache work may still own a database session;
+// downloader capacity independently bounds those background owners and transfers.
 const MAX_REQUESTS: usize = 32;
 const RETRY_AFTER_SECONDS: &str = "5";
 // Match power-details' finite read-only snapshot budget. It covers acquisition,
-// BEGIN, snapshot setup, both reads and COMMIT together, with no retry loop.
+// BEGIN, retention-lock wait and the coherent read, with no retry loop.
+// Physical cache work owns the lock afterward; transfer/streaming do not.
 const SNAPSHOT_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[derive(Clone)]
@@ -77,7 +79,11 @@ struct ArtifactState {
 /// Mount inside the listener's shared authentication middleware. Every read
 /// still requires its authenticated host's current frozen workflow membership.
 /// `cancel` ends in-flight database snapshots during server shutdown; each
-/// snapshot also has one five-second deadline covering acquisition through commit.
+/// snapshot has a five-second deadline for acquisition, setup, lock wait and read.
+/// Registered cache work retains the lock through physical open/eviction, even
+/// after request cancellation; it releases it before downloading or streaming.
+/// That physical interval has no SQL deadline; COMMIT then has its own five-second
+/// deadline. Database session loss can end exclusion before physical completion.
 pub(crate) fn router(
     pool: PgPool,
     cache: FirmwareArtifactCache,
@@ -146,8 +152,7 @@ async fn download(
             }
         }
     };
-    let AuthorizedArtifact { artifact, retained } = authorized;
-    match state.cache.open(&artifact.url, digest, &retained).await {
+    match open_authorized(&state.cache, digest, authorized).await {
         Ok(CacheLookup::Ready(artifact)) => {
             let length = artifact.content_length();
             let reader = ArtifactReader {
@@ -175,6 +180,10 @@ async fn download(
             tracing::warn!(%error, "NIC firmware artifact cache I/O failed");
             retry(StatusCode::BAD_GATEWAY, "firmware artifact unavailable")
         }
+        Err(CacheError::RetentionLockRelease) => retry(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "firmware state unavailable",
+        ),
         Err(CacheError::Download(_)) => {
             tracing::warn!("NIC firmware artifact download failed");
             retry(StatusCode::BAD_GATEWAY, "firmware artifact unavailable")
@@ -194,11 +203,45 @@ async fn download(
 struct AuthorizedArtifact {
     artifact: NicFirmwareArtifact,
     retained: HashSet<ArtifactDigest>,
+    session: DbSessionGuard,
 }
 
-// Authorization and eviction membership must come from the same SQL snapshot.
-// The session guard discards a blocked connection when this future is dropped,
-// rather than leaving its pool slot occupied by SQLx's asynchronous rollback.
+// Registered cache work owns the session, so cancelling this HTTP request
+// cannot release the database lock while its filesystem worker can still evict.
+async fn open_authorized(
+    cache: &FirmwareArtifactCache,
+    digest: ArtifactDigest,
+    authorized: AuthorizedArtifact,
+) -> Result<CacheLookup, CacheError> {
+    let AuthorizedArtifact {
+        artifact,
+        retained,
+        session,
+    } = authorized;
+    let release = async move {
+        match tokio::time::timeout(SNAPSHOT_TIMEOUT, session.commit_retention_read()).await {
+            Ok(Ok(())) => Ok(()),
+            Ok(Err(error)) => {
+                tracing::warn!(
+                    error_category = database_error_category(&error),
+                    "NIC firmware retention lock commit failed"
+                );
+                Err(CacheError::RetentionLockRelease)
+            }
+            Err(_) => {
+                tracing::warn!("NIC firmware retention lock commit deadline exceeded");
+                Err(CacheError::RetentionLockRelease)
+            }
+        }
+    };
+    cache
+        .open_with_retention_lock(&artifact.url, digest, &retained, release)
+        .await
+}
+
+// A single read-committed statement follows the shared lock. Repeatable-read
+// could establish its snapshot before a writer finishes, then evict using stale
+// membership. An abandoned SQL wait discards the connection through the guard.
 async fn load_snapshot(
     pool: &PgPool,
     host_machine_id: HostMachineId,
@@ -209,19 +252,25 @@ async fn load_snapshot(
     let mut session = DbSessionGuard::acquire(pool)
         .await
         .map_err(snapshot_error)?;
-    let mut txn = session
-        .begin_read_only_snapshot(SNAPSHOT_TIMEOUT)
+    session
+        .begin_retention_read(SNAPSHOT_TIMEOUT)
         .await
         .map_err(snapshot_error)?;
-    let authorized: Result<Option<AuthorizedArtifact>, Response> = async {
-        let operation =
-            match db::machine::lookup_managed_host_state(txn.as_pgconn(), host_machine_id.into())
+    db::nic_firmware_artifact::lock_retention(session.as_pgconn())
+        .await
+        .map_err(snapshot_error)?;
+    let authorized = async {
+        let Some(snapshot) =
+            db::nic_firmware_artifact::snapshot(session.as_pgconn(), host_machine_id)
                 .await
                 .map_err(snapshot_error)?
-            {
-                Some(ManagedHostState::NicFirmwareUpdating { operation }) => operation,
-                _ => return Ok(None),
-            };
+        else {
+            return Ok(None);
+        };
+        let operation = match &snapshot.host_state {
+            ManagedHostState::NicFirmwareUpdating { operation } => operation,
+            _ => return Ok(None),
+        };
         if operation.validate().is_err() {
             tracing::warn!("Invalid persisted NIC firmware artifact authorization");
             return Err(retry(
@@ -265,13 +314,7 @@ async fn load_snapshot(
         };
         let artifact = artifact.clone();
 
-        // Frozen membership cannot grow through existing workflow transitions,
-        // so this snapshot can only retain extra files. Admission must coordinate
-        // new membership with eviction before enabling a producer:
-        // https://github.com/dsx-ai-factory/infra-controller/issues/6680
-        let operations = db::machine::find_host_nic_firmware_operations(txn.as_pgconn())
-            .await
-            .map_err(snapshot_error)?;
+        let operations = snapshot.into_host_operations().map_err(snapshot_error)?;
         let mut retained = HashSet::new();
         for (retained_host_machine_id, operation) in operations {
             if operation.validate().is_err() {
@@ -301,21 +344,43 @@ async fn load_snapshot(
                 }
             }
         }
-        Ok(Some(AuthorizedArtifact { artifact, retained }))
+        Ok(Some((artifact, retained)))
     }
     .await;
-    // Validation denials leave a healthy read-only transaction. Complete it
-    // before returning the response so a bad operation does not churn the pool.
-    // SQL failures still discard the session if COMMIT cannot finish normally.
-    txn.commit().await.map_err(snapshot_error)?;
-    session.return_to_pool();
-    authorized
+    match authorized {
+        Ok(Some((artifact, retained))) => Ok(Some(AuthorizedArtifact {
+            artifact,
+            retained,
+            session,
+        })),
+        result => {
+            // Denials and failed reads have no physical work to protect. Return
+            // the session only after COMMIT (or rollback of an aborted read).
+            session
+                .commit_retention_read()
+                .await
+                .map_err(snapshot_error)?;
+            result.map(|_| None)
+        }
+    }
 }
 
 fn snapshot_error(error: db::DatabaseError) -> Response {
     // SQLx decode errors can include persisted JSON. Classify them without
     // dumping frozen source URLs or arbitrary database contents into logs.
-    let error_category = match &error {
+    tracing::warn!(
+        error_category = database_error_category(&error),
+        "NIC firmware artifact database snapshot failed"
+    );
+    retry(
+        StatusCode::SERVICE_UNAVAILABLE,
+        "firmware state unavailable",
+    )
+}
+
+// Database diagnostics must not expose persisted sources or arbitrary JSON.
+fn database_error_category(error: &db::DatabaseError) -> &'static str {
+    match error {
         db::DatabaseError::Sqlx(error) => match &error.source {
             sqlx::Error::PoolTimedOut => "pool_timeout",
             sqlx::Error::PoolClosed => "pool_closed",
@@ -324,15 +389,7 @@ fn snapshot_error(error: db::DatabaseError) -> Response {
             _ => "database_io",
         },
         _ => "snapshot",
-    };
-    tracing::warn!(
-        error_category,
-        "NIC firmware artifact database snapshot failed"
-    );
-    retry(
-        StatusCode::SERVICE_UNAVAILABLE,
-        "firmware state unavailable",
-    )
+    }
 }
 
 fn operation_id(query: Option<&str>) -> Option<String> {

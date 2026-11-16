@@ -579,8 +579,9 @@ impl PerObjectMetricsRegistry {
             .u64_observable_gauge(UNHEALTHY_BY_CLASSIFICATION_METRIC)
             .with_description(
                 "Per-object indication that an object (host, switch, rack, ...) is marked with a \
-                 health alert classification due to being unhealthy. Labeled with object_type and \
-                 object_id. Only classifications configured via \
+                 health alert classification due to being unhealthy. Labeled with object_type, \
+                 object_id and classification; machine series also carry in_use. Only \
+                 classifications configured via \
                  observability.per_object_metrics_for_classifications are emitted, bounding \
                  metric cardinality.",
             )

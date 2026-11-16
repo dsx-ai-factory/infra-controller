@@ -118,6 +118,7 @@ async fn new_rack_id(env: &TestHarness) -> RackId {
                 members: ["Compute", "Switch"]
                     .into_iter()
                     .map(|kind| rpc::forge::ExpectedRackGroupMember {
+                        cartridge_index: Some(0),
                         r#type: kind.into(),
                         manufacturer: "NVIDIA".into(),
                         id: kind.into(),

@@ -188,6 +188,42 @@ func TestJournal(t *testing.T) {
 			must(t, err)
 			eq(t, [2]uint64{again.Op, uint64(again.Attempt)}, [2]uint64{in.Op, 2})
 		}},
+		{"counts_planned_records_apart_from_rpc_attempts", func(t *testing.T, _ string, j *Journal) {
+			step := func(want Counts, unsettled bool) {
+				t.Helper()
+				eq(t, j.Counts(), want)
+				eq(t, j.Unsettled(), unsettled)
+			}
+			step(Counts{Known: true}, false)
+			k1, err := j.Intent(call("k1", "d1"))
+			must(t, err)
+			step(Counts{Ops: 1, Attempts: 1, Unclear: 1, Known: true}, true) // in flight: may have been sent
+			must(t, j.Receipt(k1, Outcome{Kind: Accepted}))
+			step(Counts{Ops: 1, Attempts: 1, Known: true}, false)
+			k2, err := j.Intent(call("k2", "d2"))
+			must(t, err)
+			must(t, j.Receipt(k2, Outcome{Kind: Rejected, Reason: Conflict})) // a clean rejection is not unclear
+			step(Counts{Ops: 2, Attempts: 2, Known: true}, true)
+			k2, err = j.Intent(call("k2", "d2")) // the retry is a second attempt of the same op
+			must(t, err)
+			j.MarkUnclear(k2.Op)
+			step(Counts{Ops: 2, Attempts: 3, Unclear: 1, Known: true}, true)
+			must(t, j.Receipt(k2, Outcome{Kind: Accepted}))
+			step(Counts{Ops: 2, Attempts: 3, Known: true}, false)
+			k3, err := j.Intent(call("k3", "d3"))
+			must(t, err)
+			must(t, j.Receipt(k3, Outcome{Kind: NotDispatched})) // never sent: an op, no attempt
+			step(Counts{Ops: 3, Attempts: 3, Known: true}, false)
+			k4, err := j.Intent(call("k4", "d4"))
+			must(t, err)
+			must(t, j.Receipt(k4, Outcome{Kind: Planned})) // a dry run: an op, no attempt, settled
+			step(Counts{Ops: 4, Attempts: 3, Known: true}, false)
+			k5, err := j.Intent(call("k5", "d5"))
+			must(t, err)
+			j.Inject(failSync)
+			is(t, j.Receipt(k5, Outcome{Kind: Planned}), ErrIO)
+			eq(t, j.Counts().Known, false) // a broken journal's counts are unknown
+		}},
 		{"close_failed_keeps_a_lost_reply_unclear", func(t *testing.T, _ string, j *Journal) {
 			in, err := j.Intent(call("k1", "d1"))
 			must(t, err)

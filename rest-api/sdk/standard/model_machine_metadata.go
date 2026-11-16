@@ -30,6 +30,8 @@ type MachineMetadata struct {
 	BmcInfo NullableMachineBMCInfo `json:"bmcInfo"`
 	// GPU inventory reported for the Machine
 	Gpus []MachineGPUInfo `json:"gpus"`
+	// Disks reported by the Machine. Use model and serial to pick the disk for imageDisk when creating an image-based Operating System
+	Disks []MachineDisk `json:"disks"`
 	// List of Ethernet interfaces of the machine
 	NetworkInterfaces []MachineNetworkInterface `json:"networkInterfaces"`
 	// List of InfiniBand interfaces of the machine
@@ -46,11 +48,12 @@ type _MachineMetadata MachineMetadata
 // This constructor will assign default values to properties that have it defined,
 // and makes sure properties required by API are set, but the set of arguments
 // will change when the set of required properties is changed
-func NewMachineMetadata(dmiData NullableMachineDMIData, bmcInfo NullableMachineBMCInfo, gpus []MachineGPUInfo, networkInterfaces []MachineNetworkInterface, infinibandInterfaces []MachineInfiniBandInterface, lifecycleState NullableMachineLifecycleState, lldpNeighbors []MachineLldpNeighbor) *MachineMetadata {
+func NewMachineMetadata(dmiData NullableMachineDMIData, bmcInfo NullableMachineBMCInfo, gpus []MachineGPUInfo, disks []MachineDisk, networkInterfaces []MachineNetworkInterface, infinibandInterfaces []MachineInfiniBandInterface, lifecycleState NullableMachineLifecycleState, lldpNeighbors []MachineLldpNeighbor) *MachineMetadata {
 	this := MachineMetadata{}
 	this.DmiData = dmiData
 	this.BmcInfo = bmcInfo
 	this.Gpus = gpus
+	this.Disks = disks
 	this.NetworkInterfaces = networkInterfaces
 	this.InfinibandInterfaces = infinibandInterfaces
 	this.LifecycleState = lifecycleState
@@ -140,6 +143,30 @@ func (o *MachineMetadata) GetGpusOk() ([]MachineGPUInfo, bool) {
 // SetGpus sets field value
 func (o *MachineMetadata) SetGpus(v []MachineGPUInfo) {
 	o.Gpus = v
+}
+
+// GetDisks returns the Disks field value
+func (o *MachineMetadata) GetDisks() []MachineDisk {
+	if o == nil {
+		var ret []MachineDisk
+		return ret
+	}
+
+	return o.Disks
+}
+
+// GetDisksOk returns a tuple with the Disks field value
+// and a boolean to check if the value has been set.
+func (o *MachineMetadata) GetDisksOk() ([]MachineDisk, bool) {
+	if o == nil {
+		return nil, false
+	}
+	return o.Disks, true
+}
+
+// SetDisks sets field value
+func (o *MachineMetadata) SetDisks(v []MachineDisk) {
+	o.Disks = v
 }
 
 // GetNetworkInterfaces returns the NetworkInterfaces field value
@@ -253,6 +280,7 @@ func (o MachineMetadata) ToMap() (map[string]interface{}, error) {
 	toSerialize["dmiData"] = o.DmiData.Get()
 	toSerialize["bmcInfo"] = o.BmcInfo.Get()
 	toSerialize["gpus"] = o.Gpus
+	toSerialize["disks"] = o.Disks
 	toSerialize["networkInterfaces"] = o.NetworkInterfaces
 	toSerialize["infinibandInterfaces"] = o.InfinibandInterfaces
 	toSerialize["lifecycleState"] = o.LifecycleState.Get()
@@ -268,6 +296,7 @@ func (o *MachineMetadata) UnmarshalJSON(data []byte) (err error) {
 		"dmiData",
 		"bmcInfo",
 		"gpus",
+		"disks",
 		"networkInterfaces",
 		"infinibandInterfaces",
 		"lifecycleState",

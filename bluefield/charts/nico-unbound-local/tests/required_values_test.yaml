@@ -1,0 +1,138 @@
+suite: values nico-api must render
+templates:
+  - daemonset.yaml
+tests:
+  # Each value has two boundaries in values.schema.json: the "required" list
+  # rejects an absent key, and the pattern rejects the chart's own default,
+  # which is empty because nico-api owns the value. Each case supplies every
+  # other required value, and the pattern names the value so the test does
+  # not depend on the schema library's message format.
+  - it: rejects an absent unboundConfig
+    set:
+      unboundConfig: null
+      dnsDir: /opt/forge/dns/a
+      image.repository: x
+      resolver: &resolver
+        ipv4: {address: 198.51.100.251/31, gateway: 198.51.100.250}
+        ipv6: {address: 2001:db8::251/127, gateway: 2001:db8::250}
+    asserts:
+      - failedTemplate:
+          errorPattern: unboundConfig
+
+  - it: rejects the empty default unboundConfig
+    set:
+      dnsDir: /opt/forge/dns/a
+      image.repository: x
+      resolver: *resolver
+    asserts:
+      - failedTemplate:
+          errorPattern: unboundConfig
+
+  - it: rejects an absent dnsDir
+    set:
+      unboundConfig: "server:\n"
+      dnsDir: null
+      image.repository: x
+      resolver: *resolver
+    asserts:
+      - failedTemplate:
+          errorPattern: dnsDir
+
+  - it: rejects a relative dnsDir
+    set:
+      unboundConfig: "server:\n"
+      dnsDir: opt/forge/dns/a
+      image.repository: x
+      resolver: *resolver
+    asserts:
+      - failedTemplate:
+          errorPattern: dnsDir
+
+  - it: rejects an absent image repository
+    set:
+      unboundConfig: "server:\n"
+      dnsDir: /opt/forge/dns/a
+      image.repository: null
+      resolver: *resolver
+    asserts:
+      - failedTemplate:
+          errorPattern: repository
+
+  - it: rejects the empty default image repository
+    set:
+      unboundConfig: "server:\n"
+      dnsDir: /opt/forge/dns/a
+      resolver: *resolver
+    asserts:
+      - failedTemplate:
+          errorPattern: repository
+
+  - it: rejects an absent resolver
+    set:
+      unboundConfig: "server:\n"
+      dnsDir: /opt/forge/dns/a
+      image.repository: x
+      resolver: null
+    asserts:
+      - failedTemplate:
+          errorPattern: resolver
+
+  - it: rejects the empty default resolver addresses
+    set:
+      unboundConfig: "server:\n"
+      dnsDir: /opt/forge/dns/a
+      image.repository: x
+    asserts:
+      - failedTemplate:
+          errorPattern: address
+
+  # nic-init strips the prefix to build the source rule, so an address without
+  # one would install a host route and leave the gateway off-link.
+  - it: rejects a resolver address without a prefix length
+    set:
+      unboundConfig: "server:\n"
+      dnsDir: /opt/forge/dns/a
+      image.repository: x
+      resolver:
+        ipv4: {address: 198.51.100.251, gateway: 198.51.100.250}
+        ipv6: {address: 2001:db8::251/127, gateway: 2001:db8::250}
+    asserts:
+      - failedTemplate:
+          errorPattern: address
+
+  # nic-init points each family's return route at its gateway, so an empty
+  # gateway must fail the render rather than the route inside the pod.
+  - it: rejects an empty IPv4 gateway
+    set:
+      unboundConfig: "server:\n"
+      dnsDir: /opt/forge/dns/a
+      image.repository: x
+      resolver:
+        ipv4: {address: 198.51.100.251/31, gateway: ""}
+        ipv6: {address: 2001:db8::251/127, gateway: 2001:db8::250}
+    asserts:
+      - failedTemplate:
+          errorPattern: gateway
+
+  - it: rejects an empty IPv6 gateway
+    set:
+      unboundConfig: "server:\n"
+      dnsDir: /opt/forge/dns/a
+      image.repository: x
+      resolver:
+        ipv4: {address: 198.51.100.251/31, gateway: 198.51.100.250}
+        ipv6: {address: 2001:db8::251/127, gateway: ""}
+    asserts:
+      - failedTemplate:
+          errorPattern: gateway
+
+  - it: rejects an absent interface name
+    set:
+      unboundConfig: "server:\n"
+      dnsDir: /opt/forge/dns/a
+      image.repository: x
+      interfaceName: null
+      resolver: *resolver
+    asserts:
+      - failedTemplate:
+          errorPattern: interfaceName
