@@ -89,7 +89,7 @@ The next iteration schedules replacement work or skips an empty selection.
 ## Reading results and keeping history
 
 The commands below belong to `nico-admin-cli attestation spdm`. They use the
-[SPDM gRPC methods](https://github.com/dsx-ai-factory/infra-controller/blob/f63617df0786b86a6a56d5260eb35e3de16712f8/crates/rpc/proto/forge.proto#L1098).
+[SPDM gRPC methods](https://github.com/dsx-ai-factory/infra-controller/blob/c7382e82bad9581d54f10754122f3ed95f45c4b7/crates/rpc/proto/forge.proto#L1146).
 
 ### Start a run: `trigger`
 
@@ -177,7 +177,7 @@ descending, then `job_id` descending.
 The job being updated is also kept until a later cleanup, so ten is not a
 strict limit on retained jobs.
 
-Implementation: [scheduling](https://github.com/dsx-ai-factory/infra-controller/blob/f63617df0786b86a6a56d5260eb35e3de16712f8/crates/machine-controller/src/handler/attestation.rs),
-[job reads and status](https://github.com/dsx-ai-factory/infra-controller/blob/f63617df0786b86a6a56d5260eb35e3de16712f8/crates/api-db/src/attestation/spdm.rs),
-[worker](https://github.com/dsx-ai-factory/infra-controller/blob/f63617df0786b86a6a56d5260eb35e3de16712f8/crates/spdm-controller/src/handler.rs),
-and [storage and cleanup](https://github.com/dsx-ai-factory/infra-controller/blob/f63617df0786b86a6a56d5260eb35e3de16712f8/crates/api-db/migrations/20260917113009_spdm_job_id.sql).
+Implementation: [scheduling](https://github.com/dsx-ai-factory/infra-controller/blob/c7382e82bad9581d54f10754122f3ed95f45c4b7/crates/machine-controller/src/handler/attestation.rs),
+[job reads and status](https://github.com/dsx-ai-factory/infra-controller/blob/c7382e82bad9581d54f10754122f3ed95f45c4b7/crates/api-db/src/attestation/spdm.rs),
+[worker](https://github.com/dsx-ai-factory/infra-controller/blob/c7382e82bad9581d54f10754122f3ed95f45c4b7/crates/spdm-controller/src/handler.rs),
+and [storage and cleanup](https://github.com/dsx-ai-factory/infra-controller/blob/c7382e82bad9581d54f10754122f3ed95f45c4b7/crates/api-db/migrations/20260917113009_spdm_job_id.sql).

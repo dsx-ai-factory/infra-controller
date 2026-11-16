@@ -235,11 +235,16 @@ consulted only after that lookup misses.
 Seed `any` with `mode: ALL` to attest whatever the BMC offers on hardware
 nobody has profiled.
 
-Without that fallback, a machine whose class has no profile is never attested.
+Without that fallback, lifecycle triggers and manual triggers without
+`--attester-id-regex` do not attest a machine whose class has no profile.
 It is not blocked either. Scheduling reports `NoProfile`, and the machine
 continues to exactly the state it would have reached if attestation had run and
 passed. Nothing later in the flow can tell those two apart, so §6.4 is the only
 place the gap is visible.
+
+A manual trigger with `--attester-id-regex` can still attest eligible devices
+without a profile. It overrides profile selection for that request only; see
+[manual trigger selection](spdm-jobs.md#start-a-run-trigger).
 
 A `mode: NONE` profile on a real class also attests nothing, but on purpose.
 `NONE` means an operator decided this platform has nothing to attest.
