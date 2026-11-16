@@ -5111,6 +5111,18 @@ func TestUpdateInstanceHandler_Handle(t *testing.T) {
 		CreatedBy:            tnu1.ID,
 	})
 	require.NoError(t, sxaErr)
+	// A second retiring row with the same identity. Only the oldest is reactivated.
+	duplicateDeletingSpectrumXAttachment, sxaErr := cdbm.NewSpectrumXAttachmentDAO(dbSession).Create(ctx, nil, cdbm.SpectrumXAttachmentCreateInput{
+		InstanceID:           spectrumXReissueInstance.ID,
+		SiteID:               st1.ID,
+		SpectrumXPartitionID: sxp1.ID,
+		Device:               "NVIDIA BlueField-3 B3140L E-Series FHHL SuperNIC",
+		DeviceInstance:       0,
+		AttachmentType:       cdbm.SpectrumXAttachmentTypePhysical,
+		Status:               cdbm.SpectrumXAttachmentStatusDeleting,
+		CreatedBy:            tnu1.ID,
+	})
+	require.NoError(t, sxaErr)
 	replacementSpectrumXAttachment, sxaErr := cdbm.NewSpectrumXAttachmentDAO(dbSession).Create(ctx, nil, cdbm.SpectrumXAttachmentCreateInput{
 		InstanceID:           spectrumXReissueInstance.ID,
 		SiteID:               st1.ID,
@@ -6016,6 +6028,10 @@ func TestUpdateInstanceHandler_Handle(t *testing.T) {
 					require.NoError(t, gerr)
 					assert.Equal(t, cdbm.SpectrumXAttachmentStatusDeleting, replacement.Status)
 
+					duplicate, gerr := sxaDAO.Get(context.Background(), nil, duplicateDeletingSpectrumXAttachment.ID, nil)
+					require.NoError(t, gerr)
+					assert.Equal(t, cdbm.SpectrumXAttachmentStatusDeleting, duplicate.Status)
+
 					attachments, count, gerr := sxaDAO.GetAll(
 						context.Background(),
 						nil,
@@ -6024,8 +6040,8 @@ func TestUpdateInstanceHandler_Handle(t *testing.T) {
 						nil,
 					)
 					require.NoError(t, gerr)
-					assert.Equal(t, 2, count)
-					require.Len(t, attachments, 2)
+					assert.Equal(t, 3, count)
+					require.Len(t, attachments, 3)
 				},
 			},
 			verifySiteControllerRequest: true,

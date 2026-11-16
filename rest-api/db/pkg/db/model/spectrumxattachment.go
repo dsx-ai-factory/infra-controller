@@ -313,6 +313,8 @@ type SpectrumXAttachmentDAO interface {
 	//
 	Delete(ctx context.Context, tx *db.Tx, id uuid.UUID) error
 	//
+	DeleteIfDeleting(ctx context.Context, tx *db.Tx, id uuid.UUID) error
+	//
 	DeleteAllBySiteID(ctx context.Context, tx *db.Tx, siteID uuid.UUID) error
 }
 
@@ -663,6 +665,27 @@ func (sxasd SpectrumXAttachmentSQLDAO) Delete(ctx context.Context, tx *db.Tx, id
 	}
 
 	return nil
+}
+
+// DeleteIfDeleting deletes a SpectrumXAttachment only while its status is still Deleting.
+// A caller that picked the row from an earlier read uses it so a row reactivated in the
+// meantime survives. The status is checked by the delete itself, which waits for a
+// concurrent update of the row to commit before deciding.
+func (sxasd SpectrumXAttachmentSQLDAO) DeleteIfDeleting(ctx context.Context, tx *db.Tx, id uuid.UUID) (retErr error) {
+	ctx, SpectrumXAttachmentDAOSpan := cotel.StartSpan(ctx, "SpectrumXAttachmentDAO.DeleteIfDeleting")
+	defer func() { cotel.EndSpan(SpectrumXAttachmentDAOSpan, retErr) }()
+	cotel.SetAttribute(SpectrumXAttachmentDAOSpan, attribute.String("id", id.String()))
+
+	sxa := &SpectrumXAttachment{
+		ID: id,
+	}
+
+	_, err := db.GetIDB(tx, sxasd.dbSession).NewDelete().Model(sxa).
+		Where("id = ?", id).
+		Where("status = ?", SpectrumXAttachmentStatusDeleting).
+		Exec(ctx)
+
+	return err
 }
 
 // DeleteAllBySiteID deletes all SpectrumXAttachment records for a given Site

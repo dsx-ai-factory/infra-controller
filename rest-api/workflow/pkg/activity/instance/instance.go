@@ -1397,7 +1397,9 @@ func (mi ManageInstance) UpdateInstancesInDB(ctx context.Context, siteID uuid.UU
 	if len(spectrumXAttachmentsToDelete) > 0 {
 		sxaDeleteDAO := cdbm.NewSpectrumXAttachmentDAO(mi.dbSession)
 		for _, sxa := range spectrumXAttachmentsToDelete {
-			serr := sxaDeleteDAO.Delete(ctx, nil, sxa.ID)
+			// These rows were picked from a read taken earlier in this run. An Instance
+			// update can reactivate one since then, so only a row still Deleting is removed.
+			serr := sxaDeleteDAO.DeleteIfDeleting(ctx, nil, sxa.ID)
 			if serr != nil {
 				logger.Error().Err(serr).Str("SpectrumX Attachment ID", sxa.ID.String()).Msg("Failed to delete SpectrumX Attachment, DB error")
 			}

@@ -4178,10 +4178,13 @@ func (uih UpdateInstanceHandler) Handle(c echo.Context) error {
 					existing = deletingMatches[0]
 					reusable = true
 				}
+				reactivating := reusable && existing.Status == cdbm.SpectrumXAttachmentStatusDeleting
+				updated := &existing
 				if reusable {
 					retainedSxAIDs[existing.ID] = true
 					// Redundant Deleting rows with this identity are omitted from the
-					// response. Inventory removes them once it observes the active row.
+					// response, which carries each requested attachment once. Inventory
+					// removes them once it observes the active row.
 					for i := range deletingMatches {
 						retainedSxAIDs[deletingMatches[i].ID] = true
 					}
@@ -4191,10 +4194,8 @@ func (uih UpdateInstanceHandler) Handle(c echo.Context) error {
 					// name or OVN network name still reuses this row. Persist the new metadata
 					// and carry the updated row forward; otherwise the Site keeps the stale
 					// bridge and the response reports it too.
-					reactivating := existing.Status == cdbm.SpectrumXAttachmentStatusDeleting
 					metadataChanged := !stringPtrEqual(existing.BridgeName, apiSxA.BridgeName) ||
 						!stringPtrEqual(existing.OvnNetworkName, apiSxA.OvnNetworkName)
-					updated := &existing
 					if reactivating || metadataChanged {
 						updateInput := cdbm.SpectrumXAttachmentUpdateInput{
 							SpectrumXAttachmentID: existing.ID,
@@ -4207,19 +4208,24 @@ func (uih UpdateInstanceHandler) Handle(c echo.Context) error {
 						}
 						var uerr error
 						updated, uerr = sxaDAO.Update(ctx, tx, updateInput)
-						if uerr != nil {
+						if reactivating && uerr == cdb.ErrDoesNotExist {
+							// Inventory removed the retiring row after it was read above, so
+							// there is nothing left to reactivate and a new row is created.
+							reusable = false
+						} else if uerr != nil {
 							logger.Error().Err(uerr).Msg("failed to update SpectrumX Attachment metadata in DB")
 							return cutil.NewAPIError(http.StatusInternalServerError, "Failed to update SpectrumX Attachment for Instance, DB error", nil)
 						}
 					}
-
+				}
+				if reusable {
 					// A reactivated row must not expose stale Site allocations. Update only
 					// writes non-nil values, so optional fields are cleared explicitly.
 					clearInput := cdbm.SpectrumXAttachmentClearInput{
 						SpectrumXAttachmentID: existing.ID,
 						MacAddress:            reactivating,
 						IPAddress:             reactivating,
-						VirtualFunctionID:     reactivating && apiSxA.VirtualFunctionID == nil && existing.VirtualFunctionID != nil,
+						VirtualFunctionID:     reactivating && existing.VirtualFunctionID != nil,
 						OvnNetworkName:        apiSxA.OvnNetworkName == nil && existing.OvnNetworkName != nil,
 					}
 					if clearInput.MacAddress || clearInput.IPAddress || clearInput.VirtualFunctionID || clearInput.OvnNetworkName {
@@ -4276,8 +4282,9 @@ func (uih UpdateInstanceHandler) Handle(c echo.Context) error {
 				}
 
 				// Carried into the response so a retiring attachment still appears with its
-				// Deleting status, matching what a following GET reports. The Site config
-				// build below filters these out.
+				// Deleting status, matching what a following GET reports. A Deleting duplicate
+				// of a requested attachment is the exception and is skipped above. The Site
+				// config build below filters these out.
 				newOrExistingSxAs = append(newOrExistingSxAs, existingSxAs[i])
 			}
 		}

@@ -476,6 +476,27 @@ func TestSpectrumXAttachmentSQLDAO_Lifecycle(t *testing.T) {
 	assert.Nil(t, cleared.IPAddress)
 	assert.Nil(t, cleared.VirtualFunctionID)
 
+	// Inventory picks retiring rows from an earlier read, so its delete must leave a row
+	// that was reactivated since then and remove only one that is still Deleting.
+	require.NoError(t, sxaDAO.DeleteIfDeleting(ctx, nil, created.ID))
+	_, err = sxaDAO.Get(ctx, nil, created.ID, nil)
+	require.NoError(t, err, "a row that is not Deleting must survive")
+
+	retiring, err := sxaDAO.Create(ctx, nil, SpectrumXAttachmentCreateInput{
+		InstanceID:           fx.instance.ID,
+		SiteID:               fx.site.ID,
+		SpectrumXPartitionID: fx.partition.ID,
+		Device:               "NVIDIA BlueField-3 B3140L E-Series FHHL SuperNIC",
+		DeviceInstance:       2,
+		AttachmentType:       SpectrumXAttachmentTypePhysical,
+		Status:               SpectrumXAttachmentStatusDeleting,
+		CreatedBy:            fx.user.ID,
+	})
+	require.NoError(t, err)
+	require.NoError(t, sxaDAO.DeleteIfDeleting(ctx, nil, retiring.ID))
+	_, err = sxaDAO.Get(ctx, nil, retiring.ID, nil)
+	assert.ErrorIs(t, err, db.ErrDoesNotExist)
+
 	require.NoError(t, sxaDAO.DeleteAllBySiteID(ctx, nil, fx.site.ID))
 	_, err = sxaDAO.Get(ctx, nil, created.ID, nil)
 	assert.ErrorIs(t, err, db.ErrDoesNotExist)
