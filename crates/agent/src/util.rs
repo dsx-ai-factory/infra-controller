@@ -162,9 +162,10 @@ impl UrlResolver {
     }
 }
 
-/// The PXE server's addresses, or none when `carbide-pxe.forge` doesn't resolve. Only an
-/// interface without an explicit `booturl` needs them, and the network reconcile already
-/// fails such an interface when there are none, so a DPU that doesn't need them still starts.
+/// The PXE server's addresses, or none when `carbide-pxe.forge` doesn't resolve. The agent
+/// still starts, and the network reconcile fails where DHCP needs a PXE address: a managed
+/// host with an IPv4 loopback needs an IPv4 one even with `booturl` overrides, and an
+/// interface without an explicit `booturl` needs one too.
 fn pxe_ips_or_empty(resolved: Result<Vec<IpAddr>, eyre::Report>) -> Vec<IpAddr> {
     match resolved {
         Ok(ips) => {
@@ -176,7 +177,8 @@ fn pxe_ips_or_empty(resolved: Result<Vec<IpAddr>, eyre::Report>) -> Vec<IpAddr> 
             tracing::warn!(
                 error = %e,
                 "carbide-pxe could not be resolved; DHCP will offer no PXE boot address. \
-                 An interface without an explicit booturl fails the network reconcile."
+                 The network reconcile fails for a host with an IPv4 loopback or an \
+                 interface without an explicit booturl."
             );
             vec![]
         }
