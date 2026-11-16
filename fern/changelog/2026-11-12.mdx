@@ -18,6 +18,10 @@ the Site configuration. A Site-managed IP Block whose range is no longer configu
 moves to `Deleting`, blocking new Allocations and resizing, and is deleted once it
 is no longer in use.
 
+If an IP Block remains `Deleting` after its Allocations are deleted, follow the
+manual cleanup guidance in
+[Creating Site IP Blocks](/infra-controller/rest-api-reference/getting-started#creating-site-ip-blocks).
+
 Site configuration inventory runs started before the REST upgrade can fail during
 the rollout. Subsequent scheduled runs resume Site metadata updates.
 
