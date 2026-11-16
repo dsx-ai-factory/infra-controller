@@ -110,7 +110,6 @@ mod power_shelf;
 mod rack;
 mod redfish;
 mod resource_pool;
-mod rms;
 mod route_server;
 mod routing_profile;
 mod rpc;
@@ -221,10 +220,6 @@ async fn main() -> color_eyre::Result<()> {
         // --address is clap-`required` on RedfishAction; --username/--password
         // are optional.
         return redfish::action(ra.clone()).await;
-    }
-    if let Some(CliCommand::Rms(ref rms)) = config.commands {
-        // do rms same as redfish above
-        return rms::action(rms.clone(), &config).await;
     }
 
     let url = get_api_url(config.api_url, file_config.as_ref());
@@ -405,7 +400,6 @@ async fn main() -> color_eyre::Result<()> {
         CliCommand::Browse(cmd) => cmd.dispatch(ctx).await?,
         // Redfish is handled before the API client is built (see above).
         CliCommand::Redfish(_) => unreachable!("redfish is dispatched before client init"),
-        _ => return Err(eyre::eyre!("unsupported command")),
     }
 
     Ok(())
