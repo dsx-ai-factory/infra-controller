@@ -224,7 +224,6 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn collector_transition_wakes_discovery_before_the_normal_interval() {
-        let _metrics = MetricsCapture::start();
         let (times_tx, mut times_rx) = tokio::sync::mpsc::unbounded_channel();
         let collector_transition_notify = Arc::new(Notify::new());
 
@@ -238,7 +237,7 @@ mod tests {
                 calls: 0,
                 times: times_tx,
             },
-            carbide_instrument::Instrumentation::global(),
+            carbide_instrument::Instrumentation::noop(),
         ));
 
         let first_iteration = times_rx.recv().await.expect("first iteration should run");
@@ -256,7 +255,6 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn cancellation_stops_the_loop_and_runs_shutdown_once() {
-        let _metrics = MetricsCapture::start();
         let (times_tx, mut times_rx) = tokio::sync::mpsc::unbounded_channel();
         let shutdowns = Arc::new(AtomicUsize::new(0));
 
@@ -295,7 +293,7 @@ mod tests {
                 },
                 shutdowns: shutdowns.clone(),
             },
-            carbide_instrument::Instrumentation::global(),
+            carbide_instrument::Instrumentation::noop(),
         ));
 
         times_rx.recv().await.expect("first iteration runs");

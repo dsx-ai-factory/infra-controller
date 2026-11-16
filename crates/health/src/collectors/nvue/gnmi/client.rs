@@ -2342,7 +2342,7 @@ mod tests {
             Arc::new(NoopLimiter),
             metrics.clone(),
             Arc::new(config),
-            carbide_instrument::Instrumentation::global(),
+            carbide_instrument::Instrumentation::noop(),
         )
         .unwrap();
         let source = Arc::new(StaticEndpointSource::new(vec![endpoint]));
