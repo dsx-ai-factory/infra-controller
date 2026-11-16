@@ -1566,6 +1566,7 @@ pub struct VaultConfig {
     /// When configured, this takes precedence over `VAULT_NAMESPACE` and is
     /// sent as `X-Vault-Namespace` on every Vault API request.
     pub namespace: Option<String>,
+    /// Vault Kubernetes auth mount path.
     pub kubernetes_auth_mount: Option<String>,
     /// SPIFFE trust domain for machine PKI URI SANs. Defaults to `nico.local`.
     pub spiffe_trust_domain: Option<String>,
