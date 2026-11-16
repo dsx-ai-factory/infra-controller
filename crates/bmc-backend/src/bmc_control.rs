@@ -136,15 +136,20 @@ impl BackendBmcControl<'_> {
         }
     }
 
-    /// See [`BmcControl::host_management_network_access`].
-    pub async fn host_management_network_access(&self) -> Result<Option<bool>, PlatformError> {
+    /// Whether the BMC controls the host's management network access:
+    /// libredfish recognizes a Vera Rubin service root, and the drivers
+    /// support [`BmcControl::host_management_network_access`], whether or not
+    /// the BMC reports the access.
+    pub async fn controls_host_management_network_access(&self) -> Result<bool, PlatformError> {
         match self {
             Self::Libredfish(client) => client
-                .are_onboard_nics_enabled()
+                .get_service_root()
                 .await
-                .map(|enabled| enabled.map(|enabled| enabled.is_enabled()))
+                .map(|root| root.is_vera_rubin())
                 .map_err(platform_error),
-            Self::Drivers(bmc_control) => bmc_control.host_management_network_access().await,
+            Self::Drivers(bmc_control) => {
+                supported(bmc_control.host_management_network_access().await)
+            }
         }
     }
 
@@ -175,5 +180,40 @@ fn enabled_disabled(enabled: bool) -> EnabledDisabled {
         EnabledDisabled::Enabled
     } else {
         EnabledDisabled::Disabled
+    }
+}
+
+/// Whether an operation that answered `result` is supported.
+fn supported<T>(result: Result<T, PlatformError>) -> Result<bool, PlatformError> {
+    match result {
+        Ok(_) => Ok(true),
+        Err(PlatformError::Unsupported) => Ok(false),
+        Err(error) => Err(error),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use carbide_test_support::value_scenarios;
+
+    use super::*;
+
+    #[test]
+    fn host_management_network_access_is_controlled_wherever_it_is_supported() {
+        let not_ready = || PlatformError::NotReady {
+            message: "not ready".to_string(),
+        };
+        value_scenarios!(supported:
+            "supported, reported or not" {
+                Ok(Some(false)) => Ok(true),
+                Ok(None) => Ok(true),
+            }
+            "unsupported" {
+                Err(PlatformError::Unsupported) => Ok(false),
+            }
+            "unreadable" {
+                Err(not_ready()) => Err(not_ready()),
+            }
+        );
     }
 }

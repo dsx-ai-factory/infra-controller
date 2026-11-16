@@ -281,9 +281,9 @@ async fn invoke_power_operation(
     let restore_onboard_nics =
         if action == PowerAction::AcPowercycle && mh_snapshot.has_managed_dpus() {
             let bmc = ctx.services.connect_bmc(machine).await?;
-            let bmc_control = bmc
-                .bmc_control()
-                .map_err(|error| platform_error("host_management_network_access", error.into()))?;
+            let bmc_control = bmc.bmc_control().map_err(|error| {
+                platform_error("controls_host_management_network_access", error.into())
+            })?;
             super::onboard_nics::isolate(&bmc_control, mh_snapshot).await?
         } else {
             false

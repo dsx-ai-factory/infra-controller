@@ -52,8 +52,10 @@ where
         _boot_interface: Option<&BootInterfaceSelector>,
     ) -> Result<DriverOutcome, PlatformError> {
         let current = cx.current_bios_settings().await?;
-        let mut settings = expected(ATTRIBUTES, &current, profile);
-        settings.attributes.extend(tpm_clear().attributes);
+        let mut settings = tpm_clear();
+        settings
+            .attributes
+            .extend(expected(ATTRIBUTES, &current, profile).attributes);
         cx.stage_bios_attributes(&settings.attributes).await
     }
 
@@ -81,13 +83,15 @@ mod tests {
     use super::*;
     use crate::bios::support::assert_apply_requests_tpm_clear;
 
-    /// Setup clears the TPM on this platform.
+    /// Setup clears the TPM on this platform, and a profile's TPM value wins
+    /// over the clear request's.
     #[tokio::test]
     async fn apply_requests_a_tpm_clear_status_does_not_compare() {
         assert_apply_requests_tpm_clear(
             &IloBios,
             ATTRIBUTES,
-            json!({"Tpm2Operation": "NoAction", "TpmVisibility": "Visible"}),
+            json!({"TpmVisibility": "Hidden"}),
+            json!({"Tpm2Operation": "NoAction"}),
             json!({"Tpm2Operation": "Clear"}),
         )
         .await;

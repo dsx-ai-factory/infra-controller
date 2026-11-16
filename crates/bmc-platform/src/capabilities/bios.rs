@@ -72,7 +72,8 @@ pub trait Bios<B: Bmc>: Send + Sync {
     /// including infinite boot on platforms that have the setting and a TPM
     /// clear on platforms whose setup clears the TPM. The BIOS performs a TPM
     /// clear on the next boot and resets the request, so [`Self::status`] does
-    /// not compare it.
+    /// not compare it. A `profile` value for a TPM attribute replaces the
+    /// clear request's.
     ///
     /// `boot_interface` is the host interface boot order setup will put first,
     /// or `None` on a host without one; platforms whose boot order reads BIOS

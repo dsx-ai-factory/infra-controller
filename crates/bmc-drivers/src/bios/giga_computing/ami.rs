@@ -64,8 +64,10 @@ where
         _boot_interface: Option<&BootInterfaceSelector>,
     ) -> Result<DriverOutcome, PlatformError> {
         let current = cx.reported_bios_settings().await?;
-        let mut settings = expected(ATTRIBUTES, &current, profile);
-        settings.attributes.extend(tpm_clear().attributes);
+        let mut settings = tpm_clear();
+        settings
+            .attributes
+            .extend(expected(ATTRIBUTES, &current, profile).attributes);
         cx.stage_bios_attributes(&settings.attributes).await
     }
 
@@ -119,6 +121,7 @@ mod tests {
         assert_apply_requests_tpm_clear(
             &GigaComputingAmiBios,
             ATTRIBUTES,
+            json!({}),
             json!({TPM_OPERATION: "None"}),
             json!({TPM_OPERATION: "TPM Clear"}),
         )

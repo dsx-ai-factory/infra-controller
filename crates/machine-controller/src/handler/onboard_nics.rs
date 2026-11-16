@@ -2,7 +2,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use bmc_backend::BackendBmcControl;
-use bmc_platform::PlatformError;
 use carbide_redfish::state_handler::state_handler_platform_error as platform_error;
 use chrono::Duration;
 use model::machine::{DisableOnboardNicsState, ManagedHostStateSnapshot};
@@ -28,11 +27,10 @@ pub(super) async fn isolate(
     if !snapshot.has_managed_dpus() {
         return Ok(false);
     }
-    match bmc_control.host_management_network_access().await {
-        Ok(access) => Ok(access.is_some()),
-        Err(PlatformError::Unsupported) => Ok(false),
-        Err(error) => Err(platform_error("host_management_network_access", error)),
-    }
+    bmc_control
+        .controls_host_management_network_access()
+        .await
+        .map_err(|error| platform_error("controls_host_management_network_access", error))
 }
 
 /// Shared ingestion and post-AC-cycle sequence: enable, wait, disable, wait.
@@ -86,34 +84,31 @@ mod tests {
     use bmc_backend::BackendBmc;
     use carbide_redfish::libredfish::test_support::RedfishSim;
     use carbide_redfish::libredfish::{RedfishAuth, RedfishClientPool};
-    use libredfish::EnabledDisabled;
     use model::test_support::machine_snapshot::managed_host_state_snapshot;
 
     use super::*;
 
+    /// libredfish controls the NICs of a Vera Rubin service root, whether or
+    /// not the BMC reports their access.
     #[tokio::test]
     async fn onboard_nics_are_isolated_only_behind_managed_dpus_on_bmcs_that_control_them() {
-        for (scenario, managed_dpus, controlled, expected) in [
+        for (scenario, managed_dpus, product, expected) in [
             (
-                "managed DPUs and a BMC that controls the NICs",
+                "managed DPUs behind a Vera Rubin BMC",
                 true,
-                true,
+                "VR NVL72",
                 true,
             ),
-            ("a BMC without the control", true, false, false),
-            ("no managed DPUs", false, true, false),
+            ("another NVIDIA BMC", true, "GB200 NVL", false),
+            ("no managed DPUs", false, "VR NVL72", false),
         ] {
             let sim = Arc::new(RedfishSim::default());
+            sim.set_service_root_vendor(Some("NVIDIA".into()));
+            sim.set_service_root_product(Some(product.into()));
             let client = sim
                 .create_client("host", None, RedfishAuth::Anonymous, None)
                 .await
                 .expect("the simulated BMC connects");
-            if controlled {
-                client
-                    .set_enable_onboard_nics(EnabledDisabled::Enabled)
-                    .await
-                    .expect("the simulated BMC records the setting");
-            }
             let bmc = BackendBmc::from(client);
             let mut snapshot = managed_host_state_snapshot();
             if !managed_dpus {
