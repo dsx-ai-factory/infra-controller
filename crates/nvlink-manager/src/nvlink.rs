@@ -17,7 +17,7 @@
 
 #[cfg(any(test, feature = "test-support"))]
 pub mod test_support {
-    use std::collections::HashSet;
+    use std::collections::{HashMap, HashSet};
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
 
@@ -74,6 +74,9 @@ pub mod test_support {
         /// While set, `hello` fails on this client and the clients it created, simulating an
         /// NMX-C that cannot be reached.
         _hello_fails: Arc<AtomicBool>,
+        /// Partitions left out of the next listings, by partition id and remaining listings,
+        /// simulating an NMX-C that has not finished restoring its fabric state.
+        _hidden_listings: Arc<Mutex<HashMap<u32, usize>>>,
     }
 
     impl Default for NmxcSimClient {
@@ -87,6 +90,7 @@ pub mod test_support {
                 _partition_info_list_calls: Arc::new(AtomicUsize::new(0)),
                 _gpu_info_list: Arc::new(Vec::new()),
                 _hello_fails: Arc::new(AtomicBool::new(false)),
+                _hidden_listings: Arc::new(Mutex::new(HashMap::new())),
             }
         }
     }
@@ -175,6 +179,15 @@ pub mod test_support {
         /// it has created or will create, so a test can take NMX-C down and bring it back.
         pub fn set_hello_fails(&self, fails: bool) {
             self._hello_fails.store(fails, Ordering::SeqCst);
+        }
+
+        /// Leaves `partition_id` out of the next `listings` partition listings on this client
+        /// and the clients it created, as an NMX-C still restoring its state would.
+        pub fn hide_partition_for_listings(&self, partition_id: u32, listings: usize) {
+            self._hidden_listings
+                .lock()
+                .unwrap()
+                .insert(partition_id, listings);
         }
 
         /// Serves one partition named `name` holding `gpu_uids`.
@@ -433,18 +446,27 @@ pub mod test_support {
         ) -> Result<GetPartitionInfoListResponse, NmxcError> {
             self._partition_info_list_calls
                 .fetch_add(1, Ordering::SeqCst);
+            let hidden: HashSet<u32> = {
+                let mut hidden_listings = self._hidden_listings.lock().unwrap();
+                let hidden = hidden_listings.keys().copied().collect();
+                hidden_listings.retain(|_, remaining| {
+                    *remaining -= 1;
+                    *remaining > 0
+                });
+                hidden
+            };
             let parts = self._partitions.lock().unwrap();
+            let visible = parts.iter().filter(|p| !hidden.contains(&p.partition_id));
             let partition_info_list: Vec<nmxc_model::PartitionInfo> =
                 if req.partition_id_list.is_empty() {
-                    parts.iter().map(Self::to_partition_info).collect()
+                    visible.map(Self::to_partition_info).collect()
                 } else {
                     let wanted: HashSet<u32> = req
                         .partition_id_list
                         .iter()
                         .map(|p| p.partition_id)
                         .collect();
-                    parts
-                        .iter()
+                    visible
                         .filter(|p| wanted.contains(&p.partition_id))
                         .map(Self::to_partition_info)
                         .collect()
@@ -576,6 +598,7 @@ pub mod test_support {
                 _partition_info_list_calls: self._partition_info_list_calls.clone(),
                 _gpu_info_list: self._gpu_info_list.clone(),
                 _hello_fails: self._hello_fails.clone(),
+                _hidden_listings: self._hidden_listings.clone(),
             }))
         }
     }

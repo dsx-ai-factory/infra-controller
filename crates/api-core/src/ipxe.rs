@@ -276,6 +276,10 @@ impl PxeInstructions {
         txn: &mut PgConnection,
         target: PxeInstructionsInput,
     ) -> Result<String, CarbideError> {
+        // Every script that hands the machine back to firmware runs `ifclose`
+        // before `exit`. With the interface left open, the boot that follows
+        // (shim -> GRUB -> kernel) can hang before the kernel's first message on
+        // some provisioning NICs; closing it first boots cleanly.
         let error_instructions = |machine_id: MachineId,
                                   interface_id: MachineInterfaceId,
                                   state: &ManagedHostState|
@@ -287,6 +291,7 @@ echo Interface ID: {interface_id}
 echo Current state: {state}
 echo Could not continue boot due to invalid state ||
 sleep 5 ||
+ifclose ||
 exit ||
 "#
             )
@@ -303,6 +308,7 @@ echo Interface ID: {interface_id}
 echo Current state: {state}
 echo This state assumes an OS is provisioned and will exit into the OS in 5 seconds. To re-run iPXE instructions and OS installation, trigger a reboot request with flag rebootWithCustomIpxe/boot_with_custom_ipxe set. ||
 sleep 5 ||
+ifclose ||
 exit ||
 "#
             )
@@ -320,6 +326,7 @@ echo This state assumes an OS is provisioned and will exit into the OS in 5 seco
 sleep 5 ||
 sanboot --no-describe --drive 0x80 ||
 sanboot --no-describe --drive 0x81 ||
+ifclose ||
 exit ||
 "#
             )
@@ -328,6 +335,7 @@ exit ||
         static UNKNOWN_HOST_INSTRUCTIONS: &str = r#"
 echo this is an unknown host interface, not PXE booting ||
 sleep 5 ||
+ifclose ||
 exit ||
         "#;
 

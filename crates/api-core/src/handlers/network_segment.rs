@@ -740,6 +740,7 @@ async fn allocate_vni(
             ),
         ) => {
             db::resource_pool::emit_allocation_failure(
+                &api.instrumentation,
                 api.common_pools.ethernet.pool_vni.value_type,
                 owner_id,
                 false,
@@ -750,6 +751,7 @@ async fn allocate_vni(
         }
         Err(err) => {
             db::resource_pool::emit_allocation_failure(
+                &api.instrumentation,
                 api.common_pools.ethernet.pool_vni.value_type,
                 owner_id,
                 false,
@@ -785,6 +787,7 @@ async fn allocate_vlan_id(
             ),
         ) => {
             db::resource_pool::emit_allocation_failure(
+                &api.instrumentation,
                 api.common_pools.ethernet.pool_vlan_id.value_type,
                 owner_id,
                 false,
@@ -795,6 +798,7 @@ async fn allocate_vlan_id(
         }
         Err(err) => {
             db::resource_pool::emit_allocation_failure(
+                &api.instrumentation,
                 api.common_pools.ethernet.pool_vlan_id.value_type,
                 owner_id,
                 false,

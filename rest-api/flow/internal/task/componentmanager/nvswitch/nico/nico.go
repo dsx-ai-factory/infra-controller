@@ -79,6 +79,7 @@ func Descriptor() cmcatalog.Descriptor {
 		},
 		RequiredProviders: []string{nicoprovider.ProviderName},
 		Capabilities: capability.CapabilitySet{
+			capability.CapabilityComponentReset,
 			capability.CapabilityDecommissionControl,
 			capability.CapabilityDecommissionStatus,
 			capability.CapabilityFirmwareConsistencyCheck,

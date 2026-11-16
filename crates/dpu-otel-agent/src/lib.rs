@@ -19,9 +19,9 @@ use std::sync::Arc;
 
 use ::rpc::carbide_tls_client::CarbideClientConfig;
 use carbide_host_support::agent_config::AgentConfig;
+use carbide_tls::client_config::ClientCert;
 pub use command_line::{AgentCommand, Options, RunOptions};
 use eyre::WrapErr;
-use forge_tls::client_config::ClientCert;
 
 mod command_line;
 

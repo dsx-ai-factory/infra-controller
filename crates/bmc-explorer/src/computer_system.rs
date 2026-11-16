@@ -238,16 +238,7 @@ impl<B: Bmc> ExploredComputerSystem<B> {
             let power_state = self
                 .system
                 .power_state()
-                .and_then(|state| match state {
-                    PowerState::On => Some(ModelPowerState::On),
-                    PowerState::Off => Some(ModelPowerState::Off),
-                    PowerState::PoweringOn => Some(ModelPowerState::PoweringOn),
-                    PowerState::PoweringOff => Some(ModelPowerState::PoweringOff),
-                    PowerState::Paused => Some(ModelPowerState::Paused),
-                    PowerState::Hibernating => Some(ModelPowerState::Hibernating),
-                    PowerState::Sleeping => Some(ModelPowerState::Sleeping),
-                    PowerState::UnsupportedValue => None,
-                })
+                .and_then(model_power_state)
                 .unwrap_or_default();
             let serial_console_ssh_port = self.system
             .raw()
@@ -670,6 +661,21 @@ impl<B: Bmc> ExploredComputerSystem<B> {
         } else {
             None
         }
+    }
+}
+
+/// The site-explorer power state for one a BMC reports; `None` for a value
+/// NICo does not classify, which callers resolve by their own default.
+pub fn model_power_state(state: PowerState) -> Option<ModelPowerState> {
+    match state {
+        PowerState::On => Some(ModelPowerState::On),
+        PowerState::Off => Some(ModelPowerState::Off),
+        PowerState::PoweringOn => Some(ModelPowerState::PoweringOn),
+        PowerState::PoweringOff => Some(ModelPowerState::PoweringOff),
+        PowerState::Paused => Some(ModelPowerState::Paused),
+        PowerState::Hibernating => Some(ModelPowerState::Hibernating),
+        PowerState::Sleeping => Some(ModelPowerState::Sleeping),
+        PowerState::UnsupportedValue => None,
     }
 }
 

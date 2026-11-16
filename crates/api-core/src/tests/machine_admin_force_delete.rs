@@ -136,6 +136,7 @@ async fn test_admin_force_delete_dpu_only(pool: sqlx::PgPool) {
         &mut txn,
         &dpu_machine_id,
         &vpc_id,
+        &env.api.instrumentation,
     )
     .await
     .expect("allocate VPC loopback");
@@ -179,11 +180,11 @@ async fn test_admin_force_delete_dpu_only(pool: sqlx::PgPool) {
             .is_empty()
     );
 
-    // Model the stale snapshot race directly: the reservation still belongs
-    // to this DPU even when its persisted network config no longer names it.
+    // Ownership still identifies the ASN and IPv6 reservations after their
+    // persisted fields have been cleared from the force-delete snapshot.
     sqlx::query(
         "UPDATE machines
-         SET network_config = jsonb_set(
+        SET asn = NULL, network_config = jsonb_set(
              network_config,
              '{loopback_ip_v6}',
              'null'::jsonb
@@ -1310,6 +1311,7 @@ async fn force_delete_orphan_override_removes_service_vpc_ownership_after_admin_
         &mut txn,
         &endpoint.dpu_id,
         &endpoint.vpc_id,
+        &env.api.instrumentation,
     )
     .await
     .unwrap();

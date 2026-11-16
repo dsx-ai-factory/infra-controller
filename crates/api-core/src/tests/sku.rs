@@ -288,7 +288,7 @@ pub(in crate::tests) mod tests {
         if let Some(find_match_interval) = find_match_interval {
             config.bom_validation.find_match_interval = find_match_interval;
         }
-        overrides.config = Some(config);
+        overrides.config = Some(Box::new(config));
 
         let test_env = create_test_env_with_overrides(db_pool, overrides).await;
 
@@ -303,7 +303,7 @@ pub(in crate::tests) mod tests {
         config.bom_validation.enabled = true;
         config.bom_validation.ignore_unassigned_machines = true;
         config.bom_validation.allow_allocation_on_validation_failure = false;
-        overrides.config = Some(config);
+        overrides.config = Some(Box::new(config));
 
         create_test_env_with_overrides(db_pool, overrides).await
     }

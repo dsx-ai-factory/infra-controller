@@ -555,7 +555,7 @@ async fn dpu_rediscovery_counts_a_failed_admin_address_reconcile(
         .machine_id
         .expect("the OOB interface was selected by its DPU machine id");
 
-    let metrics = MetricsCapture::start();
+    let metrics = MetricsCapture::for_registry(env.test_meter.registry());
     assert_eq!(
         dpu_discover_machine(&env, dpu, dpu_interface.id).await,
         dpu_machine_id

@@ -30,10 +30,10 @@ use carbide_host_support::hardware_enumeration::{
     enumerate_and_save_hardware, enumerate_hardware, load_hardware_from_cache,
 };
 use carbide_host_support::registration::register_machine;
+use carbide_tls::client_config::ClientCert;
 use carbide_utils::arch::CpuArchitecture;
 pub use command_line::{AgentCommand, AgentPlatformType, Options, RunOptions, WriteTarget};
 use eyre::WrapErr;
-use forge_tls::client_config::ClientCert;
 use futures_util::TryStreamExt;
 use mac_address::MacAddress;
 use network_monitor::{NetworkPingerType, Ping};
@@ -604,6 +604,7 @@ pub async fn start(cmdline: command_line::Options) -> eyre::Result<()> {
                     forge_api: forge_api_server.clone(),
                     carbide_client_config: Arc::clone(&carbide_client_config),
                 },
+                crate::instrumentation::get_event_instrumentation(),
             )
             .await;
 

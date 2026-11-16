@@ -19,6 +19,7 @@
 use std::net::SocketAddr;
 use std::sync::Arc;
 
+use carbide_tls::client_config::ClientCert;
 use clap::Parser;
 use eyre::WrapErr;
 use fmds::cfg::Options;
@@ -26,7 +27,6 @@ use fmds::grpc_server::FmdsGrpcServer;
 use fmds::rest_server::get_fmds_router;
 use fmds::state::FmdsState;
 use fmds::{http_request_metrics, nic_init};
-use forge_tls::client_config::ClientCert;
 use rpc::carbide_tls_client::CarbideClientConfig;
 use rpc::fmds::fmds_config_service_server::FmdsConfigServiceServer;
 use rpc::node_token_socket::SocketTokenSource;
@@ -144,20 +144,26 @@ async fn main() -> eyre::Result<()> {
         }
     };
 
+    let (prometheus_registry, http_request_metrics_state) = http_request_metrics::init(true)?;
     let state = Arc::new(
-        FmdsState::try_new(options.forge_api.clone(), carbide_client_config)
-            .map_err(|e| eyre::eyre!("failed to initialize FMDS state: {e}"))?,
+        FmdsState::try_new(
+            options.forge_api.clone(),
+            carbide_client_config,
+            http_request_metrics_state.instrumentation(),
+        )
+        .map_err(|e| eyre::eyre!("failed to initialize FMDS state: {e}"))?,
     );
 
-    let (prometheus_registry, http_request_metrics_state) = http_request_metrics::init()?;
     // init() installed the global meter provider, so the log-event counter can register now.
     carbide_instrument::log_events::register(&opentelemetry::global::meter("carbide-instrument"));
     let http_request_metrics_state = Arc::new(http_request_metrics_state);
 
     let metrics_address = options.metrics_address;
     let registry_for_metrics = prometheus_registry.clone();
+    let endpoint_instrumentation = http_request_metrics_state.instrumentation();
     tokio::spawn(async move {
         let config = metrics_endpoint::MetricsEndpointConfig {
+            instrumentation: endpoint_instrumentation,
             address: metrics_address,
             registry: registry_for_metrics,
             health_controller: None,
@@ -281,8 +287,14 @@ mod tests {
             "127.0.0.1:0",
         ])
         .expect("listener configuration");
-        let state =
-            Arc::new(FmdsState::try_new("https://api.test".into(), None).expect("FMDS state"));
+        let state = Arc::new(
+            FmdsState::try_new(
+                "https://api.test".into(),
+                None,
+                carbide_instrument::Instrumentation::global(),
+            )
+            .expect("FMDS state"),
+        );
         state.update_config(FmdsConfig {
             public_ipv4: None,
             public_ipv6: Some("2001:db8::17".parse().expect("host address")),

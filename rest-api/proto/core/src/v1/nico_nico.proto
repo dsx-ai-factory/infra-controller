@@ -70,12 +70,16 @@ service Forge {
   // allocation. Success means Core committed, not that the dataplane converged.
   rpc ChangeVpcRoutingProfile(VpcChangeRoutingProfileRequest) returns (VpcRoutingState);
   // Operator cleanup after independently verifying that no DPU or fabric route
-  // still uses the retained VNI. Core does not verify dataplane convergence.
+  // still uses the retained VNI. Integrated release completes in the VPC
+  // transaction. Remote success follows provider release confirmation; an error
+  // can follow committed release intent and an advanced VPC version.
+  // Core does not verify dataplane convergence.
   rpc ReleaseVpcInactiveVni(VpcReleaseInactiveVniRequest) returns (VpcReleaseInactiveVniResult);
   rpc UpdateVpcVirtualization(VpcUpdateVirtualizationRequest) returns (VpcUpdateVirtualizationResult);
   // Deletion does not release a retained VNI implicitly. Call
   // ReleaseVpcInactiveVni after verifying convergence before deleting the VPC.
-  // Retained or inconsistent owned allocations cause FailedPrecondition.
+  // Retained or inconsistent owned allocations cause FailedPrecondition, as do
+  // unfinished remote cancellation or release.
   rpc DeleteVpc(VpcDeletionRequest) returns (VpcDeletionResult);
   rpc FindVpcIds(VpcSearchFilter) returns (VpcIdList);
   rpc FindVpcsByIds(VpcsByIdsRequest) returns (VpcList);
@@ -693,23 +697,25 @@ service Forge {
   // Delete all expected racks in site
   rpc DeleteAllExpectedRacks(google.protobuf.Empty) returns (google.protobuf.Empty);
 
-  // Administrator-managed expected NVLink domain inventory
-  // Declare immutable expected membership. This does not configure hardware or validate
-  // physical NVLink connectivity. Unknown/ambiguous members and wrong-group racks are rejected.
-  rpc CreateExpectedNvLinkDomain(CreateExpectedNvLinkDomainRequest) returns (ExpectedNvLinkDomain);
-  // Delete only the declaration and release its MAC claims; no hardware operations occur.
+  // Administrator-managed NVLink domain inventory
+  // Declare immutable membership by rack index, slot index, and component type.
+  // This does not configure hardware, resolve positions against RackGroup members,
+  // or validate physical NVLink connectivity. A missing RackGroup returns NOT_FOUND.
+  // Positions already claimed by another domain return ALREADY_EXISTS.
+  rpc CreateNvLinkDomain(CreateNvLinkDomainRequest) returns (NvLinkDomain);
+  // Delete only the declaration and release its positions; no hardware operations occur.
   // Missing declarations return NOT_FOUND. Observed domains and health reports are untouched.
-  rpc DeleteExpectedNvLinkDomain(ExpectedNvLinkDomainRequest) returns (google.protobuf.Empty);
-  rpc GetExpectedNvLinkDomain(ExpectedNvLinkDomainRequest) returns (ExpectedNvLinkDomain);
-  rpc FindExpectedNvLinkDomainIds(ExpectedNvLinkDomainSearchFilter) returns (ExpectedNvLinkDomainIdList);
-  rpc FindExpectedNvLinkDomainsByIds(ExpectedNvLinkDomainsByIdsRequest) returns (ExpectedNvLinkDomainList);
+  rpc DeleteNvLinkDomain(NvLinkDomainRequest) returns (google.protobuf.Empty);
+  rpc GetNvLinkDomain(NvLinkDomainRequest) returns (NvLinkDomain);
+  rpc FindNvLinkDomainIds(NvLinkDomainSearchFilter) returns (NvLinkDomainIdList);
+  rpc FindNvLinkDomainsByIds(NvLinkDomainsByIdsRequest) returns (NvLinkDomainList);
 
   // Expected Rack Group Management
   rpc AddExpectedRackGroup(ExpectedRackGroup) returns (google.protobuf.Empty);
-  // Fails with FAILED_PRECONDITION if expected NVLink domains reference this group.
+  // Fails with FAILED_PRECONDITION if NVLink domains reference this group.
   rpc DeleteExpectedRackGroup(ExpectedRackGroupRequest) returns (google.protobuf.Empty);
   // Replace the full record, including both lists and metadata.
-  // With expected NVLink domains, racks must remain unchanged.
+  // With NVLink domains, racks must remain unchanged.
   // Topology, protocol, and metadata changes are accepted.
   rpc UpdateExpectedRackGroup(ExpectedRackGroup) returns (google.protobuf.Empty);
   rpc GetExpectedRackGroup(ExpectedRackGroupRequest) returns (ExpectedRackGroup);
@@ -718,9 +724,9 @@ service Forge {
   rpc FindExpectedRackGroupIds(ExpectedRackGroupSearchFilter) returns (ExpectedRackGroupIdList);
   rpc FindExpectedRackGroupsByIds(ExpectedRackGroupsByIdsRequest) returns (ExpectedRackGroupList);
   // Atomically clear existing groups and insert the supplied list; an empty list clears all groups.
-  // Fails with FAILED_PRECONDITION while any expected NVLink domain references a group.
+  // Fails with FAILED_PRECONDITION while any NVLink domain references a group.
   rpc ReplaceAllExpectedRackGroups(ExpectedRackGroupList) returns (google.protobuf.Empty);
-  // Fails with FAILED_PRECONDITION while any expected NVLink domain references a group.
+  // Fails with FAILED_PRECONDITION while any NVLink domain references a group.
   rpc DeleteAllExpectedRackGroups(google.protobuf.Empty) returns (google.protobuf.Empty);
 
   // Perform Attestation Procedure for Measured Boot
@@ -1192,6 +1198,12 @@ service Forge {
   // interconnect with a scout agent listening via an open ScoutStream connection.
   //
   // MlxAdminProfileSync is used to sync an MlxConfigProfile to a given device.
+  // Reserves the managed host (including commands sent to an attached DPU).
+  // Pending hardware commands or admitted NIC firmware work reject this request
+  // with FAILED_PRECONDITION. A reserved-host reply wait expires after 30 minutes
+  // with DEADLINE_EXCEEDED; timeout or uncertain delivery retains the reservation.
+  // Unattached DPUs have no host reservation or added reply deadline. Do not retry
+  // unresolved work as a replacement command. Read-only requests remain available.
   rpc MlxAdminProfileSync(mlx_device.MlxAdminProfileSyncRequest) returns (mlx_device.MlxAdminProfileSyncResponse);
   // MlxAdminProfileShow shows the configuration of a specific MlxConfigProfile
   // loaded into nico-core-api.
@@ -1208,9 +1220,21 @@ service Forge {
   //
   // MlxAdminLockdownLock locks a Mellanox device, using whatever key is currently
   // managed internally within NICo.
+  // Reserves the managed host (including commands sent to an attached DPU).
+  // Pending hardware commands or admitted NIC firmware work reject this request
+  // with FAILED_PRECONDITION. A reserved-host reply wait expires after 30 minutes
+  // with DEADLINE_EXCEEDED; timeout or uncertain delivery retains the reservation.
+  // Unattached DPUs have no host reservation or added reply deadline. Do not retry
+  // unresolved work as a replacement command. Read-only requests remain available.
   rpc MlxAdminLockdownLock(mlx_device.MlxAdminLockdownLockRequest) returns (mlx_device.MlxAdminLockdownLockResponse);
   // MlxAdminLockdownUnlock unlocks a Mellanox device, using whatever key is currently
   // managed internally within NICo.
+  // Reserves the managed host (including commands sent to an attached DPU).
+  // Pending hardware commands or admitted NIC firmware work reject this request
+  // with FAILED_PRECONDITION. A reserved-host reply wait expires after 30 minutes
+  // with DEADLINE_EXCEEDED; timeout or uncertain delivery retains the reservation.
+  // Unattached DPUs have no host reservation or added reply deadline. Do not retry
+  // unresolved work as a replacement command. Read-only requests remain available.
   rpc MlxAdminLockdownUnlock(mlx_device.MlxAdminLockdownUnlockRequest) returns (mlx_device.MlxAdminLockdownUnlockResponse);
   // MlxAdminLockdownStatus returns the live lock status of a Mellanox device
   // by querying over an open ScoutStream connection.
@@ -1249,10 +1273,22 @@ service Forge {
   rpc MlxAdminConfigQuery(mlx_device.MlxAdminConfigQueryRequest) returns (mlx_device.MlxAdminConfigQueryResponse);
   // MlxAdminConfigSet is used to set one or more running mlxconfig
   // variable values for the provided target machine device.
+  // Reserves the managed host (including commands sent to an attached DPU).
+  // Pending hardware commands or admitted NIC firmware work reject this request
+  // with FAILED_PRECONDITION. A reserved-host reply wait expires after 30 minutes
+  // with DEADLINE_EXCEEDED; timeout or uncertain delivery retains the reservation.
+  // Unattached DPUs have no host reservation or added reply deadline. Do not retry
+  // unresolved work as a replacement command. Read-only requests remain available.
   rpc MlxAdminConfigSet(mlx_device.MlxAdminConfigSetRequest) returns (mlx_device.MlxAdminConfigSetResponse);
   // MlxAdminConfigSync is used to sync one or more running mlxconfig
   // variable values for the provided target machine device, reporting back
   // specifics of what changed.
+  // Reserves the managed host (including commands sent to an attached DPU).
+  // Pending hardware commands or admitted NIC firmware work reject this request
+  // with FAILED_PRECONDITION. A reserved-host reply wait expires after 30 minutes
+  // with DEADLINE_EXCEEDED; timeout or uncertain delivery retains the reservation.
+  // Unattached DPUs have no host reservation or added reply deadline. Do not retry
+  // unresolved work as a replacement command. Read-only requests remain available.
   rpc MlxAdminConfigSync(mlx_device.MlxAdminConfigSyncRequest) returns (mlx_device.MlxAdminConfigSyncResponse);
   // MlxAdminConfigSync is used to compare one or more running mlxconfig
   // variable values for the provided target machine device, reporting back
@@ -2407,6 +2443,9 @@ message VpcConfig {
   // boundary. Core reports this field explicitly. An absent value indicates a
   // response from a Core version that predates SLAAC support.
   optional bool slaac_enabled = 10;
+  // Private DNS zone this VPC holds, as an FQDN including the trailing dot.
+  // Unset means that the VPC holds no private DNS zone.
+  optional string private_dns_zone = 12;
 }
 
 message VpcStatus {
@@ -2473,7 +2512,11 @@ message VpcCreationRequest {
 
   // Desired ID for this VPC. If the ID is not provided, NICo will generate
   // a random ID.
-  // The VPC ID must be unique within the NICo site.
+  // The VPC ID must be unique within the NICo site, including soft-deleted
+  // VPCs whose rows remain stored.
+  // An existing ID found during admission fails ALREADY_EXISTS before
+  // allocation preparation. Concurrent insertion remains subject to uniqueness
+  // enforcement when the VPC is persisted.
   optional common.VpcId id = 6;
   Metadata metadata = 12;
 
@@ -11153,6 +11196,8 @@ enum ComponentPowerActionOperation {
   COMPONENT_POWER_ACTION_OPERATION_RESET = 3;
   // Reset a specific Redfish chassis through a compute tray's BMC.
   COMPONENT_POWER_ACTION_OPERATION_CHASSIS_RESET = 4;
+  // AC power cycle the compute tray.
+  COMPONENT_POWER_ACTION_OPERATION_AC_POWERCYCLE = 5;
 }
 
 // One explicit persisted maintenance operation. There is no stable action ID,
@@ -12202,6 +12247,23 @@ enum DpuNvConfigProfile {
 // inactive VNI, and prevent attachment, peering, and routing changes through
 // cleanup. Unreachable consumers require retaining the allocation unless they
 // have been isolated. Core validates ownership, not dataplane convergence.
+// Integrated release completes in the VPC transaction; its cleanup wait returns
+// immediately.
+// Remote release intent and the advanced VPC version commit before waiting for
+// provider confirmation. Success confirms release; cancellation, timeout, or a
+// provider/database error during that wait does not roll back the committed
+// intent. Recovery finishes the original allocation's release. Keep the original
+// observation on retries, inspect GetVpcRoutingState, and wait for confirmed
+// cleanup before attempting another routing mutation.
+// Remote waits return CANCELLED on API shutdown. With either VNI pool remote,
+// acquisition, admission, and commit share a five-second SQL-phase budget.
+// Expiry returns DEADLINE_EXCEEDED. Remote SQL statements also have a five-second
+// maximum, preserving shorter operator limits. A statement timeout can return
+// INTERNAL before the phase deadline. Integrated keeps its database/session limits.
+// After commit, remote provider confirmation has a separate 30-second budget.
+// Expiry returns DEADLINE_EXCEEDED; provider unavailability returns UNAVAILABLE,
+// and database or invalid-record failures return INTERNAL. These errors after
+// commit leave release intent recoverable.
 message VpcReleaseInactiveVniRequest {
   // Required VPC whose inactive allocation will be released.
   common.VpcId id = 1;
@@ -12217,7 +12279,10 @@ message VpcReleaseInactiveVniRequest {
 }
 
 message VpcReleaseInactiveVniResult {
-  // Authoritative VPC with its advanced version after cleanup committed.
+  // VPC snapshot and advanced version committed with Integrated release or
+  // remote release intent. Remote success confirms provider release; another
+  // mutation during confirmation can make this snapshot older than the current
+  // VPC.
   Vpc vpc = 1;
   // Exact inactive allocation released by this operation.
   uint32 released_inactive_vni = 2;
@@ -12234,7 +12299,11 @@ message VpcRoutingStateRequest {
 // Supports any virtualization type with one owned allocation matching its
 // active VNI and at most one distinct allocation in the other pool. Missing,
 // duplicate, or inconsistent ownership fails instead of reporting no retained
-// allocation. VPCs without pool ownership (including configured admin VPCs)
+// allocation. One original remote assignment awaiting release confirmation is
+// reported as retained; this response does not distinguish it from an assignment
+// whose release has not started. Unattached pending/cancelling requests are
+// excluded. Routing mutations still reject unfinished cancellation or release.
+// VPCs without pool ownership (including configured admin VPCs)
 // fail FAILED_PRECONDITION. Pool values that cannot be parsed as signed 32-bit
 // integers fail INTERNAL; parsed negative values fail FAILED_PRECONDITION.
 // This is not an effective routing profile or evidence of DPU/fabric convergence;
@@ -12274,14 +12343,28 @@ message VpcRetainedVniAllocation {
 // separate operator action.
 //
 // Requires FNN configuration, named source/destination profiles, distinct
-// nonoverlapping materialized pools, and VNIs in 1..16777215. Site-global VNIs,
-// substantive VPC/interface routing overrides, and tenant-managed SitePrefix
-// attachments are unsupported. Empty override reset objects are allowed.
+// nonoverlapping pool membership, and VNIs in 1..16777215. Integrated membership
+// uses persisted inventory; remote membership uses acknowledged eligibility.
+// Site-global VNIs, substantive VPC/interface routing overrides, and
+// tenant-managed SitePrefix attachments are unsupported. Empty override reset
+// objects are allowed.
 // Same-polarity changes and a destination pool already holding the active VNI
 // are rejected. Unsupported configurations and inconsistent ownership fail
 // FAILED_PRECONDITION; missing profiles/VPCs fail NOT_FOUND; automatic allocation
-// from an exhausted pool fails RESOURCE_EXHAUSTED. Rejected requests commit
-// no changes.
+// from an exhausted pool fails RESOURCE_EXHAUSTED. Unfinished cancellation or
+// release fails FAILED_PRECONDITION. Updates rejected before VPC commit preserve
+// configuration and the active assignment. An unused remote reservation can
+// remain pending cancellation until recovery confirms cleanup. A lost commit
+// response leaves VPC commit status uncertain; inspect state using the original
+// observation.
+// API shutdown returns CANCELLED. With either VNI pool remote, each SQL phase
+// (acquisition through commit) has a five-second budget; expiry returns
+// DEADLINE_EXCEEDED. Remote SQL statements also have a five-second maximum,
+// preserving shorter operator limits; either bound can fire first, and statement
+// timeout returns INTERNAL. Integrated keeps its database/session limits.
+// Provider unavailability returns UNAVAILABLE; provider deadlines return
+// DEADLINE_EXCEEDED. Other provider rejections follow Core's provider-error
+// mapping, and invalid saved assignments or database failures return INTERNAL.
 //
 // Preserves the VPC ID, prefixes, instances, addresses, NSGs, metadata, and
 // creation-time requested VNI. External routing does not supply public
@@ -12297,8 +12380,8 @@ message VpcChangeRoutingProfileRequest {
   // Required live VPC ID. Omission fails INVALID_ARGUMENT.
   common.VpcId id = 1;
   // Required version from the original observation; missing/malformed values
-  // fail INVALID_ARGUMENT and stale versions fail FAILED_PRECONDITION. Keep this exact
-  // version on retries. A lost response leaves commit status unknown: inspect
+  // fail INVALID_ARGUMENT and stale versions fail FAILED_PRECONDITION. Keep
+  // this exact version on retries. A lost response leaves commit status unknown: inspect
   // GetVpcRoutingState and never automatically substitute a fresh version.
   optional string if_version_match = 2;
   // Required nonempty configuration-defined destination name, not a closed
@@ -12308,9 +12391,12 @@ message VpcChangeRoutingProfileRequest {
   // otherwise allocates automatically. A retained destination must match an
   // explicit request; a different value fails FAILED_PRECONDITION even if free.
   // Without a retained destination, the requested value must be a free
-  // materialized destination-pool entry, regardless of its auto_assign flag.
-  // Missing or occupied entries and the active VNI fail FAILED_PRECONDITION
-  // without falling back. Zero and values above 16777215 fail INVALID_ARGUMENT.
+  // eligible destination-pool value from either assignment partition. Integrated
+  // uses persisted inventory; remote uses its accepted eligibility revision.
+  // Integrated missing or occupied values and the active VNI fail
+  // FAILED_PRECONDITION without falling back. Remote rejection follows the
+  // provider contract and Core's error mapping; it never falls back to another
+  // value or backend. Zero and values above 16777215 fail INVALID_ARGUMENT.
   // Use only when every serving Core supports this field: older Core ignores
   // it and may choose another VNI. Verify the returned profile and active VNI;
   // a mismatched or lost response does not undo a committed change.
@@ -13030,50 +13116,58 @@ message ListMachineAttestationStatusesResponse {
 
 // Administrator-managed desired inventory, separate from an NMX-C observed domain.
 // Membership and attributes are immutable; delete and recreate to change them.
-message ExpectedNvLinkDomain {
+message NvLinkDomain {
   // Core-generated declaration UUID, not an NMX-C domain UUID.
   common.UUID id = 1;
   common.RackGroupId rack_group_id = 2;
   // Absent when no name was supplied. Names are not unique.
   optional string name = 3;
-  // Canonical BMC MACs sorted by address; every MAC belongs to at most one declaration.
-  repeated string member_bmc_mac_addresses = 4;
+  // Members sorted by rack index, slot index, and component type.
+  repeated NvLinkDomainMember members = 4;
 }
 
-message CreateExpectedNvLinkDomainRequest {
+message NvLinkDomainMember {
+  // Required zero-based position in the rack group's racks array; zero is valid.
+  optional uint32 rack_index = 1;
+  // Required caller-supplied slot index; zero is valid.
+  optional uint32 slot_index = 2;
+  // Required case-sensitive Core type: Compute or Switch.
+  string component_type = 3;
+}
+
+message CreateNvLinkDomainRequest {
   // Required existing group ID, nonblank and at most 128 characters.
   common.RackGroupId rack_group_id = 1;
   // Optional nonblank name, at most 256 characters. Omission stores NULL.
   optional string name = 2;
-  // Required distinct six-byte BMC MACs. Each must resolve to exactly one expected
-  // machine or switch whose rack is in the group. At least one of each type is required.
-  // Discovery is not required. Order is ignored. Claimed MACs return ALREADY_EXISTS.
-  // Membership records intent; subsequent device inventory changes do not rewrite it.
-  repeated string member_bmc_mac_addresses = 3;
+  // Required nonempty list of distinct positions. RackGroup member matching and
+  // physical topology validation are not performed.
+  // Order is ignored. Positions already claimed by another domain return ALREADY_EXISTS.
+  repeated NvLinkDomainMember members = 3;
 }
 
-message ExpectedNvLinkDomainRequest {
+message NvLinkDomainRequest {
   // Required non-nil declaration UUID.
   common.UUID id = 1;
 }
 
-message ExpectedNvLinkDomainSearchFilter {
+message NvLinkDomainSearchFilter {
   // Optional group filter; omission lists all declaration IDs, sorted by UUID.
   common.RackGroupId rack_group_id = 1;
 }
 
-message ExpectedNvLinkDomainIdList {
+message NvLinkDomainIdList {
   repeated common.UUID ids = 1;
 }
 
-message ExpectedNvLinkDomainsByIdsRequest {
+message NvLinkDomainsByIdsRequest {
   // Nonempty batch of non-nil UUIDs, limited by max_find_by_ids. Missing IDs are
   // omitted and duplicates collapsed; results are sorted by UUID.
   repeated common.UUID ids = 1;
 }
 
-message ExpectedNvLinkDomainList {
-  repeated ExpectedNvLinkDomain domains = 1;
+message NvLinkDomainList {
+  repeated NvLinkDomain domains = 1;
 }
 
 // `InspectResourcePoolsRequest` selects every pool with local inventory or a saved binding.
@@ -13305,6 +13399,10 @@ message HostState {
   // Unset when no explored report exists for bmc_ip.
   HostExploredFirmware explored = 16;
   HostUpdateEligibility update = 17;
+  google.protobuf.Timestamp firmware_update_window_start = 18;
+  google.protobuf.Timestamp firmware_update_window_end = 19;
+  // False means unknown, including replies from servers without window support.
+  bool firmware_update_window_known = 20;
 }
 
 message HostAllocation {

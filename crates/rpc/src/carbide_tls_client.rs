@@ -19,11 +19,11 @@ use std::str::FromStr;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use carbide_tls::client_config::ClientCert;
+use carbide_tls::dummy_tls_verifier::DummyTlsVerifier;
 use eyre::Result;
 use forge_http_connector::connector::ForgeHttpConnector;
 use forge_http_connector::resolver::{ForgeResolver, ForgeResolverOpts};
-use forge_tls::client_config::ClientCert;
-use forge_tls::dummy_tls_verifier::DummyTlsVerifier;
 use hickory_resolver::config::ResolverConfig;
 use hyper_util::client::legacy;
 use hyper_util::rt::TokioTimer;

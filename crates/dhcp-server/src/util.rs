@@ -19,7 +19,7 @@ use std::net::{Ipv4Addr, Ipv6Addr, SocketAddrV6};
 use std::time::Duration;
 
 use carbide_dhcp_common::{MachineArchitecture, VendorClass};
-use carbide_instrument::emit;
+use carbide_instrument::Instrumentation;
 use rpc::forge::DhcpRecord;
 use tokio::net::UdpSocket;
 
@@ -137,9 +137,11 @@ pub(super) fn machine_get_filename(
 
 /// Creates a configured IPv4 UDP socket, returning the terminal setup error so listeners can drain
 /// accepted packet tasks before exiting.
+/// Opens an IPv4 listener and records setup failures through the supplied instrumentation.
 pub async fn get_socket(
     listen_address: core::net::SocketAddrV4,
     interface: String,
+    instrumentation: &Instrumentation,
 ) -> Result<UdpSocket, DhcpError> {
     let mut retry = 0;
     loop {
@@ -149,7 +151,7 @@ pub async fn get_socket(
             Ok(socket) => socket,
             Err((operation, error)) => {
                 let next_action = socket_setup_next_action(retry);
-                emit(DhcpSocketSetupFailed::new(
+                instrumentation.emit(DhcpSocketSetupFailed::new(
                     operation,
                     next_action,
                     retry,
@@ -171,7 +173,7 @@ pub async fn get_socket(
             };
             retries_left -= 1;
             let next_action = interface_bind_next_action(retries_left);
-            emit(DhcpInterfaceBindFailed::new(
+            instrumentation.emit(DhcpInterfaceBindFailed::new(
                 next_action,
                 interface.clone(),
                 retries_left,
@@ -334,6 +336,9 @@ mod tests {
         let result = get_socket(
             "127.0.0.1:0".parse().unwrap(),
             "nico-missing-interface".to_string(),
+            &carbide_instrument::Instrumentation::from_meter_provider(
+                &opentelemetry::metrics::noop::NoopMeterProvider::new(),
+            ),
         )
         .await;
 

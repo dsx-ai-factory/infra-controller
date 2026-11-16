@@ -99,52 +99,48 @@ func (f decommissionMachineFixture) request(t *testing.T, method string, handler
 	return recorder
 }
 
-func TestDecommissionMachineHandlerProxiesRequest(t *testing.T) {
-	fixture := newDecommissionMachineFixture(t)
-
-	recorder := fixture.request(t, http.MethodPost, fixture.handler)
-	assert.Equal(t, http.StatusAccepted, recorder.Code)
-	assert.Equal(t, corev1.Forge_DecommissionManagedHost_FullMethodName, fixture.proxiedReq.FullMethod)
-
-	var coreRequest corev1.DecommissionManagedHostRequest
-	require.NoError(t, protojson.Unmarshal(fixture.proxiedReq.RequestJSON, &coreRequest))
-	assert.Equal(t, fixture.machineID, coreRequest.GetMachineId().GetId())
-
-	var response model.APIMessageResponse
-	require.NoError(t, json.Unmarshal(recorder.Body.Bytes(), &response))
-	assert.Equal(t, "Machine decommissioning request was accepted", response.Message)
-}
-
-func TestDecommissionMachineHandlerRejectsProviderViewer(t *testing.T) {
-	fixture := newDecommissionMachineFixture(t)
-	fixture.user = &cdbm.User{OrgData: cdbm.OrgData{fixture.org: cdbm.Org{
-		Name:  fixture.org,
-		Roles: []string{authz.ProviderViewerRole},
-	}}}
-
-	recorder := fixture.request(t, http.MethodPost, fixture.handler)
-	assert.Equal(t, http.StatusForbidden, recorder.Code)
-	assert.Empty(t, fixture.proxiedReq.FullMethod)
-}
-
-func TestDecommissionMachineHandlerRejectsUnknownMachine(t *testing.T) {
-	fixture := newDecommissionMachineFixture(t)
-	fixture.machineID = "missing-machine"
-
-	recorder := fixture.request(t, http.MethodPost, fixture.handler)
-	assert.Equal(t, http.StatusNotFound, recorder.Code)
-	assert.Empty(t, fixture.proxiedReq.FullMethod)
-}
-
-func TestDecommissionMachineHandlerRejectsMissingMachine(t *testing.T) {
-	fixture := newDecommissionMachineFixture(t)
-	_, err := cdbm.NewMachineDAO(fixture.dbSession).Update(context.Background(), nil, cdbm.MachineUpdateInput{
-		MachineID:       fixture.machineID,
-		IsMissingOnSite: cutil.GetPtr(true),
-	})
-	require.NoError(t, err)
-
-	recorder := fixture.request(t, http.MethodPost, fixture.handler)
-	assert.Equal(t, http.StatusBadRequest, recorder.Code)
-	assert.Empty(t, fixture.proxiedReq.FullMethod)
+func TestDecommissionMachineHandler_Handle(t *testing.T) {
+	cases := []struct {
+		name       string
+		prepare    func(*testing.T, *decommissionMachineFixture)
+		wantStatus int
+	}{
+		{name: "accepted", wantStatus: http.StatusAccepted},
+		{name: "provider viewer", prepare: func(t *testing.T, f *decommissionMachineFixture) {
+			f.user = &cdbm.User{OrgData: cdbm.OrgData{f.org: cdbm.Org{Name: f.org, Roles: []string{authz.ProviderViewerRole}}}}
+		}, wantStatus: http.StatusForbidden},
+		{name: "missing user", prepare: func(t *testing.T, f *decommissionMachineFixture) { f.user = nil }, wantStatus: http.StatusInternalServerError},
+		{name: "wrong org", prepare: func(t *testing.T, f *decommissionMachineFixture) { f.org = "another-org" }, wantStatus: http.StatusForbidden},
+		{name: "unknown machine", prepare: func(t *testing.T, f *decommissionMachineFixture) { f.machineID = "missing-machine" }, wantStatus: http.StatusNotFound},
+		{name: "missing machine ID", prepare: func(t *testing.T, f *decommissionMachineFixture) { f.machineID = "" }, wantStatus: http.StatusBadRequest},
+		{name: "missing on site", prepare: func(t *testing.T, f *decommissionMachineFixture) {
+			_, err := cdbm.NewMachineDAO(f.dbSession).Update(context.Background(), nil, cdbm.MachineUpdateInput{MachineID: f.machineID, IsMissingOnSite: cutil.GetPtr(true)})
+			require.NoError(t, err)
+		}, wantStatus: http.StatusBadRequest},
+		{name: "assigned machine", prepare: func(t *testing.T, f *decommissionMachineFixture) {
+			_, err := cdbm.NewMachineDAO(f.dbSession).Update(context.Background(), nil, cdbm.MachineUpdateInput{MachineID: f.machineID, IsAssigned: cutil.GetPtr(true)})
+			require.NoError(t, err)
+		}, wantStatus: http.StatusPreconditionFailed},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			fixture := newDecommissionMachineFixture(t)
+			if tc.prepare != nil {
+				tc.prepare(t, &fixture)
+			}
+			recorder := fixture.request(t, http.MethodPost, fixture.handler)
+			assert.Equal(t, tc.wantStatus, recorder.Code, recorder.Body.String())
+			if tc.wantStatus != http.StatusAccepted {
+				assert.Empty(t, fixture.proxiedReq.FullMethod)
+				return
+			}
+			assert.Equal(t, corev1.Forge_DecommissionManagedHost_FullMethodName, fixture.proxiedReq.FullMethod)
+			var coreRequest corev1.DecommissionManagedHostRequest
+			require.NoError(t, protojson.Unmarshal(fixture.proxiedReq.RequestJSON, &coreRequest))
+			assert.Equal(t, fixture.machineID, coreRequest.GetMachineId().GetId())
+			var response model.APIMessageResponse
+			require.NoError(t, json.Unmarshal(recorder.Body.Bytes(), &response))
+			assert.Equal(t, "Machine decommissioning request was accepted", response.Message)
+		})
+	}
 }

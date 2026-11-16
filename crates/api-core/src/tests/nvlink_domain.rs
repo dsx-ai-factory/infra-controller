@@ -12,39 +12,45 @@ use crate::tests::common::api_fixtures::create_test_env;
 #[crate::sqlx_test()]
 async fn expected_domain_api_lifecycle(pool: sqlx::PgPool) {
     let env = create_test_env(pool.clone()).await;
-    sqlx::raw_sql("INSERT INTO expected_rack_groups (rack_group_id, topology, racks) VALUES ('group', 'topology', '[{\"rack_id\":\"rack\",\"members\":[]}]');
-        INSERT INTO expected_machines (serial_number, bmc_mac_address, bmc_username, bmc_password, rack_id) VALUES ('compute', '00:11:22:33:44:55', 'test', 'test', 'rack');
-        INSERT INTO expected_switches (serial_number, bmc_mac_address, bmc_username, bmc_password, rack_id) VALUES ('switch', '00:11:22:33:44:66', 'test', 'test', 'rack');")
-        .execute(&pool).await.unwrap();
-    let request = forge::CreateExpectedNvLinkDomainRequest {
+    sqlx::raw_sql(
+        r#"INSERT INTO expected_rack_groups (rack_group_id, topology, racks)
+        VALUES ('group', 'topology', '[{"rack_id":"rack","members":[
+        {"type":"Compute","manufacturer":"NVIDIA","id":"compute","cartridge_index":0},
+        {"type":"Switch","manufacturer":"NVIDIA","id":"switch","cartridge_index":0}]}]');"#,
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    let request = forge::CreateNvLinkDomainRequest {
         rack_group_id: Some("group".parse().unwrap()),
         name: Some("mini".into()),
-        member_bmc_mac_addresses: vec!["00:11:22:33:44:66".into(), "00:11:22:33:44:55".into()],
+        members: vec![forge::NvLinkDomainMember {
+            rack_index: Some(99),
+            slot_index: Some(99),
+            component_type: "Compute".into(),
+        }],
     };
     let domain = env
         .api
-        .create_expected_nv_link_domain(Request::new(request.clone()))
+        .create_nv_link_domain(Request::new(request.clone()))
         .await
         .unwrap()
         .into_inner();
-    let lookup = forge::ExpectedNvLinkDomainRequest {
+    let lookup = forge::NvLinkDomainRequest {
         id: domain.id.clone(),
     };
     assert_eq!(
         env.api
-            .get_expected_nv_link_domain(Request::new(lookup.clone()))
+            .get_nv_link_domain(Request::new(lookup.clone()))
             .await
             .unwrap()
             .into_inner(),
         domain
     );
-    assert_eq!(
-        domain.member_bmc_mac_addresses,
-        vec!["00:11:22:33:44:55", "00:11:22:33:44:66"]
-    );
+    assert_eq!(domain.members, request.members);
     assert_eq!(
         env.api
-            .create_expected_nv_link_domain(Request::new(request.clone()))
+            .create_nv_link_domain(Request::new(request.clone()))
             .await
             .unwrap_err()
             .code(),
@@ -52,9 +58,7 @@ async fn expected_domain_api_lifecycle(pool: sqlx::PgPool) {
     );
     assert_eq!(
         env.api
-            .find_expected_nv_link_domain_ids(Request::new(
-                forge::ExpectedNvLinkDomainSearchFilter::default()
-            ))
+            .find_nv_link_domain_ids(Request::new(forge::NvLinkDomainSearchFilter::default()))
             .await
             .unwrap()
             .into_inner()
@@ -63,11 +67,9 @@ async fn expected_domain_api_lifecycle(pool: sqlx::PgPool) {
     );
     assert_eq!(
         env.api
-            .find_expected_nv_link_domains_by_ids(Request::new(
-                forge::ExpectedNvLinkDomainsByIdsRequest {
-                    ids: vec![domain.id.clone().unwrap()]
-                }
-            ))
+            .find_nv_link_domains_by_ids(Request::new(forge::NvLinkDomainsByIdsRequest {
+                ids: vec![domain.id.clone().unwrap()]
+            }))
             .await
             .unwrap()
             .into_inner()
@@ -83,9 +85,7 @@ async fn expected_domain_api_lifecycle(pool: sqlx::PgPool) {
     ] {
         assert_eq!(
             env.api
-                .find_expected_nv_link_domains_by_ids(Request::new(
-                    forge::ExpectedNvLinkDomainsByIdsRequest { ids }
-                ))
+                .find_nv_link_domains_by_ids(Request::new(forge::NvLinkDomainsByIdsRequest { ids }))
                 .await
                 .unwrap_err()
                 .code(),
@@ -93,12 +93,12 @@ async fn expected_domain_api_lifecycle(pool: sqlx::PgPool) {
         );
     }
     env.api
-        .delete_expected_nv_link_domain(Request::new(lookup.clone()))
+        .delete_nv_link_domain(Request::new(lookup.clone()))
         .await
         .unwrap();
     assert_eq!(
         env.api
-            .get_expected_nv_link_domain(Request::new(lookup))
+            .get_nv_link_domain(Request::new(lookup))
             .await
             .unwrap_err()
             .code(),
@@ -107,9 +107,7 @@ async fn expected_domain_api_lifecycle(pool: sqlx::PgPool) {
     // A failed competing create must not leave an orphan declaration behind.
     assert!(
         env.api
-            .find_expected_nv_link_domain_ids(Request::new(
-                forge::ExpectedNvLinkDomainSearchFilter::default()
-            ))
+            .find_nv_link_domain_ids(Request::new(forge::NvLinkDomainSearchFilter::default()))
             .await
             .unwrap()
             .into_inner()
@@ -117,7 +115,7 @@ async fn expected_domain_api_lifecycle(pool: sqlx::PgPool) {
             .is_empty()
     );
     env.api
-        .create_expected_nv_link_domain(Request::new(request))
+        .create_nv_link_domain(Request::new(request))
         .await
         .unwrap();
 }

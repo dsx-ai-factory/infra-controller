@@ -36,11 +36,11 @@ use carbide_secrets::create_credential_manager;
 use carbide_secrets::credentials::{
     BmcCredentialType, CredentialKey, CredentialReader, Credentials,
 };
+use carbide_tls::client_config::ClientCert;
 use carbide_utils::HostPortPair;
 use carbide_uuid::machine::MachineId;
 use carbide_uuid::rack::{RackId, RackProfileId};
 use eyre::{ContextCompat, WrapErr};
-use forge_tls::client_config::ClientCert;
 use futures::FutureExt;
 use mac_address::MacAddress;
 use machine_a_tron::{
@@ -1198,7 +1198,9 @@ async fn cycles(
         .no_proxy()
         .timeout(RPC_TIMEOUT)
         .build()?;
-    let credentials = create_credential_manager(&env.credential_config).await?;
+    let credentials =
+        create_credential_manager(&env.credential_config, env.metrics.instrumentation.clone())
+            .await?;
     wait_for_view(env, client, host, ViewTarget::Ready).await?;
     let initial_fabric = configure_fabric(env, client).await?;
     std::fs::write(

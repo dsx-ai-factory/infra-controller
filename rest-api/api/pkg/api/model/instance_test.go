@@ -2155,6 +2155,16 @@ phone_home:
 			os:      os,
 		},
 		{
+			name: "inherited phone-home adds retries to a legacy OS block when the request omits the flag",
+			fields: fields{
+				OperatingSystemID: cutil.GetPtr(osStaleURL.ID.String()),
+			},
+			cfg:                      cfg1,
+			os:                       osStaleURL,
+			userDataSearches:         []string{"package_update: true", "tries: 10"},
+			userDataNegativeSearches: []string{"169.254.169.254"},
+		},
+		{
 			name: "test valid Instance PhoneHome disabled create request, no userData override, OS blob has stale NICo phone-home URL",
 			fields: fields{
 				Name:              "test-name",
@@ -2302,6 +2312,17 @@ phone_home:
 		userDataNegativeSearches []string
 		wantErr                  bool
 	}{
+		{
+			name: "inherited phone-home adds retries to a legacy OS block when the request omits the flag",
+			request: &APIBatchInstanceCreateRequest{
+				NamePrefix:        "worker",
+				Count:             2,
+				OperatingSystemID: cutil.GetPtr(osStaleURL.ID.String()),
+			},
+			os:                       osStaleURL,
+			userDataSearches:         []string{"package_update: true", "tries: 10", cfg1.GetSitePhoneHomeUrl()},
+			userDataNegativeSearches: []string{"169.254.169.254"},
+		},
 		{
 			name: "PhoneHome enabled from OS, no overrides, phone-home URL inserted",
 			request: &APIBatchInstanceCreateRequest{
@@ -3288,7 +3309,7 @@ phone_home:
 			cfg:      cfg1,
 			instance: instance1,
 			os:       os1,
-			userDataExactMatch: cutil.GetPtr("#cloud-config\nphone_home:\n  post: all\n  url: " +
+			userDataExactMatch: cutil.GetPtr("#cloud-config\nphone_home:\n  post: all\n  tries: 10\n  url: " +
 				cfg1.GetSitePhoneHomeUrl() + "\n"),
 		},
 		{

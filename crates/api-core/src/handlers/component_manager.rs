@@ -17,6 +17,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::net::IpAddr;
+use std::sync::Arc;
 use std::time::Duration;
 
 use ::rpc::common::SystemPowerControl;
@@ -76,6 +77,18 @@ const UNTRACKED_SWITCH_FIRMWARE_ERROR: &str = "no firmware job tracked for this 
 // operator limit. This PostgreSQL cap applies after snapshot setup; it does not
 // bound connection acquisition, setup or the total helper duration.
 const EXPECTED_CREDENTIAL_STATEMENT_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// The core compute-tray backend standalone hosts use. It authenticates with
+/// explicit per-endpoint credentials, which the proxied pool rejects by
+/// design, so it always dials BMCs directly through the credential-ops pool.
+pub(crate) fn standalone_compute_tray_manager(api: &Api) -> CoreComputeTrayManager {
+    let direct_pool: Arc<dyn carbide_redfish::libredfish::RedfishClientPool> =
+        api.bmc_credential_ops.clone();
+    CoreComputeTrayManager::new(direct_pool).with_driver_connector(
+        api.driver_connector.clone(),
+        api.database_connection.clone(),
+    )
+}
 
 fn parse_component_credentials(
     overrides: Option<rpc::ComponentCredentialOverrides>,
@@ -835,20 +848,16 @@ fn map_switch_maintenance_operation(
     }
 }
 
-fn map_machine_maintenance_operation(
-    action: PowerAction,
-) -> Result<MachineMaintenanceOperation, &'static str> {
+fn map_machine_maintenance_operation(action: PowerAction) -> MachineMaintenanceOperation {
     match action {
-        PowerAction::On => Ok(MachineMaintenanceOperation::PowerOn),
-        PowerAction::GracefulShutdown => {
-            Ok(MachineMaintenanceOperation::PowerOff { graceful: true })
-        }
-        PowerAction::ForceOff => Ok(MachineMaintenanceOperation::PowerOff { graceful: false }),
-        PowerAction::GracefulRestart => Ok(MachineMaintenanceOperation::Reset { graceful: true }),
-        PowerAction::ForceRestart => Ok(MachineMaintenanceOperation::Reset { graceful: false }),
-        PowerAction::AcPowercycle => {
-            Err("machine state controller does not support AC power cycle")
-        }
+        PowerAction::On => MachineMaintenanceOperation::PowerOn,
+        PowerAction::GracefulShutdown => MachineMaintenanceOperation::PowerOff { graceful: true },
+        PowerAction::ForceOff => MachineMaintenanceOperation::PowerOff { graceful: false },
+        PowerAction::GracefulRestart => MachineMaintenanceOperation::Reset { graceful: true },
+        PowerAction::ForceRestart => MachineMaintenanceOperation::Reset { graceful: false },
+        PowerAction::AcPowercycle => MachineMaintenanceOperation::AcPowercycle {
+            state: Default::default(),
+        },
     }
 }
 
@@ -922,15 +931,7 @@ async fn queue_machine_power_control_via_state_controller(
     machine_ids: &[HostMachineId],
     action: PowerAction,
 ) -> Result<Vec<rpc::ComponentResult>, Status> {
-    let operation = match map_machine_maintenance_operation(action) {
-        Ok(operation) => operation,
-        Err(reason) => {
-            return Ok(machine_ids
-                .iter()
-                .map(|id| error_result(&id.to_string(), reason.to_string()))
-                .collect());
-        }
-    };
+    let operation = map_machine_maintenance_operation(action);
     queue_machine_maintenance_via_state_controller(api, cm, machine_ids, operation).await
 }
 
@@ -3017,19 +3018,6 @@ async fn power_control_ingested_machine_ids(
             }
         };
 
-        // Reject RMS AC cycles before changing the desired power
-        // state, which could otherwise cause the power manager to turn on the host.
-        if is_rack_scale
-            && action == PowerAction::AcPowercycle
-            && cm.compute_tray.backend() == ComputeTrayBackend::Rms
-        {
-            results.push(error_result(
-                &machine_id.to_string(),
-                "RMS power control does not support AC power cycle".to_string(),
-            ));
-            continue;
-        }
-
         let override_inserted = power_control_health_override(api, machine_id, true).await;
 
         let power_req = rpc::PowerOptionUpdateRequest {
@@ -3114,13 +3102,7 @@ async fn power_control_ingested_machine_ids(
     // stack (never the state machine, which has no non-rack path), so
     // power control works even when the configured backend is RMS.
     if !standalone_ids.is_empty() {
-        // CoreComputeTrayManager authenticates with explicit per-endpoint
-        // credentials (RedfishAuth::Direct), which the proxied pool rejects
-        // by design -- keep it on the direct pool (the credential-ops handle,
-        // upcast to a plain pool) until it moves to credential-key auth.
-        let direct_pool: std::sync::Arc<dyn carbide_redfish::libredfish::RedfishClientPool> =
-            api.bmc_credential_ops.clone();
-        let core_backend = CoreComputeTrayManager::new(direct_pool);
+        let core_backend = standalone_compute_tray_manager(api);
         match dispatch_compute_tray_power_control(
             api,
             &core_backend,
@@ -3519,13 +3501,7 @@ pub(crate) async fn component_power_control(
                 // NICo-core's Redfish stack, which needs only the BMC IP and
                 // credentials — matching the ingested standalone path.
                 if !standalone_macs.is_empty() {
-                    // Same direct-pool requirement as the ingested
-                    // standalone path above: explicit per-endpoint
-                    // credentials cannot route through the proxied pool.
-                    let direct_pool: std::sync::Arc<
-                        dyn carbide_redfish::libredfish::RedfishClientPool,
-                    > = api.bmc_credential_ops.clone();
-                    let core_backend = CoreComputeTrayManager::new(direct_pool);
+                    let core_backend = standalone_compute_tray_manager(api);
                     let (standalone_server_results, standalone_server_ips) =
                         dispatch_pre_ingestion_compute_power_control(
                             api,
@@ -8119,24 +8095,23 @@ mod tests {
 
     #[test]
     fn map_machine_maintenance_operation_variants() {
-        use carbide_test_support::Outcome::{FailsWith, Yields};
-        use carbide_test_support::scenarios;
+        use carbide_test_support::value_scenarios;
         use model::machine::MachineMaintenanceOperation;
 
         use super::map_machine_maintenance_operation;
 
-        scenarios!(map_machine_maintenance_operation:
+        value_scenarios!(map_machine_maintenance_operation:
             "power on/off" {
-                PowerAction::On => Yields(MachineMaintenanceOperation::PowerOn),
-                PowerAction::ForceOff => Yields(MachineMaintenanceOperation::PowerOff { graceful: false }),
-                PowerAction::GracefulShutdown => Yields(MachineMaintenanceOperation::PowerOff { graceful: true }),
+                PowerAction::On => MachineMaintenanceOperation::PowerOn,
+                PowerAction::ForceOff => MachineMaintenanceOperation::PowerOff { graceful: false },
+                PowerAction::GracefulShutdown => MachineMaintenanceOperation::PowerOff { graceful: true },
             }
             "restart intent" {
-                PowerAction::GracefulRestart => Yields(MachineMaintenanceOperation::Reset { graceful: true }),
-                PowerAction::ForceRestart => Yields(MachineMaintenanceOperation::Reset { graceful: false }),
+                PowerAction::GracefulRestart => MachineMaintenanceOperation::Reset { graceful: true },
+                PowerAction::ForceRestart => MachineMaintenanceOperation::Reset { graceful: false },
             }
-            "unsupported AC cycle" {
-                PowerAction::AcPowercycle => FailsWith("machine state controller does not support AC power cycle"),
+            "AC cycle" {
+                PowerAction::AcPowercycle => MachineMaintenanceOperation::AcPowercycle { state: Default::default() },
             }
         );
     }

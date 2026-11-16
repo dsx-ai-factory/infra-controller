@@ -833,6 +833,24 @@ async fn test_direct_discovery_applies_dpu_loopback_reservation(
         Some(IpAddr::V4(reserved_v4))
     );
     assert_eq!(dpu_machine.network_config.loopback_ip_v6, Some(reserved_v6));
+    let asn = dpu_machine
+        .asn
+        .expect("prepared ASN attaches alongside declared IPv6");
+    let mut txn = env.pool.begin().await?;
+    assert_eq!(
+        env.api
+            .resource_pool_registry
+            .inspect_allocations(
+                &env.api.common_pools.ethernet.pool_fnn_asn,
+                &mut txn,
+                model::resource_pool::OwnerType::Machine,
+                &dpu_machine.id.to_string(),
+                carbide_site_explorer::dpu_asn::DPU_ASN_SLOT,
+            )
+            .await?,
+        vec![carbide_resource_pool::AllocationStatus::Attached { value: asn }],
+    );
+    txn.rollback().await?;
     let interfaces =
         db::machine_interface::find_by_mac_address(&env.pool, dpu.oob_mac_address).await?;
     assert!(
@@ -1928,7 +1946,7 @@ async fn test_dpu_rediscovery_retries_after_busy_group_without_blocking_admin_re
         result = &mut repair => panic!("repair bypassed the held host: {result:?}"),
         _ = wait_for_blocked_query(&env.pool, blocker_pid, "UPDATE machines") => {},
     }
-    let metrics = MetricsCapture::start();
+    let metrics = MetricsCapture::for_registry(env.test_meter.registry());
     blocker.rollback().await?;
     let (rediscovered_machine_id, repaired) =
         tokio::time::timeout(Duration::from_secs(30), async {
@@ -2691,7 +2709,7 @@ async fn test_first_host_discovery_with_nothing_to_repair_writes_no_admin_addres
     assert!(dormant_link.addresses.is_empty(), "{dormant_link:?}");
     let version_before = network_config_version(&env.pool, &predicted_host_id).await?;
 
-    let metrics = MetricsCapture::start();
+    let metrics = MetricsCapture::for_registry(env.test_meter.registry());
     let stable_host_id =
         MachineId::from(host_discover_machine(&env, &host_config, primary_link.id).await);
 
@@ -2766,7 +2784,7 @@ async fn test_first_host_discovery_repairs_what_an_overlapping_dpu_discovery_mis
         .fetch_one(&mut *blocker)
         .await?;
 
-    let metrics = MetricsCapture::start();
+    let metrics = MetricsCapture::for_registry(env.test_meter.registry());
     let host_discovery = host_discover_machine(&env, &host_config, primary_link.id);
     tokio::pin!(host_discovery);
     let host_discovery_pid = tokio::select! {

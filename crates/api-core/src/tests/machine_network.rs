@@ -1549,6 +1549,7 @@ async fn test_managed_host_network_config_projects_dual_stack_admin_addresses(po
             use_vpc_vrf_loopback: false,
             routing_profile: None,
         },
+        &env.api.instrumentation,
     )
     .await
     .unwrap();
@@ -1590,6 +1591,7 @@ async fn test_managed_host_network_config_projects_dual_stack_admin_addresses(po
             use_vpc_vrf_loopback: false,
             routing_profile: None,
         },
+        &env.api.instrumentation,
     )
     .await
     .unwrap_err();
@@ -1818,6 +1820,7 @@ async fn test_managed_host_network_config_supports_ipv6_only_admin(pool: sqlx::P
             use_vpc_vrf_loopback: false,
             routing_profile: None,
         },
+        &env.api.instrumentation,
     )
     .await
     .unwrap_err();
@@ -2522,7 +2525,7 @@ async fn test_record_dpu_network_status_counts_failed_host_wakeup(pool: sqlx::Pg
         .await
         .unwrap();
 
-    let metrics = MetricsCapture::start();
+    let metrics = MetricsCapture::for_registry(env.test_meter.registry());
     // A never-before-observed network config version registers as a change,
     // which is what prompts the host state-handler wakeup.
     record_dpu_network_status(&env, dpu_machine_id, Some(network_config_version.clone())).await;

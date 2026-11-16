@@ -19,7 +19,7 @@ use std::str::FromStr;
 use std::sync::Arc;
 
 use carbide_dhcp_common::VendorClass;
-use carbide_instrument::emit;
+use carbide_instrument::Instrumentation;
 use carbide_rpc_utils::dhcp::{
     DhcpV4Config, HostConfig, InterfaceInfo, ServiceLink, ServiceLinkV4,
 };
@@ -231,6 +231,7 @@ impl DecodedPacket {
 }
 
 pub struct Packet {
+    instrumentation: Instrumentation,
     encoded_packet: Vec<u8>,
     sent_packet: Option<Message>,
     dst_address: Ipv4Addr,
@@ -291,7 +292,7 @@ impl Packet {
             return Ok(status);
         }
 
-        emit(DhcpReplySent {
+        self.instrumentation.emit(DhcpReplySent {
             message_type: self.message_type.unwrap_or(MessageTypeLabel::Other),
             destination_address: dst_address,
             xid: i64::from(sent_packet.xid()),
@@ -343,7 +344,7 @@ pub async fn process_packet(
     // ownership checks so that error precedence stays unchanged.
     let msg_type: Result<MessageType, DhcpError> =
         decoded_packet.get_option_val(OptionCode::MessageType, None);
-    emit(DhcpRequestReceived {
+    config.instrumentation.emit(DhcpRequestReceived {
         message_type: msg_type
             .as_ref()
             .map_or(MessageTypeLabel::Other, |msg_type| {
@@ -390,6 +391,7 @@ pub async fn process_packet(
                 message_type: None,
                 service_response: true,
                 reply_retirement: config.reply_retirement.clone(),
+                instrumentation: config.instrumentation.clone(),
             });
         };
         // A direct NAK rejects ciaddr, so sending the rejection to that address could make it unreachable.
@@ -453,6 +455,7 @@ fn encode_packet(
         message_type: Some(reply_message_type),
         service_response,
         reply_retirement: config.reply_retirement.clone(),
+        instrumentation: config.instrumentation.clone(),
     })
 }
 

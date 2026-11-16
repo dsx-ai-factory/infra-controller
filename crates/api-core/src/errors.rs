@@ -308,6 +308,17 @@ pub enum CarbideError {
         operation: &'static str,
     },
 
+    /// A reserved MLX command's local database or reply wait expired.
+    #[error(
+        "{operation} timed out for {machine_id}; any saved command remains unresolved until its exact result is recorded"
+    )]
+    MlxCommandDeadlineExceeded {
+        /// Scout targeted by the command.
+        machine_id: carbide_uuid::machine::MachineId,
+        /// The bounded database phase or reply wait.
+        operation: &'static str,
+    },
+
     #[error("permission denied: {0}")]
     PermissionDeniedError(String),
 
@@ -608,7 +619,8 @@ impl OperatorError for CarbideError {
             | CarbideError::DiscoveryContended(_)
             | CarbideError::Ipv6LoopbackBackfillContended { .. } => ErrorCode::nico(Api, 503),
             CarbideError::ResourcePoolCancelled { .. } => ErrorCode::nico(Api, 499),
-            CarbideError::ResourcePoolDeadlineExceeded { .. } => ErrorCode::nico(Api, 504),
+            CarbideError::ResourcePoolDeadlineExceeded { .. }
+            | CarbideError::MlxCommandDeadlineExceeded { .. } => ErrorCode::nico(Api, 504),
             CarbideError::RemoteResourcePool(error) => ErrorCode::nico(
                 Api,
                 match remote_resource_pool_status_code(error) {
@@ -831,6 +843,9 @@ impl From<CarbideError> for tonic::Status {
             }
             CarbideError::ResourcePoolDeadlineExceeded { operation } => {
                 Status::deadline_exceeded(format!("{operation} timed out"))
+            }
+            error @ CarbideError::MlxCommandDeadlineExceeded { .. } => {
+                Status::deadline_exceeded(error.to_string())
             }
             CarbideError::PermissionDeniedError(msg) => Status::permission_denied(msg),
             CarbideError::AlreadyInProgress(msg) => Status::already_exists(msg),

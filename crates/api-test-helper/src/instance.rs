@@ -386,12 +386,13 @@ pub async fn get_by_machine_id(
     .await
 }
 
-pub async fn get_by_id(addrs: &[SocketAddr], instance_id: &str) -> eyre::Result<Instance> {
+pub async fn get_by_id(addrs: &[SocketAddr], instance_id: &str) -> eyre::Result<Box<Instance>> {
     find_instances_by_ids(addrs, instance_id)
         .await?
         .instances
         .into_iter()
         .next()
+        .map(Box::new)
         .ok_or_else(|| eyre::eyre!("instance {instance_id} was not returned by FindInstancesByIds"))
 }
 

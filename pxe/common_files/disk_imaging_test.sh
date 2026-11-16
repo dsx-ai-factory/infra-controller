@@ -909,6 +909,22 @@ assert_eq "write_image_to_disk failure status" 1 "$?"
 assert_log_contains "Imaging failed 1"
 unset -f qemu-img
 
+echo "write_image_to_disk: anchors an OCI blob name so qemu-img does not read sha256: as a protocol"
+qemu_img_input="$temp_dir/qemu-img-input"
+qemu-img() {
+	# record the input path in a file
+	printf '%s' "$7" >"$qemu_img_input"
+	return 0
+}
+file="sha256:0123456789abcdef"
+write_image_to_disk >/dev/null 2>&1
+assert_eq "write_image_to_disk OCI blob status" 0 "$?"
+assert_eq "write_image_to_disk OCI blob input path" "./sha256:0123456789abcdef" "$(cat "$qemu_img_input")"
+file="$temp_dir/image.qcow2"
+write_image_to_disk >/dev/null 2>&1
+assert_eq "write_image_to_disk absolute input path" "$temp_dir/image.qcow2" "$(cat "$qemu_img_input")"
+unset -f qemu-img
+
 # get_distro_image writes shafile to the working directory, so run it in temp_dir.
 distro_workdir="$temp_dir/distro"
 mkdir -p "$distro_workdir"

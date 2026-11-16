@@ -95,12 +95,19 @@ macro_rules! capability_operations {
             $(
                 #[doc = concat!("See [`", stringify!($trait), "::", stringify!($method), "`].")]
                 pub async fn $method(&self $(, $arg: $ty)*) -> Result<$ok, PlatformError> {
-                    observe(
-                        self.bmc.endpoint(),
-                        Some(Capability::$trait),
-                        concat!(stringify!($capability), ".", stringify!($method)),
-                        self.driver.$method(&self.bmc.operation_context() $(, $arg)*),
-                    )
+                    // Boxed so a caller's future holds a pointer rather than the
+                    // driver's future: state handlers await many of these, and
+                    // inlining them all grows each handler's stack frame.
+                    Box::pin(async move {
+                        let cx = self.bmc.operation_context();
+                        observe(
+                            self.bmc.endpoint(),
+                            Some(Capability::$trait),
+                            concat!(stringify!($capability), ".", stringify!($method)),
+                            self.driver.$method(&cx $(, $arg)*),
+                        )
+                        .await
+                    })
                     .await
                 }
             )*

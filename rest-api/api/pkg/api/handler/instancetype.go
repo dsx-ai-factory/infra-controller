@@ -1416,15 +1416,15 @@ func (dith DeleteInstanceTypeHandler) Handle(c echo.Context) error {
 		}
 
 		mDAO := cdbm.NewMachineDAO(dith.dbSession)
-		mcs, _, derr := mDAO.GetAll(ctx, tx, cdbm.MachineFilterInput{InstanceTypeIDs: []uuid.UUID{it.ID}, ExcludeMetadata: true}, cdbp.PageInput{Limit: cutil.GetPtr(cdbp.TotalLimit)}, nil)
+		machineIDs, derr := mDAO.GetAllIDs(ctx, tx, cdbm.MachineFilterInput{InstanceTypeIDs: []uuid.UUID{it.ID}})
 		if derr != nil {
 			logger.Error().Err(derr).Msg("error retrieving Machines for Instance Type from DB")
 			return cutil.NewAPIError(http.StatusInternalServerError, "Failed to retrieve Machines for Instance Type", nil)
 		}
 
 		// Clear InstanceType from respective machines
-		for _, mc := range mcs {
-			_, derr := mDAO.Clear(ctx, tx, cdbm.MachineClearInput{MachineID: mc.ID, InstanceTypeID: true})
+		for _, machineID := range machineIDs {
+			_, derr := mDAO.Clear(ctx, tx, cdbm.MachineClearInput{MachineID: machineID, InstanceTypeID: true})
 			if derr != nil {
 				logger.Error().Err(derr).Msg("error clearing Machine associations for Instance Type")
 				return cutil.NewAPIError(http.StatusInternalServerError, "Failed to dissociate one or more Machines from Instance Type", nil)

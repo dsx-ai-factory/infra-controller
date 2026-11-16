@@ -21,8 +21,8 @@ use std::time::{Duration, Instant};
 use ::rpc::carbide_tls_client::CarbideClientConfig;
 use carbide_host_support::agent_config::AgentConfig;
 use carbide_systemd::systemd;
+use carbide_tls::client_config::ClientCert;
 use forge_certs::cert_renewal::ClientCertRenewer;
-use forge_tls::client_config::ClientCert;
 use humantime::format_duration as dt;
 use tokio::signal::unix::{SignalKind, signal};
 use tokio::time::sleep;
@@ -44,8 +44,11 @@ pub(super) async fn setup_and_run(
 
     // Setup client certificate renewal
     let forge_api_server = agent_config.forge_system.api_server.clone();
-    let client_cert_renewer =
-        ClientCertRenewer::new(forge_api_server.clone(), Arc::clone(&carbide_client_config));
+    let client_cert_renewer = ClientCertRenewer::new(
+        forge_api_server.clone(),
+        Arc::clone(&carbide_client_config),
+        carbide_instrument::Instrumentation::global(),
+    );
 
     let main_loop = MainLoop {
         agent_config,
