@@ -4239,6 +4239,13 @@ impl Forge for Api {
         crate::handlers::component_manager::list_component_firmware_versions(self, request).await
     }
 
+    async fn get_component_credentials(
+        &self,
+        request: Request<rpc::GetComponentCredentialsRequest>,
+    ) -> Result<Response<rpc::GetComponentCredentialsResponse>, Status> {
+        crate::handlers::component_manager::get_component_credentials(self, request).await
+    }
+
     async fn get_ipxe_template(
         &self,
         request: tonic::Request<::rpc::forge::GetIpxeTemplateRequest>,

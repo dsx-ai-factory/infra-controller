@@ -319,6 +319,10 @@ pub enum CarbideError {
         operation: &'static str,
     },
 
+    /// The bounded read of a component credential did not finish in time.
+    #[error("component credential read timed out")]
+    ComponentCredentialReadDeadlineExceeded,
+
     #[error("permission denied: {0}")]
     PermissionDeniedError(String),
 
@@ -620,7 +624,8 @@ impl OperatorError for CarbideError {
             | CarbideError::Ipv6LoopbackBackfillContended { .. } => ErrorCode::nico(Api, 503),
             CarbideError::ResourcePoolCancelled { .. } => ErrorCode::nico(Api, 499),
             CarbideError::ResourcePoolDeadlineExceeded { .. }
-            | CarbideError::MlxCommandDeadlineExceeded { .. } => ErrorCode::nico(Api, 504),
+            | CarbideError::MlxCommandDeadlineExceeded { .. }
+            | CarbideError::ComponentCredentialReadDeadlineExceeded => ErrorCode::nico(Api, 504),
             CarbideError::RemoteResourcePool(error) => ErrorCode::nico(
                 Api,
                 match remote_resource_pool_status_code(error) {
@@ -844,7 +849,8 @@ impl From<CarbideError> for tonic::Status {
             CarbideError::ResourcePoolDeadlineExceeded { operation } => {
                 Status::deadline_exceeded(format!("{operation} timed out"))
             }
-            error @ CarbideError::MlxCommandDeadlineExceeded { .. } => {
+            error @ (CarbideError::MlxCommandDeadlineExceeded { .. }
+            | CarbideError::ComponentCredentialReadDeadlineExceeded) => {
                 Status::deadline_exceeded(error.to_string())
             }
             CarbideError::PermissionDeniedError(msg) => Status::permission_denied(msg),
