@@ -20,7 +20,7 @@ use model::machine::PowerState as MachinePowerState;
 use sqlx::PgPool;
 use tokio::time::{Instant, timeout_at};
 
-use crate::component_common::ComponentPowerStateResult;
+use crate::component_common::{BmcEndpoint, BmcOperationResult, ComponentPowerStateResult};
 use crate::compute_tray_manager::{
     Backend, ComputeTrayEndpoint, ComputeTrayFirmwareUpdateStatus, ComputeTrayResult,
     ComputeTrayVendor,
@@ -31,7 +31,7 @@ use crate::firmware_inventory::{
     FirmwareInventorySource, FirmwareReadError,
 };
 
-/// `CoreComputeTrayManager` uses NICo-core's Redfish stack for power control
+/// `CoreComponentManager` uses NICo-core's Redfish stack for power control
 /// and observations. Each power-read request allows at most eight active BMCs
 /// and shares a ten-second budget across queueing, client creation, and reads.
 /// Queued endpoints expire without being read; completed observations remain
@@ -40,7 +40,7 @@ use crate::firmware_inventory::{
 /// Firmware inventory reads use the same pool and direct endpoint credentials;
 /// the pool must support direct authentication. Firmware updates, update status,
 /// and bundle listing remain unsupported. See `get_firmware_inventory` for its bounds.
-pub struct CoreComputeTrayManager {
+pub struct CoreComponentManager {
     redfish_pool: Arc<dyn RedfishClientPool>,
     /// Connects moved BMC operations through their drivers when the site
     /// sets `bmc_backend = "drivers"`; `None` runs them through libredfish.
@@ -79,13 +79,58 @@ const FIRMWARE_TEXT_LIMIT: usize = 1024;
 const FIRMWARE_INVENTORY_TEXT_LIMIT: usize = 64 * 1024;
 const FIRMWARE_INVENTORY_URI: &str = "/redfish/v1/UpdateService/FirmwareInventory";
 
-impl std::fmt::Debug for CoreComputeTrayManager {
+impl std::fmt::Debug for CoreComponentManager {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("CoreComputeTrayManager").finish()
+        f.debug_struct("CoreComponentManager").finish()
     }
 }
 
-impl CoreComputeTrayManager {
+impl CoreComponentManager {
+    /// Reboot management controllers without changing host power or configuration.
+    /// Endpoints may identify compute BMCs, switch BMCs, or power-shelf PMCs.
+    /// Results retain input order; success reports command acceptance, not recovery.
+    pub(crate) async fn reset_bmc(
+        &self,
+        endpoints: &[BmcEndpoint],
+    ) -> Result<Vec<BmcOperationResult>, ComponentManagerError> {
+        let mut results = Vec::with_capacity(endpoints.len());
+        for endpoint in endpoints {
+            let outcome = async {
+                let bmc = self.connect_bmc(endpoint).await?;
+                async { bmc.bmc_control()?.reset().await }
+                    .await
+                    .map(drop)
+                    .map_err(|error: PlatformError| format!("BMC reset failed: {error}"))
+            }
+            .await;
+            results.push(BmcOperationResult {
+                bmc_ip: endpoint.bmc_ip,
+                bmc_mac: endpoint.bmc_mac,
+                success: outcome.is_ok(),
+                error: outcome.err(),
+                backend_job_id: None,
+            });
+        }
+        Ok(results)
+    }
+
+    /// Reset switch BMCs through Redfish. NVOS fields are accepted but unused.
+    pub(crate) async fn reset_switch_bmc(
+        &self,
+        endpoints: &[crate::nv_switch_manager::SwitchEndpoint],
+    ) -> Result<Vec<BmcOperationResult>, ComponentManagerError> {
+        let endpoints: Vec<_> = endpoints
+            .iter()
+            .map(|endpoint| BmcEndpoint {
+                bmc_ip: endpoint.bmc_ip,
+                bmc_mac: endpoint.bmc_mac,
+                vendor: ComputeTrayVendor::Nvidia,
+                bmc_credentials: endpoint.bmc_credentials.clone(),
+            })
+            .collect();
+        self.reset_bmc(&endpoints).await
+    }
+
     pub fn new(redfish_pool: Arc<dyn RedfishClientPool>) -> Self {
         Self {
             redfish_pool,
@@ -415,7 +460,14 @@ fn machine_power_state(state: Option<BmcPowerState>) -> MachinePowerState {
 }
 
 #[async_trait::async_trait]
-impl crate::compute_tray_manager::ComputeTrayManager for CoreComputeTrayManager {
+impl crate::compute_tray_manager::ComputeTrayManager for CoreComponentManager {
+    async fn reset_bmc(
+        &self,
+        endpoints: &[BmcEndpoint],
+    ) -> Result<Vec<BmcOperationResult>, ComponentManagerError> {
+        CoreComponentManager::reset_bmc(self, endpoints).await
+    }
+
     fn power_state_source(&self) -> Option<crate::component_common::PowerStateSource> {
         Some(crate::component_common::PowerStateSource::Redfish)
     }
@@ -852,7 +904,7 @@ mod tests {
         let mut endpoints: Vec<_> = (1..=7).map(test_compute_tray_endpoint).collect();
         endpoints.push(endpoints[0].clone());
         let pool = compute_read_test_pool(&endpoints);
-        let manager = CoreComputeTrayManager::new(pool.clone());
+        let manager = CoreComponentManager::new(pool.clone());
         assert!(manager.get_power_state(&[]).await.unwrap().is_empty());
 
         for (endpoint, (state, _)) in endpoints.iter().zip(states) {
@@ -926,7 +978,7 @@ mod tests {
                 }
             }
 
-            let manager = CoreComputeTrayManager::new(pool.clone());
+            let manager = CoreComponentManager::new(pool.clone());
             let before = pool.sim.timepoint();
             let mut request = Box::pin(manager.get_power_state(&endpoints));
 
@@ -982,7 +1034,7 @@ mod tests {
         let first_read = pool.read_gates.block(&endpoints[1]);
         let later_read = pool.read_gates.block(&endpoints[3]);
 
-        let manager = CoreComputeTrayManager::new(pool.clone());
+        let manager = CoreComponentManager::new(pool.clone());
         let before = pool.sim.timepoint();
         let mut request = Box::pin(manager.get_power_state(&endpoints));
 
@@ -1057,7 +1109,7 @@ mod tests {
         let pool = compute_read_test_pool(&endpoints);
         let setup = pool.setup_gates.block(&endpoints[0]);
         let read = pool.read_gates.block(&endpoints[0]);
-        let manager = CoreComputeTrayManager::new(pool.clone());
+        let manager = CoreComponentManager::new(pool.clone());
         let before = pool.sim.timepoint();
         let mut request = Box::pin(manager.get_power_state(&endpoints));
 
@@ -1105,7 +1157,7 @@ mod tests {
                 .map(|endpoint| gates.block(endpoint))
                 .collect();
 
-            let manager = CoreComputeTrayManager::new(pool.clone());
+            let manager = CoreComponentManager::new(pool.clone());
             let before = pool.sim.timepoint();
             let mut request = Box::pin(manager.get_power_state(&endpoints));
 

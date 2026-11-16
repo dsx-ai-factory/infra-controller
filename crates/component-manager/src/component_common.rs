@@ -3,8 +3,79 @@
 
 //! Shared helpers used across component-manager backends and state controllers.
 
+use std::net::IpAddr;
+
+use carbide_secrets::credentials::Credentials;
 use mac_address::MacAddress;
 use model::machine::PowerState;
+
+/// Management-controller endpoint for a compute tray, switch, or power shelf.
+/// Carries controller credentials; switch backends receive NVOS details in `SwitchEndpoint`.
+#[derive(Debug, Clone)]
+pub struct BmcEndpoint {
+    /// Vendor used to select the controller implementation.
+    pub vendor: BmcVendor,
+    /// Controller address used for the connection.
+    pub bmc_ip: IpAddr,
+    /// Controller MAC identifying the requested device.
+    pub bmc_mac: MacAddress,
+    /// Credentials for direct controller authentication.
+    pub bmc_credentials: Credentials,
+}
+
+/// Controller vendor supported by the component backends.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BmcVendor {
+    /// Unknown or otherwise unlisted vendor.
+    Unknown,
+    /// Dell controller.
+    Dell,
+    /// Hewlett Packard Enterprise controller.
+    Hpe,
+    /// Lenovo controller.
+    Lenovo,
+    /// Supermicro controller.
+    Supermicro,
+    /// NVIDIA controller.
+    Nvidia,
+}
+
+impl From<bmc_vendor::BMCVendor> for BmcVendor {
+    fn from(vendor: bmc_vendor::BMCVendor) -> Self {
+        match vendor {
+            bmc_vendor::BMCVendor::Dell => Self::Dell,
+            bmc_vendor::BMCVendor::Hpe => Self::Hpe,
+            bmc_vendor::BMCVendor::Lenovo => Self::Lenovo,
+            bmc_vendor::BMCVendor::Supermicro => Self::Supermicro,
+            bmc_vendor::BMCVendor::Nvidia => Self::Nvidia,
+            bmc_vendor::BMCVendor::LenovoAMI
+            | bmc_vendor::BMCVendor::GigaComputing
+            | bmc_vendor::BMCVendor::Liteon
+            | bmc_vendor::BMCVendor::Delta
+            | bmc_vendor::BMCVendor::Sushy
+            | bmc_vendor::BMCVendor::Unknown => Self::Unknown,
+        }
+    }
+}
+
+/// Outcome of a command for one management-controller endpoint.
+#[derive(Debug, Clone)]
+pub struct BmcOperationResult {
+    /// Controller address supplied with the request.
+    pub bmc_ip: IpAddr,
+    /// Controller MAC supplied with the request.
+    pub bmc_mac: MacAddress,
+    /// Whether the backend accepted the command.
+    pub success: bool,
+    /// Failure detail when the command was not accepted.
+    pub error: Option<String>,
+
+    /// Opaque backend job ID returned for an asynchronous operation.
+    ///
+    /// `None` means the backend returned no durable job handle. Presence does
+    /// not imply success; a failed result may retain the ID for reconciliation.
+    pub backend_job_id: Option<String>,
+}
 
 /// A managed component within a rack's compute trays, switches, or power shelves.
 #[derive(Clone, Copy, Debug)]

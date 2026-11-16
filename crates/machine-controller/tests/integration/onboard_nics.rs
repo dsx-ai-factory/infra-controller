@@ -278,7 +278,7 @@ async fn queue_ac_cycle(
 async fn ac_cycle_restores_onboard_nics_without_repeating_power_after_restart(pool: PgPool) {
     use std::sync::Arc;
 
-    use component_manager::core_compute_manager::CoreComputeTrayManager;
+    use component_manager::core_component_manager::CoreComponentManager;
     use model::machine::AcPowercycleState;
 
     use crate::maintenance::{component_manager, valid_credential_manager};
@@ -288,9 +288,7 @@ async fn ac_cycle_restores_onboard_nics_without_repeating_power_after_restart(po
         .boxed_local()
         .await;
     host.advance_to_converged_ready().await;
-    let manager = component_manager(Arc::new(CoreComputeTrayManager::new(
-        env.redfish_sim.clone(),
-    )));
+    let manager = component_manager(Arc::new(CoreComponentManager::new(env.redfish_sim.clone())));
     env = Env::builder(pool.clone())
         .with_component_manager(manager.clone())
         .with_credential_manager(valid_credential_manager())
@@ -422,15 +420,13 @@ async fn ac_cycle_restores_onboard_nics_without_repeating_power_after_restart(po
 async fn ac_cycle_skips_onboard_nics_unless_vera_rubin_with_managed_dpus(pool: PgPool) {
     use std::sync::Arc;
 
-    use component_manager::core_compute_manager::CoreComputeTrayManager;
+    use component_manager::core_component_manager::CoreComponentManager;
     use model::machine::AcPowercycleState;
 
     use crate::maintenance::{component_manager, valid_credential_manager};
 
     let mut env = Env::builder(pool.clone()).build().boxed_local().await;
-    let manager = component_manager(Arc::new(CoreComputeTrayManager::new(
-        env.redfish_sim.clone(),
-    )));
+    let manager = component_manager(Arc::new(CoreComponentManager::new(env.redfish_sim.clone())));
     env = Env::builder(pool)
         .with_component_manager(manager)
         .with_credential_manager(valid_credential_manager())
