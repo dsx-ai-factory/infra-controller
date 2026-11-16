@@ -44,7 +44,7 @@ while IFS='|' read -r name code exec_status expected message; do
     output=$(bash -c "${OUTPUT_HELPERS}
 ${HTTP_CHECK}
 _http_check 'probe' nico-system app.kubernetes.io/name=nico-hardware-health http://localhost:9009/metrics '${expected}'
-printf 'counts=%s,%s,%s' \"\${PASS}\" \"\${FAIL}\" \"\${SKIP}\"")
+printf 'counts=%s,%s,%s' \"\${PASS}\" \"\${FAIL}\" \"\${SKIP}\"" 2>&1)
     if [[ "${output}" != *"${message}"* || "${output}" == *diagnostic* ]]; then
         printf '%s: unexpected result\n%s\n' "${name}" "${output}" >&2
         exit 1
@@ -71,7 +71,7 @@ while IFS='|' read -r name pod command_status message; do
     export TEST_POD="${pod}" TEST_COMMAND_STATUS="${command_status}"
     output=$(bash -c "${OUTPUT_HELPERS}
 ${HTTP_CHECK}
-${HARDWARE_CHECK}")
+${HARDWARE_CHECK}" 2>&1)
     if [[ "${output}" != *"${message}"* || "${output}" == *diagnostic* ]]; then
         printf '%s: unexpected result\n%s\n' "${name}" "${output}" >&2
         exit 1
