@@ -12,17 +12,18 @@ import (
 	"fmt"
 	"slices"
 	"strings"
-	"time"
 
 	"github.com/google/uuid"
 	"github.com/rs/zerolog/log"
 	"go.temporal.io/sdk/client"
 	"golang.org/x/crypto/ssh"
+	"google.golang.org/protobuf/encoding/protojson"
 
 	temporalEnums "go.temporal.io/api/enums/v1"
 
 	tsdk "go.temporal.io/sdk/temporal"
 
+	"github.com/NVIDIA/infra-controller/rest-api/common/pkg/grpcproxy"
 	cdb "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
 	cdbm "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/model"
 	cdbp "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/paginator"
@@ -45,17 +46,13 @@ const (
 	msgSSHKeyGroupSiteRecovered   = "SSH Key Group Site association recovered from Site inventory"
 )
 
-type recoveredSSHKeyMaterial struct {
-	publicKey   string
-	fingerprint string
-	nameBase    string
-}
-
-type recoveredSSHKeyPlan struct {
-	material    recoveredSSHKeyMaterial
-	existing    *cdbm.SSHKey
-	name        string
-	association *cdbm.SSHKeyAssociation
+type sshKeyRecoveryCandidate struct {
+	publicKey      string
+	fingerprint    string
+	defaultName    string
+	sshKey         *cdbm.SSHKey
+	name           string
+	keyAssociation *cdbm.SSHKeyAssociation
 }
 
 // ManageSSHKeyGroup is an activity wrapper for managing SSHKeyGroup lifecycle for a Site and allows
@@ -330,10 +327,6 @@ func (mskg ManageSSHKeyGroup) UpdateSSHKeyGroupsInDB(ctx context.Context, siteID
 
 	existingSkgsaTkMap := map[string]*corev1.TenantKeyset{}
 	updatedSkgMap := map[string]bool{}
-	inventoryTime := time.Time{}
-	if sshKeyGroupInventory.Timestamp != nil && sshKeyGroupInventory.Timestamp.IsValid() {
-		inventoryTime = sshKeyGroupInventory.Timestamp.AsTime()
-	}
 
 	// Iterate through SSHKeyGroup Inventory and update DB
 	for _, tenantKeyset := range sshKeyGroupInventory.TenantKeysets {
@@ -352,7 +345,19 @@ func (mskg ManageSSHKeyGroup) UpdateSSHKeyGroupsInDB(ctx context.Context, siteID
 
 		skgsa, ok := skgIDSkgsaMap[sshKeyGroupIDStr]
 		if !ok {
-			skgsa, err = mskg.createOrUpdateSSHKeyGroupFromSite(ctx, site, tenantKeyset, inventoryTime)
+			if len(tenantKeyset.GetKeysetContent().GetPublicKeys()) == 0 {
+				detailedKeyset, detailErr := mskg.getTenantKeysetDetailsFromSite(ctx, site.ID, tenantKeyset)
+				if detailErr != nil {
+					slogger.Error().Err(detailErr).Msg("failed to retrieve SSH Key Group details from Site")
+					continue
+				}
+				if detailedKeyset == nil {
+					continue
+				}
+				tenantKeyset = detailedKeyset
+			}
+
+			skgsa, err = mskg.createOrUpdateSSHKeyGroupFromSite(ctx, site, tenantKeyset)
 			if err != nil {
 				slogger.Error().Err(err).Msg("failed to recover SSH Key Group from Site inventory")
 				continue
@@ -471,101 +476,228 @@ func (mskg ManageSSHKeyGroup) UpdateSSHKeyGroupsInDB(ctx context.Context, siteID
 	return updatedSkgStrIDs, nil
 }
 
+// getTenantKeysetDetailsFromSite retrieves one keyset with its public keys when
+// the metadata-only inventory identifies a keyset that REST may need to recover.
+func (mskg ManageSSHKeyGroup) getTenantKeysetDetailsFromSite(
+	ctx context.Context,
+	siteID uuid.UUID,
+	reported *corev1.TenantKeyset,
+) (*corev1.TenantKeyset, error) {
+	logger := log.With().
+		Str("Activity", "UpdateSSHKeyGroupsInDB").
+		Str("Site ID", siteID.String()).
+		Logger()
+
+	if reported == nil {
+		logger.Warn().Msg("unable to retrieve SSH Key Group details from Site: inventory record is nil")
+		return nil, nil
+	}
+	identifier := reported.GetKeysetIdentifier()
+	if identifier == nil {
+		logger.Warn().Msg("unable to retrieve SSH Key Group details from Site: keyset identifier is missing")
+		return nil, nil
+	}
+	logger = logger.With().
+		Str("SSH Key Group ID", identifier.GetKeysetId()).
+		Str("Tenant Org", identifier.GetOrganizationId()).
+		Logger()
+	if identifier.GetKeysetId() == "" {
+		logger.Warn().Msg("unable to retrieve SSH Key Group details from Site: keyset ID is empty")
+		return nil, nil
+	}
+	if identifier.GetOrganizationId() == "" {
+		logger.Warn().Msg("unable to retrieve SSH Key Group details from Site: Tenant organization ID is empty")
+		return nil, nil
+	}
+	if reported.GetVersion() == "" {
+		logger.Warn().Msg("unable to retrieve SSH Key Group details from Site: version is empty")
+		return nil, nil
+	}
+	_, parseErr := uuid.Parse(identifier.GetKeysetId())
+	if parseErr != nil {
+		logger.Warn().Err(parseErr).Msg("unable to retrieve SSH Key Group details from Site: keyset ID is not a valid UUID")
+		return nil, nil
+	}
+
+	stc, err := mskg.siteClientPool.GetClientByID(siteID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to retrieve Temporal client for Site: %w", err)
+	}
+
+	request := &corev1.TenantKeysetsByIdsRequest{
+		KeysetIds: []*corev1.TenantKeysetIdentifier{{
+			OrganizationId: identifier.GetOrganizationId(),
+			KeysetId:       identifier.GetKeysetId(),
+		}},
+		IncludeKeyData: true,
+	}
+	requestJSON, err := protojson.Marshal(request)
+	if err != nil {
+		return nil, fmt.Errorf("failed to encode Tenant keyset request: %w", err)
+	}
+
+	workflowOptions := client.StartWorkflowOptions{
+		ID:                       "site-ssh-key-group-get-" + identifier.GetKeysetId() + "-" + uuid.NewString(),
+		TaskQueue:                queue.SiteTaskQueue,
+		WorkflowExecutionTimeout: grpcproxy.WorkflowExecutionTimeout,
+		WorkflowIDReusePolicy:    temporalEnums.WORKFLOW_ID_REUSE_POLICY_ALLOW_DUPLICATE,
+	}
+	workflowContext, cancel := context.WithTimeout(ctx, cwutil.WorkflowContextTimeout)
+	defer cancel()
+
+	run, err := stc.ExecuteWorkflow(
+		workflowContext,
+		workflowOptions,
+		grpcproxy.Core.WorkflowName,
+		grpcproxy.Request{
+			FullMethod:  corev1.Forge_FindTenantKeysetsByIds_FullMethodName,
+			RequestJSON: requestJSON,
+		},
+	)
+	if err != nil {
+		return nil, fmt.Errorf("failed to execute Core proxy workflow: %w", err)
+	}
+
+	var proxyResponse grpcproxy.Response
+	err = run.Get(workflowContext, &proxyResponse)
+	if err != nil {
+		return nil, fmt.Errorf("failed to retrieve Tenant keyset details: %w", err)
+	}
+
+	var response corev1.TenantKeySetList
+	err = protojson.Unmarshal(proxyResponse.ResponseJSON, &response)
+	if err != nil {
+		return nil, fmt.Errorf("failed to decode Tenant keyset response: %w", err)
+	}
+	if len(response.Keyset) == 0 {
+		return nil, nil
+	}
+	if len(response.Keyset) != 1 || response.Keyset[0] == nil {
+		return nil, fmt.Errorf("expected one Tenant keyset, Core returned %d", len(response.Keyset))
+	}
+
+	detailedKeyset := response.Keyset[0]
+	detailedIdentifier := detailedKeyset.GetKeysetIdentifier()
+	if detailedIdentifier == nil ||
+		detailedIdentifier.GetOrganizationId() != identifier.GetOrganizationId() ||
+		detailedIdentifier.GetKeysetId() != identifier.GetKeysetId() {
+		return nil, errors.New("tenant keyset response has an unexpected identifier")
+	}
+	if detailedKeyset.GetVersion() == "" {
+		return nil, errors.New("tenant keyset response has no version")
+	}
+
+	return detailedKeyset, nil
+}
+
 // createOrUpdateSSHKeyGroupFromSite recovers a Site keyset that has no active
 // Site association in REST. New or stale-deleted groups adopt the Site key
-// material; an active group is associated only when its existing keys match.
+// data; an active group is associated only when its existing keys match.
 func (mskg ManageSSHKeyGroup) createOrUpdateSSHKeyGroupFromSite(
 	ctx context.Context,
 	site *cdbm.Site,
 	reported *corev1.TenantKeyset,
-	inventoryTime time.Time,
 ) (*cdbm.SSHKeyGroupSiteAssociation, error) {
+	logger := log.With().
+		Str("Activity", "UpdateSSHKeyGroupsInDB").
+		Str("Site ID", site.ID.String()).
+		Logger()
+
+	if reported == nil {
+		logger.Warn().Msg("unable to recover SSH Key Group from Site: inventory record is nil")
+		return nil, nil
+	}
 	identifier := reported.GetKeysetIdentifier()
-	if identifier == nil || identifier.GetOrganizationId() == "" || reported.GetVersion() == "" {
+	if identifier == nil {
+		logger.Warn().Msg("unable to recover SSH Key Group from Site: keyset identifier is missing")
+		return nil, nil
+	}
+	logger = logger.With().
+		Str("SSH Key Group ID", identifier.GetKeysetId()).
+		Str("Tenant Org", identifier.GetOrganizationId()).
+		Logger()
+	if identifier.GetKeysetId() == "" {
+		logger.Warn().Msg("unable to recover SSH Key Group from Site: keyset ID is empty")
+		return nil, nil
+	}
+	if identifier.GetOrganizationId() == "" {
+		logger.Warn().Msg("unable to recover SSH Key Group from Site: Tenant organization ID is empty")
+		return nil, nil
+	}
+	if reported.GetVersion() == "" {
+		logger.Warn().Msg("unable to recover SSH Key Group from Site: version is empty")
 		return nil, nil
 	}
 
 	sshKeyGroupID, err := uuid.Parse(identifier.GetKeysetId())
 	if err != nil {
+		logger.Warn().Err(err).Msg("unable to recover SSH Key Group from Site: keyset ID is not a valid UUID")
 		return nil, nil
 	}
-
-	logger := log.With().
-		Str("Activity", "UpdateSSHKeyGroupsInDB").
-		Str("Site ID", site.ID.String()).
-		Str("SSH Key Group ID", sshKeyGroupID.String()).
-		Str("Tenant Org", identifier.GetOrganizationId()).
-		Logger()
 
 	// Validate and normalize every Site-reported public key before opening the
 	// transaction. Invalid, duplicate, or ambiguous key data aborts recovery
 	// without creating partial REST state.
 	content := reported.GetKeysetContent()
-	var materialErr error
-	switch {
-	case content == nil:
-		materialErr = errors.New("keyset content is missing")
-	// Older Site workers request keysets without key data, which Core represents
-	// as an empty content message. Skip empty keysets rather than risk adopting a
-	// non-empty Site keyset as empty during a mixed-version rollout.
-	case len(content.PublicKeys) == 0:
-		materialErr = errors.New("keyset content has no public keys")
+	var candidateErr error
+	if content == nil {
+		candidateErr = errors.New("keyset content is missing")
 	}
 
-	keyMaterials := make([]recoveredSSHKeyMaterial, 0)
-	if materialErr == nil {
-		keyMaterials = make([]recoveredSSHKeyMaterial, 0, len(content.PublicKeys))
+	keyCandidates := make([]sshKeyRecoveryCandidate, 0)
+	if candidateErr == nil {
+		keyCandidates = make([]sshKeyRecoveryCandidate, 0, len(content.PublicKeys))
 		fingerprints := make(map[string]bool, len(content.PublicKeys))
 		for index, reportedKey := range content.PublicKeys {
 			if reportedKey == nil {
-				materialErr = fmt.Errorf("public key at index %d is nil", index)
+				candidateErr = fmt.Errorf("public key at index %d is nil", index)
 				break
 			}
 
 			publicKeyText := strings.TrimSpace(reportedKey.GetPublicKey())
 			publicKey, _, options, rest, parseErr := ssh.ParseAuthorizedKey([]byte(publicKeyText))
 			if parseErr != nil {
-				materialErr = fmt.Errorf("public key at index %d is invalid: %w", index, parseErr)
+				candidateErr = fmt.Errorf("public key at index %d is invalid: %w", index, parseErr)
 				break
 			}
 			if len(options) > 0 {
-				materialErr = fmt.Errorf("public key at index %d contains unsupported authorized-key options", index)
+				candidateErr = fmt.Errorf("public key at index %d contains unsupported authorized-key options", index)
 				break
 			}
 			if len(strings.TrimSpace(string(rest))) > 0 {
-				materialErr = fmt.Errorf("public key at index %d contains additional key data", index)
+				candidateErr = fmt.Errorf("public key at index %d contains additional key data", index)
 				break
 			}
 
 			switch publicKey.Type() {
 			case ssh.KeyAlgoRSA, ssh.KeyAlgoECDSA256, ssh.KeyAlgoECDSA384, ssh.KeyAlgoECDSA521, ssh.KeyAlgoED25519:
 			default:
-				materialErr = fmt.Errorf("public key at index %d has unsupported type %q", index, publicKey.Type())
+				candidateErr = fmt.Errorf("public key at index %d has unsupported type %q", index, publicKey.Type())
 			}
-			if materialErr != nil {
+			if candidateErr != nil {
 				break
 			}
 
 			fingerprint := strings.TrimPrefix(ssh.FingerprintSHA256(publicKey), "SHA256:")
 			if fingerprints[fingerprint] {
-				materialErr = fmt.Errorf("public key at index %d duplicates fingerprint %s", index, fingerprint)
+				candidateErr = fmt.Errorf("public key at index %d duplicates fingerprint %s", index, fingerprint)
 				break
 			}
 			fingerprints[fingerprint] = true
 
 			digest := sha256.Sum256(publicKey.Marshal())
-			keyMaterials = append(keyMaterials, recoveredSSHKeyMaterial{
+			keyCandidates = append(keyCandidates, sshKeyRecoveryCandidate{
 				publicKey:   publicKeyText,
 				fingerprint: fingerprint,
-				nameBase:    fmt.Sprintf("recovered-key-%x", digest[:6]),
+				defaultName: fmt.Sprintf("recovered-key-%x", digest[:6]),
 			})
 		}
 	}
-	if materialErr != nil {
-		logger.Warn().Err(materialErr).Msg("unable to recover SSH Key Group from Site inventory")
+	if candidateErr != nil {
+		logger.Warn().Err(candidateErr).Msg("unable to recover SSH Key Group from Site inventory")
 		return nil, nil
 	}
-	slices.SortFunc(keyMaterials, func(a, b recoveredSSHKeyMaterial) int {
+	slices.SortFunc(keyCandidates, func(a, b sshKeyRecoveryCandidate) int {
 		return cmp.Compare(a.fingerprint, b.fingerprint)
 	})
 
@@ -588,16 +720,8 @@ func (mskg ManageSSHKeyGroup) createOrUpdateSSHKeyGroupFromSite(
 		}
 		tenant := &tenants[0]
 
-		// The API rejects a Site association the Tenant has no access to, so
-		// recovery must not create one either.
-		hasSiteAccess, accessErr := cdbm.TenantHasSiteAccess(ctx, tx, mskg.dbSession, tenant, site.ID)
-		if accessErr != nil {
-			return nil, fmt.Errorf("unable to recover SSH Key Group: failed to check Tenant Site access, DB error: %w", accessErr)
-		}
-		if !hasSiteAccess {
-			logger.Warn().Msg("unable to recover SSH Key Group: Tenant does not have access to Site")
-			return nil, nil
-		}
+		// Recover even without Site access. The Tenant can still delete the
+		// Group or remove this Site association through REST.
 
 		lockErr := tx.TryAcquireAdvisoryLock(ctx, cdbm.SSHKeyTenantLockID(tenant.ID), nil)
 		if lockErr != nil {
@@ -634,11 +758,8 @@ func (mskg ManageSSHKeyGroup) createOrUpdateSSHKeyGroupFromSite(
 				logger.Info().Msg("skipping recovery of deleting SSH Key Group")
 				return nil, nil
 			}
-			if existingGroup.Deleted != nil &&
-				(inventoryTime.IsZero() ||
-					existingGroup.Deleted.After(inventoryTime) ||
-					site.IsTimeWithinStaleInventoryThreshold(*existingGroup.Deleted)) {
-				logger.Info().Msg("not undeleting SSH Key Group because its deletion may be newer than the inventory snapshot")
+			if existingGroup.Deleted != nil && site.IsTimeWithinStaleInventoryThreshold(*existingGroup.Deleted) {
+				logger.Info().Msg("not undeleting SSH Key Group because it was deleted within the inventory staleness window")
 				return nil, nil
 			}
 		}
@@ -679,24 +800,24 @@ func (mskg ManageSSHKeyGroup) createOrUpdateSSHKeyGroupFromSite(
 			logger.Info().Msg("skipping recovery of deleting SSH Key Group Site association")
 			return nil, nil
 		}
+		groupIsActive := existingGroup != nil && existingGroup.Deleted == nil
+		if activeSiteAssociation != nil && groupIsActive {
+			return activeSiteAssociation, nil
+		}
 		if deletedSiteAssociation != nil && activeSiteAssociation == nil &&
-			(inventoryTime.IsZero() ||
-				deletedSiteAssociation.Deleted.After(inventoryTime) ||
-				site.IsTimeWithinStaleInventoryThreshold(*deletedSiteAssociation.Deleted)) {
-			logger.Info().Msg("not undeleting SSH Key Group Site association because its deletion may be newer than the inventory snapshot")
+			site.IsTimeWithinStaleInventoryThreshold(*deletedSiteAssociation.Deleted) {
+			logger.Info().Msg("not undeleting SSH Key Group Site association because it was deleted within the inventory staleness window")
 			return nil, nil
 		}
 
-		reportedFingerprints := make(map[string]bool, len(keyMaterials))
-		for _, material := range keyMaterials {
-			reportedFingerprints[material.fingerprint] = true
+		reportedFingerprints := make(map[string]bool, len(keyCandidates))
+		for _, candidate := range keyCandidates {
+			reportedFingerprints[candidate.fingerprint] = true
 		}
 
-		groupIsActive := existingGroup != nil && existingGroup.Deleted == nil
-		keyPlans := make([]recoveredSSHKeyPlan, 0, len(keyMaterials))
 		// An active REST Group remains authoritative: recover only its missing
 		// Site association and only when Site reports the same key fingerprints.
-		// Missing or deleted Groups instead adopt the validated Site key material.
+		// Missing or deleted Groups instead adopt the validated Site keys.
 		if groupIsActive {
 			keyAssociationDAO := cdbm.NewSSHKeyAssociationDAO(mskg.dbSession)
 			activeAssociations, _, associationErr := keyAssociationDAO.GetAll(
@@ -740,10 +861,10 @@ func (mskg ManageSSHKeyGroup) createOrUpdateSSHKeyGroupFromSite(
 			}
 
 			keysByFingerprint := map[string][]*cdbm.SSHKey{}
-			if len(keyMaterials) > 0 {
-				fingerprints := make([]string, 0, len(keyMaterials))
-				for _, material := range keyMaterials {
-					fingerprints = append(fingerprints, material.fingerprint)
+			if len(keyCandidates) > 0 {
+				fingerprints := make([]string, 0, len(keyCandidates))
+				for _, candidate := range keyCandidates {
+					fingerprints = append(fingerprints, candidate.fingerprint)
 				}
 				matches, _, matchErr := sshKeyDAO.GetAll(
 					ctx,
@@ -767,14 +888,15 @@ func (mskg ManageSSHKeyGroup) createOrUpdateSSHKeyGroupFromSite(
 				}
 			}
 
-			for _, material := range keyMaterials {
-				matches := keysByFingerprint[material.fingerprint]
+			for index := range keyCandidates {
+				candidate := &keyCandidates[index]
+				matches := keysByFingerprint[candidate.fingerprint]
 				var active *cdbm.SSHKey
 				var deleted *cdbm.SSHKey
 				for _, sshKey := range matches {
 					if sshKey.Deleted == nil {
 						if active != nil {
-							logger.Warn().Str("SSH Key Fingerprint", material.fingerprint).
+							logger.Warn().Str("SSH Key Fingerprint", candidate.fingerprint).
 								Msg("unable to recover SSH Key Group: multiple active SSH Keys have the same fingerprint")
 							return nil, nil
 						}
@@ -786,36 +908,32 @@ func (mskg ManageSSHKeyGroup) createOrUpdateSSHKeyGroupFromSite(
 					}
 				}
 
-				plan := recoveredSSHKeyPlan{material: material}
 				switch {
 				case active != nil:
-					plan.existing = active
+					candidate.sshKey = active
 				case deleted != nil:
-					if inventoryTime.IsZero() ||
-						deleted.Deleted.After(inventoryTime) ||
-						site.IsTimeWithinStaleInventoryThreshold(*deleted.Deleted) {
+					if site.IsTimeWithinStaleInventoryThreshold(*deleted.Deleted) {
 						logger.Info().Str("SSH Key ID", deleted.ID.String()).
-							Msg("not undeleting SSH Key because its deletion may be newer than the inventory snapshot")
+							Msg("not undeleting SSH Key because it was deleted within the inventory staleness window")
 						return nil, nil
 					}
-					plan.existing = deleted
+					candidate.sshKey = deleted
 					if len(deleted.Name) >= 2 && len(deleted.Name) <= 256 && !usedNames[deleted.Name] &&
 						strings.TrimSpace(deleted.Name) == deleted.Name {
-						plan.name = deleted.Name
+						candidate.name = deleted.Name
 					} else {
-						plan.name = material.nameBase
+						candidate.name = candidate.defaultName
 					}
 				default:
-					plan.name = material.nameBase
+					candidate.name = candidate.defaultName
 				}
-				if plan.name != "" {
-					baseName := plan.name
-					for suffix := 2; usedNames[plan.name]; suffix++ {
-						plan.name = fmt.Sprintf("%s-%d", baseName, suffix)
+				if candidate.name != "" {
+					baseName := candidate.name
+					for suffix := 2; usedNames[candidate.name]; suffix++ {
+						candidate.name = fmt.Sprintf("%s-%d", baseName, suffix)
 					}
-					usedNames[plan.name] = true
+					usedNames[candidate.name] = true
 				}
-				keyPlans = append(keyPlans, plan)
 			}
 
 			if existingGroup != nil {
@@ -834,10 +952,10 @@ func (mskg ManageSSHKeyGroup) createOrUpdateSSHKeyGroupFromSite(
 					return nil, fmt.Errorf("unable to recover SSH Key Group: failed to retrieve SSH Key associations, DB error: %w", associationErr)
 				}
 
-				plannedKeyIDs := make(map[uuid.UUID]bool, len(keyPlans))
-				for _, plan := range keyPlans {
-					if plan.existing != nil {
-						plannedKeyIDs[plan.existing.ID] = true
+				plannedKeyIDs := make(map[uuid.UUID]bool, len(keyCandidates))
+				for _, candidate := range keyCandidates {
+					if candidate.sshKey != nil {
+						plannedKeyIDs[candidate.sshKey.ID] = true
 					}
 				}
 				for index := range associations {
@@ -853,14 +971,14 @@ func (mskg ManageSSHKeyGroup) createOrUpdateSSHKeyGroupFromSite(
 					association := &associations[index]
 					associationsByKeyID[association.SSHKeyID] = append(associationsByKeyID[association.SSHKeyID], association)
 				}
-				for index := range keyPlans {
-					if keyPlans[index].existing == nil {
+				for index := range keyCandidates {
+					if keyCandidates[index].sshKey == nil {
 						continue
 					}
 
 					var active *cdbm.SSHKeyAssociation
 					var deleted *cdbm.SSHKeyAssociation
-					for _, association := range associationsByKeyID[keyPlans[index].existing.ID] {
+					for _, association := range associationsByKeyID[keyCandidates[index].sshKey.ID] {
 						if association.Deleted == nil {
 							if active != nil {
 								logger.Warn().Msg("unable to recover SSH Key Group: multiple active SSH Key associations were found")
@@ -874,18 +992,16 @@ func (mskg ManageSSHKeyGroup) createOrUpdateSSHKeyGroupFromSite(
 						}
 					}
 					if active != nil {
-						keyPlans[index].association = active
+						keyCandidates[index].keyAssociation = active
 						continue
 					}
 					if deleted != nil {
-						if inventoryTime.IsZero() ||
-							deleted.Deleted.After(inventoryTime) ||
-							site.IsTimeWithinStaleInventoryThreshold(*deleted.Deleted) {
+						if site.IsTimeWithinStaleInventoryThreshold(*deleted.Deleted) {
 							logger.Info().Str("SSH Key Association ID", deleted.ID.String()).
-								Msg("not undeleting SSH Key association because its deletion may be newer than the inventory snapshot")
+								Msg("not undeleting SSH Key association because it was deleted within the inventory staleness window")
 							return nil, nil
 						}
-						keyPlans[index].association = deleted
+						keyCandidates[index].keyAssociation = deleted
 					}
 				}
 			}
@@ -966,33 +1082,33 @@ func (mskg ManageSSHKeyGroup) createOrUpdateSSHKeyGroupFromSite(
 
 		if !groupIsActive {
 			sshKeyDAO := cdbm.NewSSHKeyDAO(mskg.dbSession)
-			for index := range keyPlans {
+			for index := range keyCandidates {
 				switch {
-				case keyPlans[index].existing == nil:
-					keyPlans[index].existing, writeErr = sshKeyDAO.Create(ctx, tx, cdbm.SSHKeyCreateInput{
-						Name:        keyPlans[index].name,
+				case keyCandidates[index].sshKey == nil:
+					keyCandidates[index].sshKey, writeErr = sshKeyDAO.Create(ctx, tx, cdbm.SSHKeyCreateInput{
+						Name:        keyCandidates[index].name,
 						TenantOrg:   tenant.Org,
 						TenantID:    tenant.ID,
-						PublicKey:   keyPlans[index].material.publicKey,
-						Fingerprint: &keyPlans[index].material.fingerprint,
+						PublicKey:   keyCandidates[index].publicKey,
+						Fingerprint: &keyCandidates[index].fingerprint,
 						CreatedBy:   tenant.CreatedBy,
 					})
 					if writeErr != nil {
 						return nil, fmt.Errorf("unable to recover SSH Key Group: failed to create SSH Key, DB error: %w", writeErr)
 					}
-				case keyPlans[index].existing.Deleted != nil:
-					keyPlans[index].existing, writeErr = sshKeyDAO.Clear(ctx, tx, cdbm.SSHKeyClearInput{
-						SSHKeyID: keyPlans[index].existing.ID,
+				case keyCandidates[index].sshKey.Deleted != nil:
+					keyCandidates[index].sshKey, writeErr = sshKeyDAO.Clear(ctx, tx, cdbm.SSHKeyClearInput{
+						SSHKeyID: keyCandidates[index].sshKey.ID,
 						Deleted:  true,
 					})
 					if writeErr != nil {
 						return nil, fmt.Errorf("unable to recover SSH Key Group: failed to undelete SSH Key, DB error: %w", writeErr)
 					}
-					keyPlans[index].existing, writeErr = sshKeyDAO.Update(ctx, tx, cdbm.SSHKeyUpdateInput{
-						SSHKeyID:    keyPlans[index].existing.ID,
-						Name:        &keyPlans[index].name,
-						PublicKey:   &keyPlans[index].material.publicKey,
-						Fingerprint: &keyPlans[index].material.fingerprint,
+					keyCandidates[index].sshKey, writeErr = sshKeyDAO.Update(ctx, tx, cdbm.SSHKeyUpdateInput{
+						SSHKeyID:    keyCandidates[index].sshKey.ID,
+						Name:        &keyCandidates[index].name,
+						PublicKey:   &keyCandidates[index].publicKey,
+						Fingerprint: &keyCandidates[index].fingerprint,
 					})
 					if writeErr != nil {
 						return nil, fmt.Errorf("unable to recover SSH Key Group: failed to refresh SSH Key, DB error: %w", writeErr)
@@ -1001,20 +1117,20 @@ func (mskg ManageSSHKeyGroup) createOrUpdateSSHKeyGroupFromSite(
 			}
 
 			keyAssociationDAO := cdbm.NewSSHKeyAssociationDAO(mskg.dbSession)
-			for index := range keyPlans {
+			for index := range keyCandidates {
 				switch {
-				case keyPlans[index].association == nil:
+				case keyCandidates[index].keyAssociation == nil:
 					_, writeErr = keyAssociationDAO.Create(ctx, tx, cdbm.SSHKeyAssociationCreateInput{
-						SSHKeyID:      keyPlans[index].existing.ID,
+						SSHKeyID:      keyCandidates[index].sshKey.ID,
 						SSHKeyGroupID: recoveredGroup.ID,
 						CreatedBy:     tenant.CreatedBy,
 					})
 					if writeErr != nil {
 						return nil, fmt.Errorf("unable to recover SSH Key Group: failed to create SSH Key association, DB error: %w", writeErr)
 					}
-				case keyPlans[index].association.Deleted != nil:
+				case keyCandidates[index].keyAssociation.Deleted != nil:
 					_, writeErr = keyAssociationDAO.Clear(ctx, tx, cdbm.SSHKeyAssociationClearInput{
-						SSHKeyAssociationID: keyPlans[index].association.ID,
+						SSHKeyAssociationID: keyCandidates[index].keyAssociation.ID,
 						Deleted:             true,
 					})
 					if writeErr != nil {
@@ -1029,6 +1145,18 @@ func (mskg ManageSSHKeyGroup) createOrUpdateSSHKeyGroupFromSite(
 		switch {
 		case activeSiteAssociation != nil:
 			recoveredAssociation = activeSiteAssociation
+			if groupChanged {
+				recoveredAssociation, writeErr = siteAssociationDAO.Update(ctx, tx, cdbm.SSHKeyGroupSiteAssociationUpdateInput{
+					ID:              recoveredAssociation.ID,
+					Version:         &recoveryVersion,
+					Status:          cwutil.GetPtr(cdbm.SSHKeyGroupSiteAssociationStatusSynced),
+					IsMissingOnSite: cwutil.GetPtr(false),
+				})
+				if writeErr != nil {
+					return nil, fmt.Errorf("unable to recover SSH Key Group: failed to refresh active Site association, DB error: %w", writeErr)
+				}
+				associationChanged = true
+			}
 		case deletedSiteAssociation == nil:
 			recoveredAssociation, writeErr = siteAssociationDAO.Create(ctx, tx, cdbm.SSHKeyGroupSiteAssociationCreateInput{
 				SSHKeyGroupID: recoveredGroup.ID,
@@ -1061,21 +1189,13 @@ func (mskg ManageSSHKeyGroup) createOrUpdateSSHKeyGroupFromSite(
 			associationChanged = true
 		}
 
-		// Adding a Site association changes the active Group's optimistic
-		// concurrency token. Preserve the Site-reported keyset version after
-		// rotating the parent Group version.
+		// Adding a Site association changes only the active Group's optimistic
+		// concurrency token. Site association versions remain the versions
+		// reported by their respective Sites.
 		if groupIsActive && associationChanged {
-			recoveredGroup, writeErr = sshKeyGroupDAO.GenerateAndUpdateVersion(ctx, tx, recoveredGroup.ID)
+			recoveredGroup, writeErr = sshKeyGroupDAO.GenerateAndUpdateGroupVersion(ctx, tx, recoveredGroup.ID)
 			if writeErr != nil {
 				return nil, fmt.Errorf("unable to recover SSH Key Group: failed to rotate Group version, DB error: %w", writeErr)
-			}
-			recoveredAssociation, writeErr = siteAssociationDAO.Update(ctx, tx, cdbm.SSHKeyGroupSiteAssociationUpdateInput{
-				ID:      recoveredAssociation.ID,
-				Version: cwutil.GetPtr(reported.GetVersion()),
-				Status:  cwutil.GetPtr(cdbm.SSHKeyGroupSiteAssociationStatusSynced),
-			})
-			if writeErr != nil {
-				return nil, fmt.Errorf("unable to recover SSH Key Group: failed to preserve Site version, DB error: %w", writeErr)
 			}
 		}
 

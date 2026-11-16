@@ -118,28 +118,7 @@ func (cskh CreateSSHKeyHandler) Handle(c echo.Context) error {
 
 	cotel.SetAttribute(handlerSpan, attribute.String("name", apiRequest.Name))
 
-	// check for name uniqueness for the tenant, ie, tenant cannot have another SSH Key with same name at the site
 	skDAO := cdbm.NewSSHKeyDAO(cskh.dbSession)
-	sks, tot, err := skDAO.GetAll(
-		ctx,
-		nil,
-		cdbm.SSHKeyFilterInput{
-			Names:     []string{apiRequest.Name},
-			TenantIDs: []uuid.UUID{tenant.ID},
-		},
-		cdbp.PageInput{},
-		nil,
-	)
-	if err != nil {
-		logger.Error().Err(err).Msg("db error checking for name uniqueness of tenant SSH Key")
-		return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to create SSH Key due to DB error", nil)
-	}
-	if tot > 0 {
-		logger.Warn().Str("tenantId", tenant.ID.String()).Str("name", apiRequest.Name).Msg("SSH Key with same name already exists for Tenant")
-		return cutil.NewAPIErrorResponse(c, http.StatusConflict, "An SSH Key with specified name already exists for Tenant", validation.Errors{
-			"id": errors.New(sks[0].ID.String()),
-		})
-	}
 
 	// Verify SSH Key Group ID
 	var dbskg *cdbm.SSHKeyGroup
@@ -186,13 +165,35 @@ func (cskh CreateSSHKeyHandler) Handle(c echo.Context) error {
 	var skgsas []cdbm.SSHKeyGroupSiteAssociation
 
 	err = cdb.WithTx(ctx, cskh.dbSession, func(tx *cdb.Tx) error {
-		// Check fingerprint uniqueness under the Tenant lock that inventory
-		// recovery also holds, so the two cannot insert the same key.
+		// Check name and fingerprint uniqueness under the Tenant lock that
+		// inventory recovery also holds, so neither can insert a duplicate.
 		derr := tx.TryAcquireAdvisoryLock(ctx, cdbm.SSHKeyTenantLockID(tenant.ID), nil)
 		if derr != nil {
 			logger.Error().Err(derr).Msg("failed to acquire Tenant SSH Key lock")
 			return cutil.NewAPIError(http.StatusInternalServerError, "Failed to create SSH Key, could not acquire data store lock", nil)
 		}
+
+		lockedNameMatches, _, derr := skDAO.GetAll(
+			ctx,
+			tx,
+			cdbm.SSHKeyFilterInput{
+				Names:     []string{apiRequest.Name},
+				TenantIDs: []uuid.UUID{tenant.ID},
+			},
+			cdbp.PageInput{},
+			nil,
+		)
+		if derr != nil {
+			logger.Error().Err(derr).Msg("db error checking for name uniqueness of tenant SSH Key")
+			return cutil.NewAPIError(http.StatusInternalServerError, "Failed to create SSH Key due to DB error", nil)
+		}
+		if len(lockedNameMatches) > 0 {
+			logger.Warn().Str("tenantId", tenant.ID.String()).Str("name", apiRequest.Name).Msg("SSH Key with same name already exists for Tenant")
+			return cutil.NewAPIError(http.StatusConflict, "An SSH Key with specified name already exists for Tenant", validation.Errors{
+				"id": errors.New(lockedNameMatches[0].ID.String()),
+			})
+		}
+
 		lockedMatches, _, derr := skDAO.GetAll(
 			ctx,
 			tx,
