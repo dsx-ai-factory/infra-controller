@@ -66,6 +66,7 @@ use crate::compute_tray_manager::{
 };
 use crate::config::ComponentManagerConfig;
 use crate::error::ComponentManagerError;
+use crate::firmware_inventory::FirmwareReadError;
 use crate::firmware_jobs::{ComponentFirmwareJobsResult, FirmwareJobSource};
 use crate::machine_info_provider::{
     MachineInfoProvider, MachineLocationError, MachineLocationObservation, MachineLocationTarget,
@@ -2745,7 +2746,7 @@ impl PowerShelfManager for RmsBackend {
         Ok(statuses)
     }
 
-    #[instrument(skip(self), fields(backend = "rms"))]
+    #[instrument(skip(self, endpoints), fields(backend = "rms"))]
     async fn list_firmware(
         &self,
         endpoints: &[PowerShelfEndpoint],
@@ -2791,31 +2792,26 @@ impl PowerShelfManager for RmsBackend {
                 }),
             };
 
-            match red::instrumented(
-                "rms",
-                "batch_get_firmware_inventory",
-                self.client.batch_get_firmware_inventory(request),
-            )
-            .await
-            {
+            // RMS errors can echo endpoint credentials. Sanitize them before
+            // RED logs the error or it reaches the per-shelf result.
+            let rpc = async {
+                self.client
+                    .batch_get_firmware_inventory(request)
+                    .await
+                    .map_err(|_| FirmwareReadError::ReadFailed)
+            };
+
+            match red::instrumented("rms", "batch_get_firmware_inventory", rpc).await {
                 Ok(response) => {
                     // An omitted summary defaults to Unspecified and fails the success check.
                     let batch = response.response.unwrap_or_default();
 
                     if batch.status != rms::ReturnCode::Success as i32 {
-                        let error = batch
-                            .node_results
-                            .into_iter()
-                            .find(|result| result.node_id == resolved.identity.node_id)
-                            .map(|result| result.error_message)
-                            .filter(|error| !error.is_empty())
-                            .or_else(|| (!batch.message.is_empty()).then_some(batch.message))
-                            .unwrap_or_else(|| "RMS firmware inventory query failed".into());
-
                         results.push(PowerShelfFirmwareVersions {
                             pmc_mac: ep.pmc_mac,
                             versions: vec![],
-                            error: Some(error),
+                            // Batch and node messages can also echo credentials.
+                            error: Some("RMS firmware inventory query failed".into()),
                         });
 
                         continue;
@@ -10822,33 +10818,33 @@ mod tests {
 
         let cases = [
             (
-                "node failure takes precedence over summary",
+                "node failure text is sanitized",
                 rms::BatchGetFirmwareInventoryResponse {
                     response: Some(rms::NodeBatchResponse {
                         status: rms::ReturnCode::Failure as i32,
-                        message: "query failed".into(),
+                        message: "query failed: password=pass".into(),
                         node_results: vec![rms::NodeOperationResult {
                             node_id: node_id.clone(),
                             status: rms::ReturnCode::Failure as i32,
-                            error_message: "BMC unavailable".into(),
+                            error_message: "BMC unavailable: password=pass".into(),
                         }],
                         ..Default::default()
                     }),
                     nodes: vec![],
                 },
-                "BMC unavailable",
+                "RMS firmware inventory query failed",
             ),
             (
-                "batch failure falls back to summary",
+                "batch failure text is sanitized",
                 rms::BatchGetFirmwareInventoryResponse {
                     response: Some(rms::NodeBatchResponse {
                         status: rms::ReturnCode::Failure as i32,
-                        message: "query failed".into(),
+                        message: "query failed: password=pass".into(),
                         ..Default::default()
                     }),
                     nodes: vec![],
                 },
-                "query failed",
+                "RMS firmware inventory query failed",
             ),
             (
                 "missing summary is a failure",
@@ -10898,13 +10894,25 @@ mod tests {
             mock.enqueue_batch_get_firmware_inventory(Ok(response))
                 .await;
 
-            let results = backend.list_firmware(&eps).await.unwrap();
+            let (results, logs) = capture_logs_async(backend.list_firmware(&eps)).await;
+            let results = results.unwrap();
 
             assert!(results[0].versions.is_empty(), "{scenario}");
 
             assert_eq!(
                 results[0].error.as_deref(),
                 Some(expected_error),
+                "{scenario}"
+            );
+
+            assert!(
+                logs.iter().all(|log| {
+                    !log.message.contains("password=pass")
+                        && log
+                            .fields
+                            .iter()
+                            .all(|(_, value)| !value.contains("password=pass"))
+                }),
                 "{scenario}"
             );
         }
@@ -10915,7 +10923,9 @@ mod tests {
         let (mock, backend, _, _, ps2, _, _) = make_backend(&pool).await;
 
         mock.enqueue_batch_get_firmware_inventory(Err(
-            librms::RackManagerError::ApiInvocationError(tonic::Status::unavailable("down")),
+            librms::RackManagerError::ApiInvocationError(tonic::Status::unavailable(
+                "BMC unavailable: password=pass",
+            )),
         ))
         .await;
 
@@ -10933,15 +10943,42 @@ mod tests {
 
         let eps = vec![make_ps_endpoint(PS_MAC_1), make_ps_endpoint(PS_MAC_2)];
 
-        let results = backend.list_firmware(&eps).await.unwrap();
+        let (results, logs) = capture_logs_async(backend.list_firmware(&eps)).await;
+        let results = results.unwrap();
 
         assert_eq!(results.len(), 2);
         assert_eq!(results[0].pmc_mac, eps[0].pmc_mac);
         assert!(results[0].versions.is_empty());
-        assert!(results[0].error.as_ref().unwrap().contains("down"));
+
+        assert_eq!(
+            results[0].error.as_deref(),
+            Some("firmware inventory read failed")
+        );
+
         assert_eq!(results[1].pmc_mac, eps[1].pmc_mac);
         assert!(results[1].versions.is_empty());
         assert!(results[1].error.is_none());
+
+        let failure_log = logs
+            .iter()
+            .find(|log| {
+                log.message == "external call failed"
+                    && log.field("operation") == Some("batch_get_firmware_inventory")
+            })
+            .expect("RED reports the transport failure");
+
+        assert_eq!(
+            failure_log.field("error"),
+            Some("firmware inventory read failed")
+        );
+
+        assert!(logs.iter().all(|log| {
+            !log.message.contains("password=pass")
+                && log
+                    .fields
+                    .iter()
+                    .all(|(_, value)| !value.contains("password=pass"))
+        }));
     }
 
     #[carbide_macros::sqlx_test]
@@ -10960,6 +10997,7 @@ mod tests {
             pool,
             Arc::new(rack_profile_config()),
             true,
+            carbide_instrument::Instrumentation::global(),
         );
 
         mock.enqueue_batch_get_firmware_inventory(Ok(rms::BatchGetFirmwareInventoryResponse {
