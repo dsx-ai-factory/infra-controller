@@ -455,9 +455,15 @@ In connected mode, `serviceAccountOrgs` can list more than one org. Custom issue
 
 ### 2.4 → 2.5: Firmware upgrade timeout based on time Scout polled for task
 
-Prior to 2.5, the timeout clock for a firmware upgrade was started when the task was first created by the controller even though Scout had not yet received the task and was not guaranteed to do so. With the 2.5 release, the timeout clock is reset to zero the first time Scout polls the controller after the task is created, which is inferred to be the time that the task was actually delivered to Scout.
+In NICo versions prior to 2.5, the timeout clock for a firmware upgrade starts when the controller creates the task, even though Scout has not yet received the task and is *not guaranteed to do so*. In version 2.5, the timeout clock resets to zero the first time Scout polls the controller and receives the task.
 
-**Impact:** If, prior to a NICo upgrade, a firmware upgrade task is created, successfully received by Scout, and the actual firmware upgrade begun but not completed, then after the NICo upgrade newer Core will mark the pending task as timed out unless the last Scout contact time happened to fall within thirty minutes of upgrade task creation. This can result in a delay before the upgrade process is complete, since the result of the ongoing firmware upgrade will be discarded, and a potentially unnecessary retry will be triggered.
+**Impact:** In a situation that meets all of the following conditions, the newer Core marks a pending task as timed out, unless the last Scout contact time happens to fall within 30 minutes of upgrade task creation:
+
+- A firmware upgrade task is created prior to a NICo upgrade
+- Scout successfully receives the task
+- The actual firmware upgrade begins but does not complete
+
+This situation delays the upgrade process before it completes, since the result of the ongoing firmware upgrade will be discarded, and a potentially unnecessary retry will be triggered.
 
 ### 2.3 → 2.4: Standalone Temporal/Keycloak PostgreSQL deprecated
 
