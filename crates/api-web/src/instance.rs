@@ -766,10 +766,37 @@ mod tests {
         let html = detail.render()?;
         assert!(html.contains("192.0.2.10, 2001:db8::10"));
         assert!(html.contains("2001:db8::20"));
-        assert!(html.contains("<th>IP Prefixes</th><td>192.0.2.0/24, 2001:db8::/64</td>"));
-        assert!(html.contains("<th>IP Prefixes</th><td></td>"));
-        assert!(html.contains("<th>IP Prefixes</th><td>2001:db8:1::/64</td>"));
-        assert!(html.contains("<th>IP Addresses</th><td></td>"));
+        // Addresses, prefixes, and gateways cells of the interface row containing
+        // `needle`; empty values render as a muted dash.
+        let address_cells = |needle: &str| -> Vec<String> {
+            let row = html
+                .split("<tr>")
+                .find(|row| row.contains(needle))
+                .and_then(|row| row.split("</tr>").next())
+                .unwrap();
+            row.split("<td>")
+                .skip(2)
+                .take(3)
+                .map(|cell| cell.split("</td>").next().unwrap_or_default().to_string())
+                .collect()
+        };
+        let empty = r#"<span class="text-muted">—</span>"#;
+        assert_eq!(
+            address_cells("02:00:00:00:00:01"),
+            [
+                "192.0.2.10, 2001:db8::10",
+                "192.0.2.0/24, 2001:db8::/64",
+                "192.0.2.1/24, 2001:db8::1/64",
+            ]
+        );
+        assert_eq!(
+            address_cells("02:00:00:00:00:02"),
+            ["2001:db8::20", empty, "2001:db8::1/64"]
+        );
+        assert_eq!(
+            address_cells("2001:db8:1::/64"),
+            [empty, "2001:db8:1::/64", empty]
+        );
         assert!(html.contains(&format!("/admin/vpc/{vpc_id}")));
         assert!(!html.contains("href=\"/admin/network-segment/\""));
 

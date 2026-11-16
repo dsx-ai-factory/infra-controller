@@ -258,7 +258,9 @@ async fn validation_run_pages_show_progress_current_work_and_logs(pool: sqlx::Pg
         assert!(results_table.contains("Complete (1)"));
         assert!(results_table.contains("Complete (0)"));
         assert!(!html.contains(&pending_attempt_id.to_string()));
-        assert!(!html.contains("<details"));
+        // The sidebar's collapsible groups are <details>; the page content must not be.
+        let content = html.split("<main>").nth(1).unwrap();
+        assert!(!content.contains("<details"));
         assert_eq!(html.matches("<pre hidden><code></code></pre>").count(), 1);
         assert!(html.contains("Select View logs to display one attempt's stdout/stderr here."));
         assert!(results_table.contains("<th>Test Name/ID</th>"));
