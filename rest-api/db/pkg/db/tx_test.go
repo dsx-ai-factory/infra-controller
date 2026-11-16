@@ -270,6 +270,10 @@ func TestTxAcquireAdvisoryLock(t *testing.T) {
 			name:     "reacquire lock success after rollback existing tx with lock",
 			testcase: 5,
 		},
+		{
+			name:     "blocking acquisition honors cancellation",
+			testcase: 6,
+		},
 	}
 	var tx1, tx2, tx3 *Tx
 	var err error
@@ -321,6 +325,18 @@ func TestTxAcquireAdvisoryLock(t *testing.T) {
 				err = tx3.AcquireAdvisoryLock(ctx, uint64(456), false)
 				assert.Nil(t, err)
 				assert.NoError(t, tx3.Rollback())
+			case 6:
+				holder, err := BeginTx(ctx, dbSession, nil)
+				require.NoError(t, err)
+				defer func() { _ = holder.Rollback() }()
+				require.NoError(t, holder.AcquireAdvisoryLock(ctx, 789, false))
+				waiter, err := BeginTx(ctx, dbSession, nil)
+				require.NoError(t, err)
+				defer func() { _ = waiter.Rollback() }()
+				waitCtx, cancel := context.WithTimeout(ctx, 100*time.Millisecond)
+				defer cancel()
+				require.ErrorIs(t, waiter.AcquireAdvisoryLock(waitCtx, 789, true), context.DeadlineExceeded)
+
 			}
 		})
 	}
@@ -481,6 +497,67 @@ func TestTxTryAcquireSharedAdvisoryLock(t *testing.T) {
 		require.NoError(t, exclusiveTx.TryAcquireAdvisoryLock(ctx, lockID, options))
 		require.ErrorIs(t, sharedTx.TryAcquireSharedAdvisoryLock(ctx, lockID, options), ErrXactAdvisoryLockFailed)
 	})
+}
+
+func TestWithTxOpts(t *testing.T) {
+	operationErr := errors.New("transaction operation failed")
+	rollbackErr := errors.New("rollback connection failure")
+	for _, tc := range []struct {
+		name        string
+		rollbackErr error
+		panic       bool
+	}{
+		{name: "successful cleanup preserves the operation error without logging"},
+		{name: "failed cleanup logs without replacing the operation error", rollbackErr: rollbackErr},
+		{name: "failed cleanup logs without replacing the panic", rollbackErr: rollbackErr, panic: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			sqlDB, mock, err := sqlmock.New()
+			require.NoError(t, err)
+			bdb := bun.NewDB(sqlDB, pgdialect.New())
+			t.Cleanup(func() {
+				mock.ExpectClose()
+				require.NoError(t, bdb.Close())
+			})
+			mock.ExpectBegin()
+			mock.ExpectExec("SET LOCAL lock_timeout").WillReturnResult(sqlmock.NewResult(0, 0))
+			mock.ExpectRollback().WillReturnError(tc.rollbackErr)
+			var logs bytes.Buffer
+			original := log.Logger
+			log.Logger = zerolog.New(&logs)
+			t.Cleanup(func() { log.Logger = original })
+			spanContext := trace.NewSpanContext(trace.SpanContextConfig{
+				TraceID: trace.TraceID{7},
+				SpanID:  trace.SpanID{8},
+			})
+			ctx := trace.ContextWithSpanContext(context.Background(), spanContext)
+			run := func() error {
+				return WithTxOpts(ctx, &Session{DB: bdb}, nil, func(*Tx) error {
+					if tc.panic {
+						panic(operationErr)
+					}
+					return operationErr
+				})
+			}
+			if tc.panic {
+				require.PanicsWithValue(t, operationErr, func() { _ = run() })
+			} else {
+				require.Equal(t, operationErr, run())
+			}
+			if tc.rollbackErr != nil {
+				var record map[string]any
+				require.NoError(t, json.Unmarshal(logs.Bytes(), &record))
+				assert.Equal(t, "error", record["level"])
+				assert.Equal(t, rollbackErr.Error(), record["error"])
+				assert.Equal(t, "failed to rollback transaction", record["message"])
+				assert.Equal(t, spanContext.TraceID().String(), record["trace_id"])
+				assert.Equal(t, spanContext.SpanID().String(), record["span_id"])
+			} else {
+				assert.Empty(t, logs.String())
+			}
+			require.NoError(t, mock.ExpectationsWereMet())
+		})
+	}
 }
 
 func TestWithTx_CommitsOnSuccess(t *testing.T) {

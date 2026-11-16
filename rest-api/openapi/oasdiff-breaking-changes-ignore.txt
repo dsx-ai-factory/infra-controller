@@ -555,3 +555,21 @@ API GET /v2/org/{org}/nico/instance/{instanceId} the `networkSecurityGroupPropag
 API PATCH /v2/org/{org}/nico/instance/{instanceId} added `#/components/schemas/NetworkSecurityGroupPropagationDetails, subschema #2` to the `networkSecurityGroupPropagationDetails` response property `oneOf` list for the response status `200`
 API PATCH /v2/org/{org}/nico/instance/{instanceId} the `networkSecurityGroupPropagationDetails` response's property `type` changed from `object` to `any` for status `200`
 GET /v2/org/{org}/nico/tray/{id}/power added the new `AcPowercycle` enum value to the `operations/actions/items/operation` response property for the response status `200`
+
+# IP Block usage is explicit null when unrequested or unavailable for tenant
+# roots. Match only this response correction in CI and local oasdiff versions.
+API GET /v2/org/{org}/nico/ipblock added `#/components/schemas/IpBlockUsageStats, subschema #2` to the `items/usageStats` response property `oneOf` list for the response status `200`
+API GET /v2/org/{org}/nico/ipblock the `items/usageStats` response's property `type` changed from `object` to `any` for status `200`
+API POST /v2/org/{org}/nico/ipblock added `#/components/schemas/IpBlockUsageStats, subschema #2` to the `usageStats` response property `oneOf` list for the response status `201`
+API POST /v2/org/{org}/nico/ipblock the `usageStats` response's property `type` changed from `object` to `any` for status `201`
+API GET /v2/org/{org}/nico/ipblock/{ipBlockId} added `#/components/schemas/IpBlockUsageStats, subschema #2` to the `usageStats` response property `oneOf` list for the response status `200`
+API GET /v2/org/{org}/nico/ipblock/{ipBlockId} the `usageStats` response's property `type` changed from `object` to `any` for status `200`
+API PATCH /v2/org/{org}/nico/ipblock/{ipBlockId} added `#/components/schemas/IpBlockUsageStats, subschema #2` to the `usageStats` response property `oneOf` list for the response status `200`
+API PATCH /v2/org/{org}/nico/ipblock/{ipBlockId} the `usageStats` response's property `type` changed from `object` to `any` for status `200`
+API GET /v2/org/{org}/nico/ipblock/{ipBlockId}/derived added `#/components/schemas/IpBlockUsageStats, subschema #2` to the `items/usageStats` response property `oneOf` list for the response status `200`
+API GET /v2/org/{org}/nico/ipblock/{ipBlockId}/derived the `items/usageStats` response's property `type` changed from `object` to `any` for status `200`
+API GET /v2/org/{org}/nico/ipblock the response property `items/usageStats` became nullable for the status `200`
+API POST /v2/org/{org}/nico/ipblock the response property `usageStats` became nullable for the status `201`
+API GET /v2/org/{org}/nico/ipblock/{ipBlockId} the response property `usageStats` became nullable for the status `200`
+API PATCH /v2/org/{org}/nico/ipblock/{ipBlockId} the response property `usageStats` became nullable for the status `200`
+API GET /v2/org/{org}/nico/ipblock/{ipBlockId}/derived the response property `items/usageStats` became nullable for the status `200`

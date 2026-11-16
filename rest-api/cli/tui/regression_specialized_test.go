@@ -36,7 +36,7 @@ func TestSession_fetchTenantIPBlocks(t *testing.T) {
 			assert.Equal(t, "tenant-a", r.URL.Query().Get("tenantId"))
 			assert.Empty(t, r.URL.Query().Get("infrastructureProviderId"))
 			w.Header().Set("Content-Type", "application/json")
-			_, _ = io.WriteString(w, `[{"id":"provider-id","name":"provider","siteId":"site-a","status":"Ready","tenantId":null,"protocolVersion":"IPv4"},{"id":"other-tenant-id","name":"other tenant","siteId":"site-a","status":"Ready","tenantId":"tenant-b","protocolVersion":"IPv4"},{"id":"tenant-id","name":"tenant","siteId":"site-a","status":"Ready","tenantId":"tenant-a","protocolVersion":"IPv4"}]`)
+			_, _ = io.WriteString(w, `[{"id":"provider-id","name":"provider","siteId":"site-a","status":"Ready","tenantId":null,"protocolVersion":"IPv4"},{"id":"other-tenant-id","name":"other tenant","siteId":"site-a","status":"Ready","tenantId":"tenant-b","protocolVersion":"IPv4"},{"id":"tenant-id","name":"tenant","siteId":"site-a","status":"Ready","tenantId":"tenant-a","protocolVersion":"IPv4","managed":true},{"id":"private-root","name":"private","siteId":"site-a","status":"Ready","tenantId":"tenant-a","protocolVersion":"IPv4","managed":false}]`)
 		default:
 			http.NotFound(w, r)
 		}
@@ -57,11 +57,15 @@ func TestSession_fetchTenantIPBlocks(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "tenant-a", tenantID)
 	assert.Equal(t, 1, providerRequests)
-	require.Len(t, items, 3)
+	require.Len(t, items, 4)
 	assert.Empty(t, items[0].Extra["tenantId"])
 	assert.Equal(t, "tenant-b", items[1].Extra["tenantId"])
 	assert.Equal(t, "tenant-a", items[2].Extra["tenantId"])
 	assert.Equal(t, "IPv4", items[2].Extra["protocolVersion"])
+
+	subnetItems := buildSubnetIPBlockSelectItems(items, "site-a", tenantID)
+	require.Len(t, subnetItems, 1)
+	assert.Equal(t, "tenant-id", subnetItems[0].ID)
 
 	selectItems := buildIPBlockSelectItems(items, tenantID)
 	require.Len(t, selectItems, 2)

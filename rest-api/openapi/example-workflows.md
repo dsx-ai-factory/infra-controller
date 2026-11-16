@@ -123,7 +123,7 @@ Site. An IPv4 Subnet requires that block to be `Ready`. VPC Prefixes configure
 
 <AccordionGroup>
   <Accordion title="Add a Subnet">
-    Add an IPv4 Subnet to a Ready `ETHERNET_VIRTUALIZER` VPC. Before running this example, use the [Create VPC endpoint](/infra-controller/rest-api-reference/api-reference/vpc/create-vpc) to create that VPC and set `networkVirtualizationType` to `ETHERNET_VIRTUALIZER`. Replace the pre-existing sample VPC ID `f466a2d5-5820-4824-a845-3218fdff801b` with the new VPC's ID. This VPC is distinct from the `FNN` VPC used by the VPC Prefix examples. The Subnet's `ipv4BlockId` identifies a Ready tenant IPv4 IP Block at the same Site, and `prefixLength` accepts values from 8 through 30.
+    Add an IPv4 Subnet to a Ready `ETHERNET_VIRTUALIZER` VPC. Before running this example, use the [Create VPC endpoint](/infra-controller/rest-api-reference/api-reference/vpc/create-vpc) to create that VPC and set `networkVirtualizationType` to `ETHERNET_VIRTUALIZER`. Replace the pre-existing sample VPC ID `f466a2d5-5820-4824-a845-3218fdff801b` with the new VPC's ID. This VPC is distinct from the `FNN` VPC used by the VPC Prefix examples. The Subnet's `ipv4BlockId` identifies a Ready IPv4 IP Block granted to the Tenant through an Allocation (`managed: true`) at the same Site, and `prefixLength` accepts values from 8 through 30.
     <Code src="snippets/input/create_subnet.sh" title="Example Call" />
     <Code src="snippets/output/create_subnet.json" title="Example Response" />
   </Accordion>
@@ -133,7 +133,7 @@ Site. An IPv4 Subnet requires that block to be `Ready`. VPC Prefixes configure
     <Code src="snippets/output/poll_subnet_status.json" title="Example Response" />
   </Accordion>
   <Accordion title="Add a VPC Prefix">
-    Add a VPC Prefix to the Ready `FNN` VPC created above at a Registered Site. Use a Ready tenant IP Block at that Site; the block determines the VPC Prefix's address family. Specify `prefixLength` to allocate any available CIDR of that length, or specify `prefix` to reserve an exact network-aligned CIDR from the block.
+    Add a VPC Prefix to the Ready `FNN` VPC created above at a Registered Site. Use a Ready IP Block granted to the Tenant through an Allocation (`managed: true`) at that Site; the block determines the VPC Prefix's address family. Specify `prefixLength` to allocate any available CIDR of that length, or specify `prefix` to reserve an exact network-aligned CIDR from the block.
     <Code src="snippets/input/create_vpc_prefix.sh" title="Automatic Allocation" />
     <Code src="snippets/output/create_vpc_prefix.json" title="Automatic Allocation Response" />
     <Code src="snippets/input/create_vpc_prefix_explicit.sh" title="Explicit CIDR Allocation" />
