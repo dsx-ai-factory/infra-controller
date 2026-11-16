@@ -15,10 +15,10 @@ nico-admin-cli firmware nic tenant clear [OPTIONS] --tenant-org-id <ID> --if-ver
 
 ## DESCRIPTION
 
-Clear a tenants NIC firmware profile selection using its complete
+Clear a tenant's NIC firmware profile selection using its complete
 observed tenant version from firmware nic tenant show. The token is
 shared with ordinary tenant updates and identity-configuration updates,
-not the profiles edit version. Every successful clear advances the
+not the profile's edit version. Every successful clear advances the
 tenant version, even if no profile is selected. A missing tenant returns
 NOT_FOUND; a stale token returns FAILED_PRECONDITION.
 
@@ -73,7 +73,7 @@ Sort output by specified field
 
 `-h, --help`
 
-Print help (see a summary with -h)
+Print help (see a summary with '-h')
 
 ## Examples
 

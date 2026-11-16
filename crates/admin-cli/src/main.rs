@@ -26,12 +26,12 @@ use std::time::Duration;
 use ::rpc::admin_cli::OutputFormat;
 use ::rpc::carbide_api_client::CarbideApiClient;
 use ::rpc::carbide_tls_client::{ApiConfig, CarbideClientConfig, RetryConfig};
+use carbide_tls::client_config::{
+    get_api_url, get_client_cert_info, get_config_from_file, get_proxy_info, get_root_ca_path,
+};
 use cfg::cli_options::{CliCommand, CliOptions};
 use clap::CommandFactory;
 use errors::CarbideCliResult;
-use forge_tls::client_config::{
-    get_api_url, get_client_cert_info, get_config_from_file, get_proxy_info, get_root_ca_path,
-};
 use measured_boot::ToTable;
 use serde::Serialize;
 use tracing_subscriber::filter::{EnvFilter, LevelFilter};
@@ -70,7 +70,6 @@ mod dpu;
 mod dpu_remediation;
 mod errors;
 mod expected_machines;
-mod expected_nvlink_domain;
 mod expected_power_shelf;
 mod expected_rack;
 mod expected_rack_group;
@@ -102,6 +101,7 @@ mod network_segment;
 mod nvl_domain;
 mod nvl_logical_partition;
 mod nvl_partition;
+mod nvlink_domain;
 mod nvlink_nmxc_endpoints;
 mod operating_system;
 mod os_image;
@@ -347,7 +347,7 @@ async fn main() -> color_eyre::Result<()> {
         CliCommand::ExpectedPowerShelf(cmd) => cmd.dispatch(ctx).await?,
         CliCommand::ExpectedRack(cmd) => cmd.dispatch(ctx).await?,
         CliCommand::ExpectedRackGroup(cmd) => cmd.dispatch(ctx).await?,
-        CliCommand::ExpectedNvlinkDomain(cmd) => cmd.dispatch(ctx).await?,
+        CliCommand::NvlinkDomain(cmd) => cmd.dispatch(ctx).await?,
         CliCommand::ExpectedSwitch(cmd) => cmd.dispatch(ctx).await?,
         CliCommand::ExtensionService(cmd) => cmd.dispatch(ctx).await?,
         CliCommand::Firmware(cmd) => cmd.dispatch(ctx).await?,

@@ -90,6 +90,7 @@ pub(super) fn test_site_explorer(
         None,
         api.credential_manager().clone(),
         false,
+        api.instrumentation().clone(),
     );
     TestSiteExplorer::new(site_explorer, endpoint_explorer)
 }

@@ -28,23 +28,36 @@ use crate::sink::otlp::OtlpQueue;
 use crate::sink::{CollectorEvent, EventContext};
 
 pub(crate) struct OtlpDrainTask {
+    instrumentation: carbide_instrument::Instrumentation,
     queue: Arc<OtlpQueue>,
     target: OtlpTargetConfig,
 }
 
 impl OtlpDrainTask {
-    pub(crate) fn new(queue: Arc<OtlpQueue>, target: OtlpTargetConfig) -> Self {
-        Self { queue, target }
+    pub(crate) fn new(
+        queue: Arc<OtlpQueue>,
+        target: OtlpTargetConfig,
+        instrumentation: carbide_instrument::Instrumentation,
+    ) -> Self {
+        Self {
+            queue,
+            target,
+            instrumentation,
+        }
     }
 
     pub(crate) async fn run(self) {
         let include_alert_details = self.target.include_alert_details;
-        run_drain(self.queue, self.target, OtlpSignal::Logs, move |channel| {
-            LogsExport {
+        run_drain(
+            self.queue,
+            self.target,
+            OtlpSignal::Logs,
+            move |channel| LogsExport {
                 client: LogsServiceClient::new(channel),
                 include_alert_details,
-            }
-        })
+            },
+            self.instrumentation,
+        )
         .await;
     }
 }

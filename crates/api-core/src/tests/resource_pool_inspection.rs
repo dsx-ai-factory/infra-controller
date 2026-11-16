@@ -511,11 +511,17 @@ async fn polling_retains_samples_after_database_failure_and_cancels_sql(
         .connect_with(database.connect_options().as_ref().clone())
         .await?;
     let monitor = ResourcePoolMonitor::new(stats_database.clone(), &HashMap::new())?;
-    let metrics = MetricsCapture::start();
+    let metrics = MetricsCapture::for_registry(env.test_meter.registry());
     let cancel = CancellationToken::new();
     let _cancel_guard = cancel.clone().drop_guard();
     let mut tasks = JoinSet::new();
-    let observations = start_pool_stats(monitor, &env.common_pools, &mut tasks, cancel.clone())?;
+    let observations = start_pool_stats(
+        monitor,
+        &env.common_pools,
+        &mut tasks,
+        cancel.clone(),
+        env.api.instrumentation.clone(),
+    )?;
     start_export_service_health_metrics(ServiceHealthContext {
         meter: env.test_meter.meter(),
         database_pool: stats_database.clone(),
@@ -696,7 +702,7 @@ async fn polling_keeps_healthy_pools_moving_and_stops_active_calls(
         .await?,
         "both optional local pools must be absent from inventory"
     );
-    let metrics = MetricsCapture::start();
+    let metrics = MetricsCapture::for_registry(env.test_meter.registry());
     let cancel = CancellationToken::new();
     let _cancel_guard = cancel.clone().drop_guard();
     let mut tasks = JoinSet::new();
@@ -705,6 +711,7 @@ async fn polling_keeps_healthy_pools_moving_and_stops_active_calls(
         &common_pools,
         &mut tasks,
         cancel.clone(),
+        env.api.instrumentation.clone(),
     )?;
 
     // The stalled name sorts first. Healthy counts must arrive before its
@@ -948,6 +955,7 @@ async fn polling_bounds_active_calls_and_cancels_an_idle_sampler(
         &env.common_pools,
         &mut tasks,
         cancel.clone(),
+        env.api.instrumentation.clone(),
     )?;
 
     tokio::time::timeout(Duration::from_secs(5), async {

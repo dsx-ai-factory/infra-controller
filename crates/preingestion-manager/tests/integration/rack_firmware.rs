@@ -88,6 +88,7 @@ fn manager(
         pool.clone(),
         Arc::new(profiles.clone()),
         true,
+        carbide_instrument::Instrumentation::global(),
     ));
 
     PreingestionManager::new(
@@ -100,6 +101,7 @@ fn manager(
         Some(env.api().credential_manager().clone()),
         env.api().work_lock_manager_handle(),
         config.ntp_servers,
+        env.api().instrumentation().clone(),
     )
     .with_rack_firmware(profiles, backend, Arc::new(StaticFirmwareObjectFetcher))
 }

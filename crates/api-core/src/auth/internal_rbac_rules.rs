@@ -367,7 +367,7 @@ impl InternalRBACRules {
         x.perm("AdminForceDeleteSwitch", vec![ForgeAdminCLI, Machineatron]);
         x.perm(
             "DecommissionSwitch",
-            vec![ForgeAdminCLI, Machineatron, Flow],
+            vec![ForgeAdminCLI, Machineatron, SiteAgent, Flow],
         );
         x.perm(
             "AdminForceDeletePowerShelf",
@@ -725,7 +725,7 @@ impl InternalRBACRules {
         );
         x.perm(
             "GetDesiredFirmwareVersions",
-            vec![ForgeAdminCLI, Machineatron, Flow],
+            vec![ForgeAdminCLI, Machineatron, Flow, SiteHealthProbe],
         );
         x.perm("UpsertHostFirmwareConfig", vec![ForgeAdminCLI, SiteAgent]);
         x.perm("DeleteHostFirmwareConfig", vec![ForgeAdminCLI, SiteAgent]);
@@ -781,7 +781,10 @@ impl InternalRBACRules {
         x.perm("SetBmcRootPassword", vec![ForgeAdminCLI]);
         x.perm("ProbeBmcVendor", vec![ForgeAdminCLI]);
         x.perm("SetFirmwareUpdateTimeWindow", vec![ForgeAdminCLI, Flow]);
-        x.perm("ListHostFirmware", vec![ForgeAdminCLI, Flow]);
+        x.perm(
+            "ListHostFirmware",
+            vec![ForgeAdminCLI, Flow, SiteHealthProbe],
+        );
         x.perm("EnableInfiniteBoot", vec![ForgeAdminCLI]);
         x.perm("IsInfiniteBootEnabled", vec![ForgeAdminCLI]);
         x.perm("Lockdown", vec![ForgeAdminCLI]);
@@ -857,7 +860,7 @@ impl InternalRBACRules {
         x.perm("CreatePowerShelf", vec![ForgeAdminCLI, Machineatron]);
         x.perm(
             "DecommissionPowerShelf",
-            vec![ForgeAdminCLI, Machineatron, Flow],
+            vec![ForgeAdminCLI, Machineatron, SiteAgent, Flow],
         );
         x.perm("DeletePowerShelf", vec![ForgeAdminCLI, Machineatron]);
         x.perm(
@@ -983,11 +986,11 @@ impl InternalRBACRules {
             "DeleteAllExpectedRacks",
             vec![ForgeAdminCLI, Machineatron, SiteAgent],
         );
-        x.perm("CreateExpectedNvLinkDomain", vec![ForgeAdminCLI, Flow]);
-        x.perm("DeleteExpectedNvLinkDomain", vec![ForgeAdminCLI, Flow]);
-        x.perm("GetExpectedNvLinkDomain", vec![ForgeAdminCLI, Flow]);
-        x.perm("FindExpectedNvLinkDomainIds", vec![ForgeAdminCLI, Flow]);
-        x.perm("FindExpectedNvLinkDomainsByIds", vec![ForgeAdminCLI, Flow]);
+        x.perm("CreateNvLinkDomain", vec![ForgeAdminCLI, Flow]);
+        x.perm("DeleteNvLinkDomain", vec![ForgeAdminCLI, Flow]);
+        x.perm("GetNvLinkDomain", vec![ForgeAdminCLI, Flow]);
+        x.perm("FindNvLinkDomainIds", vec![ForgeAdminCLI, Flow]);
+        x.perm("FindNvLinkDomainsByIds", vec![ForgeAdminCLI, Flow]);
         x.perm(
             "AddExpectedRackGroup",
             vec![ForgeAdminCLI, Machineatron, SiteAgent],
@@ -1598,6 +1601,24 @@ mod rbac_rule_tests {
         ));
     }
 
+    #[test]
+    fn probe_catalog_read_permissions() {
+        let probe = Principal::SpiffeServiceIdentifier("nico-site-health-probe".into());
+        for (method, allowed) in [
+            ("Version", true),
+            ("GetDesiredFirmwareVersions", true),
+            ("ListHostFirmware", true),
+            ("SetFirmwareUpdateTimeWindow", false),
+            ("UpsertHostFirmwareConfig", false),
+            ("DeleteHostFirmwareConfig", false),
+        ] {
+            assert_eq!(
+                InternalRBACRules::allowed_from_static(method, std::slice::from_ref(&probe)),
+                allowed,
+                "{method}"
+            );
+        }
+    }
     /// Compact machine states belong to the admin CLI, not MaT or the site probe.
     #[test]
     fn find_machine_states_by_ids_permissions() {
@@ -1661,6 +1682,8 @@ mod rbac_rule_tests {
             "CreateCredential",
             "CreateSku",
             "DecommissionManagedHost",
+            "DecommissionPowerShelf",
+            "DecommissionSwitch",
             "DeleteSku",
             "GetCredentialRotationStatus",
             "InsertPowerShelfHealthReport",
@@ -1758,7 +1781,7 @@ mod rbac_rule_tests {
     }
 
     #[test]
-    fn expected_nvlink_domain_inventory_allows_admin_and_flow() {
+    fn nvlink_domain_inventory_allows_admin_and_flow() {
         use carbide_test_support::{Check, check_values};
 
         let principals = [
@@ -1769,11 +1792,11 @@ mod rbac_rule_tests {
         ];
         check_values(
             [
-                "CreateExpectedNvLinkDomain",
-                "DeleteExpectedNvLinkDomain",
-                "GetExpectedNvLinkDomain",
-                "FindExpectedNvLinkDomainIds",
-                "FindExpectedNvLinkDomainsByIds",
+                "CreateNvLinkDomain",
+                "DeleteNvLinkDomain",
+                "GetNvLinkDomain",
+                "FindNvLinkDomainIds",
+                "FindNvLinkDomainsByIds",
             ]
             .map(|method| Check {
                 scenario: method,

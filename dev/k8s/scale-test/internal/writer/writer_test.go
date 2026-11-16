@@ -4,6 +4,7 @@
 package writer
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -687,4 +688,124 @@ func TestCloseJoinsAReleasedCallback(t *testing.T) {
 		synctest.Wait()
 		<-closed
 	})
+}
+
+func TestPendingWorkAndCreatedReceipts(t *testing.T) {
+	id := "00000000-0000-4000-8000-000000000001"
+	for _, tc := range []struct {
+		name      string
+		ids       []string
+		failClear bool
+		kind      Kind
+	}{
+		{"accepted work remains pending", []string{id}, false, Accepted},
+		{"failed settlement sync", []string{id}, true, Accepted},
+		{"receipt too many IDs", slices.Repeat([]string{id}, 19), false, Unclear},
+		{"receipt escape expansion", []string{strings.Repeat("\n", 36)}, false, Unclear},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r := newRig(t)
+			if err := r.w.Pending(r.ctx, true); err != nil {
+				t.Fatal(err)
+			}
+			out, err := Send(r.ctx, r.w, mkCall("create", "digest", nonIdem), func(context.Context) Attempt { return Attempt{IDs: tc.ids} })
+			if err != nil || out.Kind != tc.kind || !r.j.Unsettled() {
+				t.Fatalf("out=%+v err=%v pending=%t", out, err, r.j.Unsettled())
+			}
+			if tc.kind == Unclear {
+				return
+			}
+			data, err := os.ReadFile(r.j.Path())
+			if err != nil || !strings.Contains(string(data), `"ids":["`+id+`"]`) {
+				t.Fatal("created IDs were not durably journaled")
+			}
+			if tc.failClear {
+				r.j.Inject(func(*os.File, []byte) error { return errors.New("sync failed") })
+			}
+			err = r.w.Pending(r.ctx, false)
+			if (err != nil) != tc.failClear || r.j.Unsettled() != tc.failClear {
+				t.Fatalf("settlement error=%v pending=%t", err, r.j.Unsettled())
+			}
+			_ = r.j.Close()
+			_, err = journal.Create(r.dir, journal.Header{RunID: "r1", Command: "create"})
+			if !errors.Is(err, journal.ErrExists) {
+				t.Fatal("crashed or completed journal replayed")
+			}
+		})
+	}
+}
+
+func TestOnlyUnclearLabelsSettleWithLiveProof(t *testing.T) {
+	for _, mode := range []string{"ok", "create", "lock", "stop", "cancel", "fsync"} {
+		t.Run(mode, func(t *testing.T) {
+			r := newRig(t)
+			kind := "labels"
+			if mode == "create" {
+				kind = "create"
+			}
+			if err := r.w.Pending(r.ctx, true); err != nil {
+				t.Fatal(err)
+			}
+			out, err := Send(r.ctx, r.w, Call{WriteCall: journal.WriteCall{Key: "one", Kind: kind}, Retry: RetryPolicy{MaxAttempts: 1, AttemptTimeout: time.Second}}, func(context.Context) Attempt { return noReply() })
+			if err != nil || out.Kind != Unclear {
+				t.Fatalf("unclear attempt: %v", err)
+			}
+			switch mode {
+			case "lock":
+				r.gate.Close()
+			case "stop":
+				r.stop.stop()
+			case "cancel":
+				r.cancel()
+			case "fsync":
+				r.j.Inject(func(*os.File, []byte) error { return errors.New("sync failed") })
+			}
+			err = r.w.SettleLabel(r.ctx, out.Op, map[string]string{"source": "probe"})
+			if (err == nil) != (mode == "ok") {
+				t.Fatalf("settlement gate: %v", err)
+			}
+			if mode == "ok" {
+				if r.j.Counts().Unclear != 0 || !r.j.Unsettled() {
+					t.Fatal("proof lost or run-level pending cleared")
+				}
+				if err = r.w.Pending(r.ctx, false); err != nil || r.j.Unsettled() {
+					t.Fatal("proven labels remain unclear")
+				}
+				raw, _ := os.ReadFile(r.j.Path())
+				if !bytes.Contains(raw, []byte(`"entry":"labelSettled"`)) {
+					t.Fatal("settlement not durable")
+				}
+			} else if !r.j.Unsettled() {
+				t.Fatal("unfinished work cleared")
+			}
+		})
+	}
+}
+
+func TestDispatchHookRechecksLifecycle(t *testing.T) {
+	for _, mode := range []string{"lock", "stop", "cutoff"} {
+		t.Run(mode, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				r := newRig(t)
+				call := mkCall("k1", "digest", nil)
+				call.Cutoff = time.Now().Add(time.Second)
+				call.BeforeDispatch = func() error {
+					switch mode {
+					case "lock":
+						r.gate.Close()
+					case "stop":
+						r.stop.stop()
+					case "cutoff":
+						time.Sleep(2 * time.Second)
+					}
+					return nil
+				}
+				calls := 0
+				_, err := Send(r.ctx, r.w, call, func(context.Context) Attempt { calls++; return acc() })
+				if err == nil || calls != 0 || r.states(t) != "k1=notDispatched" || r.j.Unsettled() {
+					t.Fatalf("hook bypassed lifecycle: calls=%d state=%s err=%v", calls, r.states(t), err)
+				}
+			})
+		})
+	}
 }

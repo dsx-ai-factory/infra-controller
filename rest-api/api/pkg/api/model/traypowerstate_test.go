@@ -52,6 +52,20 @@ func TestAPITrayPowerState_FromProto(t *testing.T) {
 			},
 		},
 		{
+			name:      "AC cycle survives the REST and SDK boundary",
+			decodeSDK: true,
+			mutate: func(p *flowv1.TrayPowerDetails) {
+				action := p.Operations.Actions.GetValue().Actions[0]
+				action.Operation = corev1.ComponentPowerActionOperation_COMPONENT_POWER_ACTION_OPERATION_AC_POWERCYCLE
+				action.Graceful = nil
+			},
+			check: func(t *testing.T, got APITrayPowerState, encoded string) {
+				require.NotEmpty(t, got.Operations.Actions)
+				assert.Equal(t, APIPowerActionOperation("AcPowercycle"), got.Operations.Actions[0].Operation)
+				assert.Nil(t, got.Operations.Actions[0].Graceful)
+			},
+		},
+		{
 			// Keep every recorded field, including false, empty string and non-power context.
 			name:      "complete independent sections",
 			decodeSDK: true,

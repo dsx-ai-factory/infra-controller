@@ -47,6 +47,13 @@ use crate::libredfish::{RedfishAuth, RedfishClientCreationError, RedfishClientPo
 
 const TRIGGER_EVIDENCE_TASK_ID: &str = "SpdmTriggerEvidenceTaskId";
 
+/// An intercepted reset request whose response is supplied by the test.
+#[derive(Debug)]
+pub struct BmcFactoryResetRequest {
+    pub host: String,
+    pub respond: tokio::sync::oneshot::Sender<Result<(), RedfishError>>,
+}
+
 #[derive(Default)]
 struct RedfishSimState {
     hosts: HashMap<String, RedfishSimHostState>,
@@ -91,6 +98,7 @@ struct RedfishSimState {
     /// Value of `ac_powercycle_supported_by_power`. Defaults to `false`.
     ac_powercycle_supported: bool,
     next_chassis_reset_error: Option<RedfishError>,
+    next_bmc_factory_reset: Option<tokio::sync::oneshot::Sender<BmcFactoryResetRequest>>,
     next_ipmi_access_error: Option<String>,
     job_state_sequence: VecDeque<JobState>,
     /// Offset (in seconds) applied to the BMC `DateTime` returned by
@@ -722,6 +730,16 @@ impl RedfishSim {
         self.state.lock().unwrap().create_client_error = None;
     }
 
+    /// Hand the next factory-reset request to the test and await its response.
+    /// Later requests succeed normally.
+    pub fn intercept_next_bmc_factory_reset(
+        &self,
+    ) -> tokio::sync::oneshot::Receiver<BmcFactoryResetRequest> {
+        let (send, receive) = tokio::sync::oneshot::channel();
+        self.state.lock().unwrap().next_bmc_factory_reset = Some(send);
+        receive
+    }
+
     /// Delays client creation and both attester inventory reads independently.
     /// Zero durations restore immediate responses; delays release the state lock.
     pub fn set_attester_selection_delays(
@@ -927,6 +945,10 @@ pub enum RedfishSimAction {
     /// A power request rejected before its effect was applied.
     PowerFailed(libredfish::SystemPowerControl),
     BmcReset(Option<ManagerResetType>),
+    /// Records a successfully accepted BMC factory reset.
+    BmcResetToDefaults,
+    /// Records a BMC factory-reset request rejected by an injected failure.
+    BmcResetToDefaultsFailed,
     /// Records a Redfish `Chassis.Reset` call with its target and reset type.
     ChassisReset {
         chassis_id: String,
@@ -2180,7 +2202,35 @@ impl Redfish for RedfishSimClient {
     fn bmc_reset_to_defaults<'a>(
         &'a self,
     ) -> libredfish::RedfishFuture<'a, Result<(), RedfishError>> {
-        Box::pin(async move { Ok(()) })
+        Box::pin(async move {
+            let intercept = self.state.lock().unwrap().next_bmc_factory_reset.take();
+            let result = if let Some(intercept) = intercept {
+                let (respond, response) = tokio::sync::oneshot::channel();
+                intercept
+                    .send(BmcFactoryResetRequest {
+                        host: self._host.clone(),
+                        respond,
+                    })
+                    .expect("test must receive the intercepted reset request");
+                response
+                    .await
+                    .expect("test must respond to the reset request")
+            } else {
+                Ok(())
+            };
+            let mut state = self.state.lock().unwrap();
+            state
+                .hosts
+                .get_mut(&self._host)
+                .unwrap()
+                .actions
+                .push(if result.is_err() {
+                    RedfishSimAction::BmcResetToDefaultsFailed
+                } else {
+                    RedfishSimAction::BmcResetToDefaults
+                });
+            result
+        })
     }
 
     fn get_system_event_log<'a>(
@@ -3164,6 +3214,7 @@ impl super::BmcCredentialOps for RedfishSim {
         _access: &carbide_utils::redfish::BmcAccessInfo,
         dpu: bool,
         sitewide_uefi_credentials: carbide_secrets::credentials::Credentials,
+        _instrumentation: &carbide_instrument::Instrumentation,
     ) -> Result<Option<String>, super::CredentialOpError> {
         let pause = {
             let mut state = self.state.lock().unwrap();

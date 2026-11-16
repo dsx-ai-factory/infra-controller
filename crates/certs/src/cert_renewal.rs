@@ -22,9 +22,9 @@ use std::time::{Duration, Instant};
 use ::rpc::carbide_tls_client::{self, ApiConfig, CarbideClientConfig};
 use ::rpc::forge as rpc;
 use carbide_host_support::registration;
-use carbide_instrument::{Event, Outcome, emit};
+use carbide_instrument::{Event, Outcome};
+use carbide_tls::client_config::{ClientCert, MAX_CERT_RENEWAL_TIME_SECS};
 use eyre::Context;
-use forge_tls::client_config::{ClientCert, MAX_CERT_RENEWAL_TIME_SECS};
 use rand::RngExt;
 
 /// Certificates are renewed between in these 2 time intervals
@@ -67,18 +67,26 @@ enum CertRenewalCompleted {
 }
 
 pub struct ClientCertRenewer {
+    instrumentation: carbide_instrument::Instrumentation,
     cert_renewal_time: std::time::Instant,
     forge_api_server: String,
     client_config: Arc<CarbideClientConfig>,
 }
 
 impl ClientCertRenewer {
-    pub fn new(forge_api_server: String, client_config: Arc<CarbideClientConfig>) -> Self {
+    /// Creates renewal state whose completion Events use the supplied destination.
+    /// Retain its provider while renewals can run.
+    pub fn new(
+        forge_api_server: String,
+        client_config: Arc<CarbideClientConfig>,
+        instrumentation: carbide_instrument::Instrumentation,
+    ) -> Self {
         let cert_renewal_period =
             rand::rng().random_range(MIN_CERT_RENEWAL_TIME_SECS..MAX_CERT_RENEWAL_TIME_SECS);
         let cert_renewal_time = Instant::now().add(Duration::from_secs(cert_renewal_period));
 
         Self {
+            instrumentation,
             cert_renewal_time,
             forge_api_server,
             client_config,
@@ -101,7 +109,7 @@ impl ClientCertRenewer {
                     MIN_CERT_RENEWAL_FAILURE_TIME_SECS..MAX_CERT_RENEWAL_FAILURE_TIME_SECS,
                 ),
             };
-            emit(match result.err() {
+            self.instrumentation.emit(match result.err() {
                 None => CertRenewalCompleted::Succeeded {
                     next_attempt_in_secs: cert_renewal_period,
                 },
@@ -152,6 +160,7 @@ impl ClientCertRenewer {
 
 #[cfg(test)]
 mod tests {
+    use carbide_instrument::emit;
     use carbide_instrument::testing::{CapturedLog, MetricsCapture, capture_logs};
 
     use super::*;
@@ -230,6 +239,7 @@ mod tests {
         let mut renewer = ClientCertRenewer::new(
             "https://localhost:1".to_string(),
             Arc::new(CarbideClientConfig::new(String::new(), None)),
+            carbide_instrument::Instrumentation::global(),
         );
         let runtime = tokio::runtime::Builder::new_current_thread()
             .build()

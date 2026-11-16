@@ -2338,9 +2338,13 @@ mod tests {
             rest: Configurable::Disabled,
             gnmi: Configurable::Enabled(gnmi),
         });
-        let mut context =
-            DiscoveryLoopContext::new(Arc::new(NoopLimiter), metrics.clone(), Arc::new(config))
-                .unwrap();
+        let mut context = DiscoveryLoopContext::new(
+            Arc::new(NoopLimiter),
+            metrics.clone(),
+            Arc::new(config),
+            carbide_instrument::Instrumentation::global(),
+        )
+        .unwrap();
         let source = Arc::new(StaticEndpointSource::new(vec![endpoint]));
         let shard = ShardManager {
             shard: 0,

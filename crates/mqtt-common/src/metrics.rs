@@ -17,7 +17,7 @@
 
 //! Metrics for the DSX Exchange Event Bus MQTT hook.
 
-use carbide_instrument::{Event, LabelValue, MetricFamily};
+use carbide_instrument::{Event, Instrumentation, LabelValue, MetricFamily};
 use opentelemetry::KeyValue;
 use opentelemetry::metrics::Meter;
 use tokio::sync::mpsc::WeakSender;
@@ -282,11 +282,13 @@ struct DsxEventBusBmsPublicationSerializationFailed {
 /// Metrics for the MQTT state change hook.
 #[derive(Clone)]
 pub struct MqttHookMetrics {
+    instrumentation: Instrumentation,
     component: PublishComponent,
 }
 
 impl MqttHookMetrics {
-    /// Create new metrics instruments from the given meter.
+    /// Creates a queue-depth gauge from `meter` and records Events through
+    /// `instrumentation`. Retain their provider while the publisher runs.
     ///
     /// Uses a weak reference to the sender to observe queue depth without
     /// preventing shutdown (when the sender is dropped, queue depth reports 0).
@@ -294,6 +296,7 @@ impl MqttHookMetrics {
         meter: &Meter,
         sender: WeakSender<T>,
         component: PublishComponent,
+        instrumentation: Instrumentation,
     ) -> Self {
         // Get max_capacity once at construction (upgrade will succeed since sender still exists)
         let max_capacity = sender.upgrade().map(|s| s.max_capacity()).unwrap_or(0);
@@ -316,20 +319,31 @@ impl MqttHookMetrics {
             })
             .build();
 
-        Self { component }
+        Self {
+            component,
+            instrumentation,
+        }
     }
 
     /// Create metrics for a publisher that does not buffer messages in a
     /// bounded queue, so no queue-depth gauge is registered. Used by the
     /// periodic state republisher, which publishes directly from its sweep.
-    pub fn without_queue_depth(component: PublishComponent) -> Self {
-        Self { component }
+    /// Events use the supplied instrumentation; retain its provider while
+    /// the publisher runs.
+    pub fn without_queue_depth(
+        component: PublishComponent,
+        instrumentation: Instrumentation,
+    ) -> Self {
+        Self {
+            component,
+            instrumentation,
+        }
     }
 
     /// `record_managed_success` advances the publish counter and retains the
     /// change hook's `DEBUG` record. `topic` and `machine_id` stay log-only.
     pub fn record_managed_success(&self, topic: String, machine_id: String) {
-        carbide_instrument::emit(DsxEventBusPublishSucceeded {
+        self.instrumentation.emit(DsxEventBusPublishSucceeded {
             publisher: self.component,
             status: PublishStatus::Ok,
             topic,
@@ -340,7 +354,7 @@ impl MqttHookMetrics {
     /// `record_bms_success` advances the counter without adding a success log;
     /// the BMS publisher has no success record to preserve.
     pub fn record_bms_success(&self) {
-        carbide_instrument::emit(DsxEventBusBmsPublishSucceeded {
+        self.instrumentation.emit(DsxEventBusBmsPublishSucceeded {
             publisher: self.component,
             status: PublishStatus::Ok,
         });
@@ -349,19 +363,20 @@ impl MqttHookMetrics {
     /// `record_overflow` keeps a full-queue drop's counter and `WARN` record
     /// together, with per-message detail left off the metric labels.
     pub fn record_overflow(&self, topic: String, machine_id: String, error: String) {
-        carbide_instrument::emit(DsxEventBusPublishQueueOverflowed {
-            publisher: self.component,
-            status: PublishStatus::Overflow,
-            topic,
-            machine_id,
-            error,
-        });
+        self.instrumentation
+            .emit(DsxEventBusPublishQueueOverflowed {
+                publisher: self.component,
+                status: PublishStatus::Overflow,
+                topic,
+                machine_id,
+                error,
+            });
     }
 
     /// `record_managed_timeout` pairs the managed-host timeout counter with its
     /// `WARN` record and log-only correlation fields.
     pub fn record_managed_timeout(&self, topic: String, machine_id: String) {
-        carbide_instrument::emit(DsxEventBusPublishTimedOut {
+        self.instrumentation.emit(DsxEventBusPublishTimedOut {
             publisher: self.component,
             status: PublishStatus::Timeout,
             topic,
@@ -372,7 +387,7 @@ impl MqttHookMetrics {
     /// `record_bms_timeout` pairs the BMS timeout counter with its `WARN`
     /// record.
     pub fn record_bms_timeout(&self, topic: String) {
-        carbide_instrument::emit(DsxEventBusBmsPublishTimedOut {
+        self.instrumentation.emit(DsxEventBusBmsPublishTimedOut {
             publisher: self.component,
             status: PublishStatus::Timeout,
             topic,
@@ -382,7 +397,7 @@ impl MqttHookMetrics {
     /// `record_managed_publish_error` pairs a broker failure's counter with its
     /// `WARN` record and log-only error context.
     pub fn record_managed_publish_error(&self, topic: String, machine_id: String, error: String) {
-        carbide_instrument::emit(DsxEventBusPublishFailed {
+        self.instrumentation.emit(DsxEventBusPublishFailed {
             publisher: self.component,
             status: PublishStatus::PublishError,
             topic,
@@ -394,7 +409,7 @@ impl MqttHookMetrics {
     /// `record_bms_publish_error` pairs a BMS broker failure's counter with its
     /// `WARN` record and log-only error context.
     pub fn record_bms_publish_error(&self, topic: String, error: String) {
-        carbide_instrument::emit(DsxEventBusBmsPublishFailed {
+        self.instrumentation.emit(DsxEventBusBmsPublishFailed {
             publisher: self.component,
             status: PublishStatus::PublishError,
             topic,
@@ -410,13 +425,14 @@ impl MqttHookMetrics {
         machine_id: String,
         error: String,
     ) {
-        carbide_instrument::emit(DsxEventBusStateChangeSerializationFailed {
-            publisher: self.component,
-            status: PublishStatus::SerializationError,
-            topic,
-            machine_id,
-            error,
-        });
+        self.instrumentation
+            .emit(DsxEventBusStateChangeSerializationFailed {
+                publisher: self.component,
+                status: PublishStatus::SerializationError,
+                topic,
+                machine_id,
+                error,
+            });
     }
 
     /// `record_republish_serialization_error` pairs the periodic republisher's
@@ -427,13 +443,14 @@ impl MqttHookMetrics {
         machine_id: String,
         error: String,
     ) {
-        carbide_instrument::emit(DsxEventBusRepublishSerializationFailed {
-            publisher: self.component,
-            status: PublishStatus::SerializationError,
-            topic,
-            machine_id,
-            error,
-        });
+        self.instrumentation
+            .emit(DsxEventBusRepublishSerializationFailed {
+                publisher: self.component,
+                status: PublishStatus::SerializationError,
+                topic,
+                machine_id,
+                error,
+            });
     }
 
     /// `record_bms_metadata_parse_error` retains the BMS parser's `WARN`
@@ -441,30 +458,32 @@ impl MqttHookMetrics {
     /// The frozen counter groups this with serialization failures under
     /// `status="serialization_error"`.
     pub fn record_bms_metadata_parse_error(&self, topic: String, error: String) {
-        carbide_instrument::emit(DsxEventBusBmsMetadataParseFailed {
-            publisher: self.component,
-            status: PublishStatus::SerializationError,
-            topic,
-            error,
-        });
+        self.instrumentation
+            .emit(DsxEventBusBmsMetadataParseFailed {
+                publisher: self.component,
+                status: PublishStatus::SerializationError,
+                topic,
+                error,
+            });
     }
 
     /// `record_bms_publication_serialization_error` retains the BMS encoder's
     /// `WARN` record under the same frozen `serialization_error` status.
     pub fn record_bms_publication_serialization_error(&self, topic: String, error: String) {
-        carbide_instrument::emit(DsxEventBusBmsPublicationSerializationFailed {
-            publisher: self.component,
-            status: PublishStatus::SerializationError,
-            topic,
-            error,
-        });
+        self.instrumentation
+            .emit(DsxEventBusBmsPublicationSerializationFailed {
+                publisher: self.component,
+                status: PublishStatus::SerializationError,
+                topic,
+                error,
+            });
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use carbide_instrument::LabelValue;
     use carbide_instrument::testing::{CapturedLog, MetricsCapture, capture_logs};
+    use carbide_instrument::{Instrumentation, LabelValue};
     use carbide_test_support::value_scenarios;
 
     use super::{MqttHookMetrics, PublishComponent, PublishStatus};
@@ -520,8 +539,14 @@ mod tests {
 
     #[test]
     fn managed_publish_outcomes_log_and_count() {
-        let metrics = MetricsCapture::start();
-        let hook = MqttHookMetrics::without_queue_depth(PublishComponent::ManagedHost);
+        let metrics_setup =
+            metrics_endpoint::new_metrics_setup("mqtt-common-test", "carbide", false)
+                .expect("test metrics setup");
+        let metrics = MetricsCapture::for_registry(&metrics_setup.registry);
+        let hook = MqttHookMetrics::without_queue_depth(
+            PublishComponent::ManagedHost,
+            Instrumentation::from_meter_provider(&metrics_setup.meter_provider),
+        );
         let logs = capture_logs(|| {
             hook.record_managed_success(
                 "NICO/v1/machine/host-1/state".to_string(),
@@ -617,8 +642,14 @@ mod tests {
 
     #[test]
     fn republish_serialization_failure_logs_and_counts() {
-        let metrics = MetricsCapture::start();
-        let hook = MqttHookMetrics::without_queue_depth(PublishComponent::ManagedHostRepublish);
+        let metrics_setup =
+            metrics_endpoint::new_metrics_setup("mqtt-common-test", "carbide", false)
+                .expect("test metrics setup");
+        let metrics = MetricsCapture::for_registry(&metrics_setup.registry);
+        let hook = MqttHookMetrics::without_queue_depth(
+            PublishComponent::ManagedHostRepublish,
+            Instrumentation::from_meter_provider(&metrics_setup.meter_provider),
+        );
         let logs = capture_logs(|| {
             hook.record_republish_serialization_error(
                 "NICO/v1/machine/host-6/state".to_string(),
@@ -654,8 +685,14 @@ mod tests {
 
     #[test]
     fn bms_publish_siblings_preserve_logs_and_accumulate() {
-        let metrics = MetricsCapture::start();
-        let hook = MqttHookMetrics::without_queue_depth(PublishComponent::Bms);
+        let metrics_setup =
+            metrics_endpoint::new_metrics_setup("mqtt-common-test", "carbide", false)
+                .expect("test metrics setup");
+        let metrics = MetricsCapture::for_registry(&metrics_setup.registry);
+        let hook = MqttHookMetrics::without_queue_depth(
+            PublishComponent::Bms,
+            Instrumentation::from_meter_provider(&metrics_setup.meter_provider),
+        );
         let logs = capture_logs(|| {
             hook.record_bms_success();
             hook.record_bms_publish_error(

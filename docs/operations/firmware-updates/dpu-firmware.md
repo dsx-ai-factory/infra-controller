@@ -63,8 +63,9 @@ reprovisioning requested through the API.
 
 Drift is evaluated per DPU, but scheduling and disruption are managed per
 host. If several DPUs attached to one host are drifted, NICo groups them into
-one host update and counts that host once against the shared machine-update
-limit.
+one host update. Refer to [Shared Host Capacity](../firmware-updates.md#shared-host-capacity)
+for counted hosts and build requirements for NIC accounting and transaction
+protections.
 
 NICo automatically selects a host only when all of the following are true:
 
@@ -73,7 +74,7 @@ NICo automatically selects a host only when all of the following are true:
 | Managed-host state | The host is in top-level `Ready`. An assigned host is not automatically selected. |
 | Health | The aggregate host health report has no alerts. |
 | Existing work | The host is not already in another machine-update workflow, and none of its DPUs already has a reprovisioning request. |
-| Site capacity | The shared `machine_updater.max_concurrent_machine_updates_*` policy has room for another host. DPU and host firmware work use the same budget. |
+| Site capacity | The shared `machine_updater.max_concurrent_machine_updates_*` policy has room for another host. The shared capacity policy above defines which host, DPU, and NIC operations count. |
 | DPF compatibility | If NICo selects DPF reprovisioning for a host provisioned through DPF, the requested DPU set passes the compatibility checks below. Classic reprovisioning skips these checks. |
 
 For hosts already provisioned through DPF that select DPF reprovisioning,

@@ -23,7 +23,7 @@ use std::net::IpAddr;
 use std::sync::{Mutex, MutexGuard};
 use std::time::Duration;
 
-use carbide_instrument::emit;
+use carbide_instrument::Instrumentation;
 use carbide_utils::redfish::redfish_basic_authorization_context;
 use carbide_uuid::switch::SwitchId;
 use mac_address::MacAddress;
@@ -84,12 +84,18 @@ pub(super) const SWITCH_PROBE_RETRY_AFTER: Duration = Duration::from_secs(5 * 60
 /// lost the proxy's grant for `FindSwitchIds`; either way it can serve only
 /// BMCs, so the proxy takes every address for a BMC's and probes again after
 /// [`SWITCH_PROBE_RETRY_AFTER`], rather than asking once per cache miss.
-#[derive(Default)]
 pub(super) struct SwitchProbe {
+    instrumentation: Instrumentation,
     denied_until: Mutex<Option<tokio::time::Instant>>,
 }
 
 impl SwitchProbe {
+    pub(super) fn new(instrumentation: Instrumentation) -> Self {
+        Self {
+            instrumentation,
+            denied_until: Mutex::new(None),
+        }
+    }
     /// Whether a denial still stands at `now`.
     fn is_denied_at(&self, now: tokio::time::Instant) -> bool {
         lock(&self.denied_until).is_some_and(|until| now < until)
@@ -250,7 +256,7 @@ async fn switch_with_nvos_mac(
         Ok(list) => list.ids,
         Err(status) if status.code() == tonic::Code::PermissionDenied => {
             switch_probe.denied_at(tokio::time::Instant::now());
-            emit(SwitchProbeDenied {
+            switch_probe.instrumentation.emit(SwitchProbeDenied {
                 bmc_ip_address: ip.to_string(),
                 error: status.to_string(),
             });
@@ -321,7 +327,7 @@ mod tests {
     /// A denied probe stands for [`SWITCH_PROBE_RETRY_AFTER`] and no longer.
     #[test]
     fn a_denied_probe_stands_until_its_retry_time() {
-        let probe = SwitchProbe::default();
+        let probe = SwitchProbe::new(carbide_instrument::Instrumentation::global());
         let denied = tokio::time::Instant::now();
         assert!(!probe.is_denied_at(denied));
 

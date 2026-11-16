@@ -206,7 +206,7 @@ impl InstanceExtensionServicesConfig {
             if !want_active.contains(&(service.service_id, service.version.to_string())) {
                 if service.removed.is_some() {
                     // The service is already being terminated, so we just need to add it back to the new config
-                    result.push(service.clone());
+                    result.push(service);
                 } else {
                     // The service is not being terminated, so we need to mark it as terminated
                     result.push(InstanceExtensionServiceConfig {

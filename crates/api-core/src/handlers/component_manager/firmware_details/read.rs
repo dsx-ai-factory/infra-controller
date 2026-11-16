@@ -20,7 +20,6 @@ use carbide_uuid::rack::RackId;
 use component_manager::compute_tray_manager::{
     Backend as ComputeTrayBackend, ComputeTrayEndpoint, ComputeTrayManager, ComputeTrayVendor,
 };
-use component_manager::core_compute_manager::CoreComputeTrayManager;
 use component_manager::error::ComponentManagerError;
 use component_manager::firmware_inventory::{
     ComponentFirmwareInventoryResult, FirmwareInventorySource, FirmwareReadError,
@@ -765,9 +764,7 @@ async fn read_actual(
     let Some(cm) = &api.component_manager else {
         return installed_error(ErrorCode::Disabled, None);
     };
-    let pool: Arc<dyn carbide_redfish::libredfish::RedfishClientPool> =
-        api.bmc_credential_ops.clone();
-    let core = CoreComputeTrayManager::new(pool);
+    let core = crate::handlers::component_manager::standalone_compute_tray_manager(api);
     let compute: &dyn ComputeTrayManager = if matches!(
         endpoint,
         ReadEndpoint::Compute {

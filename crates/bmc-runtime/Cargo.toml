@@ -51,6 +51,7 @@ thiserror = { workspace = true }
 tracing = { workspace = true }
 
 [dev-dependencies]
+arc-swap = { workspace = true }
 axum = { workspace = true }
 bmc-mock = { path = "../bmc-mock" }
 carbide-instrument = { path = "../instrument", features = ["test-support"] }

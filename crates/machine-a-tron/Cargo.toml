@@ -70,7 +70,6 @@ russh = { workspace = true }
 
 # [local-dependencies]
 carbide-api-model = { path = "../api-model" }
-carbide-ipmi = { path = "../ipmi" }
 carbide-rpc = { path = "../rpc", features = ["model"] }
 bmc-mock = { path = "../bmc-mock" }
 carbide-tls = { path = "../tls" }
@@ -85,14 +84,15 @@ nmxc-mock = { package = "carbide-nmxc-mock", path = "../nmxc-mock" }
 
 [dev-dependencies]
 async-trait = { workspace = true }
-tonic-client-wrapper = { path = "../tonic-client-wrapper", default-features = false }
-http-body-util = { workspace = true }
-hyper = { workspace = true, features = ["http2", "server"] }
-hyper-util = { workspace = true, features = ["tokio"] }
-prost = { workspace = true }
+carbide-ipmi = { path = "../ipmi" }
 carbide-test-support = { path = "../test-support" }
+http-body-util = { workspace = true }
+hyper-util = { workspace = true, features = ["tokio"] }
+hyper = { workspace = true, features = ["http2", "server"] }
+prost = { workspace = true }
 tokio = { workspace = true, features = ["test-util"] }
 toml = { workspace = true }
+tonic-client-wrapper = { path = "../tonic-client-wrapper", default-features = false }
 
 [build-dependencies]
 carbide-version = { path = "../version" }

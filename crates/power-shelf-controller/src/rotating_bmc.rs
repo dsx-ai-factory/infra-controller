@@ -208,6 +208,7 @@ async fn rotate_power_shelf_bmc(
         services.bmc_credential_ops.as_ref(),
         &target,
         force,
+        &services.instrumentation,
     )
     .await
     {

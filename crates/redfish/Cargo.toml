@@ -15,6 +15,7 @@ default = []
 test-support = ["carbide-secrets/test-support"]
 
 [dependencies]
+bmc-platform = { path = "../bmc-platform" }
 bmc-vendor = { path = "../bmc-vendor" }
 carbide-api-model = { path = "../api-model", default-features = false }
 carbide-instrument = { path = "../instrument" }

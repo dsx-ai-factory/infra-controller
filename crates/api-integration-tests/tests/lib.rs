@@ -310,8 +310,16 @@ async fn run_integration() -> eyre::Result<()> {
 
     // Observable MQTT instruments export their initial zeros without a broker
     // connection. Register them on the server's meter for the catalogue scrape.
-    let mqtt_client =
-        mqttea::MqtteaClient::new("localhost", 1883, "test-metric-catalogue", None).await?;
+    let mqtt_client = mqttea::MqtteaClient::new(
+        "localhost",
+        1883,
+        "test-metric-catalogue",
+        None,
+        carbide_instrument::Instrumentation::from_meter_provider(
+            &opentelemetry::metrics::noop::NoopMeterProvider::new(),
+        ),
+    )
+    .await?;
     mqtt_client.register_metrics(&server_handle_2.ready.meter, "test_catalogue");
 
     assert_ne!(test_env.carbide_api_addrs[0], test_env.carbide_api_addrs[1]);
@@ -553,12 +561,19 @@ async fn run_integration() -> eyre::Result<()> {
     exercise_ib_partition_mtu_fallback(&test_env).await?;
     exercise_nvlink_partition_monitor(&test_env, server_handle_2.ready.meter.clone()).await?;
 
-    carbide_api_core::test_support::poll_resource_pool_stats(test_env.db_pool.clone()).await?;
+    carbide_api_core::test_support::poll_resource_pool_stats(
+        test_env.db_pool.clone(),
+        &carbide_instrument::Instrumentation::from_meter_provider(&test_env.metrics.meter_provider),
+    )
+    .await?;
     // The live exporters supply local gauges; the direct poll emits the failure
     // counter without updating their samples. `test_service_health_metrics`
     // checks unavailable gauge rendering, while `resource_pool_inspection`
     // exercises the sampler's failure and recovery paths.
     for line in [
+        "# TYPE carbide_machine_update_manager_completed_passes_total counter\n",
+        "\ncarbide_machine_update_manager_completed_passes_total ",
+        "# HELP carbide_machine_update_manager_completed_passes_total Number of successful machine update manager work passes, excluding lock skips and failed or cancelled passes\n",
         r#"carbide_resourcepool_used_count{pool="vpc-vni"}"#,
         r#"carbide_resourcepool_free_count{pool="vpc-vni"}"#,
         r#"carbide_resourcepool_stats_available{pool="vpc-vni"} 1"#,
@@ -669,6 +684,9 @@ async fn run_integration() -> eyre::Result<()> {
     metric_infos.extend(metrics::parse_metric_infos(
         &carbide_health::test_support::hardware_metric_exposition()?,
     ));
+    metric_infos.extend(metrics::parse_metric_infos(
+        &carbide_site_explorer::test_support::exploration_metric_exposition(),
+    ));
     for name in [
         "carbide_dpu_client_certificate_expiration_time",
         "carbide_dpu_client_certificate_expiration_time_seconds",
@@ -767,6 +785,7 @@ async fn collect_dhcp_metric_infos() -> eyre::Result<Vec<metrics::MetricInfo>> {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
     let address = listener.local_addr()?;
     let config = MetricsEndpointConfig {
+        instrumentation: setup.instrumentation.clone(),
         address,
         registry: setup.registry.clone(),
         health_controller: None,
@@ -936,7 +955,7 @@ async fn exercise_dpf_exploration_suppression(
     let certs = &api_test_helper::utils::LOCALHOST_CERTS;
     let config = CarbideClientConfig::new(
         certs.ca_cert.to_string_lossy().into_owned(),
-        Some(forge_tls::client_config::ClientCert {
+        Some(carbide_tls::client_config::ClientCert {
             cert_path: certs.client_cert.to_string_lossy().into_owned(),
             key_path: certs.client_key.to_string_lossy().into_owned(),
         }),
@@ -1038,7 +1057,7 @@ async fn exercise_admin_address_reconcile_failures(
     let certs = &api_test_helper::utils::LOCALHOST_CERTS;
     let config = CarbideClientConfig::new(
         certs.ca_cert.to_string_lossy().into_owned(),
-        Some(forge_tls::client_config::ClientCert {
+        Some(carbide_tls::client_config::ClientCert {
             cert_path: certs.client_cert.to_string_lossy().into_owned(),
             key_path: certs.client_key.to_string_lossy().into_owned(),
         }),
@@ -1100,7 +1119,7 @@ async fn exercise_ib_partition_mtu_fallback(
     let certs = &api_test_helper::utils::LOCALHOST_CERTS;
     let config = CarbideClientConfig::new(
         certs.ca_cert.to_string_lossy().into_owned(),
-        Some(forge_tls::client_config::ClientCert {
+        Some(carbide_tls::client_config::ClientCert {
             cert_path: certs.client_cert.to_string_lossy().into_owned(),
             key_path: certs.client_key.to_string_lossy().into_owned(),
         }),
@@ -1161,6 +1180,7 @@ async fn exercise_nvlink_partition_monitor(
         &mut work_lock_tasks,
         test_env.db_pool.clone(),
         db::work_lock_manager::KeepaliveConfig::default(),
+        carbide_instrument::Instrumentation::global(),
     )
     .await?;
     let nmxc_client_pool = libnmxc::NmxcClientPool::builder()
@@ -1176,6 +1196,7 @@ async fn exercise_nvlink_partition_monitor(
         },
         HostHealthConfig::default(),
         work_lock_manager_handle,
+        test_env.metrics.instrumentation.clone(),
     );
     monitor.run_single_iteration().await?;
     for line in [

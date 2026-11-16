@@ -24,7 +24,11 @@ No, NICo does not install UFM; it is a dependency. NICo leverages existing UFM d
 
 **Does NICo manage InfiniBand switches in standalone mode?**
 
-No, NICo does not manage InfiniBand switches in standalone mode. Instead, NVIDIA Unified Fabric Manager (UFM) is required for InfiniBand partitioning and fabric management. NICo calls UFM APIs to assign partition keys (P_Keys) for isolation.
+No, NICo does not manage InfiniBand switches in standalone mode. NVIDIA Unified
+Fabric Manager (UFM) is required for InfiniBand partitioning and fabric
+management. Core allocates NICo-managed partition keys (P_Keys) from its
+configured pool and uses UFM APIs to manage partition membership. Refer to
+[P_Key Allocation](manuals/networking/infiniband_partitioning.md#p_key-allocation).
 
 ## Configuration (Day 1)
 
@@ -99,7 +103,7 @@ Yes, NICo supports NVLink partitioning.
 
 - **Ethernet**: VXLAN with EVPN for VPC creation on DPUs
 - **E/W Ethernet (Spectrum-X)**: A CX-based firmware, named "DPA", which uses VXLAN on CX switches (as part of a future release)
-- **Infiniband**: UFM-based partition key (P_Key) assignment
+- **Infiniband**: Core-allocated partition keys (P_Keys) and UFM-managed partition membership
 - **NVLink**: NMX-C-based partition management
 
 DPUs enforce Ethernet isolation in hardware, UFM enforces InfiniBand isolation, and NMX-C enforces NVLink isolation--all coordinated by NICo.
@@ -152,7 +156,7 @@ The `Instance.Status` field takes one of the following values: `Pending`, `Provi
 
 The typical lifecycle is `Pending` -> `Provisioning` -> `Ready` -> `Terminating`.
 
-- `Configuring`: Appears after the Instance reaches `Ready` and is subsequently reconfigured via the PATCH endpoint (for example, adding or removing InfiniBand partitions). The Instance returns to `Ready` once reconfiguration completes.
+- `Configuring`: Appears after the Instance reaches `Ready` and is subsequently reconfigured through the PATCH endpoint. The Instance returns to `Ready` after reconfiguration completes. For InfiniBand updates, refer to the [Partition Admission Rules and REST Limitations](manuals/networking/infiniband_partitioning.md#partition-admission-rules-and-rest-limitations). An empty list or a subset of unchanged interfaces is not a supported detach procedure.
 - `Updating`: Appears when a software update is applied. Updates require an explicit opt-in: the Instance must be rebooted with the `applyUpdatesOnReboot` flag set.
 - `Rebooting`: Appears briefly during a reboot request.
 - `Error`: Indicates a failure condition, such as a loss of communication between `nico-rest` and `nico-core`.

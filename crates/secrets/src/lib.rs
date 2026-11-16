@@ -101,13 +101,14 @@ pub enum CertBackend {
 /// created in the common case; that backend fails without it, and a dedicated
 /// Vault never uses it. `spiffe` is the site's SPIFFE identity; a dedicated
 /// Vault issues certs under the same identity namespace as the rest of the
-/// deployment.
+/// deployment. Event metrics use `instrumentation`; retain its provider.
 /// `supervisor` applies only to a newly created dedicated client, with the lifecycle
 /// described by [`create_vault_client`]; shared clients retain their existing supervisor.
 pub fn create_certificate_provider(
     config: &CertificateConfig,
     shared_vault: Option<&Arc<ForgeVaultClient>>,
     spiffe: SpiffeIdentity,
+    instrumentation: carbide_instrument::Instrumentation,
     supervisor: Option<(&mut JoinSet<()>, CancellationToken)>,
 ) -> eyre::Result<Arc<dyn CertificateProvider>> {
     match &config.backend {
@@ -123,15 +124,17 @@ pub fn create_certificate_provider(
         }
         CertBackend::DedicatedVault(dedicated) => {
             let provider: Arc<dyn CertificateProvider> =
-                create_dedicated_vault_client(dedicated, spiffe, supervisor)?;
+                create_dedicated_vault_client(dedicated, spiffe, instrumentation, supervisor)?;
             Ok(provider)
         }
     }
 }
 
-/// create_credential_manager builds the default credential chain: env -> file -> vault.
+/// Builds the default credential chain: env -> file -> vault.
+/// Vault and file watcher metrics use `instrumentation`; retain its provider for the chain lifetime.
 pub async fn create_credential_manager(
     config: &CredentialConfig,
+    instrumentation: carbide_instrument::Instrumentation,
 ) -> eyre::Result<Arc<dyn CredentialManager>> {
     let mut readers: Vec<Box<dyn CredentialReader>> = Vec::new();
 
@@ -141,11 +144,11 @@ pub async fn create_credential_manager(
 
     if config.file.enabled() {
         readers.push(Box::new(
-            FileCredentialsWatcher::new(config.file.clone()).await?,
+            FileCredentialsWatcher::new(config.file.clone(), instrumentation.clone()).await?,
         ));
     }
 
-    let vault_client = create_vault_client(&config.vault, None)?;
+    let vault_client = create_vault_client(&config.vault, instrumentation.clone(), None)?;
     readers.push(Box::new(vault_client.clone()));
 
     let chained = ChainedCredentialReader::from(readers);
@@ -165,11 +168,13 @@ fn vault_is_named(config: &VaultConfig, env_address: Option<&str>) -> bool {
 /// so a service with no Vault settings starts without any Vault connection.
 /// When Vault is named, an incomplete Vault configuration fails startup rather
 /// than being dropped from the chain.
+/// Vault and file watcher metrics use `instrumentation`; retain its provider for the chain lifetime.
 pub async fn create_credential_reader(
     config: &CredentialConfig,
+    instrumentation: carbide_instrument::Instrumentation,
 ) -> eyre::Result<Arc<dyn CredentialReader>> {
     let env_address = std::env::var("VAULT_ADDR").ok();
-    create_credential_reader_with(config, env_address.as_deref()).await
+    create_credential_reader_with(config, env_address.as_deref(), instrumentation).await
 }
 
 /// [`create_credential_reader`] with `VAULT_ADDR` passed in, so tests do not
@@ -177,6 +182,7 @@ pub async fn create_credential_reader(
 async fn create_credential_reader_with(
     config: &CredentialConfig,
     env_address: Option<&str>,
+    instrumentation: carbide_instrument::Instrumentation,
 ) -> eyre::Result<Arc<dyn CredentialReader>> {
     let mut readers: Vec<Box<dyn CredentialReader>> = Vec::new();
 
@@ -186,12 +192,16 @@ async fn create_credential_reader_with(
 
     if config.file.enabled() {
         readers.push(Box::new(
-            FileCredentialsWatcher::new(config.file.clone()).await?,
+            FileCredentialsWatcher::new(config.file.clone(), instrumentation.clone()).await?,
         ));
     }
 
     if vault_is_named(&config.vault, env_address) {
-        readers.push(Box::new(create_vault_client(&config.vault, None)?));
+        readers.push(Box::new(create_vault_client(
+            &config.vault,
+            instrumentation.clone(),
+            None,
+        )?));
     }
 
     Ok(Arc::new(ChainedCredentialReader::from(readers)))
@@ -379,9 +389,15 @@ mod tests {
             ..Default::default()
         };
 
-        let reader = create_credential_reader_with(&config, None)
-            .await
-            .expect("no Vault setting is required");
+        let reader = create_credential_reader_with(
+            &config,
+            None,
+            carbide_instrument::Instrumentation::from_meter_provider(
+                &opentelemetry::metrics::noop::NoopMeterProvider::new(),
+            ),
+        )
+        .await
+        .expect("no Vault setting is required");
         let key = CredentialKey::MqttAuth {
             credential_type: MqttCredentialType::DsxExchangeConsumer,
         };
@@ -414,6 +430,16 @@ mod tests {
             },
             ..Default::default()
         };
-        assert!(create_credential_reader_with(&config, None).await.is_err());
+        assert!(
+            create_credential_reader_with(
+                &config,
+                None,
+                carbide_instrument::Instrumentation::from_meter_provider(
+                    &opentelemetry::metrics::noop::NoopMeterProvider::new()
+                ),
+            )
+            .await
+            .is_err()
+        );
     }
 }

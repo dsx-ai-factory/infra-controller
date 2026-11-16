@@ -21,7 +21,7 @@ use std::net::IpAddr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use carbide_instrument::{Event, LabelValue, emit};
+use carbide_instrument::{Event, Instrumentation, LabelValue};
 use carbide_resource_pool::ResourcePoolRegistry;
 use carbide_uuid::machine::HostMachineId;
 use db::Transaction;
@@ -51,6 +51,7 @@ const DESIRED_BOOT_INTERFACE_RECONCILE_PAGE_SIZE: i64 = 100;
 
 /// Reconciles persisted state of existing hosts.
 pub(super) struct HostReconciler {
+    instrumentation: Instrumentation,
     database_connection: PgPool,
     retained_boot_interface_window: Option<chrono::Duration>,
     resource_pool_registry: ResourcePoolRegistry,
@@ -64,8 +65,10 @@ impl HostReconciler {
         retained_boot_interface_window: Option<chrono::Duration>,
         resource_pool_registry: ResourcePoolRegistry,
         common_pools: Arc<CommonPools>,
+        instrumentation: Instrumentation,
     ) -> Self {
         Self {
+            instrumentation,
             database_connection,
             retained_boot_interface_window,
             resource_pool_registry,
@@ -104,14 +107,14 @@ impl HostReconciler {
             explored_this_run,
         )
         .await;
-        emit(HostReconciliationPhaseFinished {
+        self.instrumentation.emit(HostReconciliationPhaseFinished {
             phase: HostReconciliationPhase::ExploredHosts,
             duration: start.elapsed(),
         });
 
         let start = Instant::now();
         let result = self.reconcile_desired_boot_interfaces().await;
-        emit(HostReconciliationPhaseFinished {
+        self.instrumentation.emit(HostReconciliationPhaseFinished {
             phase: HostReconciliationPhase::DesiredBootInterfaces,
             duration: start.elapsed(),
         });
@@ -134,10 +137,11 @@ impl HostReconciler {
             .sorted_by_key(|host| host.host_bmc_ip);
         for host in hosts {
             if let Err(error) = self.reconcile_host_with_dpus(host).await {
-                emit(HostReconciliationFailed::ExploredHost {
-                    host_bmc_ip_address: host.host_bmc_ip,
-                    error: error.to_string(),
-                });
+                self.instrumentation
+                    .emit(HostReconciliationFailed::ExploredHost {
+                        host_bmc_ip_address: host.host_bmc_ip,
+                        error: error.to_string(),
+                    });
             }
         }
     }
@@ -169,10 +173,11 @@ impl HostReconciler {
                 .reconcile_host_without_dpus(address, report, endpoint_index)
                 .await
             {
-                emit(HostReconciliationFailed::ExploredHost {
-                    host_bmc_ip_address: address,
-                    error: error.to_string(),
-                });
+                self.instrumentation
+                    .emit(HostReconciliationFailed::ExploredHost {
+                        host_bmc_ip_address: address,
+                        error: error.to_string(),
+                    });
             }
         }
     }
@@ -276,6 +281,7 @@ impl HostReconciler {
                     (*dpu_id).into(),
                     None,
                     &self.preparation_cancel_token,
+                    self.instrumentation.clone(),
                 ),
                 PreparedDpuAsn::prepare(
                     &self.database_connection,
@@ -372,10 +378,11 @@ impl HostReconciler {
         )
         .await
         {
-            emit(SiteExplorerHostAdminAddressReconcileFailed {
-                host_machine_id,
-                error: error.to_string(),
-            });
+            self.instrumentation
+                .emit(SiteExplorerHostAdminAddressReconcileFailed {
+                    host_machine_id,
+                    error: error.to_string(),
+                });
         }
 
         Ok(())
@@ -479,20 +486,23 @@ impl HostReconciler {
                 let mut txn = Transaction::begin(&self.database_connection)
                     .await
                     .inspect_err(|error| {
-                        emit(HostReconciliationFailed::DesiredBootInterface {
-                            host_machine_id: machine_id,
-                            error: error.to_string(),
-                        });
+                        self.instrumentation
+                            .emit(HostReconciliationFailed::DesiredBootInterface {
+                                host_machine_id: machine_id,
+                                error: error.to_string(),
+                            });
                     })?;
                 match Self::reconcile_desired_boot_interface(txn.as_pgconn(), &machine_id, None)
                     .await
                 {
                     Ok(()) => {
                         if let Err(error) = txn.commit().await {
-                            emit(HostReconciliationFailed::DesiredBootInterface {
-                                host_machine_id: machine_id,
-                                error: error.to_string(),
-                            });
+                            self.instrumentation.emit(
+                                HostReconciliationFailed::DesiredBootInterface {
+                                    host_machine_id: machine_id,
+                                    error: error.to_string(),
+                                },
+                            );
                         }
                     }
                     Err(error) => {
@@ -500,10 +510,11 @@ impl HostReconciler {
                             "site-explorer desired boot-interface reconciliation failure",
                         )
                         .await;
-                        emit(HostReconciliationFailed::DesiredBootInterface {
-                            host_machine_id: machine_id,
-                            error: error.to_string(),
-                        });
+                        self.instrumentation
+                            .emit(HostReconciliationFailed::DesiredBootInterface {
+                                host_machine_id: machine_id,
+                                error: error.to_string(),
+                            });
                     }
                 }
             }
@@ -573,6 +584,7 @@ struct HostReconciliationPhaseFinished {
 
 #[cfg(test)]
 mod tests {
+    use carbide_instrument::emit;
     use carbide_instrument::testing::{ApproxHistogramSum, MetricsCapture, capture_logs};
     use carbide_test_support::value_scenarios;
 

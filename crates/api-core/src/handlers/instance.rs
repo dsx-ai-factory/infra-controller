@@ -21,8 +21,8 @@ use std::str::FromStr;
 use ::rpc::errors::RpcDataConversionError;
 use ::rpc::forge::{self as rpc, AdminForceDeleteMachineResponse};
 use ::rpc::model::RpcTryFrom;
-use carbide_redfish::libredfish::RedfishAuth;
-use carbide_secrets::credentials::{BmcCredentialType, CredentialKey};
+use bmc_platform::{PlatformError, ResetType};
+use carbide_utils::redfish::BmcAccessInfo;
 use carbide_uuid::infiniband::IBPartitionId;
 use carbide_uuid::instance::InstanceId;
 use carbide_uuid::machine::{HostMachineId, MachineId};
@@ -216,12 +216,6 @@ pub(crate) async fn batch_allocate(
             tracing::error!(error = ?e, "Failed to convert batch request");
         })?;
 
-    // Log all machine IDs and tenant organization IDs
-    for request in &requests {
-        log_machine_id(&request.machine_id);
-        log_tenant_organization_id(request.config.tenant.tenant_organization_id.as_str());
-    }
-
     // Call batch allocation logic
     let snapshots =
         crate::instance::batch_allocate_instances(api, requests, api.runtime_config.host_health)
@@ -307,6 +301,7 @@ pub(crate) async fn find_by_machine_id(
     log_request_data(&request);
 
     let machine_id = request.into_inner();
+    log_machine_id(&machine_id);
 
     let mut txn = api.txn_begin().await?;
 
@@ -322,6 +317,7 @@ pub(crate) async fn find_by_machine_id(
         Err(e) => return Err(CarbideError::from(e).into()),
     };
 
+    crate::api::log_managed_host_snapshot(&mh_snapshot, &machine_id);
     let maybe_instance = snapshot_to_optional_instance(mh_snapshot)?;
 
     let instances = if let Some(instance) = maybe_instance {
@@ -1279,24 +1275,18 @@ pub(crate) async fn invoke_power(
     // TODO: The API call should maybe not directly trigger the reboot
     // but instead queue it for the state handler. That will avoid racing
     // with other internal reboot requests from the state handler.
-    let bmc_ip = bmc_ip.to_string();
-    let client = api
-        .redfish_pool
-        .create_client(
-            &bmc_ip,
-            snapshot.host_snapshot.status.bmc_info.port,
-            RedfishAuth::Key(CredentialKey::BmcCredentials {
-                credential_type: BmcCredentialType::BmcRoot { bmc_mac_address },
-            }),
-            None,
-        )
+    let bmc = api
+        .connect_bmc(&BmcAccessInfo {
+            host: bmc_ip.to_string(),
+            port: snapshot.host_snapshot.status.bmc_info.port,
+            mac_address: bmc_mac_address,
+        })
+        .await?;
+    async { bmc.power()?.set(ResetType::ForceRestart).await }
         .await
-        .map_err(|e| CarbideError::internal(e.to_string()))?;
-
-    client
-        .power(libredfish::SystemPowerControl::ForceRestart)
-        .await
-        .map_err(|e| CarbideError::internal(format!("failed redfish ForceRestart subtask: {e}")))?;
+        .map_err(|e: PlatformError| {
+            CarbideError::internal(format!("failed redfish ForceRestart subtask: {e}"))
+        })?;
 
     Ok(Response::new(rpc::InstancePowerResult {}))
 }
@@ -1885,7 +1875,14 @@ pub(crate) async fn update_instance_config(
         spx_config = ?config.spxconfig,
         "Updating instance SPX configuration",
     );
-    update_instance_spx_config(&mh_snapshot, instance, &mut config.spxconfig, &mut txn).await?;
+    update_instance_spx_config(
+        &mh_snapshot,
+        instance,
+        &mut config.spxconfig,
+        api.runtime_config.is_partial_multiplane_enabled(),
+        &mut txn,
+    )
+    .await?;
 
     db::instance::update_config(&mut txn, instance.id, expected_version, config, metadata).await?;
 
@@ -2742,6 +2739,7 @@ async fn update_instance_spx_config(
     mh_snapshot: &ManagedHostStateSnapshot,
     instance: &InstanceSnapshot,
     spxcfg: &mut InstanceSpxConfig,
+    partial_multiplane_enabled: bool,
     txn: &mut sqlx::Transaction<'_, sqlx::Postgres>,
 ) -> Result<(), CarbideError> {
     let mid = instance.machine_id;
@@ -2783,10 +2781,39 @@ async fn update_instance_spx_config(
 
     mh_snapshot.dpa_interface_snapshots = dpa_interfaces;
 
+    // Plane admission consumes maintenance state that an operator request or a
+    // DPU readback can commit after this request loaded its snapshot. Both of
+    // those writers take the host lock before touching desired state or
+    // observations, so holding it here serializes them and lets the refreshed
+    // reads below describe one point in time instead of the request's baseline.
+    if partial_multiplane_enabled {
+        // Lock the Instance this request writes below before any Machine, the
+        // order power changes and IB updates already establish, then the host
+        // before any DPU as the readback path does. The write below still
+        // resolves concurrent config changes by its expected version.
+        if db::instance::find_by_id_for_update(txn.as_mut(), instance.id)
+            .await?
+            .is_none()
+        {
+            return Err(CarbideError::NotFoundError {
+                kind: "instance",
+                id: instance.id.to_string(),
+            });
+        }
+        mh_snapshot.host_snapshot.spx_multiplane =
+            db::machine::lock_spx_multiplane(txn.as_mut(), &host_machine_id).await?;
+        for dpu_snapshot in &mut mh_snapshot.dpu_snapshots {
+            let status =
+                db::machine::lock_spx_multiplane_status(txn.as_mut(), &dpu_snapshot.id).await?;
+            dpu_snapshot.status.spx_multiplane_status = status;
+        }
+    }
+
     validate_spx_partition_ownership(txn, &instance.config.tenant.tenant_organization_id, spxcfg)
         .await?;
 
-    let (spx_config_with_ports, targets) = allocate_spx_port_mac(spxcfg, &mh_snapshot)?;
+    let (spx_config_with_ports, targets) =
+        allocate_spx_port_mac(spxcfg, &mh_snapshot, partial_multiplane_enabled)?;
     if let Some(snapshot) = &instance.nic_firmware_snapshot {
         snapshot
             .validate_bindings(&targets)

@@ -29,7 +29,7 @@ use async_trait::async_trait;
 use axum::http::header::{ACCEPT, CACHE_CONTROL, CONTENT_TYPE, HeaderMap, HeaderValue};
 use axum::http::{StatusCode, Uri};
 use axum::response::{IntoResponse, Response};
-use carbide_instrument::{Event, LabelValue, emit};
+use carbide_instrument::{Event, LabelValue};
 use forge_dpu_agent_utils::machine_identity::defaults::{
     BURST, REQUESTS_PER_SECOND, SIGN_TIMEOUT_SECS, WAIT_TIMEOUT_SECS,
 };
@@ -516,11 +516,14 @@ fn sign_proxy_log_origin(upstream_url: &str) -> String {
         .unwrap_or_else(|_| "<invalid sign proxy URL>".to_string())
 }
 
+/// Forwards an identity request and records failures through `instrumentation`.
+/// Retain its provider until the request finishes.
 pub async fn forward_sign_proxy_http(
     client: &reqwest::Client,
     base_url: &str,
     request_uri: &Uri,
     headers: &HeaderMap,
+    instrumentation: &carbide_instrument::Instrumentation,
 ) -> Response {
     let upstream_url = match build_sign_proxy_request_url(base_url, request_uri.query()) {
         Ok(u) => u,
@@ -556,7 +559,7 @@ pub async fn forward_sign_proxy_http(
             };
             let error_text = sign_proxy_reqwest_error_text(error);
             let error = error_text.log_error;
-            emit(if is_timeout {
+            instrumentation.emit(if is_timeout {
                 MachineIdentitySignProxyFailed::RequestTimeout { error }
             } else {
                 MachineIdentitySignProxyFailed::RequestTransport { error }
@@ -584,7 +587,7 @@ pub async fn forward_sign_proxy_http(
         Ok(b) => b,
         Err(error) => {
             let error_text = sign_proxy_reqwest_error_text(error);
-            emit(MachineIdentitySignProxyFailed::ResponseBody {
+            instrumentation.emit(MachineIdentitySignProxyFailed::ResponseBody {
                 error: error_text.log_error,
             });
             return (StatusCode::BAD_GATEWAY, error_text.response_body).into_response();
@@ -602,7 +605,7 @@ pub async fn forward_sign_proxy_http(
         Ok(response) => response,
         Err(error) => {
             let error = error.to_string();
-            emit(MachineIdentitySignProxyFailed::ResponseBuild {
+            instrumentation.emit(MachineIdentitySignProxyFailed::ResponseBuild {
                 error: error.clone(),
             });
             return (
@@ -613,7 +616,7 @@ pub async fn forward_sign_proxy_http(
         }
     };
     if status.is_server_error() {
-        emit(MachineIdentitySignProxyFailed::UpstreamServer {});
+        instrumentation.emit(MachineIdentitySignProxyFailed::UpstreamServer {});
     }
     response
 }
@@ -622,12 +625,14 @@ pub async fn forward_sign_proxy_http(
 /// to the HTTP sign proxy. Returns [`None`] when sign-proxy is not in use (caller should use Forge).
 ///
 /// If the base URL is set but `sign_proxy_http_client` is missing, returns [`Some`] with HTTP 500
-/// (misconfiguration).
+/// (misconfiguration). Failure Events use `instrumentation`; retain its provider
+/// until the request finishes.
 pub async fn forward_sign_proxy_if_ready(
     sign_proxy_base: Option<&str>,
     sign_proxy_http_client: Option<&reqwest::Client>,
     uri: &Uri,
     headers: &HeaderMap,
+    instrumentation: &carbide_instrument::Instrumentation,
 ) -> Option<Response> {
     let base = sign_proxy_base?;
     let Some(client) = sign_proxy_http_client else {
@@ -639,7 +644,7 @@ pub async fn forward_sign_proxy_if_ready(
                 .into_response(),
         );
     };
-    Some(forward_sign_proxy_http(client, base, uri, headers).await)
+    Some(forward_sign_proxy_http(client, base, uri, headers, instrumentation).await)
 }
 
 #[derive(serde::Serialize)]
@@ -1004,7 +1009,14 @@ mod tests {
                     )
                     .parse()
                     .unwrap();
-                    let response = forward_sign_proxy_http(&client, &base, &uri, &headers).await;
+                    let response = forward_sign_proxy_http(
+                        &client,
+                        &base,
+                        &uri,
+                        &headers,
+                        &carbide_instrument::Instrumentation::global(),
+                    )
+                    .await;
                     let status = response.status();
                     let content_type = response
                         .headers()
@@ -1148,7 +1160,9 @@ mod tests {
         let response_url = format!(
             "http://{addr}/{PRIVATE_PATH}/{SIGN_PROXY_UPSTREAM_IMDS_PREFIX}?aud={QUERY_SECRET}"
         );
-        let metrics = MetricsCapture::start();
+        let setup =
+            metrics_endpoint::new_metrics_setup("sign-proxy-test", "forge-system", false).unwrap();
+        let metrics = MetricsCapture::for_registry(&setup.registry);
         let mut response = None;
         let logs = capture_logs(|| {
             response = Some(runtime.block_on(forward_sign_proxy_http(
@@ -1156,6 +1170,7 @@ mod tests {
                 &base,
                 &uri,
                 &HeaderMap::new(),
+                &setup.instrumentation,
             )));
         });
         let response = response.expect("forwarding returns an HTTP response");
@@ -1207,9 +1222,14 @@ mod tests {
             .unwrap();
         let uri: Uri = "http://client/latest/meta-data/identity".parse().unwrap();
         let metrics = MetricsCapture::start();
-        let response =
-            forward_sign_proxy_http(&client, &format!("http://{addr}"), &uri, &HeaderMap::new())
-                .await;
+        let response = forward_sign_proxy_http(
+            &client,
+            &format!("http://{addr}"),
+            &uri,
+            &HeaderMap::new(),
+            &carbide_instrument::Instrumentation::global(),
+        )
+        .await;
 
         assert_eq!(response.status(), StatusCode::GATEWAY_TIMEOUT);
         assert_eq!(
@@ -1263,7 +1283,9 @@ mod tests {
                         .unwrap();
                 });
                 let response =
-                    forward_sign_proxy_http(&client, &base, &uri, &HeaderMap::new()).await;
+                    forward_sign_proxy_http(&client, &base, &uri, &HeaderMap::new(),
+                        &carbide_instrument::Instrumentation::global(),
+                    ).await;
                 server.await.unwrap();
                 response
             }));
@@ -1313,9 +1335,15 @@ mod tests {
             .unwrap();
 
         assert!(
-            forward_sign_proxy_if_ready(None, Some(&client), &uri, &headers)
-                .await
-                .is_none()
+            forward_sign_proxy_if_ready(
+                None,
+                Some(&client),
+                &uri,
+                &headers,
+                &carbide_instrument::Instrumentation::global(),
+            )
+            .await
+            .is_none()
         );
     }
 
@@ -1326,9 +1354,15 @@ mod tests {
             .unwrap();
         let headers = HeaderMap::new();
 
-        let res = forward_sign_proxy_if_ready(Some("http://127.0.0.1:1"), None, &uri, &headers)
-            .await
-            .expect("expected misconfiguration response");
+        let res = forward_sign_proxy_if_ready(
+            Some("http://127.0.0.1:1"),
+            None,
+            &uri,
+            &headers,
+            &carbide_instrument::Instrumentation::global(),
+        )
+        .await
+        .expect("expected misconfiguration response");
         assert_eq!(res.status(), StatusCode::INTERNAL_SERVER_ERROR);
     }
 
@@ -1363,9 +1397,15 @@ mod tests {
             .build()
             .unwrap();
 
-        let res = forward_sign_proxy_if_ready(Some(base.as_str()), Some(&client), &uri, &headers)
-            .await
-            .expect("expected forward response");
+        let res = forward_sign_proxy_if_ready(
+            Some(base.as_str()),
+            Some(&client),
+            &uri,
+            &headers,
+            &carbide_instrument::Instrumentation::global(),
+        )
+        .await
+        .expect("expected forward response");
         assert_eq!(res.status(), StatusCode::CREATED);
         assert_eq!(
             res.headers().get(CONTENT_TYPE).unwrap().as_bytes(),
