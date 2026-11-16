@@ -1,7 +1,9 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use carbide_redfish::libredfish::error::state_handler_redfish_error as redfish_error;
+use bmc_backend::BackendBmcControl;
+use bmc_platform::PlatformError;
+use carbide_redfish::state_handler::state_handler_platform_error as platform_error;
 use chrono::Duration;
 use model::machine::{DisableOnboardNicsState, ManagedHostStateSnapshot};
 use state_controller::state_handler::{StateHandlerContext, StateHandlerError};
@@ -16,7 +18,26 @@ pub(super) enum Progress {
 
 pub(super) const WAIT_REASON: &str = "Waiting for onboard NIC configuration to be applied";
 
+/// Whether the host's onboard NICs must be cut off the management network:
+/// its managed DPUs carry its traffic, and its BMC controls the NICs' access.
+/// Hosts without managed DPUs keep their onboard NICs.
+pub(super) async fn isolate(
+    bmc_control: &BackendBmcControl<'_>,
+    snapshot: &ManagedHostStateSnapshot,
+) -> Result<bool, StateHandlerError> {
+    if !snapshot.has_managed_dpus() {
+        return Ok(false);
+    }
+    match bmc_control.host_management_network_access().await {
+        Ok(access) => Ok(access.is_some()),
+        Err(PlatformError::Unsupported) => Ok(false),
+        Err(error) => Err(platform_error("host_management_network_access", error)),
+    }
+}
+
 /// Shared ingestion and post-AC-cycle sequence: enable, wait, disable, wait.
+/// The toggle applies the setting even when the BMC already stores it, which
+/// it can after an AUX power cycle re-enables the NICs.
 /// Each successful write advances persisted state; errors retry only that write.
 pub(super) async fn advance(
     state: &DisableOnboardNicsState,
@@ -25,22 +46,17 @@ pub(super) async fn advance(
 ) -> Result<Progress, StateHandlerError> {
     match state {
         DisableOnboardNicsState::ConfigureOnboardNics { enable } => {
-            let client = ctx
-                .services
-                .create_redfish_client_from_machine(&snapshot.host_snapshot)
-                .await?;
-            let (operation, target) = if *enable {
-                ("enable_onboard_nics", libredfish::EnabledDisabled::Enabled)
+            let operation = if *enable {
+                "enable_onboard_nics"
             } else {
-                (
-                    "disable_onboard_nics",
-                    libredfish::EnabledDisabled::Disabled,
-                )
+                "disable_onboard_nics"
             };
-            client
-                .set_enable_onboard_nics(target)
+            let bmc = ctx.services.connect_bmc(&snapshot.host_snapshot).await?;
+            bmc.bmc_control()
+                .map_err(|error| platform_error(operation, error.into()))?
+                .set_host_management_network_access(*enable)
                 .await
-                .map_err(|error| redfish_error(operation, error))?;
+                .map_err(|error| platform_error(operation, error))?;
             Ok(Progress::Next(
                 DisableOnboardNicsState::WaitForConfigToBeApplied {
                     onboard_nics_disabled: !enable,
@@ -59,6 +75,59 @@ pub(super) async fn advance(
                     DisableOnboardNicsState::ConfigureOnboardNics { enable: false },
                 ))
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use bmc_backend::BackendBmc;
+    use carbide_redfish::libredfish::test_support::RedfishSim;
+    use carbide_redfish::libredfish::{RedfishAuth, RedfishClientPool};
+    use libredfish::EnabledDisabled;
+    use model::test_support::machine_snapshot::managed_host_state_snapshot;
+
+    use super::*;
+
+    #[tokio::test]
+    async fn onboard_nics_are_isolated_only_behind_managed_dpus_on_bmcs_that_control_them() {
+        for (scenario, managed_dpus, controlled, expected) in [
+            (
+                "managed DPUs and a BMC that controls the NICs",
+                true,
+                true,
+                true,
+            ),
+            ("a BMC without the control", true, false, false),
+            ("no managed DPUs", false, true, false),
+        ] {
+            let sim = Arc::new(RedfishSim::default());
+            let client = sim
+                .create_client("host", None, RedfishAuth::Anonymous, None)
+                .await
+                .expect("the simulated BMC connects");
+            if controlled {
+                client
+                    .set_enable_onboard_nics(EnabledDisabled::Enabled)
+                    .await
+                    .expect("the simulated BMC records the setting");
+            }
+            let bmc = BackendBmc::from(client);
+            let mut snapshot = managed_host_state_snapshot();
+            if !managed_dpus {
+                snapshot.dpu_snapshots.clear();
+            }
+            let bmc_control = bmc.bmc_control().expect("libredfish controls every BMC");
+
+            assert_eq!(
+                isolate(&bmc_control, &snapshot)
+                    .await
+                    .expect("the gate reads"),
+                expected,
+                "{scenario}"
+            );
         }
     }
 }

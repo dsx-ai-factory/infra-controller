@@ -126,18 +126,54 @@ impl BackendBmcControl<'_> {
     pub async fn set_ipmi_over_lan(&self, enabled: bool) -> Result<DriverOutcome, PlatformError> {
         match self {
             Self::Libredfish(client) => {
-                let target = if enabled {
-                    EnabledDisabled::Enabled
-                } else {
-                    EnabledDisabled::Disabled
-                };
                 client
-                    .enable_ipmi_over_lan(target)
+                    .enable_ipmi_over_lan(enabled_disabled(enabled))
                     .await
                     .map_err(platform_error)?;
                 Ok(DriverOutcome::complete())
             }
             Self::Drivers(bmc_control) => bmc_control.set_ipmi_over_lan(enabled).await,
         }
+    }
+
+    /// See [`BmcControl::host_management_network_access`].
+    pub async fn host_management_network_access(&self) -> Result<Option<bool>, PlatformError> {
+        match self {
+            Self::Libredfish(client) => client
+                .are_onboard_nics_enabled()
+                .await
+                .map(|enabled| enabled.map(|enabled| enabled.is_enabled()))
+                .map_err(platform_error),
+            Self::Drivers(bmc_control) => bmc_control.host_management_network_access().await,
+        }
+    }
+
+    /// See [`BmcControl::set_host_management_network_access`].
+    pub async fn set_host_management_network_access(
+        &self,
+        enabled: bool,
+    ) -> Result<DriverOutcome, PlatformError> {
+        match self {
+            Self::Libredfish(client) => {
+                client
+                    .set_enable_onboard_nics(enabled_disabled(enabled))
+                    .await
+                    .map_err(platform_error)?;
+                Ok(DriverOutcome::complete())
+            }
+            Self::Drivers(bmc_control) => {
+                bmc_control
+                    .set_host_management_network_access(enabled)
+                    .await
+            }
+        }
+    }
+}
+
+fn enabled_disabled(enabled: bool) -> EnabledDisabled {
+    if enabled {
+        EnabledDisabled::Enabled
+    } else {
+        EnabledDisabled::Disabled
     }
 }

@@ -59,8 +59,9 @@ where
         _boot_interface: Option<&BootInterfaceSelector>,
     ) -> Result<DriverOutcome, PlatformError> {
         let current = cx.current_bios_settings().await?;
-        cx.stage_bios_attributes(&expected(ATTRIBUTES, &current, profile).attributes)
-            .await
+        let mut settings = expected(ATTRIBUTES, &current, profile);
+        settings.attributes.extend(tpm_clear().attributes);
+        cx.stage_bios_attributes(&settings.attributes).await
     }
 
     async fn status(
@@ -95,7 +96,20 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::bios::support::assert_apply_requests_tpm_clear;
     use crate::test_support::{Fixture, body, path};
+
+    /// Setup clears the TPM on this platform.
+    #[tokio::test]
+    async fn apply_requests_a_tpm_clear_status_does_not_compare() {
+        assert_apply_requests_tpm_clear(
+            &Gb300Bios,
+            ATTRIBUTES,
+            json!({TPM_OPERATION: "TCG006None"}),
+            json!({TPM_OPERATION: "TCG006TPMClear"}),
+        )
+        .await;
+    }
 
     const SYSTEM: &str = "/redfish/v1/Systems/System_0";
     const BIOS: &str = "/redfish/v1/Systems/System_0/Bios";

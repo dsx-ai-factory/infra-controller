@@ -103,9 +103,9 @@ where
     ) -> Result<DriverOutcome, PlatformError> {
         ensure_bios_settings_unlocked(cx).await?;
         let current = cx.current_bios_settings().await?;
-        let staged = cx
-            .stage_bios_attributes(&expected_settings(&current, profile)?.attributes)
-            .await?;
+        let mut settings = expected_settings(&current, profile)?;
+        settings.attributes.extend(tpm_clear().attributes);
+        let staged = cx.stage_bios_attributes(&settings.attributes).await?;
         Ok(staged.merge(network_group_first(cx).await?))
     }
 

@@ -64,8 +64,9 @@ where
         _boot_interface: Option<&BootInterfaceSelector>,
     ) -> Result<DriverOutcome, PlatformError> {
         let current = cx.reported_bios_settings().await?;
-        cx.stage_bios_attributes(&expected(ATTRIBUTES, &current, profile).attributes)
-            .await
+        let mut settings = expected(ATTRIBUTES, &current, profile);
+        settings.attributes.extend(tpm_clear().attributes);
+        cx.stage_bios_attributes(&settings.attributes).await
     }
 
     async fn status(
@@ -104,5 +105,23 @@ where
             .attributes
             .get(INFINITE_BOOT.name)
             .map(|value| INFINITE_BOOT.value.matches(value)))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::bios::support::assert_apply_requests_tpm_clear;
+
+    /// Setup clears the TPM on this platform.
+    #[tokio::test]
+    async fn apply_requests_a_tpm_clear_status_does_not_compare() {
+        assert_apply_requests_tpm_clear(
+            &GigaComputingAmiBios,
+            ATTRIBUTES,
+            json!({TPM_OPERATION: "None"}),
+            json!({TPM_OPERATION: "TPM Clear"}),
+        )
+        .await;
     }
 }
