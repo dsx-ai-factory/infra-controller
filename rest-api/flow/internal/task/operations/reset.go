@@ -17,15 +17,6 @@ type ComponentResetTaskInfo struct {
 	Target string `json:"target"`
 }
 
-// ResetTarget preserves NVOS semantics for task payloads created before the
-// target field existed. New submissions persist their explicit effective scope.
-func (t *ComponentResetTaskInfo) ResetTarget() string {
-	if t.Target == "" {
-		return "nvos"
-	}
-	return t.Target
-}
-
 func (t *ComponentResetTaskInfo) Validate() error {
 	if t == nil {
 		return fmt.Errorf("component reset operation is required")
@@ -45,10 +36,10 @@ func (t *ComponentResetTaskInfo) Unmarshal(data json.RawMessage) error {
 }
 func (*ComponentResetTaskInfo) Type() taskcommon.TaskType { return taskcommon.TaskTypeComponentReset }
 func (t *ComponentResetTaskInfo) Description() string {
-	return "Restore " + strings.ToUpper(t.ResetTarget()) + " factory defaults"
+	return "Restore " + strings.ToUpper(t.Target) + " factory defaults"
 }
 func (t *ComponentResetTaskInfo) CodeString() string {
-	switch t.ResetTarget() {
+	switch t.Target {
 	case "nvos":
 		return taskcommon.OpCodeNVOSFactoryReset
 	case "sdn":

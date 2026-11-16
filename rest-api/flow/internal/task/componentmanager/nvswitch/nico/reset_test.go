@@ -5,15 +5,20 @@ package nico
 
 import (
 	"context"
+	"errors"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/nicoapi"
+	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/componentmanager/readiness"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/executor/temporalworkflow/common"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/pkg/common/devicetypes"
+	"github.com/NVIDIA/infra-controller/rest-api/flow/pkg/types"
 	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
 	"github.com/stretchr/testify/require"
+	"go.temporal.io/sdk/temporal"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/proto"
 	"testing"
+	"time"
 )
 
 type resetClient struct {
@@ -36,7 +41,7 @@ func (c *resetClient) GetComponentResetStatus(_ context.Context, req *corev1.Get
 	return c.observation, c.err
 }
 
-func TestManager_ResetNVOS(t *testing.T) {
+func checkFactoryResetSubmissionResults(t *testing.T) {
 	for _, tc := range []struct {
 		name      string
 		response  *corev1.ComponentResetResponse
@@ -52,7 +57,7 @@ func TestManager_ResetNVOS(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			client := &resetClient{response: tc.response, err: tc.err}
-			err := New(client, nil).ResetNVOS(context.Background(), common.Target{Type: devicetypes.ComponentTypeNVSwitch, Identifiers: []string{"switch-1"}})
+			err := New(client, nil).SubmitFactoryReset(context.Background(), common.Target{Type: devicetypes.ComponentTypeNVSwitch, Identifiers: []string{"switch-1"}}, "nvos")
 			require.Equal(t, tc.wantError, err != nil)
 			require.Equal(t, 1, client.calls)
 			require.Equal(t, corev1.ComponentResetAction_COMPONENT_RESET_ACTION_NVOS_FACTORY_RESET, client.request.Action)
@@ -95,15 +100,6 @@ func TestManager_NVOSResetCompleted(t *testing.T) {
 	}
 }
 
-func TestManager_ResetSDN(t *testing.T) {
-	client := &resetClient{response: &corev1.ComponentResetResponse{Results: []*corev1.ComponentResult{{ComponentId: proto.String("switch-1")}}}}
-	err := New(client, nil).ResetSDN(context.Background(), common.Target{Type: devicetypes.ComponentTypeNVSwitch, Identifiers: []string{"switch-1"}})
-	require.NoError(t, err)
-	require.Equal(t, 1, client.calls)
-	require.Equal(t, corev1.ComponentResetAction_COMPONENT_RESET_ACTION_SDN_FACTORY_RESET, client.request.Action)
-	require.Equal(t, "switch-1", client.request.GetSwitchIds().Ids[0].Id)
-}
-
 func TestManager_SDNResetCompleted(t *testing.T) {
 	for _, tc := range []struct {
 		name                 string
@@ -121,6 +117,78 @@ func TestManager_SDNResetCompleted(t *testing.T) {
 			require.Equal(t, tc.completed, completed)
 			require.Equal(t, tc.wantError, err != nil)
 			require.Equal(t, corev1.ComponentResetAction_COMPONENT_RESET_ACTION_SDN_FACTORY_RESET, client.statusRequest.Action)
+		})
+	}
+}
+
+// resetReadinessGate records the batch wait and subsequent bounded recheck.
+type resetReadinessGate struct {
+	readiness.Gate
+	calls   int
+	blockAt int
+	bounded bool
+}
+
+func (g *resetReadinessGate) WaitForRackHostsReady(ctx context.Context, _ []string, _ types.OperationType) error {
+	g.calls++
+	if g.calls > 1 {
+		deadline, ok := ctx.Deadline()
+		g.bounded = ok && time.Until(deadline) <= 5*time.Second
+	}
+	if g.calls == g.blockAt {
+		return errors.New("rack hosts in use")
+	}
+	return nil
+}
+func (c *resetClient) FindSwitchRackIDs(_ context.Context, ids []string) (map[string]string, error) {
+	racks := make(map[string]string, len(ids))
+	for _, id := range ids {
+		racks[id] = "rack-1"
+	}
+	return racks, nil
+}
+
+func TestManager_SubmitFactoryReset(t *testing.T) {
+	t.Run("submission results", checkFactoryResetSubmissionResults)
+	for _, tc := range []struct {
+		name, scope string
+		blockAt     int
+		wantCalls   int
+		wantError   bool
+	}{
+		{name: "ready NVOS", scope: "nvos", wantCalls: 1},
+		{name: "ready SDN", scope: "sdn", wantCalls: 1},
+		{name: "blocked before first mutation", scope: "nvos", blockAt: 1, wantError: true},
+		{name: "readiness changes after preflight", scope: "sdn", blockAt: 2, wantError: true},
+		{name: "unsupported scope", scope: "bmc", wantError: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			client := &resetClient{response: &corev1.ComponentResetResponse{Results: []*corev1.ComponentResult{{ComponentId: proto.String("switch-1")}}}}
+			gate := &resetReadinessGate{blockAt: tc.blockAt}
+			manager := New(client, gate)
+			target := common.Target{Type: devicetypes.ComponentTypeNVSwitch, Identifiers: []string{"switch-1", "switch-2"}}
+			err := manager.PrepareFactoryReset(context.Background(), target)
+			if err == nil {
+				target.Identifiers = target.Identifiers[:1]
+				err = manager.SubmitFactoryReset(context.Background(), target, tc.scope)
+			}
+			require.Equal(t, tc.wantError, err != nil)
+			require.Equal(t, tc.wantCalls, client.calls)
+			if tc.blockAt != 1 && tc.scope != "bmc" {
+				require.True(t, gate.bounded)
+			}
+			if tc.blockAt == 2 {
+				var appErr *temporal.ApplicationError
+				require.ErrorAs(t, err, &appErr)
+				require.Equal(t, "FactoryResetNotReady", appErr.Type())
+			}
+			if tc.wantCalls > 0 {
+				expected := corev1.ComponentResetAction_COMPONENT_RESET_ACTION_NVOS_FACTORY_RESET
+				if tc.scope == "sdn" {
+					expected = corev1.ComponentResetAction_COMPONENT_RESET_ACTION_SDN_FACTORY_RESET
+				}
+				require.Equal(t, expected, client.request.Action)
+			}
 		})
 	}
 }

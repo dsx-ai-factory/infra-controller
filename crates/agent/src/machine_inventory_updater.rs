@@ -28,6 +28,8 @@ use crate::instrumentation::InventoryReport;
 
 #[derive(Debug, Clone)]
 pub(super) struct MachineInventoryUpdaterConfig {
+    /// Destination for each inventory-report attempt.
+    pub(super) instrumentation: carbide_instrument::Instrumentation,
     pub(super) dpu_agent_version: String,
     /// How often to update the inventory
     pub(super) update_inventory_interval: Duration,
@@ -113,9 +115,9 @@ pub(super) async fn single_run(config: &MachineInventoryUpdaterConfig) -> eyre::
     // Keep `InventoryReport::Failed` metric-only to avoid a duplicate
     // diagnostic; `InventoryReport::Succeeded` owns the DEBUG record.
     if result.is_ok() {
-        InventoryReport::Succeeded.emit();
+        InventoryReport::Succeeded.emit(&config.instrumentation);
     } else {
-        InventoryReport::Failed.emit();
+        InventoryReport::Failed.emit(&config.instrumentation);
     }
 
     result

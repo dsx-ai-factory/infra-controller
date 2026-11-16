@@ -87,10 +87,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing::info!(version = %carbide_version::version!(), "starting carbide-pxe");
     let prometheus_handle = metrics::setup_prometheus();
 
-    // The instrumentation framework's events resolve their instruments from
-    // the global OTel meter, so it installs before the router (and any first
-    // emit) exists. The returned setup owns the meter provider and must stay
-    // alive for the process lifetime -- dropping it stops collection.
+    // Retain the provider in router state so its Event metrics remain available to scrapes.
     let otel_metrics = metrics_endpoint::new_metrics_setup("carbide-pxe", "carbide", true)
         .expect("unable to install the OTel meter provider?");
 
@@ -112,7 +109,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         static_dir: opts.static_dir.clone(),
         runtime_config,
         prometheus_handle,
-        otel_registry: otel_metrics.registry.clone(),
+        instrumentation: carbide_instrument::Instrumentation::from_meter_provider(
+            &otel_metrics.meter_provider,
+        ),
+        otel_metrics,
     };
 
     let app = Router::new()

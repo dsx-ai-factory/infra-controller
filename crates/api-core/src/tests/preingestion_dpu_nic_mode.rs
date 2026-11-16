@@ -128,6 +128,7 @@ fn build_preingestion_manager(env: &common::api_fixtures::TestEnv) -> Preingesti
         None,
         env.api.work_lock_manager_handle.clone(),
         env.config.ntp_servers.clone(),
+        env.api.instrumentation.clone(),
     )
 }
 

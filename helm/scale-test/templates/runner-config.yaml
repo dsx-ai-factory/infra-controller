@@ -4,17 +4,20 @@
 {{- $s := .Values.store }}
 {{- $name := include "scale-test.jobName" (dict "root" . "suite" "runner") }}
 {{- $ingest := eq (toString $r.command) "ingestion" }}
+{{- $instances := has $r.command (list "instance-create" "instance-delete" "instance-lifecycle") }}
+{{- $writes := or $ingest $instances }}
+{{- $fixture := and $instances (ne (toString $r.fixture.name) "") }}
 {{- $resultMax := include "scale-test.count" (dict "key" "runner.resultMaxBytes" "value" $r.resultMaxBytes) }}
 {{- if or (lt (int64 $resultMax) 262144) (gt (int64 $resultMax) 16777216) }}
 {{- fail "runner.resultMaxBytes must be 262144 to 16777216" }}
 {{- end }}
 {{- $probeTimeout := include "scale-test.positiveSeconds" (dict "key" "runner.probeRequestTimeoutSeconds" "value" $r.probeRequestTimeoutSeconds) }}
 {{- if gt (int64 $probeTimeout) 600 }}{{ fail "runner.probeRequestTimeoutSeconds must be at most 600" }}{{ end }}
-{{- if not (has $r.command (list "fleet-up" "ingestion")) }}
-{{- fail "runner.command must be fleet-up or ingestion" }}
-{{- else if and $ingest (not (kindIs "bool" $r.dryRun)) }}
-{{- fail "runner.dryRun must be true or false for ingestion, which writes" }}
-{{- else if and (not $ingest) (not (kindIs "invalid" $r.dryRun)) }}
+{{- if not (has $r.command (list "fleet-up" "ingestion" "instance-create" "instance-delete" "instance-lifecycle")) }}
+{{- fail "runner.command must be fleet-up, ingestion, instance-create, instance-delete or instance-lifecycle" }}
+{{- else if and $writes (not (kindIs "bool" $r.dryRun)) }}
+{{- fail (printf "runner.dryRun must be true or false for %s, which writes" $r.command) }}
+{{- else if and (not $writes) (not (kindIs "invalid" $r.dryRun)) }}
 {{- fail "runner.dryRun must be unset for fleet-up, which writes nothing" }}
 {{- else if and $ingest (or (le (int64 $r.wholeRunSeconds) 1800) (lt (int64 $r.finalizeSeconds) 1800)) }}
 {{- fail "ingestion needs runner.wholeRunSeconds over 1800 and runner.finalizeSeconds of at least 1800" }}
@@ -35,7 +38,7 @@ data:
   config.yaml: |
     runId: {{ required "runner.runId is required when the runner is enabled" $r.runId | quote }}
     command: {{ $r.command }}
-    {{- if $ingest }}
+    {{- if $writes }}
     dryRun: {{ $r.dryRun }}
     {{- end }}
     namespace: {{ .Release.Namespace | quote }}
@@ -64,7 +67,9 @@ data:
         {{- if or (lt (int64 $v) 1) (gt (int64 $v) (int64 $max)) }}{{ fail (printf "runner.bmc.%s must be 1 to %d" $k $max) }}{{ end }}
         {{ $k }}: {{ $v }}
         {{- end }}
+      {{- if not $instances }}
       expectedRelease: {{ required "inventory.expected.release is required when the runner is enabled" $inv.expected.release | quote }}
+      {{- end }}
       mat:
         selector: {{ $inv.selector | quote }}
       checkStore: {{ $r.checkStore }}
@@ -72,12 +77,14 @@ data:
         {{- range $k := list "racks" "hosts" "switches" "powerShelves" "dpus" }}
         {{ $k }}: {{ include "scale-test.count" (dict "key" (printf "inventory.expected.%s" $k) "value" (index $inv.expected $k)) }}
         {{- end }}
+      {{- if not $instances }}
       nicoApi:
         serverName: {{ $inv.spiffe.serverName | quote }}
         spiffe:
           trustDomain: {{ required "inventory.spiffe.trustDomain is required when the runner is enabled" $inv.spiffe.trustDomain | quote }}
           serviceBasePaths: {{ splitList "," (required "inventory.spiffe.serviceBasePaths is required when the runner is enabled" $inv.spiffe.serviceBasePaths) | toJson }}
           machineBasePath: {{ $inv.spiffe.machineBasePath | quote }}
+      {{- end }}
       {{- if $r.checkStore }}
       store:
         url: {{ required "store.url is required when the runner checks the store" $s.url | quote }}
@@ -98,4 +105,99 @@ data:
           {{ $k }}: {{ $n }}
           {{- end }}
       {{- end }}
+      {{- if $instances }}
+      rest:
+        url: {{ required "runner.rest.url is required for instances" $r.rest.url | quote }}
+        org: {{ required "runner.rest.org is required for instances" $r.rest.org | quote }}
+        providerOrg: {{ required "runner.rest.providerOrg is required for label writes" $r.rest.providerOrg | quote }}
+        {{- if not $fixture }}
+        tokenFile: /var/run/secrets/rest-token/token
+        {{- else }}
+        auth:
+          tokenUrl: {{ required "runner.rest.auth.tokenUrl is required for fixture setup" $r.rest.auth.tokenUrl | quote }}
+          providerDirectory: /var/run/secrets/rest-provider
+          tenantClientId: {{ required "runner.rest.auth.tenantClientId is required" $r.rest.auth.tenantClientId | quote }}
+          credentialsDir: /run/scale-test-identity
+          tenantDirectory: /var/run/secrets/rest-tenant
+        {{- end }}
+        {{- if $r.rest.caSecret.name }}
+        caFile: /var/run/secrets/rest-ca/ca.crt
+        {{- end }}
+      observation:
+        intervalSeconds: {{ include "scale-test.positiveSeconds" (dict "key" "runner.observation.intervalSeconds" "value" $r.observation.intervalSeconds) }}
+        labelReadbackSeconds: {{ include "scale-test.positiveSeconds" (dict "key" "runner.observation.labelReadbackSeconds" "value" $r.observation.labelReadbackSeconds) }}
+      instance:
+        {{- if not (kindIs "bool" $r.instance.topologyOptimized) }}{{ fail "runner.instance.topologyOptimized must be a boolean" }}{{ end }}
+        topologyOptimized: {{ $r.instance.topologyOptimized }}
+        deleteCount: {{ include "scale-test.count" (dict "key" "runner.instance.deleteCount" "value" $r.instance.deleteCount) }}
+        {{- range $key, $min := dict "n" 1 "burstSize" 2 "apiPoolReplicas" 1 }}
+        {{- $count := include "scale-test.count" (dict "key" (printf "runner.instance.%s" $key) "value" (index $r.instance $key)) }}
+        {{- if lt (int64 $count) $min }}{{ fail (printf "runner.instance.%s must be at least %d" $key $min) }}{{ end }}
+        {{ $key }}: {{ $count }}
+        {{- end }}
+        {{- if not $fixture }}
+        tenantId: {{ required "runner.instance.tenantId is required" $r.instance.tenantId | quote }}
+        instanceTypeId: {{ required "runner.instance.instanceTypeId is required" $r.instance.instanceTypeId | quote }}
+        {{- end }}
+        {{- if ne $r.command "instance-delete" }}
+        {{- if not $fixture }}
+        vpcId: {{ required "runner.instance.vpcId is required" $r.instance.vpcId | quote }}
+        subnetId: {{ required "runner.instance.subnetId is required" $r.instance.subnetId | quote }}
+        ipxeFile: /var/run/secrets/instance-ipxe/script.ipxe
+        {{- else }}
+        ipxeFile: /etc/scale-test/fixture.ipxe
+        {{- end }}
+        {{- else }}
+        ownedManifest: {{ required "runner.instance.ownedManifest is required for delete" $r.instance.ownedManifest | quote }}
+        {{- end }}
+        apiPoolSelector: {{ required "runner.instance.apiPoolSelector is required" $r.instance.apiPoolSelector | toJson }}
+      {{- end }}
+      {{- if $fixture }}
+      fixture:
+        name: {{ $r.fixture.name | quote }}
+        siteId: {{ required "runner.fixture.siteId is required" $r.fixture.siteId | quote }}
+        probeUrl: http://127.0.0.1:19010
+        machineCapabilities: {{ required "runner.fixture.machineCapabilities is required" $r.fixture.machineCapabilities | toJson }}
+        ipBlockCIDR: {{ required "runner.fixture.ipBlockCIDR is required" $r.fixture.ipBlockCIDR | quote }}
+        allocationPrefixLength: {{ $r.fixture.allocationPrefixLength }}
+        subnetPrefixLength: {{ $r.fixture.subnetPrefixLength }}
+        fabricPrefixCIDRs: {{ $r.fixture.fabricPrefixCIDRs | toJson }}
+        teardown: {{ $r.fixture.teardown }}
+        setupSeconds: {{ include "scale-test.positiveSeconds" (dict "key" "runner.fixture.setupSeconds" "value" $r.fixture.setupSeconds) }}
+      {{- end }}
+  {{- if $fixture }}
+  {{- if ne $r.command "instance-delete" }}
+  fixture.ipxe: {{ required "runner.fixture.ipxeScript is required for create" $r.fixture.ipxeScript | quote }}
+  {{- end }}
+  fixture-probe.yaml: |
+    metrics_listen: ":19011"
+    api_listen: "127.0.0.1:19010"
+    state:
+      enabled: true
+      site_id: {{ $r.fixture.siteId | quote }}
+      caps: {calls_per_second: 1, call_timeout: 10s, max_backoff: 30s}
+      paging: {keep_seconds: {{ max 60 (mul (int64 $r.observation.intervalSeconds) 2) }}, max_kept_snapshots: 3}
+      rest:
+        target: {{ $r.rest.url | quote }}
+        {{- if $r.rest.caSecret.name }}
+        ca: /var/run/secrets/rest-ca/ca.crt
+        {{- end }}
+        provider:
+          org: {{ $r.rest.providerOrg | quote }}
+          auth:
+            token_url: {{ $r.rest.auth.tokenUrl | quote }}
+            credentials_file: /run/scale-test-identity/provider.json
+        fixture:
+          name: {{ $r.fixture.name | quote }}
+          tenant_org: {{ $r.rest.org | quote }}
+          auth:
+            token_url: {{ $r.rest.auth.tokenUrl | quote }}
+            credentials_file: /run/scale-test-identity/tenant.json
+      readers:
+        devices: {enabled: false, interval: 480s, timeout: 360s}
+        rest_inventory:
+          enabled: true
+          interval: {{ $r.observation.intervalSeconds }}s
+          timeout: {{ div (mul (int64 $r.observation.intervalSeconds) 3) 4 }}s
+  {{- end }}
 {{- end }}

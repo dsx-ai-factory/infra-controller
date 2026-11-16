@@ -604,6 +604,7 @@ pub async fn start(cmdline: command_line::Options) -> eyre::Result<()> {
                     forge_api: forge_api_server.clone(),
                     carbide_client_config: Arc::clone(&carbide_client_config),
                 },
+                crate::instrumentation::get_event_instrumentation(),
             )
             .await;
 
@@ -908,7 +909,9 @@ async fn register(
                 e
             )
         })?,
-        None => eyre::bail!("missing DPU info, should be impossible"),
+        None => {
+            eyre::bail!("missing DPU info, should be impossible");
+        }
     };
 
     let (registration_data, ..) = register_machine(

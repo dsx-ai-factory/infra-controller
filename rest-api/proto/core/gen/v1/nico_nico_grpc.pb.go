@@ -286,11 +286,11 @@ const (
 	Forge_GetAllExpectedRacks_FullMethodName                                = "/forge.Forge/GetAllExpectedRacks"
 	Forge_ReplaceAllExpectedRacks_FullMethodName                            = "/forge.Forge/ReplaceAllExpectedRacks"
 	Forge_DeleteAllExpectedRacks_FullMethodName                             = "/forge.Forge/DeleteAllExpectedRacks"
-	Forge_CreateExpectedNvLinkDomain_FullMethodName                         = "/forge.Forge/CreateExpectedNvLinkDomain"
-	Forge_DeleteExpectedNvLinkDomain_FullMethodName                         = "/forge.Forge/DeleteExpectedNvLinkDomain"
-	Forge_GetExpectedNvLinkDomain_FullMethodName                            = "/forge.Forge/GetExpectedNvLinkDomain"
-	Forge_FindExpectedNvLinkDomainIds_FullMethodName                        = "/forge.Forge/FindExpectedNvLinkDomainIds"
-	Forge_FindExpectedNvLinkDomainsByIds_FullMethodName                     = "/forge.Forge/FindExpectedNvLinkDomainsByIds"
+	Forge_CreateNvLinkDomain_FullMethodName                                 = "/forge.Forge/CreateNvLinkDomain"
+	Forge_DeleteNvLinkDomain_FullMethodName                                 = "/forge.Forge/DeleteNvLinkDomain"
+	Forge_GetNvLinkDomain_FullMethodName                                    = "/forge.Forge/GetNvLinkDomain"
+	Forge_FindNvLinkDomainIds_FullMethodName                                = "/forge.Forge/FindNvLinkDomainIds"
+	Forge_FindNvLinkDomainsByIds_FullMethodName                             = "/forge.Forge/FindNvLinkDomainsByIds"
 	Forge_AddExpectedRackGroup_FullMethodName                               = "/forge.Forge/AddExpectedRackGroup"
 	Forge_DeleteExpectedRackGroup_FullMethodName                            = "/forge.Forge/DeleteExpectedRackGroup"
 	Forge_UpdateExpectedRackGroup_FullMethodName                            = "/forge.Forge/UpdateExpectedRackGroup"
@@ -570,6 +570,7 @@ const (
 	Forge_UpdateComponentFirmware_FullMethodName                            = "/forge.Forge/UpdateComponentFirmware"
 	Forge_GetComponentFirmwareStatus_FullMethodName                         = "/forge.Forge/GetComponentFirmwareStatus"
 	Forge_ListComponentFirmwareVersions_FullMethodName                      = "/forge.Forge/ListComponentFirmwareVersions"
+	Forge_GetComponentCredentials_FullMethodName                            = "/forge.Forge/GetComponentCredentials"
 	Forge_CreateOperatingSystem_FullMethodName                              = "/forge.Forge/CreateOperatingSystem"
 	Forge_GetOperatingSystem_FullMethodName                                 = "/forge.Forge/GetOperatingSystem"
 	Forge_UpdateOperatingSystem_FullMethodName                              = "/forge.Forge/UpdateOperatingSystem"
@@ -1176,22 +1177,24 @@ type ForgeClient interface {
 	ReplaceAllExpectedRacks(ctx context.Context, in *ExpectedRackList, opts ...grpc.CallOption) (*emptypb.Empty, error)
 	// Delete all expected racks in site
 	DeleteAllExpectedRacks(ctx context.Context, in *emptypb.Empty, opts ...grpc.CallOption) (*emptypb.Empty, error)
-	// Administrator-managed expected NVLink domain inventory
-	// Declare immutable expected membership. This does not configure hardware or validate
-	// physical NVLink connectivity. Unknown/ambiguous members and wrong-group racks are rejected.
-	CreateExpectedNvLinkDomain(ctx context.Context, in *CreateExpectedNvLinkDomainRequest, opts ...grpc.CallOption) (*ExpectedNvLinkDomain, error)
-	// Delete only the declaration and release its MAC claims; no hardware operations occur.
+	// Administrator-managed NVLink domain inventory
+	// Declare immutable membership by rack index, slot index, and component type.
+	// This does not configure hardware, resolve positions against RackGroup members,
+	// or validate physical NVLink connectivity. A missing RackGroup returns NOT_FOUND.
+	// Positions already claimed by another domain return ALREADY_EXISTS.
+	CreateNvLinkDomain(ctx context.Context, in *CreateNvLinkDomainRequest, opts ...grpc.CallOption) (*NvLinkDomain, error)
+	// Delete only the declaration and release its positions; no hardware operations occur.
 	// Missing declarations return NOT_FOUND. Observed domains and health reports are untouched.
-	DeleteExpectedNvLinkDomain(ctx context.Context, in *ExpectedNvLinkDomainRequest, opts ...grpc.CallOption) (*emptypb.Empty, error)
-	GetExpectedNvLinkDomain(ctx context.Context, in *ExpectedNvLinkDomainRequest, opts ...grpc.CallOption) (*ExpectedNvLinkDomain, error)
-	FindExpectedNvLinkDomainIds(ctx context.Context, in *ExpectedNvLinkDomainSearchFilter, opts ...grpc.CallOption) (*ExpectedNvLinkDomainIdList, error)
-	FindExpectedNvLinkDomainsByIds(ctx context.Context, in *ExpectedNvLinkDomainsByIdsRequest, opts ...grpc.CallOption) (*ExpectedNvLinkDomainList, error)
+	DeleteNvLinkDomain(ctx context.Context, in *NvLinkDomainRequest, opts ...grpc.CallOption) (*emptypb.Empty, error)
+	GetNvLinkDomain(ctx context.Context, in *NvLinkDomainRequest, opts ...grpc.CallOption) (*NvLinkDomain, error)
+	FindNvLinkDomainIds(ctx context.Context, in *NvLinkDomainSearchFilter, opts ...grpc.CallOption) (*NvLinkDomainIdList, error)
+	FindNvLinkDomainsByIds(ctx context.Context, in *NvLinkDomainsByIdsRequest, opts ...grpc.CallOption) (*NvLinkDomainList, error)
 	// Expected Rack Group Management
 	AddExpectedRackGroup(ctx context.Context, in *ExpectedRackGroup, opts ...grpc.CallOption) (*emptypb.Empty, error)
-	// Fails with FAILED_PRECONDITION if expected NVLink domains reference this group.
+	// Fails with FAILED_PRECONDITION if NVLink domains reference this group.
 	DeleteExpectedRackGroup(ctx context.Context, in *ExpectedRackGroupRequest, opts ...grpc.CallOption) (*emptypb.Empty, error)
 	// Replace the full record, including both lists and metadata.
-	// With expected NVLink domains, racks must remain unchanged.
+	// With NVLink domains, racks must remain unchanged.
 	// Topology, protocol, and metadata changes are accepted.
 	UpdateExpectedRackGroup(ctx context.Context, in *ExpectedRackGroup, opts ...grpc.CallOption) (*emptypb.Empty, error)
 	GetExpectedRackGroup(ctx context.Context, in *ExpectedRackGroupRequest, opts ...grpc.CallOption) (*ExpectedRackGroup, error)
@@ -1200,9 +1203,9 @@ type ForgeClient interface {
 	FindExpectedRackGroupIds(ctx context.Context, in *ExpectedRackGroupSearchFilter, opts ...grpc.CallOption) (*ExpectedRackGroupIdList, error)
 	FindExpectedRackGroupsByIds(ctx context.Context, in *ExpectedRackGroupsByIdsRequest, opts ...grpc.CallOption) (*ExpectedRackGroupList, error)
 	// Atomically clear existing groups and insert the supplied list; an empty list clears all groups.
-	// Fails with FAILED_PRECONDITION while any expected NVLink domain references a group.
+	// Fails with FAILED_PRECONDITION while any NVLink domain references a group.
 	ReplaceAllExpectedRackGroups(ctx context.Context, in *ExpectedRackGroupList, opts ...grpc.CallOption) (*emptypb.Empty, error)
-	// Fails with FAILED_PRECONDITION while any expected NVLink domain references a group.
+	// Fails with FAILED_PRECONDITION while any NVLink domain references a group.
 	DeleteAllExpectedRackGroups(ctx context.Context, in *emptypb.Empty, opts ...grpc.CallOption) (*emptypb.Empty, error)
 	// Perform Attestation Procedure for Measured Boot
 	AttestQuote(ctx context.Context, in *AttestQuoteRequest, opts ...grpc.CallOption) (*AttestQuoteResponse, error)
@@ -1771,6 +1774,21 @@ type ForgeClient interface {
 	UpdateComponentFirmware(ctx context.Context, in *UpdateComponentFirmwareRequest, opts ...grpc.CallOption) (*UpdateComponentFirmwareResponse, error)
 	GetComponentFirmwareStatus(ctx context.Context, in *GetComponentFirmwareStatusRequest, opts ...grpc.CallOption) (*GetComponentFirmwareStatusResponse, error)
 	ListComponentFirmwareVersions(ctx context.Context, in *ListComponentFirmwareVersionsRequest, opts ...grpc.CallOption) (*ListComponentFirmwareVersionsResponse, error)
+	// Returns the username and password Core uses to reach an ingested power
+	// shelf or switch that an external component manager (PSM or NSM) operates:
+	// the per-device entry in the credential store, else the expected-inventory
+	// credentials. Credential overrides sent with a dispatch request are not
+	// consulted. Backend registration may persist a pair, including one that
+	// was an override (NSM/PSM store them in Vault). Where Core's credential
+	// store reads the entries a manager wrote, such a pair is a per-device
+	// entry and is returned like any other.
+	// Only the nico-powershelf-manager and nico-nvswitch-manager service
+	// identities may call this, each for its own credential kinds.
+	// Core bounds the device checks and the credential lookup together at five
+	// seconds and returns DeadlineExceeded when that time expires. A failed read
+	// of the credential store returns Internal instead of falling back to
+	// expected inventory, as does a database failure.
+	GetComponentCredentials(ctx context.Context, in *GetComponentCredentialsRequest, opts ...grpc.CallOption) (*GetComponentCredentialsResponse, error)
 	// Operating System library
 	CreateOperatingSystem(ctx context.Context, in *CreateOperatingSystemRequest, opts ...grpc.CallOption) (*OperatingSystem, error)
 	GetOperatingSystem(ctx context.Context, in *OperatingSystemId, opts ...grpc.CallOption) (*OperatingSystem, error)
@@ -4479,50 +4497,50 @@ func (c *forgeClient) DeleteAllExpectedRacks(ctx context.Context, in *emptypb.Em
 	return out, nil
 }
 
-func (c *forgeClient) CreateExpectedNvLinkDomain(ctx context.Context, in *CreateExpectedNvLinkDomainRequest, opts ...grpc.CallOption) (*ExpectedNvLinkDomain, error) {
+func (c *forgeClient) CreateNvLinkDomain(ctx context.Context, in *CreateNvLinkDomainRequest, opts ...grpc.CallOption) (*NvLinkDomain, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	out := new(ExpectedNvLinkDomain)
-	err := c.cc.Invoke(ctx, Forge_CreateExpectedNvLinkDomain_FullMethodName, in, out, cOpts...)
+	out := new(NvLinkDomain)
+	err := c.cc.Invoke(ctx, Forge_CreateNvLinkDomain_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
 	return out, nil
 }
 
-func (c *forgeClient) DeleteExpectedNvLinkDomain(ctx context.Context, in *ExpectedNvLinkDomainRequest, opts ...grpc.CallOption) (*emptypb.Empty, error) {
+func (c *forgeClient) DeleteNvLinkDomain(ctx context.Context, in *NvLinkDomainRequest, opts ...grpc.CallOption) (*emptypb.Empty, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(emptypb.Empty)
-	err := c.cc.Invoke(ctx, Forge_DeleteExpectedNvLinkDomain_FullMethodName, in, out, cOpts...)
+	err := c.cc.Invoke(ctx, Forge_DeleteNvLinkDomain_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
 	return out, nil
 }
 
-func (c *forgeClient) GetExpectedNvLinkDomain(ctx context.Context, in *ExpectedNvLinkDomainRequest, opts ...grpc.CallOption) (*ExpectedNvLinkDomain, error) {
+func (c *forgeClient) GetNvLinkDomain(ctx context.Context, in *NvLinkDomainRequest, opts ...grpc.CallOption) (*NvLinkDomain, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	out := new(ExpectedNvLinkDomain)
-	err := c.cc.Invoke(ctx, Forge_GetExpectedNvLinkDomain_FullMethodName, in, out, cOpts...)
+	out := new(NvLinkDomain)
+	err := c.cc.Invoke(ctx, Forge_GetNvLinkDomain_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
 	return out, nil
 }
 
-func (c *forgeClient) FindExpectedNvLinkDomainIds(ctx context.Context, in *ExpectedNvLinkDomainSearchFilter, opts ...grpc.CallOption) (*ExpectedNvLinkDomainIdList, error) {
+func (c *forgeClient) FindNvLinkDomainIds(ctx context.Context, in *NvLinkDomainSearchFilter, opts ...grpc.CallOption) (*NvLinkDomainIdList, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	out := new(ExpectedNvLinkDomainIdList)
-	err := c.cc.Invoke(ctx, Forge_FindExpectedNvLinkDomainIds_FullMethodName, in, out, cOpts...)
+	out := new(NvLinkDomainIdList)
+	err := c.cc.Invoke(ctx, Forge_FindNvLinkDomainIds_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
 	return out, nil
 }
 
-func (c *forgeClient) FindExpectedNvLinkDomainsByIds(ctx context.Context, in *ExpectedNvLinkDomainsByIdsRequest, opts ...grpc.CallOption) (*ExpectedNvLinkDomainList, error) {
+func (c *forgeClient) FindNvLinkDomainsByIds(ctx context.Context, in *NvLinkDomainsByIdsRequest, opts ...grpc.CallOption) (*NvLinkDomainList, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	out := new(ExpectedNvLinkDomainList)
-	err := c.cc.Invoke(ctx, Forge_FindExpectedNvLinkDomainsByIds_FullMethodName, in, out, cOpts...)
+	out := new(NvLinkDomainList)
+	err := c.cc.Invoke(ctx, Forge_FindNvLinkDomainsByIds_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -7322,6 +7340,16 @@ func (c *forgeClient) ListComponentFirmwareVersions(ctx context.Context, in *Lis
 	return out, nil
 }
 
+func (c *forgeClient) GetComponentCredentials(ctx context.Context, in *GetComponentCredentialsRequest, opts ...grpc.CallOption) (*GetComponentCredentialsResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(GetComponentCredentialsResponse)
+	err := c.cc.Invoke(ctx, Forge_GetComponentCredentials_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 func (c *forgeClient) CreateOperatingSystem(ctx context.Context, in *CreateOperatingSystemRequest, opts ...grpc.CallOption) (*OperatingSystem, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(OperatingSystem)
@@ -8079,22 +8107,24 @@ type ForgeServer interface {
 	ReplaceAllExpectedRacks(context.Context, *ExpectedRackList) (*emptypb.Empty, error)
 	// Delete all expected racks in site
 	DeleteAllExpectedRacks(context.Context, *emptypb.Empty) (*emptypb.Empty, error)
-	// Administrator-managed expected NVLink domain inventory
-	// Declare immutable expected membership. This does not configure hardware or validate
-	// physical NVLink connectivity. Unknown/ambiguous members and wrong-group racks are rejected.
-	CreateExpectedNvLinkDomain(context.Context, *CreateExpectedNvLinkDomainRequest) (*ExpectedNvLinkDomain, error)
-	// Delete only the declaration and release its MAC claims; no hardware operations occur.
+	// Administrator-managed NVLink domain inventory
+	// Declare immutable membership by rack index, slot index, and component type.
+	// This does not configure hardware, resolve positions against RackGroup members,
+	// or validate physical NVLink connectivity. A missing RackGroup returns NOT_FOUND.
+	// Positions already claimed by another domain return ALREADY_EXISTS.
+	CreateNvLinkDomain(context.Context, *CreateNvLinkDomainRequest) (*NvLinkDomain, error)
+	// Delete only the declaration and release its positions; no hardware operations occur.
 	// Missing declarations return NOT_FOUND. Observed domains and health reports are untouched.
-	DeleteExpectedNvLinkDomain(context.Context, *ExpectedNvLinkDomainRequest) (*emptypb.Empty, error)
-	GetExpectedNvLinkDomain(context.Context, *ExpectedNvLinkDomainRequest) (*ExpectedNvLinkDomain, error)
-	FindExpectedNvLinkDomainIds(context.Context, *ExpectedNvLinkDomainSearchFilter) (*ExpectedNvLinkDomainIdList, error)
-	FindExpectedNvLinkDomainsByIds(context.Context, *ExpectedNvLinkDomainsByIdsRequest) (*ExpectedNvLinkDomainList, error)
+	DeleteNvLinkDomain(context.Context, *NvLinkDomainRequest) (*emptypb.Empty, error)
+	GetNvLinkDomain(context.Context, *NvLinkDomainRequest) (*NvLinkDomain, error)
+	FindNvLinkDomainIds(context.Context, *NvLinkDomainSearchFilter) (*NvLinkDomainIdList, error)
+	FindNvLinkDomainsByIds(context.Context, *NvLinkDomainsByIdsRequest) (*NvLinkDomainList, error)
 	// Expected Rack Group Management
 	AddExpectedRackGroup(context.Context, *ExpectedRackGroup) (*emptypb.Empty, error)
-	// Fails with FAILED_PRECONDITION if expected NVLink domains reference this group.
+	// Fails with FAILED_PRECONDITION if NVLink domains reference this group.
 	DeleteExpectedRackGroup(context.Context, *ExpectedRackGroupRequest) (*emptypb.Empty, error)
 	// Replace the full record, including both lists and metadata.
-	// With expected NVLink domains, racks must remain unchanged.
+	// With NVLink domains, racks must remain unchanged.
 	// Topology, protocol, and metadata changes are accepted.
 	UpdateExpectedRackGroup(context.Context, *ExpectedRackGroup) (*emptypb.Empty, error)
 	GetExpectedRackGroup(context.Context, *ExpectedRackGroupRequest) (*ExpectedRackGroup, error)
@@ -8103,9 +8133,9 @@ type ForgeServer interface {
 	FindExpectedRackGroupIds(context.Context, *ExpectedRackGroupSearchFilter) (*ExpectedRackGroupIdList, error)
 	FindExpectedRackGroupsByIds(context.Context, *ExpectedRackGroupsByIdsRequest) (*ExpectedRackGroupList, error)
 	// Atomically clear existing groups and insert the supplied list; an empty list clears all groups.
-	// Fails with FAILED_PRECONDITION while any expected NVLink domain references a group.
+	// Fails with FAILED_PRECONDITION while any NVLink domain references a group.
 	ReplaceAllExpectedRackGroups(context.Context, *ExpectedRackGroupList) (*emptypb.Empty, error)
-	// Fails with FAILED_PRECONDITION while any expected NVLink domain references a group.
+	// Fails with FAILED_PRECONDITION while any NVLink domain references a group.
 	DeleteAllExpectedRackGroups(context.Context, *emptypb.Empty) (*emptypb.Empty, error)
 	// Perform Attestation Procedure for Measured Boot
 	AttestQuote(context.Context, *AttestQuoteRequest) (*AttestQuoteResponse, error)
@@ -8674,6 +8704,21 @@ type ForgeServer interface {
 	UpdateComponentFirmware(context.Context, *UpdateComponentFirmwareRequest) (*UpdateComponentFirmwareResponse, error)
 	GetComponentFirmwareStatus(context.Context, *GetComponentFirmwareStatusRequest) (*GetComponentFirmwareStatusResponse, error)
 	ListComponentFirmwareVersions(context.Context, *ListComponentFirmwareVersionsRequest) (*ListComponentFirmwareVersionsResponse, error)
+	// Returns the username and password Core uses to reach an ingested power
+	// shelf or switch that an external component manager (PSM or NSM) operates:
+	// the per-device entry in the credential store, else the expected-inventory
+	// credentials. Credential overrides sent with a dispatch request are not
+	// consulted. Backend registration may persist a pair, including one that
+	// was an override (NSM/PSM store them in Vault). Where Core's credential
+	// store reads the entries a manager wrote, such a pair is a per-device
+	// entry and is returned like any other.
+	// Only the nico-powershelf-manager and nico-nvswitch-manager service
+	// identities may call this, each for its own credential kinds.
+	// Core bounds the device checks and the credential lookup together at five
+	// seconds and returns DeadlineExceeded when that time expires. A failed read
+	// of the credential store returns Internal instead of falling back to
+	// expected inventory, as does a database failure.
+	GetComponentCredentials(context.Context, *GetComponentCredentialsRequest) (*GetComponentCredentialsResponse, error)
 	// Operating System library
 	CreateOperatingSystem(context.Context, *CreateOperatingSystemRequest) (*OperatingSystem, error)
 	GetOperatingSystem(context.Context, *OperatingSystemId) (*OperatingSystem, error)
@@ -9524,20 +9569,20 @@ func (UnimplementedForgeServer) ReplaceAllExpectedRacks(context.Context, *Expect
 func (UnimplementedForgeServer) DeleteAllExpectedRacks(context.Context, *emptypb.Empty) (*emptypb.Empty, error) {
 	return nil, status.Error(codes.Unimplemented, "method DeleteAllExpectedRacks not implemented")
 }
-func (UnimplementedForgeServer) CreateExpectedNvLinkDomain(context.Context, *CreateExpectedNvLinkDomainRequest) (*ExpectedNvLinkDomain, error) {
-	return nil, status.Error(codes.Unimplemented, "method CreateExpectedNvLinkDomain not implemented")
+func (UnimplementedForgeServer) CreateNvLinkDomain(context.Context, *CreateNvLinkDomainRequest) (*NvLinkDomain, error) {
+	return nil, status.Error(codes.Unimplemented, "method CreateNvLinkDomain not implemented")
 }
-func (UnimplementedForgeServer) DeleteExpectedNvLinkDomain(context.Context, *ExpectedNvLinkDomainRequest) (*emptypb.Empty, error) {
-	return nil, status.Error(codes.Unimplemented, "method DeleteExpectedNvLinkDomain not implemented")
+func (UnimplementedForgeServer) DeleteNvLinkDomain(context.Context, *NvLinkDomainRequest) (*emptypb.Empty, error) {
+	return nil, status.Error(codes.Unimplemented, "method DeleteNvLinkDomain not implemented")
 }
-func (UnimplementedForgeServer) GetExpectedNvLinkDomain(context.Context, *ExpectedNvLinkDomainRequest) (*ExpectedNvLinkDomain, error) {
-	return nil, status.Error(codes.Unimplemented, "method GetExpectedNvLinkDomain not implemented")
+func (UnimplementedForgeServer) GetNvLinkDomain(context.Context, *NvLinkDomainRequest) (*NvLinkDomain, error) {
+	return nil, status.Error(codes.Unimplemented, "method GetNvLinkDomain not implemented")
 }
-func (UnimplementedForgeServer) FindExpectedNvLinkDomainIds(context.Context, *ExpectedNvLinkDomainSearchFilter) (*ExpectedNvLinkDomainIdList, error) {
-	return nil, status.Error(codes.Unimplemented, "method FindExpectedNvLinkDomainIds not implemented")
+func (UnimplementedForgeServer) FindNvLinkDomainIds(context.Context, *NvLinkDomainSearchFilter) (*NvLinkDomainIdList, error) {
+	return nil, status.Error(codes.Unimplemented, "method FindNvLinkDomainIds not implemented")
 }
-func (UnimplementedForgeServer) FindExpectedNvLinkDomainsByIds(context.Context, *ExpectedNvLinkDomainsByIdsRequest) (*ExpectedNvLinkDomainList, error) {
-	return nil, status.Error(codes.Unimplemented, "method FindExpectedNvLinkDomainsByIds not implemented")
+func (UnimplementedForgeServer) FindNvLinkDomainsByIds(context.Context, *NvLinkDomainsByIdsRequest) (*NvLinkDomainList, error) {
+	return nil, status.Error(codes.Unimplemented, "method FindNvLinkDomainsByIds not implemented")
 }
 func (UnimplementedForgeServer) AddExpectedRackGroup(context.Context, *ExpectedRackGroup) (*emptypb.Empty, error) {
 	return nil, status.Error(codes.Unimplemented, "method AddExpectedRackGroup not implemented")
@@ -10375,6 +10420,9 @@ func (UnimplementedForgeServer) GetComponentFirmwareStatus(context.Context, *Get
 }
 func (UnimplementedForgeServer) ListComponentFirmwareVersions(context.Context, *ListComponentFirmwareVersionsRequest) (*ListComponentFirmwareVersionsResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method ListComponentFirmwareVersions not implemented")
+}
+func (UnimplementedForgeServer) GetComponentCredentials(context.Context, *GetComponentCredentialsRequest) (*GetComponentCredentialsResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method GetComponentCredentials not implemented")
 }
 func (UnimplementedForgeServer) CreateOperatingSystem(context.Context, *CreateOperatingSystemRequest) (*OperatingSystem, error) {
 	return nil, status.Error(codes.Unimplemented, "method CreateOperatingSystem not implemented")
@@ -15174,92 +15222,92 @@ func _Forge_DeleteAllExpectedRacks_Handler(srv interface{}, ctx context.Context,
 	return interceptor(ctx, in, info, handler)
 }
 
-func _Forge_CreateExpectedNvLinkDomain_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
-	in := new(CreateExpectedNvLinkDomainRequest)
+func _Forge_CreateNvLinkDomain_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(CreateNvLinkDomainRequest)
 	if err := dec(in); err != nil {
 		return nil, err
 	}
 	if interceptor == nil {
-		return srv.(ForgeServer).CreateExpectedNvLinkDomain(ctx, in)
+		return srv.(ForgeServer).CreateNvLinkDomain(ctx, in)
 	}
 	info := &grpc.UnaryServerInfo{
 		Server:     srv,
-		FullMethod: Forge_CreateExpectedNvLinkDomain_FullMethodName,
+		FullMethod: Forge_CreateNvLinkDomain_FullMethodName,
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
-		return srv.(ForgeServer).CreateExpectedNvLinkDomain(ctx, req.(*CreateExpectedNvLinkDomainRequest))
+		return srv.(ForgeServer).CreateNvLinkDomain(ctx, req.(*CreateNvLinkDomainRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
 
-func _Forge_DeleteExpectedNvLinkDomain_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
-	in := new(ExpectedNvLinkDomainRequest)
+func _Forge_DeleteNvLinkDomain_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(NvLinkDomainRequest)
 	if err := dec(in); err != nil {
 		return nil, err
 	}
 	if interceptor == nil {
-		return srv.(ForgeServer).DeleteExpectedNvLinkDomain(ctx, in)
+		return srv.(ForgeServer).DeleteNvLinkDomain(ctx, in)
 	}
 	info := &grpc.UnaryServerInfo{
 		Server:     srv,
-		FullMethod: Forge_DeleteExpectedNvLinkDomain_FullMethodName,
+		FullMethod: Forge_DeleteNvLinkDomain_FullMethodName,
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
-		return srv.(ForgeServer).DeleteExpectedNvLinkDomain(ctx, req.(*ExpectedNvLinkDomainRequest))
+		return srv.(ForgeServer).DeleteNvLinkDomain(ctx, req.(*NvLinkDomainRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
 
-func _Forge_GetExpectedNvLinkDomain_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
-	in := new(ExpectedNvLinkDomainRequest)
+func _Forge_GetNvLinkDomain_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(NvLinkDomainRequest)
 	if err := dec(in); err != nil {
 		return nil, err
 	}
 	if interceptor == nil {
-		return srv.(ForgeServer).GetExpectedNvLinkDomain(ctx, in)
+		return srv.(ForgeServer).GetNvLinkDomain(ctx, in)
 	}
 	info := &grpc.UnaryServerInfo{
 		Server:     srv,
-		FullMethod: Forge_GetExpectedNvLinkDomain_FullMethodName,
+		FullMethod: Forge_GetNvLinkDomain_FullMethodName,
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
-		return srv.(ForgeServer).GetExpectedNvLinkDomain(ctx, req.(*ExpectedNvLinkDomainRequest))
+		return srv.(ForgeServer).GetNvLinkDomain(ctx, req.(*NvLinkDomainRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
 
-func _Forge_FindExpectedNvLinkDomainIds_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
-	in := new(ExpectedNvLinkDomainSearchFilter)
+func _Forge_FindNvLinkDomainIds_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(NvLinkDomainSearchFilter)
 	if err := dec(in); err != nil {
 		return nil, err
 	}
 	if interceptor == nil {
-		return srv.(ForgeServer).FindExpectedNvLinkDomainIds(ctx, in)
+		return srv.(ForgeServer).FindNvLinkDomainIds(ctx, in)
 	}
 	info := &grpc.UnaryServerInfo{
 		Server:     srv,
-		FullMethod: Forge_FindExpectedNvLinkDomainIds_FullMethodName,
+		FullMethod: Forge_FindNvLinkDomainIds_FullMethodName,
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
-		return srv.(ForgeServer).FindExpectedNvLinkDomainIds(ctx, req.(*ExpectedNvLinkDomainSearchFilter))
+		return srv.(ForgeServer).FindNvLinkDomainIds(ctx, req.(*NvLinkDomainSearchFilter))
 	}
 	return interceptor(ctx, in, info, handler)
 }
 
-func _Forge_FindExpectedNvLinkDomainsByIds_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
-	in := new(ExpectedNvLinkDomainsByIdsRequest)
+func _Forge_FindNvLinkDomainsByIds_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(NvLinkDomainsByIdsRequest)
 	if err := dec(in); err != nil {
 		return nil, err
 	}
 	if interceptor == nil {
-		return srv.(ForgeServer).FindExpectedNvLinkDomainsByIds(ctx, in)
+		return srv.(ForgeServer).FindNvLinkDomainsByIds(ctx, in)
 	}
 	info := &grpc.UnaryServerInfo{
 		Server:     srv,
-		FullMethod: Forge_FindExpectedNvLinkDomainsByIds_FullMethodName,
+		FullMethod: Forge_FindNvLinkDomainsByIds_FullMethodName,
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
-		return srv.(ForgeServer).FindExpectedNvLinkDomainsByIds(ctx, req.(*ExpectedNvLinkDomainsByIdsRequest))
+		return srv.(ForgeServer).FindNvLinkDomainsByIds(ctx, req.(*NvLinkDomainsByIdsRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
@@ -20275,6 +20323,24 @@ func _Forge_ListComponentFirmwareVersions_Handler(srv interface{}, ctx context.C
 	return interceptor(ctx, in, info, handler)
 }
 
+func _Forge_GetComponentCredentials_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(GetComponentCredentialsRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ForgeServer).GetComponentCredentials(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Forge_GetComponentCredentials_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ForgeServer).GetComponentCredentials(ctx, req.(*GetComponentCredentialsRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 func _Forge_CreateOperatingSystem_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(CreateOperatingSystemRequest)
 	if err := dec(in); err != nil {
@@ -21637,24 +21703,24 @@ var Forge_ServiceDesc = grpc.ServiceDesc{
 			Handler:    _Forge_DeleteAllExpectedRacks_Handler,
 		},
 		{
-			MethodName: "CreateExpectedNvLinkDomain",
-			Handler:    _Forge_CreateExpectedNvLinkDomain_Handler,
+			MethodName: "CreateNvLinkDomain",
+			Handler:    _Forge_CreateNvLinkDomain_Handler,
 		},
 		{
-			MethodName: "DeleteExpectedNvLinkDomain",
-			Handler:    _Forge_DeleteExpectedNvLinkDomain_Handler,
+			MethodName: "DeleteNvLinkDomain",
+			Handler:    _Forge_DeleteNvLinkDomain_Handler,
 		},
 		{
-			MethodName: "GetExpectedNvLinkDomain",
-			Handler:    _Forge_GetExpectedNvLinkDomain_Handler,
+			MethodName: "GetNvLinkDomain",
+			Handler:    _Forge_GetNvLinkDomain_Handler,
 		},
 		{
-			MethodName: "FindExpectedNvLinkDomainIds",
-			Handler:    _Forge_FindExpectedNvLinkDomainIds_Handler,
+			MethodName: "FindNvLinkDomainIds",
+			Handler:    _Forge_FindNvLinkDomainIds_Handler,
 		},
 		{
-			MethodName: "FindExpectedNvLinkDomainsByIds",
-			Handler:    _Forge_FindExpectedNvLinkDomainsByIds_Handler,
+			MethodName: "FindNvLinkDomainsByIds",
+			Handler:    _Forge_FindNvLinkDomainsByIds_Handler,
 		},
 		{
 			MethodName: "AddExpectedRackGroup",
@@ -22767,6 +22833,10 @@ var Forge_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "ListComponentFirmwareVersions",
 			Handler:    _Forge_ListComponentFirmwareVersions_Handler,
+		},
+		{
+			MethodName: "GetComponentCredentials",
+			Handler:    _Forge_GetComponentCredentials_Handler,
 		},
 		{
 			MethodName: "CreateOperatingSystem",

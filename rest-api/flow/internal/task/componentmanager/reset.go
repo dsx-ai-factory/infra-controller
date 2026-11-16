@@ -8,11 +8,11 @@ import (
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/executor/temporalworkflow/common"
 )
 
-// ComponentResetter separates the one-shot mutation from retryable observations.
-// Each call operates on exactly one switch so partial failures retain attribution.
+// ComponentResetter gates a rack batch, submits one switch at a time, and
+// observes accepted resets without repeating the mutation.
 type ComponentResetter interface {
-	ResetNVOS(context.Context, common.Target) error
+	PrepareFactoryReset(context.Context, common.Target) error
+	SubmitFactoryReset(context.Context, common.Target, string) error
 	NVOSResetCompleted(context.Context, common.Target) (bool, error)
-	ResetSDN(context.Context, common.Target) error
 	SDNResetCompleted(context.Context, common.Target) (bool, error)
 }

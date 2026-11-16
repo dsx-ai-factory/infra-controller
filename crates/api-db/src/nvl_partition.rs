@@ -156,6 +156,19 @@ pub async fn mark_as_deleted(
         .map_err(|e| DatabaseError::new(query, e))
 }
 
+/// Deletes the given physical partition rows and returns the ids that existed.
+pub async fn final_delete_many(
+    partition_ids: &[NvLinkPartitionId],
+    txn: &mut PgConnection,
+) -> Result<Vec<NvLinkPartitionId>, DatabaseError> {
+    let query = "DELETE FROM nvlink_partitions WHERE id = ANY($1) RETURNING id";
+    sqlx::query_scalar(query)
+        .bind(partition_ids)
+        .fetch_all(txn)
+        .await
+        .map_err(|e| DatabaseError::new(query, e))
+}
+
 pub async fn final_delete(
     partition_id: NvLinkPartitionId,
     txn: &mut PgConnection,

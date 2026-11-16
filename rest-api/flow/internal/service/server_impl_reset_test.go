@@ -23,7 +23,7 @@ func TestFlowServerImpl_FactoryResetSwitches(t *testing.T) {
 		invalid     bool
 		code        string
 	}{
-		{name: "legacy default NVOS", code: taskcommon.OpCodeNVOSFactoryReset},
+		{name: "missing reset target", invalid: true},
 		{name: "explicit NVOS", scope: "nvos", code: taskcommon.OpCodeNVOSFactoryReset},
 		{name: "SDN", scope: "sdn", code: taskcommon.OpCodeSDNFactoryReset},
 		{name: "unknown scope", scope: "bmc", invalid: true},

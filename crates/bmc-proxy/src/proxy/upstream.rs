@@ -24,7 +24,7 @@ use std::net::{IpAddr, Ipv6Addr};
 use std::time::{Duration, Instant};
 
 use axum::body::Body;
-use carbide_instrument::emit;
+use carbide_instrument::Instrumentation;
 use carbide_utils::HostPortPair;
 use http::{HeaderMap, Method, Response, StatusCode, Uri};
 use rpc::carbide_api_client::CarbideApiClient;
@@ -92,7 +92,7 @@ pub(super) struct UpstreamResponse {
 /// An attempt that got no answer from the BMC: the caller's answer, and how
 /// the BMC failed it, if the proxy did not fail it first.
 pub(super) struct AttemptFailed {
-    pub(super) response: Response<Body>,
+    pub(super) response: Box<Response<Body>>,
     pub(super) by_bmc: Option<BmcFailure>,
     /// The target's certificate failed verification, so the request was not
     /// sent: the address may no longer be what its cached credentials say.
@@ -110,7 +110,7 @@ pub(super) enum BmcFailure {
 impl From<Response<Body>> for AttemptFailed {
     fn from(response: Response<Body>) -> Self {
         Self {
-            response,
+            response: Box::new(response),
             by_bmc: None,
             certificate_rejected: false,
         }
@@ -248,7 +248,7 @@ pub(super) async fn send_upstream(
 
     let started = Instant::now();
     let upstream_result = upstream_request.send().await;
-    emit(UpstreamRequestCompleted {
+    state.instrumentation.emit(UpstreamRequestCompleted {
         method: MethodLabel::from(&parts.method),
         status: UpstreamStatus::from_result(&upstream_result),
         took: started.elapsed(),
@@ -268,12 +268,12 @@ pub(super) async fn send_upstream(
             // changed hands, so it neither counts against the BMC nor reads
             // as a connection failure.
             if let Some(rejection) = rejection {
-                emit(UpstreamCertificateRejected {
+                state.instrumentation.emit(UpstreamCertificateRejected {
                     bmc_ip_address: target_ip.to_string(),
                     error: rejection.to_string(),
                 });
                 return AttemptFailed {
-                    response: error_response(
+                    response: Box::new(error_response(
                         (
                             StatusCode::BAD_GATEWAY,
                             format!(
@@ -281,7 +281,7 @@ pub(super) async fn send_upstream(
                             ),
                         )
                             .into(),
-                    ),
+                    )),
                     by_bmc: None,
                     certificate_rejected: true,
                 };
@@ -296,7 +296,9 @@ pub(super) async fn send_upstream(
                     }
                     _ => None,
                 },
-                response: error_response((StatusCode::BAD_GATEWAY, error.to_string()).into()),
+                response: Box::new(error_response(
+                    (StatusCode::BAD_GATEWAY, error.to_string()).into(),
+                )),
                 certificate_rejected: false,
             }
         })
@@ -471,14 +473,24 @@ impl UpstreamClients {
     pub(super) fn new(
         redirect_mode: RedirectMode,
         switch_tls: Option<&SwitchTlsConfig>,
+        instrumentation: Instrumentation,
     ) -> Result<Self, BmcProxyError> {
+        let switch_instrumentation = instrumentation.clone();
         Ok(Self {
-            bmc: build_http_client(redirect_mode)?,
+            bmc: build_http_client(redirect_mode, instrumentation.clone())?,
             switch_nvos: switch_tls
                 .map(|config| {
-                    SwitchClient::new(config, move |tls| {
-                        build_switch_http_client(redirect_mode, tls)
-                    })
+                    SwitchClient::new(
+                        config,
+                        move |tls| {
+                            build_switch_http_client(
+                                redirect_mode,
+                                tls,
+                                switch_instrumentation.clone(),
+                            )
+                        },
+                        instrumentation.clone(),
+                    )
                 })
                 .transpose()?,
         })
@@ -497,8 +509,11 @@ impl UpstreamClients {
 /// the client accepts any, and presents none of its own.
 fn build_http_client(
     redirect_mode: RedirectMode,
+    instrumentation: Instrumentation,
 ) -> Result<reqwest_middleware::ClientWithMiddleware, BmcProxyError> {
-    with_middleware(client_builder(redirect_mode).danger_accept_invalid_certs(true))
+    with_middleware(
+        client_builder(redirect_mode, instrumentation).danger_accept_invalid_certs(true),
+    )
 }
 
 /// The client for switches' NVOS interfaces, over `tls`, which verifies the
@@ -508,16 +523,20 @@ fn build_http_client(
 pub(super) fn build_switch_http_client(
     redirect_mode: RedirectMode,
     tls: rustls::ClientConfig,
+    instrumentation: Instrumentation,
 ) -> Result<reqwest_middleware::ClientWithMiddleware, BmcProxyError> {
     with_middleware(
-        client_builder(redirect_mode)
+        client_builder(redirect_mode, instrumentation)
             .no_proxy()
             .tls_backend_preconfigured(tls),
     )
 }
 
 /// What every upstream client shares, whatever its TLS.
-fn client_builder(redirect_mode: RedirectMode) -> reqwest::ClientBuilder {
+fn client_builder(
+    redirect_mode: RedirectMode,
+    instrumentation: Instrumentation,
+) -> reqwest::ClientBuilder {
     reqwest::Client::builder()
         // Keep the proxy's error-sanitization boundary explicit even if a
         // workspace dependency enables a reqwest decompression feature later.
@@ -525,7 +544,7 @@ fn client_builder(redirect_mode: RedirectMode) -> reqwest::ClientBuilder {
         .no_brotli()
         .no_deflate()
         .no_zstd()
-        .redirect(redirect_policy(redirect_mode))
+        .redirect(redirect_policy(redirect_mode, instrumentation))
         .connect_timeout(std::time::Duration::from_secs(5)) // Limit connections to 5 seconds
         // A backstop: every request sets its own budget when its body is attached.
         .timeout(DEFAULT_UPSTREAM_TIMEOUT)
@@ -547,7 +566,10 @@ fn with_middleware(
 
 /// Builds the Reqwest policy that preserves its redirect method and body
 /// handling while preventing credentials from crossing an origin boundary.
-fn redirect_policy(mode: RedirectMode) -> reqwest::redirect::Policy {
+fn redirect_policy(
+    mode: RedirectMode,
+    instrumentation: Instrumentation,
+) -> reqwest::redirect::Policy {
     reqwest::redirect::Policy::custom(move |attempt| {
         if mode == RedirectMode::ReturnToClient {
             return attempt.stop();
@@ -565,7 +587,7 @@ fn redirect_policy(mode: RedirectMode) -> reqwest::redirect::Policy {
 
         let status = RedirectStatus::from(attempt.status());
         if attempt.previous().len() > MAX_REDIRECTS {
-            emit(RedirectObserved {
+            instrumentation.emit(RedirectObserved {
                 mode,
                 status,
                 target,
@@ -574,7 +596,7 @@ fn redirect_policy(mode: RedirectMode) -> reqwest::redirect::Policy {
             return attempt.error("too many same-origin BMC redirects");
         }
 
-        emit(RedirectObserved {
+        instrumentation.emit(RedirectObserved {
             mode,
             status,
             target,
@@ -775,13 +797,16 @@ mod tests {
         );
         let source = spawn_http(source, &mut servers, shutdown.clone()).await;
 
-        let response = build_http_client(RedirectMode::FollowSameOrigin)
-            .expect("HTTP client builds")
-            .get(format!("http://{source}/start"))
-            .header("x-auth-token", "must-not-leak")
-            .send()
-            .await
-            .expect("source response returned");
+        let response = build_http_client(
+            RedirectMode::FollowSameOrigin,
+            carbide_instrument::Instrumentation::global(),
+        )
+        .expect("HTTP client builds")
+        .get(format!("http://{source}/start"))
+        .header("x-auth-token", "must-not-leak")
+        .send()
+        .await
+        .expect("source response returned");
 
         assert_eq!(response.status(), StatusCode::TEMPORARY_REDIRECT);
         assert_eq!(destination_hits.load(Ordering::SeqCst), 0);
@@ -822,14 +847,17 @@ mod tests {
             )
             .with_state(destination_hits.clone());
         let address = spawn_http(app, &mut servers, shutdown.clone()).await;
-        let response = build_http_client(RedirectMode::FollowSameOrigin)
-            .expect("HTTP client builds")
-            .get(format!("http://{address}/start"))
-            .basic_auth("original-user", Some("original-password"))
-            .header("x-auth-token", "original-token")
-            .send()
-            .await
-            .expect("source response returned");
+        let response = build_http_client(
+            RedirectMode::FollowSameOrigin,
+            carbide_instrument::Instrumentation::global(),
+        )
+        .expect("HTTP client builds")
+        .get(format!("http://{address}/start"))
+        .basic_auth("original-user", Some("original-password"))
+        .header("x-auth-token", "original-token")
+        .send()
+        .await
+        .expect("source response returned");
 
         let status = response.status();
         drop(response);
@@ -867,12 +895,15 @@ mod tests {
                 .with_state(requests.clone());
         let chain = spawn_http(chain, &mut servers, shutdown.clone()).await;
 
-        build_http_client(RedirectMode::FollowSameOrigin)
-            .expect("HTTP client builds")
-            .get(format!("http://{chain}/0"))
-            .send()
-            .await
-            .expect_err("sixth redirect exceeds the configured limit");
+        build_http_client(
+            RedirectMode::FollowSameOrigin,
+            carbide_instrument::Instrumentation::global(),
+        )
+        .expect("HTTP client builds")
+        .get(format!("http://{chain}/0"))
+        .send()
+        .await
+        .expect_err("sixth redirect exceeds the configured limit");
 
         assert_eq!(requests.load(Ordering::SeqCst), 6);
         stop_http(&mut servers, &shutdown).await;
@@ -980,15 +1011,20 @@ mod tests {
             .await;
         let client_config = CarbideClientConfig::default();
         let api_config = ApiConfig::new("https://example.com", &client_config);
-        let api_client = CarbideApiClient::new(&api_config);
+        let api_client =
+            CarbideApiClient::new(&api_config, carbide_instrument::Instrumentation::noop());
 
         create_client(
             ip,
             &api_client,
             &credential_cache,
-            &SwitchProbe::default(),
-            &UpstreamClients::new(RedirectMode::FollowSameOrigin, None)
-                .expect("test HTTP clients build"),
+            &SwitchProbe::new(carbide_instrument::Instrumentation::global()),
+            &UpstreamClients::new(
+                RedirectMode::FollowSameOrigin,
+                None,
+                carbide_instrument::Instrumentation::global(),
+            )
+            .expect("test HTTP clients build"),
             &proxy_override(case),
         )
         .await
@@ -1263,8 +1299,11 @@ mod tests {
     async fn observe_attached_body(
         declared_length: Option<u64>,
     ) -> Result<AttachedBodySummary, String> {
-        let client =
-            build_http_client(RedirectMode::FollowSameOrigin).map_err(|e| e.to_string())?;
+        let client = build_http_client(
+            RedirectMode::FollowSameOrigin,
+            carbide_instrument::Instrumentation::global(),
+        )
+        .map_err(|e| e.to_string())?;
         let mut headers = HeaderMap::new();
         if let Some(length) = declared_length {
             headers.insert(
@@ -1414,7 +1453,11 @@ mod tests {
     // replayable.
     #[tokio::test]
     async fn only_buffered_or_absent_bodies_are_replayable() {
-        let client = build_http_client(RedirectMode::FollowSameOrigin).expect("http client");
+        let client = build_http_client(
+            RedirectMode::FollowSameOrigin,
+            carbide_instrument::Instrumentation::global(),
+        )
+        .expect("http client");
         let post = || client.post("https://bmc.invalid/redfish/v1/Systems");
 
         let mut none = UpstreamBody::None;

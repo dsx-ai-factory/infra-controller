@@ -588,9 +588,10 @@ fn histogram_units_round_trip() {
 fn red_helper_counts_everything_and_logs_only_failures() {
     use futures_util::FutureExt as _;
 
-    let metrics = MetricsCapture::start();
+    let metrics = MetricsCapture::owned();
     let logs = capture_logs(|| {
         let ok: Result<u32, String> = carbide_instrument::red::instrumented(
+            metrics.instrumentation(),
             "matrix_backend",
             "matrix_op",
             std::future::ready(Ok(7)),
@@ -600,6 +601,7 @@ fn red_helper_counts_everything_and_logs_only_failures() {
         assert_eq!(ok, Ok(7));
 
         let failed: Result<u32, String> = carbide_instrument::red::instrumented(
+            metrics.instrumentation(),
             "matrix_backend",
             "matrix_op",
             std::future::ready(Err("boom".to_string())),
@@ -635,7 +637,7 @@ fn red_helper_counts_everything_and_logs_only_failures() {
 /// longer calls still contribute to the overflow bucket, count, and sum.
 #[test]
 fn red_histogram_resolves_slow_calls() {
-    let metrics = MetricsCapture::start();
+    let metrics = MetricsCapture::owned();
     let name = "carbide_external_call_duration_milliseconds";
     let labels = &[
         ("backend", "matrix_slow_backend"),
@@ -643,7 +645,13 @@ fn red_histogram_resolves_slow_calls() {
         ("outcome", "error"),
     ];
     for elapsed_ms in [5.0, 20_000.0, 300_000.0, 360_000.0] {
-        carbide_instrument::red::record("matrix_slow_backend", "read", "error", elapsed_ms);
+        carbide_instrument::red::record(
+            metrics.instrumentation(),
+            "matrix_slow_backend",
+            "read",
+            "error",
+            elapsed_ms,
+        );
     }
 
     assert_eq!(metrics.histogram_count_delta(name, labels), 4);

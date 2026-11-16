@@ -1347,6 +1347,7 @@ async fn test_gb200_deployment_migration_requires_every_dpu(pool: sqlx::PgPool) 
     .await;
 
     let updater = DpuNicFirmwareUpdate {
+        instrumentation: env.api.instrumentation.clone(),
         reported_wrong_versions: Mutex::new(HashSet::new()),
         metrics: None,
         config: env.config.clone(),

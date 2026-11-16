@@ -17,7 +17,7 @@ func TestComponentResetTaskInfo_Persistence(t *testing.T) {
 		name, raw, target, code string
 		invalid                 bool
 	}{
-		{name: "predecessor payload", raw: `{}`, target: "nvos", code: taskcommon.OpCodeNVOSFactoryReset},
+		{name: "missing persisted target is invalid", raw: `{}`, invalid: true},
 		{name: "explicit NVOS", raw: `{"target":"nvos"}`, target: "nvos", code: taskcommon.OpCodeNVOSFactoryReset},
 		{name: "SDN survives reload", raw: `{"target":"sdn"}`, target: "sdn", code: taskcommon.OpCodeSDNFactoryReset},
 		{name: "invalid persisted scope", raw: `{"target":"bmc"}`, invalid: true},
@@ -37,7 +37,7 @@ func TestComponentResetTaskInfo_Persistence(t *testing.T) {
 			require.NoError(t, err)
 			require.NoError(t, reloaded.Validate())
 			require.Equal(t, tc.code, reloaded.CodeString())
-			require.Equal(t, tc.target, reloaded.(*ComponentResetTaskInfo).ResetTarget())
+			require.Equal(t, tc.target, reloaded.(*ComponentResetTaskInfo).Target)
 			require.Equal(t, reloaded, reloaded.Clone())
 		})
 	}

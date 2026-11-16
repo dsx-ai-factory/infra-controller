@@ -52,6 +52,7 @@ pub trait BearerTokenAuthenticator: Send + Sync {
 
 #[derive(Clone)]
 pub struct CertDescriptionMiddleware<AZ: Authorization> {
+    instrumentation: carbide_instrument::Instrumentation,
     pub spiffe_context: Arc<SpiffeContext>,
     pub extra_allowed_certs: Option<AllowedCertCriteria>,
     /// Optional bearer-token (JWT) authenticator. When set, requests carrying an
@@ -67,11 +68,15 @@ pub struct CertDescriptionMiddleware<AZ: Authorization> {
 }
 
 impl<AZ: Authorization> CertDescriptionMiddleware<AZ> {
+    /// Creates authentication state whose rejection Events use the supplied destination.
+    /// Retain its provider while services created from this layer are in use.
     pub fn new(
         extra_allowed_certs: Option<AllowedCertCriteria>,
         spiffe_context: SpiffeContext,
+        instrumentation: carbide_instrument::Instrumentation,
     ) -> Self {
         CertDescriptionMiddleware {
+            instrumentation,
             spiffe_context: Arc::new(spiffe_context),
             extra_allowed_certs,
             bearer_authenticator: None,
@@ -685,11 +690,13 @@ where
                         false
                     }
                     Err(error) => {
-                        carbide_instrument::emit(ClientCertRejected {
-                            reason: RejectReason::from(&error),
-                            peer_address: conn_attrs.peer_address,
-                            error: error.to_string(),
-                        });
+                        self.authorization_context
+                            .instrumentation
+                            .emit(ClientCertRejected {
+                                reason: RejectReason::from(&error),
+                                peer_address: conn_attrs.peer_address,
+                                error: error.to_string(),
+                            });
                         false
                     }
                 };
@@ -701,7 +708,9 @@ where
                 }
             }
         } else {
-            carbide_instrument::emit(AuthenticationConnectionAttributesMissing);
+            self.authorization_context
+                .instrumentation
+                .emit(AuthenticationConnectionAttributesMissing);
         }
 
         extensions.insert(auth_context);
@@ -823,7 +832,11 @@ mod tests {
     fn missing_connection_attributes_logs_counts_and_delegates() {
         let metrics = MetricsCapture::start();
         let recorder = AuthContextRecorder::default();
-        let middleware = CertDescriptionMiddleware::<NoAuthorization>::new(None, spiffe_context());
+        let middleware = CertDescriptionMiddleware::<NoAuthorization>::new(
+            None,
+            spiffe_context(),
+            carbide_instrument::Instrumentation::global(),
+        );
         let mut service = middleware.layer(recorder.clone());
 
         let logs = capture_logs(|| {
@@ -870,7 +883,11 @@ mod tests {
     #[test]
     fn valid_chain_with_unmappable_intermediate_counts_no_rejection() {
         let metrics = MetricsCapture::start();
-        let middleware = CertDescriptionMiddleware::<NoAuthorization>::new(None, spiffe_context());
+        let middleware = CertDescriptionMiddleware::<NoAuthorization>::new(
+            None,
+            spiffe_context(),
+            carbide_instrument::Instrumentation::global(),
+        );
         let mut service = middleware.layer(Terminal);
 
         capture_logs(|| {
@@ -906,7 +923,11 @@ mod tests {
     #[test]
     fn rejected_client_cert_logs_and_counts() {
         let metrics = MetricsCapture::start();
-        let middleware = CertDescriptionMiddleware::<NoAuthorization>::new(None, spiffe_context());
+        let middleware = CertDescriptionMiddleware::<NoAuthorization>::new(
+            None,
+            spiffe_context(),
+            carbide_instrument::Instrumentation::global(),
+        );
         let mut service = middleware.layer(Terminal);
 
         let logs = capture_logs(|| {
@@ -990,10 +1011,14 @@ mod tests {
 
     #[tokio::test]
     async fn valid_bearer_token_yields_machine_principal() {
-        let middleware = CertDescriptionMiddleware::<NoAuthorization>::new(None, spiffe_context())
-            .with_bearer_authenticator(Arc::new(FakeAuth(
-                "spiffe://example.test/carbide-system/machine/m1".to_string(),
-            )));
+        let middleware = CertDescriptionMiddleware::<NoAuthorization>::new(
+            None,
+            spiffe_context(),
+            carbide_instrument::Instrumentation::global(),
+        )
+        .with_bearer_authenticator(Arc::new(FakeAuth(
+            "spiffe://example.test/carbide-system/machine/m1".to_string(),
+        )));
         let principals = principals_for(middleware, Some("Bearer good")).await;
         assert!(
             principals.contains(&Principal::SpiffeMachineIdentifier("m1".to_string())),
@@ -1011,11 +1036,14 @@ mod tests {
     #[tokio::test]
     async fn bearer_scheme_is_matched_case_insensitively() {
         for header in ["bearer good", "BEARER good", "BeArEr good", "Bearer   good"] {
-            let middleware =
-                CertDescriptionMiddleware::<NoAuthorization>::new(None, spiffe_context())
-                    .with_bearer_authenticator(Arc::new(FakeAuth(
-                        "spiffe://example.test/carbide-system/machine/m1".to_string(),
-                    )));
+            let middleware = CertDescriptionMiddleware::<NoAuthorization>::new(
+                None,
+                spiffe_context(),
+                carbide_instrument::Instrumentation::global(),
+            )
+            .with_bearer_authenticator(Arc::new(FakeAuth(
+                "spiffe://example.test/carbide-system/machine/m1".to_string(),
+            )));
             let principals = principals_for(middleware, Some(header)).await;
             assert!(
                 principals.contains(&Principal::SpiffeMachineIdentifier("m1".to_string())),
@@ -1029,11 +1057,14 @@ mod tests {
     #[tokio::test]
     async fn a_non_bearer_authorization_header_is_ignored() {
         for header in ["Basic good", "good", "Bearer"] {
-            let middleware =
-                CertDescriptionMiddleware::<NoAuthorization>::new(None, spiffe_context())
-                    .with_bearer_authenticator(Arc::new(FakeAuth(
-                        "spiffe://example.test/carbide-system/machine/m1".to_string(),
-                    )));
+            let middleware = CertDescriptionMiddleware::<NoAuthorization>::new(
+                None,
+                spiffe_context(),
+                carbide_instrument::Instrumentation::global(),
+            )
+            .with_bearer_authenticator(Arc::new(FakeAuth(
+                "spiffe://example.test/carbide-system/machine/m1".to_string(),
+            )));
             let principals = principals_for(middleware, Some(header)).await;
             assert!(
                 !principals
@@ -1046,10 +1077,14 @@ mod tests {
 
     #[tokio::test]
     async fn invalid_bearer_token_yields_no_machine_principal() {
-        let middleware = CertDescriptionMiddleware::<NoAuthorization>::new(None, spiffe_context())
-            .with_bearer_authenticator(Arc::new(FakeAuth(
-                "spiffe://example.test/carbide-system/machine/m1".to_string(),
-            )));
+        let middleware = CertDescriptionMiddleware::<NoAuthorization>::new(
+            None,
+            spiffe_context(),
+            carbide_instrument::Instrumentation::global(),
+        )
+        .with_bearer_authenticator(Arc::new(FakeAuth(
+            "spiffe://example.test/carbide-system/machine/m1".to_string(),
+        )));
         let principals = principals_for(middleware, Some("Bearer bogus")).await;
         assert!(
             !principals
@@ -1096,8 +1131,12 @@ mod tests {
     async fn principals_for_chain(
         (machine_certs_enabled, chain): (bool, &[&str]),
     ) -> Vec<Principal> {
-        let middleware = CertDescriptionMiddleware::<NoAuthorization>::new(None, spiffe_context())
-            .with_machine_certs_enabled(machine_certs_enabled);
+        let middleware = CertDescriptionMiddleware::<NoAuthorization>::new(
+            None,
+            spiffe_context(),
+            carbide_instrument::Instrumentation::global(),
+        )
+        .with_machine_certs_enabled(machine_certs_enabled);
         let chain = chain
             .iter()
             .map(|path| spiffe_leaf_certificate(path))
@@ -1148,7 +1187,11 @@ mod tests {
 
     #[tokio::test]
     async fn machine_cert_yields_machine_principal_by_default() {
-        let middleware = CertDescriptionMiddleware::<NoAuthorization>::new(None, spiffe_context());
+        let middleware = CertDescriptionMiddleware::<NoAuthorization>::new(
+            None,
+            spiffe_context(),
+            carbide_instrument::Instrumentation::global(),
+        );
         let principals = principals_for_certs(
             middleware,
             None,
@@ -1166,11 +1209,15 @@ mod tests {
         // `[node_auth] mtls_enabled = false`: a machine client cert mints no
         // machine principal, while a valid bearer token still does — the JWT
         // becomes the only node auth path.
-        let middleware = CertDescriptionMiddleware::<NoAuthorization>::new(None, spiffe_context())
-            .with_machine_certs_enabled(false)
-            .with_bearer_authenticator(Arc::new(FakeAuth(
-                "spiffe://example.test/carbide-system/machine/m2".to_string(),
-            )));
+        let middleware = CertDescriptionMiddleware::<NoAuthorization>::new(
+            None,
+            spiffe_context(),
+            carbide_instrument::Instrumentation::global(),
+        )
+        .with_machine_certs_enabled(false)
+        .with_bearer_authenticator(Arc::new(FakeAuth(
+            "spiffe://example.test/carbide-system/machine/m2".to_string(),
+        )));
         let principals = principals_for_certs(
             middleware,
             Some("Bearer good"),
@@ -1191,8 +1238,12 @@ mod tests {
     async fn service_cert_unaffected_when_machine_certs_disabled() {
         // The gate is scoped to machine certs: service identities on the same
         // listener keep authenticating via mTLS.
-        let middleware = CertDescriptionMiddleware::<NoAuthorization>::new(None, spiffe_context())
-            .with_machine_certs_enabled(false);
+        let middleware = CertDescriptionMiddleware::<NoAuthorization>::new(
+            None,
+            spiffe_context(),
+            carbide_instrument::Instrumentation::global(),
+        )
+        .with_machine_certs_enabled(false);
         let principals = principals_for_certs(
             middleware,
             None,
@@ -1215,8 +1266,12 @@ mod tests {
     /// cosmetic. Assert the whole principal set, not the absence of one member.
     #[tokio::test]
     async fn a_machine_cert_alone_authorizes_nothing_when_machine_certs_are_disabled() {
-        let middleware = CertDescriptionMiddleware::<NoAuthorization>::new(None, spiffe_context())
-            .with_machine_certs_enabled(false);
+        let middleware = CertDescriptionMiddleware::<NoAuthorization>::new(
+            None,
+            spiffe_context(),
+            carbide_instrument::Instrumentation::global(),
+        )
+        .with_machine_certs_enabled(false);
         let principals = principals_for_certs(
             middleware,
             None,
@@ -1235,11 +1290,15 @@ mod tests {
     /// machine mTLS is disabled.
     #[tokio::test]
     async fn a_bearer_token_authorizes_when_the_machine_cert_is_refused() {
-        let middleware = CertDescriptionMiddleware::<NoAuthorization>::new(None, spiffe_context())
-            .with_bearer_authenticator(Arc::new(FakeAuth(
-                "spiffe://example.test/carbide-system/machine/m1".to_string(),
-            )))
-            .with_machine_certs_enabled(false);
+        let middleware = CertDescriptionMiddleware::<NoAuthorization>::new(
+            None,
+            spiffe_context(),
+            carbide_instrument::Instrumentation::global(),
+        )
+        .with_bearer_authenticator(Arc::new(FakeAuth(
+            "spiffe://example.test/carbide-system/machine/m1".to_string(),
+        )))
+        .with_machine_certs_enabled(false);
         let principals = principals_for_certs(
             middleware,
             Some("Bearer good"),
@@ -1261,8 +1320,12 @@ mod tests {
     /// earns `TrustedCertificate` alongside its own principal.
     #[tokio::test]
     async fn a_service_cert_keeps_trusted_certificate_when_machine_certs_are_disabled() {
-        let middleware = CertDescriptionMiddleware::<NoAuthorization>::new(None, spiffe_context())
-            .with_machine_certs_enabled(false);
+        let middleware = CertDescriptionMiddleware::<NoAuthorization>::new(
+            None,
+            spiffe_context(),
+            carbide_instrument::Instrumentation::global(),
+        )
+        .with_machine_certs_enabled(false);
         let principals = principals_for_certs(
             middleware,
             None,
@@ -1279,7 +1342,11 @@ mod tests {
     /// not cost a normal mTLS node its trusted-certificate grant.
     #[tokio::test]
     async fn a_machine_cert_keeps_trusted_certificate_when_machine_certs_are_enabled() {
-        let middleware = CertDescriptionMiddleware::<NoAuthorization>::new(None, spiffe_context());
+        let middleware = CertDescriptionMiddleware::<NoAuthorization>::new(
+            None,
+            spiffe_context(),
+            carbide_instrument::Instrumentation::global(),
+        );
         let principals = principals_for_certs(
             middleware,
             None,
@@ -1296,7 +1363,11 @@ mod tests {
     async fn bearer_ignored_when_no_authenticator_configured() {
         // Without an authenticator installed, an Authorization header is ignored
         // (nodes keep using mTLS) — no machine principal appears.
-        let middleware = CertDescriptionMiddleware::<NoAuthorization>::new(None, spiffe_context());
+        let middleware = CertDescriptionMiddleware::<NoAuthorization>::new(
+            None,
+            spiffe_context(),
+            carbide_instrument::Instrumentation::global(),
+        );
         let principals = principals_for(middleware, Some("Bearer good")).await;
         assert!(
             !principals

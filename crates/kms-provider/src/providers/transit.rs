@@ -26,7 +26,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64;
-use carbide_instrument::{Event, LabelValue, emit, red};
+use carbide_instrument::{Event, LabelValue, red};
 use vaultrs::api::transit::requests::DataKeyType;
 use vaultrs::client::VaultClient;
 use vaultrs::transit;
@@ -81,6 +81,7 @@ pub const DEFAULT_TRANSIT_MOUNT: &str = "transit";
 /// Each kek_id corresponds to a named Transit key
 /// on the server.
 pub struct TransitKmsProvider {
+    instrumentation: carbide_instrument::Instrumentation,
     client: Arc<VaultClient>,
     transit_mount: String,
     known_keys: Vec<String>,
@@ -92,13 +93,19 @@ impl TransitKmsProvider {
     /// list of known Transit key names. The known_keys
     /// list is used by can_decrypt_kek to determine
     /// ownership without a network call.
-    pub fn new(client: Arc<VaultClient>, transit_mount: String, known_keys: Vec<String>) -> Self {
+    pub fn new(
+        client: Arc<VaultClient>,
+        transit_mount: String,
+        known_keys: Vec<String>,
+        instrumentation: carbide_instrument::Instrumentation,
+    ) -> Self {
         tracing::info!(
             transit_mount = %transit_mount,
             known_keys = ?known_keys,
             "initialized Transit KMS provider"
         );
         Self {
+            instrumentation,
             client,
             transit_mount,
             known_keys,
@@ -109,10 +116,12 @@ impl TransitKmsProvider {
     /// the Vault token at 90% (0.9) of each lease
     /// duration until `cancel` fires. The caller spawns
     /// it -- typically onto the process JoinSet, so
-    /// shutdown actually stops it.
+    /// shutdown actually stops it. Event metrics use the supplied instrumentation;
+    /// retain its provider until the future finishes.
     pub fn run_token_renewal(
         &self,
         cancel: tokio_util::sync::CancellationToken,
+        instrumentation: carbide_instrument::Instrumentation,
     ) -> impl Future<Output = ()> + Send + 'static {
         let client = self.client.clone();
         async move {
@@ -123,7 +132,7 @@ impl TransitKmsProvider {
                 match vaultrs::token::lookup_self(client.as_ref()).await {
                     Ok(info) => break info,
                     Err(e) => {
-                        emit(TokenMaintenanceFailed::Lookup {
+                        instrumentation.emit(TokenMaintenanceFailed::Lookup {
                             error: e.to_string(),
                         });
                         tokio::select! {
@@ -161,7 +170,7 @@ impl TransitKmsProvider {
                         );
                     }
                     Err(e) => {
-                        emit(TokenMaintenanceFailed::Renew {
+                        instrumentation.emit(TokenMaintenanceFailed::Renew {
                             error: e.to_string(),
                         });
                         next_renewal = Duration::from_secs(30);
@@ -179,6 +188,7 @@ impl KmsBackend for TransitKmsProvider {
         // decoded buffers.
         let plaintext_b64 = Zeroizing::new(BASE64.encode(dek));
         let response = red::instrumented(
+            &self.instrumentation,
             "vault_transit",
             "encrypt_dek",
             transit::data::encrypt(
@@ -210,6 +220,7 @@ impl KmsBackend for TransitKmsProvider {
             .map_err(|_| KmsError::DecryptionFailed("invalid ciphertext encoding".to_string()))?;
 
         let response = red::instrumented(
+            &self.instrumentation,
             "vault_transit",
             "decrypt_dek",
             transit::data::decrypt(
@@ -251,6 +262,7 @@ impl KmsBackend for TransitKmsProvider {
         kek_id: &str,
     ) -> Result<(Zeroizing<[u8; 32]>, EncryptedDek), KmsError> {
         let response = red::instrumented(
+            &self.instrumentation,
             "vault_transit",
             "generate_data_key",
             transit::generate::data_key(
@@ -292,6 +304,7 @@ mod tests {
     use std::net::TcpListener;
     use std::process::Stdio;
 
+    use carbide_instrument::emit;
     use carbide_instrument::testing::{MetricsCapture, capture_logs};
     use carbide_test_support::{Check, check_values};
     use serial_test::serial;
@@ -494,6 +507,7 @@ mod tests {
             vault.client.clone(),
             "transit".to_string(),
             vec!["test-key".to_string()],
+            carbide_instrument::Instrumentation::noop(),
         );
 
         let dek: [u8; 32] = rand::random();
@@ -526,6 +540,7 @@ mod tests {
             vault.client.clone(),
             "transit".to_string(),
             vec!["test-key".to_string()],
+            carbide_instrument::Instrumentation::noop(),
         );
 
         let (dek, wrapped) = provider
@@ -557,6 +572,7 @@ mod tests {
             vault.client.clone(),
             "transit".to_string(),
             vec!["test-key".to_string()],
+            carbide_instrument::Instrumentation::noop(),
         );
 
         let dek: [u8; 32] = rand::random();

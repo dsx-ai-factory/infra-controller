@@ -47,11 +47,7 @@ impl CredentialClient {
             Credentials::UsernamePassword { username, password } => (username, password),
         };
 
-        if password.is_empty() {
-            return false;
-        }
-
-        true
+        !password.is_empty()
     }
 
     // TODO (spyda): fix the credential implementation for DPU and Host UEFI so that

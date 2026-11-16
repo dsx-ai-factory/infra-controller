@@ -69,8 +69,11 @@ impl TestSiteExplorer {
         self.endpoint_explorer.insert_endpoint_results(endpoints);
     }
 
-    pub async fn run_single_iteration(&self) -> SiteExplorerResult<SiteIdentifiedHosts> {
-        self.site_explorer.run_single_iteration().await
+    pub fn run_single_iteration(
+        &self,
+    ) -> impl Future<Output = SiteExplorerResult<SiteIdentifiedHosts>> + Send {
+        // Keep the exploration future out of each calling fixture's frame.
+        Box::pin(self.site_explorer.run_single_iteration())
     }
 }
 

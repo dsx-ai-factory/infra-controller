@@ -691,3 +691,58 @@ func TestParseSettings(t *testing.T) {
 		}
 	}
 }
+
+type ingestShiftClock struct{ shift time.Duration }
+
+func (c *ingestShiftClock) Now() time.Time   { return time.Now().Add(c.shift) }
+func (*ingestShiftClock) Instant() time.Time { return time.Now() }
+
+type baselineBoundProbe struct{ *fakeProbe }
+
+func (p baselineBoundProbe) Count(ctx context.Context, f probeapi.Filter) (probeapi.CountResponse, error) {
+	time.Sleep(time.Millisecond)
+	if err := ctx.Err(); err != nil {
+		return probeapi.CountResponse{}, err
+	}
+	return p.fakeProbe.Count(ctx, f)
+}
+
+func TestReadinessEdgeAndMonotonicSendCutoff(t *testing.T) {
+	for _, name := range []string{"last readiness poll", "backward wall clock"} {
+		t.Run(name, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				r := newRunRig(t)
+				clock := &ingestShiftClock{}
+				now := time.Now()
+				rc := run.RunCtx{Ctx: context.Background(), Clock: clock, Deadline: now.Add(time.Hour), ProbeReadEnd: now.Add(2 * time.Hour), EvidenceEnd: now.Add(2 * time.Hour), DryRun: true}
+				check := r.test.check
+				if name == "last readiness poll" {
+					r.test.probe = baselineBoundProbe{r.probe}
+					r.test.check = func(ctx context.Context, d readiness.Deps, end time.Time) readiness.Report {
+						time.Sleep(time.Until(end) - time.Nanosecond)
+						return check(ctx, d, end)
+					}
+					out, err := r.test.Run(rc, r.w)
+					if err != nil || out.Verdict != result.Go {
+						t.Fatalf("last-poll gate=%s err=%v", out.Verdict, err)
+					}
+				} else {
+					r.test.s.Writes.Concurrency = one
+					clock.shift = time.Hour
+					rc.Deadline = now.Add(time.Hour + 20*time.Second)
+					rc.DryRun = false
+					r.test.check = func(ctx context.Context, d readiness.Deps, end time.Time) readiness.Report {
+						clock.shift = 0
+						return check(ctx, d, end)
+					}
+					r.test.dial = func(string) (ForgeWriter, error) { time.Sleep(19 * time.Second); return r.f, nil }
+					r.f.during = func(context.Context, string) { time.Sleep(2 * time.Second) }
+					_, _ = r.test.Run(rc, r.w)
+					if calls := r.f.seen(); len(calls) != 1 {
+						t.Fatalf("sent past monotonic work end: %v", calls)
+					}
+				}
+			})
+		})
+	}
+}

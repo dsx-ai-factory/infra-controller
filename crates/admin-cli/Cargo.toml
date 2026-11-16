@@ -27,6 +27,7 @@ name = "nico-admin-cli"
 path = "src/main.rs"
 
 [dependencies]
+carbide-instrument = { path = "../instrument" }
 # [local-dependencies]
 # DO NOT PUT DEPENDENCIES OTHER THAN LOCAL DEPS HERE, THEY SHOULD ALL HAVE 'path =' IN THEM.
 bmc-vendor = { path = "../bmc-vendor" }
@@ -46,7 +47,6 @@ carbide-rpc = { path = "../rpc", features = ["cli", "model"] }
 carbide-rpc-utils = { path = "../rpc-utils" }
 carbide-utils = { path = "../utils" }
 config-version = { path = "../config-version" }
-rms-observability = { path = "../rms-observability" }
 # DO NOT PUT DEPENDENCIES OTHER THAN LOCAL DEPS HERE, THEY SHOULD ALL HAVE 'path =' IN THEM.
 
 chrono = { workspace = true }
@@ -59,7 +59,6 @@ eyre = { workspace = true }
 futures = { workspace = true }
 ipnet = { workspace = true }
 libredfish = { workspace = true }
-librms = { workspace = true }
 mac_address = { workspace = true }
 pandoc = { workspace = true }
 prettytable-rs = { workspace = true }
@@ -91,7 +90,6 @@ prost = { workspace = true }
 tempfile = { workspace = true }
 
 [build-dependencies]
-clap = { workspace = true }
 carbide-version = { path = "../version" }
 
 [lints]

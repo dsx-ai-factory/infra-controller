@@ -18,6 +18,7 @@
 pub mod domain;
 pub mod domain_metadata;
 pub mod resource_record;
+pub(crate) mod zone;
 
 use carbide_uuid::network::NetworkSegmentId;
 use ipnetwork::IpNetwork;

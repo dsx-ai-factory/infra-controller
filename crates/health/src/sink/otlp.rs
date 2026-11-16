@@ -18,7 +18,7 @@
 use std::num::NonZeroUsize;
 use std::sync::Arc;
 
-use carbide_instrument::{emit, initialize_counter_series};
+use carbide_instrument::Instrumentation;
 use opentelemetry::KeyValue;
 use prometheus::{Counter, CounterVec, Opts};
 
@@ -67,6 +67,7 @@ pub(crate) struct OtlpMetricQueueKey {
 
 #[cfg(not(feature = "bench-hooks"))]
 pub(crate) struct OtlpSink {
+    instrumentation: Instrumentation,
     queue: Arc<OtlpQueue>,
     metrics_queue: Arc<OtlpMetricsQueue>,
     replaced_total: Counter,
@@ -78,6 +79,7 @@ pub(crate) struct OtlpSink {
 
 #[cfg(feature = "bench-hooks")]
 pub struct OtlpSink {
+    instrumentation: Instrumentation,
     queue: Arc<OtlpQueue>,
     metrics_queue: Arc<OtlpMetricsQueue>,
     replaced_total: Counter,
@@ -118,6 +120,7 @@ impl OtlpSink {
     ///
     /// The returned order matches `configs`. Each sink starts separate log and
     /// metric drain tasks. Queue metrics identify the configured endpoint.
+    /// Retain the instrumentation provider until the sinks and drains stop.
     ///
     /// # Errors
     ///
@@ -128,6 +131,7 @@ impl OtlpSink {
         mapper: Arc<dyn RedfishEventMapper>,
         metrics_manager: &MetricsManager,
         prefix: &str,
+        instrumentation: &Instrumentation,
     ) -> Result<Vec<Self>, HealthError> {
         let handle = tokio::runtime::Handle::try_current().map_err(|e| {
             HealthError::GenericError(format!("otlp sink requires active tokio runtime: {e}"))
@@ -170,14 +174,14 @@ impl OtlpSink {
             let target = ConfiguredOtlpTarget(config.endpoint.clone());
 
             for signal in [OtlpSignal::Logs, OtlpSignal::Metrics] {
-                let initialized = initialize_counter_series(&OtlpRecordAccepted {
+                let initialized = instrumentation.initialize_counter_series(&OtlpRecordAccepted {
                     target: target.clone(),
                     signal,
                 });
 
                 debug_assert!(initialized, "OTLP ingress Event must be a counter");
 
-                let initialized = initialize_counter_series(&OtlpRecordsExported {
+                let initialized = instrumentation.initialize_counter_series(&OtlpRecordsExported {
                     target: target.clone(),
                     signal,
                 });
@@ -191,7 +195,7 @@ impl OtlpSink {
             let metrics_replaced_total =
                 metrics_replaced_total.get_metric_with_label_values(&[&config.endpoint])?;
 
-            let drain = OtlpDrainTask::new(queue.clone(), config.clone());
+            let drain = OtlpDrainTask::new(queue.clone(), config.clone(), instrumentation.clone());
             handle.spawn(drain.run());
 
             // Each target and signal owns a drain so a slow collector cannot
@@ -200,11 +204,13 @@ impl OtlpSink {
                 metrics_queue.clone(),
                 config.clone(),
                 prefix.to_string(),
+                instrumentation.clone(),
             );
 
             handle.spawn(metrics_drain.run());
 
             sinks.push(Self {
+                instrumentation: instrumentation.clone(),
                 queue,
                 metrics_queue,
                 replaced_total,
@@ -222,7 +228,7 @@ impl OtlpSink {
 
     /// Records the observable result of one log or metric queue insertion.
     fn record_save_outcome(&self, outcome: SaveOutcome, signal: OtlpSignal) {
-        emit(OtlpRecordAccepted {
+        self.instrumentation.emit(OtlpRecordAccepted {
             target: self.target.clone(),
             signal,
         });
@@ -233,7 +239,7 @@ impl OtlpSink {
                 OtlpSignal::Logs => self.replaced_total.inc(),
                 OtlpSignal::Metrics => self.metrics_replaced_total.inc(),
             },
-            SaveOutcome::DroppedOldest => emit(OtlpQueueEntryDropped {
+            SaveOutcome::DroppedOldest => self.instrumentation.emit(OtlpQueueEntryDropped {
                 target: self.target.clone(),
                 signal,
             }),
@@ -275,6 +281,7 @@ impl OtlpSink {
         };
 
         Self {
+            instrumentation: carbide_instrument::Instrumentation::global(),
             queue: Arc::new(DedupQueue::bounded(capacity)),
             metrics_queue: Arc::new(DedupQueue::bounded(capacity)),
             replaced_total: Counter::new("bench_replaced", "bench").unwrap(),
@@ -1269,6 +1276,7 @@ mod tests {
             Arc::new(OpenBmcEventMapper),
             &metrics_manager,
             "otlp_replacement_test",
+            &carbide_instrument::Instrumentation::global(),
         )
         .expect("OTLP sinks should initialize");
 
@@ -1639,6 +1647,7 @@ mod tests {
             Arc::new(OpenBmcEventMapper),
             &metrics_manager,
             name,
+            &carbide_instrument::Instrumentation::global(),
         )
         .expect("OTLP sink should initialize")
         .remove(0)
@@ -1832,6 +1841,7 @@ mod tests {
                 tls: None,
             },
             "staging".to_string(),
+            carbide_instrument::Instrumentation::global(),
         )
         .run();
         tokio::pin!(drain);
@@ -2009,6 +2019,7 @@ mod tests {
                 tls: None,
             },
             "otlp_concurrency_test".to_string(),
+            carbide_instrument::Instrumentation::global(),
         )
         .run();
         tokio::pin!(drain);

@@ -82,7 +82,14 @@ impl RmsBackend {
             session.return_to_pool();
             Ok(nodes)
         };
-        query(self.client.as_ref(), &macs, prepare, deadline).await
+        query(
+            &self.instrumentation,
+            self.client.as_ref(),
+            &macs,
+            prepare,
+            deadline,
+        )
+        .await
     }
 
     /// Keeps the BMC and NVUE endpoints together in each switch descriptor.
@@ -140,7 +147,14 @@ impl RmsBackend {
             session.return_to_pool();
             Ok(nodes)
         };
-        query(self.client.as_ref(), &macs, prepare, deadline).await
+        query(
+            &self.instrumentation,
+            self.client.as_ref(),
+            &macs,
+            prepare,
+            deadline,
+        )
+        .await
     }
 
     /// Checks current IP ownership before allowing expected-rack fallback.
@@ -190,7 +204,14 @@ impl RmsBackend {
             session.return_to_pool();
             Ok(nodes)
         };
-        query(self.client.as_ref(), &macs, prepare, deadline).await
+        query(
+            &self.instrumentation,
+            self.client.as_ref(),
+            &macs,
+            prepare,
+            deadline,
+        )
+        .await
     }
 }
 
@@ -220,6 +241,7 @@ struct NodeRead {
 /// Keeps one result per endpoint while sharing identical rack/node queries.
 /// Preparation errors are deliberately sanitized at this observation boundary.
 async fn query(
+    instrumentation: &carbide_instrument::Instrumentation,
     client: &dyn RmsApi,
     macs: &[MacAddress],
     prepare: impl Future<Output = Result<Vec<Result<rms::NodeInfo, String>>, ComponentManagerError>>,
@@ -369,8 +391,13 @@ async fn query(
                     }
                 }
             };
-            let response =
-                red::instrumented("rms", "batch_get_firmware_inventory", bounded_attempt).await;
+            let response = red::instrumented(
+                instrumentation,
+                "rms",
+                "batch_get_firmware_inventory",
+                bounded_attempt,
+            )
+            .await;
             for read in batch {
                 let inventory = match &response {
                     Ok(response) => inventory_for_node(response, &read.node.node_id),

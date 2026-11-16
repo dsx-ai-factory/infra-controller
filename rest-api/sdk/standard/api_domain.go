@@ -46,7 +46,20 @@ func (r ApiFactoryResetNvlinkDomainRequest) Execute() (*FactoryResetResponse, *h
 /*
 FactoryResetNvlinkDomain Restore factory defaults on an NVLink Domain’s switches
 
-Requires an explicit target of `nvos` or `sdn`; there is no default. Other reset targets are rejected. Provider Admin operation. Target `nvos` clears NVOS configuration and reboots the selected switches; target `sdn` restores their SDN configuration to factory defaults. Only ingested switches are supported. Domain targets expand to their switch members. Flow blocks conflicting rack tasks and applies its rack-host readiness gate without an override. Returns task IDs, one per owning rack; submission does not imply reset completion. Query the Task APIs for completed, failed, or terminated outcomes and the task report. Completion means Core reports reset completed, not that the Domain is operational. NICo does not automatically restore configuration or re-ingest devices in this operation. Core must implement the selected NVOS_FACTORY_RESET or SDN_FACTORY_RESET action; unsupported Core versions fail the task explicitly. Failed or unknown submissions are not automatically repeated. After a timeout or lost response, inspect existing tasks and hardware before submitting again. Core status observes the latest recorded device/action reference; another out-of-band reset can replace that reference.
+Restores factory defaults on every switch in an NVLink Domain. Only Provider Admins can call this endpoint. The Site must be Registered and belong to the current organization's provider.
+
+`target` is required, case-sensitive, and has no default:
+
+- `nvos` clears the NVOS configuration and reboots the switches.
+- `sdn` restores the SDN configuration to factory defaults.
+
+Every switch in the Domain must be ingested. The request returns `409` if a conflicting task is Pending or Running on any of the Domain's racks. A rack's task fails without resetting any of its switches if a host in that rack does not become ready for a disruptive operation, for example because a Tenant is using it. If a host goes into use while the task is running, remaining switches whose resets have not been submitted are skipped and the task fails. Resets already accepted may still complete. This check cannot be overridden.
+
+The reset runs in the background. A `202` response returns one task ID for each rack the Domain's switches belong to, in no particular order. It means the tasks were created, not that the switches accepted or completed the resets. Use the Task APIs to see whether each task completed, failed, or was terminated. If a rack's task fails before any reset is submitted, read its task message for the reason. When available, its task report provides additional details. A completed task means the Site reported the resets as finished, not that the Domain is operational. NICo does not restore the switch configurations or re-ingest the switches afterwards.
+
+If the Site does not support the selected reset, the task fails.
+
+Failed or uncertain reset submissions are not retried automatically. After a timeout or a lost response, check existing tasks and the switches before submitting again, since resets may already be running. Avoid starting another reset of the same type on these switches outside this API while their tasks are running, as a task may report that reset's outcome instead.
 
 	@param ctx context.Context - for authentication, logging, cancellation, deadlines, tracing, etc. Passed from http.Request or context.Background().
 	@param org Name of the organization whose provider owns the Site.

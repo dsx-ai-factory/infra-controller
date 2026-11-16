@@ -3824,6 +3824,7 @@ pub async fn allocate_loopback_ip_v6(
             ),
         ) => {
             crate::resource_pool::emit_allocation_failure(
+                &carbide_instrument::Instrumentation::global(),
                 pool.value_type,
                 owner_id,
                 false,
@@ -3836,6 +3837,7 @@ pub async fn allocate_loopback_ip_v6(
         }
         Err(error) => {
             crate::resource_pool::emit_allocation_failure(
+                &carbide_instrument::Instrumentation::global(),
                 pool.value_type,
                 owner_id,
                 false,
@@ -3850,10 +3852,12 @@ pub async fn allocate_loopback_ip_v6(
 /// Allocate a value from the loopback IP resource pool.
 ///
 /// If the pool exists but is empty or has en error, return that.
+/// Allocation failure events use the caller's `instrumentation`.
 pub async fn allocate_vpc_dpu_loopback(
     common_pools: &CommonPools,
     txn: &mut PgConnection,
     owner_id: &str,
+    instrumentation: &carbide_instrument::Instrumentation,
 ) -> Result<IpAddr, DatabaseError> {
     match crate::resource_pool::allocate(
         &common_pools.ethernet.pool_vpc_dpu_loopback_ip,
@@ -3871,6 +3875,7 @@ pub async fn allocate_vpc_dpu_loopback(
             ),
         ) => {
             crate::resource_pool::emit_allocation_failure(
+                instrumentation,
                 common_pools.ethernet.pool_vpc_dpu_loopback_ip.value_type,
                 owner_id,
                 false,
@@ -3883,6 +3888,7 @@ pub async fn allocate_vpc_dpu_loopback(
         }
         Err(err) => {
             crate::resource_pool::emit_allocation_failure(
+                instrumentation,
                 common_pools.ethernet.pool_vpc_dpu_loopback_ip.value_type,
                 owner_id,
                 false,
@@ -5295,6 +5301,7 @@ mod test {
                 }),
                 fabric_interfaces: Vec::new(),
                 accepted_lldp_snapshot_fingerprint: None,
+                service_vpc_network_observation: None,
             }),
             dpu_agent_health_report: Some(HealthReport {
                 source: HealthReport::DPU_AGENT_SOURCE.to_string(),
@@ -5805,7 +5812,7 @@ mod test {
                     Ok::<_, Box<dyn std::error::Error>>(())
                 };
                 let commit_completion = async {
-                    crate::test_support::postgres::wait_for_blocked_query(
+                    let failure_pid = crate::test_support::postgres::wait_for_blocked_query(
                         &pool,
                         completion_pid,
                         "UPDATE machines SET failure_details",
@@ -5822,14 +5829,16 @@ mod test {
                         .await?,
                         crate::ConditionalWrite::Applied(()),
                     );
+                    // PostgreSQL can briefly leave its reported lock wait while
+                    // handling a signal, even though the row stays locked.
                     assert_eq!(
-                        crate::test_support::postgres::count_blocked_queries(
+                        crate::test_support::postgres::wait_for_blocked_query(
                             &pool,
                             completion_pid,
                             "UPDATE machines SET failure_details",
                         )
                         .await,
-                        1,
+                        failure_pid,
                         "the failure writer must remain blocked after CAS and before commit",
                     );
                     completion.commit().await?;
@@ -6999,6 +7008,7 @@ mod test {
             instance_network_observation: None,
             fabric_interfaces: Vec::new(),
             accepted_lldp_snapshot_fingerprint: None,
+            service_vpc_network_observation: None,
         };
         assert!(matches!(
             super::update_network_status_observation(writer.as_mut(), &dpu_id, &observation)
@@ -7594,6 +7604,7 @@ mod test {
                 instance_network_observation: None,
                 fabric_interfaces: Vec::new(),
                 accepted_lldp_snapshot_fingerprint: None,
+                service_vpc_network_observation: None,
             };
             let mut txn = pool.begin().await?;
             let result =
@@ -7650,6 +7661,7 @@ mod test {
             instance_network_observation: None,
             fabric_interfaces: Vec::new(),
             accepted_lldp_snapshot_fingerprint: None,
+            service_vpc_network_observation: None,
         };
         assert_eq!(
             update_network_status_observation(txn.as_mut(), &machine_id, &initial).await?,
@@ -7669,6 +7681,7 @@ mod test {
             instance_network_observation: None,
             fabric_interfaces: Vec::new(),
             accepted_lldp_snapshot_fingerprint: Some(fingerprint_b),
+            service_vpc_network_observation: None,
         };
         let mut txn = pool.begin().await?;
         assert_eq!(
@@ -7866,6 +7879,7 @@ mod test {
                     pci_name: "5e:00.0".to_string(),
                     device_description: None,
                     interface_type: DpaInterfaceType::Svpc,
+                    interface_name: None,
                 },
                 &mut txn,
             )

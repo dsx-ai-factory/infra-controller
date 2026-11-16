@@ -20,7 +20,7 @@
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use carbide_instrument::emit;
+use carbide_instrument::Instrumentation;
 use carbide_utils::none_if_empty::NoneIfEmpty;
 use futures_util::TryStreamExt;
 use sha2::{Digest, Sha256};
@@ -46,19 +46,23 @@ struct FirmwareDownloadFailed {
 /// Dropping it removes successful and partial downloads together unless the
 /// consumer explicitly retains them for reconciliation with `retain_on_drop`.
 pub(super) struct FirmwareStaging {
+    instrumentation: Instrumentation,
     work_dir: tempfile::TempDir,
     download_dir: PathBuf,
     retry_backoff: Duration,
 }
 
 impl FirmwareStaging {
-    pub(super) fn new() -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
+    pub(super) fn new(
+        instrumentation: Instrumentation,
+    ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
         let work_dir = tempfile::tempdir()?;
         let download_dir = work_dir.path().join("downloads");
         // Create directories before yielding so cancellation cannot leave a
         // filesystem worker creating a child after its parent was removed.
         std::fs::create_dir(&download_dir)?;
         Ok(Self {
+            instrumentation,
             work_dir,
             download_dir,
             retry_backoff: Duration::from_secs(1),
@@ -143,6 +147,7 @@ impl FirmwareStaging {
                 kind,
                 &url_context,
                 self.retry_backoff,
+                &self.instrumentation,
             ),
         )
         .await
@@ -289,6 +294,7 @@ async fn download_file_with_retries(
     kind: FirmwareDownloadKind,
     url_context: &LoggableFirmwareUrl,
     retry_backoff: Duration,
+    instrumentation: &Instrumentation,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     tryhard::retry_fn(|| download_file(client, url, destination))
         .retries(DOWNLOAD_MAX_RETRIES)
@@ -301,7 +307,7 @@ async fn download_file_with_retries(
             };
             let delay = next_delay.unwrap_or_default();
             let error = url_context.redact_from(&error.to_string());
-            emit(ScoutFirmwareDownloadAttemptFailed {
+            instrumentation.emit(ScoutFirmwareDownloadAttemptFailed {
                 kind,
                 next_action,
                 attempt: i64::from(attempt),
@@ -533,7 +539,7 @@ mod tests {
                 ],
                 |url| {
                     runtime.block_on(async {
-                        FirmwareStaging::new()
+                        FirmwareStaging::new(carbide_instrument::Instrumentation::global())
                             .unwrap()
                             .stage(
                                 &reqwest::Client::new(),
@@ -608,14 +614,15 @@ printf 'first=%s second=%s' "$(cat "$1")" "$(cat "$2")"
     fn test_download_failure() {
         const SECRET: &str = "DOWNLOAD_FAILURE_SECRET_MARKER";
 
-        let metrics = MetricsCapture::start();
+        let setup = metrics_endpoint::new_metrics_setup("scout-test", "test", false).unwrap();
+        let metrics = MetricsCapture::for_registry(&setup.registry);
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
             .unwrap();
         let ((base, result), logs) = runtime.block_on(capture_logs_async(async {
             let (base, server) = start_server(Router::new()).await;
-            let mut staging = FirmwareStaging::new()
+            let mut staging = FirmwareStaging::new(setup.instrumentation.clone())
                 .unwrap()
                 .with_retry_backoff(Duration::from_millis(10));
             let result = staging
@@ -699,7 +706,7 @@ printf 'first=%s second=%s' "$(cat "$1")" "$(cat "$2")"
             }),
         );
         let (base, server) = start_server(app).await;
-        let mut staging = FirmwareStaging::new()
+        let mut staging = FirmwareStaging::new(carbide_instrument::Instrumentation::global())
             .unwrap()
             .with_retry_backoff(Duration::from_millis(10));
         let path = staging
@@ -728,7 +735,8 @@ printf 'first=%s second=%s' "$(cat "$1")" "$(cat "$2")"
             .route("/config.bin", get(|| async { "wrong config" }));
         let (base, server) = start_server(app).await;
         let client = reqwest::Client::new();
-        let mut staging = FirmwareStaging::new().unwrap();
+        let mut staging =
+            FirmwareStaging::new(carbide_instrument::Instrumentation::global()).unwrap();
         let work_dir = staging.work_dir().to_path_buf();
         let image = staging
             .stage(
@@ -794,7 +802,8 @@ printf 'first=%s second=%s' "$(cat "$1")" "$(cat "$2")"
             );
             let (base, server) = start_server(app).await;
             let client = reqwest::Client::new();
-            let mut staging = FirmwareStaging::new().unwrap();
+            let mut staging =
+                FirmwareStaging::new(carbide_instrument::Instrumentation::global()).unwrap();
             let work_dir = staging.work_dir().to_path_buf();
             let destination = staging.download_dir().join("image.bin");
             let url = format!("{base}/image.bin");
@@ -863,7 +872,8 @@ printf 'first=%s second=%s' "$(cat "$1")" "$(cat "$2")"
         );
         let (base, server) = start_server(app).await;
         let client = reqwest::Client::new();
-        let mut staging = FirmwareStaging::new().unwrap();
+        let mut staging =
+            FirmwareStaging::new(carbide_instrument::Instrumentation::global()).unwrap();
         let work_dir = staging.work_dir().to_path_buf();
         let url = format!("{base}/image.bin");
         // One subscriber must remain attached throughout the future, since

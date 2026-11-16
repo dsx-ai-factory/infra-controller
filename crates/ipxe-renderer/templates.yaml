@@ -215,6 +215,7 @@ templates:
       echo Current state: {{current_state}}
       echo Could not continue boot due to invalid state ||
       sleep 5 ||
+      ifclose ||
       exit ||
 
   - id: f5dd027a-d3d9-5128-9709-96d2af192aef
@@ -231,6 +232,7 @@ templates:
       echo Current state: {{current_state}}
       echo This state assumes an OS is provisioned and will exit into the OS in 5 seconds. To re-run iPXE instructions and OS installation, trigger a reboot request with flag rebootWithCustomIpxe/boot_with_custom_ipxe set. ||
       sleep 5 ||
+      ifclose ||
       exit ||
 
   - id: dd8c8306-9047-5fc0-9c78-3f520bdf7247
@@ -242,6 +244,7 @@ templates:
       #!ipxe
       echo this is an unknown {{architecture}} host, not PXE booting ||
       sleep 5 ||
+      ifclose ||
       exit ||
 
   - id: 9bfffafc-4ffa-53b8-b9c4-81d1b01e7257

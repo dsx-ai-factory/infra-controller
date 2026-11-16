@@ -26,7 +26,9 @@ func (rs *FlowServerImpl) FactoryResetSwitches(ctx context.Context, req *pb.Fact
 		return nil, status.Error(codes.Unavailable, "task manager is not available")
 	}
 	info := &operations.ComponentResetTaskInfo{Target: req.GetResetTarget()}
-	info.Target = info.ResetTarget()
+	if req.GetResetTarget() == "" {
+		return nil, status.Error(codes.InvalidArgument, "reset_target is required: nvos or sdn")
+	}
 	err := info.Validate()
 	if err != nil {
 		return nil, status.Error(codes.InvalidArgument, err.Error())

@@ -825,7 +825,7 @@ message PowerOnRackRequest {
 message FactoryResetSwitchesRequest {
     OperationTargetSpec target_spec = 1;
     string description = 2;
-    // Reset scope: "nvos" or "sdn". Omission retains NVOS for older clients.
+    // Required reset scope: "nvos" or "sdn". Missing or empty values are rejected.
     string reset_target = 3;
 }
 

@@ -121,6 +121,8 @@ impl MachineValidationManager {
         Ok(())
     }
 
+    /// Selects tests and records execution Events through `instrumentation`.
+    /// Retain its provider until the validation run finishes.
     pub async fn run(
         machine_id: &MachineId,
         platform_name: String,
@@ -128,6 +130,7 @@ impl MachineValidationManager {
         context: String,
         validation_id: MachineValidationId,
         machine_validation_filter: MachineValidationFilter,
+        instrumentation: &carbide_instrument::Instrumentation,
     ) -> Result<(), MachineValidationError> {
         let mc = MachineValidation { options };
 
@@ -195,6 +198,7 @@ impl MachineValidationManager {
             validation_id,
             true,
             machine_validation_filter,
+            instrumentation,
         )
         .await?;
 

@@ -23,7 +23,7 @@
 
 use std::time::Instant;
 
-use carbide_instrument::{Event, LabelValue, emit};
+use carbide_instrument::{Event, Instrumentation, LabelValue};
 
 /// The secrets operation, as the bounded `operation` metric label. Each
 /// variant renders to the exact string the counters have always reported.
@@ -103,19 +103,21 @@ struct SecretsRequestDuration {
 /// Times one secrets operation and records its outcome exactly once: call
 /// [`OperationTimer::succeed`] on the success path, and any other way out of
 /// scope -- early `?` returns included -- records a failure on drop. The
-/// events are metric-only; with no meter provider installed, `emit` is a
-/// no-op.
+/// events are metric-only and use the supplied instrumentation handle.
 pub struct OperationTimer {
+    instrumentation: Instrumentation,
     operation: SecretsOperation,
     started: Instant,
     completed: bool,
 }
 
 impl OperationTimer {
-    /// Start timing an operation, counting the attempt immediately.
-    pub fn start(operation: SecretsOperation) -> Self {
-        emit(SecretsRequestStarted { operation });
+    /// Starts timing an operation with the supplied instrumentation, counting
+    /// the attempt immediately. Retain its provider until the timer completes.
+    pub fn start(operation: SecretsOperation, instrumentation: Instrumentation) -> Self {
+        instrumentation.emit(SecretsRequestStarted { operation });
         Self {
+            instrumentation,
             operation,
             started: Instant::now(),
             completed: false,
@@ -126,10 +128,10 @@ impl OperationTimer {
     pub fn succeed(mut self) {
         self.completed = true;
         let duration_ms = self.started.elapsed().as_millis() as u64;
-        emit(SecretsRequestSucceeded {
+        self.instrumentation.emit(SecretsRequestSucceeded {
             operation: self.operation,
         });
-        emit(SecretsRequestDuration {
+        self.instrumentation.emit(SecretsRequestDuration {
             operation: self.operation,
             duration_ms,
         });
@@ -142,10 +144,10 @@ impl Drop for OperationTimer {
             return;
         }
         let duration_ms = self.started.elapsed().as_millis() as u64;
-        emit(SecretsRequestFailed {
+        self.instrumentation.emit(SecretsRequestFailed {
             operation: self.operation,
         });
-        emit(SecretsRequestDuration {
+        self.instrumentation.emit(SecretsRequestDuration {
             operation: self.operation,
             duration_ms,
         });
@@ -163,11 +165,8 @@ mod tests {
     /// renders to the exact snake_case string the counters have always
     /// reported.
     ///
-    /// The emit conditions -- which counter fires on success versus failure,
-    /// and that the duration records once on each path without logging -- are
-    /// pinned in the `secrets_metrics` integration-test binary, which runs
-    /// alone in its own process so no other emitter moves the global series
-    /// between a capture baseline and its delta.
+    /// Store tests exercise successful and failed operations against their own
+    /// registry, including the one duration observation on either path.
     #[test]
     fn secrets_operation_renders_expected_label_values() {
         check_values(

@@ -51,6 +51,7 @@ struct AttestationAttesterSetNew {
 pub(crate) async fn record(
     report: &EndpointExplorationReport,
     txn: &mut PgConnection,
+    instrumentation: &carbide_instrument::Instrumentation,
 ) -> Result<(), DatabaseError> {
     let (Some(hardware_class), Some(attesters)) =
         (report.hardware_class.as_deref(), report.attester_set())
@@ -59,7 +60,7 @@ pub(crate) async fn record(
     };
 
     if db::hardware_class_attesters::record(txn, hardware_class, &attesters).await? {
-        carbide_instrument::emit(AttestationAttesterSetNew {
+        instrumentation.emit(AttestationAttesterSetNew {
             hardware_class: hardware_class.to_string(),
             attester_digest: attesters.digest,
             attester_ids: attesters.ids.join(","),

@@ -85,7 +85,7 @@ func SeriesSpecFor(f Filter, fullHostRead bool) (SeriesSpec, error) {
 		return SeriesSpec{"expected_records", FamilyExpected, with(with(nil, "type", f.RecordType), "linked", f.Linked), nil}, nil
 	case UnitTypeHost:
 		return hostSpec(f, fullHostRead)
-	case UnitTypeDpu, UnitTypeSwitch, UnitTypePowerShelf, UnitTypeRack:
+	case UnitTypeDpu, UnitTypeSwitch, UnitTypePowerShelf, UnitTypeRack, UnitTypeInstance:
 		if f.Stage != nil && *f.Stage == StageExpected {
 			return expectedStageSpec(f)
 		}
@@ -198,6 +198,9 @@ const maxSelectorValue = 256
 // mirrors the Rust metric contract so SelectorProblems and GaugeLabels agree
 // with it.
 var gauges = map[string][]string{
+	"hosts_firmware":                   {"vendor", "model", "component", "phase", "ready"},
+	"firmware_config_revision":         {},
+	"host_firmware_config_revision":    {},
 	"units":                            {"type", "stage", "state"},
 	"hosts":                            {"model", "instance_type", "state", "allocatable", "update_complete"},
 	"hosts_update_eligible":            {"model", "eligible", "reason"},

@@ -65,6 +65,8 @@ func TestManagerImpl_SubmitTask(t *testing.T) {
 		name  string
 		check func(*testing.T)
 	}{
+		{name: "preemption", check: testPreemptingAdmission},
+		{name: "ordinary forced shutdown does not preempt", check: testSubmitTaskDoesNotPreemptForcedShutdown},
 		{name: "per-rack rejection propagation", check: testSubmitTaskRejections},
 		{name: "rejects a Compute component target with an NVSwitch-only rack rule", check: func(t *testing.T) {
 			rackID := uuid.New()

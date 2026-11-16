@@ -32,7 +32,7 @@ use std::sync::Arc;
 use arc_swap::ArcSwap;
 use async_trait::async_trait;
 pub use auth::RedfishAuth;
-use carbide_instrument::{Event, LabelValue, emit};
+use carbide_instrument::{Event, Instrumentation, LabelValue};
 use carbide_secrets::credentials::{CredentialKey, CredentialReader, CredentialType, Credentials};
 use carbide_utils::HostPortPair;
 use carbide_utils::redfish::{BmcAccessInfo, redact_redfish_response_body};
@@ -82,6 +82,7 @@ enum DpuUefiPasswordSetupSkipped {
 }
 fn emit_dpu_uefi_password_setup_skipped_if_needed(
     bios_attrs: &std::collections::HashMap<String, serde_json::Value>,
+    instrumentation: &Instrumentation,
 ) -> bool {
     let skipped = match bios_attrs.get("Attributes") {
         None => DpuUefiPasswordSetupSkipped::BiosAttributesMissing {},
@@ -94,7 +95,7 @@ fn emit_dpu_uefi_password_setup_skipped_if_needed(
         },
     };
 
-    emit(skipped);
+    instrumentation.emit(skipped);
     true
 }
 
@@ -102,15 +103,18 @@ fn emit_dpu_uefi_password_setup_skipped_if_needed(
 /// object. Only this constructor yields a [`BmcCredentialOps`]: it is built
 /// from the raw `libredfish` pool, which an intermediary-routing pool does
 /// not have -- credential operations always authenticate to the BMC itself.
+/// RED metrics use `instrumentation`; retain its provider while clients can run.
 pub fn new_pool_with_credential_ops(
     credential_reader: Arc<dyn CredentialReader>,
     pool: libredfish::RedfishClientPool,
     proxy_address: Arc<ArcSwap<Option<HostPortPair>>>,
+    instrumentation: Instrumentation,
 ) -> (Arc<dyn RedfishClientPool>, Arc<dyn BmcCredentialOps>) {
     let inner = Arc::new(implementation::RedfishClientPoolImpl::new(
         credential_reader,
         pool,
         proxy_address,
+        instrumentation,
     ));
     (inner.clone(), inner)
 }
@@ -123,15 +127,18 @@ pub fn new_pool_with_credential_ops(
 /// should be built with the client identity the proxy's mTLS listener
 /// expects, and *without* `danger_accept_invalid_certs` -- the proxy,
 /// unlike a BMC, presents a verifiable certificate.
+/// RED metrics use `instrumentation`; retain its provider while clients can run.
 pub fn new_proxied_pool(
     credential_reader: Arc<dyn CredentialReader>,
     pool: libredfish::RedfishClientPool,
     proxy: HostPortPair,
+    instrumentation: Instrumentation,
 ) -> Arc<dyn RedfishClientPool> {
     Arc::new(implementation::ProxiedRedfishClientPoolImpl::new(
         credential_reader,
         pool,
         proxy,
+        instrumentation,
     ))
 }
 
@@ -263,11 +270,14 @@ pub trait BmcCredentialOps: RedfishClientPool + sealed::Sealed {
     ///
     /// Builds its own Redfish client from `access`; [`CredentialOpError`]
     /// separates client-creation failures from device-level ones.
+    ///
+    /// Events use `instrumentation`; retain its provider until the operation finishes.
     async fn uefi_setup(
         &self,
         access: &BmcAccessInfo,
         dpu: bool,
         sitewide_uefi_credentials: Credentials,
+        instrumentation: &Instrumentation,
     ) -> Result<Option<String>, CredentialOpError> {
         let client = self
             .client_by_info(access)
@@ -286,7 +296,7 @@ pub trait BmcCredentialOps: RedfishClientPool + sealed::Sealed {
 
             // Preserve the non-fatal return for now, but this should become a hard
             // failure once callers can reject DPUs that retain factory credentials.
-            if emit_dpu_uefi_password_setup_skipped_if_needed(&bios_attrs) {
+            if emit_dpu_uefi_password_setup_skipped_if_needed(&bios_attrs, instrumentation) {
                 return Ok(None);
             }
             tracing::info!(
@@ -964,7 +974,9 @@ mod tests {
                 let metrics = MetricsCapture::start();
                 let mut skipped = false;
                 let logs = capture_logs(|| {
-                    skipped = emit_dpu_uefi_password_setup_skipped_if_needed(&bios_attrs);
+                    skipped = emit_dpu_uefi_password_setup_skipped_if_needed(&bios_attrs,
+                        &Instrumentation::global(),
+                    );
                 });
                 let logs = logs
                     .into_iter()
@@ -1643,7 +1655,12 @@ mod tests {
         };
         double.sim.set_create_client_error("bmc probe timed out");
         let err = double
-            .uefi_setup(&double_access(), true, site_creds())
+            .uefi_setup(
+                &double_access(),
+                true,
+                site_creds(),
+                &Instrumentation::global(),
+            )
             .await
             .expect_err("client creation failure must fail the op");
         assert!(
@@ -1671,7 +1688,12 @@ mod tests {
                 serde_json::json!({ "CurrentUefiPassword": "" }),
             )]));
         let err = double
-            .uefi_setup(&double_access(), true, site_creds())
+            .uefi_setup(
+                &double_access(),
+                true,
+                site_creds(),
+                &Instrumentation::global(),
+            )
             .await
             .expect_err("store read failure must fail the op");
         assert!(

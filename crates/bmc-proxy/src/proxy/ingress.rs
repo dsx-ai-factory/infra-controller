@@ -26,7 +26,7 @@ use std::time::Duration;
 
 use axum::Router;
 use carbide_authn::middleware::ConnectionAttributes;
-use carbide_instrument::{Event, LabelValue, MetricFamily, emit};
+use carbide_instrument::{Event, Instrumentation, LabelValue, MetricFamily};
 use hyper_util::rt::{TokioExecutor, TokioIo};
 use hyper_util::server::conn::auto;
 use hyper_util::service::TowerToHyperService;
@@ -54,6 +54,7 @@ const TLS_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 const ACCEPT_RETRY_DELAY: Duration = Duration::from_secs(1);
 
 pub(super) struct RefreshableTlsAcceptor {
+    instrumentation: Instrumentation,
     acceptor: TlsAcceptor,
     /// When the next reload from disk is due.
     reload_at: Instant,
@@ -72,7 +73,7 @@ impl RefreshableTlsAcceptor {
             match reload().await {
                 Ok(reloaded) => *self = reloaded,
                 Err(e) => {
-                    emit(TlsCertificateReloadFailed {
+                    self.instrumentation.emit(TlsCertificateReloadFailed {
                         error: e.to_string(),
                     });
                     self.reload_at = Instant::now() + TLS_RELOAD_RETRY_INTERVAL;
@@ -82,10 +83,13 @@ impl RefreshableTlsAcceptor {
         self.acceptor.clone()
     }
 
-    pub(super) async fn new(config: TlsConfig) -> Result<Self, BmcProxyError> {
+    pub(super) async fn new(
+        config: TlsConfig,
+        instrumentation: Instrumentation,
+    ) -> Result<Self, BmcProxyError> {
         tokio::task::Builder::new()
             .name("get_tls_acceptor refresh")
-            .spawn_blocking(move || get_tls_acceptor(&config))
+            .spawn_blocking(move || get_tls_acceptor(&config, instrumentation))
             .expect("Failed to spawn blocking task")
             .await
             .expect("task panicked")
@@ -213,7 +217,8 @@ impl BmcProxy {
 
         'accepting: loop {
             let (conn, addr) = {
-                let incoming = accept_with_backoff(|| self.listener.accept());
+                let incoming =
+                    accept_with_backoff(|| self.listener.accept(), &self.state.instrumentation);
                 tokio::pin!(incoming);
                 loop {
                     tokio::select! {
@@ -229,10 +234,11 @@ impl BmcProxy {
             let handshake_deadline = Instant::now() + TLS_HANDSHAKE_TIMEOUT;
 
             let tls_config = self.state.config.tls.clone();
+            let tls_instrumentation = self.state.instrumentation.clone();
             let Some(tls_acceptor) = cancel_token
                 .run_until_cancelled(self.tls_acceptor.current(|| {
                     reload_tls(&mut tls_reloads, handshake_deadline, move || {
-                        get_tls_acceptor(&tls_config)
+                        get_tls_acceptor(&tls_config, tls_instrumentation)
                     })
                 }))
                 .await
@@ -250,6 +256,7 @@ impl BmcProxy {
                     http.clone(),
                     self.app.clone(),
                     handshake_deadline,
+                    self.state.instrumentation.clone(),
                 ))
                 // Safety: This only fails if run outside the tokio runtime
                 .expect("could not spawn task to handle HTTP connection");
@@ -260,7 +267,7 @@ impl BmcProxy {
         while let Some(served) = connections.join_next().await {
             report_connection_result(served);
         }
-        stop_tls_reloads(&mut tls_reloads).await;
+        stop_tls_reloads(&mut tls_reloads, &self.state.instrumentation).await;
     }
 }
 
@@ -295,11 +302,14 @@ where
 
 /// Abort queued reloads and join any running one. A blocking file read that has
 /// already started cannot be aborted, so shutdown waits for it to finish.
-async fn stop_tls_reloads(tasks: &mut JoinSet<Result<RefreshableTlsAcceptor, BmcProxyError>>) {
+async fn stop_tls_reloads(
+    tasks: &mut JoinSet<Result<RefreshableTlsAcceptor, BmcProxyError>>,
+    instrumentation: &Instrumentation,
+) {
     tasks.abort_all();
     while let Some(reloaded) = tasks.join_next().await {
         match reloaded {
-            Ok(Err(error)) => emit(TlsCertificateReloadFailed {
+            Ok(Err(error)) => instrumentation.emit(TlsCertificateReloadFailed {
                 error: error.to_string(),
             }),
             Err(error) if !error.is_cancelled() => {
@@ -320,18 +330,18 @@ fn report_connection_result(served: Result<(), JoinError>) {
 
 /// Listener errors are retried after a fixed pause for the listener's lifetime.
 /// The owner polls this future alongside cancellation and completed tasks.
-async fn accept_with_backoff<F, Fut, T>(mut accept: F) -> T
+async fn accept_with_backoff<F, Fut, T>(mut accept: F, instrumentation: &Instrumentation) -> T
 where
     F: FnMut() -> Fut,
     Fut: Future<Output = std::io::Result<T>>,
 {
     loop {
         let incoming = accept().await;
-        emit(TlsConnectionAttempted);
+        instrumentation.emit(TlsConnectionAttempted);
         match incoming {
             Ok(incoming) => return incoming,
             Err(error) => {
-                emit(TcpAcceptFailed {
+                instrumentation.emit(TcpAcceptFailed {
                     reason: ConnectionFailReason::TcpConnectionFailure,
                     error: error.to_string(),
                 });
@@ -350,13 +360,14 @@ async fn serve<IO>(
     http: auto::Builder<TokioExecutor>,
     app: Router,
     handshake_deadline: Instant,
+    instrumentation: Instrumentation,
 ) where
     IO: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
     match handshake(&tls_acceptor, conn, handshake_deadline).await {
         Ok(conn) => {
             let conn = TokioIo::new(conn);
-            emit(TlsConnectionSucceeded);
+            instrumentation.emit(TlsConnectionSucceeded);
 
             let (_, session) = conn.inner().get_ref();
             let connection_attributes = {
@@ -385,7 +396,7 @@ async fn serve<IO>(
             }
         }
         Err(error) => {
-            emit(TlsConnectionFailed {
+            instrumentation.emit(TlsConnectionFailed {
                 reason: ConnectionFailReason::TlsConnectionFailure,
                 error: error.to_string(),
                 peer_address: addr,
@@ -413,7 +424,10 @@ where
         })
 }
 
-fn get_tls_acceptor(tls_config: &TlsConfig) -> Result<RefreshableTlsAcceptor, BmcProxyError> {
+fn get_tls_acceptor(
+    tls_config: &TlsConfig,
+    instrumentation: Instrumentation,
+) -> Result<RefreshableTlsAcceptor, BmcProxyError> {
     let certs = {
         let fd = match std::fs::File::open(&tls_config.identity_pemfile_path) {
             Ok(fd) => fd,
@@ -521,6 +535,7 @@ fn get_tls_acceptor(tls_config: &TlsConfig) -> Result<RefreshableTlsAcceptor, Bm
 
     let acceptor = TlsAcceptor::from(Arc::new(tls));
     Ok(RefreshableTlsAcceptor {
+        instrumentation,
         acceptor,
         reload_at: Instant::now() + TLS_REFRESH_INTERVAL,
     })
@@ -770,9 +785,12 @@ mod tests {
             admin_root_cafile_path: format!("{fixtures}ca.crt"),
             switch: None,
         };
-        let mut tls = RefreshableTlsAcceptor::new(config.clone())
-            .await
-            .expect("initial TLS config");
+        let mut tls = RefreshableTlsAcceptor::new(
+            config.clone(),
+            carbide_instrument::Instrumentation::global(),
+        )
+        .await
+        .expect("initial TLS config");
         let original = tls.acceptor.clone();
         let not_due = tls
             .current(|| async { panic!("fresh configuration must not reload") })
@@ -782,7 +800,12 @@ mod tests {
         std::fs::write(&key_path, "incomplete key").expect("simulate partial key update");
         tls.reload_at = Instant::now();
         let retained = tls
-            .current(|| RefreshableTlsAcceptor::new(config.clone()))
+            .current(|| {
+                RefreshableTlsAcceptor::new(
+                    config.clone(),
+                    carbide_instrument::Instrumentation::global(),
+                )
+            })
             .await;
         assert!(Arc::ptr_eq(retained.config(), original.config()));
         assert_eq!(tls.reload_at, Instant::now() + TLS_RELOAD_RETRY_INTERVAL);
@@ -795,11 +818,20 @@ mod tests {
         std::fs::write(&key_path, key).expect("finish key update");
         tokio::time::advance(TLS_RELOAD_RETRY_INTERVAL - Duration::from_nanos(1)).await;
         let before_retry = tls
-            .current(|| RefreshableTlsAcceptor::new(config.clone()))
+            .current(|| {
+                RefreshableTlsAcceptor::new(
+                    config.clone(),
+                    carbide_instrument::Instrumentation::global(),
+                )
+            })
             .await;
         assert!(Arc::ptr_eq(before_retry.config(), original.config()));
         tokio::time::advance(Duration::from_nanos(1)).await;
-        let recovered = tls.current(|| RefreshableTlsAcceptor::new(config)).await;
+        let recovered = tls
+            .current(|| {
+                RefreshableTlsAcceptor::new(config, carbide_instrument::Instrumentation::global())
+            })
+            .await;
         assert!(!Arc::ptr_eq(recovered.config(), original.config()));
         assert_eq!(tls.reload_at, Instant::now() + TLS_REFRESH_INTERVAL);
         assert_eq!(metrics.counter_delta(TLS_RELOAD_FAILURE_METRIC, &[]), 1.0);
@@ -813,6 +845,7 @@ mod tests {
             let metrics = MetricsCapture::start();
             let (acceptor, _) = test_identity();
             let mut tls = RefreshableTlsAcceptor {
+                instrumentation: carbide_instrument::Instrumentation::global(),
                 acceptor: acceptor.clone(),
                 reload_at: Instant::now(),
             };
@@ -826,6 +859,7 @@ mod tests {
                         started.send(()).expect("announce the blocking read");
                         wait_release.recv().expect("finish the blocking read");
                         Ok(RefreshableTlsAcceptor {
+                            instrumentation: carbide_instrument::Instrumentation::global(),
                             acceptor,
                             reload_at: Instant::now() + TLS_REFRESH_INTERVAL,
                         })
@@ -868,7 +902,8 @@ mod tests {
             );
 
             {
-                let stopping = stop_tls_reloads(&mut tasks);
+                let instrumentation = carbide_instrument::Instrumentation::global();
+                let stopping = stop_tls_reloads(&mut tasks, &instrumentation);
                 tokio::pin!(stopping);
                 tokio::select! {
                     biased;
@@ -955,6 +990,7 @@ mod tests {
                 auto::Builder::new(TokioExecutor::new()),
                 answering_app(),
                 started + TLS_HANDSHAKE_TIMEOUT,
+                carbide_instrument::Instrumentation::global(),
             )
             .await;
         });
@@ -1046,6 +1082,7 @@ mod tests {
             listener,
             state: test_state_with_config(CONFIG_WITHOUT_TLS_FILES),
             tls_acceptor: RefreshableTlsAcceptor {
+                instrumentation: carbide_instrument::Instrumentation::global(),
                 acceptor,
                 reload_at: match event {
                     AtTheProxy::AReloadFails => Instant::now(),
@@ -1142,17 +1179,21 @@ mod tests {
     async fn accept_backoff_retries_and_observes_cancellation() {
         for cancel in [false, true] {
             let metrics = MetricsCapture::start();
+            let instrumentation = carbide_instrument::Instrumentation::global();
             let mut attempts = 0;
             let started = Instant::now();
             let shutdown = CancellationToken::new();
-            let accepted = shutdown.run_until_cancelled(accept_with_backoff(|| {
-                attempts += 1;
-                std::future::ready(if attempts == 1 {
-                    Err(std::io::Error::other("injected accept failure"))
-                } else {
-                    Ok(())
-                })
-            }));
+            let accepted = shutdown.run_until_cancelled(accept_with_backoff(
+                || {
+                    attempts += 1;
+                    std::future::ready(if attempts == 1 {
+                        Err(std::io::Error::other("injected accept failure"))
+                    } else {
+                        Ok(())
+                    })
+                },
+                &instrumentation,
+            ));
             let cancel_after_failure = async {
                 if cancel {
                     tokio::time::sleep(ACCEPT_RETRY_DELAY / 2).await;

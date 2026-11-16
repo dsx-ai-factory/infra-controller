@@ -97,6 +97,16 @@ sha256 = "<64 hexadecimal characters>"
   `script.filename`, written for NICo releases before 2.0, is accepted and
   ignored.
 
+### Scout Script Execution Limits
+
+Scout script supervision and retained-input recovery are unreleased and require Scout builds containing [the script supervision implementation](https://github.com/dsx-ai-factory/infra-controller/pull/8841). Verify the deployed Scout image's build revision and install matching Scout/helper binaries. Older Scout builds do not provide this contract. Both packaged and URL-named scripts follow the [Scout script execution contract](host-firmware.md#scout-script-execution).
+
+Size script output and `execution_timeout_seconds` for the vendor workflow. The execution deadline includes helper startup, script execution, descendants, and output collection. Each output stream is capped at 1 MiB; exceeding a cap requests termination, including during an update. Cleanup and result delivery can add up to 5 seconds each.
+
+Core separately waits for 30 seconds of script download, plus `execution_timeout_seconds`, plus one `artifact_download_timeout_seconds` allowance per file artifact, plus 30 minutes of slack. The total is capped at 5 hours. Core can therefore time out before a long-running script finishes; the Scout deadline does not extend Core's cap.
+
+Refer to [Scout Script Recovery](host-firmware.md#scout-script-recovery) for retained inputs, cooperative hardware exclusion, and process/hardware reconciliation requirements. A cleanup diagnostic does not authorize replay, and a lost Core success report has a separate [delivery limitation](https://github.com/dsx-ai-factory/infra-controller/issues/8840).
+
 ### Minimum and default versions
 
 The pre-ingestion minimum is an upgrade trigger, not the upgrade target. When a
@@ -377,19 +387,25 @@ control the automatic paths; they do not define component target versions.
 
 ### Managed-machine scheduling
 
-Machine Update Manager uses one capacity budget for managed-host and DPU
-firmware work:
+Machine Update Manager uses a shared ceiling for new automatic requests.
+Refer to [Shared Host Capacity](../firmware-updates.md#shared-host-capacity)
+for the calculation, legacy configuration precedence, and build requirements
+for NIC accounting and transaction protections.
+
+The following table lists Core field defaults; Helm can supply values as
+described in the shared capacity policy:
 
 | Setting | Default | Meaning |
 |---|---|---|
 | `machine_update_run_interval` | `300` | Seconds between Machine Update Manager passes. |
-| `machine_updater.max_concurrent_machine_updates_absolute` | unset | Fixed ceiling on the number of distinct hosts in machine-update workflows. Used directly when the percentage is unset; otherwise caps the percentage budget after unhealthy hosts are subtracted. |
-| `machine_updater.max_concurrent_machine_updates_percent` | unset | Percentage of all managed hosts, rounded up, minus unhealthy hosts, with a minimum of zero. An absolute limit, if set, further caps this budget. Zero or negative percentages disable automatic machine updates. |
+| `machine_updater.max_concurrent_machine_updates_absolute` | unset | Absolute input to the shared ceiling for new automatic requests. Legacy configuration can supply or reduce the effective value; refer to the shared capacity policy above. |
+| `machine_updater.max_concurrent_machine_updates_percent` | unset | Percentage input to the shared ceiling for new automatic requests. Nonpositive values prevent new automatic requests; existing workflows continue. Refer to the shared capacity policy above. |
 | `machine_updater.instance_autoreboot_period.start` | unset | Start of a one-time UTC window in which an assigned host may consume an existing update request without tenant approval. |
 | `machine_updater.instance_autoreboot_period.end` | unset | End of that one-time UTC window. |
 
-For example, this allows at most five managed hosts to be in update workflows
-and gives assigned hosts a four-hour automatic reboot window:
+With no percentage limit configured, this example sets a ceiling of five hosts
+for new automatic requests, unless a lower legacy limit applies. It also gives
+assigned hosts a four-hour automatic reboot window:
 
 ```toml
 machine_update_run_interval = 300

@@ -34,6 +34,7 @@ use crate::gate::CallError;
 pub(crate) enum Reader {
     Devices,
     RestInventory,
+    NicoConfig,
 }
 
 impl Reader {
@@ -41,6 +42,7 @@ impl Reader {
         match self {
             Reader::Devices => "devices",
             Reader::RestInventory => "rest_inventory",
+            Reader::NicoConfig => "nico_config",
         }
     }
 }
@@ -104,6 +106,7 @@ impl<T: Send + Sync + 'static> AnySnapshot for FamilySnapshot<T> {
 /// allocation, so kept snapshots cost only the units that changed.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub(crate) struct UnitsData {
+    pub firmware_config: Option<carbide_site_health_probe_api::FirmwareConfigEvidence>,
     pub units: Vec<Arc<Unit>>,
     /// Units whose state was not in the pinned state table, published as
     /// `other`.
@@ -170,6 +173,7 @@ impl<'a> UnitsBuilder<'a> {
         self.units.sort_by(|a, b| unit_key(a).cmp(&unit_key(b)));
         self.units.shrink_to_fit();
         UnitsData {
+            firmware_config: None,
             units: self.units,
             unknown_states,
             compact_host_read: false,

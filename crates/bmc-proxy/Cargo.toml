@@ -45,14 +45,11 @@ libc = { workspace = true }
 
 #these are alphabetized
 async-trait = { workspace = true }
-axum-extra = { workspace = true, features = ["cookie", "cookie-private"] }
 axum = { workspace = true, features = ["http2"] }
 bytes = { workspace = true }
-casbin = { features = ["glob"], workspace = true }
 clap = { workspace = true }
 figment = { workspace = true, features = ["toml"] }
 futures-util = { workspace = true }
-futures = { workspace = true }
 http-body-util = { workspace = true }
 http = { workspace = true }
 humantime-serde = { workspace = true }
@@ -117,7 +114,11 @@ bmc-mock = { path = "../bmc-mock" }
 carbide-instrument = { path = "../instrument", features = ["test-support"] }
 carbide-test-support = { path = "../test-support" }
 carbide-utils = { path = "../utils", features = ["test-support"] }
+
+axum-extra = { workspace = true, features = ["cookie", "cookie-private"] }
 axum-server = { workspace = true, features = ["tls-rustls"] }
+casbin = { features = ["glob"], workspace = true }
+futures = { workspace = true }
 rcgen = { workspace = true }
 serde_json = { workspace = true }
 tempfile = { workspace = true }

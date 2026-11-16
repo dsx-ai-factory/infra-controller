@@ -27,9 +27,9 @@ func init() {
 // componentReset uses fixed execution semantics: no rule may retry a reset.
 // Separate per-device activities let accepted peers finish after another fails.
 func componentReset(ctx workflow.Context, info task.ExecutionInfo, payload *operations.ComponentResetTaskInfo) error {
-	submitActivity, observeActivity := activity.NameResetNVOS, activity.NameNVOSResetCompleted
-	if payload.ResetTarget() == "sdn" {
-		submitActivity, observeActivity = activity.NameResetSDN, activity.NameSDNResetCompleted
+	observeActivity := activity.NameNVOSResetCompleted
+	if payload.Target == "sdn" {
+		observeActivity = activity.NameSDNResetCompleted
 	}
 	statusCtx := workflow.WithActivityOptions(ctx, workflow.ActivityOptions{StartToCloseTimeout: 30 * time.Second, RetryPolicy: &temporal.RetryPolicy{MaximumAttempts: 3}})
 	err := updateRunningTaskStatus(statusCtx, info.TaskID)
@@ -42,13 +42,25 @@ func componentReset(ctx workflow.Context, info task.ExecutionInfo, payload *oper
 		return updateFinishedTaskStatus(statusCtx, info.TaskID, fmt.Errorf("factory reset requires ingested switches"), nil)
 	}
 	deadline := workflow.Now(ctx).Add(50 * time.Minute)
+	preflightCtx := workflow.WithActivityOptions(ctx, workflow.ActivityOptions{
+		StartToCloseTimeout: 31 * time.Minute,
+		RetryPolicy:         &temporal.RetryPolicy{MaximumAttempts: 1},
+	})
+	err = executeActivityBeforeDeadline(preflightCtx, deadline, nil, activity.NamePrepareFactoryReset, target)
+	if ctx.Err() != nil {
+		return ctx.Err()
+	}
+	if err != nil {
+		return updateFinishedTaskStatus(statusCtx, info.TaskID, fmt.Errorf("factory reset preflight: %w", err), nil)
+	}
 	step := report.StepRecord{ComponentType: "NVSwitch", Status: report.StatusRunning, TotalComponents: target.Len()}
 	rep := &report.Report{Version: report.Version, Stages: []report.StageRecord{{Number: 1, Status: report.StatusRunning, Steps: []report.StepRecord{step}}}}
 	var failures []error
+	notSubmitted := 0
 	pending := make([]common.Target, 0, target.Len())
 	// Submit every device before observing completion, so a slow first reset
 	// cannot prevent healthy peers from starting. Each mutation has one attempt.
-	for _, id := range target.Identifiers {
+	for index, id := range target.Identifiers {
 		single := common.Target{Type: target.Type, IdentifierType: target.IdentifierType, Identifiers: []string{id}}
 		remaining := deadline.Sub(workflow.Now(ctx))
 		if remaining <= 0 {
@@ -57,12 +69,17 @@ func componentReset(ctx workflow.Context, info task.ExecutionInfo, payload *oper
 			continue
 		}
 		submitCtx := workflow.WithActivityOptions(ctx, workflow.ActivityOptions{StartToCloseTimeout: min(remaining, 31*time.Minute), RetryPolicy: &temporal.RetryPolicy{MaximumAttempts: 1}})
-		err = executeActivityBeforeDeadline(submitCtx, deadline, nil, submitActivity, single)
+		err = executeActivityBeforeDeadline(submitCtx, deadline, nil, activity.NameSubmitFactoryReset, single, payload.Target)
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
 		if err != nil {
 			failures = append(failures, fmt.Errorf("switch %s: %w", id, err))
+			var appErr *temporal.ApplicationError
+			if errors.As(err, &appErr) && appErr.Type() == "FactoryResetNotReady" {
+				notSubmitted = target.Len() - index
+				break
+			}
 			if resetFailureIsDefinitive(err) {
 				rep.Stages[0].Steps[0].FailedComponents++
 			}
@@ -115,6 +132,11 @@ func componentReset(ctx workflow.Context, info task.ExecutionInfo, payload *oper
 		}
 	}
 	err = errors.Join(failures...)
+	if notSubmitted > 0 {
+		// Task messages and report errors retain only the first line. Put the
+		// stop reason and count before the underlying errors, including peers.
+		err = fmt.Errorf("factory reset stopped: rack readiness check failed; %d switches were not submitted: %w", notSubmitted, err)
+	}
 	rep.Stages[0].Status = report.StatusCompleted
 	if err != nil {
 		rep.Stages[0].Status = report.StatusFailed

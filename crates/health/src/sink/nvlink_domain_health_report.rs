@@ -23,7 +23,7 @@
 
 use std::sync::Arc;
 
-use carbide_instrument::{Outcome, emit};
+use carbide_instrument::{Instrumentation, Outcome};
 use carbide_uuid::nvlink::NvLinkDomainId;
 use tokio_util::sync::CancellationToken;
 
@@ -52,7 +52,12 @@ impl NvLinkDomainHealthReportSink {
     /// Creates the sink and its ordered submission worker.
     ///
     /// Returns an error when called without an active Tokio runtime.
-    pub fn new(config: &NvLinkDomainHealthReportSinkConfig) -> Result<Self, HealthError> {
+    ///
+    /// Event metrics use `instrumentation`; retain its provider while the sink runs.
+    pub fn new(
+        config: &NvLinkDomainHealthReportSinkConfig,
+        instrumentation: Instrumentation,
+    ) -> Result<Self, HealthError> {
         let handle = tokio::runtime::Handle::try_current().map_err(|error| {
             HealthError::GenericError(format!(
                 "NVLink domain health report sink requires active Tokio runtime: {error}"
@@ -64,6 +69,7 @@ impl NvLinkDomainHealthReportSink {
             config.connection.client_cert.clone(),
             config.connection.client_key.clone(),
             &config.connection.api_url,
+            instrumentation.clone(),
         );
 
         let queue: Arc<DedupQueue<NvLinkDomainHealthReportKey, Arc<HealthReport>>> =
@@ -95,7 +101,7 @@ impl NvLinkDomainHealthReportSink {
                             return;
                         };
 
-                        emit(HealthReportSubmitted {
+                        instrumentation.emit(HealthReportSubmitted {
                             target: HealthReportTarget::NvLinkDomain,
                             outcome: Outcome::from(&result),
                             id: key.id.to_string(),
@@ -261,8 +267,11 @@ mod tests {
 
     #[tokio::test]
     async fn dropping_sink_releases_submission_worker_queue() {
-        let sink = NvLinkDomainHealthReportSink::new(&Default::default())
-            .expect("sink should start inside a Tokio runtime");
+        let sink = NvLinkDomainHealthReportSink::new(
+            &Default::default(),
+            carbide_instrument::Instrumentation::global(),
+        )
+        .expect("sink should start inside a Tokio runtime");
 
         let queue = Arc::downgrade(&sink.queue);
 

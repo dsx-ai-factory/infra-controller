@@ -53,7 +53,11 @@ use crate::state::store::{ALL_FAMILIES, SnapshotStore};
 pub(crate) const RETIRE_AFTER: Duration = Duration::from_secs(15 * 60);
 
 /// Gauges that are never published as 0 for a vanished label set.
-const NOT_RETIRED: &[&str] = &[REST_TOTALS.name];
+const NOT_RETIRED: &[&str] = &[
+    REST_TOTALS.name,
+    carbide_site_health_probe_api::metrics::FIRMWARE_CONFIG_REVISION.name,
+    carbide_site_health_probe_api::metrics::HOST_FIRMWARE_CONFIG_REVISION.name,
+];
 
 const FAILURE_KINDS: [FailureKind; 5] = [
     FailureKind::Timeout,
@@ -226,6 +230,14 @@ pub(crate) fn family_series(family: Family, snap: &dyn AnySnapshot, series: &mut
             if let Some(data) = units_of(snap) {
                 unit_series(&data.units, series);
                 host_series(&data.units, series);
+                if let Some(config) = &data.firmware_config {
+                    set(
+                        series,
+                        carbide_site_health_probe_api::metrics::HOST_FIRMWARE_CONFIG_REVISION.name,
+                        vec![],
+                        config.revision as f64,
+                    );
+                }
                 for (mode, on) in [
                     ("full", !data.compact_host_read),
                     ("compact", data.compact_host_read),
@@ -320,11 +332,20 @@ pub(crate) fn family_series(family: Family, snap: &dyn AnySnapshot, series: &mut
                 }
             }
         }
+        Family::ConfigNicoApi => {
+            if let Some(data) = crate::readers::nico_config::data(snap) {
+                set(
+                    series,
+                    carbide_site_health_probe_api::metrics::FIRMWARE_CONFIG_REVISION.name,
+                    vec![],
+                    data.revision as f64,
+                );
+            }
+        }
         // Cached REST unit lists and config do not add count series.
         Family::RestMachines
         | Family::RestInstances
         | Family::RestTenantInstances
-        | Family::ConfigNicoApi
         | Family::ConfigRest => {}
     }
 }
@@ -355,6 +376,34 @@ fn host_series(units: &[Arc<Unit>], series: &mut Series) {
             ],
             1.0,
         );
+        use carbide_site_health_probe_api::metrics::{
+            HOSTS_FIRMWARE, firmware_phase, firmware_ready, vendor_label,
+        };
+        use carbide_site_health_probe_api::{Component, FirmwarePhase};
+        for component in [Component::Bmc, Component::Uefi] {
+            let observed_phase = firmware_phase(unit, component);
+            let observed_ready = firmware_ready(unit);
+            for phase in [
+                FirmwarePhase::Unknown,
+                FirmwarePhase::Behind,
+                FirmwarePhase::Updating,
+                FirmwarePhase::Failed,
+                FirmwarePhase::Current,
+            ] {
+                for ready in [false, true] {
+                    let labels = vec![
+                        vendor_label(host),
+                        model_label(host),
+                        wire(component),
+                        wire(phase),
+                        ready.to_string(),
+                    ];
+                    let value =
+                        f64::from(u8::from(observed_phase == phase && observed_ready == ready));
+                    add(series, HOSTS_FIRMWARE.name, labels, value);
+                }
+            }
+        }
         let eligible = flag_label(host.update_eligible);
         let reason = host
             .update_blocking_reason
@@ -419,7 +468,7 @@ impl Collector for StateCollector {
 /// The readers' sink: counts each delivery on the OTel meter, then stores
 /// it.
 pub(crate) struct CountingSink {
-    store: Arc<SnapshotStore>,
+    pub(crate) store: Arc<SnapshotStore>,
     sweeps: Counter<u64>,
     unknown_states: Counter<u64>,
 }
@@ -485,7 +534,8 @@ fn reader_of(family: Family) -> Option<Reader> {
         | Family::RestMachines
         | Family::RestInstances
         | Family::ConfigRest => Some(Reader::RestInventory),
-        Family::RestTenantInstances | Family::ConfigNicoApi => None,
+        Family::ConfigNicoApi => Some(Reader::NicoConfig),
+        Family::RestTenantInstances => None,
     }
 }
 
@@ -591,6 +641,10 @@ mod tests {
 
     fn host_fields(model: &str, bmc: &str) -> HostFields {
         HostFields {
+            firmware_window: None,
+            firmware_policy_eligible: None,
+            firmware_policy_blocking_reason: None,
+            firmware: None,
             vendor: Some("NVIDIA".to_string()),
             model: Some(model.to_string()),
             instance_type: None,
@@ -851,6 +905,9 @@ carbide_site_health_probe_unresolved_units{type="dpu"} 1
 
     /// Every state gauge's descriptor: name, labels in order, help.
     const DESCRIPTORS: &str = r#"
+carbide_site_health_probe_hosts_firmware [vendor,model,component,phase,ready] Hosts per vendor, model, firmware component, phase and native readiness.
+carbide_site_health_probe_firmware_config_revision [] Latest successful firmware configuration revision.
+carbide_site_health_probe_host_firmware_config_revision [] Configuration revision pinned to host firmware evidence.
 carbide_site_health_probe_units [type,stage,state] Units per type, stage (registered, ready, error) and state, from the newest complete sweep.
 carbide_site_health_probe_hosts [model,instance_type,state,allocatable,update_complete] Hosts per model, instance type, state, allocatability and update completion.
 carbide_site_health_probe_hosts_update_eligible [model,eligible,reason] Hosts per model and firmware update eligibility (true, false, unknown) with the blocking reason.
@@ -1041,6 +1098,11 @@ carbide_site_health_probe_host_predicates_known [predicate] 1 when the current h
         let out = exposition(&setup.registry);
         let got: Vec<&str> = out
             .lines()
+            .filter(|line| {
+                !line.contains("carbide_site_health_probe_hosts_firmware")
+                    && !line.contains("carbide_site_health_probe_firmware_config_revision")
+                    && !line.contains("carbide_site_health_probe_host_firmware_config_revision")
+            })
             .filter(|line| {
                 line.starts_with(PREFIX)
                     || line.starts_with(&format!("# HELP {PREFIX}"))

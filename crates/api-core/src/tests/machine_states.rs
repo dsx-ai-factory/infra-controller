@@ -335,6 +335,7 @@ async fn rejected_dpa_network_config_rolls_back_before_transition(pool: sqlx::Pg
                 pci_name: pci_name.to_string(),
                 device_description: None,
                 interface_type: DpaInterfaceType::Svpc,
+                interface_name: None,
             },
             &mut txn,
         )
@@ -677,6 +678,7 @@ async fn test_machine_creator_created_host_advances_through_dpu_discovery(
         Arc::new(env.config.rack_profiles.clone()),
         None,
         false,
+        env.api.instrumentation.clone(),
     );
 
     // Use a known DPU serial so we can assert on the generated MachineId.
@@ -879,7 +881,7 @@ async fn test_machine_creator_created_host_advances_through_dpu_discovery(
             .await?
     );
 
-    let handler = MachineStateHandlerBuilder::builder()
+    let handler = MachineStateHandlerBuilder::builder(env.api.instrumentation.clone())
         .dpu_up_threshold(chrono::Duration::minutes(1))
         .hardware_models(env.config.get_firmware_config())
         .reachability_params(env.reachability_params)
@@ -1664,7 +1666,7 @@ async fn test_dpu_heartbeat(pool: sqlx::PgPool) -> sqlx::Result<()> {
     );
 
     // Tell state handler to mark DPU as unhealthy after 1 second
-    let handler = MachineStateHandlerBuilder::builder()
+    let handler = MachineStateHandlerBuilder::builder(env.api.instrumentation.clone())
         .dpu_up_threshold(chrono::Duration::seconds(1))
         .reachability_params(env.reachability_params)
         .attestation_enabled(env.attestation_enabled)
@@ -4266,6 +4268,74 @@ async fn test_ready_boot_config_skips_unlock_when_already_correct(pool: sqlx::Pg
     );
 }
 
+#[crate::sqlx_test]
+async fn test_ending_maintenance_reverifies_a_correct_host_without_mutating_it(pool: sqlx::PgPool) {
+    let mut config = crate::tests::common::api_fixtures::get_config();
+    config.maintenance_end_boot_config_recheck_enabled = true;
+    let overrides = TestEnvOverrides::with_config(config);
+    let env = create_zero_dpu_test_env_with_overrides(pool, overrides).await;
+    let mh = create_managed_host_with_config(&env, ManagedHostConfig::zero_dpu()).await;
+    let maintenance = |operation: rpc::forge::MaintenanceOperation| {
+        tonic::Request::new(rpc::forge::MaintenanceRequest {
+            operation: operation.into(),
+            host_id: Some(mh.id.into()),
+            reference: Some("https://jira.example.com/ABC-123".to_string()),
+        })
+    };
+    env.api
+        .set_maintenance(maintenance(rpc::forge::MaintenanceOperation::Enable))
+        .await
+        .unwrap();
+    env.api
+        .set_maintenance(maintenance(rpc::forge::MaintenanceOperation::Disable))
+        .await
+        .unwrap();
+    let mut txn = env.db_txn().await;
+    let pending = mh
+        .host()
+        .db_machine(&mut txn)
+        .await
+        .pending_boot_interface_config_version()
+        .expect("ending maintenance should open a pending boot configuration");
+    drop(txn);
+    env.redfish_sim.set_is_bios_setup(true);
+    env.redfish_sim.set_is_boot_order_setup(true);
+    env.redfish_sim
+        .set_lockdown(libredfish::EnabledDisabled::Enabled);
+    let checkpoint = env.redfish_sim.timepoint();
+
+    env.run_machine_state_controller_iteration().await;
+    env.run_machine_state_controller_iteration_until_state_matches(
+        &mh.id,
+        5,
+        ManagedHostState::Ready,
+    )
+    .await;
+
+    let mut txn = env.db_txn().await;
+    let host = mh.host().db_machine(&mut txn).await;
+    assert_eq!(host.pending_boot_interface_config_version(), None);
+    assert_eq!(
+        host.status
+            .boot_interface_status_observation
+            .as_ref()
+            .map(|observation| observation.config_version),
+        Some(pending),
+        "the re-verified generation should be recorded as observed"
+    );
+    drop(txn);
+    let actions = env.redfish_sim.actions_since(&checkpoint).all_hosts();
+    assert!(
+        !actions.iter().any(|action| matches!(
+            action,
+            RedfishSimAction::MachineSetup { .. }
+                | RedfishSimAction::SetBootOrderDpuFirst { .. }
+                | RedfishSimAction::Power(_)
+        )),
+        "re-verifying a correct host must not write BIOS, change boot order or reboot: {actions:?}"
+    );
+}
+
 /// A periodic observation of an unchanged target refreshes only its observation
 /// metadata. It does not create a new desired generation, enter convergence,
 /// or issue any Redfish mutation.
@@ -5319,7 +5389,7 @@ async fn test_ready_boot_config_waits_for_observed_lockdown_before_verifying(poo
     let pending = set_pending_boot_interface(&env, &mh).await;
     let mut reachability = env.reachability_params;
     reachability.uefi_boot_wait = Duration::minutes(1);
-    let handler = MachineStateHandlerBuilder::builder()
+    let handler = MachineStateHandlerBuilder::builder(env.api.instrumentation.clone())
         .hardware_models(env.config.get_firmware_config())
         .reachability_params(reachability)
         .attestation_enabled(env.attestation_enabled)
@@ -5542,7 +5612,7 @@ async fn test_ready_boot_lockdown_deadline_parks_without_effects(pool: sqlx::PgP
         drop(txn);
         for _ in 0..2 {
             // Recreate the handler to ensure the budget comes from persisted state.
-            let handler = MachineStateHandlerBuilder::builder()
+            let handler = MachineStateHandlerBuilder::builder(env.api.instrumentation.clone())
                 .hardware_models(env.config.get_firmware_config())
                 .reachability_params(env.reachability_params)
                 .attestation_enabled(env.attestation_enabled)
@@ -5849,7 +5919,7 @@ async fn test_ready_boot_full_lockdown_captures_new_failure_without_skipping_res
     .await;
     let mut reachability = env.reachability_params;
     reachability.uefi_boot_wait = Duration::minutes(1);
-    let handler = MachineStateHandlerBuilder::builder()
+    let handler = MachineStateHandlerBuilder::builder(env.api.instrumentation.clone())
         .hardware_models(env.config.get_firmware_config())
         .reachability_params(reachability)
         .attestation_enabled(env.attestation_enabled)

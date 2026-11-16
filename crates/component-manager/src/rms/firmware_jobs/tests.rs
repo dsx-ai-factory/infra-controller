@@ -20,7 +20,14 @@ const PRIVATE: &str = "private-credentials-manifest-options-body";
 /// Supplies only the RMS client and chosen pool; individual tests own tracking setup.
 fn backend(pool: PgPool) -> (Arc<MockRmsApi>, RmsBackend) {
     let mock = Arc::new(MockRmsApi::new());
-    let backend = RmsBackend::new(mock.clone(), Some(mock.clone()), pool, Arc::default(), true);
+    let backend = RmsBackend::new(
+        mock.clone(),
+        Some(mock.clone()),
+        pool,
+        Arc::default(),
+        true,
+        carbide_instrument::Instrumentation::global(),
+    );
     (mock, backend)
 }
 
@@ -57,6 +64,7 @@ fn image_response(id: &str, state: &str) -> rms::GetSwitchSystemImageJobStatusRe
 /// existing mapper tests retain the documented mappings, not an exhaustive wire matrix.
 #[tokio::test]
 async fn protocol_evidence_is_attributed_and_diagnostics_are_private() {
+    let instrumentation = carbide_instrument::Instrumentation::noop();
     use FirmwareJobReadError::{JobNotFound, PollFailed, StatusUnavailable};
     use ObservedJobKind::{FirmwareObject as Firmware, SwitchSystemImage as Image};
     #[derive(Debug, Clone, Copy)]
@@ -169,6 +177,7 @@ async fn protocol_evidence_is_attributed_and_diagnostics_are_private() {
         let configured = !matches!(evidence, Unconfigured);
 
         let (result, logs) = capture_logs_async(observe_job(
+            &instrumentation,
             &mock,
             configured.then_some(&mock as &dyn RmsSwitchSystemImageStatusApi),
             &job,

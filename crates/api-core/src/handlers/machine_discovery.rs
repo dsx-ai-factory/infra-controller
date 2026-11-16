@@ -196,6 +196,14 @@ pub(crate) async fn discover_machine(
         caller_machine_id.and_then(|id| PredictedHostMachineId::try_from(id).ok())
     };
 
+    if let Some(id) = predicted_host_id {
+        trace_propagation::MachineTraceAttributes {
+            predicted_id: Some(&id.to_string()),
+            ..Default::default()
+        }
+        .record_on(&tracing::Span::current());
+    }
+
     let (dpu_loopback, dpu_asn, admin_admission, loopback_intent) = if hardware_info.is_dpu() {
         let mut preflight = api.txn_begin().await?;
         let interface = discovery_interface(
@@ -256,6 +264,7 @@ pub(crate) async fn discover_machine(
                 stable_machine_id,
                 reservation.as_ref().and_then(|r| r.loopback_ipv4),
                 &api.cancel_token,
+                api.instrumentation.clone(),
             ),
             PreparedDpuAsn::prepare(
                 api.pg_pool(),
@@ -498,6 +507,7 @@ pub(crate) async fn discover_machine(
                 })?
             };
 
+            crate::api::log_machine_snapshot(&db_machine);
             db_machine.id
         } else {
             // Now we know stable machine id for host. Let's update it in db.
@@ -748,6 +758,13 @@ pub(crate) async fn discover_machine(
             (None, Some(_)) => Some(machine_id),
             (None, None) => None,
         };
+        if let Some(host_machine_id) = reconciled_host_machine_id {
+            trace_propagation::MachineTraceAttributes {
+                managed_host_id: Some(&host_machine_id.to_string()),
+                ..Default::default()
+            }
+            .record_on(&tracing::Span::current());
+        }
         if let Some(host_machine_id) = reconciled_host_machine_id
             && let Err(error) = db::machine_interface::reconcile_admin_addresses_after_commit(
                 api.pg_pool(),
@@ -755,7 +772,7 @@ pub(crate) async fn discover_machine(
             )
             .await
         {
-            carbide_instrument::emit(HostAdminAddressReconcileFailed {
+            api.instrumentation.emit(HostAdminAddressReconcileFailed {
                 dpu_machine_id: dpu_host_machine_id.map(|_| stable_machine_id),
                 host_machine_id,
                 error: error.to_string(),

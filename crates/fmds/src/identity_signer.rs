@@ -17,7 +17,7 @@
 
 use async_trait::async_trait;
 use axum::http::{HeaderMap, Uri};
-use forge_dpu_fmds_shared::machine_identity::{
+use carbide_dpu_fmds_shared::machine_identity::{
     MetaDataIdentityOutcome, MetaDataIdentitySigner, forward_sign_proxy_if_ready,
     sign_machine_identity_with_forge, wait_identity_rate_limit_permit,
 };
@@ -49,6 +49,7 @@ impl MetaDataIdentitySigner for FmdsState {
             serving.sign_proxy_http_client.as_ref(),
             uri,
             headers,
+            &self.instrumentation,
         )
         .await
         {

@@ -32,6 +32,7 @@ test-support = ["dep:mockall"]
 
 [dependencies]
 bmc-backend = { path = "../bmc-backend" }
+bmc-platform = { path = "../bmc-platform" }
 bmc-runtime = { path = "../bmc-runtime" }
 bmc-vendor = { path = "../bmc-vendor" }
 carbide-api-db = { path = "../api-db", default-features = false }
@@ -53,6 +54,7 @@ carbide-uuid = { path = "../uuid", default-features = false }
 component-manager = { path = "../component-manager" }
 config-version = { path = "../config-version", default-features = false }
 state-controller = { path = "../state-controller" }
+trace-propagation = { path = "../trace-propagation" }
 
 async-trait = { workspace = true }
 chrono = { workspace = true }
@@ -66,6 +68,7 @@ lazy_static = { workspace = true }
 libredfish = { workspace = true }
 mac_address = { workspace = true }
 mockall = { workspace = true, optional = true }
+nv-redfish = { workspace = true, features = ["secure-boot"] }
 opentelemetry = { workspace = true }
 prometheus = { workspace = true }
 prost = { workspace = true }

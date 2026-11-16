@@ -55,7 +55,14 @@ pub struct ApiClientWrapper {
 }
 
 impl ApiClientWrapper {
-    pub fn new(root_ca: String, client_cert: String, client_key: String, api_url: &Url) -> Self {
+    /// Builds an API client whose RED metrics use the supplied destination.
+    pub fn new(
+        root_ca: String,
+        client_cert: String,
+        client_key: String,
+        api_url: &Url,
+        instrumentation: carbide_instrument::Instrumentation,
+    ) -> Self {
         let client_config = CarbideClientConfig::new(
             root_ca,
             Some(ClientCert {
@@ -65,7 +72,7 @@ impl ApiClientWrapper {
         );
         let api_config = ApiConfig::new(api_url.as_str(), &client_config);
 
-        let client = CarbideApiClient::new(&api_config);
+        let client = CarbideApiClient::new(&api_config, instrumentation);
 
         Self { client }
     }
