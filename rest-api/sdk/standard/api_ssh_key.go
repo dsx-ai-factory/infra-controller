@@ -479,7 +479,7 @@ type ApiGetSshKeyRequest struct {
 	includeRelation *[]string
 }
 
-// Related entities to expand. Repeat the parameter to request multiple relations.
+// Related entity to expand. Repeat the parameter to specify multiple values.
 func (r ApiGetSshKeyRequest) IncludeRelation(includeRelation []string) ApiGetSshKeyRequest {
 	r.includeRelation = &includeRelation
 	return r

@@ -583,7 +583,7 @@ type ApiGetSiteRequest struct {
 	includeRelation *[]string
 }
 
-// Related entities to expand. Repeat the parameter to request multiple relations.
+// Related entity to expand. Repeat the parameter to specify multiple values.
 func (r ApiGetSiteRequest) IncludeRelation(includeRelation []string) ApiGetSiteRequest {
 	r.includeRelation = &includeRelation
 	return r

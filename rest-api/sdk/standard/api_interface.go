@@ -71,7 +71,7 @@ func (r ApiGetAllInterfacesRequest) Status(status InterfaceStatus) ApiGetAllInte
 	return r
 }
 
-// Related entity to expand; repeat the parameter to request multiple relations.
+// Related entity to expand. Repeat the parameter to specify multiple values.
 func (r ApiGetAllInterfacesRequest) IncludeRelation(includeRelation []string) ApiGetAllInterfacesRequest {
 	r.includeRelation = &includeRelation
 	return r

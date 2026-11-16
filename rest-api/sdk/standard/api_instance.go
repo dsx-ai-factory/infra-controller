@@ -1603,14 +1603,13 @@ func (a *InstanceAPIService) GetInstanceExecute(r ApiGetInstanceRequest) (*Insta
 }
 
 type ApiGetInstanceStatusHistoryRequest struct {
-	ctx             context.Context
-	ApiService      *InstanceAPIService
-	org             string
-	instanceId      string
-	pageNumber      *int32
-	pageSize        *int32
-	orderBy         *string
-	includeRelation *[]string
+	ctx        context.Context
+	ApiService *InstanceAPIService
+	org        string
+	instanceId string
+	pageNumber *int32
+	pageSize   *int32
+	orderBy    *string
 }
 
 // Page number for pagination query
@@ -1628,12 +1627,6 @@ func (r ApiGetInstanceStatusHistoryRequest) PageSize(pageSize int32) ApiGetInsta
 // Ordering for pagination query
 func (r ApiGetInstanceStatusHistoryRequest) OrderBy(orderBy string) ApiGetInstanceStatusHistoryRequest {
 	r.orderBy = &orderBy
-	return r
-}
-
-// Related Instance entities to load while retrieving status history. Repeat the parameter to request multiple relations.
-func (r ApiGetInstanceStatusHistoryRequest) IncludeRelation(includeRelation []string) ApiGetInstanceStatusHistoryRequest {
-	r.includeRelation = &includeRelation
 	return r
 }
 
@@ -1694,17 +1687,6 @@ func (a *InstanceAPIService) GetInstanceStatusHistoryExecute(r ApiGetInstanceSta
 	}
 	if r.orderBy != nil {
 		parameterAddToHeaderOrQuery(localVarQueryParams, "orderBy", r.orderBy, "form", "")
-	}
-	if r.includeRelation != nil {
-		t := *r.includeRelation
-		if reflect.TypeOf(t).Kind() == reflect.Slice {
-			s := reflect.ValueOf(t)
-			for i := 0; i < s.Len(); i++ {
-				parameterAddToHeaderOrQuery(localVarQueryParams, "includeRelation", s.Index(i).Interface(), "form", "multi")
-			}
-		} else {
-			parameterAddToHeaderOrQuery(localVarQueryParams, "includeRelation", t, "form", "multi")
-		}
 	}
 	// to determine the Content-Type header
 	localVarHTTPContentTypes := []string{}

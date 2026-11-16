@@ -6060,7 +6060,6 @@ func NewGetInstanceStatusDetailsHandler(dbSession *cdb.Session) GetInstanceStatu
 // @Security ApiKeyAuth
 // @Param org path string true "Name of NGC organization"
 // @Param id path string true "ID of Instance"
-// @Param includeRelation query []string false "Related Instance entities to load while retrieving status history e.g. 'InfrastructureProvider', 'Tenant', 'Site'. Repeat the parameter to request multiple relations." collectionFormat(multi)
 // @Success 200 {object} []model.APIStatusDetail
 // @Router /v2/org/{org}/nico/instance/{id}/status-history [get]
 func (gisdh GetInstanceStatusDetailsHandler) Handle(c echo.Context) error {
@@ -6090,14 +6089,6 @@ func (gisdh GetInstanceStatusDetailsHandler) Handle(c echo.Context) error {
 		return cutil.NewAPIErrorResponse(c, http.StatusForbidden, "User does not have Tenant Admin role with org", nil)
 	}
 
-	// Get and validate includeRelation params
-	qParams := c.QueryParams()
-	qIncludeRelations, errMsg := common.GetAndValidateQueryRelations(qParams, cdbm.InstanceRelatedEntities)
-	if errMsg != "" {
-		logger.Warn().Msg(errMsg)
-		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, errMsg, nil)
-	}
-
 	// Get Instance ID from URL param
 	instanceStrID := c.Param("id")
 	instanceID, err := uuid.Parse(instanceStrID)
@@ -6109,7 +6100,7 @@ func (gisdh GetInstanceStatusDetailsHandler) Handle(c echo.Context) error {
 
 	// Get Instance
 	instanceDAO := cdbm.NewInstanceDAO(gisdh.dbSession)
-	instance, err := instanceDAO.GetByID(ctx, nil, instanceID, qIncludeRelations, false)
+	instance, err := instanceDAO.GetByID(ctx, nil, instanceID, nil, false)
 	if err != nil {
 		if err == cdb.ErrDoesNotExist {
 			return cutil.NewAPIErrorResponse(c, http.StatusNotFound, "Could not find Instance with specified ID", nil)

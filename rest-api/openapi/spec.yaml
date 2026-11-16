@@ -1177,7 +1177,7 @@ paths:
                 - InfrastructureProvider
           in: query
           name: includeRelation
-          description: Related entities to expand. Repeat the parameter to request multiple relations.
+          description: Related entity to expand. Repeat the parameter to specify multiple values.
           style: form
           explode: true
     patch:
@@ -3610,7 +3610,7 @@ paths:
                 - VpcPrefix
           in: query
           name: includeRelation
-          description: Related entity to expand; repeat the parameter to request multiple relations.
+          description: Related entity to expand. Repeat the parameter to specify multiple values.
           style: form
           explode: true
         - schema:
@@ -10209,24 +10209,6 @@ paths:
           in: query
           name: orderBy
           description: Ordering for pagination query
-        - schema:
-            type: array
-            items:
-              type: string
-              enum:
-                - InfrastructureProvider
-                - Tenant
-                - Site
-                - InstanceType
-                - Machine
-                - VPC
-                - OperatingSystem
-                - NetworkSecurityGroup
-          in: query
-          name: includeRelation
-          description: Related Instance entities to load while retrieving status history. Repeat the parameter to request multiple relations.
-          style: form
-          explode: true
   '/v2/org/{org}/nico/instance/{instanceId}/interface':
     parameters:
       - schema:
@@ -18087,7 +18069,7 @@ paths:
                 - Tenant
           in: query
           name: includeRelation
-          description: Related entities to expand. Repeat the parameter to request multiple relations.
+          description: Related entity to expand. Repeat the parameter to specify multiple values.
           style: form
           explode: true
     delete:
@@ -18505,7 +18487,7 @@ paths:
                 - Tenant
           in: query
           name: includeRelation
-          description: Related entities to expand. Repeat the parameter to request multiple relations.
+          description: Related entity to expand. Repeat the parameter to specify multiple values.
           style: form
           explode: true
     delete:
@@ -18815,7 +18797,7 @@ paths:
                 - Tenant
           in: query
           name: includeRelation
-          description: Related entities to expand. Repeat the parameter to request multiple relations.
+          description: Related entity to expand. Repeat the parameter to specify multiple values.
           style: form
           explode: true
     delete:
