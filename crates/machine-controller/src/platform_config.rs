@@ -73,7 +73,9 @@ impl PlatformConfig {
 /// BIOS work. Work the other writes start is not waited on.
 ///
 /// Secure boot is written after the BIOS because a BIOS write may clear the
-/// configuration work the BMC has queued.
+/// configuration work the BMC has queued. A BMC may refuse the secure boot
+/// write while that BIOS work is pending; the BIOS work is still returned, and
+/// secure boot is written once a later apply finds the BIOS settings in effect.
 pub(crate) async fn apply(
     bmc: &PlatformBmc<'_>,
     site_config: &MachineStateHandlerSiteConfig,
@@ -113,8 +115,29 @@ pub(crate) async fn apply(
     unless_unsupported(apply_settings.await, DriverOutcome::complete())?;
     unless_unsupported(setup_console.await, DriverOutcome::complete())?;
     let bios = unless_unsupported(apply_bios.await, DriverOutcome::complete())?;
-    unless_unsupported(disable_secure_boot.await, DriverOutcome::complete())?;
-    Ok(bios)
+    after_pending_bios(
+        bios,
+        unless_unsupported(disable_secure_boot.await, DriverOutcome::complete()),
+    )
+}
+
+/// The `bios` work `apply` returns once the secure boot write that followed
+/// it answered `secure_boot`. A failed write fails `apply` only when no BIOS
+/// work is pending, since failing would lose the work the host must wait for.
+fn after_pending_bios(
+    bios: DriverOutcome,
+    secure_boot: Result<DriverOutcome, PlatformError>,
+) -> Result<DriverOutcome, PlatformError> {
+    match secure_boot {
+        Err(error) if matches!(bios, DriverOutcome::Accepted { .. }) => {
+            tracing::warn!(
+                %error,
+                "disabling secure boot failed while BIOS work is pending; a later apply retries it"
+            );
+            Ok(bios)
+        }
+        secure_boot => secure_boot.map(|_| bios),
+    }
 }
 
 /// Whether every platform setting the platform reports is in effect.
@@ -157,5 +180,35 @@ fn unless_unsupported<T>(
     match result {
         Err(PlatformError::Unsupported) => Ok(fallback),
         result => result,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use carbide_test_support::value_scenarios;
+
+    use super::*;
+
+    #[test]
+    fn a_failed_secure_boot_write_keeps_pending_bios_work() {
+        let job = || {
+            DriverOutcome::accepted(idrac_job(
+                VendorJobId::new("JID_42".to_string()).expect("nonempty"),
+            ))
+        };
+        let refused = || PlatformError::NotReady {
+            message: "SYS011".to_string(),
+        };
+        value_scenarios!(run = |(bios, secure_boot)| after_pending_bios(bios, secure_boot);
+            "the secure boot write succeeds" {
+                (job(), Ok(DriverOutcome::complete())) => Ok(job()),
+                (DriverOutcome::complete(), Ok(DriverOutcome::complete()))
+                    => Ok(DriverOutcome::complete()),
+            }
+            "the secure boot write fails" {
+                (job(), Err(refused())) => Ok(job()),
+                (DriverOutcome::complete(), Err(refused())) => Err(refused()),
+            }
+        );
     }
 }
