@@ -231,10 +231,13 @@ and [DPU health-report collection](https://github.com/dsx-ai-factory/infra-contr
 The [complete example rule](examples/dpu-heartbeat.rules.yml) uses `for: 5m`
 to require a sustained failure. This delay starts after Core reports a
 `HeartbeatTimeout`; it does not set Core's heartbeat timeout. The selector
-keeps all labels, including `failure` and any scrape-added labels such as
+keeps all labels, including `failure`, `fresh`, and any scrape-added labels such as
 `job`, `instance`, or `site`. Each distinct label set has its own alert and
-pending timer. Check actual labels and scope the selector to the intended
-Core scrape job and site before deployment.
+pending timer. Core sets `fresh="false"` when the controller's last metrics
+are older than the fresh period, and keeps exporting the last count. This rule
+also matches those stale values. A change in `fresh` creates a new label set,
+so its `for: 5m` timer starts again. Check actual labels and scope the selector
+to the intended Core scrape job and site before deployment.
 
 No matching series means **no reported heartbeat failure**, so this rule does
 not fire on absence. Do not add `absent()` for this failure-only series:
@@ -256,7 +259,7 @@ promtool test rules docs/design/examples/dpu-heartbeat.test.yml
 ```
 
 Then compare the metric name, type, labels, and values with a real Core scrape
-from the QA site. These unit tests do not verify live rule loading or
+from a test site. These rule unit tests do not verify live rule loading or
 Alertmanager notification delivery.
 
 **Stuck-and-unhealthy — is it hardware?** (join with the [#2168](https://github.com/dsx-ai-factory/infra-controller/pull/2168)metric):
