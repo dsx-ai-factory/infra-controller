@@ -19,10 +19,10 @@ use std::net::{Ipv4Addr, Ipv6Addr};
 use std::sync::Arc;
 
 use arc_swap::{ArcSwap, ArcSwapOption};
+use carbide_dpu_fmds_shared::machine_identity::{MachineIdentityParams, MachineIdentityServing};
 use carbide_uuid::infiniband::IBPartitionId;
 use carbide_uuid::instance::InstanceId;
 use carbide_uuid::machine::MachineId;
-use forge_dpu_fmds_shared::machine_identity::{MachineIdentityParams, MachineIdentityServing};
 use governor::middleware::NoOpMiddleware;
 use governor::state::{InMemoryState, NotKeyed};
 use governor::{Quota, RateLimiter, clock};

@@ -19,9 +19,9 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
+use carbide_dpu_fmds_shared::machine_identity::MachineIdentityParams;
 use carbide_host_support::agent_config::MachineIdentityConfig;
 use eyre::{WrapErr, eyre};
-use forge_dpu_fmds_shared::machine_identity::MachineIdentityParams;
 use opentelemetry::metrics::Meter;
 use rpc::fmds::fmds_config_service_client::FmdsConfigServiceClient;
 use rpc::fmds::{
