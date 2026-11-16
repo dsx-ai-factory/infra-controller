@@ -1805,21 +1805,23 @@ func (rs *FlowServerImpl) ValidateComponents(
 	var modelFilter *dbquery.StringQueryInfo
 	var componentTypes []devicetypes.ComponentType
 	var rackFilters []*pb.Filter
+	var hasFilters bool
 
 	if len(req.GetFilters()) > 0 {
 		for _, filter := range req.GetFilters() {
 			if filter == nil {
 				continue
 			}
-			if _, isRackFilter := filter.GetField().(*pb.Filter_RackField); isRackFilter {
-				rackFilters = append(rackFilters, filter)
-				continue
-			}
 			fieldName, queryInfo, err := protobuf.FilterFrom(filter)
 			if err != nil {
 				return nil, fmt.Errorf("invalid filter: %w", err)
 			}
-			if queryInfo == nil {
+			if queryInfo == nil || len(queryInfo.Patterns) == 0 {
+				continue
+			}
+			hasFilters = true
+			if _, isRackFilter := filter.GetField().(*pb.Filter_RackField); isRackFilter {
+				rackFilters = append(rackFilters, filter)
 				continue
 			}
 
@@ -1854,8 +1856,6 @@ func (rs *FlowServerImpl) ValidateComponents(
 	if infoFilter == nil {
 		infoFilter = &dbquery.StringQueryInfo{Patterns: []string{}, IsWildcard: false, UseOR: false}
 	}
-
-	hasFilters := len(req.GetFilters()) > 0
 
 	targetSpec := req.GetTargetSpec()
 	isScoped := targetSpec != nil || hasFilters
@@ -2093,8 +2093,8 @@ func (rs *FlowServerImpl) applyComponentFilters(
 }
 
 // matchesStringQuery checks if a string matches the StringQueryInfo criteria.
-// With UseOR == true the value matches if any pattern matches; with UseOR ==
-// false (AND) the value must match every pattern.
+// Exact patterns use membership matching, like StringQueryInfo.ToFilterable's IN
+// predicate. Wildcard patterns use UseOR to choose between OR and AND.
 func (rs *FlowServerImpl) matchesStringQuery(value string, query dbquery.StringQueryInfo) bool {
 	if len(query.Patterns) == 0 {
 		return true
@@ -2111,7 +2111,7 @@ func (rs *FlowServerImpl) matchesStringQuery(value string, query dbquery.StringQ
 		return rs.matchesWildcard(value, normalizedPattern)
 	}
 
-	if query.UseOR {
+	if !query.IsWildcard || query.UseOR {
 		for _, pattern := range query.Patterns {
 			if matches(pattern) {
 				return true

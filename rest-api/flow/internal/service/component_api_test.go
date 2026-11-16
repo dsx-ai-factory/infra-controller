@@ -1392,3 +1392,22 @@ func TestPurgeComponent_NotFound(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "failed to purge component")
 }
+
+func TestFlowServerImpl_matchesStringQuery(t *testing.T) {
+	cases := []struct {
+		name  string
+		query dbquery.StringQueryInfo
+		want  bool
+	}{
+		{name: "exact alternatives default to membership", query: dbquery.StringQueryInfo{Patterns: []string{"compute-01", "compute-02"}}, want: true},
+		{name: "exact alternatives reject nonmembers", query: dbquery.StringQueryInfo{Patterns: []string{"compute-02", "compute-03"}}},
+		{name: "wildcard AND requires every pattern", query: dbquery.StringQueryInfo{Patterns: []string{"compute", "02"}, IsWildcard: true}},
+		{name: "wildcard OR accepts one pattern", query: dbquery.StringQueryInfo{Patterns: []string{"compute", "02"}, IsWildcard: true, UseOR: true}, want: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := (&FlowServerImpl{}).matchesStringQuery("compute-01", tc.query)
+			assert.Equal(t, tc.want, got)
+		})
+	}
+}

@@ -56,8 +56,8 @@ func TestFlowServerImpl_ValidateComponents(t *testing.T) {
 	rackName := func(name string) *pb.Filter {
 		return &pb.Filter{Field: &pb.Filter_RackField{RackField: pb.RackFilterField_RACK_FILTER_FIELD_NAME}, QueryInfo: &pb.StringQueryInfo{Patterns: []string{name}}}
 	}
-	componentFilter := func(field pb.ComponentFilterField, value string) *pb.Filter {
-		return &pb.Filter{Field: &pb.Filter_ComponentField{ComponentField: field}, QueryInfo: &pb.StringQueryInfo{Patterns: []string{value}}}
+	componentFilter := func(field pb.ComponentFilterField, values ...string) *pb.Filter {
+		return &pb.Filter{Field: &pb.Filter_ComponentField{ComponentField: field}, QueryInfo: &pb.StringQueryInfo{Patterns: values}}
 	}
 	cases := []struct {
 		name                              string
@@ -65,11 +65,16 @@ func TestFlowServerImpl_ValidateComponents(t *testing.T) {
 		target                            bool
 		emptyRack                         bool
 		listError                         bool
+		unexpected                        int32
 		total, missing, mismatch, matches int32
 	}{
 		{name: "rack name selects parent not component", filters: []*pb.Filter{rackName("test-rack")}, total: 3, missing: 1, mismatch: 2, matches: 1},
 		{name: "absent rack name stays empty", filters: []*pb.Filter{rackName("absent-rack")}, emptyRack: true},
 		{name: "absent tray name stays empty", filters: []*pb.Filter{componentFilter(pb.ComponentFilterField_COMPONENT_FILTER_FIELD_NAME, "absent-tray")}},
+		{name: "empty patterns retain unexpected drift", filters: []*pb.Filter{componentFilter(pb.ComponentFilterField_COMPONENT_FILTER_FIELD_NAME)}, total: 5, missing: 1, mismatch: 3, unexpected: 1},
+		{name: "missing query info retains unexpected drift", filters: []*pb.Filter{{Field: &pb.Filter_ComponentField{ComponentField: pb.ComponentFilterField_COMPONENT_FILTER_FIELD_NAME}}}, total: 5, missing: 1, mismatch: 3, unexpected: 1},
+		{name: "empty patterns retain explicit target scope", filters: []*pb.Filter{componentFilter(pb.ComponentFilterField_COMPONENT_FILTER_FIELD_NAME)}, target: true, total: 3, missing: 1, mismatch: 2, matches: 1},
+		{name: "multiple exact tray names use membership", filters: []*pb.Filter{componentFilter(pb.ComponentFilterField_COMPONENT_FILTER_FIELD_NAME, "compute-01", "compute-02")}, total: 2, missing: 1, mismatch: 1},
 		{name: "tray name without target", filters: []*pb.Filter{componentFilter(pb.ComponentFilterField_COMPONENT_FILTER_FIELD_NAME, "compute-01")}, total: 1, mismatch: 1},
 		{name: "tray type without target", filters: []*pb.Filter{componentFilter(pb.ComponentFilterField_COMPONENT_FILTER_FIELD_TYPE, "nvswitch")}, total: 1, mismatch: 1},
 		{name: "tray manufacturer without target", filters: []*pb.Filter{componentFilter(pb.ComponentFilterField_COMPONENT_FILTER_FIELD_MANUFACTURER, "NVIDIA")}, total: 2, missing: 1, mismatch: 1},
@@ -91,6 +96,9 @@ func TestFlowServerImpl_ValidateComponents(t *testing.T) {
 			outside := &component.Component{Info: deviceinfo.DeviceInfo{ID: outsideID, Name: "test-rack"}, RackID: uuid.New()}
 			base.components[outsideID] = outside
 			base.drifts = append(base.drifts, inventorystore.ComponentDrift{ID: uuid.New(), ComponentID: &outsideID, DriftType: "mismatch"})
+			if tc.unexpected > 0 {
+				base.drifts = append(base.drifts, inventorystore.ComponentDrift{ID: uuid.New(), DriftType: "missing_in_expected"})
+			}
 			mgr := &validationManager{mockManager: base}
 			mgr.listRacks = func(name dbquery.StringQueryInfo, manufacturer, model *dbquery.StringQueryInfo, page *dbquery.Pagination, withComponents, externalOnly bool) ([]*rack.Rack, int32, error) {
 				assert.Equal(t, tc.filters[0].GetQueryInfo().GetPatterns(), name.Patterns)
@@ -126,11 +134,13 @@ func TestFlowServerImpl_ValidateComponents(t *testing.T) {
 			assert.Equal(t, tc.total, resp.GetTotalDiffs())
 			assert.Len(t, resp.GetDiffs(), int(tc.total))
 			assert.Equal(t, tc.missing, resp.GetMissingCount())
-			assert.Zero(t, resp.GetUnexpectedCount())
+			assert.Equal(t, tc.unexpected, resp.GetUnexpectedCount())
 			assert.Equal(t, tc.mismatch, resp.GetMismatchCount())
 			assert.Equal(t, tc.matches, resp.GetMatchCount())
-			for _, diff := range resp.GetDiffs() {
-				assert.NotEqual(t, outsideID.String(), diff.GetId().GetId())
+			if tc.unexpected == 0 {
+				for _, diff := range resp.GetDiffs() {
+					assert.NotEqual(t, outsideID.String(), diff.GetId().GetId())
+				}
 			}
 			if tc.name == "rack name selects parent not component" {
 				detail, detailErr := server.ValidateComponents(context.Background(), &pb.ValidateComponentsRequest{TargetSpec: &pb.OperationTargetSpec{Targets: &pb.OperationTargetSpec_Racks{Racks: &pb.RackTargets{Targets: []*pb.RackTarget{{Identifier: &pb.RackTarget_Id{Id: &pb.UUID{Id: rackID.String()}}}}}}}})
