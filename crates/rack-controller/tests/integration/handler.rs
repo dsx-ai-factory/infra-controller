@@ -3906,11 +3906,11 @@ async fn test_ingestion_reconciles_late_compute_firmware_body(
         Some(&original_job),
     )
     .await?;
+
     env.rms_sim
-        .set_firmware_job_status(rms::GetFirmwareJobStatusResponse {
-            status: rms::ReturnCode::Success as i32,
+        .set_firmware_job_status(rms::JobStatus {
             job_id: "original-child".to_string(),
-            job_state: rms::FirmwareJobState::Running as i32,
+            execution_state: rms::JobExecutionState::Running as i32,
             ..Default::default()
         })
         .await;
@@ -4008,11 +4008,11 @@ async fn test_ingestion_reconciles_late_compute_firmware_body(
         original_before.rack_fw_details.unwrap().status,
         RackFirmwareUpgradeState::InProgress
     );
+
     env.rms_sim
-        .set_firmware_job_status(rms::GetFirmwareJobStatusResponse {
-            status: rms::ReturnCode::Success as i32,
+        .set_firmware_job_status(rms::JobStatus {
             job_id: "original-child".to_string(),
-            job_state: rms::FirmwareJobState::Completed as i32,
+            execution_state: rms::JobExecutionState::Completed as i32,
             ..Default::default()
         })
         .await;
@@ -4112,10 +4112,9 @@ async fn test_ingestion_reconciles_late_compute_firmware_body(
     let admitted_at = status.started_at;
 
     env.rms_sim
-        .set_firmware_job_status(rms::GetFirmwareJobStatusResponse {
-            status: rms::ReturnCode::Success as i32,
+        .set_firmware_job_status(rms::JobStatus {
             job_id: "late-child".to_string(),
-            job_state: rms::FirmwareJobState::Running as i32,
+            execution_state: rms::JobExecutionState::Running as i32,
             ..Default::default()
         })
         .await;
@@ -4142,10 +4141,9 @@ async fn test_ingestion_reconciles_late_compute_firmware_body(
     assert!(status.is_current_for(requested_at));
 
     env.rms_sim
-        .set_firmware_job_status(rms::GetFirmwareJobStatusResponse {
-            status: rms::ReturnCode::Success as i32,
+        .set_firmware_job_status(rms::JobStatus {
             job_id: "late-child".to_string(),
-            job_state: rms::FirmwareJobState::Completed as i32,
+            execution_state: rms::JobExecutionState::Completed as i32,
             ..Default::default()
         })
         .await;
@@ -4291,11 +4289,11 @@ async fn ingestion_reopens_firmware_workflow(
             .unwrap()
             .return_to_completed
     );
+
     env.rms_sim
-        .set_firmware_job_status(rms::GetFirmwareJobStatusResponse {
-            status: rms::ReturnCode::Success as i32,
+        .set_firmware_job_status(rms::JobStatus {
             job_id: "late-child".to_string(),
-            job_state: rms::FirmwareJobState::Running as i32,
+            execution_state: rms::JobExecutionState::Running as i32,
             ..Default::default()
         })
         .await;
@@ -4380,10 +4378,9 @@ async fn ingestion_reopens_firmware_workflow(
         (later.host_snapshot.id, "later-child"),
     ] {
         env.rms_sim
-            .set_firmware_job_status(rms::GetFirmwareJobStatusResponse {
-                status: rms::ReturnCode::Success as i32,
+            .set_firmware_job_status(rms::JobStatus {
                 job_id: child.to_string(),
-                job_state: rms::FirmwareJobState::Completed as i32,
+                execution_state: rms::JobExecutionState::Completed as i32,
                 ..Default::default()
             })
             .await;
@@ -4490,13 +4487,13 @@ async fn test_firmware_upgrade_wait_for_complete_waits_while_jobs_running(
         waiting_for_rack_firmware_upgrade_state(),
     )
     .await?;
+
     env.rms_sim
-        .set_firmware_job_status(librms::protos::rack_manager::GetFirmwareJobStatusResponse {
-            status: librms::protos::rack_manager::ReturnCode::Success as i32,
+        .set_firmware_job_status(rms::JobStatus {
             job_id: "child-job-1".to_string(),
-            job_state: rms::FirmwareJobState::Running as i32,
+            execution_state: rms::JobExecutionState::Running as i32,
             state_description: "running".to_string(),
-            node_id: host.host_snapshot.id.to_string(),
+            node_id: Some(host.host_snapshot.id.to_string()),
             ..Default::default()
         })
         .await;
@@ -4585,13 +4582,13 @@ async fn test_firmware_upgrade_wait_for_complete_transitions_to_error_on_job_fai
         failed_rack_firmware_upgrade_state(),
     )
     .await?;
+
     env.rms_sim
-        .set_firmware_job_status(librms::protos::rack_manager::GetFirmwareJobStatusResponse {
-            status: librms::protos::rack_manager::ReturnCode::Success as i32,
+        .set_firmware_job_status(rms::JobStatus {
             job_id: "child-job-1".to_string(),
-            job_state: rms::FirmwareJobState::Failed as i32,
+            execution_state: rms::JobExecutionState::Failed as i32,
             state_description: "failed".to_string(),
-            node_id: host.host_snapshot.id.to_string(),
+            node_id: Some(host.host_snapshot.id.to_string()),
             error_message: "upgrade failed".to_string(),
             ..Default::default()
         })
@@ -4783,23 +4780,22 @@ async fn test_firmware_upgrade_wait_for_complete_waits_for_all_nodes_to_be_termi
     .await?;
 
     env.rms_sim
-        .set_firmware_job_status(librms::protos::rack_manager::GetFirmwareJobStatusResponse {
-            status: librms::protos::rack_manager::ReturnCode::Success as i32,
+        .set_firmware_job_status(rms::JobStatus {
             job_id: "child-job-1".to_string(),
-            job_state: rms::FirmwareJobState::Failed as i32,
+            execution_state: rms::JobExecutionState::Failed as i32,
             state_description: "failed".to_string(),
-            node_id: host_a.host_snapshot.id.to_string(),
+            node_id: Some(host_a.host_snapshot.id.to_string()),
             error_message: "upgrade failed".to_string(),
             ..Default::default()
         })
         .await;
+
     env.rms_sim
-        .set_firmware_job_status(librms::protos::rack_manager::GetFirmwareJobStatusResponse {
-            status: librms::protos::rack_manager::ReturnCode::Success as i32,
+        .set_firmware_job_status(rms::JobStatus {
             job_id: "child-job-2".to_string(),
-            job_state: rms::FirmwareJobState::Running as i32,
+            execution_state: rms::JobExecutionState::Running as i32,
             state_description: "running".to_string(),
-            node_id: host_b.host_snapshot.id.to_string(),
+            node_id: Some(host_b.host_snapshot.id.to_string()),
             ..Default::default()
         })
         .await;
@@ -4905,12 +4901,11 @@ async fn test_firmware_upgrade_wait_for_complete_waits_for_all_nodes_to_be_termi
     .await?;
 
     env.rms_sim
-        .set_firmware_job_status(librms::protos::rack_manager::GetFirmwareJobStatusResponse {
-            status: librms::protos::rack_manager::ReturnCode::Success as i32,
+        .set_firmware_job_status(rms::JobStatus {
             job_id: "child-job-2".to_string(),
-            job_state: rms::FirmwareJobState::Completed as i32,
+            execution_state: rms::JobExecutionState::Completed as i32,
             state_description: "completed".to_string(),
-            node_id: host_b.host_snapshot.id.to_string(),
+            node_id: Some(host_b.host_snapshot.id.to_string()),
             ..Default::default()
         })
         .await;
@@ -4982,7 +4977,7 @@ async fn test_firmware_upgrade_wait_for_complete_waits_for_all_nodes_to_be_termi
 }
 
 /// test_firmware_upgrade_wait_for_complete_retries_when_job_lookup_fails
-/// verifies that a response-level lookup failure from GetFirmwareJobStatus does
+/// verifies that a NOT_FOUND lookup failure from GetJobStatus does
 /// not mark the device failed and instead keeps the rack waiting while the
 /// machine remains in WaitingForRackFirmwareUpgrade.
 #[sqlx_test]
@@ -5004,14 +4999,11 @@ async fn test_firmware_upgrade_wait_for_complete_retries_when_job_lookup_fails(
         waiting_for_rack_firmware_upgrade_state(),
     )
     .await?;
+
     env.rms_sim
-        .set_firmware_job_status(librms::protos::rack_manager::GetFirmwareJobStatusResponse {
-            status: librms::protos::rack_manager::ReturnCode::Failure as i32,
-            job_id: "child-job-1".to_string(),
-            state_description: "Job not found".to_string(),
-            error_message: "Job not found: child-job-1".to_string(),
-            ..Default::default()
-        })
+        .queue_get_job_status_response(Err(
+            tonic::Status::not_found("Job not found: child-job-1").into()
+        ))
         .await;
 
     let mut rack = get_db_rack(env.db_reader().as_mut(), &rack_id).await;
@@ -5253,12 +5245,11 @@ async fn test_firmware_completion_enters_profile_driven_nvos_for_default_scope(
     txn.commit().await?;
 
     env.rms_sim
-        .set_firmware_job_status(rms::GetFirmwareJobStatusResponse {
-            status: rms::ReturnCode::Success as i32,
+        .set_firmware_job_status(rms::JobStatus {
             job_id: job_id.to_string(),
-            job_state: rms::FirmwareJobState::Completed as i32,
+            execution_state: rms::JobExecutionState::Completed as i32,
             state_description: "completed".to_string(),
-            node_id: switch_id.to_string(),
+            node_id: Some(switch_id.to_string()),
             ..Default::default()
         })
         .await;
