@@ -145,7 +145,7 @@ async fn fixture_with_config(
             reads.fetch_add(1, Ordering::SeqCst);
             deployments.lock().unwrap().push(deployment);
             if reject_reads
-                .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |remaining| {
+                .try_update(Ordering::SeqCst, Ordering::SeqCst, |remaining| {
                     remaining.checked_sub(1)
                 })
                 .is_ok()
@@ -198,6 +198,7 @@ async fn fixture_with_config(
         target_source: "updated-bfb".to_string(),
     });
     let updater = DpuNicFirmwareUpdate {
+        instrumentation: env.api.instrumentation.clone(),
         reported_wrong_versions: Mutex::new(HashSet::new()),
         metrics: None,
         config: env.config.clone(),

@@ -36,7 +36,7 @@ pub struct DhcpByteBuffer {
 }
 
 impl DhcpByteBuffer {
-    /// Return an empty buffer for omitted DHCPv6 options.
+    /// Return an empty buffer for omitted DHCP options.
     pub(super) fn empty() -> Self {
         Self {
             ptr: ptr::null_mut(),
@@ -591,7 +591,7 @@ pub extern "C" fn machine_free_nameservers(nameservers: *mut libc::c_char) {
     };
 }
 
-/// Free a byte buffer returned by a DHCPv6 option getter.
+/// Free a byte buffer returned by a DHCP option getter.
 ///
 /// # Safety
 /// The buffer must have been returned by this crate and not freed before.

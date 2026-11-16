@@ -6,9 +6,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use bmc_backend::BackendBmc;
+use bmc_platform::{PlatformError, PowerState as BmcPowerState, ResetType};
 use bmc_runtime::DriverConnector;
 use carbide_redfish::libredfish::RedfishClientPool;
-use carbide_redfish::libredfish::conv::IntoModel;
 use carbide_secrets::credentials::Credentials;
 use carbide_utils::redfish::BmcAccessInfo;
 use futures_util::{StreamExt, stream};
@@ -16,6 +16,7 @@ use libredfish::model::ODataId;
 use libredfish::model::software_inventory::SoftwareInventory;
 use mac_address::MacAddress;
 use model::component_manager::{ComputeTrayComponent, PowerAction};
+use model::machine::PowerState as MachinePowerState;
 use sqlx::PgPool;
 use tokio::time::{Instant, timeout_at};
 
@@ -105,10 +106,6 @@ impl CoreComputeTrayManager {
 
     /// Connects to `endpoint`'s BMC with its credentials through the
     /// configured `bmc_backend`.
-    #[expect(
-        dead_code,
-        reason = "callers arrive as operations move to the driver system"
-    )]
     async fn connect_bmc(&self, endpoint: &ComputeTrayEndpoint) -> Result<BackendBmc, String> {
         let Some(drivers) = &self.drivers else {
             let Credentials::UsernamePassword { username, password } = &endpoint.bmc_credentials;
@@ -390,14 +387,30 @@ fn map_vendor(vendor: ComputeTrayVendor) -> Option<libredfish::model::service_ro
     }
 }
 
-fn map_power_action(action: PowerAction) -> libredfish::SystemPowerControl {
+fn map_power_action(action: PowerAction) -> ResetType {
     match action {
-        PowerAction::On => libredfish::SystemPowerControl::On,
-        PowerAction::GracefulShutdown => libredfish::SystemPowerControl::GracefulShutdown,
-        PowerAction::ForceOff => libredfish::SystemPowerControl::ForceOff,
-        PowerAction::GracefulRestart => libredfish::SystemPowerControl::GracefulRestart,
-        PowerAction::ForceRestart => libredfish::SystemPowerControl::ForceRestart,
-        PowerAction::AcPowercycle => libredfish::SystemPowerControl::ACPowercycle,
+        PowerAction::On => ResetType::On,
+        PowerAction::GracefulShutdown => ResetType::GracefulShutdown,
+        PowerAction::ForceOff => ResetType::ForceOff,
+        PowerAction::GracefulRestart => ResetType::GracefulRestart,
+        PowerAction::ForceRestart => ResetType::ForceRestart,
+        PowerAction::AcPowercycle => ResetType::FullPowerCycle,
+    }
+}
+
+/// The model power state for a BMC's reported one, `Unknown` when it reports
+/// none NICo classifies.
+fn machine_power_state(state: Option<BmcPowerState>) -> MachinePowerState {
+    match state {
+        Some(BmcPowerState::On) => MachinePowerState::On,
+        Some(BmcPowerState::Off) => MachinePowerState::Off,
+        Some(BmcPowerState::PoweringOn) => MachinePowerState::PoweringOn,
+        Some(BmcPowerState::PoweringOff) => MachinePowerState::PoweringOff,
+        Some(BmcPowerState::Paused) => MachinePowerState::Paused,
+        Some(
+            BmcPowerState::Sleeping | BmcPowerState::Hibernating | BmcPowerState::UnsupportedValue,
+        )
+        | None => MachinePowerState::Unknown,
     }
 }
 
@@ -496,31 +509,16 @@ impl crate::compute_tray_manager::ComputeTrayManager for CoreComputeTrayManager 
                 }
                 let endpoint = &endpoints[index];
                 let read = async {
-                    let Credentials::UsernamePassword { username, password } =
-                        &endpoint.bmc_credentials;
-                    let client = self
-                        .redfish_pool
-                        .create_client(
-                            &endpoint.bmc_ip.to_string(),
-                            Some(443),
-                            carbide_redfish::libredfish::RedfishAuth::Direct(
-                                username.clone(),
-                                password.clone(),
-                            ),
-                            map_vendor(endpoint.vendor),
-                        )
-                        .await
-                        .map_err(|error| format!("failed to create redfish client: {error}"))?;
+                    let bmc = self.connect_bmc(endpoint).await?;
                     // Setup can finish on the deadline poll. Check again so
                     // the inner-first poll cannot begin a late power read.
                     if Instant::now() >= deadline {
                         return Err(POWER_READ_TIMEOUT_ERROR.to_owned());
                     }
-                    client
-                        .get_power_state()
-                        .await
-                        .map(|state| Some(state.into_model()))
-                        .map_err(|error| format!("redfish power read failed: {error}"))
+                    let state = async { bmc.power()?.state().await }.await.map_err(
+                        |error: PlatformError| format!("redfish power read failed: {error}"),
+                    )?;
+                    Ok(Some(machine_power_state(state)))
                 };
                 let power_state = timeout_at(deadline, read)
                     .await
@@ -540,32 +538,16 @@ impl crate::compute_tray_manager::ComputeTrayManager for CoreComputeTrayManager 
         endpoints: &[ComputeTrayEndpoint],
         action: PowerAction,
     ) -> Result<Vec<ComputeTrayResult>, ComponentManagerError> {
-        let redfish_action = map_power_action(action);
+        let reset_type = map_power_action(action);
         let mut results = Vec::with_capacity(endpoints.len());
 
         for ep in endpoints {
-            let Credentials::UsernamePassword {
-                ref username,
-                ref password,
-            } = ep.bmc_credentials;
-
-            let auth = carbide_redfish::libredfish::RedfishAuth::Direct(
-                username.clone(),
-                password.clone(),
-            );
-            let vendor = map_vendor(ep.vendor);
-
             let outcome = async {
-                let client = self
-                    .redfish_pool
-                    .create_client(&ep.bmc_ip.to_string(), Some(443), auth, vendor)
+                let bmc = self.connect_bmc(ep).await?;
+                async { bmc.power()?.set(reset_type).await }
                     .await
-                    .map_err(|e| format!("failed to create Redfish client: {e}"))?;
-
-                client
-                    .power(redfish_action)
-                    .await
-                    .map_err(|e| format!("Redfish power control failed: {e}"))
+                    .map(drop)
+                    .map_err(|e: PlatformError| format!("Redfish power control failed: {e}"))
             }
             .await;
 
@@ -861,7 +843,8 @@ mod tests {
             (RedfishPowerState::PoweringOn, PowerState::PoweringOn),
             (RedfishPowerState::PoweringOff, PowerState::PoweringOff),
             (RedfishPowerState::Paused, PowerState::Paused),
-            (RedfishPowerState::Reset, PowerState::Reset),
+            // libredfish's non-standard Reset is a restart in progress.
+            (RedfishPowerState::Reset, PowerState::PoweringOn),
             (RedfishPowerState::Unknown, PowerState::Unknown),
         ];
 
@@ -922,7 +905,7 @@ mod tests {
         for (phase, expected_prefix) in [
             (
                 PowerReadPhase::ClientCreation,
-                "failed to create redfish client:",
+                "failed to create Redfish client:",
             ),
             (PowerReadPhase::PowerRead, "redfish power read failed:"),
         ] {

@@ -102,11 +102,12 @@ type Receipt struct {
 	At      jsonx.Time `json:"at"`
 }
 
-// Outcome of one attempt. A NICo write returns Empty, so an accepted attempt
-// creates no IDs: Kind alone, or a rejection's Reason, is kept.
+// Outcome of one attempt. REST creates retain bounded server-assigned IDs.
+// Other writes retain Kind and a rejection's Reason only.
 type Outcome struct {
-	Kind   string `json:"kind"`
-	Reason Reason `json:"reason,omitempty"`
+	IDs    []string `json:"ids,omitempty"`
+	Kind   string   `json:"kind"`
+	Reason Reason   `json:"reason,omitempty"`
 }
 
 const (
@@ -133,6 +134,7 @@ const (
 )
 
 type track struct {
+	kind       string
 	op         uint64
 	attempts   uint32
 	idempotent bool
@@ -161,6 +163,7 @@ type Journal struct {
 	fsync           func(*os.File) error // (*os.File).Sync; a seam for tests
 	nextSeq, nextOp uint64
 	open            map[string]*track
+	pending         bool // accepted work still needs semantic settlement
 	broken          error
 	attempts        uint64 // intents, less those settled notDispatched or planned
 	bytes, max      uint64
@@ -227,7 +230,7 @@ func (j *Journal) Freeze() { j.frozen.Store(true) }
 func (j *Journal) Unsettled() bool {
 	j.mu.Lock()
 	defer j.mu.Unlock()
-	return j.broken != nil || len(j.open) > 0
+	return j.broken != nil || j.pending || len(j.open) > 0
 }
 
 // Counts is a snapshot of the journal's records, from what is already tracked.
@@ -369,7 +372,7 @@ func (j *Journal) Intent(c WriteCall) (IntentRef, error) {
 			if t.status == inFlight {
 				return nil, fmt.Errorf("%w: %s", ErrKeyBusy, c.Key)
 			}
-			same := c.Idempotent && t.idempotent && t.digest == c.RequestDigest
+			same := c.Idempotent && t.idempotent && t.digest == c.RequestDigest && t.kind == c.Kind
 			if !same && (t.status == unclear || t.lostReply) {
 				return nil, fmt.Errorf("%w: %s", ErrUnclearKey, c.Key)
 			}
@@ -385,7 +388,7 @@ func (j *Journal) Intent(c WriteCall) (IntentRef, error) {
 		if ref.Attempt == 1 {
 			j.nextOp++
 		}
-		next := &track{op: ref.Op, attempts: ref.Attempt, idempotent: c.Idempotent, digest: c.RequestDigest}
+		next := &track{kind: c.Kind, op: ref.Op, attempts: ref.Attempt, idempotent: c.Idempotent, digest: c.RequestDigest}
 		if t != nil {
 			next.lostReply = t.lostReply
 		}
@@ -482,4 +485,48 @@ func (j *Journal) CloseFailed(op uint64) bool {
 		delete(j.open, key)
 	}
 	return t.lostReply
+}
+
+// Record persists bounded command evidence before a subsequent mutation.
+func (j *Journal) Record(kind string, data any) error {
+	return j.append(struct {
+		Entry string `json:"entry"`
+		Data  any    `json:"data"`
+	}{kind, data})
+}
+
+// Pending persists the run-level settlement marker. Receipts cannot clear it.
+func (j *Journal) Pending(pending bool) error {
+	return j.locked(func() (any, error) {
+		e := struct {
+			Entry   string `json:"entry"`
+			Pending bool   `json:"pending"`
+		}{"pendingWork", pending}
+		if err := j.write(e, j.reserved); err != nil {
+			return nil, err
+		}
+		j.pending = pending
+		return e, nil
+	})
+}
+
+// SettleLabel persists probe proof before closing an unclear label operation.
+// It never settles another write kind or clears the run-level pending marker.
+func (j *Journal) SettleLabel(op uint64, proof any) error {
+	return j.locked(func() (any, error) {
+		key, t := j.openOp(op)
+		if t == nil || t.kind != "labels" || t.status != unclear || !t.lostReply {
+			return nil, errors.New("operation is not an unclear label write")
+		}
+		e := struct {
+			Entry string `json:"entry"`
+			Op    uint64 `json:"op"`
+			Data  any    `json:"data"`
+		}{"labelSettled", op, proof}
+		if err := j.write(e, j.reserved); err != nil {
+			return nil, err
+		}
+		delete(j.open, key)
+		return e, nil
+	})
 }

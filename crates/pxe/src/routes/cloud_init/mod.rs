@@ -30,7 +30,7 @@
 use std::collections::HashMap;
 
 use axum::Router;
-use carbide_instrument::emit;
+use carbide_instrument::Instrumentation;
 
 use crate::common::AppState;
 use crate::metrics::{BootEndpoint, OutcomeReason, PxeCloudInitRequestFailed};
@@ -46,11 +46,12 @@ pub(crate) mod tenant;
 /// The Scout routes do not use this -- the error template would stop NoCloud
 /// bringing the datasource up at all, costing the snippets entirely.
 fn log_and_generate_generic_error(
+    instrumentation: &Instrumentation,
     error: String,
     reason: OutcomeReason,
     endpoint: BootEndpoint,
 ) -> (String, HashMap<String, String>) {
-    emit(PxeCloudInitRequestFailed {
+    instrumentation.emit(PxeCloudInitRequestFailed {
         endpoint,
         reason,
         error,

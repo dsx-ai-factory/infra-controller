@@ -166,7 +166,10 @@ struct EndpointWiring {
 async fn build_endpoint_wiring(
     config: &Config,
     bmc_latency_metrics: Option<Arc<BmcLatencyMetrics>>,
+    instrumentation: carbide_instrument::Instrumentation,
 ) -> Result<EndpointWiring, HealthError> {
+    let bmc_instrumentation =
+        crate::bmc::BmcInstrumentation::new(instrumentation.clone(), bmc_latency_metrics);
     let reqwest = ReqwestClient::with_params(ReqwestClientParams::new().accept_invalid_certs(true))
         .map_err(BmcError::ReqwestError)?;
     let mut sources: Vec<Arc<dyn EndpointSource>> = Vec::new();
@@ -183,7 +186,12 @@ async fn build_endpoint_wiring(
             })
             .collect();
         Some(Arc::new(
-            static_credentials::StaticCredentialProvider::new(path.clone(), targets).await?,
+            static_credentials::StaticCredentialProvider::new(
+                path.clone(),
+                targets,
+                instrumentation.clone(),
+            )
+            .await?,
         ))
     } else {
         None
@@ -205,7 +213,7 @@ async fn build_endpoint_wiring(
             config.bmc_proxy_url.as_ref(),
             config.cache_size,
             config.bmc_request_concurrency,
-            bmc_latency_metrics.clone(),
+            bmc_instrumentation.clone(),
             file_provider.clone().ok_or_else(|| {
                 HealthError::GenericError(
                     "static endpoints require endpoint_sources.static_credentials_file".into(),
@@ -228,7 +236,7 @@ async fn build_endpoint_wiring(
             config.bmc_proxy_url.clone(),
             config.cache_size,
             config.bmc_request_concurrency,
-            bmc_latency_metrics.clone(),
+            bmc_instrumentation.clone(),
         ));
         sources.push(endpoint_source as Arc<dyn EndpointSource>);
     }
@@ -240,7 +248,7 @@ async fn build_endpoint_wiring(
             config.bmc_proxy_url.as_ref(),
             config.cache_size,
             config.bmc_request_concurrency,
-            bmc_latency_metrics,
+            bmc_instrumentation.clone(),
         );
         sources.push(Arc::new(cluster_source));
     }
@@ -261,6 +269,7 @@ async fn build_endpoint_wiring(
 fn build_data_sink(
     config: &Config,
     metrics_manager: Arc<MetricsManager>,
+    instrumentation: &carbide_instrument::Instrumentation,
 ) -> Result<Option<Arc<dyn DataSink>>, HealthError> {
     let mut sinks: Vec<Arc<dyn DataSink>> = Vec::new();
     let mut processors: Vec<Arc<dyn EventProcessor>> = Vec::new();
@@ -316,23 +325,38 @@ fn build_data_sink(
     }
 
     if let Configurable::Enabled(ref sink_cfg) = config.sinks.health_report {
-        sinks.push(Arc::new(HealthReportSink::new(sink_cfg)?));
+        sinks.push(Arc::new(HealthReportSink::new(
+            sink_cfg,
+            instrumentation.clone(),
+        )?));
     }
 
     if let Configurable::Enabled(ref sink_cfg) = config.sinks.rack_health_report {
-        sinks.push(Arc::new(RackHealthReportSink::new(sink_cfg)?));
+        sinks.push(Arc::new(RackHealthReportSink::new(
+            sink_cfg,
+            instrumentation.clone(),
+        )?));
     }
 
     if let Configurable::Enabled(ref sink_cfg) = config.sinks.switch_health_report {
-        sinks.push(Arc::new(SwitchHealthReportSink::new(sink_cfg)?));
+        sinks.push(Arc::new(SwitchHealthReportSink::new(
+            sink_cfg,
+            instrumentation.clone(),
+        )?));
     }
 
     if let Configurable::Enabled(ref sink_cfg) = config.sinks.nvlink_domain_health_report {
-        sinks.push(Arc::new(NvLinkDomainHealthReportSink::new(sink_cfg)?));
+        sinks.push(Arc::new(NvLinkDomainHealthReportSink::new(
+            sink_cfg,
+            instrumentation.clone(),
+        )?));
     }
 
     if let Configurable::Enabled(ref sink_cfg) = config.sinks.power_shelf_health_report {
-        sinks.push(Arc::new(PowerShelfHealthReportSink::new(sink_cfg)?));
+        sinks.push(Arc::new(PowerShelfHealthReportSink::new(
+            sink_cfg,
+            instrumentation.clone(),
+        )?));
     }
 
     if let Configurable::Enabled(ref otlp_cfg) = config.sinks.otlp {
@@ -343,6 +367,7 @@ fn build_data_sink(
             mapper,
             &metrics_manager,
             &config.metrics.prefix,
+            instrumentation,
         )?;
 
         for sink in otlp_sinks {
@@ -506,9 +531,18 @@ pub async fn run_service(
 
     let EndpointWiring {
         source: endpoint_source,
-    } = build_endpoint_wiring(&config, bmc_latency_metrics).await?;
+    } = build_endpoint_wiring(
+        &config,
+        bmc_latency_metrics,
+        framework_metrics.instrumentation.clone(),
+    )
+    .await?;
 
-    let data_sink = build_data_sink(&config, metrics_manager.clone())?;
+    let data_sink = build_data_sink(
+        &config,
+        metrics_manager.clone(),
+        &framework_metrics.instrumentation,
+    )?;
 
     let config_arc = Arc::new(config);
 
@@ -535,6 +569,7 @@ pub async fn run_service(
             config.clone(),
             tls_config,
             nmxc_schema_override,
+            framework_metrics.instrumentation.clone(),
         )?;
 
         let collector_transition_notify = ctx.collector_transition_notify.clone();
@@ -556,6 +591,7 @@ pub async fn run_service(
             collector_transition_notify,
             cancel_token.clone(),
             iteration,
+            framework_metrics.instrumentation,
         )
     });
 
@@ -648,9 +684,15 @@ switch = { serial = "switch-host" }
         config.endpoint_sources.static_credentials_file = Some(file.path().into());
         config.validate().expect("test config should be valid");
 
-        let wiring = build_endpoint_wiring(&config, None)
-            .await
-            .expect("endpoint wiring should build");
+        let wiring = build_endpoint_wiring(
+            &config,
+            None,
+            carbide_instrument::Instrumentation::from_meter_provider(
+                &opentelemetry::metrics::noop::NoopMeterProvider::new(),
+            ),
+        )
+        .await
+        .expect("endpoint wiring should build");
 
         let endpoints = wiring
             .source
@@ -715,7 +757,15 @@ mac = "aa:bb:cc:dd:ee:03"
             .unwrap();
         config.endpoint_sources.static_credentials_file = Some(path);
         config.validate().unwrap();
-        let wiring = build_endpoint_wiring(&config, None).await.unwrap();
+        let wiring = build_endpoint_wiring(
+            &config,
+            None,
+            carbide_instrument::Instrumentation::from_meter_provider(
+                &opentelemetry::metrics::noop::NoopMeterProvider::new(),
+            ),
+        )
+        .await
+        .unwrap();
         let endpoints = wiring.source.fetch_bmc_hosts().await.unwrap();
         assert_eq!(endpoints.len(), 3);
         let providers = endpoints
@@ -777,9 +827,15 @@ mac = "aa:bb:cc:dd:ee:03"
                 .join("../..")
                 .join(&*path);
             config.endpoint_sources.carbide_api = Configurable::Disabled;
-            let wiring = build_endpoint_wiring(&config, None)
-                .await
-                .unwrap_or_else(|error| panic!("{name}: {error}"));
+            let wiring = build_endpoint_wiring(
+                &config,
+                None,
+                carbide_instrument::Instrumentation::from_meter_provider(
+                    &opentelemetry::metrics::noop::NoopMeterProvider::new(),
+                ),
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{name}: {error}"));
             let endpoints = wiring.source.fetch_bmc_hosts().await.unwrap();
             assert_eq!(
                 endpoints.len(),
@@ -830,7 +886,14 @@ mac = "aa:bb:cc:dd:ee:03"
                     .unwrap()
                 })
                 .collect();
-            let (result, logs) = capture_logs_async(build_endpoint_wiring(&config, None)).await;
+            let (result, logs) = capture_logs_async(build_endpoint_wiring(
+                &config,
+                None,
+                carbide_instrument::Instrumentation::from_meter_provider(
+                    &opentelemetry::metrics::noop::NoopMeterProvider::new(),
+                ),
+            ))
+            .await;
             assert!(result.is_err(), "{scenario}");
             let errors = logs
                 .iter()

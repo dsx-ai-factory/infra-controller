@@ -94,8 +94,8 @@ impl BackendPower<'_> {
     }
 }
 
-/// `Reset` and `Unknown` have no platform equivalent; callers treat both as a
-/// state they cannot act on.
+/// `Unknown` has no platform equivalent. `Reset` is a restart in progress, so
+/// callers wait it out as they do `PoweringOn`.
 fn power_state(state: libredfish::PowerState) -> Option<PowerState> {
     match state {
         libredfish::PowerState::Off => Some(PowerState::Off),
@@ -103,7 +103,8 @@ fn power_state(state: libredfish::PowerState) -> Option<PowerState> {
         libredfish::PowerState::PoweringOff => Some(PowerState::PoweringOff),
         libredfish::PowerState::PoweringOn => Some(PowerState::PoweringOn),
         libredfish::PowerState::Paused => Some(PowerState::Paused),
-        libredfish::PowerState::Reset | libredfish::PowerState::Unknown => None,
+        libredfish::PowerState::Reset => Some(PowerState::PoweringOn),
+        libredfish::PowerState::Unknown => None,
     }
 }
 
@@ -127,7 +128,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn power_states_without_a_platform_equivalent_are_unknown() {
+    fn libredfish_power_states_map_to_what_callers_act_on() {
         value_scenarios!(power_state:
             "states callers act on" {
                 libredfish::PowerState::Off => Some(PowerState::Off),
@@ -137,7 +138,7 @@ mod tests {
                 libredfish::PowerState::Paused => Some(PowerState::Paused),
             }
             "states callers wait out" {
-                libredfish::PowerState::Reset => None,
+                libredfish::PowerState::Reset => Some(PowerState::PoweringOn),
                 libredfish::PowerState::Unknown => None,
             }
         );

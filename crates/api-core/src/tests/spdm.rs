@@ -76,7 +76,7 @@ pub(in crate::tests) mod tests {
     async fn a_second_spdm_environment_reuses_the_seeded_profile(pool: sqlx::PgPool) {
         for _ in 0..2 {
             let mut overrides = TestEnvOverrides::no_network_segments();
-            overrides.config = Some(spdm_enabled_config());
+            overrides.config = Some(Box::new(spdm_enabled_config()));
             let _env = create_test_env_with_overrides(pool.clone(), overrides).await;
         }
     }
@@ -416,7 +416,7 @@ pub(in crate::tests) mod tests {
         let env = create_test_env_with_overrides(
             pool,
             TestEnvOverrides {
-                config: Some(spdm_enabled_config()),
+                config: Some(Box::new(spdm_enabled_config())),
                 ..Default::default()
             },
         )
@@ -443,6 +443,9 @@ pub(in crate::tests) mod tests {
             }
             txn.commit().await?;
 
+            let metrics = carbide_instrument::testing::MetricsCapture::for_registry(
+                env.test_meter.registry(),
+            );
             let response = env
                 .api
                 .trigger_machine_attestation(Request::new(SpdmMachineAttestationTriggerRequest {
@@ -453,6 +456,27 @@ pub(in crate::tests) mod tests {
                 .into_inner();
 
             assert_eq!(case.expect_outcome, response.outcome(), "{}", case.scenario);
+            if case.expect_outcome == SpdmSchedulingOutcome::Scheduled {
+                assert_eq!(
+                    metrics.counter_delta(
+                        "carbide_attestation_scheduling_total",
+                        &[
+                            ("outcome", "scheduled"),
+                            (
+                                "profile_source",
+                                if case.expect_fallback {
+                                    "any_fallback"
+                                } else {
+                                    "class"
+                                }
+                            ),
+                        ],
+                    ),
+                    1.0,
+                    "{}",
+                    case.scenario,
+                );
+            }
             assert_eq!(
                 case.expect_devices, response.devices_under_attestation,
                 "{}",
@@ -555,7 +579,7 @@ pub(in crate::tests) mod tests {
         let env = create_test_env_with_overrides(
             pool,
             TestEnvOverrides {
-                config: Some(spdm_enabled_config()),
+                config: Some(Box::new(spdm_enabled_config())),
                 ..Default::default()
             },
         )
@@ -624,7 +648,7 @@ pub(in crate::tests) mod tests {
         let env = create_test_env_with_overrides(
             pool,
             TestEnvOverrides {
-                config: Some(spdm_enabled_config()),
+                config: Some(Box::new(spdm_enabled_config())),
                 ..Default::default()
             },
         )
@@ -689,7 +713,7 @@ pub(in crate::tests) mod tests {
         let env = create_test_env_with_overrides(
             pool,
             TestEnvOverrides {
-                config: Some(spdm_enabled_config()),
+                config: Some(Box::new(spdm_enabled_config())),
                 ..Default::default()
             },
         )
@@ -725,7 +749,7 @@ pub(in crate::tests) mod tests {
         let env = create_test_env_with_overrides(
             pool,
             TestEnvOverrides {
-                config: Some(spdm_enabled_config()),
+                config: Some(Box::new(spdm_enabled_config())),
                 ..Default::default()
             },
         )
@@ -786,7 +810,7 @@ pub(in crate::tests) mod tests {
         let env = create_test_env_with_overrides(
             pool,
             TestEnvOverrides {
-                config: Some(spdm_enabled_config()),
+                config: Some(Box::new(spdm_enabled_config())),
                 ..Default::default()
             },
         )
@@ -931,7 +955,7 @@ pub(in crate::tests) mod tests {
         let env = create_test_env_with_overrides(
             pool,
             TestEnvOverrides {
-                config: Some(config),
+                config: Some(Box::new(config)),
                 ..Default::default()
             },
         )
@@ -1185,7 +1209,7 @@ pub(in crate::tests) mod tests {
         let env = create_test_env_with_overrides(
             pool,
             TestEnvOverrides {
-                config: Some(spdm_enabled_config()),
+                config: Some(Box::new(spdm_enabled_config())),
                 ..Default::default()
             },
         )
@@ -1194,6 +1218,9 @@ pub(in crate::tests) mod tests {
             .redfish_sim
             .create_client("cancellation-fixture", None, RedfishAuth::Anonymous, None)
             .await?;
+
+        env.redfish_sim.set_evidence_collection_running(false);
+        let (machine_id, _dpu_id) = create_managed_host(&env).await.into();
 
         for Case {
             scenario,
@@ -1240,8 +1267,6 @@ pub(in crate::tests) mod tests {
                 cancel_error: None,
             },
         ] {
-            env.redfish_sim.set_evidence_collection_running(false);
-            let (machine_id, _dpu_id) = create_managed_host(&env).await.into();
             env.redfish_sim.set_evidence_collection_running(true);
             let job_id = uuid::Uuid::try_from(
                 env.api
@@ -1507,7 +1532,27 @@ pub(in crate::tests) mod tests {
                     "cleanup must not read evidence"
                 );
             }
-            if !finish_collection && operator_outcome.is_none() {
+            if finish_collection {
+                // Finish the retry before the next job uses the same devices; an
+                // unfinished job can claim them again on the next controller scan.
+                // With requeue disabled, five passes trigger collection, store evidence,
+                // verify it, enter `Passed`, and record completion.
+                for _ in 0..5 {
+                    env.run_spdm_controller_iteration_no_requeue().await;
+                }
+                for device in &devices {
+                    let snapshot = db::attestation::spdm::load_snapshot_for_machine_and_device_id(
+                        &mut txn,
+                        &machine_id,
+                        &device.device_id,
+                        &job_id,
+                    )
+                    .await?;
+                    assert_eq!(snapshot.state, SpdmAttestationState::Passed, "{scenario}");
+                    assert!(snapshot.completed_at.is_some(), "{scenario}");
+                    assert!(!snapshot.evidence_collection_locked, "{scenario}");
+                }
+            } else if operator_outcome.is_none() {
                 // The Failed handler records completion on the following iteration.
                 env.run_spdm_controller_iteration_no_requeue().await;
                 for device in &devices {
@@ -1630,7 +1675,7 @@ pub(in crate::tests) mod tests {
         let env = create_test_env_with_overrides(
             pool,
             TestEnvOverrides {
-                config: Some(spdm_enabled_config()),
+                config: Some(Box::new(spdm_enabled_config())),
                 ..Default::default()
             },
         )
@@ -1971,7 +2016,7 @@ pub(in crate::tests) mod tests {
         let env = create_test_env_with_overrides(
             pool,
             TestEnvOverrides {
-                config: Some(config),
+                config: Some(Box::new(config)),
                 ..TestEnvOverrides::no_network_segments()
             },
         )
@@ -2138,7 +2183,7 @@ pub(in crate::tests) mod tests {
         let env = create_test_env_with_overrides(
             pool,
             TestEnvOverrides {
-                config: Some(config),
+                config: Some(Box::new(config)),
                 ..Default::default()
             },
         )
@@ -2392,7 +2437,7 @@ pub(in crate::tests) mod tests {
         let env = create_test_env_with_overrides(
             pool,
             TestEnvOverrides {
-                config: Some(spdm_enabled_config()),
+                config: Some(Box::new(spdm_enabled_config())),
                 ..Default::default()
             },
         )

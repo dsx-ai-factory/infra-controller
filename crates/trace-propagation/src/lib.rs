@@ -44,6 +44,7 @@
 //! propagation helpers are no-ops — safe to wire in unconditionally. [`LogTraceContext`] reads
 //! existing span context for logging independently of the global propagator.
 
+use std::net::IpAddr;
 use std::sync::OnceLock;
 use std::task::{Context as TaskContext, Poll};
 
@@ -52,6 +53,45 @@ use opentelemetry::{Context, global};
 use opentelemetry_http::{HeaderExtractor, HeaderInjector};
 use tower::Service;
 use tracing_opentelemetry::OpenTelemetrySpanExt;
+
+/// Identities of the target of one machine operation, not the telemetry producer.
+///
+/// Attach these to the operation span and select its descendants in TraceQL.
+/// Unknown values are omitted; subsequent calls add newly resolved identities.
+/// Callers validate IDs and distinguish the direct target from its managed host.
+/// See `docs/observability/tracing.md` for the attribute contract.
+#[derive(Default)]
+pub struct MachineTraceAttributes<'a> {
+    pub machine_id: Option<&'a str>,
+    pub predicted_id: Option<&'a str>,
+    pub bmc_ip: Option<IpAddr>,
+    pub managed_host_id: Option<&'a str>,
+    pub managed_host_bmc_ip: Option<IpAddr>,
+}
+
+impl MachineTraceAttributes<'_> {
+    /// Tag only `span`; no attributes are copied to its parents or descendants.
+    /// Safe to call without an OpenTelemetry subscriber.
+    pub fn record_on(&self, span: &tracing::Span) {
+        for (key, value) in [
+            ("nico.machine.id", self.machine_id),
+            ("nico.machine.predicted_id", self.predicted_id),
+            ("nico.managed_host.id", self.managed_host_id),
+        ] {
+            if let Some(value) = value {
+                span.set_attribute(key, value.to_owned());
+            }
+        }
+        for (key, value) in [
+            ("nico.machine.bmc.ip", self.bmc_ip),
+            ("nico.managed_host.bmc.ip", self.managed_host_bmc_ip),
+        ] {
+            if let Some(value) = value {
+                span.set_attribute(key, value.to_canonical().to_string());
+            }
+        }
+    }
+}
 
 /// Reads trace IDs for logging layers without retaining their subscriber.
 ///
@@ -472,3 +512,6 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+mod machine_tests;

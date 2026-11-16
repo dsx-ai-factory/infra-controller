@@ -10,9 +10,9 @@
 
 use std::time::Duration;
 
+use bmc_platform::ResetType;
 use carbide_libmlx_model::firmware::operation::FirmwareOperationState;
 use chrono::{DateTime, Utc};
-use libredfish::SystemPowerControl;
 use model::machine::machine_search_config::MachineSearchConfig;
 use model::machine::nic_firmware::{
     NicFirmwareActivation, NicFirmwareBaselineContinuation, NicFirmwareLockdownPolicy,
@@ -44,6 +44,18 @@ pub(super) async fn handle(
             "invalid admitted NIC firmware operation: {error}"
         ))
     })?;
+
+    if snapshot
+        .host_snapshot
+        .status
+        .hardware_dispatch
+        .as_ref()
+        .is_some_and(|dispatch| dispatch.is_pending())
+    {
+        return Ok(StateHandlerOutcome::wait(
+            "an earlier hardware command is still awaiting its result".to_string(),
+        ));
+    }
 
     let machine_failure = super::get_failed_state(snapshot);
     let machine_failure_reason = machine_failure.as_ref().map(|(machine_id, details)| {
@@ -351,7 +363,7 @@ pub(super) async fn handle(
                 super::handler_host_power_control_with_location(
                     snapshot,
                     ctx,
-                    SystemPowerControl::ForceRestart,
+                    ResetType::ForceRestart,
                     std::panic::Location::caller(),
                     Some(now),
                 ),

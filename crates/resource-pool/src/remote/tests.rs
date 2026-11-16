@@ -67,6 +67,7 @@ impl Harness {
                 interval: Duration::from_secs(3600),
                 timeout: Duration::from_secs(60),
             },
+            carbide_instrument::Instrumentation::global(),
         )
         .await
         .unwrap();
@@ -2337,15 +2338,16 @@ async fn database_wait_preserves_a_shorter_operator_timeout(database: PgPool) ->
         .max_connections(1)
         .connect_with(database.connect_options().as_ref().clone())
         .await?;
-    sqlx::query("SET statement_timeout = '100ms'")
+    // Allow setup headroom under load while staying below the five-second default.
+    sqlx::query("SET statement_timeout = '1s'")
         .execute(&single_connection)
         .await?;
     let mut txn = super::database_transaction(&single_connection).await?;
     let timeout: String = sqlx::query_scalar("SHOW statement_timeout")
         .fetch_one(txn.as_pgconn())
         .await?;
-    assert_eq!(timeout, "100ms");
-    let error = sqlx::query("SELECT pg_sleep(1)")
+    assert_eq!(timeout, "1s");
+    let error = sqlx::query("SELECT pg_sleep(2)")
         .execute(txn.as_pgconn())
         .await
         .expect_err("the operator's shorter timeout must interrupt the query");
@@ -2360,7 +2362,7 @@ async fn database_wait_preserves_a_shorter_operator_timeout(database: PgPool) ->
     let restored: String = sqlx::query_scalar("SHOW statement_timeout")
         .fetch_one(&single_connection)
         .await?;
-    assert_eq!(restored, "100ms");
+    assert_eq!(restored, "1s");
     single_connection.close().await;
     Ok(())
 }

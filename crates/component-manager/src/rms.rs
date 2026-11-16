@@ -24,7 +24,7 @@ use std::net::IpAddr;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use carbide_instrument::{Event, emit, red};
+use carbide_instrument::{Event, red};
 use carbide_rack::firmware_object::{
     ANY_RACK_HARDWARE_TYPE, RMS_NOAUTH_ACCESS_TOKEN, profile_hardware_type_wire_value,
     rms_access_token_or_noauth,
@@ -66,6 +66,7 @@ use crate::compute_tray_manager::{
 };
 use crate::config::ComponentManagerConfig;
 use crate::error::ComponentManagerError;
+use crate::firmware_inventory::FirmwareReadError;
 use crate::firmware_jobs::{ComponentFirmwareJobsResult, FirmwareJobSource};
 use crate::machine_info_provider::{
     MachineInfoProvider, MachineLocationError, MachineLocationObservation, MachineLocationTarget,
@@ -336,14 +337,18 @@ fn rms_node_descriptor_config_error(
 ///
 /// # Compute power and firmware commands
 ///
-/// If the machine lookup finds a different MAC at a requested BMC IP, the
-/// command returns a failure under the requested IP and MAC with no job ID.
+/// Compute AC power cycles delegate to Core's Redfish implementation using the
+/// supplied endpoints and credentials, without an RMS identity lookup or job.
+/// For commands sent to RMS, if the machine lookup finds a different MAC at a
+/// requested BMC IP, the command returns a failure under the requested IP and MAC with no job ID.
 /// That endpoint is not sent to RMS and its firmware tracking is unchanged;
 /// other valid endpoints can proceed. The check uses the machine ownership
 /// found during lookup, including machines without a rack. It does not check
 /// other inventory kinds or prevent reassignment after the lookup.
 pub struct RmsBackend {
+    instrumentation: carbide_instrument::Instrumentation,
     client: Arc<dyn RmsApi>,
+    core_compute_manager: Option<crate::core_compute_manager::CoreComputeTrayManager>,
     switch_system_image_client: Option<Arc<dyn RmsSwitchSystemImageStatusApi>>,
     db: PgPool,
     rack_profiles: Arc<RackProfileConfig>,
@@ -1364,21 +1369,36 @@ impl std::fmt::Debug for RmsBackend {
 }
 
 impl RmsBackend {
+    /// Creates an RMS backend whose diagnostic Events use the supplied destination.
+    /// Retain its provider while backend requests can run.
     pub fn new(
         client: Arc<dyn RmsApi>,
         switch_system_image_client: Option<Arc<dyn RmsSwitchSystemImageStatusApi>>,
         db: PgPool,
         rack_profiles: Arc<RackProfileConfig>,
         _nvos_password_rotation_enabled: bool,
+        instrumentation: carbide_instrument::Instrumentation,
     ) -> Self {
         Self {
+            instrumentation,
             client,
+            core_compute_manager: None,
             switch_system_image_client,
             db,
             rack_profiles,
             firmware_jobs: Mutex::new(HashMap::new()),
             staged_firmware_objects: Mutex::new(HashMap::new()),
         }
+    }
+
+    /// Enables compute AC power cycles through Core's Redfish implementation.
+    /// Other compute operations and all switch/shelf operations continue to use RMS.
+    pub(crate) fn with_core_compute_manager(
+        mut self,
+        manager: crate::core_compute_manager::CoreComputeTrayManager,
+    ) -> Self {
+        self.core_compute_manager = Some(manager);
+        self
     }
 
     /// Installs `jobs` as the full set of firmware jobs tracked for `bmc_mac`,
@@ -2313,10 +2333,9 @@ fn aggregate_firmware_job_states(states: &[FirmwareState]) -> FirmwareState {
 /// shelves. Mirrors the value used by `crate::power_shelf_controller::maintenance`.
 const POWER_SHELF_BMC_PORT: u32 = 443;
 
-/// Build the `rms::NodeInfo` describing a power shelf for inclusion in a
-/// `BatchSetPowerState` request. The caller-supplied variant of the
-/// RPC requires the BMC connection details inline rather than relying on
-/// RMS's inventory; power shelves do not expose a host endpoint.
+/// Build the `rms::NodeInfo` describing a power shelf for batch power and
+/// firmware requests. These RPCs require BMC connection details inline;
+/// power shelves do not expose a host endpoint.
 fn build_power_shelf_node_info(
     ep: &PowerShelfEndpoint,
     resolved: &ResolvedRmsNode<'_>,
@@ -2727,7 +2746,7 @@ impl PowerShelfManager for RmsBackend {
         Ok(statuses)
     }
 
-    #[instrument(skip(self), fields(backend = "rms"))]
+    #[instrument(skip(self, endpoints), fields(backend = "rms"))]
     async fn list_firmware(
         &self,
         endpoints: &[PowerShelfEndpoint],
@@ -2746,41 +2765,91 @@ impl PowerShelfManager for RmsBackend {
         ids.extend(
             resolve_pre_ingestion_power_shelf_identities(&self.db, &pre_ingestion_macs).await?,
         );
+
         let mut results = Vec::with_capacity(endpoints.len());
 
         for ep in endpoints {
-            let Some(identity) = ids.get(&ep.pmc_mac) else {
-                results.push(PowerShelfFirmwareVersions {
-                    pmc_mac: ep.pmc_mac,
-                    versions: vec![],
-                    error: Some(RMS_IDENTITY_LOOKUP_ERROR.into()),
-                });
-                continue;
+            let resolved = match self.resolve_switch_or_power_shelf_node(
+                &ids,
+                ep.pmc_mac,
+                SwitchOrPowerShelfRole::PowerShelf,
+            ) {
+                Ok(resolved) => resolved,
+                Err(error) => {
+                    results.push(PowerShelfFirmwareVersions {
+                        pmc_mac: ep.pmc_mac,
+                        versions: vec![],
+                        error: Some(error),
+                    });
+
+                    continue;
+                }
             };
 
-            let request = rms::GetNodeFirmwareInventoryRequest {
-                node_id: identity.node_id.clone(),
-                rack_id: identity.rack_id.clone(),
+            let request = rms::BatchGetFirmwareInventoryRequest {
+                nodes: Some(rms::NodeSet {
+                    nodes: vec![build_power_shelf_node_info(ep, &resolved)],
+                }),
             };
 
-            match red::instrumented(
-                "rms",
-                "get_node_firmware_inventory",
-                self.client.get_node_firmware_inventory(request),
-            )
-            .await
-            {
+            // RMS errors can echo endpoint credentials. Sanitize them before
+            // RED logs the error or it reaches the per-shelf result.
+            let rpc = async {
+                self.client
+                    .batch_get_firmware_inventory(request)
+                    .await
+                    .map_err(|_| FirmwareReadError::ReadFailed)
+            };
+
+            match red::instrumented("rms", "batch_get_firmware_inventory", rpc).await {
                 Ok(response) => {
-                    if response.status != rms::ReturnCode::Success as i32 {
+                    // An omitted summary defaults to Unspecified and fails the success check.
+                    let batch = response.response.unwrap_or_default();
+
+                    if batch.status != rms::ReturnCode::Success as i32 {
                         results.push(PowerShelfFirmwareVersions {
                             pmc_mac: ep.pmc_mac,
                             versions: vec![],
+                            // Batch and node messages can also echo credentials.
                             error: Some("RMS firmware inventory query failed".into()),
                         });
+
                         continue;
                     }
 
-                    let versions = response
+                    let mut inventories = response
+                        .nodes
+                        .into_iter()
+                        .filter(|node| node.node_id == resolved.identity.node_id);
+
+                    let inventory = inventories.next();
+
+                    if inventories.next().is_some() {
+                        results.push(PowerShelfFirmwareVersions {
+                            pmc_mac: ep.pmc_mac,
+                            versions: vec![],
+                            error: Some(
+                                "RMS returned duplicate firmware inventories for power shelf"
+                                    .into(),
+                            ),
+                        });
+
+                        continue;
+                    }
+
+                    let Some(inventory) = inventory else {
+                        results.push(PowerShelfFirmwareVersions {
+                            pmc_mac: ep.pmc_mac,
+                            versions: vec![],
+                            error: Some(
+                                "RMS returned no firmware inventory for power shelf".into(),
+                            ),
+                        });
+
+                        continue;
+                    };
+
+                    let versions = inventory
                         .firmware_list
                         .into_iter()
                         .map(|fi| fi.version)
@@ -4337,7 +4406,7 @@ impl NvSwitchManager for RmsBackend {
                         let summary = if info.message.is_empty() {
                             format!("status {}", info.status)
                         } else {
-                            info.message.clone()
+                            info.message
                         };
                         results.push(SwitchSlotAndTrayResult {
                             bmc_mac: ep.bmc_mac,
@@ -4448,7 +4517,12 @@ impl NvSwitchManager for RmsBackend {
         &self,
         job_id: &str,
     ) -> Result<ConfigureSwitchCertificateJobStatus, ComponentManagerError> {
-        rms_get_configure_switch_certificate_job_status(self.client.as_ref(), job_id).await
+        rms_get_configure_switch_certificate_job_status(
+            self.client.as_ref(),
+            job_id,
+            &self.instrumentation,
+        )
+        .await
     }
 
     #[instrument(skip(self, endpoints, domain_name), fields(backend = "rms"))]
@@ -5681,6 +5755,7 @@ fn certificate_node_failures(
 async fn rms_get_configure_switch_certificate_job_status(
     client: &dyn RmsApi,
     job_id: &str,
+    instrumentation: &carbide_instrument::Instrumentation,
 ) -> Result<ConfigureSwitchCertificateJobStatus, ComponentManagerError> {
     let request = rms::GetConfigureSwitchCertificateJobStatusRequest {
         job_id: job_id.to_owned(),
@@ -5715,7 +5790,7 @@ async fn rms_get_configure_switch_certificate_job_status(
 
     let state =
         map_rms_configure_switch_certificate_job_state(&response.state).unwrap_or_else(|| {
-            emit(RmsSwitchCertificateJobStateUnrecognized);
+            instrumentation.emit(RmsSwitchCertificateJobStateUnrecognized);
             ConfigureSwitchCertificateState::InProgress
         });
     let (error, failure) = if state == ConfigureSwitchCertificateState::Failed {
@@ -5984,6 +6059,14 @@ impl ComputeTrayManager for RmsBackend {
         endpoints: &[ComputeTrayEndpoint],
         action: PowerAction,
     ) -> Result<Vec<ComputeTrayResult>, ComponentManagerError> {
+        if action == PowerAction::AcPowercycle {
+            let core = self.core_compute_manager.as_ref().ok_or_else(|| {
+                ComponentManagerError::Unsupported(
+                    "compute AC power cycle requires the Core Redfish manager".into(),
+                )
+            })?;
+            return core.power_control(endpoints, action).await;
+        }
         let operation = to_rms_power_operation(action)?;
         // Ingested trays resolve their RMS identity from the machine row by BMC
         // IP.
@@ -6566,7 +6649,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn ac_power_cycle_is_rejected_before_rms_dispatch_for_all_components() {
+    async fn ac_power_cycle_is_rejected_before_rms_dispatch_for_switches_and_shelves() {
         // A closed pool makes accidental identity lookups fail immediately.
         let pool = sqlx::postgres::PgPoolOptions::new()
             .connect_lazy("postgresql://localhost/unused")
@@ -6579,19 +6662,10 @@ mod tests {
             pool,
             Arc::new(rack_profile_config()),
             true,
+            carbide_instrument::Instrumentation::global(),
         );
         let action = PowerAction::AcPowercycle;
         for (component, error) in [
-            (
-                "compute",
-                ComputeTrayManager::power_control(
-                    &backend,
-                    &[make_ct_endpoint(CT_IP_1, CT_MAC_1)],
-                    action,
-                )
-                .await
-                .unwrap_err(),
-            ),
             (
                 "switch",
                 NvSwitchManager::power_control(&backend, &[make_sw_endpoint(SW_MAC_1)], action)
@@ -6610,6 +6684,82 @@ mod tests {
                 "{component}: {error}"
             );
         }
+        assert!(mock.batch_set_power_state_calls().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn compute_ac_power_cycle_uses_core_and_preserves_per_device_results() {
+        use carbide_redfish::libredfish::test_support::{RedfishSim, RedfishSimAction};
+
+        use crate::component_manager::build_component_manager;
+        use crate::config::ComponentManagerConfig;
+
+        // AC cycles need neither an RMS identity nor an RMS connection.
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .connect_lazy("postgresql://localhost/unused")
+            .unwrap();
+        pool.close().await;
+        let mock = Arc::new(MockRmsApi::new());
+        let redfish = Arc::new(RedfishSim::default());
+        let manager = build_component_manager(
+            &ComponentManagerConfig {
+                compute_tray_backend: ComputeTrayBackend::Rms,
+                nv_switch_backend: NvSwitchBackend::Mock,
+                power_shelf_backend: PowerShelfBackend::Mock,
+                ..Default::default()
+            },
+            rack_profile_config(),
+            Some(mock.clone()),
+            None,
+            Some(pool),
+            Some(redfish.clone()),
+            None,
+            carbide_instrument::Instrumentation::global(),
+        )
+        .await
+        .unwrap();
+        let endpoints = [
+            make_ct_endpoint(CT_IP_1, CT_MAC_1),
+            make_ct_endpoint(CT_IP_2, CT_MAC_2),
+        ];
+        let before = redfish.timepoint();
+        redfish.fail_next_power_action(
+            libredfish::SystemPowerControl::ACPowercycle,
+            "AC cycle rejected",
+        );
+        let results = manager
+            .compute_tray
+            .power_control(&endpoints, PowerAction::AcPowercycle)
+            .await
+            .unwrap();
+        assert_eq!(results.len(), 2);
+        for (result, endpoint) in results.iter().zip(&endpoints) {
+            assert_eq!(result.bmc_ip, endpoint.bmc_ip);
+            assert_eq!(result.bmc_mac, endpoint.bmc_mac);
+            assert!(result.backend_job_id.is_none());
+        }
+        assert!(!results[0].success);
+        assert!(
+            results[0]
+                .error
+                .as_deref()
+                .unwrap()
+                .contains("AC cycle rejected")
+        );
+        assert!(results[1].success);
+        assert!(results[1].error.is_none());
+        assert_eq!(
+            redfish.actions_since(&before).for_host(CT_IP_1),
+            vec![RedfishSimAction::PowerFailed(
+                libredfish::SystemPowerControl::ACPowercycle
+            )]
+        );
+        assert_eq!(
+            redfish.actions_since(&before).for_host(CT_IP_2),
+            vec![RedfishSimAction::Power(
+                libredfish::SystemPowerControl::ACPowercycle
+            )]
+        );
         assert!(mock.batch_set_power_state_calls().await.is_empty());
     }
 
@@ -7396,6 +7546,7 @@ mod tests {
         let (status, logs) = capture_logs_async(rms_get_configure_switch_certificate_job_status(
             &mock,
             "cert-job-1",
+            &carbide_instrument::Instrumentation::global(),
         ))
         .await;
         let status = status.expect("unknown RMS state keeps certificate polling active");
@@ -7671,9 +7822,13 @@ mod tests {
             ))
             .await;
 
-            let error = rms_get_configure_switch_certificate_job_status(&mock, "cert-job-1")
-                .await
-                .expect_err("a missing RMS job must be reported");
+            let error = rms_get_configure_switch_certificate_job_status(
+                &mock,
+                "cert-job-1",
+                &carbide_instrument::Instrumentation::global(),
+            )
+            .await
+            .expect_err("a missing RMS job must be reported");
 
             let ComponentManagerError::NotFound(detail) = error else {
                 panic!("expected a missing RMS job error");
@@ -9379,6 +9534,7 @@ mod tests {
             limited_pool.clone(),
             Arc::new(rack_profile_config()),
             true,
+            carbide_instrument::Instrumentation::global(),
         );
         let endpoint = make_ct_endpoint(CT_IP_1, CT_MAC_1);
 
@@ -9586,6 +9742,7 @@ mod tests {
             pool.clone(),
             Arc::new(rack_profile_config()),
             true,
+            carbide_instrument::Instrumentation::global(),
         );
         (mock, backend, rack_id, ps1, ps2, sw1, sw2)
     }
@@ -9616,6 +9773,7 @@ mod tests {
             pool.clone(),
             Arc::new(rack_profile_config()),
             true,
+            carbide_instrument::Instrumentation::global(),
         );
         (mock, backend, rack_id, ct1, ct2)
     }
@@ -10034,6 +10192,7 @@ mod tests {
             pool.clone(),
             Arc::new(rack_profile_config()),
             true,
+            carbide_instrument::Instrumentation::global(),
         );
 
         let pmc_mac: MacAddress = PS_MAC_1.parse().unwrap();
@@ -10590,52 +10749,283 @@ mod tests {
     #[carbide_macros::sqlx_test]
     async fn ps_list_firmware_success(pool: sqlx::PgPool) {
         let (mock, backend, rack_id, ps1, _, _, _) = make_backend(&pool).await;
-        mock.enqueue_get_node_firmware_inventory(Ok(MockRmsApi::firmware_inventory_ok(&[
-            ("PMC", "1.2.3"),
-            ("PSU", "4.5.6"),
-        ])))
+
+        mock.enqueue_batch_get_firmware_inventory(Ok(rms::BatchGetFirmwareInventoryResponse {
+            response: Some(rms::NodeBatchResponse {
+                status: rms::ReturnCode::Success as i32,
+                ..Default::default()
+            }),
+            nodes: vec![rms::NodeFirmwareInventory {
+                node_id: ps1.to_string(),
+                firmware_list: vec![
+                    rms::FirmwareInventoryInfo {
+                        name: "PMC".into(),
+                        version: "1.2.3".into(),
+                        ..Default::default()
+                    },
+                    rms::FirmwareInventoryInfo {
+                        name: "PSU".into(),
+                        version: "4.5.6".into(),
+                        ..Default::default()
+                    },
+                ],
+            }],
+        }))
         .await;
 
         let eps = vec![make_ps_endpoint(PS_MAC_1)];
+
         let results = backend.list_firmware(&eps).await.unwrap();
 
         assert_eq!(results[0].versions, vec!["1.2.3", "4.5.6"]);
         assert!(results[0].error.is_none());
 
-        let calls = mock.get_node_firmware_inventory_calls().await;
-        assert_eq!(calls[0].node_id, ps1.to_string());
-        assert_eq!(calls[0].rack_id, rack_id.to_string());
+        let calls = mock.batch_get_firmware_inventory_calls().await;
+
+        let [call] = calls.as_slice() else {
+            panic!("expected one batch firmware inventory call");
+        };
+
+        let nodes = call.nodes.as_ref().expect("request nodes");
+
+        let [node] = nodes.nodes.as_slice() else {
+            panic!("expected one power shelf node");
+        };
+
+        assert_eq!(node.node_id, ps1.to_string());
+        assert_eq!(node.rack_id, rack_id.to_string());
+        assert_descriptor_node(node, ROLE_POWER_SHELF);
+        assert!(node.host_endpoint.is_none());
+
+        let bmc = node.bmc_endpoint.as_ref().expect("BMC endpoint");
+        let interface = bmc.interface.as_ref().expect("BMC interface");
+
+        assert_eq!(interface.ip_address, "10.0.0.1");
+        assert_eq!(interface.mac_address, PS_MAC_1);
+        assert_eq!(bmc.port, 443);
+
+        assert!(matches!(
+            bmc.credentials.as_ref().and_then(|credentials| credentials.auth.as_ref()),
+            Some(rms::credentials::Auth::UserPass(credentials))
+                if credentials.username == "admin" && credentials.password == "pass"
+        ));
     }
 
     #[carbide_macros::sqlx_test]
-    async fn ps_list_firmware_rms_failure(pool: sqlx::PgPool) {
-        let (mock, backend, _, _, _, _, _) = make_backend(&pool).await;
-        mock.enqueue_get_node_firmware_inventory(Ok(rms::GetNodeFirmwareInventoryResponse {
-            status: rms::ReturnCode::Failure as i32,
-            ..Default::default()
-        }))
-        .await;
+    async fn ps_list_firmware_batch_failures(pool: sqlx::PgPool) {
+        let (mock, backend, _, ps1, _, _, _) = make_backend(&pool).await;
+        let node_id = ps1.to_string();
+
+        let cases = [
+            (
+                "node failure text is sanitized",
+                rms::BatchGetFirmwareInventoryResponse {
+                    response: Some(rms::NodeBatchResponse {
+                        status: rms::ReturnCode::Failure as i32,
+                        message: "query failed: password=pass".into(),
+                        node_results: vec![rms::NodeOperationResult {
+                            node_id: node_id.clone(),
+                            status: rms::ReturnCode::Failure as i32,
+                            error_message: "BMC unavailable: password=pass".into(),
+                        }],
+                        ..Default::default()
+                    }),
+                    nodes: vec![],
+                },
+                "RMS firmware inventory query failed",
+            ),
+            (
+                "batch failure text is sanitized",
+                rms::BatchGetFirmwareInventoryResponse {
+                    response: Some(rms::NodeBatchResponse {
+                        status: rms::ReturnCode::Failure as i32,
+                        message: "query failed: password=pass".into(),
+                        ..Default::default()
+                    }),
+                    nodes: vec![],
+                },
+                "RMS firmware inventory query failed",
+            ),
+            (
+                "missing summary is a failure",
+                rms::BatchGetFirmwareInventoryResponse::default(),
+                "RMS firmware inventory query failed",
+            ),
+            (
+                "success requires inventory for the requested node",
+                rms::BatchGetFirmwareInventoryResponse {
+                    response: Some(rms::NodeBatchResponse {
+                        status: rms::ReturnCode::Success as i32,
+                        ..Default::default()
+                    }),
+                    nodes: vec![rms::NodeFirmwareInventory {
+                        node_id: "another-node".into(),
+                        firmware_list: vec![],
+                    }],
+                },
+                "RMS returned no firmware inventory for power shelf",
+            ),
+            (
+                "duplicate inventories for the requested node are rejected",
+                rms::BatchGetFirmwareInventoryResponse {
+                    response: Some(rms::NodeBatchResponse {
+                        status: rms::ReturnCode::Success as i32,
+                        ..Default::default()
+                    }),
+                    nodes: ["1.2.3", "9.9.9"]
+                        .into_iter()
+                        .map(|version| rms::NodeFirmwareInventory {
+                            node_id: node_id.clone(),
+                            firmware_list: vec![rms::FirmwareInventoryInfo {
+                                name: "PMC".into(),
+                                version: version.into(),
+                                ..Default::default()
+                            }],
+                        })
+                        .collect(),
+                },
+                "RMS returned duplicate firmware inventories for power shelf",
+            ),
+        ];
 
         let eps = vec![make_ps_endpoint(PS_MAC_1)];
-        let results = backend.list_firmware(&eps).await.unwrap();
 
-        assert!(results[0].versions.is_empty());
-        assert!(results[0].error.is_some());
+        for (scenario, response, expected_error) in cases {
+            mock.enqueue_batch_get_firmware_inventory(Ok(response))
+                .await;
+
+            let (results, logs) = capture_logs_async(backend.list_firmware(&eps)).await;
+            let results = results.unwrap();
+
+            assert!(results[0].versions.is_empty(), "{scenario}");
+
+            assert_eq!(
+                results[0].error.as_deref(),
+                Some(expected_error),
+                "{scenario}"
+            );
+
+            assert!(
+                logs.iter().all(|log| {
+                    !log.message.contains("password=pass")
+                        && log
+                            .fields
+                            .iter()
+                            .all(|(_, value)| !value.contains("password=pass"))
+                }),
+                "{scenario}"
+            );
+        }
     }
 
     #[carbide_macros::sqlx_test]
     async fn ps_list_firmware_transport_error(pool: sqlx::PgPool) {
-        let (mock, backend, _, _, _, _, _) = make_backend(&pool).await;
-        mock.enqueue_get_node_firmware_inventory(Err(
-            librms::RackManagerError::ApiInvocationError(tonic::Status::unavailable("down")),
+        let (mock, backend, _, _, ps2, _, _) = make_backend(&pool).await;
+
+        mock.enqueue_batch_get_firmware_inventory(Err(
+            librms::RackManagerError::ApiInvocationError(tonic::Status::unavailable(
+                "BMC unavailable: password=pass",
+            )),
         ))
         .await;
 
-        let eps = vec![make_ps_endpoint(PS_MAC_1)];
-        let results = backend.list_firmware(&eps).await.unwrap();
+        mock.enqueue_batch_get_firmware_inventory(Ok(rms::BatchGetFirmwareInventoryResponse {
+            response: Some(rms::NodeBatchResponse {
+                status: rms::ReturnCode::Success as i32,
+                ..Default::default()
+            }),
+            nodes: vec![rms::NodeFirmwareInventory {
+                node_id: ps2.to_string(),
+                firmware_list: vec![],
+            }],
+        }))
+        .await;
 
+        let eps = vec![make_ps_endpoint(PS_MAC_1), make_ps_endpoint(PS_MAC_2)];
+
+        let (results, logs) = capture_logs_async(backend.list_firmware(&eps)).await;
+        let results = results.unwrap();
+
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[0].pmc_mac, eps[0].pmc_mac);
         assert!(results[0].versions.is_empty());
-        assert!(results[0].error.as_ref().unwrap().contains("down"));
+
+        assert_eq!(
+            results[0].error.as_deref(),
+            Some("firmware inventory read failed")
+        );
+
+        assert_eq!(results[1].pmc_mac, eps[1].pmc_mac);
+        assert!(results[1].versions.is_empty());
+        assert!(results[1].error.is_none());
+
+        let failure_log = logs
+            .iter()
+            .find(|log| {
+                log.message == "external call failed"
+                    && log.field("operation") == Some("batch_get_firmware_inventory")
+            })
+            .expect("RED reports the transport failure");
+
+        assert_eq!(
+            failure_log.field("error"),
+            Some("firmware inventory read failed")
+        );
+
+        assert!(logs.iter().all(|log| {
+            !log.message.contains("password=pass")
+                && log
+                    .fields
+                    .iter()
+                    .all(|(_, value)| !value.contains("password=pass"))
+        }));
+    }
+
+    #[carbide_macros::sqlx_test]
+    async fn ps_list_firmware_pre_ingestion_uses_expected_rack_profile(pool: sqlx::PgPool) {
+        let rack_id = RackId::new(uuid::Uuid::new_v4().to_string());
+        let mut txn = pool.begin().await.unwrap();
+
+        seed_pre_ingestion_power_shelf(&mut txn, PS_MAC_1, &rack_id, false).await;
+        txn.commit().await.unwrap();
+
+        let mock = Arc::new(MockRmsApi::new());
+
+        let backend = RmsBackend::new(
+            mock.clone(),
+            Some(mock.clone()),
+            pool,
+            Arc::new(rack_profile_config()),
+            true,
+            carbide_instrument::Instrumentation::global(),
+        );
+
+        mock.enqueue_batch_get_firmware_inventory(Ok(rms::BatchGetFirmwareInventoryResponse {
+            response: Some(rms::NodeBatchResponse {
+                status: rms::ReturnCode::Success as i32,
+                ..Default::default()
+            }),
+            nodes: vec![rms::NodeFirmwareInventory {
+                node_id: PS_MAC_1.to_owned(),
+                firmware_list: vec![],
+            }],
+        }))
+        .await;
+
+        let results = backend
+            .list_firmware(&[make_ps_endpoint(PS_MAC_1)])
+            .await
+            .unwrap();
+
+        assert_eq!(results.len(), 1);
+        assert!(results[0].error.is_none());
+
+        let calls = mock.batch_get_firmware_inventory_calls().await;
+        let node = &calls[0].nodes.as_ref().unwrap().nodes[0];
+
+        assert_eq!(node.node_id, PS_MAC_1);
+        assert_eq!(node.rack_id, rack_id.to_string());
+        assert_descriptor_node(node, ROLE_POWER_SHELF);
     }
 
     #[carbide_macros::sqlx_test]
@@ -12024,6 +12414,7 @@ mod tests {
             read_pool.clone(),
             Arc::default(),
             true,
+            carbide_instrument::Instrumentation::global(),
         );
         for (mac, kind, id) in [
             (CT_MAC_1, StoredJobKind::FirmwareObject, "compute-job"),
@@ -12730,6 +13121,7 @@ mod tests {
                 pool.clone(),
                 Arc::new(rack_profile_config()),
                 true,
+                carbide_instrument::Instrumentation::global(),
             );
 
             // Power responses summarize batch success. Queue enough successes
@@ -12828,6 +13220,7 @@ mod tests {
                 pool.clone(),
                 Arc::new(rack_profile_config()),
                 true,
+                carbide_instrument::Instrumentation::global(),
             );
 
             // A command rejected before dispatch must preserve both job stores.
@@ -13085,6 +13478,7 @@ mod tests {
             pool.clone(),
             Arc::new(rack_profile_config()),
             true,
+            carbide_instrument::Instrumentation::global(),
         );
 
         let bmc_mac: MacAddress = CT_MAC_1.parse().unwrap();
@@ -13142,6 +13536,7 @@ mod tests {
             pool.clone(),
             Arc::new(rack_profile_config()),
             true,
+            carbide_instrument::Instrumentation::global(),
         );
 
         let eps = vec![make_ct_endpoint(CT_IP_1, CT_MAC_1)];

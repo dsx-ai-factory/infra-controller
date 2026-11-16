@@ -134,6 +134,7 @@ workspace = false
 # what is committed (regenerate locally with `cargo make gen-cli-docs`).
 script = '''
 cargo test -p nico-admin-cli cfg::cli_options::tests
+cargo test -p nico-admin-cli generate_docs::cmd::tests::man_conversion_preserves_apostrophes -- --ignored
 cargo run -p nico-admin-cli -- generate-cli-docs --out-dir docs/manuals/nico-admin-cli
 git diff --exit-code -- docs/manuals/nico-admin-cli
 '''

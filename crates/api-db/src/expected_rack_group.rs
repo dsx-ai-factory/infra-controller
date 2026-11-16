@@ -171,7 +171,7 @@ pub async fn update(txn: &mut PgConnection, group: &ExpectedRackGroup) -> Databa
                 "member cartridge_index is required".into(),
             ));
         }
-        let query = "SELECT EXISTS (SELECT 1 FROM expected_nvlink_domains WHERE rack_group_id=$1)";
+        let query = "SELECT EXISTS (SELECT 1 FROM nvlink_domains WHERE rack_group_id=$1)";
         let used: bool = sqlx::query_scalar(query)
             .bind(&group.rack_group_id)
             .fetch_one(&mut *txn)
@@ -179,7 +179,7 @@ pub async fn update(txn: &mut PgConnection, group: &ExpectedRackGroup) -> Databa
             .map_err(|e| DatabaseError::query(query, e))?;
         if used {
             return Err(DatabaseError::FailedPrecondition(
-                "delete expected NVLink domains before changing their rack group's racks".into(),
+                "delete NVLink domains before changing their rack group's racks".into(),
             ));
         }
     }

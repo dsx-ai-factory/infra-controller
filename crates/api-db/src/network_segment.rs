@@ -17,7 +17,6 @@
 use std::collections::HashMap;
 use std::net::IpAddr;
 
-use carbide_instrument::emit;
 use carbide_uuid::machine::HostMachineId;
 use carbide_uuid::network::NetworkSegmentId;
 use carbide_uuid::vpc::VpcId;
@@ -531,9 +530,11 @@ pub async fn segment_exists(txn: &mut PgConnection, name: &str) -> Result<bool, 
 /// Config-declared networks that have neither a segment row nor a snapshot,
 /// in unspecified order. The caller must create the segment and write the
 /// snapshot in the same transaction.
+/// Drift Events use `instrumentation`; retain its provider until reconciliation finishes.
 pub async fn reconcile_network_defs(
     txn: &mut PgConnection,
     declared: &HashMap<String, NetworkDefinition>,
+    instrumentation: &carbide_instrument::Instrumentation,
 ) -> Result<Vec<(String, NetworkDefinition)>, DatabaseError> {
     let stored = all_stored_defs(&mut *txn).await?;
     let mut to_create: Vec<(String, NetworkDefinition)> = Vec::new();
@@ -545,7 +546,7 @@ pub async fn reconcile_network_defs(
             (Some(stored_def), true) if stored_def == def => {}
             // Declaration has drifted since seed; warn and leave both in place.
             (Some(stored_def), true) => {
-                emit(ConfigDefinitionDrifted {
+                instrumentation.emit(ConfigDefinitionDrifted {
                     resource_kind: ConfigResourceKind::NetworkDefinition,
                     drift_kind: ConfigDriftKind::Changed,
                     name: name.clone(),
@@ -598,7 +599,7 @@ pub async fn reconcile_network_defs(
 
     for name in stored.keys() {
         if !declared.contains_key(name) {
-            emit(ConfigDefinitionDrifted {
+            instrumentation.emit(ConfigDefinitionDrifted {
                 resource_kind: ConfigResourceKind::NetworkDefinition,
                 drift_kind: ConfigDriftKind::Dropped,
                 name: name.clone(),
@@ -1616,7 +1617,12 @@ mod tests {
             .into_iter()
             .collect();
 
-        let to_create = reconcile_network_defs(&mut txn, &declared).await?;
+        let to_create = reconcile_network_defs(
+            &mut txn,
+            &declared,
+            &carbide_instrument::Instrumentation::global(),
+        )
+        .await?;
 
         // reconcile must not have written a snapshot for a brand-new network.
         let stored = stored_def(txn.as_mut(), "brand-new").await?;
@@ -1675,8 +1681,12 @@ mod tests {
         let mut txn = pool.begin().await?;
         let def = def("192.168.1.0/24", "192.168.1.1");
 
-        let to_create =
-            reconcile_network_defs(&mut txn, &declared_one("pre-existing", def.clone())).await?;
+        let to_create = reconcile_network_defs(
+            &mut txn,
+            &declared_one("pre-existing", def.clone()),
+            &carbide_instrument::Instrumentation::global(),
+        )
+        .await?;
         assert!(
             to_create.is_empty(),
             "this arm must not add networks to the to-create list"
@@ -1699,8 +1709,12 @@ mod tests {
         let def = def("192.168.1.0/24", "192.168.1.1");
         insert_network_def(&mut txn, "stable", segment_id, &def).await?;
 
-        let to_create =
-            reconcile_network_defs(&mut txn, &declared_one("stable", def.clone())).await?;
+        let to_create = reconcile_network_defs(
+            &mut txn,
+            &declared_one("stable", def.clone()),
+            &carbide_instrument::Instrumentation::global(),
+        )
+        .await?;
         assert!(
             to_create.is_empty(),
             "this arm must not add networks to the to-create list"
@@ -1730,8 +1744,12 @@ mod tests {
         let drifted = def("10.0.0.0/24", "10.0.0.1");
         insert_network_def(&mut txn, "drifty", segment_id, &original).await?;
 
-        let to_create =
-            reconcile_network_defs(&mut txn, &declared_one("drifty", drifted.clone())).await?;
+        let to_create = reconcile_network_defs(
+            &mut txn,
+            &declared_one("drifty", drifted.clone()),
+            &carbide_instrument::Instrumentation::global(),
+        )
+        .await?;
         assert!(
             to_create.is_empty(),
             "this arm must not add networks to the to-create list"
@@ -1761,7 +1779,12 @@ mod tests {
         insert_network_def(&mut txn, "abandoned", segment_id, &def).await?;
 
         let empty: HashMap<String, NetworkDefinition> = HashMap::new();
-        let to_create = reconcile_network_defs(&mut txn, &empty).await?;
+        let to_create = reconcile_network_defs(
+            &mut txn,
+            &empty,
+            &carbide_instrument::Instrumentation::global(),
+        )
+        .await?;
         assert!(
             to_create.is_empty(),
             "this arm must not add networks to the to-create list"
@@ -1986,8 +2009,12 @@ mod tests {
         let mut txn = pool.begin().await?;
         let def = def("192.168.1.0/24", "192.168.1.1");
 
-        let to_create =
-            reconcile_network_defs(&mut txn, &declared_one("ambiguous", def.clone())).await?;
+        let to_create = reconcile_network_defs(
+            &mut txn,
+            &declared_one("ambiguous", def.clone()),
+            &carbide_instrument::Instrumentation::global(),
+        )
+        .await?;
         assert!(
             to_create.is_empty(),
             "this arm must not add networks to the to-create list"

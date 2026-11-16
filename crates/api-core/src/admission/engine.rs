@@ -879,8 +879,16 @@ mod tests {
     #[tokio::test]
     async fn non_runnable_backlog_does_not_reject_independent_client_at_global_saturation() {
         let pending_timeout = Duration::from_secs(5);
-        let limits = AdmissionLimits::new(4, 16, 1, 4, pending_timeout, Duration::from_secs(60))
-            .expect("test admission limits are valid");
+        let limits = AdmissionLimits::new(
+            4,
+            16,
+            1,
+            4,
+            pending_timeout,
+            Duration::from_secs(120),
+            Duration::from_secs(60),
+        )
+        .expect("test admission limits are valid");
         let client_limits = limits.default_client();
         let unused_global_capacity =
             limits.max_work_in_flight() - client_limits.max_work_in_flight();

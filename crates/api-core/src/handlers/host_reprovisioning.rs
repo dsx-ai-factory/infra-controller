@@ -93,7 +93,7 @@ pub(crate) async fn trigger_host_reprovisioning(
     // truthful for every initiator. Counted only after the commit: a
     // rolled-back trigger never started anything.
     if let Some(initiator) = started_initiator {
-        carbide_instrument::emit(
+        api.instrumentation.emit(
             crate::machine_update_manager::metrics::FirmwareUpdateProgress {
                 target: crate::machine_update_manager::metrics::FirmwareUpdateTarget::Host,
                 phase: crate::machine_update_manager::metrics::FirmwareUpdatePhase::Started,
@@ -266,7 +266,7 @@ pub(crate) async fn report_scout_firmware_upgrade_status(
         .enqueue_object(&machine_id)
         .await
     {
-        carbide_instrument::emit(StateHandlerWakeupFailed {
+        api.instrumentation.emit(StateHandlerWakeupFailed {
             trigger: WakeupTrigger::ScoutFirmwareUpgradeStatus,
             machine_id: machine_id.into(),
             err: err.to_string(),

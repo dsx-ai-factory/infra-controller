@@ -40,6 +40,11 @@ using StringSetter = void (*)(const char *);
 using ValidatedStringSetter = bool (*)(const char *);
 using BoolSetter = void (*)(bool);
 
+// Share the IPv4 bound: iPXE needs one option 43, and Kea counts its header at 255 bytes.
+constexpr size_t max_nico_pxe_service_url_length =
+    255 - Option::OPTION4_HDR_LEN -
+    (Option::OPTION4_HDR_LEN + sizeof(uint32_t)) - Option::OPTION4_HDR_LEN;
+
 enum class KeaDhcpFamily { V4, V6, Unsupported };
 
 KeaDhcpFamily configured_family() {
@@ -106,13 +111,24 @@ bool set_bool_parameter(LibraryHandle *handle, const char *name,
 }
 
 bool configure_common(LibraryHandle *handle) {
-  // Both Kea daemons need the Carbide API and metrics endpoint.
+  // Both Kea daemons share API, PXE service URL and metrics configuration.
   return set_string_parameter(handle, "carbide-api-url", carbide_set_config_api) &&
+         set_validated_string_parameter(handle, "nico-pxe-service-url",
+                                        hook_set_config_nico_pxe_service_url) &&
          set_validated_string_parameter(handle, "carbide-metrics-endpoint",
                                         carbide_set_config_metrics_endpoint);
 }
 
 bool configure_v4(LibraryHandle *handle) {
+  const auto nico_pxe_service_url = handle->getParameter("nico-pxe-service-url");
+  if (nico_pxe_service_url &&
+      nico_pxe_service_url->getType() == Element::string &&
+      nico_pxe_service_url->stringValue().size() > max_nico_pxe_service_url_length) {
+    LOG_ERROR(loader_logger, "nico-pxe-service-url exceeds DHCPv4 limit of %1 bytes")
+        .arg(max_nico_pxe_service_url_length);
+    return false;
+  }
+
   ConstElementPtr next_server =
       handle->getParameter("carbide-provisioning-server-ipv4");
   if (next_server) {
@@ -221,7 +237,16 @@ extern "C" int dhcp6_srv_configured(CalloutHandle &handle) {
 }
 
 bool configure_v6(LibraryHandle *handle) {
-  // New DHCPv6 hook params intentionally use hook-* names.
+  const auto nico_pxe_service_url = handle->getParameter("nico-pxe-service-url");
+  if (nico_pxe_service_url &&
+      nico_pxe_service_url->getType() == Element::string &&
+      nico_pxe_service_url->stringValue().size() > max_nico_pxe_service_url_length) {
+    LOG_ERROR(loader_logger, "nico-pxe-service-url exceeds DHCPv6 limit of %1 bytes")
+        .arg(max_nico_pxe_service_url_length);
+    return false;
+  }
+
+  // DHCPv6-specific hook params use hook-* names.
   if (!set_validated_string_parameter(handle, "hook-dns-servers-ipv6",
                                       hook_set_config_dns_servers_ipv6) ||
       !set_validated_string_parameter(handle, "hook-ntp-servers-ipv6",

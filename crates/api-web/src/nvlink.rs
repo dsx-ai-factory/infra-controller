@@ -516,7 +516,7 @@ async fn fetch_logical_partitions(
         }
 
         let show_lp = ShowLogicalPartition {
-            partition: lp.clone(),
+            partition: lp,
             physical_partitions: show_physical_partitions,
         };
         show_partitions.push(show_lp);

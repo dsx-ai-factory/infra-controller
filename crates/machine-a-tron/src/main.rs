@@ -32,12 +32,12 @@ use bmc_mock::mac_address_pool::{
     RangesConfig as MacAddressRangesConfig,
 };
 use bmc_mock::{CombinedServer, ListenerOrAddress};
+use carbide_tls::client_config::{
+    get_client_cert_info, get_config_from_file, get_proxy_info, get_root_ca_path,
+};
 use clap::Parser;
 use figment::Figment;
 use figment::providers::{Format, Toml};
-use forge_tls::client_config::{
-    get_client_cert_info, get_config_from_file, get_proxy_info, get_root_ca_path,
-};
 use mac_address::MacAddress;
 use machine_a_tron::{
     BmcMockRegistry, ControlState, DeviceStatusConfig, DhcpClient, MachineATron, MachineATronArgs,

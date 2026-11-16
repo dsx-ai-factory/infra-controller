@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-// Package writer is the only path for a NICo write that returns Empty:
+// Package writer is the path for gated NICo and REST writes:
 // journal the intent, recheck the lock and the stop signal, send, journal the
 // receipt. A write whose reply is lost is marked unclear and never resent as
 // if nothing had landed.
@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"log/slog"
 	"math"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -61,6 +62,13 @@ type Call struct {
 	Retry RetryPolicy
 	// Cutoff, when set: no attempt, the first included, goes out at or after it, checked last, right before the dispatch. An attempt already out is not cut.
 	Cutoff time.Time
+	// RetryCutoff reserves caller observation time after a retry.
+	RetryCutoff time.Time
+	// ReconcileUnclear verifies an uncertain result before a same-op retry.
+	// It returns true only after journaled settlement, false only with retry proof.
+	ReconcileUnclear func(uint64) (bool, error)
+	// BeforeDispatch is bounded and side-effect-free, and may run more than once per attempt.
+	BeforeDispatch func() error
 }
 
 func (c Call) cut() bool { return !c.Cutoff.IsZero() && !time.Now().Before(c.Cutoff) }
@@ -74,12 +82,13 @@ type Gate interface{ Check() error }
 // writer depends only on this.
 type Stopper interface{ Stopped() <-chan struct{} }
 
-// Attempt is what one dispatched attempt got back, for a write that returns
-// Empty: accepted when neither Rejected nor NoReply. Detail is local text the
+// Attempt is what one dispatched attempt got back. It is accepted when
+// neither Rejected nor NoReply is set. Detail is local text the
 // adapter writes, never a reply body or an error that can hold a URL: the
 // writer only logs it, scrubbed and cut, and the journal keeps the reason
 // alone.
 type Attempt struct {
+	IDs      []string // bounded server-assigned UUIDs, at most 18 of 36 ASCII bytes each
 	Rejected *Rejection
 	NoReply  bool // the write may or may not have landed
 	Detail   string
@@ -98,6 +107,7 @@ const (
 // Outcome of one logical write. SentAt (of attempt 1) and RepliedAt are set
 // when Accepted, Reason when Failed.
 type Outcome struct {
+	IDs               []string
 	Kind              Kind
 	Op                uint64
 	Attempts          uint32
@@ -208,15 +218,30 @@ func Send(ctx context.Context, w *Writer, c Call, attempt func(context.Context) 
 		// dispatch itself, after every lock and bookkeeping step. Nothing
 		// waits on the journal between this check and the dispatch. run reports
 		// the actual dispatch time, taken after that final check.
-		reply, dispatchAt, halt := run(w, ctx, c.Retry.AttemptTimeout, func() error {
+		live := func() error {
 			if err := w.halted(ctx); err != nil {
 				return err
-			} else if c.cut() {
+			} else if c.cut() || in.Attempt > 1 && !c.RetryCutoff.IsZero() && !time.Now().Before(c.RetryCutoff) {
 				return ErrCutoff
 			} else if in.Attempt == 1 || !w.pastDeadline(0) {
 				return nil
 			}
 			return errPastDeadline
+		}
+		check := func() error {
+			if err := live(); err != nil {
+				return err
+			}
+			if c.BeforeDispatch != nil {
+				return c.BeforeDispatch()
+			}
+			return nil
+		}
+		reply, dispatchAt, halt := run(w, ctx, c.Retry.AttemptTimeout, func() error {
+			if err := check(); err != nil {
+				return err
+			}
+			return check()
 		}, attempt)
 		repliedAt := time.Now().UTC()
 		if halt != nil {
@@ -244,11 +269,24 @@ func Send(ctx context.Context, w *Writer, c Call, attempt func(context.Context) 
 		if r := reply.Rejected; r != nil && maybeApplied(*r) {
 			lost, reply = *r, Attempt{NoReply: true, Detail: string(r.Reason) + ": the write may have landed"}
 		}
+		if len(reply.IDs) > 18 || slices.ContainsFunc(reply.IDs, func(id string) bool { return len(id) != 36 || strings.Trim(id, "0123456789abcdefABCDEF-") != "" }) {
+			reply = Attempt{NoReply: true}
+		}
 		var rej Rejection
 		switch {
 		case reply.NoReply:
 			slog.Warn("write got no reply", "scope", c.Scope, "kind", c.Kind, "key", c.Key, "detail", scrubbed(reply.Detail))
 			w.j.MarkUnclear(in.Op)
+			if c.ReconcileUnclear != nil {
+				settled, err := c.ReconcileUnclear(in.Op)
+				if err != nil {
+					return Outcome{Kind: Unclear, Op: in.Op}, err
+				}
+				if settled {
+					return Outcome{Kind: Accepted, Op: in.Op, Attempts: in.Attempt, SentAt: firstSentAt, RepliedAt: time.Now()}, nil
+				}
+				lost.Retryable = true
+			}
 			if !c.Idempotent || !lost.Retryable || in.Attempt >= c.Retry.MaxAttempts {
 				return Outcome{Kind: Unclear, Op: in.Op}, nil
 			}
@@ -269,8 +307,8 @@ func Send(ctx context.Context, w *Writer, c Call, attempt func(context.Context) 
 			}
 		default:
 			slog.Info("write accepted", "scope", c.Scope, "kind", c.Kind, "key", c.Key, "op", in.Op)
-			out = Outcome{Kind: Accepted, Op: in.Op, Attempts: in.Attempt, SentAt: firstSentAt, RepliedAt: repliedAt}
-			if err := w.j.Receipt(in, journal.Outcome{Kind: journal.Accepted}); err != nil {
+			out = Outcome{IDs: slices.Clone(reply.IDs), Kind: Accepted, Op: in.Op, Attempts: in.Attempt, SentAt: firstSentAt, RepliedAt: repliedAt}
+			if err := w.j.Receipt(in, journal.Outcome{Kind: journal.Accepted, IDs: reply.IDs}); err != nil {
 				return out, err // the known acceptance, with the I/O error
 			}
 			return out, nil
@@ -451,4 +489,31 @@ func scrubbed(detail string) string {
 		return string(clean[:MaxDetailChars]) + "..."
 	}
 	return string(clean)
+}
+
+// Record persists command evidence under the ordinary live-lock and stop gate.
+func (w *Writer) Record(ctx context.Context, kind string, data any) error {
+	if err := w.halted(ctx); err != nil {
+		return err
+	}
+	return w.j.Record(kind, data)
+}
+
+// Unsettled reports durable work or broken evidence inherited by a phase.
+func (w *Writer) Unsettled() bool { return w.j.Unsettled() }
+
+// Pending sets or clears semantic work only while the ordinary write gate is live.
+func (w *Writer) Pending(ctx context.Context, pending bool) error {
+	if err := w.halted(ctx); err != nil {
+		return err
+	}
+	return w.j.Pending(pending)
+}
+
+// SettleLabel accepts caller-verified probe proof through the live write gate.
+func (w *Writer) SettleLabel(ctx context.Context, op uint64, proof any) error {
+	if err := w.halted(ctx); err != nil {
+		return err
+	}
+	return w.j.SettleLabel(op, proof)
 }

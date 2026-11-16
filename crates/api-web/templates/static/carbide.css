@@ -2349,3 +2349,64 @@ td.config-value pre {
   color: var(--text-muted);
   text-align: center;
 }
+
+/* Machine telemetry links and their secondary copy action. */
+.telemetry-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 1rem;
+}
+
+.telemetry-actions button,
+.telemetry-actions button:hover:enabled:not(.tab-button) {
+  background-color: transparent;
+  color: var(--text-secondary);
+  border-color: var(--border-color);
+  box-shadow: none;
+}
+
+.telemetry-actions [aria-disabled="true"],
+.telemetry-actions button:disabled {
+  color: var(--text-muted);
+  cursor: default;
+}
+
+#grafana-address-settings {
+  margin: 0.25rem 0 0;
+}
+
+#grafana-address-settings summary {
+  padding: 0.25rem 0;
+  margin-bottom: 0;
+  border: 0;
+  background-color: transparent;
+  color: var(--text-muted);
+  font-size: 0.9rem;
+  overflow-wrap: anywhere;
+}
+
+#grafana-address-settings[open] summary {
+  margin-bottom: 0.5rem;
+}
+
+#grafana-address-settings label,
+#grafana-address-help {
+  display: block;
+}
+
+@media (max-width: 768px) {
+  .detailsview.telemetry-table {
+    table-layout: fixed;
+  }
+
+  .detailsview.telemetry-table th {
+    width: 5rem;
+    min-width: 0;
+  }
+
+  .detailsview.telemetry-table th,
+  .detailsview.telemetry-table td {
+    padding: 0.75rem;
+  }
+}

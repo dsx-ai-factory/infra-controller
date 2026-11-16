@@ -476,8 +476,8 @@ pub(super) async fn show_html(
     for mo in managed_hosts.into_iter() {
         let m = ManagedHostRowDisplay::from_snapshot(mo, &sla_config);
 
-        let vendor = m.vendor.to_lowercase().clone();
-        let model = m.model.to_lowercase().clone();
+        let vendor = m.vendor.to_lowercase();
+        let model = m.model.to_lowercase();
 
         if !vendor.is_empty() {
             let models = models_per_vendor.entry(vendor).or_default();

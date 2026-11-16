@@ -1,0 +1,63 @@
+suite: DPF metrics service endpoints
+templates:
+  - daemonset.yaml
+release:
+  name: another-cluster-otel
+  namespace: release-namespace
+tests:
+  - it: scrapes the DPUService-named agent, FMDS, and DTS Services
+    set:
+      multiClusterSupport: true
+      dpf.dpuService.namespace: service-namespace
+      nico_dpu_agent: agent-abc123
+      nico_fmds: fmds-abc123
+      nico_dts: dts-abc123
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: NICO_DPU_AGENT_METRICS_TARGET
+            value: agent-abc123.service-namespace.svc.cluster.local:8888
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: NICO_FMDS_METRICS_TARGET
+            value: fmds-abc123.service-namespace.svc.cluster.local:8888
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: NICO_DTS_METRICS_TARGET
+            value: dts-abc123.service-namespace.svc.cluster.local:9189
+  - it: uses the release namespace for DTS without DPF identity
+    set:
+      multiClusterSupport: true
+      nico_dts: dts-abc123
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: NICO_DTS_METRICS_TARGET
+            value: dts-abc123.release-namespace.svc.cluster.local:9189
+  - it: preserves legacy metrics endpoints by default even when DPF supplies identity
+    set:
+      dpf.dpuService.name: otel-abc123
+      dpf.dpuService.namespace: service-namespace
+      nico_dpu_agent: agent-abc123
+      nico_fmds: fmds-abc123
+      nico_dts: dts-abc123
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: NICO_DPU_AGENT_METRICS_TARGET
+            value: carbide-dpf-cluster-agent-abc123.dpf-operator-system.svc.cluster.local:8888
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: NICO_FMDS_METRICS_TARGET
+            value: carbide-dpf-cluster-fmds-abc123.dpf-operator-system.svc.cluster.local:8888
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: NICO_DTS_METRICS_TARGET
+            value: carbide-dpf-cluster-dts-abc123-doca-telemetry.dpf-operator-system.svc.cluster.local:9189

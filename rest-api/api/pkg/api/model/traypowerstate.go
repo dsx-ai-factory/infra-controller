@@ -91,6 +91,7 @@ var powerActionStatusNames = map[corev1.ComponentPowerActionStatus]APIPowerActio
 }
 
 var powerActionOperationNames = map[corev1.ComponentPowerActionOperation]APIPowerActionOperation{
+	corev1.ComponentPowerActionOperation_COMPONENT_POWER_ACTION_OPERATION_AC_POWERCYCLE: "AcPowercycle",
 	corev1.ComponentPowerActionOperation_COMPONENT_POWER_ACTION_OPERATION_POWER_ON:      "PowerOn",
 	corev1.ComponentPowerActionOperation_COMPONENT_POWER_ACTION_OPERATION_POWER_OFF:     "PowerOff",
 	corev1.ComponentPowerActionOperation_COMPONENT_POWER_ACTION_OPERATION_RESET:         "Reset",
@@ -114,6 +115,7 @@ var powerTaskOperationNames = map[flowv1.PowerControlOperation]APIPowerTaskOpera
 }
 
 var taskTypeNames = map[flowv1.TaskKind]APITaskType{
+	flowv1.TaskKind_TASK_KIND_COMPONENT_RESET:    "ComponentReset",
 	flowv1.TaskKind_TASK_KIND_POWER_CONTROL:      "PowerControl",
 	flowv1.TaskKind_TASK_KIND_FIRMWARE_CONTROL:   "FirmwareControl",
 	flowv1.TaskKind_TASK_KIND_BRING_UP:           "BringUp",

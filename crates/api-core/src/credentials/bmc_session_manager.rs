@@ -445,6 +445,7 @@ impl BmcSessionStore for PgBmcSessionStore {
 }
 
 pub(crate) struct BmcSessionManager {
+    instrumentation: carbide_instrument::Instrumentation,
     redfish_pool: Arc<NvRedfishClientPool>,
     credential_manager: Arc<dyn CredentialManager>,
     store: Arc<dyn BmcSessionStore>,
@@ -466,8 +467,10 @@ impl BmcSessionManager {
         lockout_threshold: u32,
         allow_basic_auth_fallback: bool,
         max_sessions_per_caller: usize,
+        instrumentation: carbide_instrument::Instrumentation,
     ) -> Self {
         Self {
+            instrumentation,
             redfish_pool,
             credential_manager,
             store,
@@ -558,7 +561,7 @@ impl BmcSessionManager {
             .await
         {
             if let Err(revoke_err) = created.delete().await {
-                carbide_instrument::emit(BmcSessionCleanupFailed {
+                self.instrumentation.emit(BmcSessionCleanupFailed {
                     operation: BmcSessionCleanupOperation::RevokeUnpersistedSession,
                     bmc_mac_address: bmc_mac,
                     spiffe_service_id: Some(spiffe_service_id.to_owned()),
@@ -614,7 +617,7 @@ impl BmcSessionManager {
         let outstanding = match self.store.find_by_owner(spiffe_service_id, bmc_mac).await {
             Ok(rows) => rows,
             Err(err) => {
-                carbide_instrument::emit(BmcSessionCleanupFailed {
+                self.instrumentation.emit(BmcSessionCleanupFailed {
                     operation: BmcSessionCleanupOperation::ListSessionsForRevoke,
                     bmc_mac_address: bmc_mac,
                     spiffe_service_id: Some(spiffe_service_id.to_owned()),
@@ -633,7 +636,7 @@ impl BmcSessionManager {
         let members = match sessions.members().await {
             Ok(members) => members,
             Err(err) => {
-                carbide_instrument::emit(BmcSessionCleanupFailed {
+                self.instrumentation.emit(BmcSessionCleanupFailed {
                     operation: BmcSessionCleanupOperation::ListSessionsForRevoke,
                     bmc_mac_address: bmc_mac,
                     spiffe_service_id: Some(spiffe_service_id.to_owned()),
@@ -658,7 +661,7 @@ impl BmcSessionManager {
                 Ok(ConditionalWrite::Applied(())) => {}
                 Ok(ConditionalWrite::NotApplied(SessionNotOwned)) => continue,
                 Err(err) => {
-                    carbide_instrument::emit(BmcSessionCleanupFailed {
+                    self.instrumentation.emit(BmcSessionCleanupFailed {
                         operation: BmcSessionCleanupOperation::DeleteSessionRows,
                         bmc_mac_address: bmc_mac,
                         spiffe_service_id: Some(spiffe_service_id.to_owned()),
@@ -676,7 +679,7 @@ impl BmcSessionManager {
             if let Some(session) = members.iter().find(|m| m.raw().odata_id() == &session_id)
                 && let Err(err) = session.delete().await
             {
-                carbide_instrument::emit(BmcSessionCleanupFailed {
+                self.instrumentation.emit(BmcSessionCleanupFailed {
                     operation: BmcSessionCleanupOperation::RevokePriorSession,
                     bmc_mac_address: bmc_mac,
                     spiffe_service_id: Some(spiffe_service_id.to_owned()),
@@ -747,7 +750,7 @@ impl BmcSessionManager {
     /// Drop all session rows for `bmc_mac` and clear any lockout state.
     pub(crate) async fn flush_mac(&self, bmc_mac: MacAddress) {
         if let Err(err) = self.store.delete_by_mac(bmc_mac).await {
-            carbide_instrument::emit(BmcSessionCleanupFailed {
+            self.instrumentation.emit(BmcSessionCleanupFailed {
                 operation: BmcSessionCleanupOperation::DeleteSessionRows,
                 bmc_mac_address: bmc_mac,
                 spiffe_service_id: None,
@@ -805,12 +808,13 @@ impl BmcSessionManager {
         entry.last_status = status;
         if entry.consecutive_unauthorized >= self.lockout_threshold && entry.tripped_at.is_none() {
             entry.tripped_at = Some(Instant::now());
-            carbide_instrument::emit(BmcSessionLockoutBreakerTripped::new(
-                bmc_mac,
-                status,
-                entry.consecutive_unauthorized,
-                self.lockout_threshold,
-            ));
+            self.instrumentation
+                .emit(BmcSessionLockoutBreakerTripped::new(
+                    bmc_mac,
+                    status,
+                    entry.consecutive_unauthorized,
+                    self.lockout_threshold,
+                ));
             return Some(BmcSessionError::AvoidLockout {
                 bmc_mac,
                 consecutive_unauthorized: entry.consecutive_unauthorized,
@@ -822,7 +826,8 @@ impl BmcSessionManager {
 
     async fn clear_lockout(&self, bmc_mac: MacAddress) {
         if self.lockouts.lock().await.remove(&bmc_mac).is_some() {
-            carbide_instrument::emit(BmcSessionLockoutBreakerCleared::new(bmc_mac));
+            self.instrumentation
+                .emit(BmcSessionLockoutBreakerCleared::new(bmc_mac));
         }
     }
 
@@ -1060,20 +1065,32 @@ mod tests {
         }
     }
 
-    fn manager_with_creds() -> (Arc<BmcSessionManager>, Arc<InMemoryBmcSessionStore>) {
+    fn manager_with_creds() -> (
+        Arc<BmcSessionManager>,
+        Arc<InMemoryBmcSessionStore>,
+        carbide_utils::test_support::test_meter::TestMeter,
+    ) {
         manager_with_creds_and_threshold(TEST_LOCKOUT_THRESHOLD)
     }
 
     fn manager_with_creds_and_threshold(
         threshold: u32,
-    ) -> (Arc<BmcSessionManager>, Arc<InMemoryBmcSessionStore>) {
+    ) -> (
+        Arc<BmcSessionManager>,
+        Arc<InMemoryBmcSessionStore>,
+        carbide_utils::test_support::test_meter::TestMeter,
+    ) {
         manager_with_creds_threshold_and_fallback(threshold, false)
     }
 
     fn manager_with_creds_threshold_and_fallback(
         threshold: u32,
         allow_basic_auth_fallback: bool,
-    ) -> (Arc<BmcSessionManager>, Arc<InMemoryBmcSessionStore>) {
+    ) -> (
+        Arc<BmcSessionManager>,
+        Arc<InMemoryBmcSessionStore>,
+        carbide_utils::test_support::test_meter::TestMeter,
+    ) {
         let bmc_proxy = Arc::new(ArcSwap::new(Arc::new(None)));
         let redfish_pool = carbide_redfish::nv_redfish::new_pool(bmc_proxy);
         let credential_manager =
@@ -1082,6 +1099,7 @@ mod tests {
                 password: "password".to_string(),
             }));
         let store = InMemoryBmcSessionStore::new();
+        let test_meter = carbide_utils::test_support::test_meter::TestMeter::default();
         let manager = Arc::new(BmcSessionManager::new(
             redfish_pool,
             credential_manager,
@@ -1089,8 +1107,9 @@ mod tests {
             threshold,
             allow_basic_auth_fallback,
             TEST_MAX_SESSIONS_PER_CALLER,
+            carbide_instrument::Instrumentation::new(test_meter.meter()),
         ));
-        (manager, store)
+        (manager, store, test_meter)
     }
 
     fn cap_row(n: u8) -> StoredSession {
@@ -1187,8 +1206,7 @@ mod tests {
 
     #[tokio::test]
     async fn flush_mac_deletes_store_rows_and_clears_lockout() {
-        let _metrics = MetricsCapture::start();
-        let (manager, store) = manager_with_creds();
+        let (manager, store, _test_meter) = manager_with_creds();
         let mac_a = mac(0xAA);
         let mac_b = mac(0xBB);
 
@@ -1219,6 +1237,7 @@ mod tests {
                 username: "root".to_string(),
                 password: "password".to_string(),
             }));
+        let test_meter = carbide_utils::test_support::test_meter::TestMeter::default();
         let manager = Arc::new(BmcSessionManager::new(
             redfish_pool,
             credential_manager,
@@ -1226,6 +1245,7 @@ mod tests {
             TEST_LOCKOUT_THRESHOLD,
             false,
             TEST_MAX_SESSIONS_PER_CALLER,
+            carbide_instrument::Instrumentation::new(test_meter.meter()),
         ));
         let bmc_mac = mac(0xAF);
 
@@ -1234,7 +1254,7 @@ mod tests {
             manager.no_session_service.lock().await.insert(bmc_mac);
         });
 
-        let metrics = MetricsCapture::start();
+        let metrics = MetricsCapture::for_registry(test_meter.registry());
         let logs = capture_logs(|| runtime.block_on(manager.flush_mac(bmc_mac)));
         let cleanup_logs = logs
             .iter()
@@ -1282,8 +1302,7 @@ mod tests {
 
     #[tokio::test]
     async fn note_credentials_updated_retains_store_rows() {
-        let _metrics = MetricsCapture::start();
-        let (manager, store) = manager_with_creds();
+        let (manager, store, _test_meter) = manager_with_creds();
         let bmc_mac = mac(0xCC);
         seed_row(&store, "svc-1", bmc_mac, "/sessions/keep-me").await;
         manager.force_trip_for_test(bmc_mac, 5, 403).await;
@@ -1353,6 +1372,7 @@ mod tests {
         let redfish_pool = carbide_redfish::nv_redfish::new_pool(bmc_proxy);
         let credential_manager = Arc::new(TestCredentialManager::default());
         let store = InMemoryBmcSessionStore::new();
+        let test_meter = carbide_utils::test_support::test_meter::TestMeter::default();
         let manager = BmcSessionManager::new(
             redfish_pool,
             credential_manager,
@@ -1360,6 +1380,7 @@ mod tests {
             TEST_LOCKOUT_THRESHOLD,
             false,
             TEST_MAX_SESSIONS_PER_CALLER,
+            carbide_instrument::Instrumentation::new(test_meter.meter()),
         );
 
         let bmc_mac = mac(0xCE);
@@ -1376,7 +1397,7 @@ mod tests {
 
     #[tokio::test]
     async fn mac_lock_collapses_all_spiffe_callers_for_one_mac() {
-        let (manager, _store) = manager_with_creds();
+        let (manager, _store, _test_meter) = manager_with_creds();
         let mac_a = mac(0x01);
         let mac_b = mac(0x02);
 
@@ -1399,7 +1420,7 @@ mod tests {
 
     #[tokio::test]
     async fn acquire_mac_lock_evicts_unused_entries() {
-        let (manager, _store) = manager_with_creds();
+        let (manager, _store, _test_meter) = manager_with_creds();
         let mac_a = mac(0x10);
         let mac_b = mac(0x11);
 
@@ -1432,7 +1453,7 @@ mod tests {
 
     #[tokio::test]
     async fn acquire_mac_lock_retains_in_use_entries() {
-        let (manager, _store) = manager_with_creds();
+        let (manager, _store, _test_meter) = manager_with_creds();
         let mac_busy = mac(0x20);
         let mac_other = mac(0x21);
 
@@ -1559,6 +1580,7 @@ mod tests {
             std::time::Duration::from_millis(50),
         );
         let store = InMemoryBmcSessionStore::new();
+        let test_meter = carbide_utils::test_support::test_meter::TestMeter::default();
         let manager = Arc::new(BmcSessionManager::new(
             redfish_pool,
             credential_manager.clone(),
@@ -1566,6 +1588,7 @@ mod tests {
             TEST_LOCKOUT_THRESHOLD,
             false,
             TEST_MAX_SESSIONS_PER_CALLER,
+            carbide_instrument::Instrumentation::new(test_meter.meter()),
         ));
 
         let bmc_mac = mac(0xAB);
@@ -1593,7 +1616,7 @@ mod tests {
 
     #[tokio::test]
     async fn record_unauthorized_returns_none_below_threshold() {
-        let (manager, _store) = manager_with_creds_and_threshold(3);
+        let (manager, _store, _test_meter) = manager_with_creds_and_threshold(3);
         let bmc_mac = mac(0xDE);
         for _ in 0..2 {
             assert!(manager.record_unauthorized(bmc_mac, 401).await.is_none());
@@ -1615,8 +1638,7 @@ mod tests {
 
     #[tokio::test]
     async fn record_unauthorized_trips_at_threshold() {
-        let _metrics = MetricsCapture::start();
-        let (manager, _store) = manager_with_creds_and_threshold(3);
+        let (manager, _store, _test_meter) = manager_with_creds_and_threshold(3);
         let bmc_mac = mac(0xDE);
         assert!(manager.record_unauthorized(bmc_mac, 401).await.is_none());
         assert!(manager.record_unauthorized(bmc_mac, 401).await.is_none());
@@ -1645,8 +1667,7 @@ mod tests {
 
     #[tokio::test]
     async fn record_unauthorized_only_emits_avoid_lockout_on_the_tripping_request() {
-        let _metrics = MetricsCapture::start();
-        let (manager, _store) = manager_with_creds_and_threshold(2);
+        let (manager, _store, _test_meter) = manager_with_creds_and_threshold(2);
         let bmc_mac = mac(0xDE);
         assert!(manager.record_unauthorized(bmc_mac, 401).await.is_none());
         let trip = manager.record_unauthorized(bmc_mac, 401).await;
@@ -1691,10 +1712,12 @@ mod tests {
 
     fn observe_cleanup_failure(case: CleanupFailureCase) -> CleanupFailureObservation {
         let bmc_mac = mac(0xBC);
-        let metrics = MetricsCapture::start();
+        let test_meter = carbide_utils::test_support::test_meter::TestMeter::default();
+        let instrumentation = carbide_instrument::Instrumentation::new(test_meter.meter());
+        let metrics = MetricsCapture::for_registry(test_meter.registry());
         let logs = capture_logs(|| match case {
             CleanupFailureCase::RevokePriorSession => {
-                carbide_instrument::emit(BmcSessionCleanupFailed {
+                instrumentation.emit(BmcSessionCleanupFailed {
                     operation: BmcSessionCleanupOperation::RevokePriorSession,
                     bmc_mac_address: bmc_mac,
                     spiffe_service_id: Some(TEST_SPIFFE_SERVICE_ID.to_string()),
@@ -1703,7 +1726,7 @@ mod tests {
                 });
             }
             CleanupFailureCase::ListSessionsForRevoke => {
-                carbide_instrument::emit(BmcSessionCleanupFailed {
+                instrumentation.emit(BmcSessionCleanupFailed {
                     operation: BmcSessionCleanupOperation::ListSessionsForRevoke,
                     bmc_mac_address: bmc_mac,
                     spiffe_service_id: Some(TEST_SPIFFE_SERVICE_ID.to_string()),
@@ -1712,7 +1735,7 @@ mod tests {
                 });
             }
             CleanupFailureCase::RevokeUnpersistedSession => {
-                carbide_instrument::emit(BmcSessionCleanupFailed {
+                instrumentation.emit(BmcSessionCleanupFailed {
                     operation: BmcSessionCleanupOperation::RevokeUnpersistedSession,
                     bmc_mac_address: bmc_mac,
                     spiffe_service_id: Some(TEST_SPIFFE_SERVICE_ID.to_string()),
@@ -1721,7 +1744,7 @@ mod tests {
                 });
             }
             CleanupFailureCase::DeleteSessionRows => {
-                carbide_instrument::emit(BmcSessionCleanupFailed {
+                instrumentation.emit(BmcSessionCleanupFailed {
                     operation: BmcSessionCleanupOperation::DeleteSessionRows,
                     bmc_mac_address: bmc_mac,
                     spiffe_service_id: None,
@@ -1876,9 +1899,9 @@ mod tests {
         let runtime = tokio::runtime::Builder::new_current_thread()
             .build()
             .expect("test runtime");
-        let (manager, _store) = manager_with_creds_and_threshold(2);
+        let (manager, _store, test_meter) = manager_with_creds_and_threshold(2);
         let bmc_mac = mac(0xDE);
-        let metrics = MetricsCapture::start();
+        let metrics = MetricsCapture::for_registry(test_meter.registry());
         let mut unauthorized_results = Vec::new();
 
         let logs = capture_logs(|| {
@@ -2052,8 +2075,7 @@ mod tests {
 
     #[tokio::test]
     async fn clear_lockout_removes_tripped_state() {
-        let _metrics = MetricsCapture::start();
-        let (manager, _store) = manager_with_creds_and_threshold(1);
+        let (manager, _store, _test_meter) = manager_with_creds_and_threshold(1);
         let bmc_mac = mac(0xEE);
         manager.force_trip_for_test(bmc_mac, 1, 401).await;
         assert!(manager.check_not_locked_out(bmc_mac).await.is_some());
@@ -2064,7 +2086,7 @@ mod tests {
 
     #[tokio::test]
     async fn rotate_short_circuits_when_breaker_tripped() {
-        let (manager, _store) = manager_with_creds_and_threshold(1);
+        let (manager, _store, _test_meter) = manager_with_creds_and_threshold(1);
         let bmc_mac = mac(0xF1);
         manager.force_trip_for_test(bmc_mac, 7, 401).await;
 
@@ -2089,8 +2111,7 @@ mod tests {
 
     #[tokio::test]
     async fn concurrent_unauthorized_records_trip_exactly_once() {
-        let _metrics = MetricsCapture::start();
-        let (manager, _store) = manager_with_creds_and_threshold(3);
+        let (manager, _store, _test_meter) = manager_with_creds_and_threshold(3);
         let bmc_mac = mac(0xF2);
 
         let mut handles = Vec::new();
@@ -2132,6 +2153,7 @@ mod tests {
         let redfish_pool = carbide_redfish::nv_redfish::new_pool(bmc_proxy);
         let credential_manager = Arc::new(TestCredentialManager::default());
         let store = InMemoryBmcSessionStore::new();
+        let test_meter = carbide_utils::test_support::test_meter::TestMeter::default();
         let manager = BmcSessionManager::new(
             redfish_pool,
             credential_manager,
@@ -2139,6 +2161,7 @@ mod tests {
             TEST_LOCKOUT_THRESHOLD,
             false,
             TEST_MAX_SESSIONS_PER_CALLER,
+            carbide_instrument::Instrumentation::new(test_meter.meter()),
         );
 
         let bmc_mac = mac(0xA1);

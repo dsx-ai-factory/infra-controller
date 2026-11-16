@@ -102,11 +102,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         carbide_ipmi::test_support(),
         credential_provider.clone(),
     ));
+    let meter_provider = opentelemetry::metrics::noop::NoopMeterProvider::new();
+    let instrumentation = carbide_instrument::Instrumentation::from_meter_provider(&meter_provider);
     let explorer = BmcEndpointExplorer::new(
         bmc_client,
         rotate_switch_nvos_credentials,
         // Standalone debug tool: no database, so rotation bookkeeping is skipped.
         None,
+        instrumentation,
     )
     .with_drive_firmware(args.explore_drive_firmware);
 

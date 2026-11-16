@@ -18,11 +18,11 @@
 use std::path::{Path, PathBuf};
 use std::string::ToString;
 
+use carbide_tls::default as tls_default;
 use forge_dpu_agent_utils::machine_identity::defaults::{
     BURST, REQUESTS_PER_SECOND, SIGN_TIMEOUT_SECS, WAIT_TIMEOUT_SECS,
 };
 use forge_dpu_agent_utils::{FMDS_IPV6_ADDRESS, FMDS_IPV6_GATEWAY};
-use forge_tls::default as tls_default;
 use serde::{Deserialize, Serialize};
 
 /// HBN container root

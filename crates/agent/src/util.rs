@@ -21,10 +21,10 @@ use std::net::IpAddr;
 use std::str::FromStr;
 use std::time::Duration;
 
+use carbide_http_connector::resolver::{CarbideResolver, CarbideResolverOpts};
 use carbide_uuid::machine::{DpuMachineId, MachineId};
 use diff::Result as DiffResult;
 use eyre::{OptionExt, WrapErr};
-use forge_http_connector::resolver::{ForgeResolver, ForgeResolverOpts};
 use hickory_resolver::config::ResolverConfig;
 use hickory_resolver::proto::rr::Name;
 use hyper::service::Service;
@@ -99,7 +99,7 @@ pub enum StripType {}
 
 pub struct UrlResolver {
     nameservers: Vec<IpAddr>,
-    resolver: ForgeResolver,
+    resolver: CarbideResolver,
 }
 
 impl UrlResolver {
@@ -128,7 +128,7 @@ impl UrlResolver {
         Ok(parsed_config)
     }
 
-    fn try_get_resolver(resolver_config: Config) -> Result<ForgeResolver, eyre::Report> {
+    fn try_get_resolver(resolver_config: Config) -> Result<CarbideResolver, eyre::Report> {
         let forge_resolver_config =
             forge_resolver::resolver::into_forge_resolver_config(resolver_config)?;
 
@@ -138,11 +138,11 @@ impl UrlResolver {
             forge_resolver_config.0.inner,
         );
 
-        let updated_opts = ForgeResolverOpts::new()
+        let updated_opts = CarbideResolverOpts::new()
             .use_mgmt_vrf()
             .timeout(Duration::from_secs(5));
         let resolver_cfg =
-            ForgeResolver::with_config_and_options(hickory_resolver_config, updated_opts);
+            CarbideResolver::with_config_and_options(hickory_resolver_config, updated_opts);
 
         Ok(resolver_cfg)
     }

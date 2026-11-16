@@ -7064,7 +7064,7 @@ async fn test_extension_service_create_failure(db_pool: sqlx::PgPool) -> Result<
         .await?
         .expect("creating an extension service should have created a credential");
 
-    let metrics = MetricsCapture::start();
+    let metrics = MetricsCapture::for_registry(env.test_meter.registry());
     env.test_credential_manager
         .set_delete_credentials_failure(true);
 
@@ -7265,7 +7265,7 @@ async fn test_extension_service_update_failure(db_pool: sqlx::PgPool) -> Result<
         c
     };
 
-    let metrics = MetricsCapture::start();
+    let metrics = MetricsCapture::for_registry(env.test_meter.registry());
     env.test_credential_manager
         .set_delete_credentials_failure(true);
 
@@ -8746,7 +8746,7 @@ async fn test_extension_service_delete_credential_cleanup_failure(
         .get_credentials(&second_credential_key)
         .await?;
 
-    let metrics = MetricsCapture::start();
+    let metrics = MetricsCapture::for_registry(env.test_meter.registry());
     env.test_credential_manager
         .set_delete_credentials_failure(true);
 

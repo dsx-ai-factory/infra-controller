@@ -140,6 +140,7 @@ fn machine_operation(operation: &MachineMaintenanceOperation) -> rpc::ComponentP
             (Operation::Reset, Some(*graceful), None)
         }
         MachineMaintenanceOperation::Reboot => (Operation::Reset, Some(true), None),
+        MachineMaintenanceOperation::AcPowercycle { .. } => (Operation::AcPowercycle, None, None),
         MachineMaintenanceOperation::ChassisReset { chassis_id } => {
             (Operation::ChassisReset, None, Some(chassis_id.clone()))
         }
@@ -467,6 +468,16 @@ mod tests {
                     expect: rpc::ComponentPowerAction {
                         operation: Operation::Reset as i32,
                         graceful: Some(true),
+                        ..Default::default()
+                    },
+                },
+                Check {
+                    scenario: "AC power cycle",
+                    input: MachineMaintenanceOperation::AcPowercycle {
+                        state: Default::default(),
+                    },
+                    expect: rpc::ComponentPowerAction {
+                        operation: Operation::AcPowercycle as i32,
                         ..Default::default()
                     },
                 },
