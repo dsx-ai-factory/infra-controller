@@ -15,9 +15,9 @@
  * limitations under the License.
  */
 
-//! The platform settings a host needs before it boots for provisioning:
-//! secure boot off, the BMC's manager settings, the serial console, and the
-//! BIOS settings. Each platform's drivers decide what those mean on it.
+//! The platform settings a host needs before it boots for provisioning: the
+//! BMC's manager settings, the serial console, the BIOS settings, and secure
+//! boot off. Each platform's drivers decide what those mean on it.
 
 use bmc_platform::{
     BiosSettings, BootInterfaceSelector, ConsoleState, DriverOutcome, ManagerSettings,
@@ -68,9 +68,12 @@ impl PlatformConfig {
     }
 }
 
-/// Writes every platform setting the platform supports, in order, and
-/// returns the BMC work they started. Settings take effect on the next host
-/// restart.
+/// Writes every platform setting the platform supports, in order. Settings
+/// take effect on the next host restart, which must wait for the returned
+/// BIOS work. Work the other writes start is not waited on.
+///
+/// Secure boot is written after the BIOS because a BIOS write may clear the
+/// configuration work the BMC has queued.
 pub(crate) async fn apply(
     bmc: &PlatformBmc<'_>,
     site_config: &MachineStateHandlerSiteConfig,
@@ -84,6 +87,17 @@ pub(crate) async fn apply(
         PlatformBmc::Drivers(bmc) => bmc,
     };
     let config = PlatformConfig::new(site_config, bmc, boot_interface);
+    let apply_settings = async {
+        bmc.bmc_control()?
+            .apply_settings(&config.manager_profile)
+            .await
+    };
+    let setup_console = async { bmc.console()?.setup().await };
+    let apply_bios = async {
+        bmc.bios()?
+            .apply(&config.bios_profile, config.boot_interface.as_ref())
+            .await
+    };
     let disable_secure_boot = async {
         if bmc.secure_boot()?.status().await? != SecureBootStatus::Enabled {
             return Ok(DriverOutcome::complete());
@@ -96,32 +110,11 @@ pub(crate) async fn apply(
             )
             .await
     };
-    let apply_settings = async {
-        bmc.bmc_control()?
-            .apply_settings(&config.manager_profile)
-            .await
-    };
-    let setup_console = async { bmc.console()?.setup().await };
-    let apply_bios = async {
-        bmc.bios()?
-            .apply(&config.bios_profile, config.boot_interface.as_ref())
-            .await
-    };
-    Ok(
-        unless_unsupported(disable_secure_boot.await, DriverOutcome::complete())?
-            .merge(unless_unsupported(
-                apply_settings.await,
-                DriverOutcome::complete(),
-            )?)
-            .merge(unless_unsupported(
-                setup_console.await,
-                DriverOutcome::complete(),
-            )?)
-            .merge(unless_unsupported(
-                apply_bios.await,
-                DriverOutcome::complete(),
-            )?),
-    )
+    unless_unsupported(apply_settings.await, DriverOutcome::complete())?;
+    unless_unsupported(setup_console.await, DriverOutcome::complete())?;
+    let bios = unless_unsupported(apply_bios.await, DriverOutcome::complete())?;
+    unless_unsupported(disable_secure_boot.await, DriverOutcome::complete())?;
+    Ok(bios)
 }
 
 /// Whether every platform setting the platform reports is in effect.
