@@ -453,6 +453,12 @@ Only a client in a listed org is a service account, and only for requests to tha
 
 In connected mode, `serviceAccountOrgs` can list more than one org. Custom issuer `isServiceAccount` mappings, which used to require disconnected mode, are now accepted in connected mode with no limit on their number.
 
+### 2.4 → 2.5: Firmware upgrade timeout based on time Scout polled for task
+
+Prior to 2.5, the timeout clock for a firmware upgrade was started when the task was first created by the controller even though Scout had not yet received the task and was not guaranteed to do so. With the 2.5 release, the timeout clock is reset to zero the first time Scout polls the controller after the task is created, which is inferred to be the time that the task was actually delivered to Scout.
+
+**Impact:** If, prior to a NICo upgrade, a firmware upgrade task is created, successfully received by Scout, and the actual firmware upgrade begun but not completed, then after the NICo upgrade newer Core will mark the pending task as timed out unless the last Scout contact time happened to fall within thirty minutes of upgrade task creation. This can result in a delay before the upgrade process is complete, since the result of the ongoing firmware upgrade will be discarded, and a potentially unnecessary retry will be triggered.
+
 ### 2.3 → 2.4: Standalone Temporal/Keycloak PostgreSQL deprecated
 
 <Warning>
