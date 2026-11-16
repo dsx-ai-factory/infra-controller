@@ -15,6 +15,8 @@
  * limitations under the License.
  */
 
+use std::borrow::Cow;
+
 use carbide_instrument::Instrumentation;
 use carbide_network::ip::IdentifyAddressFamily;
 use mac_address::MacAddress;
@@ -27,6 +29,31 @@ use crate::CarbideError;
 use crate::handlers::static_address_metrics::{
     PreallocationSuccess, StaticAddressPreallocationCompleted,
 };
+
+/// The fixed-address declarations that reconciliation applies to physical
+/// interfaces: the effective Host BMC, then every other interface with its
+/// own MAC. A DPU loopback is reserved from its resource pool instead.
+/// Create-time validation checks the same declarations, so create rejects
+/// what update would reject.
+pub(super) fn fixed_address_declarations(
+    machine: &ExpectedMachine,
+) -> impl Iterator<Item = Cow<'_, ExpectedInterface>> {
+    std::iter::once(Cow::Owned(machine.effective_host_bmc()))
+        .chain(
+            machine
+                .data
+                .interfaces
+                .iter()
+                .filter(|interface| {
+                    !interface.role.is_dpu_loopback()
+                        && interface
+                            .mac_address
+                            .is_some_and(|mac| mac != machine.bmc_mac_address)
+                })
+                .map(Cow::Borrowed),
+        )
+        .filter(|interface| interface.fixed_ip.is_some())
+}
 
 /// Reconciles fixed addresses using the caller's retention policy and metric destination.
 ///
@@ -74,20 +101,11 @@ impl<'a> InterfacePreallocator<'a> {
         machine: &ExpectedMachine,
     ) -> Result<Vec<PreallocationSuccess>, CarbideError> {
         let mut preallocations = Vec::new();
-        let host_bmc = machine.effective_host_bmc();
-        if host_bmc.fixed_ip.is_some() {
-            preallocations.push(self.update_expected_interface(&mut *txn, &host_bmc).await?);
-        }
-
-        for interface in machine.data.interfaces.iter().filter(|interface| {
-            !interface.role.is_dpu_loopback()
-                && interface
-                    .mac_address
-                    .is_some_and(|mac| mac != machine.bmc_mac_address)
-        }) {
-            if interface.fixed_ip.is_some() {
-                preallocations.push(self.update_expected_interface(&mut *txn, interface).await?);
-            }
+        for interface in fixed_address_declarations(machine) {
+            preallocations.push(
+                self.update_expected_interface(&mut *txn, &interface)
+                    .await?,
+            );
         }
 
         Ok(preallocations)

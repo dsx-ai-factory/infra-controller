@@ -3268,7 +3268,8 @@ async fn test_dhcp_v6_info_request_promotes_predicted_interface(
 
     // Options-only association does not freeze configuration. Start with a
     // Fixed address outside the configured prefix, then correct it after DHCP
-    // rejects the first allocation.
+    // rejects the first allocation. The API now rejects that address, so store
+    // it directly, as a record created before that validation would be.
     let mut expected = rpc::forge::ExpectedMachine {
         bmc_mac_address: bmc_mac.to_string(),
         chassis_serial_number: "FIRST-FAMILY-CONFIGURATION".into(),
@@ -3280,11 +3281,18 @@ async fn test_dhcp_v6_info_request_promotes_predicted_interface(
         }],
         ..Default::default()
     };
-    env.api
-        .replace_all_expected_machines(tonic::Request::new(rpc::forge::ExpectedMachineList {
-            expected_machines: vec![expected.clone()],
-        }))
-        .await?;
+    let mut txn = pool.begin().await?;
+    db::expected_machine::clear(&mut txn).await?;
+    db::expected_machine::create(
+        &mut txn,
+        ExpectedMachine {
+            id: None,
+            bmc_mac_address: bmc_mac,
+            data: expected.clone().try_into()?,
+        },
+    )
+    .await?;
+    txn.commit().await?;
     let status = env
         .api
         .discover_dhcp(dhcpv6_discovery(
