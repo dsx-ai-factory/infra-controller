@@ -5204,6 +5204,11 @@ async fn test_ready_boot_full_lockdown_rejects_unsupported_platform(pool: sqlx::
             Some(bmc_vendor::BMCVendor::Lenovo),
             Some("HG635N_V2"),
         ),
+        (
+            "XCC model with the GB300 vendor",
+            Some(bmc_vendor::BMCVendor::LenovoAMI),
+            Some("ThinkSystem SR680a V3"),
+        ),
         ("missing identity", None, None),
         ("missing endpoint", None, None),
     ] {
@@ -5300,6 +5305,29 @@ async fn test_ready_boot_full_lockdown_rejects_unsupported_platform(pool: sqlx::
 /// direct status read confirms the policy.
 #[crate::sqlx_test]
 async fn test_ready_boot_config_waits_for_observed_lockdown_before_verifying(pool: sqlx::PgPool) {
+    ready_boot_config_waits_for_observed_lockdown_before_verifying(
+        pool,
+        bmc_vendor::BMCVendor::LenovoAMI,
+        "HG635N_V2",
+    )
+    .await;
+}
+
+#[crate::sqlx_test]
+async fn test_ready_boot_config_restores_full_lockdown_on_lenovo_xcc(pool: sqlx::PgPool) {
+    ready_boot_config_waits_for_observed_lockdown_before_verifying(
+        pool,
+        bmc_vendor::BMCVendor::Lenovo,
+        "ThinkSystem SR680a V3",
+    )
+    .await;
+}
+
+async fn ready_boot_config_waits_for_observed_lockdown_before_verifying(
+    pool: sqlx::PgPool,
+    vendor: bmc_vendor::BMCVendor,
+    model: &str,
+) {
     let recovery = Some(ReadyBootLockdownRecovery {
         started_at: Utc::now(),
         full_policy_required: false,
@@ -5311,13 +5339,7 @@ async fn test_ready_boot_config_waits_for_observed_lockdown_before_verifying(poo
     let env =
         create_zero_dpu_test_env_with_overrides(pool, TestEnvOverrides::with_config(config)).await;
     let mh = create_managed_host_with_config(&env, ManagedHostConfig::zero_dpu()).await;
-    set_ready_lockdown_platform(
-        &env,
-        &mh,
-        Some(bmc_vendor::BMCVendor::LenovoAMI),
-        Some("HG635N_V2"),
-    )
-    .await;
+    set_ready_lockdown_platform(&env, &mh, Some(vendor), Some(model)).await;
     let pending = set_pending_boot_interface(&env, &mh).await;
     let mut reachability = env.reachability_params;
     reachability.uefi_boot_wait = Duration::minutes(1);

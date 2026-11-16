@@ -7842,7 +7842,7 @@ async fn handle_ready_boot_config(
                             }
                             require_ready_full_lockdown_platform(&mh_snapshot.host_snapshot, ctx)
                                 .await?;
-                            // Only the validated GB300 policy/restart sequence may
+                            // Only the validated policy/restart platforms may
                             // enter the new persisted state after reader rollout.
                             return Ok(StateHandlerOutcome::transition(ready_boot_configuring(
                                 desired,
@@ -14064,8 +14064,14 @@ fn dpu_restart_power_action(
     }
 }
 
-/// Restricts Ready full-policy restoration to the validated Lenovo GB300 model.
-/// Other platforms can require different policy or restart semantics.
+const READY_FULL_LOCKDOWN_PLATFORMS: [(bmc_vendor::BMCVendor, &str); 2] = [
+    (bmc_vendor::BMCVendor::LenovoAMI, "HG635N_V2"),
+    (bmc_vendor::BMCVendor::Lenovo, "ThinkSystem SR680a V3"),
+];
+
+/// Restricts Ready full-policy restoration to the validated Lenovo GB300 model
+/// and the Lenovo XCC ThinkSystem SR680a V3. Other platforms can require
+/// different policy or restart semantics.
 async fn require_ready_full_lockdown_platform(
     machine: &Machine<impl MachineIdSubtypeTrait>,
     ctx: &mut StateHandlerContext<'_, MachineStateHandlerContextObjects>,
@@ -14078,13 +14084,15 @@ async fn require_ready_full_lockdown_platform(
     let endpoints =
         db::explored_endpoints::find_by_ips(&mut ctx.services.db_reader, vec![addr]).await?;
     if let [endpoint] = endpoints.as_slice()
-        && endpoint.report.vendor == Some(bmc_vendor::BMCVendor::LenovoAMI)
-        && endpoint.report.model.as_deref() == Some("HG635N_V2")
+        && READY_FULL_LOCKDOWN_PLATFORMS.iter().any(|(vendor, model)| {
+            endpoint.report.vendor.as_ref() == Some(vendor)
+                && endpoint.report.model.as_deref() == Some(*model)
+        })
     {
         return Ok(());
     }
     Err(StateHandlerError::ManualInterventionRequired(format!(
-        "host {} full-lockdown recovery requires a LenovoAMI HG635N_V2 BMC report. Its platform is unknown or unsupported. Keeping the recovery state unchanged without full-policy writes or restarts",
+        "host {} full-lockdown recovery requires a LenovoAMI HG635N_V2 or Lenovo ThinkSystem SR680a V3 BMC report. Its platform is unknown or unsupported. Keeping the recovery state unchanged without full-policy writes or restarts",
         machine.id,
     )))
 }
