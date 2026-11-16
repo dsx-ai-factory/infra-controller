@@ -19,6 +19,7 @@ import (
 // contract.
 type EventExecutionStore interface {
 	eventrule.EventPlanStore
+	GetEventTypeForExecution(context.Context, uuid.UUID) (eventrule.Type, error)
 	eventrule.ExecutionStore
 }
 
@@ -385,6 +386,11 @@ func testAtomicEventLifecycle(t *testing.T, factory ExecutionFactory) {
 	require.NoError(t, err)
 	require.Len(t, claims, 1, "only the first event has a dispatchable execution")
 	requireValidClaims(t, claims, "scheduler-1")
+	kind, err := store.GetEventTypeForExecution(ctx, claims[0].Execution.ID)
+	require.NoError(t, err)
+	require.Equal(t, definition.Type, kind)
+	_, err = store.GetEventTypeForExecution(ctx, uuid.New())
+	require.ErrorIs(t, err, eventrule.ErrExecutionNotFound)
 }
 
 func testConcurrentEventDeduplication(t *testing.T, factory ExecutionFactory) {

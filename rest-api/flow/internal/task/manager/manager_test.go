@@ -57,6 +57,8 @@ func (s *submitTaskInventory) GetComponentByID(
 }
 
 func TestManagerImpl_SubmitTask(t *testing.T) {
+	t.Run("preemption", testPreemptingAdmission)
+	t.Run("ordinary forced shutdown does not preempt", testSubmitTaskDoesNotPreemptForcedShutdown)
 	t.Run("rejects a Compute component target with an NVSwitch-only rack rule", func(t *testing.T) {
 		rackID := uuid.New()
 		componentID := uuid.New()
