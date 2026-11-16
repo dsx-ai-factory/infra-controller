@@ -21,7 +21,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use bmc_backend::BackendBmc;
-use bmc_platform::{PlatformError, PowerState, ResetType};
+use bmc_platform::{BiosSettings, BootInterfaceSelector, PlatformError, PowerState, ResetType};
 use bmc_runtime::DriverConnector;
 use carbide_redfish::boot_interface::BootInterfaceTarget;
 use carbide_redfish::libredfish::{
@@ -696,12 +696,24 @@ impl RedfishClient {
         &self,
         bmc_ip_address: SocketAddr,
         bmc: EstablishedBmc,
+        report: Option<&EndpointExplorationReport>,
         boot_interface: Option<&BootInterfaceTarget>,
     ) -> Result<(), EndpointExplorationError> {
-        let client = self
-            .create_established_redfish_client(bmc_ip_address, bmc, None)
-            .await
-            .map_err(map_redfish_client_creation_error)?;
+        let client = match self
+            .connect_established(bmc_ip_address, bmc, report)
+            .await?
+        {
+            BackendBmc::Libredfish(client) => client,
+            BackendBmc::Drivers(bmc) => {
+                let boot_interface = boot_interface.map(BootInterfaceSelector::from);
+                bmc.bios()
+                    .map_err(|error| map_platform_error(error.into()))?
+                    .apply(&BiosSettings::default(), boot_interface.as_ref())
+                    .await
+                    .map_err(map_platform_error)?;
+                return Ok(());
+            }
+        };
 
         // We will be redoing machine_setup later and can worry about getting the profile right then.
         // Keep `empty_profiles` outside the closure so the returned future can borrow it.
