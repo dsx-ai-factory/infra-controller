@@ -136,6 +136,7 @@ async fn test_admin_force_delete_dpu_only(pool: sqlx::PgPool) {
         &mut txn,
         &dpu_machine_id,
         &vpc_id,
+        &env.api.instrumentation,
     )
     .await
     .expect("allocate VPC loopback");
@@ -1310,6 +1311,7 @@ async fn force_delete_orphan_override_removes_service_vpc_ownership_after_admin_
         &mut txn,
         &endpoint.dpu_id,
         &endpoint.vpc_id,
+        &env.api.instrumentation,
     )
     .await
     .unwrap();

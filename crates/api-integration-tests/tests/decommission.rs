@@ -1198,7 +1198,9 @@ async fn cycles(
         .no_proxy()
         .timeout(RPC_TIMEOUT)
         .build()?;
-    let credentials = create_credential_manager(&env.credential_config).await?;
+    let credentials =
+        create_credential_manager(&env.credential_config, env.metrics.instrumentation.clone())
+            .await?;
     wait_for_view(env, client, host, ViewTarget::Ready).await?;
     let initial_fabric = configure_fabric(env, client).await?;
     std::fs::write(
@@ -2433,7 +2435,9 @@ async fn host_bios_evidence(
     let unset = match response.status() {
         reqwest::StatusCode::OK => true,
         reqwest::StatusCode::BAD_REQUEST => false,
-        status => eyre::bail!("unexpected status {status} probing the UEFI password"),
+        status => {
+            eyre::bail!("unexpected status {status} probing the UEFI password");
+        }
     };
     Ok(json!({"embedded_uefi_shell": shell, "uefi_password_unset": unset}))
 }

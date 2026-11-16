@@ -205,7 +205,8 @@ able to re-create them after `/readyz` returns 200 again, and scaling the
 fleet during a run causes a window in which UFM partitions are absent.
 
 The same applies to the gateway RMS job table. An id neither issued nor
-polled for an hour is forgotten, and a restart forgets every id at once.
+polled for `rms.job_retention` (24 hours by default) is forgotten, and a
+restart forgets every id at once.
 For an id absent from that table, `GetJobStatus` returns `NOT_FOUND` with
 `job <id> not found`. `GetConfigureSwitchCertificateJobStatus`,
 `GetFirmwareJobStatus` and `GetSwitchSystemImageJobStatus` return
@@ -256,6 +257,7 @@ Durations accept `duration-str` syntax (`15s`, `2m`, `500ms`).
 | `ownership.request_timeout` | duration | `5s` | Per-request timeout for `/racks/status`; must be nonzero |
 | `ownership.stale_after` | duration | `60s` | How long a failing source's last answer keeps routing; at least `ownership.poll_interval` |
 | `rms.request_timeout` | duration | `30s` | Deadline for each forwarded RMS request, connection setup included; must be nonzero |
+| `rms.job_retention` | duration | `24h` | How long a job id is kept after it was last issued or polled; a job's first status poll must arrive within this time; must be nonzero and at most `7d` |
 | `ufm.enabled` | bool | forced `true` | Ignored; the gateway always activates the mock |
 | `ufm.include_local_inventory` | bool | `false` | Must stay `false`; there is no in-process inventory |
 | `ufm.metrics_address` | socket address | unset | Must stay unset; use the top-level `metrics_address` |
@@ -299,6 +301,7 @@ stale_after = "60s"
 
 [rms]
 request_timeout = "30s"
+job_retention = "24h"
 
 [ufm.fabric]
 ufm_version = "6.18.0"

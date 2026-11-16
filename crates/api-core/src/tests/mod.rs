@@ -127,3 +127,5 @@ pub(crate) use crate::tests::common::sqlx_fixtures::sqlx_fixture_from_str;
 fn setup_test_logging() {
     crate::test_support::setup_test_logging()
 }
+
+mod machine_tracing;

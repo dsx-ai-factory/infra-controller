@@ -903,7 +903,7 @@ struct ReaderLease {
 impl Drop for ReaderLease {
     fn drop(&mut self) {
         self.readers
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |count| {
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |count| {
                 count.checked_sub(1)
             })
             .expect("reader lease was counted");

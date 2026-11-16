@@ -19,7 +19,6 @@ use std::collections::HashSet;
 
 use ::rpc::carbide_api_client::{EXPECTED_SWITCH_UPDATE_MASK_HEADER, ExpectedSwitchUpdateField};
 use ::rpc::forge as rpc;
-use carbide_instrument::emit;
 use db::{DatabaseError, expected_switch as db_expected_switch};
 use mac_address::MacAddress;
 use model::expected_switch::{
@@ -33,10 +32,8 @@ use crate::handlers::expected_component_patch::{
     ExpectedComponent, UpdateField, UpdateMask, parse_bmc_ip, required_id, required_value,
     validate_bmc_mac, validate_single_interface_address,
 };
-use crate::handlers::machine_interface_address::update_preallocated_machine_interface;
-use crate::handlers::static_address_metrics::{
-    PreallocationSuccess, StaticAddressPreallocationCompleted,
-};
+use crate::handlers::interface_preallocator::InterfacePreallocator;
+use crate::handlers::static_address_metrics::PreallocationSuccess;
 
 fn parse_expected_switch_update_mask(
     request: &Request<rpc::ExpectedSwitch>,
@@ -250,6 +247,10 @@ pub(crate) async fn update_expected_switch(
     api: &Api,
     request: Request<rpc::ExpectedSwitch>,
 ) -> Result<Response<()>, Status> {
+    let preallocator = InterfacePreallocator::new(
+        &api.instrumentation,
+        api.runtime_config.retained_boot_interface_window,
+    );
     let update_mask = parse_expected_switch_update_mask(&request)?;
     let patch = request.into_inner();
     let validate_nvos_interfaces = update_mask.as_ref().map_or_else(
@@ -304,7 +305,7 @@ pub(crate) async fn update_expected_switch(
         &mut txn,
         &mut switch,
         validate_nvos_interfaces,
-        api.runtime_config.retained_boot_interface_window,
+        &preallocator,
     )
     .await?;
 
@@ -312,9 +313,7 @@ pub(crate) async fn update_expected_switch(
         message: format!("Failed to commit transaction: {}", e),
     })?;
 
-    for outcome in preallocations {
-        emit(StaticAddressPreallocationCompleted::from(outcome));
-    }
+    preallocator.record_committed(preallocations);
 
     Ok(Response::new(()))
 }
@@ -323,6 +322,10 @@ pub(crate) async fn patch_expected_switch(
     api: &Api,
     request: Request<rpc::PatchExpectedSwitchRequest>,
 ) -> Result<Response<()>, Status> {
+    let preallocator = InterfacePreallocator::new(
+        &api.instrumentation,
+        api.runtime_config.retained_boot_interface_window,
+    );
     let request = request.into_inner();
     let fields = UpdateMask::parse(
         request.update_mask.map(|mask| mask.paths),
@@ -419,13 +422,11 @@ pub(crate) async fn patch_expected_switch(
         &mut txn,
         &mut switch,
         fields.contains(UpdateField::NvosInterfaces),
-        api.runtime_config.retained_boot_interface_window,
+        &preallocator,
     )
     .await?;
     txn.commit().await?;
-    for preallocation in preallocations {
-        emit(StaticAddressPreallocationCompleted::from(preallocation));
-    }
+    preallocator.record_committed(preallocations);
     Ok(Response::new(()))
 }
 
@@ -433,7 +434,7 @@ async fn update_switch_in_transaction(
     txn: &mut sqlx::PgConnection,
     switch: &mut ExpectedSwitch,
     validate_nvos_interfaces: bool,
-    retained_window: Option<chrono::Duration>,
+    preallocator: &InterfacePreallocator<'_>,
 ) -> Result<Vec<PreallocationSuccess>, CarbideError> {
     validate_expected_switch(switch, validate_nvos_interfaces)?;
 
@@ -446,20 +447,17 @@ async fn update_switch_in_transaction(
     let mut preallocations = Vec::with_capacity(2);
     if let Some(bmc_ip) = switch.bmc_ip_address {
         preallocations.push(
-            update_preallocated_machine_interface(
-                &mut *txn,
-                switch.bmc_mac_address,
-                bmc_ip,
-                retained_window,
-            )
-            .await?,
+            preallocator
+                .update_interface(&mut *txn, switch.bmc_mac_address, bmc_ip)
+                .await?,
         );
     }
     if let Some(nvos_ip) = switch.nvos_ip_address {
         // Pairing already validated above; there is exactly one NVOS port.
         let nvos_mac = switch.nvos_interfaces[0].mac_address;
         preallocations.push(
-            update_preallocated_machine_interface(&mut *txn, nvos_mac, nvos_ip, retained_window)
+            preallocator
+                .update_interface(&mut *txn, nvos_mac, nvos_ip)
                 .await?,
         );
     }

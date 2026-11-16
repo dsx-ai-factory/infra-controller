@@ -70,6 +70,7 @@ pub async fn acquire_admin_admission(
 /// before creation writes, then attach after interface writes. Roll back on
 /// error before cancelling.
 pub struct PreparedDpuLoopback<'a> {
+    instrumentation: carbide_instrument::Instrumentation,
     machine_id: MachineId,
     identity: MachineCreationIdentity,
     registry: &'a ResourcePoolRegistry,
@@ -78,6 +79,7 @@ pub struct PreparedDpuLoopback<'a> {
 }
 
 impl<'a> PreparedDpuLoopback<'a> {
+    /// Uses the supplied Event instrumentation; retain its provider through attachment.
     /// `prepare` captures the machine lifetime and resolves a missing IPv4
     /// reservation without holding the caller's transaction. Existing attached
     /// ownership is reused, including when its configuration field was cleared.
@@ -95,6 +97,7 @@ impl<'a> PreparedDpuLoopback<'a> {
         machine_id: MachineId,
         requested_loopback_v4: Option<Ipv4Addr>,
         cancel: &CancellationToken,
+        instrumentation: carbide_instrument::Instrumentation,
     ) -> Result<Self, ResourcePoolBackendError> {
         let pool = &pools.ethernet.pool_loopback_ip;
         let owner_id = machine_id.to_string();
@@ -139,6 +142,7 @@ impl<'a> PreparedDpuLoopback<'a> {
                                             ResourcePoolError::Empty,
                                         );
                                     db::resource_pool::emit_allocation_failure(
+                                        &instrumentation,
                                         pool.value_type,
                                         &owner_id,
                                         false,
@@ -177,6 +181,7 @@ impl<'a> PreparedDpuLoopback<'a> {
             None => None,
         };
         Ok(Self {
+            instrumentation,
             machine_id,
             identity,
             registry,
@@ -292,6 +297,7 @@ impl<'a> PreparedDpuLoopback<'a> {
                         Ok(value) => value,
                         Err(ResourcePoolBackendError::Integrated(error)) => {
                             db::resource_pool::emit_allocation_failure(
+                                &self.instrumentation,
                                 self.pools.ethernet.pool_loopback_ip.value_type,
                                 &owner_id,
                                 false,

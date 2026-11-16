@@ -23,7 +23,7 @@ use nv_redfish::{Bmc, Error as NvRedfishError};
 pub enum Error<B: Bmc> {
     NvRedfish {
         context: &'static str,
-        err: NvRedfishError<B>,
+        err: Box<NvRedfishError<B>>,
     },
     BmcNotProvided(&'static str),
     InvalidValue(String),
@@ -70,7 +70,10 @@ where
 
 impl<B: Bmc> Error<B> {
     pub(crate) fn nv_redfish(context: &'static str) -> impl Fn(NvRedfishError<B>) -> Self {
-        move |err| Self::NvRedfish { context, err }
+        move |err| Self::NvRedfish {
+            context,
+            err: Box::new(err),
+        }
     }
 
     pub(crate) fn bmc_not_provided(what: &'static str) -> impl Fn() -> Self {

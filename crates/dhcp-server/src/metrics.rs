@@ -25,7 +25,7 @@
 
 use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4, SocketAddrV6};
 
-use carbide_instrument::{DynamicLog, Event, LabelValue, LogAt, MetricFamily, emit};
+use carbide_instrument::{DynamicLog, Event, Instrumentation, LabelValue, LogAt, MetricFamily};
 use dhcproto::v4::MessageType;
 use dhcproto::v6::MessageType as MessageTypeV6;
 
@@ -600,8 +600,12 @@ pub(super) struct DhcpV6RequestReceived {
 }
 
 /// Count one received DHCPv6 datagram using bounded ingress classification.
-pub fn record_v6_request_received(packet: &[u8], source_address: SocketAddr) {
-    emit(DhcpV6RequestReceived {
+pub fn record_v6_request_received(
+    packet: &[u8],
+    source_address: SocketAddr,
+    instrumentation: &Instrumentation,
+) {
+    instrumentation.emit(DhcpV6RequestReceived {
         message_type: MessageTypeLabel::from(carbide_dhcpv6::request_message_type(packet)),
         source_address,
     });

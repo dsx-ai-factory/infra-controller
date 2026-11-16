@@ -14,12 +14,14 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+use std::collections::HashMap;
 use std::ops::DerefMut;
 
 use carbide_uuid::DbTable;
 use carbide_uuid::network::NetworkSegmentId;
 use carbide_uuid::vpc::VpcId;
 use config_version::ConfigVersion;
+use model::dns::DnsZone;
 use model::vpc::{
     ChangeVpcRoutingProfile, NewVpc, PowerResourceGroupUpdate, UpdateVpc, UpdateVpcVirtualization,
     Vpc, VpcStatus,
@@ -28,6 +30,7 @@ use sqlx::{PgConnection, PgTransaction};
 
 use super::{ColumnInfo, FilterableQueryBuilder, ObjectColumnFilter, network_segment, vpc};
 use crate::db_read::DbReader;
+use crate::dns::zone::DbDnsZone;
 use crate::{DatabaseError, DatabaseResult};
 
 #[cfg(test)]
@@ -252,6 +255,33 @@ pub async fn find_by_id_including_deleted(
     )
     .await?
     .pop())
+}
+
+/// Returns the private DNS zone of each live VPC in `vpc_ids` that holds one,
+/// keyed by VPC id.
+pub async fn find_private_dns_zones_by_vpc_ids(
+    txn: impl DbReader<'_>,
+    vpc_ids: &[VpcId],
+) -> Result<HashMap<VpcId, DnsZone>, DatabaseError> {
+    let query = format!(
+        "SELECT {} FROM dns_zones
+         WHERE vpc_id = ANY($1) AND EXISTS (
+             SELECT 1 FROM vpcs WHERE vpcs.id = dns_zones.vpc_id AND vpcs.deleted IS NULL)",
+        DbDnsZone::db_table_columns()
+    );
+    let rows = sqlx::query_as::<_, DbDnsZone>(sqlx::AssertSqlSafe(query.as_str()))
+        .bind(vpc_ids)
+        .fetch_all(txn)
+        .await
+        .map_err(|e| DatabaseError::query(&query, e))?;
+
+    let mut zones = HashMap::new();
+    for row in rows {
+        if let Some(vpc_id) = row.vpc_id {
+            zones.insert(vpc_id, DnsZone::try_from(row)?);
+        }
+    }
+    Ok(zones)
 }
 
 pub async fn find_by_vni(txn: &mut PgConnection, vni: i32) -> Result<Vec<Vpc>, DatabaseError> {
@@ -712,5 +742,52 @@ mod tests {
 
         assert!(try_delete(txn.as_mut(), vpc_id).await.unwrap().is_none());
         txn.rollback().await.unwrap();
+    }
+
+    #[crate::sqlx_test]
+    async fn find_private_dns_zones_by_vpc_ids_skips_deleted_vpcs(pool: sqlx::PgPool) {
+        // Two live VPCs and a soft-deleted VPC each hold a zone.
+        let (live, deleted, unrequested) = (VpcId::new(), VpcId::new(), VpcId::new());
+        sqlx::query(
+            "INSERT INTO vpcs (id, name, version, deleted) VALUES \
+                 ($1, 'live', 'V1-T0', NULL), ($2, 'deleted', 'V1-T0', NOW()), \
+                 ($3, 'unrequested', 'V1-T0', NULL)",
+        )
+        .bind(live)
+        .bind(deleted)
+        .bind(unrequested)
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO dns_zones \
+                 (vpc_id, name, primary_ns, contact, serial, minimum, soa_ttl, default_ttl) \
+             VALUES \
+                 ($1, 'live.example', 'ns.other.test', 'admin.other.test', 7, 30, 900, 60), \
+                 ($2, 'deleted.example', 'ns.other.test', 'admin.other.test', 7, 30, 900, 60), \
+                 ($3, 'unrequested.example', 'ns.other.test', 'admin.other.test', 7, 30, 900, 60)",
+        )
+        .bind(live)
+        .bind(deleted)
+        .bind(unrequested)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let zones = find_private_dns_zones_by_vpc_ids(&pool, &[live, deleted])
+            .await
+            .unwrap();
+
+        // Only the requested live VPC's zone is returned, with each column in its field.
+        assert_eq!(zones.keys().collect::<Vec<_>>(), [&live]);
+        let zone = &zones[&live];
+        assert_eq!(zone.name.as_str(), "live.example.");
+        assert_eq!(zone.vpc_id, Some(live));
+        assert_eq!(
+            zone.soa.to_string(),
+            "ns.other.test. admin.other.test. 7 3600 3600 604800 30"
+        );
+        assert_eq!(zone.soa.ttl.0, 900);
+        assert_eq!(zone.default_ttl.map(|ttl| ttl.as_secs()), Some(60));
     }
 }

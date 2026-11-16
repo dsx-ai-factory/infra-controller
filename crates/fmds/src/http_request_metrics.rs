@@ -19,7 +19,6 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use axum::Router;
-use carbide_instrument::emit;
 use eyre::WrapErr;
 use hyper::{Request, Response};
 use opentelemetry::KeyValue;
@@ -86,15 +85,22 @@ impl FmdsHttpResponseGenerated {
     }
 }
 
-/// `HttpRequestMetrics` is the compatibility handle returned by `init()`.
-/// Events resolve their instruments through the global meter provider now,
-/// but callers can keep passing this value into the middleware unchanged.
+/// Owns the Event instrumentation and Prometheus provider used by FMDS requests.
 pub struct HttpRequestMetrics {
-    _private: (),
+    instrumentation: carbide_instrument::Instrumentation,
+    _meter_provider: SdkMeterProvider,
 }
 
-/// Registers the Prometheus reader and global meter provider used by FMDS.
-pub fn init() -> eyre::Result<(Registry, HttpRequestMetrics)> {
+impl HttpRequestMetrics {
+    /// Returns a handle that records Event metrics in this instance's registry.
+    pub fn instrumentation(&self) -> carbide_instrument::Instrumentation {
+        self.instrumentation.clone()
+    }
+}
+
+/// Creates an isolated Prometheus reader and instrumentation owner. Installs
+/// its provider globally for generated clients when `set_global_meter` is true.
+pub fn init(set_global_meter: bool) -> eyre::Result<(Registry, HttpRequestMetrics)> {
     let prometheus_registry = Registry::new();
     let exporter = ExporterBuilder::default()
         .with_registry(prometheus_registry.clone())
@@ -115,13 +121,23 @@ pub fn init() -> eyre::Result<(Registry, HttpRequestMetrics)> {
         .with_resource(resource_attributes)
         .build();
 
-    opentelemetry::global::set_meter_provider(meter_provider);
+    if set_global_meter {
+        opentelemetry::global::set_meter_provider(meter_provider.clone());
+    }
 
-    Ok((prometheus_registry, HttpRequestMetrics { _private: () }))
+    let instrumentation = carbide_instrument::Instrumentation::from_meter_provider(&meter_provider);
+    Ok((
+        prometheus_registry,
+        HttpRequestMetrics {
+            instrumentation,
+            _meter_provider: meter_provider,
+        },
+    ))
 }
 
 /// Adds the request-count and latency Events used by FMDS.
-pub fn with_http_request_trace_layer(router: Router, _metrics: Arc<HttpRequestMetrics>) -> Router {
+pub fn with_http_request_trace_layer(router: Router, metrics: Arc<HttpRequestMetrics>) -> Router {
+    let request_metrics = metrics.clone();
     let layer = TraceLayer::new_for_http()
         .make_span_with(|request: &Request<AxumBody>| {
             tracing::info_span!(
@@ -131,11 +147,15 @@ pub fn with_http_request_trace_layer(router: Router, _metrics: Arc<HttpRequestMe
             )
         })
         .on_request(move |request: &Request<AxumBody>, _span: &Span| {
-            emit(FmdsHttpRequestStarted::new(request));
+            request_metrics
+                .instrumentation
+                .emit(FmdsHttpRequestStarted::new(request));
         })
         .on_response(
             move |_response: &Response<AxumBody>, latency: Duration, _span: &Span| {
-                emit(FmdsHttpResponseGenerated::new(latency));
+                metrics
+                    .instrumentation
+                    .emit(FmdsHttpResponseGenerated::new(latency));
             },
         );
 
@@ -183,15 +203,17 @@ mod tests {
     }
 
     fn observe_event(case: EventCase) -> EventObservation {
-        let metrics = MetricsCapture::start();
+        let (registry, instrumentation_owner) = init(false).unwrap();
+        let instrumentation = instrumentation_owner.instrumentation();
+        let metrics = MetricsCapture::for_registry(&registry);
         let logs = capture_logs(|| match case {
-            EventCase::Request => emit(FmdsHttpRequestStarted {
+            EventCase::Request => instrumentation.emit(FmdsHttpRequestStarted {
                 method: "GET".to_string(),
                 request_path: "/latest/meta-data".to_string(),
             }),
-            EventCase::Response => emit(FmdsHttpResponseGenerated::new(Duration::from_micros(
-                12_500,
-            ))),
+            EventCase::Response => instrumentation.emit(FmdsHttpResponseGenerated::new(
+                Duration::from_micros(12_500),
+            )),
         })
         .into_iter()
         .map(|log| LogObservation {
@@ -275,7 +297,9 @@ mod tests {
 
     #[test]
     fn tracing_layer_emits_one_start_and_completion_event_per_request() {
-        let metrics = MetricsCapture::start();
+        let (registry, http_metrics) = init(false).unwrap();
+        let http_metrics = Arc::new(http_metrics);
+        let metrics = MetricsCapture::for_registry(&registry);
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
@@ -284,7 +308,7 @@ mod tests {
             runtime.block_on(async {
                 let router = with_http_request_trace_layer(
                     Router::new().route("/health", get(|| async { StatusCode::NO_CONTENT })),
-                    Arc::new(HttpRequestMetrics { _private: () }),
+                    http_metrics.clone(),
                 );
                 let response = router
                     .oneshot(

@@ -22,6 +22,7 @@ use std::time::Duration;
 use ::rpc::errors::RpcDataConversionError;
 use ::rpc::forge as rpc;
 use ::rpc::model::machine::ManagedHostStateSnapshotRpc;
+use bmc_platform::{PlatformError, ResetType};
 use carbide_redfish::libredfish::RedfishAuth;
 use carbide_secrets::credentials::{BmcCredentialType, CredentialKey, Credentials};
 use carbide_site_explorer::dpu_asn::DPU_ASN_SLOT;
@@ -31,7 +32,6 @@ use carbide_uuid::machine::{
 };
 use db::ConditionalWrite;
 use db::resource_pool::ResourcePoolAllocationNotOwned;
-use libredfish::SystemPowerControl;
 use model::bmc_info::BmcInfo;
 use model::bmc_suppression::{BmcSuppressionSource, BmcSuppressionSubsystem};
 use model::hardware_info::MachineNvLinkInfo;
@@ -1386,10 +1386,24 @@ pub(crate) async fn admin_force_delete_machine(
                             }
                         }
 
-                        if host_restart_needed
-                            && let Err(e) = client.power(SystemPowerControl::ForceRestart).await
-                        {
-                            tracing::warn!(%machine_id, error = %e, "Failed to reboot host while force deleting machine");
+                        if host_restart_needed {
+                            let access = carbide_utils::redfish::BmcAccessInfo {
+                                host: ip_address.clone(),
+                                port: machine.status.bmc_info.port,
+                                mac_address: bmc_mac_address,
+                            };
+                            let restart = match api.connect_bmc(&access).await {
+                                Ok(bmc) => {
+                                    async { bmc.power()?.set(ResetType::ForceRestart).await }
+                                        .await
+                                        .map(drop)
+                                        .map_err(|error: PlatformError| error.to_string())
+                                }
+                                Err(error) => Err(error.to_string()),
+                            };
+                            if let Err(e) = restart {
+                                tracing::warn!(%machine_id, error = %e, "Failed to reboot host while force deleting machine");
+                            }
                         }
                     }
                     Err(e) => {

@@ -58,10 +58,8 @@ serviceMonitor:
   interval: ""
 
 ## nico-api client certificate (ca.crt, tls.crt, tls.key) for the state
-## readers. Required while a nico-api reader is on: the probe's SPIFFE
-## identity may call only FindMachineIds, FindMachinesByIds and
-## FindHostStatesByIds. The
-## certificate must map to an external user through a trusted issuer.
+## readers. Required while a nico-api reader is on. The certificate must
+## map to an external user through a trusted issuer.
 nicoApiClientCert:
   existingSecret: ""
 
@@ -71,7 +69,7 @@ nicoApiClientCert:
 ## when nico-api runs in a different namespace than this probe. The service
 ## name must stay "nico-site-health-probe" — nico-api's internal RBAC grants
 ## exactly this identity read access to FindMachineIds, FindMachinesByIds
-## and FindHostStatesByIds.
+## FindHostStatesByIds, GetDesiredFirmwareVersions and ListHostFirmware.
 certificate:
   identityNamespace: ""
   spiffeServiceName: nico-site-health-probe
@@ -169,6 +167,7 @@ state:
   ## then skipped. The REST reader is off until the site provides the
   ## `state.rest` inputs (see the README for a complete example).
   readers:
+    nicoConfig: {enabled: false, interval: 60s, timeout: 120s}
     devices:
       enabled: true
       interval: 120s

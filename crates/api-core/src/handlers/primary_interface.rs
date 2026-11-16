@@ -346,7 +346,7 @@ pub(super) async fn update_primary_interface_from_scout(
         });
     };
     let candidate_interface_id = comparison.candidate_interface_id();
-    comparison.emit(&host_machine_id);
+    comparison.emit(&api.instrumentation, &host_machine_id);
 
     // Then, stop before taking update locks unless this report can drive enabled reconciliation.
     let source_is_replaceable = machine

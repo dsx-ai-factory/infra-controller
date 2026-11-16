@@ -175,14 +175,18 @@ mod tests {
             r#"{"profiles":{"bmc":{"password":"sensitive"}}} {}"#,
         ] {
             std::fs::write(&path, input).unwrap();
-            let error =
-                StructuredCredentialReader::<BmcCredentialSnapshot>::new(FileCredentialsConfig {
+            let error = StructuredCredentialReader::<BmcCredentialSnapshot>::new(
+                FileCredentialsConfig {
                     path: Some(path.clone()),
                     ..Default::default()
-                })
-                .await
-                .err()
-                .expect("invalid file must fail initial load");
+                },
+                carbide_instrument::Instrumentation::from_meter_provider(
+                    &opentelemetry::metrics::noop::NoopMeterProvider::new(),
+                ),
+            )
+            .await
+            .err()
+            .expect("invalid file must fail initial load");
             assert!(!format!("{error:?}").contains("sensitive"));
         }
         let fields = CredentialOverrides {
@@ -220,14 +224,18 @@ mod tests {
         symlink("v1", dir.path().join("..data")).unwrap();
         let path = dir.path().join("credentials.json");
         symlink("..data/credentials.json", &path).unwrap();
-        let reader =
-            StructuredCredentialReader::<BmcCredentialSnapshot>::new(FileCredentialsConfig {
+        let reader = StructuredCredentialReader::<BmcCredentialSnapshot>::new(
+            FileCredentialsConfig {
                 path: Some(path.clone()),
                 poll_interval: Some(Duration::from_millis(25)),
                 ..Default::default()
-            })
-            .await
-            .unwrap();
+            },
+            carbide_instrument::Instrumentation::from_meter_provider(
+                &opentelemetry::metrics::noop::NoopMeterProvider::new(),
+            ),
+        )
+        .await
+        .unwrap();
         let mac = "00:11:22:33:44:55".parse().unwrap();
         let password = || {
             let BmcCredentials::UsernamePassword { password, .. } =

@@ -47,12 +47,14 @@ enum RulePrincipal {
     DsxExchangeConsumer,
     SiteHealthProbe,   // synthetic read-only monitoring (#5360)
     RackScaleAnalyzer, // RSA: NVLink domain and component health reports
+    PowerShelfManager, // external PSM: reads power-shelf PMC credentials only
+    NvSwitchManager,   // external NSM: reads switch BMC and NVOS credentials only
     Anonymous,         // Permitted for everything
 }
 use self::RulePrincipal::{
     Agent, Anonymous, BmcProxy, Dhcp, Dns, DsxExchangeConsumer, Flow, ForgeAdminCLI, Health,
-    Machineatron, MaintenanceJobs, Pxe, RackScaleAnalyzer, Scout, SiteAgent, SiteHealthProbe, Ssh,
-    SshRs,
+    Machineatron, MaintenanceJobs, NvSwitchManager, PowerShelfManager, Pxe, RackScaleAnalyzer,
+    Scout, SiteAgent, SiteHealthProbe, Ssh, SshRs,
 };
 
 impl InternalRBACRules {
@@ -367,7 +369,7 @@ impl InternalRBACRules {
         x.perm("AdminForceDeleteSwitch", vec![ForgeAdminCLI, Machineatron]);
         x.perm(
             "DecommissionSwitch",
-            vec![ForgeAdminCLI, Machineatron, Flow],
+            vec![ForgeAdminCLI, Machineatron, SiteAgent, Flow],
         );
         x.perm(
             "AdminForceDeletePowerShelf",
@@ -725,7 +727,7 @@ impl InternalRBACRules {
         );
         x.perm(
             "GetDesiredFirmwareVersions",
-            vec![ForgeAdminCLI, Machineatron, Flow],
+            vec![ForgeAdminCLI, Machineatron, Flow, SiteHealthProbe],
         );
         x.perm("UpsertHostFirmwareConfig", vec![ForgeAdminCLI, SiteAgent]);
         x.perm("DeleteHostFirmwareConfig", vec![ForgeAdminCLI, SiteAgent]);
@@ -781,7 +783,10 @@ impl InternalRBACRules {
         x.perm("SetBmcRootPassword", vec![ForgeAdminCLI]);
         x.perm("ProbeBmcVendor", vec![ForgeAdminCLI]);
         x.perm("SetFirmwareUpdateTimeWindow", vec![ForgeAdminCLI, Flow]);
-        x.perm("ListHostFirmware", vec![ForgeAdminCLI, Flow]);
+        x.perm(
+            "ListHostFirmware",
+            vec![ForgeAdminCLI, Flow, SiteHealthProbe],
+        );
         x.perm("EnableInfiniteBoot", vec![ForgeAdminCLI]);
         x.perm("IsInfiniteBootEnabled", vec![ForgeAdminCLI]);
         x.perm("Lockdown", vec![ForgeAdminCLI]);
@@ -857,7 +862,7 @@ impl InternalRBACRules {
         x.perm("CreatePowerShelf", vec![ForgeAdminCLI, Machineatron]);
         x.perm(
             "DecommissionPowerShelf",
-            vec![ForgeAdminCLI, Machineatron, Flow],
+            vec![ForgeAdminCLI, Machineatron, SiteAgent, Flow],
         );
         x.perm("DeletePowerShelf", vec![ForgeAdminCLI, Machineatron]);
         x.perm(
@@ -1128,6 +1133,11 @@ impl InternalRBACRules {
         );
         x.perm("GetComponentFirmwareStatus", vec![ForgeAdminCLI, Flow]);
         x.perm("ListComponentFirmwareVersions", vec![ForgeAdminCLI, Flow]);
+        // The handler further binds each credential kind to one of the two.
+        x.perm(
+            "GetComponentCredentials",
+            vec![PowerShelfManager, NvSwitchManager],
+        );
         x.perm("GetDPFHostSnapshot", vec![ForgeAdminCLI]);
         x.perm("GetDPFServiceVersions", vec![ForgeAdminCLI]);
         x.perm("FindPendingDPUServiceSyncIds", vec![ForgeAdminCLI]);
@@ -1256,6 +1266,15 @@ impl RuleInfo {
                     RulePrincipal::RackScaleAnalyzer => {
                         vec![Principal::SpiffeServiceIdentifier("rsa".to_string())]
                     }
+                    // External component managers (no legacy carbide- alias).
+                    // Beyond the methods open to every caller, each may call
+                    // only GetComponentCredentials.
+                    RulePrincipal::PowerShelfManager => vec![Principal::SpiffeServiceIdentifier(
+                        crate::auth::POWER_SHELF_MANAGER_SERVICE_ID.to_string(),
+                    )],
+                    RulePrincipal::NvSwitchManager => vec![Principal::SpiffeServiceIdentifier(
+                        crate::auth::NV_SWITCH_MANAGER_SERVICE_ID.to_string(),
+                    )],
                     RulePrincipal::Anonymous => vec![Principal::Anonymous],
                 })
                 .collect(),
@@ -1598,6 +1617,24 @@ mod rbac_rule_tests {
         ));
     }
 
+    #[test]
+    fn probe_catalog_read_permissions() {
+        let probe = Principal::SpiffeServiceIdentifier("nico-site-health-probe".into());
+        for (method, allowed) in [
+            ("Version", true),
+            ("GetDesiredFirmwareVersions", true),
+            ("ListHostFirmware", true),
+            ("SetFirmwareUpdateTimeWindow", false),
+            ("UpsertHostFirmwareConfig", false),
+            ("DeleteHostFirmwareConfig", false),
+        ] {
+            assert_eq!(
+                InternalRBACRules::allowed_from_static(method, std::slice::from_ref(&probe)),
+                allowed,
+                "{method}"
+            );
+        }
+    }
     /// Compact machine states belong to the admin CLI, not MaT or the site probe.
     #[test]
     fn find_machine_states_by_ids_permissions() {
@@ -1661,6 +1698,8 @@ mod rbac_rule_tests {
             "CreateCredential",
             "CreateSku",
             "DecommissionManagedHost",
+            "DecommissionPowerShelf",
+            "DecommissionSwitch",
             "DeleteSku",
             "GetCredentialRotationStatus",
             "InsertPowerShelfHealthReport",
@@ -1743,6 +1782,46 @@ mod rbac_rule_tests {
                 "InsertSwitchHealthReport",
             ]
         );
+    }
+
+    /// The external power-shelf and NVSwitch managers can read component
+    /// credentials, and nothing beyond RPCs open to every caller.
+    #[test]
+    fn component_managers_only_read_component_credentials() {
+        use carbide_test_support::{Check, check_values};
+
+        let service = |name: &str| Principal::SpiffeServiceIdentifier(name.to_string());
+        let principals = [
+            service("nico-powershelf-manager"),
+            service("nico-nvswitch-manager"),
+            service("nico-flow"),
+            service("unlisted"),
+        ];
+        check_values(
+            [Check {
+                scenario: "component credential read",
+                input: "GetComponentCredentials",
+                expect: [true, true, false, false],
+            }],
+            |method| {
+                principals.each_ref().map(|principal| {
+                    InternalRBACRules::allowed_from_static(method, std::slice::from_ref(principal))
+                })
+            },
+        );
+
+        for manager in &principals[..2] {
+            let allowed_only_for_manager = |method: &&String| {
+                InternalRBACRules::allowed_from_static(method, std::slice::from_ref(manager))
+                    && !InternalRBACRules::allowed_from_static(method, &[service("unlisted")])
+            };
+            let methods: Vec<&String> = INTERNAL_RBAC_RULES
+                .perms
+                .keys()
+                .filter(allowed_only_for_manager)
+                .collect();
+            assert_eq!(methods, ["GetComponentCredentials"], "{manager:?}");
+        }
     }
 
     #[test]

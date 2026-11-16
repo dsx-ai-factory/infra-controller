@@ -44,6 +44,8 @@ pub struct StartArgs {
     pub cancel_token: CancellationToken,
     pub ready_channel: Sender<carbide::ApiServerReady>,
     pub credential_config: CredentialConfig,
+    /// Provider and registry owned by the fixture and shared with this server.
+    pub metrics: metrics_endpoint::MetricsSetup,
     pub insecure_discovery: bool,
     /// Enable the SPDM controller and the machine controller's SPDM measuring paths.
     /// This flag is fixed for the server's lifetime. The fixture uses deliberately
@@ -75,6 +77,7 @@ async fn start_with_config_inner(
         cancel_token,
         ready_channel,
         credential_config,
+        metrics,
         insecure_discovery,
         spdm_enabled,
     }: StartArgs,
@@ -379,6 +382,7 @@ async fn start_with_config_inner(
         tmp.path().to_path_buf(),
         None,
         credential_config,
+        metrics,
         true,
         cancel_token,
         ready_channel,

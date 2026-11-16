@@ -127,7 +127,7 @@ pub(crate) async fn cleanup_machine_completed(
             .enqueue_object(&host_machine_id.into())
             .await
     {
-        carbide_instrument::emit(StateHandlerWakeupFailed {
+        api.instrumentation.emit(StateHandlerWakeupFailed {
             trigger: WakeupTrigger::CleanupCompleted,
             machine_id,
             err: err.to_string(),
@@ -211,6 +211,7 @@ pub(crate) async fn forge_agent_control(
         db::machine::update_scout_contact_time(&machine_id, &mut txn)
             .await
             .map_err(CarbideError::from)?;
+        crate::api::log_machine_snapshot(&machine);
         let host_machine = HostMachine::try_from(machine.clone())
             .map_err(|error| CarbideError::internal(format!("invalid host machine: {error}")))?;
         let state = host_machine.current_state();
@@ -600,6 +601,8 @@ pub(crate) async fn reboot_completed(
         )
         .await?;
 
+    crate::api::log_machine_snapshot(&machine);
+
     // Firmware activation uses this timestamp to leave Rebooting. Requests
     // without a machine identity retain their behavior outside that workflow,
     // but cannot confirm a firmware activation for another host.
@@ -628,7 +631,7 @@ pub(crate) async fn reboot_completed(
             .enqueue_object(&host_machine_id)
             .await
     {
-        carbide_instrument::emit(StateHandlerWakeupFailed {
+        api.instrumentation.emit(StateHandlerWakeupFailed {
             trigger: WakeupTrigger::RebootCompleted,
             machine_id,
             err: err.to_string(),

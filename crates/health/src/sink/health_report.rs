@@ -21,7 +21,7 @@ use std::hash::{Hash, Hasher};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use carbide_instrument::{Outcome, emit};
+use carbide_instrument::{Instrumentation, Outcome};
 use carbide_uuid::machine::MachineId;
 
 use super::dedup_queue::DedupQueue;
@@ -87,7 +87,12 @@ fn content_hash(report: &HealthReport) -> u64 {
 }
 
 impl HealthReportSink {
-    pub fn new(config: &HealthReportSinkConfig) -> Result<Self, HealthError> {
+    /// Starts report workers using the supplied Event destination.
+    /// Retain the instrumentation provider until the workers stop.
+    pub fn new(
+        config: &HealthReportSinkConfig,
+        instrumentation: Instrumentation,
+    ) -> Result<Self, HealthError> {
         let handle = tokio::runtime::Handle::try_current().map_err(|error| {
             HealthError::GenericError(format!(
                 "health report sink requires active Tokio runtime: {error}"
@@ -107,6 +112,7 @@ impl HealthReportSink {
         for worker_id in 0..config.workers {
             let worker_client = Arc::clone(&client);
             let worker_queue = Arc::clone(&queue);
+            let instrumentation = instrumentation.clone();
             handle.spawn(async move {
                 loop {
                     let (key, report) = worker_queue.next().await;
@@ -115,7 +121,7 @@ impl HealthReportSink {
                         Ok(converted) => {
                             let result =
                                 worker_client.submit_health_report(&key.id, converted).await;
-                            emit(HealthReportSubmitted {
+                            instrumentation.emit(HealthReportSubmitted {
                                 target: HealthReportTarget::Machine,
                                 outcome: Outcome::from(&result),
                                 id: key.id.to_string(),

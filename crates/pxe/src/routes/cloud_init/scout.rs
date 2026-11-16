@@ -31,7 +31,6 @@ use axum::Router;
 use axum::extract::State;
 use axum::response::IntoResponse;
 use axum::routing::get;
-use carbide_instrument::emit;
 use serde::Serialize;
 
 use crate::STATIC_URL_PREFIX;
@@ -218,7 +217,7 @@ async fn user_data(machine: Machine, state: State<AppState>) -> impl IntoRespons
     let snippet_urls = match scan_snippet_dir(&state.static_dir) {
         SnippetScan::Found(names) => {
             let base_url = snippet_base_url(&machine, &state);
-            emit(PxeBootOutcome {
+            state.instrumentation.emit(PxeBootOutcome {
                 endpoint: ENDPOINT,
                 reason: OutcomeReason::Ok,
             });
@@ -228,14 +227,14 @@ async fn user_data(machine: Machine, state: State<AppState>) -> impl IntoRespons
                 .collect()
         }
         SnippetScan::NotConfigured => {
-            emit(PxeBootOutcome {
+            state.instrumentation.emit(PxeBootOutcome {
                 endpoint: ENDPOINT,
                 reason: OutcomeReason::InstructionsEmpty,
             });
             Vec::new()
         }
         SnippetScan::Unreadable(error) => {
-            emit(PxeSnippetDirectoryUnreadable {
+            state.instrumentation.emit(PxeSnippetDirectoryUnreadable {
                 endpoint: ENDPOINT,
                 reason: OutcomeReason::SnippetDirectoryUnreadable,
                 error,
@@ -277,7 +276,7 @@ async fn meta_data(machine: Machine, state: State<AppState>) -> impl IntoRespons
         },
     };
 
-    emit(PxeBootOutcome {
+    state.instrumentation.emit(PxeBootOutcome {
         endpoint: ENDPOINT,
         reason: OutcomeReason::Ok,
     });
@@ -467,9 +466,10 @@ mod tests {
     /// An unconfigured site is a served, counted outcome rather than an error.
     #[tokio::test]
     async fn user_data_without_snippets_counts_instructions_empty() {
-        let metrics = MetricsCapture::start();
+        let state = test_app_state();
+        let metrics = MetricsCapture::for_registry(&state.otel_metrics.registry);
 
-        let _ = user_data(machine_with_interface(None), State(test_app_state())).await;
+        let _ = user_data(machine_with_interface(None), State(state.clone())).await;
 
         assert_eq!(
             metrics.counter_delta(
@@ -488,14 +488,15 @@ mod tests {
         let interface_id = "91609f10-c91d-470d-a260-6293ea0c1234";
         let host_id = "fm100ht038bg3qsho433vkg684heguv282qaggmrsh2ugn1qk096n2c6hcg";
         for (metadata_id, expected_id) in [(None, interface_id), (Some(host_id), host_id)] {
-            let metrics = MetricsCapture::start();
+            let state = test_app_state_with_templates();
+            let metrics = MetricsCapture::for_registry(&state.otel_metrics.registry);
             let mut machine = machine_with_interface(Some(interface_id));
             machine.instructions.metadata =
                 metadata_id.map(|instance_id| forge::CloudInitMetaData {
                     instance_id: instance_id.to_string(),
                     ..Default::default()
                 });
-            let response = meta_data(machine, State(test_app_state_with_templates()))
+            let response = meta_data(machine, State(state.clone()))
                 .await
                 .into_response();
 
@@ -564,10 +565,6 @@ mod tests {
     /// test proving the scan and the template are wired together.
     #[tokio::test]
     async fn user_data_serves_an_include_list_of_the_configured_snippets() {
-        // Takes the lock that keeps other tests' exact counter deltas meaningful,
-        // since driving a handler emits into the shared registry.
-        let _metrics = MetricsCapture::start();
-
         let root = tempfile::tempdir().unwrap();
         let dir = root.path().join(SNIPPET_SUBDIR);
         std::fs::create_dir_all(&dir).unwrap();
@@ -612,10 +609,6 @@ mod tests {
     /// attributed to a machine rather than to another host called `scout`.
     #[tokio::test]
     async fn meta_data_serves_the_interface_hostname_as_local_hostname() {
-        // Takes the lock that keeps other tests' exact counter deltas meaningful,
-        // since driving a handler emits into the shared registry.
-        let _metrics = MetricsCapture::start();
-
         let response = meta_data(
             machine_with_hostname("node-17"),
             State(test_app_state_with_templates()),
@@ -637,10 +630,6 @@ mod tests {
     /// empty one, leaving cloud-init to derive a hostname itself.
     #[tokio::test]
     async fn meta_data_omits_local_hostname_when_the_interface_has_none() {
-        // Takes the lock that keeps other tests' exact counter deltas meaningful,
-        // since driving a handler emits into the shared registry.
-        let _metrics = MetricsCapture::start();
-
         let response = meta_data(
             machine_with_interface(None),
             State(test_app_state_with_templates()),

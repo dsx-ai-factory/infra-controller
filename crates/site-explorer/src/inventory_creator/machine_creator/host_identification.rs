@@ -113,6 +113,7 @@ impl MachineCreator {
     pub(crate) fn identify_managed_hosts(
         candidates: Vec<ConfiguredIngestionCandidate>,
         metrics: &mut SiteExplorationMetrics,
+        instrumentation: &carbide_instrument::Instrumentation,
     ) -> (
         Vec<IdentifiedManagedHost>,
         HostBootInterfaces,
@@ -154,6 +155,7 @@ impl MachineCreator {
                     declared_primary,
                     &mut boot_interfaces,
                     metrics,
+                    instrumentation,
                 ),
             };
 
@@ -184,6 +186,7 @@ impl MachineCreator {
         declared_primary: Option<MacAddress>,
         boot_interfaces: &mut HostBootInterfaces,
         metrics: &mut SiteExplorationMetrics,
+        instrumentation: &carbide_instrument::Instrumentation,
     ) -> Option<(ExploredManagedHost, Option<HostPrimaryInterfaceSelection>)> {
         // The host report owns the physical chassis identity, while each
         // `ExploredDpu` owns the DPU endpoint report. Join those views by
@@ -280,7 +283,7 @@ impl MachineCreator {
                     .and_then(|system| system.serial_number.clone()),
             )
         {
-            carbide_instrument::emit(event);
+            instrumentation.emit(event);
         }
 
         // For `Nic` hosts, don't attach DPUs even if matching

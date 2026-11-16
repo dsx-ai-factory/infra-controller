@@ -357,7 +357,12 @@ pub(crate) async fn set_host_uefi_password(
 
     let job_id = api
         .bmc_credential_ops
-        .uefi_setup(&bmc_access_info, false, host_uefi_credentials)
+        .uefi_setup(
+            &bmc_access_info,
+            false,
+            host_uefi_credentials,
+            &api.instrumentation,
+        )
         .await
         .map_err(|e| {
             tracing::error!(error = %e, "Failed to run uefi_setup call");
@@ -509,7 +514,12 @@ pub(crate) async fn set_dpu_uefi_password(
     // A DPU stages the UEFI change through Redfish BIOS settings and schedules no
     // job (it commits on the next DPU restart), so there is no job id to return.
     api.bmc_credential_ops
-        .uefi_setup(&bmc_access_info, true, dpu_uefi_credentials)
+        .uefi_setup(
+            &bmc_access_info,
+            true,
+            dpu_uefi_credentials,
+            &api.instrumentation,
+        )
         .await
         .map_err(|e| {
             tracing::error!(error = %e, "Failed to run uefi_setup call for DPU");

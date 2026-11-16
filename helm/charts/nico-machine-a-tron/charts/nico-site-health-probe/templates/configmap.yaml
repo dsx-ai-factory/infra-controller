@@ -102,6 +102,12 @@ data:
         skip_totals: true
         {{- end }}
       readers:
+        {{- if .readers.nicoConfig.enabled }}
+        nico_config:
+          enabled: true
+          interval: {{ .readers.nicoConfig.interval | quote }}
+          timeout: {{ .readers.nicoConfig.timeout | quote }}
+        {{- end }}
         {{- range $name, $key := dict "devices" "devices" "restInventory" "rest_inventory" }}
         {{- $reader := index $.Values.state.readers $name }}
         {{ $key }}:

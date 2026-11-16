@@ -72,6 +72,14 @@ impl Env {
     pub(super) async fn run_single_iteration(&mut self) {
         self.machine_controller.run_single_iteration().boxed().await;
     }
+
+    /// Processes each host once so intermediate states remain observable.
+    pub(super) async fn run_single_iteration_without_requeue(&mut self) {
+        self.machine_controller
+            .run_single_iteration_ext(false)
+            .boxed()
+            .await;
+    }
 }
 
 impl EnvBuilder {
@@ -151,7 +159,7 @@ impl EnvBuilder {
             uefi_boot_wait: runtime_config.machine_state_controller.uefi_boot_wait,
         };
         let power_options: PowerOptionConfig = runtime_config.power_manager_options.clone().into();
-        let machine_handler = MachineStateHandlerBuilder::builder()
+        let machine_handler = MachineStateHandlerBuilder::builder(api.instrumentation().clone())
             .dpu_up_threshold(runtime_config.machine_state_controller.dpu_up_threshold)
             .dpu_nic_firmware_reprovision_update_enabled(
                 runtime_config
@@ -189,6 +197,7 @@ impl EnvBuilder {
             None => controller_redfish_sim.clone(),
         };
         let services = MachineStateHandlerServices {
+            instrumentation: api.instrumentation().clone(),
             db_pool: pool.clone(),
             db_reader: pool.clone().into(),
             redfish_client_pool: redfish_client_pool.clone(),

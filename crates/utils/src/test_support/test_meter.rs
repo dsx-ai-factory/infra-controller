@@ -27,6 +27,12 @@ pub struct TestMeter {
 }
 
 impl TestMeter {
+    /// Returns the registry owned by this test provider for isolated assertions.
+    /// Keep this TestMeter alive while capturing or collecting its metrics.
+    pub fn registry(&self) -> &prometheus::Registry {
+        &self.registry
+    }
+
     /// Returns the latest accumulated metrics in prometheus format
     pub fn export_metrics(&self) -> String {
         let mut buffer = vec![];

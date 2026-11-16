@@ -135,8 +135,7 @@ The optional `--expiry` accepts a duration such as `30min` or `1h`, defaults to 
 cannot exceed `60h`. After expiry, the server restores its startup filter on the next
 15-minute reset check. A filter with span directives cannot be evaluated by target alone,
 so nico-api enables payload encoding and redaction
-even if the filter ultimately suppresses the audit record. For `nico-admin-cli rms`, set
-`RUST_LOG=rms_rpc_audit=debug`; the records go to stderr.
+even if the filter ultimately suppresses the audit record.
 
 Bodies are redacted before being attached to a span or log: credentials, passwords, tokens,
 URLs, arbitrary attributes, config values, error text, embedded JSON, and binary fields are
@@ -157,9 +156,8 @@ duration) metrics are unchanged. Readiness probes carry trace headers but do not
 their own body audit record. Raw tonic clients and streaming RPCs
 are outside the decoded observer; RMS's V1/V2 service definitions contain only unary RPCs.
 
-`nico-admin-cli rms` installs the same policy and emits DEBUG audit logs through its own
-subscriber, but does not export nico-api OTLP spans. Without a configured propagator and
-active OpenTelemetry context, transport injection is a no-op. API spans follow the existing
+Without a configured propagator and active OpenTelemetry context, transport injection is a
+no-op. API spans follow the existing
 endpoint and enabled flag. An RMS RPC without a local parent is an eligible trace root;
 child RPCs inherit their parent's sampling decision. Rack reconciliation adds
 a rack span under the state processor's existing trace root.
