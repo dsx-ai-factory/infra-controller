@@ -5480,15 +5480,17 @@ func (ComponentPowerActionOperation) EnumDescriptor() ([]byte, []int) {
 	return file_nico_nico_proto_rawDescGZIP(), []int{96}
 }
 
-// Reset operations supported by the component manager. Only SDN factory reset
-// and NVOS factory reset are implemented.
+// Reset operations supported by the component manager.
 type ComponentResetAction int32
 
 const (
 	ComponentResetAction_COMPONENT_RESET_ACTION_UNSPECIFIED ComponentResetAction = 0
 	// Reset the management controller on a compute, switch, or power shelf tray.
+	// Uses the vendor-default BMC reset, without host power cycling or factory reset.
+	// Dispatched directly, without a maintenance request or tracked job.
 	ComponentResetAction_COMPONENT_RESET_ACTION_BMC_RESET ComponentResetAction = 1
 	// Restore management-controller defaults on a compute, switch, or power shelf tray.
+	// Not implemented.
 	ComponentResetAction_COMPONENT_RESET_ACTION_BMC_FACTORY_RESET ComponentResetAction = 2
 	// Initiate NVOS factory reset and reboot the switch; switch targets only.
 	ComponentResetAction_COMPONENT_RESET_ACTION_NVOS_FACTORY_RESET ComponentResetAction = 3
@@ -66115,8 +66117,14 @@ func (x *ComponentConfigureSwitchCertificateResponse) GetResults() []*ComponentR
 type ComponentResetRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// Required, non-empty explicit targets. Duplicates are InvalidArgument.
-	// Only switch IDs and switch BMC MACs are supported in this version. MACs can
-	// target expected inventory before ingestion; malformed MACs fail per device.
+	// BMC reset accepts all selectors; SDN/NVOS factory resets require switch targets.
+	// MACs can target discovered interfaces before ingestion using stored or expected
+	// credentials; malformed MACs fail per device. Every switch reset action requires
+	// BMC and NVOS endpoints and credentials, including before ingestion. Credentials
+	// come from Vault with expected-switch inventory as fallback; missing information
+	// fails per device.
+	// MAC-targeted BMC reset results echo
+	// the requested MAC; ID-targeted results include the ID and resolved MAC.
 	//
 	// Types that are valid to be assigned to Target:
 	//
@@ -66130,7 +66138,7 @@ type ComponentResetRequest struct {
 	// Required; unspecified or unknown values are InvalidArgument.
 	Action ComponentResetAction `protobuf:"varint,7,opt,name=action,proto3,enum=forge.ComponentResetAction" json:"action,omitempty"`
 	// Optional NVL certificate-domain selector, only valid for SDN factory reset.
-	// Omission uses the RMS configured domain. This is not a DNS suffix; an
+	// Omission uses the configured default domain. This is not a DNS suffix; an
 	// explicitly empty or whitespace-only value is InvalidArgument.
 	DomainName    *string `protobuf:"bytes,8,opt,name=domain_name,json=domainName,proto3,oneof" json:"domain_name,omitempty"`
 	unknownFields protoimpl.UnknownFields
@@ -66284,11 +66292,15 @@ func (*ComponentResetRequest_PowerShelfPmcMacs) isComponentResetRequest_Target()
 
 type ComponentResetResponse struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
-	// One result per requested device, in request order. SUCCESS means the reset
+	// One result per requested device, in request order. For BMC reset, SUCCESS
+	// means the command was accepted, not that the controller has recovered.
+	// BMC reset has no durable job reference; status is a successful no-op. A failed command
+	// response does not prove the reset was not applied; do not blindly resubmit.
+	// For SDN/NVOS factory resets, SUCCESS means the reset
 	// was accepted and its reference recorded. OUTCOME_UNKNOWN means the reset may
-	// have started, including when RMS accepted it but NICo could not record its
+	// have started, including when it was accepted but NICo could not record its
 	// reference; do not automatically resubmit. INVALID_ARGUMENT means the target
-	// could not be prepared or RMS rejected it before dispatch. NOT_FOUND means the
+	// could not be prepared or the request was rejected before dispatch. NOT_FOUND means the
 	// target or its credentials could not be resolved. A non-SUCCESS result leaves
 	// the previous recorded reference in place.
 	Results       []*ComponentResult `protobuf:"bytes,1,rep,name=results,proto3" json:"results,omitempty"`
@@ -66335,6 +66347,9 @@ func (x *ComponentResetResponse) GetResults() []*ComponentResult {
 
 type GetComponentResetStatusRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
+	// BMC reset returns SUCCESS/COMPLETED without checking inventory, contacting the
+	// controller, or requiring a prior submission. This no-op does not verify recovery.
+	// BMC factory reset returns Unimplemented; only SDN/NVOS resets have tracked status.
 	// Required, non-empty explicit targets, with the same selection and duplicate
 	// rules as ComponentResetRequest. MAC status lookup requires no credentials.
 	//
@@ -66347,7 +66362,7 @@ type GetComponentResetStatusRequest struct {
 	//	*GetComponentResetStatusRequest_SwitchBmcMacs
 	//	*GetComponentResetStatusRequest_PowerShelfPmcMacs
 	Target isGetComponentResetStatusRequest_Target `protobuf_oneof:"target"`
-	// Required; selects the tracked reset of this action, not the latest action.
+	// Required; for SDN/NVOS selects the tracked reset of this action, not the latest action.
 	Action        ComponentResetAction `protobuf:"varint,7,opt,name=action,proto3,enum=forge.ComponentResetAction" json:"action,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -66493,7 +66508,9 @@ func (*GetComponentResetStatusRequest_PowerShelfPmcMacs) isGetComponentResetStat
 
 type ComponentResetStatus struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
-	// Observation of the latest successfully recorded accepted reset reference,
+	// For BMC reset, SUCCESS/COMPLETED is an untracked no-op; malformed MACs return
+	// INVALID_ARGUMENT/UNKNOWN. Results echo only the supplied ID or MAC.
+	// For SDN/NVOS, observation of the latest successfully recorded accepted reset reference,
 	// including per-device correlation and diagnostics. This may describe an
 	// earlier reset than a subsequent failed or unknown submission attempt.
 	// No reference is NOT_FOUND/UNKNOWN; it does not prove no reset occurred.

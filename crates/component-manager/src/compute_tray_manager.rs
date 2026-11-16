@@ -4,53 +4,20 @@
 use std::fmt::Debug;
 use std::net::IpAddr;
 
-use carbide_secrets::credentials::Credentials;
 use mac_address::MacAddress;
 use model::component_manager::{ComputeTrayComponent, FirmwareState, PowerAction};
 
-use crate::component_common::{ComponentPowerStateResult, PowerStateSource};
+pub use crate::component_common::{
+    BmcEndpoint as ComputeTrayEndpoint, BmcOperationResult as ComputeTrayResult,
+    BmcVendor as ComputeTrayVendor,
+};
+use crate::component_common::{
+    BmcEndpoint, BmcOperationResult, ComponentPowerStateResult, PowerStateSource,
+};
 use crate::error::ComponentManagerError;
 use crate::firmware_inventory::{ComponentFirmwareInventoryResult, FirmwareInventorySource};
 use crate::firmware_jobs::{ComponentFirmwareJobsResult, FirmwareJobSource};
 use crate::types::FirmwareUpdateOptions;
-
-/// Physical network identifiers for a compute tray, used to register with and
-/// operate against the backend service (CTM).
-#[derive(Debug, Clone)]
-pub struct ComputeTrayEndpoint {
-    pub vendor: ComputeTrayVendor,
-    pub bmc_ip: IpAddr,
-    pub bmc_mac: MacAddress,
-    pub bmc_credentials: Credentials,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ComputeTrayVendor {
-    Unknown,
-    Dell,
-    Hpe,
-    Lenovo,
-    Supermicro,
-    Nvidia,
-}
-
-impl From<bmc_vendor::BMCVendor> for ComputeTrayVendor {
-    fn from(vendor: bmc_vendor::BMCVendor) -> Self {
-        match vendor {
-            bmc_vendor::BMCVendor::Dell => Self::Dell,
-            bmc_vendor::BMCVendor::Hpe => Self::Hpe,
-            bmc_vendor::BMCVendor::Lenovo => Self::Lenovo,
-            bmc_vendor::BMCVendor::Supermicro => Self::Supermicro,
-            bmc_vendor::BMCVendor::Nvidia => Self::Nvidia,
-            bmc_vendor::BMCVendor::LenovoAMI
-            | bmc_vendor::BMCVendor::GigaComputing
-            | bmc_vendor::BMCVendor::Liteon
-            | bmc_vendor::BMCVendor::Delta
-            | bmc_vendor::BMCVendor::Sushy
-            | bmc_vendor::BMCVendor::Unknown => Self::Unknown,
-        }
-    }
-}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ComputeTrayModel {
@@ -58,20 +25,6 @@ pub enum ComputeTrayModel {
     Viking,
     GB200,
     GB300,
-}
-
-#[derive(Debug, Clone)]
-pub struct ComputeTrayResult {
-    pub bmc_ip: IpAddr,
-    pub bmc_mac: MacAddress,
-    pub success: bool,
-    pub error: Option<String>,
-
-    /// Opaque backend job ID returned for an asynchronous operation.
-    ///
-    /// `None` means the backend returned no durable job handle. Presence does
-    /// not imply success; a failed result may retain the ID for reconciliation.
-    pub backend_job_id: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -111,6 +64,21 @@ impl std::fmt::Display for Backend {
 #[async_trait::async_trait]
 pub trait ComputeTrayManager: Send + Sync + Debug + 'static {
     fn name(&self) -> &str;
+
+    /// Reset management controllers in input order, preserving per-endpoint failures.
+    /// Success reports command acceptance, not verified controller recovery.
+    /// Supported backends delegate to Core until they implement native BMC reset.
+    /// No rack identity or NVOS credentials are required. An unavailable Core
+    /// dependency returns `Unsupported` before controller I/O.
+    async fn reset_bmc(
+        &self,
+        _endpoints: &[BmcEndpoint],
+    ) -> Result<Vec<BmcOperationResult>, ComponentManagerError> {
+        Err(ComponentManagerError::Unsupported(format!(
+            "BMC reset is not supported by the {} backend",
+            self.name()
+        )))
+    }
 
     /// Identifies the source when `get_power_state` supports fresh, passive reads.
     /// `None` means callers must reject passive reads before fetching credentials

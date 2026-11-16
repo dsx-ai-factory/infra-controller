@@ -23,7 +23,7 @@ use carbide_uuid::power_shelf::PowerShelfId;
 use carbide_uuid::rack::RackId;
 use carbide_uuid::switch::SwitchId;
 use component_manager::component_manager::ComponentManager;
-use component_manager::core_compute_manager::CoreComputeTrayManager;
+use component_manager::core_component_manager::CoreComponentManager;
 use component_manager::mock::{MockComputeTrayManager, MockNvSwitchManager, MockPowerShelfManager};
 use component_manager::rms::RmsBackend;
 use libredfish::model::service_root::RedfishVendor;
@@ -1498,7 +1498,7 @@ async fn core_power_details_use_stored_credentials_and_the_direct_pool(
             false,
         );
         if scenario.use_core_backend {
-            manager.compute_tray = Arc::new(CoreComputeTrayManager::new(direct_pool.clone()));
+            manager.compute_tray = Arc::new(CoreComponentManager::new(direct_pool.clone()));
         }
         let mut api = TestApiBuilder::new(
             pool.clone(),

@@ -1880,7 +1880,7 @@ async fn component_firmware_details_caller_budget_bounds_credentials(
     let mock = Arc::new(MockRmsApi::new());
     let (mut api, fetcher) = api(&env, pool, config, mock.clone(), false).await?;
     api.component_manager.as_mut().unwrap().compute_tray = Arc::new(
-        component_manager::core_compute_manager::CoreComputeTrayManager::new(
+        component_manager::core_component_manager::CoreComponentManager::new(
             api.bmc_credential_ops.clone(),
         ),
     );
@@ -1970,7 +1970,7 @@ async fn component_firmware_details_bound_installed_workflows(pool: sqlx::PgPool
     let redfish = Arc::new(RedfishSim::default());
     redfish.set_create_client_error("released workflow completes without hardware");
     api.component_manager.as_mut().unwrap().compute_tray = Arc::new(
-        component_manager::core_compute_manager::CoreComputeTrayManager::new(redfish.clone()),
+        component_manager::core_component_manager::CoreComponentManager::new(redfish.clone()),
     );
     let (arrivals, mut arrived) = tokio::sync::mpsc::unbounded_channel();
     api.credential_manager = Arc::new(CompositeCredentialManager::new(

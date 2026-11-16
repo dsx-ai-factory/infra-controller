@@ -13,7 +13,7 @@ use model::component_manager::{
 use model::rack_type::RackHardwareTopology;
 use model::switch::FabricManagerStatus;
 
-use crate::component_common::{ComponentPowerStateResult, PowerStateSource};
+use crate::component_common::{BmcOperationResult, ComponentPowerStateResult, PowerStateSource};
 use crate::error::ComponentManagerError;
 use crate::firmware_inventory::{ComponentFirmwareInventoryResult, FirmwareInventorySource};
 use crate::firmware_jobs::{ComponentFirmwareJobsResult, FirmwareJobSource};
@@ -316,6 +316,22 @@ pub struct ComponentResetStatus {
 #[async_trait::async_trait]
 pub trait NvSwitchManager: Send + Sync + Debug + 'static {
     fn name(&self) -> &str;
+
+    /// Reset management controllers in input order, preserving per-endpoint failures.
+    /// Success reports command acceptance, not verified controller recovery.
+    /// Supported backends delegate to Core until they implement native BMC reset.
+    /// Receives BMC and NVOS endpoints and credentials, including before ingestion.
+    /// Core uses only the BMC fields; backends may use NVOS for controller recovery.
+    /// An unavailable Core dependency returns `Unsupported` before controller I/O.
+    async fn reset_bmc(
+        &self,
+        _endpoints: &[SwitchEndpoint],
+    ) -> Result<Vec<BmcOperationResult>, ComponentManagerError> {
+        Err(ComponentManagerError::Unsupported(format!(
+            "BMC reset is not supported by the {} backend",
+            self.name()
+        )))
+    }
 
     /// Identifies the source when `get_power_state` supports fresh, passive reads.
     /// `None` means callers must reject passive reads before fetching credentials
