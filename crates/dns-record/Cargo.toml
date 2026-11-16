@@ -26,14 +26,15 @@ repository.workspace = true
 
 [dependencies]
 serde = { workspace = true, features = ["derive"] }
-serde_json = { workspace = true }
 chrono = { workspace = true }
 tracing = { workspace = true }
-uuid = { workspace = true, features = ["v4"] }
 
 [dev-dependencies]
-assert-json-diff = { workspace = true }
 carbide-test-support = { path = "../test-support" }
+
+assert-json-diff = { workspace = true }
+serde_json = { workspace = true }
+uuid = { workspace = true, features = ["v4"] }
 
 [lints.clippy]
 undocumented_unsafe_blocks = "deny"

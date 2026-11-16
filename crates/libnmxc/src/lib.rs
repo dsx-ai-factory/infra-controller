@@ -105,10 +105,17 @@ impl Endpoint {
     }
 }
 
+/// PEM files of the client certificate and its private key, presented together for mutual TLS.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct NmxcClientIdentity {
+    pub cert_path: PathBuf,
+    pub key_path: PathBuf,
+}
+
 /// Optional TLS paths for HTTPS connections to NMX-C.
 ///
-/// When both `client_cert_path` and `client_key_path` are set, the client presents a certificate
-/// for mutual TLS. `ca_cert_path` adds an extra CA bundle for verifying the server (system roots
+/// When `client_identity` is set, the client presents its certificate for mutual TLS.
+/// `ca_cert_path` adds an extra CA bundle for verifying the server (system roots
 /// are still used unless configured otherwise by tonic).
 ///
 /// `authority` sets the TLS server name (SNI / certificate verification hostname).
@@ -117,8 +124,7 @@ impl Endpoint {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct NmxcTlsConfig {
     pub ca_cert_path: Option<PathBuf>,
-    pub client_cert_path: Option<PathBuf>,
-    pub client_key_path: Option<PathBuf>,
+    pub client_identity: Option<NmxcClientIdentity>,
     pub authority: Option<String>,
 }
 
@@ -127,15 +133,15 @@ impl NmxcTlsConfig {
     /// of them is newer than it, unless another is unreadable, such as one
     /// missing mid-rotation.
     fn material_paths(&self) -> Vec<PathBuf> {
-        [
-            &self.ca_cert_path,
-            &self.client_cert_path,
-            &self.client_key_path,
-        ]
-        .into_iter()
-        .flatten()
-        .cloned()
-        .collect()
+        let identity_paths = self
+            .client_identity
+            .iter()
+            .flat_map(|identity| [&identity.cert_path, &identity.key_path]);
+        self.ca_cert_path
+            .iter()
+            .chain(identity_paths)
+            .cloned()
+            .collect()
     }
 }
 
@@ -287,28 +293,20 @@ impl TlsChannelConnector {
             config = config.ca_certificate(Certificate::from_pem(pem));
         }
 
-        match (&tls.client_cert_path, &tls.client_key_path) {
-            (Some(cert_path), Some(key_path)) => {
-                let cert = tokio::fs::read(cert_path).await.map_err(|e| {
-                    NmxcError::InvalidEndpoint(format!(
-                        "read NMX-C TLS client cert {}: {e}",
-                        cert_path.display()
-                    ))
-                })?;
-                let key = tokio::fs::read(key_path).await.map_err(|e| {
-                    NmxcError::InvalidEndpoint(format!(
-                        "read NMX-C TLS client key {}: {e}",
-                        key_path.display()
-                    ))
-                })?;
-                config = config.identity(Identity::from_pem(cert, key));
-            }
-            (None, None) => {}
-            _ => {
-                return Err(NmxcError::InvalidEndpoint(
-                    "NMX-C TLS client cert path and key path must both be set for mTLS".to_string(),
-                ));
-            }
+        if let Some(identity) = &tls.client_identity {
+            let cert = tokio::fs::read(&identity.cert_path).await.map_err(|e| {
+                NmxcError::InvalidEndpoint(format!(
+                    "read NMX-C TLS client cert {}: {e}",
+                    identity.cert_path.display()
+                ))
+            })?;
+            let key = tokio::fs::read(&identity.key_path).await.map_err(|e| {
+                NmxcError::InvalidEndpoint(format!(
+                    "read NMX-C TLS client key {}: {e}",
+                    identity.key_path.display()
+                ))
+            })?;
+            config = config.identity(Identity::from_pem(cert, key));
         }
 
         let domain = tls.authority.clone().filter(|s| !s.is_empty()).or_else(|| {
@@ -633,8 +631,10 @@ mod tests {
                 }
                 let tls = NmxcTlsConfig {
                     ca_cert_path: Some(dir.path().join("ca.pem")),
-                    client_cert_path: Some(dir.path().join("client-cert.pem")),
-                    client_key_path: Some(dir.path().join("client-key.pem")),
+                    client_identity: Some(NmxcClientIdentity {
+                        cert_path: dir.path().join("client-cert.pem"),
+                        key_path: dir.path().join("client-key.pem"),
+                    }),
                     authority: None,
                 };
                 // Build through the public builder so its TLS material handoff

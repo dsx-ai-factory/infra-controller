@@ -142,19 +142,18 @@ func (mei ManageExpectedMachine) UpdateExpectedMachinesInDB(ctx context.Context,
 	linkedMachineByBmcMac := map[string]string{}
 	if len(linkedMachineIDs) > 0 {
 		mDAO := cdbm.NewMachineDAO(mei.dbSession)
-		machines, _, merr := mDAO.GetAll(ctx, nil, cdbm.MachineFilterInput{
-			MachineIDs:      linkedMachineIDs,
-			SiteIDs:         []uuid.UUID{siteID},
-			ExcludeMetadata: true,
-		}, cdbp.PageInput{Limit: cutil.GetPtr(cdbp.TotalLimit)}, nil)
+		machineIDs, merr := mDAO.GetAllIDs(ctx, nil, cdbm.MachineFilterInput{
+			MachineIDs: linkedMachineIDs,
+			SiteIDs:    []uuid.UUID{siteID},
+		})
 		if merr != nil {
 			logger.Error().Err(merr).Msg("failed to validate linked Machines against REST inventory")
 			return merr
 		}
 
-		existingMachineIDs := make(map[string]bool, len(machines))
-		for _, machine := range machines {
-			existingMachineIDs[machine.ID] = true
+		existingMachineIDs := make(map[string]bool, len(machineIDs))
+		for _, machineID := range machineIDs {
+			existingMachineIDs[machineID] = true
 		}
 		for bmcMacAddress, machineID := range linkedMachineCandidatesByBmcMac {
 			if existingMachineIDs[machineID] {
@@ -293,6 +292,7 @@ func (mei ManageExpectedMachine) UpdateExpectedMachinesInDB(ctx context.Context,
 			(reported.FallbackDpuSerialNumbers != nil && !slices.Equal(cur.FallbackDpuSerialNumbers, reported.FallbackDpuSerialNumbers)) ||
 			(reported.IsDpfEnabled != nil && !util.PtrsEqual(cur.IsDpfEnabled, reported.IsDpfEnabled)) ||
 			(reported.HostLifecycleProfile.DisableLockdown != nil && !util.PtrsEqual(cur.HostLifecycleProfile.DisableLockdown, reported.HostLifecycleProfile.DisableLockdown)) ||
+			(reported.HostLifecycleProfile.RetainHBNConfigOnBoot != nil && !util.PtrsEqual(cur.HostLifecycleProfile.RetainHBNConfigOnBoot, reported.HostLifecycleProfile.RetainHBNConfigOnBoot)) ||
 			!maps.Equal(cur.Labels, reported.Labels) {
 			uerr := cdb.WithTx(ctx, mei.dbSession, func(tx *cdb.Tx) error {
 				// Match the handlers: Expected Inventory lock, then new SKU,

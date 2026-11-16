@@ -22,15 +22,16 @@ use std::time::Duration;
 use ::rpc::errors::RpcDataConversionError;
 use ::rpc::forge as rpc;
 use ::rpc::model::machine::ManagedHostStateSnapshotRpc;
+use bmc_platform::{PlatformError, ResetType};
 use carbide_redfish::libredfish::RedfishAuth;
 use carbide_secrets::credentials::{BmcCredentialType, CredentialKey, Credentials};
+use carbide_site_explorer::dpu_asn::DPU_ASN_SLOT;
 use carbide_site_explorer::dpu_loopback::DPU_IPV4_LOOPBACK_SLOT;
 use carbide_uuid::machine::{
     DpuMachineId, HostMachineId, HostOrDpuId, MachineId, MachineIdSubtypeTrait,
 };
 use db::ConditionalWrite;
 use db::resource_pool::ResourcePoolAllocationNotOwned;
-use libredfish::SystemPowerControl;
 use model::bmc_info::BmcInfo;
 use model::bmc_suppression::{BmcSuppressionSource, BmcSuppressionSubsystem};
 use model::hardware_info::MachineNvLinkInfo;
@@ -806,19 +807,37 @@ async fn force_delete_cleanup_txn(
 
         db::network_devices::dpu_to_network_device_map::delete(&mut txn, &dpu_machine.id).await?;
 
-        if let Some(asn) = dpu_machine.asn {
-            match db::resource_pool::release(
+        // Ownership remains authoritative when the machine snapshot has no ASN.
+        if let Some(owned) = api
+            .resource_pool_registry
+            .find_owned(
                 &api.common_pools.ethernet.pool_fnn_asn,
                 &mut txn,
-                asn,
                 model::resource_pool::OwnerType::Machine,
                 &owner_id,
+                DPU_ASN_SLOT,
             )
             .await?
-            {
-                ConditionalWrite::Applied(())
-                | ConditionalWrite::NotApplied(ResourcePoolAllocationNotOwned) => {}
+        {
+            let asn = *owned.value();
+            match owned.release(&mut txn).await? {
+                ConditionalWrite::Applied(()) => {}
+                ConditionalWrite::NotApplied(ResourcePoolAllocationNotOwned) => {
+                    return Err(CarbideError::FailedPrecondition(format!(
+                        "DPU `{}` no longer owns ASN `{asn}`",
+                        dpu_machine.id,
+                    )));
+                }
             }
+        } else {
+            api.resource_pool_registry
+                .request_cancellation(
+                    &mut txn,
+                    model::resource_pool::OwnerType::Machine,
+                    &owner_id,
+                    DPU_ASN_SLOT,
+                )
+                .await?;
         }
         let owned_interfaces = if request.delete_interfaces {
             db::machine_interface::find_by_machine_id_for_update(&mut txn, &dpu_machine.id).await?
@@ -1367,10 +1386,24 @@ pub(crate) async fn admin_force_delete_machine(
                             }
                         }
 
-                        if host_restart_needed
-                            && let Err(e) = client.power(SystemPowerControl::ForceRestart).await
-                        {
-                            tracing::warn!(%machine_id, error = %e, "Failed to reboot host while force deleting machine");
+                        if host_restart_needed {
+                            let access = carbide_utils::redfish::BmcAccessInfo {
+                                host: ip_address.clone(),
+                                port: machine.status.bmc_info.port,
+                                mac_address: bmc_mac_address,
+                            };
+                            let restart = match api.connect_bmc(&access).await {
+                                Ok(bmc) => {
+                                    async { bmc.power()?.set(ResetType::ForceRestart).await }
+                                        .await
+                                        .map(drop)
+                                        .map_err(|error: PlatformError| error.to_string())
+                                }
+                                Err(error) => Err(error.to_string()),
+                            };
+                            if let Err(e) = restart {
+                                tracing::warn!(%machine_id, error = %e, "Failed to reboot host while force deleting machine");
+                            }
                         }
                     }
                     Err(e) => {

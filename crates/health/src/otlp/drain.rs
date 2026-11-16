@@ -29,6 +29,7 @@ use crate::sink::otlp::OtlpQueue;
 use crate::sink::{CollectorEvent, DeliveryCounts, EventContext};
 
 pub(crate) struct OtlpDrainTask {
+    instrumentation: carbide_instrument::Instrumentation,
     queue: Arc<OtlpQueue>,
     target: OtlpTargetConfig,
     flush_token: CancellationToken,
@@ -41,8 +42,10 @@ impl OtlpDrainTask {
         target: OtlpTargetConfig,
         flush_token: CancellationToken,
         counts: DeliveryCounts,
+        instrumentation: carbide_instrument::Instrumentation,
     ) -> Self {
         Self {
+            instrumentation,
             queue,
             target,
             flush_token,
@@ -63,6 +66,7 @@ impl OtlpDrainTask {
                 client: LogsServiceClient::new(channel),
                 include_alert_details,
             },
+            self.instrumentation,
         )
         .await;
     }

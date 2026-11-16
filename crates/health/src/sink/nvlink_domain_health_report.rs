@@ -23,7 +23,7 @@
 
 use std::sync::Arc;
 
-use carbide_instrument::{Outcome, emit};
+use carbide_instrument::{Instrumentation, Outcome};
 use carbide_uuid::nvlink::NvLinkDomainId;
 use tokio_util::sync::CancellationToken;
 
@@ -55,11 +55,13 @@ pub struct NvLinkDomainHealthReportSink {
 impl NvLinkDomainHealthReportSink {
     /// Creates the sink and its ordered submission worker, registering the
     /// worker with `sink_workers` for the shutdown flush.
+    /// Event metrics use `instrumentation`; retain its provider while the sink runs.
     ///
     /// Returns an error when called without an active Tokio runtime.
     pub(crate) fn new(
         config: &NvLinkDomainHealthReportSinkConfig,
         sink_workers: &mut SinkWorkers,
+        instrumentation: Instrumentation,
     ) -> Result<Self, HealthError> {
         let handle = tokio::runtime::Handle::try_current().map_err(|error| {
             HealthError::GenericError(format!(
@@ -88,7 +90,9 @@ impl NvLinkDomainHealthReportSink {
             Arc::clone(&queue),
             counts.clone(),
             sink_workers.flush_token(),
-            move |key, report| submit_report(Arc::clone(&client), key, report),
+            move |key, report| {
+                submit_report(Arc::clone(&client), instrumentation.clone(), key, report)
+            },
         );
 
         let worker = handle.spawn(async move {
@@ -107,6 +111,7 @@ impl NvLinkDomainHealthReportSink {
 
 async fn submit_report(
     client: Arc<ApiClientWrapper>,
+    instrumentation: Instrumentation,
     key: NvLinkDomainHealthReportKey,
     report: Arc<HealthReport>,
 ) -> bool {
@@ -118,7 +123,7 @@ async fn submit_report(
 
             let delivered = result.is_ok();
 
-            emit(HealthReportSubmitted {
+            instrumentation.emit(HealthReportSubmitted {
                 target: HealthReportTarget::NvLinkDomain,
                 outcome: Outcome::from(&result),
                 id: key.id.to_string(),
@@ -280,9 +285,12 @@ mod tests {
 
     #[tokio::test]
     async fn dropping_sink_releases_submission_worker_queue() {
-        let sink =
-            NvLinkDomainHealthReportSink::new(&Default::default(), &mut SinkWorkers::default())
-                .expect("sink should start inside a Tokio runtime");
+        let sink = NvLinkDomainHealthReportSink::new(
+            &Default::default(),
+            &mut SinkWorkers::default(),
+            carbide_instrument::Instrumentation::global(),
+        )
+        .expect("sink should start inside a Tokio runtime");
 
         let queue = Arc::downgrade(&sink.queue);
 

@@ -625,7 +625,7 @@ async fn transport_and_tls_text_stays_out_of_results_and_logs() {
             .unwrap();
         assert_eq!(diagnostic.field("rack_id"), Some("rack-a"));
         if let Some(code) = code {
-            assert_eq!(diagnostic.field("rpc_code"), Some(code));
+            assert_eq!(diagnostic.field("grpc_status_code"), Some(code));
         }
         let warning = logs
             .iter()

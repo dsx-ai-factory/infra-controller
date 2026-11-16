@@ -213,9 +213,9 @@ func TestValidateKnownTrayIDNamespace(t *testing.T) {
 		{name: "accept NVSwitch namespace", resourceID: "sw100-rest-of-id", trayType: "NVSwitch"},
 		{name: "accept PowerShelf namespace", resourceID: "ps100-rest-of-id", trayType: "PowerShelf"},
 		{name: "allow unknown namespace", resourceID: "future-rest-of-id", trayType: "Compute"},
-		{name: "reject NVSwitch ID as Compute", resourceID: "sw100-rest-of-id", trayType: "Compute", wantError: "Tray ID namespace NVSwitch does not match type Compute"},
-		{name: "reject Compute ID as NVSwitch", resourceID: "fm100-rest-of-id", trayType: "NVSwitch", wantError: "Tray ID namespace Compute does not match type NVSwitch"},
-		{name: "reject NVSwitch ID as PowerShelf", resourceID: "sw100-rest-of-id", trayType: "PowerShelf", wantError: "Tray ID namespace NVSwitch does not match type PowerShelf"},
+		{name: "reject NVSwitch ID as Compute", resourceID: "sw100-rest-of-id", trayType: "Compute", wantError: "tray ID namespace NVSwitch does not match type Compute"},
+		{name: "reject Compute ID as NVSwitch", resourceID: "fm100-rest-of-id", trayType: "NVSwitch", wantError: "tray ID namespace Compute does not match type NVSwitch"},
+		{name: "reject NVSwitch ID as PowerShelf", resourceID: "sw100-rest-of-id", trayType: "PowerShelf", wantError: "tray ID namespace NVSwitch does not match type PowerShelf"},
 	}
 
 	for _, test := range tests {

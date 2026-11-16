@@ -17,8 +17,8 @@
 use std::borrow::Cow;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
+use ::rpc::carbide_tls_client::{self, ApiConfig, CarbideClientConfig};
 use ::rpc::forge as rpc;
-use ::rpc::forge_tls_client::{self, ApiConfig, ForgeClientConfig};
 use dhcproto::v6::{Architecture, DhcpOption, Message, MessageType, OptionCode};
 use http::Uri;
 use ipnetwork::IpNetwork;
@@ -282,10 +282,10 @@ impl Machine {
     async fn try_fetch_v6(
         discovery: V6Discovery,
         carbide_api_url: &str,
-        client_config: &ForgeClientConfig,
+        client_config: &CarbideClientConfig,
     ) -> Result<Self, String> {
         let api_config = ApiConfig::new(carbide_api_url, client_config);
-        match forge_tls_client::ForgeTlsClient::retry_build(&api_config).await {
+        match carbide_tls_client::CarbideTlsClient::retry_build(&api_config).await {
             Ok(mut client) => {
                 let request = tonic::Request::new(build_discovery(&discovery));
                 client
@@ -607,8 +607,12 @@ fn fetch_machine(discovery: V6Discovery, machine_ptr_out: *mut *mut Machine) -> 
 
     // Tonic is async, but Kea calls us synchronously from its hook thread.
     let runtime = CarbideDhcpContext::get_tokio_runtime();
-    let forge_client_config = tls::build_forge_client_config();
-    match runtime.block_on(Machine::try_fetch_v6(discovery, url, &forge_client_config)) {
+    let carbide_client_config = tls::build_carbide_client_config();
+    match runtime.block_on(Machine::try_fetch_v6(
+        discovery,
+        url,
+        &carbide_client_config,
+    )) {
         Ok(machine) => {
             // Expiry tombstones protect against stale hook-cache reuse. A fresh
             // API response is authoritative, even if the allocator chooses the

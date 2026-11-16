@@ -81,6 +81,7 @@ pub(crate) async fn run_discovery_loop<I: DiscoveryIteration>(
     collector_transition_notify: Arc<Notify>,
     cancel_token: CancellationToken,
     mut iteration: I,
+    instrumentation: carbide_instrument::Instrumentation,
 ) -> I {
     let mut backoff = ExponentialBackoff::new(&backoff_config);
 
@@ -91,7 +92,10 @@ pub(crate) async fn run_discovery_loop<I: DiscoveryIteration>(
             result = iteration.run_once() => result,
         };
 
-        managed_loop::record_iteration(LoopManager::HealthDiscovery, &result);
+        instrumentation.emit(managed_loop::ManagedLoopIteration::from_result(
+            LoopManager::HealthDiscovery,
+            &result,
+        ));
         let delay = match result {
             Ok(()) => {
                 backoff.reset();
@@ -149,7 +153,10 @@ mod tests {
     /// asserted windows.
     #[tokio::test(start_paused = true)]
     async fn discovery_loop_retries_failures_and_resets_backoff() {
-        let metrics = MetricsCapture::start();
+        let setup =
+            metrics_endpoint::new_metrics_setup("discovery-loop-test", "forge-system", false)
+                .unwrap();
+        let metrics = MetricsCapture::for_registry(&setup.registry);
         let (times_tx, mut times_rx) = tokio::sync::mpsc::unbounded_channel();
         let collector_transition_notify = Arc::new(Notify::new());
 
@@ -169,6 +176,7 @@ mod tests {
                 calls: 0,
                 times: times_tx,
             },
+            setup.instrumentation,
         ));
 
         let mut times = Vec::new();
@@ -230,6 +238,7 @@ mod tests {
                 calls: 0,
                 times: times_tx,
             },
+            carbide_instrument::Instrumentation::global(),
         ));
 
         let first_iteration = times_rx.recv().await.expect("first iteration should run");
@@ -261,6 +270,7 @@ mod tests {
                 calls: 0,
                 times: times_tx,
             },
+            carbide_instrument::Instrumentation::global(),
         ));
 
         times_rx.recv().await.expect("first iteration runs");

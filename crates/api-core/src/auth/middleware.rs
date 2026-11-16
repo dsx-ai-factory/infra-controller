@@ -17,6 +17,7 @@
 use std::sync::Arc;
 
 use carbide_authn::middleware::{ConnectionAttributes, Principal};
+use carbide_instrument::Instrumentation;
 use futures_util::future::BoxFuture;
 use hyper::{Request, Response, StatusCode};
 use tonic::service::AxumBody;
@@ -159,7 +160,7 @@ where
                         .extensions_mut()
                         .get_mut::<AuthContext>()
                         .ok_or_else(|| {
-                            carbide_instrument::emit(AuthContextMissing {
+                            authorizer.instrumentation.emit(AuthContextMissing {
                                 authorizer: Authorizer::Casbin,
                                 method: method_name.clone(),
                                 client_address: client_address(peer_address),
@@ -186,7 +187,7 @@ where
                             true
                         }
                         Err(e) => {
-                            carbide_instrument::emit(AuthorizationDenied {
+                            authorizer.instrumentation.emit(AuthorizationDenied {
                                 principal_class: PrincipalClass::classify(principals),
                                 authorizer: Authorizer::Casbin,
                                 method: method_name,
@@ -266,14 +267,16 @@ fn empty_response_with_status(status: StatusCode) -> Response<AxumBody> {
         .unwrap()
 }
 
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub(crate) struct InternalRBACHandler {
+    instrumentation: Instrumentation,
     allow_machineatron_scout_stream: bool,
 }
 
 impl InternalRBACHandler {
-    pub(crate) fn new(auth_config: Option<&AuthConfig>) -> Self {
+    pub(crate) fn new(auth_config: Option<&AuthConfig>, instrumentation: Instrumentation) -> Self {
         Self {
+            instrumentation,
             allow_machineatron_scout_stream: auth_config
                 .is_some_and(|config| config.allow_machineatron_scout_stream),
         }
@@ -289,6 +292,7 @@ where
 
     fn authorize(&mut self, request: Request<B>) -> Self::Future {
         let allow_machineatron_scout_stream = self.allow_machineatron_scout_stream;
+        let instrumentation = self.instrumentation.clone();
         Box::pin(async move {
             let request_permitted = match RequestClass::from(&request) {
                 // Forge-owned endpoints must go through access control.
@@ -296,7 +300,7 @@ where
                     let request_peer_address = peer_address(&request);
                     let req_auth_context =
                         request.extensions().get::<AuthContext>().ok_or_else(|| {
-                            carbide_instrument::emit(AuthContextMissing {
+                            instrumentation.emit(AuthContextMissing {
                                 authorizer: Authorizer::InternalRbac,
                                 method: method_name.clone(),
                                 client_address: client_address(request_peer_address),
@@ -316,7 +320,7 @@ where
                             }));
 
                     if !allowed {
-                        carbide_instrument::emit(AuthorizationDenied {
+                        instrumentation.emit(AuthorizationDenied {
                             principal_class: PrincipalClass::classify(principals),
                             authorizer: Authorizer::InternalRbac,
                             method: method_name,
@@ -428,7 +432,9 @@ mod tests {
     fn observe_missing_auth_context(
         handler: MissingAuthContextHandler,
     ) -> MissingAuthContextObservation {
-        let metrics = MetricsCapture::start();
+        let test_meter = carbide_utils::test_support::test_meter::TestMeter::default();
+        let instrumentation = Instrumentation::new(test_meter.meter());
+        let metrics = MetricsCapture::for_registry(test_meter.registry());
         let request = forge_request_without_auth_context(
             ::rpc::service_path!("PowerControl"),
             "203.0.113.15:41000",
@@ -438,12 +444,14 @@ mod tests {
         let logs = capture_logs(|| {
             let result = match handler {
                 MissingAuthContextHandler::Casbin => {
-                    let mut handler =
-                        CasbinHandler::new(Arc::new(CasbinAuthorizer::new(Arc::new(DenyAll))));
+                    let mut handler = CasbinHandler::new(Arc::new(CasbinAuthorizer::new(
+                        Arc::new(DenyAll),
+                        instrumentation.clone(),
+                    )));
                     handler.authorize(request).now_or_never()
                 }
                 MissingAuthContextHandler::InternalRbac => {
-                    let mut handler = InternalRBACHandler::default();
+                    let mut handler = InternalRBACHandler::new(None, instrumentation.clone());
                     handler.authorize(request).now_or_never()
                 }
             }
@@ -523,8 +531,13 @@ mod tests {
     /// under the caller's principal class, and the caller gets 403.
     #[test]
     fn denied_forge_call_logs_and_counts() {
-        let metrics = MetricsCapture::start();
-        let mut handler = CasbinHandler::new(Arc::new(CasbinAuthorizer::new(Arc::new(DenyAll))));
+        let test_meter = carbide_utils::test_support::test_meter::TestMeter::default();
+        let instrumentation = Instrumentation::new(test_meter.meter());
+        let metrics = MetricsCapture::for_registry(test_meter.registry());
+        let mut handler = CasbinHandler::new(Arc::new(CasbinAuthorizer::new(
+            Arc::new(DenyAll),
+            instrumentation,
+        )));
 
         let logs = capture_logs(|| {
             let request = forge_request(
@@ -572,8 +585,8 @@ mod tests {
 
     #[test]
     fn machineatron_scout_stream_requires_explicit_devspace_opt_in() {
-        // Denied cases emit the same global counter asserted by the denial tests.
-        let _metrics = MetricsCapture::start();
+        let test_meter = carbide_utils::test_support::test_meter::TestMeter::default();
+        let instrumentation = Instrumentation::new(test_meter.meter());
         let values: serde_yaml::Value = serde_yaml::from_str(include_str!(
             "../../../../dev/deployment/devspace/values.base.yaml"
         ))
@@ -655,7 +668,8 @@ mod tests {
             ],
             |(config, uri, principal)| {
                 let config = config.map(|text| toml::from_str::<AuthConfig>(text).unwrap());
-                let mut handler = InternalRBACHandler::new(config.as_ref());
+                let mut handler =
+                    InternalRBACHandler::new(config.as_ref(), instrumentation.clone());
                 let request = forge_request(uri, vec![principal], "198.51.100.4:40000");
                 match handler.authorize(request).now_or_never().unwrap() {
                     Ok(_) => true,
@@ -672,8 +686,10 @@ mod tests {
     /// distinguished by the authorizer label, and the caller gets 403.
     #[test]
     fn denied_internal_rbac_call_logs_and_counts() {
-        let metrics = MetricsCapture::start();
-        let mut handler = InternalRBACHandler::default();
+        let test_meter = carbide_utils::test_support::test_meter::TestMeter::default();
+        let instrumentation = Instrumentation::new(test_meter.meter());
+        let metrics = MetricsCapture::for_registry(test_meter.registry());
+        let mut handler = InternalRBACHandler::new(None, instrumentation);
 
         let logs = capture_logs(|| {
             // MachineSetup permits only the admin CLI, never a bare trusted

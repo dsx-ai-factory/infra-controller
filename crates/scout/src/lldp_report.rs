@@ -19,8 +19,8 @@
 
 use std::time::Duration;
 
+use ::rpc::carbide_tls_client::{ApiConfig, CarbideClientConfig, CarbideTlsClient};
 use ::rpc::forge::{LldpNeighborReport, LldpReport, LldpReportResult};
-use ::rpc::forge_tls_client::{ApiConfig, ForgeClientConfig, ForgeTlsClient};
 use carbide_host_support::lldp_collector::{LldpCollectorResult, LldpNeighbor};
 use carbide_host_support::lldp_snapshot_cache::{LldpSnapshotCache, result_of};
 use carbide_uuid::machine::MachineId;
@@ -55,7 +55,7 @@ pub(crate) enum ReportOutcome {
 pub(crate) struct LldpReporter {
     machine_id: MachineId,
     api: String,
-    client_config: ForgeClientConfig,
+    client_config: CarbideClientConfig,
     cache: LldpSnapshotCache,
 }
 
@@ -63,7 +63,7 @@ impl LldpReporter {
     pub(crate) fn new(
         machine_id: MachineId,
         api: String,
-        client_config: ForgeClientConfig,
+        client_config: CarbideClientConfig,
     ) -> Self {
         Self {
             machine_id,
@@ -147,10 +147,10 @@ pub(crate) async fn report_lldp_neighbors(
 
 async fn send_report(
     api: &str,
-    client_config: &ForgeClientConfig,
+    client_config: &CarbideClientConfig,
     report: LldpNeighborReport,
 ) -> Result<(), LldpReportError> {
-    let mut client = ForgeTlsClient::retry_build(&ApiConfig::new(api, client_config))
+    let mut client = CarbideTlsClient::retry_build(&ApiConfig::new(api, client_config))
         .await
         .map_err(|e| LldpReportError::Connect(e.to_string()))?;
 

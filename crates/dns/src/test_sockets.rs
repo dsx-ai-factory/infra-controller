@@ -32,7 +32,7 @@ use hyper::service::service_fn;
 use hyper::{Request, Response, header};
 use hyper_util::rt::{TokioExecutor, TokioIo};
 use prost::Message as _;
-use rpc::forge_tls_client::{ForgeClientConfig, ForgeTlsClient};
+use rpc::carbide_tls_client::{CarbideClientConfig, CarbideTlsClient};
 use rpc::protos::dns::{
     DnsLookupOutcome, DnsResourceRecord, DnsResourceRecordLookupRequest,
     DnsResourceRecordLookupResponse,
@@ -51,8 +51,6 @@ const TEST_TIMEOUT: Duration = Duration::from_secs(10);
 
 #[tokio::test]
 async fn aaaa_query_over_ipv6_udp_returns_only_ipv6_answers() {
-    // The real handler emits metrics, so share the exact-counter tests' lock.
-    let _metrics_window = MetricsCapture::start();
     timeout(TEST_TIMEOUT, async {
         let name: Name = "host.example.com.".parse().unwrap();
         let records = [
@@ -106,7 +104,6 @@ async fn aaaa_query_over_ipv6_udp_returns_only_ipv6_answers() {
 
 #[tokio::test]
 async fn ipv6_ptr_query_over_tcp_returns_the_target_name() {
-    let _metrics_window = MetricsCapture::start();
     timeout(TEST_TIMEOUT, async {
         let name: Name =
             "2.4.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.8.b.d.0.1.0.0.2.ip6.arpa."
@@ -167,7 +164,6 @@ async fn negative_answers_count_one_miss_then_cached_hits() {
         (DnsLookupOutcome::NoData, ResponseCode::NoError, 1.0),
         (DnsLookupOutcome::Records, ResponseCode::NoError, 0.0),
     ] {
-        let metrics = MetricsCapture::start();
         timeout(TEST_TIMEOUT, async {
             let name: Name = "host.example.com.".parse().unwrap();
             let negative = outcome != DnsLookupOutcome::Records;
@@ -194,6 +190,7 @@ async fn negative_answers_count_one_miss_then_cached_hits() {
                 }),
             };
             let server = TestDnsServer::start_with_reply(reply).await;
+            let metrics = MetricsCapture::for_registry(&server.metrics_setup.registry);
             let packet = query(name, RecordType::A).to_vec().unwrap();
             let client = UdpSocket::bind("[::1]:0").await.unwrap();
             client.connect(server.udp_address).await.unwrap();
@@ -247,6 +244,7 @@ fn assert_response(response: &Message, request: &Message, answers: &[Record]) {
 }
 
 struct TestDnsServer {
+    metrics_setup: metrics_endpoint::MetricsSetup,
     server: hickory_server::Server<DnsServer>,
     api: MockLookupApi,
     udp_address: SocketAddr,
@@ -266,18 +264,27 @@ impl TestDnsServer {
 
     async fn start_with_reply(reply: DnsResourceRecordLookupResponse) -> Self {
         let api = MockLookupApi::start(reply).await;
-        let client = ForgeTlsClient::new(&ForgeClientConfig::default())
+        let client = CarbideTlsClient::new(&CarbideClientConfig::default())
             .build(format!("http://{}", api.address))
             .await
             .expect("production Forge client builds for the mock API");
-        let meter = opentelemetry::global::meter("dns-socket-tests");
-        let server = DnsServer::new(Mutex::new(client), &meter, &Config::default());
+        let metrics_setup =
+            metrics_endpoint::new_metrics_setup("dns-socket-tests", "carbide", false).unwrap();
+        let instrumentation =
+            carbide_instrument::Instrumentation::from_meter_provider(&metrics_setup.meter_provider);
+        let server = DnsServer::new(
+            Mutex::new(client),
+            &metrics_setup.meter,
+            instrumentation,
+            &Config::default(),
+        );
 
         // Retain both sockets until registration; releasing a reserved port
         // would let another concurrent test bind it first.
         let udp_socket = UdpSocket::bind("[::1]:0").await.unwrap();
         let tcp_socket = TcpListener::bind("[::1]:0").await.unwrap();
         Self {
+            metrics_setup,
             udp_address: udp_socket.local_addr().unwrap(),
             tcp_address: tcp_socket.local_addr().unwrap(),
             server: server.register_sockets(udp_socket, tcp_socket),

@@ -16,10 +16,16 @@
  */
 use std::net::IpAddr;
 
-use carbide_uuid::machine::HostMachineId;
+use carbide_uuid::machine::{
+    HostMachineId, MachineIdSubtype, PredictedHostMachineId, StableHostMachineId,
+};
 use db::DatabaseError;
 use db::db_read::DbReader;
+use mac_address::MacAddress;
 use model::site_explorer::ExploredManagedHost;
+use sqlx::PgConnection;
+
+use crate::errors::SiteExplorerResult;
 
 /// ManagedHost wraps an ExploredManagedHost along with a machine id.
 /// This helper structure is used by the create_managed_host to create a managed host
@@ -62,4 +68,88 @@ pub async fn is_endpoint_in_managed_host(
     let machine_id =
         db::machine_topology::find_machine_id_by_bmc_ip(txn, &bmc_ip_address.to_string()).await?;
     Ok(machine_id.is_some())
+}
+
+/// Host identity found through the zero-DPU host's interface inventory.
+pub(super) enum ZeroDpuHostLookup {
+    NotFound,
+    Predicted(PredictedHostMachineId),
+    Stable(StableHostMachineId),
+    Conflict,
+}
+
+/// Resolves host identity from owned interfaces or pending predictions and rejects
+/// persisted DPU attachments: a report can temporarily omit its DPU inventory.
+/// Predicted interfaces must belong to the explored BMC before they can be refreshed.
+pub(super) async fn find_zero_dpu_host(
+    txn: &mut PgConnection,
+    bmc_mac_address: MacAddress,
+    mac_addresses: &[MacAddress],
+) -> SiteExplorerResult<ZeroDpuHostLookup> {
+    // Interface ownership survives migration from a predicted to a stable ID.
+    let endpoint_machine_id = db::machine_topology::find_machine_id_by_bmc_mac::<HostMachineId>(
+        &mut *txn,
+        bmc_mac_address,
+    )
+    .await?;
+
+    let machine_ids_by_mac =
+        db::machine::find_machine_ids_by_mac_addresses(&mut *txn, mac_addresses).await?;
+    let predicted_machine_ids_by_mac =
+        db::predicted_machine_interface::find_machine_ids_by_mac_addresses(
+            &mut *txn,
+            mac_addresses,
+        )
+        .await?;
+    let mut host = ZeroDpuHostLookup::NotFound;
+    for mac_address in mac_addresses {
+        let Some(machine_id) = machine_ids_by_mac
+            .get(mac_address)
+            .or_else(|| predicted_machine_ids_by_mac.get(mac_address))
+            .copied()
+        else {
+            continue;
+        };
+
+        match machine_id.machine_id_subtype() {
+            MachineIdSubtype::StableHost(machine_id) => {
+                host = ZeroDpuHostLookup::Stable(machine_id);
+                break;
+            }
+            MachineIdSubtype::PredictedHost(predicted_machine_id) => {
+                if endpoint_machine_id.as_ref() != Some(predicted_machine_id.as_host_machine_id()) {
+                    tracing::warn!(
+                        %mac_address,
+                        predicted_machine_id = %machine_id,
+                        ?endpoint_machine_id,
+                        %bmc_mac_address,
+                        "Could not confirm that the predicted interface belongs to the explored BMC; skipping refresh",
+                    );
+                    return Ok(ZeroDpuHostLookup::Conflict);
+                }
+                host = ZeroDpuHostLookup::Predicted(predicted_machine_id);
+            }
+            MachineIdSubtype::Dpu(_) => {
+                return Ok(ZeroDpuHostLookup::Conflict);
+            }
+        }
+    }
+
+    let machine_id: HostMachineId = match &host {
+        ZeroDpuHostLookup::Predicted(machine_id) => (*machine_id).into(),
+        ZeroDpuHostLookup::Stable(machine_id) => (*machine_id).into(),
+        ZeroDpuHostLookup::NotFound | ZeroDpuHostLookup::Conflict => return Ok(host),
+    };
+    let interfaces = db::machine_interface::find_by_machine_ids(txn, &[machine_id]).await?;
+    Ok(
+        if interfaces
+            .values()
+            .flatten()
+            .any(|interface| interface.attached_dpu_machine_id.is_some())
+        {
+            ZeroDpuHostLookup::Conflict
+        } else {
+            host
+        },
+    )
 }

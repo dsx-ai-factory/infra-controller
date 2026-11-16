@@ -328,6 +328,7 @@ pub(crate) async fn start_svpc_handler(
         api_service.runtime_config.mqtt_broker_port().unwrap(),
         &client_id,
         Some(options),
+        api_service.instrumentation.clone(),
     )
     .await?;
 

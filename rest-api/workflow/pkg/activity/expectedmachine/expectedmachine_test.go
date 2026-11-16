@@ -1483,6 +1483,9 @@ func TestManageExpectedMachine_UpdateExpectedMachinesInDB(t *testing.T) {
 			FixedMask: cutil.GetPtr("255.255.255.0"), FixedGateway: cutil.GetPtr("192.0.2.1"), Primary: cutil.GetPtr(true),
 			NetworkSegmentType: cutil.GetPtr(cdbm.ExpectedInterfaceNetworkSegmentTypeHostInband),
 			Role:               cutil.GetPtr(cdbm.ExpectedInterfaceRoleHost), IPAllocation: cutil.GetPtr(cdbm.ExpectedInterfaceIPAllocationFixed),
+		}, {
+			MacAddress: cutil.GetPtr("02:00:00:00:00:20"), FixedIP: cutil.GetPtr("198.51.100.20"),
+			Role: cutil.GetPtr(cdbm.ExpectedInterfaceRoleDpuLoopback), IPAllocation: cutil.GetPtr(cdbm.ExpectedInterfaceIPAllocationFixed),
 		}}
 		changed := []cdbm.ExpectedMachineInterface{{
 			MacAddress: cutil.GetPtr("02:00:00:00:00:09"), NicType: cutil.GetPtr("CX9"), FixedIP: cutil.GetPtr("192.0.2.10"),

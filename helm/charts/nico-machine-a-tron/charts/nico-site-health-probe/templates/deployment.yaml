@@ -6,10 +6,12 @@
 {{- $restReaders := include "nico-site-health-probe.restReaders" . }}
 {{- $stateSecrets := list }}
 {{- if $restReaders }}
-{{- range $who := list "provider" }}
-{{- $auth := (index $.Values.state.rest $who).auth }}
-{{- if and $auth.existingSecret.name (not $auth.tokenFile) }}
+{{- range $who := list "provider" "tenant" }}
+{{- with index $.Values.state.rest $who }}
+{{- $auth := .auth }}
+{{- if and (or (eq $who "provider") .org) $auth.existingSecret.name (not $auth.tokenFile) }}
 {{- $stateSecrets = append $stateSecrets (dict "name" (printf "state-%s" $who) "secret" $auth.existingSecret.name) }}
+{{- end }}
 {{- end }}
 {{- end }}
 {{- end }}

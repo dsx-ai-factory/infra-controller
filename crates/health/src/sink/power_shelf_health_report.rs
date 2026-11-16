@@ -17,7 +17,7 @@
 
 use std::sync::Arc;
 
-use carbide_instrument::{Outcome, emit};
+use carbide_instrument::{Instrumentation, Outcome};
 use carbide_uuid::power_shelf::PowerShelfId;
 
 use super::dedup_queue::DedupQueue;
@@ -47,11 +47,13 @@ pub struct PowerShelfHealthReportSink {
 impl PowerShelfHealthReportSink {
     /// Creates the sink and its submission workers, registering them with
     /// `sink_workers` for the shutdown flush.
+    /// Retain the instrumentation provider until the workers stop.
     ///
     /// Returns an error when called without an active Tokio runtime.
     pub(crate) fn new(
         config: &PowerShelfHealthReportSinkConfig,
         sink_workers: &mut SinkWorkers,
+        instrumentation: Instrumentation,
     ) -> Result<Self, HealthError> {
         let handle = tokio::runtime::Handle::try_current().map_err(|error| {
             HealthError::GenericError(format!(
@@ -74,11 +76,20 @@ impl PowerShelfHealthReportSink {
         let handles = (0..config.workers)
             .map(|worker_id| {
                 let client = Arc::clone(&client);
+                let instrumentation = instrumentation.clone();
                 handle.spawn(run_report_worker(
                     Arc::clone(&queue),
                     counts.clone(),
                     sink_workers.flush_token(),
-                    move |key, report| submit_report(Arc::clone(&client), worker_id, key, report),
+                    move |key, report| {
+                        submit_report(
+                            Arc::clone(&client),
+                            instrumentation.clone(),
+                            worker_id,
+                            key,
+                            report,
+                        )
+                    },
                 ))
             })
             .collect();
@@ -95,6 +106,7 @@ impl PowerShelfHealthReportSink {
 
 async fn submit_report(
     client: Arc<ApiClientWrapper>,
+    instrumentation: Instrumentation,
     worker_id: usize,
     key: PowerShelfHealthReportKey,
     report: Arc<HealthReport>,
@@ -107,7 +119,7 @@ async fn submit_report(
 
             let delivered = result.is_ok();
 
-            emit(HealthReportSubmitted {
+            instrumentation.emit(HealthReportSubmitted {
                 target: HealthReportTarget::PowerShelf,
                 outcome: Outcome::from(&result),
                 id: key.id.to_string(),

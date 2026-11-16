@@ -311,7 +311,7 @@ impl MetricsEmitter for MachineMetricsEmitter {
                                 &[
                                     attrs,
                                     &[
-                                        KeyValue::new("failure", failure.clone()),
+                                        KeyValue::new("failure", failure),
                                         KeyValue::new("probe_id", probe.clone()),
                                         KeyValue::new(
                                             "probe_target",

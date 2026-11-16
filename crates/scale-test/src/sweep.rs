@@ -142,6 +142,8 @@ mod tests {
                 read_at: at,
                 sweep_age_seconds: age,
                 sweep_interval_seconds: interval,
+                last_attempt_succeeded: None,
+                last_attempt_error: None,
             },
         }
     }

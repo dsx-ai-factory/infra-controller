@@ -356,9 +356,7 @@ func run(ctx context.Context) error {
 		reg.MustRegister(collectors.NewGoCollector())
 
 		// Register core metrics
-		cm := cwm.NewCoreMetrics(reg, mconfig.Namespace)
-		// TODO: Set version here when available
-		cm.Info.With(prometheus.Labels{"version": "unknown", "namespace": tcfg.Namespace}).Set(1)
+		cwm.NewCoreMetrics(reg, mconfig.Namespace, tcfg.Namespace)
 
 		// Published by the Site health monitor cron, which runs on the Cloud queue.
 		siteHealthMetrics = cwm.NewSiteHealthMetrics(reg, mconfig.Namespace)

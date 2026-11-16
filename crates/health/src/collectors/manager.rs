@@ -17,10 +17,10 @@
 
 //! Redfish `Manager` status collection.
 //!
-//! A power shelf's management controller (PMC) is its Redfish `Manager`. This
-//! collector publishes the manager's status, power state, firmware version,
-//! and last reset time so the analyzer can judge controller availability
-//! separately from BMC reachability.
+//! A power shelf's management controller (PMC) is one use of a Redfish
+//! `Manager`. This collector publishes each manager's status, power state,
+//! firmware version, and last reset time. It runs for power shelves by default
+//! and for generic Redfish endpoints when resource-status processing is enabled.
 
 use std::borrow::Cow;
 use std::sync::Arc;
@@ -34,12 +34,16 @@ use crate::HealthError;
 use crate::collectors::{IterationResult, PeriodicCollector};
 use crate::endpoint::BmcEndpoint;
 use crate::metrics::MetricLabel;
-use crate::sink::{CollectorEvent, DataSink, EventContext, MetricSample};
+use crate::sink::{
+    CollectorEvent, DataSink, EventContext, MetricSample, ResourceStatusObservation,
+};
 
 /// Configuration for the manager collector.
 pub struct ManagerCollectorConfig {
     /// Destination for emitted samples. `None` polls the BMC but publishes nothing.
     pub data_sink: Option<Arc<dyn DataSink>>,
+    /// Emit source observations for the resource-status processor.
+    pub emit_resource_status: bool,
 }
 
 /// Manager status collector for a single BMC endpoint.
@@ -54,6 +58,7 @@ pub struct ManagerCollector<B: Bmc> {
     bmc: Arc<B>,
     event_context: EventContext,
     data_sink: Option<Arc<dyn DataSink>>,
+    emit_resource_status: bool,
 }
 
 impl<B> PeriodicCollector<B> for ManagerCollector<B>
@@ -72,6 +77,7 @@ where
             bmc,
             event_context: EventContext::from_endpoint(endpoint.as_ref(), "manager_collector"),
             data_sink: config.data_sink,
+            emit_resource_status: config.emit_resource_status,
         })
     }
 
@@ -84,7 +90,13 @@ where
 
         self.emit_event(CollectorEvent::MetricCollectionStart);
         for manager in &managers {
-            for sample in manager_metrics(&manager.raw(), &manager.raw().odata_id.to_string()) {
+            let raw = manager.raw();
+            if self.emit_resource_status {
+                self.emit_event(CollectorEvent::ResourceStatusObservation(Box::new(
+                    ResourceStatusObservation::Manager(Arc::clone(&raw)),
+                )));
+            }
+            for sample in manager_metrics(&raw, &raw.odata_id.to_string()) {
                 self.emit_event(CollectorEvent::Metric(Box::new(sample)));
             }
         }

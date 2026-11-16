@@ -25,7 +25,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use carbide_instrument::emit;
+use carbide_instrument::Instrumentation;
 use rumqttc::{AsyncClient, Event, EventLoop, MqttOptions, Packet, QoS};
 use tokio::sync::{Mutex, RwLock, Semaphore, mpsc};
 use tracing::{debug, error, info, warn};
@@ -50,6 +50,7 @@ const DEFAULT_CLIENT_QUEUE_SIZE: usize = 5000;
 // MqtteaClient provides client-scoped MQTT functionality with embedded registry.
 // Each client instance has its own registry for complete isolation between clients.
 pub struct MqtteaClient {
+    instrumentation: Instrumentation,
     // client is the underlying MQTT client for actual network
     // communication.
     client: Arc<AsyncClient>,
@@ -95,17 +96,16 @@ pub struct MqtteaClient {
 }
 
 impl MqtteaClient {
-    // new creates a new MQTT client with empty client-scoped registry.
-    // Each client gets its own independent registry for complete isolation.
-    // Call connect() after registering handlers to begin processing messages.
-    //
-    // This is an async function because credentials may need to be fetched
-    // from a credentials provider (e.g., OAuth2 token provider).
+    /// Creates a client with its own message registry and the supplied Event destination.
+    /// Retain the instrumentation provider until the client and its tasks stop.
+    /// Register handlers before calling `connect()` to begin processing messages.
+    /// Construction may fetch credentials from a provider, such as OAuth2.
     pub async fn new(
         broker_host: &str,
         broker_port: u16,
         client_id: &str,
         client_options: Option<ClientOptions>,
+        instrumentation: Instrumentation,
     ) -> Result<Arc<Self>, MqtteaClientError> {
         let mqtt_options =
             build_mqtt_options(client_id, broker_host, broker_port, client_options.as_ref())
@@ -142,6 +142,7 @@ impl MqtteaClient {
         info!(%broker_host, broker_port, "Created MQTT client");
 
         Ok(Arc::new(Self {
+            instrumentation,
             client: Arc::new(client),
             client_id: client_id.into(),
             event_loop: Arc::new(Mutex::new(Some(event_loop))),
@@ -248,7 +249,9 @@ impl MqtteaClient {
                             let should_replay =
                                 should_replay_subscriptions(has_connected, connack.session_present);
                             if has_connected {
-                                emit(MqttReconnected {});
+                                client_for_reconnect
+                                    .instrumentation
+                                    .emit(MqttReconnected {});
                             }
                             has_connected = true;
                             connection_state.set_connected(true);
@@ -406,7 +409,7 @@ impl MqtteaClient {
                     let _permit = match semaphore_internal.acquire().await {
                         Ok(permit) => permit,
                         Err(e) => {
-                            emit(HandlerDispatchDropped {
+                            client.instrumentation.emit(HandlerDispatchDropped {
                                 message_type: std::any::type_name::<T>(),
                                 error: e.to_string(),
                             });

@@ -1149,6 +1149,73 @@ mod tests {
         assert!(templates.len() >= 11);
     }
 
+    /// Every path that hands the machine back to firmware must close the
+    /// network interface first. Left open, the next loader (shim -> GRUB ->
+    /// kernel) can hang before the kernel's first message on some provisioning
+    /// NICs; `ifclose` before `exit` boots cleanly.
+    ///
+    /// A template's plain `exit` ends the chained script successfully and the
+    /// embedded menu then returns to firmware, so it must be preceded by
+    /// `ifclose`. A template's `exit 1` fails the chain and the menu retries
+    /// instead, so it is not a firmware exit. In the embedded menu every `exit`
+    /// returns to firmware, inline ones included.
+    #[test]
+    fn templates_close_the_interface_before_exiting_to_firmware() {
+        fn exit_command(line: &str) -> bool {
+            line.split("&&")
+                .flat_map(|part| part.split("||"))
+                .map(str::trim)
+                .any(|cmd| {
+                    cmd == "exit"
+                        || cmd
+                            .strip_prefix("exit ")
+                            .is_some_and(|code| code.trim().parse::<u8>().is_ok())
+                })
+        }
+        fn preceded_by_ifclose(lines: &[&str], i: usize) -> bool {
+            i > 0 && lines[i - 1].starts_with("ifclose")
+        }
+
+        let renderer = DefaultIpxeScriptRenderer::new();
+        for name in renderer.list_templates() {
+            // whoami's `exit` only ends the chained script; the menu continues
+            // and may still need the network.
+            if name == "whoami" {
+                continue;
+            }
+            let script = renderer
+                .get_template_by_name(&name)
+                .unwrap()
+                .template
+                .clone();
+            let lines: Vec<&str> = script.lines().map(str::trim).collect();
+            for (i, line) in lines.iter().enumerate() {
+                if *line == "exit" || *line == "exit ||" {
+                    assert!(
+                        preceded_by_ifclose(&lines, i),
+                        "{name}: `{line}` at line {} is not preceded by ifclose",
+                        i + 1
+                    );
+                }
+            }
+        }
+
+        let lines: Vec<&str> = STATIC_IPXE_MENU_TEMPLATE.lines().map(str::trim).collect();
+        let mut exits = 0;
+        for (i, line) in lines.iter().enumerate() {
+            if line.starts_with('#') || line.starts_with("echo") || !exit_command(line) {
+                continue;
+            }
+            exits += 1;
+            assert!(
+                (*line == "exit" || line.starts_with("exit ")) && preceded_by_ifclose(&lines, i),
+                "embed.ipxe: `{line}` at line {} returns to firmware without ifclose on the line before",
+                i + 1
+            );
+        }
+        assert!(exits > 0, "embed.ipxe has no firmware exit to check");
+    }
+
     /// The host discovery templates must hand Scout its cloud-init datasource,
     /// and the DPU template must not.
     ///
@@ -1265,7 +1332,7 @@ mod tests {
             }
             "IPv6 prefers the leased address over SLAAC" {
                 ":configure_ipv6\n\
-                 ifconf -c ipv6 || exit 1\n\
+                 ifconf -c ipv6 || goto exit_to_firmware\n\
                  isset ${netX.dhcpv6/ip6} || goto configure_slaac\n\
                  set http-source6 ${netX.dhcpv6/ip6}%${netX/ifname}\n\
                  goto ipv6_ready" => true,
@@ -1285,9 +1352,12 @@ mod tests {
             "missing prerequisites diagnose and return to firmware" {
                 ":missing_ipv6_address\n\
                  echo NICo IPv6 boot requires a DHCPv6 lease or SLAAC address.\n\
-                 exit 1" => true,
+                 goto exit_to_firmware" => true,
                 ":missing_boot_uri\n\
                  echo NICo IPv6 boot requires an inherited HTTP boot URI.\n\
+                 goto exit_to_firmware" => true,
+                ":exit_to_firmware\n\
+                 ifclose ||\n\
                  exit 1" => true,
             }
         );
@@ -1301,14 +1371,14 @@ mod tests {
             ":nico_ready\n\
              imgfree nico-boot ||\n\
              set nico-retry-provisioning 0\n\
-             time chain --name nico-boot ${nico-pxe-base}/api/v0/pxe/boot?buildarch=${buildarch}&platform=${platform}&manufacturer=${manufacturer}&product=${product}&serial=${serial} && exit 1 || goto retry_nico_boot"
+             time chain --name nico-boot ${nico-pxe-base}/api/v0/pxe/boot?buildarch=${buildarch}&platform=${platform}&manufacturer=${manufacturer}&product=${product}&serial=${serial} && goto exit_to_firmware || goto retry_nico_boot"
         ));
         assert!(STATIC_IPXE_MENU_TEMPLATE.contains(
             ":retry_nico_boot\n\
              iseq ${nico-retry-provisioning} 1 || goto error_handler\n\
              imgstat nico-boot || goto error_handler\n\
              prompt --key p --timeout 30000 Hit the ${bold}p${boldoff} key to open NICo menu; retrying in 30 seconds... && goto nico_menu ||\n\
-             time imgexec nico-boot && exit 1 || goto retry_nico_boot"
+             time imgexec nico-boot && goto exit_to_firmware || goto retry_nico_boot"
         ));
         assert_eq!(
             STATIC_IPXE_MENU_TEMPLATE

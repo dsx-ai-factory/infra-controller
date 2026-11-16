@@ -39,7 +39,7 @@ func newCertManager(t *testing.T) *certmanager.Client {
 	caPath := filepath.Join(t.TempDir(), "ca.pem")
 	caPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: srv.Certificate().Raw})
 	require.NoError(t, os.WriteFile(caPath, caPEM, 0600))
-	client, err := certmanager.NewClient(srv.URL, caPath)
+	client, err := certmanager.NewClient(t.Context(), certmanager.Options{URL: srv.URL, CAPath: caPath})
 	require.NoError(t, err)
 	return client
 }

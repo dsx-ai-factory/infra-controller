@@ -22,9 +22,9 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
 
 use bmc_mock::mac_address_pool::MacAddressPool;
+use carbide_tls::client_config::get_root_ca_path;
 use carbide_uuid::machine::MachineId;
 use eyre::WrapErr;
-use forge_tls::client_config::get_root_ca_path;
 use futures::future::try_join_all;
 use machine_a_tron::{
     BmcMockRegistry, ControlState, DeviceHandle, DeviceStatusConfig, DhcpClient, DpuMachineHandle,
@@ -33,22 +33,22 @@ use machine_a_tron::{
 // Expose the service and its router together so callers can retain one service
 // while mounting its wire API and observing that same instance.
 pub use rms_mock::{RmsMock, router as rms_service_router};
+use rpc::carbide_tls_client::{ApiConfig, CarbideClientConfig, CarbideClientT, RetryConfig};
 use rpc::forge::MachinesByIdsRequest;
-use rpc::forge_tls_client::{ApiConfig, ForgeClientConfig, ForgeClientT, RetryConfig};
-use rpc::protos::forge_api_client::ForgeApiClient;
+use rpc::protos::carbide_api_client::CarbideApiClient;
 use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
 
 /// Emulate a load balancer while retaining each server's connection.
 #[derive(Debug)]
 struct RoundRobinConnectionProvider {
-    clients: Vec<ForgeApiClient>,
+    clients: Vec<CarbideApiClient>,
     next_client: AtomicUsize,
 }
 
 #[async_trait::async_trait]
-impl tonic_client_wrapper::ConnectionProvider<ForgeClientT> for RoundRobinConnectionProvider {
-    async fn provide_connection(&self) -> Result<ForgeClientT, tonic::Status> {
+impl tonic_client_wrapper::ConnectionProvider<CarbideClientT> for RoundRobinConnectionProvider {
+    async fn provide_connection(&self) -> Result<CarbideClientT, tonic::Status> {
         let index = self.next_client.fetch_add(1, Ordering::Relaxed) % self.clients.len();
         let client = &self.clients[index];
         tracing::debug!(url = client.url(), "Selecting MAT test API server");
@@ -181,13 +181,13 @@ pub async fn run_local(
     app_config.validate()?;
 
     let forge_root_ca_path = get_root_ca_path(None, None); // Will get it from the local repo
-    let mut forge_client_config = ForgeClientConfig::new(forge_root_ca_path.clone(), None);
-    forge_client_config.suppress_insecure_tls_warning = true;
+    let mut carbide_client_config = CarbideClientConfig::new(forge_root_ca_path.clone(), None);
+    carbide_client_config.suppress_insecure_tls_warning = true;
 
     let api_config = ApiConfig::new_with_multiple_urls(
         &app_config.carbide_api_url,
         &additional_api_urls,
-        &forge_client_config,
+        &carbide_client_config,
         RetryConfig {
             retries: 10,
             interval: Duration::from_secs(1),
@@ -195,15 +195,15 @@ pub async fn run_local(
     );
 
     // Switch servers on each RPC without rebuilding their TLS connections.
-    let forge_api_client = if additional_api_urls.is_empty() {
-        ForgeApiClient::new(&api_config)
+    let carbide_api_client = if additional_api_urls.is_empty() {
+        CarbideApiClient::new(&api_config)
     } else {
-        ForgeApiClient::build(RoundRobinConnectionProvider {
+        CarbideApiClient::build(RoundRobinConnectionProvider {
             clients: std::iter::once(&app_config.carbide_api_url)
                 .chain(additional_api_urls.iter())
                 .map(|url| {
-                    ForgeApiClient::new(
-                        &ApiConfig::new(url, &forge_client_config)
+                    CarbideApiClient::new(
+                        &ApiConfig::new(url, &carbide_client_config)
                             .with_retry_config(api_config.retry_config),
                     )
                 })
@@ -212,7 +212,7 @@ pub async fn run_local(
         })
     };
 
-    let desired_firmware = forge_api_client
+    let desired_firmware = carbide_api_client
         .get_desired_firmware_versions()
         .await?
         .entries;
@@ -223,15 +223,15 @@ pub async fn run_local(
     );
 
     let (dhcp_client, dhcp_service) =
-        DhcpClient::start(&app_config, forge_api_client.clone().into()).await?;
+        DhcpClient::start(&app_config, carbide_api_client.clone().into()).await?;
 
     let app_context = Arc::new(MachineATronContext {
         bmc_registry: bmc_address_registry.clone(),
         app_config,
-        forge_client_config,
+        carbide_client_config,
         bmc_mock_certs_dir: Some(repo_root.join("crates/bmc-mock")),
         desired_firmware_versions: std::sync::RwLock::new(desired_firmware),
-        forge_api_client,
+        carbide_api_client,
         dhcp_client,
         mac_address_pool,
     });
@@ -254,11 +254,11 @@ pub async fn run_local(
         .await?;
 
         if delete_from_api {
-            try_join_all(device_simulators.into_iter().map(|simulator| {
+            // All simulators share a client quota; avoid a rack-sized burst of API deletes.
+            for simulator in device_simulators {
                 let api_client = app_context.api_client();
-                async move { simulator.delete_from_api(api_client).await }
-            }))
-            .await?;
+                simulator.delete_from_api(api_client).await?;
+            }
         }
 
         Ok(())

@@ -18,14 +18,19 @@
 use std::net::SocketAddr;
 use std::sync::Arc;
 
-use bmc_drivers::{DriverMap, ResolvedSelection, Rules, SelectedDrivers, SelectionHash};
+use bmc_drivers::{
+    DriverMap, Drivers, ResolvedSelection, Rules, SelectError, SelectedDrivers, SelectionHash,
+};
 use bmc_platform::{ClassifyBmcError, IpmiOps, OpCx, PlatformIdentity};
 use carbide_secrets::credentials::{BmcCredentialType, CredentialKey};
 use carbide_utils::redfish::{BmcAccessInfo, parse_uri_host_ip};
 use mac_address::MacAddress;
+use model::site_explorer::EndpointExplorationReport;
 use nv_redfish::{Bmc, ServiceRoot};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
+
+use crate::platform_identity;
 
 /// Secret-free, serializable identity of a BMC access endpoint.
 ///
@@ -85,25 +90,32 @@ impl BmcRef {
         })
     }
 
-    /// Builds a runtime reference from canonical access metadata and persisted selection.
-    pub fn from_access_info(
+    /// Builds a runtime reference from canonical access metadata, selecting
+    /// drivers by `rules` for the identity `report` recorded.
+    pub fn from_exploration(
         access: &BmcAccessInfo,
-        credential_key: CredentialKey,
-        identity: PlatformIdentity,
-        selection: ResolvedSelection,
-    ) -> Result<Self, BmcRefError> {
+        report: &EndpointExplorationReport,
+        rules: &Rules,
+    ) -> Result<Self, ExploredBmcRefError> {
+        // A report without the service root cannot tell vendors apart.
+        if report.service_root.is_none() {
+            return Err(ExploredBmcRefError::NoServiceRoot);
+        }
         let ip = parse_uri_host_ip(&access.host)
             .ok_or_else(|| BmcRefError::InvalidIpAddress(access.host.clone()))?;
-        let reference = Self::new(
+        let identity = platform_identity(report);
+        let selection = Drivers::select(rules, &identity)?;
+        let credential_key = CredentialKey::BmcCredentials {
+            credential_type: BmcCredentialType::BmcRoot {
+                bmc_mac_address: access.mac_address,
+            },
+        };
+        Ok(Self::new(
             SocketAddr::new(ip, access.port.unwrap_or(443)),
             credential_key,
             identity,
             selection,
-        )?;
-        if reference.mac_address() != access.mac_address {
-            return Err(BmcRefError::MacAddressMismatch);
-        }
-        Ok(reference)
+        )?)
     }
 
     /// Returns the concrete BMC socket address required by the client pool.
@@ -123,27 +135,28 @@ impl BmcRef {
         &self.credential_key
     }
 
-    /// Returns the identity and resource ids selected during exploration.
+    /// Returns the identity and resource ids the selection matched on.
     pub const fn identity(&self) -> &PlatformIdentity {
         &self.identity
     }
 
-    /// Returns the complete driver map persisted during exploration.
+    /// Returns the complete driver map selected for this BMC.
     pub const fn driver_map(&self) -> &DriverMap {
         &self.selection.drivers
     }
 
-    /// Returns the complete selection decision persisted during exploration.
+    /// Returns the complete selection decision for this BMC.
     pub const fn selection(&self) -> &ResolvedSelection {
         &self.selection
     }
 
-    /// Returns the hash of the rule set that produced the persisted selection.
+    /// Returns the hash of the rule set that produced the selection.
     pub const fn selection_hash(&self) -> SelectionHash {
         self.selection.hash
     }
 
-    /// Whether the persisted selection was produced by `rules`.
+    /// Whether the selection was produced by `rules`, which a reference
+    /// deserialized after a rule change may not be.
     pub fn selection_is_current(&self, rules: &Rules) -> bool {
         self.selection_hash() == rules.hash()
     }
@@ -167,14 +180,23 @@ pub enum BmcRefError {
     /// Runtime BMC references require per-BMC root credentials.
     #[error("BMC reference must use a per-BMC root credential key")]
     UnsupportedCredentialKey,
-    /// Access metadata and credential key refer to different BMCs.
-    #[error("BMC access MAC address does not match its credential key")]
-    MacAddressMismatch,
 }
 
-/// A live Redfish endpoint using the driver map persisted during exploration.
+/// Failure to build a runtime reference from an exploration report.
+#[derive(Clone, Debug, Eq, Error, PartialEq)]
+pub enum ExploredBmcRefError {
+    /// Exploration has not recorded the service root drivers select by.
+    #[error("BMC has no drivers selected until site exploration records its service root")]
+    NoServiceRoot,
+    #[error(transparent)]
+    Select(#[from] SelectError),
+    #[error(transparent)]
+    Reference(#[from] BmcRefError),
+}
+
+/// A live Redfish endpoint using the driver map selected for its BMC.
 ///
-/// The persisted selection is resolved through the compiled catalogue once, on
+/// The selection is resolved through the compiled catalogue once, on
 /// connect, so a controller writes `bmc.power()?.set(reset_type)` and never
 /// sees driver ids or operation contexts.
 pub struct ConnectedBmc<B: Bmc + 'static> {
@@ -263,6 +285,16 @@ mod tests {
         DriverMap::filled(CapabilitySelection::Unsupported)
     }
 
+    fn report_with_service_root() -> EndpointExplorationReport {
+        EndpointExplorationReport {
+            service_root: Some(model::site_explorer::ServiceRoot {
+                vendor: Some("Dell".to_string()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }
+    }
+
     #[test]
     fn bmc_ref_round_trip_preserves_selection_without_secrets() {
         let mac_address = MacAddress::new([2, 0, 0, 0, 0, 1]);
@@ -302,47 +334,59 @@ mod tests {
     }
 
     #[test]
-    fn endpoint_uses_canonical_access_info_without_credentials() {
-        let mac_address = MacAddress::new([2, 0, 0, 0, 0, 2]);
+    fn exploration_reference_selects_only_once_the_service_root_is_recorded() {
+        let mac_address = MacAddress::new([2, 0, 0, 0, 0, 4]);
         let access = BmcAccessInfo {
-            host: "192.0.2.11".to_string(),
+            host: "192.0.2.14".to_string(),
             port: None,
             mac_address,
         };
-        let endpoint = BmcRef::from_access_info(
-            &access,
-            root_credential_key(mac_address),
-            PlatformIdentity::default(),
-            selection(unsupported_driver_map(), BTreeSet::new()),
-        )
-        .expect("IP endpoint converts");
+        let rules = Rules::new(Vec::new()).expect("empty rules are valid");
 
         assert_eq!(
+            BmcRef::from_exploration(&access, &EndpointExplorationReport::default(), &rules).err(),
+            Some(ExploredBmcRefError::NoServiceRoot)
+        );
+
+        let endpoint = BmcRef::from_exploration(&access, &report_with_service_root(), &rules)
+            .expect("a report with a service root selects drivers");
+        assert_eq!(
             endpoint.address(),
-            "192.0.2.11:443".parse().expect("valid socket address")
+            "192.0.2.14:443".parse().expect("valid socket address")
         );
         assert_eq!(endpoint.mac_address(), mac_address);
+        assert!(matches!(
+            endpoint.credential_key(),
+            CredentialKey::BmcCredentials {
+                credential_type: BmcCredentialType::BmcRoot { bmc_mac_address },
+            } if *bmc_mac_address == mac_address
+        ));
+        assert_eq!(
+            endpoint.identity().service_root.vendor.as_deref(),
+            Some("Dell")
+        );
+        assert!(endpoint.selection_is_current(&rules));
     }
 
     #[test]
     fn endpoint_rejects_hostname_without_dns_resolution() {
         assert!(matches!(
-            BmcRef::from_access_info(
+            BmcRef::from_exploration(
                 &BmcAccessInfo {
                     host: "bmc.example.test".to_string(),
                     port: None,
                     mac_address: MacAddress::new([2, 0, 0, 0, 0, 2]),
                 },
-                root_credential_key(MacAddress::new([2, 0, 0, 0, 0, 2])),
-                PlatformIdentity::default(),
-                selection(unsupported_driver_map(), BTreeSet::new()),
+                &report_with_service_root(),
+                &Rules::new(Vec::new()).expect("empty rules are valid"),
             ),
-            Err(BmcRefError::InvalidIpAddress(host)) if host == "bmc.example.test"
+            Err(ExploredBmcRefError::Reference(BmcRefError::InvalidIpAddress(host)))
+                if host == "bmc.example.test"
         ));
     }
 
     #[test]
-    fn bmc_ref_rejects_non_device_credentials_and_mismatched_metadata() {
+    fn bmc_ref_rejects_non_device_credentials() {
         let address = "192.0.2.11:443".parse().expect("valid socket address");
         assert!(matches!(
             BmcRef::new(
@@ -354,21 +398,6 @@ mod tests {
                 selection(unsupported_driver_map(), BTreeSet::new()),
             ),
             Err(BmcRefError::UnsupportedCredentialKey)
-        ));
-
-        let access = BmcAccessInfo {
-            host: "192.0.2.11".to_string(),
-            port: None,
-            mac_address: MacAddress::new([2, 0, 0, 0, 0, 2]),
-        };
-        assert!(matches!(
-            BmcRef::from_access_info(
-                &access,
-                root_credential_key(MacAddress::new([2, 0, 0, 0, 0, 3])),
-                PlatformIdentity::default(),
-                selection(unsupported_driver_map(), BTreeSet::new()),
-            ),
-            Err(BmcRefError::MacAddressMismatch)
         ));
     }
 }

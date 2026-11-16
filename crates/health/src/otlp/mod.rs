@@ -26,7 +26,7 @@ use std::ops::Range;
 use std::sync::Arc;
 use std::time::Duration;
 
-use carbide_instrument::{LabelValue, emit, emit_count};
+use carbide_instrument::LabelValue;
 use opentelemetry::StringValue;
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
@@ -124,7 +124,13 @@ impl OtlpExportResponse {
     /// Counts acknowledged records, excluding rejections reported by the
     /// receiver, and returns that count. Invalid rejection counts produce a
     /// warning and no counter increment, and acknowledge no records.
-    fn record(&self, target: &OtlpTargetConfig, signal: OtlpSignal, record_count: usize) -> usize {
+    fn record(
+        &self,
+        target: &OtlpTargetConfig,
+        signal: OtlpSignal,
+        record_count: usize,
+        instrumentation: &carbide_instrument::Instrumentation,
+    ) -> usize {
         let accepted = usize::try_from(self.rejected_records)
             .ok()
             .and_then(|rejected| record_count.checked_sub(rejected));
@@ -152,7 +158,7 @@ impl OtlpExportResponse {
             );
         }
 
-        emit_count(
+        instrumentation.emit_count(
             OtlpRecordsExported {
                 target: ConfiguredOtlpTarget(target.endpoint.clone()),
                 signal,
@@ -365,6 +371,7 @@ pub(crate) async fn export_items<E: OtlpExport>(
     items: &[E::Item],
     target: &OtlpTargetConfig,
     signal: OtlpSignal,
+    instrumentation: &carbide_instrument::Instrumentation,
     mut settle: impl FnMut(ExportOutcome),
 ) {
     let observed_nanos = convert::export_time_nanos();
@@ -402,7 +409,8 @@ pub(crate) async fn export_items<E: OtlpExport>(
 
             match export.send(request).await {
                 Ok(response) => {
-                    let acknowledged = response.record(target, signal, record_count);
+                    let acknowledged =
+                        response.record(target, signal, record_count, instrumentation);
                     let failed = (record_count - acknowledged).min(range.len());
 
                     settle(ExportOutcome {
@@ -445,7 +453,7 @@ pub(crate) async fn export_items<E: OtlpExport>(
                     tokio::time::sleep(delay).await;
                 }
                 Err(status) => {
-                    emit(OtlpExportFailed {
+                    instrumentation.emit(OtlpExportFailed {
                         signal,
                         code: status.code().into(),
                         error: status.message().to_string(),
@@ -503,6 +511,7 @@ async fn run_drain<K, Q, E>(
     flush_token: CancellationToken,
     counts: DeliveryCounts,
     make_export: impl Fn(Channel) -> E,
+    instrumentation: carbide_instrument::Instrumentation,
 ) where
     K: Eq + Hash + Clone,
     Q: IntoExportItem<E::Item>,
@@ -594,6 +603,7 @@ async fn run_drain<K, Q, E>(
                 counts.clone(),
                 target.clone(),
                 signal,
+                instrumentation.clone(),
             ));
 
             // A flush keeps draining after a partial batch: replacements can
@@ -618,14 +628,22 @@ async fn export_batch<E: OtlpExport>(
     counts: DeliveryCounts,
     target: Arc<OtlpTargetConfig>,
     signal: OtlpSignal,
+    instrumentation: carbide_instrument::Instrumentation,
 ) {
-    export_items(&mut export, &batch, &target, signal, |outcome| {
-        counts.finish(
-            outcome.delivered + outcome.failed,
-            outcome.delivered,
-            outcome.failed,
-        );
-    })
+    export_items(
+        &mut export,
+        &batch,
+        &target,
+        signal,
+        &instrumentation,
+        |outcome| {
+            counts.finish(
+                outcome.delivered + outcome.failed,
+                outcome.delivered,
+                outcome.failed,
+            );
+        },
+    )
     .await;
 }
 
@@ -1155,6 +1173,7 @@ mod tests {
             &case.items,
             &target,
             OtlpSignal::Logs,
+            &carbide_instrument::Instrumentation::global(),
             |range| {
                 outcome.delivered += range.delivered;
                 outcome.failed += range.failed;
@@ -1219,7 +1238,12 @@ mod tests {
             let mut acknowledged = None;
 
             let logs = capture_logs(|| {
-                acknowledged = Some(response.record(&target, OtlpSignal::Logs, 3));
+                acknowledged = Some(response.record(
+                    &target,
+                    OtlpSignal::Logs,
+                    3,
+                    &carbide_instrument::Instrumentation::global(),
+                ));
             });
 
             assert_eq!(
@@ -1268,6 +1292,7 @@ mod tests {
                 &[1, 2, 3],
                 &target,
                 OtlpSignal::Logs,
+                &carbide_instrument::Instrumentation::global(),
                 |outcome| outcomes.push(outcome),
             )
             .await;

@@ -39,8 +39,8 @@ pub mod dpa_interface;
 pub mod dpu_agent_upgrade_policy;
 pub mod dpu_machine_update;
 pub mod dpu_remediation;
+pub mod expected_dpu_loopback_reservation;
 pub mod expected_machine;
-pub mod expected_nvlink_domain;
 pub mod expected_power_shelf;
 pub mod expected_rack;
 pub mod expected_rack_group;
@@ -49,6 +49,7 @@ pub mod explored_endpoints;
 pub mod explored_managed_host;
 pub mod extension_service;
 pub mod hardware_class_attesters;
+pub mod hardware_dispatch;
 pub mod health_history;
 pub mod health_report;
 pub mod host_firmware_config;
@@ -81,8 +82,10 @@ pub mod network_prefix;
 pub mod network_security_group;
 pub mod network_segment;
 pub mod nic_firmware;
+pub mod nic_firmware_artifact;
 pub mod nvl_logical_partition;
 pub mod nvl_partition;
+pub mod nvlink_domain;
 pub mod nvlink_domain_health_report;
 pub mod nvlink_nmxc_endpoints;
 pub mod operating_system;
@@ -380,7 +383,7 @@ pub enum DatabaseError {
     #[error("generic error from report: {0}")]
     GenericErrorFromReport(#[from] eyre::ErrReport),
     #[error(transparent)]
-    Sqlx(#[from] AnnotatedSqlxError),
+    Sqlx(Box<AnnotatedSqlxError>),
     #[error("{kind} not found: {id}")]
     NotFoundError {
         /// The type of the resource that was not found (e.g. Machine)
@@ -482,6 +485,12 @@ impl From<Infallible> for DatabaseError {
     }
 }
 
+impl From<AnnotatedSqlxError> for DatabaseError {
+    fn from(error: AnnotatedSqlxError) -> Self {
+        Self::Sqlx(Box::new(error))
+    }
+}
+
 impl From<InvalidMachineType> for DatabaseError {
     fn from(value: InvalidMachineType) -> Self {
         Self::internal(value.to_string())
@@ -489,6 +498,14 @@ impl From<InvalidMachineType> for DatabaseError {
 }
 
 impl DatabaseError {
+    /// Identifies PostgreSQL lock-unavailable errors (55P03), including NOWAIT rejection.
+    /// Roll back the failed transaction before retrying.
+    pub fn is_lock_not_available(&self) -> bool {
+        matches!(self, DatabaseError::Sqlx(error)
+            if error.source.as_database_error().and_then(|error| error.code()).as_deref()
+                == Some("55P03"))
+    }
+
     /// Returns true if the database error wrapps a sqlx::Error::RowNotFound, or if it's our own DatabaseError::NotFoundError
     pub fn is_not_found(&self) -> bool {
         match self {
@@ -534,61 +551,61 @@ impl DatabaseError {
     #[track_caller]
     pub fn new(op_name: impl AsRef<str>, source: sqlx::Error) -> DatabaseError {
         let loc = Location::caller();
-        DatabaseError::Sqlx(AnnotatedSqlxError {
+        DatabaseError::Sqlx(Box::new(AnnotatedSqlxError {
             file: loc.file(),
             line: loc.line(),
             query: op_name.as_ref().to_string(),
             source,
-        })
+        }))
     }
 
     fn txn_begin(source: sqlx::Error, loc: &'static Location<'static>) -> DatabaseError {
-        DatabaseError::Sqlx(AnnotatedSqlxError {
+        DatabaseError::Sqlx(Box::new(AnnotatedSqlxError {
             file: loc.file(),
             line: loc.line(),
             query: "transaction begin".into(),
             source,
-        })
+        }))
     }
 
     fn txn_commit(source: sqlx::Error, loc: &'static Location<'static>) -> DatabaseError {
-        DatabaseError::Sqlx(AnnotatedSqlxError {
+        DatabaseError::Sqlx(Box::new(AnnotatedSqlxError {
             file: loc.file(),
             line: loc.line(),
             query: "transaction commit".into(),
             source,
-        })
+        }))
     }
 
     fn txn_rollback(source: sqlx::Error, loc: &'static Location<'static>) -> DatabaseError {
-        DatabaseError::Sqlx(AnnotatedSqlxError {
+        DatabaseError::Sqlx(Box::new(AnnotatedSqlxError {
             file: loc.file(),
             line: loc.line(),
             query: "transaction rollback".into(),
             source,
-        })
+        }))
     }
 
     #[track_caller]
     pub fn acquire(source: sqlx::Error) -> DatabaseError {
         let loc = Location::caller();
-        DatabaseError::Sqlx(AnnotatedSqlxError {
+        DatabaseError::Sqlx(Box::new(AnnotatedSqlxError {
             file: loc.file(),
             line: loc.line(),
             query: "acquire connection".into(),
             source,
-        })
+        }))
     }
 
     #[track_caller]
     pub fn query(query: impl AsRef<str>, source: sqlx::Error) -> DatabaseError {
         let loc = Location::caller();
-        DatabaseError::Sqlx(AnnotatedSqlxError {
+        DatabaseError::Sqlx(Box::new(AnnotatedSqlxError {
             file: loc.file(),
             line: loc.line(),
             query: query.as_ref().to_string(),
             source,
-        })
+        }))
     }
 
     /// Creates a `Internal` error with the given error message

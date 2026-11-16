@@ -176,7 +176,7 @@ pub async fn load(
 
 /// `latest_for_owner_slot` loads the highest remote allocation generation for one
 /// purpose, including attached and terminal requests. Callers use the saved request
-/// for an unfinished attempt or advance its generation after confirmed cleanup.
+/// for an unfinished attempt or advance after cleanup or a retained attachment.
 /// `None` means this owner and slot have never requested a remote allocation.
 /// This read does not reserve the next generation; `begin` enforces uniqueness.
 pub async fn latest_for_owner_slot(
@@ -201,6 +201,35 @@ pub async fn latest_for_owner_slot(
         .bind(owner_id)
         .bind(slot)
         .fetch_optional(db)
+        .await
+        .map_err(|error| DatabaseError::query(query, error))
+}
+
+/// `active_for_owner_slot` locks every unfinished remote request for one purpose,
+/// including retained attachments and releases from older generations. Confirmed
+/// cleanup is excluded. Use this query when cleanup or ownership in any pool
+/// matters; the latest generation alone can hide an older assignment.
+pub async fn active_for_owner_slot(
+    txn: &mut PgConnection,
+    owner_type: OwnerType,
+    owner_id: &str,
+    slot: &str,
+) -> Result<Vec<ResourcePoolAllocation>, DatabaseError> {
+    let query = "SELECT allocation_id, pool_name, owner_type, owner_id, state,
+        created_at, updated_at, integrated_resource_id, value, value_type,
+        auto_assign, allocated_at, binding_id, remote_request, result
+        FROM resource_pool_allocations
+        WHERE binding_id IS NOT NULL AND owner_type = $1
+          AND public.digest(owner_id, 'sha256') = public.digest($2::text, 'sha256')
+          AND public.digest(remote_request->>'slot', 'sha256') = public.digest($3::text, 'sha256')
+          AND owner_id = $2 AND remote_request->>'slot' = $3
+          AND state IN ('pending', 'attached', 'cancel_requested', 'release_requested')
+        ORDER BY remote_request->'generation' FOR UPDATE";
+    sqlx::query_as(query)
+        .bind(owner_type.to_string())
+        .bind(owner_id)
+        .bind(slot)
+        .fetch_all(txn)
         .await
         .map_err(|error| DatabaseError::query(query, error))
 }

@@ -24,6 +24,8 @@ var _ MappedNullable = &ExpectedRackGroupMember{}
 
 // ExpectedRackGroupMember External device identity; the case-sensitive tuple (type, manufacturer, id) is unique within a group.
 type ExpectedRackGroupMember struct {
+	// Cartridge index, or null for a legacy member without an index.
+	CartridgeIndex NullableUint32 `json:"cartridgeIndex,omitempty"`
 	// Case-sensitive REST rack component type. NVSwitch maps to Switch in Core.
 	Type string `json:"type"`
 	// Non-blank manufacturer name.
@@ -52,6 +54,49 @@ func NewExpectedRackGroupMember(type_ string, manufacturer string, id string) *E
 func NewExpectedRackGroupMemberWithDefaults() *ExpectedRackGroupMember {
 	this := ExpectedRackGroupMember{}
 	return &this
+}
+
+// GetCartridgeIndex returns the CartridgeIndex field value if set, zero value otherwise (both if not set or set to explicit null).
+func (o *ExpectedRackGroupMember) GetCartridgeIndex() uint32 {
+	if o == nil || IsNil(o.CartridgeIndex.Get()) {
+		var ret uint32
+		return ret
+	}
+	return *o.CartridgeIndex.Get()
+}
+
+// GetCartridgeIndexOk returns a tuple with the CartridgeIndex field value if set, nil otherwise
+// and a boolean to check if the value has been set.
+// NOTE: If the value is an explicit nil, `nil, true` will be returned
+func (o *ExpectedRackGroupMember) GetCartridgeIndexOk() (*uint32, bool) {
+	if o == nil {
+		return nil, false
+	}
+	return o.CartridgeIndex.Get(), o.CartridgeIndex.IsSet()
+}
+
+// HasCartridgeIndex returns a boolean if a field has been set.
+func (o *ExpectedRackGroupMember) HasCartridgeIndex() bool {
+	if o != nil && o.CartridgeIndex.IsSet() {
+		return true
+	}
+
+	return false
+}
+
+// SetCartridgeIndex gets a reference to the given NullableUint32 and assigns it to the CartridgeIndex field.
+func (o *ExpectedRackGroupMember) SetCartridgeIndex(v uint32) {
+	o.CartridgeIndex.Set(&v)
+}
+
+// SetCartridgeIndexNil sets the value for CartridgeIndex to be an explicit nil
+func (o *ExpectedRackGroupMember) SetCartridgeIndexNil() {
+	o.CartridgeIndex.Set(nil)
+}
+
+// UnsetCartridgeIndex ensures that no value is present for CartridgeIndex, not even an explicit nil
+func (o *ExpectedRackGroupMember) UnsetCartridgeIndex() {
+	o.CartridgeIndex.Unset()
 }
 
 // GetType returns the Type field value
@@ -136,6 +181,9 @@ func (o ExpectedRackGroupMember) MarshalJSON() ([]byte, error) {
 
 func (o ExpectedRackGroupMember) ToMap() (map[string]interface{}, error) {
 	toSerialize := map[string]interface{}{}
+	if o.CartridgeIndex.IsSet() {
+		toSerialize["cartridgeIndex"] = o.CartridgeIndex.Get()
+	}
 	toSerialize["type"] = o.Type
 	toSerialize["manufacturer"] = o.Manufacturer
 	toSerialize["id"] = o.Id

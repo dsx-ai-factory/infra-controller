@@ -1125,8 +1125,13 @@ mod tests {
             ..SwitchReachabilityConfig::default()
         };
         let mut join_set = JoinSet::new();
-        let work_lock_manager =
-            db::work_lock_manager::start(&mut join_set, pool.clone(), Default::default()).await?;
+        let work_lock_manager = db::work_lock_manager::start(
+            &mut join_set,
+            pool.clone(),
+            Default::default(),
+            carbide_instrument::Instrumentation::global(),
+        )
+        .await?;
         let monitor = SwitchReachabilityMonitor::with_prober(
             pool.clone(),
             config.clone(),
@@ -1252,8 +1257,13 @@ mod tests {
             ..SwitchReachabilityConfig::default()
         };
         let mut join_set = JoinSet::new();
-        let work_lock_manager =
-            db::work_lock_manager::start(&mut join_set, pool.clone(), Default::default()).await?;
+        let work_lock_manager = db::work_lock_manager::start(
+            &mut join_set,
+            pool.clone(),
+            Default::default(),
+            carbide_instrument::Instrumentation::global(),
+        )
+        .await?;
         let monitor = SwitchReachabilityMonitor::with_prober(
             pool.clone(),
             config,
@@ -1296,24 +1306,28 @@ mod tests {
 
         // Replica A takes the lock on its first pass and keeps it, so its
         // streak counts every pass.
+        let keepalive_config = KeepaliveConfig::default();
         let mut a_manager = JoinSet::new();
-        let a_handle =
-            db::work_lock_manager::start(&mut a_manager, pool.clone(), Default::default()).await?;
+        let a_handle = db::work_lock_manager::start(
+            &mut a_manager,
+            pool.clone(),
+            keepalive_config,
+            carbide_instrument::Instrumentation::global(),
+        )
+        .await?;
         let a = SwitchReachabilityMonitor::with_prober(
             pool.clone(),
             config.clone(),
             a_handle,
             prober.clone(),
         );
-        // Replica B treats a lease without keepalives as expired quickly.
+        // Both replicas use the same lease policy while A is active.
         let mut b_manager = JoinSet::new();
         let b_handle = db::work_lock_manager::start(
             &mut b_manager,
             pool.clone(),
-            KeepaliveConfig {
-                interval: Duration::from_secs(3600),
-                timeout: Duration::from_millis(50),
-            },
+            keepalive_config,
+            carbide_instrument::Instrumentation::global(),
         )
         .await?;
         let b = SwitchReachabilityMonitor::with_prober(
@@ -1342,10 +1356,17 @@ mod tests {
             Some(1)
         );
 
-        // A's manager stops sending keepalives; B takes the lease over and
-        // becomes the owner. A notices on its next pass and forgets its state.
+        // Stop A's keepalives and expire its stored lease before B takes over.
+        // A notices on its next pass and forgets its state.
         a_manager.shutdown().await;
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        sqlx::query(
+            "UPDATE work_locks SET last_keepalive = clock_timestamp() - $2::interval \
+             WHERE work_key = $1",
+        )
+        .bind(SwitchReachabilityMonitor::ITERATION_WORK_KEY)
+        .bind(keepalive_config.timeout * 2)
+        .execute(&pool)
+        .await?;
         prober.set(config.nvos_port, None);
         assert_eq!(b.run_single_iteration().await?, 1, "B clears the alert");
         assert!(b.lock.lock().await.is_some());
@@ -1372,8 +1393,13 @@ mod tests {
         // The monitor's manager holds the pass lock, then stops sending
         // keepalives, as a replica that stalled would.
         let mut stalled = JoinSet::new();
-        let stalled_handle =
-            db::work_lock_manager::start(&mut stalled, pool.clone(), Default::default()).await?;
+        let stalled_handle = db::work_lock_manager::start(
+            &mut stalled,
+            pool.clone(),
+            Default::default(),
+            carbide_instrument::Instrumentation::global(),
+        )
+        .await?;
         let monitor = SwitchReachabilityMonitor::with_prober(
             pool.clone(),
             SwitchReachabilityConfig::default(),
@@ -1409,6 +1435,7 @@ mod tests {
                 interval: Duration::from_secs(3600),
                 timeout: Duration::from_millis(1),
             },
+            carbide_instrument::Instrumentation::global(),
         )
         .await?;
         tokio::time::sleep(Duration::from_millis(20)).await;
@@ -1467,8 +1494,13 @@ mod tests {
         set_controller_state(&pool, &switch.id, &SwitchControllerState::Ready).await?;
 
         let mut join_set = JoinSet::new();
-        let work_lock_manager =
-            db::work_lock_manager::start(&mut join_set, pool.clone(), Default::default()).await?;
+        let work_lock_manager = db::work_lock_manager::start(
+            &mut join_set,
+            pool.clone(),
+            Default::default(),
+            carbide_instrument::Instrumentation::global(),
+        )
+        .await?;
         let mut monitor_tasks = JoinSet::new();
         let cancel = CancellationToken::new();
         SwitchReachabilityMonitor::with_prober(

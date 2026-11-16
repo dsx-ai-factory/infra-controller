@@ -19,7 +19,7 @@ use std::net::{IpAddr, Ipv6Addr};
 use ::rpc::forge as rpc;
 use carbide_uuid::vpc::VpcId;
 use db::resource_pool::ResourcePoolDatabaseError;
-use db::{AnnotatedSqlxError, DatabaseError, ObjectColumnFilter, network_segment};
+use db::{DatabaseError, ObjectColumnFilter, network_segment};
 use ipnetwork::IpNetwork;
 use model::network_prefix::NewNetworkPrefix;
 use model::network_segment::{
@@ -386,10 +386,10 @@ pub(crate) async fn add_prefix(
             // Keep backstop constraints diagnostic even for writers outside the
             // overlap guard. The normal range/family probes reject first.
             let constraint = match &error {
-                DatabaseError::Sqlx(AnnotatedSqlxError {
-                    source: sqlx::Error::Database(error),
-                    ..
-                }) => error.constraint(),
+                DatabaseError::Sqlx(error) => error
+                    .source
+                    .as_database_error()
+                    .and_then(|error| error.constraint()),
                 _ => None,
             };
             if db::network_prefix::is_overlap_constraint(constraint) {
@@ -647,6 +647,10 @@ pub(crate) async fn save_without_reverse_zones(
     set_to_ready: bool,
     allocate_svi_ip: bool,
 ) -> Result<NetworkSegment, CarbideError> {
+    if let Some(domain_id) = ns.subdomain_id {
+        db::dns::domain::lock_live_for_reference(txn.as_mut(), domain_id).await?;
+    }
+
     let prefixes = ns
         .prefixes
         .iter()
@@ -678,10 +682,14 @@ pub(crate) async fn save_without_reverse_zones(
     };
     let mut network_segment = match db::network_segment::persist(ns, txn, initial_state).await {
         Ok(segment) => segment,
-        Err(DatabaseError::Sqlx(AnnotatedSqlxError {
-            source: sqlx::Error::Database(e),
-            ..
-        })) if db::network_prefix::is_overlap_constraint(e.constraint()) => {
+        Err(DatabaseError::Sqlx(error))
+            if db::network_prefix::is_overlap_constraint(
+                error
+                    .source
+                    .as_database_error()
+                    .and_then(|error| error.constraint()),
+            ) =>
+        {
             return Err(CarbideError::InvalidArgument(
                 "prefix overlaps with an existing one".to_string(),
             ));
@@ -736,6 +744,7 @@ async fn allocate_vni(
             ),
         ) => {
             db::resource_pool::emit_allocation_failure(
+                &api.instrumentation,
                 api.common_pools.ethernet.pool_vni.value_type,
                 owner_id,
                 false,
@@ -746,6 +755,7 @@ async fn allocate_vni(
         }
         Err(err) => {
             db::resource_pool::emit_allocation_failure(
+                &api.instrumentation,
                 api.common_pools.ethernet.pool_vni.value_type,
                 owner_id,
                 false,
@@ -781,6 +791,7 @@ async fn allocate_vlan_id(
             ),
         ) => {
             db::resource_pool::emit_allocation_failure(
+                &api.instrumentation,
                 api.common_pools.ethernet.pool_vlan_id.value_type,
                 owner_id,
                 false,
@@ -791,6 +802,7 @@ async fn allocate_vlan_id(
         }
         Err(err) => {
             db::resource_pool::emit_allocation_failure(
+                &api.instrumentation,
                 api.common_pools.ethernet.pool_vlan_id.value_type,
                 owner_id,
                 false,

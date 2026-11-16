@@ -424,22 +424,28 @@ impl CollectorState {
             .collect()
     }
 
-    pub(super) fn prune_finished_logs(&mut self) {
-        self.logs.retain(|key, collector| {
-            if collector.is_finished() {
-                tracing::info!(
-                    endpoint_key = %key,
-                    "pruning finished logs collector (task exited); discovery will respawn"
-                );
-                false
-            } else {
-                true
-            }
-        });
+    /// Releases Logs parents after auto-mode transitions and gNMI parents after
+    /// supervised failure, allowing the normal spawn pass to replace them.
+    pub(super) fn prune_finished_collectors(&mut self) {
+        for kind in [CollectorKind::Logs, CollectorKind::NvueGnmi] {
+            self.map_mut(kind).retain(|key, collector| {
+                if collector.is_finished() {
+                    tracing::info!(
+                        endpoint_key = %key,
+                        collector_kind = ?kind,
+                        "pruning finished collector (task exited); discovery will respawn"
+                    );
+                    false
+                } else {
+                    true
+                }
+            });
+        }
     }
 }
 
 pub struct DiscoveryLoopContext {
+    pub(crate) instrumentation: carbide_instrument::Instrumentation,
     pub(super) collectors: CollectorState,
     pub(crate) discovery_iteration_histogram: Histogram,
     pub(crate) discovery_endpoint_fetch_histogram: Histogram,
@@ -453,6 +459,7 @@ pub struct DiscoveryLoopContext {
     pub(crate) telemetry_config: Configurable<TelemetryCollectorOptions>,
     pub(crate) logs_config: Configurable<LogsCollectorOptions>,
     pub(crate) firmware_config: Configurable<FirmwareCollectorOptions>,
+    pub(crate) resource_status_processor_enabled: bool,
     pub(crate) manager_config: Configurable<ManagerCollectorOptions>,
     pub(crate) leak_detector_config: Configurable<LeakDetectorCollectorOptions>,
     pub(crate) nmxt_config: Configurable<NmxtCollectorOptions>,
@@ -488,13 +495,23 @@ pub struct DiscoveryLoopContext {
 }
 
 impl DiscoveryLoopContext {
+    /// Creates discovery state whose Event metrics use the supplied instrumentation.
+    /// Retain its provider until discovery and its collectors stop.
     pub fn new(
         limiter: Arc<dyn RateLimiter>,
         metrics_manager: Arc<MetricsManager>,
         config: Arc<Config>,
+        instrumentation: carbide_instrument::Instrumentation,
     ) -> Result<Self, HealthError> {
         let nmxc_schema_override = load_nmxc_schema_override(&config)?;
-        Self::new_with_tls_config(limiter, metrics_manager, config, None, nmxc_schema_override)
+        Self::new_with_tls_config(
+            limiter,
+            metrics_manager,
+            config,
+            None,
+            nmxc_schema_override,
+            instrumentation,
+        )
     }
 
     pub(crate) fn new_with_tls_config(
@@ -503,6 +520,7 @@ impl DiscoveryLoopContext {
         config: Arc<Config>,
         tls_config: Option<MtlsProfileConfig>,
         nmxc_schema_override: Option<Arc<NmxcSchemaOverride>>,
+        instrumentation: carbide_instrument::Instrumentation,
     ) -> Result<Self, HealthError> {
         let registry = metrics_manager.global_registry();
 
@@ -547,6 +565,7 @@ impl DiscoveryLoopContext {
             };
 
         Ok(Self {
+            instrumentation,
             collectors: CollectorState::new(),
             discovery_iteration_histogram,
             discovery_endpoint_fetch_histogram,
@@ -560,6 +579,7 @@ impl DiscoveryLoopContext {
             telemetry_config: config.collectors.telemetry.clone(),
             logs_config: config.collectors.logs.clone(),
             firmware_config: config.collectors.firmware.clone(),
+            resource_status_processor_enabled: config.processors.resource_status.is_enabled(),
             manager_config: config.collectors.manager.clone(),
             leak_detector_config: config.collectors.leak_detector.clone(),
             nmxt_config: config.collectors.nmxt.clone(),
@@ -750,6 +770,7 @@ mod tests {
             Arc::new(crate::limiter::NoopLimiter),
             Arc::new(MetricsManager::new("tls_context").expect("metrics manager")),
             Arc::new(config),
+            carbide_instrument::Instrumentation::global(),
         )
         .expect("context should initialize");
 
@@ -767,6 +788,7 @@ mod tests {
             Arc::new(crate::limiter::NoopLimiter),
             Arc::new(MetricsManager::new("drain_collectors").expect("metrics manager")),
             Arc::new(Config::default()),
+            carbide_instrument::Instrumentation::global(),
         )
         .expect("context should initialize");
 

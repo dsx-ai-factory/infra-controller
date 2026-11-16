@@ -173,7 +173,9 @@ func TestGetRackHandler_Handle(t *testing.T) {
 	rackID := "core-rack-01"
 
 	mockRack := &flowv1.Rack{
-		ExternalId: rackID,
+		ExternalId:             rackID,
+		OperationStatus:        flowv1.Phase_PHASE_ERROR,
+		OperationStatusDetails: &flowv1.RackOperationStatusDetails{TrayCountsByType: &flowv1.TrayStatusCountsByType{Compute: &flowv1.TrayStatusCounts{Ready: 2}, NvSwitch: &flowv1.TrayStatusCounts{Error: 1}}},
 		Info: &flowv1.DeviceInfo{
 			Id:           &flowv1.UUID{Id: uuid.NewString()},
 			Name:         "Rack-001",
@@ -204,6 +206,15 @@ func TestGetRackHandler_Handle(t *testing.T) {
 			mockRack:       mockRack,
 			expectedStatus: http.StatusOK,
 			wantErr:        false,
+		},
+		{
+			name:           "success - older Flow has no counts",
+			reqOrg:         org,
+			user:           providerUser,
+			rackID:         rackID,
+			queryParams:    map[string]string{"siteId": site.ID.String()},
+			mockRack:       &flowv1.Rack{ExternalId: rackID},
+			expectedStatus: http.StatusOK,
 		},
 		{
 			name:   "failure - Flow not enabled on site",
@@ -308,6 +319,16 @@ func TestGetRackHandler_Handle(t *testing.T) {
 			err = json.Unmarshal(rec.Body.Bytes(), &apiRack)
 			assert.NoError(t, err)
 			assert.Equal(t, rackID, apiRack.ID)
+			if tt.mockRack.GetOperationStatusDetails() == nil {
+				var fields map[string]json.RawMessage
+				require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &fields))
+				require.Contains(t, fields, "operationStatusDetails")
+				assert.JSONEq(t, "null", string(fields["operationStatusDetails"]))
+				return
+			}
+			require.NotNil(t, apiRack.OperationStatusDetails)
+			assert.Equal(t, "Error", apiRack.OperationStatus)
+			assert.Equal(t, model.APITrayStatusCountsByType{Compute: model.APITrayStatusCounts{Ready: 2}, NVSwitch: model.APITrayStatusCounts{Error: 1}}, apiRack.OperationStatusDetails.TrayCountsByType)
 		})
 	}
 }
@@ -358,6 +379,8 @@ func TestGetAllRackHandler_Handle(t *testing.T) {
 		rackID := &flowv1.UUID{Id: id}
 		modelPtr := model
 		return &flowv1.Rack{
+			OperationStatus:        flowv1.Phase_PHASE_ERROR,
+			OperationStatusDetails: &flowv1.RackOperationStatusDetails{TrayCountsByType: &flowv1.TrayStatusCountsByType{Compute: &flowv1.TrayStatusCounts{Ready: 2}, NvSwitch: &flowv1.TrayStatusCounts{Error: 1}}},
 			Info: &flowv1.DeviceInfo{
 				Id:           rackID,
 				Name:         name,
@@ -401,6 +424,16 @@ func TestGetAllRackHandler_Handle(t *testing.T) {
 			expectedCount:  len(testRacks),
 			expectedTotal:  cutil.GetPtr(len(testRacks)),
 			wantErr:        false,
+		},
+		{
+			name:           "success - older Flow has no counts",
+			reqOrg:         org,
+			user:           providerUser,
+			queryParams:    map[string]string{"siteId": site.ID.String()},
+			mockResponse:   createMockRLAResponse([]*flowv1.Rack{{ExternalId: "rack-legacy"}}, 1),
+			expectedStatus: http.StatusOK,
+			expectedCount:  1,
+			expectedTotal:  cutil.GetPtr(1),
 		},
 		{
 			name:   "success - filter by name",
@@ -598,6 +631,18 @@ func TestGetAllRackHandler_Handle(t *testing.T) {
 			err = json.Unmarshal(rec.Body.Bytes(), &apiRacks)
 			assert.NoError(t, err)
 			assert.Equal(t, tt.expectedCount, len(apiRacks))
+			var rawRacks []map[string]json.RawMessage
+			require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &rawRacks))
+			for i, rack := range apiRacks {
+				if tt.mockResponse.Racks[i].GetOperationStatusDetails() == nil {
+					require.Contains(t, rawRacks[i], "operationStatusDetails")
+					assert.JSONEq(t, "null", string(rawRacks[i]["operationStatusDetails"]))
+					continue
+				}
+				require.NotNil(t, rack.OperationStatusDetails)
+				assert.Equal(t, "Error", rack.OperationStatus)
+				assert.Equal(t, model.APITrayStatusCountsByType{Compute: model.APITrayStatusCounts{Ready: 2}, NVSwitch: model.APITrayStatusCounts{Error: 1}}, rack.OperationStatusDetails.TrayCountsByType)
+			}
 
 			// Verify pagination header
 			ph := rec.Header().Get(pagination.ResponseHeaderName)

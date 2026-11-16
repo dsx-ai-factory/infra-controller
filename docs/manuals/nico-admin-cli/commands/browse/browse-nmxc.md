@@ -31,7 +31,7 @@ Chassis serial number (mutually exclusive with --rack-id)
 
 `--rack-id <RACK_ID>`
 
-Rack ID; resolves the NMX-C endpoint from the racks ready control-plane
+Rack ID; resolves the NMX-C endpoint from the rack's ready control-plane
 switch (mutually exclusive with --chassis-serial)
 
 `--operation <OPERATION>`
@@ -76,7 +76,7 @@ Sort output by specified field
 
 `-h, --help`
 
-Print help (see a summary with -h)
+Print help (see a summary with '-h')
 
 ## Examples
 

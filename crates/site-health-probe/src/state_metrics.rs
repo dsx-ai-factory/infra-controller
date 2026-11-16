@@ -320,9 +320,9 @@ pub(crate) fn family_series(family: Family, snap: &dyn AnySnapshot, series: &mut
                 }
             }
         }
-        // Read by no reader until the firmware and instance tests (#8154,
-        // #8152).
-        Family::RestInstances
+        // Cached REST unit lists and config do not add count series.
+        Family::RestMachines
+        | Family::RestInstances
         | Family::RestTenantInstances
         | Family::ConfigNicoApi
         | Family::ConfigRest => {}
@@ -480,11 +480,12 @@ fn reader_of(family: Family) -> Option<Reader> {
         | Family::Instance
         | Family::Expected
         | Family::HostFirmwareRequests => Some(Reader::Devices),
-        Family::RestTotals | Family::RestSiteMatch => Some(Reader::RestInventory),
-        Family::RestInstances
-        | Family::RestTenantInstances
-        | Family::ConfigNicoApi
-        | Family::ConfigRest => None,
+        Family::RestTotals
+        | Family::RestSiteMatch
+        | Family::RestMachines
+        | Family::RestInstances
+        | Family::ConfigRest => Some(Reader::RestInventory),
+        Family::RestTenantInstances | Family::ConfigNicoApi => None,
     }
 }
 
@@ -613,6 +614,8 @@ mod tests {
 
     fn unit(unit_type: UnitType, id: &str, state: &str, stage: Stage) -> Unit {
         Unit {
+            controller_instance_id: None,
+            rest_machine: None,
             id: id.to_string(),
             unit_type,
             source: Source::NicoApi,
@@ -1308,7 +1311,7 @@ carbide_site_health_probe_host_predicates_known [predicate] 1 when the current h
         );
         assert_eq!(
             samples(&out, "sweeps_total", &[]).len(),
-            4,
+            6,
             "enabled swept families times 2 results"
         );
 
@@ -1349,6 +1352,8 @@ carbide_site_health_probe_host_predicates_known [predicate] 1 when the current h
             .iter()
             .take(500)
             .map(|u| Unit {
+                controller_instance_id: None,
+                rest_machine: None,
                 unit_type: UnitType::HostFirmwareRequest,
                 ..u.clone()
             })

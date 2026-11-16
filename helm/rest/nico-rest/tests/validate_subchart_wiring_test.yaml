@@ -120,6 +120,8 @@ tests:
 
   - it: rejects moving Site Manager while the API keeps the default endpoint
     set:
+      nico-rest-cert-manager.authorization.allowedIdentities:
+        - spiffe://nico.local/nico-rest-sm/sa/nico-rest-site-manager
       nico-rest-site-manager.namespaceOverride: nico-rest-sm
     asserts:
       - failedTemplate:
@@ -127,6 +129,8 @@ tests:
 
   - it: rejects renaming the Site Manager Service while the API keeps the default endpoint
     set:
+      nico-rest-cert-manager.authorization.allowedIdentities:
+        - spiffe://nico.local/nico-rest/sa/site-manager
       nico-rest-site-manager.nameOverride: site-manager
     asserts:
       - failedTemplate:
@@ -134,6 +138,8 @@ tests:
 
   - it: checks the workflow endpoint when the API doesn't call Site Manager
     set:
+      nico-rest-cert-manager.authorization.allowedIdentities:
+        - spiffe://nico.local/nico-rest-sm/sa/nico-rest-site-manager
       nico-rest-site-manager.namespaceOverride: nico-rest-sm
       nico-rest-api.config.siteManager.enabled: false
     asserts:
@@ -142,9 +148,51 @@ tests:
 
   - it: accepts a moved Site Manager once both callers point at it
     set:
+      nico-rest-cert-manager.authorization.allowedIdentities:
+        - spiffe://nico.local/nico-rest-sm/sa/nico-rest-site-manager
       nico-rest-site-manager.namespaceOverride: nico-rest-sm
       nico-rest-api.config.siteManager.svcEndpoint: https://nico-rest-site-manager.nico-rest-sm:8100/v1/site
       nico-rest-workflow.config.siteManager.svcEndpoint: https://nico-rest-site-manager.nico-rest-sm:8100/v1/site
+    asserts:
+      - hasDocuments:
+          count: 0
+
+  - it: rejects a Site Manager URI missing from the allowlist
+    set:
+      nico-rest-site-manager.clientCertificate.spiffeID: spiffe://custom.test/site-manager
+    asserts:
+      - failedTemplate:
+          errorPattern: 'Site Manager client SPIFFE ID.*missing from.*allowedIdentities'
+
+  - it: accepts a deliberately configured identity on both sides
+    set:
+      nico-rest-site-manager.clientCertificate.spiffeID: spiffe://custom.test/site-manager
+      nico-rest-cert-manager.authorization.allowedIdentities:
+        - spiffe://custom.test/site-manager
+    asserts:
+      - hasDocuments:
+          count: 0
+
+  - it: rejects relocating Site Manager without adjusting its allowed identity
+    set:
+      nico-rest-site-manager.namespaceOverride: registration
+    asserts:
+      - failedTemplate:
+          errorPattern: 'spiffe://nico.local/registration/sa/nico-rest-site-manager.*missing'
+
+  - it: validates an explicit allowlist against the client URI in a custom trust domain
+    set:
+      global.spiffe.trustDomain: example.test
+      nico-rest-cert-manager.authorization.allowedIdentities:
+        - spiffe://example.test/nico-rest/sa/nico-rest-site-manager
+    asserts:
+      - hasDocuments:
+          count: 0
+
+  - it: validates an explicit client URI against the allowlist in a custom trust domain
+    set:
+      global.spiffe.trustDomain: example.test
+      nico-rest-site-manager.clientCertificate.spiffeID: spiffe://example.test/nico-rest/sa/nico-rest-site-manager
     asserts:
       - hasDocuments:
           count: 0

@@ -22,7 +22,6 @@ use arc_swap::ArcSwap;
 use async_trait::async_trait;
 use carbide_secrets::credentials::{CredentialKey, CredentialReader, Credentials};
 use carbide_utils::HostPortPair;
-use carbide_uuid::machine::MachineId;
 use eyre::eyre;
 
 use crate::IPMITool;
@@ -31,6 +30,7 @@ use crate::metrics::{IpmiCommand, count_ipmi_command};
 /// HTTP-based IPMI implementation for testing with bmc-mock.
 /// Sends JSON requests to bmc_proxy which routes to appropriate machine.
 pub(super) struct IPMIToolHttpImpl {
+    instrumentation: carbide_instrument::Instrumentation,
     bmc_proxy: Arc<ArcSwap<Option<HostPortPair>>>,
     credential_reader: Arc<dyn CredentialReader>,
 }
@@ -39,8 +39,10 @@ impl IPMIToolHttpImpl {
     pub(super) fn new(
         bmc_proxy: Arc<ArcSwap<Option<HostPortPair>>>,
         credential_reader: Arc<dyn CredentialReader>,
+        instrumentation: carbide_instrument::Instrumentation,
     ) -> Self {
         Self {
+            instrumentation,
             bmc_proxy,
             credential_reader,
         }
@@ -146,7 +148,7 @@ impl IPMIToolHttpImpl {
             Ok(())
         }
         .await;
-        count_ipmi_command(command, &result);
+        count_ipmi_command(command, &result, &self.instrumentation);
         result
     }
 }
@@ -164,7 +166,6 @@ impl IPMITool for IPMIToolHttpImpl {
 
     async fn restart(
         &self,
-        _machine_id: &MachineId,
         bmc_address: SocketAddr,
         legacy_boot: bool,
         credential_key: &CredentialKey,

@@ -22,6 +22,7 @@ use serde::{Serialize, Serializer};
 pub mod arch;
 pub mod cmd;
 pub mod config;
+pub mod duration;
 mod host_port_pair;
 mod listen_addr;
 pub mod managed_loop;

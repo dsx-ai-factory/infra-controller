@@ -25,7 +25,7 @@ policy for a VPC. The inline admin VPC profile is excluded.
 
 `-h, --help`
 
-Print help (see a summary with -h)
+Print help (see a summary with '-h')
 
 ## Subcommands
 
