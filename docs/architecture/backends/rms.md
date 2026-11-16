@@ -135,7 +135,7 @@ Component Manager also provides these passive status methods through its RMS bac
 | Power state | `batch_get_power_state` |
 | Installed firmware | `batch_get_firmware_inventory` |
 | Firmware manifest comparison | `compare_firmware_object` |
-| Tracked firmware jobs | `get_firmware_job_status`, `get_switch_system_image_job_status` (switches) |
+| Tracked firmware jobs | `get_job_status`, `get_switch_system_image_job_status` (switches) |
 
 These passive methods do not submit updates or move a firmware update to its next phase.
 Firmware job reads attempt to query the job identifiers recorded for each requested device.
