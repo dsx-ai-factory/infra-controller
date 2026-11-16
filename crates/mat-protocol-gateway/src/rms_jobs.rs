@@ -27,10 +27,10 @@
 //! the batch, otherwise a queued part keeps it queued and a running part keeps it running, and it
 //! is complete only once every part is.
 //!
-//! The table lives in process memory. An id neither issued nor polled for [`JOB_RETENTION`] is
-//! forgotten, and a gateway restart forgets every id at once; the proxy answers such ids the way
-//! the RMS mock answers ids it never issued. Ids carry a per-process token so an id from a
-//! previous process is never mistaken for one issued by the current one.
+//! The table lives in process memory. An id neither issued nor polled for the configured
+//! `rms.job_retention` is forgotten, and a gateway restart forgets every id at once; the proxy
+//! answers such ids the way the RMS mock answers ids it never issued. Ids carry a per-process
+//! token so an id from a previous process is never mistaken for one issued by the current one.
 
 use std::collections::HashMap;
 use std::sync::Mutex;
@@ -39,9 +39,6 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use librms::protos::rack_manager as rms;
 
 use crate::ownership::SourceId;
-
-/// How long an id is kept after it was last issued or polled.
-const JOB_RETENTION: Duration = Duration::from_secs(60 * 60);
 
 /// A job as one machine-a-tron instance names it.
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
@@ -82,20 +79,15 @@ pub(crate) struct JobMap {
     table: Mutex<Table>,
 }
 
-impl Default for JobMap {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 impl JobMap {
-    /// An empty map whose ids are `gw-<process token>-<n>`.
-    pub(crate) fn new() -> Self {
+    /// An empty map whose ids are `gw-<process token>-<n>`; an id neither issued nor polled for
+    /// `retention` is forgotten.
+    pub(crate) fn new(retention: Duration) -> Self {
         let token = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map(|since| since.as_millis())
             .unwrap_or_default();
-        Self::with_prefix_and_retention(format!("gw-{token:x}"), JOB_RETENTION)
+        Self::with_prefix_and_retention(format!("gw-{token:x}"), retention)
     }
 
     fn with_prefix_and_retention(prefix: String, retention: Duration) -> Self {
@@ -351,7 +343,11 @@ impl JobPhase {
 
 #[cfg(test)]
 mod tests {
+    use carbide_test_support::{Check, check_values};
+
     use super::*;
+
+    const HOUR: Duration = Duration::from_secs(60 * 60);
 
     fn source(name: &str) -> SourceId {
         SourceId(name.to_owned())
@@ -370,7 +366,7 @@ mod tests {
 
     #[test]
     fn interning_is_idempotent_per_instance_and_distinct_across_instances() {
-        let jobs = map(JOB_RETENTION);
+        let jobs = map(HOUR);
 
         let first = jobs.intern(&source("a"), "rms-mock-1");
         let again = jobs.intern(&source("a"), "rms-mock-1");
@@ -397,7 +393,7 @@ mod tests {
 
     #[test]
     fn a_batch_over_several_instances_gets_an_aggregate_id_and_its_parts_know_it() {
-        let jobs = map(JOB_RETENTION);
+        let jobs = map(HOUR);
 
         let single = jobs.batch_id(vec![job("a", "rms-mock-7")]);
         let split = jobs.batch_id(vec![job("a", "rms-mock-8"), job("b", "rms-mock-3")]);
@@ -423,7 +419,7 @@ mod tests {
 
     #[test]
     fn fresh_maps_carry_a_process_token_in_their_prefix() {
-        let id = JobMap::new().intern(&source("a"), "rms-mock-1");
+        let id = JobMap::new(HOUR).intern(&source("a"), "rms-mock-1");
         assert!(id.starts_with("gw-") && id.len() > "gw--1".len(), "{id}");
     }
 
@@ -451,6 +447,36 @@ mod tests {
         // Long after its last use the aggregate goes too, with its parts' membership.
         assert_eq!(jobs.resolve_at(&split, start + retention * 3), None);
         assert_eq!(jobs.aggregate_of(&job("a", "rms-mock-2")), None);
+    }
+
+    #[test]
+    fn the_configured_retention_decides_how_long_an_unpolled_id_is_kept() {
+        let minute = Duration::from_secs(60);
+        check_values(
+            [
+                Check {
+                    scenario: "first poll just inside the retention",
+                    input: (HOUR, HOUR - minute),
+                    expect: true,
+                },
+                Check {
+                    scenario: "first poll at the retention",
+                    input: (HOUR, HOUR),
+                    expect: false,
+                },
+                Check {
+                    scenario: "a longer retention keeps the id over the same gap",
+                    input: (24 * HOUR, HOUR),
+                    expect: true,
+                },
+            ],
+            |(retention, gap)| {
+                let jobs = map(retention);
+                let start = Instant::now();
+                let id = jobs.intern_at(&source("a"), "rms-mock-1", start);
+                jobs.resolve_at(&id, start + gap).is_some()
+            },
+        );
     }
 
     #[test]

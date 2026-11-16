@@ -1198,7 +1198,9 @@ async fn cycles(
         .no_proxy()
         .timeout(RPC_TIMEOUT)
         .build()?;
-    let credentials = create_credential_manager(&env.credential_config).await?;
+    let credentials =
+        create_credential_manager(&env.credential_config, env.metrics.instrumentation.clone())
+            .await?;
     wait_for_view(env, client, host, ViewTarget::Ready).await?;
     let initial_fabric = configure_fabric(env, client).await?;
     std::fs::write(

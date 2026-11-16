@@ -31,6 +31,7 @@ cert-manager = { path = "../cert-manager" }
 # External dependencies. PLEASE KEEP ALPHABETIZED ORDER.
 bmc-drivers = { path = "../bmc-drivers" }
 bmc-backend = { path = "../bmc-backend" }
+bmc-platform = { path = "../bmc-platform" }
 bmc-runtime = { path = "../bmc-runtime" }
 bmc-explorer = { path = "../bmc-explorer" }
 bmc-vendor = { path = "../bmc-vendor" }

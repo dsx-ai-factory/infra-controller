@@ -141,21 +141,15 @@ func (gamch GetAllMachineCapabilityHandler) Handle(c echo.Context) error {
 	filterInput := cdbm.MachineFilterInput{
 		InfrastructureProviderIDs: []uuid.UUID{orgInfrastructureProvider.ID},
 		HasInstanceType:           hasInstanceType,
-		ExcludeMetadata:           true, // Exclude metadata since we're only retrieving Machines for the IDs
 	}
 	if site != nil {
 		filterInput.SiteIDs = []uuid.UUID{site.ID}
 	}
 
-	ms, _, err := mDAO.GetAll(ctx, nil, filterInput, cdbp.PageInput{Limit: cutil.GetPtr(cdbp.TotalLimit)}, nil)
+	mids, err := mDAO.GetAllIDs(ctx, nil, filterInput)
 	if err != nil {
 		logger.Error().Err(err).Msg("error getting Machines from DB")
 		return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to retrieve Machines, DB error", nil)
-	}
-
-	mids := []string{}
-	for _, m := range ms {
-		mids = append(mids, m.ID)
 	}
 
 	// Get other Machine Capability filters

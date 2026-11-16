@@ -48,6 +48,8 @@ impl StateHandlerContextObjects for MachineStateHandlerContextObjects {
 
 #[derive(Clone)]
 pub struct MachineStateHandlerServices {
+    /// Destination for Event metrics owned by this controller instance.
+    pub instrumentation: carbide_instrument::Instrumentation,
     pub db_pool: PgPool,
     /// Postgres database pool that can be passed directly to read-only db functions without a
     /// transaction

@@ -31,6 +31,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
+use carbide_instrument::Instrumentation;
 use carbide_redfish::libredfish::{RedfishAuth, RedfishClientCreationError, RedfishClientPool};
 use carbide_secrets::credentials::CredentialReader;
 use carbide_utils::HostPortPair;
@@ -62,9 +63,13 @@ fn identity_files(proxy_config: &BmcProxyConfig) -> [(String, PathBuf); 3] {
 }
 
 /// Counts a check that could not rebuild a client.
-fn report_reload_failure<T>(_: &T, failure: Option<&ReloadError>) {
+fn report_reload_failure<T>(
+    instrumentation: &Instrumentation,
+    _: &T,
+    failure: Option<&ReloadError>,
+) {
     if let Some(error) = failure {
-        carbide_instrument::emit(BmcProxyClientReloadFailed {
+        instrumentation.emit(BmcProxyClientReloadFailed {
             error: error.to_string(),
         });
     }
@@ -100,6 +105,7 @@ impl ProxiedRedfishPool {
     pub(crate) fn new(
         proxy_config: &BmcProxyConfig,
         credential_reader: Arc<dyn CredentialReader>,
+        instrumentation: Instrumentation,
     ) -> eyre::Result<Self> {
         let proxy: HostPortPair = proxy_config
             .proxy_target()
@@ -122,7 +128,7 @@ impl ProxiedRedfishPool {
                     proxy.clone(),
                 ))
             },
-            report_reload_failure,
+            move |value, failure| report_reload_failure(&instrumentation, value, failure),
         )?;
         Ok(Self {
             inner,
@@ -178,7 +184,10 @@ pub(crate) struct PassthroughClient {
 }
 
 impl PassthroughClient {
-    pub(crate) fn new(proxy_config: &BmcProxyConfig) -> eyre::Result<Self> {
+    pub(crate) fn new(
+        proxy_config: &BmcProxyConfig,
+        instrumentation: Instrumentation,
+    ) -> eyre::Result<Self> {
         let target = proxy_config
             .proxy_target()
             .map_err(|err| eyre::eyre!(err))?;
@@ -212,7 +221,7 @@ impl PassthroughClient {
                     .with(reqwest_tracing::TracingMiddleware::default())
                     .build())
             },
-            report_reload_failure,
+            move |value, failure| report_reload_failure(&instrumentation, value, failure),
         )?;
         Ok(Self { client, target })
     }
@@ -261,10 +270,13 @@ mod tests {
     // failed reload, and leaves the client in service.
     #[tokio::test(start_paused = true)]
     async fn a_client_that_cannot_be_rebuilt_counts_a_failed_reload() {
-        let metrics = carbide_instrument::testing::MetricsCapture::start();
+        let test_meter = carbide_utils::test_support::test_meter::TestMeter::default();
+        let metrics =
+            carbide_instrument::testing::MetricsCapture::for_registry(test_meter.registry());
         let dir = tempfile::tempdir().expect("temp dir");
         let config = test_config_with_generated_pems(&dir);
-        let passthrough = PassthroughClient::new(&config).expect("the first build succeeds");
+        let passthrough = PassthroughClient::new(&config, Instrumentation::new(test_meter.meter()))
+            .expect("the first build succeeds");
 
         std::fs::write(&config.client_key, "not a key").expect("the key rewrites");
         tokio::time::advance(IDENTITY_REFRESH_INTERVAL).await;

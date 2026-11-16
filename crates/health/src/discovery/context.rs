@@ -444,6 +444,7 @@ impl CollectorState {
 }
 
 pub struct DiscoveryLoopContext {
+    pub(crate) instrumentation: carbide_instrument::Instrumentation,
     pub(super) collectors: CollectorState,
     pub(crate) discovery_iteration_histogram: Histogram,
     pub(crate) discovery_endpoint_fetch_histogram: Histogram,
@@ -493,13 +494,23 @@ pub struct DiscoveryLoopContext {
 }
 
 impl DiscoveryLoopContext {
+    /// Creates discovery state whose Event metrics use the supplied instrumentation.
+    /// Retain its provider until discovery and its collectors stop.
     pub fn new(
         limiter: Arc<dyn RateLimiter>,
         metrics_manager: Arc<MetricsManager>,
         config: Arc<Config>,
+        instrumentation: carbide_instrument::Instrumentation,
     ) -> Result<Self, HealthError> {
         let nmxc_schema_override = load_nmxc_schema_override(&config)?;
-        Self::new_with_tls_config(limiter, metrics_manager, config, None, nmxc_schema_override)
+        Self::new_with_tls_config(
+            limiter,
+            metrics_manager,
+            config,
+            None,
+            nmxc_schema_override,
+            instrumentation,
+        )
     }
 
     pub(crate) fn new_with_tls_config(
@@ -508,6 +519,7 @@ impl DiscoveryLoopContext {
         config: Arc<Config>,
         tls_config: Option<MtlsProfileConfig>,
         nmxc_schema_override: Option<Arc<NmxcSchemaOverride>>,
+        instrumentation: carbide_instrument::Instrumentation,
     ) -> Result<Self, HealthError> {
         let registry = metrics_manager.global_registry();
 
@@ -552,6 +564,7 @@ impl DiscoveryLoopContext {
             };
 
         Ok(Self {
+            instrumentation,
             collectors: CollectorState::new(),
             discovery_iteration_histogram,
             discovery_endpoint_fetch_histogram,
@@ -756,6 +769,7 @@ mod tests {
             Arc::new(crate::limiter::NoopLimiter),
             Arc::new(MetricsManager::new("tls_context").expect("metrics manager")),
             Arc::new(config),
+            carbide_instrument::Instrumentation::global(),
         )
         .expect("context should initialize");
 
@@ -773,6 +787,7 @@ mod tests {
             Arc::new(crate::limiter::NoopLimiter),
             Arc::new(MetricsManager::new("drain_collectors").expect("metrics manager")),
             Arc::new(Config::default()),
+            carbide_instrument::Instrumentation::global(),
         )
         .expect("context should initialize");
 

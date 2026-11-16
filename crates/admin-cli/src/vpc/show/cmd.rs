@@ -240,6 +240,10 @@ pub(in crate::vpc) fn convert_vpc_to_nice_format(vpc: &forgerpc::Vpc) -> Carbide
             format_slaac_enabled(config.slaac_enabled).into(),
         ),
         (
+            "PRIVATE DNS ZONE",
+            config.private_dns_zone.as_deref().unwrap_or("None").into(),
+        ),
+        (
             "ROUTING PROFILE TYPE",
             config
                 .routing_profile_type
@@ -295,9 +299,7 @@ mod tests {
             &self,
             _vpc_ids: Vec<VpcId>,
         ) -> CarbideCliResult<forgerpc::VpcList> {
-            Err(CarbideCliError::GenericError(
-                "unexpected VPC detail request".to_string(),
-            ))
+            Ok(self.vpcs.clone())
         }
     }
 
@@ -340,6 +342,49 @@ mod tests {
         assert!(!overrides.contains("\"access_tier\""));
         assert!(effective.contains("\"internal\": true"));
         assert!(effective.contains("\"access_tier\": 2"));
+    }
+
+    #[tokio::test]
+    async fn vpc_detail_command_shows_private_dns_zone() {
+        for (private_dns_zone, expected) in [
+            (
+                Some("corp.example."),
+                "PRIVATE DNS ZONE         : corp.example.",
+            ),
+            (None, "PRIVATE DNS ZONE         : None"),
+        ] {
+            let client = FakeVpcShowClient {
+                vpcs: forgerpc::VpcList {
+                    vpcs: vec![forgerpc::Vpc {
+                        config: Some(forgerpc::VpcConfig {
+                            private_dns_zone: private_dns_zone.map(str::to_string),
+                            ..Default::default()
+                        }),
+                        ..Default::default()
+                    }],
+                },
+            };
+
+            let mut captured = CapturedOutput::new();
+            show(
+                Args {
+                    id: Some(VpcId::new()),
+                    tenant_org_id: None,
+                    name: None,
+                    label_key: None,
+                    label_value: None,
+                },
+                OutputFormat::AsciiTable,
+                captured.writer(),
+                &client,
+                100,
+            )
+            .await
+            .expect("VPC detail should render");
+
+            let display = String::from_utf8(captured.into_bytes().await).expect("UTF-8 output");
+            assert!(display.lines().any(|line| line == expected), "{display}");
+        }
     }
 
     #[tokio::test]

@@ -29,6 +29,7 @@ test-support = []
 [dependencies]
 async-trait = { workspace = true }
 bmc-backend = { path = "../bmc-backend" }
+bmc-platform = { path = "../bmc-platform" }
 bmc-runtime = { path = "../bmc-runtime" }
 bmc-vendor = { path = "../bmc-vendor" }
 carbide-api-db = { path = "../api-db", default-features = false }

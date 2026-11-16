@@ -62,7 +62,7 @@
 //! let options = ClientOptions::default()
 //!     .with_credentials_provider(Arc::new(credentials_provider));
 //!
-//! let client = MqtteaClient::new("broker.example.com", 8883, "my-client", Some(options)).await?;
+//! let client = MqtteaClient::new("broker.example.com", 8883, "my-client", Some(options), carbide_instrument::Instrumentation::global()).await?;
 //! ```
 
 mod oauth2_provider;

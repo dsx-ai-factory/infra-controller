@@ -52,6 +52,7 @@ async fn test_start_updates(pool: sqlx::PgPool) -> Result<(), Box<dyn std::error
     managed_host.update_nic_firmware_version(&mut txn).await?;
     txn.commit().await?;
     let dpu_nic_firmware_update = DpuNicFirmwareUpdate {
+        instrumentation: env.api.instrumentation.clone(),
         reported_wrong_versions: std::sync::Mutex::new(std::collections::HashSet::new()),
         metrics: None,
         config: env.config.clone(),
@@ -66,7 +67,7 @@ async fn test_start_updates(pool: sqlx::PgPool) -> Result<(), Box<dyn std::error
         .await
         .expect("Failed to create transaction");
 
-    let metrics = MetricsCapture::start();
+    let metrics = MetricsCapture::for_registry(env.test_meter.registry());
 
     let started_count = dpu_nic_firmware_update
         .start_updates(&env.pool, &work_lock, 10, &HashSet::default(), &snapshots)
@@ -119,6 +120,7 @@ async fn test_classic_updates_outlive_dpf_admission_deadline(
     }
     txn.commit().await?;
     let updater = DpuNicFirmwareUpdate {
+        instrumentation: env.api.instrumentation.clone(),
         reported_wrong_versions: std::sync::Mutex::new(HashSet::new()),
         metrics: None,
         config: env.config.clone(),
@@ -196,6 +198,7 @@ async fn test_start_updates_with_multidpu(
     txn.commit().await?;
 
     let dpu_nic_firmware_update = DpuNicFirmwareUpdate {
+        instrumentation: env.api.instrumentation.clone(),
         reported_wrong_versions: std::sync::Mutex::new(std::collections::HashSet::new()),
         metrics: None,
         config: env.config.clone(),
@@ -243,6 +246,7 @@ async fn test_get_updates_in_progress(
     managed_host.update_nic_firmware_version(&mut txn).await?;
     txn.commit().await?;
     let dpu_nic_firmware_update = DpuNicFirmwareUpdate {
+        instrumentation: env.api.instrumentation.clone(),
         reported_wrong_versions: std::sync::Mutex::new(std::collections::HashSet::new()),
         metrics: None,
         config: env.config.clone(),
@@ -292,6 +296,7 @@ async fn test_check_for_updates(pool: sqlx::PgPool) -> Result<(), Box<dyn std::e
     txn.commit().await?;
 
     let dpu_nic_firmware_update = DpuNicFirmwareUpdate {
+        instrumentation: env.api.instrumentation.clone(),
         reported_wrong_versions: std::sync::Mutex::new(std::collections::HashSet::new()),
         metrics: None,
         config: env.config.clone(),
@@ -337,6 +342,7 @@ async fn test_wrong_version_failures_count_once_per_outcome(
     txn.commit().await?;
 
     let dpu_nic_firmware_update = DpuNicFirmwareUpdate {
+        instrumentation: env.api.instrumentation.clone(),
         reported_wrong_versions: std::sync::Mutex::new(std::collections::HashSet::new()),
         metrics: None,
         config: env.config.clone(),
@@ -384,7 +390,7 @@ async fn test_wrong_version_failures_count_once_per_outcome(
         }
     };
 
-    let metrics = MetricsCapture::start();
+    let metrics = MetricsCapture::for_registry(env.test_meter.registry());
     let wrong_version_delta = || {
         metrics.counter_delta(
             "carbide_firmware_update_failures_total",
@@ -481,13 +487,14 @@ async fn test_clear_completed_updates_dpf_host_off_list_version(
     );
 
     let dpu_nic_firmware_update = DpuNicFirmwareUpdate {
+        instrumentation: env.api.instrumentation.clone(),
         reported_wrong_versions: std::sync::Mutex::new(std::collections::HashSet::new()),
         metrics: None,
         config: env.config.clone(),
         dpf: None,
     };
 
-    let metrics = MetricsCapture::start();
+    let metrics = MetricsCapture::for_registry(env.test_meter.registry());
     let mut txn = env.pool.begin().await?;
     dpu_nic_firmware_update
         .clear_completed_updates(&mut txn)
@@ -539,6 +546,7 @@ async fn stale_work_lock_cannot_admit_dpu_firmware(
     host.update_nic_firmware_version(&mut txn).await?;
     txn.commit().await?;
     let updater = DpuNicFirmwareUpdate {
+        instrumentation: env.api.instrumentation.clone(),
         reported_wrong_versions: std::sync::Mutex::new(HashSet::new()),
         metrics: None,
         config: env.config.clone(),
@@ -587,7 +595,9 @@ async fn outstanding_dpu_read_failure_is_returned(
             "/src/cfg/test_data/full_config.toml"
         )))
         .extract()?;
+    let test_meter = carbide_utils::test_support::test_meter::TestMeter::default();
     let updater = DpuNicFirmwareUpdate {
+        instrumentation: carbide_instrument::Instrumentation::new(test_meter.meter()),
         reported_wrong_versions: std::sync::Mutex::new(HashSet::new()),
         metrics: None,
         config: std::sync::Arc::new(config),
@@ -619,6 +629,7 @@ async fn dpu_admission_keeps_work_lock_ownership_until_commit(
     host.update_nic_firmware_version(&mut txn).await?;
     txn.commit().await?;
     let updater = DpuNicFirmwareUpdate {
+        instrumentation: env.api.instrumentation.clone(),
         reported_wrong_versions: std::sync::Mutex::new(HashSet::new()),
         metrics: None,
         config: env.config.clone(),
@@ -690,6 +701,7 @@ async fn contended_dpu_admission_releases_another_work_manager(
     host.update_nic_firmware_version(&mut txn).await?;
     txn.commit().await?;
     let updater = DpuNicFirmwareUpdate {
+        instrumentation: env.api.instrumentation.clone(),
         reported_wrong_versions: std::sync::Mutex::new(HashSet::new()),
         metrics: None,
         config: env.config.clone(),
@@ -708,8 +720,13 @@ async fn contended_dpu_admission_releases_another_work_manager(
         .connect_with(env.pool.connect_options().as_ref().clone())
         .await?;
     let mut tasks = tokio::task::JoinSet::new();
-    let contender =
-        db::work_lock_manager::start(&mut tasks, env.pool.clone(), Default::default()).await?;
+    let contender = db::work_lock_manager::start(
+        &mut tasks,
+        env.pool.clone(),
+        Default::default(),
+        carbide_instrument::Instrumentation::global(),
+    )
+    .await?;
     let work_key = "contended-dpu-admission";
     let work_lock = env
         .api

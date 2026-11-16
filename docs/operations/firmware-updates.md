@@ -54,32 +54,103 @@ the disruptive work and the return to service.
 On each scheduler pass, NICo:
 
 1. clears bookkeeping for updates that have completed;
-1. counts the distinct hosts already in maintenance or an update workflow;
+1. counts distinct hosts reported by the update modules;
 1. calculates the remaining capacity from the site-wide machine-update limit;
-1. asks the enabled DPU and host firmware modules for eligible work; and
-1. creates requests until the shared capacity is full.
-
-```mermaid
-flowchart LR
-    A["Periodic scheduler pass"] --> B["Clear completed update markers"]
-    B --> C["Count hosts already updating"]
-    C --> D["Calculate shared capacity"]
-    D --> E["Apply DPU and host eligibility checks"]
-    E --> F["Create reprovisioning requests"]
-    F --> G["Managed-host state machine performs the work"]
-```
-
-Host and DPU work therefore compete for the same capacity, and a host with
-several drifted DPUs counts once. Each module still applies its own state,
-health, approval, and update-window checks before selecting a host. If the
-calculated capacity is zero, drift remains pending and no automatic managed
-machine update starts.
+1. asks the host firmware module and, when enabled, the DPU module for eligible work; and
+1. creates requests up to the remaining shared capacity.
 
 Pre-ingestion firmware is not scheduled by Machine Update Manager. It has a
 separate polling interval and concurrency limit because the hardware has not
 yet entered the managed-host lifecycle. Refer to the
 [Machine Update Manager architecture](../architecture/overview.md#machine-update-manager)
 for the broader ownership model.
+
+### Shared Host Capacity
+
+NIC capacity accounting and the transaction protections below require a build
+containing the [shared NIC accounting implementation (PR #8780)](https://github.com/dsx-ai-factory/infra-controller/pull/8780).
+Earlier builds lack this NIC accounting and these transaction protections.
+This implementation counts existing NIC operations; it does not enable first
+production NIC admission or the full NIC rollout.
+[Remaining NIC admission work](https://github.com/dsx-ai-factory/infra-controller/issues/6680)
+is tracked separately.
+
+Machine Update Manager counts distinct hosts from these sources:
+
+- Hosts with a host reprovisioning request, including operator requests. The
+  host firmware module always participates in accounting.
+- Hosts with DPU reprovisioning requests from the automatic update initiator,
+  while `dpu_config.dpu_nic_firmware_reprovision_update_enabled` is `true`.
+  Disabling this module also stops counting its outstanding automatic requests.
+- Stable or predicted hosts whose current state is `NicFirmwareUpdating`.
+  NIC accounting continues when new NIC admission is disabled.
+
+One counted host consumes one slot, even when it has several DPUs or NIC cards
+or appears in several modules. A maintenance state or manual DPU request alone
+does not consume a slot. This ceiling gates new automatic requests; manual
+work can make occupancy exceed the ceiling. Selection follows the separate
+[host scheduling gates](firmware-updates/host-firmware.md#scheduling-gates) and
+[DPU eligibility checks](firmware-updates/dpu-firmware.md#eligibility-and-scheduling).
+
+NIC accounting reads current host states, excluding state history and the
+state mirrored onto DPU records. Every NIC phase occupies capacity:
+`ObservingSupervisor`, `Unlocking`, `UpdatingFirmware`, `Rebooting`,
+`Reobserving`, `RestoringLockdown`, and `Failed`. A host retains its slot during
+recovery, lockdown restoration, and failure until it leaves `NicFirmwareUpdating`.
+Missing supervisor receipts do not free capacity. A parked `Failed` operation
+can require operator intervention; follow [NIC Firmware Recovery](../architecture/state_machines/managedhost.md#nic-firmware-recovery)
+for diagnostics and the guarded recovery paths.
+
+Core resolves the capacity policy after loading configuration:
+
+- The deprecated top-level `max_concurrent_machine_updates` supplies the
+  effective `machine_updater.max_concurrent_machine_updates_absolute` when the
+  nested field is unset. When both are set, Core uses the smaller value.
+- With `machine_updater.max_concurrent_machine_updates_percent` set, Core rounds
+  that percentage of all managed hosts up, then subtracts unhealthy hosts,
+  stopping at zero. A nonnegative effective absolute limit further caps this
+  result. A zero or negative percentage permits no new automatic requests,
+  even if the absolute limit is positive.
+- Without a percentage, the effective absolute limit applies directly. If
+  neither limit is set after resolving the legacy key, the ceiling is zero.
+- Existing occupied slots reduce the remaining capacity. A zero ceiling stops
+  new automatic requests without cancelling existing workflows or freeing slots.
+
+For example, suppose there are 100 managed hosts, a 20% limit, 3 unhealthy
+hosts, a nested absolute limit of 20, a legacy absolute limit of 10, and 2
+distinct occupied hosts. These are example inputs, not defaults. The effective
+absolute limit is 10, the ceiling is `min(20 - 3, 10) = 10`, and 8 slots remain
+for new automatic requests.
+
+The host total includes predicted hosts and every managed-host state. A host
+is unhealthy for this calculation if it has any aggregate alert other than
+`HostUpdateInProgress`. Such a host is subtracted as unhealthy even if it also
+occupies an update slot. Core accepts negative absolute values: without a
+percentage they prevent new requests; with a positive percentage they do not
+cap the percentage calculation.
+
+The Helm chart supplies a legacy limit of `10` by default. The setup values in
+`helm-prereqs/values/nico-core.yaml`, `nico-core-10k-hosts.yaml`, and
+`nico-core-simulation.yaml` override it with `20`. These are overridable chart
+and setup defaults. Site TOML overrides base TOML, and `CARBIDE_API_`
+environment configuration overrides both, before Core resolves the legacy key.
+
+If an occupancy read fails, including a persisted NIC operation that cannot
+be decoded, the pass fails before creating new requests. Core retries failed
+passes at `machine_update_run_interval`, whose default is 300 seconds. Inspect
+`carbide_managed_loop_iterations_total{manager="machine_update_manager",outcome="error"}`
+and the warning "managed loop iteration failed" for the cause. A persistent
+read failure blocks new automatic requests until corrected.
+
+Cleanup and request-creation transactions verify that the scheduler still
+owns its database work lock before writing. Changed ownership rejects those
+writes. Each transaction applies a 5-second PostgreSQL `statement_timeout` per
+statement, preserving a shorter nonzero session limit. A session limit of zero
+becomes 5 seconds. The setting remains local until commit or rollback.
+This cap does not bound connection acquisition, work-lock acquisition, the
+total transaction duration, or the whole scheduler pass. Firmware catalog
+filesystem reads and DPF compatibility checks run outside these transactions. DPF has
+separate compatibility deadlines, described in [Eligibility and scheduling](firmware-updates/dpu-firmware.md#eligibility-and-scheduling).
 
 ## Set the expected versions
 

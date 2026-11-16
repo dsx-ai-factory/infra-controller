@@ -162,10 +162,12 @@ impl EndpointExplorationService {
     }
 
     /// Refreshes an endpoint immediately, or queues it during DPF provisioning.
+    /// Deferred-request Events use the supplied instrumentation.
     /// Queued refreshes return the cached report with `exploration_requested` set.
     pub async fn refresh_endpoint_report(
         &self,
         bmc_ip: IpAddr,
+        instrumentation: &carbide_instrument::Instrumentation,
     ) -> Result<ExploredEndpoint, EndpointExplorationServiceError> {
         let mut txn = db::Transaction::begin(&self.database_connection).await?;
 
@@ -190,6 +192,7 @@ impl EndpointExplorationService {
             bmc_ip,
             bmc_interface.mac_address,
             crate::suppression::ExplorationRequest::Refresh,
+            instrumentation,
         )
         .await
         {
@@ -243,6 +246,7 @@ impl EndpointExplorationService {
         let boot_interface = existing_endpoint.boot_interface_target().map(Into::into);
         let existing_report = existing_endpoint.report;
 
+        let instrumentation = instrumentation.clone();
         let join_handle = tokio::spawn(async move {
             let probe = service
                 .try_explore_endpoint(
@@ -280,7 +284,7 @@ impl EndpointExplorationService {
             .await?
             {
                 ConditionalWrite::Applied(()) => {
-                    attester_inventory::record(&report, &mut txn).await?;
+                    attester_inventory::record(&report, &mut txn, &instrumentation).await?;
                 }
                 ConditionalWrite::NotApplied(EndpointReportNotCurrent) => {
                     return Err(EndpointExplorationServiceError::ConcurrentModification {

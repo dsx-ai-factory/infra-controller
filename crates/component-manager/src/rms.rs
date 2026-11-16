@@ -24,7 +24,7 @@ use std::net::IpAddr;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use carbide_instrument::{Event, emit, red};
+use carbide_instrument::{Event, red};
 use carbide_rack::firmware_object::{
     ANY_RACK_HARDWARE_TYPE, RMS_NOAUTH_ACCESS_TOKEN, profile_hardware_type_wire_value,
     rms_access_token_or_noauth,
@@ -345,6 +345,7 @@ fn rms_node_descriptor_config_error(
 /// found during lookup, including machines without a rack. It does not check
 /// other inventory kinds or prevent reassignment after the lookup.
 pub struct RmsBackend {
+    instrumentation: carbide_instrument::Instrumentation,
     client: Arc<dyn RmsApi>,
     core_compute_manager: Option<crate::core_compute_manager::CoreComputeTrayManager>,
     switch_system_image_client: Option<Arc<dyn RmsSwitchSystemImageStatusApi>>,
@@ -1367,14 +1368,18 @@ impl std::fmt::Debug for RmsBackend {
 }
 
 impl RmsBackend {
+    /// Creates an RMS backend whose diagnostic Events use the supplied destination.
+    /// Retain its provider while backend requests can run.
     pub fn new(
         client: Arc<dyn RmsApi>,
         switch_system_image_client: Option<Arc<dyn RmsSwitchSystemImageStatusApi>>,
         db: PgPool,
         rack_profiles: Arc<RackProfileConfig>,
         _nvos_password_rotation_enabled: bool,
+        instrumentation: carbide_instrument::Instrumentation,
     ) -> Self {
         Self {
+            instrumentation,
             client,
             core_compute_manager: None,
             switch_system_image_client,
@@ -4462,7 +4467,12 @@ impl NvSwitchManager for RmsBackend {
         &self,
         job_id: &str,
     ) -> Result<ConfigureSwitchCertificateJobStatus, ComponentManagerError> {
-        rms_get_configure_switch_certificate_job_status(self.client.as_ref(), job_id).await
+        rms_get_configure_switch_certificate_job_status(
+            self.client.as_ref(),
+            job_id,
+            &self.instrumentation,
+        )
+        .await
     }
 
     #[instrument(skip(self, endpoints, domain_name), fields(backend = "rms"))]
@@ -5695,6 +5705,7 @@ fn certificate_node_failures(
 async fn rms_get_configure_switch_certificate_job_status(
     client: &dyn RmsApi,
     job_id: &str,
+    instrumentation: &carbide_instrument::Instrumentation,
 ) -> Result<ConfigureSwitchCertificateJobStatus, ComponentManagerError> {
     let request = rms::GetConfigureSwitchCertificateJobStatusRequest {
         job_id: job_id.to_owned(),
@@ -5729,7 +5740,7 @@ async fn rms_get_configure_switch_certificate_job_status(
 
     let state =
         map_rms_configure_switch_certificate_job_state(&response.state).unwrap_or_else(|| {
-            emit(RmsSwitchCertificateJobStateUnrecognized);
+            instrumentation.emit(RmsSwitchCertificateJobStateUnrecognized);
             ConfigureSwitchCertificateState::InProgress
         });
     let (error, failure) = if state == ConfigureSwitchCertificateState::Failed {
@@ -6601,6 +6612,7 @@ mod tests {
             pool,
             Arc::new(rack_profile_config()),
             true,
+            carbide_instrument::Instrumentation::global(),
         );
         let action = PowerAction::AcPowercycle;
         for (component, error) in [
@@ -6652,6 +6664,7 @@ mod tests {
             Some(pool),
             Some(redfish.clone()),
             None,
+            carbide_instrument::Instrumentation::global(),
         )
         .await
         .unwrap();
@@ -7483,6 +7496,7 @@ mod tests {
         let (status, logs) = capture_logs_async(rms_get_configure_switch_certificate_job_status(
             &mock,
             "cert-job-1",
+            &carbide_instrument::Instrumentation::global(),
         ))
         .await;
         let status = status.expect("unknown RMS state keeps certificate polling active");
@@ -7758,9 +7772,13 @@ mod tests {
             ))
             .await;
 
-            let error = rms_get_configure_switch_certificate_job_status(&mock, "cert-job-1")
-                .await
-                .expect_err("a missing RMS job must be reported");
+            let error = rms_get_configure_switch_certificate_job_status(
+                &mock,
+                "cert-job-1",
+                &carbide_instrument::Instrumentation::global(),
+            )
+            .await
+            .expect_err("a missing RMS job must be reported");
 
             let ComponentManagerError::NotFound(detail) = error else {
                 panic!("expected a missing RMS job error");
@@ -9466,6 +9484,7 @@ mod tests {
             limited_pool.clone(),
             Arc::new(rack_profile_config()),
             true,
+            carbide_instrument::Instrumentation::global(),
         );
         let endpoint = make_ct_endpoint(CT_IP_1, CT_MAC_1);
 
@@ -9673,6 +9692,7 @@ mod tests {
             pool.clone(),
             Arc::new(rack_profile_config()),
             true,
+            carbide_instrument::Instrumentation::global(),
         );
         (mock, backend, rack_id, ps1, ps2, sw1, sw2)
     }
@@ -9703,6 +9723,7 @@ mod tests {
             pool.clone(),
             Arc::new(rack_profile_config()),
             true,
+            carbide_instrument::Instrumentation::global(),
         );
         (mock, backend, rack_id, ct1, ct2)
     }
@@ -10121,6 +10142,7 @@ mod tests {
             pool.clone(),
             Arc::new(rack_profile_config()),
             true,
+            carbide_instrument::Instrumentation::global(),
         );
 
         let pmc_mac: MacAddress = PS_MAC_1.parse().unwrap();
@@ -12111,6 +12133,7 @@ mod tests {
             read_pool.clone(),
             Arc::default(),
             true,
+            carbide_instrument::Instrumentation::global(),
         );
         for (mac, kind, id) in [
             (CT_MAC_1, StoredJobKind::FirmwareObject, "compute-job"),
@@ -12817,6 +12840,7 @@ mod tests {
                 pool.clone(),
                 Arc::new(rack_profile_config()),
                 true,
+                carbide_instrument::Instrumentation::global(),
             );
 
             // Power responses summarize batch success. Queue enough successes
@@ -12915,6 +12939,7 @@ mod tests {
                 pool.clone(),
                 Arc::new(rack_profile_config()),
                 true,
+                carbide_instrument::Instrumentation::global(),
             );
 
             // A command rejected before dispatch must preserve both job stores.
@@ -13172,6 +13197,7 @@ mod tests {
             pool.clone(),
             Arc::new(rack_profile_config()),
             true,
+            carbide_instrument::Instrumentation::global(),
         );
 
         let bmc_mac: MacAddress = CT_MAC_1.parse().unwrap();
@@ -13229,6 +13255,7 @@ mod tests {
             pool.clone(),
             Arc::new(rack_profile_config()),
             true,
+            carbide_instrument::Instrumentation::global(),
         );
 
         let eps = vec![make_ct_endpoint(CT_IP_1, CT_MAC_1)];

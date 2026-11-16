@@ -193,10 +193,11 @@ pub(crate) async fn sign_machine_identity(
         decrypt_machine_identity_ciphertext(api.credential_manager.as_ref(), enc_key.as_str())
             .await
             .inspect_err(|e| {
-                carbide_instrument::emit(MachineIdentityStoredSecretDecryptionFailed::SigningKey {
-                    organization_id: identity_row.organization_id.to_string(),
-                    error: e.message().to_string(),
-                });
+                api.instrumentation
+                    .emit(MachineIdentityStoredSecretDecryptionFailed::SigningKey {
+                        organization_id: identity_row.organization_id.to_string(),
+                        error: e.message().to_string(),
+                    });
             })
             .map_err(|_| {
                 CarbideError::internal("stored signing key could not be decrypted".to_string())
@@ -242,7 +243,7 @@ pub(crate) async fn sign_machine_identity(
         )
         .await
         .inspect_err(|e| {
-            carbide_instrument::emit(
+            api.instrumentation.emit(
                 MachineIdentityStoredSecretDecryptionFailed::TokenDelegationAuth {
                     organization_id: identity_row.organization_id.to_string(),
                     error: e.message().to_string(),
@@ -263,6 +264,7 @@ pub(crate) async fn sign_machine_identity(
             &subject_jwt,
             &audiences,
             delegation_creds.as_ref(),
+            &api.instrumentation,
         )
         .await?;
         return Ok(Response::new(response));

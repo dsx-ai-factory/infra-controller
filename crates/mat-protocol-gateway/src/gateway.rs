@@ -77,6 +77,7 @@ impl Gateway {
     /// Creates the UFM mock, the RMS proxy and the metrics registry; nothing is served or polled
     /// yet. The CA file named by `sources.ca_cert_path` is read here.
     pub fn new(config: GatewayConfig, auth_token: &UfmAuthToken) -> eyre::Result<Self> {
+        config.validate()?;
         let metrics_setup = new_metrics_setup("carbide-mat-protocol-gateway", "carbide", false)?;
         // Not ready until `bootstrap` has a source list; the metrics endpoint shares the flag.
         metrics_setup.health_controller.set_ready(false);
@@ -153,6 +154,7 @@ impl Gateway {
     fn start_metrics_endpoint(&self) -> Option<JoinHandle<()>> {
         let address = self.config.metrics_address?;
         let metrics_config = MetricsEndpointConfig {
+            instrumentation: self.metrics_setup.instrumentation.clone(),
             address,
             registry: self.metrics_setup.registry.clone(),
             health_controller: Some(self.metrics_setup.health_controller.clone()),
@@ -338,6 +340,7 @@ pub async fn run_with_listener(
     tracing::info!(
         address = %gateway.config.listen_address,
         tls = gateway.config.tls.is_some(),
+        rms_job_retention_seconds = gateway.config.rms.job_retention.as_secs(),
         "Starting machine-a-tron protocol gateway"
     );
 

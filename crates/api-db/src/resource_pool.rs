@@ -1147,9 +1147,11 @@ pub async fn pool_has_rows(txn: &mut PgConnection, name: &str) -> Result<bool, D
 /// not removed.
 /// Remote pools save the same seed snapshot and drift diagnostics without
 /// creating local inventory; provider registration uses that saved seed later.
+/// Drift Events use `instrumentation`; retain its provider until reconciliation finishes.
 pub async fn reconcile_pool_defs(
     txn: &mut PgConnection,
     declared: &HashMap<String, ResourcePoolDef>,
+    instrumentation: &carbide_instrument::Instrumentation,
 ) -> Result<(), DefineResourcePoolError> {
     let stored = all_stored_defs(&mut *txn).await?;
     let remote_pools: HashSet<_> = binding::all(&mut *txn)
@@ -1178,7 +1180,7 @@ pub async fn reconcile_pool_defs(
             (Some(stored_def), true) if stored_def == def => {}
             // Declaration has drifted since seed. Warn, don't reapply.
             (Some(stored_def), true) => {
-                emit(ConfigDefinitionDrifted {
+                instrumentation.emit(ConfigDefinitionDrifted {
                     resource_kind: ConfigResourceKind::ResourcePool,
                     drift_kind: ConfigDriftKind::Changed,
                     name: name.clone(),
@@ -1206,7 +1208,7 @@ pub async fn reconcile_pool_defs(
 
     for name in stored.keys() {
         if !declared.contains_key(name) {
-            emit(ConfigDefinitionDrifted {
+            instrumentation.emit(ConfigDefinitionDrifted {
                 resource_kind: ConfigResourceKind::ResourcePool,
                 drift_kind: ConfigDriftKind::Dropped,
                 name: name.clone(),
@@ -3465,7 +3467,12 @@ mod tests {
             .into_iter()
             .collect();
 
-        reconcile_pool_defs(&mut txn, &declared).await?;
+        reconcile_pool_defs(
+            &mut txn,
+            &declared,
+            &carbide_instrument::Instrumentation::global(),
+        )
+        .await?;
 
         let stored = stored_def(txn.as_mut(), "brand-new").await?;
         assert_eq!(
@@ -3512,7 +3519,12 @@ mod tests {
             .into_iter()
             .collect();
 
-        reconcile_pool_defs(&mut txn, &declared).await?;
+        reconcile_pool_defs(
+            &mut txn,
+            &declared,
+            &carbide_instrument::Instrumentation::global(),
+        )
+        .await?;
 
         let stored = stored_def(txn.as_mut(), "preexisting").await?;
         assert_eq!(stored.as_ref(), Some(&def), "snapshot must be backfilled");
@@ -3566,9 +3578,13 @@ mod tests {
             ("prospective".to_owned(), original),
         ]);
         let mut txn = pool.begin().await?;
-        let error = reconcile_pool_defs(&mut txn, &declared)
-            .await
-            .expect_err("a failed binding read must fail reconciliation");
+        let error = reconcile_pool_defs(
+            &mut txn,
+            &declared,
+            &carbide_instrument::Instrumentation::global(),
+        )
+        .await
+        .expect_err("a failed binding read must fail reconciliation");
         let DefineResourcePoolError::DatabaseError(DatabaseError::Sqlx(query_error)) = &error
         else {
             panic!("expected a binding query failure, got {error:?}");
@@ -3624,7 +3640,12 @@ mod tests {
             [("stable".to_string(), def.clone())].into_iter().collect();
 
         let mut txn = pool.begin().await?;
-        let (result, logs) = capture_logs_async(reconcile_pool_defs(&mut txn, &declared)).await;
+        let (result, logs) = capture_logs_async(reconcile_pool_defs(
+            &mut txn,
+            &declared,
+            &carbide_instrument::Instrumentation::global(),
+        ))
+        .await;
         result?;
         txn.commit().await?;
 
@@ -3681,7 +3702,12 @@ mod tests {
             .collect();
 
         let mut txn = pool.begin().await?;
-        let (result, logs) = capture_logs_async(reconcile_pool_defs(&mut txn, &declared)).await;
+        let (result, logs) = capture_logs_async(reconcile_pool_defs(
+            &mut txn,
+            &declared,
+            &carbide_instrument::Instrumentation::global(),
+        ))
+        .await;
         result?;
         txn.commit().await?;
 
@@ -3734,7 +3760,12 @@ mod tests {
 
         // Reconciliation succeeds but leaves an error diagnostic for the operator.
         let mut txn = pool.begin().await?;
-        let (result, logs) = capture_logs_async(reconcile_pool_defs(&mut txn, &declared)).await;
+        let (result, logs) = capture_logs_async(reconcile_pool_defs(
+            &mut txn,
+            &declared,
+            &carbide_instrument::Instrumentation::global(),
+        ))
+        .await;
         result?;
         txn.commit().await?;
 

@@ -126,7 +126,11 @@ async fn get_partition_status(api: &Api, ib_partition_id: IBPartitionId) -> IbPa
     segment.status.unwrap()
 }
 
-fn assert_successful_ufm_changes(metrics: &MetricsCapture, operation: &str, minimum: f64) {
+fn assert_successful_ufm_changes(
+    metrics: &carbide_instrument::testing::RegistryMetricsCapture,
+    operation: &str,
+    minimum: f64,
+) {
     let observed = metrics.counter_delta(
         "carbide_ib_monitor_ufm_changes_applied_total",
         &[
@@ -135,9 +139,7 @@ fn assert_successful_ufm_changes(metrics: &MetricsCapture, operation: &str, mini
             ("status", "ok"),
         ],
     );
-    // Event metrics share one process-global test meter. Focused Event tests
-    // pin exact counts; these checks only need to prove the instance lifecycle
-    // reached the expected UFM operation.
+    // The instance lifecycle can drive multiple monitor iterations.
     assert!(
         observed >= minimum,
         "expected at least {minimum} successful {operation} changes, observed {observed}"
@@ -1106,7 +1108,7 @@ async fn test_create_instance_with_ib_config(pool: sqlx::PgPool) {
     // about to make live again.
     insert_retired_ib_membership(&env.pool, &reused_membership).await;
 
-    let creation_metrics = MetricsCapture::start();
+    let creation_metrics = MetricsCapture::for_registry(env.test_meter.registry());
     let (tinstance, instance) =
         create_instance_with_ib_config(&env, &mh, ib_config.clone(), segment_id).await;
     assert_eq!(
@@ -1188,7 +1190,7 @@ async fn test_create_instance_with_ib_config(pool: sqlx::PgPool) {
         "The expected amount of ports for pkey {hex_pkey} has not been registered"
     );
 
-    let deletion_metrics = MetricsCapture::start();
+    let deletion_metrics = MetricsCapture::for_registry(env.test_meter.registry());
     tinstance.delete().await;
     assert_successful_ufm_changes(&deletion_metrics, "unbind_guid_from_pkey", 2.0);
     drop(deletion_metrics);

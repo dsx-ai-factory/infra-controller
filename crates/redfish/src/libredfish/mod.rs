@@ -32,7 +32,7 @@ use std::sync::Arc;
 use arc_swap::ArcSwap;
 use async_trait::async_trait;
 pub use auth::RedfishAuth;
-use carbide_instrument::{Event, LabelValue, emit};
+use carbide_instrument::{Event, Instrumentation, LabelValue};
 use carbide_secrets::credentials::{CredentialKey, CredentialReader, CredentialType, Credentials};
 use carbide_utils::HostPortPair;
 use carbide_utils::redfish::{BmcAccessInfo, redact_redfish_response_body};
@@ -82,6 +82,7 @@ enum DpuUefiPasswordSetupSkipped {
 }
 fn emit_dpu_uefi_password_setup_skipped_if_needed(
     bios_attrs: &std::collections::HashMap<String, serde_json::Value>,
+    instrumentation: &Instrumentation,
 ) -> bool {
     let skipped = match bios_attrs.get("Attributes") {
         None => DpuUefiPasswordSetupSkipped::BiosAttributesMissing {},
@@ -94,7 +95,7 @@ fn emit_dpu_uefi_password_setup_skipped_if_needed(
         },
     };
 
-    emit(skipped);
+    instrumentation.emit(skipped);
     true
 }
 
@@ -263,11 +264,14 @@ pub trait BmcCredentialOps: RedfishClientPool + sealed::Sealed {
     ///
     /// Builds its own Redfish client from `access`; [`CredentialOpError`]
     /// separates client-creation failures from device-level ones.
+    ///
+    /// Events use `instrumentation`; retain its provider until the operation finishes.
     async fn uefi_setup(
         &self,
         access: &BmcAccessInfo,
         dpu: bool,
         sitewide_uefi_credentials: Credentials,
+        instrumentation: &Instrumentation,
     ) -> Result<Option<String>, CredentialOpError> {
         let client = self
             .client_by_info(access)
@@ -286,7 +290,7 @@ pub trait BmcCredentialOps: RedfishClientPool + sealed::Sealed {
 
             // Preserve the non-fatal return for now, but this should become a hard
             // failure once callers can reject DPUs that retain factory credentials.
-            if emit_dpu_uefi_password_setup_skipped_if_needed(&bios_attrs) {
+            if emit_dpu_uefi_password_setup_skipped_if_needed(&bios_attrs, instrumentation) {
                 return Ok(None);
             }
             tracing::info!(
@@ -964,7 +968,9 @@ mod tests {
                 let metrics = MetricsCapture::start();
                 let mut skipped = false;
                 let logs = capture_logs(|| {
-                    skipped = emit_dpu_uefi_password_setup_skipped_if_needed(&bios_attrs);
+                    skipped = emit_dpu_uefi_password_setup_skipped_if_needed(&bios_attrs,
+                        &Instrumentation::global(),
+                    );
                 });
                 let logs = logs
                     .into_iter()
@@ -1643,7 +1649,12 @@ mod tests {
         };
         double.sim.set_create_client_error("bmc probe timed out");
         let err = double
-            .uefi_setup(&double_access(), true, site_creds())
+            .uefi_setup(
+                &double_access(),
+                true,
+                site_creds(),
+                &Instrumentation::global(),
+            )
             .await
             .expect_err("client creation failure must fail the op");
         assert!(
@@ -1671,7 +1682,12 @@ mod tests {
                 serde_json::json!({ "CurrentUefiPassword": "" }),
             )]));
         let err = double
-            .uefi_setup(&double_access(), true, site_creds())
+            .uefi_setup(
+                &double_access(),
+                true,
+                site_creds(),
+                &Instrumentation::global(),
+            )
             .await
             .expect_err("store read failure must fail the op");
         assert!(

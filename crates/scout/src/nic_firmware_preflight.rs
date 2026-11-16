@@ -21,6 +21,7 @@
 
 use std::time::Duration;
 
+use carbide_instrument::Instrumentation;
 use clap::{Args, Subcommand};
 use eyre::WrapErr;
 use libmlx::firmware::config::FirmwareSpec;
@@ -65,7 +66,7 @@ pub(crate) enum FirmwareAction {
 }
 
 impl FirmwareAction {
-    pub(crate) async fn run(&self) -> eyre::Result<()> {
+    pub(crate) async fn run(&self, instrumentation: &Instrumentation) -> eyre::Result<()> {
         // Register before starting downloads or a query. Selecting a signal
         // drops the operation so staging and subprocess guards can clean up.
         let mut interrupt = signal(SignalKind::interrupt())
@@ -84,7 +85,7 @@ impl FirmwareAction {
             },
             result = async {
                 match self {
-                    Self::Preflight(args) => args.run().await,
+                    Self::Preflight(args) => args.run(instrumentation).await,
                 }
             } => result,
         }
@@ -126,7 +127,7 @@ pub(crate) struct PreflightArgs {
 }
 
 impl PreflightArgs {
-    async fn run(&self) -> eyre::Result<()> {
+    async fn run(&self, instrumentation: &Instrumentation) -> eyre::Result<()> {
         let desired = FirmwareSpec {
             part_number: self.part_number.clone(),
             psid: self.psid.clone(),
@@ -134,9 +135,10 @@ impl PreflightArgs {
         };
         validate_preflight_request(&self.device, &desired)?;
         let report = self
-            .inspect_with(FirmwareStaging::new, async |files| {
-                Ok(inspect_prepared_firmware(&self.device, &desired, files).await?)
-            })
+            .inspect_with(
+                || FirmwareStaging::new(instrumentation.clone()),
+                async |files| Ok(inspect_prepared_firmware(&self.device, &desired, files).await?),
+            )
             .await?;
 
         print!("{}", self.format_report(&report));
@@ -662,25 +664,28 @@ mod tests {
             };
             let inspections = Cell::new(0);
             let result: eyre::Result<Vec<PathBuf>> = args
-                .inspect_with(FirmwareStaging::new, async |files| {
-                    inspections.set(inspections.get() + 1);
-                    assert_eq!(
-                        tokio::fs::read(files.image).await.unwrap(),
-                        b"firmware image bytes"
-                    );
-                    assert_eq!(files.device_config.is_some(), case.config_matches.is_some());
-                    if let Some(config) = files.device_config {
+                .inspect_with(
+                    || FirmwareStaging::new(Instrumentation::global()),
+                    async |files| {
+                        inspections.set(inspections.get() + 1);
                         assert_eq!(
-                            tokio::fs::read(config).await.unwrap(),
-                            b"device config bytes"
+                            tokio::fs::read(files.image).await.unwrap(),
+                            b"firmware image bytes"
                         );
-                        assert_ne!(files.image, config);
-                    }
-                    Ok(std::iter::once(files.image)
-                        .chain(files.device_config)
-                        .map(PathBuf::from)
-                        .collect())
-                })
+                        assert_eq!(files.device_config.is_some(), case.config_matches.is_some());
+                        if let Some(config) = files.device_config {
+                            assert_eq!(
+                                tokio::fs::read(config).await.unwrap(),
+                                b"device config bytes"
+                            );
+                            assert_ne!(files.image, config);
+                        }
+                        Ok(std::iter::once(files.image)
+                            .chain(files.device_config)
+                            .map(PathBuf::from)
+                            .collect())
+                    },
+                )
                 .await;
 
             stop.cancel();
@@ -804,7 +809,7 @@ mod tests {
                 Duration::from_secs(30),
                 args.inspect_with(
                     || {
-                        FirmwareStaging::new()
+                        FirmwareStaging::new(carbide_instrument::Instrumentation::global())
                             .map(|staging| staging.with_retry_backoff(Duration::from_millis(10)))
                     },
                     async |_| {

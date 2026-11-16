@@ -542,7 +542,9 @@ mod tests {
             .acquire_timeout(Duration::from_millis(50))
             .connect_lazy("postgres://unused:unused@127.0.0.1:1/unused")
             .unwrap();
+        let test_meter = carbide_utils::test_support::test_meter::TestMeter::default();
         let mut services = MachineStateHandlerServices {
+            instrumentation: carbide_instrument::Instrumentation::new(test_meter.meter()),
             db_pool: db_pool.clone(),
             db_reader: db_pool.into(),
             redfish_client_pool: redfish_sim.clone(),

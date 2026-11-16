@@ -267,7 +267,12 @@ async fn record_network_status_before_deadline(
     };
     tokio::time::timeout(
         Duration::from_secs(5),
-        record_network_status(status, &format!("https://{address}"), &client_config),
+        record_network_status(
+            status,
+            &format!("https://{address}"),
+            &client_config,
+            &carbide_instrument::Instrumentation::global(),
+        ),
     )
     .await
     .map_err(|_| eyre::eyre!("network status report exceeded its test deadline"))?

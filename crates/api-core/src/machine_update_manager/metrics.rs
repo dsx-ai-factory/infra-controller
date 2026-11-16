@@ -165,6 +165,17 @@ pub(crate) struct FirmwareUpdateFailed {
     pub(crate) firmware_version: String,
 }
 
+#[derive(carbide_instrument::Event)]
+#[event(
+    event_name = "machine_update_manager_completed_pass",
+    metric_name = "carbide_machine_update_manager_completed_passes_total",
+    component = "nico-api",
+    log = off,
+    metric = counter,
+    describe = "Number of successful machine update manager work passes, excluding lock skips and failed or cancelled passes"
+)]
+pub(super) struct CompletedPass;
+
 #[cfg(test)]
 mod tests {
     use std::str::FromStr as _;

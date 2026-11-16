@@ -17,6 +17,7 @@
 
 use std::net::SocketAddr;
 
+use bmc_platform::{PowerState, ResetType};
 use carbide_redfish::boot_interface::BootInterfaceTarget;
 use libredfish::RoleId;
 use libredfish::model::service_root::RedfishVendor;
@@ -56,12 +57,16 @@ pub trait EndpointExplorer: Send + Sync + 'static {
 /// don't route through the explorer.
 #[async_trait::async_trait]
 pub trait AuthenticatedBmc: Send + Sync + 'static {
-    // redfish_reset_bmc issues a BMC reset through redfish.
+    /// Issues a BMC reset through Redfish. `report` selects the drivers as for
+    /// [`Self::redfish_get_power_state`]. A `reset_type` is sent as given; without
+    /// one the platform's default reset is used, which the drivers backend knows
+    /// only for a BMC `report` identifies and otherwise leaves to the BMC.
     async fn redfish_reset_bmc(
         &self,
         address: SocketAddr,
         interface: &MachineInterfaceSnapshot,
-        reset_type: Option<libredfish::ManagerResetType>,
+        report: Option<&EndpointExplorationReport>,
+        reset_type: Option<ResetType>,
     ) -> Result<(), EndpointExplorationError>;
 
     // ipmitool_reset_bmc issues a cold BMC reset through ipmitool.
@@ -71,17 +76,23 @@ pub trait AuthenticatedBmc: Send + Sync + 'static {
         interface: &MachineInterfaceSnapshot,
     ) -> Result<(), EndpointExplorationError>;
 
+    /// `report` is the BMC's explored endpoint, which selects its drivers.
+    /// Without one that recorded the service root, as for BMCs exploration
+    /// could not identify, the drivers backend acts on the host system over
+    /// plain Redfish.
     async fn redfish_get_power_state(
         &self,
         address: SocketAddr,
         interface: &MachineInterfaceSnapshot,
-    ) -> Result<libredfish::PowerState, EndpointExplorationError>;
+        report: Option<&EndpointExplorationReport>,
+    ) -> Result<Option<PowerState>, EndpointExplorationError>;
 
     async fn redfish_power_control(
         &self,
         address: SocketAddr,
         interface: &MachineInterfaceSnapshot,
-        action: libredfish::SystemPowerControl,
+        report: Option<&EndpointExplorationReport>,
+        action: ResetType,
     ) -> Result<(), EndpointExplorationError>;
 
     /// Reset a Redfish Chassis (e.g. an HGX baseboard) out-of-band via the BMC at
@@ -92,8 +103,9 @@ pub trait AuthenticatedBmc: Send + Sync + 'static {
         &self,
         address: SocketAddr,
         interface: &MachineInterfaceSnapshot,
+        report: Option<&EndpointExplorationReport>,
         chassis_id: &str,
-        action: libredfish::SystemPowerControl,
+        action: ResetType,
     ) -> Result<(), EndpointExplorationError>;
 
     async fn have_credentials(&self, interface: &MachineInterfaceSnapshot) -> bool;

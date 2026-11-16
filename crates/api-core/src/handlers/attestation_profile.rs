@@ -18,7 +18,7 @@ use std::collections::HashMap;
 
 use ::rpc::forge as rpc;
 use carbide_authn::middleware::Principal;
-use carbide_instrument::{Event, LabelValue, emit};
+use carbide_instrument::{Event, Instrumentation, LabelValue};
 use config_version::ConfigVersion;
 use model::attestation::profile::{
     ANY_HARDWARE_CLASS, AttestationPolicyDocument, AttestationProfile, DeleteAttestationProfile,
@@ -89,6 +89,7 @@ fn updated_by(auth_context: Option<&AuthContext>) -> String {
 }
 
 fn emit_change(
+    instrumentation: &Instrumentation,
     operation: AttestationProfileOperation,
     hardware_class: &str,
     from_version: Option<ConfigVersion>,
@@ -96,7 +97,7 @@ fn emit_change(
     updated_by: &str,
     policy_document: Option<&AttestationPolicyDocument>,
 ) {
-    emit(AttestationProfileChanged {
+    instrumentation.emit(AttestationProfileChanged {
         operation,
         hardware_class: hardware_class.to_string(),
         from_version: from_version.map(|version| version.to_string()),
@@ -135,6 +136,7 @@ pub(crate) async fn create(
     txn.commit().await?;
 
     emit_change(
+        &api.instrumentation,
         AttestationProfileOperation::Created,
         &profile.hardware_class,
         None,
@@ -172,6 +174,7 @@ pub(crate) async fn update(
     txn.commit().await?;
 
     emit_change(
+        &api.instrumentation,
         AttestationProfileOperation::Updated,
         &profile.hardware_class,
         Some(current.version),
@@ -200,6 +203,7 @@ pub(crate) async fn delete(
     txn.commit().await?;
 
     emit_change(
+        &api.instrumentation,
         AttestationProfileOperation::Deleted,
         &delete.hardware_class,
         Some(current.version),

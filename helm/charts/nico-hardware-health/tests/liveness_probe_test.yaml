@@ -1,0 +1,20 @@
+suite: hardware-health liveness probe
+templates:
+  - templates/deployment.yaml
+tests:
+  - it: gives the probe a 10 s timeout by default
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].livenessProbe.timeoutSeconds
+          value: 10
+      - equal:
+          path: spec.template.spec.containers[0].livenessProbe.periodSeconds
+          value: 300
+
+  - it: allows the probe timeout to be overridden
+    set:
+      livenessProbe.timeoutSeconds: 30
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].livenessProbe.timeoutSeconds
+          value: 30

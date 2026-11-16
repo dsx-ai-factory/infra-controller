@@ -171,19 +171,31 @@ struct SecretEntry {
 /// system.
 #[derive(Clone)]
 pub struct PostgresCredentialManager {
+    instrumentation: carbide_instrument::Instrumentation,
     pool: PgPool,
     routing: SecretRouting,
     kms: Arc<dyn KmsBackend>,
 }
 
 impl PostgresCredentialManager {
-    /// Create a manager from a pool, write routing, and KMS backend.
-    pub fn new(pool: PgPool, routing: SecretRouting, kms: Arc<dyn KmsBackend>) -> Self {
-        Self { pool, routing, kms }
+    /// Creates a manager with explicit Event instrumentation. Retain its provider
+    /// while operations can use the manager.
+    pub fn new(
+        pool: PgPool,
+        routing: SecretRouting,
+        kms: Arc<dyn KmsBackend>,
+        instrumentation: carbide_instrument::Instrumentation,
+    ) -> Self {
+        Self {
+            pool,
+            routing,
+            kms,
+            instrumentation,
+        }
     }
 
     fn timer(&self, operation: SecretsOperation) -> OperationTimer {
-        OperationTimer::start(operation)
+        OperationTimer::start(operation, self.instrumentation.clone())
     }
 
     async fn conn(&self) -> Result<sqlx::pool::PoolConnection<sqlx::Postgres>, PgSecretsError> {

@@ -365,6 +365,7 @@ impl TestEnv {
     /// test environment
     pub(in crate::tests) fn machine_state_handler_services(&self) -> MachineStateHandlerServices {
         MachineStateHandlerServices {
+            instrumentation: self.api.instrumentation.clone(),
             db_pool: self.pool.clone(),
             db_reader: self.pool.clone().into(),
             redfish_client_pool: self.redfish_sim.clone(),
@@ -1329,15 +1330,17 @@ async fn create_test_env_with_overrides_inner(
     let cancel_token = CancellationToken::new();
     let mut join_set = JoinSet::new();
 
+    let test_meter = TestMeter::default();
+    let instrumentation = carbide_instrument::Instrumentation::new(test_meter.meter());
     let work_lock_manager_handle = work_lock_manager::start(
         &mut join_set,
         db_pool.clone(),
         work_lock_manager::KeepaliveConfig::default(),
+        instrumentation.clone(),
     )
     .await
     .expect("work_lock_manager failed to start: no availble connections?");
 
-    let test_meter = TestMeter::default();
     let credential_manager = Arc::new(TestCredentialManager::default());
 
     let firmware_object_fetcher = overrides
@@ -1511,6 +1514,7 @@ async fn create_test_env_with_overrides_inner(
         Some(db_pool.clone()),
         None,
         None,
+        instrumentation.clone(),
     )
     .await
     .expect("test component manager should build");
@@ -1544,7 +1548,7 @@ async fn create_test_env_with_overrides_inner(
     .with_eth_data(eth_virt_data)
     .with_nmxc_client_pool(nmxc_sim.clone())
     .with_metric_emitter(ApiMetricsEmitter::new(&test_meter.meter()))
-    .with_instrumentation(carbide_instrument::Instrumentation::new(test_meter.meter()))
+    .with_instrumentation(instrumentation.clone())
     .with_redfish_pool(redfish_sim.clone())
     .with_ib_fabric_manager(ib_fabric_manager.clone())
     .with_firmware_object_fetcher(firmware_object_fetcher.clone())
@@ -1571,6 +1575,7 @@ async fn create_test_env_with_overrides_inner(
         api.ib_fabric_manager.clone(),
         config.host_health,
         api.work_lock_manager_handle.clone(),
+        api.instrumentation.clone(),
     );
 
     let nvl_partition_monitor = NvlPartitionMonitor::new(
@@ -1580,6 +1585,7 @@ async fn create_test_env_with_overrides_inner(
         config.nvlink_config.clone().unwrap(),
         config.host_health,
         api.work_lock_manager_handle.clone(),
+        api.instrumentation.clone(),
     );
 
     let switch_cert_monitor = SwitchCertificateMonitor::new(
@@ -1588,6 +1594,7 @@ async fn create_test_env_with_overrides_inner(
         config.nvlink_config.clone().unwrap(),
         test_component_manager.clone(),
         api.work_lock_manager_handle.clone(),
+        api.instrumentation.clone(),
     );
 
     let attestation_enabled = config.attestation_enabled;
@@ -1610,7 +1617,7 @@ async fn create_test_env_with_overrides_inner(
 
     let machine_swap = SwapHandler {
         inner: Arc::new(Mutex::new(
-            MachineStateHandlerBuilder::builder()
+            MachineStateHandlerBuilder::builder(api.instrumentation.clone())
                 .hardware_models(config.get_firmware_config())
                 .reachability_params(reachability_params)
                 .attestation_enabled(attestation_enabled)
@@ -1692,6 +1699,7 @@ async fn create_test_env_with_overrides_inner(
     let machine_controller = machine_controller_builder
         .services(
             MachineStateHandlerServices {
+                instrumentation: api.instrumentation.clone(),
                 db_pool: db_pool.clone(),
                 db_reader: db_pool.clone().into(),
                 redfish_client_pool: redfish_sim.clone(),
@@ -1739,6 +1747,7 @@ async fn create_test_env_with_overrides_inner(
         .processor_id(state_controller_id.clone())
         .services(
             SpdmStateHandlerServices {
+                instrumentation: api.instrumentation.clone(),
                 db_pool: db_pool.clone(),
                 redfish_client_pool: redfish_sim.clone(),
                 bmc_connector: BmcConnector::Libredfish(redfish_sim.clone()),
@@ -1760,6 +1769,7 @@ async fn create_test_env_with_overrides_inner(
         .processor_id(state_controller_id.clone())
         .services(
             IBPartitionStateHandlerServices {
+                instrumentation: api.instrumentation.clone(),
                 db_pool: db_pool.clone(),
                 ib_fabric_manager: api.ib_fabric_manager.clone(),
                 ib_pools: common_pools.infiniband.clone(),
@@ -1844,6 +1854,7 @@ async fn create_test_env_with_overrides_inner(
         .processor_id(state_controller_id.clone())
         .services(
             RackStateHandlerServices {
+                instrumentation: api.instrumentation.clone(),
                 db_pool: db_pool.clone(),
                 site_config: RackConfig {
                     rms: config.rms.clone(),
@@ -1917,6 +1928,7 @@ async fn create_test_env_with_overrides_inner(
         test_machine_info_provider(&rms_sim),
         credential_manager.clone(),
         api.runtime_config.dpf.enabled && api.dpf_sdk.is_some(),
+        api.instrumentation.clone(),
     );
 
     // Create some instance types

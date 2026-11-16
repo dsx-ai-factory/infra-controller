@@ -38,6 +38,18 @@ pub async fn set_power(bmc: &BackendBmc, reset_type: ResetType) -> Result<(), Pl
     bmc.power()?.set(reset_type).await.map(drop)
 }
 
+/// Restarts the BMC itself.
+pub async fn reset_bmc(bmc: &BackendBmc) -> Result<(), PlatformError> {
+    bmc.bmc_control()?.reset().await.map(drop)
+}
+
+/// Resets the BMC to its factory defaults.
+pub async fn reset_bmc_to_factory_defaults(bmc: &BackendBmc) -> Result<(), PlatformError> {
+    bmc.bmc_control()?
+        .reset_to_factory_defaults()
+        .await
+        .map(drop)
+}
 /// Names `state` for logs and wait reasons, `Unknown` when unclassified.
 pub fn power_state_name(state: Option<PowerState>) -> String {
     state.map_or_else(|| "Unknown".to_string(), |state| format!("{state:?}"))

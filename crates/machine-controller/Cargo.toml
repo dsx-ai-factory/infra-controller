@@ -54,6 +54,7 @@ carbide-uuid = { path = "../uuid", default-features = false }
 component-manager = { path = "../component-manager" }
 config-version = { path = "../config-version", default-features = false }
 state-controller = { path = "../state-controller" }
+trace-propagation = { path = "../trace-propagation" }
 
 async-trait = { workspace = true }
 chrono = { workspace = true }

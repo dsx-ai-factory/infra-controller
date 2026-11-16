@@ -59,6 +59,7 @@ async fn test_preingestion_defers_once_on_an_incomplete_report(
         None,
         env.api().work_lock_manager_handle(),
         config.ntp_servers.clone(),
+        env.api().instrumentation().clone(),
     );
 
     let response = env
@@ -248,6 +249,7 @@ async fn test_preingestion_defers_once_on_an_incomplete_report(
             None,
             env.api().work_lock_manager_handle(),
             config.ntp_servers.clone(),
+            env.api().instrumentation().clone(),
         );
         restarted.run_single_iteration().await?;
 
@@ -303,6 +305,7 @@ async fn test_preingestion_does_not_defer_when_autoupdate_is_off(
         None,
         env.api().work_lock_manager_handle(),
         config.ntp_servers.clone(),
+        env.api().instrumentation().clone(),
     );
 
     let response = env
@@ -381,6 +384,7 @@ async fn lenovo_preingestion_releases_firmware_lockdown(
         None,
         env.api().work_lock_manager_handle(),
         config.ntp_servers.clone(),
+        env.api().instrumentation().clone(),
     );
     let response = env
         .api()
@@ -453,6 +457,18 @@ async fn lenovo_preingestion_releases_firmware_lockdown(
 #[sqlx_test]
 async fn test_preingestion_bmc_upgrade(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
     let env = TestHarness::builder(pool.clone()).build().await;
+    let metrics =
+        carbide_instrument::testing::MetricsCapture::for_registry(env.test_meter.registry());
+    let completed_tasks = || {
+        metrics.counter_delta(
+            "carbide_preingestion_firmware_upgrade_tasks_total",
+            &[
+                ("outcome", "ok"),
+                ("firmware", "bmc"),
+                ("final_state", "completed"),
+            ],
+        )
+    };
     let domain = env.test_domain().await;
     let nc = env.network_controller();
     let underlay_segment = nc.create_underlay_segment(&domain).await;
@@ -468,6 +484,7 @@ async fn test_preingestion_bmc_upgrade(pool: PgPool) -> Result<(), Box<dyn std::
         None,
         env.api().work_lock_manager_handle(),
         config.ntp_servers.clone(),
+        env.api().instrumentation().clone(),
     );
 
     let response = env
@@ -556,6 +573,8 @@ async fn test_preingestion_bmc_upgrade(pool: PgPool) -> Result<(), Box<dyn std::
     }
     txn.commit().await?;
 
+    assert_eq!(completed_tasks(), 0.0);
+
     // Second firmware upload
     mgr.run_single_iteration().await?;
 
@@ -573,6 +592,8 @@ async fn test_preingestion_bmc_upgrade(pool: PgPool) -> Result<(), Box<dyn std::
     };
     txn.commit().await?;
 
+    assert_eq!(completed_tasks(), 1.0);
+
     // Let it go to NewFirmwareReportedWait
     mgr.run_single_iteration().await?;
 
@@ -584,6 +605,8 @@ async fn test_preingestion_bmc_upgrade(pool: PgPool) -> Result<(), Box<dyn std::
         panic!("Bad preingestion state: {endpoint:?}");
     };
     txn.commit().await?;
+
+    assert_eq!(completed_tasks(), 2.0);
 
     // One more, to make sure noething is weird with retrying resets
     mgr.run_single_iteration().await?;
@@ -643,6 +666,11 @@ async fn test_preingestion_bmc_upgrade(pool: PgPool) -> Result<(), Box<dyn std::
     );
     txn.commit().await?;
 
+    assert_eq!(
+        completed_tasks(),
+        2.0,
+        "later state-machine iterations must not recount completed tasks"
+    );
     Ok(())
 }
 
@@ -671,6 +699,7 @@ async fn test_preingestion_uefi_activation_powers_on_an_off_host(
         None,
         env.api().work_lock_manager_handle(),
         config.ntp_servers.clone(),
+        env.api().instrumentation().clone(),
     );
 
     let response = env
@@ -808,6 +837,7 @@ async fn test_preingestion_bmc_upgrade_uses_runtime_host_firmware_config(
         None,
         env.api().work_lock_manager_handle(),
         config.ntp_servers.clone(),
+        env.api().instrumentation().clone(),
     );
 
     let response = env
@@ -914,6 +944,7 @@ async fn test_preingestion_bmc_upgrade_with_url_only_files_artifacts(
         None,
         env.api().work_lock_manager_handle(),
         config.ntp_servers.clone(),
+        env.api().instrumentation().clone(),
     );
 
     let response = env
@@ -959,6 +990,7 @@ async fn test_preingestion_preupdate_powercycling(
         None,
         env.api().work_lock_manager_handle(),
         config.ntp_servers.clone(),
+        env.api().instrumentation().clone(),
     );
 
     let response = env
@@ -1170,6 +1202,7 @@ async fn test_preingestion_preupdate_fails_if_host_never_reaches_on_after_restar
         None,
         env.api().work_lock_manager_handle(),
         config.ntp_servers.clone(),
+        env.api().instrumentation().clone(),
     );
 
     let response = env
@@ -1283,6 +1316,7 @@ async fn test_preingestion_preupdate_fails_if_host_never_powers_on_after_bmc_res
         None,
         env.api().work_lock_manager_handle(),
         config.ntp_servers.clone(),
+        env.api().instrumentation().clone(),
     );
 
     let response = env
@@ -1370,6 +1404,7 @@ async fn test_preingestion_preupdate_rechecks_host_still_powering_on(
         None,
         env.api().work_lock_manager_handle(),
         config.ntp_servers.clone(),
+        env.api().instrumentation().clone(),
     );
 
     let response = env
@@ -1509,6 +1544,7 @@ async fn test_preingestion_upgrade_script(
         None,
         env.api().work_lock_manager_handle(),
         config.ntp_servers.clone(),
+        env.api().instrumentation().clone(),
     );
 
     let response = env
