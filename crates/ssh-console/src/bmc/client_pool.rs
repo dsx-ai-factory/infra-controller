@@ -497,48 +497,12 @@ impl BmcPool {
             .grpc_total_hosts
             .record(machine_ids.len() as _, &[]);
 
-        // -- Reconcile our list with the running tasks
-        let to_add = {
-            let mut members = self.members.write().expect("lock poisoned");
-
-            // Remove any machines that are no longer monitored
-            let to_remove = members
-                .keys()
-                .filter(|&machine_id| !machine_ids.contains(machine_id))
-                .copied()
-                .collect::<Vec<_>>();
-            for machine_id in to_remove {
-                tracing::info!(%machine_id, "removing machine from console logging, no longer found in carbide");
-                members.remove(&machine_id);
-            }
-
-            // Close on-demand connections nobody has used for the idle timeout
-            let now = Instant::now();
-            for machine_id in expired_on_demand(
-                members.iter().map(|(id, member)| (*id, member.view())),
-                now,
-                self.config.on_demand_bmc_idle_timeout,
-            ) {
-                tracing::info!(%machine_id, "closing idle on-demand BMC connection");
-                members.remove(&machine_id);
-            }
-
-            // Reserve a permit for each machine to add while permits last. Machines left over
-            // connect on demand.
-            let mut to_add = Vec::new();
-            for machine_id in machine_ids.iter().filter(|id| !members.contains_key(id)) {
-                let Ok(permit) = self.permits.clone().try_acquire_owned() else {
-                    break;
-                };
-                to_add.push((*machine_id, permit));
-            }
-            to_add
-        };
+        let to_add = self.prune_and_pick_additions(&machine_ids);
 
         // For each one we want to add, get the connection details. Skip any machines which fail
         // here.
         let all_connection_details = futures_util::stream::iter(to_add)
-            .map(|(machine_id, permit)| async move {
+            .map(|machine_id| async move {
                 match connection::lookup(
                     &machine_id.to_string(),
                     &self.config,
@@ -546,7 +510,7 @@ impl BmcPool {
                 )
                 .await
                 {
-                    Ok(connection_details) => Some((machine_id, connection_details, permit)),
+                    Ok(connection_details) => Some((machine_id, connection_details)),
                     Err(error) => {
                         tracing::error!(%machine_id, %error, "error looking up connection details, excluding from bmc list");
                         None
@@ -558,40 +522,87 @@ impl BmcPool {
             .collect::<Vec<_>>()
             .await;
 
-        {
-            // Now add each of these to the pool
-            let mut members = self.members.write().expect("lock poisoned");
-            for (machine_id, connection_details, permit) in all_connection_details {
-                if members.contains_key(&machine_id) {
-                    continue;
-                }
-                tracing::info!(%machine_id, "begin connection to machine");
-                members.insert(
-                    machine_id,
-                    Member {
-                        client: self.spawn_client(connection_details),
-                        origin: Origin::Standing,
-                        _permit: permit,
-                    },
-                );
-            }
-
-            self.metrics.total_machines.record(members.len() as _, &[]);
-
-            let unpooled = machine_ids
-                .iter()
-                .filter(|id| !members.contains_key(id))
-                .count();
-            if unpooled > 0 && self.permits.available_permits() == 0 {
-                tracing::warn!(
-                    unpooled_machines = unpooled,
-                    max_bmc_connections = self.config.max_bmc_connections.get(),
-                    "BMC connection pool is full; machines without a pooled connection connect on demand"
-                );
-            }
-        }
+        self.add_standing_members(&machine_ids, all_connection_details);
 
         Ok(())
+    }
+
+    /// Remove members that are no longer monitored or have idled out, and pick the machines to
+    /// add: as many as there are free permits. The permits are taken when the members are
+    /// inserted, so a console session that connects on demand during the lookups is not refused.
+    fn prune_and_pick_additions(&self, machine_ids: &HashSet<MachineId>) -> Vec<MachineId> {
+        let mut members = self.members.write().expect("lock poisoned");
+
+        // Remove any machines that are no longer monitored
+        let to_remove = members
+            .keys()
+            .filter(|&machine_id| !machine_ids.contains(machine_id))
+            .copied()
+            .collect::<Vec<_>>();
+        for machine_id in to_remove {
+            tracing::info!(%machine_id, "removing machine from console logging, no longer found in carbide");
+            members.remove(&machine_id);
+        }
+
+        // Close on-demand connections nobody has used for the idle timeout
+        let now = Instant::now();
+        for machine_id in expired_on_demand(
+            members.iter().map(|(id, member)| (*id, member.view())),
+            now,
+            self.config.on_demand_bmc_idle_timeout,
+        ) {
+            tracing::info!(%machine_id, "closing idle on-demand BMC connection");
+            members.remove(&machine_id);
+        }
+
+        // As many as there are free permits. The rest connect on demand.
+        machine_ids
+            .iter()
+            .filter(|id| !members.contains_key(id))
+            .take(self.permits.available_permits())
+            .copied()
+            .collect()
+    }
+
+    /// Add a standing member for each looked-up machine while permits last.
+    fn add_standing_members(
+        &self,
+        machine_ids: &HashSet<MachineId>,
+        all_connection_details: Vec<(MachineId, ConnectionDetails)>,
+    ) {
+        let mut members = self.members.write().expect("lock poisoned");
+        for (machine_id, connection_details) in all_connection_details {
+            if members.contains_key(&machine_id) {
+                continue;
+            }
+            // An on-demand connection may have taken a permit during the lookups.
+            let Ok(permit) = self.permits.clone().try_acquire_owned() else {
+                break;
+            };
+            tracing::info!(%machine_id, "begin connection to machine");
+            members.insert(
+                machine_id,
+                Member {
+                    client: self.spawn_client(connection_details),
+                    origin: Origin::Standing,
+                    _permit: permit,
+                },
+            );
+        }
+
+        self.metrics.total_machines.record(members.len() as _, &[]);
+
+        let unpooled = machine_ids
+            .iter()
+            .filter(|id| !members.contains_key(id))
+            .count();
+        if unpooled > 0 && self.permits.available_permits() == 0 {
+            tracing::warn!(
+                unpooled_machine_count = unpooled,
+                max_bmc_connections = self.config.max_bmc_connections.get(),
+                "BMC connection pool is full; machines without a pooled connection connect on demand"
+            );
+        }
     }
 
     /// Subscribe to a machine's BMC, connecting on demand when it has no pooled connection.
@@ -941,6 +952,54 @@ mod tests {
         let subscription = pool.connect(wanted).await.expect("on-demand connection");
         assert_eq!(pool.members(), vec![(wanted, Origin::OnDemand)]);
         drop(subscription);
+        pool.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn console_session_connects_on_demand_while_a_refresh_looks_up_connections() {
+        let pool = TestPool::new(3, Duration::from_secs(600), 4).await;
+        let machine_ids: HashSet<MachineId> = pool.machines.iter().copied().collect();
+        let first = pool.machines[0];
+        let open_session = pool.connect(first).await.expect("on-demand connection");
+
+        // The refresh has picked its additions and is looking up their connection details.
+        let picked = pool.pool.prune_and_pick_additions(&machine_ids);
+        assert_eq!(picked.len(), 2);
+        let wanted = pool
+            .machines
+            .iter()
+            .copied()
+            .find(|machine_id| *machine_id != first && !picked.contains(machine_id))
+            .expect("a machine the refresh did not pick");
+
+        let subscription = pool.connect(wanted).await.expect("on-demand connection");
+
+        // The refresh then adds standing members only while permits last.
+        let mut looked_up = Vec::new();
+        for machine_id in picked {
+            let connection_details = connection::lookup(
+                &machine_id.to_string(),
+                &pool.pool.config,
+                &pool.pool.carbide_api_client,
+            )
+            .await
+            .expect("lookup");
+            looked_up.push((machine_id, connection_details));
+        }
+        pool.pool.add_standing_members(&machine_ids, looked_up);
+
+        let members = pool.members();
+        assert_eq!(members.len(), 3);
+        assert!(members.contains(&(first, Origin::OnDemand)));
+        assert!(members.contains(&(wanted, Origin::OnDemand)));
+        assert_eq!(
+            members
+                .iter()
+                .filter(|(_, origin)| *origin == Origin::Standing)
+                .count(),
+            1
+        );
+        drop((open_session, subscription));
         pool.shutdown().await;
     }
 
