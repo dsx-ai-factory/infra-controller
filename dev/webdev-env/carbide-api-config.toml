@@ -22,6 +22,11 @@ asn = 4294967000
 
 bypass_rbac = true
 
+attestation_enabled = false
+
+initial_domain_name = "local.forge"
+initial_dpu_agent_upgrade_policy = "off"
+
 [auth]
 permissive_mode = true
 
@@ -30,11 +35,6 @@ spiffe_trust_domain = "nico.local"
 spiffe_service_base_paths = ["/forge-system/sa/", "/default/sa/"]
 spiffe_machine_base_path = "/forge-system/machine/"
 additional_issuer_cns = []
-
-attestation_enabled = false
-
-initial_domain_name = "local.forge"
-initial_dpu_agent_upgrade_policy = "off"
 
 [pools.lo-ip]
 type = "ipv4"

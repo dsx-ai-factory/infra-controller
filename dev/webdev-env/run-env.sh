@@ -69,7 +69,9 @@ if ! docker ps --filter name=vault-webdev --format '{{.Names}}' | grep -q vault-
     echo "Setup complete."
 else
     echo "Containers already running."
-    export VAULT_ADDR="http://127.0.0.1:${VAULT_PORT}"
+    # A reused container may predate VAULT_PORT; use the host port it actually publishes.
+    VAULT_HOST_PORT="$(docker port vault-webdev 8200/tcp 2>/dev/null | head -n1 | sed 's/.*://')"
+    export VAULT_ADDR="http://127.0.0.1:${VAULT_HOST_PORT:-$VAULT_PORT}"
     export VAULT_TOKEN="$(docker exec vault-webdev cat /root/.vault-token 2>/dev/null)"
 fi
 

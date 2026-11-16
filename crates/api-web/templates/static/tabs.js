@@ -45,10 +45,30 @@
             slideIndicator(nav, button);
         }
 
+        // Tab semantics for assistive technology: each button controls the
+        // panel named by its data-tab, and aria-selected follows the active tab.
+        const tabButtons = Array.from(nav.querySelectorAll('.tab-button[data-tab]'));
+        if (tabButtons.length > 0) nav.setAttribute('role', 'tablist');
+        tabButtons.forEach(function(button) {
+            const panel = document.getElementById('tab-' + button.getAttribute('data-tab'));
+            if (!button.id) button.id = 'tab-button-' + button.getAttribute('data-tab');
+            button.setAttribute('role', 'tab');
+            button.setAttribute('aria-selected', String(button.classList.contains('active')));
+            if (panel) {
+                button.setAttribute('aria-controls', panel.id);
+                panel.setAttribute('role', 'tabpanel');
+                panel.setAttribute('aria-labelledby', button.id);
+            }
+        });
+
         function setActive(button, keepHash) {
             const currentBtn = nav.querySelector('.tab-button.active');
-            if (currentBtn) currentBtn.classList.remove('active');
+            if (currentBtn) {
+                currentBtn.classList.remove('active');
+                currentBtn.setAttribute('aria-selected', 'false');
+            }
             button.classList.add('active');
+            button.setAttribute('aria-selected', 'true');
 
             const currentContent = document.querySelector('.tab-content.active');
             if (currentContent) currentContent.classList.remove('active');
@@ -175,7 +195,8 @@
                 if (!response.ok) throw new Error('HTTP ' + response.status);
                 doc = new DOMParser().parseFromString(await response.text(), 'text/html');
             } catch (err) {
-                window.location.href = url;
+                // A failed load that a later click superseded must not navigate away.
+                if (loadId === latestLoad) window.location.href = url;
                 return;
             }
             // A later click superseded this load.

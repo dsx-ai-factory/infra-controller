@@ -3445,7 +3445,8 @@ table.data-table.search-results td:last-child {
 }
 
 @media (max-width: 1100px) {
-  .timeline-row {
+  .timeline-row,
+  .timeline-row.timeline-row-wide {
     grid-template-columns: minmax(0, 1fr);
     gap: 0.5rem;
   }

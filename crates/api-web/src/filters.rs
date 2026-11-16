@@ -658,7 +658,9 @@ mod tests {
     use carbide_test_support::{Check, check_values};
     use health_report::{HealthProbeAlert, HealthProbeId};
 
-    use super::{escaped_shortened_id_link, format_json, state_path, state_prefix};
+    use super::{
+        escaped_shortened_id_link, format_json, health_target_html, state_path, state_prefix,
+    };
 
     #[test]
     fn compact_health_alerts_list_each_alert_with_full_text_on_hover() {
