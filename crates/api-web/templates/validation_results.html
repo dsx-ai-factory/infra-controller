@@ -1,12 +1,14 @@
-{% extends "base.html" %}
+{% extends "detail_base.html" %}
+{% import "detail_ui.html" as ui %}
 
 {% block title %}Machine Validation Run {{ validation_id }}{% endblock %}
+{% block entity_label %}Validation Run{% endblock %}
+{% block entity_id %}{{ validation_id }}{% endblock %}
+{% block header_links %}{% endblock %}
 
 {% block head %}
 <style>
-.validation-panels { margin-top: 1.5rem; }
 .validation-table { overflow-x: auto; }
-.validation-metadata td { overflow-wrap: anywhere; }
 table.validation-results { table-layout: fixed; }
 .validation-results th, .validation-results td { padding: 0.5rem; }
 .validation-results th { font-size: 0.75rem; letter-spacing: 0; overflow-wrap: normal; }
@@ -23,14 +25,22 @@ table.validation-results { table-layout: fixed; }
 </style>
 {% endblock %}
 
-{% block content %}
-<h1>Machine Validation Run {{ validation_id }}</h1>
-<table class="overview validation-metadata">
-	<tr><th>Machine ID</th><td>{% match machine_id %}{% when Some with (id) %}<a href="/admin/machine/{{ id }}">{{ id }}</a>{% when None %}N/A{% endmatch %}</td></tr>
-	<tr><th>State</th><td>{{ status }}</td></tr>
-	<tr><th>Completed/Total</th><td>{{ progress }}</td></tr>
-	<tr><th>Context</th><td>{{ context }}</td></tr>
-</table>
+{% block detail_content %}
+<section class="entity-summary">
+	<div class="entity-summary-status">
+		{% call ui::stat("State") %}<span class="{{ status.bubble_class }}">{{ status.label }}</span>{% endcall %}
+		{% call ui::stat("Completed/Total") %}<span>{{ progress }}</span>{% endcall %}
+	</div>
+	<div class="entity-summary-groups">
+		<div class="entity-summary-group">
+			<h4>Run</h4>
+			<dl>
+				<dt>Machine</dt><dd>{% match machine_id %}{% when Some with (id) %}<a href="/admin/machine/{{ id }}">{{ id }}</a>{% when None %}<span class="text-muted">N/A</span>{% endmatch %}</dd>
+				<dt>Context</dt><dd>{{ context }}</dd>
+			</dl>
+		</div>
+	</div>
+</section>
 <div class="config-body validation-panels">
 <section class="config-tables" aria-label="Validation tests">
 <h2>Tests</h2>

@@ -30,7 +30,7 @@ use rpc::forge::forge_server::Forge;
 use uuid::Uuid;
 
 use super::pagination::{self, PageContext, PaginationParams};
-use super::{Base, health};
+use super::{Base, filters, health};
 
 #[derive(serde::Serialize, Template)]
 #[template(path = "nvlink_partition_show.html")]

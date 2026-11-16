@@ -1,99 +1,69 @@
-{% extends "base.html" %}
+{% extends "detail_base.html" %}
+{% import "detail_ui.html" as ui %}
 
 {% block title %}Power Shelf {{ id }}{% endblock %}
+{% block entity_label %}Power Shelf{% endblock %}
+{% block entity_id %}{{ id }}{% endblock %}
 
-{% block content %}
-<div id="json">
-	<a id="json-link" href="">JSON</a>
+{% block detail_content %}
+<div class="tab-nav">
+	<button class="tab-button active" data-tab="overview">Overview</button>
+	<button class="tab-button" data-tab="health">Health</button>
+	<button class="tab-button" data-tab="hardware">Hardware</button>
+	<button class="tab-button" data-tab="history">History</button>
+	<div class="tab-indicator"></div>
 </div>
-<h1>Power Shelf {{ id }}</h1>
 
-<h2>Info</h2>
-<table class="detailsview">
-	<tr>
-		<th>ID</th>
-		<td>{{ id }}</td>
-	</tr>
-	<tr><th>Rack ID</th><td>{{ rack_id|rack_id_link|safe }}</td></tr>
-</table>
+<!-- Overview Tab -->
+<div class="tab-content active" id="tab-overview">
+	<section class="entity-summary">
+		<div class="entity-summary-status">
+			{% call ui::state_stat(lifecycle_detail) %}{% endcall %}
+			{% call ui::health_stat(health_detail) %}{% endcall %}
+			{% if let Some(power_state) = power_state %}
+			{% call ui::stat("Power") %}<span class="bubble{% if power_state.eq_ignore_ascii_case("on") %} success{% else if power_state.eq_ignore_ascii_case("off") %} error{% endif %}">{{ power_state }}</span>{% endcall %}
+			{% endif %}
+		</div>
+		<div class="entity-summary-groups">
+			<div class="entity-summary-group">
+				<h4>Configuration</h4>
+				<dl>
+					<dt>Name</dt>
+					<dd>{% if name.is_empty() %}<span class="text-muted">None</span>{% else %}{{ name }}{% endif %}</dd>
+					<dt>Capacity</dt>
+					<dd>{{ capacity }}{% if capacity != "N/A" %} W{% endif %}</dd>
+					<dt>Voltage</dt>
+					<dd>{{ voltage }}{% if voltage != "N/A" %} V{% endif %}</dd>
+				</dl>
+			</div>
+			<div class="entity-summary-group">
+				<h4>Location</h4>
+				<dl>
+					<dt>Rack</dt>
+					<dd>{% if rack_id.is_empty() %}<span class="text-muted">None</span>{% else %}{{ rack_id|rack_id_link|safe }}{% endif %}</dd>
+				</dl>
+			</div>
+		</div>
+	</section>
 
-{{ lifecycle_detail|safe }}
+	{{ lifecycle_detail|safe }}
 
-<h2>Metadata</h2>
-{{ metadata_detail|safe }}
+	<h2>Metadata</h2>
+	{{ metadata_detail|safe }}
+</div>
 
-{{ health_detail|safe }}
+<!-- Health Tab -->
+<div class="tab-content" id="tab-health">
+	{% call ui::health_tab(health_panel) %}{% endcall %}
+</div>
 
-<h2>Configuration</h2>
-<table class="detailsview">
-	<tr>
-		<th>Name</th>
-		<td>{{ name }}</td>
-	</tr>
-	<tr>
-		<th>Capacity (W)</th>
-		<td>{{ capacity }}</td>
-	</tr>
-	<tr>
-		<th>Voltage (V)</th>
-		<td>{{ voltage }}</td>
-	</tr>
-</table>
+<!-- Hardware Tab -->
+<div class="tab-content" id="tab-hardware">
+	{% call ui::bmc_info_card(bmc_info, firmware_inventory) %}{% endcall %}
+</div>
 
-<h2>Status</h2>
-<table class="detailsview">
-	{% if let Some(power_state) = power_state %}
-	<tr>
-		<th>Power State</th>
-		<td>{{ power_state }}</td>
-	</tr>
-	{% endif %}
-</table>
-
-<h2>BMC</h2>
-<table class="detailsview">
-	{% if let Some(bmc_info) = bmc_info %}
-	{% if let Some(machine_interface_id) = bmc_info.machine_interface_id %}
-	<tr>
-		<th>Machine Interface ID</th>
-		<td>{{ machine_interface_id }}</td>
-	</tr>
-	{% endif %}
-	{% if let Some(ip) = bmc_info.ip %}
-	<tr>
-		<th>BMC IP</th>
-		<td>{{ ip }}</td>
-	</tr>
-	{% endif %}
-	{% if let Some(mac) = bmc_info.mac %}
-	<tr>
-		<th>BMC MAC</th>
-		<td>{{ mac }}</td>
-	</tr>
-	{% endif %}
-	{% if let Some(version) = bmc_info.version %}
-	<tr>
-		<th>BMC Version</th>
-		<td>{{ version }}</td>
-	</tr>
-	{% endif %}
-	{% if let Some(firmware_version) = bmc_info.firmware_version %}
-	<tr>
-		<th>BMC Firmware Version</th>
-		<td>{{ firmware_version }}</td>
-	</tr>
-	{% endif %}
-	{% else %}
-	<tr>
-		<td colspan="2" class="text-muted">No BMC info available.</td>
-	</tr>
-	{% endif %}
-</table>
-
-{{ firmware_inventory|safe }}
-
-<h2>History</h2>
-<a href="/admin/power-shelf/{{ id }}/state-history">Open State History on separate page</a>
-{{ history|safe }}
-
+<!-- History Tab -->
+<div class="tab-content" id="tab-history">
+	{% call ui::state_history(history, format!("/admin/power-shelf/{}/state-history", self.id)) %}{% endcall %}
+</div>
 {% endblock %}

@@ -49,6 +49,16 @@ struct HealthPage {
     id: String,
     object_label: String,
     object_detail_url: String,
+    panel: HealthPanel,
+}
+
+/// Health reports, report management, and history for one object. Rendered
+/// in detail pages' Health tab and on the NVLink domain health page.
+#[derive(Template)]
+#[template(path = "health_panel.html")]
+pub(super) struct HealthPanel {
+    health_url: String,
+    object_label: String,
     show_machine_templates: bool,
     entries: Vec<HealthReportEntry>,
     aggregate_health: LabeledHealthReport,
@@ -61,6 +71,46 @@ struct HealthPage {
 #[template(path = "health_history_table.html")]
 pub(super) struct HealthHistoryTable {
     pub(super) records: Vec<HealthHistoryRecord>,
+}
+
+/// One health history record prepared for display.
+struct HealthHistoryEntry<'a> {
+    record: &'a HealthHistoryRecord,
+    recorded_at: String,
+    duration: String,
+    is_current: bool,
+}
+
+impl HealthHistoryTable {
+    /// Records newest first, each with how long that health lasted.
+    fn entries(&self) -> Vec<HealthHistoryEntry<'_>> {
+        let mut records: Vec<_> = self
+            .records
+            .iter()
+            .map(|record| {
+                let recorded_at = chrono::DateTime::parse_from_rfc3339(&record.timestamp)
+                    .ok()
+                    .map(|time| time.with_timezone(&chrono::Utc));
+                (recorded_at, record)
+            })
+            .collect();
+        records.sort_by_key(|(time, _)| std::cmp::Reverse(*time));
+        let times: Vec<_> = records.iter().map(|(time, _)| *time).collect();
+        let durations = super::state_history::history_durations(&times);
+        records
+            .into_iter()
+            .zip(durations)
+            .enumerate()
+            .map(|(index, ((time, record), duration))| HealthHistoryEntry {
+                record,
+                recorded_at: time
+                    .map(super::state_history::format_history_time)
+                    .unwrap_or_else(|| record.timestamp.clone()),
+                duration,
+                is_current: index == 0,
+            })
+            .collect()
+    }
 }
 
 #[derive(Debug, serde::Serialize)]
@@ -173,72 +223,42 @@ struct MachineHealthSnapshot {
     associated_dpu_machine_ids: Vec<MachineId>,
 }
 
-/// View machine health.
-pub(super) async fn machine_health(
-    AxumState(state): AxumState<Arc<Api>>,
-    AxumPath(machine_id): AxumPath<String>,
-) -> Response {
+/// Machine health lives in the machine page's Health tab.
+pub(super) async fn machine_health(AxumPath(machine_id): AxumPath<String>) -> Response {
     let Ok(machine_id) = MachineId::from_str(&machine_id) else {
         return (StatusCode::BAD_REQUEST, "invalid machine id").into_response();
     };
-
-    let data = match fetch_machine_health_page_data(&state, &machine_id).await {
-        Ok(data) => data,
-        Err(response) => return response,
-    };
-
-    render_health(HealthObject::Machine(machine_id), data)
+    redirect_to_health_tab(HealthObject::Machine(machine_id))
 }
 
-/// View rack health.
-pub(super) async fn rack_health(
-    AxumState(state): AxumState<Arc<Api>>,
-    AxumPath(rack_id): AxumPath<String>,
-) -> Response {
+/// Rack health lives in the rack page's Health tab.
+pub(super) async fn rack_health(AxumPath(rack_id): AxumPath<String>) -> Response {
     let Ok(rack_id) = RackId::from_str(&rack_id) else {
         return (StatusCode::BAD_REQUEST, "invalid rack id").into_response();
     };
-
-    let data = match fetch_rack_health_page_data(&state, &rack_id).await {
-        Ok(data) => data,
-        Err(response) => return response,
-    };
-
-    render_health(HealthObject::Rack(rack_id), data)
+    redirect_to_health_tab(HealthObject::Rack(rack_id))
 }
 
-/// View power shelf health.
-pub(super) async fn power_shelf_health(
-    AxumState(state): AxumState<Arc<Api>>,
-    AxumPath(power_shelf_id): AxumPath<String>,
-) -> Response {
+/// Power shelf health lives in the power shelf page's Health tab.
+pub(super) async fn power_shelf_health(AxumPath(power_shelf_id): AxumPath<String>) -> Response {
     let Ok(power_shelf_id) = PowerShelfId::from_str(&power_shelf_id) else {
         return (StatusCode::BAD_REQUEST, "invalid power shelf id").into_response();
     };
-
-    let data = match fetch_power_shelf_health_page_data(&state, &power_shelf_id).await {
-        Ok(data) => data,
-        Err(response) => return response,
-    };
-
-    render_health(HealthObject::PowerShelf(power_shelf_id), data)
+    redirect_to_health_tab(HealthObject::PowerShelf(power_shelf_id))
 }
 
-/// View switch health.
-pub(super) async fn switch_health(
-    AxumState(state): AxumState<Arc<Api>>,
-    AxumPath(switch_id): AxumPath<String>,
-) -> Response {
+/// Switch health lives in the switch page's Health tab.
+pub(super) async fn switch_health(AxumPath(switch_id): AxumPath<String>) -> Response {
     let Ok(switch_id) = SwitchId::from_str(&switch_id) else {
         return (StatusCode::BAD_REQUEST, "invalid switch id").into_response();
     };
+    redirect_to_health_tab(HealthObject::Switch(switch_id))
+}
 
-    let data = match fetch_switch_health_page_data(&state, &switch_id).await {
-        Ok(data) => data,
-        Err(response) => return response,
-    };
-
-    render_health(HealthObject::Switch(switch_id), data)
+/// Keeps old `/health` links working; NVLink domains have no detail page and
+/// keep their standalone health page.
+fn redirect_to_health_tab(object: HealthObject) -> Response {
+    Redirect::to(&format!("{}?tab=health", object.detail_url())).into_response()
 }
 
 /// View NVLink domain health.
@@ -270,6 +290,57 @@ pub(super) async fn nvlink_domain_detail(AxumPath(domain_id): AxumPath<String>) 
 }
 
 fn render_health(object: HealthObject, data: HealthPageData) -> Response {
+    let display = HealthPage {
+        id: object.id(),
+        object_label: object.label(),
+        object_detail_url: object.detail_url(),
+        panel: health_panel(&object, data),
+    };
+
+    (StatusCode::OK, Html(display.render().unwrap())).into_response()
+}
+
+/// Loads a detail page's Health tab. `None` when the health data cannot be
+/// loaded; the failure is logged and the rest of the page renders.
+fn health_tab(object: HealthObject, data: Result<HealthPageData, Response>) -> Option<HealthPanel> {
+    match data {
+        Ok(data) => Some(health_panel(&object, data)),
+        Err(response) => {
+            tracing::warn!(
+                object = object.kind(),
+                id = %object.id(),
+                status = %response.status(),
+                "health panel unavailable"
+            );
+            None
+        }
+    }
+}
+
+pub(super) async fn machine_health_panel(api: &Api, machine_id: MachineId) -> Option<HealthPanel> {
+    let data = fetch_machine_health_page_data(api, &machine_id).await;
+    health_tab(HealthObject::Machine(machine_id), data)
+}
+
+pub(super) async fn rack_health_panel(api: &Api, rack_id: RackId) -> Option<HealthPanel> {
+    let data = fetch_rack_health_page_data(api, &rack_id).await;
+    health_tab(HealthObject::Rack(rack_id), data)
+}
+
+pub(super) async fn switch_health_panel(api: &Api, switch_id: SwitchId) -> Option<HealthPanel> {
+    let data = fetch_switch_health_page_data(api, &switch_id).await;
+    health_tab(HealthObject::Switch(switch_id), data)
+}
+
+pub(super) async fn power_shelf_health_panel(
+    api: &Api,
+    power_shelf_id: PowerShelfId,
+) -> Option<HealthPanel> {
+    let data = fetch_power_shelf_health_page_data(api, &power_shelf_id).await;
+    health_tab(HealthObject::PowerShelf(power_shelf_id), data)
+}
+
+fn health_panel(object: &HealthObject, data: HealthPageData) -> HealthPanel {
     let mut entries = data.entries;
     // Sort by type first and source name second.
     entries.sort_by(|a, b| {
@@ -289,22 +360,19 @@ fn render_health(object: HealthObject, data: HealthPageData) -> Response {
         .map(HealthReportEntry::from_rpc_convert_invalid)
         .collect();
 
-    let display = HealthPage {
-        id: object.id(),
+    HealthPanel {
+        health_url: object.health_url(),
         object_label: object.label(),
-        object_detail_url: object.detail_url(),
         show_machine_templates: object.show_machine_templates(),
         aggregate_health: LabeledHealthReport {
-            label: "Aggregate Health".to_string(),
+            label: String::new(),
             report: data.aggregate_health,
         },
         health_contributors: data.health_contributors,
         entries,
         history_url: object.history_url(),
         history: data.history,
-    };
-
-    (StatusCode::OK, Html(display.render().unwrap())).into_response()
+    }
 }
 
 fn not_found_response(kind: &str, id: &impl fmt::Display) -> Response {

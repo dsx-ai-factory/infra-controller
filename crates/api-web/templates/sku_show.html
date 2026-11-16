@@ -8,29 +8,29 @@
 
 <table class="sortable overview">
 	<thead>
-		<th>Id</th>
-		<th>Associated Machine Count</th>
-		<th>Architecture</th>
-		<th>Model</th>
-		<th>Vendor</th>
-		<th>CPUs</th>
-		<th>GPUs</th>
-		<th>IB Devices</th>
-		<th>Memory</th>
+		<tr>
+			<th>SKU</th>
+			<th>Platform</th>
+			<th>Hardware</th>
+			<th>Machines</th>
+		</tr>
 	</thead>
 	<tbody>
 		{% for sku in skus %}
 		<tr>
 			<td><a href="/admin/sku/{{ sku.id }}">{{ sku.id }}</a></td>
+			<td>
+				{% if sku.model.is_empty() %}<span class="text-muted">Unknown model</span>{% else %}{{ sku.model }}{% endif %}
+				<span class="cell-sub">{{ sku.vendor }}{% if !sku.vendor.is_empty() && !sku.architecture.is_empty() %} · {% endif %}{{ sku.architecture }}</span>
+			</td>
+			<td class="cell-nowrap">
+				{{ sku.num_cpus }} CPU · {{ sku.num_gpus }} GPU · {{ sku.num_ib_devices }} IB
+				{% if !sku.memory_capacity.is_empty() %}<span class="cell-sub">{{ sku.memory_capacity }}</span>{% endif %}
+			</td>
 			<td>{{ sku.associated_machine_count }}</td>
-			<td>{{ sku.architecture }}</td>
-			<td>{{ sku.model }}</td>
-			<td>{{ sku.vendor }}</td>
-			<td>{{ sku.num_cpus }}</td>
-			<td>{{ sku.num_gpus }}</td>
-			<td>{{ sku.num_ib_devices }}</td>
-			<td>{{ sku.memory_capacity }}</td>
 		</tr>
+		{% else %}
+		<tr><td colspan="4">No SKUs.</td></tr>
 		{% endfor %}
 	</tbody>
 </table>

@@ -4,59 +4,37 @@
 
 {% block content %}
 <div id="json"><a id="json-link" href="">JSON</a></div>
+<h1>Power Shelves</h1>
 
-<div class="container-fluid">
-    <div class="row">
-        <div class="col">
-            <h1>Power Shelves</h1>
-        </div>
-    </div>
-
-    <div class="row">
-        <div class="col">
-            <div class="card">
-                <div class="card-header">
-                    <h5 class="card-title mb-0">Power Shelves</h5>
-                </div>
-                <div class="card-body">
-                    {% if !power_shelves.is_empty() %}
-                    <div class="table-responsive">
-                        <table class="table table-striped">
-                            <thead>
-                            <tr>
-                                <th>ID</th>
-                                <th>Name</th>
-                                <th>State</th>
-                                <th>Capacity (W)</th>
-                                <th>Voltage (V)</th>
-                                <th>Actions</th>
-                            </tr>
-                            </thead>
-                            <tbody>
-                            {% for shelf in power_shelves %}
-                            <tr>
-                                <td>{{ shelf.id|power_shelf_id_link|safe }}</td>
-                                <td>{{ shelf.name }}</td>
-                                <td>{{ shelf.state_display|safe }}</td>
-                                <td>{{ shelf.capacity }}</td>
-                                <td>{{ shelf.voltage }}</td>
-                                <td>
-                                    <a href="/admin/power-shelf/{{ shelf.id }}/state-history"
-                                       class="btn btn-sm btn-outline-primary">
-                                        State History
-                                    </a>
-                                </td>
-                            </tr>
-                            {% endfor %}
-                            </tbody>
-                        </table>
-                    </div>
-                    {% else %}
-                    <p class="text-muted">No power shelves found.</p>
-                    {% endif %}
-                </div>
-            </div>
-        </div>
-    </div>
-</div>
+<table class="sortable overview">
+	<thead>
+		<tr>
+			<th>Power Shelf</th>
+			<th>State</th>
+			<th>Rating</th>
+			<th class="no-sort"></th>
+		</tr>
+	</thead>
+	<tbody>
+		{% for shelf in power_shelves %}
+		<tr>
+			<td>
+				{{ shelf.id|power_shelf_id_link|safe }}
+				{% if !shelf.name.is_empty() %}<span class="cell-sub">{{ shelf.name }}</span>{% endif %}
+			</td>
+			<td class="state-cell">{{ shelf.state_display|safe }}</td>
+			<td class="cell-nowrap">
+				{% if shelf.capacity == "N/A" && shelf.voltage == "N/A" %}
+				<span class="text-muted">—</span>
+				{% else %}
+				{{ shelf.capacity }} W · {{ shelf.voltage }} V
+				{% endif %}
+			</td>
+			<td class="cell-nowrap"><a href="/admin/power-shelf/{{ shelf.id }}/state-history">State history</a></td>
+		</tr>
+		{% else %}
+		<tr><td colspan="4">No power shelves found.</td></tr>
+		{% endfor %}
+	</tbody>
+</table>
 {% endblock %}

@@ -1,6 +1,30 @@
-<table class="detailsview">
-	<tr><th>Name</th><td>{{ metadata.name }}</td></tr>
-	<tr><th>Description</th><td>{{ metadata.description }}</td></tr>
-	<tr><th>Labels</th><td>{{ metadata.labels|label_list_fmt(false)|safe }}</td></tr>
-	<tr><th>Version</th><td>{{ metadata_version }}</td></tr>
-</table>
+<section class="entity-summary">
+	<div class="entity-summary-groups">
+		<div class="entity-summary-group">
+			<h4>Identity</h4>
+			<dl>
+				<dt>Name</dt>
+				<dd>{% if metadata.name.is_empty() %}<span class="text-muted">None</span>{% else %}{{ metadata.name }}{% endif %}</dd>
+				<dt>Description</dt>
+				<dd>{% if metadata.description.is_empty() %}<span class="text-muted">None</span>{% else %}{{ metadata.description }}{% endif %}</dd>
+				{% if !metadata_version.is_empty() %}
+				<dt>Version</dt>
+				<dd>{{ metadata_version }}</dd>
+				{% endif %}
+			</dl>
+		</div>
+		<div class="entity-summary-group">
+			<h4>Labels</h4>
+			{% if metadata.labels.is_empty() %}
+			<p class="text-muted">No labels.</p>
+			{% else %}
+			<dl class="entity-summary-list">
+				{% for label in metadata.labels %}
+				<dt>{{ label.key }}</dt>
+				<dd>{{ label.value|option_fmt }}</dd>
+				{% endfor %}
+			</dl>
+			{% endif %}
+		</div>
+	</div>
+</section>
