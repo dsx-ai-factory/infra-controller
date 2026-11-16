@@ -770,7 +770,12 @@ pub async fn build_component_manager(
                 )
             })?;
             Arc::new(
-                crate::nsm::NsmSwitchBackend::connect(&endpoint.url, endpoint.tls.as_ref()).await?,
+                crate::nsm::NsmSwitchBackend::connect(
+                    &endpoint.url,
+                    endpoint.tls.as_ref(),
+                    instrumentation.clone(),
+                )
+                .await?,
             )
         }
         NvSwitchBackend::Rms => {
@@ -805,8 +810,12 @@ pub async fn build_component_manager(
                 )
             })?;
             Arc::new(
-                crate::psm::PsmPowerShelfBackend::connect(&endpoint.url, endpoint.tls.as_ref())
-                    .await?,
+                crate::psm::PsmPowerShelfBackend::connect(
+                    &endpoint.url,
+                    endpoint.tls.as_ref(),
+                    instrumentation.clone(),
+                )
+                .await?,
             )
         }
         PowerShelfBackend::Rms => {

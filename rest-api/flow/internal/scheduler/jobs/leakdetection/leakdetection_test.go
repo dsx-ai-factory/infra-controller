@@ -23,6 +23,7 @@ import (
 
 type mockManager struct {
 	requests       []*operation.Request
+	preserve       func(operation.Wrapper) bool
 	submitErr      error
 	cancelErr      error
 	returnNoTaskID bool
@@ -33,6 +34,7 @@ func (m *mockManager) Stop(_ context.Context)        {}
 
 func (m *mockManager) SubmitTask(_ context.Context, req *operation.Request) ([]uuid.UUID, error) {
 	m.requests = append(m.requests, req)
+	m.preserve = req.SubmitOptions.PreserveConflictingTask
 	if m.submitErr != nil {
 		return nil, m.submitErr
 	}
@@ -76,7 +78,7 @@ func TestSubmitPowerOffTask(t *testing.T) {
 			require.NotNil(t, comp.External)
 			assert.Equal(t, tc.componentType, comp.External.Type)
 			assert.Equal(t, "component-1", comp.External.ID)
-			assert.Equal(t, operation.ConflictStrategyQueue, req.ConflictStrategy)
+			assert.Equal(t, operation.ConflictStrategyPreempt, req.ConflictStrategy)
 			assert.Contains(t, req.Description, "component-1")
 			var info operations.PowerControlTaskInfo
 			require.NoError(t, json.Unmarshal(req.Operation.Info, &info))
@@ -95,11 +97,12 @@ func TestSubmitRackPowerOffTask(t *testing.T) {
 
 	require.NoError(t, err)
 	require.Len(t, mgr.requests, 1)
+	require.NotNil(t, mgr.preserve)
 	req := mgr.requests[0]
 	require.True(t, req.TargetSpec.IsRackTargeting())
 	require.Len(t, req.TargetSpec.Racks, 1)
 	require.Equal(t, rackID, req.TargetSpec.Racks[0].Identifier.ExternalID)
-	require.Equal(t, operation.ConflictStrategyQueue, req.ConflictStrategy)
+	require.Equal(t, operation.ConflictStrategyPreempt, req.ConflictStrategy)
 	require.Contains(t, req.Description, rackID)
 	var info operations.PowerControlTaskInfo
 	require.NoError(t, json.Unmarshal(req.Operation.Info, &info))

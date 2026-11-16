@@ -160,8 +160,10 @@ fn test_nvos_update_manager(
     rms_sim: &RmsSim,
 ) -> Option<Arc<dyn component_manager::NvosUpdateManager>> {
     rms_sim.as_rms_client().map(|client| {
-        Arc::new(component_manager::rms::rms_nvos_update_manager(client))
-            as Arc<dyn component_manager::NvosUpdateManager>
+        Arc::new(component_manager::rms::rms_nvos_update_manager(
+            client,
+            carbide_instrument::Instrumentation::noop(),
+        )) as Arc<dyn component_manager::NvosUpdateManager>
     })
 }
 
@@ -171,6 +173,7 @@ fn test_rack_firmware_update_manager(
     rms_sim.as_rms_client().map(|client| {
         Arc::new(component_manager::rms::rms_rack_firmware_update_manager(
             client,
+            carbide_instrument::Instrumentation::noop(),
         )) as Arc<dyn component_manager::RackFirmwareUpdateManager>
     })
 }

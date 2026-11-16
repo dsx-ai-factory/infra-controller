@@ -94,7 +94,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     let api_config = ApiConfig::new(&app_config.carbide_api_url, &carbide_client_config);
 
-    let carbide_api_client = CarbideApiClient::new(&api_config);
+    let carbide_api_client =
+        CarbideApiClient::new(&api_config, carbide_instrument::Instrumentation::noop());
     let (dhcp_client, dhcp_service) =
         DhcpClient::start(&app_config, carbide_api_client.clone().into()).await?;
 

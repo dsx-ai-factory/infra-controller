@@ -219,6 +219,10 @@ fn host(i: usize, state: &str, model: &str, bmc: &str) -> Unit {
     };
     Unit {
         host: Some(HostFields {
+            firmware_window: None,
+            firmware_policy_eligible: None,
+            firmware_policy_blocking_reason: None,
+            firmware: None,
             vendor: Some("NVIDIA".to_string()),
             model: Some(model.to_string()),
             instance_type: i.is_multiple_of(2).then(|| "it-1".to_string()),
@@ -727,6 +731,7 @@ async fn allocatable_filter_works_under_compact_and_422_under_full() {
                 ..Filter::new(UnitType::Host)
             };
             let caps = Capabilities {
+                nico_config: false,
                 full_host_read: false,
                 rest_fixture: false,
             };
@@ -1280,10 +1285,13 @@ fn rest_reader(enabled: bool) -> Harness {
 #[tokio::test]
 async fn config_without_rest_reader_is_200_with_nulls() {
     let h = rest_reader(false);
-    for uri in [
-        "/v1/config",
-        "/v1/config?vendor=Other&model=x&component=bmc&instanceType=it-9",
-    ] {
+    assert_eq!(
+        h.get("/v1/config?vendor=Other&model=x&component=bmc")
+            .await
+            .status,
+        StatusCode::UNPROCESSABLE_ENTITY
+    );
+    for uri in ["/v1/config", "/v1/config?instanceType=it-9"] {
         let reply = h.get(uri).await;
         assert_eq!(reply.status, StatusCode::OK, "{uri}: {}", reply.body);
         // Explicit nulls: no site check at all, not an unknown one.
@@ -1440,11 +1448,8 @@ async fn config_rest_site_keeps_last_result_after_a_failed_read() {
 async fn config_filters_leave_rest_site_alone() {
     let h = harness();
     site_match(&h, 1, SiteMatch::Mismatch);
-    let config = config_reply(
-        h.get("/v1/config?vendor=Other&model=x&component=bmc&instanceType=it-9")
-            .await,
-    );
-    // Firmware targets and the tenant allocation wait for their tests.
+    let config = config_reply(h.get("/v1/config?instanceType=it-9").await);
+    // No native config reader or tenant allocation is enabled.
     assert_eq!((config.nico_api, config.rest), (None, None));
     assert_eq!(
         config.rest_site.expect("restSite").result,
@@ -1787,5 +1792,268 @@ async fn tenant_allocation_config_keeps_failure_evidence_and_scope() {
         assert_eq!(reply.body["rest"]["tenantAllocation"]["unusedUsable"], 3);
         assert_eq!(!reply.body["rest"]["lastAttemptError"].is_null(), failed);
         assert!(h.get("/v1/config?instanceType=other").await.body["rest"].is_null());
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn firmware_counts_equal_unit_predicates() {
+    use carbide_site_health_probe_api::*;
+    let mut cfg = state_config();
+    cfg.readers.nico_config.enabled = true;
+    cfg.readers.rest_inventory.enabled = false;
+    let h = harness_with(&cfg);
+    let config = crate::readers::nico_config::tests::content();
+    let now = crate::clock::now();
+    let meta = SweepMeta {
+        process: 1,
+        seq: 1,
+        reader: Reader::NicoConfig,
+        start: now,
+        end: now,
+    };
+    h.store.publish(
+        Family::ConfigNicoApi,
+        Arc::new(FamilySnapshot {
+            meta: meta.clone(),
+            data: config.clone(),
+        }),
+    );
+    let mut units = vec![
+        host(1, "Ready", "GB200 NVL", "b"),
+        host(2, "Ready", "GB200 NVL", "b"),
+        host(3, "Assigned", "GB200 NVL", "b"),
+    ];
+    for (i, unit) in units.iter_mut().enumerate() {
+        let host = unit.host.as_mut().unwrap();
+        host.vendor = Some(if i == 1 { "dell" } else { "nvidia" }.into());
+        host.model = Some("GB200 NVL".into());
+        host.allocatable = Some(i != 2);
+        host.firmware = Some(HostFirmware {
+            report_version: Some("rev".into()),
+            waiting_for_refresh: Some(false),
+            components: [FirmwarePhase::Current, FirmwarePhase::Behind]
+                .into_iter()
+                .zip(["bmc", "uefi"])
+                .map(|(phase, name)| FirmwareComponentInventory {
+                    component_name: name.into(),
+                    entries: vec![],
+                    phase,
+                })
+                .collect(),
+        });
+    }
+    let mut data = UnitsData::new(units, 0);
+    data.compact_host_read = true;
+    data.firmware_config = Some(FirmwareConfigEvidence {
+        revision: 1,
+        read_start: now.into(),
+        read_at: now.into(),
+    });
+    h.store.publish(
+        Family::Host,
+        Arc::new(FamilySnapshot {
+            meta: SweepMeta {
+                reader: Reader::Devices,
+                ..meta.clone()
+            },
+            data: data.clone(),
+        }),
+    );
+    for (vendor, component, phase, ready, expected) in [
+        ("NVIDIA", "bmc", "current", true, 1),
+        ("nvidia", "bmc", "current", true, 1),
+        ("nvidia", "bmc", "current", false, 1),
+        ("dell", "bmc", "current", true, 1),
+        ("nvidia", "uefi", "current", true, 0),
+        ("nvidia", "uefi", "behind", true, 1),
+    ] {
+        let query = format!(
+            "type=host&vendor={vendor}&model=GB200%20NVL&firmwareComponent={component}&firmwarePhase={phase}&firmwareReady={ready}"
+        );
+        assert_eq!(h.get(&format!("/v1/count?{query}")).await.count(), expected);
+        assert_eq!(
+            h.get(&format!("/v1/units?{query}"))
+                .await
+                .units()
+                .units
+                .len() as u64,
+            expected
+        );
+        assert_eq!(
+            h.metric_sum(
+                "hosts_firmware",
+                &[
+                    ("vendor", vendor.to_ascii_lowercase()),
+                    ("model", "GB200 NVL".into()),
+                    ("component", component.into()),
+                    ("phase", phase.into()),
+                    ("ready", ready.to_string())
+                ]
+            ),
+            expected as f64
+        );
+    }
+    let filtered = h
+        .get("/v1/config?vendor=NVIDIA&model=GB200%20NVL&component=bmc")
+        .await;
+    assert_eq!(filtered.status, StatusCode::OK);
+    assert_eq!(
+        filtered.body["nicoApi"]["firmwareTargets"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    for endpoint in ["count", "units"] {
+        let reply = h
+            .get(&format!(
+                "/v1/{endpoint}?type=host&vendor=NVIDIA&model=GB200%20NVL"
+            ))
+            .await;
+        assert_eq!(reply.status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(reply.field(), "vendor");
+    }
+    let families = h.registry.gather();
+    assert_eq!(
+        families
+            .iter()
+            .find(|f| f.name() == "carbide_site_health_probe_hosts_firmware")
+            .unwrap()
+            .get_metric()
+            .len(),
+        40,
+        "explicit zero grid"
+    );
+    let query = "/v1/count?type=host&vendor=nvidia&model=GB200%20NVL&firmwareComponent=bmc";
+    h.store.publish(
+        Family::Host,
+        Arc::new(FamilySnapshot {
+            meta: SweepMeta {
+                reader: Reader::Devices,
+                start: now - Duration::from_secs(300),
+                ..meta.clone()
+            },
+            data: data.clone(),
+        }),
+    );
+    assert_eq!(
+        h.get(query).await.status,
+        StatusCode::OK,
+        "a completed long host sweep is fresh"
+    );
+    h.store.publish(
+        Family::Host,
+        Arc::new(FamilySnapshot {
+            meta: SweepMeta {
+                reader: Reader::Devices,
+                start: now - Duration::from_secs(541),
+                end: now - Duration::from_secs(241),
+                ..meta.clone()
+            },
+            data: data.clone(),
+        }),
+    );
+    assert_eq!(h.get(query).await.status, StatusCode::SERVICE_UNAVAILABLE);
+    h.store.publish(
+        Family::Host,
+        Arc::new(FamilySnapshot {
+            meta: SweepMeta {
+                reader: Reader::Devices,
+                ..meta.clone()
+            },
+            data: data.clone(),
+        }),
+    );
+    let mut changed = config.clone();
+    changed.revision += 1;
+    h.store.publish(
+        Family::ConfigNicoApi,
+        Arc::new(FamilySnapshot {
+            meta: meta.clone(),
+            data: changed,
+        }),
+    );
+    assert_eq!(
+        h.get(query).await.status,
+        StatusCode::SERVICE_UNAVAILABLE,
+        "pinned revision mismatch"
+    );
+    h.store.publish(
+        Family::ConfigNicoApi,
+        Arc::new(FamilySnapshot {
+            meta: meta.clone(),
+            data: config.clone(),
+        }),
+    );
+    h.store.failed(
+        Reader::NicoConfig,
+        Family::ConfigNicoApi,
+        crate::snapshot::FailureKind::Rpc,
+        "read failed",
+    );
+    assert_eq!(h.get(query).await.status, StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(
+        h.get("/v1/config?component=bmc").await.body["nicoApi"]["revision"],
+        1
+    );
+    h.store.publish(
+        Family::ConfigNicoApi,
+        Arc::new(FamilySnapshot {
+            meta: meta.clone(),
+            data: config.clone(),
+        }),
+    );
+    tokio::time::advance(Duration::from_secs(121)).await;
+    assert_eq!(h.get(query).await.status, StatusCode::SERVICE_UNAVAILABLE);
+    data.firmware_config = None;
+    h.store.publish(
+        Family::Host,
+        Arc::new(FamilySnapshot {
+            meta: SweepMeta {
+                reader: Reader::Devices,
+                ..meta
+            },
+            data,
+        }),
+    );
+    assert!(
+        h.registry
+            .gather()
+            .iter()
+            .all(|f| f.name() != "carbide_site_health_probe_host_firmware_config_revision"),
+        "unknown revision must disappear, never retire to zero"
+    );
+}
+
+#[tokio::test]
+async fn firmware_zero_and_missing_are_distinct() {
+    let query = "/v1/count?type=host&vendor=nvidia&model=GB200%20NVL&firmwareComponent=bmc&firmwarePhase=current";
+    assert_eq!(
+        harness().get(query).await.status,
+        StatusCode::UNPROCESSABLE_ENTITY
+    );
+    let mut cfg = state_config();
+    cfg.readers.nico_config.enabled = true;
+    let h = harness_with(&cfg);
+    assert_eq!(h.get(query).await.status, StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(
+        h.get("/v1/config?component=bmc").await.status,
+        StatusCode::SERVICE_UNAVAILABLE
+    );
+    cfg.nico_api.host_read = HostReadMode::Full;
+    assert_eq!(
+        harness_with(&cfg).get(query).await.status,
+        StatusCode::UNPROCESSABLE_ENTITY
+    );
+    for extra in [
+        "&stage=ready",
+        "&allocatable=true",
+        "&source=rest",
+        "&bmcVersion=old",
+    ] {
+        assert_eq!(
+            h.get(&format!("{query}{extra}")).await.status,
+            StatusCode::UNPROCESSABLE_ENTITY
+        );
     }
 }

@@ -38,9 +38,8 @@ use crate::snapshot::{
     AnySnapshot, CensusView, FailureKind, FamilySnapshot, Reader, SnapshotSink, UnitsData,
 };
 
-/// Every family the readers publish. Firmware config and tenant-instance
-/// summaries remain unimplemented.
-pub(crate) const ALL_FAMILIES: [Family; 13] = [
+/// Every family the readers publish. Tenant-instance summaries remain unimplemented.
+pub(crate) const ALL_FAMILIES: [Family; 14] = [
     Family::Host,
     Family::Dpu,
     Family::Switch,
@@ -54,6 +53,7 @@ pub(crate) const ALL_FAMILIES: [Family; 13] = [
     Family::RestInstances,
     Family::RestMachines,
     Family::ConfigRest,
+    Family::ConfigNicoApi,
 ];
 
 /// Families whose units `/v1/units` pages through.
@@ -79,6 +79,7 @@ struct Snapshots {
     current: Option<Arc<dyn AnySnapshot>>,
     /// Whether a cursor points into the current snapshot.
     current_paged: bool,
+    last_attempt: Option<LastAttempt>,
     /// Replaced snapshots, oldest first, with their replacement time.
     superseded: VecDeque<(Arc<dyn AnySnapshot>, Instant)>,
 }
@@ -86,7 +87,6 @@ struct Snapshots {
 #[derive(Default)]
 struct Slot {
     snapshots: Mutex<Snapshots>,
-    last_attempt: Mutex<Option<LastAttempt>>,
 }
 
 /// The newest snapshot of every family.
@@ -215,11 +215,16 @@ impl SnapshotStore {
 
     /// The newest attempt to read `family`, published or not.
     pub(crate) fn last_attempt(&self, family: Family) -> Option<LastAttempt> {
-        self.slot(family)
-            .last_attempt
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .clone()
+        self.snapshots(family).last_attempt.clone()
+    }
+
+    /// Snapshot and latest attempt from one publication boundary.
+    pub(crate) fn current_attempt(
+        &self,
+        family: Family,
+    ) -> (Option<Arc<dyn AnySnapshot>>, Option<LastAttempt>) {
+        let snap = self.snapshots(family);
+        (snap.current.clone(), snap.last_attempt.clone())
     }
 
     /// Resolves once every family in `enabled` has had one complete
@@ -243,14 +248,6 @@ impl SnapshotStore {
         {
             superseded.pop_front();
         }
-    }
-
-    fn record_attempt(&self, family: Family, attempt: LastAttempt) {
-        *self
-            .slot(family)
-            .last_attempt
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner) = Some(attempt);
     }
 }
 
@@ -282,29 +279,24 @@ impl SnapshotSink for SnapshotStore {
                 );
             }
         }
+        snapshots.last_attempt = Some(LastAttempt {
+            reader,
+            failure: None,
+            at: crate::clock::now(),
+        });
         drop(snapshots);
-        self.record_attempt(
-            family,
-            LastAttempt {
-                reader,
-                failure: None,
-                at: crate::clock::now(),
-            },
-        );
         self.ready.send_if_modified(|ready| ready.insert(family));
     }
 
     fn failed(&self, reader: Reader, family: Family, kind: FailureKind, error: &str) {
         // Kept snapshots expire on time while sweeps fail too.
-        self.expire(&mut self.snapshots(family).superseded);
-        self.record_attempt(
-            family,
-            LastAttempt {
-                reader,
-                failure: Some((kind, error.to_string())),
-                at: crate::clock::now(),
-            },
-        );
+        let mut snapshots = self.snapshots(family);
+        self.expire(&mut snapshots.superseded);
+        snapshots.last_attempt = Some(LastAttempt {
+            reader,
+            failure: Some((kind, error.to_string())),
+            at: crate::clock::now(),
+        });
     }
 }
 

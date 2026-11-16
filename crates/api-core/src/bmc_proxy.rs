@@ -111,6 +111,7 @@ impl ProxiedRedfishPool {
             .proxy_target()
             .map_err(|err| eyre::eyre!(err))?;
         let reader = credential_reader.clone();
+        let pool_instrumentation = instrumentation.clone();
         let inner = Reloading::new(
             identity_files(proxy_config),
             IDENTITY_RELOAD,
@@ -126,6 +127,7 @@ impl ProxiedRedfishPool {
                     reader.clone(),
                     pool,
                     proxy.clone(),
+                    pool_instrumentation.clone(),
                 ))
             },
             move |value, failure| report_reload_failure(&instrumentation, value, failure),
