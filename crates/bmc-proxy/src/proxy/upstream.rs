@@ -92,7 +92,7 @@ pub(super) struct UpstreamResponse {
 /// An attempt that got no answer from the BMC: the caller's answer, and how
 /// the BMC failed it, if the proxy did not fail it first.
 pub(super) struct AttemptFailed {
-    pub(super) response: Response<Body>,
+    pub(super) response: Box<Response<Body>>,
     pub(super) by_bmc: Option<BmcFailure>,
     /// The target's certificate failed verification, so the request was not
     /// sent: the address may no longer be what its cached credentials say.
@@ -110,7 +110,7 @@ pub(super) enum BmcFailure {
 impl From<Response<Body>> for AttemptFailed {
     fn from(response: Response<Body>) -> Self {
         Self {
-            response,
+            response: Box::new(response),
             by_bmc: None,
             certificate_rejected: false,
         }
@@ -273,7 +273,7 @@ pub(super) async fn send_upstream(
                     error: rejection.to_string(),
                 });
                 return AttemptFailed {
-                    response: error_response(
+                    response: Box::new(error_response(
                         (
                             StatusCode::BAD_GATEWAY,
                             format!(
@@ -281,7 +281,7 @@ pub(super) async fn send_upstream(
                             ),
                         )
                             .into(),
-                    ),
+                    )),
                     by_bmc: None,
                     certificate_rejected: true,
                 };
@@ -296,7 +296,9 @@ pub(super) async fn send_upstream(
                     }
                     _ => None,
                 },
-                response: error_response((StatusCode::BAD_GATEWAY, error.to_string()).into()),
+                response: Box::new(error_response(
+                    (StatusCode::BAD_GATEWAY, error.to_string()).into(),
+                )),
                 certificate_rejected: false,
             }
         })

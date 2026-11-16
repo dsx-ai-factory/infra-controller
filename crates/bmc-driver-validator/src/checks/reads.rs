@@ -45,6 +45,10 @@ pub(super) fn checks() -> Vec<Check> {
             CheckId::new(Capability::BmcControl, "settings_status"),
             run!(manager_settings_status),
         ),
+        Check::read(
+            CheckId::new(Capability::BmcControl, "host_management_network_access"),
+            run!(host_management_network_access),
+        ),
         Check::read(CheckId::new(Capability::Bios, "status"), run!(bios_status)),
         Check::read(
             CheckId::new(Capability::Bios, "infinite_boot"),
@@ -121,6 +125,18 @@ async fn ac_power_cycle_supported(cx: &CheckCx<'_>) -> Step {
 async fn ipmi_over_lan(cx: &CheckCx<'_>) -> Step {
     let enabled = cx.bmc().bmc_control()?.ipmi_over_lan_enabled().await?;
     Ok(yes_no(enabled, "enabled", "disabled"))
+}
+
+async fn host_management_network_access(cx: &CheckCx<'_>) -> Step {
+    let access = cx
+        .bmc()
+        .bmc_control()?
+        .host_management_network_access()
+        .await?;
+    Ok(match access {
+        Some(access) => yes_no(access, "enabled", "disabled"),
+        None => "the BMC does not report host management network access".to_string(),
+    })
 }
 
 async fn manager_settings_status(cx: &CheckCx<'_>) -> Checked {

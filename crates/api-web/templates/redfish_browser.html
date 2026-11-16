@@ -1,89 +1,66 @@
 {% extends "base.html" %}
+{% import "common_ui.html" as common %}
 
 {% block title %}Redfish Browser{% endblock %}
 
 {% block content %}
 <h1>Redfish Browser</h1>
-
-<p>
-This page allows to send queries to BMCs managed by Forge.
-Enter a valid redfish URL below to send a query and display the response.
-The query needs to be fully qualified - e.g. <b>https://127.0.0.1/redfish/v1</b>.
+<p class="page-intro">
+	Query a managed BMC's Redfish API and view the response. Use a fully qualified URL,
+	e.g. <code>https://127.0.0.1/redfish/v1</code>; <code>@odata.id</code> paths in the response link to further queries.
 </p>
 
-<form id="redfish_console" method="GET" action="/admin/redfish-browser">
-	<input type=text size="80" id="url_input" name="url" placeholder="https://127.0.0.1/redfish/v1" value="{{ url }}" />
-	<input type="submit" value="Start query">
+<form id="redfish_console" class="entity-summary query-console" method="GET" action="/admin/redfish-browser">
+	<label class="query-field query-field-wide">
+		<span>URL</span>
+		<input type="text" id="url_input" name="url" placeholder="https://127.0.0.1/redfish/v1" value="{{ url }}" />
+	</label>
+	<input type="submit" value="Run query">
 </form>
 
 {% if !url.is_empty() %}
-
-<h3>Metadata</h3>
-<table class="detailsview">
-	<tr><th>BMC IP</th><td>{{ bmc_ip }}</td></tr>
-	<tr><th>Machine ID</th><td>{{ machine_id|machine_id_link|safe }}</td></tr>
-	<tr><th>HTTP status</th><td>{{ status_code }} {{ status_string }}</td></tr>
-	{% if !response_headers.is_empty() %}
-	<tr>
-		<th>Response Headers</th>
-		<td>
-			<details>
-				<summary>Expand Headers</summary>
-				<table class="detailsview">
-					{% for header in response_headers %}
-					<tr>
-						<td>{{ header.name }}</td>
-						<td>{{ header.value }}</td>
-					</tr>
-					{% endfor %}
-				</table>
-			</details>
-		</td>
-	</tr>
-	{% endif %}
-</table>
-
-{% if !error.is_empty() %}
-<h3>Error</h3>
-<textarea disabled>{{ error }}</textarea>
-{% endif %}
-
-<details open>
-	<summary>Past Actions</summary>
-	<div style="overflow: scroll;">
-	{{ actions|safe }}
+<section class="entity-summary">
+	<div class="entity-summary-status">
+		<div class="entity-summary-stat">
+			<span class="entity-summary-label">BMC</span>
+			{% if bmc_ip.is_empty() %}<span class="text-muted">—</span>{% else %}<a href="/admin/explored-endpoint/{{ bmc_ip }}">{{ bmc_ip }}</a>{% endif %}
+		</div>
+		<div class="entity-summary-stat">
+			<span class="entity-summary-label">Machine</span>
+			{% if machine_id.is_empty() %}<span class="text-muted">—</span>{% else %}{{ machine_id|machine_id_link|safe }}{% endif %}
+		</div>
 	</div>
-</details>
-
-{% if !response.is_empty() %}
-
-<details open>
-  <summary>Actions</summary>
-  <table>
-  <tbody id="actions-table">
-  	<tr>
-  		<th>Name</th>
-  		<th>Parameters</th>
-  		<th>Request</th>
-  	</tr>
-  </tbody>
-  </table>
-</details>
-
-<h3>Response</h3>
-<table class="detailsview">
-<tbody>
-	<tr>
-		<td>
-			<div style="overflow: auto;">
-				<pre><code class="bmcresponse">{{ response }}</code></pre>
-			</div>
-		</td>
-	</tr>
-</tbody>
-</table>
-{% endif %}
-
+	{% if !error.is_empty() %}
+	<div class="entity-summary-alert">{{ error }}</div>
+	{% endif %}
+	{% call common::response_headers(response_headers) %}{% endcall %}
+	<details class="entity-summary-details" open>
+		<summary>Past actions</summary>
+		<div class="data-table-scroll">
+		{{ actions|safe }}
+		</div>
+	</details>
+	{% if !response.is_empty() %}
+	<details class="entity-summary-details" open>
+		<summary>Available actions</summary>
+		<div class="data-table-scroll">
+		<table class="data-table redfish-actions-table">
+			<tbody id="actions-table">
+				<tr>
+					<th>Name</th>
+					<th>Parameters</th>
+					<th>Request</th>
+				</tr>
+			</tbody>
+		</table>
+		</div>
+	</details>
+	<div class="entity-summary-table">
+		<h4>Response</h4>
+		<pre class="entity-summary-pre"><code class="bmcresponse">{{ response }}</code></pre>
+	</div>
+	{% endif %}
+</section>
 {% endif %}
 
 {% endblock %}

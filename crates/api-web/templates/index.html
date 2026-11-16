@@ -1,4 +1,5 @@
 {% extends "base.html" %}
+{% import "common_ui.html" as common %}
 
 {% block title %}Configuration{% endblock %}
 
@@ -13,7 +14,10 @@
 			<span class="config-version-label">NICo version</span>
 			<code>{{ version }}</code>
 		</div>
-		<input type="search" id="config-search" placeholder="Filter options by name, value, or description&hellip;" autocomplete="off">
+		<div class="table-filter-search config-search">
+			{% call common::search_icon(15, "2") %}{% endcall %}
+			<input type="search" id="config-search" placeholder="Filter options by name, value, or description&hellip;" autocomplete="off" aria-label="Filter options">
+		</div>
 		<label class="config-toggle">
 			<input type="checkbox" id="config-overridden-only"> Overridden only
 		</label>

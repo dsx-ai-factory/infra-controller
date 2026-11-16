@@ -19,7 +19,7 @@ use std::net::{IpAddr, Ipv6Addr};
 use ::rpc::forge as rpc;
 use carbide_uuid::vpc::VpcId;
 use db::resource_pool::ResourcePoolDatabaseError;
-use db::{AnnotatedSqlxError, DatabaseError, ObjectColumnFilter, network_segment};
+use db::{DatabaseError, ObjectColumnFilter, network_segment};
 use ipnetwork::IpNetwork;
 use model::network_prefix::NewNetworkPrefix;
 use model::network_segment::{
@@ -386,10 +386,10 @@ pub(crate) async fn add_prefix(
             // Keep backstop constraints diagnostic even for writers outside the
             // overlap guard. The normal range/family probes reject first.
             let constraint = match &error {
-                DatabaseError::Sqlx(AnnotatedSqlxError {
-                    source: sqlx::Error::Database(error),
-                    ..
-                }) => error.constraint(),
+                DatabaseError::Sqlx(error) => error
+                    .source
+                    .as_database_error()
+                    .and_then(|error| error.constraint()),
                 _ => None,
             };
             if db::network_prefix::is_overlap_constraint(constraint) {
@@ -682,10 +682,14 @@ pub(crate) async fn save_without_reverse_zones(
     };
     let mut network_segment = match db::network_segment::persist(ns, txn, initial_state).await {
         Ok(segment) => segment,
-        Err(DatabaseError::Sqlx(AnnotatedSqlxError {
-            source: sqlx::Error::Database(e),
-            ..
-        })) if db::network_prefix::is_overlap_constraint(e.constraint()) => {
+        Err(DatabaseError::Sqlx(error))
+            if db::network_prefix::is_overlap_constraint(
+                error
+                    .source
+                    .as_database_error()
+                    .and_then(|error| error.constraint()),
+            ) =>
+        {
             return Err(CarbideError::InvalidArgument(
                 "prefix overlaps with an existing one".to_string(),
             ));

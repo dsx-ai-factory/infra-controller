@@ -368,11 +368,11 @@ mod tests {
                 }
                 .into(),
                 Self::Generic => ResourcePoolError::Parse {
-                    e: "invalid integer".to_string(),
-                    v: "not-an-integer".to_string(),
-                    pool_name: DPA_VNI.to_string(),
-                    owner_type: "spx_partition".to_string(),
-                    owner_id: OWNER_ID.to_string(),
+                    e: "invalid integer".into(),
+                    v: "not-an-integer".into(),
+                    pool_name: DPA_VNI.into(),
+                    owner_type: "spx_partition".into(),
+                    owner_id: OWNER_ID.into(),
                 }
                 .into(),
             }

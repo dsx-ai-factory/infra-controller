@@ -63,6 +63,15 @@ struct AttestationSummary {
 #[derive(Template)]
 #[template(path = "attestation_results.html")]
 struct AttestationResults {
+    machine_id: String,
+    panel: AttestationPanel,
+}
+
+/// The latest attestation journal for a machine with its PCR comparison,
+/// shown on the machine page and on the standalone results page.
+#[derive(Template)]
+#[template(path = "attestation_panel.html")]
+pub(super) struct AttestationPanel {
     journal_time: String,
     journal_id: String,
     attestation_status: String,
@@ -86,21 +95,54 @@ struct AttestationPcr {
     description: String,
 }
 
+impl AttestationPcr {
+    fn mismatched(&self) -> bool {
+        self.bundle_value != "-" && self.report_value != self.bundle_value
+    }
+}
+
 /// View attestation results
 pub(super) async fn show_attestation_results(
     AxumState(state): AxumState<Arc<Api>>,
     AxumPath(machine_id): AxumPath<String>,
 ) -> impl IntoResponse {
+    match load_attestation_panel(&state, &machine_id).await {
+        Ok(panel) => {
+            let page = AttestationResults { machine_id, panel };
+            (StatusCode::OK, Html(page.render().unwrap()))
+        }
+        Err(err_response) => err_response,
+    }
+}
+
+/// Loads the machine page's attestation section. `Err` carries the message
+/// to show in place of the results.
+pub(super) async fn machine_attestation_panel(
+    state: &Arc<Api>,
+    machine_id: &str,
+) -> Result<AttestationPanel, String> {
+    load_attestation_panel(state, machine_id)
+        .await
+        .map_err(|(status, Html(message))| {
+            if status == StatusCode::BAD_REQUEST {
+                "No attestation results.".to_string()
+            } else {
+                message
+            }
+        })
+}
+
+async fn load_attestation_panel(
+    state: &Arc<Api>,
+    machine_id: &str,
+) -> Result<AttestationPanel, (StatusCode, Html<String>)> {
     // 1. get latest journal entry, report, bundle
-    // 2. populate AttestationResults and return it
+    // 2. populate AttestationPanel and return it
 
     // 1.
     // get latest journal
 
-    let latest_journal = match get_latest_journal_for_machine_id(&state, &machine_id).await {
-        Ok(journal) => journal,
-        Err(err_response) => return err_response,
-    };
+    let latest_journal = get_latest_journal_for_machine_id(state, machine_id).await?;
 
     // get report
     let request = tonic::Request::new(mbprotos::ShowMeasurementReportForIdRequest {
@@ -112,25 +154,25 @@ pub(super) async fn show_attestation_results(
                 Ok(report) => report,
                 Err(err) => {
                     tracing::error!(error = %err, "show_attestation_results");
-                    return (
+                    return Err((
                         StatusCode::INTERNAL_SERVER_ERROR,
                         Html("Error deserializing the report".to_string()),
-                    );
+                    ));
                 }
             },
             None => {
-                return (
+                return Err((
                     StatusCode::INTERNAL_SERVER_ERROR,
                     Html("No report returned by the API".to_string()),
-                );
+                ));
             }
         },
         Err(err) => {
             tracing::error!(error = %err, "show_attestation_results");
-            return (
+            return Err((
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Html("Error getting measurement report".to_string()),
-            );
+            ));
         }
     };
 
@@ -147,25 +189,25 @@ pub(super) async fn show_attestation_results(
                     Ok(bundle) => bundle,
                     Err(err) => {
                         tracing::error!(error = %err, "show_attestation_results");
-                        return (
+                        return Err((
                             StatusCode::INTERNAL_SERVER_ERROR,
                             Html("Error deserializing the bundle".to_string()),
-                        );
+                        ));
                     }
                 },
                 None => {
-                    return (
+                    return Err((
                         StatusCode::INTERNAL_SERVER_ERROR,
                         Html("MeasurementBundleId present, but no bundle found".to_string()),
-                    );
+                    ));
                 }
             },
             Err(err) => {
                 tracing::error!(error = %err, "show_attestation_results");
-                return (
+                return Err((
                     StatusCode::INTERNAL_SERVER_ERROR,
                     Html("Error getting measurement bundle".to_string()),
-                );
+                ));
             }
         };
         Some(bundle)
@@ -180,20 +222,20 @@ pub(super) async fn show_attestation_results(
                     Ok(bundle) => Some(bundle),
                     Err(err) => {
                         tracing::error!(error = %err, "show_attestation_results");
-                        return (
+                        return Err((
                             StatusCode::INTERNAL_SERVER_ERROR,
                             Html("Error deserializing the bundle".to_string()),
-                        );
+                        ));
                     }
                 },
                 None => None,
             },
             Err(err) => {
                 tracing::error!(error = %err, "show_attestation_results");
-                return (
+                return Err((
                     StatusCode::INTERNAL_SERVER_ERROR,
                     Html("Error getting partially matching measurement bundle".to_string()),
-                );
+                ));
             }
         }
     };
@@ -213,42 +255,42 @@ pub(super) async fn show_attestation_results(
                         Ok(profile) => profile,
                         Err(err) => {
                             tracing::error!(error = %err, "show_attestation_results");
-                            return (
+                            return Err((
                                 StatusCode::INTERNAL_SERVER_ERROR,
                                 Html("Error deserializing measurement system profile".to_string()),
-                            );
+                            ));
                         }
                     }
                 }
                 None => {
-                    return (
+                    return Err((
                         StatusCode::INTERNAL_SERVER_ERROR,
                         Html("No system measurement profile returned".to_string()),
-                    );
+                    ));
                 }
             },
             Err(err) => {
                 tracing::error!(error = %err, "show_attestation_results");
-                return (
+                return Err((
                     StatusCode::INTERNAL_SERVER_ERROR,
                     Html("Error getting measurement system profile".to_string()),
-                );
+                ));
             }
         }
     } else {
-        return (
+        return Err((
             StatusCode::INTERNAL_SERVER_ERROR,
             Html("Journal is not linked to a profile".to_string()),
-        );
+        ));
     };
 
     // 2.
     let mut report_table = vec![AttestationPcr::default(); report.pcr_values().len()];
-    // create a vector of AttestationPcrs and add it to AttestationResults
+    // create a vector of AttestationPcrs and add it to AttestationPanel
     for val in report.pcr_values() {
         let idx = val.pcr_register as usize;
         report_table[idx].pcr_slot = idx as i16;
-        report_table[idx].report_value = val.sha_any.clone();
+        report_table[idx].report_value = val.sha_any;
         report_table[idx].bundle_value = get_bundle_value_for_pcr_slot(&bundle, idx);
         report_table[idx].description = if idx < PCR_SLOT_DESCRIPTIONS.len() {
             PCR_SLOT_DESCRIPTIONS[idx].to_string()
@@ -262,7 +304,7 @@ pub(super) async fn show_attestation_results(
         None => ("-".to_string(), "-".to_string()),
     };
 
-    let attestation_results = AttestationResults {
+    Ok(AttestationPanel {
         journal_time: latest_journal.ts.to_string(),
         journal_id: latest_journal.journal_id.to_string(),
         attestation_status: if latest_journal.bundle_id.is_some() {
@@ -281,14 +323,13 @@ pub(super) async fn show_attestation_results(
         },
         profile_name: profile.name,
         profile_id: profile.profile_id.to_string(),
-        machine_id,
+        machine_id: machine_id.to_string(),
         profile_attributes: profile
             .attrs
             .iter()
             .map(|elem| (elem.key.clone(), elem.value.clone()))
             .collect(),
-    };
-    (StatusCode::OK, Html(attestation_results.render().unwrap()))
+    })
 }
 
 fn get_bundle_value_for_pcr_slot(

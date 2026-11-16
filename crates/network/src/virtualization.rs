@@ -310,7 +310,7 @@ pub fn get_svi_ip(
 ) -> eyre::Result<Option<IpNetwork>> {
     if virtualization_type == VpcVirtualizationType::Fnn && is_l2_segment {
         let Some(svi_ip) = svi_ip else {
-            return Err(eyre::eyre!(format!("SVI IP is not allocated",)));
+            return Err(eyre::eyre!("SVI IP is not allocated"));
         };
 
         return Ok(Some(IpNetwork::new(*svi_ip, prefix)?));

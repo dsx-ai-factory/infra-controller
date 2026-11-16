@@ -98,7 +98,6 @@ struct ManagedHostRowDisplay {
     maintenance_reference: String,
     maintenance_start_time: String,
     dpus: Vec<AttachedDpuRowDisplay>,
-    dpf_enabled: bool,
     dpf_used_for_ingestion: bool,
 }
 
@@ -212,7 +211,6 @@ impl ManagedHostRowDisplay {
             maintenance_reference,
             maintenance_start_time,
             dpus: dpu_snapshots.into_iter().map_into().collect(),
-            dpf_enabled: host_snapshot.config.dpf.enabled,
             dpf_used_for_ingestion: host_snapshot.config.dpf.used_for_ingestion,
         }
     }
@@ -269,14 +267,6 @@ struct AttachedDpuRowDisplay {
     bmc_mac: String,
     oob_ip: String,
     oob_mac: String,
-}
-
-enum DpuProperty {
-    MachineId,
-    BmcIp,
-    BmcMac,
-    OobIp,
-    OobMac,
 }
 
 // derive PartialOrd will order them in the declared order, which for our purposes should be
@@ -354,31 +344,27 @@ impl GroupingKey {
 }
 
 impl ManagedHostRowDisplay {
-    fn dpu_properties(&self, property: DpuProperty) -> String {
-        let lines: Vec<String> = match property {
-            DpuProperty::MachineId => self
-                .dpus
-                .iter()
-                .map(|d| {
-                    filters::machine_link(d.machine_id.clone(), "machine")
-                        .unwrap_or("UNKNOWN".to_string())
-                })
-                .collect(),
-            DpuProperty::BmcIp => self
-                .dpus
-                .iter()
-                .map(|d| {
-                    format!(
-                        "<a href=\"/admin/explored-endpoint/{}\">{}</a>",
-                        d.bmc_ip, d.bmc_ip
-                    )
-                })
-                .collect(),
-            DpuProperty::BmcMac => self.dpus.iter().map(|d| d.bmc_mac.clone()).collect(),
-            DpuProperty::OobIp => self.dpus.iter().map(|d| d.oob_ip.clone()).collect(),
-            DpuProperty::OobMac => self.dpus.iter().map(|d| d.oob_mac.clone()).collect(),
-        };
-        lines.join("<br/>")
+    /// Total memory without the per-module breakdown, e.g. "512 GiB" from
+    /// "512 GiB (32 GiBx16)".
+    fn memory_total(&self) -> &str {
+        self.host_memory
+            .split_once(" (")
+            .map_or(self.host_memory.as_str(), |(total, _)| total)
+    }
+
+    /// The state bubble's tooltip: the full state, then the state handler's
+    /// reason. `None` for a short state without a reason, which the bubble
+    /// already shows whole.
+    fn state_title(&self) -> Option<String> {
+        // The bubble is 17 characters wide before it wraps or is cut.
+        const BUBBLE_CHARS: usize = 17;
+        if !self.state_reason.is_empty() {
+            Some(format!("{}: {}", self.state, self.state_reason))
+        } else if self.state.chars().count() > BUBBLE_CHARS {
+            Some(self.state.clone())
+        } else {
+            None
+        }
     }
 
     fn grouping_key(&self, cols: &[GroupingKey]) -> String {
@@ -476,8 +462,8 @@ pub(super) async fn show_html(
     for mo in managed_hosts.into_iter() {
         let m = ManagedHostRowDisplay::from_snapshot(mo, &sla_config);
 
-        let vendor = m.vendor.to_lowercase().clone();
-        let model = m.model.to_lowercase().clone();
+        let vendor = m.vendor.to_lowercase();
+        let model = m.model.to_lowercase();
 
         if !vendor.is_empty() {
             let models = models_per_vendor.entry(vendor).or_default();

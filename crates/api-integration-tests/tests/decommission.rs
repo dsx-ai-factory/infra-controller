@@ -2435,7 +2435,9 @@ async fn host_bios_evidence(
     let unset = match response.status() {
         reqwest::StatusCode::OK => true,
         reqwest::StatusCode::BAD_REQUEST => false,
-        status => eyre::bail!("unexpected status {status} probing the UEFI password"),
+        status => {
+            eyre::bail!("unexpected status {status} probing the UEFI password");
+        }
     };
     Ok(json!({"embedded_uefi_shell": shell, "uefi_password_unset": unset}))
 }

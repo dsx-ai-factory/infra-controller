@@ -36,6 +36,7 @@ use model::network_segment::NetworkSegmentType;
 use rpc::forge::forge_server::Forge;
 use rpc::forge::get_machine_boot_interfaces_response::Reconciliation as BootInterfaceReconciliation;
 use rpc::forge::get_machine_boot_interfaces_response::reconciliation::State as BootInterfaceReconciliationState;
+use rpc::forge::machine_validation_status::{MachineValidationCompleted, MachineValidationState};
 use rpc::forge::{self as forgerpc, HealthReportApplyMode, MachineInventorySoftwareComponent};
 use serde::Deserialize;
 
@@ -187,12 +188,9 @@ impl MachineRowDisplay {
     }
 }
 
-pub(super) async fn show_hosts_html(
-    state: AxumState<Arc<Api>>,
-    query: Query<PaginationParams>,
-    path: OriginalUri,
-) -> impl IntoResponse {
-    show(state, true, false, query, path).await
+/// The host list is retired in favor of Managed Hosts; old links land there.
+pub(super) async fn show_hosts_html() -> Redirect {
+    Redirect::to("/admin/managed-host")
 }
 
 pub(super) async fn show_hosts_json(AxumState(state): AxumState<Arc<Api>>) -> Response {
@@ -446,7 +444,6 @@ struct MachineDetail<'a> {
     host_id: String,
     rack_id: String,
     lifecycle_detail: super::LifecycleDetail,
-    last_reboot: String,
     machine_type: String,
     is_host: bool,
     network_config: String,
@@ -465,15 +462,18 @@ struct MachineDetail<'a> {
     ib_interfaces: Vec<MachineIbInterfaceDisplay>,
     inventory: Vec<MachineInventorySoftwareComponent>,
     health_detail: super::HealthDetail,
+    health_panel: Option<super::health::HealthPanel>,
     bmc: Option<rpc::forge::BmcEndpoint>,
     firmware_inventory: FirmwareInventory,
     bmc_status: Option<rpc::forge::BmcStatus>,
     has_complete_bmc_endpoint: bool,
     discovery_info_json: String,
     metadata_detail: super::MetadataDetail,
-    capabilities: Vec<MachineCapability>,
+    capabilities: Vec<MachineCapabilityGroup>,
     capabilities_json: String,
     validation_runs: Vec<ValidationRun>,
+    /// Latest attestation results; `None` for DPUs, `Err` holds the message shown instead.
+    attestation: Option<Result<super::attestation::AttestationPanel, String>>,
     hw_sku: String,
     available_skus: Vec<String>,
     quarantine_state: Option<ManagedHostQuarantineState>,
@@ -494,7 +494,6 @@ struct DesiredBootInterfaceDisplay {
     candidates: Vec<BootInterfaceCandidateDisplay>,
     predicted_candidates: Vec<PredictedBootInterfaceDisplay>,
     default_machine_interface_id: Option<String>,
-    has_selectable_candidates: bool,
 }
 
 /// Template projection of the targeted boot-interface reconciliation status.
@@ -592,7 +591,6 @@ impl DesiredBootInterfaceDisplay {
             .as_ref()
             .and_then(|target| unique_managed_interface_id(target, &machine_interfaces))
             .filter(|interface_id| selectable_machine_interface_ids.contains(interface_id));
-        let has_selectable_candidates = !selectable_machine_interface_ids.is_empty();
 
         let mut candidates = machine_interfaces
             .into_iter()
@@ -663,7 +661,6 @@ impl DesiredBootInterfaceDisplay {
             predicted_candidates,
             default_machine_interface_id: default_machine_interface_id
                 .map(|machine_interface_id| machine_interface_id.to_string()),
-            has_selectable_candidates,
         }
     }
 }
@@ -780,18 +777,23 @@ impl From<BootInterfaceReconciliation> for BootInterfaceReconciliationDisplay {
     }
 }
 
-struct MachineCapability {
+/// Every reported model of one capability type, e.g. each GPU and its count.
+struct MachineCapabilityGroup {
     ty: &'static str,
+    /// Shown under Compute; otherwise under Storage & Network.
+    compute: bool,
+    items: Vec<MachineCapability>,
+}
+
+struct MachineCapability {
     name: String,
     count: u32,
 }
 
 struct MachineInterfaceDisplay {
-    index: usize,
     id: String,
     dpu_id: String,
     segment_id: String,
-    domain_id: String,
     hostname: String,
     primary: String,
     mac_address: String,
@@ -821,8 +823,37 @@ struct MachineNvLinkGpuDisplay {
     guid: u64,
 }
 
+/// Machine validation run state as a short label and its bubble class.
+#[derive(Debug, PartialEq)]
+pub(super) struct ValidationStatus {
+    pub(super) label: &'static str,
+    pub(super) bubble_class: &'static str,
+}
+
+impl ValidationStatus {
+    pub(super) fn from_rpc(status: Option<&forgerpc::MachineValidationStatus>) -> Self {
+        let (label, bubble_class) = match status.and_then(|s| s.machine_validation_state.as_ref()) {
+            Some(MachineValidationState::Started(_)) => ("Started", "bubble"),
+            Some(MachineValidationState::InProgress(_)) => ("In Progress", "bubble"),
+            Some(MachineValidationState::Completed(outcome)) => {
+                match MachineValidationCompleted::try_from(*outcome) {
+                    Ok(MachineValidationCompleted::Success) => ("Success", "bubble success"),
+                    Ok(MachineValidationCompleted::Failed) => ("Failed", "bubble error"),
+                    Ok(MachineValidationCompleted::Skipped) => ("Skipped", "bubble warning"),
+                    Err(_) => ("Completed", "bubble"),
+                }
+            }
+            None => ("Unknown", "bubble"),
+        };
+        Self {
+            label,
+            bubble_class,
+        }
+    }
+}
+
 pub(super) struct ValidationRun {
-    pub(super) status: String,
+    pub(super) status: ValidationStatus,
     pub(super) context: String,
     pub(super) validation_id: String,
     pub(super) start_time: String,
@@ -837,12 +868,7 @@ impl From<forgerpc::MachineValidationRun> for ValidationRun {
     fn from(run: forgerpc::MachineValidationRun) -> Self {
         Self {
             machine_id: run.machine_id.map(|id| id.to_string()).unwrap_or_default(),
-            status: run
-                .status
-                .as_ref()
-                .and_then(|status| status.machine_validation_state.as_ref())
-                .map(|state| format!("{state:?}"))
-                .unwrap_or_else(|| "Unknown".to_string()),
+            status: ValidationStatus::from_rpc(run.status.as_ref()),
             progress: run
                 .status
                 .as_ref()
@@ -909,16 +935,13 @@ impl From<forgerpc::Machine> for MachineDetail<'_> {
         let interfaces: Vec<_> = status
             .interfaces
             .into_iter()
-            .enumerate()
-            .map(|(i, interface)| MachineInterfaceDisplay {
-                index: i,
+            .map(|interface| MachineInterfaceDisplay {
                 id: interface.id.unwrap_or_default().to_string(),
                 dpu_id: interface
                     .attached_dpu_machine_id
                     .map(|id| id.to_string())
                     .unwrap_or_else(super::invalid_machine_id),
                 segment_id: interface.segment_id.unwrap_or_default().to_string(),
-                domain_id: interface.domain_id.unwrap_or_default().to_string(),
                 hostname: interface.hostname,
                 primary: interface.primary_interface.to_string(),
                 mac_address: interface.mac_address,
@@ -965,7 +988,7 @@ impl From<forgerpc::Machine> for MachineDetail<'_> {
                 if let Some(props) = iface.pci_properties {
                     iface_display.device = props.device;
                     iface_display.vendor = props.vendor;
-                    iface_display.slot = props.slot.clone().unwrap_or_default();
+                    iface_display.slot = props.slot.unwrap_or_default();
                 }
                 if let Some(ib_status) = status.infiniband.as_ref() {
                     iface_display.observed_at =
@@ -1025,17 +1048,7 @@ impl From<forgerpc::Machine> for MachineDetail<'_> {
         let host_id = status
             .associated_host_machine_id
             .map_or_else(String::default, |id| id.to_string());
-        let health_reports_link_text = if is_host {
-            "Go to Host health reports"
-        } else {
-            "Go to DPU health reports"
-        };
-        let health_detail = super::HealthDetail::new(
-            format!("/admin/machine/{machine_id}/health"),
-            health_reports_link_text,
-            status.health,
-            status.health_sources,
-        );
+        let health_detail = super::HealthDetail::new(status.health);
         let has_complete_bmc_endpoint = m
             .bmc
             .as_ref()
@@ -1045,14 +1058,13 @@ impl From<forgerpc::Machine> for MachineDetail<'_> {
             id: machine_id.clone(),
             tempo_query,
             rack_id: m.rack_id.map(|id| id.to_string()).unwrap_or_default(),
-            lifecycle_detail: super::LifecycleDetail::new(
-                m.state,
-                m.state_version,
-                m.state_reason,
-                m.state_sla,
-            ),
-            last_reboot: to_time(status.last_reboot_time, Some(&machine_id))
-                .unwrap_or("N/A".to_string()),
+            lifecycle_detail: super::LifecycleDetail {
+                last_reboot: Some(
+                    to_time(status.last_reboot_time, Some(&machine_id))
+                        .unwrap_or("N/A".to_string()),
+                ),
+                ..super::LifecycleDetail::new(m.state, m.state_version, m.state_reason, m.state_sla)
+            },
             metadata_detail: super::MetadataDetail {
                 metadata: m.metadata.unwrap_or_default(),
                 metadata_version: m.version,
@@ -1085,6 +1097,7 @@ impl From<forgerpc::Machine> for MachineDetail<'_> {
                 .unwrap_or_default(),
             host_id,
             health_detail,
+            health_panel: None, // filled in later
             discovery_info_json,
             capabilities_json: status
                 .capabilities
@@ -1094,60 +1107,93 @@ impl From<forgerpc::Machine> for MachineDetail<'_> {
             capabilities: status
                 .capabilities
                 .map(|s| {
-                    let mut caps = Vec::new();
-                    for item in s.cpu {
-                        caps.push(MachineCapability {
-                            ty: "cpu",
-                            name: item.name,
-                            count: item.count,
-                        })
-                    }
-                    for item in s.gpu {
-                        caps.push(MachineCapability {
-                            ty: "gpu",
-                            name: item.name,
-                            count: item.count,
-                        })
-                    }
-                    for item in s.memory {
-                        caps.push(MachineCapability {
-                            ty: "memory",
-                            name: item.name,
-                            count: item.count,
-                        })
-                    }
-                    for item in s.storage {
-                        caps.push(MachineCapability {
-                            ty: "storage",
-                            name: item.name,
-                            count: item.count,
-                        })
-                    }
-                    for item in s.network {
-                        caps.push(MachineCapability {
-                            ty: "network",
-                            name: item.name,
-                            count: item.count,
-                        })
-                    }
-                    for item in s.infiniband {
-                        caps.push(MachineCapability {
-                            ty: "infiniband",
-                            name: item.name,
-                            count: item.count,
-                        })
-                    }
-                    for item in s.dpu {
-                        caps.push(MachineCapability {
-                            ty: "dpu",
-                            name: item.name,
-                            count: item.count,
-                        })
-                    }
-                    caps
+                    [
+                        (
+                            "CPU",
+                            true,
+                            s.cpu
+                                .into_iter()
+                                .map(|item| MachineCapability {
+                                    name: item.name,
+                                    count: item.count,
+                                })
+                                .collect::<Vec<_>>(),
+                        ),
+                        (
+                            "GPU",
+                            true,
+                            s.gpu
+                                .into_iter()
+                                .map(|item| MachineCapability {
+                                    name: item.name,
+                                    count: item.count,
+                                })
+                                .collect(),
+                        ),
+                        (
+                            "Memory",
+                            true,
+                            s.memory
+                                .into_iter()
+                                .map(|item| MachineCapability {
+                                    name: item.name,
+                                    count: item.count,
+                                })
+                                .collect(),
+                        ),
+                        (
+                            "DPU",
+                            true,
+                            s.dpu
+                                .into_iter()
+                                .map(|item| MachineCapability {
+                                    name: item.name,
+                                    count: item.count,
+                                })
+                                .collect(),
+                        ),
+                        (
+                            "Storage",
+                            false,
+                            s.storage
+                                .into_iter()
+                                .map(|item| MachineCapability {
+                                    name: item.name,
+                                    count: item.count,
+                                })
+                                .collect(),
+                        ),
+                        (
+                            "Network",
+                            false,
+                            s.network
+                                .into_iter()
+                                .map(|item| MachineCapability {
+                                    name: item.name,
+                                    count: item.count,
+                                })
+                                .collect(),
+                        ),
+                        (
+                            "InfiniBand",
+                            false,
+                            s.infiniband
+                                .into_iter()
+                                .map(|item| MachineCapability {
+                                    name: item.name,
+                                    count: item.count,
+                                })
+                                .collect(),
+                        ),
+                    ]
+                    .into_iter()
+                    .filter(|(_, _, items)| !items.is_empty())
+                    .map(|(ty, compute, items)| MachineCapabilityGroup { ty, compute, items })
+                    .collect()
                 })
                 .unwrap_or_default(),
             validation_runs: Vec::new(),
+            attestation: None,
             hw_sku: config.hw_sku.unwrap_or_default(),
             available_skus: Vec::new(), // filled in later
             quarantine_state_is_link: quarantine_state
@@ -1335,6 +1381,12 @@ pub(super) async fn detail(
     };
 
     display.validation_runs = validation_runs;
+    if !machine_id.machine_type().is_dpu() {
+        display.attestation = Some(
+            super::attestation::machine_attestation_panel(&state, &machine_id.to_string()).await,
+        );
+    }
+    display.health_panel = super::health::machine_health_panel(&state, machine_id).await;
     display.action_status = ActionStatus::from_query(&params);
 
     if let Ok(dpu_machine_id) = DpuMachineId::try_from(machine_id) {
@@ -1371,7 +1423,7 @@ pub(super) async fn maintenance(
     AxumPath(machine_id): AxumPath<String>,
     Form(form): Form<MaintenanceAction>,
 ) -> Response {
-    let view_url = format!("/admin/machine/{machine_id}");
+    let view_url = format!("/admin/machine/{machine_id}#maintenance_view");
 
     let machine_id = match machine_id.parse::<MachineId>() {
         Ok(machine_id) => machine_id,
@@ -1425,7 +1477,7 @@ pub(super) async fn quarantine(
     AxumPath(machine_id): AxumPath<String>,
     Form(form): Form<QuarantineAction>,
 ) -> Response {
-    let view_url = format!("/admin/machine/{machine_id}");
+    let view_url = format!("/admin/machine/{machine_id}#quarantine_view");
     let machine_id = match machine_id.parse::<HostMachineId>() {
         Ok(machine_id) => machine_id,
         Err(e) => return (StatusCode::BAD_REQUEST, e.to_string()).into_response(),
@@ -1719,14 +1771,14 @@ mod machine_detail_tests {
         assert!(html.contains("data-tempo-query="));
         assert!(html.contains(DPU_TWO));
         assert!(html.contains("value=\"http://localhost:13000\""));
-        let metadata = html.find("<h3>Metadata</h3>").unwrap();
-        let telemetry = html.find("<h3>Telemetry</h3>").unwrap();
+        let metadata = html.find("<h2>Metadata</h2>").unwrap();
+        let telemetry = html.find("<h2>Telemetry</h2>").unwrap();
         assert!(metadata < telemetry);
         let telemetry_table = html[telemetry..]
-            .split_once("</table>")
-            .expect("telemetry table renders")
+            .split_once("</section>")
+            .expect("telemetry card renders")
             .0;
-        assert!(telemetry_table.contains("<th>Tracing</th>"));
+        assert!(telemetry_table.contains("<strong>Tracing</strong>"));
         assert!(telemetry_table.contains("id=\"grafana-uri\""));
         assert!(telemetry_table.contains("id=\"copy-grafana-tempo-link\""));
         assert!(telemetry_table.contains("id=\"view-grafana-tempo-link\""));
@@ -1759,6 +1811,35 @@ mod machine_detail_tests {
     }
 
     #[test]
+    fn validation_status_labels_each_outcome() {
+        value_scenarios!(run = |state: Option<MachineValidationState>| {
+            let status = state.map(|state| forgerpc::MachineValidationStatus {
+                machine_validation_state: Some(state),
+                ..Default::default()
+            });
+            let display = ValidationStatus::from_rpc(status.as_ref());
+            (display.label, display.bubble_class)
+        };
+            "running" {
+                Some(MachineValidationState::Started(0)) => ("Started", "bubble"),
+                Some(MachineValidationState::InProgress(0)) => ("In Progress", "bubble"),
+            }
+            "completed outcomes" {
+                Some(MachineValidationState::Completed(MachineValidationCompleted::Success as i32))
+                    => ("Success", "bubble success"),
+                Some(MachineValidationState::Completed(MachineValidationCompleted::Failed as i32))
+                    => ("Failed", "bubble error"),
+                Some(MachineValidationState::Completed(MachineValidationCompleted::Skipped as i32))
+                    => ("Skipped", "bubble warning"),
+                Some(MachineValidationState::Completed(99)) => ("Completed", "bubble"),
+            }
+            "no status" {
+                None => ("Unknown", "bubble"),
+            }
+        );
+    }
+
+    #[test]
     fn bmc_endpoint_and_status_render_independently() {
         let endpoint = forgerpc::BmcEndpoint {
             ip: Some("192.0.2.10".to_string()),
@@ -1780,16 +1861,19 @@ mod machine_detail_tests {
             });
             let html = display.render().expect("machine detail renders");
             let bmc_section = html
-                .split_once("<h3 id=\"bmc_info_view\">BMC</h3>")
+                .split_once("<h2 id=\"bmc_info_view\">BMC</h2>")
                 .unwrap().1
-                .split_once("<h3>Discovery Info</h3>")
+                .split_once("<h2>Capabilities</h2>")
                 .unwrap().0;
+            let actions = html
+                .split_once("<div class=\"action-cards\">")
+                .map_or("", |(_, rest)| rest.split_once("<h2>Metadata</h2>").unwrap().0);
             (
-                bmc_section.contains("<th>IP</th>"),
-                bmc_section.contains("<th>Version</th>"),
-                bmc_section.contains("<th>Firmware Version</th>"),
-                bmc_section.contains("id=\"powercontrol_action\""),
-                bmc_section.contains("id=\"bmcreset_action\""),
+                bmc_section.contains("<dt>IP</dt>"),
+                bmc_section.contains("<dt>Version</dt>"),
+                bmc_section.contains("<dt>Firmware Version</dt>"),
+                actions.contains("id=\"powercontrol_action\""),
+                actions.contains("id=\"bmcreset_action\""),
                 bmc_section.contains("Missing BMC Data"),
             )
         };
@@ -1806,6 +1890,34 @@ mod machine_detail_tests {
                 (None, None) => (false, false, false, false, false, true),
             }
         );
+    }
+
+    /// Action handlers redirect to these fragments; tabs.js can only open the
+    /// right tab when the fragment names an element on the page.
+    #[test]
+    fn host_redirect_fragments_name_rendered_sections() {
+        let display = MachineDetail::from(forgerpc::Machine {
+            machine_type: forgerpc::MachineType::Host as i32,
+            bmc: Some(forgerpc::BmcEndpoint {
+                ip: Some("192.0.2.10".to_string()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        });
+        let html = display.render().expect("machine detail renders");
+        for fragment in [
+            "power_view",
+            "bmc_reset_view",
+            "quarantine_view",
+            "maintenance_view",
+            "sku_view",
+            "desired_boot_interface",
+        ] {
+            assert!(
+                html.contains(&format!("id=\"{fragment}\"")),
+                "missing #{fragment}"
+            );
+        }
     }
 }
 

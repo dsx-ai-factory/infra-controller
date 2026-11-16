@@ -32991,7 +32991,7 @@ components:
           type:
             - string
             - 'null'
-          maxLength: 20
+          maxLength: 255
           description: Password for accessing the Expected Power Shelf's BMC
         shelfSerialNumber:
           type: string
@@ -33132,7 +33132,7 @@ components:
             - 'null'
           minLength: 1
           writeOnly: true
-          maxLength: 20
+          maxLength: 255
           description: Password for accessing the Expected Power Shelf's BMC. Omission or null preserves the value. A non-empty value can be supplied without defaultBmcUsername.
         shelfSerialNumber:
           type:

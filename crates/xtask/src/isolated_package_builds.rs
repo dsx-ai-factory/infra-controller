@@ -47,7 +47,7 @@ pub(super) fn check() -> eyre::Result<()> {
         failures.join(", ")
     );
 
-    bail!("one or more isolated package builds failed")
+    bail!("one or more isolated package builds failed");
 }
 
 fn workspace_packages() -> eyre::Result<Vec<String>> {

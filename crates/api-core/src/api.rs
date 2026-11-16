@@ -31,13 +31,14 @@ use ::rpc::protos::dns::{
 };
 use ::rpc::protos::{measured_boot as measured_boot_pb, mlx_device as mlx_device_pb};
 use bmc_backend::{BackendBmc, BmcConnectError, BmcConnector};
-use bmc_runtime::DriverConnector;
+use bmc_runtime::{ConnectedBmc, DriverConnector};
 use carbide_ib_fabric::ib::IBFabricManager;
 use carbide_machine_controller::dpf::DpfOperations;
 use carbide_machine_controller::io::MachineStateControllerIO;
 use carbide_rack::bms_client::BmsDsxExchangeHandle;
 use carbide_rack_controller::firmware_object::FirmwareObjectFetcher;
 use carbide_redfish::libredfish::{BmcCredentialOps, RedfishClientPool};
+use carbide_redfish::nv_redfish::RedfishBmc;
 use carbide_resource_pool::ResourcePoolRegistry;
 use carbide_secrets::SecretsError;
 use carbide_secrets::certificates::CertificateProvider;
@@ -4239,6 +4240,13 @@ impl Forge for Api {
         crate::handlers::component_manager::list_component_firmware_versions(self, request).await
     }
 
+    async fn get_component_credentials(
+        &self,
+        request: Request<rpc::GetComponentCredentialsRequest>,
+    ) -> Result<Response<rpc::GetComponentCredentialsResponse>, Status> {
+        crate::handlers::component_manager::get_component_credentials(self, request).await
+    }
+
     async fn get_ipxe_template(
         &self,
         request: tonic::Request<::rpc::forge::GetIpxeTemplateRequest>,
@@ -4483,6 +4491,21 @@ impl Api {
                 BmcConnectError::Libredfish(error) => CarbideError::internal(error.to_string()),
                 BmcConnectError::Drivers(error) => CarbideError::internal(error.to_string()),
             })
+    }
+
+    /// The BMC at `access` through its drivers, or `None` without connecting
+    /// when the site sets `bmc_backend = "libredfish"`.
+    pub(crate) async fn connect_drivers(
+        &self,
+        access: &BmcAccessInfo,
+    ) -> Result<Option<Box<ConnectedBmc<RedfishBmc>>>, CarbideError> {
+        if self.driver_connector.is_none() {
+            return Ok(None);
+        }
+        Ok(match self.connect_bmc(access).await? {
+            BackendBmc::Drivers(bmc) => Some(bmc),
+            BackendBmc::Libredfish(_) => None,
+        })
     }
 
     /// Returns the site-wide default credentials that gate endpoint exploration

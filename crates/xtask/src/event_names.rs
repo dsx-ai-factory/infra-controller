@@ -81,7 +81,7 @@ pub(super) fn check() -> eyre::Result<()> {
     bail!(
         "check-event-names found {} error(s)",
         report.diagnostics.len()
-    )
+    );
 }
 
 #[derive(Debug, Eq, Ord, PartialEq, PartialOrd)]

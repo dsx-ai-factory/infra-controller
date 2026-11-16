@@ -127,6 +127,7 @@ use crate::handler::firmware_artifact::ResolvedFirmwareArtifactSource;
 use crate::health_report::{
     create_host_update_health_report_dpufw, create_host_update_health_report_hostfw,
 };
+use crate::platform_config::{self, DpuSettings, PlatformBmc};
 use crate::redfish::{
     did_dpu_finish_booting, host_power_control, host_power_control_with_location, power_state,
     power_state_name, reboot_requested_mode, reset_bmc, set_power,
@@ -162,7 +163,7 @@ mod sku;
 #[cfg(test)]
 mod test_machine_setup;
 
-use bios_config::handle_bios_setup_failed_recovery;
+use bios_config::{handle_bios_setup_failed_recovery, platform_settings_in_effect};
 use extension_services::{cleanup_terminated_extension_services, get_extension_services_status};
 use helpers::{
     DpuDiscoveringStateHelper, DpuInitStateHelper, ManagedHostStateHelper, NextState,
@@ -3395,11 +3396,7 @@ fn is_dpu_up(state: &ManagedHostStateSnapshot, dpu_snapshot: &DpuMachine) -> boo
         .unwrap_or(DateTime::<Utc>::MIN_UTC);
     let state_change_time = state.host_snapshot.state.version.timestamp();
 
-    if observation_time < state_change_time {
-        return false;
-    }
-
-    true
+    observation_time >= state_change_time
 }
 
 fn is_dpu_observed_since(dpu_snapshot: &DpuMachine, minimum_observed_at: DateTime<Utc>) -> bool {
@@ -5485,7 +5482,6 @@ impl DpuMachineStateHandler {
                 // UEFI credential change performed below until DPF credential
                 // management is available.
                 if !dpf_used_for_ingestion {
-                    let boot_interface = None; // libredfish will choose the DPU
                     if self.enable_secure_boot {
                         dpu_redfish_client
                             .set_host_rshim(EnabledDisabled::Disabled)
@@ -5495,35 +5491,39 @@ impl DpuMachineStateHandler {
                             .set_host_privilege_level(HostPrivilegeLevel::Restricted)
                             .await
                             .map_err(|e| redfish_error("set_host_privilege_level", e))?;
-                    } else if let Err(e) = call_machine_setup_and_handle_no_dpu_error(
-                        dpu_redfish_client.as_ref(),
-                        boot_interface,
-                        state.host_snapshot.associated_dpu_machine_ids().len(),
-                        &ctx.services.site_config,
-                    )
-                    .await
-                    {
-                        // TODO(chet): I don't know if this is still a thing, but I'm pretty sure
-                        // it hasn't been fixed/addressed yet, and it appears to be logged all over
-                        // the place now.
-                        let msg = format!(
-                            "redfish machine_setup failed for DPU {}, potentially due to known race condition between UEFI POST and BMC. issuing a force-restart. err: {}",
-                            dpu_snapshot.id, e
-                        );
-                        tracing::warn!(msg);
-                        let reboot_status = trigger_reboot_if_needed(
-                            dpu_snapshot,
+                    } else {
+                        let bmc = PlatformBmc::connect_dpu(
+                            ctx.services,
                             state,
-                            None,
-                            &self.reachability_params,
-                            ctx,
+                            dpu_snapshot,
+                            dpu_redfish_client.as_ref(),
                         )
                         .await?;
+                        if let Err(e) =
+                            platform_config::apply_dpu(&bmc, &ctx.services.site_config).await
+                        {
+                            // TODO(chet): I don't know if this is still a thing, but I'm pretty sure
+                            // it hasn't been fixed/addressed yet, and it appears to be logged all over
+                            // the place now.
+                            let msg = format!(
+                                "applying the platform settings failed for DPU {}, potentially due to known race condition between UEFI POST and BMC. issuing a force-restart. err: {}",
+                                dpu_snapshot.id, e
+                            );
+                            tracing::warn!(msg);
+                            let reboot_status = trigger_reboot_if_needed(
+                                dpu_snapshot,
+                                state,
+                                None,
+                                &self.reachability_params,
+                                ctx,
+                            )
+                            .await?;
 
-                        return Ok(StateHandlerOutcome::wait(format!(
-                            "{msg};\nWaiting for DPU {} to reboot: {reboot_status:#?}",
-                            dpu_snapshot.id
-                        )));
+                            return Ok(StateHandlerOutcome::wait(format!(
+                                "{msg};\nWaiting for DPU {} to reboot: {reboot_status:#?}",
+                                dpu_snapshot.id
+                            )));
+                        }
                     }
                 }
 
@@ -5683,28 +5683,32 @@ impl DpuMachineStateHandler {
                     }
                 };
 
-                match dpu_redfish_client.is_bios_setup(None).await {
-                    Ok(true) => {
+                let bmc = PlatformBmc::connect_dpu(
+                    ctx.services,
+                    state,
+                    dpu_snapshot,
+                    dpu_redfish_client.as_ref(),
+                )
+                .await?;
+                match platform_config::dpu_settings(&bmc).await {
+                    Ok(DpuSettings::InEffect) => {
                         tracing::info!(
                             dpu_machine_id = %dpu_snapshot.id,
                             "BIOS setup verified"
                         );
                         Ok(StateHandlerOutcome::transition(next_state))
                     }
-                    Ok(false) => Ok(StateHandlerOutcome::wait(format!(
+                    Ok(DpuSettings::Pending) => Ok(StateHandlerOutcome::wait(format!(
                         "Polling BIOS setup status, waiting for settings to be applied on DPU {}",
                         dpu_snapshot.id
                     ))),
-                    Err(e)
-                        if carbide_redfish::libredfish::dpu_bios::is_dpu_bios_attributes_not_ready(&e) =>
-                    {
+                    Ok(DpuSettings::Unreported) => {
                         let msg = format!(
-                            "DPU {} BIOS attributes not ready ({e}); issuing a force-restart to mitigate the known UEFI POST/BMC race",
+                            "DPU {} BIOS attributes not ready; issuing a force-restart to mitigate the known UEFI POST/BMC race",
                             dpu_snapshot.id
                         );
                         tracing::warn!(
                             machine_id = %dpu_snapshot.id,
-                            error = %e,
                             "DPU BIOS attributes not ready; issuing a force-restart to mitigate the known UEFI POST/BMC race",
                         );
                         let reboot_status = trigger_reboot_if_needed(
@@ -7949,6 +7953,7 @@ async fn handle_ready_boot_config(
                     // This state is restartable, so re-observe after lockdown is
                     // restored rather than trusting an earlier pre-crash read.
                     let inspection = inspect_host_boot_config(
+                        ctx.services,
                         redfish_client.as_ref(),
                         mh_snapshot,
                         &captured_boot_interface,
@@ -8156,6 +8161,7 @@ async fn complete_host_init_lockdown(
     };
     let boot_interface: BootInterfaceTarget = desired.value.clone().into();
     let inspection = match inspect_host_boot_config(
+        ctx.services,
         redfish_client.as_ref(),
         mh_snapshot,
         &boot_interface,
@@ -8536,11 +8542,6 @@ impl StateHandler for HostMachineStateHandler {
                     Box::new(mh_snapshot.managed_state.clone()),
                 )),
                 MachineState::EnableIpmiOverLan => {
-                    let host_redfish_client = ctx
-                        .services
-                        .create_redfish_client_from_machine(&mh_snapshot.host_snapshot)
-                        .await?;
-
                     let bmc = ctx.services.connect_bmc(&mh_snapshot.host_snapshot).await?;
                     let bmc_control = bmc
                         .bmc_control()
@@ -8560,15 +8561,12 @@ impl StateHandler for HostMachineStateHandler {
                             .map_err(|e| platform_error("enable_ipmi_over_lan", e))?;
                     }
 
-                    let machine_state = if mh_snapshot.has_managed_dpus()
-                        && is_vera_rubin_host(host_redfish_client.as_ref()).await?
-                    {
+                    let machine_state = if onboard_nics::isolate(&bmc_control, mh_snapshot).await? {
                         MachineState::DisableOnboardNics {
                             disable_onboard_nics_state:
                                 DisableOnboardNicsState::ConfigureOnboardNics { enable: true },
                         }
                     } else {
-                        // Other platforms and no-DPU hosts retain their onboard NIC settings.
                         MachineState::WaitingForPlatformConfiguration { retry_count: 0 }
                     };
 
@@ -13341,15 +13339,6 @@ fn handler_restart_dpu(
     }
 }
 
-/// Use libredfish's vendor detection to identify Vera Rubin compute-tray BMCs.
-async fn is_vera_rubin_host(redfish_client: &dyn Redfish) -> Result<bool, StateHandlerError> {
-    redfish_client
-        .get_service_root()
-        .await
-        .map(|root| root.is_vera_rubin())
-        .map_err(|error| redfish_error("get_service_root", error))
-}
-
 /// Returns true if the host's current Redfish power state is `Off`.
 async fn is_host_powered_off(
     mh_snapshot: &ManagedHostStateSnapshot,
@@ -14906,10 +14895,13 @@ async fn set_host_boot_order(
             // `SYS011`). If the HTTP device drifted since the owning lifecycle's
             // inspection, return to the shared BIOS/job stages before attempting
             // the order write.
-            let is_bios_setup = boot_interface
-                .run(|bi| redfish_client.is_bios_setup(Some(bi)))
-                .await
-                .map_err(|e| redfish_error("is_bios_setup", e))?;
+            let is_bios_setup = platform_settings_in_effect(
+                ctx.services,
+                redfish_client,
+                mh_snapshot,
+                Some(&boot_interface),
+            )
+            .await?;
 
             if !is_bios_setup {
                 // The HTTP-boot device drifted after the owning lifecycle's
@@ -15036,10 +15028,13 @@ async fn set_host_boot_order(
                 RequiredBootInterface::Wait(outcome) => return Ok(outcome),
             };
 
-            let is_bios_setup = boot_interface
-                .run(|bi| redfish_client.is_bios_setup(Some(bi)))
-                .await
-                .map_err(|e| redfish_error("is_bios_setup", e))?;
+            let is_bios_setup = platform_settings_in_effect(
+                ctx.services,
+                redfish_client,
+                mh_snapshot,
+                Some(&boot_interface),
+            )
+            .await?;
 
             if is_bios_setup {
                 tracing::info!(
@@ -15349,10 +15344,13 @@ async fn set_host_boot_order(
             // device or another managed BIOS attribute. Verify BIOS first for
             // every platform and return to the shared job-aware repair before
             // declaring the overall boot configuration complete.
-            let is_bios_setup = boot_interface
-                .run(|bi| redfish_client.is_bios_setup(Some(bi)))
-                .await
-                .map_err(|e| redfish_error("is_bios_setup", e))?;
+            let is_bios_setup = platform_settings_in_effect(
+                ctx.services,
+                redfish_client,
+                mh_snapshot,
+                Some(&boot_interface),
+            )
+            .await?;
 
             if !is_bios_setup {
                 tracing::warn!(

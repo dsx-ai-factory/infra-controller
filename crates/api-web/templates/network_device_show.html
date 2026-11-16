@@ -4,37 +4,58 @@
 
 {% block content %}
 <div id="json"><a id="json-link" href="">JSON</a></div>
-<h1>Network Devices</h1>
-<ol id="toc">
-{% for d in devices %}
-	<li><a href="#{{ d.name }}">{{ d.name }}</a></li>
-{% endfor %}
-</ol>
+<h1>Network Devices ({{ devices.len() }})</h1>
 
-{% for d in devices %}
-<h2 id="{{d.name }}">{{ d.name }}</h2>
-<table class="detailsview">
-	<tr><th>ID</th><td>{{ d.id }}</td></tr>
-	<tr><th>Description</th><td>{{ d.description }}</td></tr>
-	<tr><th>Mgmt IP</th><td>{{ d.mgmt_ips }}</td></tr>
-	<tr><th>Discovered Via</th><td>{{ d.discovered_via }}</td></tr>
-	<tr><th>Device Type</th><td>{{ d.device_type }}</td></tr>
-	<tr><th>Connected DPU(s)</th>
-		<td>
-		<table>
-			<thead><tr><th>ID</th><th>Local port</th><th>Remote port</th></tr></thead>
-			<tbody>
-			{% for dpu in d.connected_dpus %}
-				<tr>
-					<td>{{ dpu.id|machine_id_link|safe }}</td>
-					<td>{{ dpu.local_port }}</td>
-					<td>{{ dpu.remote_port }}</td>
-				</tr>
-			{% endfor %}
-			</tbody>
-		</table>
-		</td>
-	</tr>
+<table class="sortable overview">
+	<thead>
+		<tr>
+			<th>Device</th>
+			<th>Type</th>
+			<th>Mgmt IP</th>
+			<th>Discovered Via</th>
+			<th>Connected DPUs</th>
+			<th>Description</th>
+		</tr>
+	</thead>
+	<tbody>
+	{% for d in devices %}
+		<tr id="{{ d.name }}">
+			<td>
+				<span class="device-name">{% for part in d.name.split('.') %}{% if !loop.first %}.<wbr>{% endif %}{{ part }}{% endfor %}</span>
+				{% if let Some(mac) = d.id.strip_prefix("mac=") %}<code class="cell-chip" title="Chassis MAC">{{ mac }}</code>{% else %}<code class="cell-chip">{{ d.id }}</code>{% endif %}
+			</td>
+			<td>{{ d.device_type }}</td>
+			<td class="cell-nowrap">
+				{% for ip in d.mgmt_ips %}<div>{{ ip }}</div>{% else %}<span class="text-muted">None</span>{% endfor %}
+			</td>
+			<td>{{ d.discovered_via }}</td>
+			<td data-sort="{{ d.connected_dpus.len() }}">
+				{% if d.connected_dpus.is_empty() %}
+				<span class="text-muted">None</span>
+				{% else %}
+				<dl class="port-list">
+					{% for dpu in d.connected_dpus %}
+					<dt>{{ dpu.id|machine_id_link|safe }}</dt>
+					<dd title="Local port → remote port">{{ dpu.local_port }} → {{ dpu.remote_port }}</dd>
+					{% endfor %}
+				</dl>
+				{% endif %}
+			</td>
+			<td class="device-description">{% if d.description.is_empty() %}<span class="text-muted">None</span>{% else %}{{ d.description }}{% endif %}</td>
+		</tr>
+	{% else %}
+		<tr><td colspan="6">No network devices.</td></tr>
+	{% endfor %}
+	</tbody>
+	<tfoot>
+		<tr>
+			<th>{{ devices.len() }} item{% if devices.len() != 1 %}s{% endif %}</th>
+			<th></th>
+			<th></th>
+			<th></th>
+			<th></th>
+			<th></th>
+		</tr>
+	</tfoot>
 </table>
-{% endfor %}
 {% endblock %}

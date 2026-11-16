@@ -308,7 +308,7 @@ impl RmsInventory for ControlState {
             | PowerState::Sleeping
             | PowerState::Hibernating
             | PowerState::UnsupportedValue => {
-                eyre::bail!("device power state is unavailable")
+                eyre::bail!("device power state is unavailable");
             }
             PowerState::On => SimPowerState::On,
             PowerState::Off => SimPowerState::Off,
@@ -344,7 +344,9 @@ impl RmsInventory for ControlState {
 /// as a power cycle and `OFF` as a graceful shutdown.
 fn power_control_for(op: PowerOperation) -> eyre::Result<ResourceResetType> {
     Ok(match op {
-        PowerOperation::Unspecified => eyre::bail!("power operation is unspecified"),
+        PowerOperation::Unspecified => {
+            eyre::bail!("power operation is unspecified");
+        }
         PowerOperation::On | PowerOperation::ForceOn => ResourceResetType::On,
         PowerOperation::Off | PowerOperation::GracefulShutdown => {
             ResourceResetType::GracefulShutdown

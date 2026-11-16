@@ -585,7 +585,7 @@ fn answer_failed_attempt(
     if let Some(ended) = ended {
         report(slot, class, ended);
     }
-    failed.response
+    *failed.response
 }
 
 /// Counts an exchange that ended as `ended` against `class`'s breaker at the

@@ -15,7 +15,7 @@
  * limitations under the License.
  */
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::net::IpAddr;
 use std::str::FromStr;
 use std::sync::Arc;
@@ -152,16 +152,18 @@ struct ExploredEndpointDisplay {
     has_exploration_error: bool,
     vendor: String,
     bmc_mac_addrs: Vec<String>,
-    power_states: Vec<String>,
     machine_id: String,
-    preingestion_state: String,
+    /// Preingestion state name, e.g. `Complete` or `Failed`.
+    preingestion_name: String,
     serial_numbers: Vec<String>,
 }
 
 impl From<&ExploredEndpoint> for ExploredEndpointDisplay {
     fn from(ep: &ExploredEndpoint) -> Self {
         let report_ref = ep.report.as_ref();
+        let (preingestion_name, _) = split_preingestion_state(&ep.preingestion_state);
         Self {
+            preingestion_name,
             exploration_paused_for_dpf: ep.exploration_paused_for_dpf,
             address: ep.address.clone(),
             endpoint_type: report_ref
@@ -195,22 +197,12 @@ impl From<&ExploredEndpoint> for ExploredEndpointDisplay {
             machine_id: report_ref
                 .and_then(|report| report.machine_id.clone())
                 .unwrap_or_default(),
-            preingestion_state: ep.preingestion_state.clone(),
             serial_numbers: report_ref
                 .map(|report| {
                     report
                         .systems
                         .iter()
                         .map(|s| s.serial_number().to_string())
-                        .collect()
-                })
-                .unwrap_or_default(),
-            power_states: report_ref
-                .map(|report| {
-                    report
-                        .systems
-                        .iter()
-                        .map(|s| format!("{:?}", s.power_state()))
                         .collect()
                 })
                 .unwrap_or_default(),
@@ -438,6 +430,8 @@ struct ExploredEndpointDetail<'a> {
     has_exploration_error: bool,
     last_exploration_error: String,
     machine_setup_status: String,
+    /// Model of the first system (or chassis) that reports one.
+    model: Option<String>,
     credentials_set: String,
     has_machine: bool,
     secure_boot_status: String,
@@ -445,8 +439,111 @@ struct ExploredEndpointDetail<'a> {
     is_dell_endpoint: bool,
     report_age: String,
     pause_remediation: bool,
+    /// Preingestion state name, e.g. `BfbCopyInProgress`.
+    preingestion_name: String,
+    /// The state's fields, which can be long (IPs, MACs, failure reasons).
+    preingestion_fields: Option<String>,
+    drivers: DriverSelectionView,
     bmc_action_redirect_to: Option<String>,
     action_status: Option<ActionStatus<'a>>,
+}
+
+/// Splits the `Debug`-formatted preingestion state into its variant name and
+/// fields, e.g. `Failed { reason: "x" }` into `Failed` and `reason: "x"`.
+fn split_preingestion_state(state: &str) -> (String, Option<String>) {
+    let state = state.trim();
+    let (name, rest) = state.split_at(state.find([' ', '{', '(']).unwrap_or(state.len()));
+    let rest = rest.trim();
+    let fields = rest
+        .strip_prefix('{')
+        .and_then(|rest| rest.strip_suffix('}'))
+        .or_else(|| {
+            rest.strip_prefix('(')
+                .and_then(|rest| rest.strip_suffix(')'))
+        })
+        .unwrap_or(rest)
+        .trim();
+    (
+        name.to_string(),
+        (!fields.is_empty()).then(|| fields.to_string()),
+    )
+}
+
+/// The BMC drivers the API server's rules select for an endpoint.
+enum DriverSelectionView {
+    /// The latest report lacks the service root, so no rule can match yet.
+    NotSelected,
+    Selected(DriverSelection),
+    Unavailable(String),
+}
+
+struct DriverSelection {
+    drivers: Vec<SelectedDriver>,
+    quirks: Vec<String>,
+    hash: String,
+}
+
+impl DriverSelection {
+    /// The drivers in two halves for side-by-side tables, the first one longer.
+    fn columns(&self) -> [&[SelectedDriver]; 2] {
+        let (first, second) = self.drivers.split_at(self.drivers.len().div_ceil(2));
+        [first, second]
+    }
+}
+
+struct SelectedDriver {
+    capability: String,
+    driver: String,
+    /// `None` when the compiled default applies rather than a rule.
+    rule: Option<String>,
+}
+
+/// The JSON form `bmc_drivers::ResolvedSelection` serializes to.
+#[derive(Deserialize)]
+struct SelectionJson {
+    drivers: BTreeMap<String, String>,
+    matched_rules: Vec<MatchedRuleJson>,
+    #[serde(default)]
+    quirks: Vec<String>,
+    hash: String,
+}
+
+#[derive(Deserialize)]
+struct MatchedRuleJson {
+    capability: String,
+    rule_id: String,
+}
+
+impl From<forgerpc::BmcDriverSelection> for DriverSelectionView {
+    fn from(response: forgerpc::BmcDriverSelection) -> Self {
+        let Some(selection) = response.selection else {
+            return Self::NotSelected;
+        };
+        let selection = match serde_json::from_str::<SelectionJson>(&selection) {
+            Ok(selection) => selection,
+            Err(err) => {
+                return Self::Unavailable(format!("could not parse the driver selection: {err}"));
+            }
+        };
+        let mut rules: HashMap<String, String> = selection
+            .matched_rules
+            .into_iter()
+            .map(|matched| (matched.capability, matched.rule_id))
+            .collect();
+        Self::Selected(DriverSelection {
+            drivers: selection
+                .drivers
+                .into_iter()
+                .map(|(capability, driver)| SelectedDriver {
+                    rule: rules.remove(&capability),
+                    capability,
+                    driver,
+                })
+                .collect(),
+            quirks: selection.quirks,
+            hash: selection.hash,
+        })
+    }
 }
 
 struct ExploredEndpointInfo {
@@ -479,8 +576,12 @@ impl From<ExploredEndpointInfo> for ExploredEndpointDetail<'_> {
                 .unwrap_or_else(|| "unknown".to_string());
 
         let pause_remediation = endpoint_info.endpoint.pause_remediation;
+        let (preingestion_name, preingestion_fields) =
+            split_preingestion_state(&endpoint_info.endpoint.preingestion_state);
 
         Self {
+            preingestion_name,
+            preingestion_fields,
             last_exploration_error: report_ref
                 .map(|report| report.last_exploration_error_display())
                 .unwrap_or_default(),
@@ -490,6 +591,18 @@ impl From<ExploredEndpointInfo> for ExploredEndpointDetail<'_> {
             machine_setup_status: machine_setup_status_to_string(
                 report_ref.and_then(|report| report.machine_setup_status.as_ref()),
             ),
+            model: report_ref.and_then(|report| {
+                report
+                    .systems
+                    .iter()
+                    .find_map(|system| system.model.clone())
+                    .or_else(|| {
+                        report
+                            .chassis
+                            .iter()
+                            .find_map(|chassis| chassis.model.clone())
+                    })
+            }),
             secure_boot_status: secure_boot_status_to_string(
                 report_ref.and_then(|report| report.secure_boot_status.as_ref()),
             ),
@@ -508,6 +621,7 @@ impl From<ExploredEndpointInfo> for ExploredEndpointDetail<'_> {
             is_dell_endpoint,
             report_age,
             pause_remediation,
+            drivers: DriverSelectionView::NotSelected,
             bmc_action_redirect_to: None,
             action_status: None,
         }
@@ -657,6 +771,19 @@ pub(super) async fn detail(
 
     let mut display = ExploredEndpointDetail::from(endpoint_info);
 
+    display.drivers = match state
+        .find_bmc_driver_selection(tonic::Request::new(rpc::forge::BmcEndpointRequest {
+            ip_address: endpoint_ip.clone(),
+            mac_address: None,
+        }))
+        .await
+    {
+        Ok(response) => DriverSelectionView::from(response.into_inner()),
+        Err(err) => {
+            tracing::warn!(error = %err, bmc_ip_address = %endpoint_ip, "find_bmc_driver_selection failed");
+            DriverSelectionView::Unavailable(err.message().to_string())
+        }
+    };
     display.action_status = ActionStatus::from_query(&params);
 
     (StatusCode::OK, Html(display.render().unwrap())).into_response()
@@ -1368,11 +1495,13 @@ mod tests {
 
     use askama::Template;
     use carbide_test_support::value_scenarios;
+    use rpc::forge::BmcDriverSelection;
     use rpc::site_explorer::{EndpointExplorationReport, ExploredEndpoint, OperatorErrorSchema};
+    use serde_json::json;
 
     use super::{
-        ExploredEndpointDetail, ExploredEndpointDisplay, ExploredEndpointInfo,
-        ExploredEndpointsShow, query_filter_for,
+        DriverSelectionView, ExploredEndpointDetail, ExploredEndpointDisplay, ExploredEndpointInfo,
+        ExploredEndpointsShow, query_filter_for, split_preingestion_state,
     };
     use crate::pagination::PageContext;
 
@@ -1388,6 +1517,87 @@ mod tests {
     }
 
     #[test]
+    fn preingestion_state_splits_name_from_fields() {
+        value_scenarios!(run = |state: &str| { split_preingestion_state(state) };
+            "unit variant" {
+                "Complete" => ("Complete".to_string(), None),
+            }
+            "struct variant" {
+                r#"Failed { reason: "BMC unreachable" }"# => (
+                    "Failed".to_string(),
+                    Some(r#"reason: "BMC unreachable""#.to_string()),
+                ),
+            }
+            "nested fields stay intact" {
+                "InitialBMCReset { phase: WaitForReset { since: 3 } }" => (
+                    "InitialBMCReset".to_string(),
+                    Some("phase: WaitForReset { since: 3 }".to_string()),
+                ),
+            }
+        );
+    }
+
+    #[test]
+    fn drivers_section_shows_each_capability_with_the_rule_that_chose_it() {
+        let render = |selection: Option<String>| {
+            let mut detail = ExploredEndpointDetail::from(ExploredEndpointInfo {
+                endpoint: endpoint("192.0.2.10", None),
+                credentials_set: "Configured".to_string(),
+                has_machine: false,
+            });
+            detail.drivers = DriverSelectionView::from(BmcDriverSelection {
+                selection,
+                identity: None,
+            });
+            let html = detail.render().expect("detail template renders");
+            let (before, drivers) = html
+                .split_once("<h2>Drivers</h2>")
+                .expect("drivers section renders");
+            assert!(
+                before.contains("<h2>Actions</h2>"),
+                "drivers follow actions"
+            );
+            drivers
+                .split_once("</section>")
+                .expect("drivers card closes")
+                .0
+                .to_string()
+        };
+
+        let selected = render(Some(
+            json!({
+                "drivers": { "lockdown": "lenovo-xcc", "power": "standard" },
+                "matched_rules": [{ "capability": "lockdown", "rule_id": "lenovo-xcc-rule" }],
+                "quirks": ["lenovo_force_restart_hangs"],
+                "hash": "ab12",
+            })
+            .to_string(),
+        ));
+        assert!(selected.contains(
+            "<dt>lockdown</dt><dd class=\"driver-name\"><code>lenovo-xcc</code></dd>\
+             <dd class=\"driver-rule\"><span class=\"driver-rule-matched\" \
+             title=\"Rule that selected this driver\">lenovo-xcc-rule</span></dd>"
+        ));
+        assert!(selected.contains(
+            "<dt>power</dt><dd class=\"driver-name\"><code>standard</code></dd>\
+             <dd class=\"driver-rule\"><span class=\"text-muted\">Default</span></dd>"
+        ));
+        assert_eq!(
+            selected.matches("<dl class=\"driver-list\">").count(),
+            2,
+            "drivers split across two columns"
+        );
+        assert!(selected.contains("<code>lenovo_force_restart_hangs</code>"));
+        assert!(selected.contains("<code>ab12</code>"));
+
+        assert!(render(None).contains("No drivers are selected until site exploration"));
+        assert!(
+            render(Some("{".to_string()))
+                .contains("Driver selection unavailable: could not parse the driver selection")
+        );
+    }
+
+    #[test]
     fn detail_form_uses_ipv4_and_ipv6_redfish_urls() {
         value_scenarios!(run = |address| {
             let rendered = ExploredEndpointDetail::from(ExploredEndpointInfo {
@@ -1398,7 +1608,7 @@ mod tests {
             .render()
             .expect("detail template renders");
             assert!(
-                rendered.contains(&format!("<h1>Endpoint {address}</h1>")),
+                rendered.contains(&format!("<code id=\"entity-id\">{address}</code>")),
                 "detail heading preserves bare address {address}",
             );
             let url = rendered

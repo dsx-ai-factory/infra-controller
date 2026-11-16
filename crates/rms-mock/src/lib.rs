@@ -173,9 +173,11 @@ impl RmsInventory for StaticInventory {
 
     fn set_power(&self, bmc_mac: mac_address::MacAddress, op: PowerOperation) -> eyre::Result<()> {
         let power = match (op, self.power_state(bmc_mac)?) {
-            (PowerOperation::Unspecified, _) => eyre::bail!("power operation is unspecified"),
+            (PowerOperation::Unspecified, _) => {
+                eyre::bail!("power operation is unspecified");
+            }
             (PowerOperation::On | PowerOperation::ForceOn, SimPowerState::On) => {
-                eyre::bail!("cannot power on machine, it is already on")
+                eyre::bail!("cannot power on machine, it is already on");
             }
             (
                 PowerOperation::Off
@@ -184,7 +186,9 @@ impl RmsInventory for StaticInventory {
                 | PowerOperation::GracefulRestart
                 | PowerOperation::ForceRestart,
                 SimPowerState::Off,
-            ) => eyre::bail!("cannot power off machine, it is already off"),
+            ) => {
+                eyre::bail!("cannot power off machine, it is already off");
+            }
             (PowerOperation::On | PowerOperation::ForceOn, SimPowerState::Off) => SimPowerState::On,
             (
                 PowerOperation::Off | PowerOperation::ForceOff | PowerOperation::GracefulShutdown,
