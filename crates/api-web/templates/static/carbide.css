@@ -2353,17 +2353,6 @@ div#json a#refresh-endpoint:hover {
   margin: 0;
 }
 
-/* Status or warning shown above a detail page's tabs */
-.detail-notice {
-  margin: 0 0 1rem;
-  padding: 0.75rem 1.25rem;
-  border: 1px solid var(--warning);
-  border-left-width: 4px;
-  border-radius: 8px;
-  background-color: var(--bg-warning);
-  color: var(--text-secondary);
-}
-
 /* Failure line between the status bar and the groups */
 .entity-summary-alert {
   padding: 0.75rem 1.5rem;
