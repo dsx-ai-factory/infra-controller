@@ -49,12 +49,15 @@
 {% endmacro %}
 
 {% block content %}
+{# Regions marked data-tab-swap are replaced in place when tabs.js loads another tab #}
+<div id="expected-machine-json" data-tab-swap>
 {% if active_tab == "all" %}
 <div id="json">
 	<a href="/admin/expected-machine-definition.json">JSON</a>
 </div>
 {% endif %}
-<h1>Expected Machines ({{ page.total_items() }})</h1>
+</div>
+<h1 id="expected-machine-title" data-tab-swap>Expected Machines ({{ page.total_items() }})</h1>
 {% include "site_explorer_run_status.html" %}
 
 <!-- Tab Navigation -->
@@ -68,6 +71,7 @@
 	<div class="tab-indicator"></div>
 </div>
 
+<div id="expected-machine-tab" data-tab-swap>
 {% if active_tab != "unexpected" %}
 	{% call expected_machines_table(expected_rows) %}{% endcall %}
 {% else %}
@@ -103,5 +107,6 @@
 {% endif %}
 
 {% include "pages_footer.html" %}
+</div>
 
 {% endblock %}

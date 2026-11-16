@@ -1,33 +1,46 @@
-{% extends "base.html" %}
+{% extends "detail_base.html" %}
 
-{% block title %}SKU Detail{% endblock %}
+{% block title %}SKU {{ id }}{% endblock %}
+{% block entity_label %}SKU{% endblock %}
+{% block entity_id %}{{ id }}{% endblock %}
 
-{% block content %}
-<div id="json"><a id="json-link" href="">JSON</a></div>
-<h1>SKU Detail</h1>
+{% block detail_content %}
+<section class="entity-summary">
+	<div class="entity-summary-groups">
+		<div class="entity-summary-group">
+			<h4>SKU</h4>
+			<dl>
+				<dt>Description</dt>
+				<dd>{% if description.is_empty() %}<span class="text-muted">None</span>{% else %}{{ description }}{% endif %}</dd>
+				<dt>Created</dt>
+				<dd>{{ created }}</dd>
+				<dt>Updated</dt>
+				<dd>{{ updated }}</dd>
+			</dl>
+		</div>
+	</div>
+</section>
 
-<table class="detailsview">
-	<tr><th>ID</th><td>{{ id }}</td></tr>
-	<tr><th>Description</th><td>{{ description }}</td></tr>
-	<tr><th>Created</th><td>{{ created }}</td></tr>
-	<tr><th>Updated</th><td>{{ updated }}</td></tr>
-	<tr>
-		<th>Associated Machines</th>
-		<td>
-			{% for m in associated_machines %}
-			{% if !loop.first %}<br>{% endif %}
-			{{ m|machine_id_link|safe }}
-			{% endfor %}
-		</td>
-	</tr>
-	<tr>
-		<th>SKU definition</th>
-		<td>
-			<div style="overflow: auto;">
-				<pre><code>{{ components_json }}</code></pre>
-			</div>
-		</td>
-	</tr>
-</table>
+<h2>Associated Machines ({{ associated_machines.len() }})</h2>
+<section class="entity-summary">
+	{% if associated_machines.is_empty() %}
+	<p class="entity-summary-empty">No machines use this SKU.</p>
+	{% else %}
+	<div class="data-table-scroll">
+	<table class="data-table">
+		<thead><tr><th>Machine</th></tr></thead>
+		<tbody>
+		{% for m in associated_machines %}
+			<tr><td>{{ m|machine_id_link|safe }}</td></tr>
+		{% endfor %}
+		</tbody>
+	</table>
+	</div>
+	{% endif %}
+</section>
 
+<h2>Definition</h2>
+<section class="entity-summary">
+	<pre class="entity-summary-pre"><code>{{ components_json }}</code></pre>
+</section>
 {% endblock %}

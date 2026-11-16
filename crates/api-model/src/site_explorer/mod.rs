@@ -270,10 +270,6 @@ pub struct EndpointExplorationReport {
     #[deprecated(note = "use rack_position() instead")]
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub revision_id: Option<i32>,
-    /// Transient remediation error detected during an otherwise successful exploration.
-    /// Not persisted; used to trigger Site Explorer auto-remediation in the same run.
-    #[serde(skip, default)]
-    pub remediation_error: Option<EndpointExplorationError>,
 }
 
 impl EndpointExplorationReport {
@@ -1152,7 +1148,6 @@ impl EndpointExplorationReport {
             lockdown_status: None,
             power_shelf_id: None,
             switch_id: None,
-            remediation_error: None,
             ..Default::default()
         }
     }
@@ -1208,6 +1203,11 @@ impl EndpointExplorationReport {
     ///
     /// TODO(chet): These are obviously workarounds for now while
     /// we work with vendors to update their BMC firmware.
+    ///
+    /// Site explorer creates a power-shelf row only for an endpoint this
+    /// accepts, and `GetComponentCredentials` returns a stored BMC root
+    /// credential only for a MAC address with such a row. Loosening this
+    /// check widens which credentials that RPC can return.
     pub fn is_power_shelf(&self) -> bool {
         self.chassis.iter().any(|c| {
             c.id.to_lowercase().contains("powershelf")
@@ -1220,6 +1220,11 @@ impl EndpointExplorationReport {
     }
 
     /// Return `true` if the explored endpoint is a Switch
+    ///
+    /// Site explorer creates a switch row only for an endpoint this accepts,
+    /// and `GetComponentCredentials` returns stored switch credentials only
+    /// for a MAC address with such a row. Loosening this check widens which
+    /// credentials that RPC can return.
     pub fn is_switch(&self) -> bool {
         self.chassis
             .iter()
@@ -1709,6 +1714,7 @@ pub enum EndpointExplorationError {
         response_code: Option<u16>,
     },
 
+    /// Missing DPU BIOS attributes; retained for reading stored exploration errors.
     #[error("invalid redfish response for DPU BIOS: {details}")]
     #[serde(rename_all = "PascalCase")]
     InvalidDpuRedfishBiosResponse {
@@ -1735,9 +1741,9 @@ pub enum EndpointExplorationError {
 impl EndpointExplorationError {
     pub const INVALID_DPU_REDFISH_BIOS_RESPONSE_CODE: ErrorCode =
         ErrorCode::nico(ErrorSubsystem::Dpu, 134);
-    pub const INVALID_DPU_REDFISH_BIOS_RESPONSE_MITIGATION: &'static str = "No action needed: site explorer automatically force-restarts the DPU to clear this \
-         known UEFI/BMC race and re-explores on its next run (~2 min). It escalates to a BMC \
-         reset if the empty BIOS attributes persist.";
+    pub const INVALID_DPU_REDFISH_BIOS_RESPONSE_MITIGATION: &'static str = "During DPU initialization, the machine controller retries BIOS setup and may restart \
+         the DPU to recover missing BIOS attributes. If the error persists, check DPU firmware \
+         and BMC health.";
 
     pub fn is_unauthorized(&self) -> bool {
         matches!(self, EndpointExplorationError::Unauthorized { .. })
@@ -1759,13 +1765,6 @@ impl EndpointExplorationError {
                 self,
                 EndpointExplorationError::InvalidDpuRedfishBiosResponse { .. }
             )
-    }
-
-    pub fn is_dpu_redfish_bios_response_invalid(&self) -> bool {
-        matches!(
-            self,
-            EndpointExplorationError::InvalidDpuRedfishBiosResponse { .. }
-        )
     }
 
     /// Returns the consecutive count if this is an IntermittentUnauthorized error.
@@ -4119,9 +4118,7 @@ mod tests {
         fn from_mitigation(mitigation: Option<&str>) -> Self {
             match mitigation {
                 None => Self::NoMitigation,
-                Some(mitigation) if mitigation.contains("force-restarts the DPU") => {
-                    Self::DpuRecovery
-                }
+                Some(mitigation) if mitigation.contains("machine controller") => Self::DpuRecovery,
                 Some(mitigation)
                     if mitigation.contains("general DGX H100/H200 Redfish API information") =>
                 {
@@ -4150,7 +4147,6 @@ mod tests {
         unauthorized: bool,
         unreachable: bool,
         redfish: bool,
-        invalid_dpu_bios_response: bool,
         intermittent_unauthorized_count: Option<u32>,
         mitigation_group: MitigationGroup,
     }
@@ -4160,7 +4156,6 @@ mod tests {
         unauthorized: bool,
         unreachable: bool,
         redfish: bool,
-        invalid_dpu_bios_response: bool,
     }
 
     fn expected_error_behavior(
@@ -4173,14 +4168,12 @@ mod tests {
             unauthorized,
             unreachable,
             redfish,
-            invalid_dpu_bios_response,
         } = predicates;
         EndpointErrorBehavior {
             code,
             unauthorized,
             unreachable,
             redfish,
-            invalid_dpu_bios_response,
             intermittent_unauthorized_count,
             mitigation_group,
         }
@@ -4408,7 +4401,6 @@ mod tests {
                         ErrorCode::nico(ErrorSubsystem::Dpu, 134),
                         EndpointPredicates {
                             redfish: true,
-                            invalid_dpu_bios_response: true,
                             ..Default::default()
                         },
                         None,
@@ -4423,7 +4415,6 @@ mod tests {
                     unauthorized: error.is_unauthorized(),
                     unreachable: error.is_unreachable(),
                     redfish: error.is_redfish(),
-                    invalid_dpu_bios_response: error.is_dpu_redfish_bios_response_invalid(),
                     intermittent_unauthorized_count: error.intermittent_unauthorized_count(),
                     mitigation_group: MitigationGroup::from_mitigation(
                         schema.mitigation.as_deref(),
@@ -4435,11 +4426,13 @@ mod tests {
 
     #[test]
     fn dpu_bios_error_schema_contains_operator_action() {
-        let error = EndpointExplorationError::InvalidDpuRedfishBiosResponse {
-            details: "DPU BMC BIOS attributes not ready".to_string(),
-            response_body: None,
-            response_code: None,
-        };
+        let error: EndpointExplorationError = serde_json::from_value(serde_json::json!({
+            "Type": "InvalidDpuRedfishBiosResponse",
+            "Details": "DPU BMC BIOS attributes not ready",
+            "ResponseBody": null,
+            "ResponseCode": null,
+        }))
+        .expect("stored DPU BIOS errors remain readable");
 
         let schema = error.operator_error_schema();
         let mitigation = schema
@@ -4447,8 +4440,8 @@ mod tests {
             .as_deref()
             .expect("DPU BIOS errors have recovery guidance");
 
-        assert!(mitigation.contains("force-restarts the DPU"));
-        assert!(mitigation.contains("BMC reset"));
+        assert!(mitigation.contains("machine controller"));
+        assert!(mitigation.contains("firmware"));
         assert!(
             schema
                 .text
@@ -4879,7 +4872,6 @@ mod tests {
             lockdown_status: None,
             power_shelf_id: None,
             switch_id: None,
-            remediation_error: None,
             ..Default::default()
         };
 
@@ -5046,7 +5038,6 @@ mod tests {
             lockdown_status: None,
             power_shelf_id: None,
             switch_id: None,
-            remediation_error: None,
             ..Default::default()
         };
         report

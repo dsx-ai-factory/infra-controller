@@ -540,7 +540,9 @@ async fn write_state(
             }
             async_write!(output, "{table}")?;
         }
-        OutputFormat::Csv => eyre::bail!("CSV output is not supported for VPC routing commands"),
+        OutputFormat::Csv => {
+            eyre::bail!("CSV output is not supported for VPC routing commands");
+        }
     }
     Ok(())
 }

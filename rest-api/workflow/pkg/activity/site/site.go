@@ -302,29 +302,26 @@ func (mst ManageSite) DeleteSiteComponentsFromDB(ctx context.Context, siteID uui
 
 	// Delete Instances
 	// Check that Instance exists
-	instances, _, err := instanceDAO.GetAll(ctx, nil, cdbm.InstanceFilterInput{SiteIDs: []uuid.UUID{siteID}}, cdbp.PageInput{Limit: ccu.GetPtr(cdbp.TotalLimit)}, nil)
+	instanceIDs, err := instanceDAO.GetAllIDs(ctx, nil, cdbm.InstanceFilterInput{SiteIDs: []uuid.UUID{siteID}})
 	if err != nil {
 		logger.Error().Err(err).Msg("failed to retrieve Instances from DB by Site ID")
 		return err
 	}
 
-	instanceIDs := make([]uuid.UUID, 0, len(instances))
-	for _, instance := range instances {
-		instanceIDs = append(instanceIDs, instance.ID)
-
+	for _, instanceID := range instanceIDs {
 		// Remove Machine reference if purgeMachines is true
 		if purgeMachines {
-			_, serr := instanceDAO.Clear(ctx, nil, cdbm.InstanceClearInput{InstanceID: instance.ID, MachineID: true})
+			_, serr := instanceDAO.Clear(ctx, nil, cdbm.InstanceClearInput{InstanceID: instanceID, MachineID: true})
 			if serr != nil && serr != cdb.ErrDoesNotExist {
-				logger.Error().Err(serr).Str("Instance ID", instance.ID.String()).Msg("error clearing Machine ID for Instance in DB")
-				return err
+				logger.Error().Err(serr).Str("Instance ID", instanceID.String()).Msg("error clearing Machine ID for Instance in DB")
+				return serr
 			}
 		}
 
 		// Delete Instance
-		err = instanceDAO.Delete(ctx, nil, instance.ID)
+		err = instanceDAO.Delete(ctx, nil, instanceID)
 		if err != nil && err != cdb.ErrDoesNotExist {
-			logger.Error().Err(err).Str("Instance ID", instance.ID.String()).Msg("error deleting Instance record in DB")
+			logger.Error().Err(err).Str("Instance ID", instanceID.String()).Msg("error deleting Instance record in DB")
 			return err
 		}
 	}
@@ -384,25 +381,25 @@ func (mst ManageSite) DeleteSiteComponentsFromDB(ctx context.Context, siteID uui
 
 	// Delete Machines
 	// Check if Machines exist
-	mcs, _, err := mDAO.GetAll(ctx, nil, cdbm.MachineFilterInput{SiteIDs: []uuid.UUID{siteID}}, cdbp.PageInput{Limit: ccu.GetPtr(cdbp.TotalLimit)}, nil)
+	machineIDs, err := mDAO.GetAllIDs(ctx, nil, cdbm.MachineFilterInput{SiteIDs: []uuid.UUID{siteID}})
 	if err != nil {
 		logger.Error().Err(err).Msg("error retrieving Machine for Site from DB")
 		return err
 	}
 
-	for _, mc := range mcs {
+	for _, machineID := range machineIDs {
 		// Get MachineInterfaces by Machine
 		mits, _, serr := miDAO.GetAll(
 			ctx,
 			nil,
 			cdbm.MachineInterfaceFilterInput{
-				MachineIDs: []string{mc.ID},
+				MachineIDs: []string{machineID},
 			},
 			cdbp.PageInput{Limit: ccu.GetPtr(cdbp.TotalLimit)},
 			nil,
 		)
 		if serr != nil {
-			logger.Error().Err(serr).Str("Machine ID", mc.ID).Msg("error retrieving Machine Interfaces for Machine from DB")
+			logger.Error().Err(serr).Str("Machine ID", machineID).Msg("error retrieving Machine Interfaces for Machine from DB")
 			return serr
 		}
 
@@ -416,7 +413,7 @@ func (mst ManageSite) DeleteSiteComponentsFromDB(ctx context.Context, siteID uui
 		}
 
 		// Get Machine Capability records from the db
-		mcbs, _, serr := mcDAO.GetAll(ctx, nil, []string{mc.ID}, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, ccu.GetPtr(cdbp.TotalLimit), nil)
+		mcbs, _, serr := mcDAO.GetAll(ctx, nil, []string{machineID}, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, ccu.GetPtr(cdbp.TotalLimit), nil)
 		if serr != nil {
 			logger.Error().Err(serr).Msg("error retrieving MachineCapabilities for Site's machine from DB")
 			return serr
@@ -431,7 +428,7 @@ func (mst ManageSite) DeleteSiteComponentsFromDB(ctx context.Context, siteID uui
 			}
 		}
 
-		serr = mDAO.Delete(ctx, nil, mc.ID, purgeMachines)
+		serr = mDAO.Delete(ctx, nil, machineID, purgeMachines)
 		if serr != nil && serr != cdb.ErrDoesNotExist {
 			logger.Error().Err(serr).Msg("error deleting Machine record in db")
 			return serr

@@ -74,6 +74,7 @@ pub(super) async fn run(
     validation_id: MachineValidationId,
     context: String,
     machine_validation_filter: machine_validation::MachineValidationFilter,
+    instrumentation: &carbide_instrument::Instrumentation,
 ) -> Result<(), CarbideClientError> {
     let platform_name = get_system_manufacturer_name().await;
     let options = machine_validation::MachineValidationOptions {
@@ -90,6 +91,7 @@ pub(super) async fn run(
         context,
         validation_id,
         machine_validation_filter,
+        instrumentation,
     )
     .await
     .map_err(|e| CarbideClientError::GenericError(format!("{e}")))?;

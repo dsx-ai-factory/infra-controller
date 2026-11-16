@@ -49,6 +49,9 @@ service Flow {
     rpc PowerOffRack(PowerOffRackRequest) returns (SubmitTaskResponse);
     rpc PowerResetRack(PowerResetRackRequest) returns (SubmitTaskResponse);
     rpc ACPowerCycleRack(ACPowerCycleRackRequest) returns (SubmitTaskResponse);
+    // Restores NVOS or SDN configuration defaults on switches. Accepted work is polled;
+    // uncertain submissions are never automatically repeated. No reprovisioning.
+    rpc FactoryResetSwitches(FactoryResetSwitchesRequest) returns (SubmitTaskResponse);
 
     // Component CRUD
     rpc GetComponentInfoByID(GetComponentInfoByIDRequest) returns (GetComponentInfoResponse);
@@ -814,6 +817,15 @@ message PowerOnRackRequest {
     // maintenance where tenant impact has been acknowledged out-of-band;
     // the bypass is recorded in the server log.
     bool override_readiness_check = 5;
+}
+
+// Targets must resolve exclusively to ingested switches. Domain selectors must
+// include the NVSwitch component filter. Existing rack conflict handling applies.
+message FactoryResetSwitchesRequest {
+    OperationTargetSpec target_spec = 1;
+    string description = 2;
+    // Required reset scope: "nvos" or "sdn". Missing or empty values are rejected.
+    string reset_target = 3;
 }
 
 message PowerOffRackRequest {
@@ -2199,6 +2211,7 @@ enum TaskKind {
     TASK_KIND_DECOMMISSION = 4;
     // Installing expected inventory for a rack.
     TASK_KIND_INJECT_EXPECTATION = 5;
+    TASK_KIND_COMPONENT_RESET = 6;
 }
 
 // Uses the external rack ID, as GetRackInfoByID does. Empty IDs return

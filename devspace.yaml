@@ -37,6 +37,9 @@ vars:
   LOCAL_DEV_DSX_GATEWAY_FORWARD_PORT:
     source: env
     default: "18080"
+  LOCAL_DEV_CARGO_JOBS:
+    source: env
+    default: ""
   LOCAL_DEV_DSX_GATEWAY_PROFILE: "0"
   LOCAL_DEV_EXTRA_CORE_IMAGE: ""
 
@@ -89,6 +92,8 @@ images:
       - latest
     dockerfile: dev/deployment/devspace/Dockerfile.core-artifacts
     context: .
+    buildArgs:
+      CARGO_JOBS: ${LOCAL_DEV_CARGO_JOBS}
     buildKit: {}
     skipPush: true
   nico-api:

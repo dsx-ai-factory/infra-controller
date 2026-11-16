@@ -37,13 +37,18 @@ const DPU_ADMISSION_TIMEOUT: Duration = Duration::from_secs(5);
 /// `cancel`, leaving the remaining reservation lifetime for SQL attachment.
 /// Cancellation returns `ResourcePoolBackendError::Cancelled`; expiration
 /// returns `ResourcePoolBackendError::DeadlineExceeded`. Without a provider
-/// reservation, the wait has no deadline and ignores `cancel`.
+/// reservation, the wait has no deadline but still observes `cancel`.
 pub async fn acquire_admin_admission(
     has_provider_reservation: bool,
     cancel: &CancellationToken,
 ) -> Result<OwnedSemaphorePermit, ResourcePoolBackendError> {
     if !has_provider_reservation {
-        return Ok(db::machine_interface::admin_lock_admission().await);
+        return cancel
+            .run_until_cancelled(db::machine_interface::admin_lock_admission())
+            .await
+            .ok_or(ResourcePoolBackendError::Cancelled {
+                operation: "DPU admin lock admission",
+            });
     }
 
     cancel
@@ -65,6 +70,7 @@ pub async fn acquire_admin_admission(
 /// before creation writes, then attach after interface writes. Roll back on
 /// error before cancelling.
 pub struct PreparedDpuLoopback<'a> {
+    instrumentation: carbide_instrument::Instrumentation,
     machine_id: MachineId,
     identity: MachineCreationIdentity,
     registry: &'a ResourcePoolRegistry,
@@ -73,6 +79,7 @@ pub struct PreparedDpuLoopback<'a> {
 }
 
 impl<'a> PreparedDpuLoopback<'a> {
+    /// Uses the supplied Event instrumentation; retain its provider through attachment.
     /// `prepare` captures the machine lifetime and resolves a missing IPv4
     /// reservation without holding the caller's transaction. Existing attached
     /// ownership is reused, including when its configuration field was cleared.
@@ -90,6 +97,7 @@ impl<'a> PreparedDpuLoopback<'a> {
         machine_id: MachineId,
         requested_loopback_v4: Option<Ipv4Addr>,
         cancel: &CancellationToken,
+        instrumentation: carbide_instrument::Instrumentation,
     ) -> Result<Self, ResourcePoolBackendError> {
         let pool = &pools.ethernet.pool_loopback_ip;
         let owner_id = machine_id.to_string();
@@ -134,6 +142,7 @@ impl<'a> PreparedDpuLoopback<'a> {
                                             ResourcePoolError::Empty,
                                         );
                                     db::resource_pool::emit_allocation_failure(
+                                        &instrumentation,
                                         pool.value_type,
                                         &owner_id,
                                         false,
@@ -172,6 +181,7 @@ impl<'a> PreparedDpuLoopback<'a> {
             None => None,
         };
         Ok(Self {
+            instrumentation,
             machine_id,
             identity,
             registry,
@@ -287,6 +297,7 @@ impl<'a> PreparedDpuLoopback<'a> {
                         Ok(value) => value,
                         Err(ResourcePoolBackendError::Integrated(error)) => {
                             db::resource_pool::emit_allocation_failure(
+                                &self.instrumentation,
                                 self.pools.ethernet.pool_loopback_ip.value_type,
                                 &owner_id,
                                 false,

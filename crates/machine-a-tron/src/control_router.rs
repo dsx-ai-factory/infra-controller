@@ -308,7 +308,7 @@ impl RmsInventory for ControlState {
             | PowerState::Sleeping
             | PowerState::Hibernating
             | PowerState::UnsupportedValue => {
-                eyre::bail!("device power state is unavailable")
+                eyre::bail!("device power state is unavailable");
             }
             PowerState::On => SimPowerState::On,
             PowerState::Off => SimPowerState::Off,
@@ -344,7 +344,9 @@ impl RmsInventory for ControlState {
 /// as a power cycle and `OFF` as a graceful shutdown.
 fn power_control_for(op: PowerOperation) -> eyre::Result<ResourceResetType> {
     Ok(match op {
-        PowerOperation::Unspecified => eyre::bail!("power operation is unspecified"),
+        PowerOperation::Unspecified => {
+            eyre::bail!("power operation is unspecified");
+        }
         PowerOperation::On | PowerOperation::ForceOn => ResourceResetType::On,
         PowerOperation::Off | PowerOperation::GracefulShutdown => {
             ResourceResetType::GracefulShutdown
@@ -1126,6 +1128,7 @@ mod tests {
                     topology: "gb200_nvl72r1_c2g4".to_string(),
                     protocol: "NVLINK_V5".to_string(),
                     members: vec![MemberIntent {
+                        cartridge_index: 0,
                         r#type: "Compute".to_string(),
                         manufacturer: "WIWYNN".to_string(),
                         id: "rack-unit-11".to_string(),

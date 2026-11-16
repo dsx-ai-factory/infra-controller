@@ -4,13 +4,19 @@
 package activity
 
 import (
+	"bytes"
 	"context"
 	"testing"
+
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 
 	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
 	cClient "github.com/NVIDIA/infra-controller/rest-api/site-workflow/pkg/grpc/client"
 	"github.com/NVIDIA/infra-controller/rest-api/site-workflow/pkg/util"
 	"github.com/google/uuid"
+	"github.com/rs/zerolog"
+	"github.com/rs/zerolog/log"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
@@ -232,34 +238,26 @@ func TestManageDpuExtensionService_UpdateDpuExtensionServiceOnSite(t *testing.T)
 }
 
 func TestManageDpuExtensionService_DeleteDpuExtensionServiceOnSite(t *testing.T) {
-	mockCoreGrpcClient := cClient.NewMockCoreGrpcClient()
-
-	coreGrpcAtomicClient := cClient.NewCoreGrpcAtomicClient(&cClient.CoreGrpcClientConfig{})
-	coreGrpcAtomicClient.SwapClient(mockCoreGrpcClient)
-
-	type fields struct {
-		CoreGrpcAtomicClient *cClient.CoreGrpcAtomicClient
-	}
 	type args struct {
-		ctx     context.Context
 		request *corev1.DeleteDpuExtensionServiceRequest
 	}
 
 	serviceID := "test-service-id"
 
 	tests := []struct {
-		name    string
-		fields  fields
-		args    args
-		wantErr bool
+		name               string
+		args               args
+		wantErr            bool
+		deleteErr          error
+		lookupErr          error
+		services           []*corev1.DpuExtensionService
+		lookupCalls        int
+		cancelBeforeLookup bool
+		cancelDuringLookup bool
 	}{
 		{
 			name: "test delete DpuExtensionService success",
-			fields: fields{
-				CoreGrpcAtomicClient: coreGrpcAtomicClient,
-			},
 			args: args{
-				ctx: context.Background(),
 				request: &corev1.DeleteDpuExtensionServiceRequest{
 					ServiceId: serviceID,
 				},
@@ -268,11 +266,7 @@ func TestManageDpuExtensionService_DeleteDpuExtensionServiceOnSite(t *testing.T)
 		},
 		{
 			name: "test delete DpuExtensionService fail on missing ServiceId",
-			fields: fields{
-				CoreGrpcAtomicClient: coreGrpcAtomicClient,
-			},
 			args: args{
-				ctx: context.Background(),
 				request: &corev1.DeleteDpuExtensionServiceRequest{
 					ServiceId: "",
 				},
@@ -281,25 +275,89 @@ func TestManageDpuExtensionService_DeleteDpuExtensionServiceOnSite(t *testing.T)
 		},
 		{
 			name: "test delete DpuExtensionService fail on missing request",
-			fields: fields{
-				CoreGrpcAtomicClient: coreGrpcAtomicClient,
-			},
 			args: args{
-				ctx:     context.Background(),
 				request: nil,
 			},
 			wantErr: true,
+		},
+		{
+			name:      "whole-service NotFound succeeds when the service is absent",
+			args:      args{request: &corev1.DeleteDpuExtensionServiceRequest{ServiceId: serviceID}},
+			deleteErr: status.Error(codes.NotFound, "absent"), lookupCalls: 1,
+		},
+		{
+			name:      "NotFound for a version of an existing service remains an error",
+			args:      args{request: &corev1.DeleteDpuExtensionServiceRequest{ServiceId: serviceID}},
+			deleteErr: status.Error(codes.NotFound, "version absent"),
+			services:  []*corev1.DpuExtensionService{{ServiceId: serviceID}}, lookupCalls: 1, wantErr: true,
+		},
+		{
+			name:      "failed lookup does not confirm service absence",
+			args:      args{request: &corev1.DeleteDpuExtensionServiceRequest{ServiceId: serviceID}},
+			deleteErr: status.Error(codes.NotFound, "absent"),
+			lookupErr: status.Error(codes.Unavailable, "unavailable"), lookupCalls: 1, wantErr: true,
+		},
+		{
+			name:      "version deletion NotFound does not check whole-service absence",
+			args:      args{request: &corev1.DeleteDpuExtensionServiceRequest{ServiceId: serviceID, Versions: []string{"v1"}}},
+			deleteErr: status.Error(codes.NotFound, "version absent"), wantErr: true,
+		},
+		{
+			name:      "other delete errors do not check service absence",
+			args:      args{request: &corev1.DeleteDpuExtensionServiceRequest{ServiceId: serviceID}},
+			deleteErr: status.Error(codes.PermissionDenied, "denied"), wantErr: true,
+		},
+		{
+			name:      "cancellation before lookup does not confirm service absence",
+			args:      args{request: &corev1.DeleteDpuExtensionServiceRequest{ServiceId: serviceID}},
+			deleteErr: status.Error(codes.NotFound, "absent"), cancelBeforeLookup: true, wantErr: true,
+		},
+		{
+			name:      "cancellation during lookup does not confirm service absence",
+			args:      args{request: &corev1.DeleteDpuExtensionServiceRequest{ServiceId: serviceID}},
+			deleteErr: status.Error(codes.NotFound, "absent"), lookupCalls: 1, cancelDuringLookup: true, wantErr: true,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			mm := NewManageDpuExtensionService(tt.fields.CoreGrpcAtomicClient)
-			err := mm.DeleteDpuExtensionServiceOnSite(tt.args.ctx, tt.args.request)
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			mockClient := cClient.NewMockCoreGrpcClient()
+			serviceClient := mockClient.GrpcServiceClient().(*cClient.MockCoreGrpcServiceClient)
+			serviceClient.DeleteDpuExtensionServiceFunc = func(_ context.Context, request *corev1.DeleteDpuExtensionServiceRequest) (*corev1.DeleteDpuExtensionServiceResponse, error) {
+				assert.Equal(t, tt.args.request, request)
+				if tt.cancelBeforeLookup {
+					cancel()
+				}
+				return &corev1.DeleteDpuExtensionServiceResponse{}, tt.deleteErr
+			}
+			lookupCalls := 0
+			serviceClient.FindDpuExtensionServicesByIdsFunc = func(_ context.Context, request *corev1.DpuExtensionServicesByIdsRequest) (*corev1.DpuExtensionServiceList, error) {
+				lookupCalls++
+				assert.Equal(t, []string{serviceID}, request.ServiceIds)
+				if tt.cancelDuringLookup {
+					cancel()
+				}
+				return &corev1.DpuExtensionServiceList{Services: tt.services}, tt.lookupErr
+			}
+			atomicClient := cClient.NewCoreGrpcAtomicClient(&cClient.CoreGrpcClientConfig{})
+			atomicClient.SwapClient(mockClient)
+			var logs bytes.Buffer
+			originalLogger := log.Logger
+			log.Logger = zerolog.New(&logs)
+			t.Cleanup(func() { log.Logger = originalLogger })
+			mm := NewManageDpuExtensionService(atomicClient)
+			err := mm.DeleteDpuExtensionServiceOnSite(ctx, tt.args.request)
+			assert.Equal(t, tt.lookupCalls, lookupCalls)
 			if tt.wantErr {
 				assert.Error(t, err)
 			} else {
-				assert.NoError(t, err)
+				require.NoError(t, err)
+				assert.NotContains(t, logs.String(), `"level":"warn"`)
+				if tt.deleteErr != nil {
+					assert.Contains(t, logs.String(), "already absent on Site")
+				}
 			}
 		})
 	}

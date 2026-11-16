@@ -463,6 +463,7 @@ fn spawn_generic_redfish_collectors(
                         endpoint_arc.clone(),
                         bmc.clone(),
                         SseLogCollectorConfig {
+                            instrumentation: ctx.instrumentation.clone(),
                             include_diagnostics: ctx.logs_include_diagnostics,
                             request_concurrency: ctx.bmc_request_concurrency,
                             gpu_inventory: sse_gpu_inventory,
@@ -548,6 +549,7 @@ fn spawn_generic_redfish_collectors(
                         endpoint_arc.clone(),
                         bmc.clone(),
                         SseLogCollectorConfig {
+                            instrumentation: ctx.instrumentation.clone(),
                             include_diagnostics: ctx.logs_include_diagnostics,
                             request_concurrency: ctx.bmc_request_concurrency,
                             gpu_inventory: sse_gpu_inventory,
@@ -1092,8 +1094,13 @@ mod tests {
         let limiter: Arc<dyn RateLimiter> = Arc::new(NoopLimiter);
         let metrics_manager =
             Arc::new(MetricsManager::new(metrics_name).expect("metrics manager should initialize"));
-        DiscoveryLoopContext::new(limiter, metrics_manager, Arc::new(config))
-            .expect("context should initialize")
+        DiscoveryLoopContext::new(
+            limiter,
+            metrics_manager,
+            Arc::new(config),
+            carbide_instrument::Instrumentation::global(),
+        )
+        .expect("context should initialize")
     }
 
     fn test_endpoint(
@@ -1521,6 +1528,16 @@ mod tests {
 
     #[tokio::test]
     async fn test_switch_host_primary_starts_collectors_and_reuses_gnmi_cache() {
+        // Hold the gNMI destination open until its collectors stop.
+        let listener = tokio::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
+            .await
+            .expect("gNMI listener should bind");
+
+        let gnmi_port = listener
+            .local_addr()
+            .expect("gNMI listener should have an address")
+            .port();
+
         let mut config = Config::default();
         config.collectors.sensors = Configurable::Disabled;
         config.collectors.logs = Configurable::Disabled;
@@ -1532,6 +1549,7 @@ mod tests {
         config.collectors.nvue = Configurable::Enabled(NvueCollectorConfig {
             rest: Configurable::Enabled(Default::default()),
             gnmi: Configurable::Enabled(NvueGnmiConfig {
+                gnmi_port,
                 additional_subscriptions: vec![NvueGnmiSubscriptionConfig {
                     name: "retained".into(),
                     paths: vec![vec!["value".into()]],
@@ -1551,8 +1569,15 @@ mod tests {
 
         let mut ctx = context_with_config(config, "test_switch_host_nmxt_nvue_enabled");
 
+        // Register periodic collectors without allowing NMX-T or REST iterations.
+        ctx.limiter = Arc::new(crate::limiter::BucketLimiter::new(
+            0,
+            Duration::from_secs(1),
+            Duration::ZERO,
+        ));
+
         let mut endpoint = test_endpoint(
-            Ipv4Addr::new(10, 0, 0, 9),
+            Ipv4Addr::LOCALHOST,
             "55:66:77:88:99:cc",
             Some(switch_metadata_with_role(
                 SwitchEndpointRole::Host,
@@ -1626,6 +1651,10 @@ mod tests {
         assert!(reading.contains("serial_number=\"MT2515600ZYB\""));
         assert!(reading.ends_with(" 42"));
         assert!(!exported.contains("serial_number=\"switch-host\""));
+
+        let shutdown = ctx.drain_collectors(Duration::from_secs(5)).await;
+
+        assert_eq!(shutdown.timed_out, 0);
     }
 
     #[tokio::test]
@@ -1927,7 +1956,10 @@ mod tests {
                 None,
                 10,
                 std::num::NonZeroUsize::MIN,
-                None,
+                crate::bmc::BmcInstrumentation::new(
+                    carbide_instrument::Instrumentation::global(),
+                    None,
+                ),
             )
             .expect("constructor succeeds"),
         );
@@ -2209,9 +2241,13 @@ mod tests {
             MetricsManager::new("test_auto_downgraded").expect("metrics manager should initialize"),
         );
 
-        let mut ctx =
-            DiscoveryLoopContext::new(limiter, metrics_manager, Arc::new(auto_mode_config(true)))
-                .expect("context should initialize");
+        let mut ctx = DiscoveryLoopContext::new(
+            limiter,
+            metrics_manager,
+            Arc::new(auto_mode_config(true)),
+            carbide_instrument::Instrumentation::global(),
+        )
+        .expect("context should initialize");
 
         let endpoint = test_endpoint(Ipv4Addr::new(10, 0, 0, 1), "aa:bb:cc:dd:ee:01", None);
 
@@ -2265,9 +2301,13 @@ mod tests {
             MetricsManager::new("test_auto_sticky").expect("metrics manager should initialize"),
         );
 
-        let mut ctx =
-            DiscoveryLoopContext::new(limiter, metrics_manager, Arc::new(auto_mode_config(false)))
-                .expect("context should initialize");
+        let mut ctx = DiscoveryLoopContext::new(
+            limiter,
+            metrics_manager,
+            Arc::new(auto_mode_config(false)),
+            carbide_instrument::Instrumentation::global(),
+        )
+        .expect("context should initialize");
 
         let endpoint = test_endpoint(Ipv4Addr::new(10, 0, 0, 2), "aa:bb:cc:dd:ee:02", None);
 
@@ -2299,9 +2339,13 @@ mod tests {
             MetricsManager::new("test_auto_no_sink").expect("metrics manager should initialize"),
         );
 
-        let mut ctx =
-            DiscoveryLoopContext::new(limiter, metrics_manager, Arc::new(auto_mode_config(false)))
-                .expect("context should initialize");
+        let mut ctx = DiscoveryLoopContext::new(
+            limiter,
+            metrics_manager,
+            Arc::new(auto_mode_config(false)),
+            carbide_instrument::Instrumentation::global(),
+        )
+        .expect("context should initialize");
 
         let endpoint = test_endpoint(Ipv4Addr::new(10, 0, 0, 2), "aa:bb:cc:dd:ee:02", None);
         spawn_collectors_for_endpoint(&mut ctx, &endpoint, None, "test_auto_no_sink")

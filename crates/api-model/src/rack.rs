@@ -354,10 +354,59 @@ pub fn derive_rack_aggregate_health(sources: &HealthReportSources) -> health_rep
     }
     let mut output = health_report::HealthReport::empty("rack-aggregate-health".to_string());
     for report in sources.merges.values() {
-        output.merge(report);
+        if report.source == health_report::HealthReport::RACK_FIRMWARE_SOURCE {
+            output.merge(&summarize_firmware_mismatches(report));
+        } else {
+            output.merge(report);
+        }
     }
     output.observed_at = Some(chrono::Utc::now());
     output
+}
+
+/// Summarizes component evidence without changing its persisted recovery state.
+/// The timestamp is the earliest outstanding mismatch; the target is the rack.
+fn summarize_firmware_mismatches(
+    report: &health_report::HealthReport,
+) -> health_report::HealthReport {
+    let probe_id = health_report::HealthProbeId::rack_firmware_mismatch();
+    let mut mismatches = report
+        .alerts
+        .iter()
+        .filter(|alert| alert.id == probe_id)
+        .collect::<Vec<_>>();
+    if mismatches.is_empty() {
+        return report.clone();
+    }
+    mismatches.sort_by(|first, second| first.target.cmp(&second.target));
+    let summary = health_report::HealthProbeAlert {
+        id: probe_id.clone(),
+        target: None,
+        in_alert_since: mismatches
+            .iter()
+            .filter_map(|alert| alert.in_alert_since)
+            .min(),
+        message: format!(
+            "Firmware version mismatch in {} rack component(s):\n{}",
+            mismatches.len(),
+            mismatches
+                .iter()
+                .map(|alert| alert.message.as_str())
+                .collect::<Vec<_>>()
+                .join("\n"),
+        ),
+        tenant_message: None,
+        classifications: mismatches
+            .iter()
+            .flat_map(|alert| alert.classifications.iter().cloned())
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
+            .collect(),
+    };
+    let mut report = report.clone();
+    report.alerts.retain(|alert| alert.id != probe_id);
+    report.alerts.push(summary);
+    report
 }
 
 /// SQL `NULL` maps to `None` for `controller_state_outcome`,
@@ -1055,6 +1104,70 @@ mod tests {
     use carbide_uuid::switch::{SwitchIdSource, SwitchType};
 
     use super::*;
+
+    #[test]
+    fn rack_firmware_summary_preserves_evidence_and_override_semantics() {
+        use health_report::{
+            HealthAlertClassification, HealthProbeAlert, HealthProbeId, HealthReport,
+        };
+
+        let started = Utc::now();
+        let mut report = HealthReport::empty(HealthReport::RACK_FIRMWARE_SOURCE.to_string());
+        report.alerts = [
+            ("switch/BMC", "switch BMC: 1 versus 2", started),
+            (
+                "compute/BIOS",
+                "compute BIOS: 3 versus 4",
+                started - chrono::Duration::seconds(1),
+            ),
+        ]
+        .into_iter()
+        .map(|(target, message, in_alert_since)| HealthProbeAlert {
+            id: HealthProbeId::rack_firmware_mismatch(),
+            target: Some(target.to_string()),
+            message: message.to_string(),
+            in_alert_since: Some(in_alert_since),
+            tenant_message: None,
+            classifications: vec![HealthAlertClassification::hardware()],
+        })
+        .collect();
+        let mut sources = HealthReportSources::default();
+        sources.merges.insert(report.source.clone(), report.clone());
+        let aggregate = derive_rack_aggregate_health(&sources);
+        let [alert] = aggregate.alerts.as_slice() else {
+            panic!("expected one rack firmware summary");
+        };
+        assert_eq!(alert.id, HealthProbeId::rack_firmware_mismatch());
+        assert_eq!(alert.target, None);
+        assert_eq!(
+            alert.in_alert_since,
+            Some(started - chrono::Duration::seconds(1))
+        );
+        assert_eq!(
+            alert.classifications,
+            vec![HealthAlertClassification::hardware()]
+        );
+        assert_eq!(
+            alert.message,
+            "Firmware version mismatch in 2 rack component(s):\ncompute BIOS: 3 versus 4\nswitch BMC: 1 versus 2"
+        );
+        assert_eq!(sources.merges[HealthReport::RACK_FIRMWARE_SOURCE], report);
+
+        let mut external_report = report;
+        external_report.source = "operator".to_string();
+        let mut external_sources = HealthReportSources::default();
+        external_sources
+            .merges
+            .insert(external_report.source.clone(), external_report.clone());
+        let mut expected_alerts = external_report.alerts.clone();
+        expected_alerts.sort_by(|first, second| first.target.cmp(&second.target));
+        assert_eq!(
+            derive_rack_aggregate_health(&external_sources).alerts,
+            expected_alerts
+        );
+        sources.replace = Some(external_report.clone());
+        assert_eq!(derive_rack_aggregate_health(&sources), external_report);
+    }
 
     #[test]
     fn power_sequence_preserves_legacy_states_and_submitted_targets() {

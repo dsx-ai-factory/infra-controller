@@ -120,7 +120,7 @@ func (t *Test) Run(rc run.RunCtx, w *writer.Writer) (result.Outcome, error) {
 	// The work ends at the wall deadline, on the monotonic clock: no admission, new send or stage count past it.
 	workEnd := rc.Clock.Instant().Add(rc.Deadline.Sub(rc.Clock.Now()))
 	window := time.Duration(t.cfg.Timeouts.ReadinessSeconds) * time.Second
-	deadline := rc.Clock.Instant().Add(window - min(window/10, 5*time.Second))
+	deadline := rc.Clock.Instant().Add(window)
 	if workEnd.Before(deadline) {
 		deadline = workEnd
 	}
@@ -132,7 +132,8 @@ func (t *Test) Run(rc run.RunCtx, w *writer.Writer) (result.Outcome, error) {
 	}
 	in := &ingest{t: t, rc: rc, inv: &rep.Inventory, stages: Stages(rep.Inventory.N), invs: countInvariants()}
 	in.d.Checks, in.d.Plan = rep.Checks, rep.Inventory.N
-	if !in.gate(deadline, workEnd, rep.Ready()) {
+	gateEnd := minTime(workEnd, rc.Clock.Instant().Add(window))
+	if !in.gate(gateEnd, workEnd, rep.Ready()) {
 		var reasons []string
 		for _, c := range in.d.Checks {
 			if !c.OK {
@@ -145,7 +146,7 @@ func (t *Test) Run(rc run.RunCtx, w *writer.Writer) (result.Outcome, error) {
 	in.d.GoAt = &jsonx.Time{Time: rc.Clock.Now()}
 	conc := t.s.Writes.Concurrency
 	if rc.DryRun {
-		in.res = Dispatch(rc.Ctx, w, nil, in.plan, in.recs, conc, rc.Deadline, true)
+		in.res = Dispatch(rc.Ctx, w, nil, in.plan, in.recs, conc, workEnd, true)
 		in.d.Sends, _ = sends(in.res)
 		raw, _ := in.d.raw()
 		n := 0
@@ -166,10 +167,10 @@ func (t *Test) Run(rc run.RunCtx, w *writer.Writer) (result.Outcome, error) {
 		defer func() { _ = c.Close() }()
 	}
 	obs := observe(rc.Ctx, t.probe, in.stages, in.invs, time.Duration(t.cfg.Probe.PollSeconds)*time.Second, workEnd, rc.ProbeReadEnd)
-	in.res = Dispatch(rc.Ctx, w, f, in.plan, in.recs, conc, rc.Deadline, false)
+	in.res = Dispatch(rc.Ctx, w, f, in.plan, in.recs, conc, workEnd, false)
 	timed, until := in.res.Err == nil, time.Time{} // a zero until stops the observer at once
 	if timed {
-		until = rc.Deadline
+		until = workEnd
 	}
 	seen := obs.stop(until)
 	in.seen = &seen
@@ -229,8 +230,9 @@ func (in *ingest) matSelector() []config.PodSelector {
 
 // podCapture is every serving pod the selectors match, keyed namespace/pod, and why a listing failed.
 type podCapture struct {
-	Pods map[string]podState
-	Fail string
+	Unready map[string]bool
+	Pods    map[string]podState
+	Fail    string
 }
 
 // podState is a pod's identity and restart count: a pod recreated under its name has a new UID.
@@ -239,17 +241,28 @@ type podState struct {
 	Restarts uint32
 }
 
-func capture(ctx context.Context, pods inventory.PodLister, sels []config.PodSelector) podCapture {
-	c, fails := podCapture{Pods: map[string]podState{}}, []string{}
+func capture(ctx context.Context, pods inventory.PodLister, sels []config.PodSelector, requireReady ...bool) podCapture {
+	c, fails := podCapture{Pods: map[string]podState{}, Unready: map[string]bool{}}, []string{}
 	for _, s := range sels {
 		list, err := pods.ListPods(ctx, s.Namespace, s.LabelSelector)
 		if err != nil {
 			fails = append(fails, fmt.Sprintf("listing %s in %s: %s", s.LabelSelector, s.Namespace, err))
 		}
+		serving := 0
 		for _, p := range list {
 			if readiness.Serving(p) {
+				serving++
+				if !p.Ready {
+					c.Unready[s.Namespace+"/"+p.Name] = true
+				}
+				if len(requireReady) > 0 && requireReady[0] && (!p.Ready || p.UID == "") {
+					fails = append(fails, "selected serving pod is not Ready")
+				}
 				c.Pods[s.Namespace+"/"+p.Name] = podState{p.UID, p.Restarts}
 			}
+		}
+		if len(requireReady) > 0 && requireReady[0] && serving == 0 {
+			fails = append(fails, "pod selector matches no serving pods")
 		}
 	}
 	c.Fail = strings.Join(fails, "; ")
@@ -592,4 +605,11 @@ func (in *ingest) worstSize() int {
 		return math.MaxInt
 	}
 	return len(b)
+}
+
+func minTime(a, b time.Time) time.Time {
+	if a.Before(b) {
+		return a
+	}
+	return b
 }

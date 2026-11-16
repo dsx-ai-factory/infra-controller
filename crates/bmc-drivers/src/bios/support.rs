@@ -141,6 +141,75 @@ impl<B: Bmc> RedfishBiosExt<B> for OpCx<'_, B> {
     }
 }
 
+/// Asserts that `driver`'s apply of `profile`, on a BIOS already holding
+/// `attributes`, `profile`, and the `idle` TPM attributes, stages exactly the
+/// `staged` TPM clear request, and that status still reads as applied: the
+/// request is one-shot and the BIOS resets it once performed.
+#[cfg(test)]
+pub(super) async fn assert_apply_requests_tpm_clear(
+    driver: &dyn bmc_platform::Bios<bmc_mock::test_support::TestBmc>,
+    attributes: &[BiosAttribute],
+    profile: Value,
+    idle: Value,
+    staged: Value,
+) {
+    use std::collections::BTreeMap;
+
+    use serde_json::json;
+
+    use crate::test_support::{Fixture, body, path};
+
+    const SYSTEM: &str = "/redfish/v1/Systems/1";
+    const BIOS: &str = "/redfish/v1/Systems/1/Bios";
+    const SETTINGS: &str = "/redfish/v1/Systems/1/Bios/SD";
+
+    let profile = BiosSettings {
+        attributes: serde_json::from_value(profile).expect("an object"),
+    };
+    let mut current = with_profile(
+        desired_settings(attributes, &BiosSettings::default()),
+        &profile,
+    )
+    .attributes;
+    current.extend(serde_json::from_value::<BTreeMap<String, Value>>(idle).expect("an object"));
+    let bmc = Fixture::new("Vendor", "", "1", "1")
+        .document(
+            SYSTEM,
+            json!({"@odata.id": SYSTEM, "Id": "1", "Name": "System", "Bios": {"@odata.id": BIOS}}),
+        )
+        .document(
+            BIOS,
+            json!({
+                "@odata.id": BIOS,
+                "@Redfish.Settings": {"SettingsObject": {"@odata.id": SETTINGS}},
+                "Id": "BIOS",
+                "Name": "BIOS",
+                "Attributes": current,
+            }),
+        )
+        .document(
+            SETTINGS,
+            json!({"@odata.id": SETTINGS, "Id": "SD", "Name": "BIOS Settings", "Attributes": {}}),
+        )
+        .build()
+        .await;
+    let cx = bmc.cx().await;
+
+    driver
+        .apply(&cx, &profile, None)
+        .await
+        .expect("apply stages the settings");
+    let writes = bmc.writes();
+    assert_eq!(writes.len(), 1, "{writes:?}");
+    assert_eq!(path(&writes[0]), SETTINGS);
+    assert_eq!(body(&writes[0]), json!({ "Attributes": staged }));
+    let status = driver
+        .status(&cx, &profile, None)
+        .await
+        .expect("status reads");
+    assert!(status.is_applied, "{status:?}");
+}
+
 #[cfg(test)]
 mod tests {
     use serde_json::json;

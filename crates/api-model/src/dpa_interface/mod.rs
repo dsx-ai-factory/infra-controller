@@ -259,6 +259,10 @@ pub struct DpaInterface {
     pub device_description: Option<String>,
 
     pub interface_type: DpaInterfaceType,
+
+    /// Declared logical interface name of the lane this interface stands for,
+    /// when the registering caller knew it.
+    pub interface_name: Option<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -269,6 +273,9 @@ pub struct NewDpaInterface {
     pub pci_name: String,
     pub device_description: Option<String>,
     pub interface_type: DpaInterfaceType,
+    /// Declared logical interface name of the lane this registration stands
+    /// for, when the registering caller knows it.
+    pub interface_name: Option<String>,
 }
 
 impl NewDpaInterface {
@@ -296,6 +303,8 @@ impl NewDpaInterface {
             pci_name,
             device_description,
             interface_type,
+            // Scout reports a device, not a declared lane.
+            interface_name: None,
         })
     }
 }
@@ -435,6 +444,8 @@ pub struct DpaInterfaceSnapshotPgJson {
     #[serde(default)]
     pub device_description: Option<String>,
     pub interface_type: DpaInterfaceType,
+    #[serde(default)]
+    pub interface_name: Option<String>,
 }
 
 impl TryFrom<DpaInterfaceSnapshotPgJson> for DpaInterface {
@@ -478,6 +489,7 @@ impl TryFrom<DpaInterfaceSnapshotPgJson> for DpaInterface {
             overlay_ip: value.overlay_ip,
             device_description: value.device_description,
             interface_type: value.interface_type,
+            interface_name: value.interface_name,
         })
     }
 }
@@ -897,6 +909,7 @@ mod tests {
             history: Vec::new(),
             device_description: None,
             interface_type: DpaInterfaceType::Svpc,
+            interface_name: None,
         }
     }
 

@@ -88,7 +88,15 @@ pub(crate) async fn grow(
                     &api.common_pools,
                 )
                 .await
-                .map_err(CarbideError::from)?;
+                .map_err(|source| {
+                    if source.is_lock_not_available() {
+                        CarbideError::Ipv6LoopbackBackfillContended {
+                            source: Box::new(source),
+                        }
+                    } else {
+                        source.into()
+                    }
+                })?;
             }
             Ok(Response::new(rpc::GrowResourcePoolResponse {}))
         }

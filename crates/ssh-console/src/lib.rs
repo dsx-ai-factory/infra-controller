@@ -66,6 +66,7 @@ pub async fn spawn(
         config.clone(),
         carbide_api_client.clone(),
         &metrics.meter,
+        metrics.instrumentation.clone(),
         cancel_token.clone(),
     );
     bmc_client_pool
@@ -87,6 +88,7 @@ pub async fn spawn(
     let api_server = api_server::spawn(
         config.clone(),
         bmc_client_pool.connection_store(),
+        metrics.instrumentation.clone(),
         cancel_token.clone(),
     )
     .await?;

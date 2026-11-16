@@ -17,7 +17,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use carbide_instrument::{Event, LabelValue, emit};
+use carbide_instrument::{Event, LabelValue};
 use sqlx::{PgPool, PgTransaction};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc, oneshot};
 use tokio::task::JoinSet;
@@ -157,6 +157,7 @@ static COMMAND_BUFFER_SIZE: usize = 100;
 /// This is returned by [`start`], and can be used to communicate to acquire [`WorkLock`] items for doing
 #[derive(Clone)]
 pub struct WorkLockManagerHandle {
+    instrumentation: carbide_instrument::Instrumentation,
     keepalive_interval: Duration,
     cmd_tx: mpsc::UnboundedSender<QueuedWorkLockManagerCommand>,
     command_slots: Arc<Semaphore>,
@@ -180,6 +181,7 @@ impl Default for KeepaliveConfig {
 }
 
 /// Start a work manager in the background. This should only be done once per carbide instance.
+/// Event metrics use `instrumentation`; retain its provider until the manager and locks stop.
 ///
 /// To actually interact with the global work manager, use [`WorkLockManagerHandle`] (returned by this
 /// function.)
@@ -198,6 +200,7 @@ pub async fn start(
     join_set: &mut JoinSet<()>,
     pool: PgPool,
     keepalive_config: KeepaliveConfig,
+    instrumentation: carbide_instrument::Instrumentation,
 ) -> DatabaseResult<WorkLockManagerHandle> {
     let pool = create_work_lock_pool(&pool).await?;
 
@@ -217,12 +220,13 @@ pub async fn start(
         // Note: don't inherit the callers span, since child spans can't outlive their parent.
         // This prevents a crash in tracing-subscriber.
         .spawn(
-            run_loop(pool, cmd_rx, keepalive_timeout)
+            run_loop(pool, cmd_rx, keepalive_timeout, instrumentation.clone())
                 .instrument(tracing::debug_span!(parent: None, "WorklockManager::run_loop")),
         )
         .expect("failed to start work manager");
 
     Ok(WorkLockManagerHandle {
+        instrumentation,
         cmd_tx,
         command_slots,
         keepalive_interval,
@@ -252,6 +256,7 @@ async fn run_loop(
     pool: PgPool,
     mut cmd_rx: mpsc::UnboundedReceiver<QueuedWorkLockManagerCommand>,
     keepalive_timeout: Duration,
+    instrumentation: carbide_instrument::Instrumentation,
 ) {
     while let Some(QueuedWorkLockManagerCommand {
         command,
@@ -294,7 +299,7 @@ async fn run_loop(
                 let result = release_lock(&pool, &work_key, worker_id)
                     .await
                     .inspect_err(|e| {
-                        emit(WorkLockFailed::Release {
+                        instrumentation.emit(WorkLockFailed::Release {
                             work_key: work_key.clone(),
                             worker_id,
                             failure: WorkLockFailure::from_release_error(e),
@@ -365,11 +370,13 @@ impl Drop for WorkLock {
                 reply_tx: None,
             })
             .inspect_err(|e| {
-                emit(WorkLockFailed::ReleaseDispatch {
-                    work_key: self.work_key.clone(),
-                    worker_id: self.worker_id,
-                    error: e.to_string(),
-                });
+                self.manager
+                    .instrumentation
+                    .emit(WorkLockFailed::ReleaseDispatch {
+                        work_key: self.work_key.clone(),
+                        worker_id: self.worker_id,
+                        error: e.to_string(),
+                    });
             })
             .ok();
     }
@@ -407,12 +414,12 @@ impl WorkLock {
                                             keepalive_stop_rx.try_recv(),
                                             Err(oneshot::error::TryRecvError::Empty)
                                         ) {
-                                            emit(WorkLockFailed::LockLost { work_key, worker_id, error: msg });
+                                            manager.instrumentation.emit(WorkLockFailed::LockLost { work_key, worker_id, error: msg });
                                         }
                                         return;
                                     }
                                     Err(e) => {
-                                        emit(WorkLockFailed::Keepalive { failure: e.failure(), work_key: work_key.clone(), worker_id, error: e.to_string() });
+                                        manager.instrumentation.emit(WorkLockFailed::Keepalive { failure: e.failure(), work_key: work_key.clone(), worker_id, error: e.to_string() });
                                     }
                                 }
                             }
@@ -459,11 +466,13 @@ impl WorkLock {
                 reply_tx: Some(reply_tx),
             })
             .inspect_err(|error| {
-                emit(WorkLockFailed::ReleaseDispatch {
-                    work_key: self.work_key.clone(),
-                    worker_id: self.worker_id,
-                    error: error.to_string(),
-                });
+                self.manager
+                    .instrumentation
+                    .emit(WorkLockFailed::ReleaseDispatch {
+                        work_key: self.work_key.clone(),
+                        worker_id: self.worker_id,
+                        error: error.to_string(),
+                    });
             })
             .map_err(|error| ReleaseLockError::WorkLockManagerSend(error.to_string()))?;
 
@@ -818,6 +827,7 @@ mod tests {
     async fn command_dispatch_errors_distinguish_capacity_and_shutdown() {
         let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
         let manager = WorkLockManagerHandle {
+            instrumentation: carbide_instrument::Instrumentation::global(),
             keepalive_interval: Duration::from_secs(60),
             cmd_tx,
             command_slots: Arc::new(Semaphore::new(COMMAND_BUFFER_SIZE)),
@@ -860,6 +870,7 @@ mod tests {
         let metrics = MetricsCapture::start();
         let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel();
         let manager = WorkLockManagerHandle {
+            instrumentation: carbide_instrument::Instrumentation::global(),
             keepalive_interval: Duration::from_secs(60),
             cmd_tx,
             command_slots: Arc::new(Semaphore::new(COMMAND_BUFFER_SIZE)),
@@ -916,9 +927,14 @@ mod tests {
     async fn test_exclusivity(pool: PgPool) {
         let mut join_set = JoinSet::new();
         {
-            let manager = start(&mut join_set, pool, Default::default())
-                .await
-                .unwrap();
+            let manager = start(
+                &mut join_set,
+                pool,
+                Default::default(),
+                carbide_instrument::Instrumentation::global(),
+            )
+            .await
+            .unwrap();
 
             let lock_1 = manager.try_acquire_lock("work_key_1".into()).await.unwrap();
             assert!(
@@ -959,9 +975,14 @@ mod tests {
     #[crate::sqlx_test]
     async fn explicit_release_waits_for_database_deletion(pool: PgPool) {
         let mut join_set = JoinSet::new();
-        let manager = start(&mut join_set, pool.clone(), Default::default())
-            .await
-            .expect("start work lock manager");
+        let manager = start(
+            &mut join_set,
+            pool.clone(),
+            Default::default(),
+            carbide_instrument::Instrumentation::global(),
+        )
+        .await
+        .expect("start work lock manager");
         let work_key = "acknowledged-release".to_string();
         let work_lock = manager
             .try_acquire_lock(work_key.clone())
@@ -998,6 +1019,7 @@ mod tests {
 
         let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
         let manager = WorkLockManagerHandle {
+            instrumentation: carbide_instrument::Instrumentation::global(),
             keepalive_interval: keepalive_config.interval,
             cmd_tx,
             command_slots: Arc::new(Semaphore::new(COMMAND_BUFFER_SIZE)),
@@ -1027,7 +1049,12 @@ mod tests {
             .unwrap();
 
         let mut join_set = JoinSet::new();
-        join_set.spawn(run_loop(pool, cmd_rx, keepalive_config.timeout));
+        join_set.spawn(run_loop(
+            pool,
+            cmd_rx,
+            keepalive_config.timeout,
+            carbide_instrument::Instrumentation::global(),
+        ));
 
         keepalive_reply_rx
             .await
@@ -1057,9 +1084,14 @@ mod tests {
         // failure, so isolate process-global metric deltas through teardown.
         let _metrics_guard = MetricsCapture::start();
         let mut join_set = JoinSet::new();
-        let manager = start(&mut join_set, pool, Default::default())
-            .await
-            .unwrap();
+        let manager = start(
+            &mut join_set,
+            pool,
+            Default::default(),
+            carbide_instrument::Instrumentation::global(),
+        )
+        .await
+        .unwrap();
         let lock = manager
             .try_acquire_lock("contended".to_string())
             .await
@@ -1096,6 +1128,7 @@ mod tests {
                 interval: Duration::from_millis(100),
                 timeout: Duration::from_millis(500),
             },
+            carbide_instrument::Instrumentation::global(),
         )
         .await
         .unwrap();
@@ -1182,7 +1215,12 @@ WHERE datname = $1 AND pid <> pg_backend_pid()"#,
         let mut join_set = JoinSet::new();
         let manager = tokio::time::timeout(
             Duration::from_secs(3),
-            start(&mut join_set, main_pool, Default::default()),
+            start(
+                &mut join_set,
+                main_pool,
+                Default::default(),
+                carbide_instrument::Instrumentation::global(),
+            ),
         )
         .await
         .expect("WorkLockManager waited for the exhausted main pool")
@@ -1206,6 +1244,7 @@ WHERE datname = $1 AND pid <> pg_backend_pid()"#,
                 interval: Duration::from_millis(500),
                 timeout: Duration::from_millis(100),
             },
+            carbide_instrument::Instrumentation::global(),
         )
         .await
         .unwrap();

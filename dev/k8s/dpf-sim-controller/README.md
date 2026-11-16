@@ -170,6 +170,11 @@ make deploy IMG=<registry>/dpf-sim-controller:<tag> \
 # DPUDevice/DPUNode CRs, the simulator creates DPUs and walks them to Ready.
 ```
 
+The deploy applies the pod resources and reconcile worker count in
+`config/manager/manager.yaml`, which are sized for small fleets. For fleets of
+thousands of DPUs, refer to
+[Sizing for large simulated fleets](#sizing-for-large-simulated-fleets).
+
 > **Required nico-api setting for ANY machine-a-tron simulation** (#3561, cores
 > after `v2.1.0-pr-294`): `DiscoverMachine` resolves callers by TCP source IP,
 > and every simulated machine shares the MAT pod's IP, so all agent discovery
@@ -218,6 +223,46 @@ kubectl annotate dpunode node-02-00-00-00-00-01 -n dpf-operator-system \
 > native amd64 (CI); on an Apple-Silicon laptop, cross-compile first
 > (`GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -o bin/dpf-sim-controller ./cmd`)
 > and build a copy-only image, or build on an amd64 host.
+
+## Sizing for large simulated fleets
+
+`make deploy` takes the pod resources and the number of parallel reconcile
+workers as variables, and `make run` takes the worker count. The defaults equal
+`config/manager/manager.yaml`, so a deploy without them applies the checked-in
+manifest unchanged. Pass bare quantities. The render quotes them. `make render`
+prints the RBAC and Deployment manifests exactly as `make deploy` applies them,
+so the effect of an override can be diffed before it reaches the cluster.
+
+| Variable | Default | Sets |
+|---|---|---|
+| `CPU_REQUEST` | `500m` | `resources.requests.cpu` |
+| `MEM_REQUEST` | `1Gi` | `resources.requests.memory` |
+| `CPU_LIMIT` | `2` | `resources.limits.cpu` |
+| `MEM_LIMIT` | `4Gi` | `resources.limits.memory` |
+| `RECONCILE_CONCURRENCY` | `16` | `--reconcile-concurrency`, the parallel reconcile workers, at least 1 |
+
+The simulator's work grows with the DPU count. On a fleet of 20,016 simulated
+hosts with 40,032 DPUs it ran at its CPU limit from fleet-up until NICo had
+created the DPF CRs for every DPU, both at the default 2 CPU and at 8 CPU (7.3
+to 7.9 cores), with the default 16 workers. At 2 CPU, memory peaked at 2.2 GiB
+and the count of ready machines ran up to 22 percent behind the 8 CPU run while
+the DPF CRs were being created, then the ready ramp matched once all CRs
+existed. At 8 CPU the last of the 40,032 DPF CRs existed 26 minutes earlier.
+The CPU limit sets the pace of the DPU phase, and 8 CPU alone did not remove
+the bottleneck.
+
+For a fleet of that size start from the values below. The default pairs 16
+workers with 2 CPU. Keep that ratio as a starting point and raise
+`RECONCILE_CONCURRENCY` together with `CPU_LIMIT` while
+`kubectl top pod -n dpf-operator-system` shows the pod at its CPU limit through
+the DPU phase. The requests only have to fit the node next to the other
+simulator pods.
+
+```bash
+make deploy IMG=<registry>/dpf-sim-controller:<tag> \
+            CPU_REQUEST=1 MEM_REQUEST=2Gi CPU_LIMIT=8 MEM_LIMIT=8Gi \
+            RECONCILE_CONCURRENCY=64
+```
 
 ## Installing the managed BFB (optional)
 

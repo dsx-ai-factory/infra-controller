@@ -408,6 +408,7 @@ pub(crate) async fn admin_network(
     snapshot: &ManagedHostStateSnapshot,
     dpu_machine_id: &DpuMachineId,
     options: AdminNetworkOptions<'_>,
+    instrumentation: &carbide_instrument::Instrumentation,
 ) -> Result<(rpc::FlatInterfaceConfig, MachineInterfaceId), tonic::Status> {
     let AdminNetworkOptions {
         fnn_enabled: fnn_enabled_on_admin,
@@ -617,6 +618,7 @@ pub(crate) async fn admin_network(
                                     txn,
                                     dpu_machine_id,
                                     &vpc.id,
+                                    instrumentation,
                                 )
                                 .await?,
                             )

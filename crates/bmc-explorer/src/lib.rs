@@ -62,6 +62,7 @@ use bmc_platform::ServiceRootIdentity;
 use chassis::ExploredChassisCollection;
 use component_integrity::ExploredComponentIntegrity;
 use computer_system::ExploredComputerSystem;
+pub use computer_system::model_power_state;
 use drives::ExploredDrives;
 pub use error::Error;
 use inventories::ExploredInventories;
@@ -188,6 +189,54 @@ fn build_chassis_explore_config<B: Bmc>(root: &ServiceRoot<B>) -> chassis::Confi
     }
 }
 
+/// Index of the host system among a BMC's systems. BMCs that list a host
+/// beside baseboards report a BIOS only on the host, so the first system after
+/// the first that reports one wins, otherwise the first. `None` when the BMC
+/// lists no systems.
+pub fn primary_system_index<B: Bmc>(
+    systems: &[nv_redfish::computer_system::ComputerSystem<B>],
+) -> Option<usize> {
+    if systems.is_empty() {
+        return None;
+    }
+    Some(
+        systems
+            .iter()
+            .enumerate()
+            .skip(1)
+            .find(|(_, system)| system.raw().bios.is_some())
+            .map_or(0, |(index, _)| index),
+    )
+}
+
+/// Index of the manager for `system` among a BMC's managers: the one whose
+/// `ManagerForServers` links `system`, otherwise the first, as for BMCs that
+/// don't populate the link or list no systems. `None` when the BMC lists no
+/// managers.
+pub fn primary_manager_index<B: Bmc>(
+    managers: &[nv_redfish::manager::Manager<B>],
+    system: Option<&nv_redfish::computer_system::ComputerSystem<B>>,
+) -> Option<usize> {
+    if managers.is_empty() {
+        return None;
+    }
+    let linked = system.and_then(|system| {
+        managers.iter().position(|manager| {
+            manager
+                .raw()
+                .links
+                .as_ref()
+                .and_then(|links| links.manager_for_servers.as_ref())
+                .is_some_and(|servers| {
+                    servers
+                        .iter()
+                        .any(|server| *server.id() == system.raw().odata_id)
+                })
+        })
+    });
+    Some(linked.unwrap_or(0))
+}
+
 /// Collects required resources, then converts them into an exploration report.
 #[tracing::instrument(name = "generate_exploration_report", skip_all)]
 pub async fn nv_generate_exploration_report<B: Bmc>(
@@ -234,16 +283,8 @@ pub async fn nv_generate_exploration_report<B: Bmc>(
         .await
         .map_err(Error::nv_redfish("systems members"))?;
 
-    let primary_index = systems
-        .iter()
-        .enumerate()
-        .skip(1)
-        .find(|(_, system)| system.raw().bios.is_some())
-        .map(|(index, _)| index)
-        .unwrap_or(0);
-    if systems.is_empty() {
-        return Err(Error::bmc_not_provided("at least one computer system")());
-    }
+    let primary_index = primary_system_index(&systems)
+        .ok_or_else(Error::bmc_not_provided("at least one computer system"))?;
     let mut systems = systems;
     let system = systems.swap_remove(primary_index);
     let primary_system_id = system.raw().id.clone();
@@ -285,25 +326,9 @@ pub async fn nv_generate_exploration_report<B: Bmc>(
         .await
         .map_err(Error::nv_redfish("managers members"))?;
 
-    // Prefer the manager whose ManagerForServers links the chosen system; fall
-    // back to the first manager for BMCs that don't populate the link.
-    let manager = match managers.iter().position(|m| {
-        m.raw()
-            .links
-            .as_ref()
-            .and_then(|l| l.manager_for_servers.as_ref())
-            .is_some_and(|servers| {
-                servers
-                    .iter()
-                    .any(|s| *s.id() == explored_system.system.raw().odata_id)
-            })
-    }) {
-        Some(i) => managers.swap_remove(i),
-        None => managers
-            .into_iter()
-            .next()
-            .ok_or_else(Error::bmc_not_provided("at least one manager"))?,
-    };
+    let manager_index = primary_manager_index(&managers, Some(&explored_system.system))
+        .ok_or_else(Error::bmc_not_provided("at least one manager"))?;
+    let manager = managers.swap_remove(manager_index);
 
     let hw_type = hw_type(&root, explored_system, &explored_chassis);
     let explored_drives = if config.explore_drive_firmware {
@@ -343,6 +368,7 @@ pub async fn nv_generate_exploration_report<B: Bmc>(
             },
             hw::HwType::LenovoAmi => manager::Config {
                 need_oem_ami_config_bmc: true,
+                need_host_interfaces: true,
                 ..Default::default()
             },
             hw::HwType::LenovoGb300 => manager::Config {
@@ -485,7 +511,6 @@ pub async fn nv_generate_exploration_report<B: Bmc>(
         machine_setup_status: Some(machine_setup_status),
         secure_boot_status,
         lockdown_status,
-        remediation_error: None,
         ..Default::default()
     })
 }
@@ -566,7 +591,6 @@ async fn build_powershelf_report<B: Bmc>(
         }),
         secure_boot_status: None,
         lockdown_status: None,
-        remediation_error: None,
         ..Default::default()
     })
 }
@@ -812,51 +836,13 @@ fn lockdown_status<B: Bmc>(
                 .as_ref()
                 .ok_or_else(Error::bmc_not_provided("AMI Manager ConfigBMC"))?;
             let attrs = config_bmc.raw();
-            let descr = [
-                (
-                    "LockoutHostControl",
-                    attrs
-                        .lockout_host_control
-                        .map(|v| v == LockoutHostControlState::Enable),
-                ),
-                (
-                    "LockoutBiosVariableWriteMode",
-                    attrs
-                        .lockout_bios_variable_write_mode
-                        .map(|v| v == LockoutBiosVariableWriteMode::Enable),
-                ),
-                (
-                    "LockdownBiosSettingsChange",
-                    attrs
-                        .lockdown_bios_settings_change
-                        .map(|v| v == LockdownBiosSettingsChangeState::Enable),
-                ),
-                (
-                    "LockdownBiosUpgradeDowngrade",
-                    attrs
-                        .lockdown_bios_upgrade_downgrade
-                        .map(|v| v == LockdownBiosUpgradeDowngradeState::Enable),
-                ),
-            ];
-            let all_enabled = descr.iter().filter_map(|v| v.1).all(identity);
-            let all_disabled = descr.iter().filter_map(|v| v.1).all(|v| !v);
-            let status = if all_enabled {
-                InternalLockdownStatus::Enabled
-            } else if all_disabled {
-                InternalLockdownStatus::Disabled
-            } else {
-                InternalLockdownStatus::Partial
-            };
-            let message = descr
-                .iter()
-                .filter_map(|(name, enabled)| {
-                    enabled.map(|enabled| {
-                        format!("{name}={}", if enabled { "Enable" } else { "Disable" })
-                    })
-                })
-                .join(", ");
-
-            Ok(Some(LockdownStatus { status, message }))
+            let interface = explored_manager
+                .host_interfaces
+                .as_ref()
+                .ok_or_else(Error::bmc_not_provided("host interfaces"))?
+                .first()
+                .map(|interface| interface.interface_enabled().unwrap_or(true));
+            Ok(Some(lenovo_ami_lockdown_status(&attrs, interface)))
         }
 
         hw::HwType::Lenovo => {
@@ -1007,6 +993,57 @@ fn lockdown_status<B: Bmc>(
 
         _ => Ok(None),
     }
+}
+
+fn lenovo_ami_lockdown_status(
+    attrs: &nv_redfish::oem::ami::schema::ami_manager::ConfigBmc,
+    interface: Option<bool>,
+) -> LockdownStatus {
+    let descr = [
+        (
+            "LockoutHostControl",
+            attrs
+                .lockout_host_control
+                .map(|v| v == LockoutHostControlState::Enable),
+        ),
+        (
+            "LockoutBiosVariableWriteMode",
+            attrs
+                .lockout_bios_variable_write_mode
+                .map(|v| v == LockoutBiosVariableWriteMode::Enable),
+        ),
+        (
+            "LockdownBiosSettingsChange",
+            attrs
+                .lockdown_bios_settings_change
+                .map(|v| v == LockdownBiosSettingsChangeState::Enable),
+        ),
+        (
+            "LockdownBiosUpgradeDowngrade",
+            attrs
+                .lockdown_bios_upgrade_downgrade
+                .map(|v| v == LockdownBiosUpgradeDowngradeState::Enable),
+        ),
+    ];
+    let all_enabled =
+        descr.iter().all(|(_, value)| *value == Some(true)) && interface == Some(false);
+    let all_disabled =
+        descr.iter().all(|(_, value)| *value == Some(false)) && interface == Some(true);
+    let status = if all_enabled {
+        InternalLockdownStatus::Enabled
+    } else if all_disabled {
+        InternalLockdownStatus::Disabled
+    } else {
+        InternalLockdownStatus::Partial
+    };
+    let message = descr
+        .iter()
+        .filter_map(|(name, enabled)| {
+            enabled.map(|enabled| format!("{name}={}", if enabled { "Enable" } else { "Disable" }))
+        })
+        .join(", ");
+    let message = format!("{message}, host_interface={interface:?}");
+    LockdownStatus { status, message }
 }
 
 /// WARNING: KCS is not represented: it is neither configurable nor readable over
@@ -1526,9 +1563,36 @@ mod tests {
     use super::hw::HwType;
     use super::{
         InternalLockdownStatus, Product, giga_computing_ami_lockdown_status, is_bf4_product,
-        should_fetch_bf4_chassis_except_irot_nic, should_fetch_supplemental_network_adapter_ports,
-        should_use_network_adapter_port_fallback,
+        lenovo_ami_lockdown_status, should_fetch_bf4_chassis_except_irot_nic,
+        should_fetch_supplemental_network_adapter_ports, should_use_network_adapter_port_fallback,
     };
+
+    #[test]
+    fn lenovo_ami_lockdown_requires_config_and_host_interface_to_agree() {
+        for (value, interface, expected) in [
+            ("Enable", Some(false), InternalLockdownStatus::Enabled),
+            ("Disable", Some(true), InternalLockdownStatus::Disabled),
+            ("Enable", Some(true), InternalLockdownStatus::Partial),
+            ("Disable", Some(false), InternalLockdownStatus::Partial),
+            ("Disable", None, InternalLockdownStatus::Partial),
+        ] {
+            let attrs = serde_json::from_value(serde_json::json!({
+                "@odata.id": "/redfish/v1/Managers/Self/Oem/ConfigBMC",
+                "LockoutHostControl": value,
+                "LockoutBiosVariableWriteMode": value,
+                "LockdownBiosSettingsChange": value,
+                "LockdownBiosUpgradeDowngrade": value,
+            }))
+            .unwrap();
+            let status = lenovo_ami_lockdown_status(&attrs, interface);
+            assert_eq!(status.status, expected, "{value}, {interface:?}");
+            assert!(
+                status
+                    .message
+                    .contains(&format!("host_interface={interface:?}"))
+            );
+        }
+    }
 
     /// Build a host interface schema from the JSON a Giga Computing BMC returns
     /// for `Managers/Self/HostInterfaces/Self`, keeping only the lockdown fields.

@@ -63,7 +63,7 @@ impl NmxCTlsConnectionProvider {
     fn next_endpoint_url(&self) -> &str {
         let connection_index = self
             .last_connection_index
-            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |current_index| {
+            .try_update(Ordering::SeqCst, Ordering::SeqCst, |current_index| {
                 Some((current_index + 1) % self.urls.len())
             })
             .unwrap(); // SAFETY: we always return Some(), so this will always succeed.

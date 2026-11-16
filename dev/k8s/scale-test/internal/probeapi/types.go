@@ -7,7 +7,11 @@
 // vectors keep these types in step. jsonx applies the serde rules.
 package probeapi
 
-import "github.com/NVIDIA/infra-controller/dev/k8s/scale-test/internal/jsonx"
+import (
+	"encoding/json"
+
+	"github.com/NVIDIA/infra-controller/dev/k8s/scale-test/internal/jsonx"
+)
 
 // ContractVersion is the probe's metric contract version this runner reads
 // (metrics::CONTRACT_VERSION in the Rust crate). The probe serves it as
@@ -434,6 +438,12 @@ func (b *ErrorBody) UnmarshalJSON(data []byte) error      { return jsonx.Decode(
 
 // RestMachineFields preserves REST identity, labels and eligibility evidence.
 // REST readiness alone does not prove NICo allocatability.
+type MachineCapability struct {
+	Type  string  `json:"type" yaml:"type"`
+	Name  string  `json:"name" yaml:"name"`
+	Count *uint64 `json:"count" yaml:"count"`
+}
+
 type RestMachineFields struct {
 	ControllerID     string            `json:"controllerId"`
 	InstanceType     *string           `json:"instanceType"`
@@ -441,4 +451,18 @@ type RestMachineFields struct {
 	TenantID         *string           `json:"tenantId"`
 	Labels           map[string]string `json:"labels"`
 	IsUsableByTenant bool              `json:"isUsableByTenant"`
+
+	MachineCapabilities []MachineCapability `json:"machineCapabilities,omitempty"`
+}
+
+// FixtureResponse is a complete, uncached read of one configured resource kind.
+type FixtureResponse struct {
+	Kind                string            `json:"kind"`
+	SiteID              string            `json:"siteId"`
+	Org                 string            `json:"org"`
+	ProcessStartSeconds float64           `json:"processStartSeconds"`
+	CallsTotal          uint64            `json:"callsTotal"`
+	ReadStart           jsonx.Time        `json:"readStart"`
+	ReadAt              jsonx.Time        `json:"readAt"`
+	Objects             []json.RawMessage `json:"objects"`
 }

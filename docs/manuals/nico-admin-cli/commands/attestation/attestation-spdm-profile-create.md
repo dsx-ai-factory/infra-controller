@@ -57,13 +57,13 @@ Sort output by specified field
 
 `-h, --help`
 
-Print help (see a summary with -h)
+Print help (see a summary with '-h')
 
 `<HARDWARE_CLASS>`
 
 Hardware class the profile is keyed to. One of the classes exploration
-records, or any for the fallback. Run attestation spdm coverage to see
-the classes this site has
+records, or 'any' for the fallback. Run 'attestation spdm coverage' to
+see the classes this site has
 
 ## Examples
 

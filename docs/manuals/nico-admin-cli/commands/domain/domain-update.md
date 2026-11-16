@@ -22,7 +22,7 @@ Update domain default TTL
 
 `--default-ttl <SECONDS>`
 
-Default TTL for the zones records, 30 to 86400 seconds. Once set it
+Default TTL for the zone's records, 30 to 86400 seconds. Once set it
 cannot be cleared back to the site default
 
 `--extended`
@@ -45,7 +45,7 @@ Sort output by specified field
 
 `-h, --help`
 
-Print help (see a summary with -h)
+Print help (see a summary with '-h')
 
 `<DomainId>`
 

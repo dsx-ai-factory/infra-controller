@@ -1,0 +1,73 @@
+{% let attested = attestation_status == "Attested" %}
+<section class="entity-summary">
+	<div class="entity-summary-status">
+		<div class="entity-summary-stat">
+			<span class="entity-summary-label">Outcome</span>
+			<span class="bubble {% if attested %}success{% else %}error{% endif %}">{{ attestation_status }}</span>
+		</div>
+		<div class="entity-summary-stat">
+			<span class="entity-summary-label">Journal</span>
+			<span>{{ journal_time }}</span>
+		</div>
+	</div>
+	<div class="entity-summary-groups">
+		<div class="entity-summary-group">
+			<h4>Profile</h4>
+			<dl>
+				<dt>Name</dt><dd>{{ profile_name }}</dd>
+				<dt>ID</dt><dd><code class="id-chip" title="{{ profile_id }}">{{ profile_id }}</code></dd>
+				{% for profile_attr in profile_attributes %}
+				<dt>{{ profile_attr.0 }}</dt><dd>{{ profile_attr.1 }}</dd>
+				{% endfor %}
+			</dl>
+		</div>
+		<div class="entity-summary-group">
+			<h4>{% if attested %}Bundle{% else %}Partially Matching Bundle{% endif %}</h4>
+			<dl>
+				<dt>ID</dt><dd><code class="id-chip" title="{{ bundle_id }}">{{ bundle_id }}</code></dd>
+				<dt>Status</dt><dd>{{ bundle_status }}</dd>
+				<dt>Created</dt><dd>{{ bundle_ts }}</dd>
+			</dl>
+		</div>
+		<div class="entity-summary-group">
+			<h4>Report</h4>
+			<dl>
+				<dt>ID</dt><dd><code class="id-chip" title="{{ report_id }}">{{ report_id }}</code></dd>
+				<dt>Created</dt><dd>{{ report_ts }}</dd>
+				<dt>Journal</dt><dd><code class="id-chip" title="{{ journal_id }}">{{ journal_id }}</code></dd>
+			</dl>
+		</div>
+	</div>
+</section>
+
+<h3>PCR Values</h3>
+<form class="entity-summary" method="POST" action="/admin/machine/{{ machine_id }}/attestation-submit-report-promotion">
+		<div class="data-table-scroll">
+		<table class="data-table pcr-table">
+			<thead>
+				<tr>
+					<th>PCR</th>
+					<th>Description</th>
+					<th>Bundle</th>
+					<th>Report</th>
+					<th>Promote</th>
+				</tr>
+			</thead>
+			<tbody>
+			{% for pcr_row in attestation_table %}
+				<tr>
+					<td>PCR{{ pcr_row.pcr_slot }}</td>
+					<td>{{ pcr_row.description }}</td>
+					<td><code class="{% if pcr_row.mismatched() %}text-error{% endif %}">{{ pcr_row.bundle_value }}</code></td>
+					<td><code class="{% if pcr_row.mismatched() %}text-error{% endif %}">{{ pcr_row.report_value }}</code></td>
+					<td><input type="checkbox" name="PCR{{ pcr_row.pcr_slot }}" aria-label="Promote PCR{{ pcr_row.pcr_slot }}"/></td>
+				</tr>
+			{% endfor %}
+			</tbody>
+		</table>
+		</div>
+		<div class="entity-summary-footer">
+			<input type="hidden" name="reportname" value="{{ report_id }}"/>
+			<input type="submit" value="Promote Report"/>
+		</div>
+</form>

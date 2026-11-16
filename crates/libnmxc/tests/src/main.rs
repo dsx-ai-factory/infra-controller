@@ -11,7 +11,9 @@ use std::process::ExitCode;
 
 use clap::Parser;
 #[allow(unused_imports)]
-use libnmxc::{Endpoint, NMX_C_GATEWAY_ID, Nmxc, NmxcClientPool, NmxcError, NmxcTlsConfig};
+use libnmxc::{
+    Endpoint, NMX_C_GATEWAY_ID, Nmxc, NmxcClientIdentity, NmxcClientPool, NmxcError, NmxcTlsConfig,
+};
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tracing_subscriber::EnvFilter;
 
@@ -99,10 +101,18 @@ async fn run(cli: Cli) -> Result<(), NmxcError> {
         || cli.client_key.is_some()
         || cli.authority.is_some()
     {
+        // main() rejects a certificate without its key and a key without its certificate.
+        let client_identity =
+            cli.client_cert
+                .clone()
+                .zip(cli.client_key.clone())
+                .map(|(cert_path, key_path)| NmxcClientIdentity {
+                    cert_path,
+                    key_path,
+                });
         builder = builder.tls(NmxcTlsConfig {
             ca_cert_path: cli.ca_cert.clone(),
-            client_cert_path: cli.client_cert.clone(),
-            client_key_path: cli.client_key.clone(),
+            client_identity,
             authority: cli.authority.clone(),
         });
     }

@@ -96,7 +96,6 @@ lazy_static = { workspace = true }
 libc = { workspace = true }
 mac_address = { workspace = true }
 mockall = { workspace = true }
-netlink-packet-route = { workspace = true }
 nix = { features = ["fs", "user"], workspace = true }
 nonzero_ext = { workspace = true }
 opentelemetry = { workspace = true }
@@ -149,8 +148,10 @@ tonic-prost-build = { workspace = true }
 [dev-dependencies]
 carbide-instrument = { path = "../instrument", features = ["test-support"] }
 carbide-test-support = { path = "../test-support" }
-rcgen = { workspace = true }
+
+netlink-packet-route = { workspace = true }
 prost = { workspace = true }
+rcgen = { workspace = true }
 rustls-pki-types = { workspace = true }
 tokio = { workspace = true, features = ["test-util"] }
 

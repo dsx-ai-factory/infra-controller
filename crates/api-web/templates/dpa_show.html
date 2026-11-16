@@ -8,23 +8,28 @@
 
 <table class="sortable overview">
 	<thead>
-		<th>Id</th>
-		<th>Machine Id</th>
-		<th>MacAddr</th>
-		<th>State</th>
-		<th>Created</th>
+		<tr>
+			<th>DPA</th>
+			<th>Machine</th>
+			<th>State</th>
+			<th>Created</th>
+		</tr>
 	</thead>
 	<tbody>
 		{% for dpa in dpas %}
 		<tr>
-			<td><a href="/admin/dpa/{{ dpa.id|option_fmt }}">{{ dpa.id|option_fmt }}</a></td>
-			<td>{{ dpa.machine_id|option_fmt }}</td>
-			<td>{{ dpa.mac_addr }}</td>
-			<td>{{ dpa.controller_state }}</td>
-			<td>{{ dpa.created|option_fmt }}</td>
+			<td>
+				<a href="/admin/dpa/{{ dpa.id|option_fmt }}">{{ dpa.id|option_fmt }}</a>
+				{% if !dpa.mac_addr.is_empty() %}<code class="cell-chip">{{ dpa.mac_addr }}</code>{% endif %}
+			</td>
+			<td>{% if let Some(machine_id) = dpa.machine_id %}{{ machine_id|machine_id_link|safe }}{% else %}<span class="text-muted">None</span>{% endif %}</td>
+			{% let state = dpa.controller_state|state_with_substate_label %}
+			<td class="state-cell"><span class="bubble" title="{{ state }}">{{ state|slash_breaks|safe }}</span></td>
+			<td class="cell-nowrap">{{ dpa.created|option_fmt }}</td>
 		</tr>
+		{% else %}
+		<tr><td colspan="4">No DPAs.</td></tr>
 		{% endfor %}
 	</tbody>
 </table>
-
 {% endblock %}

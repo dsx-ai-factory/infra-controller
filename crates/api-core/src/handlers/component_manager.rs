@@ -17,6 +17,8 @@
 
 use std::collections::{HashMap, HashSet};
 use std::net::IpAddr;
+use std::sync::Arc;
+use std::time::Duration;
 
 use ::rpc::common::SystemPowerControl;
 use ::rpc::forge::{self as rpc};
@@ -41,7 +43,7 @@ use component_manager::power_shelf_manager::{
     PowerShelfEndpoint, PowerShelfManager, PowerShelfVendor,
 };
 use component_manager::types::{ComponentCredentials, FirmwareUpdateOptions};
-use db::{self, WithTransaction};
+use db::{self, DbSessionGuard, WithTransaction};
 use futures_util::FutureExt;
 use mac_address::MacAddress;
 use model::component_manager::{
@@ -60,20 +62,54 @@ use tonic::{Code, Request, Response, Status};
 
 use crate::CarbideError;
 use crate::api::{Api, log_request_data, log_request_data_redacted};
+use crate::auth::{AuthContext, NV_SWITCH_MANAGER_SERVICE_ID, POWER_SHELF_MANAGER_SERVICE_ID};
 use crate::handlers::firmware::load_desired_firmware_version_entries;
 
 #[cfg(test)]
 mod credentials_tests;
-#[allow(
-    dead_code,
-    reason = "Staged for the passive handler in https://github.com/dsx-ai-factory/infra-controller/issues/8633"
-)]
-mod firmware_details;
+pub(crate) mod firmware_details;
 pub(crate) mod power_details;
 
 const MACHINE_POWER_OVERRIDE_SOURCE: &str = "component_power_control";
 const MACHINE_POWER_OVERRIDE_MESSAGE: &str = "Compute-Tray component power control in progress";
 const UNTRACKED_SWITCH_FIRMWARE_ERROR: &str = "no firmware job tracked for this switch";
+
+// Cap each expected-inventory statement at five seconds, preserving a shorter
+// operator limit. This PostgreSQL cap applies after snapshot setup; it does not
+// bound connection acquisition, setup or the total helper duration.
+const EXPECTED_CREDENTIAL_STATEMENT_TIMEOUT: Duration = Duration::from_secs(5);
+
+// Cap each SQL statement of the device checks in `get_component_credentials`
+// at five seconds through PostgreSQL's `statement_timeout`, preserving a
+// shorter operator limit, like the expected-inventory read that can follow
+// them. The cap bounds what PostgreSQL keeps running for a caller that has
+// left; it does not bound connection acquisition or setup.
+const COMPONENT_MEMBERSHIP_STATEMENT_TIMEOUT: Duration = Duration::from_secs(5);
+
+// Bound the whole read of `get_component_credentials` at five seconds. The
+// statement caps above bound one SQL statement each, inside PostgreSQL. They
+// do not bound the wait for a pooled connection, which is 30 seconds by
+// default, snapshot setup, the credential store read, or the sum of the
+// steps. This deadline covers all of them, counted from the first wait. API
+// admission, when enabled, also ends a handler, at the caller's deadline or
+// at `max_execution_time`, which is 300 seconds by default, so this deadline
+// is the one that holds for a caller with a longer deadline or none. It
+// equals the statement caps: a statement still running at the deadline is
+// abandoned with its connection, and its cap then bounds what PostgreSQL
+// keeps running.
+const COMPONENT_CREDENTIAL_READ_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// The core compute-tray backend standalone hosts use. It authenticates with
+/// explicit per-endpoint credentials, which the proxied pool rejects by
+/// design, so it always dials BMCs directly through the credential-ops pool.
+pub(crate) fn standalone_compute_tray_manager(api: &Api) -> CoreComputeTrayManager {
+    let direct_pool: Arc<dyn carbide_redfish::libredfish::RedfishClientPool> =
+        api.bmc_credential_ops.clone();
+    CoreComputeTrayManager::new(direct_pool).with_driver_connector(
+        api.driver_connector.clone(),
+        api.database_connection.clone(),
+    )
+}
 
 fn parse_component_credentials(
     overrides: Option<rpc::ComponentCredentialOverrides>,
@@ -833,20 +869,16 @@ fn map_switch_maintenance_operation(
     }
 }
 
-fn map_machine_maintenance_operation(
-    action: PowerAction,
-) -> Result<MachineMaintenanceOperation, &'static str> {
+fn map_machine_maintenance_operation(action: PowerAction) -> MachineMaintenanceOperation {
     match action {
-        PowerAction::On => Ok(MachineMaintenanceOperation::PowerOn),
-        PowerAction::GracefulShutdown => {
-            Ok(MachineMaintenanceOperation::PowerOff { graceful: true })
-        }
-        PowerAction::ForceOff => Ok(MachineMaintenanceOperation::PowerOff { graceful: false }),
-        PowerAction::GracefulRestart => Ok(MachineMaintenanceOperation::Reset { graceful: true }),
-        PowerAction::ForceRestart => Ok(MachineMaintenanceOperation::Reset { graceful: false }),
-        PowerAction::AcPowercycle => {
-            Err("machine state controller does not support AC power cycle")
-        }
+        PowerAction::On => MachineMaintenanceOperation::PowerOn,
+        PowerAction::GracefulShutdown => MachineMaintenanceOperation::PowerOff { graceful: true },
+        PowerAction::ForceOff => MachineMaintenanceOperation::PowerOff { graceful: false },
+        PowerAction::GracefulRestart => MachineMaintenanceOperation::Reset { graceful: true },
+        PowerAction::ForceRestart => MachineMaintenanceOperation::Reset { graceful: false },
+        PowerAction::AcPowercycle => MachineMaintenanceOperation::AcPowercycle {
+            state: Default::default(),
+        },
     }
 }
 
@@ -920,15 +952,7 @@ async fn queue_machine_power_control_via_state_controller(
     machine_ids: &[HostMachineId],
     action: PowerAction,
 ) -> Result<Vec<rpc::ComponentResult>, Status> {
-    let operation = match map_machine_maintenance_operation(action) {
-        Ok(operation) => operation,
-        Err(reason) => {
-            return Ok(machine_ids
-                .iter()
-                .map(|id| error_result(&id.to_string(), reason.to_string()))
-                .collect());
-        }
-    };
+    let operation = map_machine_maintenance_operation(action);
     queue_machine_maintenance_via_state_controller(api, cm, machine_ids, operation).await
 }
 
@@ -1680,8 +1704,9 @@ struct SwitchEndpoints {
     unresolved: Vec<UnresolvedDevice<SwitchId>>,
 }
 
-// Only direct-dispatch handlers use this fallback. State controllers require
-// credentials already configured in Vault during ingestion/rotation.
+// Direct dispatch and passive component reads may fall back to expected
+// inventory. State-controller writers still require credentials in Vault from
+// ingestion/rotation; a successful passive read does not admit an update.
 async fn fetch_credentials(
     api: &Api,
     component: RackComponent,
@@ -1694,7 +1719,7 @@ async fn fetch_credentials(
             tracing::info!(
                 rack_component = ?component,
                 management_mac_address = %bmc_mac,
-                "using expected inventory credentials for direct dispatch because Vault credentials are absent"
+                "using expected inventory credentials because Vault credentials are absent"
             );
             Ok(credentials)
         }
@@ -1723,6 +1748,15 @@ async fn fetch_vault_credentials(
     })
 }
 
+/// `fetch_expected_credentials` shares the statement cap across passive and
+/// direct-dispatch callers. Passive readers wrap credential resolution in their
+/// own deadlines, including acquisition and setup. Legacy direct-dispatch callers
+/// rely on the pool's configured acquisition timeout for that wait; this helper
+/// adds no overall deadline.
+///
+/// Dropping the future discards its connection and releases local pool capacity.
+/// The abandoned PostgreSQL session can outlive that release: the statement cap
+/// and eventual server/socket cleanup are separate from local cancellation.
 async fn fetch_expected_credentials(
     component: RackComponent,
     pool: &sqlx::PgPool,
@@ -1733,26 +1767,26 @@ async fn fetch_expected_credentials(
             "failed to fetch expected credentials for {component:?} at {bmc_mac}: {e}"
         ))
     };
-    let mut conn = pool
-        .acquire()
+    let mut connection = DbSessionGuard::acquire(pool).await.map_err(map_error)?;
+    let mut txn = connection
+        .begin_read_only_snapshot(EXPECTED_CREDENTIAL_STATEMENT_TIMEOUT)
         .await
-        .map_err(db::DatabaseError::acquire)
         .map_err(map_error)?;
     let credentials = match component {
         RackComponent::ComputeBmc => {
-            db::expected_machine::find_by_bmc_mac_address(&mut *conn, bmc_mac)
+            db::expected_machine::find_by_bmc_mac_address(txn.as_pgconn(), bmc_mac)
                 .await
                 .map(|row| {
                     row.map(|row| Credentials::new(row.data.bmc_username, row.data.bmc_password))
                 })
         }
         RackComponent::SwitchBmc => {
-            db::expected_switch::find_by_bmc_mac_address(&mut conn, bmc_mac)
+            db::expected_switch::find_by_bmc_mac_address(txn.as_pgconn(), bmc_mac)
                 .await
                 .map(|row| row.map(|row| Credentials::new(row.bmc_username, row.bmc_password)))
         }
         RackComponent::SwitchNvos => {
-            db::expected_switch::find_by_bmc_mac_address(&mut conn, bmc_mac)
+            db::expected_switch::find_by_bmc_mac_address(txn.as_pgconn(), bmc_mac)
                 .await
                 .map(|row| {
                     row.and_then(|row| {
@@ -1763,16 +1797,211 @@ async fn fetch_expected_credentials(
                 })
         }
         RackComponent::PowerShelfPmc => {
-            db::expected_power_shelf::find_by_bmc_mac_address(&mut conn, bmc_mac)
+            db::expected_power_shelf::find_by_bmc_mac_address(txn.as_pgconn(), bmc_mac)
                 .await
                 .map(|row| row.map(|row| Credentials::new(row.bmc_username, row.bmc_password)))
         }
     };
-    credentials.map_err(map_error)?.ok_or_else(|| {
+    let credentials = credentials.map_err(map_error)?;
+    txn.commit().await.map_err(map_error)?;
+    connection.return_to_pool();
+    // An absent row is a successful read and must also return its healthy session.
+    credentials.ok_or_else(|| {
         ComponentManagerError::NotFound(format!(
             "no credentials found for {component:?} at {bmc_mac}"
         ))
     })
+}
+
+/// The kind of device a credential kind belongs to: a power shelf or a
+/// switch. Core has ingested a device when the table of its kind holds a row
+/// for it that is not soft-deleted. `RackComponent` names the credential and
+/// also has a compute variant, which `get_component_credentials` never serves.
+enum IngestedComponent {
+    PowerShelf,
+    Switch,
+}
+
+/// Returns the credential Core uses to reach an ingested power shelf or switch
+/// to the external manager that operates it.
+///
+/// Each manager identity may request only its own credential kinds. Expected
+/// inventory confers no membership: the device needs a power-shelf or switch
+/// row that is not soft-deleted, and no interface with its MAC address may be
+/// owned by a machine. Resolution then follows dispatch: the credential store,
+/// else expected inventory.
+pub(crate) async fn get_component_credentials(
+    api: &Api,
+    request: Request<rpc::GetComponentCredentialsRequest>,
+) -> Result<Response<rpc::GetComponentCredentialsResponse>, Status> {
+    log_request_data(&request);
+    let caller = request
+        .extensions()
+        .get::<AuthContext>()
+        .and_then(AuthContext::get_spiffe_service_id)
+        .map(str::to_owned);
+    let request = request.into_inner();
+
+    let (component, device, permitted_caller) = match request.kind() {
+        rpc::ComponentCredentialKind::PowerShelfPmc => (
+            RackComponent::PowerShelfPmc,
+            IngestedComponent::PowerShelf,
+            POWER_SHELF_MANAGER_SERVICE_ID,
+        ),
+        rpc::ComponentCredentialKind::SwitchBmc => (
+            RackComponent::SwitchBmc,
+            IngestedComponent::Switch,
+            NV_SWITCH_MANAGER_SERVICE_ID,
+        ),
+        rpc::ComponentCredentialKind::SwitchNvos => (
+            RackComponent::SwitchNvos,
+            IngestedComponent::Switch,
+            NV_SWITCH_MANAGER_SERVICE_ID,
+        ),
+        rpc::ComponentCredentialKind::Unspecified => {
+            // The generated getter also reports a number that names no kind
+            // as unspecified.
+            return Err(
+                CarbideError::InvalidArgument("kind is unspecified or unknown".into()).into(),
+            );
+        }
+    };
+    let bmc_mac: MacAddress = request.bmc_mac_address.parse().map_err(|_| {
+        CarbideError::InvalidArgument("bmc_mac_address is not a MAC address".into())
+    })?;
+    if caller.as_deref() != Some(permitted_caller) {
+        // The RBAC rule admits both managers to this method, so the RBAC
+        // layer logs no denial when one asks for the other's kind. This
+        // warning is the handler's record of the refusal.
+        tracing::warn!(
+            caller_service_id = caller.as_deref(),
+            permitted_service_id = permitted_caller,
+            rack_component = ?component,
+            management_mac_address = %bmc_mac,
+            "component credential request refused for this service identity"
+        );
+        return Err(CarbideError::PermissionDeniedError(format!(
+            "this credential kind is returned only to the {permitted_caller} service identity"
+        ))
+        .into());
+    }
+
+    let credentials = read_component_credentials(
+        api,
+        component,
+        device,
+        bmc_mac,
+        tokio::time::sleep(COMPONENT_CREDENTIAL_READ_TIMEOUT),
+    )
+    .await?;
+    let Credentials::UsernamePassword { username, password } = credentials;
+    Ok(Response::new(rpc::GetComponentCredentialsResponse {
+        credentials: Some(rpc::UsernamePassword { username, password }),
+    }))
+}
+
+/// Runs the device checks and resolves the credential, or answers
+/// `DeadlineExceeded` once `expired` completes. The handler passes the timer
+/// for `COMPONENT_CREDENTIAL_READ_TIMEOUT`. A read that has not finished by
+/// then is dropped, which discards its guarded connection.
+async fn read_component_credentials(
+    api: &Api,
+    component: RackComponent,
+    device: IngestedComponent,
+    bmc_mac: MacAddress,
+    expired: impl Future<Output = ()>,
+) -> Result<Credentials, Status> {
+    tokio::select! {
+        // A read that finished wins over a deadline that expired with it.
+        biased;
+        credentials = resolve_component_credentials(api, component, device, bmc_mac) => credentials,
+        () = expired => {
+            tracing::warn!(
+                rack_component = ?component,
+                management_mac_address = %bmc_mac,
+                "component credential read timed out"
+            );
+            Err(CarbideError::ComponentCredentialReadDeadlineExceeded.into())
+        }
+    }
+}
+
+/// Checks that Core ingested the device and no machine owns its MAC address,
+/// then resolves its credential from the store, else from expected inventory.
+async fn resolve_component_credentials(
+    api: &Api,
+    component: RackComponent,
+    device: IngestedComponent,
+    bmc_mac: MacAddress,
+) -> Result<Credentials, Status> {
+    let not_found = || CarbideError::NotFoundError {
+        kind: "component_credentials",
+        id: bmc_mac.to_string(),
+    };
+
+    // A caller can abandon a read, and its deadline can end it. Dropping this
+    // future discards the guarded connection, so a read left behind a blocked
+    // table does not keep a pool slot.
+    let mut connection = DbSessionGuard::acquire(api.pg_pool())
+        .await
+        .map_err(CarbideError::from)?;
+    let mut txn = connection
+        .begin_read_only_snapshot(COMPONENT_MEMBERSHIP_STATEMENT_TIMEOUT)
+        .await
+        .map_err(CarbideError::from)?;
+
+    // Membership is the credential boundary of this RPC. A power-shelf or
+    // switch row carries a BMC MAC address only after site explorer classified
+    // the explored BMC as that component (`EndpointExplorationReport::
+    // is_power_shelf` and `is_switch`), while expected-inventory rows are
+    // operator input and may name any MAC address. `machines/bmc/{mac}/root`
+    // is shared with hosts and DPUs, so a MAC without such a row is refused.
+    let ingested = match device {
+        IngestedComponent::PowerShelf => db::power_shelf::find_by(
+            txn.as_pgconn(),
+            db::ObjectColumnFilter::One(db::power_shelf::BmcMacAddressColumn, &bmc_mac),
+        )
+        .await
+        .map_err(CarbideError::from)?
+        .iter()
+        .any(|shelf| shelf.deleted.is_none()),
+        IngestedComponent::Switch => db::switch::find_by(
+            txn.as_pgconn(),
+            db::ObjectColumnFilter::One(db::switch::BmcMacAddressColumn, &bmc_mac),
+        )
+        .await
+        .map_err(CarbideError::from)?
+        .iter()
+        .any(|switch| switch.deleted.is_none()),
+    };
+
+    // The classification above is device-reported data, not a constraint, so a
+    // MAC address that a machine also owns is refused as well.
+    let machine_owned = ingested
+        && db::machine_interface::mac_address_has_machine(txn.as_pgconn(), bmc_mac)
+            .await
+            .map_err(CarbideError::from)?;
+
+    // A refusal is a successful read and must also return its healthy session.
+    txn.commit().await.map_err(CarbideError::from)?;
+    connection.return_to_pool();
+    if !ingested || machine_owned {
+        return Err(not_found().into());
+    }
+
+    match fetch_credentials(api, component, bmc_mac).await {
+        Ok(credentials) => Ok(credentials),
+        Err(ComponentManagerError::NotFound(_)) => Err(not_found().into()),
+        Err(error) => {
+            tracing::error!(
+                rack_component = ?component,
+                management_mac_address = %bmc_mac,
+                error = %error,
+                "component credential lookup failed"
+            );
+            Err(CarbideError::internal("component credential lookup failed".to_string()).into())
+        }
+    }
 }
 
 async fn resolve_switch_endpoints(
@@ -3001,19 +3230,6 @@ async fn power_control_ingested_machine_ids(
             }
         };
 
-        // Reject RMS AC cycles before changing the desired power
-        // state, which could otherwise cause the power manager to turn on the host.
-        if is_rack_scale
-            && action == PowerAction::AcPowercycle
-            && cm.compute_tray.backend() == ComputeTrayBackend::Rms
-        {
-            results.push(error_result(
-                &machine_id.to_string(),
-                "RMS power control does not support AC power cycle".to_string(),
-            ));
-            continue;
-        }
-
         let override_inserted = power_control_health_override(api, machine_id, true).await;
 
         let power_req = rpc::PowerOptionUpdateRequest {
@@ -3098,13 +3314,7 @@ async fn power_control_ingested_machine_ids(
     // stack (never the state machine, which has no non-rack path), so
     // power control works even when the configured backend is RMS.
     if !standalone_ids.is_empty() {
-        // CoreComputeTrayManager authenticates with explicit per-endpoint
-        // credentials (RedfishAuth::Direct), which the proxied pool rejects
-        // by design -- keep it on the direct pool (the credential-ops handle,
-        // upcast to a plain pool) until it moves to credential-key auth.
-        let direct_pool: std::sync::Arc<dyn carbide_redfish::libredfish::RedfishClientPool> =
-            api.bmc_credential_ops.clone();
-        let core_backend = CoreComputeTrayManager::new(direct_pool);
+        let core_backend = standalone_compute_tray_manager(api);
         match dispatch_compute_tray_power_control(
             api,
             &core_backend,
@@ -3503,13 +3713,7 @@ pub(crate) async fn component_power_control(
                 // NICo-core's Redfish stack, which needs only the BMC IP and
                 // credentials — matching the ingested standalone path.
                 if !standalone_macs.is_empty() {
-                    // Same direct-pool requirement as the ingested
-                    // standalone path above: explicit per-endpoint
-                    // credentials cannot route through the proxied pool.
-                    let direct_pool: std::sync::Arc<
-                        dyn carbide_redfish::libredfish::RedfishClientPool,
-                    > = api.bmc_credential_ops.clone();
-                    let core_backend = CoreComputeTrayManager::new(direct_pool);
+                    let core_backend = standalone_compute_tray_manager(api);
                     let (standalone_server_results, standalone_server_ips) =
                         dispatch_pre_ingestion_compute_power_control(
                             api,
@@ -8103,24 +8307,23 @@ mod tests {
 
     #[test]
     fn map_machine_maintenance_operation_variants() {
-        use carbide_test_support::Outcome::{FailsWith, Yields};
-        use carbide_test_support::scenarios;
+        use carbide_test_support::value_scenarios;
         use model::machine::MachineMaintenanceOperation;
 
         use super::map_machine_maintenance_operation;
 
-        scenarios!(map_machine_maintenance_operation:
+        value_scenarios!(map_machine_maintenance_operation:
             "power on/off" {
-                PowerAction::On => Yields(MachineMaintenanceOperation::PowerOn),
-                PowerAction::ForceOff => Yields(MachineMaintenanceOperation::PowerOff { graceful: false }),
-                PowerAction::GracefulShutdown => Yields(MachineMaintenanceOperation::PowerOff { graceful: true }),
+                PowerAction::On => MachineMaintenanceOperation::PowerOn,
+                PowerAction::ForceOff => MachineMaintenanceOperation::PowerOff { graceful: false },
+                PowerAction::GracefulShutdown => MachineMaintenanceOperation::PowerOff { graceful: true },
             }
             "restart intent" {
-                PowerAction::GracefulRestart => Yields(MachineMaintenanceOperation::Reset { graceful: true }),
-                PowerAction::ForceRestart => Yields(MachineMaintenanceOperation::Reset { graceful: false }),
+                PowerAction::GracefulRestart => MachineMaintenanceOperation::Reset { graceful: true },
+                PowerAction::ForceRestart => MachineMaintenanceOperation::Reset { graceful: false },
             }
-            "unsupported AC cycle" {
-                PowerAction::AcPowercycle => FailsWith("machine state controller does not support AC power cycle"),
+            "AC cycle" {
+                PowerAction::AcPowercycle => MachineMaintenanceOperation::AcPowercycle { state: Default::default() },
             }
         );
     }

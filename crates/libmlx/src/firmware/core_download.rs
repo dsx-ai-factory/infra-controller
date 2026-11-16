@@ -7,7 +7,7 @@
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use forge_tls::client_config::ClientCert;
+use carbide_tls::client_config::ClientCert;
 use http_body_util::BodyExt;
 use rpc::carbide_tls_client::{
     CarbideClientConfig, CarbideTlsClient, CarbideTlsClientError, ConfigurationError,
