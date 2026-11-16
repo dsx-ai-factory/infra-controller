@@ -6,6 +6,8 @@ package model
 import (
 	"context"
 	"database/sql"
+	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -390,6 +392,65 @@ func TestExpectedPowerShelfSQLDAO_Get_includeRelations(t *testing.T) {
 	assert.NoError(t, err)
 	assert.NotNil(t, got)
 	assert.NotNil(t, got.Site)
+}
+
+func TestExpectedPowerShelfSQLDAO_GetAllIDs(t *testing.T) {
+	ctx := context.Background()
+	dbSession := testInitDB(t)
+	defer dbSession.Close()
+	testExpectedPowerShelfSetupSchema(t, dbSession)
+
+	user := TestBuildUser(t, dbSession, "test-user", "test-org", []string{"admin"})
+	ip := TestBuildInfrastructureProvider(t, dbSession, "test-provider", "test-org", user)
+	site := TestBuildSite(t, dbSession, ip, "test-site", user)
+	site2 := TestBuildSite(t, dbSession, ip, "test-site-2", user)
+	epsd := NewExpectedPowerShelfDAO(dbSession)
+
+	createExpectedPowerShelf := func(site *Site, bmcMacAddress string) uuid.UUID {
+		t.Helper()
+		created, err := epsd.Create(ctx, nil, ExpectedPowerShelfCreateInput{
+			ExpectedPowerShelfID: uuid.New(),
+			SiteID:               site.ID,
+			BmcMacAddress:        bmcMacAddress,
+			ShelfSerialNumber:    "SHELF-" + bmcMacAddress,
+			CreatedBy:            user.ID,
+		})
+		require.NoError(t, err)
+		return created.ID
+	}
+
+	siteIDs := []uuid.UUID{createExpectedPowerShelf(site, "00:1B:44:11:3A:B7"), createExpectedPowerShelf(site, "00:1B:44:11:3A:B8")}
+	slices.SortFunc(siteIDs, func(a, b uuid.UUID) int { return strings.Compare(a.String(), b.String()) })
+	createExpectedPowerShelf(site2, "00:1B:44:11:3A:B9")
+
+	tests := []struct {
+		desc     string
+		filter   ExpectedPowerShelfFilterInput
+		expected []uuid.UUID
+	}{
+		{
+			desc:     "Site filter excludes other Sites",
+			filter:   ExpectedPowerShelfFilterInput{SiteIDs: []uuid.UUID{site.ID}},
+			expected: siteIDs,
+		},
+		{
+			desc:     "no matching ExpectedPowerShelves returns an empty slice",
+			filter:   ExpectedPowerShelfFilterInput{SiteIDs: []uuid.UUID{uuid.New()}},
+			expected: []uuid.UUID{},
+		},
+		{
+			desc:     "empty ExpectedPowerShelf ID filter returns an empty slice",
+			filter:   ExpectedPowerShelfFilterInput{ExpectedPowerShelfIDs: []uuid.UUID{}},
+			expected: []uuid.UUID{},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.desc, func(t *testing.T) {
+			got, err := epsd.GetAllIDs(ctx, nil, tc.filter)
+			require.NoError(t, err)
+			assert.Equal(t, tc.expected, got)
+		})
+	}
 }
 
 func TestExpectedPowerShelfSQLDAO_GetAll(t *testing.T) {

@@ -40,7 +40,7 @@ type ManageExpectedSwitch struct {
 // The reconciliation logic is as follows:
 // - UUID existing in NICo but not in DB: create record in DB
 // - UUID existing in both NICo and DB with differences: update record in DB
-// - UUID existing in DB but not in NICo: delete the stale record if it has not changed since the initial read
+// - UUID existing in DB but not in NICo: delete the stale record if it has not changed since the deletion sweep read it
 func (mei ManageExpectedSwitch) UpdateExpectedSwitchesInDB(ctx context.Context, siteID uuid.UUID, expectedSwitchInventory *corev1.ExpectedSwitchInventory) error {
 	logger := log.With().Str("Activity", "UpdateExpectedSwitchesInDB").Str("Site ID", siteID.String()).Logger()
 
@@ -77,15 +77,37 @@ func (mei ManageExpectedSwitch) UpdateExpectedSwitchesInDB(ctx context.Context, 
 	// Initialize ExpectedSwitch DAO (used for reconciliation of expected instances)
 	esDAO := cdbm.NewExpectedSwitchDAO(mei.dbSession)
 
-	// Fetch ALL existing expected switches for site
-	filterInput := cdbm.ExpectedSwitchFilterInput{SiteIDs: []uuid.UUID{siteID}}
-	existingExpectedSwitches, _, err := esDAO.GetAll(ctx, nil, filterInput, cdbp.PageInput{Limit: cutil.GetPtr(cdbp.TotalLimit)}, nil)
-	if err != nil {
-		logger.Error().Err(err).Msg("failed to get ExpectedSwitches for Site from DB")
-		return err
+	// The deletion sweep only considers Expected Switches that existed before this page is applied.
+	var siteExpectedSwitchIDs []uuid.UUID
+	if util.ShouldReconcileDeletions(expectedSwitchInventory.GetInventoryPage()) {
+		siteExpectedSwitchIDs, err = esDAO.GetAllIDs(ctx, nil, cdbm.ExpectedSwitchFilterInput{SiteIDs: []uuid.UUID{siteID}})
+		if err != nil {
+			logger.Error().Err(err).Msg("failed to get ExpectedSwitch IDs for Site from DB")
+			return err
+		}
 	}
 
-	// Build a map of all existing Expected Switches by UUID (unique identifier)
+	// Look up only the Expected Switches this page reports. Pages run concurrently, so loading
+	// the whole Site here would make each page's memory grow with the Site's Expected Switch count.
+	pageExpectedSwitchIDs := []uuid.UUID{}
+	for _, res := range expectedSwitchInventory.GetExpectedSwitches() {
+		id, serr := uuid.Parse(res.GetExpectedSwitchId().GetValue())
+		if serr == nil {
+			pageExpectedSwitchIDs = append(pageExpectedSwitchIDs, id)
+		}
+	}
+
+	existingExpectedSwitches := []cdbm.ExpectedSwitch{}
+	if len(pageExpectedSwitchIDs) > 0 {
+		filterInput := cdbm.ExpectedSwitchFilterInput{SiteIDs: []uuid.UUID{siteID}, ExpectedSwitchIDs: pageExpectedSwitchIDs}
+		existingExpectedSwitches, _, err = esDAO.GetAll(ctx, nil, filterInput, cdbp.PageInput{Limit: cutil.GetPtr(cdbp.TotalLimit)}, nil)
+		if err != nil {
+			logger.Error().Err(err).Msg("failed to get ExpectedSwitches for Site from DB")
+			return err
+		}
+	}
+
+	// Build a map of the page's existing Expected Switches by UUID (unique identifier)
 	existingByID := map[uuid.UUID]*cdbm.ExpectedSwitch{}
 	for _, es := range existingExpectedSwitches {
 		existingByID[es.ID] = &es
@@ -238,12 +260,26 @@ func (mei ManageExpectedSwitch) UpdateExpectedSwitchesInDB(ctx context.Context, 
 
 	// Delete stale records missing from `reportedIDs` only after the final page
 	// (or when paging is disabled). Matching the saved `Updated` timestamp in
-	// `DeleteIfUnchanged` preserves API edits committed after our initial read.
+	// `DeleteIfUnchanged` preserves API edits committed after the sweep's read.
 	if util.ShouldReconcileDeletions(expectedSwitchInventory.GetInventoryPage()) {
-		for _, es := range existingExpectedSwitches {
-			if _, keep := reportedIDs[es.ID]; keep {
-				continue
+		// Only the Expected Switches the Site stopped reporting are loaded in full.
+		unreportedExpectedSwitchIDs := []uuid.UUID{}
+		for _, id := range siteExpectedSwitchIDs {
+			if !reportedIDs[id] {
+				unreportedExpectedSwitchIDs = append(unreportedExpectedSwitchIDs, id)
 			}
+		}
+
+		unreportedExpectedSwitches := []cdbm.ExpectedSwitch{}
+		if len(unreportedExpectedSwitchIDs) > 0 {
+			unreportedExpectedSwitches, _, err = esDAO.GetAll(ctx, nil, cdbm.ExpectedSwitchFilterInput{SiteIDs: []uuid.UUID{siteID}, ExpectedSwitchIDs: unreportedExpectedSwitchIDs}, cdbp.PageInput{Limit: cutil.GetPtr(cdbp.TotalLimit)}, nil)
+			if err != nil {
+				logger.Error().Err(err).Msg("failed to get unreported ExpectedSwitches from DB")
+				return err
+			}
+		}
+
+		for _, es := range unreportedExpectedSwitches {
 			// Avoid destructive actions inside race-condition window
 			if site.IsTimeWithinStaleInventoryThreshold(es.Updated) {
 				continue

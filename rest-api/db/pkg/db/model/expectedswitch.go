@@ -407,6 +407,8 @@ type ExpectedSwitchDAO interface {
 	Clear(ctx context.Context, tx *db.Tx, input ExpectedSwitchClearInput) (*ExpectedSwitch, error)
 	// GetAll returns all the rows based on the filter and page inputs
 	GetAll(ctx context.Context, tx *db.Tx, filter ExpectedSwitchFilterInput, page paginator.PageInput, includeRelations []string) ([]ExpectedSwitch, int, error)
+	// GetAllIDs returns the IDs of all rows matching the filter
+	GetAllIDs(ctx context.Context, tx *db.Tx, filter ExpectedSwitchFilterInput) ([]uuid.UUID, error)
 	// Get returns row for specified ID
 	Get(ctx context.Context, tx *db.Tx, expectedSwitchID uuid.UUID, includeRelations []string, forUpdate bool) (*ExpectedSwitch, error)
 }
@@ -650,6 +652,34 @@ func (essd ExpectedSwitchSQLDAO) GetAll(ctx context.Context, tx *db.Tx, filter E
 	}
 
 	return expectedSwitches, expectedSwitchPaginator.Total, nil
+}
+
+// GetAllIDs returns the IDs of all ExpectedSwitches matching the filter, ordered by ID
+// The returned slice is empty but not nil when no ExpectedSwitches match
+func (essd ExpectedSwitchSQLDAO) GetAllIDs(ctx context.Context, tx *db.Tx, filter ExpectedSwitchFilterInput) (_ []uuid.UUID, retErr error) {
+	// Create a child span and set the attributes for current request
+	ctx, expectedSwitchDAOSpan := cotel.StartSpan(ctx, "ExpectedSwitchDAO.GetAllIDs")
+	defer func() { cotel.EndSpan(expectedSwitchDAOSpan, retErr) }()
+
+	ids := []uuid.UUID{}
+
+	if filter.ExpectedSwitchIDs != nil && len(filter.ExpectedSwitchIDs) == 0 {
+		return ids, nil
+	}
+
+	query := db.GetIDB(tx, essd.dbSession).NewSelect().Model((*ExpectedSwitch)(nil)).Column("id")
+
+	query, err := essd.setQueryWithFilter(filter, query, expectedSwitchDAOSpan)
+	if err != nil {
+		return nil, err
+	}
+
+	err = query.Order("es.id").Scan(ctx, &ids)
+	if err != nil {
+		return nil, err
+	}
+
+	return ids, nil
 }
 
 // Update updates specified fields of an existing ExpectedSwitch

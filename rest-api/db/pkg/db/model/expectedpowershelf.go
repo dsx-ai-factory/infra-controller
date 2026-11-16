@@ -285,6 +285,8 @@ type ExpectedPowerShelfDAO interface {
 	Clear(ctx context.Context, tx *db.Tx, input ExpectedPowerShelfClearInput) (*ExpectedPowerShelf, error)
 	// GetAll returns all the rows based on the filter and page inputs
 	GetAll(ctx context.Context, tx *db.Tx, filter ExpectedPowerShelfFilterInput, page paginator.PageInput, includeRelations []string) ([]ExpectedPowerShelf, int, error)
+	// GetAllIDs returns the IDs of all rows matching the filter
+	GetAllIDs(ctx context.Context, tx *db.Tx, filter ExpectedPowerShelfFilterInput) ([]uuid.UUID, error)
 	// Get returns row for specified ID
 	Get(ctx context.Context, tx *db.Tx, expectedPowerShelfID uuid.UUID, includeRelations []string, forUpdate bool) (*ExpectedPowerShelf, error)
 }
@@ -502,6 +504,34 @@ func (epsd ExpectedPowerShelfSQLDAO) GetAll(ctx context.Context, tx *db.Tx, filt
 	}
 
 	return expectedPowerShelves, expectedPowerShelfPaginator.Total, nil
+}
+
+// GetAllIDs returns the IDs of all ExpectedPowerShelves matching the filter, ordered by ID
+// The returned slice is empty but not nil when no ExpectedPowerShelves match
+func (epsd ExpectedPowerShelfSQLDAO) GetAllIDs(ctx context.Context, tx *db.Tx, filter ExpectedPowerShelfFilterInput) (_ []uuid.UUID, retErr error) {
+	// Create a child span and set the attributes for current request
+	ctx, expectedPowerShelfDAOSpan := cotel.StartSpan(ctx, "ExpectedPowerShelfDAO.GetAllIDs")
+	defer func() { cotel.EndSpan(expectedPowerShelfDAOSpan, retErr) }()
+
+	ids := []uuid.UUID{}
+
+	if filter.ExpectedPowerShelfIDs != nil && len(filter.ExpectedPowerShelfIDs) == 0 {
+		return ids, nil
+	}
+
+	query := db.GetIDB(tx, epsd.dbSession).NewSelect().Model((*ExpectedPowerShelf)(nil)).Column("id")
+
+	query, err := epsd.setQueryWithFilter(filter, query, expectedPowerShelfDAOSpan)
+	if err != nil {
+		return nil, err
+	}
+
+	err = query.Order("eps.id").Scan(ctx, &ids)
+	if err != nil {
+		return nil, err
+	}
+
+	return ids, nil
 }
 
 // Update updates specified fields of an existing ExpectedPowerShelf

@@ -52,7 +52,7 @@ type ManageExpectedMachine struct {
 // The reconciliation logic is as follows:
 // - UUID existing in NICo but not in DB: create record in DB
 // - UUID existing in both NICo and DB with differences: update record in DB
-// - UUID existing in DB but not in NICo: delete the stale record if it has not changed since the initial read
+// - UUID existing in DB but not in NICo: delete the stale record if it has not changed since the deletion sweep read it
 func (mei ManageExpectedMachine) UpdateExpectedMachinesInDB(ctx context.Context, siteID uuid.UUID, expectedMachineInventory *corev1.ExpectedMachineInventory) error {
 	logger := log.With().Str("Activity", "UpdateExpectedMachinesInDB").Str("Site ID", siteID.String()).Logger()
 
@@ -89,15 +89,37 @@ func (mei ManageExpectedMachine) UpdateExpectedMachinesInDB(ctx context.Context,
 	// Initialize ExpectedMachine DAO (used for reconciliation of expected instances)
 	emDAO := cdbm.NewExpectedMachineDAO(mei.dbSession)
 
-	// Fetch ALL existing expected machines for site
-	filterInput := cdbm.ExpectedMachineFilterInput{SiteIDs: []uuid.UUID{siteID}}
-	existingExpectedMachines, _, err := emDAO.GetAll(ctx, nil, filterInput, cdbp.PageInput{Limit: cutil.GetPtr(cdbp.TotalLimit)}, nil)
-	if err != nil {
-		logger.Error().Err(err).Msg("failed to get ExpectedMachines for Site from DB")
-		return err
+	// The deletion sweep only considers Expected Machines that existed before this page is applied.
+	var siteExpectedMachineIDs []uuid.UUID
+	if util.ShouldReconcileDeletions(expectedMachineInventory.GetInventoryPage()) {
+		siteExpectedMachineIDs, err = emDAO.GetAllIDs(ctx, nil, cdbm.ExpectedMachineFilterInput{SiteIDs: []uuid.UUID{siteID}})
+		if err != nil {
+			logger.Error().Err(err).Msg("failed to get ExpectedMachine IDs for Site from DB")
+			return err
+		}
 	}
 
-	// Build a map of all existing Expected Machines by UUID (unique identifier)
+	// Look up only the Expected Machines this page reports. Pages run concurrently, so loading
+	// the whole Site here would make each page's memory grow with the Site's Expected Machine count.
+	pageExpectedMachineIDs := []uuid.UUID{}
+	for _, rem := range expectedMachineInventory.GetExpectedMachines() {
+		id, serr := uuid.Parse(rem.GetId().GetValue())
+		if serr == nil {
+			pageExpectedMachineIDs = append(pageExpectedMachineIDs, id)
+		}
+	}
+
+	existingExpectedMachines := []cdbm.ExpectedMachine{}
+	if len(pageExpectedMachineIDs) > 0 {
+		filterInput := cdbm.ExpectedMachineFilterInput{SiteIDs: []uuid.UUID{siteID}, ExpectedMachineIDs: pageExpectedMachineIDs}
+		existingExpectedMachines, _, err = emDAO.GetAll(ctx, nil, filterInput, cdbp.PageInput{Limit: cutil.GetPtr(cdbp.TotalLimit)}, nil)
+		if err != nil {
+			logger.Error().Err(err).Msg("failed to get ExpectedMachines for Site from DB")
+			return err
+		}
+	}
+
+	// Build a map of the page's existing Expected Machines by UUID (unique identifier)
 	existingByID := map[uuid.UUID]*cdbm.ExpectedMachine{}
 	for _, em := range existingExpectedMachines {
 		existingByID[em.ID] = &em
@@ -379,12 +401,26 @@ func (mei ManageExpectedMachine) UpdateExpectedMachinesInDB(ctx context.Context,
 
 	// Delete stale records missing from `reportedIDs` only after the final page
 	// (or when paging is disabled). Matching the saved `Updated` timestamp in
-	// `DeleteIfUnchanged` preserves API edits committed after our initial read.
+	// `DeleteIfUnchanged` preserves API edits committed after the sweep's read.
 	if util.ShouldReconcileDeletions(expectedMachineInventory.GetInventoryPage()) {
-		for _, em := range existingExpectedMachines {
-			if _, keep := reportedIDs[em.ID]; keep {
-				continue
+		// Only the Expected Machines the Site stopped reporting are loaded in full.
+		unreportedExpectedMachineIDs := []uuid.UUID{}
+		for _, id := range siteExpectedMachineIDs {
+			if !reportedIDs[id] {
+				unreportedExpectedMachineIDs = append(unreportedExpectedMachineIDs, id)
 			}
+		}
+
+		unreportedExpectedMachines := []cdbm.ExpectedMachine{}
+		if len(unreportedExpectedMachineIDs) > 0 {
+			unreportedExpectedMachines, _, err = emDAO.GetAll(ctx, nil, cdbm.ExpectedMachineFilterInput{SiteIDs: []uuid.UUID{siteID}, ExpectedMachineIDs: unreportedExpectedMachineIDs}, cdbp.PageInput{Limit: cutil.GetPtr(cdbp.TotalLimit)}, nil)
+			if err != nil {
+				logger.Error().Err(err).Msg("failed to get unreported ExpectedMachines from DB")
+				return err
+			}
+		}
+
+		for _, em := range unreportedExpectedMachines {
 			// Avoid destructive actions inside race-condition window
 			if site.IsTimeWithinStaleInventoryThreshold(em.Updated) {
 				continue

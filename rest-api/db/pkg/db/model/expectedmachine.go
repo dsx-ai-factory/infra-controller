@@ -491,6 +491,8 @@ type ExpectedMachineDAO interface {
 	Clear(ctx context.Context, tx *db.Tx, input ExpectedMachineClearInput) (*ExpectedMachine, error)
 	// GetAll returns all the rows based on the filter and page inputs
 	GetAll(ctx context.Context, tx *db.Tx, filter ExpectedMachineFilterInput, page paginator.PageInput, includeRelations []string) ([]ExpectedMachine, int, error)
+	// GetAllIDs returns the IDs of all rows matching the filter
+	GetAllIDs(ctx context.Context, tx *db.Tx, filter ExpectedMachineFilterInput) ([]uuid.UUID, error)
 	// GetDistinctLabelKeys returns the distinct label keys based on the filter and page inputs
 	GetDistinctLabelKeys(ctx context.Context, tx *db.Tx, filter ExpectedMachineFilterInput, page paginator.PageInput) ([]string, int, error)
 	// GetDistinctLabelValues returns the distinct values for a label key based on the filter and page inputs
@@ -758,6 +760,34 @@ func (emsd ExpectedMachineSQLDAO) GetAll(ctx context.Context, tx *db.Tx, filter 
 	}
 
 	return expectedMachines, expectedMachinePaginator.Total, nil
+}
+
+// GetAllIDs returns the IDs of all ExpectedMachines matching the filter, ordered by ID
+// The returned slice is empty but not nil when no ExpectedMachines match
+func (emsd ExpectedMachineSQLDAO) GetAllIDs(ctx context.Context, tx *db.Tx, filter ExpectedMachineFilterInput) (_ []uuid.UUID, retErr error) {
+	// Create a child span and set the attributes for current request
+	ctx, expectedMachineDAOSpan := cotel.StartSpan(ctx, "ExpectedMachineDAO.GetAllIDs")
+	defer func() { cotel.EndSpan(expectedMachineDAOSpan, retErr) }()
+
+	ids := []uuid.UUID{}
+
+	if filter.ExpectedMachineIDs != nil && len(filter.ExpectedMachineIDs) == 0 {
+		return ids, nil
+	}
+
+	query := db.GetIDB(tx, emsd.dbSession).NewSelect().Model((*ExpectedMachine)(nil)).Column("id")
+
+	query, err := emsd.setQueryWithFilter(filter, query, expectedMachineDAOSpan)
+	if err != nil {
+		return nil, err
+	}
+
+	err = query.Order("em.id").Scan(ctx, &ids)
+	if err != nil {
+		return nil, err
+	}
+
+	return ids, nil
 }
 
 // GetDistinctLabelKeys returns paginated, distinct ExpectedMachine label keys.

@@ -6,6 +6,8 @@ package model
 import (
 	"context"
 	"database/sql"
+	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -837,6 +839,65 @@ func TestExpectedMachineSQLDAO_Get_MachineRelation_NoMatch(t *testing.T) {
 	assert.NoError(t, err)
 	assert.NotNil(t, got)
 	assert.Nil(t, got.Machine, "Machine relation should be nil when MachineID is null")
+}
+
+func TestExpectedMachineSQLDAO_GetAllIDs(t *testing.T) {
+	ctx := context.Background()
+	dbSession := testInitDB(t)
+	defer dbSession.Close()
+	testExpectedMachineSetupSchema(t, dbSession)
+
+	user := TestBuildUser(t, dbSession, "test-user", "test-org", []string{"admin"})
+	ip := TestBuildInfrastructureProvider(t, dbSession, "test-provider", "test-org", user)
+	site := TestBuildSite(t, dbSession, ip, "test-site", user)
+	site2 := TestBuildSite(t, dbSession, ip, "test-site-2", user)
+	emsd := NewExpectedMachineDAO(dbSession)
+
+	createExpectedMachine := func(site *Site, bmcMacAddress string) uuid.UUID {
+		t.Helper()
+		created, err := emsd.Create(ctx, nil, ExpectedMachineCreateInput{
+			ExpectedMachineID:   uuid.New(),
+			SiteID:              site.ID,
+			BmcMacAddress:       bmcMacAddress,
+			ChassisSerialNumber: "CHASSIS-" + bmcMacAddress,
+			CreatedBy:           user.ID,
+		})
+		require.NoError(t, err)
+		return created.ID
+	}
+
+	siteIDs := []uuid.UUID{createExpectedMachine(site, "00:1B:44:11:3A:B7"), createExpectedMachine(site, "00:1B:44:11:3A:B8")}
+	slices.SortFunc(siteIDs, func(a, b uuid.UUID) int { return strings.Compare(a.String(), b.String()) })
+	createExpectedMachine(site2, "00:1B:44:11:3A:B9")
+
+	tests := []struct {
+		desc     string
+		filter   ExpectedMachineFilterInput
+		expected []uuid.UUID
+	}{
+		{
+			desc:     "Site filter excludes other Sites",
+			filter:   ExpectedMachineFilterInput{SiteIDs: []uuid.UUID{site.ID}},
+			expected: siteIDs,
+		},
+		{
+			desc:     "no matching ExpectedMachines returns an empty slice",
+			filter:   ExpectedMachineFilterInput{SiteIDs: []uuid.UUID{uuid.New()}},
+			expected: []uuid.UUID{},
+		},
+		{
+			desc:     "empty ExpectedMachine ID filter returns an empty slice",
+			filter:   ExpectedMachineFilterInput{ExpectedMachineIDs: []uuid.UUID{}},
+			expected: []uuid.UUID{},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.desc, func(t *testing.T) {
+			got, err := emsd.GetAllIDs(ctx, nil, tc.filter)
+			require.NoError(t, err)
+			assert.Equal(t, tc.expected, got)
+		})
+	}
 }
 
 func TestExpectedMachineSQLDAO_GetAll(t *testing.T) {

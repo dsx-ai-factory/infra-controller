@@ -6,6 +6,8 @@ package model
 import (
 	"context"
 	"database/sql"
+	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -490,6 +492,65 @@ func TestExpectedSwitchSQLDAO_Get_includeRelations(t *testing.T) {
 	assert.NoError(t, err)
 	assert.NotNil(t, got)
 	assert.NotNil(t, got.Site)
+}
+
+func TestExpectedSwitchSQLDAO_GetAllIDs(t *testing.T) {
+	ctx := context.Background()
+	dbSession := testInitDB(t)
+	defer dbSession.Close()
+	testExpectedSwitchSetupSchema(t, dbSession)
+
+	user := TestBuildUser(t, dbSession, "test-user", "test-org", []string{"admin"})
+	ip := TestBuildInfrastructureProvider(t, dbSession, "test-provider", "test-org", user)
+	site := TestBuildSite(t, dbSession, ip, "test-site", user)
+	site2 := TestBuildSite(t, dbSession, ip, "test-site-2", user)
+	essd := NewExpectedSwitchDAO(dbSession)
+
+	createExpectedSwitch := func(site *Site, bmcMacAddress string) uuid.UUID {
+		t.Helper()
+		created, err := essd.Create(ctx, nil, ExpectedSwitchCreateInput{
+			ExpectedSwitchID:   uuid.New(),
+			SiteID:             site.ID,
+			BmcMacAddress:      bmcMacAddress,
+			SwitchSerialNumber: "SWITCH-" + bmcMacAddress,
+			CreatedBy:          user.ID,
+		})
+		require.NoError(t, err)
+		return created.ID
+	}
+
+	siteIDs := []uuid.UUID{createExpectedSwitch(site, "00:1B:44:11:3A:B7"), createExpectedSwitch(site, "00:1B:44:11:3A:B8")}
+	slices.SortFunc(siteIDs, func(a, b uuid.UUID) int { return strings.Compare(a.String(), b.String()) })
+	createExpectedSwitch(site2, "00:1B:44:11:3A:B9")
+
+	tests := []struct {
+		desc     string
+		filter   ExpectedSwitchFilterInput
+		expected []uuid.UUID
+	}{
+		{
+			desc:     "Site filter excludes other Sites",
+			filter:   ExpectedSwitchFilterInput{SiteIDs: []uuid.UUID{site.ID}},
+			expected: siteIDs,
+		},
+		{
+			desc:     "no matching ExpectedSwitches returns an empty slice",
+			filter:   ExpectedSwitchFilterInput{SiteIDs: []uuid.UUID{uuid.New()}},
+			expected: []uuid.UUID{},
+		},
+		{
+			desc:     "empty ExpectedSwitch ID filter returns an empty slice",
+			filter:   ExpectedSwitchFilterInput{ExpectedSwitchIDs: []uuid.UUID{}},
+			expected: []uuid.UUID{},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.desc, func(t *testing.T) {
+			got, err := essd.GetAllIDs(ctx, nil, tc.filter)
+			require.NoError(t, err)
+			assert.Equal(t, tc.expected, got)
+		})
+	}
 }
 
 func TestExpectedSwitchSQLDAO_GetAll(t *testing.T) {
