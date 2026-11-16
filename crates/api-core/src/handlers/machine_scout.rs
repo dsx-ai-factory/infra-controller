@@ -17,6 +17,7 @@
 use ::rpc::forge::ForgeAgentControlResponse;
 use ::rpc::model::machine::get_action_for_dpu_state;
 use ::rpc::{forge as rpc, forge_agent_control_response as fac, scout_firmware_upgrade as sfu};
+use carbide_machine_controller::handler::FIRMWARE_UPGRADE_SCOUT_DELIVERY_TIMEOUT;
 use carbide_uuid::machine::{DpuMachineId, HostOrDpuId, MachineId, MachineIdSubtype};
 use model::machine::machine_search_config::MachineSearchConfig;
 use model::machine::{
@@ -518,7 +519,7 @@ pub(crate) async fn forge_agent_control(
                         CarbideError::from(db::DatabaseError::query("scout poll timestamp", error))
                     })?;
                 let now = chrono::Utc::now();
-                let delivery_deadline = *started_at + chrono::Duration::minutes(30);
+                let delivery_deadline = *started_at + FIRMWARE_UPGRADE_SCOUT_DELIVERY_TIMEOUT;
                 // The controller may not have observed the preceding poll yet.
                 let contact = machine
                     .status

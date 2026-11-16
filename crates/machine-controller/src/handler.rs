@@ -183,6 +183,8 @@ use crate::write_ops::MachineWriteOp;
 // We can't use http::StatusCode because libredfish has a newer version
 const NOT_FOUND: u16 = 404;
 
+pub const FIRMWARE_UPGRADE_SCOUT_DELIVERY_TIMEOUT: Duration = Duration::minutes(30);
+
 #[cfg(not(test))]
 pub const MAX_NEW_FIRMWARE_REPORTED_RESET_RETRIES: u32 = 5;
 
@@ -11408,7 +11410,7 @@ impl HostUpgradeState {
                         )))
                     }
                 } else {
-                    let delivery_deadline = *started_at + Duration::minutes(30);
+                    let delivery_deadline = *started_at + FIRMWARE_UPGRADE_SCOUT_DELIVERY_TIMEOUT;
                     if delivered_at.is_none()
                         && let Some(contact) = state.host_snapshot.status.last_scout_contact_time
                         && contact > *started_at
