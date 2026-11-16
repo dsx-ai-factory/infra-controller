@@ -1193,6 +1193,8 @@ pub(crate) fn mandatory_services(
             .expect("DPU agent has generated Helm values")["xplaneMaintenance"] =
             serde_json::json!({ "enabled": true });
     }
+    // Not `node_auth.enabled` directly: an operator staging a disable
+    // moves fmds off tokens first, while the API still accepts them.
     let mut fmds = fmds_service(
         &resolved.base.fmds,
         interfaces,
@@ -1220,8 +1222,6 @@ pub(crate) fn mandatory_services(
         doca_hbn_service(&resolved.base.doca_hbn, interfaces, service_vpc_slots),
         dhcp,
         agent,
-        // Not `node_auth.enabled` directly: an operator staging a disable
-        // moves fmds off tokens first, while the API still accepts them.
         fmds,
         otel,
     ];
