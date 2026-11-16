@@ -41,18 +41,18 @@ const MGMT_VRF_NAME: &[u8] = "mgmt".as_bytes();
 pub(super) type HickoryResolverFuture =
     Pin<Box<dyn Future<Output = Result<SocketAddrs, NetError>> + Send>>;
 
-/// `ForgeRuntimeProvider` creates Hickory sockets with optional management-VRF binding.
+/// `CarbideRuntimeProvider` creates Hickory sockets with optional management-VRF binding.
 /// Each TCP connection attempt uses the supplied timeout, or five seconds for `None`.
 /// Expiry returns `TimedOut` and drops the connection future and its socket; cancelling
 /// the caller's future also drops the attempt. Hickory starts its separate DNS query
 /// timeout after the connection succeeds.
 #[derive(Clone, Default)]
-pub struct ForgeRuntimeProvider {
+pub struct CarbideRuntimeProvider {
     handle: TokioHandle,
     use_mgmt_vrf: bool,
 }
 
-impl ForgeRuntimeProvider {
+impl CarbideRuntimeProvider {
     pub fn new() -> Self {
         Self {
             handle: TokioHandle::default(),
@@ -116,7 +116,7 @@ impl ForgeRuntimeProvider {
     }
 }
 
-impl RuntimeProvider for ForgeRuntimeProvider {
+impl RuntimeProvider for CarbideRuntimeProvider {
     type Handle = TokioHandle;
     type Timer = TokioTime;
     type Udp = TokioUdpSocket;
@@ -133,7 +133,7 @@ impl RuntimeProvider for ForgeRuntimeProvider {
         timeout: Option<Duration>,
     ) -> Pin<Box<dyn Send + Future<Output = std::io::Result<Self::Tcp>>>> {
         if self.use_mgmt_vrf {
-            let socket = match ForgeRuntimeProvider::create_tcp_socket(server_addr, true) {
+            let socket = match CarbideRuntimeProvider::create_tcp_socket(server_addr, true) {
                 Ok(socket) => socket,
                 Err(io_err) => {
                     return Box::pin(async move { Err(io_err) });
@@ -163,7 +163,7 @@ impl RuntimeProvider for ForgeRuntimeProvider {
         _server_addr: SocketAddr,
     ) -> Pin<Box<dyn Send + Future<Output = std::io::Result<Self::Udp>>>> {
         if self.use_mgmt_vrf {
-            let socket = match ForgeRuntimeProvider::create_udp_socket(local_addr, true) {
+            let socket = match CarbideRuntimeProvider::create_udp_socket(local_addr, true) {
                 Ok(socket) => socket,
                 Err(io_err) => {
                     return Box::pin(async move { Err(io_err) });
@@ -198,7 +198,7 @@ impl RuntimeProvider for ForgeRuntimeProvider {
 }
 
 /// A hyper resolver using `hickory`'s [`TokioAsyncResolver`].
-pub type ForgeResolver = HickoryResolver<ForgeRuntimeProvider>;
+pub type CarbideResolver = HickoryResolver<CarbideRuntimeProvider>;
 
 /// DNS resolver options for NICo clients.
 ///
@@ -206,16 +206,16 @@ pub type ForgeResolver = HickoryResolver<ForgeRuntimeProvider>;
 /// IPv4 remains preferred because IPv6 routes may be unusable.
 /// Batch lookups wait for both families, including configured timeouts and retries
 /// for a family that does not respond. With these options and
-/// [`ForgeResolver::with_config_and_options`], `ForgeHttpConnector` can start TCP
+/// [`CarbideResolver::with_config_and_options`], `CarbideHttpConnector` can start TCP
 /// with ready IPv4 addresses while retaining pending AAAA for IPv6 fallback.
 /// [`Self::new`] instead retains Hickory's `Ipv6AndIpv4` batch strategy.
 #[derive(Clone, Debug)]
-pub struct ForgeResolverOpts {
+pub struct CarbideResolverOpts {
     inner: ResolverOpts,
     use_mgmt_vrf: bool,
 }
 
-impl Default for ForgeResolverOpts {
+impl Default for CarbideResolverOpts {
     fn default() -> Self {
         let mut inner = ResolverOpts::default();
         inner.ip_strategy = LookupIpStrategy::Ipv4AndIpv6;
@@ -271,7 +271,7 @@ impl Iterator for SocketAddrs {
     }
 }
 
-impl ForgeResolverOpts {
+impl CarbideResolverOpts {
     /// Retains Hickory's defaults, including the `Ipv6AndIpv4` batch strategy.
     /// Use [`Self::default`] for IPv4 preference and incremental connections.
     pub fn new() -> Self {
@@ -297,12 +297,12 @@ impl ForgeResolverOpts {
 
 /// Get the default resolver options as configured per crate features.
 /// This allows us to enable DNSSEC conditionally.
-fn default_opts() -> ForgeResolverOpts {
-    ForgeResolverOpts::default()
+fn default_opts() -> CarbideResolverOpts {
+    CarbideResolverOpts::default()
 }
 
-impl ForgeResolver {
-    /// Create a new [`ForgeResolver`] with the default config options.
+impl CarbideResolver {
+    /// Create a new [`CarbideResolver`] with the default config options.
     /// This must be run inside a Tokio runtime context.
     #[must_use]
     pub fn new() -> Self {
@@ -314,7 +314,7 @@ impl ForgeResolver {
     /// return unfinished AAAA work separately; other strategies use batch lookups.
     /// This must be run inside a Tokio runtime context.
     #[must_use]
-    pub fn with_config_and_options(config: ResolverConfig, options: ForgeResolverOpts) -> Self {
+    pub fn with_config_and_options(config: ResolverConfig, options: CarbideResolverOpts) -> Self {
         let connection_lookup =
             (options.inner.ip_strategy == LookupIpStrategy::Ipv4AndIpv6).then(|| {
                 Arc::new(ConnectionLookupConfig {
@@ -323,7 +323,7 @@ impl ForgeResolver {
                     ndots: options.inner.ndots,
                 })
             });
-        let rt = ForgeRuntimeProvider::new().use_mgmt_vrf(options.use_mgmt_vrf);
+        let rt = CarbideRuntimeProvider::new().use_mgmt_vrf(options.use_mgmt_vrf);
         let resolver = Resolver::builder_with_config(config, rt)
             .with_options(options.inner)
             .build()
@@ -336,7 +336,7 @@ impl ForgeResolver {
     }
 }
 
-impl Default for ForgeResolver {
+impl Default for CarbideResolver {
     fn default() -> Self {
         Self::with_config_and_options(ResolverConfig::default(), default_opts())
     }
@@ -627,7 +627,7 @@ mod tests {
     use tokio::task::JoinHandle;
 
     use super::*;
-    use crate::connector::{ConnectorMetrics, ForgeHttpConnector};
+    use crate::connector::{CarbideHttpConnector, ConnectorMetrics};
 
     /// A never-ready dial must report `TimedOut` without relying on OS routing
     /// to simulate a blackholed DNS server.
@@ -654,8 +654,10 @@ mod tests {
             |timeout| async move {
                 let expected = timeout.unwrap_or(Duration::from_secs(5));
                 let start = tokio::time::Instant::now();
-                let connection =
-                    ForgeRuntimeProvider::connect_tcp_with_timeout(std::future::pending(), timeout);
+                let connection = CarbideRuntimeProvider::connect_tcp_with_timeout(
+                    std::future::pending(),
+                    timeout,
+                );
                 tokio::pin!(connection);
                 assert!(
                     futures_util::poll!(&mut connection).is_pending(),
@@ -689,7 +691,7 @@ mod tests {
         let original_error = std::io::Error::from_raw_os_error(111);
         let original_kind = original_error.kind();
         let original_message = original_error.to_string();
-        let result = ForgeRuntimeProvider::connect_tcp_with_timeout(
+        let result = CarbideRuntimeProvider::connect_tcp_with_timeout(
             std::future::ready(Err(original_error)),
             Some(Duration::from_secs(5)),
         )
@@ -709,7 +711,7 @@ mod tests {
         tokio::time::timeout(Duration::from_secs(10), async {
             let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await?;
             let server_addr = listener.local_addr()?;
-            let AsyncIoTokioAsStd(mut client) = ForgeRuntimeProvider::new()
+            let AsyncIoTokioAsStd(mut client) = CarbideRuntimeProvider::new()
                 .connect_tcp(server_addr, None, Some(Duration::from_secs(5)))
                 .await?;
             let (mut server, client_addr) = listener.accept().await?;
@@ -734,24 +736,24 @@ mod tests {
             [
                 Check {
                     scenario: "default enables both families with IPv4 preference",
-                    input: ForgeResolverOpts::default(),
+                    input: CarbideResolverOpts::default(),
                     expect: LookupIpStrategy::Ipv4AndIpv6,
                 },
                 Check {
                     scenario: "new retains Hickory's IPv6-first batch strategy",
-                    input: ForgeResolverOpts::new(),
+                    input: CarbideResolverOpts::new(),
                     expect: LookupIpStrategy::Ipv6AndIpv4,
                 },
             ],
             |options| options.inner.ip_strategy,
         );
-        assert!(ForgeResolver::default().connection_lookup.is_some());
+        assert!(CarbideResolver::default().connection_lookup.is_some());
     }
 
     /// Local DNS fixture with recorded questions and an owned, joined responder task.
     /// Explicit records keep address selection independent of external DNS.
     struct DnsServer {
-        resolver: ForgeResolver,
+        resolver: CarbideResolver,
         shutdown: mpsc::Sender<()>,
         task: JoinHandle<Vec<Query>>,
     }
@@ -768,7 +770,7 @@ mod tests {
         /// Holds one family until the test observes the required resolver state.
         async fn start_gated(
             record_type: RecordType,
-            options: ForgeResolverOpts,
+            options: CarbideResolverOpts,
         ) -> (Self, Arc<ReplyGate>) {
             let gate = Arc::new(ReplyGate {
                 record_type,
@@ -796,7 +798,7 @@ mod tests {
         async fn start_with_config(
             answers: Vec<Record>,
             mut config: ResolverConfig,
-            mut options: ForgeResolverOpts,
+            mut options: CarbideResolverOpts,
             reply_gate: Option<Arc<ReplyGate>>,
             additionals: Vec<Record>,
             answer_override: Option<(Query, Vec<Record>)>,
@@ -809,7 +811,7 @@ mod tests {
             name_server.connections[0].port = address.port();
             config.name_servers = vec![name_server];
             options.inner.use_hosts_file = ResolveHosts::Never;
-            let resolver = ForgeResolver::with_config_and_options(config, options);
+            let resolver = CarbideResolver::with_config_and_options(config, options);
             let (shutdown, mut shutdown_rx) = mpsc::channel::<()>(1);
             let task = tokio::spawn(async move {
                 let mut queries = Vec::new();
@@ -970,7 +972,7 @@ mod tests {
                 ],
                 vec![],
             ),
-            ForgeResolverOpts::default(),
+            CarbideResolverOpts::default(),
             Some(gate.clone()),
             vec![],
             None,
@@ -1018,7 +1020,7 @@ mod tests {
     #[tokio::test]
     async fn dropping_connecting_addresses_releases_the_pending_lookup_owner() {
         let (server, gate) =
-            DnsServer::start_gated(RecordType::AAAA, ForgeResolverOpts::default()).await;
+            DnsServer::start_gated(RecordType::AAAA, CarbideResolverOpts::default()).await;
         let result = tokio::time::timeout(Duration::from_secs(10), async {
             let owners_before = Arc::strong_count(&server.resolver.resolver);
             let mut resolved = server
@@ -1060,7 +1062,7 @@ mod tests {
                 other_replied: Notify::new(),
                 release: Notify::new(),
             });
-            let mut options = ForgeResolverOpts::default().timeout(Duration::from_secs(5));
+            let mut options = CarbideResolverOpts::default().timeout(Duration::from_secs(5));
             options.inner.negative_min_ttl = Some(Duration::from_secs(60));
             let mut answers = vec![address_record("service.test.", Ipv4Addr::LOCALHOST)];
             if !empty_aaaa {
@@ -1089,7 +1091,8 @@ mod tests {
                 }
                 let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await?;
                 let address = listener.local_addr()?;
-                let mut connector = ForgeHttpConnector::new_with_resolver(server.resolver.clone());
+                let mut connector =
+                    CarbideHttpConnector::new_with_resolver(server.resolver.clone());
                 connector.set_connect_timeout(Some(Duration::from_secs(5)));
                 connector.set_happy_eyeballs_timeout(happy_eyeballs_timeout);
                 connector.set_metrics(metrics.clone());
@@ -1148,7 +1151,7 @@ mod tests {
             let server = DnsServer::start_with_config(
                 vec![],
                 ResolverConfig::default(),
-                ForgeResolverOpts::default(),
+                CarbideResolverOpts::default(),
                 None,
                 vec![],
                 Some((
@@ -1190,7 +1193,7 @@ mod tests {
     #[tokio::test]
     async fn cached_aaaa_waits_for_a_and_keeps_ipv4_first() {
         let (server, gate) =
-            DnsServer::start_gated(RecordType::A, ForgeResolverOpts::default()).await;
+            DnsServer::start_gated(RecordType::A, CarbideResolverOpts::default()).await;
         let result = tokio::time::timeout(Duration::from_secs(10), async {
             let ipv6 = server
                 .resolver
@@ -1406,7 +1409,7 @@ mod tests {
             let mut server = DnsServer::start_with_config(
                 case.answers,
                 config,
-                ForgeResolverOpts::default(),
+                CarbideResolverOpts::default(),
                 None,
                 case.additionals,
                 None,
@@ -1434,7 +1437,7 @@ mod tests {
                     // A selected CNAME with no usable IP must fail gracefully,
                     // not connect through the later search suffix's decoy.
                     let mut connector =
-                        ForgeHttpConnector::new_with_resolver(server.resolver.clone());
+                        CarbideHttpConnector::new_with_resolver(server.resolver.clone());
                     connector.set_connect_timeout(Some(Duration::from_secs(1)));
                     let error = tower_service::Service::call(
                         &mut connector,
@@ -1578,7 +1581,7 @@ mod tests {
     async fn batch_lookups_keep_their_order_and_completion_behavior() {
         struct Case {
             scenario: &'static str,
-            options: ForgeResolverOpts,
+            options: CarbideResolverOpts,
             opaque: bool,
             public_batch: bool,
             expected: Vec<SocketAddr>,
@@ -1588,21 +1591,21 @@ mod tests {
         let cases = [
             Case {
                 scenario: "opaque resolver keeps its configured IPv4-first batch",
-                options: ForgeResolverOpts::default(),
+                options: CarbideResolverOpts::default(),
                 opaque: true,
                 public_batch: false,
                 expected: vec![ipv4, ipv6],
             },
             Case {
                 scenario: "new retains Hickory's IPv6-first batch",
-                options: ForgeResolverOpts::new(),
+                options: CarbideResolverOpts::new(),
                 opaque: false,
                 public_batch: false,
                 expected: vec![ipv6, ipv4],
             },
             Case {
                 scenario: "public Service lookup remains a batch on an incremental resolver",
-                options: ForgeResolverOpts::default(),
+                options: CarbideResolverOpts::default(),
                 opaque: false,
                 public_batch: true,
                 expected: vec![ipv4, ipv6],
@@ -1611,7 +1614,7 @@ mod tests {
         for case in cases {
             let (server, gate) = DnsServer::start_gated(RecordType::AAAA, case.options).await;
             let resolver = if case.opaque {
-                ForgeResolver::from_async_resolver(server.resolver.resolver.as_ref().clone())
+                CarbideResolver::from_async_resolver(server.resolver.resolver.as_ref().clone())
             } else {
                 server.resolver.clone()
             };
@@ -1688,7 +1691,7 @@ mod tests {
         // IPv4 has already failed; neither may return that first error early.
         for happy_eyeballs_timeout in [None, Some(Duration::from_millis(50))] {
             let (server, gate) =
-                DnsServer::start_gated(RecordType::AAAA, ForgeResolverOpts::default()).await;
+                DnsServer::start_gated(RecordType::AAAA, CarbideResolverOpts::default()).await;
             let mut metrics = ConnectorMetrics::default();
             let result = tokio::time::timeout(Duration::from_secs(10), async {
                 // Keep the IPv4 port reserved without listening, so that attempt
@@ -1698,7 +1701,8 @@ mod tests {
                 let ipv6 = listener.local_addr()?;
                 let ipv4 = refused_ipv4.local_addr()?;
 
-                let mut connector = ForgeHttpConnector::new_with_resolver(server.resolver.clone());
+                let mut connector =
+                    CarbideHttpConnector::new_with_resolver(server.resolver.clone());
                 connector.set_connect_timeout(Some(Duration::from_secs(2)));
                 connector.set_happy_eyeballs_timeout(happy_eyeballs_timeout);
                 connector.set_metrics(metrics.clone());
@@ -1770,13 +1774,14 @@ mod tests {
             ),
         ] {
             let (server, gate) =
-                DnsServer::start_gated(RecordType::AAAA, ForgeResolverOpts::default()).await;
+                DnsServer::start_gated(RecordType::AAAA, CarbideResolverOpts::default()).await;
             let mut metrics = ConnectorMetrics::default();
             let result = fixture_io(async {
                 let (ipv6, ipv4) = bind_loopback_pair()?;
                 let ipv4_address = ipv4.local_addr()?;
                 let ipv6_address = ipv6.local_addr()?;
-                let mut connector = ForgeHttpConnector::new_with_resolver(server.resolver.clone());
+                let mut connector =
+                    CarbideHttpConnector::new_with_resolver(server.resolver.clone());
                 connector.set_connect_retries_max(Some(2));
                 connector.set_connect_retries_interval(Some(Duration::from_secs(3)));
                 connector.set_connect_timeout(Some(Duration::from_secs(1)));
@@ -1939,7 +1944,7 @@ mod tests {
 
         for (scenario, cached_dns) in [("pending AAAA", false), ("cached DNS", true)] {
             let (server, gate) =
-                DnsServer::start_gated(RecordType::AAAA, ForgeResolverOpts::default()).await;
+                DnsServer::start_gated(RecordType::AAAA, CarbideResolverOpts::default()).await;
             fixture_io(async {
                 if cached_dns {
                     gate.release.notify_one();
@@ -1970,7 +1975,8 @@ mod tests {
                     .expect("bind proxy");
                 let proxy_address = proxy.local_addr().expect("proxy address");
                 let mut metrics = ConnectorMetrics::default();
-                let mut connector = ForgeHttpConnector::new_with_resolver(server.resolver.clone());
+                let mut connector =
+                    CarbideHttpConnector::new_with_resolver(server.resolver.clone());
                 connector.set_socks5_proxy(Some(proxy_address.to_string()));
                 connector.set_happy_eyeballs_timeout(Some(Duration::from_millis(50)));
                 connector.set_connect_timeout(Some(Duration::from_secs(5)));
@@ -2048,7 +2054,7 @@ mod tests {
                 other_replied: Notify::new(),
                 release: Notify::new(),
             });
-            let mut options = ForgeResolverOpts::default();
+            let mut options = CarbideResolverOpts::default();
             // The fixture's empty response has no SOA; make its negative result
             // cacheable so the completed-delivery row does not depend on I/O order.
             options.inner.negative_min_ttl = Some(Duration::from_secs(60));
@@ -2084,7 +2090,8 @@ mod tests {
                 }
                 let start = tokio::time::Instant::now();
                 let mut metrics = ConnectorMetrics::default();
-                let mut connector = ForgeHttpConnector::new_with_resolver(server.resolver.clone());
+                let mut connector =
+                    CarbideHttpConnector::new_with_resolver(server.resolver.clone());
                 connector.set_local_address(Some(Ipv6Addr::LOCALHOST.into()));
                 connector.set_happy_eyeballs_timeout(Some(Duration::from_millis(50)));
                 connector.set_connect_retries_max(Some(2));
@@ -2158,7 +2165,7 @@ mod tests {
             tokio::time::timeout(Duration::from_secs(5), async {
                 let listener = TcpListener::bind(listen_addr).await?;
                 let server_addr = listener.local_addr()?;
-                let socket = ForgeRuntimeProvider::create_tcp_socket(server_addr, false)?;
+                let socket = CarbideRuntimeProvider::create_tcp_socket(server_addr, false)?;
                 let mut client = TcpSocket::from_std_stream(socket.into())
                     .connect(server_addr)
                     .await?;
@@ -2189,7 +2196,7 @@ mod tests {
             tokio::time::timeout(Duration::from_secs(5), async {
                 let server = TokioUdpSocket::bind(local_addr).await?;
                 let server_addr = server.local_addr()?;
-                let socket = ForgeRuntimeProvider::create_udp_socket(local_addr, false)?;
+                let socket = CarbideRuntimeProvider::create_udp_socket(local_addr, false)?;
                 socket.bind(&SockAddr::from(local_addr))?;
                 let client = TokioUdpSocket::from_std(socket.into())?;
 

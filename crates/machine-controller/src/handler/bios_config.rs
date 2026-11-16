@@ -186,25 +186,34 @@ impl HostBiosProfiles {
                         health_report,
                     });
             }
-            BiosProfileHealth::Clear => {
-                let machine_id = host.id.to_machine_id();
-                let write: WriteOpFn = Box::new(move |txn| {
-                    async move {
-                        db::machine::remove_health_report(
-                            txn,
-                            &machine_id,
-                            HealthReportApplyMode::Merge,
-                            BIOS_PROFILE_HEALTH_SOURCE,
-                        )
-                        .await?;
-                        Ok(())
-                    }
-                    .boxed()
-                });
-                ctx.pending_db_writes.push(write);
-            }
-            BiosProfileHealth::Unchanged => {}
+            BiosProfileHealth::Clear | BiosProfileHealth::Unchanged => {}
         }
+    }
+
+    fn clear_once_applied(
+        &self,
+        ctx: &mut StateHandlerContext<'_, MachineStateHandlerContextObjects>,
+        mh_snapshot: &ManagedHostStateSnapshot,
+    ) {
+        let host = &mh_snapshot.host_snapshot;
+        if self.health(host, Utc::now()) != BiosProfileHealth::Clear {
+            return;
+        }
+        let machine_id = host.id.to_machine_id();
+        let write: WriteOpFn = Box::new(move |txn| {
+            async move {
+                db::machine::remove_health_report(
+                    txn,
+                    &machine_id,
+                    HealthReportApplyMode::Merge,
+                    BIOS_PROFILE_HEALTH_SOURCE,
+                )
+                .await?;
+                Ok(())
+            }
+            .boxed()
+        });
+        ctx.pending_db_writes.push(write);
     }
 }
 
@@ -564,6 +573,7 @@ pub(super) async fn configure_host_bios(
     retry_count: u32,
 ) -> Result<BiosConfigOutcome, StateHandlerError> {
     let bmc = PlatformBmc::connect(ctx.services, mh_snapshot, redfish_client).await?;
+    let tracks_bios_profile = matches!(bmc, PlatformBmc::Libredfish { .. });
     let selection = match bmc {
         PlatformBmc::Libredfish { .. } => {
             let selection = HostBiosProfiles::select(
@@ -629,6 +639,9 @@ pub(super) async fn configure_host_bios(
         }
         Ok(outcome) => outcome,
     };
+    if tracks_bios_profile {
+        selection.clear_once_applied(ctx, mh_snapshot);
+    }
 
     let bios_job_id = outcome.references().find_map(|reference| match reference {
         OperationReference::VendorJob { job_id, .. } => Some(job_id.to_string()),

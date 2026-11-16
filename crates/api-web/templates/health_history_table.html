@@ -1,29 +1,43 @@
-<table class="detailsview">
-	<thead>
-		<tr>
-			<th>Time</th>
-			<th>Alerts</th>
-			<th>Classifications</th>
-			<th>Details</th>
-		</tr>
-	</thead>
-	<tbody>
-	{% for record in records %}
-		<tr>
-			<td>{{ record.timestamp }}</td>
-			<td>
-				{{ record.health.alerts|health_alerts_fmt(false, true)|safe }}
-			</td>
-			<td>{{ record.health.alerts|health_alert_classifications_fmt|safe }}</td>
-			<td>
-				<details>
-					<summary>Expand</summary>
-					<div style="overflow: auto; max-height: 300px; border: 1px solid var(--border-color); border-radius: 8px; background-color: var(--bg-tertiary); margin-top: 0.5rem;">
-						<pre style="margin: 0; padding: 1rem; background-color: transparent; white-space: pre-wrap;"><code>{{ record.health|json|pretty_json }}</code></pre>
-					</div>
-				</details>
-			</td>
-		</tr>
+<section class="entity-summary">
+	{% for entry in self.entries() %}
+	<div class="timeline-row{% if entry.is_current %} current{% endif %}{% if entry.record.health.alerts.is_empty() %} healthy{% else %} unhealthy{% endif %}">
+		<div class="timeline-when">
+			<div class="timeline-time">{{ entry.recorded_at }}</div>
+			{% if !entry.duration.is_empty() %}
+			<div class="timeline-duration">{% if entry.is_current %}Current · {% endif %}{{ entry.duration }}</div>
+			{% endif %}
+		</div>
+		<div class="timeline-what">
+			{% if entry.record.health.alerts.is_empty() %}
+			<div class="timeline-healthy">Healthy</div>
+			{% else %}
+			<table class="data-table alert-table">
+				<thead>
+					<tr>
+						<th>Alert</th>
+						<th>Target</th>
+						<th>Message</th>
+					</tr>
+				</thead>
+				<tbody>
+				{% for alert in entry.record.health.alerts %}
+					<tr>
+						<td>{{ alert.id }}</td>
+						<td>{% if let Some(target) = alert.target %}{{ target|health_target_link|safe }}{% else %}<span class="text-muted">—</span>{% endif %}</td>
+						<td>{{ alert.message }}</td>
+					</tr>
+				{% endfor %}
+				</tbody>
+			</table>
+			<div class="alert-row-classifications">{{ entry.record.health.alerts|health_alert_classifications_fmt|safe }}</div>
+			{% endif %}
+			<details class="report-row-json">
+				<summary>JSON</summary>
+				<pre><code>{{ entry.record.health|json|pretty_json }}</code></pre>
+			</details>
+		</div>
+	</div>
+	{% else %}
+	<p class="entity-summary-empty">No health history.</p>
 	{% endfor %}
-	</tbody>
-</table>
+</section>
