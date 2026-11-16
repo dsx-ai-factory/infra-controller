@@ -6949,6 +6949,68 @@ fn ready_boot_config_superseded_state(
     }))
 }
 
+fn bios_reapply_requested(mh_snapshot: &ManagedHostStateSnapshot) -> bool {
+    mh_snapshot
+        .host_snapshot
+        .health_reports
+        .merges
+        .contains_key(health_report::BIOS_REAPPLY_MERGE_SOURCE)
+}
+
+async fn consume_bios_reapply_after_write(
+    ctx: &mut StateHandlerContext<'_, MachineStateHandlerContextObjects>,
+    mh_snapshot: &ManagedHostStateSnapshot,
+    outcome: StateHandlerOutcome<ManagedHostState>,
+) -> Result<StateHandlerOutcome<ManagedHostState>, StateHandlerError> {
+    let write_issued = matches!(
+        &outcome,
+        StateHandlerOutcome::Transition {
+            next_state: ManagedHostState::BootConfiguring {
+                boot_config_state: ReadyBootConfigState::WaitingForBiosJob { .. }
+                    | ReadyBootConfigState::PollingBiosSetup { .. },
+                ..
+            },
+            ..
+        }
+    );
+    if !write_issued || !bios_reapply_requested(mh_snapshot) {
+        return Ok(outcome);
+    }
+    let host_id = mh_snapshot.host_snapshot.id;
+    Ok(outcome
+        .in_transaction(&ctx.services.db_pool, move |txn| {
+            async move {
+                db::machine::remove_health_report(
+                    txn,
+                    &host_id,
+                    HealthReportApplyMode::Merge,
+                    health_report::BIOS_REAPPLY_MERGE_SOURCE,
+                )
+                .await
+            }
+            .boxed()
+        })
+        .await??)
+}
+
+fn ready_boot_config_decision(
+    mh_snapshot: &ManagedHostStateSnapshot,
+    post_lock_verification_retry_count: u32,
+    decision: HostBootConfigDecision,
+) -> HostBootConfigDecision {
+    if post_lock_verification_retry_count > 0 || !bios_reapply_requested(mh_snapshot) {
+        return decision;
+    }
+    if decision != HostBootConfigDecision::ConfigureBios {
+        tracing::info!(
+            machine_id = %mh_snapshot.host_snapshot.id,
+            ?decision,
+            "Re-applying the host BIOS profile requested when maintenance ended",
+        );
+    }
+    HostBootConfigDecision::ConfigureBios
+}
+
 fn ready_boot_config_state_from_stage(stage: HostBootConfigStage) -> ReadyBootConfigState {
     match stage {
         HostBootConfigStage::ConfigureBios { retry_count } => {
@@ -7349,7 +7411,11 @@ async fn handle_ready_boot_config(
                 HostBootConfigCheckOutcome::Wait(reason) => {
                     return Ok(StateHandlerOutcome::wait(reason));
                 }
-                HostBootConfigCheckOutcome::Ready(decision) => decision,
+                HostBootConfigCheckOutcome::Ready(decision) => ready_boot_config_decision(
+                    mh_snapshot,
+                    post_lock_verification_retry_count,
+                    decision,
+                ),
             };
             let preflight_complete = matches!(preflight_decision, HostBootConfigDecision::Complete);
 
@@ -7462,7 +7528,7 @@ async fn handle_ready_boot_config(
                 .create_redfish_client_from_machine(&mh_snapshot.host_snapshot)
                 .await?;
 
-            let next_state = match check_host_boot_config(
+            let decision = match check_host_boot_config(
                 redfish_client.as_ref(),
                 mh_snapshot,
                 reachability_params,
@@ -7475,20 +7541,23 @@ async fn handle_ready_boot_config(
                 HostBootConfigCheckOutcome::Wait(reason) => {
                     return Ok(StateHandlerOutcome::wait(reason));
                 }
-                HostBootConfigCheckOutcome::Ready(HostBootConfigDecision::ConfigureBios) => {
+                HostBootConfigCheckOutcome::Ready(decision) => ready_boot_config_decision(
+                    mh_snapshot,
+                    post_lock_verification_retry_count,
+                    decision,
+                ),
+            };
+            let next_state = match decision {
+                HostBootConfigDecision::ConfigureBios => {
                     ReadyBootConfigState::ConfigureBios { retry_count: 0 }
                 }
-                HostBootConfigCheckOutcome::Ready(HostBootConfigDecision::SetBootOrder) => {
-                    ReadyBootConfigState::SetBootOrder {
-                        set_boot_order_info: initial_set_boot_order_info(),
-                    }
-                }
-                HostBootConfigCheckOutcome::Ready(HostBootConfigDecision::Complete) => {
-                    ReadyBootConfigState::LockHost {
-                        post_lock_action: None,
-                        recovery: None,
-                    }
-                }
+                HostBootConfigDecision::SetBootOrder => ReadyBootConfigState::SetBootOrder {
+                    set_boot_order_info: initial_set_boot_order_info(),
+                },
+                HostBootConfigDecision::Complete => ReadyBootConfigState::LockHost {
+                    post_lock_action: None,
+                    recovery: None,
+                },
             };
 
             Ok(StateHandlerOutcome::transition(ready_boot_configuring(
@@ -7502,7 +7571,7 @@ async fn handle_ready_boot_config(
                 .services
                 .create_redfish_client_from_machine(&mh_snapshot.host_snapshot)
                 .await?;
-            handle_ready_boot_config_stage(
+            let outcome = handle_ready_boot_config_stage(
                 ctx,
                 mh_snapshot,
                 reachability_params,
@@ -7511,7 +7580,8 @@ async fn handle_ready_boot_config(
                 post_lock_verification_retry_count,
                 HostBootConfigStage::ConfigureBios { retry_count },
             )
-            .await
+            .await?;
+            consume_bios_reapply_after_write(ctx, mh_snapshot, outcome).await
         }
         ReadyBootConfigState::WaitingForBiosJob { bios_config_info } => {
             let redfish_client = ctx
@@ -16499,6 +16569,62 @@ mod tests {
         #[test]
         fn empty_product_name_is_not_bf4() {
             assert!(!is_bf4_dmi_product(""));
+        }
+    }
+
+    mod ready_boot_config_decision_tests {
+        use model::test_support::machine_snapshot::managed_host_state_snapshot;
+
+        use super::*;
+
+        const DECISIONS: [HostBootConfigDecision; 3] = [
+            HostBootConfigDecision::ConfigureBios,
+            HostBootConfigDecision::SetBootOrder,
+            HostBootConfigDecision::Complete,
+        ];
+
+        fn snapshot(bios_reapply: bool) -> ManagedHostStateSnapshot {
+            let mut state = managed_host_state_snapshot();
+            if bios_reapply {
+                state.host_snapshot.health_reports.merges.insert(
+                    health_report::BIOS_REAPPLY_MERGE_SOURCE.to_string(),
+                    HealthReport::empty(health_report::BIOS_REAPPLY_MERGE_SOURCE.to_string()),
+                );
+            }
+            state
+        }
+
+        #[test]
+        fn keeps_the_inspected_decision_without_a_reapply_request() {
+            let state = snapshot(false);
+            for decision in DECISIONS {
+                assert_eq!(
+                    ready_boot_config_decision(&state, 0, decision.clone()),
+                    decision
+                );
+            }
+        }
+
+        #[test]
+        fn configures_bios_while_a_reapply_is_requested() {
+            let state = snapshot(true);
+            for decision in DECISIONS {
+                assert_eq!(
+                    ready_boot_config_decision(&state, 0, decision),
+                    HostBootConfigDecision::ConfigureBios
+                );
+            }
+        }
+
+        #[test]
+        fn a_post_lock_retry_keeps_the_inspected_decision() {
+            let state = snapshot(true);
+            for decision in DECISIONS {
+                assert_eq!(
+                    ready_boot_config_decision(&state, 1, decision.clone()),
+                    decision
+                );
+            }
         }
     }
 

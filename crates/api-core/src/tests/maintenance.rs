@@ -394,3 +394,122 @@ async fn ending_maintenance(
 
     Ok(())
 }
+
+async fn bios_reapply_test_env(db_pool: sqlx::PgPool, reapply: bool) -> TestEnv {
+    let mut config = common::api_fixtures::get_config();
+    config.maintenance_end_boot_config_recheck_enabled = true;
+    config.maintenance_end_bios_reapply_enabled = reapply;
+    create_test_env_with_overrides(db_pool, TestEnvOverrides::with_config(config)).await
+}
+
+fn maintenance_request(
+    host_id: MachineId,
+    operation: rpcf::MaintenanceOperation,
+) -> tonic::Request<rpcf::MaintenanceRequest> {
+    tonic::Request::new(rpcf::MaintenanceRequest {
+        operation: operation.into(),
+        host_id: Some(host_id),
+        reference: Some("https://jira.example.com/ABC-123".to_string()),
+    })
+}
+
+async fn cycle_maintenance(env: &TestEnv, host_id: MachineId) -> Result<(), tonic::Status> {
+    env.api
+        .set_maintenance(maintenance_request(
+            host_id,
+            rpcf::MaintenanceOperation::Enable,
+        ))
+        .await?;
+    env.api
+        .set_maintenance(maintenance_request(
+            host_id,
+            rpcf::MaintenanceOperation::Disable,
+        ))
+        .await?;
+    Ok(())
+}
+
+#[crate::sqlx_test]
+async fn test_ending_maintenance_requests_a_bios_reapply(
+    db_pool: sqlx::PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    ending_maintenance_bios_reapply(db_pool, true).await
+}
+
+#[crate::sqlx_test]
+async fn test_ending_maintenance_rechecks_without_a_bios_reapply_by_default(
+    db_pool: sqlx::PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    ending_maintenance_bios_reapply(db_pool, false).await
+}
+
+async fn ending_maintenance_bios_reapply(
+    db_pool: sqlx::PgPool,
+    reapply: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let env = bios_reapply_test_env(db_pool, reapply).await;
+    let mh = create_managed_host(&env).await;
+
+    cycle_maintenance(&env, mh.host().id.into()).await?;
+
+    let mut txn = env.db_txn().await;
+    let host = mh.host().db_machine(&mut txn).await;
+    drop(txn);
+    assert!(
+        !host.health_reports.merges.contains_key("maintenance"),
+        "ending maintenance removes the maintenance alert",
+    );
+    assert!(
+        host.pending_boot_interface_config_version().is_some(),
+        "ending maintenance opens a pending boot configuration",
+    );
+    let alert = host
+        .health_reports
+        .merges
+        .get(health_report::BIOS_REAPPLY_MERGE_SOURCE);
+    if reapply {
+        let alert =
+            alert.expect("ending maintenance on a free Ready host requests a BIOS re-apply");
+        assert!(
+            alert.has_classification(
+                &health_report::HealthAlertClassification::prevent_allocations()
+            ),
+            "the BIOS re-apply alert keeps the host from being allocated: {alert:?}",
+        );
+    } else {
+        assert!(
+            alert.is_none(),
+            "without the re-apply setting, ending maintenance only re-verifies: {alert:?}",
+        );
+    }
+
+    Ok(())
+}
+
+#[crate::sqlx_test]
+async fn test_ending_maintenance_keeps_an_assigned_host_bios(
+    db_pool: sqlx::PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let env = bios_reapply_test_env(db_pool, true).await;
+    let segment_id = env.create_vpc_and_tenant_segment().await;
+    let mh = create_managed_host(&env).await;
+    mh.instance_builer(&env)
+        .single_interface_network_config(segment_id)
+        .build()
+        .await;
+
+    cycle_maintenance(&env, mh.host().id.into()).await?;
+
+    let mut txn = env.db_txn().await;
+    let host = mh.host().db_machine(&mut txn).await;
+    drop(txn);
+    assert!(
+        !host
+            .health_reports
+            .merges
+            .contains_key(health_report::BIOS_REAPPLY_MERGE_SOURCE),
+        "a host with an instance keeps its BIOS until it is released",
+    );
+
+    Ok(())
+}
