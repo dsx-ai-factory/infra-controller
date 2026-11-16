@@ -5,6 +5,7 @@ pub struct TestWrapper {
 }
 #[derive(Debug)]
 struct Inner {
+    instrumentation: ::carbide_instrument::Instrumentation,
     connection_provider: Box<
         dyn ::tonic_client_wrapper::ConnectionProvider<TestInnerClient>,
     >,
@@ -16,10 +17,14 @@ struct InnerConnection {
     created: std::time::SystemTime,
 }
 impl TestWrapper {
+    /// Builds a client whose RED metrics use `instrumentation`.
+    /// Retain its meter provider while client calls can run.
     pub fn build<P: ::tonic_client_wrapper::ConnectionProvider<TestInnerClient>>(
         connection_provider: P,
+        instrumentation: ::carbide_instrument::Instrumentation,
     ) -> Self {
         let inner = Inner {
+            instrumentation,
             connection_provider: Box::new(connection_provider),
             connection: tokio::sync::Mutex::new(None),
         };
@@ -61,6 +66,7 @@ impl TestWrapper {
         &self,
     ) -> Result<crate::test::GoldenResponse, tonic::Status> {
         ::carbide_instrument::red::instrumented(
+                &self.inner.instrumentation,
                 "golden_service",
                 "golden_rpc",
                 async move {

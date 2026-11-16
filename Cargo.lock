@@ -2756,6 +2756,7 @@ dependencies = [
  "bmc-mock",
  "bytes",
  "carbide-api-model",
+ "carbide-instrument",
  "carbide-ipmi",
  "carbide-network",
  "carbide-nmxc-mock",
@@ -3541,6 +3542,7 @@ name = "carbide-rvs"
 version = "0.0.1"
 dependencies = [
  "axum",
+ "carbide-instrument",
  "carbide-rpc",
  "carbide-test-support",
  "carbide-tls",
@@ -8077,6 +8079,7 @@ dependencies = [
  "bmc-vendor",
  "carbide-api-model",
  "carbide-health-report",
+ "carbide-instrument",
  "carbide-libmlx",
  "carbide-libmlx-model",
  "carbide-macros",

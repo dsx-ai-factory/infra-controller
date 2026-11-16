@@ -733,6 +733,7 @@ async fn build_kms_backend(
                         .unwrap_or(DEFAULT_TRANSIT_MOUNT)
                         .to_string(),
                     keys.clone(),
+                    instrumentation.clone(),
                 );
                 join_set
                     .build_task()
@@ -764,10 +765,11 @@ async fn build_kms_backend(
                 // Connects now and verifies the server and every key before
                 // any DEK is wrapped; an unreachable server or an unqualified
                 // key fails the boot with a message that names the field.
-                let provider = KmipKmsProvider::connect(client_config, keys.clone())
-                    .await
-                    .map_err(eyre::Report::new)
-                    .wrap_err_with(|| format!("KMS provider {name:?}"))?;
+                let provider =
+                    KmipKmsProvider::connect(client_config, keys.clone(), instrumentation.clone())
+                        .await
+                        .map_err(eyre::Report::new)
+                        .wrap_err_with(|| format!("KMS provider {name:?}"))?;
                 Arc::new(provider)
             }
         };

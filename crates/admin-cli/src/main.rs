@@ -274,10 +274,10 @@ async fn main() -> color_eyre::Result<()> {
                 verified.request_timeout = Some(VERIFIED_VERSION_TIMEOUT);
                 verified.connect_retries_max = Some(0);
                 version_fallback = Some(version::VerificationFallback {
-                    api_client: ApiClient(CarbideApiClient::new(&ApiConfig::new(
-                        &url,
-                        &client_config,
-                    ))),
+                    api_client: ApiClient(CarbideApiClient::new(
+                        &ApiConfig::new(&url, &client_config),
+                        carbide_instrument::Instrumentation::noop(),
+                    )),
                     root_ca_path: client_config.root_ca_path.clone(),
                 });
                 verified_retry = Some(RetryConfig {
@@ -304,7 +304,10 @@ async fn main() -> color_eyre::Result<()> {
         api_config = api_config.with_retry_config(retry_config);
     }
     let ctx = RuntimeContext {
-        api_client: ApiClient(CarbideApiClient::new(&api_config)),
+        api_client: ApiClient(CarbideApiClient::new(
+            &api_config,
+            carbide_instrument::Instrumentation::noop(),
+        )),
         config: RuntimeConfig {
             format: config.format,
             request_timeout: client_config.request_timeout,

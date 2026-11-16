@@ -97,6 +97,7 @@ impl FieldFilter {
 
 #[derive(Debug)]
 pub struct NvueClient {
+    instrumentation: carbide_instrument::Instrumentation,
     server_address: NvueServerAddress,
     client: Client,
 }
@@ -108,15 +109,23 @@ impl NvueClient {
     const APPLY_CONFIG_REVISION_TIMEOUT: Duration = Duration::from_secs(60);
     const APPLY_CONFIG_REVISION_POLL_INTERVAL: Duration = Duration::from_secs(1);
 
-    pub fn new(server_address: NvueServerAddress) -> Result<Self, NvueClientError> {
+    /// Creates a client whose RED metrics use the supplied destination.
+    pub fn new(
+        server_address: NvueServerAddress,
+        instrumentation: carbide_instrument::Instrumentation,
+    ) -> Result<Self, NvueClientError> {
         build_client(&server_address).map(|client| Self {
+            instrumentation,
             server_address,
             client,
         })
     }
 
-    pub fn new_https_from_env() -> Result<Self, NvueClientError> {
-        NvueServerAddress::https_from_env().and_then(Self::new)
+    /// Creates an HTTPS client from the environment with an explicit RED destination.
+    pub fn new_https_from_env(
+        instrumentation: carbide_instrument::Instrumentation,
+    ) -> Result<Self, NvueClientError> {
+        NvueServerAddress::https_from_env().and_then(|address| Self::new(address, instrumentation))
     }
 
     // Construct a URL string using the internal server address and the
@@ -165,7 +174,7 @@ impl NvueClient {
             .body()
             .and_then(|b| b.as_bytes())
             .map(|b| String::from_utf8_lossy(b).into_owned());
-        red::instrumented("nvue", operation, async move {
+        red::instrumented(&self.instrumentation, "nvue", operation, async move {
             self.client
                 .execute(request)
                 .await
@@ -706,7 +715,11 @@ mod tests {
             })
         });
         let server = MockNvueServer::start(handler).expect("mock server should start");
-        let client = NvueClient::new(server.server_address()).expect("client should be created");
+        let client = NvueClient::new(
+            server.server_address(),
+            carbide_instrument::Instrumentation::noop(),
+        )
+        .expect("client should be created");
 
         let neighbors = client
             .get_bgp_neighbors_filtered("default", FieldFilter::new().include("/*/state"))
@@ -753,7 +766,11 @@ mod tests {
         let handler = ConfigRevisionHandler::default().with_override(respond_pending_once);
 
         let server = MockNvueServer::start(handler).expect("mock server should start");
-        let client = NvueClient::new(server.server_address()).expect("client should be created");
+        let client = NvueClient::new(
+            server.server_address(),
+            carbide_instrument::Instrumentation::noop(),
+        )
+        .expect("client should be created");
         let revision_id = client
             .create_config_revision()
             .await
@@ -803,7 +820,11 @@ mod tests {
         let handler = ConfigRevisionHandler::default().with_override(pending_revisions);
 
         let server = MockNvueServer::start(handler).expect("mock server should start");
-        let client = NvueClient::new(server.server_address()).expect("client should be created");
+        let client = NvueClient::new(
+            server.server_address(),
+            carbide_instrument::Instrumentation::noop(),
+        )
+        .expect("client should be created");
         let revision_id = client
             .create_config_revision()
             .await
@@ -872,7 +893,11 @@ mod tests {
     async fn apply_config_revision_waits_for_rollback_and_preserves_error() {
         let handler = ConfigRevisionRollbackHandler::new(serde_json::json!({}), 1, 1);
         let server = MockNvueServer::start(handler).expect("mock server should start");
-        let client = NvueClient::new(server.server_address()).expect("client should be created");
+        let client = NvueClient::new(
+            server.server_address(),
+            carbide_instrument::Instrumentation::noop(),
+        )
+        .expect("client should be created");
         let revision_id = client
             .create_config_revision()
             .await
@@ -930,7 +955,11 @@ mod tests {
             ConfigRevisionRollbackHandler::new(serde_json::json!({}), 35, 35)
                 .with_response_checkpoints();
         let server = MockNvueServer::start(handler).expect("mock server should start");
-        let client = NvueClient::new(server.server_address()).expect("client should be created");
+        let client = NvueClient::new(
+            server.server_address(),
+            carbide_instrument::Instrumentation::noop(),
+        )
+        .expect("client should be created");
         let revision_id = client
             .create_config_revision()
             .await
@@ -984,7 +1013,11 @@ mod tests {
             serde_json::to_value(&config).expect("test configuration should serialize");
         let handler = Arc::new(ConfigRevisionHandler::default());
         let server = MockNvueServer::start(Arc::clone(&handler)).expect("mock server should start");
-        let client = NvueClient::new(server.server_address()).expect("client should be created");
+        let client = NvueClient::new(
+            server.server_address(),
+            carbide_instrument::Instrumentation::noop(),
+        )
+        .expect("client should be created");
 
         let first_revision_id = client
             .push_config(&config)

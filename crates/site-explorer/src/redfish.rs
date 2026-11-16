@@ -1576,6 +1576,7 @@ mod tests {
             "site-explorer-test",
             bmc_drivers::built_in_rules(),
             carbide_ipmi::test_support(),
+            carbide_instrument::Instrumentation::noop(),
         )
         .expect("the pools are in order");
         let mut client = build_redfish_client(Arc::new(RedfishSim::default()));

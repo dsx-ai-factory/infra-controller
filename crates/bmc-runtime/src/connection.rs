@@ -39,6 +39,7 @@ use crate::{
 /// Constructs and refreshes concrete pooled Redfish connections on behalf of
 /// one named caller.
 pub struct ConnectionManager {
+    instrumentation: carbide_instrument::Instrumentation,
     pool: Arc<NvRedfishClientPool>,
     credentials: Arc<dyn RuntimeCredentialProvider>,
     caller_identity: String,
@@ -47,15 +48,18 @@ pub struct ConnectionManager {
 
 impl ConnectionManager {
     /// Creates a manager; `caller_identity` names the service requesting credentials.
+    /// RED metrics use `instrumentation`; retain its provider while connections run.
     pub fn new(
         pool: Arc<NvRedfishClientPool>,
         credentials: Arc<dyn RuntimeCredentialProvider>,
         caller_identity: String,
+        instrumentation: carbide_instrument::Instrumentation,
     ) -> Result<Self, CredentialRequestError> {
         if caller_identity.trim().is_empty() {
             return Err(CredentialRequestError::EmptyCallerIdentity);
         }
         Ok(Self {
+            instrumentation,
             pool,
             credentials,
             caller_identity,
@@ -89,6 +93,7 @@ impl ConnectionManager {
             connection.bmc,
             connection.service_root,
             ipmi,
+            self.instrumentation.clone(),
         ))
     }
 
@@ -149,12 +154,18 @@ impl ConnectionManager {
             .await
             .map_err(ConnectError::Credentials)?;
         let (address, credentials) = (endpoint.address(), lease.into_credentials());
-        observe(endpoint, None, "create_client", async {
-            self.pool
-                .connection_with_bmc_credentials(address, credentials)
-                .await
-                .map_err(PlatformError::from_redfish)
-        })
+        observe(
+            &self.instrumentation,
+            endpoint,
+            None,
+            "create_client",
+            async {
+                self.pool
+                    .connection_with_bmc_credentials(address, credentials)
+                    .await
+                    .map_err(PlatformError::from_redfish)
+            },
+        )
         .await
         .map_err(ConnectError::Transport)
     }
@@ -182,12 +193,14 @@ pub struct DriverPools {
 impl DriverConnector {
     /// `caller_identity` names the service in credential requests, and
     /// `ipmi_tool` serves drivers that restart or reset over IPMI.
+    /// RED metrics use `instrumentation`; retain its provider while operations run.
     pub fn new(
         pools: DriverPools,
         credential_reader: Arc<dyn CredentialReader>,
         caller_identity: &str,
         rules: Rules,
         ipmi_tool: Arc<dyn IPMITool>,
+        instrumentation: carbide_instrument::Instrumentation,
     ) -> Result<Self, DriverConnectorError> {
         if pools.direct.authenticates_upstream() {
             return Err(DriverConnectorError::ProxiedDirectPool);
@@ -198,8 +211,12 @@ impl DriverConnector {
             } else {
                 Arc::new(StoredRootCredentials::new(credential_reader))
             };
-        let connections =
-            ConnectionManager::new(pools.routed, credentials, caller_identity.to_string())?;
+        let connections = ConnectionManager::new(
+            pools.routed,
+            credentials,
+            caller_identity.to_string(),
+            instrumentation,
+        )?;
         Ok(Self {
             connections,
             direct_pool: pools.direct,
@@ -247,15 +264,21 @@ impl DriverConnector {
             .into());
         }
         let address = endpoint.address();
-        let connection = observe(&endpoint, None, "create_client", async {
-            self.direct_pool
-                .uncached_connection_with_bmc_credentials(
-                    address,
-                    BmcCredentials::new(username, password),
-                )
-                .await
-                .map_err(PlatformError::from_redfish)
-        })
+        let connection = observe(
+            &self.connections.instrumentation,
+            &endpoint,
+            None,
+            "create_client",
+            async {
+                self.direct_pool
+                    .uncached_connection_with_bmc_credentials(
+                        address,
+                        BmcCredentials::new(username, password),
+                    )
+                    .await
+                    .map_err(PlatformError::from_redfish)
+            },
+        )
         .await
         .map_err(ConnectError::Transport)?;
         Ok(ConnectedBmc::new(
@@ -263,6 +286,7 @@ impl DriverConnector {
             connection.bmc,
             connection.service_root,
             None,
+            self.connections.instrumentation.clone(),
         ))
     }
 }
@@ -351,6 +375,7 @@ mod tests {
             "test",
             Rules::new(Vec::new()).expect("empty rules are valid"),
             carbide_ipmi::test_support(),
+            carbide_instrument::Instrumentation::noop(),
         )
     }
 

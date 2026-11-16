@@ -34,7 +34,10 @@ async fn nras_comm_failure_returns_comm_err() {
         validate_jwt_expiry: false,
     };
     // execute
-    let client = nras::NrasVerifierClient::new_with_config(&config);
+    let client = nras::NrasVerifierClient::new_with_config(
+        &config,
+        carbide_instrument::Instrumentation::noop(),
+    );
     let device_att_info: DeviceAttestationInfo = Default::default();
 
     let actual_err = client
@@ -66,7 +69,10 @@ async fn nras_response_parsing_failure_returns_parsing_err() {
     };
 
     // execute
-    let client = nras::NrasVerifierClient::new_with_config(&config);
+    let client = nras::NrasVerifierClient::new_with_config(
+        &config,
+        carbide_instrument::Instrumentation::noop(),
+    );
     let device_att_info: DeviceAttestationInfo = Default::default();
 
     let actual_err = client
@@ -91,7 +97,10 @@ async fn nras_response_not_200_returns_comm_error() {
     };
 
     // execute
-    let client = nras::NrasVerifierClient::new_with_config(&config);
+    let client = nras::NrasVerifierClient::new_with_config(
+        &config,
+        carbide_instrument::Instrumentation::noop(),
+    );
     let device_att_info: DeviceAttestationInfo = Default::default();
 
     let actual_err = client
@@ -118,9 +127,10 @@ async fn keystore_comm_failure_returns_comm_error() {
     };
 
     // execute
-    let actual_err = nras::NrasKeyStore::new_with_config(&config)
-        .await
-        .expect_err("Expected NrasError to be returned");
+    let actual_err =
+        nras::NrasKeyStore::new_with_config(&config, &carbide_instrument::Instrumentation::noop())
+            .await
+            .expect_err("Expected NrasError to be returned");
 
     // verify
     assert!(matches!(actual_err, NrasError::Communication(_)));
@@ -146,9 +156,10 @@ async fn keystore_status_code_not_200_returns_comm_error() {
     };
 
     // execute
-    let actual_err = nras::NrasKeyStore::new_with_config(&config)
-        .await
-        .expect_err("Expected NrasError to be returned");
+    let actual_err =
+        nras::NrasKeyStore::new_with_config(&config, &carbide_instrument::Instrumentation::noop())
+            .await
+            .expect_err("Expected NrasError to be returned");
 
     // verify
     assert!(matches!(actual_err, NrasError::Communication(_)));
@@ -174,9 +185,10 @@ async fn keystore_parsing_error_returns_jwk_err() {
     };
 
     // execute
-    let actual_err = nras::NrasKeyStore::new_with_config(&config)
-        .await
-        .expect_err("Expected NrasError to be returned");
+    let actual_err =
+        nras::NrasKeyStore::new_with_config(&config, &carbide_instrument::Instrumentation::noop())
+            .await
+            .expect_err("Expected NrasError to be returned");
 
     // verify
     assert!(matches!(actual_err, NrasError::Jwk(_)));
@@ -328,11 +340,15 @@ async fn happy_path_one_gpu_returns_processed_attestation_outcome() {
         validate_jwt_expiry: false,
     };
 
-    let client = nras::NrasVerifierClient::new_with_config(&config);
+    let client = nras::NrasVerifierClient::new_with_config(
+        &config,
+        carbide_instrument::Instrumentation::noop(),
+    );
 
-    let keystore = nras::NrasKeyStore::new_with_config(&config)
-        .await
-        .expect("Unexpected error creating KeyStore");
+    let keystore =
+        nras::NrasKeyStore::new_with_config(&config, &carbide_instrument::Instrumentation::noop())
+            .await
+            .expect("Unexpected error creating KeyStore");
 
     let device_att_info: DeviceAttestationInfo = Default::default();
 

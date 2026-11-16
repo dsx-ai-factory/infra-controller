@@ -1011,7 +1011,8 @@ mod tests {
             .await;
         let client_config = CarbideClientConfig::default();
         let api_config = ApiConfig::new("https://example.com", &client_config);
-        let api_client = CarbideApiClient::new(&api_config);
+        let api_client =
+            CarbideApiClient::new(&api_config, carbide_instrument::Instrumentation::noop());
 
         create_client(
             ip,
