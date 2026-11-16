@@ -53,7 +53,6 @@ governor = { workspace = true }
 http-body-util = { workspace = true }
 hyper = { workspace = true }
 ipnetwork = { workspace = true }
-netlink-packet-route = { workspace = true }
 nonzero_ext = { workspace = true }
 opentelemetry = { workspace = true }
 opentelemetry-prometheus = { workspace = true }
@@ -84,6 +83,7 @@ carbide-test-support = { path = "../test-support" }
 http-body-util = { workspace = true }
 hyper = { workspace = true }
 hyper-util = { workspace = true, features = ["client-legacy"] }
+netlink-packet-route = { workspace = true }
 uuid = { features = ["v4"], workspace = true }
 
 [build-dependencies]
