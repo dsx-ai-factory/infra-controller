@@ -12,10 +12,15 @@
 {{- $supplementalNetworkConfig := default (dict) .Values.supplementalNetworkConfig -}}
 {{- $supplementalCmName := default "" (get $supplementalNetworkConfig "name") -}}
 {{- $supplementalCmKey := default "supplemental.json" (get $supplementalNetworkConfig "key") -}}
+{{- $lldpHostLibraryPath := default "" .Values.lldpSidecar.hostLibraryPath -}}
+{{- $lldpLibraryPath := default "" .Values.lldpSidecar.ldLibraryPath -}}
+{{- if and (empty $lldpLibraryPath) $lldpHostLibraryPath -}}
+{{- $lldpLibraryPath = "/host/lib64" -}}
+{{- end -}}
 {{- /* The agent's config.toml is needed by any section that sets a key in it. */ -}}
 {{- $prometheusDisabled := eq (toString .Values.prometheusEnabled) "false" -}}
 {{- $fmdsNetworkingConfigured := ne .Values.fmds.networkingAddresses nil -}}
-{{- $agentConfigEnabled := or .Values.fmds.sign_proxy_url $supplementalCmName .Values.metricsPort $prometheusDisabled $fmdsNetworkingConfigured -}}
+{{- $agentConfigEnabled := or .Values.forgeSystem.apiServer .Values.fmds.sign_proxy_url $supplementalCmName .Values.metricsPort $prometheusDisabled $fmdsNetworkingConfigured -}}
 {{- $podAnnotations := .Values.serviceDaemonSet.annotations -}}
 {{- if $agentConfigEnabled -}}
 {{- $podAnnotations = omit $podAnnotations "checksum/machine-identity-config" -}}
@@ -83,7 +88,16 @@ spec:
           {{- toYaml . | nindent 8 }}
         {{- end }}
     spec:
+      {{- if .Values.hostNetwork }}
+      hostNetwork: true
+      dnsPolicy: ClusterFirstWithHostNet
+      {{- else }}
       dnsPolicy: ClusterFirst
+      {{- end }}
+      {{- with .Values.serviceDaemonSet.hostAliases }}
+      hostAliases:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
       {{- if not (empty .Values.serviceDaemonSet.nodeSelector) }}
       affinity:
         nodeAffinity:
@@ -151,8 +165,8 @@ spec:
             - run
             - "--hbn-config-mode=nvue-rest"
             - "--agent-platform-type=containerized"
-            - "--dhcp-grpc-server=http://carbide-dpf-cluster-{{ .Values.dhcp_server.service_name }}.dpf-operator-system.svc.cluster.local:10079"
-            - "--fmds-grpc-server=http://carbide-dpf-cluster-{{ .Values.fmds.service_name }}.dpf-operator-system.svc.cluster.local:50052"
+            - "--dhcp-grpc-server=http://{{ .Values.dpuClusterName }}-{{ .Values.dhcp_server.service_name }}.dpf-operator-system.svc.cluster.local:10079"
+            - "--fmds-grpc-server=http://{{ .Values.dpuClusterName }}-{{ .Values.fmds.service_name }}.dpf-operator-system.svc.cluster.local:50052"
             {{- if not (empty .Values.dhcp_server.interface_prepend) }}
             - "--dhcp-server-interface-prepend={{ .Values.dhcp_server.interface_prepend }}"
             {{ end }}
@@ -202,7 +216,7 @@ spec:
             - name: IGNORE_MGMT_VRF
               value: "1"
             - name: NVUE_HTTPS_ADDRESS
-              value: carbide-dpf-cluster-{{ .Values.hbn.nvue_https_address }}.dpf-operator-system.svc.cluster.local:8765
+              value: {{ printf "%s-%s.dpf-operator-system.svc.cluster.local:8765" .Values.dpuClusterName .Values.hbn.nvue_https_address }}
             - name: NVUE_USERNAME
               value: "carbide"
             - name: NVUE_PASSWORD
@@ -241,6 +255,7 @@ spec:
               mountPath: /etc/nico/xplane
               readOnly: true
             {{- end }}
+        {{- if .Values.lldpSidecar.enabled }}
         - name: nico-lldp-sidecar
           securityContext:
             privileged: false
@@ -254,6 +269,11 @@ spec:
           args:
             - sidecar-mode
           imagePullPolicy: {{ .Values.image.pullPolicy }}
+          {{- with $lldpLibraryPath }}
+          env:
+            - name: LD_LIBRARY_PATH
+              value: {{ . | quote }}
+          {{- end }}
           {{- with .Values.lldpSidecar.resources }}
           resources:
             {{- toYaml . | nindent 12 }}
@@ -270,9 +290,15 @@ spec:
             - name: host-lib
               mountPath: /lib
               readOnly: true
+            {{- if $lldpHostLibraryPath }}
+            - name: host-library
+              mountPath: /host/lib64
+              readOnly: true
+            {{- end }}
             - name: sys
               mountPath: /host-sys
               readOnly: true
+        {{- end }}
       volumes:
         {{- if $agentConfigEnabled }}
         - name: agent-config
@@ -301,6 +327,7 @@ spec:
             type: DirectoryOrCreate
         - name: hw-cache
           emptyDir: {}
+        {{- if .Values.lldpSidecar.enabled }}
         - name: host-run
           hostPath:
             path: /run
@@ -313,6 +340,13 @@ spec:
           hostPath:
             path: /lib
             type: Directory
+        {{- if $lldpHostLibraryPath }}
+        - name: host-library
+          hostPath:
+            path: {{ $lldpHostLibraryPath | quote }}
+            type: Directory
+        {{- end }}
+        {{- end }}
         - name: sys
           hostPath:
             path: /sys

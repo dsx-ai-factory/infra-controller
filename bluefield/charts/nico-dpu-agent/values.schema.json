@@ -120,6 +120,23 @@
             "type": "string"
           }
         },
+        "hostAliases": {
+          "type": "array",
+          "description": "Optional static host entries for the DPU agent pod, for example an API hostname resolved through the management network.",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["ip", "hostnames"],
+            "properties": {
+              "ip": { "type": "string", "minLength": 1 },
+              "hostnames": {
+                "type": "array",
+                "minItems": 1,
+                "items": { "type": "string", "minLength": 1 }
+              }
+            }
+          }
+        },
         "updateStrategy": {
           "type": "object",
           "description": "serviceDaemonSet upgrade strategy configuration",
@@ -163,8 +180,20 @@
     "lldpSidecar": {
       "type": "object",
       "description": "Configuration for the LLDP snapshot sidecar",
-      "required": ["resources"],
+      "required": ["enabled", "resources"],
       "properties": {
+        "enabled": {
+          "type": "boolean",
+          "description": "Run the LLDP snapshot sidecar. Defaults to true; disable only when host LLDP is unavailable and discovery does not require snapshots."
+        },
+        "hostLibraryPath": {
+          "type": "string",
+          "description": "Optional host library directory to mount read-only at /host/lib64. When set, /host/lib64 is used as the default LD_LIBRARY_PATH for the sidecar."
+        },
+        "ldLibraryPath": {
+          "type": "string",
+          "description": "Optional explicit LD_LIBRARY_PATH for the sidecar. Use /usr/lib/forge-runtime if the host /lib mount lacks libudev.so.1. An explicit path takes precedence over hostLibraryPath; when both are empty, default lookup is unchanged."
+        },
         "resources": {
           "type": "object",
           "description": "CPU and memory requests and limits for the LLDP snapshot sidecar",
@@ -230,6 +259,25 @@
         }
       },
       "additionalProperties": false
+    },
+    "hostNetwork": {
+      "type": "boolean",
+      "description": "Use the DPU node's management network for agent discovery instead of the pod network. Defaults to false."
+    },
+    "dpuClusterName": {
+      "type": "string",
+      "minLength": 1,
+      "description": "DPUCluster name used to construct DPU service DNS names. Defaults to carbide-dpf-cluster."
+    },
+    "forgeSystem": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "apiServer": {
+          "type": "string",
+          "description": "Optional NICo API URL written to the agent config; empty uses the agent's compiled default."
+        }
+      }
     }
   },
   "additionalProperties": true

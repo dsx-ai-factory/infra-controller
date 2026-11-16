@@ -742,6 +742,57 @@ Notes:
 - Nested scalars and arrays replace generated values.
 - Omitted keys keep their generated values.
 
+On OpenShift/RHCOS, DPF mounts the host's `/lib` into the LLDP sidecar, while
+BlueField runtime libraries such as `libudev.so.1` are provided under the host's
+`/usr/lib64`. If the sidecar reports a missing shared library, mount that host
+directory and use it for lookup:
+
+```toml
+[dpf.services.dpu_agent.extra_helm_values.lldpSidecar]
+hostLibraryPath = "/usr/lib64"
+```
+
+For a service defined under `[dpf.deployments.<name>.services]`, set the
+corresponding deployment-specific
+`[dpf.deployments.<name>.services.dpu_agent.extra_helm_values.lldpSidecar]`
+instead; it does not inherit the site-wide service override.
+
+The chart mounts it read-only at `/host/lib64` and uses that path as the
+sidecar's default `LD_LIBRARY_PATH`. An explicit `lldpSidecar.ldLibraryPath`
+takes precedence; include `/host/lib64` in that path or clear the override
+when switching to host libraries. Both settings are opt-in, so deployments
+that do not need host libraries keep their existing behavior.
+
+On a hosted DPU cluster, the DPU agent may need to send discovery from the
+DPU's management IP rather than its pod IP. The chart keeps pod networking by
+default; enable host networking only when the NICo inventory maps that
+management address to the DPU. Set `dpuClusterName` to the actual `DPUCluster`
+name so the agent reaches the right DHCP, FMDS, and HBN services. If the API
+route hostname is not resolved by the DPU cluster's DNS, an optional host alias
+can map it to the reachable ingress address:
+
+```toml
+[dpf.services.dpu_agent.extra_helm_values]
+hostNetwork = true
+dpuClusterName = "doca"
+
+[dpf.services.dpu_agent.extra_helm_values.forgeSystem]
+apiServer = "https://carbide-api.forge:31079"
+
+[[dpf.services.dpu_agent.extra_helm_values.serviceDaemonSet.hostAliases]]
+ip = "<reachable-ingress-address>"
+hostnames = ["carbide-api.forge"]
+```
+
+Use the site's actual cluster name and API endpoint. The agent chart writes
+`forgeSystem.apiServer` to its ConfigMap and rolls the pod when it changes.
+`hostAliases` changes only pod name resolution; it does not expose the API route
+or install a certificate. The LLDP sidecar remains enabled by default and
+requires `lldpcli` on the DPU host. The optional host library mount does not
+provide that binary. Set `lldpSidecar.enabled = false` when the DPU image does
+not include `lldpcli` and the deployment does not require LLDP snapshots;
+verify the agent's other discovery data before using that setting.
+
 Set the DPU agent machine identity proxy with a key similar to the following:
 
 ```toml
