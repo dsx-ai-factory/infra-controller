@@ -78,8 +78,10 @@ async fn read(
     mock: &MockRmsApi,
     nodes: Vec<rms::NodeInfo>,
 ) -> Vec<ComponentFirmwareInventoryResult> {
+    let instrumentation = carbide_instrument::Instrumentation::noop();
     let macs: Vec<_> = (0..nodes.len()).map(mac).collect();
     query(
+        &instrumentation,
         mock,
         &macs,
         async { Ok(nodes.into_iter().map(Ok).collect()) },
@@ -411,10 +413,12 @@ async fn duplicates_share_only_identical_queries() {
 /// Admission rejects excessive work before polling any preparation future.
 #[tokio::test]
 async fn endpoint_admission_checks_the_exact_boundary() {
+    let instrumentation = carbide_instrument::Instrumentation::noop();
     let mock = MockRmsApi::new();
     for count in [0, 256, 257] {
         let macs: Vec<_> = (0..count).map(mac).collect();
         let result = query(
+            &instrumentation,
             &mock,
             &macs,
             async {
@@ -447,6 +451,7 @@ async fn endpoint_admission_checks_the_exact_boundary() {
 /// Paused time applies only to the private seam, which performs no SQL.
 #[tokio::test(start_paused = true)]
 async fn preparation_and_rpc_share_one_owned_deadline() {
+    let instrumentation = carbide_instrument::Instrumentation::noop();
     let proof = async {
         let mock = MockRmsApi::new();
         let input = nodes(129);
@@ -464,7 +469,7 @@ async fn preparation_and_rpc_share_one_owned_deadline() {
             Ok(input.into_iter().map(Ok).collect())
         };
         let (results, logs) = capture_logs_async(async {
-            let read = query(&mock, &macs, prepare, deadline);
+            let read = query(&instrumentation, &mock, &macs, prepare, deadline);
             tokio::pin!(read);
             tokio::select! { _ = first_arrival => {}, _ = &mut read => panic!("first RPC must wait") }
             let (arrival, release) = mock.block_next_batch_get_firmware_inventory().await;
@@ -507,6 +512,7 @@ async fn preparation_and_rpc_share_one_owned_deadline() {
         assert_eq!(STATEMENT_TIMEOUT, Duration::from_secs(5));
 
         let preparation_timeout = query(
+            &instrumentation,
             &mock,
             &macs,
             std::future::pending(),
@@ -546,6 +552,7 @@ async fn preparation_and_rpc_share_one_owned_deadline() {
 /// Dropping the caller must drop both preparation and an in-flight RPC.
 #[tokio::test]
 async fn cancellation_drops_owned_work() {
+    let instrumentation = carbide_instrument::Instrumentation::noop();
     let proof = async {
         let mock = MockRmsApi::new();
         let macs = [mac(0)];
@@ -556,7 +563,13 @@ async fn cancellation_drops_owned_work() {
             held.await.unwrap();
             Ok(vec![Ok(nodes(1).remove(0))])
         };
-        let mut read = Box::pin(query(&mock, &macs, prepare, Instant::now() + READ_TIMEOUT));
+        let mut read = Box::pin(query(
+            &instrumentation,
+            &mock,
+            &macs,
+            prepare,
+            Instant::now() + READ_TIMEOUT,
+        ));
         tokio::select! { _ = arrival => {}, _ = &mut read => panic!("preparation must wait") }
         drop(read);
         assert!(release.is_closed());
@@ -577,6 +590,7 @@ async fn cancellation_drops_owned_work() {
 /// Diagnostics identify the failed stage without retaining private backend text.
 #[tokio::test]
 async fn transport_and_tls_text_stays_out_of_results_and_logs() {
+    let instrumentation = carbide_instrument::Instrumentation::noop();
     const PRIVATE: &str = "firmware-private-credential-and-response-body";
     let safe = |logs: &[CapturedLog], category: &str| {
         assert!(
@@ -650,8 +664,14 @@ async fn transport_and_tls_text_stays_out_of_results_and_logs() {
             }
         };
 
-        let (results, logs) =
-            capture_logs_async(query(&mock, &macs, prepare, Instant::now() + READ_TIMEOUT)).await;
+        let (results, logs) = capture_logs_async(query(
+            &instrumentation,
+            &mock,
+            &macs,
+            prepare,
+            Instant::now() + READ_TIMEOUT,
+        ))
+        .await;
 
         assert_eq!(
             results.unwrap()[0].inventory,

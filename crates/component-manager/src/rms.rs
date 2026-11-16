@@ -459,6 +459,7 @@ impl RmsSwitchSystemImageStatusApi for librms::RackManagerApi {
 
 /// RMS implementation of rack firmware updates and passive manifest comparisons.
 struct RmsRackFirmwareUpdateManager {
+    instrumentation: carbide_instrument::Instrumentation,
     client: Arc<dyn RmsApi>,
 }
 
@@ -971,6 +972,7 @@ fn apply_rack_firmware_job_status_response(
 
 /// RMS implementation of durable rack-level NVOS operations.
 struct RmsNvosUpdateManager {
+    instrumentation: carbide_instrument::Instrumentation,
     client: Arc<dyn RmsApi>,
 }
 
@@ -1228,14 +1230,26 @@ impl NvosUpdateManager for RmsNvosUpdateManager {
         // restart, sending the desired password as both the current and target
         // password is safe: RMS verifies it first, then uses the factory admin
         // credential only when recovery is needed.
-        rms_ensure_switch_password_rotation(self.client.as_ref(), node, credentials, password).await
+        rms_ensure_switch_password_rotation(
+            &self.instrumentation,
+            self.client.as_ref(),
+            node,
+            credentials,
+            password,
+        )
+        .await
     }
 
     async fn get_nvos_password_update_status(
         &self,
         job_id: &str,
     ) -> Result<SwitchPasswordRotationState, ComponentManagerError> {
-        rms_get_switch_password_rotation_job_status(self.client.as_ref(), job_id).await
+        rms_get_switch_password_rotation_job_status(
+            &self.instrumentation,
+            self.client.as_ref(),
+            job_id,
+        )
+        .await
     }
 }
 
@@ -1326,8 +1340,14 @@ fn apply_nvos_job_status_response(
 }
 
 /// Creates the RMS implementation of durable rack-level NVOS operations.
-pub fn rms_nvos_update_manager(client: Arc<dyn RmsApi>) -> impl NvosUpdateManager {
-    RmsNvosUpdateManager { client }
+pub fn rms_nvos_update_manager(
+    client: Arc<dyn RmsApi>,
+    instrumentation: carbide_instrument::Instrumentation,
+) -> impl NvosUpdateManager {
+    RmsNvosUpdateManager {
+        client,
+        instrumentation,
+    }
 }
 
 /// Creates the RMS implementation of machine slot and tray discovery.
@@ -1356,8 +1376,14 @@ pub fn rms_machine_info_provider(client: Arc<dyn RmsApi>) -> impl MachineInfoPro
 /// Each device allows 256 rows, 1024 bytes per retained field and 64 KiB of
 /// retained metadata. Response limits apply after decoding and do not cap SDK
 /// wire allocations.
-pub fn rms_rack_firmware_update_manager(client: Arc<dyn RmsApi>) -> impl RackFirmwareUpdateManager {
-    RmsRackFirmwareUpdateManager { client }
+pub fn rms_rack_firmware_update_manager(
+    client: Arc<dyn RmsApi>,
+    instrumentation: carbide_instrument::Instrumentation,
+) -> impl RackFirmwareUpdateManager {
+    RmsRackFirmwareUpdateManager {
+        client,
+        instrumentation,
+    }
 }
 
 impl std::fmt::Debug for RmsBackend {
@@ -1693,6 +1719,7 @@ impl RmsBackend {
         .map_err(|error| error.to_string())?;
 
         let response = red::instrumented(
+            &self.instrumentation,
             "rms",
             "apply_firmware_object",
             self.client.apply_firmware_object(request),
@@ -1772,8 +1799,14 @@ impl RmsBackend {
         }
 
         let submitted_macs: Vec<_> = switches.iter().map(|(bmc_mac, _)| *bmc_mac).collect();
-        let submission =
-            rms_batch_reset_switch(self.client.as_ref(), switches, job_kind, domain_name).await;
+        let submission = rms_batch_reset_switch(
+            &self.instrumentation,
+            self.client.as_ref(),
+            switches,
+            job_kind,
+            domain_name,
+        )
+        .await;
         match submission {
             Ok(submitted) => responses.extend(submitted),
             Err(error) => {
@@ -1871,8 +1904,13 @@ impl RmsBackend {
                 )
             })?;
         let job_labels = job_kind.to_labels()?;
-        let jobs =
-            rms_get_switch_job_tree(self.client.as_ref(), job_labels, &parent_job_id).await?;
+        let jobs = rms_get_switch_job_tree(
+            &self.instrumentation,
+            self.client.as_ref(),
+            job_labels,
+            &parent_job_id,
+        )
+        .await?;
         let parent = jobs
             .iter()
             .find(|job| job.job_id == parent_job_id)
@@ -2451,6 +2489,7 @@ impl PowerShelfManager for RmsBackend {
             };
 
             match red::instrumented(
+                &self.instrumentation,
                 "rms",
                 "batch_set_power_state",
                 self.client.batch_set_power_state(request),
@@ -2548,6 +2587,7 @@ impl PowerShelfManager for RmsBackend {
             };
 
             match red::instrumented(
+                &self.instrumentation,
                 "rms",
                 "apply_firmware_object",
                 self.client.apply_firmware_object(request),
@@ -2699,6 +2739,7 @@ impl PowerShelfManager for RmsBackend {
             };
 
             match red::instrumented(
+                &self.instrumentation,
                 "rms",
                 "get_firmware_job_status",
                 self.client.get_firmware_job_status(request),
@@ -2801,7 +2842,14 @@ impl PowerShelfManager for RmsBackend {
                     .map_err(|_| FirmwareReadError::ReadFailed)
             };
 
-            match red::instrumented("rms", "batch_get_firmware_inventory", rpc).await {
+            match red::instrumented(
+                &self.instrumentation,
+                "rms",
+                "batch_get_firmware_inventory",
+                rpc,
+            )
+            .await
+            {
                 Ok(response) => {
                     // An omitted summary defaults to Unspecified and fails the success check.
                     let batch = response.response.unwrap_or_default();
@@ -2908,15 +2956,24 @@ impl PowerShelfManager for RmsBackend {
                 })
                 .collect())
         };
-        Ok(query_rms_power_states(self.client.as_ref(), &macs, prepare_nodes, deadline).await)
+        Ok(query_rms_power_states(
+            &self.instrumentation,
+            self.client.as_ref(),
+            &macs,
+            prepare_nodes,
+            deadline,
+        )
+        .await)
     }
 }
 
 /// Query all firmware object IDs from RMS.
 async fn list_firmware_object_ids(
+    instrumentation: &carbide_instrument::Instrumentation,
     client: &dyn RmsApi,
 ) -> Result<Vec<String>, ComponentManagerError> {
     let response = red::instrumented(
+        instrumentation,
         "rms",
         "list_firmware_objects",
         client.list_firmware_objects(rms::ListFirmwareObjectsRequest {
@@ -3115,6 +3172,7 @@ struct RmsPowerRead {
 /// individual preparation errors as entries. Whole-preparation errors fail all
 /// slots; failures after dispatch preserve observations from completed batches.
 async fn query_rms_power_states(
+    instrumentation: &carbide_instrument::Instrumentation,
     client: &dyn RmsApi,
     macs: &[MacAddress],
     prepare_nodes: impl Future<
@@ -3220,20 +3278,21 @@ async fn query_rms_power_states(
                     nodes: chunk.iter().map(|read| read.node.clone()).collect(),
                 }),
             };
-            let response = red::instrumented("rms", "batch_get_power_state", async {
-                timeout_at(deadline, client.batch_get_power_state(request))
-                    .await
-                    .map_err(|_| RMS_POWER_READ_TIMEOUT_ERROR.to_owned())?
-                    // RMS can echo endpoint credentials in a transport error.
-                    // Strip that text before RED logs and returns the failure.
-                    .map_err(|error| match error {
-                        RackManagerError::ApiInvocationError(status) => {
-                            format!("RMS power read RPC failed: {:?}", status.code())
-                        }
-                        RackManagerError::TlsError(_) => "RMS power read TLS failed".to_owned(),
-                    })
-            })
-            .await;
+            let response =
+                red::instrumented(instrumentation, "rms", "batch_get_power_state", async {
+                    timeout_at(deadline, client.batch_get_power_state(request))
+                        .await
+                        .map_err(|_| RMS_POWER_READ_TIMEOUT_ERROR.to_owned())?
+                        // RMS can echo endpoint credentials in a transport error.
+                        // Strip that text before RED logs and returns the failure.
+                        .map_err(|error| match error {
+                            RackManagerError::ApiInvocationError(status) => {
+                                format!("RMS power read RPC failed: {:?}", status.code())
+                            }
+                            RackManagerError::TlsError(_) => "RMS power read TLS failed".to_owned(),
+                        })
+                })
+                .await;
             for read in chunk {
                 let observed = match &response {
                     Ok(response) => rms_power_state_for_node(response, &read.node.node_id),
@@ -3572,6 +3631,7 @@ fn summarize_firmware_batch(
 }
 
 async fn query_tracked_firmware_job_status(
+    instrumentation: &carbide_instrument::Instrumentation,
     client: &dyn RmsApi,
     switch_system_image_client: Option<&dyn RmsSwitchSystemImageStatusApi>,
     job: &RmsTrackedFirmwareJob,
@@ -3583,6 +3643,7 @@ async fn query_tracked_firmware_job_status(
             };
 
             match red::instrumented(
+                instrumentation,
                 "rms",
                 "get_firmware_job_status",
                 client.get_firmware_job_status(request),
@@ -3622,6 +3683,7 @@ async fn query_tracked_firmware_job_status(
             };
 
             match red::instrumented(
+                instrumentation,
                 "rms",
                 "get_switch_system_image_job_status",
                 client.get_switch_system_image_job_status(request),
@@ -3953,6 +4015,7 @@ impl NvSwitchManager for RmsBackend {
             };
 
             match red::instrumented(
+                &self.instrumentation,
                 "rms",
                 "batch_set_power_state",
                 self.client.batch_set_power_state(request),
@@ -4051,6 +4114,7 @@ impl NvSwitchManager for RmsBackend {
                     options,
                 ) {
                     Ok(request) => match red::instrumented(
+                        &self.instrumentation,
                         "rms",
                         "apply_switch_system_image",
                         self.client.apply_switch_system_image(request),
@@ -4135,6 +4199,7 @@ impl NvSwitchManager for RmsBackend {
                     &component_filters,
                 ) {
                     Ok(request) => match red::instrumented(
+                        &self.instrumentation,
                         "rms",
                         "apply_firmware_object",
                         self.client.apply_firmware_object(request),
@@ -4262,6 +4327,7 @@ impl NvSwitchManager for RmsBackend {
             let mut errors = Vec::new();
             for job in &jobs {
                 let (state, error) = query_tracked_firmware_job_status(
+                    &self.instrumentation,
                     self.client.as_ref(),
                     self.switch_system_image_client.as_deref(),
                     job,
@@ -4286,6 +4352,7 @@ impl NvSwitchManager for RmsBackend {
             {
                 Some(StagedFirmwareObjectOutcome::Submitted(job)) => {
                     let (state, error) = query_tracked_firmware_job_status(
+                        &self.instrumentation,
                         self.client.as_ref(),
                         self.switch_system_image_client.as_deref(),
                         &job,
@@ -4327,7 +4394,7 @@ impl NvSwitchManager for RmsBackend {
 
     #[instrument(skip(self), fields(backend = "rms"))]
     async fn list_firmware_bundles(&self) -> Result<Vec<String>, ComponentManagerError> {
-        list_firmware_object_ids(self.client.as_ref()).await
+        list_firmware_object_ids(&self.instrumentation, self.client.as_ref()).await
     }
 
     #[instrument(skip(self, endpoints), fields(backend = "rms"))]
@@ -4354,7 +4421,14 @@ impl NvSwitchManager for RmsBackend {
                 })
                 .collect())
         };
-        Ok(query_rms_power_states(self.client.as_ref(), &macs, prepare_nodes, deadline).await)
+        Ok(query_rms_power_states(
+            &self.instrumentation,
+            self.client.as_ref(),
+            &macs,
+            prepare_nodes,
+            deadline,
+        )
+        .await)
     }
 
     #[instrument(skip(self), fields(backend = "rms"))]
@@ -4395,6 +4469,7 @@ impl NvSwitchManager for RmsBackend {
             };
 
             match red::instrumented(
+                &self.instrumentation,
                 "rms",
                 "batch_get_node_device_info",
                 self.client.batch_get_node_device_info(request),
@@ -4479,6 +4554,7 @@ impl NvSwitchManager for RmsBackend {
         let node_id = device.node_id.clone();
 
         rms_configure_switch_certificate(
+            &self.instrumentation,
             self.client.as_ref(),
             vec![device],
             Some(&node_id),
@@ -4508,8 +4584,15 @@ impl NvSwitchManager for RmsBackend {
             .await
             .map_err(|error| ComponentManagerError::RejectedBeforeDispatch(error.to_string()))?;
 
-        rms_configure_switch_certificate(self.client.as_ref(), nodes, None, domain_name, services)
-            .await
+        rms_configure_switch_certificate(
+            &self.instrumentation,
+            self.client.as_ref(),
+            nodes,
+            None,
+            domain_name,
+            services,
+        )
+        .await
     }
 
     #[instrument(skip(self), fields(backend = "rms", job_id))]
@@ -4572,7 +4655,8 @@ impl NvSwitchManager for RmsBackend {
         &self,
         job_id: &str,
     ) -> Result<SwitchFactoryResetJobStatus, ComponentManagerError> {
-        rms_get_switch_factory_reset_job_status(self.client.as_ref(), job_id).await
+        rms_get_switch_factory_reset_job_status(&self.instrumentation, self.client.as_ref(), job_id)
+            .await
     }
 
     #[instrument(skip(self, endpoints, services), fields(backend = "rms"))]
@@ -4623,7 +4707,8 @@ impl NvSwitchManager for RmsBackend {
             ));
         }
 
-        rms_batch_disable_switch_mtls(self.client.as_ref(), nodes, services).await
+        rms_batch_disable_switch_mtls(&self.instrumentation, self.client.as_ref(), nodes, services)
+            .await
     }
 
     #[instrument(skip(self), fields(backend = "rms", job_id))]
@@ -4631,7 +4716,8 @@ impl NvSwitchManager for RmsBackend {
         &self,
         job_id: &str,
     ) -> Result<SwitchMtlsDisableJobStatus, ComponentManagerError> {
-        rms_get_switch_mtls_disable_job_status(self.client.as_ref(), job_id).await
+        rms_get_switch_mtls_disable_job_status(&self.instrumentation, self.client.as_ref(), job_id)
+            .await
     }
 
     #[instrument(skip(self, endpoints, topology), fields(backend = "rms"))]
@@ -4643,6 +4729,7 @@ impl NvSwitchManager for RmsBackend {
         let nodes = self.resolve_scale_up_fabric_nodes(endpoints).await?;
 
         let response = red::instrumented(
+            &self.instrumentation,
             "rms",
             "configure_scale_up_fabric_manager_v2",
             self.client.configure_scale_up_fabric_manager_v2(
@@ -4670,6 +4757,7 @@ impl NvSwitchManager for RmsBackend {
         job_id: &str,
     ) -> Result<Option<ScaleUpFabricManagerJobStatus>, ComponentManagerError> {
         let response = match red::instrumented(
+            &self.instrumentation,
             "rms",
             "get_job_status",
             self.client.get_job_status(rms::GetJobStatusRequest {
@@ -4698,6 +4786,7 @@ impl NvSwitchManager for RmsBackend {
         let nodes = self.resolve_scale_up_fabric_nodes(endpoints).await?;
 
         let response = red::instrumented(
+            &self.instrumentation,
             "rms",
             "get_scale_up_fabric_status",
             self.client
@@ -4719,6 +4808,7 @@ impl NvSwitchManager for RmsBackend {
         let nodes = self.resolve_scale_up_fabric_nodes(endpoints).await?;
 
         let response = red::instrumented(
+            &self.instrumentation,
             "rms",
             "batch_get_scale_up_fabric_service_status",
             self.client.batch_get_scale_up_fabric_service_status(
@@ -4760,6 +4850,7 @@ impl NvSwitchManager for RmsBackend {
         );
 
         rms_ensure_switch_password_rotation(
+            &self.instrumentation,
             self.client.as_ref(),
             device,
             &endpoint.nvos_credentials,
@@ -4773,7 +4864,12 @@ impl NvSwitchManager for RmsBackend {
         &self,
         job_id: &str,
     ) -> Result<SwitchPasswordRotationState, ComponentManagerError> {
-        rms_get_switch_password_rotation_job_status(self.client.as_ref(), job_id).await
+        rms_get_switch_password_rotation_job_status(
+            &self.instrumentation,
+            self.client.as_ref(),
+            job_id,
+        )
+        .await
     }
 }
 
@@ -4783,6 +4879,7 @@ impl NvSwitchManager for RmsBackend {
 /// response without a job ID is not accepted as convergence evidence because
 /// older RMS builds used that shape for non-resumable synchronous work.
 async fn rms_ensure_switch_password_rotation(
+    instrumentation: &carbide_instrument::Instrumentation,
     client: &dyn RmsApi,
     device: rms::NodeInfo,
     current_credentials: &Credentials,
@@ -4809,6 +4906,7 @@ async fn rms_ensure_switch_password_rotation(
     };
 
     let response = red::instrumented(
+        instrumentation,
         "rms",
         "update_switch_system_password",
         client.update_switch_system_password(request),
@@ -4867,6 +4965,7 @@ fn map_rms_password_rotation_state(job: &rms::JobStatus) -> SwitchPasswordRotati
 
 /// Submits switch resets and associates each admission result with its BMC MAC.
 async fn rms_batch_reset_switch(
+    instrumentation: &carbide_instrument::Instrumentation,
     client: &dyn RmsApi,
     switches: Vec<(MacAddress, rms::NodeInfo)>,
     job_kind: RmsJobKind,
@@ -4883,6 +4982,7 @@ async fn rms_batch_reset_switch(
     let job_labels = job_kind.to_labels()?;
     let response = match job_kind {
         RmsJobKind::SwitchSdnFactoryReset => red::instrumented(
+            instrumentation,
             "rms",
             "batch_reset_switch_sdn_factory_default",
             client.batch_reset_switch_sdn_factory_default(
@@ -4892,6 +4992,7 @@ async fn rms_batch_reset_switch(
         .await
         .map(|response| response.response),
         RmsJobKind::SwitchNvosFactoryReset => red::instrumented(
+            instrumentation,
             "rms",
             "batch_reset_switch_factory_default",
             client.batch_reset_switch_factory_default(rms::BatchResetSwitchFactoryDefaultRequest {
@@ -5296,6 +5397,7 @@ fn summarize_rms_switch_mtls_disable_jobs(
 /// not prove that the operation never started, so those cases preserve the unknown
 /// outcome.
 async fn rms_get_switch_job_tree(
+    instrumentation: &carbide_instrument::Instrumentation,
     client: &dyn RmsApi,
     labels: RmsSwitchJobLabels,
     job_id: &str,
@@ -5312,7 +5414,14 @@ async fn rms_get_switch_job_tree(
         include_child_job_states: true,
     };
 
-    match red::instrumented("rms", "get_job_status", client.get_job_status(request)).await {
+    match red::instrumented(
+        instrumentation,
+        "rms",
+        "get_job_status",
+        client.get_job_status(request),
+    )
+    .await
+    {
         Ok(response) => Ok(response.job_states),
         Err(RackManagerError::ApiInvocationError(status)) => match status.code() {
             tonic::Code::NotFound => Err(ComponentManagerError::OperationOutcomeUnknown(format!(
@@ -5350,26 +5459,31 @@ async fn rms_get_switch_job_tree(
 
 /// Reads and aggregates the RMS parent and child states for a factory reset.
 async fn rms_get_switch_factory_reset_job_status(
+    instrumentation: &carbide_instrument::Instrumentation,
     client: &dyn RmsApi,
     job_id: &str,
 ) -> Result<SwitchFactoryResetJobStatus, ComponentManagerError> {
-    let jobs = rms_get_switch_job_tree(client, FACTORY_RESET_JOB_LABELS, job_id).await?;
+    let jobs =
+        rms_get_switch_job_tree(instrumentation, client, FACTORY_RESET_JOB_LABELS, job_id).await?;
 
     summarize_rms_switch_factory_reset_jobs(job_id, &jobs)
 }
 
 /// Reads and aggregates the RMS parent and child states for an mTLS disable.
 async fn rms_get_switch_mtls_disable_job_status(
+    instrumentation: &carbide_instrument::Instrumentation,
     client: &dyn RmsApi,
     job_id: &str,
 ) -> Result<SwitchMtlsDisableJobStatus, ComponentManagerError> {
-    let jobs = rms_get_switch_job_tree(client, MTLS_DISABLE_JOB_LABELS, job_id).await?;
+    let jobs =
+        rms_get_switch_job_tree(instrumentation, client, MTLS_DISABLE_JOB_LABELS, job_id).await?;
 
     summarize_rms_switch_mtls_disable_jobs(job_id, &jobs)
 }
 
 /// Submits one mTLS-disable batch and requires a durable job handle.
 async fn rms_batch_disable_switch_mtls(
+    instrumentation: &carbide_instrument::Instrumentation,
     client: &dyn RmsApi,
     nodes: Vec<rms::NodeInfo>,
     services: &[i32],
@@ -5380,6 +5494,7 @@ async fn rms_batch_disable_switch_mtls(
     };
 
     let response = red::instrumented(
+        instrumentation,
         "rms",
         "batch_disable_switch_mtls",
         client.batch_disable_switch_mtls(request),
@@ -5500,6 +5615,7 @@ fn summarize_password_rotation_jobs(
 
 /// Reads and classifies the latest password-rotation job observation.
 async fn rms_get_switch_password_rotation_job_status(
+    instrumentation: &carbide_instrument::Instrumentation,
     client: &dyn RmsApi,
     job_id: &str,
 ) -> Result<SwitchPasswordRotationState, ComponentManagerError> {
@@ -5514,7 +5630,14 @@ async fn rms_get_switch_password_rotation_job_status(
         include_child_job_states: true,
     };
 
-    match red::instrumented("rms", "get_job_status", client.get_job_status(request)).await {
+    match red::instrumented(
+        instrumentation,
+        "rms",
+        "get_job_status",
+        client.get_job_status(request),
+    )
+    .await
+    {
         Ok(response) => Ok(summarize_password_rotation_jobs(
             job_id,
             &response.job_states,
@@ -5587,6 +5710,7 @@ fn map_rms_configure_switch_certificate_job_state(
 }
 
 async fn rms_configure_switch_certificate(
+    instrumentation: &carbide_instrument::Instrumentation,
     client: &dyn RmsApi,
     nodes: Vec<rms::NodeInfo>,
     node_id: Option<&str>,
@@ -5607,6 +5731,7 @@ async fn rms_configure_switch_certificate(
     };
 
     let response = red::instrumented(
+        instrumentation,
         "rms",
         "configure_switch_certificate",
         client.configure_switch_certificate(request),
@@ -5762,6 +5887,7 @@ async fn rms_get_configure_switch_certificate_job_status(
     };
 
     let response = red::instrumented(
+        instrumentation,
         "rms",
         "get_configure_switch_certificate_job_status",
         client.get_configure_switch_certificate_job_status(request),
@@ -5795,6 +5921,7 @@ async fn rms_get_configure_switch_certificate_job_status(
         });
     let (error, failure) = if state == ConfigureSwitchCertificateState::Failed {
         let jobs = red::instrumented(
+            instrumentation,
             "rms",
             "get_job_status",
             client.get_job_status(rms::GetJobStatusRequest {
@@ -5909,6 +6036,7 @@ impl RmsBackend {
         };
 
         match red::instrumented(
+            &self.instrumentation,
             "rms",
             "apply_firmware_object",
             self.client.apply_firmware_object(request),
@@ -6050,7 +6178,14 @@ impl ComputeTrayManager for RmsBackend {
                 })
                 .collect())
         };
-        Ok(query_rms_power_states(self.client.as_ref(), &macs, prepare_nodes, deadline).await)
+        Ok(query_rms_power_states(
+            &self.instrumentation,
+            self.client.as_ref(),
+            &macs,
+            prepare_nodes,
+            deadline,
+        )
+        .await)
     }
 
     #[instrument(skip(self), fields(backend = "rms"))]
@@ -6143,6 +6278,7 @@ impl ComputeTrayManager for RmsBackend {
             };
 
             match red::instrumented(
+                &self.instrumentation,
                 "rms",
                 "batch_set_power_state",
                 self.client.batch_set_power_state(request),
@@ -6324,8 +6460,13 @@ impl ComputeTrayManager for RmsBackend {
 
             let job = RmsTrackedFirmwareJob::FirmwareObject(job_id);
 
-            let (state, error) =
-                query_tracked_firmware_job_status(self.client.as_ref(), None, &job).await;
+            let (state, error) = query_tracked_firmware_job_status(
+                &self.instrumentation,
+                self.client.as_ref(),
+                None,
+                &job,
+            )
+            .await;
 
             statuses.push(ComputeTrayFirmwareUpdateStatus {
                 bmc_ip: ep.bmc_ip,
@@ -6348,8 +6489,13 @@ impl ComputeTrayManager for RmsBackend {
     ) -> Result<ComputeTrayFirmwareUpdateStatus, ComponentManagerError> {
         let job = RmsTrackedFirmwareJob::FirmwareObject(job_id.to_string());
 
-        let (state, error) =
-            query_tracked_firmware_job_status(self.client.as_ref(), None, &job).await;
+        let (state, error) = query_tracked_firmware_job_status(
+            &self.instrumentation,
+            self.client.as_ref(),
+            None,
+            &job,
+        )
+        .await;
 
         Ok(ComputeTrayFirmwareUpdateStatus {
             bmc_ip,
@@ -6362,7 +6508,7 @@ impl ComputeTrayManager for RmsBackend {
 
     #[instrument(skip(self), fields(backend = "rms"))]
     async fn list_firmware_bundles(&self) -> Result<Vec<String>, ComponentManagerError> {
-        list_firmware_object_ids(self.client.as_ref()).await
+        list_firmware_object_ids(&self.instrumentation, self.client.as_ref()).await
     }
 }
 
@@ -6438,6 +6584,7 @@ mod tests {
         let mock = Arc::new(MockRmsApi::new());
 
         let manager = RmsRackFirmwareUpdateManager {
+            instrumentation: carbide_instrument::Instrumentation::noop(),
             client: mock.clone(),
         };
 
@@ -6799,6 +6946,7 @@ mod tests {
         .await;
 
         let manager = RmsNvosUpdateManager {
+            instrumentation: carbide_instrument::Instrumentation::noop(),
             client: mock.clone(),
         };
 
@@ -6965,6 +7113,7 @@ mod tests {
         .await;
 
         let manager = RmsNvosUpdateManager {
+            instrumentation: carbide_instrument::Instrumentation::noop(),
             client: mock.clone(),
         };
 
@@ -7053,6 +7202,7 @@ mod tests {
         .await;
 
         let manager = RmsNvosUpdateManager {
+            instrumentation: carbide_instrument::Instrumentation::noop(),
             client: mock.clone(),
         };
 
@@ -7150,6 +7300,7 @@ mod tests {
         .await;
 
         let manager = RmsNvosUpdateManager {
+            instrumentation: carbide_instrument::Instrumentation::noop(),
             client: mock.clone(),
         };
 
@@ -7607,6 +7758,7 @@ mod tests {
             mock.enqueue_configure_switch_certificate(response).await;
 
             let error = rms_configure_switch_certificate(
+                &carbide_instrument::Instrumentation::noop(),
                 &mock,
                 vec![rms::NodeInfo::default()],
                 None,
@@ -7647,6 +7799,7 @@ mod tests {
         .await;
 
         let error = rms_configure_switch_certificate(
+            &carbide_instrument::Instrumentation::noop(),
             &mock,
             vec![rms::NodeInfo::default()],
             Some("switch-a"),
@@ -9250,6 +9403,7 @@ mod tests {
     ) -> Vec<ComponentPowerStateResult> {
         let macs = vec![PS_MAC_1.parse().expect("management MAC"); nodes.len()];
         query_rms_power_states(
+            &carbide_instrument::Instrumentation::noop(),
             mock,
             &macs,
             async { Ok(nodes.into_iter().map(Ok).collect()) },
@@ -9291,6 +9445,7 @@ mod tests {
         let macs = [PS_MAC_1, PS_MAC_2, SW_MAC_1, SW_MAC_2, CT_MAC_1]
             .map(|mac| mac.parse::<MacAddress>().expect("management MAC"));
         let results = query_rms_power_states(
+            &carbide_instrument::Instrumentation::noop(),
             &mock,
             &macs,
             async { Ok(nodes.into_iter().map(Ok).collect()) },
@@ -9487,6 +9642,7 @@ mod tests {
             let error = ComponentManagerError::Internal("identity query failed".to_owned());
             let expected_error = error.to_string();
             let results = query_rms_power_states(
+                &carbide_instrument::Instrumentation::noop(),
                 &mock,
                 &macs,
                 async { Err(error) },
@@ -9502,8 +9658,14 @@ mod tests {
             );
             assert!(mock.batch_get_power_state_calls().await.is_empty());
             let deadline = Instant::now() + RMS_POWER_READ_TIMEOUT;
-            let results =
-                query_rms_power_states(&mock, &macs, std::future::pending(), deadline).await;
+            let results = query_rms_power_states(
+                &carbide_instrument::Instrumentation::noop(),
+                &mock,
+                &macs,
+                std::future::pending(),
+                deadline,
+            )
+            .await;
             assert_eq!(Instant::now(), deadline);
             assert_eq!(
                 results,
@@ -9583,7 +9745,8 @@ mod tests {
             let (first_entered, first_release) = mock.block_next_batch_get_power_state().await;
             let deadline = Instant::now() + RMS_POWER_READ_TIMEOUT;
             let macs = vec![PS_MAC_1.parse().expect("management MAC"); nodes.len()];
-            let mut read = Box::pin(query_rms_power_states(&mock, &macs, async {
+            let instrumentation = carbide_instrument::Instrumentation::noop();
+            let mut read = Box::pin(query_rms_power_states(&instrumentation, &mock, &macs, async {
                 tokio::time::sleep(RMS_POWER_READ_TIMEOUT / 4).await;
                 Ok(nodes.into_iter().map(Ok).collect())
             }, deadline));
@@ -11056,9 +11219,13 @@ mod tests {
 
         mock.enqueue_get_job_status(Ok(response)).await;
 
-        let status = rms_get_switch_factory_reset_job_status(&mock, "factory-reset-job-1")
-            .await
-            .expect("factory-reset job status should be readable");
+        let status = rms_get_switch_factory_reset_job_status(
+            &carbide_instrument::Instrumentation::noop(),
+            &mock,
+            "factory-reset-job-1",
+        )
+        .await
+        .expect("factory-reset job status should be readable");
 
         assert_eq!(status.state, SwitchFactoryResetState::Pending);
         assert!(status.error.is_none());
@@ -11083,9 +11250,13 @@ mod tests {
             mock.enqueue_get_job_status(Err(RackManagerError::ApiInvocationError(status)))
                 .await;
 
-            let error = rms_get_switch_factory_reset_job_status(&mock, "factory-reset-job-1")
-                .await
-                .unwrap_err();
+            let error = rms_get_switch_factory_reset_job_status(
+                &carbide_instrument::Instrumentation::noop(),
+                &mock,
+                "factory-reset-job-1",
+            )
+            .await
+            .unwrap_err();
 
             assert!(matches!(
                 error,
@@ -11221,6 +11392,7 @@ mod tests {
             mock.enqueue_batch_disable_switch_mtls(response).await;
 
             let error = rms_batch_disable_switch_mtls(
+                &carbide_instrument::Instrumentation::noop(),
                 &mock,
                 vec![rms::NodeInfo::default()],
                 &[rms::SwitchService::NvueApi as i32],
@@ -11251,6 +11423,7 @@ mod tests {
         .await;
 
         let error = rms_batch_disable_switch_mtls(
+            &carbide_instrument::Instrumentation::noop(),
             &mock,
             vec![rms::NodeInfo::default()],
             &[rms::SwitchService::NvueApi as i32],
@@ -11280,6 +11453,7 @@ mod tests {
         .await;
 
         let error = rms_batch_disable_switch_mtls(
+            &carbide_instrument::Instrumentation::noop(),
             &mock,
             vec![rms::NodeInfo::default()],
             &[rms::SwitchService::NvueApi as i32],
@@ -11327,9 +11501,13 @@ mod tests {
         )))
         .await;
 
-        let status = rms_get_switch_mtls_disable_job_status(&mock, "disable-mtls-job-1")
-            .await
-            .expect("a failed child job is an observed terminal status");
+        let status = rms_get_switch_mtls_disable_job_status(
+            &carbide_instrument::Instrumentation::noop(),
+            &mock,
+            "disable-mtls-job-1",
+        )
+        .await
+        .expect("a failed child job is an observed terminal status");
 
         assert_eq!(status.state, SwitchMtlsDisableState::Failed);
 
@@ -11339,9 +11517,13 @@ mod tests {
                 && error.contains("ssh login failed")
         }));
 
-        let error = rms_get_switch_mtls_disable_job_status(&mock, "disable-mtls-job-1")
-            .await
-            .unwrap_err();
+        let error = rms_get_switch_mtls_disable_job_status(
+            &carbide_instrument::Instrumentation::noop(),
+            &mock,
+            "disable-mtls-job-1",
+        )
+        .await
+        .unwrap_err();
 
         assert!(matches!(
             error,
@@ -11494,6 +11676,7 @@ mod tests {
                         )
                     });
                 let result = rms_batch_reset_switch(
+                    &carbide_instrument::Instrumentation::noop(),
                     &mock,
                     switches.into(),
                     RmsJobKind::SwitchNvosFactoryReset,
@@ -11554,6 +11737,7 @@ mod tests {
         .await;
 
         let error = rms_batch_reset_switch(
+            &carbide_instrument::Instrumentation::noop(),
             &mock,
             vec![(SW_MAC_1.parse().unwrap(), rms::NodeInfo::default())],
             RmsJobKind::SwitchNvosFactoryReset,
@@ -11578,6 +11762,7 @@ mod tests {
             .await;
 
         let error = rms_batch_reset_switch(
+            &carbide_instrument::Instrumentation::noop(),
             &invalid_argument,
             vec![(SW_MAC_1.parse().unwrap(), rms::NodeInfo::default())],
             RmsJobKind::SwitchNvosFactoryReset,
@@ -11599,6 +11784,7 @@ mod tests {
             .await;
 
         let error = rms_batch_reset_switch(
+            &carbide_instrument::Instrumentation::noop(),
             &unimplemented,
             vec![(SW_MAC_1.parse().unwrap(), rms::NodeInfo::default())],
             RmsJobKind::SwitchNvosFactoryReset,
@@ -11788,6 +11974,7 @@ mod tests {
         };
 
         let result = rms_ensure_switch_password_rotation(
+            &carbide_instrument::Instrumentation::noop(),
             &mock,
             rms::NodeInfo::default(),
             &credentials,
@@ -11816,6 +12003,7 @@ mod tests {
         };
 
         let result = rms_ensure_switch_password_rotation(
+            &carbide_instrument::Instrumentation::noop(),
             &mock,
             rms::NodeInfo::default(),
             &credentials,
@@ -11849,6 +12037,7 @@ mod tests {
         };
 
         let started = rms_ensure_switch_password_rotation(
+            &carbide_instrument::Instrumentation::noop(),
             &mock,
             rms::NodeInfo::default(),
             &credentials,
@@ -11881,6 +12070,7 @@ mod tests {
         };
 
         let result = rms_ensure_switch_password_rotation(
+            &carbide_instrument::Instrumentation::noop(),
             &mock,
             rms::NodeInfo::default(),
             &credentials,
@@ -11910,6 +12100,7 @@ mod tests {
         };
 
         let result = rms_ensure_switch_password_rotation(
+            &carbide_instrument::Instrumentation::noop(),
             &mock,
             rms::NodeInfo::default(),
             &credentials,
@@ -11939,6 +12130,7 @@ mod tests {
         };
 
         let result = rms_ensure_switch_password_rotation(
+            &carbide_instrument::Instrumentation::noop(),
             &mock,
             rms::NodeInfo::default(),
             &credentials,
@@ -11966,9 +12158,13 @@ mod tests {
         }))
         .await;
 
-        let status = rms_get_switch_password_rotation_job_status(&mock, "password-job-1")
-            .await
-            .expect("password job should be readable");
+        let status = rms_get_switch_password_rotation_job_status(
+            &carbide_instrument::Instrumentation::noop(),
+            &mock,
+            "password-job-1",
+        )
+        .await
+        .expect("password job should be readable");
 
         assert_eq!(status, SwitchPasswordRotationState::Completed);
 
@@ -11988,9 +12184,13 @@ mod tests {
         )))
         .await;
 
-        let status = rms_get_switch_password_rotation_job_status(&mock, "password-job-1")
-            .await
-            .expect("missing jobs are observations, not polling errors");
+        let status = rms_get_switch_password_rotation_job_status(
+            &carbide_instrument::Instrumentation::noop(),
+            &mock,
+            "password-job-1",
+        )
+        .await
+        .expect("missing jobs are observations, not polling errors");
 
         assert_eq!(status, SwitchPasswordRotationState::NotFound);
     }
@@ -12004,7 +12204,12 @@ mod tests {
         )))
         .await;
 
-        let result = rms_get_switch_password_rotation_job_status(&mock, "password-job-1").await;
+        let result = rms_get_switch_password_rotation_job_status(
+            &carbide_instrument::Instrumentation::noop(),
+            &mock,
+            "password-job-1",
+        )
+        .await;
 
         assert!(matches!(
             result,
@@ -12017,7 +12222,12 @@ mod tests {
     async fn sw_password_rotation_poll_rejects_empty_job_id_without_rpc() {
         let mock = MockRmsApi::new();
 
-        let result = rms_get_switch_password_rotation_job_status(&mock, "").await;
+        let result = rms_get_switch_password_rotation_job_status(
+            &carbide_instrument::Instrumentation::noop(),
+            &mock,
+            "",
+        )
+        .await;
 
         assert!(matches!(
             result,
@@ -12037,7 +12247,12 @@ mod tests {
         )))
         .await;
 
-        let result = rms_get_switch_password_rotation_job_status(&mock, "password-job-1").await;
+        let result = rms_get_switch_password_rotation_job_status(
+            &carbide_instrument::Instrumentation::noop(),
+            &mock,
+            "password-job-1",
+        )
+        .await;
 
         assert!(matches!(
             result,

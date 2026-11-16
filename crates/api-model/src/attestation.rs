@@ -382,13 +382,25 @@ pub mod spdm {
         ) -> Result<ProcessedAttestationOutcome, NrasError>;
     }
 
-    #[derive(Debug, Default)]
-    pub struct VerifierImpl {}
+    #[derive(Debug)]
+    pub struct VerifierImpl {
+        instrumentation: carbide_instrument::Instrumentation,
+    }
+
+    impl VerifierImpl {
+        /// Creates an NRAS verifier using the supplied RED metric destination.
+        pub fn new(instrumentation: carbide_instrument::Instrumentation) -> Self {
+            Self { instrumentation }
+        }
+    }
 
     #[async_trait::async_trait]
     impl Verifier for VerifierImpl {
         fn client(&self, nras_config: nras::Config) -> Box<dyn nras::VerifierClient> {
-            Box::new(NrasVerifierClient::new_with_config(&nras_config))
+            Box::new(NrasVerifierClient::new_with_config(
+                &nras_config,
+                self.instrumentation.clone(),
+            ))
         }
         async fn parse_attestation_outcome(
             &self,
@@ -396,7 +408,8 @@ pub mod spdm {
             state: &RawAttestationOutcome,
         ) -> Result<ProcessedAttestationOutcome, NrasError> {
             // now create a KeyStore to validate those tokens
-            let nras_keystore = nras::NrasKeyStore::new_with_config(nras_config).await?;
+            let nras_keystore =
+                nras::NrasKeyStore::new_with_config(nras_config, &self.instrumentation).await?;
             let parser = nras::Parser::new_with_config(nras_config);
             parser.parse_attestation_outcome(state, &nras_keystore)
         }

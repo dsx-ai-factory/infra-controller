@@ -925,10 +925,10 @@ mod force_delete_tests {
         });
 
         let client_config = CarbideClientConfig::default();
-        let client = CarbideApiClient::new(&ApiConfig::new(
-            &format!("http://{address}"),
-            &client_config,
-        ));
+        let client = CarbideApiClient::new(
+            &ApiConfig::new(&format!("http://{address}"), &client_config),
+            carbide_instrument::Instrumentation::noop(),
+        );
         let result = ApiClient(client)
             .force_delete_machine("simulated-machine".to_string())
             .await;

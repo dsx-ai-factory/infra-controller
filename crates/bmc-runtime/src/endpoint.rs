@@ -200,6 +200,7 @@ pub enum ExploredBmcRefError {
 /// connect, so a controller writes `bmc.power()?.set(reset_type)` and never
 /// sees driver ids or operation contexts.
 pub struct ConnectedBmc<B: Bmc + 'static> {
+    pub(crate) instrumentation: carbide_instrument::Instrumentation,
     endpoint: BmcRef,
     bmc: Arc<B>,
     service_root: Arc<ServiceRoot<B>>,
@@ -212,14 +213,17 @@ where
     B::Error: ClassifyBmcError,
 {
     /// Creates a connected endpoint without repeating exploration or selection.
+    /// RED metrics use `instrumentation`; retain its provider while operations run.
     pub fn new(
         endpoint: BmcRef,
         bmc: Arc<B>,
         service_root: Arc<ServiceRoot<B>>,
         ipmi: Option<Arc<dyn IpmiOps>>,
+        instrumentation: carbide_instrument::Instrumentation,
     ) -> Self {
         let drivers = SelectedDrivers::resolve(endpoint.driver_map());
         Self {
+            instrumentation,
             endpoint,
             bmc,
             service_root,

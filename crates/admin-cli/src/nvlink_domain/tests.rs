@@ -253,10 +253,10 @@ async fn dispatch(
     };
     let mut captured = CapturedOutput::new();
     let context = RuntimeContext {
-        api_client: ApiClient(CarbideApiClient::new(&ApiConfig::new(
-            &format!("http://{address}"),
-            &config,
-        ))),
+        api_client: ApiClient(CarbideApiClient::new(
+            &ApiConfig::new(&format!("http://{address}"), &config),
+            carbide_instrument::Instrumentation::noop(),
+        )),
         config: RuntimeConfig {
             format,
             request_timeout: config.request_timeout,

@@ -320,7 +320,7 @@ pub(super) async fn setup_and_run(
     let nvue_context = match options.hbn_config_mode {
         HbnConfigMode::ContainerExec => None,
         HbnConfigMode::NvueRest => {
-            let nvue_client = nvue_client::NvueClient::new_https_from_env()?;
+            let nvue_client = nvue_client::NvueClient::new_https_from_env(instrumentation.clone())?;
             let nvue_context = NvueClientContext::new(nvue_client);
             Some(nvue_context)
         }

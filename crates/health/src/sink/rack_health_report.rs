@@ -58,6 +58,7 @@ impl RackHealthReportSink {
             config.connection.client_cert.clone(),
             config.connection.client_key.clone(),
             &config.connection.api_url,
+            instrumentation.clone(),
         ));
 
         let queue: Arc<DedupQueue<RackHealthReportKey, Arc<HealthReport>>> =

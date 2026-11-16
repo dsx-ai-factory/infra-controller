@@ -66,10 +66,10 @@ async fn run_version(site_fabric_null_routes: Option<Vec<String>>) -> String {
     };
     let mut captured = CapturedOutput::new();
     let ctx = RuntimeContext {
-        api_client: ApiClient(CarbideApiClient::new(&ApiConfig::new(
-            &format!("http://{address}"),
-            &client_config,
-        ))),
+        api_client: ApiClient(CarbideApiClient::new(
+            &ApiConfig::new(&format!("http://{address}"), &client_config),
+            carbide_instrument::Instrumentation::noop(),
+        )),
         config: RuntimeConfig {
             format: OutputFormat::AsciiTable,
             request_timeout: client_config.request_timeout,
@@ -261,6 +261,7 @@ async fn version_falls_back_when_the_verified_attempt_fails() {
         api_client: ApiClient(CarbideApiClient::new(
             &ApiConfig::new(&format!("http://{refused}"), &client_config)
                 .with_retry_config(no_retries),
+            carbide_instrument::Instrumentation::noop(),
         )),
         config: RuntimeConfig {
             format: OutputFormat::AsciiTable,
@@ -273,10 +274,10 @@ async fn version_falls_back_when_the_verified_attempt_fails() {
         output_file: std::mem::replace(captured.writer(), Box::new(tokio::io::sink())),
     };
     let fallback = VerificationFallback {
-        api_client: ApiClient(CarbideApiClient::new(&ApiConfig::new(
-            &format!("http://{served}"),
-            &client_config,
-        ))),
+        api_client: ApiClient(CarbideApiClient::new(
+            &ApiConfig::new(&format!("http://{served}"), &client_config),
+            carbide_instrument::Instrumentation::noop(),
+        )),
         root_ca_path: "/path/to/root-ca.pem".to_string(),
     };
 
