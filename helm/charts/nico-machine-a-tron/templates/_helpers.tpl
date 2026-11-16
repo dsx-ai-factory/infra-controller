@@ -66,10 +66,16 @@ Count configured pods.
 Stable indices for configured pods. Explicit podIndex overrides the trailing
 decimal suffix. Validate before integer conversion so invalid or overflowing
 values cannot silently become zero. Both MAC pools and DHCP relay IPs use this map.
+Pods that override every enabled MAC base and do not use DHCP relay get no index.
 */}}
 {{- define "nico-machine-a-tron.podIndices" -}}
 {{- $indices := dict -}}
 {{- $owners := dict -}}
+{{- $macPool := .Values.macAddressPool | default dict -}}
+{{- $macPoolEnabled := ternary $macPool.enabled true (hasKey $macPool "enabled") -}}
+{{- $hwMacRanges := .Values.hwMacAddressRanges | default dict -}}
+{{- $hwMacRangesEnabled := ternary $hwMacRanges.enabled true (hasKey $hwMacRanges "enabled") -}}
+{{- $dhcpRelayEnabled := include "nico-machine-a-tron.dhcpRelayEnabled" . -}}
 {{- range $podName, $podConfig := .Values.pods -}}
 {{- if not $podConfig -}}
 {{- continue -}}
@@ -77,6 +83,11 @@ values cannot silently become zero. Both MAC pools and DHCP relay IPs use this m
 {{- $hasMachines := gt (len ($podConfig.machines | default dict)) 0 -}}
 {{- $hasRacks := gt (len ($podConfig.racks | default dict)) 0 -}}
 {{- if not (or $hasMachines $hasRacks) -}}
+{{- continue -}}
+{{- end -}}
+{{- $usesMacPool := and $macPoolEnabled (not ($podConfig.macAddressPool | default dict).base) -}}
+{{- $usesHwMacRanges := and $hwMacRangesEnabled (not ($podConfig.hwMacAddressRanges | default dict).base) -}}
+{{- if not (or $usesMacPool $usesHwMacRanges $dhcpRelayEnabled) -}}
 {{- continue -}}
 {{- end -}}
 {{- $rawIndex := regexFind "[0-9]+$" $podName -}}

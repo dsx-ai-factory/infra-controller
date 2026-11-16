@@ -662,11 +662,11 @@ duplicate indices fail rendering when either MAC pool or DHCP relay mode is
 enabled. Without those features, pod names do not need an index.
 
 An active pod has at least one entry under `machines` or `racks`. Null pods and
-pods with both maps empty are ignored. The index requirements also apply to
-active pods with per-pod MAC base overrides or full `configFiles.matConfigs`
-overrides. Explicit `pods.<name>.macAddressPool.base` and
-`pods.<name>.hwMacAddressRanges.base` still take precedence over generated bases;
-`configFiles.matConfigs.<name>` still replaces the entire TOML configuration.
+pods with both maps empty are ignored. A pod needs no index if it sets
+`pods.<name>.macAddressPool.base` and `pods.<name>.hwMacAddressRanges.base` for
+every enabled MAC pool and DHCP relay mode is off. The index requirements still
+apply to active pods with full `configFiles.matConfigs` overrides.
+`configFiles.matConfigs.<name>` replaces the entire TOML configuration.
 
 Adding or removing other pods leaves an existing pod's index unchanged. Renaming
 a pod preserves the index only if the trailing number stays the same or the

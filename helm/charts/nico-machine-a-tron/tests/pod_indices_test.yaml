@@ -190,6 +190,35 @@ tests:
           value: nico-machine-a-tron-custom-bmc-mock
         template: service.yaml
 
+  - it: allows a name without an index when every MAC base is overridden
+    templates: [configmap.yaml]
+    set:
+      pods:
+        mat-0: null
+        custom: &overriddenBases
+          <<: *machines
+          macAddressPool:
+            base: "02:00:aa:00:00:00"
+          hwMacAddressRanges:
+            base: "02:01:aa:00:00:00"
+    asserts:
+      - matchRegex:
+          path: data["mat.toml"]
+          pattern: '\[mac_address_pool\]\s+base = "02:00:aa:00:00:00"'
+      - matchRegex:
+          path: data["mat.toml"]
+          pattern: '\[hw_mac_address_ranges\]\s+base = "02:01:aa:00:00:00"'
+
+  - it: still requires an index for overridden MAC bases when DHCP relay is enabled
+    templates: [service.yaml]
+    set:
+      dhcpRelay.baseIP: "10.96.127.10"
+      pods:
+        mat-0: null
+        custom: *overriddenBases
+    asserts:
+      - failedTemplate: {}
+
   - it: rejects a name without a suffix or explicit index when a MAC pool is enabled
     templates: [configmap.yaml]
     set:
