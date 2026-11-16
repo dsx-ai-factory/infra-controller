@@ -162,7 +162,7 @@ mod sku;
 #[cfg(test)]
 mod test_machine_setup;
 
-use bios_config::handle_bios_setup_failed_recovery;
+use bios_config::{handle_bios_setup_failed_recovery, platform_settings_in_effect};
 use extension_services::{cleanup_terminated_extension_services, get_extension_services_status};
 use helpers::{
     DpuDiscoveringStateHelper, DpuInitStateHelper, ManagedHostStateHelper, NextState,
@@ -295,6 +295,7 @@ pub struct MachineStateHandler {
 }
 
 pub struct MachineStateHandlerBuilder {
+    instrumentation: carbide_instrument::Instrumentation,
     dpu_up_threshold: chrono::Duration,
     dpu_nic_firmware_initial_update_enabled: bool,
     // TODO: Cleanup needed for this flag.
@@ -317,8 +318,12 @@ pub struct MachineStateHandlerBuilder {
 }
 
 impl MachineStateHandlerBuilder {
-    pub fn builder() -> Self {
+    /// Creates a builder whose default firmware downloader uses `instrumentation`.
+    /// A supplied downloader retains its own destination. Keep the provider alive
+    /// while the handler's firmware operations run.
+    pub fn builder(instrumentation: carbide_instrument::Instrumentation) -> Self {
         Self {
+            instrumentation,
             dpu_up_threshold: chrono::Duration::minutes(5),
             dpu_nic_firmware_initial_update_enabled: true,
             dpu_nic_firmware_reprovision_update_enabled: true,
@@ -495,9 +500,12 @@ impl MachineStateHandlerBuilder {
 
 impl MachineStateHandler {
     fn new(builder: MachineStateHandlerBuilder) -> Self {
+        let downloader = builder
+            .firmware_downloader
+            .unwrap_or_else(|| FirmwareDownloader::new(builder.instrumentation.clone()));
         let host_upgrade = Arc::new(HostUpgradeState {
             parsed_hosts: Arc::new(builder.hardware_models.clone().unwrap_or_default()),
-            downloader: builder.firmware_downloader.unwrap_or_default(),
+            downloader,
             upload_limiter: builder
                 .upload_limiter
                 .unwrap_or(Arc::new(Semaphore::new(5))),
@@ -3387,11 +3395,7 @@ fn is_dpu_up(state: &ManagedHostStateSnapshot, dpu_snapshot: &DpuMachine) -> boo
         .unwrap_or(DateTime::<Utc>::MIN_UTC);
     let state_change_time = state.host_snapshot.state.version.timestamp();
 
-    if observation_time < state_change_time {
-        return false;
-    }
-
-    true
+    observation_time >= state_change_time
 }
 
 fn is_dpu_observed_since(dpu_snapshot: &DpuMachine, minimum_observed_at: DateTime<Utc>) -> bool {
@@ -5534,7 +5538,12 @@ impl DpuMachineStateHandler {
                 let credentials_updated = match ctx
                     .services
                     .bmc_credential_ops
-                    .uefi_setup(&dpu_bmc_access, true, dpu_uefi_credentials)
+                    .uefi_setup(
+                        &dpu_bmc_access,
+                        true,
+                        dpu_uefi_credentials,
+                        &ctx.services.instrumentation,
+                    )
                     .await
                 {
                     Err(e) => {
@@ -7937,6 +7946,7 @@ async fn handle_ready_boot_config(
                     // This state is restartable, so re-observe after lockdown is
                     // restored rather than trusting an earlier pre-crash read.
                     let inspection = inspect_host_boot_config(
+                        ctx.services,
                         redfish_client.as_ref(),
                         mh_snapshot,
                         &captured_boot_interface,
@@ -8144,6 +8154,7 @@ async fn complete_host_init_lockdown(
     };
     let boot_interface: BootInterfaceTarget = desired.value.clone().into();
     let inspection = match inspect_host_boot_config(
+        ctx.services,
         redfish_client.as_ref(),
         mh_snapshot,
         &boot_interface,
@@ -8325,7 +8336,12 @@ async fn handle_host_uefi_setup(
             match ctx
                 .services
                 .bmc_credential_ops
-                .uefi_setup(&host_bmc_access, false, host_uefi_credentials)
+                .uefi_setup(
+                    &host_bmc_access,
+                    false,
+                    host_uefi_credentials,
+                    &ctx.services.instrumentation,
+                )
                 .await
             {
                 Ok(job_id) => Ok(StateHandlerOutcome::transition(
@@ -8519,11 +8535,6 @@ impl StateHandler for HostMachineStateHandler {
                     Box::new(mh_snapshot.managed_state.clone()),
                 )),
                 MachineState::EnableIpmiOverLan => {
-                    let host_redfish_client = ctx
-                        .services
-                        .create_redfish_client_from_machine(&mh_snapshot.host_snapshot)
-                        .await?;
-
                     let bmc = ctx.services.connect_bmc(&mh_snapshot.host_snapshot).await?;
                     let bmc_control = bmc
                         .bmc_control()
@@ -8543,15 +8554,12 @@ impl StateHandler for HostMachineStateHandler {
                             .map_err(|e| platform_error("enable_ipmi_over_lan", e))?;
                     }
 
-                    let machine_state = if mh_snapshot.has_managed_dpus()
-                        && is_vera_rubin_host(host_redfish_client.as_ref()).await?
-                    {
+                    let machine_state = if onboard_nics::isolate(&bmc_control, mh_snapshot).await? {
                         MachineState::DisableOnboardNics {
                             disable_onboard_nics_state:
                                 DisableOnboardNicsState::ConfigureOnboardNics { enable: true },
                         }
                     } else {
-                        // Other platforms and no-DPU hosts retain their onboard NIC settings.
                         MachineState::WaitingForPlatformConfiguration { retry_count: 0 }
                     };
 
@@ -13324,15 +13332,6 @@ fn handler_restart_dpu(
     }
 }
 
-/// Use libredfish's vendor detection to identify Vera Rubin compute-tray BMCs.
-async fn is_vera_rubin_host(redfish_client: &dyn Redfish) -> Result<bool, StateHandlerError> {
-    redfish_client
-        .get_service_root()
-        .await
-        .map(|root| root.is_vera_rubin())
-        .map_err(|error| redfish_error("get_service_root", error))
-}
-
 /// Returns true if the host's current Redfish power state is `Off`.
 async fn is_host_powered_off(
     mh_snapshot: &ManagedHostStateSnapshot,
@@ -14890,10 +14889,13 @@ async fn set_host_boot_order(
             // `SYS011`). If the HTTP device drifted since the owning lifecycle's
             // inspection, return to the shared BIOS/job stages before attempting
             // the order write.
-            let is_bios_setup = boot_interface
-                .run(|bi| redfish_client.is_bios_setup(Some(bi)))
-                .await
-                .map_err(|e| redfish_error("is_bios_setup", e))?;
+            let is_bios_setup = platform_settings_in_effect(
+                ctx.services,
+                redfish_client,
+                mh_snapshot,
+                Some(&boot_interface),
+            )
+            .await?;
 
             if !is_bios_setup {
                 // The HTTP-boot device drifted after the owning lifecycle's
@@ -15020,10 +15022,13 @@ async fn set_host_boot_order(
                 RequiredBootInterface::Wait(outcome) => return Ok(outcome),
             };
 
-            let is_bios_setup = boot_interface
-                .run(|bi| redfish_client.is_bios_setup(Some(bi)))
-                .await
-                .map_err(|e| redfish_error("is_bios_setup", e))?;
+            let is_bios_setup = platform_settings_in_effect(
+                ctx.services,
+                redfish_client,
+                mh_snapshot,
+                Some(&boot_interface),
+            )
+            .await?;
 
             if is_bios_setup {
                 tracing::info!(
@@ -15333,10 +15338,13 @@ async fn set_host_boot_order(
             // device or another managed BIOS attribute. Verify BIOS first for
             // every platform and return to the shared job-aware repair before
             // declaring the overall boot configuration complete.
-            let is_bios_setup = boot_interface
-                .run(|bi| redfish_client.is_bios_setup(Some(bi)))
-                .await
-                .map_err(|e| redfish_error("is_bios_setup", e))?;
+            let is_bios_setup = platform_settings_in_effect(
+                ctx.services,
+                redfish_client,
+                mh_snapshot,
+                Some(&boot_interface),
+            )
+            .await?;
 
             if !is_bios_setup {
                 tracing::warn!(

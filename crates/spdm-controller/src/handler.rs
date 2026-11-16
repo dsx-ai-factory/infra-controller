@@ -17,7 +17,7 @@
 
 use std::sync::Arc;
 
-use carbide_instrument::{Event, LabelValue, Outcome, emit};
+use carbide_instrument::{Event, LabelValue, Outcome};
 use carbide_redfish::libredfish::conv::IntoModel;
 use carbide_redfish::libredfish::error::state_handler_redfish_error as redfish_error;
 use itertools::Itertools;
@@ -469,15 +469,21 @@ impl StateHandler for SpdmAttestationStateHandler {
                         if let EvidenceCollectionTaskStateClass::Unexpected(task_state) =
                             task_state_class
                         {
-                            emit(SpdmEvidenceCollectionTaskStateUnexpected {
-                                task_state,
-                                next_action,
-                                machine_id: machine_id.to_string(),
-                                device_id: device_id.clone(),
-                                task_id: task_id.clone(),
-                                retry_count: *retry_count,
-                                error: task.messages.iter().map(|t| t.message.as_str()).join("\n"),
-                            });
+                            ctx.services.instrumentation.emit(
+                                SpdmEvidenceCollectionTaskStateUnexpected {
+                                    task_state,
+                                    next_action,
+                                    machine_id: machine_id.to_string(),
+                                    device_id: device_id.clone(),
+                                    task_id: task_id.clone(),
+                                    retry_count: *retry_count,
+                                    error: task
+                                        .messages
+                                        .iter()
+                                        .map(|t| t.message.as_str())
+                                        .join("\n"),
+                                },
+                            );
                         }
 
                         if next_action == EvidenceCollectionNextAction::Wait {
@@ -610,7 +616,9 @@ impl StateHandler for SpdmAttestationStateHandler {
             }
             SpdmAttestationState::NrasVerification => {
                 let client = self.verifier.client(self.nras_config.clone());
-                let raw_attest_outcome = perform_attestation(client.as_ref(), snapshot).await?;
+                let raw_attest_outcome =
+                    perform_attestation(client.as_ref(), snapshot, &ctx.services.instrumentation)
+                        .await?;
 
                 let processed_response = self
                     .verifier
@@ -831,6 +839,7 @@ enum AttestationPerformed {
 async fn perform_attestation(
     client: &dyn VerifierClient,
     device: &SpdmDeviceAttestation,
+    instrumentation: &carbide_instrument::Instrumentation,
 ) -> Result<RawAttestationOutcome, SpdmHandlerError> {
     let Some(ca_certificate) = &device.ca_certificate else {
         return Err(SpdmHandlerError::MissingData {
@@ -901,7 +910,7 @@ async fn perform_attestation(
     // the machine and device ids are log-only context. Attestation evidence, JWTs,
     // certificates, and the nonce never reach a label or the log line.
     let (machine_id, device_id) = (device.machine_id.to_string(), device.device_id.clone());
-    emit(match Outcome::from(&response) {
+    instrumentation.emit(match Outcome::from(&response) {
         Outcome::Ok => AttestationPerformed::Ok {
             device_type: attested_device_type,
             machine_id,
@@ -927,6 +936,7 @@ async fn perform_attestation(
 
 #[cfg(test)]
 mod tests {
+    use carbide_instrument::emit;
     use carbide_instrument::testing::{MetricsCapture, capture_logs};
     use carbide_test_support::value_scenarios;
 

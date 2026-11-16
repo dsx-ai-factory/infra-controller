@@ -48,6 +48,7 @@ url = { workspace = true }
 uuid = { workspace = true }
 
 [dev-dependencies]
+carbide-instrument = { path = "../instrument" }
 carbide-api-db = { path = "../api-db", features = ["test-support"] }
 carbide-macros = { path = "../macros" }
 carbide-resource-pool-api = { path = "../resource-pool-api", features = [

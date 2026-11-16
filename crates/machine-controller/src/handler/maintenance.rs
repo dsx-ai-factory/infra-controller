@@ -280,11 +280,11 @@ async fn invoke_power_operation(
     // so a failed platform check cannot cause a successfully issued AC cycle to be repeated.
     let restore_onboard_nics =
         if action == PowerAction::AcPowercycle && mh_snapshot.has_managed_dpus() {
-            let client = ctx
-                .services
-                .create_redfish_client_from_machine(machine)
-                .await?;
-            super::is_vera_rubin_host(client.as_ref()).await?
+            let bmc = ctx.services.connect_bmc(machine).await?;
+            let bmc_control = bmc.bmc_control().map_err(|error| {
+                platform_error("controls_host_management_network_access", error.into())
+            })?;
+            super::onboard_nics::isolate(&bmc_control, mh_snapshot).await?
         } else {
             false
         };

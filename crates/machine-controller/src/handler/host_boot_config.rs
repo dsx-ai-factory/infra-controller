@@ -41,7 +41,7 @@ use state_controller::state_handler::{StateHandlerContext, StateHandlerError};
 use super::bios_config::{
     BiosConfigJobAdvanceOutcome, BiosConfigOutcome, PollingBiosSetupOutcome,
     advance_bios_config_job, advance_polling_bios_setup, bios_profile_needs_reapply,
-    configure_host_bios, verify_bios_profile_after_reboot,
+    configure_host_bios, platform_settings_in_effect, verify_bios_profile_after_reboot,
 };
 use super::{
     ReachabilityParams, RequiredBootInterface, SetBootOrderOutcome,
@@ -49,7 +49,7 @@ use super::{
     require_boot_interface, resolve_boot_interface_for_step, set_host_boot_order,
     trigger_reboot_if_needed,
 };
-use crate::context::MachineStateHandlerContextObjects;
+use crate::context::{MachineStateHandlerContextObjects, MachineStateHandlerServices};
 
 /// Runtime projection of the persisted BIOS and boot-order states shared by
 /// HostInit, assigned platform configuration, DPU reprovision, and validation.
@@ -145,14 +145,14 @@ pub(super) fn decide_host_boot_config(
 /// undiscovered zero-DPU NIC (pace the reboot), and a Redfish read error (log
 /// and retry).
 pub(super) async fn inspect_host_boot_config(
+    services: &MachineStateHandlerServices,
     redfish_client: &dyn Redfish,
     mh_snapshot: &ManagedHostStateSnapshot,
     boot_interface: &BootInterfaceTarget,
 ) -> Result<HostBootConfigInspection, StateHandlerError> {
-    let is_bios_setup = boot_interface
-        .run(|bi| redfish_client.is_bios_setup(Some(bi)))
-        .await
-        .map_err(|e| redfish_error("is_bios_setup", e))?;
+    let is_bios_setup =
+        platform_settings_in_effect(services, redfish_client, mh_snapshot, Some(boot_interface))
+            .await?;
 
     if !is_bios_setup || should_skip_boot_order_remediation(mh_snapshot) {
         return Ok(HostBootConfigInspection {
@@ -207,7 +207,9 @@ pub(super) async fn check_host_boot_config(
 
     log_host_config(redfish_client, mh_snapshot).await;
 
-    let inspection = inspect_host_boot_config(redfish_client, mh_snapshot, &boot_interface).await?;
+    let inspection =
+        inspect_host_boot_config(ctx.services, redfish_client, mh_snapshot, &boot_interface)
+            .await?;
     let decision = match decide_host_boot_config(inspection) {
         HostBootConfigDecision::Complete
             if bios_profile_needs_reapply(redfish_client, mh_snapshot, ctx).await =>
@@ -320,10 +322,10 @@ pub(super) async fn run_host_boot_config_stage(
                 resolve_boot_interface_for_step(ctx, mh_snapshot, explicit_target).await?;
             let boot_interface = boot_interface.into_target();
             match advance_polling_bios_setup(
+                ctx.services,
                 redfish_client,
                 mh_snapshot,
                 retry_count,
-                &ctx.services.site_config.machine_state_controller,
                 boot_interface.as_ref(),
             )
             .await?

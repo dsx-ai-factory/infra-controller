@@ -33,14 +33,14 @@ var version = "dev"
 // line, bad config or a refused lock.
 const exitNotRun = result.ExitNotRun
 
-const usage = "usage: scale-test version | scale-test fleet-up|ingestion|instance-create|instance-delete [--config <path>]"
+const usage = "usage: scale-test version | scale-test fleet-up|ingestion|instance-create|instance-delete|instance-lifecycle [--config <path>]"
 
 func main() {
 	os.Exit(run(os.Args[1:], os.Stdout, os.Stderr))
 }
 
 func run(args []string, stdout, stderr io.Writer) int {
-	if len(args) > 0 && (args[0] == "fleet-up" || args[0] == "ingestion" || args[0] == "instance-create" || args[0] == "instance-delete") {
+	if len(args) > 0 && (args[0] == "fleet-up" || args[0] == "ingestion" || args[0] == "instance-create" || args[0] == "instance-delete" || args[0] == "instance-lifecycle") {
 		return command(args[0], args[1:], stdout, stderr)
 	}
 	switch command := strings.Join(args, " "); command {
@@ -120,7 +120,7 @@ func setUp(ctx context.Context, name, path string) (runner.Deps, runner.Test, er
 	if name == "fleet-up" {
 		return deps, fleetup.New(cfg, d), nil
 	}
-	if name == "instance-create" || name == "instance-delete" {
+	if name == "instance-create" || name == "instance-delete" || name == "instance-lifecycle" {
 		t, err := ingestion.ProductionInstances(cfg, instances, d)
 		return deps, t, err
 	}

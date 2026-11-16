@@ -5,6 +5,22 @@
   "type": "object",
   "required": ["serviceDaemonSet"],
   "properties": {
+    "multiClusterSupport": {
+      "type": "boolean",
+      "default": false
+    },
+    "dpf": {
+      "type": "object",
+      "properties": {
+        "dpuService": {
+          "type": "object",
+          "properties": {
+            "name": { "type": "string" },
+            "namespace": { "type": "string" }
+          }
+        }
+      }
+    },
     "tracesSpanLevel": {
       "type": "string",
       "description": "DHCP server span verbosity. Empty preserves the binary default of info."

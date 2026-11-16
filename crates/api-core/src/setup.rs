@@ -134,6 +134,7 @@ fn create_ipmi_tool(
     credential_reader: Arc<dyn CredentialReader>,
     carbide_config: &CarbideConfig,
     bmc_proxy: Arc<ArcSwap<Option<HostPortPair>>>,
+    instrumentation: carbide_instrument::Instrumentation,
 ) -> Arc<dyn IPMITool> {
     match carbide_config.dpu_ipmi_tool_impl.as_deref() {
         Some("test") => {
@@ -142,11 +143,15 @@ fn create_ipmi_tool(
         }
         Some("bmc-mock") => {
             tracing::info!("Using HTTP IPMI transport via bmc_proxy");
-            carbide_ipmi::bmc_mock(bmc_proxy, credential_reader)
+            carbide_ipmi::bmc_mock(bmc_proxy, credential_reader, instrumentation)
         }
         _ => {
             tracing::info!("Using lanplus IPMI transport (/usr/bin/ipmitool)");
-            carbide_ipmi::tool(credential_reader, carbide_config.dpu_ipmi_reboot_attempts)
+            carbide_ipmi::tool(
+                credential_reader,
+                carbide_config.dpu_ipmi_reboot_attempts,
+                instrumentation,
+            )
         }
     }
 }
@@ -367,6 +372,7 @@ pub async fn start_runtime(runtime_inputs: RuntimeInputs<'_>) -> eyre::Result<So
         credential_manager.clone(),
         &carbide_config,
         dynamic_settings.bmc_proxy.clone(),
+        instrumentation.clone(),
     );
 
     let driver_connector = create_driver_connector(
@@ -488,7 +494,12 @@ pub async fn start_runtime(runtime_inputs: RuntimeInputs<'_>) -> eyre::Result<So
         // and accepted definitions for remote pools, before it builds the handles
         // used by the API and controllers. Route servers and site prefixes also
         // need to reflect the config before the API starts serving requests.
-        db::resource_pool::reconcile_pool_defs(&mut txn, &seed_data.initial_pools).await?;
+        db::resource_pool::reconcile_pool_defs(
+            &mut txn,
+            &seed_data.initial_pools,
+            &instrumentation,
+        )
+        .await?;
         // We'll always update whatever route servers are in the config
         // to the database, and then leverage the enable_route_servers
         // flag where needed to determine if we actually want to use
@@ -561,6 +572,7 @@ pub async fn start_runtime(runtime_inputs: RuntimeInputs<'_>) -> eyre::Result<So
         &carbide_config.firmware_global,
         cancel_token.clone(),
         join_set,
+        instrumentation.clone(),
     )?;
 
     // A listen-only replica trusts another instance to reconcile configuration,
@@ -761,6 +773,7 @@ pub async fn start_runtime(runtime_inputs: RuntimeInputs<'_>) -> eyre::Result<So
             // until it moves to credential-key auth.
             Some(shared_redfish_pool.clone()),
             driver_connector.clone(),
+            instrumentation.clone(),
         )
         .await
         {
@@ -915,8 +928,9 @@ fn create_firmware_delivery(
     config: &FirmwareGlobal,
     cancel_token: CancellationToken,
     join_set: &mut JoinSet<()>,
+    instrumentation: carbide_instrument::Instrumentation,
 ) -> eyre::Result<(FirmwareDownloader, FirmwareArtifactCache)> {
-    let downloader = FirmwareDownloader::with_config(config.downloads.clone())?;
+    let downloader = FirmwareDownloader::with_config(config.downloads.clone(), instrumentation)?;
     let cache = FirmwareArtifactCache::new(
         config.firmware_download_cache_directory.clone(),
         config.nic_firmware_cache_capacity_bytes,
@@ -1071,6 +1085,7 @@ fn build_dpf_interfaces_and_services(
         service_vpc_slots,
         &carbide_config.node_auth,
         carbide_config.ewethers_config.as_ref(),
+        carbide_config.dpf.multi_cluster_support,
     );
     (interfaces, mandatory_services)
 }
@@ -2035,6 +2050,7 @@ async fn initialize_and_start_controllers<'a>(
                 config.mqtt_broker_port,
                 &client_id,
                 Some(options),
+                api_service.instrumentation.clone(),
             )
             .map_err(|e| eyre::eyre!("failed to create DSX exchange event bus MQTT client: {e}"))
             .await?;
@@ -2247,7 +2263,7 @@ async fn initialize_and_start_controllers<'a>(
         .per_object_state_metrics(machine_state_recorder)
         .iteration_config((&carbide_config.machine_state_controller.controller).into())
         .state_handler(Arc::new(
-            MachineStateHandlerBuilder::builder()
+            MachineStateHandlerBuilder::builder(api_service.instrumentation.clone())
                 .dpu_up_threshold(carbide_config.machine_state_controller.dpu_up_threshold)
                 .dpu_nic_firmware_reprovision_update_enabled(
                     carbide_config
@@ -2409,6 +2425,7 @@ async fn initialize_and_start_controllers<'a>(
             .processor_id(state_controller_id.clone())
             .services(
                 SpdmStateHandlerServices {
+                    instrumentation: api_service.instrumentation.clone(),
                     db_pool: db_pool.clone(),
                     redfish_client_pool: shared_redfish_pool.clone(),
                     bmc_connector: BmcConnector::new(
@@ -2435,6 +2452,7 @@ async fn initialize_and_start_controllers<'a>(
         .processor_id(state_controller_id.clone())
         .services(
             IBPartitionStateHandlerServices {
+                instrumentation: api_service.instrumentation.clone(),
                 db_pool: db_pool.clone(),
                 ib_fabric_manager: ib_fabric_manager.clone(),
                 ib_pools: common_pools.infiniband.clone(),
@@ -2453,6 +2471,7 @@ async fn initialize_and_start_controllers<'a>(
         .processor_id(state_controller_id.clone())
         .services(
             PowerShelfStateHandlerServices {
+                instrumentation: api_service.instrumentation.clone(),
                 db_pool: db_pool.clone(),
                 component_manager: component_manager.clone().map(Arc::new),
                 credential_manager: credential_manager.clone(),
@@ -2485,6 +2504,7 @@ async fn initialize_and_start_controllers<'a>(
         .processor_id(state_controller_id.clone())
         .services(
             RackStateHandlerServices {
+                instrumentation: api_service.instrumentation.clone(),
                 db_pool: db_pool.clone(),
                 site_config: RackConfig {
                     rms: carbide_config.rms.clone(),
@@ -2517,6 +2537,7 @@ async fn initialize_and_start_controllers<'a>(
         .processor_id(state_controller_id.clone())
         .services(
             SwitchStateHandlerServices {
+                instrumentation: api_service.instrumentation.clone(),
                 db_pool: db_pool.clone(),
                 component_manager: component_manager.clone().map(Arc::new),
                 credential_manager: credential_manager.clone(),
@@ -2554,6 +2575,7 @@ async fn initialize_and_start_controllers<'a>(
         ib_fabric_manager.clone(),
         carbide_config.host_health,
         work_lock_manager_handle.clone(),
+        api_service.instrumentation.clone(),
     )
     .start(join_set, cancel_token.clone())?;
 
@@ -2561,6 +2583,7 @@ async fn initialize_and_start_controllers<'a>(
         db_pool: db_pool.clone(),
         nmxc_client_pool: api_service.nmxc_client_pool.clone(),
         meter: meter.clone(),
+        instrumentation: api_service.instrumentation.clone(),
         config: carbide_config.nvlink_config.clone().unwrap_or_default(),
         host_health: carbide_config.host_health,
         component_manager: api_service.component_manager.clone().map(Arc::new),
@@ -2600,12 +2623,12 @@ async fn initialize_and_start_controllers<'a>(
 
             DpaMonitor::new(
                 db_pool.clone(),
-                db_pool.clone().into(),
                 dpa_info,
                 meter.clone(),
                 carbide_config.ewethers_config.clone().unwrap_or_default(),
                 carbide_config.host_health,
                 work_lock_manager_handle.clone(),
+                api_service.instrumentation.clone(),
             )
             .start(join_set, cancel_token.clone())?;
 
@@ -2750,6 +2773,50 @@ mod tests {
     };
     use crate::cfg::load::parse_carbide_config;
 
+    #[test]
+    fn dpf_multi_cluster_support_reaches_all_nico_helm_templates() {
+        for (input, expected) in [
+            ("", false),
+            ("multiClusterSupport = false", false),
+            ("multiClusterSupport = true", true),
+        ] {
+            let mut config = crate::test_support::default_config::get();
+            config.dpf = toml::from_str(input).unwrap();
+            let services = &mut config.dpf.services;
+            for service in [
+                &mut services.dhcp_server,
+                &mut services.dpu_agent,
+                &mut services.fmds,
+                &mut services.otel,
+            ] {
+                service.extra_helm_values = serde_json::json!({
+                    "multiClusterSupport": !expected,
+                    "dpf": { "preserved": "value" }
+                })
+                .as_object()
+                .cloned();
+            }
+            let (_, services) = build_dpf_interfaces_and_services(
+                &config,
+                &config.dpf.deployments.bf3,
+                DpuDeploymentType::Bf3,
+                ServiceVpcSlots::default(),
+                None,
+            );
+            let templates: Vec<_> = services
+                .iter()
+                .map(|service| carbide_dpf::build_service_template(service, "test-ns", "bf3"))
+                .filter_map(|template| template.spec.helm_chart.values)
+                .filter(|values| values.get("multiClusterSupport").is_some())
+                .collect();
+            assert_eq!(templates.len(), 4, "{input}");
+            for values in templates {
+                assert_eq!(values["multiClusterSupport"], expected, "{input}");
+                assert_eq!(values["dpf"]["preserved"], "value", "{input}");
+            }
+        }
+    }
+
     /// The startup factory shares configured capacity across legacy and NIC transfers.
     #[tokio::test]
     async fn firmware_delivery_factory_shares_the_configured_transfer_pool() {
@@ -2771,8 +2838,15 @@ mod tests {
             config.firmware_download_cache_directory = directory.path().join("cache");
             let cancel = CancellationToken::new();
             let mut tasks = JoinSet::new();
-            let (downloader, cache) = create_firmware_delivery(&config, cancel.clone(), &mut tasks)
-                .expect("production firmware delivery composition");
+            let (downloader, cache) = create_firmware_delivery(
+                &config,
+                cancel.clone(),
+                &mut tasks,
+                carbide_instrument::Instrumentation::from_meter_provider(
+                    &opentelemetry::metrics::noop::NoopMeterProvider::new(),
+                ),
+            )
+            .expect("production firmware delivery composition");
             let started = Arc::new(Notify::new());
             let release = Arc::new(Notify::new());
             let legacy_started = started.clone();

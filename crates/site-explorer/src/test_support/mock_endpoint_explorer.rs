@@ -234,7 +234,8 @@ impl AuthenticatedBmc for MockEndpointExplorer {
         &self,
         _address: SocketAddr,
         _interface: &MachineInterfaceSnapshot,
-        _reset_type: Option<libredfish::ManagerResetType>,
+        _report: Option<&EndpointExplorationReport>,
+        _reset_type: Option<ResetType>,
     ) -> Result<(), EndpointExplorationError> {
         Ok(())
     }

@@ -104,7 +104,7 @@ impl RmsProxy {
             connector: BackendConnector::new(sources, rms)?,
             request_timeout: rms.request_timeout,
             backends: RwLock::new(None),
-            jobs: JobMap::new(),
+            jobs: JobMap::new(rms.job_retention),
         })
     }
 
@@ -1931,7 +1931,10 @@ mod tests {
                 "mat-a",
                 format!("http://{}/", listener.local_addr().unwrap()),
             )],
-            &RmsConfig { request_timeout },
+            &RmsConfig {
+                request_timeout,
+                ..RmsConfig::default()
+            },
         );
         let request = rms::BatchGetPowerStateRequest {
             nodes: Some(rms::NodeSet {

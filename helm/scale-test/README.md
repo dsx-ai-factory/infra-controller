@@ -89,7 +89,8 @@ nico-api's own SPIFFE settings, or the identity check fails and the run is
 notReady. `inventory.spiffe.serverName` is optional: left empty, TLS checks
 nico-api's certificate against the host in the nico-api URL the MAT pods
 serve; set it to a name on the certificate when the two differ, or the
-version call fails and the run is notReady. It also needs `inventory.expected.release`, every
+version call fails and the run is notReady. It also needs
+`inventory.expected.release`, every
 `inventory.expected` count (an explicit 0 where a type is absent),
 `runner.controlPlane` and, while `runner.checkStore` is on, `store.url`. With
 `runner.checkStore` off the run is diagnostic and never go.
@@ -170,16 +171,27 @@ elsewhere once a multi-arch image exists.
   run nonroot with a read-only root filesystem, all capabilities dropped and
   the RuntimeDefault seccomp profile.
 
-## Instance create and delete
+## Instance creation, deletion and lifecycle
 
-Install one runner Job per command with `runner.command: instance-create` or
-`instance-delete`, a fresh `runner.runId` and explicit `runner.dryRun`.
-Use the same retained PVC for both. Delete requires the successful create
-run's `.owned.json` basename in `runner.instance.ownedManifest` and the same N,
-tenant, type and REST origin. It never discovers instances to delete.
+Install one runner Job with `instance-create`, `instance-delete` or
+`instance-lifecycle`, a fresh `runner.runId` and explicit `runner.dryRun`.
+Use the retained PVC across commands. Delete requires the latest successful
+run's `.owned.json` basename and the same tenant, type and REST origin.
+`instance.deleteCount` selects that many Ready owned instances by burst then name.
+Zero or unset deletes all owned instances. The latest phase's `ownedManifest`
+points to the remaining instances, including an empty manifest after release.
+Already deleted hosts lose only their owned label. Retained and non-owned
+instances stay outside the mutation cohort. Counts above Ready supply fail.
+
+Lifecycle runs create and delete under one Lease and journal, retaining
+pending work between phases. One result contains separate create/delete
+stages and burst timings. Failed or unsettled create stops before delete.
+Phase artifact names are distinct and retain the root journal identity.
+Fixture teardown runs only after the final owned instance is released and
+`fixture.teardown` is true. It still requires an empty tenant.
 
 Set `runner.rest.org` to the tenant org and `providerOrg` to the provider org.
-The runner rereads mounted `tokenSecret` before writes but does not mint tokens.
+With `tokenSecret`, the runner rereads the mounted token but does not mint tokens.
 Refresh `token` externally each half lifetime, before expiry, with both org grants.
 A 401 stops as a clean refusal. Create mounts `ipxeSecret` key `script.ipxe`.
 Pin an iPXE fixture suitable for the simulator. Phone-home is disabled.
@@ -210,3 +222,93 @@ a renewing maintenance Lease and validate ownership. Verify settlement in
 native and REST state through the probe. Empty read-back after a lost create
 is insufficient. Exercise this operator handoff before qualifying writes.
 If the procedure is unavailable, keep the site blocked.
+
+For one-install setup, configure `runner.fixture` and `runner.rest.auth` in
+values.yaml alongside the inventory, shared probe/store, PVC and health
+selectors. Provider and tenant Secrets use `client-id` and `client-secret`.
+Keep clients, copied secrets and grants stable through teardown; Secrets copy once.
+Provision provider and tenant identities and grants once at site bring-up.
+Both client Secrets are required for fixture runs. Token URLs require HTTPS.
+The optional REST CA covers token requests too. Credentials stay outside
+the journal.
+
+Supply a pinned simulator iPXE script and probe image. Attest loaded site
+fabric coverage through `fabricPrefixCIDRs`.
+A covering provider block is borrowed; REST chooses the child allocation
+address. The run-owned REST sidecar requires native-sidecar support and
+does not read rack/tray totals. Setup
+freezes hosts across two sweeps before mutations and calibrates again after
+setup. Budget Helm and runner deadlines for setup plus both calibrations.
+Use one `helm install ... -f values.yaml --wait --wait-for-jobs --timeout ...`.
+
+Start with `dryRun: true`, then a new run ID and `dryRun: false`. For delete,
+keep the fixture settings/PVC, use `command: instance-delete` and set
+`instance.ownedManifest` to the create run's owned manifest. Optional
+`fixture.teardown` releases only proven-owned resources. Borrowed resources
+and the tenant row remain. REST has no tenant delete route. Uncertain writes
+require operator reconciliation under the live Lease. Uninstall never
+releases fixtures.
+
+For example, save the inventory, store, pod selectors and retained PVC values
+above in `site-values.yaml`, then save this overlay as `instance-values.yaml`.
+Replace placeholders and the iPXE script with the qualified fixture inputs.
+The budget covers both lifecycle phases and repeated two-sweep gates at the
+480-second cadence. Shorter budgets must account for the chosen burst count.
+
+```yaml
+runner:
+  enabled: true
+  dryRun: false
+  wholeRunSeconds: 28800
+  activeDeadlineSeconds: 28920
+  readinessSeconds: 1800
+  rest:
+    url: https://rest.example
+    org: scale-tenant
+    providerOrg: provider
+    caSecret: {name: rest-ca, key: ca.crt}
+    auth:
+      tokenUrl: https://identity.example/token
+      providerSecret: provider-client
+      tenantSecret: tenant-client
+      tenantClientId: scale-tenant-client
+  observation: {intervalSeconds: 480}
+  instance: {"n": 5, burstSize: 5}
+  fixture:
+    name: scale-fixture
+    siteId: "<site UUID>"
+    machineCapabilities: [{type: GPU, name: "<capability name>", count: 4}]
+    ipBlockCIDR: 10.210.0.0/16
+    allocationPrefixLength: 18
+    subnetPrefixLength: 18
+    fabricPrefixCIDRs: [10.210.0.0/16]
+    ipxeScript: "#!ipxe\n<pinned simulator boot commands>\n"
+    probeImage: "<probe repository>@sha256:<digest>"
+```
+
+Create five instances, then wait for the Job to finish before upgrading
+the same release to delete two. Keep the namespace, release name and
+run-data claim across commands, and use a fresh runId for each Job:
+
+```bash
+helm install instance-test helm/scale-test --namespace <ns> \
+  -f site-values.yaml -f instance-values.yaml \
+  --set runner.command=instance-create --set runner.runId=create-five
+helm upgrade instance-test helm/scale-test --namespace <ns> \
+  -f site-values.yaml -f instance-values.yaml \
+  --set runner.command=instance-delete --set runner.runId=delete-two \
+  --set runner.instance.deleteCount=2 \
+  --set runner.instance.ownedManifest=create-five.owned.json
+```
+
+Continue from `delete-two.owned.json` for the remaining three. Teardown is
+optional and waits until none remain. Run the complete six-instance
+lifecycle after earlier runs have released the tenant:
+
+```bash
+helm upgrade instance-test helm/scale-test --namespace <ns> \
+  -f site-values.yaml -f instance-values.yaml \
+  --set runner.command=instance-lifecycle --set runner.runId=lifecycle-six \
+  --set runner.instance.n=6 --set runner.instance.burstSize=2 \
+  --set runner.fixture.teardown=true
+```

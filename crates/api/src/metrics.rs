@@ -71,6 +71,7 @@ pub fn setup_metrics() -> eyre::Result<MetricsSetup> {
     forge_http_connector::connector::register_global_metrics(&meter);
 
     Ok(MetricsSetup {
+        instrumentation: carbide_instrument::Instrumentation::from_meter_provider(&meter_provider),
         registry,
         meter,
         meter_provider,

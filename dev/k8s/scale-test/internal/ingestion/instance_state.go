@@ -35,11 +35,24 @@ type instanceSnapshot struct {
 	rows     map[probeapi.Family]map[string]probeapi.Unit
 	meta     map[probeapi.Family]probeapi.SweepInfo
 	config   probeapi.ConfigResponse
+
+	restEpoch    float64
+	sidecarCalls uint64
+	sidecarRead  time.Time
 }
 
-func (s *instanceSnapshot) oldestSource() time.Time {
-	oldest := minTime(s.config.Rest.ReadStart.Time, s.config.RestSite.ReadStart.Time)
-	for _, source := range s.meta {
+func (s *instanceSnapshot) oldestSource(nativeOnly bool) time.Time {
+	oldest := time.Now()
+	if !nativeOnly && s.config.Rest != nil {
+		oldest = s.config.Rest.ReadStart.Time
+	}
+	if !nativeOnly && s.config.RestSite != nil {
+		oldest = minTime(oldest, s.config.RestSite.ReadStart.Time)
+	}
+	for family, source := range s.meta {
+		if nativeOnly && (family == probeapi.FamilyRestMachines || family == probeapi.FamilyRestInstances) {
+			continue
+		}
 		oldest = minTime(oldest, source.SweepStart.Time)
 	}
 	return oldest
@@ -49,12 +62,13 @@ var instanceFamilies = []struct {
 	family probeapi.Family
 	filter probeapi.Filter
 }{
+	// Check the tenant cache before downloading fleet-sized families.
+	{probeapi.FamilyRestInstances, probeapi.Filter{Type: probeapi.UnitTypeInstance, Source: new(probeapi.SourceRest)}},
 	{probeapi.FamilyHost, probeapi.Filter{Type: probeapi.UnitTypeHost}},
 	{probeapi.FamilyDpu, probeapi.Filter{Type: probeapi.UnitTypeDpu}},
 	{probeapi.FamilyInstance, probeapi.Filter{Type: probeapi.UnitTypeInstance}},
 	{probeapi.FamilyExpected, probeapi.Filter{Type: probeapi.UnitTypeExpectedRecord, RecordType: new(probeapi.RecordTypeHost)}},
 	{probeapi.FamilyRestMachines, probeapi.Filter{Type: probeapi.UnitTypeHost, Source: new(probeapi.SourceRest)}},
-	{probeapi.FamilyRestInstances, probeapi.Filter{Type: probeapi.UnitTypeInstance, Source: new(probeapi.SourceRest)}},
 }
 
 func readInstanceSnapshot(ctx context.Context, p probe.Probe, until time.Time, s InstanceSettings, previous ...*instanceSnapshot) (*instanceSnapshot, error) {
@@ -66,25 +80,55 @@ func readInstanceSnapshot(ctx context.Context, p probe.Probe, until time.Time, s
 	if len(previous) > 0 && previous[0] != nil && cfg.Metrics != nil && previous[0].config.Metrics != nil && cfg.Metrics.ProcessStartSeconds != previous[0].config.Metrics.ProcessStartSeconds {
 		return nil, instanceIssue("native probe process changed between snapshots")
 	}
-	out.config = cfg
 	interval := float64(s.Observation.IntervalSeconds)
-	if cfg.Metrics == nil || cfg.Rest == nil || cfg.Rest.TenantAllocation == nil || cfg.RestSite == nil || cfg.RestSite.Result != probeapi.SiteMatchMatch {
-		return nil, instanceIssue("probe lacks tenant allocation or a matching REST site")
+	if cfg.Metrics == nil {
+		return nil, instanceIssue("native probe process metadata missing")
 	}
-	allocation := cfg.Rest.TenantAllocation
-	validRead := func(r probeapi.ReadInfo) bool {
-		return r.LastAttemptError == nil && r.ReadIntervalSeconds == interval && r.ReadStart.Before(r.ReadAt.Time) && !r.ReadAt.After(time.Now()) && r.ReadAt.Sub(r.ReadStart.Time).Seconds() <= .75*interval && time.Since(r.ReadStart.Time) >= 0 && time.Since(r.ReadStart.Time).Seconds() <= 2*interval
+	restReader := p
+	out.restEpoch = cfg.Metrics.ProcessStartSeconds
+	if s.sidecar != nil {
+		status, e := s.sidecar.Fixture(ctx, "status")
+		if e != nil {
+			return nil, instanceObservationError(e)
+		}
+		if status.SiteID != s.Fixture.SiteID || status.Org != s.Rest.Org || s.restEpoch != 0 && status.ProcessStartSeconds != s.restEpoch || status.CallsTotal > 1<<53 || time.Since(status.ReadStart.Time) < 0 || time.Since(status.ReadStart.Time) > 30*time.Second || status.ReadAt.Before(status.ReadStart.Time) || status.ReadAt.After(time.Now()) {
+			return nil, instanceIssue("REST sidecar scope or process changed")
+		}
+		out.restEpoch, out.sidecarCalls, out.sidecarRead = status.ProcessStartSeconds, status.CallsTotal, status.ReadAt.Time
+		restReader = s.sidecar
+		cfg.Rest, cfg.RestSite = nil, nil
+		if !s.preparing {
+			rc, e := s.sidecar.Config(ctx, probe.ConfigFilter{InstanceType: &s.Instance.InstanceTypeID})
+			if e != nil {
+				return nil, instanceObservationError(e)
+			}
+			cfg.Rest = rc.Rest
+			if cfg.Rest == nil || cfg.Rest.TenantAllocation == nil {
+				return nil, instanceObservationError(&probe.Error{Kind: probe.NoCompleteSweep})
+			}
+		}
 	}
-	if !validRead(cfg.Rest.ReadInfo) || !validRead(cfg.RestSite.ReadInfo) || allocation.Tenant != s.Instance.TenantID || allocation.InstanceType != s.Instance.InstanceTypeID {
-		return nil, instanceIssue("allocation scope or source freshness is unproven")
+	if !s.preparing {
+		if err := instanceAllocation(cfg, s); err != nil {
+			return nil, err
+		}
 	}
+	out.config = cfg
 	for _, spec := range instanceFamilies {
+		reader, epoch := p, cfg.Metrics.ProcessStartSeconds
+		if spec.filter.Source != nil {
+			reader, epoch = restReader, out.restEpoch
+		}
+		if s.preparing && !s.tenantCensus && spec.family == probeapi.FamilyRestInstances {
+			out.rows[spec.family] = map[string]probeapi.Unit{}
+			continue
+		}
 		if len(previous) > 0 && previous[0] != nil {
-			peek, err := p.Units(ctx, spec.filter, nil, probe.Page{Limit: new(uint32(1))})
+			peek, err := reader.Units(ctx, spec.filter, nil, probe.Page{Limit: new(uint32(1))})
 			if err != nil {
 				return nil, instanceObservationError(err)
 			}
-			if err = sourceMeta(peek.SweepInfo, spec.family, cfg.Metrics.ProcessStartSeconds, interval); err != nil {
+			if err = sourceMeta(peek.SweepInfo, spec.family, epoch, interval); err != nil {
 				return nil, err
 			}
 			if peek.SnapshotID == previous[0].meta[spec.family].SnapshotID {
@@ -93,11 +137,11 @@ func readInstanceSnapshot(ctx context.Context, p probe.Probe, until time.Time, s
 				continue
 			}
 		}
-		rows, meta, err := probe.SnapshotUnits(ctx, p, until, spec.filter)
+		rows, meta, err := probe.SnapshotUnits(ctx, reader, until, spec.filter)
 		if err != nil {
 			return nil, instanceObservationError(err)
 		}
-		if err = sourceMeta(meta, spec.family, cfg.Metrics.ProcessStartSeconds, interval); err != nil {
+		if err = sourceMeta(meta, spec.family, epoch, interval); err != nil {
 			return nil, err
 		}
 		index := map[string]probeapi.Unit{}
@@ -142,6 +186,13 @@ func readInstanceSnapshot(ctx context.Context, p probe.Probe, until time.Time, s
 		}
 	}
 	_, err = out.restHosts()
+	if err == nil && s.sidecar != nil {
+		for id := range out.rest {
+			if out.rows[probeapi.FamilyHost][id].ID == "" {
+				return nil, instanceIssue("REST site/controller identity does not match native census")
+			}
+		}
+	}
 	return out, err
 }
 
@@ -166,6 +217,15 @@ func (s *instanceSnapshot) restHosts() (map[string]probeapi.Unit, error) {
 
 func readyHost(u probeapi.Unit) bool {
 	return u.Stage == probeapi.StageReady && u.Host != nil && u.Host.Allocatable != nil && *u.Host.Allocatable
+}
+
+// Occupied hosts stay Registered. Only the complete controller state is Ready.
+func occupiedHost(u probeapi.Unit) bool {
+	if u.Reason == nil {
+		return false
+	}
+	state, _, _ := strings.Cut(*u.Reason, ": ")
+	return u.Stage == probeapi.StageRegistered && u.State == "Assigned" && state == "Assigned/Ready" && !u.Done && u.Host != nil && u.Host.Allocatable != nil && !*u.Host.Allocatable
 }
 func restHealthy(u probeapi.Unit) bool {
 	return u.RestMachine != nil && (u.State == "Ready" || u.State == "InUse")
@@ -195,23 +255,27 @@ type CohortHost struct {
 	Name             string   `json:"name,omitempty"`
 }
 type instancePlan struct {
-	Network      map[string]string `json:"network,omitempty"`
-	sourceHash   string
-	SourceOwned  map[string]string                      `json:"sourceOwned,omitempty"`
-	CommandRunID string                                 `json:"runId"`
-	Health       map[string]any                         `json:"health"`
-	Inventory    map[string]string                      `json:"inventory"`
-	Requests     []instanceRequest                      `json:"requests"`
-	ScriptSHA    string                                 `json:"scriptSha256"`
-	RunID        string                                 `json:"ownerRunId"`
-	Tenant       string                                 `json:"tenant"`
-	Type         string                                 `json:"type"`
-	Org          string                                 `json:"org"`
-	Origin       string                                 `json:"origin"`
-	Cohort       []CohortHost                           `json:"cohort"`
-	Excluded     map[string]string                      `json:"excluded"`
-	Baseline     map[string]string                      `json:"baseline"`
-	Sources      map[probeapi.Family]probeapi.SweepInfo `json:"sources"`
+	OriginalCount int               `json:"originalCount,omitempty"`
+	Fixture       map[string]string `json:"fixture,omitempty"`
+	Network       map[string]string `json:"network,omitempty"`
+	sourceHash    string
+	SourceOwned   map[string]string                      `json:"sourceOwned,omitempty"`
+	CommandRunID  string                                 `json:"runId"`
+	Health        map[string]any                         `json:"health"`
+	Inventory     map[string]string                      `json:"inventory"`
+	Requests      []instanceRequest                      `json:"requests"`
+	ScriptSHA     string                                 `json:"scriptSha256"`
+	RunID         string                                 `json:"ownerRunId"`
+	Tenant        string                                 `json:"tenant"`
+	Type          string                                 `json:"type"`
+	Org           string                                 `json:"org"`
+	Origin        string                                 `json:"origin"`
+	Cohort        []CohortHost                           `json:"cohort"`
+	Excluded      map[string]string                      `json:"excluded"`
+	Baseline      map[string]string                      `json:"baseline"`
+	Sources       map[probeapi.Family]probeapi.SweepInfo `json:"sources"`
+
+	OwnerJournalRunID string `json:"ownerJournalRunId,omitempty"`
 }
 
 func planInstances(s *instanceSnapshot, inv inventory.SiteInventory, mat map[string]podState, settings InstanceSettings, runID, namespace string) (instancePlan, error) {
@@ -358,6 +422,7 @@ func planInstances(s *instanceSnapshot, inv inventory.SiteInventory, mat map[str
 func hostSignature(s *instanceSnapshot, id string) string {
 	u := s.rows[probeapi.FamilyHost][id]
 	v := struct {
+		OccupiedReady  bool
 		State          string
 		Stage          probeapi.Stage
 		Allocatable    *bool
@@ -375,7 +440,9 @@ func hostSignature(s *instanceSnapshot, id string) string {
 		Expected       string
 		NativeInstance string
 		DPUs           map[string]string
-	}{BMC: u.BmcIP, State: u.State, Stage: u.Stage, NativeInstance: s.bindings[id], Expected: s.expected[id], DPUs: map[string]string{}}
+
+		RESTCapabilities []probeapi.MachineCapability
+	}{OccupiedReady: occupiedHost(u), BMC: u.BmcIP, State: u.State, Stage: u.Stage, NativeInstance: s.bindings[id], Expected: s.expected[id], DPUs: map[string]string{}}
 	if u.Host != nil {
 		v.Rack = u.Host.RackID
 		v.DPUList = slices.Sorted(slices.Values(u.Host.DpuIDs))
@@ -392,6 +459,7 @@ func hostSignature(s *instanceSnapshot, id string) string {
 	if r := s.rest[id]; r.RestMachine != nil {
 		v.RESTID = r.ID
 		v.RESTType = r.RestMachine.InstanceType
+		v.RESTCapabilities = r.RestMachine.MachineCapabilities
 		v.RESTTenant = r.RestMachine.TenantID
 		v.RESTUsable = r.RestMachine.IsUsableByTenant
 		v.Selector, v.SelectorOwned = r.RestMachine.Labels[instanceLabel]
@@ -568,4 +636,19 @@ func safeMachineID(id string) bool {
 		}
 	}
 	return true
+}
+
+func instanceAllocation(cfg probeapi.ConfigResponse, s InstanceSettings) error {
+	if cfg.Rest == nil || cfg.Rest.TenantAllocation == nil || s.sidecar == nil && (cfg.RestSite == nil || cfg.RestSite.Result != probeapi.SiteMatchMatch) {
+		return instanceIssue("probe lacks allocation or site agreement")
+	}
+	interval := float64(s.Observation.IntervalSeconds)
+	validRead := func(r probeapi.ReadInfo) bool {
+		return r.LastAttemptError == nil && r.ReadIntervalSeconds == interval && r.ReadStart.Before(r.ReadAt.Time) && !r.ReadAt.After(time.Now()) && r.ReadAt.Sub(r.ReadStart.Time).Seconds() <= .75*interval && time.Since(r.ReadStart.Time) >= 0 && time.Since(r.ReadStart.Time).Seconds() <= 2*interval
+	}
+	allocation := cfg.Rest.TenantAllocation
+	if !validRead(cfg.Rest.ReadInfo) || s.sidecar == nil && !validRead(cfg.RestSite.ReadInfo) || allocation.Tenant != s.Instance.TenantID || allocation.InstanceType != s.Instance.InstanceTypeID {
+		return instanceIssue("allocation scope or source freshness unproven")
+	}
+	return nil
 }

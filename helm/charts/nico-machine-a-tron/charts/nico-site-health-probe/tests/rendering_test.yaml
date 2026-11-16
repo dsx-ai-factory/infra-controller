@@ -1372,3 +1372,28 @@ tests:
           content:
             name: state-tenant
           any: true
+
+  - it: nico_config_off_is_old_probe_compatible
+    template: templates/configmap.yaml
+    set: {state: {enabled: true, siteId: site-1}, nicoApiClientCert: {existingSecret: nico-admin-cert}}
+    asserts:
+      - notMatchRegex: {path: 'data["config.yaml"]', pattern: 'nico_config:'}
+
+  - it: nico_config_opt_in_wires_tls
+    set:
+      probes.grpcMachines.enabled: false
+      state: {enabled: true, siteId: site-1, readers: {devices: {enabled: false}, nicoConfig: {enabled: true, interval: 75s, timeout: 90s}}}
+      nicoApiClientCert: {existingSecret: nico-admin-cert}
+    asserts:
+      - matchRegex: {path: 'data["config.yaml"]', pattern: 'nico_config:\n\s+enabled: true\n\s+interval: "75s"\n\s+timeout: "90s"'}
+        template: templates/configmap.yaml
+      - contains:
+          path: spec.template.spec.volumes
+          content: {name: nico-admin-tls, secret: {secretName: nico-admin-cert}}
+        template: templates/deployment.yaml
+
+  - it: nico_config_opt_in_requires_tls
+    template: templates/deployment.yaml
+    set: {state: {enabled: true, siteId: site-1, readers: {devices: {enabled: false}, nicoConfig: {enabled: true}}}}
+    asserts:
+      - failedTemplate: {errorPattern: nicoApiClientCert.existingSecret is required while a nico-api state reader is on}

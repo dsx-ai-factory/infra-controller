@@ -20,7 +20,14 @@ const PRIVATE: &str = "private-credentials-manifest-options-body";
 /// Supplies only the RMS client and chosen pool; individual tests own tracking setup.
 fn backend(pool: PgPool) -> (Arc<MockRmsApi>, RmsBackend) {
     let mock = Arc::new(MockRmsApi::new());
-    let backend = RmsBackend::new(mock.clone(), Some(mock.clone()), pool, Arc::default(), true);
+    let backend = RmsBackend::new(
+        mock.clone(),
+        Some(mock.clone()),
+        pool,
+        Arc::default(),
+        true,
+        carbide_instrument::Instrumentation::global(),
+    );
     (mock, backend)
 }
 

@@ -107,10 +107,10 @@ async fn main() -> eyre::Result<()> {
         // Half a credential is a deployment bug; fail loudly instead of
         // silently running without mTLS.
         (Some(_), None) => {
-            eyre::bail!("--client-cert was provided without --client-key")
+            eyre::bail!("--client-cert was provided without --client-key");
         }
         (None, Some(_)) => {
-            eyre::bail!("--client-key was provided without --client-cert")
+            eyre::bail!("--client-key was provided without --client-cert");
         }
     };
     // Same class of deployment bug as half a client credential above, and it
@@ -160,8 +160,10 @@ async fn main() -> eyre::Result<()> {
 
     let metrics_address = options.metrics_address;
     let registry_for_metrics = prometheus_registry.clone();
+    let endpoint_instrumentation = http_request_metrics_state.instrumentation();
     tokio::spawn(async move {
         let config = metrics_endpoint::MetricsEndpointConfig {
+            instrumentation: endpoint_instrumentation,
             address: metrics_address,
             registry: registry_for_metrics,
             health_controller: None,

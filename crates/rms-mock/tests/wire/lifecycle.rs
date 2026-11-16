@@ -350,7 +350,7 @@ async fn lifecycle_callback_failures_retain_failure_without_replaying_or_clearin
         fn reset_switch(&self, _mac: MacAddress) -> eyre::Result<()> {
             self.reset_attempts
                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            eyre::bail!("NVOS factory reset is unavailable")
+            eyre::bail!("NVOS factory reset is unavailable");
         }
         fn set_switch_password(
             &self,
@@ -360,7 +360,7 @@ async fn lifecycle_callback_failures_retain_failure_without_replaying_or_clearin
         ) -> eyre::Result<()> {
             self.password_attempts
                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            eyre::bail!("NVOS user is unavailable")
+            eyre::bail!("NVOS user is unavailable");
         }
     }
 
