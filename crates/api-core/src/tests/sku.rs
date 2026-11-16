@@ -17,7 +17,7 @@
 pub(in crate::tests) mod tests {
     use std::time::Duration;
 
-    use carbide_uuid::machine::MachineId;
+    use carbide_uuid::machine::{MachineId, StableHostMachineId};
     use db::sku::CURRENT_SKU_VERSION;
     use db::{self, DatabaseError, ObjectFilter, WithTransaction};
     use futures_util::FutureExt;
@@ -351,15 +351,12 @@ pub(in crate::tests) mod tests {
         .ok_or_else(|| eyre::eyre!("machine not found: {}", machine_id))
     }
 
-    /// Helper: Test SKU version compatibility and backward compatibility
-    /// Creates a machine with latest SKU version, then generates an older version SKU
-    /// from the same hardware to verify version handling and diff behavior
+    /// Generate an older SKU from an ingested host to check version and diff behavior.
     async fn test_match_sku_versions(
         env: &TestEnv,
+        machine_id: StableHostMachineId,
         old_schema_version: u32,
     ) -> Result<(), eyre::Error> {
-        let (machine_id, _dpu_id) = create_managed_host(env).await.into();
-
         let mut txn = env.pool.begin().await?;
         let machine = db::machine::find(
             txn.as_mut(),
@@ -2207,8 +2204,10 @@ pub(in crate::tests) mod tests {
     #[crate::sqlx_test]
     async fn test_match_all_sku_versions(pool: sqlx::PgPool) -> Result<(), eyre::Error> {
         let env = create_test_env_for_bom_validation(pool.clone(), false, None, false).await;
+        let (machine_id, _dpu_id) = create_managed_host(&env).await.into();
+
         for old_sku_version in 0..CURRENT_SKU_VERSION {
-            test_match_sku_versions(&env, old_sku_version).await?;
+            test_match_sku_versions(&env, machine_id, old_sku_version).await?;
         }
         Ok(())
     }
