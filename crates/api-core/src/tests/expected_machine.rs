@@ -2678,6 +2678,110 @@ async fn test_expected_machine_update_fixed_interface_requires_managed_prefix(
     Ok(())
 }
 
+/// Every create path rejects an explicit fixed policy outside every managed
+/// prefix, as update does. Otherwise the stored record could never be updated.
+#[crate::sqlx_test]
+async fn test_expected_machine_create_fixed_interface_requires_managed_prefix(
+    pool: sqlx::PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let env = create_test_env(pool).await;
+
+    /// One create path that stores a new expected machine.
+    #[derive(Clone, Copy, Debug)]
+    enum CreatePath {
+        Add,
+        BatchCreate,
+        ReplaceAll,
+        Import,
+    }
+
+    for (path, suffix, fixed_ip) in [
+        (CreatePath::Add, 0x80, "203.0.113.250"),
+        (CreatePath::BatchCreate, 0x82, "203.0.113.251"),
+        (CreatePath::ReplaceAll, 0x84, "203.0.113.252"),
+        (CreatePath::Import, 0x86, "203.0.113.253"),
+    ] {
+        let bmc_mac: MacAddress = format!("5A:5B:5C:5D:62:{suffix:02X}").parse()?;
+        let interface_mac: MacAddress = format!("5A:5B:5C:5D:62:{:02X}", suffix + 1).parse()?;
+        let machine = rpc::forge::ExpectedMachine {
+            id: Some(::rpc::common::Uuid {
+                value: Uuid::new_v4().to_string(),
+            }),
+            bmc_mac_address: bmc_mac.to_string(),
+            bmc_username: "ADMIN".into(),
+            bmc_password: "PASS".into(),
+            chassis_serial_number: format!("CREATE-PREFIX-{suffix:02X}"),
+            host_nics: vec![rpc::forge::ExpectedInterface {
+                mac_address: Some(interface_mac.to_string()),
+                role: Some(rpc::forge::ExpectedInterfaceRole::Host as i32),
+                ip_allocation: Some(rpc::forge::ExpectedInterfaceIpAllocation::Fixed as i32),
+                fixed_ip: Some(fixed_ip.to_string()),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+
+        let error = match path {
+            CreatePath::Add => env
+                .api
+                .add_expected_machine(tonic::Request::new(machine))
+                .await
+                .expect_err("add must reject the address"),
+            CreatePath::BatchCreate => env
+                .api
+                .create_expected_machines(tonic::Request::new(
+                    rpc::forge::BatchExpectedMachineOperationRequest {
+                        expected_machines: Some(ExpectedMachineList {
+                            expected_machines: vec![machine],
+                        }),
+                        accept_partial_results: false,
+                    },
+                ))
+                .await
+                .expect_err("batch create must reject the address"),
+            CreatePath::ReplaceAll => env
+                .api
+                .replace_all_expected_machines(tonic::Request::new(ExpectedMachineList {
+                    expected_machines: vec![machine],
+                }))
+                .await
+                .expect_err("replace-all must reject the address"),
+            CreatePath::Import => {
+                let machine = ExpectedMachine {
+                    id: None,
+                    bmc_mac_address: bmc_mac,
+                    data: machine.try_into()?,
+                };
+                let mut txn = env.pool.begin().await?;
+                let error = crate::handlers::expected_machine::create_missing_from(
+                    &mut txn,
+                    &env.api.common_pools,
+                    std::slice::from_ref(&machine),
+                )
+                .await
+                .expect_err("import must reject the address");
+                txn.rollback().await?;
+                error.into()
+            }
+        };
+        assert_eq!(error.code(), tonic::Code::InvalidArgument, "{path:?}");
+        assert!(
+            error.message().contains(&format!(
+                "fixed IP {fixed_ip} is not within a configured network segment"
+            )),
+            "{path:?}: {error}",
+        );
+        assert!(
+            db::expected_machine::find_by_bmc_mac_address(&env.pool, bmc_mac)
+                .await?
+                .is_none(),
+            "{path:?}: a rejected create must not store the machine",
+        );
+    }
+
+    Ok(())
+}
+
 #[crate::sqlx_test]
 async fn test_legacy_bmc_update_preserves_interface_behavior_and_restores_naming(
     pool: sqlx::PgPool,

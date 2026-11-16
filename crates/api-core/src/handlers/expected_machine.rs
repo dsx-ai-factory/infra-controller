@@ -37,7 +37,7 @@ use crate::handlers::expected_component_patch::{
     ExpectedComponent, UpdateField, UpdateMask, parse_bmc_ip, required_id, required_value,
     validate_bmc_mac, validate_single_interface_address,
 };
-use crate::handlers::interface_preallocator::InterfacePreallocator;
+use crate::handlers::interface_preallocator::{InterfacePreallocator, fixed_address_declarations};
 use crate::handlers::static_address_metrics::PreallocationSuccess;
 
 lazy_static! {
@@ -83,7 +83,7 @@ pub(crate) async fn add(
     let machine = parse_expected_machine_for_insert(request.into_inner(), None)?;
 
     let mut txn = api.txn_begin().await?;
-    validate_expected_machine(&mut txn, &api.common_pools, &machine).await?;
+    validate_new_expected_machine(&mut txn, &api.common_pools, &machine).await?;
     // Convert through CarbideError so a duplicate BMC MAC becomes AlreadyExists; the direct
     // DatabaseError to Status conversion reports it as FailedPrecondition.
     db::expected_machine::create(&mut txn, machine)
@@ -285,6 +285,45 @@ async fn validate_expected_machine(
 ) -> Result<(), CarbideError> {
     validate_expected_machine_for_insert(machine)?;
     validate_reservation_pool_membership(txn, common_pools, machine).await
+}
+
+/// [`validate_expected_machine`] plus [`validate_fixed_address_segments`], for
+/// paths that store a new record without reconciling its fixed addresses.
+/// Update paths omit the segment check because their reconciliation applies it
+/// to the same declarations and records the failure in its metrics.
+async fn validate_new_expected_machine(
+    txn: &mut sqlx::PgConnection,
+    common_pools: &CommonPools,
+    machine: &ExpectedMachine,
+) -> Result<(), CarbideError> {
+    validate_expected_machine(&mut *txn, common_pools, machine).await?;
+    validate_fixed_address_segments(txn, machine).await
+}
+
+/// Reject a fixed address that fixed-address reconciliation would reject
+/// because no managed prefix contains it, or because it falls in a segment
+/// of the wrong type. Update and Site Explorer apply this check when they
+/// reconcile the address. Without it on create, a stored record could never
+/// be updated.
+async fn validate_fixed_address_segments(
+    txn: &mut sqlx::PgConnection,
+    machine: &ExpectedMachine,
+) -> Result<(), CarbideError> {
+    for interface in fixed_address_declarations(machine) {
+        if interface.allows_static_assignments_fallback() {
+            continue;
+        }
+        let Some(fixed_ip) = interface.fixed_ip else {
+            continue;
+        };
+        db::network_segment::for_managed_static_address(
+            &mut *txn,
+            fixed_ip,
+            interface.segment_type_guard(),
+        )
+        .await?;
+    }
+    Ok(())
 }
 
 /// Reject duplicate per-family addresses in the request. The child table also
@@ -489,7 +528,7 @@ pub(crate) async fn create_missing_from(
             LegacyHostBmcOverrides::default()
         };
         normalize_host_bmc_configuration(&mut expected_machine, None, overrides)?;
-        validate_expected_machine(&mut *txn, common_pools, &expected_machine).await?;
+        validate_new_expected_machine(&mut *txn, common_pools, &expected_machine).await?;
         db::expected_machine::create(&mut *txn, expected_machine).await?;
     }
 
@@ -918,7 +957,7 @@ pub(crate) async fn replace_all(
     for replacement in replacements {
         let existing = find_previous_expected_machine(&previous, &replacement);
         let parsed = parse_expected_machine_for_insert(replacement, existing)?;
-        validate_expected_machine(&mut txn, &api.common_pools, &parsed).await?;
+        validate_new_expected_machine(&mut txn, &api.common_pools, &parsed).await?;
         if !seen_bmc_macs.insert(parsed.bmc_mac_address) {
             return Err(CarbideError::InvalidArgument(format!(
                 "duplicate expected machine BMC MAC address {} in replacement list",
@@ -1431,7 +1470,7 @@ async fn create_expected_machine(
     };
 
     normalize_host_bmc_configuration(&mut expected_machine, None, overrides)?;
-    validate_expected_machine(&mut *txn, common_pools, &expected_machine).await?;
+    validate_new_expected_machine(&mut *txn, common_pools, &expected_machine).await?;
     db::expected_machine::create(txn, expected_machine).await?;
 
     Ok((result_machine, Vec::new()))
