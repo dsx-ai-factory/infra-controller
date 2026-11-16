@@ -39,7 +39,7 @@ pub(crate) struct Args {
     /// expected_rack_groups_count must match the array length. An empty array
     /// clears all groups.
     ///
-    /// Each rack has rack_id and members; each member has type, manufacturer, and id.
+    /// Each rack has rack_id and members; each member requires type, manufacturer, id, and cartridge_index.
     /// Metadata contains name,
     /// description, and labels as an array of {key, value} objects. Export a
     /// compatible file with --format json expected-rack-group show.

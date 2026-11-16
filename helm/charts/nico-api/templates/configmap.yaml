@@ -62,6 +62,9 @@ data:
 {{- end }}
 {{- end }}
 {{- if .Values.vaultClusterInfo }}
+{{- if not .Values.vault.enabled }}
+{{- fail "nico-api.vaultClusterInfo is set but nico-api.vault.enabled is false: remove vaultClusterInfo or set vault.enabled=true" }}
+{{- end }}
 ---
 apiVersion: v1
 kind: ConfigMap

@@ -20,12 +20,12 @@ use carbide_uuid::instance::InstanceId;
 use carbide_uuid::machine::{MachineId, MachineIdParseError};
 use carbide_uuid::site_prefix::SitePrefixId;
 use carbide_uuid::switch::{SwitchId, SwitchIdParseError};
-use rpc::forge_tls_client::ForgeTlsClientError;
+use rpc::carbide_tls_client::CarbideTlsClientError;
 
 #[derive(thiserror::Error, Debug)]
 pub(crate) enum CarbideCliError {
     #[error("unable to connect to carbide API: {0}")]
-    ApiConnectFailed(#[from] ForgeTlsClientError),
+    ApiConnectFailed(#[from] CarbideTlsClientError),
 
     #[error("the API call to the forge API server returned {0}")]
     ApiInvocationError(#[from] tonic::Status),

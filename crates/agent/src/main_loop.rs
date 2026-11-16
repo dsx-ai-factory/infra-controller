@@ -25,9 +25,9 @@ use std::str::FromStr;
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use ::rpc::carbide_tls_client::CarbideClientConfig;
 use ::rpc::forge::ManagedHostNetworkConfigResponse;
-use ::rpc::forge_tls_client::ForgeClientConfig;
-use ::rpc::{forge as rpc, forge_tls_client};
+use ::rpc::{carbide_tls_client, forge as rpc};
 use carbide_host_support::agent_config::AgentConfig;
 use carbide_host_support::lldp_snapshot_cache::classify_against_accepted_snapshot;
 use carbide_network::virtualization::VpcVirtualizationType;
@@ -85,7 +85,7 @@ use crate::{
 pub(super) async fn setup_and_run(
     machine_id: DpuMachineId,
     factory_mac_address: MacAddress,
-    forge_client_config: Arc<ForgeClientConfig>,
+    carbide_client_config: Arc<CarbideClientConfig>,
     agent_config: AgentConfig,
     options: command_line::RunOptions,
 ) -> eyre::Result<()> {
@@ -109,17 +109,22 @@ pub(super) async fn setup_and_run(
     }
 
     let process_start_time = SystemTime::now();
+    let instrumentation = crate::instrumentation::get_event_instrumentation();
 
     let forge_api_server = agent_config.forge_system.api_server.clone();
     // Setup client certificate renewal
-    let client_cert_renewer =
-        ClientCertRenewer::new(forge_api_server.clone(), Arc::clone(&forge_client_config));
+    let client_cert_renewer = ClientCertRenewer::new(
+        forge_api_server.clone(),
+        Arc::clone(&carbide_client_config),
+        instrumentation.clone(),
+    );
 
     let machine_info = MachineInfo::new(machine_id);
     let remediation_executor = RemediationExecutor::new(
         forge_api_server.clone(),
-        Arc::clone(&forge_client_config),
+        Arc::clone(&carbide_client_config),
         machine_info,
+        instrumentation.clone(),
     );
     tokio::task::spawn(async move {
         remediation_executor.run().await;
@@ -129,14 +134,15 @@ pub(super) async fn setup_and_run(
         instance_metadata_endpoint::InstanceMetadataRouterStateImpl::new(
             machine_id,
             forge_api_server.clone(),
-            Arc::clone(&forge_client_config),
+            Arc::clone(&carbide_client_config),
             agent_config.machine_identity.clone(),
+            instrumentation.clone(),
         )
         .map_err(|e| eyre::eyre!("failed to initialize instance metadata router state: {e}"))?,
     );
 
     let agent_meter = get_dpu_agent_meter();
-    let metrics = create_metrics(agent_meter);
+    let metrics = create_metrics(agent_meter, instrumentation.clone());
 
     // Containerized (DPF) mode starts not-ready: the pod should only become
     // Ready once the first GetManagedHostNetworkConfig iteration has actually
@@ -162,6 +168,7 @@ pub(super) async fn setup_and_run(
                 "Starting Prometheus /metrics endpoint"
             );
             let metrics_config = metrics_endpoint::MetricsEndpointConfig {
+                instrumentation: instrumentation.clone(),
                 address: metrics_address,
                 registry: get_prometheus_registry(),
                 health_controller: Some(health_controller.clone()),
@@ -201,6 +208,7 @@ pub(super) async fn setup_and_run(
         );
         let last_connect_succeeded = register_external_connection_metric(&get_dpu_agent_meter());
         FmdsUpdater::External {
+            instrumentation: instrumentation.clone(),
             address: fmds_addr.clone(),
             machine_identity: agent_config.machine_identity.clone(),
             connect_timeout: Duration::from_secs(options.fmds_connect_timeout_secs),
@@ -280,8 +288,8 @@ pub(super) async fn setup_and_run(
     // collection, so it follows the renewals ClientCertRenewer performs over
     // the agent's lifetime.
     {
-        let forge_client_config = Arc::clone(&forge_client_config);
-        metrics.record_client_cert_expiry_time(move || forge_client_config.client_cert_expiry());
+        let carbide_client_config = Arc::clone(&carbide_client_config);
+        metrics.record_client_cert_expiry_time(move || carbide_client_config.client_cert_expiry());
     }
 
     if options.agent_platform_type.is_dpu_os()
@@ -327,15 +335,16 @@ pub(super) async fn setup_and_run(
             ),
             machine_id,
             forge_api: forge_api_server.clone(),
-            forge_client_config: Arc::clone(&forge_client_config),
+            carbide_client_config: Arc::clone(&carbide_client_config),
         },
+        instrumentation.clone(),
     )
     .await;
 
     let host_machine_id = match get_host_machine_id_retry(
         &agent_config,
         &periodic_config_fetcher,
-        Arc::clone(&forge_client_config),
+        Arc::clone(&carbide_client_config),
         &forge_api_server,
     )
     .await
@@ -359,7 +368,7 @@ pub(super) async fn setup_and_run(
     }
 
     if options.agent_platform_type.is_dpu_os() {
-        if let Err(e) = lldp::prepare_lldp().await {
+        if let Err(e) = lldp::prepare_lldp(&instrumentation).await {
             tracing::error!(error = %e, "Couldn't prepare LLDP configuration");
         }
         if let Err(e) = lldp::set_lldp_system_description(&machine_id).await {
@@ -376,11 +385,12 @@ pub(super) async fn setup_and_run(
     .await?;
 
     let inventory_updater_config = MachineInventoryUpdaterConfig {
+        instrumentation: instrumentation.clone(),
         dpu_agent_version: build_version.clone(),
         update_inventory_interval: Duration::from_secs(agent_config.period.inventory_update_secs),
         machine_id,
         forge_api: forge_api_server.clone(),
-        forge_client_config: Arc::clone(&forge_client_config),
+        carbide_client_config: Arc::clone(&carbide_client_config),
         agent_platform_type: options.agent_platform_type.clone(),
     };
 
@@ -408,12 +418,12 @@ pub(super) async fn setup_and_run(
                 Arc::from(pinger_type),
             );
             let forge_api_clone = forge_api_server.clone();
-            let forge_client_config_clone = Arc::clone(&forge_client_config);
+            let carbide_client_config_clone = Arc::clone(&carbide_client_config);
             let network_monitor_handle = tokio::spawn(async move {
                 network_monitor
                     .run(
                         &forge_api_clone,
-                        forge_client_config_clone,
+                        carbide_client_config_clone,
                         &mut close_receiver,
                     )
                     .await
@@ -443,6 +453,7 @@ pub(super) async fn setup_and_run(
         .map(|prefix| InterfaceTranslationMode::Prepend(prefix.clone()));
 
     let lldp_platform_type = options.agent_platform_type.clone();
+    let lldp_instrumentation = instrumentation.clone();
     let latest_lldp = carbide_host_support::lldp_collector_task::start_lldp_collector(
         move || {
             // The clone must happen here, outside the future, so the future
@@ -450,17 +461,18 @@ pub(super) async fn setup_and_run(
             // closure instead, and a lending future implements only
             // `AsyncFnMut`, whose future cannot be bounded `Send` on stable.
             let platform_type = lldp_platform_type.clone();
+            let instrumentation = lldp_instrumentation.clone();
             async move {
                 let collected = crate::collect_lldp_neighbors(&platform_type).await;
                 // Emitted here rather than where the collection is reported, so
                 // the metric keeps counting collection attempts rather than the
                 // status loop's reads of them.
                 match &collected {
-                    Ok(_) => LldpCollection::Succeeded.emit(),
+                    Ok(_) => LldpCollection::Succeeded.emit(&instrumentation),
                     Err(error) => LldpCollection::Failed {
                         error: error.to_string(),
                     }
-                    .emit(),
+                    .emit(&instrumentation),
                 }
                 collected
             }
@@ -471,7 +483,8 @@ pub(super) async fn setup_and_run(
     );
 
     let mut main_loop = MainLoop {
-        forge_client_config,
+        instrumentation,
+        carbide_client_config,
         build_version,
         machine_id,
         periodic_config_reader,
@@ -553,7 +566,8 @@ async fn apply_fmds_interface(
 }
 
 struct MainLoop {
-    forge_client_config: Arc<ForgeClientConfig>,
+    instrumentation: carbide_instrument::Instrumentation,
+    carbide_client_config: Arc<CarbideClientConfig>,
     machine_id: DpuMachineId,
     factory_mac_address: MacAddress,
     build_version: String,
@@ -866,7 +880,7 @@ impl CurrentNetworkVersion {
         Self::normalize_security_group_rule_order(&mut config.network_security_policy_overrides);
 
         if let Some(routing_profile) = &mut config.routing_profile {
-            Self::normalize_routing_profile(routing_profile);
+            crate::service_network::normalize_routing_profile(routing_profile);
         }
     }
 
@@ -883,7 +897,7 @@ impl CurrentNetworkVersion {
         interface.vpc_peer_vnis.sort_unstable();
 
         if let Some(routing_profile) = &mut interface.vpc_routing_profile {
-            Self::normalize_routing_profile(routing_profile);
+            crate::service_network::normalize_routing_profile(routing_profile);
         }
         if let Some(routing_profile) = &mut interface.interface_routing_profile {
             Self::sort_prefix_entries(&mut routing_profile.allowed_anycast_prefixes);
@@ -894,23 +908,6 @@ impl CurrentNetworkVersion {
             }
             Self::normalize_security_group_rule_order(&mut network_security_group.rules);
         }
-    }
-
-    /// `normalize_routing_profile` sorts collections whose order does not
-    /// change routing behavior.
-    fn normalize_routing_profile(routing_profile: &mut rpc::RoutingProfile) {
-        routing_profile
-            .route_target_imports
-            .sort_by_key(|route_target| {
-                (route_target.asn, route_target.vni, route_target.vni_self)
-            });
-        routing_profile
-            .route_targets_on_exports
-            .sort_by_key(|route_target| {
-                (route_target.asn, route_target.vni, route_target.vni_self)
-            });
-        Self::sort_prefix_entries(&mut routing_profile.accepted_leaks_from_underlay);
-        Self::sort_prefix_entries(&mut routing_profile.allowed_anycast_prefixes);
     }
 
     /// `normalize_security_group_rule` sorts the resolved source and
@@ -1068,11 +1065,11 @@ impl MainLoop {
                 managed_host_config_version = conf.managed_host_config_version.as_str(),
                 "Restart OVS because use_admin_network_changed is set to true"
             );
-            if let Err(err) = crate::ovs::restart_ovs()
+            if let Err(err) = crate::ovs::restart_ovs(&self.instrumentation)
                 .await
                 .wrap_err("restarting OVS after admin network change")
             {
-                carbide_instrument::emit(OvsRestart::Retrying {
+                self.instrumentation.emit(OvsRestart::Retrying {
                     error: format!("{err:#}"),
                     managed_host_config_version: conf.managed_host_config_version.clone(),
                 });
@@ -1119,7 +1116,7 @@ impl MainLoop {
         let mut current_extension_service_version = None;
 
         let client_certificate_expiry_unix_epoch_secs =
-            self.forge_client_config.client_cert_expiry();
+            self.carbide_client_config.client_cert_expiry();
 
         let fabric_interfaces = get_fabric_interfaces_data().await.unwrap_or_else(|err| {
             tracing::warn!(
@@ -1612,7 +1609,8 @@ impl MainLoop {
                 let _ = record_network_status(
                     status_out,
                     &self.forge_api_server,
-                    &self.forge_client_config,
+                    &self.carbide_client_config,
+                    &self.instrumentation,
                 )
                 .await;
                 self.seen_blank = false;
@@ -1733,7 +1731,7 @@ impl MainLoop {
             ));
             let upgrade_result = upgrade::upgrade(
                 &self.forge_api_server,
-                &self.forge_client_config,
+                &self.carbide_client_config,
                 &self.machine_id,
                 self.agent_config.updates.override_upgrade_cmd.as_deref(),
             )
@@ -2015,9 +2013,10 @@ fn fmds_reply_routes(
 async fn record_network_status(
     status: rpc::DpuNetworkStatus,
     forge_api: &str,
-    forge_client_config: &forge_tls_client::ForgeClientConfig,
+    carbide_client_config: &carbide_tls_client::CarbideClientConfig,
+    instrumentation: &carbide_instrument::Instrumentation,
 ) -> Result<(), eyre::Report> {
-    let mut client = match forge_tls_client::ForgeTlsClient::new(forge_client_config)
+    let mut client = match carbide_tls_client::CarbideTlsClient::new(carbide_client_config)
         .build(forge_api)
         .await
     {
@@ -2027,7 +2026,7 @@ async fn record_network_status(
                 forge_api: forge_api.to_string(),
                 error: format!("{err:#}"),
             }
-            .emit();
+            .emit(instrumentation);
             return Err(err.into());
         }
     };
@@ -2037,14 +2036,14 @@ async fn record_network_status(
         .await
     {
         Ok(_) => {
-            NetworkStatus::Succeeded.emit();
+            NetworkStatus::Succeeded.emit(instrumentation);
             Ok(())
         }
         Err(err) => {
             NetworkStatus::RpcFailed {
                 error: format!("{err:#}"),
             }
-            .emit();
+            .emit(instrumentation);
             Err(err.into())
         }
     }

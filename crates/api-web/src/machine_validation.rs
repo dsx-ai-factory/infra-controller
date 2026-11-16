@@ -15,12 +15,14 @@
  * limitations under the License.
  */
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use askama::Template;
 use axum::extract::{Path as AxumPath, Query, State as AxumState};
 use axum::response::{Html, IntoResponse, Response};
-use carbide_api_core::Api;
+use axum::{Extension, Json};
+use carbide_api_core::{Api, AuthContext};
 use carbide_uuid::machine_validation::MachineValidationId;
 use hyper::http::StatusCode;
 use rpc::forge::forge_server::Forge;
@@ -35,10 +37,17 @@ struct ValidationResult {
     validation_id: String,
     name: String,
     test_id: String,
-    context: String,
+    attempt_id: Option<String>,
+    attempt: Option<i32>,
+    in_progress: bool,
     status: String,
     start_time: String,
+    start_time_sort: i64,
+    start_time_short: String,
+    start_date: String,
     end_time: String,
+    duration: String,
+    duration_ms: Option<i64>,
 }
 
 struct ValidateTest {
@@ -111,7 +120,11 @@ struct ValidationResultDetailDisplay {
 #[template(path = "validation_results.html")]
 struct ValidationResults {
     validation_id: MachineValidationId,
+    machine_id: Option<String>,
     validation_results: Vec<ValidationResult>,
+    status: String,
+    progress: String,
+    context: String,
 }
 
 #[derive(Template)]
@@ -214,7 +227,7 @@ pub(super) async fn results(
     });
     tracing::info!(machine_validation_id = %validation_id, "results");
 
-    let validation_results = match state
+    let mut validation_results: Vec<ValidationResult> = match state
         .get_machine_validation_results(request)
         .await
         .map(|response| response.into_inner())
@@ -222,14 +235,46 @@ pub(super) async fn results(
         Ok(results) => results
             .results
             .into_iter()
-            .map(|r: forgerpc::MachineValidationResult| ValidationResult {
-                validation_id: r.validation_id.unwrap_or_default().to_string(),
-                name: r.name,
-                test_id: r.test_id.unwrap_or_default(),
-                context: r.context,
-                status: r.exit_code.to_string(),
-                start_time: r.start_time.unwrap_or_default().to_string(),
-                end_time: r.end_time.unwrap_or_default().to_string(),
+            .map(|r: forgerpc::MachineValidationResult| {
+                let start = r
+                    .start_time
+                    .and_then(|time| chrono::DateTime::<chrono::Utc>::try_from(time).ok());
+                let end = r
+                    .end_time
+                    .and_then(|time| chrono::DateTime::<chrono::Utc>::try_from(time).ok());
+                let elapsed = start
+                    .zip(end)
+                    .filter(|(start, end)| end >= start)
+                    .map(|(start, end)| end - start);
+                let duration = elapsed
+                    .and_then(|elapsed| elapsed.to_std().ok())
+                    .map(carbide_utils::duration::format_duration_compact)
+                    .unwrap_or_else(|| "N/A".to_string());
+                ValidationResult {
+                    validation_id: r.validation_id.unwrap_or_default().to_string(),
+                    name: r.name,
+                    test_id: r.test_id.unwrap_or_default(),
+                    attempt_id: None,
+                    attempt: None,
+                    in_progress: false,
+                    status: r.exit_code.to_string(),
+                    start_time: r
+                        .start_time
+                        .map(|time| time.to_string())
+                        .unwrap_or_default(),
+                    start_time_sort: start
+                        .map(|time| time.timestamp_micros())
+                        .unwrap_or_default(),
+                    start_time_short: start
+                        .map(|time| time.format("%H:%M:%S").to_string())
+                        .unwrap_or_else(|| "N/A".to_string()),
+                    start_date: start
+                        .map(|time| time.format("%Y-%m-%d").to_string())
+                        .unwrap_or_default(),
+                    end_time: r.end_time.map(|time| time.to_string()).unwrap_or_default(),
+                    duration,
+                    duration_ms: elapsed.map(|elapsed| elapsed.num_milliseconds()),
+                }
             })
             .collect(),
         Err(err) => {
@@ -241,14 +286,218 @@ pub(super) async fn results(
                 .into_response();
         }
     };
-    // tracing::info!(%validation_results, "results_details");
+    let mut db_reader = state.db_reader();
+    let run = match db::machine_validation::find_by(
+        &mut db_reader,
+        db::ObjectColumnFilter::One(db::machine_validation::IdColumn, &validation_id),
+    )
+    .await
+    {
+        Ok(runs) => runs
+            .into_iter()
+            .next()
+            .map(forgerpc::MachineValidationRun::from),
+        Err(err) => {
+            tracing::error!(error = %err, %validation_id, "Failed to load validation run");
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Failed to load validation run",
+            )
+                .into_response();
+        }
+    };
+    let status = run
+        .as_ref()
+        .and_then(|run| run.status.as_ref())
+        .and_then(|status| status.machine_validation_state.as_ref())
+        .map(|state| format!("{state:?}"))
+        .unwrap_or_else(|| "Unknown".to_string());
+    let progress = run
+        .as_ref()
+        .and_then(|run| run.status.as_ref())
+        .map(|status| format!("{}/{}", status.completed_tests, status.total))
+        .unwrap_or_default();
+    let machine_id = run
+        .as_ref()
+        .and_then(|run| run.machine_id.as_ref())
+        .map(|id| id.to_string());
+    let context = run
+        .as_ref()
+        .and_then(|run| run.context.clone())
+        .unwrap_or_else(|| "N/A".to_string());
+    let attempts = match db::machine_validation_execution::find_attempts_by_run_id(
+        &mut db_reader,
+        &validation_id,
+    )
+    .await
+    {
+        Ok(attempts) => attempts,
+        Err(err) => {
+            tracing::error!(error = %err, %validation_id, "Failed to load validation attempts");
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Failed to load validation attempts",
+            )
+                .into_response();
+        }
+    };
+    // Planned items still have a zero counter while their first attempt is numbered 1.
+    let attempt_numbers: HashMap<_, _> = attempts
+        .iter()
+        .map(|attempt| (attempt.attempt_id.to_string(), attempt.attempt_number))
+        .collect();
+    // Result ingestion records attempt 1. Match its terminal report rather than
+    // assuming the latest attempt produced the result (which can predate a retry).
+    let result_attempts: HashMap<_, _> = attempts
+        .into_iter()
+        .filter_map(|attempt| {
+            if attempt.attempt_number != 1 || !attempt.terminal {
+                return None;
+            }
+            Some((
+                (
+                    attempt.test_id,
+                    rpc::Timestamp::from(attempt.started_at?).to_string(),
+                    rpc::Timestamp::from(attempt.ended_at?).to_string(),
+                    attempt.exit_code?.to_string(),
+                ),
+                attempt.attempt_id.to_string(),
+            ))
+        })
+        .collect();
+    for result in &mut validation_results {
+        result.attempt_id = result_attempts
+            .get(&(
+                result.test_id.clone(),
+                result.start_time.clone(),
+                result.end_time.clone(),
+                result.status.clone(),
+            ))
+            .cloned();
+        result.attempt = result.attempt_id.as_ref().map(|_| 1);
+    }
+    if let Some(run) = run.as_ref() {
+        let items = match db::machine_validation_execution::find_run_items_by_run_id(
+            &mut db_reader,
+            &validation_id,
+        )
+        .await
+        {
+            Ok(items) => items,
+            Err(err) => {
+                tracing::error!(error = %err, %validation_id, "Failed to load validation run items");
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "Failed to load validation run items",
+                )
+                    .into_response();
+            }
+        };
+        validation_results.extend(
+            items
+                .into_iter()
+                .filter(|item| {
+                    run.end_time.is_none()
+                        && item.state
+                            == model::machine_validation::MachineValidationRunItemState::Running
+                })
+                .map(|item| {
+                    let start = item.started_at;
+                    let attempt_id = item.current_attempt_id.map(|id| id.to_string());
+                    ValidationResult {
+                        validation_id: validation_id.to_string(),
+                        name: if item.display_name.is_empty() {
+                            item.test_id.clone()
+                        } else {
+                            item.display_name
+                        },
+                        test_id: item.test_id,
+                        attempt: attempt_id
+                            .as_ref()
+                            .and_then(|id| attempt_numbers.get(id).copied()),
+                        attempt_id,
+                        in_progress: true,
+                        status: String::new(),
+                        start_time: start
+                            .map(|time| rpc::Timestamp::from(time).to_string())
+                            .unwrap_or_default(),
+                        start_time_sort: start
+                            .map(|time| time.timestamp_micros())
+                            .unwrap_or_default(),
+                        start_time_short: start
+                            .map(|time| time.format("%H:%M:%S").to_string())
+                            .unwrap_or_else(|| "N/A".to_string()),
+                        start_date: start
+                            .map(|time| time.format("%Y-%m-%d").to_string())
+                            .unwrap_or_default(),
+                        end_time: String::new(),
+                        duration: "N/A".to_string(),
+                        duration_ms: None,
+                    }
+                }),
+        );
+    }
+    validation_results.sort_by_key(|result| !result.in_progress);
 
     let tmpl = ValidationResults {
         validation_id,
+        machine_id,
         validation_results,
+        status,
+        progress,
+        context,
     };
 
     (StatusCode::OK, Html(tmpl.render().unwrap())).into_response()
+}
+
+#[derive(serde::Deserialize)]
+pub(super) struct AttemptLogQuery {
+    #[serde(default)]
+    after_sequence: u32,
+}
+
+pub(super) async fn attempt_logs(
+    AxumState(state): AxumState<Arc<Api>>,
+    AxumPath(attempt_id): AxumPath<String>,
+    Query(query): Query<AttemptLogQuery>,
+    auth_context: Option<Extension<AuthContext>>,
+) -> Response {
+    let Some(Extension(auth_context)) = auth_context else {
+        return (StatusCode::UNAUTHORIZED, "Authentication required").into_response();
+    };
+    let mut request = tonic::Request::new(forgerpc::MachineValidationAttemptLogGetRequest {
+        attempt_id: Some(rpc::common::Uuid { value: attempt_id }),
+        after_sequence: query.after_sequence,
+        limit: 100,
+    });
+    request.extensions_mut().insert(auth_context);
+    match state.get_machine_validation_attempt_logs(request).await {
+        Ok(response) => {
+            let logs = response.into_inner();
+            let chunks: Vec<_> = logs.chunks.into_iter().map(|chunk| serde_json::json!({
+                "sequence": chunk.sequence,
+                "stream": if chunk.stream == forgerpc::MachineValidationAttemptLogStream::Stderr as i32 { "stderr" } else { "stdout" },
+                "content": chunk.content,
+            })).collect();
+            (
+                [(http::header::CACHE_CONTROL, "no-store")],
+                Json(serde_json::json!({ "chunks": chunks, "has_more": logs.has_more })),
+            )
+                .into_response()
+        }
+        Err(error) => {
+            let status = match error.code() {
+                tonic::Code::Unauthenticated => StatusCode::UNAUTHORIZED,
+                tonic::Code::PermissionDenied => StatusCode::FORBIDDEN,
+                tonic::Code::NotFound => StatusCode::NOT_FOUND,
+                tonic::Code::InvalidArgument => StatusCode::BAD_REQUEST,
+                _ => StatusCode::INTERNAL_SERVER_ERROR,
+            };
+            tracing::warn!(%error, "Failed to load validation attempt logs");
+            (status, "Failed to load validation attempt logs").into_response()
+        }
+    }
 }
 
 pub(super) async fn result_details(
@@ -400,18 +649,7 @@ pub(super) async fn runs(
             .runs
             .into_iter()
             .rev()
-            .map(|vr| ValidationRun {
-                machine_id: vr.machine_id.map(|id| id.to_string()).unwrap_or_default(),
-                status:format!("{:?}", vr.status.unwrap_or_default().machine_validation_state.unwrap_or(
-                    rpc::forge::machine_validation_status::MachineValidationState::Completed(
-                        rpc::forge::machine_validation_status::MachineValidationCompleted::Success.into(),
-                    ),
-                )),
-                context: vr.context.unwrap_or_default(),
-                validation_id: vr.validation_id.unwrap_or_default().to_string(),
-                start_time: vr.start_time.unwrap_or_default().to_string(),
-                end_time: vr.end_time.map_or_else(|| "N/A".to_string(), |time| time.to_string()),
-            })
+            .map(ValidationRun::from)
             .collect(),
         Err(err) => {
             tracing::warn!(error = %err,"get_machine_validation_runs failed");

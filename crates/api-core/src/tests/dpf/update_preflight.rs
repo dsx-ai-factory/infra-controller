@@ -198,6 +198,7 @@ async fn fixture_with_config(
         target_source: "updated-bfb".to_string(),
     });
     let updater = DpuNicFirmwareUpdate {
+        instrumentation: env.api.instrumentation.clone(),
         reported_wrong_versions: Mutex::new(HashSet::new()),
         metrics: None,
         config: env.config.clone(),

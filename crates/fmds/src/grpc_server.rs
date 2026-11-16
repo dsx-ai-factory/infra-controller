@@ -18,7 +18,7 @@
 use std::net::{IpAddr, Ipv6Addr};
 use std::sync::Arc;
 
-use carbide_instrument::{Event, Outcome, emit};
+use carbide_instrument::{Event, Outcome};
 use rpc::fmds::fmds_config_service_server::FmdsConfigService;
 use rpc::fmds::{UpdateConfigRequest, UpdateConfigResponse};
 use tonic::{Request, Response, Status};
@@ -77,15 +77,19 @@ impl FmdsConfigService for FmdsGrpcServer {
     ) -> Result<Response<UpdateConfigResponse>, Status> {
         match self.apply_config_update(request) {
             Ok(applied) => {
-                emit(ConfigUpdateIngested::Accepted {
-                    agent_address: applied.agent_address,
-                });
+                self.state
+                    .instrumentation
+                    .emit(ConfigUpdateIngested::Accepted {
+                        agent_address: applied.agent_address,
+                    });
                 Ok(applied.response)
             }
             Err(status) => {
-                emit(ConfigUpdateIngested::Rejected {
-                    error: status.to_string(),
-                });
+                self.state
+                    .instrumentation
+                    .emit(ConfigUpdateIngested::Rejected {
+                        error: status.to_string(),
+                    });
                 Err(status)
             }
         }
@@ -194,7 +198,14 @@ mod tests {
     use super::*;
 
     fn make_test_state() -> Arc<FmdsState> {
-        Arc::new(FmdsState::try_new("https://api.test".to_string(), None).unwrap())
+        Arc::new(
+            FmdsState::try_new(
+                "https://api.test".to_string(),
+                None,
+                carbide_instrument::Instrumentation::global(),
+            )
+            .unwrap(),
+        )
     }
 
     fn make_test_update() -> FmdsConfigUpdate {
@@ -480,12 +491,20 @@ mod tests {
                 TerminalCase::MissingUpdate => None,
             },
         });
-        let server = FmdsGrpcServer::new(make_test_state());
+        let (registry, instrumentation_owner) = crate::http_request_metrics::init(false).unwrap();
+        let server = FmdsGrpcServer::new(Arc::new(
+            FmdsState::try_new(
+                "https://api.test".to_string(),
+                None,
+                instrumentation_owner.instrumentation(),
+            )
+            .unwrap(),
+        ));
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
             .unwrap();
-        let metrics = MetricsCapture::start();
+        let metrics = MetricsCapture::for_registry(&registry);
         let mut result = None;
         let logs = capture_logs(|| {
             result = Some(runtime.block_on(server.update_config(request)));

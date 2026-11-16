@@ -83,6 +83,9 @@ pub(crate) struct Inventory {
     pub provider_auth: Arc<Auth>,
     pub provider_org: String,
     pub site_id: String,
+    pub tenant: Option<super::rest_instances::Fixture>,
+    /// Whether the machine, rack and tray totals are read.
+    pub totals: bool,
 }
 
 /// Reads site totals and the site check.
@@ -108,6 +111,23 @@ impl RestInventoryReader {
         sink: Arc<dyn SnapshotSink>,
         process_start: SystemTime,
     ) -> Self {
+        let families: &'static [Family] = match (target.totals, target.tenant.is_some()) {
+            (true, true) => &[
+                Family::RestTotals,
+                Family::RestSiteMatch,
+                Family::RestInstances,
+                Family::RestMachines,
+                Family::ConfigRest,
+            ],
+            (true, false) => &[Family::RestTotals, Family::RestSiteMatch],
+            (false, true) => &[
+                Family::RestSiteMatch,
+                Family::RestInstances,
+                Family::RestMachines,
+                Family::ConfigRest,
+            ],
+            (false, false) => &[Family::RestSiteMatch],
+        };
         Self {
             cfg,
             client,
@@ -116,10 +136,7 @@ impl RestInventoryReader {
             sink,
             process: unix_millis(process_start),
             seq: AtomicU64::new(0),
-            attempt: Attempt::new(
-                Reader::RestInventory,
-                &[Family::RestTotals, Family::RestSiteMatch],
-            ),
+            attempt: Attempt::new(Reader::RestInventory, families),
         }
     }
 
@@ -239,7 +256,36 @@ impl Probe for RestInventoryReader {
         let start = crate::clock::now();
         let seq = self.seq.fetch_add(1, Ordering::SeqCst) + 1;
         self.attempt.begin();
-        let totals = self.totals(recorder).await;
+        let mut failed = Incomplete::default();
+        if let Some(tenant) = &self.target.tenant {
+            tenant
+                .read(
+                    &self.client,
+                    recorder,
+                    &self.target,
+                    super::rest_instances::Publication {
+                        meta: &SweepMeta {
+                            process: self.process,
+                            seq,
+                            reader: Reader::RestInventory,
+                            start,
+                            end: start,
+                        },
+                        attempt: &self.attempt,
+                        sink: self.sink.as_ref(),
+                    },
+                    &mut failed,
+                )
+                .await;
+        }
+        let totals_start = crate::clock::now();
+        let totals = if self.target.totals {
+            Some(self.totals(recorder).await)
+        } else {
+            None
+        };
+        let totals_end = crate::clock::now();
+        let site_start = crate::clock::now();
         let site_match = self.site_match(recorder).await;
         let meta = SweepMeta {
             process: self.process,
@@ -249,19 +295,31 @@ impl Probe for RestInventoryReader {
             end: crate::clock::now(),
         };
         let sink = self.sink.as_ref();
-        let mut failed = Incomplete::default();
-        let totals_kind = totals.as_ref().err().map(|f| f.kind);
-        if !self
-            .attempt
-            .deliver(sink, &meta, Family::RestTotals, totals)
-        {
-            failed.record(Family::RestTotals, totals_kind);
+        if let Some(totals) = totals {
+            let totals_kind = totals.as_ref().err().map(|f| f.kind);
+            if !self.attempt.deliver(
+                sink,
+                &SweepMeta {
+                    start: totals_start,
+                    end: totals_end,
+                    ..meta
+                },
+                Family::RestTotals,
+                totals,
+            ) {
+                failed.record(Family::RestTotals, totals_kind);
+            }
         }
         let site_match_kind = site_match.as_ref().err().map(|f| f.kind);
-        if !self
-            .attempt
-            .deliver(sink, &meta, Family::RestSiteMatch, site_match)
-        {
+        if !self.attempt.deliver(
+            sink,
+            &SweepMeta {
+                start: site_start,
+                ..meta
+            },
+            Family::RestSiteMatch,
+            site_match,
+        ) {
             failed.record(Family::RestSiteMatch, site_match_kind);
         }
         failed.finish()
@@ -316,7 +374,9 @@ mod tests {
             Inventory {
                 provider_auth: rest.auth(),
                 provider_org: "provider-org".to_string(),
+                tenant: None,
                 site_id: "site-1".to_string(),
+                totals: true,
             },
             census,
             Arc::clone(sink) as Arc<dyn SnapshotSink>,
@@ -379,6 +439,46 @@ mod tests {
             SiteMatch::Unknown,
             "the site check publishes"
         );
+    }
+
+    #[tokio::test]
+    async fn skipped_totals_are_not_read() {
+        let rest = FakeRest::start().await;
+        // A REST API that times out on racks and trays, as a large site's does.
+        rest.always_status("rack", StatusCode::GATEWAY_TIMEOUT);
+        rest.always_status("tray", StatusCode::GATEWAY_TIMEOUT);
+        let sink = Arc::new(FakeSink::default());
+        let reader = RestInventoryReader::new(
+            ReaderConfig {
+                enabled: true,
+                interval: Duration::from_secs(120),
+                timeout: Duration::from_secs(600),
+            },
+            rest.client(),
+            Inventory {
+                provider_auth: rest.auth(),
+                provider_org: "provider-org".to_string(),
+                tenant: None,
+                site_id: "site-1".to_string(),
+                totals: false,
+            },
+            None,
+            Arc::clone(&sink) as Arc<dyn SnapshotSink>,
+            SystemTime::now(),
+        );
+        reader
+            .run(&ObservationRecorder::default())
+            .await
+            .expect("a sweep without totals completes");
+        assert!(
+            rest.requests()
+                .iter()
+                .all(|(_, path, _)| path.ends_with("/machine")),
+            "only the site-check machine page is read: {:?}",
+            rest.requests()
+        );
+        assert_eq!(sink.count(Family::RestTotals), 0);
+        assert_eq!(sink.count(Family::RestSiteMatch), 1);
     }
 
     #[tokio::test]

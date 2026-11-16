@@ -36,7 +36,7 @@ use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 use crate::{
-    IntegratedResourcePoolBackend, ResourcePoolBackend, ResourcePoolBackendError,
+    AllocationStatus, IntegratedResourcePoolBackend, ResourcePoolBackend, ResourcePoolBackendError,
     ResourcePoolRegistry, ResourcePoolRegistryError, ResourcePoolWithBackend,
 };
 
@@ -91,6 +91,26 @@ async fn integrated_forwards_pool_values_and_owners_in_the_borrowed_transaction(
         ConditionalWrite::NotApplied(ResourcePoolAllocationNotOwned)
     );
     let registry = ResourcePoolRegistry::default();
+    // Typed inspection also works for Integrated ownership without a saved binding.
+    assert_eq!(
+        registry
+            .inspect_allocations(
+                &descriptor,
+                &mut txn,
+                OwnerType::IBPartition,
+                "existing-owner",
+                "address",
+            )
+            .await?,
+        vec![AllocationStatus::Attached { value: existing }]
+    );
+    assert!(registry.has_values(&mut txn, &descriptor).await?);
+    assert!(matches!(
+        registry
+            .find_integer_overlap(&mut txn, &descriptor, &other_descriptor)
+            .await,
+        Err(ResourcePoolBackendError::Value(_))
+    ));
     let owned = registry
         .find_owned(
             &descriptor,
@@ -216,6 +236,31 @@ async fn integrated_forwards_pool_values_and_owners_in_the_borrowed_transaction(
             ),
         ],
     );
+    // A committed native release uses the same completion handle. Waiting needs
+    // neither a database connection nor a provider reservation.
+    let mut txn = database.begin().await?;
+    let owned = registry
+        .find_owned(
+            &descriptor,
+            &mut txn,
+            OwnerType::IBPartition,
+            "existing-owner",
+            "address",
+        )
+        .await?
+        .expect("restored native owner");
+    let cleanup = owned.cleanup();
+    assert_eq!(
+        owned.release(&mut txn).await?,
+        ConditionalWrite::Applied(())
+    );
+    txn.commit().await?;
+    let closed =
+        PgPoolOptions::new().connect_lazy_with(database.connect_options().as_ref().clone());
+    closed.close().await;
+    cleanup
+        .wait(&registry, &closed, &CancellationToken::new())
+        .await?;
     Ok(())
 }
 
@@ -363,6 +408,22 @@ async fn uncached_remote_ownership_returns_an_error_and_preserves_attachment(
             ResourcePoolRegistryError::UnsupportedAuthority { name }
         )) if name == descriptor.name()
     ));
+    // Membership must reject the same missing runtime rather than report an
+    // empty Integrated pool for a saved remote binding.
+    assert!(matches!(
+        registry.has_values(&mut txn, &descriptor).await,
+        Err(ResourcePoolBackendError::Registry(
+            ResourcePoolRegistryError::UnsupportedAuthority { .. }
+        ))
+    ));
+    assert!(matches!(
+        registry
+            .find_integer_overlap(&mut txn, &descriptor, &descriptor)
+            .await,
+        Err(ResourcePoolBackendError::Registry(
+            ResourcePoolRegistryError::UnsupportedAuthority { .. }
+        ))
+    ));
     txn.commit().await?;
     assert_eq!(
         remote::load(&database, request.request_id).await?,
@@ -378,6 +439,7 @@ async fn uncached_remote_ownership_returns_an_error_and_preserves_attachment(
 async fn shared_allocation_defers_integrated_reservation_until_the_entity_transaction(
     database: sqlx::PgPool,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    const AUTOMATIC_VALUE: i32 = 42;
     let descriptor = ResourcePool::<i32>::new("prepared-pool".to_owned(), ValueType::Integer);
     let backend = ResourcePoolBackend::Integrated(IntegratedResourcePoolBackend);
     let selected = ResourcePoolWithBackend {
@@ -385,7 +447,7 @@ async fn shared_allocation_defers_integrated_reservation_until_the_entity_transa
         backend: &backend,
     };
     let mut txn = database.begin().await?;
-    populate(&descriptor, &mut txn, vec![42], true).await?;
+    populate(&descriptor, &mut txn, vec![AUTOMATIC_VALUE], true).await?;
     populate(&descriptor, &mut txn, vec![43], false).await?;
     txn.commit().await?;
 
@@ -463,6 +525,34 @@ async fn shared_allocation_defers_integrated_reservation_until_the_entity_transa
                 .await?,
             43,
         ),
+        (
+            "exact automatic partition",
+            selected
+                .prepare_exact_allocation(
+                    &closed,
+                    OwnerType::NetworkSegment,
+                    "segment-1",
+                    "vni",
+                    42,
+                    &CancellationToken::new(),
+                )
+                .await?,
+            42,
+        ),
+        (
+            "exact manual partition",
+            selected
+                .prepare_exact_allocation(
+                    &closed,
+                    OwnerType::NetworkSegment,
+                    "segment-1",
+                    "vni",
+                    43,
+                    &CancellationToken::new(),
+                )
+                .await?,
+            43,
+        ),
     ];
     let state_query = "SELECT state FROM resource_pool WHERE name = $1 AND value = $2";
 
@@ -477,6 +567,18 @@ async fn shared_allocation_defers_integrated_reservation_until_the_entity_transa
         assert_eq!(allocation.route_target_policy(), None, "{scenario}");
         let mut txn = database.begin().await?;
         assert_eq!(allocation.allocate(&mut txn).await?, expected, "{scenario}");
+        let automatic: bool = sqlx::query_scalar(
+            "SELECT auto_assign FROM resource_pool WHERE name = $1 AND value = $2",
+        )
+        .bind(descriptor.name())
+        .bind(expected.to_string())
+        .fetch_one(&mut *txn)
+        .await?;
+        assert_eq!(
+            automatic,
+            expected == AUTOMATIC_VALUE,
+            "{scenario}: assignment mode is preserved"
+        );
         let allocated: Json<ResourcePoolEntryState> = sqlx::query_scalar(state_query)
             .bind(descriptor.name())
             .bind(expected.to_string())
@@ -491,6 +593,26 @@ async fn shared_allocation_defers_integrated_reservation_until_the_entity_transa
             "{scenario}",
         );
 
+        if scenario == "exact automatic partition" {
+            // Exact is a new reservation, even when this owner already holds
+            // the requested value; preserve the allocator's source error.
+            let duplicate = selected
+                .prepare_exact_allocation(
+                    &closed,
+                    OwnerType::NetworkSegment,
+                    "segment-1",
+                    "vni",
+                    AUTOMATIC_VALUE,
+                    &CancellationToken::new(),
+                )
+                .await?;
+            assert!(matches!(
+                duplicate.allocate(&mut txn).await,
+                Err(ResourcePoolBackendError::Integrated(
+                    db::resource_pool::ResourcePoolDatabaseError::Database(error)
+                )) if matches!(error.as_ref(), db::DatabaseError::FailedPrecondition(_))
+            ));
+        }
         // A failed entity write must not leave the returned value reserved, and
         // Integrated cancellation must not open a cleanup transaction either.
         txn.rollback().await?;
@@ -502,5 +624,21 @@ async fn shared_allocation_defers_integrated_reservation_until_the_entity_transa
             .await?;
         assert_eq!(after.0, ResourcePoolEntryState::Free, "{scenario}");
     }
+    let requested_automatic = selected
+        .prepare_allocation(
+            &closed,
+            OwnerType::NetworkSegment,
+            "segment-1",
+            "vni",
+            Some(AUTOMATIC_VALUE),
+            &CancellationToken::new(),
+        )
+        .await?;
+    let mut txn = database.begin().await?;
+    assert!(matches!(
+        requested_automatic.allocate(&mut txn).await,
+        Err(ResourcePoolBackendError::Integrated(_))
+    ));
+    txn.rollback().await?;
     Ok(())
 }

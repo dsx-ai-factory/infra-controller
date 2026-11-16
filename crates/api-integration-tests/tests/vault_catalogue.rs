@@ -58,7 +58,12 @@ async fn credentials_round_trip_over_ipv6_tls() -> eyre::Result<()> {
             vault_cacert: Some(vault.ca_cert.clone()),
             ..Default::default()
         };
-        let client = create_vault_client(&config)?;
+        let client = create_vault_client(
+            &config,
+            carbide_instrument::Instrumentation::from_meter_provider(
+                &opentelemetry::metrics::noop::NoopMeterProvider::new(),
+            ),
+        )?;
         client.set_credentials(&key, &expected).await?;
         Ok::<_, eyre::Report>(client.get_credentials(&key).await?)
     })
@@ -100,7 +105,13 @@ async fn setup_vault_with_secrets() -> Option<(
         vault_cacert: Some(vault.ca_cert.clone()),
         ..Default::default()
     };
-    let client = create_vault_client(&config).expect("create vault client");
+    let client = create_vault_client(
+        &config,
+        carbide_instrument::Instrumentation::from_meter_provider(
+            &opentelemetry::metrics::noop::NoopMeterProvider::new(),
+        ),
+    )
+    .expect("create vault client");
 
     // Populate a mix of secrets across prefixes.
     let secrets = vec![

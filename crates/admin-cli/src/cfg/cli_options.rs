@@ -238,17 +238,14 @@ pub(crate) enum CliCommand {
     ExpectedRack(expected_rack::Cmd),
     #[clap(about = "Expected rack group handling", subcommand)]
     ExpectedRackGroup(expected_rack_group::Cmd),
-    /// Administrator-owned expected NVLink domain declarations
+    /// Administrator-owned NVLink domain declarations
     ///
     /// A domain is an administrator-managed group of compute and switch trays within a RackGroup.
     /// No NVLink management state machine consumes these declarations yet.
     /// NVLink management is planned to move from rack-based
     /// to domain-based state machines, which will use these declarations to define domains.
-    #[clap(
-        about = "Administrator-owned expected NVLink domain declarations",
-        subcommand
-    )]
-    ExpectedNvlinkDomain(crate::expected_nvlink_domain::Cmd),
+    #[clap(about = "Administrator-owned NVLink domain declarations", subcommand)]
+    NvlinkDomain(crate::nvlink_domain::Cmd),
     #[clap(about = "Expected switch handling", subcommand, visible_alias = "ew")]
     ExpectedSwitch(expected_switch::Cmd),
     #[clap(

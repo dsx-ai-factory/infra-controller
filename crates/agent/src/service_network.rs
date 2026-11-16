@@ -590,13 +590,37 @@ fn validate_routing_profile(profile: &rpc::RoutingProfile) -> eyre::Result<()> {
 }
 
 /// Sorts routing collections whose order does not affect the generated NVUE policy.
-fn normalize_routing_profile(profile: &mut rpc::RoutingProfile) {
+/// Keeps HBN fingerprints and shared host/service VPC comparisons consistent.
+pub(super) fn normalize_routing_profile(profile: &mut rpc::RoutingProfile) {
     profile
         .route_target_imports
         .sort_by_key(|target| (target.asn, target.vni, target.vni_self));
     profile
         .route_targets_on_exports
         .sort_by_key(|target| (target.asn, target.vni, target.vni_self));
+    // Cumulative rules have no precedence, including the targets inside each rule.
+    for entry in &mut profile.route_targets_on_exports_by_prefix {
+        entry
+            .route_targets
+            .sort_by_key(|target| (target.asn, target.vni, target.vni_self));
+    }
+    profile
+        .route_targets_on_exports_by_prefix
+        .sort_by(|left, right| {
+            (&left.prefix, left.match_type, left.max_prefix_length)
+                .cmp(&(&right.prefix, right.match_type, right.max_prefix_length))
+                .then_with(|| {
+                    left.route_targets
+                        .iter()
+                        .map(|target| (target.asn, target.vni, target.vni_self))
+                        .cmp(
+                            right
+                                .route_targets
+                                .iter()
+                                .map(|target| (target.asn, target.vni, target.vni_self)),
+                        )
+                })
+        });
     profile
         .accepted_leaks_from_underlay
         .sort_by(|left, right| left.prefix.cmp(&right.prefix));

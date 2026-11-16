@@ -296,6 +296,58 @@ func TestDryRunMismatchRefused(t *testing.T) {
 	}
 }
 
+// TestResultJournalCounts proves result.json reports the journal's own counts (journal.Counts: attempts are RPCs that went out or may have),
+// not unknown: after real writes, one of them unclear, and after a dry run, which has planned ops and no attempts.
+func TestResultJournalCounts(t *testing.T) {
+	rows := []struct {
+		name   string
+		dryRun bool
+		run    func(RunCtx, *writer.Writer)
+		want   [3]uint64 // ops, attempts, unclear
+	}{
+		{"writes", false, func(ctx RunCtx, w *writer.Writer) {
+			write(ctx.Ctx, w, "k1", true, writer.Attempt{})
+			write(ctx.Ctx, w, "k2", true, writer.Attempt{})
+			write(ctx.Ctx, w, "k3", false, writer.Attempt{NoReply: true})
+		}, [3]uint64{3, 3, 1}},
+		{"dry run", true, func(ctx RunCtx, w *writer.Writer) {
+			for _, k := range []string{"k1", "k2", "k3"} {
+				_, _ = writer.Plan(ctx.Ctx, w, writer.Call{WriteCall: journal.WriteCall{Scope: "test", Kind: "k", Key: k, Idempotent: true}, Retry: writer.DefaultRetry})
+			}
+		}, [3]uint64{3, 0, 0}},
+	}
+	for _, r := range rows {
+		t.Run(r.name, func(t *testing.T) {
+			d := deps(t, nil, held(nil))
+			d.Config.DryRun = ptr(r.dryRun)
+			var j *journal.Journal
+			d.NewJournal = func(dir string, h journal.Header) (*journal.Journal, error) {
+				var err error
+				j, err = journal.Create(dir, h)
+				return j, err
+			}
+			Execute(d, fakeTest{run: func(ctx RunCtx, w *writer.Writer) (result.Outcome, error) {
+				r.run(ctx, w)
+				return result.OutcomeOf(result.Passed), nil
+			}})
+			data, err := os.ReadFile(result.ResultFor(d.Config.Journal.Dir, d.Config.RunID).Path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var got struct {
+				Journal struct{ Ops, Attempts, Unclear *uint64 }
+			}
+			if err := json.Unmarshal(data, &got); err != nil || got.Journal.Ops == nil || got.Journal.Attempts == nil || got.Journal.Unclear == nil {
+				t.Fatalf("result.json journal counts = %+v (%v), want all known", got.Journal, err)
+			}
+			c := j.Counts()
+			if have := [3]uint64{*got.Journal.Ops, *got.Journal.Attempts, *got.Journal.Unclear}; have != r.want || have != [3]uint64{c.Ops, c.Attempts, c.Unclear} {
+				t.Errorf("result.json counts = %v, journal's = %+v, want %v", have, c, r.want)
+			}
+		})
+	}
+}
+
 // TestLostReplyAfterCommitKeepsRecordsInAgreement proves that when the final status write commits but its reply is
 // lost, the ConfigMap and result.json carry the same verdict: the read-back confirms the write landed, so the clean
 // verdict stays in both instead of result.json alone being downgraded.

@@ -18,6 +18,16 @@ dpf_crd_dir = os.path.join(repo_root, 'crates/dpf/crds')
 rest_api_docker_local = os.path.join(rest_api_dir, 'docker/local')
 values_file = os.path.join(tilt_dir, 'values.yaml')
 kea_version = str(read_file(os.path.join(repo_root, 'dev/docker/kea.version'))).strip()
+docker_platform = str(local(['docker', 'info', '--format', '{{.OSType}}/{{.Architecture}}'], quiet=True)).strip()
+native_platforms = {
+    'linux/amd64': ('linux/amd64', 'x86_64'),
+    'linux/x86_64': ('linux/amd64', 'x86_64'),
+    'linux/arm64': ('linux/arm64', 'aarch64'),
+    'linux/aarch64': ('linux/arm64', 'aarch64'),
+}
+if docker_platform not in native_platforms:
+    fail('Local development requires a Linux AMD64 or ARM64 Docker daemon; got %s' % docker_platform)
+build_platform, compiler_arch = native_platforms[docker_platform]
 
 all_values = read_yaml(values_file)
 tilt_values = all_values['tilt']
@@ -222,6 +232,7 @@ def rest_image(name, dockerfile, only):
         'localhost/%s' % name,
         rest_api_dir,
         dockerfile=os.path.join(rest_api_docker_local, dockerfile),
+        platform=build_platform,
         only=only + [
             'go.mod',
             'go.sum',
@@ -944,18 +955,21 @@ local_resource(
 
 docker_build(
     'nico-tilt-runtime-base',
-    tilt_dir,
-    dockerfile=os.path.join(tilt_dir, 'Dockerfile.runtime-base'),
-    only=['Dockerfile.runtime-base'],
+    repo_root,
+    dockerfile=os.path.join(repo_root, 'dev/docker/Dockerfile.dev-runtime'),
+    only=['dev/docker/Dockerfile.dev-runtime'],
+    platform=build_platform,
 )
 docker_build(
     'build-container-localdev',
-    os.path.join(repo_root, 'dev/docker'),
+    repo_root,
     dockerfile=os.path.join(
         repo_root,
-        'dev/docker/Dockerfile.build-container-x86_64',
+        'dev/docker/Dockerfile.build-container-%s' % compiler_arch,
     ),
+    only=['dev/docker'],
     build_args={'KEA_VERSION': kea_version},
+    platform=build_platform,
 )
 # A target packages only the service being refreshed. Cargo caches are shared.
 core_images = [
@@ -973,9 +987,14 @@ for image, target in core_images:
     docker_build(
         image,
         repo_root,
-        dockerfile=os.path.join(tilt_dir, 'Dockerfile.core'),
+        dockerfile=os.path.join(repo_root, 'dev/docker/Dockerfile.dev-services'),
         target=target,
-        build_args={'KEA_VERSION': kea_version},
+        build_args={
+            'KEA_VERSION': kea_version,
+            'CONTAINER_BUILD': 'build-container-localdev',
+            'CONTAINER_RUNTIME': 'nico-tilt-runtime-base',
+        },
+        platform=build_platform,
     )
 docker_build(
     'mat-k8s-controller',
@@ -985,6 +1004,7 @@ docker_build(
         'Dockerfile.mat-k8s-controller',
     ),
     only=['dev/k8s/machine-a-tron-controller'],
+    platform=build_platform,
 )
 
 # Dev-only stand-in for the DPF operator: walks the DPU custom resources
@@ -997,6 +1017,7 @@ if enable_dpf:
         'dpf-sim-controller',
         dpf_sim_dir,
         dockerfile=os.path.join(dpf_sim_dir, 'Dockerfile'),
+        platform=build_platform,
     )
     k8s_yaml(os.path.join(dpf_sim_dir, 'config/rbac/role.yaml'))
     k8s_yaml(os.path.join(dpf_sim_dir, 'config/manager/manager.yaml'))
@@ -1079,12 +1100,21 @@ rest_image(
 core_global = all_values['global']
 nico_api_values = component_values(core_global, all_values['nico-api'])
 nico_api_dependencies = ['nico-local-config', 'nico-postgres', 'vault']
+bmc_proxy_values = component_values(core_global, all_values['nico-bmc-proxy'])
 
 if enable_observability:
     nico_api_values['tracing'] = {'enabled': True}
     api_env = nico_api_values.setdefault('env', {})
     if not api_env.get('OTEL_EXPORTER_OTLP_TRACES_ENDPOINT'):
         api_env['OTEL_EXPORTER_OTLP_TRACES_ENDPOINT'] = 'http://tempo.%s.svc.cluster.local:4317' % observability_namespace
+    bmc_proxy_values['configFiles']['nicoBmcProxyConfig'] += (
+        '\n[tracing]\nenabled = true\notlp_endpoint = %s\n' %
+        encode_json(api_env['OTEL_EXPORTER_OTLP_TRACES_ENDPOINT']).strip()
+    )
+    # Tilt runs the Kea hook, not the standalone DHCP server, DNS, or PXE.
+    # Keep either explicit DHCP endpoint override ahead of the profile default.
+    if not nico_dhcp_values.get('otlpEndpoint') and not nico_dhcp_values.get('env', {}).get('OTEL_EXPORTER_OTLP_TRACES_ENDPOINT'):
+        nico_dhcp_values['otlpEndpoint'] = api_env['OTEL_EXPORTER_OTLP_TRACES_ENDPOINT']
     nico_api_dependencies.append('tempo')
 
 if enable_dsx_exchange:
@@ -1130,7 +1160,7 @@ helm_chart(
     name='nico-bmc-proxy',
     chart=os.path.join(core_charts, 'nico-bmc-proxy'),
     namespace=core_namespace,
-    values=component_values(core_global, all_values['nico-bmc-proxy']),
+    values=bmc_proxy_values,
     resource_deps=['nico-api'],
     image_deps=['nico-bmc-proxy'],
     image_keys=[('image.repository', 'image.tag')],

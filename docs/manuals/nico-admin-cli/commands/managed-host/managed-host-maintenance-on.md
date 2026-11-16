@@ -28,7 +28,7 @@ Managed Host ID
 
 `--reference <REFERENCE>`
 
-URL of reference (ticket, issue, etc) for this machines maintenance
+URL of reference (ticket, issue, etc) for this machine's maintenance
 
 `--extended`
 
@@ -50,7 +50,7 @@ Sort output by specified field
 
 `-h, --help`
 
-Print help (see a summary with -h)
+Print help (see a summary with '-h')
 
 ## Examples
 

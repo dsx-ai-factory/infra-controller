@@ -23,7 +23,6 @@ use async_trait::async_trait;
 use bmc_platform::{IpmiOps, PlatformError};
 use carbide_ipmi::IPMITool;
 use carbide_secrets::credentials::CredentialKey;
-use carbide_uuid::machine::MachineId;
 
 /// Per-endpoint adapter exposing only the IPMI operations allowed to drivers.
 ///
@@ -33,7 +32,6 @@ use carbide_uuid::machine::MachineId;
 /// so every failure is logged with its cause and reported as unreachable.
 pub struct EndpointIpmiOps {
     tool: Arc<dyn IPMITool>,
-    machine_id: MachineId,
     address: SocketAddr,
     credential_key: CredentialKey,
 }
@@ -42,13 +40,11 @@ impl EndpointIpmiOps {
     /// Creates the adapter for one BMC endpoint.
     pub const fn new(
         tool: Arc<dyn IPMITool>,
-        machine_id: MachineId,
         address: SocketAddr,
         credential_key: CredentialKey,
     ) -> Self {
         Self {
             tool,
-            machine_id,
             address,
             credential_key,
         }
@@ -60,7 +56,6 @@ impl EndpointIpmiOps {
     fn unreachable(&self, operation: &'static str, error: &impl Display) -> PlatformError {
         tracing::warn!(
             bmc = %self.address,
-            machine_id = %self.machine_id,
             operation,
             error = %format_args!("{error:#}"),
             "IPMI command failed"
@@ -80,7 +75,7 @@ impl IpmiOps for EndpointIpmiOps {
 
     async fn chassis_power_reset(&self) -> Result<(), PlatformError> {
         self.tool
-            .restart(&self.machine_id, self.address, false, &self.credential_key)
+            .restart(self.address, false, &self.credential_key)
             .await
             .map_err(|error| self.unreachable("chassis_power_reset", &error))
     }
@@ -88,8 +83,6 @@ impl IpmiOps for EndpointIpmiOps {
 
 #[cfg(test)]
 mod tests {
-    use std::str::FromStr;
-
     use carbide_instrument::testing::capture_logs_async;
     use carbide_secrets::credentials::{BmcCredentialType, CredentialKey};
 
@@ -109,7 +102,6 @@ mod tests {
 
         async fn restart(
             &self,
-            _machine_id: &MachineId,
             _bmc_address: SocketAddr,
             _legacy_boot: bool,
             _credential_key: &CredentialKey,
@@ -125,8 +117,6 @@ mod tests {
     async fn failed_commands_log_their_cause() {
         let ipmi = EndpointIpmiOps::new(
             Arc::new(FailingTool),
-            MachineId::from_str("fm100htes3rn1npvbtm5qd57dkilaag7ljugl1llmm7rfuq1ov50i0rpl30")
-                .expect("machine id"),
             "192.0.2.10:623".parse().expect("address"),
             CredentialKey::BmcCredentials {
                 credential_type: BmcCredentialType::BmcRoot {

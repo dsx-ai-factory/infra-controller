@@ -112,7 +112,7 @@ async fn only_one_primary_interface_per_machine(
     .await?;
 
     let machine_id = from_hardware_info(&host_config.borrow().into()).unwrap();
-    let new_machine = db::machine::get_or_create(&mut txn, None, &machine_id, &new_interface)
+    let new_machine = db::machine::get_or_create(&mut txn, None, &machine_id, &new_interface, None)
         .await
         .expect("Unable to create machine");
 
@@ -555,7 +555,7 @@ async fn dpu_rediscovery_counts_a_failed_admin_address_reconcile(
         .machine_id
         .expect("the OOB interface was selected by its DPU machine id");
 
-    let metrics = MetricsCapture::start();
+    let metrics = MetricsCapture::for_registry(env.test_meter.registry());
     assert_eq!(
         dpu_discover_machine(&env, dpu, dpu_interface.id).await,
         dpu_machine_id

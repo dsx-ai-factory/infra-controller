@@ -17,13 +17,18 @@
 
 use std::sync::Arc;
 
+use bmc_backend::{BackendBmc, BmcConnectError, BmcConnector};
 use carbide_credential_rotation::RotationGate;
 use carbide_health_metrics::PerObjectMetricsRegistry;
 use carbide_redfish::libredfish::{BmcCredentialOps, RedfishClientPool};
 use carbide_secrets::credentials::CredentialManager;
+use carbide_utils::redfish::BmcAccessInfo;
 use component_manager::component_manager::ComponentManager;
+use model::power_shelf::PowerShelf;
 use sqlx::PgPool;
-use state_controller::state_handler::StateHandlerContextObjects;
+use state_controller::state_handler::{
+    ExternalServiceError, StateHandlerContextObjects, StateHandlerError,
+};
 
 use crate::metrics::PowerShelfMetrics;
 
@@ -31,6 +36,8 @@ pub struct PowerShelfStateHandlerContextObjects {}
 
 #[derive(Clone)]
 pub struct PowerShelfStateHandlerServices {
+    /// Event metric destination shared by the controller and credential rotation engine.
+    pub instrumentation: carbide_instrument::Instrumentation,
     pub db_pool: PgPool,
     pub component_manager: Option<Arc<ComponentManager>>,
     pub credential_manager: Arc<dyn CredentialManager>,
@@ -44,6 +51,8 @@ pub struct PowerShelfStateHandlerServices {
     /// Libredfish pool used to converge the power shelf BMC (PMC) credential
     /// The same shared instance the machine- and switch-controllers use.
     pub redfish_client_pool: Arc<dyn RedfishClientPool>,
+    /// Connects moved BMC operations through the site's `bmc_backend`.
+    pub bmc_connector: BmcConnector,
     /// Credential-lifecycle operations (password set/rotate/clear,
     /// candidate validation). A sealed trait implemented only by the direct
     /// pool, so handing these to a wrapper pool is a compile error (a
@@ -58,6 +67,54 @@ pub struct PowerShelfStateHandlerServices {
     /// a Ready power shelf never enters `RotatingBmc` on its own; the operator
     /// force-converge escape hatch still works regardless.
     pub bmc_rotation_enabled: bool,
+}
+
+impl PowerShelfStateHandlerServices {
+    /// Connects to `power_shelf`'s BMC through the configured `bmc_backend`.
+    pub(crate) async fn connect_bmc(
+        &self,
+        power_shelf: &PowerShelf,
+    ) -> Result<BackendBmc, StateHandlerError> {
+        let missing = |missing| StateHandlerError::MissingData {
+            object_id: power_shelf.id.to_string(),
+            missing,
+        };
+        let bmc_info = power_shelf
+            .bmc_info
+            .as_ref()
+            .ok_or_else(|| missing("addressable_bmc"))?;
+        let (Some(ip), Some(mac_address)) = (bmc_info.ip, bmc_info.mac) else {
+            return Err(missing("addressable_bmc"));
+        };
+        let access = BmcAccessInfo {
+            host: ip.to_string(),
+            port: bmc_info.port,
+            mac_address,
+        };
+        let report = || async {
+            db::explored_endpoints::find_by_ips(&self.db_pool, vec![ip])
+                .await?
+                .into_iter()
+                .next()
+                .map(|explored| explored.report)
+                .ok_or_else(|| missing("explored endpoint of the BMC"))
+        };
+        self.bmc_connector
+            .connect(&access, report)
+            .await
+            .map_err(|error| match error {
+                BmcConnectError::Report(error) => error,
+                BmcConnectError::Libredfish(error) => error.into(),
+                BmcConnectError::Drivers(error) => ExternalServiceError::with_source(
+                    "redfish",
+                    "create_client",
+                    error.to_string(),
+                    "redfish_client_creation_error",
+                    error,
+                )
+                .into(),
+            })
+    }
 }
 
 impl StateHandlerContextObjects for PowerShelfStateHandlerContextObjects {

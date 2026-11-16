@@ -40,7 +40,7 @@ pub async fn force_delete(
     .await
 }
 
-pub async fn get_by_id(addrs: &[SocketAddr], machine_id: &MachineId) -> eyre::Result<Machine> {
+pub async fn get_by_id(addrs: &[SocketAddr], machine_id: &MachineId) -> eyre::Result<Box<Machine>> {
     let request = MachinesByIdsRequest {
         machine_ids: vec![*machine_id],
         include_history: false,
@@ -53,6 +53,7 @@ pub async fn get_by_id(addrs: &[SocketAddr], machine_id: &MachineId) -> eyre::Re
         .machines
         .into_iter()
         .next()
+        .map(Box::new)
         .ok_or_else(|| eyre::eyre!("machine {machine_id} was not returned by FindMachinesByIds"))
 }
 

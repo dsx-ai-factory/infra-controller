@@ -24,7 +24,7 @@ use serde::{Deserialize, Serialize};
 #[derive(Args, Debug)]
 pub(super) struct Attributes {
     /// Rack JSON; repeat for each rack. Example:
-    /// {"rack_id":"rack-01","members":[{"type":"Switch","manufacturer":"NVIDIA","id":"switch-01"}]}
+    /// {"rack_id":"rack-01","members":[{"type":"Switch","manufacturer":"NVIDIA","id":"switch-01","cartridge_index":0}]}
     /// Both fields are required; use "members": [] for a rack without devices.
     /// Member type must be Compute, Switch, or PowerShelf. Omitting --rack supplies no racks.
     #[arg(long = "rack", value_parser = parse_rack)]
@@ -41,7 +41,31 @@ pub(super) struct Attributes {
 }
 
 fn parse_rack(value: &str) -> Result<ExpectedRackGroupRack, String> {
-    serde_json::from_str(value).map_err(|e| format!("expected rack JSON {{rack_id, members}}: {e}"))
+    let rack = serde_json::from_str(value)
+        .map_err(|e| format!("expected rack JSON {{rack_id, members}}: {e}"))?;
+    validate_indexes(&rack)?;
+    Ok(rack)
+}
+
+fn validate_indexes(rack: &ExpectedRackGroupRack) -> Result<(), String> {
+    if rack
+        .members
+        .iter()
+        .any(|member| member.cartridge_index.is_none())
+    {
+        return Err("member cartridge_index is required".into());
+    }
+    Ok(())
+}
+
+fn deserialize_racks<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Vec<ExpectedRackGroupRack>, D::Error> {
+    let racks = Vec::<ExpectedRackGroupRack>::deserialize(deserializer)?;
+    for rack in &racks {
+        validate_indexes(rack).map_err(serde::de::Error::custom)?;
+    }
+    Ok(racks)
 }
 
 impl Attributes {
@@ -73,7 +97,7 @@ pub(super) struct ExpectedRackGroupJson {
     rack_group_id: RackGroupId,
     protocol: String,
     topology: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_racks")]
     racks: Vec<ExpectedRackGroupRack>,
     #[serde(default)]
     metadata: Option<forge::Metadata>,
@@ -94,6 +118,7 @@ impl From<ExpectedRackGroupJson> for forge::ExpectedRackGroup {
                         .members
                         .into_iter()
                         .map(|member| forge::ExpectedRackGroupMember {
+                            cartridge_index: member.cartridge_index,
                             r#type: member.device_type.to_string(),
                             manufacturer: member.manufacturer,
                             id: member.id,

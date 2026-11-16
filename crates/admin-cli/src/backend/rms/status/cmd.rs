@@ -114,7 +114,7 @@ const RMS_PREFIX: &str = "rms: ";
 /// - **nico-api → RMS (not configured)**: The handler returns a specific
 ///   `UNAVAILABLE` message when no RMS endpoint is configured.
 /// - **CLI → nico-api**: A transport-level `UNAVAILABLE` means nico-api is
-///   down or unreachable from this host.  `ForgeTlsClientError` also maps
+///   down or unreachable from this host.  `CarbideTlsClientError` also maps
 ///   local configuration failures (missing root CA, bad cert, etc.) to
 ///   `UNAVAILABLE`; those are identified by their message prefix.
 ///
@@ -143,7 +143,7 @@ fn classify(s: tonic::Status) -> Report {
                 || msg.contains("transport error")
                 || msg.contains("error trying to connect")
                 || msg.contains("connection refused")
-                // ForgeTlsClientError::Connection surfaces as "ConnectError error: …"
+                // CarbideTlsClientError::Connection surfaces as "ConnectError error: …"
                 || msg.contains("ConnectError")
             {
                 // Tonic transport errors surface as UNAVAILABLE with a
@@ -162,7 +162,7 @@ fn classify(s: tonic::Status) -> Report {
                     ),
                 )
             } else if msg.contains("configuration error") {
-                // ForgeTlsClientError::Configuration (missing CA file, invalid
+                // CarbideTlsClientError::Configuration (missing CA file, invalid
                 // cert, etc.) — the CLI never contacted nico-api.
                 Report::failure(
                     StatusToken::CliConfigError,
@@ -376,12 +376,12 @@ mod tests {
                 StatusToken::ApiUnreachable,
             ),
             (
-                "api-unreachable: ForgeTlsClientError::Connection",
+                "api-unreachable: CarbideTlsClientError::Connection",
                 tonic::Status::unavailable("ConnectError error: tcp connect error"),
                 StatusToken::ApiUnreachable,
             ),
             (
-                "cli-config-error: ForgeTlsClientError::Configuration",
+                "cli-config-error: CarbideTlsClientError::Configuration",
                 tonic::Status::unavailable(
                     "configuration error: could not read root CA cert at /bad/path: \
                      no such file or directory",

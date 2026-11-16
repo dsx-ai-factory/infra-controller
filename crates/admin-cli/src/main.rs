@@ -24,14 +24,14 @@ use std::io::{IsTerminal, Write};
 use std::time::Duration;
 
 use ::rpc::admin_cli::OutputFormat;
-use ::rpc::forge_api_client::ForgeApiClient;
-use ::rpc::forge_tls_client::{ApiConfig, ForgeClientConfig, RetryConfig};
+use ::rpc::carbide_api_client::CarbideApiClient;
+use ::rpc::carbide_tls_client::{ApiConfig, CarbideClientConfig, RetryConfig};
+use carbide_tls::client_config::{
+    get_api_url, get_client_cert_info, get_config_from_file, get_proxy_info, get_root_ca_path,
+};
 use cfg::cli_options::{CliCommand, CliOptions};
 use clap::CommandFactory;
 use errors::CarbideCliResult;
-use forge_tls::client_config::{
-    get_api_url, get_client_cert_info, get_config_from_file, get_proxy_info, get_root_ca_path,
-};
 use measured_boot::ToTable;
 use serde::Serialize;
 use tracing_subscriber::filter::{EnvFilter, LevelFilter};
@@ -70,7 +70,6 @@ mod dpu;
 mod dpu_remediation;
 mod errors;
 mod expected_machines;
-mod expected_nvlink_domain;
 mod expected_power_shelf;
 mod expected_rack;
 mod expected_rack_group;
@@ -102,6 +101,7 @@ mod network_segment;
 mod nvl_domain;
 mod nvl_logical_partition;
 mod nvl_partition;
+mod nvlink_domain;
 mod nvlink_nmxc_endpoints;
 mod operating_system;
 mod os_image;
@@ -259,9 +259,9 @@ async fn main() -> color_eyre::Result<()> {
 
     let proxy = get_proxy_info()?;
 
-    let mut client_config = ForgeClientConfig::new(root_ca_path, client_cert);
+    let mut client_config = CarbideClientConfig::new(root_ca_path, client_cert);
     client_config.socks_proxy(proxy);
-    // Without a client cert, `ForgeClientConfig::new` disables server
+    // Without a client cert, `CarbideClientConfig::new` disables server
     // verification. `version` verifies the server only if the user explicitly
     // supplied a usable root CA; an auto-discovered default CA may not be the
     // issuer for this server, and a missing or malformed CA must not make
@@ -279,7 +279,7 @@ async fn main() -> color_eyre::Result<()> {
                 verified.request_timeout = Some(VERIFIED_VERSION_TIMEOUT);
                 verified.connect_retries_max = Some(0);
                 version_fallback = Some(version::VerificationFallback {
-                    api_client: ApiClient(ForgeApiClient::new(&ApiConfig::new(
+                    api_client: ApiClient(CarbideApiClient::new(&ApiConfig::new(
                         &url,
                         &client_config,
                     ))),
@@ -309,7 +309,7 @@ async fn main() -> color_eyre::Result<()> {
         api_config = api_config.with_retry_config(retry_config);
     }
     let ctx = RuntimeContext {
-        api_client: ApiClient(ForgeApiClient::new(&api_config)),
+        api_client: ApiClient(CarbideApiClient::new(&api_config)),
         config: RuntimeConfig {
             format: config.format,
             request_timeout: client_config.request_timeout,
@@ -347,7 +347,7 @@ async fn main() -> color_eyre::Result<()> {
         CliCommand::ExpectedPowerShelf(cmd) => cmd.dispatch(ctx).await?,
         CliCommand::ExpectedRack(cmd) => cmd.dispatch(ctx).await?,
         CliCommand::ExpectedRackGroup(cmd) => cmd.dispatch(ctx).await?,
-        CliCommand::ExpectedNvlinkDomain(cmd) => cmd.dispatch(ctx).await?,
+        CliCommand::NvlinkDomain(cmd) => cmd.dispatch(ctx).await?,
         CliCommand::ExpectedSwitch(cmd) => cmd.dispatch(ctx).await?,
         CliCommand::ExtensionService(cmd) => cmd.dispatch(ctx).await?,
         CliCommand::Firmware(cmd) => cmd.dispatch(ctx).await?,

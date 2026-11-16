@@ -1126,6 +1126,7 @@ mod tests {
                     topology: "gb200_nvl72r1_c2g4".to_string(),
                     protocol: "NVLINK_V5".to_string(),
                     members: vec![MemberIntent {
+                        cartridge_index: 0,
                         r#type: "Compute".to_string(),
                         manufacturer: "WIWYNN".to_string(),
                         id: "rack-unit-11".to_string(),

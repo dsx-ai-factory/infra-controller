@@ -34,7 +34,7 @@ mod test_create_domain;
 #[cfg(test)]
 mod test_explicit_columns;
 
-/// Requires lowercase spelling and a name accepted by the DNS name parser.
+/// Validates a domain name according to DNS standards
 fn validate_domain_name(name: &str) -> Result<(), DatabaseError> {
     if name != name.to_lowercase() {
         return Err(DatabaseError::InvalidArgument(
@@ -55,8 +55,6 @@ pub struct DbDomain {
     pub name: String,
     /// Default record TTL; absence means the site default.
     pub default_ttl: Option<model::dns::ZoneTtl>,
-    /// Owning VPC, or `None` for an infrastructure domain.
-    pub vpc_id: Option<carbide_uuid::vpc::VpcId>,
     pub created: DateTime<Utc>,
     pub updated: DateTime<Utc>,
     pub deleted: Option<DateTime<Utc>>,
@@ -70,7 +68,6 @@ impl From<DbDomain> for Domain {
             id: db.id,
             name: db.name,
             default_ttl: db.default_ttl,
-            vpc_id: db.vpc_id,
             created: db.created,
             updated: db.updated,
             deleted: db.deleted,
@@ -102,24 +99,15 @@ impl<'a> ColumnInfo<'a> for NameColumn {
     }
 }
 
-/// Creates an infrastructure domain, or a forward domain owned by a live VPC.
-///
-/// Live names must be unique across all owners, ignoring case and trailing
-/// dots, and each VPC may own at most one live domain. Parent and child domain
-/// names may coexist.
-///
-/// Call this inside a transaction so the VPC row lock stays held from owner
-/// validation until the domain is committed.
 pub async fn persist(value: NewDomain, txn: &mut PgConnection) -> DatabaseResult<Domain> {
     validate_domain_name(&value.name)?;
-    validate_scope(&value.name, value.vpc_id, txn).await?;
 
     // Create default metadata entry
     let metadata_id = super::domain_metadata::DbMetadata::create_default(txn).await?;
 
     let query = format!(
-        "INSERT INTO domains (name, soa, domain_metadata_id, vpc_id, default_ttl)
-                 VALUES ($1, $2, $3, $4, $5)
+        "INSERT INTO domains (name, soa, domain_metadata_id, default_ttl)
+                 VALUES ($1, $2, $3, $4)
                  RETURNING {}",
         DbDomain::db_table_columns()
     );
@@ -130,39 +118,23 @@ pub async fn persist(value: NewDomain, txn: &mut PgConnection) -> DatabaseResult
             kind: "domain",
             id: value.name,
         }),
-        Err(err) if err.violates_constraint("domains_live_name_key") => Err(
-            DatabaseError::InvalidArgument(format!("domain {} already exists", value.name)),
-        ),
-        Err(err) if err.violates_constraint("domains_live_vpc_zone_key") => {
-            Err(DatabaseError::InvalidArgument(format!(
-                "VPC {} already owns a domain",
-                value
-                    .vpc_id
-                    .expect("only a VPC-owned insert can hit this index")
-            )))
-        }
         Err(err) => Err(err),
     }
 }
 
-/// Creates the initial domain in an empty `domains` table.
-///
-/// Returns `None` if any row already exists, including deleted rows.
-/// The caller must use a transaction, as for [`persist`].
+/// Create the domain only if it would be the first one
 pub async fn persist_first(
     value: &NewDomain,
     txn: &mut PgConnection,
 ) -> DatabaseResult<Option<Domain>> {
     validate_domain_name(&value.name)?;
 
-    validate_scope(&value.name, value.vpc_id, txn).await?;
-
     let metadata_id = super::domain_metadata::DbMetadata::create_default(txn).await?;
 
     let query = format!(
         "
-            INSERT INTO domains (name, soa, domain_metadata_id, vpc_id, default_ttl)
-            SELECT $1, $2, $3, $4, $5
+            INSERT INTO domains (name, soa, domain_metadata_id, default_ttl)
+            SELECT $1, $2, $3, $4
             WHERE NOT EXISTS (SELECT name FROM domains)
             RETURNING {}",
         DbDomain::db_table_columns()
@@ -180,55 +152,11 @@ async fn persist_inner_with_metadata(
         .bind(&value.name)
         .bind(sqlx::types::Json(&value.soa))
         .bind(metadata_id)
-        .bind(value.vpc_id)
         .bind(value.default_ttl)
         .fetch_optional(txn)
         .await
         .map(|opt| opt.map(Domain::from))
         .map_err(|e| DatabaseError::query(query, e))
-}
-
-/// Requires a live owning VPC and restricts VPC-owned domains to forward zones.
-///
-/// Domain creation and VPC deletion take the same VPC row lock. Keep the
-/// transaction open through insertion so the owner cannot be deleted after
-/// this check and before the domain is created.
-///
-/// Domains without a VPC owner skip these checks. Network setup still writes
-/// infrastructure reverse-zone rows for rollback compatibility.
-async fn validate_scope(
-    name: &str,
-    vpc_id: Option<carbide_uuid::vpc::VpcId>,
-    txn: &mut PgConnection,
-) -> DatabaseResult<()> {
-    let Some(vpc_id) = vpc_id else {
-        return Ok(());
-    };
-
-    let name = model::dns::Fqdn::parse(name)
-        .map_err(|error| DatabaseError::InvalidArgument(format!("invalid domain name: {error}")))?;
-    let reverse_roots = ["in-addr.arpa.", "ip6.arpa."]
-        .map(|root| model::dns::Fqdn::parse(root).expect("reverse tree roots are valid names"));
-    let is_reverse_zone = reverse_roots.iter().any(|root| name.is_within(root));
-
-    let vpcs = crate::vpc::find_by_with_lock(
-        &mut *txn,
-        ObjectColumnFilter::One(crate::vpc::IdColumn, &vpc_id),
-        crate::vpc::VpcRowLock::Mutation,
-    )
-    .await?;
-    if vpcs.is_empty() {
-        return Err(DatabaseError::NotFoundError {
-            kind: "VPC",
-            id: vpc_id.to_string(),
-        });
-    }
-    if is_reverse_zone {
-        return Err(DatabaseError::InvalidArgument(
-            "VPC domains must be forward zones".to_string(),
-        ));
-    }
-    Ok(())
 }
 
 /// Finds `domains` based on specified criteria, excluding deleted entries.
@@ -269,19 +197,13 @@ pub async fn find_all_by<'a, C: ColumnInfo<'a, TableType = Domain>>(
         .map_err(|e| DatabaseError::query(query.sql(), e))
 }
 
-/// Finds the live infrastructure domain with the longest name in `candidates`.
-/// Returns `None` if no live infrastructure domain matches.
+/// Finds the live domain whose name is the longest entry in `candidates`.
 ///
-/// Pass the queried name's label suffixes, lowercase and without a trailing
-/// dot (see `Fqdn::suffixes`). Comparing with `lower(rtrim(name, '.'))` also
-/// matches stored names with uppercase letters or trailing dots. This lets
-/// one query check the suffixes without loading every domain.
-///
-/// Registering a VPC domain only records ownership. Skip these rows so the
-/// DNS handler cannot return their apex SOA or use them for authoritative
-/// negative answers. An enclosing infrastructure zone can still be
-/// authoritative for names beneath the VPC domain.
-/// TODO: include VPC-owned zones when VPC record publication is implemented.
+/// `candidates` are the label suffixes of a queried name, lowercase and
+/// without a trailing dot (see `Fqdn::suffixes`). Names compare after
+/// `lower(rtrim(name, '.'))`, so a stored dotted or mixed-case spelling still
+/// matches. One query, bounded by the number of labels in the question, in
+/// place of loading every row.
 pub async fn find_longest_live_zone(
     txn: impl DbReader<'_>,
     candidates: &[String],
@@ -290,7 +212,6 @@ pub async fn find_longest_live_zone(
         "SELECT {}
                  FROM domains
                  WHERE deleted IS NULL
-                   AND vpc_id IS NULL
                    AND lower(rtrim(name, '.')) = ANY($1)
                  ORDER BY length(rtrim(name, '.')) DESC, name
                  LIMIT 1",
@@ -356,6 +277,92 @@ pub async fn find_by_uuid(
         .map(|f| f.first().cloned())
 }
 
+/// Locks a live domain identity while a caller creates a reference to it.
+///
+/// The shared advisory lock permits concurrent reference creation but conflicts
+/// with the exclusive lock acquired by [`find_by_uuid_for_delete`]. Callers
+/// must keep the transaction open until the reference is persisted.
+pub async fn lock_live_for_reference(
+    txn: &mut PgConnection,
+    uuid: DomainId,
+) -> Result<(), DatabaseError> {
+    let lock_query = "SELECT pg_advisory_xact_lock_shared(
+                          hashtextextended('domains:id:' || $1::text, 0)
+                      )";
+    sqlx::query(lock_query)
+        .bind(uuid)
+        .execute(&mut *txn)
+        .await
+        .map_err(|error| DatabaseError::query(lock_query, error))?;
+
+    let query = "SELECT EXISTS (SELECT 1 FROM domains WHERE id = $1 AND deleted IS NULL)";
+    let exists: bool = sqlx::query_scalar(query)
+        .bind(uuid)
+        .fetch_one(txn)
+        .await
+        .map_err(|error| DatabaseError::query(query, error))?;
+    if !exists {
+        return Err(DatabaseError::NotFoundError {
+            kind: "domain",
+            id: uuid.to_string(),
+        });
+    }
+
+    Ok(())
+}
+
+/// Exclusively locks a domain identity.
+async fn lock_id_exclusive(txn: &mut PgConnection, uuid: DomainId) -> Result<(), DatabaseError> {
+    let lock_query = "SELECT pg_advisory_xact_lock(
+                          hashtextextended('domains:id:' || $1::text, 0)
+                      )";
+    sqlx::query(lock_query)
+        .bind(uuid)
+        .execute(&mut *txn)
+        .await
+        .map_err(|error| DatabaseError::query(lock_query, error))?;
+    Ok(())
+}
+
+/// Exclusively locks a domain identity for deletion, then finds the domain.
+/// Deleted domains are included so repeated deletion remains idempotent.
+pub async fn find_by_uuid_for_delete(
+    txn: &mut PgConnection,
+    uuid: DomainId,
+) -> Result<Option<Domain>, DatabaseError> {
+    lock_id_exclusive(txn, uuid).await?;
+    let query = "SELECT id, name, default_ttl, created, updated, deleted, soa, domain_metadata_id
+                 FROM domains WHERE id = $1";
+    sqlx::query_as::<_, DbDomain>(query)
+        .bind(uuid)
+        .fetch_optional(txn)
+        .await
+        .map(|domain| domain.map(Domain::from))
+        .map_err(|error| DatabaseError::query(query, error))
+}
+
+/// Reports whether a live network segment or machine interface references the
+/// domain. The caller must first hold the delete lock for this domain.
+pub async fn has_live_references(
+    txn: &mut PgConnection,
+    uuid: DomainId,
+) -> Result<bool, DatabaseError> {
+    let query = "SELECT EXISTS (
+                     SELECT 1
+                     FROM network_segments
+                     WHERE subdomain_id = $1 AND deleted IS NULL
+                 ) OR EXISTS (
+                     SELECT 1
+                     FROM machine_interfaces
+                     WHERE domain_id = $1
+                 )";
+    sqlx::query_scalar(query)
+        .bind(uuid)
+        .fetch_one(txn)
+        .await
+        .map_err(|error| DatabaseError::query(query, error))
+}
+
 /// Batched counterpart to [`find_by_uuid`]: fetch every domain in `ids` with a single
 /// `WHERE id = ANY($1)` query (deleted entries included, matching `find_by_uuid`), keyed by id.
 ///
@@ -387,6 +394,7 @@ pub async fn delete(value: Domain, txn: &mut PgConnection) -> Result<Domain, Dat
                      deleted = GREATEST(statement_timestamp(), updated + interval '1 microsecond')
                  WHERE id = $1
                    AND updated = $2
+                   AND deleted IS NULL
                  RETURNING {}",
         DbDomain::db_table_columns()
     );
@@ -404,14 +412,11 @@ pub async fn delete(value: Domain, txn: &mut PgConnection) -> Result<Domain, Dat
         })
 }
 
-/// Writes the snapshot's name, SOA, and default TTL while its timestamp and
-/// VPC owner still match the stored row; ownership is never changed here.
-/// A missing row or a timestamp or owner mismatch returns
-/// `ConcurrentModificationError`.
-///
-/// The timestamp advances even for multiple updates in one transaction, so
-/// a later writer cannot reuse the same snapshot. The caller must hold an
-/// explicit transaction and acquire reverse-zone locks for reverse domains.
+/// Updates a domain while its update timestamp still matches the snapshot whose
+/// reverse-zone locks the caller acquired. A zero-row update also covers a row
+/// that no longer exists. The new timestamp always advances, including for
+/// multiple updates in one transaction, so a later writer cannot reuse the same
+/// snapshot.
 pub async fn update(value: &Domain, txn: &mut PgConnection) -> Result<Domain, DatabaseError> {
     validate_domain_name(&value.name)?;
 
@@ -420,10 +425,10 @@ pub async fn update(value: &Domain, txn: &mut PgConnection) -> Result<Domain, Da
                  SET name = $1,
                      updated = GREATEST(statement_timestamp(), updated + interval '1 microsecond'),
                      soa = $2,
-                     default_ttl = $6
+                     default_ttl = $5
                  WHERE id = $3
                    AND updated = $4
-                   AND vpc_id IS NOT DISTINCT FROM $5
+                   AND deleted IS NULL
                  RETURNING {}",
         DbDomain::db_table_columns()
     );
@@ -433,7 +438,6 @@ pub async fn update(value: &Domain, txn: &mut PgConnection) -> Result<Domain, Da
         .bind(sqlx::types::Json(&value.soa))
         .bind(value.id)
         .bind(value.updated)
-        .bind(value.vpc_id)
         .bind(value.default_ttl)
         .fetch_one(txn)
         .await
@@ -556,18 +560,6 @@ mod test_find_longest_live_zone {
             .await
             .expect("delete domain");
 
-        // Registering a VPC domain must not make the DNS handler select it as a zone.
-        let vpc_id = crate::test_support::vpc::insert_vpc(txn.as_mut(), "unpublished").await;
-        db::dns::domain::persist(
-            NewDomain {
-                vpc_id: Some(vpc_id),
-                ..NewDomain::new("owned.example")
-            },
-            &mut txn,
-        )
-        .await
-        .expect("persist VPC-owned domain");
-
         let suffixes = |name: &str| {
             model::dns::Fqdn::parse(name)
                 .expect("fixture name")
@@ -586,15 +578,11 @@ mod test_find_longest_live_zone {
             "the longest live match wins over its parent and its deleted child, in stored spelling"
         );
 
-        for name in ["www.example.org.", "www.owned.example."] {
-            let held = db::dns::domain::find_longest_live_zone(txn.as_mut(), &suffixes(name))
+        let held =
+            db::dns::domain::find_longest_live_zone(txn.as_mut(), &suffixes("www.example.org."))
                 .await
                 .expect("query");
-            assert!(
-                held.is_none(),
-                "no live site zone encloses {name}: {held:?}"
-            );
-        }
+        assert!(held.is_none(), "no live zone encloses the name: {held:?}");
     }
 }
 

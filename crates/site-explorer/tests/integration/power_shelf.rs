@@ -168,7 +168,6 @@ async fn test_site_explorer_power_shelf_discovery(
             lockdown_status: None,
             power_shelf_id: None,
             switch_id: None,
-            remediation_error: None,
             ..Default::default()
         }),
     );
@@ -279,7 +278,6 @@ async fn test_site_explorer_power_shelf_discovery_with_static_ip(
             lockdown_status: None,
             power_shelf_id: None,
             switch_id: None,
-            remediation_error: None,
             ..Default::default()
         }),
     );
@@ -551,7 +549,6 @@ async fn test_site_explorer_power_shelf_with_expected_config(
             lockdown_status: None,
             power_shelf_id: None,
             switch_id: None,
-            remediation_error: None,
             ..Default::default()
         }),
     );
@@ -663,7 +660,6 @@ async fn test_site_explorer_power_shelf_creation_limit(
                 lockdown_status: None,
                 power_shelf_id: None,
                 switch_id: None,
-                remediation_error: None,
                 ..Default::default()
             }),
         );
@@ -765,7 +761,6 @@ async fn test_site_explorer_power_shelf_disabled(
             lockdown_status: None,
             power_shelf_id: None,
             switch_id: None,
-            remediation_error: None,
             ..Default::default()
         }),
     );
@@ -940,7 +935,6 @@ async fn test_power_shelf_state_history_error_handling(
         lockdown_status: None,
         power_shelf_id: None,
         switch_id: None,
-        remediation_error: None,
         ..Default::default()
     };
 

@@ -72,7 +72,7 @@ use model::network_security_group::{
 use model::network_segment::NetworkDefinition;
 use model::resource_pool::define::ResourcePoolConfig;
 use model::tenant::identity_config::SigningAlgorithm;
-pub use model::vpc::{PrefixFilterPolicyEntry, RouteTargetConfig};
+pub use model::vpc::{PrefixFilterPolicyEntry, PrefixRouteTargetConfig, RouteTargetConfig};
 use model::vpc::{RouteTargetConfigError, VpcConfig};
 use regex::Regex;
 use serde::{Deserialize, Deserializer, Serialize};
@@ -118,6 +118,30 @@ where
     Option::<String>::deserialize(deserializer)?
         .map(|value| duration_str::parse_chrono(&value).map_err(serde::de::Error::custom))
         .transpose()
+}
+
+fn deserialize_optional_std_duration<'de, D>(
+    deserializer: D,
+) -> Result<Option<std::time::Duration>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Option::<String>::deserialize(deserializer)?
+        .map(|value| duration_str::parse(&value).map_err(serde::de::Error::custom))
+        .transpose()
+}
+
+fn serialize_optional_std_duration<S>(
+    duration: &Option<std::time::Duration>,
+    serializer: S,
+) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    match duration {
+        None => serializer.serialize_none(),
+        Some(duration) => as_std_duration(duration, serializer),
+    }
 }
 
 /// nico-api configuration file content
@@ -514,6 +538,10 @@ pub struct CarbideConfig {
     /// misbehaves before a release adds a rule for it.
     #[serde(default)]
     pub bmc_driver_rules: Vec<Rule>,
+
+    /// Which client BMC operations moved to the driver system run through.
+    #[serde(default)]
+    pub bmc_backend: BmcBackend,
 
     /// Deprecated compatibility key. This setting no longer affects runtime
     /// behavior; keep accepting it temporarily so existing site files can be
@@ -985,17 +1013,17 @@ pub struct CarbideConfig {
     #[serde(default = "default_to_true")]
     pub enable_admin_ui: bool,
 
-    /// External tool links surfaced in the admin web UI's "Tools"
-    /// sidebar. Each entry's `name` must be unique. The section is
-    /// hidden when the list is empty.
+    /// Links shown in the admin web UI. They are hidden by default.
     #[serde(default)]
-    pub web_ui_sidebar_tools: Vec<ToolLink>,
+    pub web_ui: WebUiConfig,
 
-    /// URL template for the "Logs" link on machine and endpoint detail
-    /// pages. The placeholder `{search}` is replaced with the machine ID
-    /// or BMC IP. When empty, the Logs link is hidden.
-    #[serde(default)]
-    pub web_ui_logs_link_template: String,
+    /// Old name for `web_ui.sidebar_tools`, kept so startup can warn about its use.
+    #[serde(default, rename = "web_ui_sidebar_tools", skip_serializing)]
+    pub deprecated_web_ui_sidebar_tools: Option<Vec<ToolLink>>,
+
+    /// Old name for `web_ui.logs_link_template`, kept so startup can warn about its use.
+    #[serde(default, rename = "web_ui_logs_link_template", skip_serializing)]
+    pub deprecated_web_ui_logs_link_template: Option<String>,
 
     /// In-memory log history for the admin web live log viewer
     /// (`/admin/logs`): how much recent log data to keep for
@@ -1080,6 +1108,16 @@ pub struct ApiAdmissionControlConfig {
     )]
     pub pending_timeout: std::time::Duration,
 
+    /// Maximum time an admitted request may execute its handler. Must cover the
+    /// longest legitimate unary RPC served by nico-api, including twice
+    /// `certificates.cert_manager.request_timeout_secs` when cert-manager is enabled.
+    #[serde(
+        default = "default_api_admission_max_execution_time",
+        deserialize_with = "deserialize_duration",
+        serialize_with = "as_std_duration"
+    )]
+    pub max_execution_time: std::time::Duration,
+
     /// How long empty client scheduling state remains cached.
     #[serde(
         default = "default_api_admission_client_idle_timeout",
@@ -1103,6 +1141,13 @@ pub struct ApiAdmissionServiceLimitsConfig {
         serialize_with = "as_std_duration"
     )]
     pub pending_timeout: std::time::Duration,
+    /// Overrides the global `max_execution_time` for this service when set.
+    #[serde(
+        default,
+        deserialize_with = "deserialize_optional_std_duration",
+        serialize_with = "serialize_optional_std_duration"
+    )]
+    pub max_execution_time: Option<std::time::Duration>,
 }
 
 impl Default for ApiAdmissionControlConfig {
@@ -1114,6 +1159,7 @@ impl Default for ApiAdmissionControlConfig {
             max_work_in_flight_per_client: default_api_admission_max_work_in_flight_per_client(),
             max_pending_per_client: default_api_admission_max_pending_per_client(),
             pending_timeout: default_api_admission_pending_timeout(),
+            max_execution_time: default_api_admission_max_execution_time(),
             client_idle_timeout: default_api_admission_client_idle_timeout(),
             service_limits: BTreeMap::new(),
         }
@@ -1134,6 +1180,7 @@ impl ApiAdmissionControlConfig {
             self.max_work_in_flight_per_client,
             self.max_pending_per_client,
             self.pending_timeout,
+            self.max_execution_time,
             self.client_idle_timeout,
         )
         .map(Some)
@@ -1154,6 +1201,7 @@ impl ApiAdmissionControlConfig {
                 limits.max_work_in_flight,
                 limits.max_pending,
                 limits.pending_timeout,
+                limits.max_execution_time.unwrap_or(self.max_execution_time),
                 self.max_work_in_flight,
                 self.max_pending,
             )
@@ -1239,6 +1287,18 @@ pub struct CredentialFileSourceConfig {
         serialize_with = "as_std_duration"
     )]
     pub poll_interval: std::time::Duration,
+}
+
+/// The client BMC operations run through.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BmcBackend {
+    /// libredfish clients.
+    #[default]
+    Libredfish,
+    /// The drivers selected for each BMC by `bmc_driver_rules` and the
+    /// compiled rules.
+    Drivers,
 }
 
 /// Read precedence and mutation policy for site UFM credentials.
@@ -1613,6 +1673,21 @@ impl PerObjectStateMetricObjectType {
             Self::IbPartition => "ib_partition",
         }
     }
+}
+
+/// Settings for admin web UI links, grouped under `[web_ui]`.
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct WebUiConfig {
+    /// External links in the Tools sidebar. Names must be unique and URLs must
+    /// use HTTP or HTTPS. An empty list hides the section.
+    #[serde(default)]
+    pub sidebar_tools: Vec<ToolLink>,
+
+    /// URL template for Logs links on machine and endpoint detail pages.
+    /// `{search}` is replaced with the machine ID or BMC IP. An empty string hides the link.
+    #[serde(default)]
+    pub logs_link_template: String,
 }
 
 /// One external tool link rendered in the admin web UI's "Tools"
@@ -3265,6 +3340,11 @@ pub struct FnnRoutingProfileConfig {
     #[serde(default)]
     pub route_targets_on_exports: Option<Vec<RouteTargetConfig>>,
 
+    /// Adds targets to already eligible type-5 exports from every matching prefix rule.
+    /// Omission means no conditional exports; a VPC's present list replaces this list.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub route_targets_on_exports_by_prefix: Option<Vec<PrefixRouteTargetConfig>>,
+
     /// Is this an internal or external tenant/VPC profile
     #[serde(default)]
     pub internal: Option<bool>,
@@ -3346,6 +3426,7 @@ impl FnnRoutingProfileConfig {
             tenant_prefix_overlap_eligible: _,
             route_target_imports,
             route_targets_on_exports,
+            route_targets_on_exports_by_prefix,
             // External profiles cannot participate in exact prefix reuse.
             internal,
             leak_default_route_from_underlay,
@@ -3366,6 +3447,9 @@ impl FnnRoutingProfileConfig {
 
         *internal == Some(true)
             && !contributions.has_additional_targets()
+            && route_targets_on_exports_by_prefix
+                .as_ref()
+                .is_none_or(Vec::is_empty)
             && !leak_default_route_from_underlay.unwrap_or_default()
             && !leak_tenant_host_routes_to_underlay.unwrap_or_default()
             && !tenant_leak_communities_accepted.unwrap_or_default()
@@ -3379,26 +3463,41 @@ impl FnnRoutingProfileConfig {
 impl FnnConfig {
     /// Validates global and configured routing-profile targets before the API starts serving.
     pub(crate) fn validate_route_targets(&self) -> eyre::Result<()> {
-        let validate_profile =
-            |path: &str, profile: &FnnRoutingProfileConfig| -> eyre::Result<()> {
-                for (field, targets) in [
-                    (
-                        "route_target_imports",
-                        profile.route_target_imports.as_deref(),
-                    ),
-                    (
-                        "route_targets_on_exports",
-                        profile.route_targets_on_exports.as_deref(),
-                    ),
-                ] {
-                    for (index, target) in targets.unwrap_or_default().iter().enumerate() {
-                        target
-                            .validate()
-                            .wrap_err_with(|| format!("{path}.{field}[{index}] is invalid"))?;
-                    }
+        let validate_profile = |path: &str,
+                                profile: &FnnRoutingProfileConfig|
+         -> eyre::Result<()> {
+            for (field, targets) in [
+                (
+                    "route_target_imports",
+                    profile.route_target_imports.as_deref(),
+                ),
+                (
+                    "route_targets_on_exports",
+                    profile.route_targets_on_exports.as_deref(),
+                ),
+            ] {
+                for (index, target) in targets.unwrap_or_default().iter().enumerate() {
+                    target
+                        .validate()
+                        .wrap_err_with(|| format!("{path}.{field}[{index}] is invalid"))?;
                 }
-                Ok(())
-            };
+            }
+            let entries = profile
+                .route_targets_on_exports_by_prefix
+                .as_deref()
+                .unwrap_or_default();
+            PrefixRouteTargetConfig::validate_entries(entries).wrap_err_with(|| {
+                format!("{path}.route_targets_on_exports_by_prefix is invalid")
+            })?;
+            for (index, entry) in entries.iter().enumerate() {
+                for (target_index, target) in entry.route_targets.iter().enumerate() {
+                    target.validate().wrap_err_with(|| format!(
+                            "{path}.route_targets_on_exports_by_prefix[{index}].route_targets[{target_index}] is invalid"
+                        ))?;
+                }
+            }
+            Ok(())
+        };
 
         // Global targets have no VPC context and therefore accept literals only.
         if let Some(target) = &self.common_internal_route_target {
@@ -3447,6 +3546,10 @@ impl FnnConfig {
         };
 
         Ok(Cow::Owned(FnnRoutingProfileConfig {
+            route_targets_on_exports_by_prefix: overrides
+                .route_targets_on_exports_by_prefix
+                .clone()
+                .or_else(|| base_profile.route_targets_on_exports_by_prefix.clone()),
             route_target_imports: overrides
                 .route_target_imports
                 .clone()
@@ -3482,10 +3585,12 @@ impl FnnConfig {
 
 impl FnnRoutingProfileConfig {
     /// Resolves route targets against one VPC while constructing the concrete DPU routing profile.
-    pub(crate) fn to_rpc(
-        &self,
-        vpc_vni: Option<u32>,
-    ) -> Result<rpc::forge::RoutingProfile, RouteTargetConfigError> {
+    pub(crate) fn to_rpc(&self, vpc_vni: Option<u32>) -> eyre::Result<rpc::forge::RoutingProfile> {
+        let conditional_exports = self
+            .route_targets_on_exports_by_prefix
+            .as_deref()
+            .unwrap_or_default();
+        PrefixRouteTargetConfig::validate_entries(conditional_exports)?;
         let resolve_route_targets = |targets: Option<&[RouteTargetConfig]>| {
             targets
                 .unwrap_or_default()
@@ -3495,6 +3600,19 @@ impl FnnRoutingProfileConfig {
         };
 
         Ok(rpc::forge::RoutingProfile {
+            route_targets_on_exports_by_prefix: conditional_exports
+                .iter()
+                .map(|entry| {
+                    // Resolve nested targets with the same VPC context as unconditional targets.
+                    Ok(rpc::forge::PrefixRouteTarget {
+                        prefix: entry.prefix.trunc().to_string(),
+                        match_type: rpc::forge::ExportPrefixMatchType::from(entry.match_type)
+                            as i32,
+                        max_prefix_length: entry.max_prefix_length,
+                        route_targets: resolve_route_targets(Some(&entry.route_targets))?,
+                    })
+                })
+                .collect::<Result<_, RouteTargetConfigError>>()?,
             tenant_leak_communities_accepted: self
                 .tenant_leak_communities_accepted
                 .unwrap_or_default(),
@@ -3533,9 +3651,10 @@ impl FnnRoutingProfileConfig {
     pub(crate) fn to_effective_rpc(
         &self,
         vpc_vni: Option<u32>,
-    ) -> Result<rpc::forge::VpcEffectiveRoutingProfile, RouteTargetConfigError> {
+    ) -> eyre::Result<rpc::forge::VpcEffectiveRoutingProfile> {
         let routing_profile = self.to_rpc(vpc_vni)?;
         Ok(rpc::forge::VpcEffectiveRoutingProfile {
+            route_targets_on_exports_by_prefix: routing_profile.route_targets_on_exports_by_prefix,
             route_target_imports: routing_profile.route_target_imports,
             route_targets_on_exports: routing_profile.route_targets_on_exports,
             leak_default_route_from_underlay: routing_profile.leak_default_route_from_underlay,
@@ -3670,6 +3789,50 @@ impl CarbideConfig {
         )
     }
 
+    /// Reject an admission deadline that would drop a cert-manager issuance before its
+    /// cleanup runs. Issuance and cleanup each wait up to `request_timeout_secs`, and a
+    /// dropped handler leaves its CertificateRequest behind. Internal services can reach
+    /// issuance through `DiscoverMachine` and `CreateCredential`, so each service
+    /// `max_execution_time` override must cover it as well.
+    pub fn validate_admission_covers_cert_manager(&self) -> eyre::Result<()> {
+        let admission = &self.api_admission_control;
+        if !admission.enabled {
+            return Ok(());
+        }
+        let Some(cert_manager) = self.certificates.cert_manager_config()? else {
+            return Ok(());
+        };
+        let required =
+            std::time::Duration::from_secs(cert_manager.request_timeout_secs).saturating_mul(2);
+        let overrides = admission
+            .service_limits
+            .iter()
+            .filter_map(|(service_id, limits)| {
+                limits.max_execution_time.map(|deadline| {
+                    (
+                        format!(
+                            "api_admission_control.service_limits.{service_id}.max_execution_time"
+                        ),
+                        deadline,
+                    )
+                })
+            });
+        let deadlines = std::iter::once((
+            "api_admission_control.max_execution_time".to_string(),
+            admission.max_execution_time,
+        ))
+        .chain(overrides);
+        for (field, deadline) in deadlines {
+            eyre::ensure!(
+                deadline >= required,
+                "{field} ({deadline:?}) must be at least twice \
+                 certificates.cert_manager.request_timeout_secs ({}s) when cert-manager is enabled",
+                cert_manager.request_timeout_secs,
+            );
+        }
+        Ok(())
+    }
+
     /// Returns an error when two `tools` entries share a `name`,
     /// since names are used as stable identifiers (e.g. `name = "grafana"`
     /// is referenced by the per-machine "Logs" deep link).
@@ -3677,7 +3840,7 @@ impl CarbideConfig {
     /// `https` scheme.
     pub fn validate_web_ui_sidebar_tools(&self) -> eyre::Result<()> {
         let mut seen = std::collections::HashSet::new();
-        for tool in &self.web_ui_sidebar_tools {
+        for tool in &self.web_ui.sidebar_tools {
             if !seen.insert(tool.name.as_str()) {
                 return Err(eyre::eyre!(
                     "duplicate tools entry with name = {:?}; tool names must be unique",
@@ -4322,6 +4485,13 @@ const fn default_api_admission_max_work_in_flight_per_client() -> usize {
 
 const fn default_api_admission_max_pending_per_client() -> usize {
     64
+}
+
+const fn default_api_admission_max_execution_time() -> std::time::Duration {
+    // Matches the Rust client's request timeout. That client sends no `grpc-timeout`, so a
+    // shorter default would cut off admin-cli, Scout and DPU agent calls the client still waits on.
+    // Keep in sync with the cert-manager deadline in the nico-api chart's config template.
+    std::time::Duration::from_secs(300)
 }
 
 const fn default_api_admission_pending_timeout() -> std::time::Duration {
@@ -5912,6 +6082,106 @@ path = "credentials.yaml"
         );
     }
 
+    /// Verifies conditional targets inherit, replace, or clear as a collection and
+    /// resolve independently per VPC.
+    #[test]
+    fn conditional_export_overrides_and_vpc_resolution_preserve_configured_symbols() {
+        // Configure one reusable symbolic rule through the named-profile TOML representation.
+        let profile: FnnRoutingProfileConfig = toml::from_str(r#"
+            internal = true
+            tenant_prefix_overlap_eligible = true
+            route_targets_on_exports_by_prefix = [
+                { prefix = "0.0.0.0/0", match_type = "exact", route_targets = [{ asn = 429000000, vni_self = true }] },
+            ]
+        "#).expect("conditional export profile");
+        let fnn = FnnConfig {
+            admin_vpc: None,
+            common_internal_route_target: None,
+            additional_route_target_imports: vec![],
+            routing_profiles: HashMap::from([("BASE".to_string(), profile)]),
+            use_vpc_vrf_loopback: false,
+        };
+
+        // Each VPC resolves the same symbol without altering the configured rule.
+        for vni in [100, 200] {
+            let resolved = fnn
+                .resolve_vpc_routing_profile(&vpc_config(Some("BASE"), None))
+                .expect("inherited rules")
+                .to_rpc(Some(vni))
+                .expect("encodable VPC VNI");
+            assert_eq!(
+                resolved.route_targets_on_exports_by_prefix[0].route_targets[0].vni,
+                Some(vni)
+            );
+            assert!(!resolved.route_targets_on_exports_by_prefix[0].route_targets[0].vni_self);
+        }
+        let configured_profile = fnn
+            .routing_profiles
+            .get("BASE")
+            .expect("retained configured profile");
+        assert!(
+            configured_profile
+                .route_targets_on_exports_by_prefix
+                .as_ref()
+                .expect("configured rules")[0]
+                .route_targets[0]
+                .vni_self
+        );
+        assert!(!configured_profile.is_eligible_for_tenant_prefix_overlap());
+
+        // Encoding validation must run after nested symbolic targets have resolved.
+        assert!(configured_profile.to_rpc(Some(65_536)).is_err());
+
+        // Clone the configured rules to retain the symbolic target in the replacement fixture.
+        let mut replacement_rules = configured_profile
+            .route_targets_on_exports_by_prefix
+            .clone()
+            .expect("configured rules");
+        // Change the prefix to distinguish replacement from retaining or appending the base rule.
+        replacement_rules[0].prefix = "::/0".parse().expect("IPv6 default route");
+
+        value_scenarios!(run = |overrides| {
+            // Compare complete collections so inherited rules cannot leak into a replacement.
+            fnn.resolve_vpc_routing_profile(&vpc_config(Some("BASE"), Some(overrides)))
+                .expect("conditional export overrides")
+                .into_owned()
+                .route_targets_on_exports_by_prefix
+        };
+            "conditional export collection overrides" {
+                // Present unrelated properties retain the populated conditional export list.
+                VpcRoutingProfileOverrides {
+                    route_target_imports: Some(vec![]), // Leave conditional exports unset.
+                    ..Default::default()
+                } => configured_profile.route_targets_on_exports_by_prefix.clone(),
+                // A populated list replaces the base collection instead of accumulating its rules.
+                VpcRoutingProfileOverrides {
+                    route_targets_on_exports_by_prefix: Some(replacement_rules.clone()), // Supply the complete replacement.
+                    ..Default::default()
+                } => Some(replacement_rules),
+            }
+        );
+
+        // A present empty collection clears inherited conditional exports and restores isolation.
+        let cleared = fnn
+            .resolve_vpc_routing_profile(&vpc_config(
+                Some("BASE"),
+                Some(VpcRoutingProfileOverrides {
+                    route_targets_on_exports_by_prefix: Some(vec![]),
+                    ..Default::default()
+                }),
+            ))
+            .expect("explicit clearing")
+            .into_owned();
+        assert!(
+            cleared
+                .to_rpc(Some(100))
+                .expect("cleared profile")
+                .route_targets_on_exports_by_prefix
+                .is_empty()
+        );
+        assert!(cleared.is_eligible_for_tenant_prefix_overlap());
+    }
+
     /// Verifies numeric TOML remains compatible while symbolic targets retain
     /// their unresolved VPC dependency.
     #[test]
@@ -5941,6 +6211,7 @@ path = "credentials.yaml"
         assert_eq!(
             profile,
             FnnRoutingProfileConfig {
+                route_targets_on_exports_by_prefix: None,
                 tenant_prefix_overlap_eligible: false,
                 route_target_imports: Some(vec![
                     RouteTargetConfig {
@@ -6092,6 +6363,7 @@ path = "credentials.yaml"
             prefix: "192.0.2.0/24".parse().expect("valid test prefix"),
         };
         let base = FnnRoutingProfileConfig {
+            route_targets_on_exports_by_prefix: None,
             tenant_prefix_overlap_eligible: true,
             route_target_imports: Some(vec![RouteTargetConfig {
                 asn: 3,
@@ -6129,6 +6401,7 @@ path = "credentials.yaml"
         assert_eq!(
             fnn.resolve_vpc_routing_profile(&vpc).unwrap().as_ref(),
             &FnnRoutingProfileConfig {
+                route_targets_on_exports_by_prefix: None,
                 tenant_prefix_overlap_eligible: true,
                 route_target_imports: Some(vec![]),
                 route_targets_on_exports: Some(vec![inherited_export]),
@@ -6675,7 +6948,7 @@ path = "credentials.yaml"
             .merge(Toml::file(format!("{TEST_DATA_DIR}/min_config.toml")))
             .extract()
             .unwrap();
-        config.web_ui_sidebar_tools = vec![ToolLink {
+        config.web_ui.sidebar_tools = vec![ToolLink {
             name: "evil".to_string(),
             display_name: "Evil".to_string(),
             url: BAD_URL.to_string(),
@@ -6899,7 +7172,7 @@ path = "credentials.yaml"
     #[test]
     fn api_admission_control_only_validates_bounds_when_enabled() {
         type ZeroOut = fn(&mut ApiAdmissionControlConfig);
-        let cases: [(&str, ZeroOut); 6] = [
+        let cases: [(&str, ZeroOut); 7] = [
             ("max_work_in_flight", |config| config.max_work_in_flight = 0),
             ("max_pending", |config| config.max_pending = 0),
             ("max_work_in_flight_per_client", |config| {
@@ -6910,6 +7183,9 @@ path = "credentials.yaml"
             }),
             ("pending_timeout", |config| {
                 config.pending_timeout = std::time::Duration::ZERO
+            }),
+            ("max_execution_time", |config| {
+                config.max_execution_time = std::time::Duration::ZERO
             }),
             ("client_idle_timeout", |config| {
                 config.client_idle_timeout = std::time::Duration::ZERO
@@ -6923,6 +7199,7 @@ path = "credentials.yaml"
             max_work_in_flight_per_client: 0,
             max_pending_per_client: 0,
             pending_timeout: std::time::Duration::ZERO,
+            max_execution_time: std::time::Duration::from_secs(120),
             client_idle_timeout: std::time::Duration::ZERO,
             service_limits: BTreeMap::new(),
         };
@@ -6974,6 +7251,155 @@ path = "credentials.yaml"
         assert_api_admission_semaphore_bound("max_work_in_flight", |config, value| {
             config.max_work_in_flight = value;
         });
+    }
+
+    /// The default admission deadline covers cert-manager's default issuance plus cleanup. A
+    /// longer cert-manager timeout, or a shorter service override, is rejected only while
+    /// admission and either cert-manager backend are enabled.
+    #[test]
+    fn validate_admission_covers_cert_manager_issuance_and_cleanup() {
+        struct Case {
+            name: &'static str,
+            admission_enabled: bool,
+            use_cert_manager: bool,
+            use_cert_manager_ufm: bool,
+            request_timeout_secs: u64,
+            service_deadline_secs: Option<u64>,
+            rejected_field: Option<&'static str>,
+        }
+        let cases = [
+            Case {
+                name: "exactly twice the default deadline",
+                admission_enabled: true,
+                use_cert_manager: true,
+                use_cert_manager_ufm: false,
+                request_timeout_secs: 150,
+                service_deadline_secs: None,
+                rejected_field: None,
+            },
+            Case {
+                name: "over half the default deadline",
+                admission_enabled: true,
+                use_cert_manager: true,
+                use_cert_manager_ufm: false,
+                request_timeout_secs: 151,
+                service_deadline_secs: None,
+                rejected_field: Some("api_admission_control.max_execution_time"),
+            },
+            Case {
+                name: "UFM backend alone",
+                admission_enabled: true,
+                use_cert_manager: false,
+                use_cert_manager_ufm: true,
+                request_timeout_secs: 151,
+                service_deadline_secs: None,
+                rejected_field: Some("api_admission_control.max_execution_time"),
+            },
+            Case {
+                name: "service override below twice the timeout",
+                admission_enabled: true,
+                use_cert_manager: true,
+                use_cert_manager_ufm: false,
+                request_timeout_secs: 150,
+                service_deadline_secs: Some(299),
+                rejected_field: Some(
+                    "api_admission_control.service_limits.site-agent.max_execution_time",
+                ),
+            },
+            Case {
+                name: "cert-manager disabled",
+                admission_enabled: true,
+                use_cert_manager: false,
+                use_cert_manager_ufm: false,
+                request_timeout_secs: 600,
+                service_deadline_secs: Some(1),
+                rejected_field: None,
+            },
+            Case {
+                name: "admission disabled",
+                admission_enabled: false,
+                use_cert_manager: true,
+                use_cert_manager_ufm: false,
+                request_timeout_secs: 600,
+                service_deadline_secs: Some(1),
+                rejected_field: None,
+            },
+        ];
+
+        for case in cases {
+            let mut config: CarbideConfig = Figment::new()
+                .merge(Toml::file(format!("{TEST_DATA_DIR}/min_config.toml")))
+                .extract()
+                .unwrap();
+            config.api_admission_control.enabled = case.admission_enabled;
+            config.certificates.use_cert_manager = case.use_cert_manager;
+            config.certificates.use_cert_manager_ufm = case.use_cert_manager_ufm;
+            config.certificates.cert_manager = Some(cert_manager::Config {
+                request_timeout_secs: case.request_timeout_secs,
+                ..Default::default()
+            });
+            if let Some(secs) = case.service_deadline_secs {
+                config.api_admission_control.service_limits.insert(
+                    "site-agent".to_string(),
+                    ApiAdmissionServiceLimitsConfig {
+                        max_work_in_flight: 1,
+                        max_pending: 1,
+                        pending_timeout: std::time::Duration::from_secs(1),
+                        max_execution_time: Some(std::time::Duration::from_secs(secs)),
+                    },
+                );
+            }
+
+            let result = config.validate_admission_covers_cert_manager();
+            match case.rejected_field {
+                None => result.unwrap_or_else(|error| panic!("{}: {error}", case.name)),
+                Some(field) => {
+                    let error = result.expect_err(case.name).to_string();
+                    let timeout = format!("request_timeout_secs ({}s)", case.request_timeout_secs);
+                    assert!(
+                        error.starts_with(&format!("{field} (")) && error.contains(&timeout),
+                        "{}: unexpected error: {error}",
+                        case.name
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn api_admission_control_parses_max_execution_time_overrides() {
+        let config = toml::from_str::<ApiAdmissionControlConfig>(
+            r#"
+            max_execution_time = "45s"
+
+            [service_limits.site-agent]
+            max_work_in_flight = 4
+            max_pending = 32
+            pending_timeout = "5s"
+            max_execution_time = "300s"
+
+            [service_limits.flow]
+            max_work_in_flight = 4
+            max_pending = 32
+            pending_timeout = "5s"
+            "#,
+        )
+        .expect("admission config parses");
+
+        assert_eq!(
+            config.max_execution_time,
+            std::time::Duration::from_secs(45)
+        );
+        assert_eq!(
+            config.service_limits["site-agent"].max_execution_time,
+            Some(std::time::Duration::from_secs(300))
+        );
+        // An omitted override inherits the global value when limits are built.
+        assert_eq!(config.service_limits["flow"].max_execution_time, None);
+        config
+            .admission_limits()
+            .expect("overrides are valid")
+            .expect("admission is enabled");
     }
 
     #[test]
@@ -7134,6 +7560,7 @@ path = "credentials.yaml"
                 max_work_in_flight_per_client: 8,
                 max_pending_per_client: 64,
                 pending_timeout: std::time::Duration::from_secs(5),
+                max_execution_time: std::time::Duration::from_secs(300),
                 client_idle_timeout: std::time::Duration::from_secs(5 * 60),
                 service_limits: BTreeMap::new(),
             }
@@ -7442,6 +7869,8 @@ path = "credentials.yaml"
                 "ssh-console.nico-system.svc.cluster.local:1079",
             ),
             ("{{ .Values.tracing.enabled }}", "false"),
+            // Twice the `requestTimeoutSecs` value rendered above.
+            ("{{ $certDeadline }}", "240"),
             ("{{ . | quote }}", r#""/tmp/test.pem""#),
         ] {
             config = config.replace(template, rendered);
@@ -7476,7 +7905,7 @@ path = "credentials.yaml"
         .unwrap();
         let profiles = &config.rack_profiles.rack_profiles;
         assert_eq!(profiles.len(), 14);
-        for (id, family, topology, name, compute_vendor, power_vendor) in [
+        for (id, family, topology, name, compute_vendor, power_vendor, power_count) in [
             (
                 "VR_NVL72R1_C2G4_NVIDIA",
                 "vrnvl72",
@@ -7484,6 +7913,7 @@ path = "credentials.yaml"
                 None,
                 "NVIDIA",
                 "LiteOn",
+                4,
             ),
             (
                 "GB300_NVL72R1_C2G4_NVIDIA",
@@ -7492,6 +7922,7 @@ path = "credentials.yaml"
                 Some("GB300"),
                 "NVIDIA",
                 "LiteOn",
+                6,
             ),
             (
                 "GB300_NVL72R1_C2G4_LENOVO",
@@ -7500,6 +7931,7 @@ path = "credentials.yaml"
                 Some("GB300"),
                 "Lenovo",
                 "LiteOn",
+                6,
             ),
             (
                 "GB300_NVL72R1_C2G4_SMC",
@@ -7508,6 +7940,7 @@ path = "credentials.yaml"
                 Some("GB300"),
                 "Supermicro",
                 "Delta",
+                6,
             ),
             (
                 "GB200_NVL72R1_C2G4_NVIDIA",
@@ -7516,6 +7949,7 @@ path = "credentials.yaml"
                 Some("GB200"),
                 "NVIDIA",
                 "LiteOn",
+                8,
             ),
             (
                 "GB200_NVL72R1_C2G4_WIWYNN",
@@ -7524,9 +7958,10 @@ path = "credentials.yaml"
                 Some("GB200"),
                 "WIWYNN",
                 "LiteOn",
+                8,
             ),
         ] {
-            for suffix in ["", "_NO_POWERSHELF"] {
+            for (suffix, count) in [("", power_count), ("_NO_POWERSHELF", 0)] {
                 let key = format!("{id}{suffix}");
                 let profile = profiles
                     .get(&key)
@@ -7548,7 +7983,7 @@ path = "credentials.yaml"
                     Some(compute_vendor),
                     "{key}"
                 );
-                assert_eq!(caps.compute.count, 0, "{key}");
+                assert_eq!(caps.compute.count, 16, "{key}");
                 assert_eq!(caps.switch.vendor.as_deref(), Some("NVIDIA"), "{key}");
                 assert_eq!(caps.switch.count, 9, "{key}");
                 assert_eq!(
@@ -7556,12 +7991,12 @@ path = "credentials.yaml"
                     Some(power_vendor),
                     "{key}"
                 );
-                assert_eq!(caps.power_shelf.count, 0, "{key}");
+                assert_eq!(caps.power_shelf.count, count, "{key}");
             }
         }
-        for (id, family, vendor) in [
-            ("NVL72", "gb200", "NVIDIA"),
-            ("NVL72_GB300", "gb300", "Lenovo"),
+        for (id, family, vendor, power_count) in [
+            ("NVL72", "gb200", "NVIDIA", 8),
+            ("NVL72_GB300", "gb300", "Lenovo", 6),
         ] {
             let profile = &profiles[id];
             assert_eq!(profile.product_family.as_ref().unwrap().as_str(), family);
@@ -7569,9 +8004,9 @@ path = "credentials.yaml"
                 profile.rack_capabilities.compute.vendor.as_deref(),
                 Some(vendor)
             );
-            assert_eq!(profile.rack_capabilities.compute.count, 0);
+            assert_eq!(profile.rack_capabilities.compute.count, 16);
             assert_eq!(profile.rack_capabilities.switch.count, 9);
-            assert_eq!(profile.rack_capabilities.power_shelf.count, 0);
+            assert_eq!(profile.rack_capabilities.power_shelf.count, power_count);
         }
         let overridden: CarbideConfig = Figment::new()
             .merge(Toml::string(&source))

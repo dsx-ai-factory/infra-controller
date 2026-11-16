@@ -1,8 +1,10 @@
-{{- if .Values.certManager.vaultIssuer.create }}
+{{- if and .Values.vault.enabled .Values.certManager.vaultIssuer.create }}
 ## =============================================================================
 ## Vault-backed ClusterIssuer for NICo PKI
 ## Issues certificates via Vault PKI engine (nicoca/sign/nico-cluster).
 ## Requires: Vault PKI configured (vault-pki-config Job), cert-manager Vault SA.
+## Rendered only while vault.enabled is true; a site installed without Vault
+## issues its certificates from site-issuer (site-issuer.yaml) instead.
 ## =============================================================================
 ---
 apiVersion: cert-manager.io/v1

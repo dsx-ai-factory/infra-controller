@@ -2,33 +2,157 @@
 
 {% block title %}Machine Validation Run {{ validation_id }}{% endblock %}
 
+{% block head %}
+<style>
+.validation-panels { margin-top: 1.5rem; }
+.validation-table { overflow-x: auto; }
+.validation-metadata td { overflow-wrap: anywhere; }
+table.validation-results { table-layout: fixed; }
+.validation-results th, .validation-results td { padding: 0.5rem; }
+.validation-results th { font-size: 0.75rem; letter-spacing: 0; overflow-wrap: normal; }
+.validation-attempt-link span { white-space: nowrap; }
+.validation-results td { overflow-wrap: anywhere; }
+.validation-results tr.selected { background: var(--bg-secondary); }
+.validation-test-name { display: block; }
+.validation-test-id { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 0.8rem; }
+.validation-start-date { display: block; font-size: 0.8rem; }
+.validation-log { overflow-wrap: anywhere; margin-top: 2.5rem; }
+.validation-log h2 { margin-top: 0; }
+.validation-log pre { max-height: 60vh; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; }
+@media (max-width: 1100px) { .validation-log { order: 0; position: static; max-height: none; } }
+</style>
+{% endblock %}
+
 {% block content %}
 <h1>Machine Validation Run {{ validation_id }}</h1>
-<table class="sortable overview">
+<table class="overview validation-metadata">
+	<tr><th>Machine ID</th><td>{% match machine_id %}{% when Some with (id) %}<a href="/admin/machine/{{ id }}">{{ id }}</a>{% when None %}N/A{% endmatch %}</td></tr>
+	<tr><th>State</th><td>{{ status }}</td></tr>
+	<tr><th>Completed/Total</th><td>{{ progress }}</td></tr>
+	<tr><th>Context</th><td>{{ context }}</td></tr>
+</table>
+<div class="config-body validation-panels">
+<section class="config-tables" aria-label="Validation tests">
+<h2>Tests</h2>
+<div class="validation-table">
+<table class="sortable overview validation-results n-last">
+	<colgroup><col style="width: 32%"><col style="width: 16%"><col style="width: 18%"><col style="width: 18%"><col style="width: 16%"></colgroup>
 	<thead>
-		<tr>
-			<th>Test ID</th>
-			<th>Name</th>
-			<th>Context</th>
-			<th>Status</th>
-			<th>Start Time</th>
-			<th>End Time</th>
-		</tr>
+		<tr><th>Test Name/ID</th><th>Status</th><th>Attempt</th><th>Started (UTC)</th><th>Duration</th></tr>
 	</thead>
 	<tbody>
 		{% for result in validation_results %}
 		<tr>
-			<td><a href="/admin/machinevalidation/tests/{{ result.test_id }}">{{ result.test_id }}</a></td>
-			<td><a href="/admin/machinevalidation/resultdetails/{{ result.validation_id }}/{{ result.test_id }}">{{
-					result.name }}</a></td>
-			<td>{{ result.context }}</td>
-			                <td>{% if result.status == "0" %}<span class="bubble success">{% else %}<span class="bubble error">{% endif %}{{ result.status }}</span></td>
-			<td>{{ result.start_time }}</td>
-			<td>{{ result.end_time }}</td>
-
+			<td>
+				{% if result.in_progress %}<span class="validation-test-name">{{ result.name }}</span>{% else %}<a class="validation-test-name" href="/admin/machinevalidation/resultdetails/{{ result.validation_id }}/{{ result.test_id }}">{{ result.name }}</a>{% endif %}
+				<a class="validation-test-id" title="{{ result.test_id }}" href="/admin/machinevalidation/tests/{{ result.test_id }}">{{ result.test_id }}</a>
+			</td>
+			<td>{% if result.in_progress %}<span class="bubble">In Progress</span>{% else %}{% if result.status == "0" %}<span class="bubble success">{% else %}<span class="bubble error">{% endif %}Complete ({{ result.status }})</span>{% endif %}</td>
+			<td>{% match result.attempt_id %}{% when Some with (id) %}<a class="validation-attempt-link" href="#attempt-log-{{ id }}" data-attempt-id="{{ id }}" data-test-id="{{ result.test_id }}" data-attempt-number="{% match result.attempt %}{% when Some with (number) %}{{ number }}{% when None %}{% endmatch %}">{% match result.attempt %}{% when Some with (number) %}<span>Attempt {{ number }} ·</span> {% when None %}{% endmatch %}<span>View logs</span></a>{% when None %}Unavailable{% endmatch %}</td>
+			<td data-sort="{{ result.start_time_sort }}"><time datetime="{{ result.start_time }}" title="{{ result.start_time }}">{{ result.start_time_short }}</time><span class="validation-start-date">{{ result.start_date }}</span></td>
+			<td data-sort="{% match result.duration_ms %}{% when Some with (ms) %}{{ ms }}{% when None %}{% endmatch %}"{% if !result.end_time.is_empty() %} title="Ended {{ result.end_time }}"{% endif %}>{{ result.duration }}</td>
 		</tr>
-		{% endfor %}
+		{% else %}<tr><td colspan="5">No running tests or results available.</td></tr>{% endfor %}
 	</tbody>
 </table>
-
+</div>
+</section>
+<aside class="config-panel validation-log" aria-label="Selected attempt logs">
+<h2 id="validation-log-title" tabindex="-1">Attempt Logs</h2>
+<p>Attempt logs require an authorized OAuth or client-certificate identity. Basic authentication alone does not grant log access.</p>
+<p id="validation-log-selection"></p>
+<p class="log-status" role="status">Select View logs to display one attempt's stdout/stderr here.</p>
+<pre hidden><code></code></pre>
+</aside>
+</div>
+{% endblock %}
+{% block script %}
+const logPanel = document.querySelector('.validation-log');
+const logTitle = document.getElementById('validation-log-title');
+const logSelection = document.getElementById('validation-log-selection');
+const logStatus = logPanel.querySelector('.log-status');
+const logOutput = logPanel.querySelector('code');
+const logLinks = new Map();
+document.querySelectorAll('.validation-attempt-link').forEach(link => logLinks.set(link.hash, link));
+let selectedLog = null;
+let logTimer;
+function selectAttempt() {
+    const link = logLinks.get(location.hash);
+    if (link && selectedLog?.id === link.dataset.attemptId) {
+        logPanel.scrollIntoView({ block: 'nearest' });
+        logTitle.focus({ preventScroll: true });
+        return;
+    }
+    clearTimeout(logTimer);
+    selectedLog?.controller?.abort();
+    selectedLog = null;
+    logLinks.forEach(item => {
+        item.closest('tr').classList.remove('selected');
+        item.removeAttribute('aria-current');
+    });
+    logOutput.textContent = '';
+    logOutput.parentElement.hidden = !link;
+    logSelection.textContent = '';
+    logTitle.textContent = 'Attempt Logs';
+    if (!link) {
+        logStatus.textContent = "Select View logs to display one attempt's stdout/stderr here.";
+        return;
+    }
+    link.closest('tr').classList.add('selected');
+    link.setAttribute('aria-current', 'true');
+    logTitle.textContent = link.dataset.testId;
+    logSelection.textContent = `Attempt ${link.dataset.attemptNumber || 'unknown'} · ${link.dataset.attemptId}`;
+    logStatus.textContent = 'Loading logs…';
+    selectedLog = { id: link.dataset.attemptId, sequence: 0, text: '', denied: false };
+    refreshValidationLogs(selectedLog);
+    logPanel.scrollIntoView({ block: 'nearest' });
+    logTitle.focus({ preventScroll: true });
+}
+window.addEventListener('hashchange', selectAttempt);
+logLinks.forEach(link => link.addEventListener('click', event => {
+    if (link.hash === location.hash) {
+        event.preventDefault();
+        selectAttempt();
+    }
+}));
+async function refreshValidationLogs(view) {
+    if (selectedLog !== view || view.denied) return;
+    let delay = 2000;
+    if (!document.hidden) {
+        const controller = new AbortController();
+        view.controller = controller;
+        const timeout = setTimeout(() => controller.abort(), 10000);
+        try {
+            const response = await fetch(`/admin/machinevalidation/attempts/${view.id}/logs?after_sequence=${view.sequence}`, {
+                signal: controller.signal, cache: 'no-store', redirect: 'error'
+            });
+            if (selectedLog !== view) return;
+            if (response.status === 401 || response.status === 403) {
+                view.denied = true;
+                logStatus.textContent = 'Log access requires an authorized user identity from OAuth or a client certificate. Basic authentication alone does not grant access. Reload after signing in.';
+                return;
+            }
+            if (!response.ok) throw new Error(`HTTP ${response.status}`);
+            const page = await response.json();
+            if (selectedLog !== view) return;
+            for (const chunk of page.chunks) {
+                view.text += `[${chunk.stream}] ${chunk.content}`;
+                view.sequence = chunk.sequence;
+            }
+            view.text = view.text.slice(-32768);
+            logOutput.textContent = view.text;
+            logStatus.textContent = page.has_more ? 'Loading more logs…' :
+                (view.sequence ? 'Up to date. Refreshing every 2 seconds.' : 'No logs available. Collection may be disabled, output has not arrived, or retention has expired.');
+            if (page.has_more) delay = 0;
+        } catch (error) {
+            if (selectedLog !== view) return;
+            logStatus.textContent = `Unable to load logs (${error.message}). Retrying…`;
+        } finally {
+            clearTimeout(timeout);
+            view.controller = null;
+        }
+    }
+    if (selectedLog === view && !view.denied) logTimer = setTimeout(() => refreshValidationLogs(view), delay);
+}
+selectAttempt();
 {% endblock %}

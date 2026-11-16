@@ -52,6 +52,7 @@ const DPF_ADMISSION_TIMEOUT: Duration = Duration::from_secs(30);
 ///
 /// Note that if the version does not match in either direction, the DPU will be updated.
 pub(crate) struct DpuNicFirmwareUpdate {
+    pub(crate) instrumentation: carbide_instrument::Instrumentation,
     pub(crate) metrics: Option<DpuNicFirmwareUpdateMetrics>,
     pub(crate) config: Arc<CarbideConfig>,
     /// DPF handle for discovering outdated DPUs and checking reprovision compatibility.
@@ -172,7 +173,7 @@ impl MachineUpdateModule for DpuNicFirmwareUpdate {
                 Ok(false) => continue,
                 Err(reprovisioning_err) => match reprovisioning_err {
                     DatabaseError::NotFoundError { id, .. } => {
-                        carbide_instrument::emit(FirmwareUpdateFailed {
+                        self.instrumentation.emit(FirmwareUpdateFailed {
                             target: FirmwareUpdateTarget::DpuNic,
                             cause: FirmwareUpdateFailureCause::NoUpdateMatch,
                             machine_id: host_machine_id.into(),
@@ -191,7 +192,7 @@ impl MachineUpdateModule for DpuNicFirmwareUpdate {
 
             // Count only committed admissions. A DPU that left Ready or gained
             // another request after the snapshot has not started this update.
-            carbide_instrument::emit(FirmwareUpdateProgress {
+            self.instrumentation.emit(FirmwareUpdateProgress {
                 target: FirmwareUpdateTarget::DpuNic,
                 phase: FirmwareUpdatePhase::Started,
                 machine_id: host_machine_id,
@@ -249,7 +250,7 @@ impl MachineUpdateModule for DpuNicFirmwareUpdate {
                     ))
                 })
             {
-                carbide_instrument::emit(FirmwareUpdateFailed {
+                self.instrumentation.emit(FirmwareUpdateFailed {
                     target: FirmwareUpdateTarget::DpuNic,
                     cause: FirmwareUpdateFailureCause::WrongVersionAfterUpdate,
                     machine_id: updated_machine.host_machine_id.into(),
@@ -318,6 +319,7 @@ impl DpuNicFirmwareUpdate {
         config: Arc<CarbideConfig>,
         meter: opentelemetry::metrics::Meter,
         dpf: Option<Arc<dyn DpfOperations>>,
+        instrumentation: carbide_instrument::Instrumentation,
     ) -> Option<Self> {
         if !config
             .dpu_config
@@ -329,6 +331,7 @@ impl DpuNicFirmwareUpdate {
         let mut metrics = DpuNicFirmwareUpdateMetrics::new();
         metrics.register_callbacks(&meter);
         Some(DpuNicFirmwareUpdate {
+            instrumentation,
             reported_wrong_versions: std::sync::Mutex::new(HashSet::new()),
             metrics: Some(metrics),
             config,

@@ -647,6 +647,10 @@ pub(crate) async fn save_without_reverse_zones(
     set_to_ready: bool,
     allocate_svi_ip: bool,
 ) -> Result<NetworkSegment, CarbideError> {
+    if let Some(domain_id) = ns.subdomain_id {
+        db::dns::domain::lock_live_for_reference(txn.as_mut(), domain_id).await?;
+    }
+
     let prefixes = ns
         .prefixes
         .iter()
@@ -736,6 +740,7 @@ async fn allocate_vni(
             ),
         ) => {
             db::resource_pool::emit_allocation_failure(
+                &api.instrumentation,
                 api.common_pools.ethernet.pool_vni.value_type,
                 owner_id,
                 false,
@@ -746,6 +751,7 @@ async fn allocate_vni(
         }
         Err(err) => {
             db::resource_pool::emit_allocation_failure(
+                &api.instrumentation,
                 api.common_pools.ethernet.pool_vni.value_type,
                 owner_id,
                 false,
@@ -781,6 +787,7 @@ async fn allocate_vlan_id(
             ),
         ) => {
             db::resource_pool::emit_allocation_failure(
+                &api.instrumentation,
                 api.common_pools.ethernet.pool_vlan_id.value_type,
                 owner_id,
                 false,
@@ -791,6 +798,7 @@ async fn allocate_vlan_id(
         }
         Err(err) => {
             db::resource_pool::emit_allocation_failure(
+                &api.instrumentation,
                 api.common_pools.ethernet.pool_vlan_id.value_type,
                 owner_id,
                 false,

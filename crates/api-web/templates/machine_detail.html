@@ -64,6 +64,27 @@
 <h3>Metadata</h3>
 {{ metadata_detail|safe }}
 
+<h3>Telemetry</h3>
+<table class="detailsview telemetry-table">
+	<tr>
+		<th>Tracing</th>
+		<td>
+			<div class="telemetry-actions">
+				<a id="view-grafana-tempo-link" data-tempo-query="{{ tempo_query }}" target="_blank" rel="noopener noreferrer" aria-disabled="true" title="Open machine traces in a new tab">View machine traces in Grafana <span aria-hidden="true">↗</span></a>
+				<button id="copy-grafana-tempo-link" type="button" disabled>Copy link</button>
+			</div>
+			<details id="grafana-address-settings">
+				<summary>Grafana: <span id="grafana-destination">http://localhost:13000</span> · Change address</summary>
+				<label for="grafana-uri">Grafana address</label>
+				<input id="grafana-uri" type="text" value="http://localhost:13000" size="40" style="width: 24rem; max-width: 100%;" aria-describedby="grafana-address-help grafana-tempo-status">
+				<small id="grafana-address-help">Used by “View machine traces” and “Copy link”. Saved in this browser.</small>
+			</details>
+			<span id="grafana-tempo-status" role="status"></span>
+			<textarea id="grafana-tempo-link" aria-label="Grafana Tempo link" readonly hidden></textarea>
+		</td>
+	</tr>
+</table>
+
 {{ health_detail|safe }}
 <table class="detailsview">
 	<tr>
@@ -520,7 +541,7 @@ Missing BMC Data
 
 <div class="section">
     <h2>Machine Validation</h2>
-    <table class="sortable detailsview">
+    <table class="sortable overview">
         <thead>
             <tr>
                 <th>Validation ID</th>
@@ -528,6 +549,8 @@ Missing BMC Data
                 <th>Start Time</th>
                 <th>End Time</th>
                 <th>State</th>
+                <th>Completed/Total</th>
+                <th>Current Work</th>
             </tr>
         </thead>
         <tbody>
@@ -538,6 +561,13 @@ Missing BMC Data
                 <td>{{ run.start_time }}</td>
                 <td>{{ run.end_time }}</td>
                 <td>{% if run.status == "Completed(Success)" %}<span class="bubble success">{% else %}<span class="bubble error">{% endif %}{{ run.status }}</span></td>
+                <td>{{ run.progress }}</td>
+                <td style="overflow-wrap: anywhere;">
+                    {% if run.current_tests != "" %}
+                    <div><strong>Test:</strong> {{ run.current_tests }}</div>
+                    <div><strong>Attempt:</strong> {{ run.current_attempts }}</div>
+                    {% endif %}
+                </td>
             </tr>
             {% endfor %}
         </tbody>
@@ -605,6 +635,103 @@ Missing BMC Data
 {{ history|safe }}
 
 <script>
+	function parseGrafanaUri(grafanaUri) {
+		const value = grafanaUri.trim();
+		if (!value || /\s/.test(value)) throw new Error('Missing or invalid Grafana address.');
+		const url = new URL(value.includes('://') ? value : 'https://' + value);
+		if (url.protocol !== 'http:' && url.protocol !== 'https:') {
+			throw new Error('Grafana address must use HTTP or HTTPS.');
+		}
+		return url;
+	}
+
+	function buildGrafanaTempoUrl(grafanaUri, query) {
+		if (!query) throw new Error('Missing machine identities.');
+		const url = parseGrafanaUri(grafanaUri);
+		const orgId = url.searchParams.get('orgId') || '1';
+		url.pathname = url.pathname.replace(/\/+$/, '') + '/explore';
+		url.search = '';
+		url.hash = '';
+		url.searchParams.set('schemaVersion', '1');
+		url.searchParams.set('orgId', orgId);
+		url.searchParams.set('panes', JSON.stringify({
+			machine: {
+				datasource: 'tempo',
+				queries: [{
+					refId: 'A',
+					datasource: {type: 'tempo', uid: 'tempo'},
+					queryType: 'traceql',
+					query: query,
+					tableType: 'spans',
+					limit: 1000,
+					spss: 100,
+					filters: []
+				}],
+				range: {from: 'now-1h', to: 'now'}
+			}
+		}));
+		return url.href;
+	}
+
+	function updateGrafanaTempoLink() {
+		const input = document.getElementById('grafana-uri');
+		const view = document.getElementById('view-grafana-tempo-link');
+		const copy = document.getElementById('copy-grafana-tempo-link');
+		const status = document.getElementById('grafana-tempo-status');
+		const destination = document.getElementById('grafana-destination');
+		document.getElementById('grafana-tempo-link').hidden = true;
+		try {
+			const baseUrl = parseGrafanaUri(input.value);
+			const link = buildGrafanaTempoUrl(input.value, view.dataset.tempoQuery);
+			view.href = link;
+			view.removeAttribute('aria-disabled');
+			copy.disabled = false;
+			input.removeAttribute('aria-invalid');
+			destination.textContent = baseUrl.href;
+			status.textContent = '';
+			return link;
+		} catch (error) {
+			view.removeAttribute('href');
+			view.setAttribute('aria-disabled', 'true');
+			copy.disabled = true;
+			destination.textContent = 'Not configured';
+			input.setAttribute('aria-invalid', 'true');
+			status.textContent = view.dataset.tempoQuery
+				? 'Enter a valid HTTP or HTTPS Grafana address.'
+				: 'No machine identities are available for this search.';
+			document.getElementById('grafana-address-settings').open = true;
+			return null;
+		}
+	}
+
+	async function copyGrafanaTempoLink() {
+		const status = document.getElementById('grafana-tempo-status');
+		const output = document.getElementById('grafana-tempo-link');
+		const link = updateGrafanaTempoLink();
+		if (!link) return;
+		try {
+			await navigator.clipboard.writeText(link);
+		} catch (error) {
+			// Admin pages served over HTTP may not have the Clipboard API.
+			output.value = link;
+			output.hidden = false;
+			output.focus();
+			output.select();
+			let copied = false;
+			try {
+				copied = document.execCommand('copy');
+			} catch (error) {
+				// Leave the selected link visible when browser clipboard access is blocked.
+			}
+			if (!copied) {
+				status.textContent = 'Clipboard unavailable. Copy the selected link below.';
+				return;
+			}
+			output.hidden = true;
+		}
+		status.textContent = 'Grafana Tempo link copied.';
+	}
+
 	function are_you_sure_maintenance(event) {
 		event.preventDefault();
 		let form = document.getElementById("maintenance_action");
@@ -641,6 +768,28 @@ Missing BMC Data
 	}
 
 	document.addEventListener("DOMContentLoaded", function(event){
+		const grafanaUri = document.getElementById('grafana-uri');
+		const grafanaUriStorageKey = 'nico.grafanaUri';
+		try {
+			grafanaUri.value = localStorage.getItem(grafanaUriStorageKey) || grafanaUri.value;
+		} catch (error) {
+			// Browser storage may be blocked; keep the default URI usable.
+		}
+		updateGrafanaTempoLink();
+		grafanaUri.addEventListener('input', function() {
+			updateGrafanaTempoLink();
+			try {
+				if (grafanaUri.value.trim()) {
+					localStorage.setItem(grafanaUriStorageKey, grafanaUri.value);
+				} else {
+					localStorage.removeItem(grafanaUriStorageKey);
+				}
+			} catch (error) {
+				// Copying links still works when browser storage is unavailable.
+			}
+		});
+		document.getElementById('copy-grafana-tempo-link').addEventListener('click', copyGrafanaTempoLink);
+
 		// Set up maintenance/quarantine form handlers (Host machines only)
 		const maintenance_form = document.getElementById("maintenance_action");
 		if (maintenance_form) {

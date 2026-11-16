@@ -30,6 +30,7 @@ type MatService struct {
 // PodInfo is one Pod as the readers need it.
 type PodInfo struct {
 	Name        string
+	UID         string // a pod recreated under its name has a new one
 	Labels      map[string]string
 	Annotations map[string]string
 	Phase       string

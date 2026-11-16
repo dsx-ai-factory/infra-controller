@@ -28,8 +28,10 @@ service FirmwareSupervisor {
   // with different work is rejected, as is new work while a predecessor still
   // requires execution or reconciliation. Complete permits a new ID, as do
   // Failed or Canceled before any mutation intent. The original receipt never
-  // restarts. An occupied host mutation claim returns RESOURCE_EXHAUSTED without
-  // admitting the request.
+  // restarts. If earlier checks pass but acquiring the host mutation claim fails
+  // because it is occupied, the default response is RESOURCE_EXHAUSTED.
+  // report_rejection_details opts in to an explicit not_admitted response for that
+  // submission. Other failures preserve their gRPC status.
   rpc SubmitFirmwareOperation(SubmitFirmwareOperationRequest) returns (SubmitFirmwareOperationResponse);
   // Return a recorded operation; an unknown ID returns NOT_FOUND.
   rpc GetFirmwareOperation(GetFirmwareOperationRequest) returns (GetFirmwareOperationResponse);
@@ -99,6 +101,15 @@ message SubmitFirmwareOperationRequest {
   // and the journal. A duplicate returns its receipt without requiring this
   // configuration and never replaces the accepted operation's runtime input.
   CoreFirmwareDownloadConfig core_download_config = 7;
+  // Report rejection only if earlier checks pass and acquiring the host mutation
+  // claim fails because it is occupied. Omission or false retains
+  // RESOURCE_EXHAUSTED. Older protocol-v5 helpers may return RESOURCE_EXHAUSTED
+  // even when true. A matching retained receipt takes precedence; this option
+  // does not change request identity. Other failures preserve their gRPC status.
+  // A rejection describes only this submission and never resolves an earlier
+  // uncertain attempt, even with the same operation ID. Transport failures and
+  // deadlines leave admission uncertain.
+  bool report_rejection_details = 8;
 }
 
 // FirmwareUpdateContext binds one checked workflow to its dispatch and artifacts.
@@ -118,7 +129,7 @@ message FirmwareUpdateContext {
 
 // Scout's resolved certificate-based Core transport settings for this accepted
 // operation. Paths are absolute on the shared host filesystem. The helper uses
-// ForgeTlsClient and mints its own node JWT; no JWT or PEM bytes are transmitted.
+// CarbideTlsClient and mints its own node JWT; no JWT or PEM bytes are transmitted.
 // Nothing in this message is stored in the durable request or fingerprint.
 // Artifact transport failures retry after 1, 2, and 4 seconds. Those retries,
 // connection retries, cache-readiness polling, and body I/O share one 30-minute
@@ -129,7 +140,7 @@ message CoreFirmwareDownloadConfig {
   // information, query, or fragment. Never an original artifact source URL.
   string core_url = 1;
   // Required absolute root-CA file path, at most 4096 UTF-8 bytes.
-  // ForgeTlsClient rereads it on each request attempt to verify Core's identity.
+  // CarbideTlsClient rereads it on each request attempt to verify Core's identity.
   string root_ca_path = 2;
   // Required absolute client-certificate file path, at most 4096 UTF-8 bytes.
   // Reread for each client build and used with client_key_path for node JWTs.
@@ -157,12 +168,12 @@ message CoreFirmwareDownloadConfig {
   // fails connection setup. The helper does not read proxy environment defaults.
   optional string socks_proxy = 9;
   // Connection retries after the initial attempt; omission or zero disables
-  // them. Scout's ForgeClientConfig factory normally supplies 3. This limit is
+  // them. Scout's CarbideClientConfig factory normally supplies 3. This limit is
   // independent of the artifact transport retries described above.
   optional uint32 connect_retries_max = 10;
   // Delay between connection retries; omission or zero means no delay.
   // A supplied protobuf duration must be nonnegative and fit the monotonic
-  // clock. Scout's ForgeClientConfig factory normally supplies 20 seconds.
+  // clock. Scout's CarbideClientConfig factory normally supplies 20 seconds.
   google.protobuf.Duration connect_retries_interval = 11;
 }
 
@@ -182,10 +193,31 @@ message ObserveFirmwareUpdateRequest {
   FirmwareUpdateContext update_context = 5;
 }
 
-// SubmitFirmwareOperationResponse contains the durably recorded receipt.
+// A durable admission receipt or an explicit rejection before admission.
 message SubmitFirmwareOperationResponse {
-  // Always present on success; acknowledgement does not mean execution completed.
-  mlx_device.FirmwareOperation operation = 1;
+  // A successful response must set result; clients reject an unset result.
+  oneof result {
+    // A receipt acknowledges durable admission, not completed execution.
+    mlx_device.FirmwareOperation operation = 1;
+    // Rejection of this opted-in submission after earlier checks passed but
+    // acquiring an occupied host mutation claim failed. It never resolves an
+    // earlier uncertain attempt, even with the same operation ID.
+    FirmwareOperationNotAdmitted not_admitted = 2;
+  }
+}
+
+// Rejection of this submission before journal admission, not a durable receipt.
+// The client validates its operation ID and the identity pinned before Submit.
+// It never resolves an earlier uncertain attempt, even with the same ID.
+message FirmwareOperationNotAdmitted {
+  // Exact original Submit ID: 1-256 printable nonspace ASCII bytes.
+  string operation_id = 1;
+  // Opaque rejecting helper instance ID: 1-256 printable nonspace ASCII bytes.
+  // The client validates this token without requiring UUID syntax.
+  string supervisor_instance_id = 2;
+  // Required exact protocol, PCI slot, boot, and execution device identity pinned
+  // by the client's handshake before Submit. Omission or mismatch is invalid.
+  SupervisorIdentity identity = 3;
 }
 
 // GetFirmwareOperationRequest selects an operation without changing it.

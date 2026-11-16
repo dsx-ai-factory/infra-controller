@@ -38,7 +38,9 @@ pub use composite::CompositeDataSink;
 pub use events::{
     Classification, CollectorEvent, DiagnosticLogRecord, EventContext, FirmwareInfo, HealthReport,
     HealthReportAlert, HealthReportSuccess, HealthReportTarget, LogRecord, LogSeverity,
-    MetricSample, MetricSemantics, Probe, ReportSource, SensorAttribution, SensorThresholdContext,
+    MetricSample, MetricSemantics, Probe, RedfishCondition, RedfishResourceType, RedfishStatus,
+    ReportSource, ResourceStatusInfo, ResourceStatusObservation, SensorAttribution,
+    SensorThresholdContext,
 };
 pub use health_report::HealthReportSink;
 pub use log_file::LogFileSink;

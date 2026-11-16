@@ -1,12 +1,48 @@
 # =============================================================================
 # Dynamic values for nico-prereqs — rendered at sync time by helmfile.
-# Runs after vault is deployed and unsealed.
+# Runs after vault is deployed and unsealed, or without Vault when setup.sh
+# exports INSTALL_VAULT=false (--skip-vault).
 #
-# Uses exec to query live cluster state (root token only).
+# vault.enabled follows NICO_PREREQS_VAULT_ENABLED, falling back to INSTALL_VAULT
+# and then to true when both are unset, so direct helmfile use keeps installing
+# Vault. setup.sh exports INSTALL_VAULT for the whole run. With --skip-vault it
+# sets NICO_PREREQS_VAULT_ENABLED=true while a Deployment in nico-system or a
+# cert-manager Certificate still references Vault (Core, RMS, Flow, or the
+# site-agent before the run redeploys them), and false in the sync at the end
+# of the run after no consumer does. The root token is read live from the
+# cluster (exec) only while the Vault resources render: the Secret may not
+# exist otherwise. A failed or empty read fails the render instead of writing
+# an empty nico-vault-token that a consumer would hit on its next restart. The
+# retained --skip-vault sync exports the token the consumers already hold
+# (NICO_PREREQS_VAULT_TOKEN_B64) in place of that read, so it does not need
+# the vault namespace.
+# While setup.sh retains the Vault resources without running the vault-pki-config
+# Job, it exports the live AppRole credentials, which render into
+# nico-vault-approle-tokens so the sync does not reset that Secret to the chart's
+# empty placeholders; unset, the placeholders render as on a Vault install.
 # DNS is working on this cluster — vault addressed by DNS name.
 # =============================================================================
+{{- $vaultEnabled := ne (env "NICO_PREREQS_VAULT_ENABLED" | default (env "INSTALL_VAULT" | default "true")) "false" }}
 vault:
+  enabled: {{ $vaultEnabled }}
   address: "https://vault.vault.svc.cluster.local:8200"
-  token: "{{ exec "sh" (list "-c" "kubectl get secret vaultroottoken -n vault -o jsonpath={.data.token} | base64 -d") }}"
+{{- if $vaultEnabled }}
+{{- $rawToken := env "NICO_PREREQS_VAULT_TOKEN_B64" }}
+{{- if not $rawToken }}
+{{- $rawToken = exec "kubectl" (list "get" "secret" "vaultroottoken" "-n" "vault" "-o" "jsonpath={.data.token}") }}
+{{- end }}
+{{- /* b64dec returns its error text instead of failing, so the value is checked before decoding. */}}
+{{- if not (regexMatch "^[A-Za-z0-9+/]+={0,2}$" $rawToken) }}
+{{- fail "vaultroottoken in namespace vault holds no base64 token: initialize and unseal Vault (setup.sh phase 4) before syncing nico-prereqs with vault.enabled=true" }}
+{{- end }}
+{{- $token := b64dec $rawToken }}
+{{- if not $token }}
+{{- fail "vaultroottoken in namespace vault holds an empty token: initialize and unseal Vault (setup.sh phase 4) before syncing nico-prereqs with vault.enabled=true" }}
+{{- end }}
+  token: {{ $token | quote }}
+  approleSecret:
+    roleId: "{{ env "NICO_PREREQS_APPROLE_ROLE_ID" }}"
+    secretId: "{{ env "NICO_PREREQS_APPROLE_SECRET_ID" }}"
+{{- end }}
 imagePullSecrets:
   ngcNicoPull: "{{ env "REGISTRY_PULL_SECRET" }}"

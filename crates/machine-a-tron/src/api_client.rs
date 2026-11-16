@@ -33,7 +33,7 @@ use rpc::forge::{
     ExpectedRackGroup, ExpectedRackGroupRequest, ExpectedRackRequest, ExpectedSwitch,
     SetDynamicConfigRequest,
 };
-use rpc::protos::forge_api_client::ForgeApiClient;
+use rpc::protos::carbide_api_client::CarbideApiClient;
 
 use crate::MachineConfig;
 use crate::status::DeviceKind;
@@ -59,10 +59,10 @@ pub struct MockDiscoveryData {
 }
 
 #[derive(Debug, Clone)]
-pub struct ApiClient(pub ForgeApiClient);
+pub struct ApiClient(pub CarbideApiClient);
 
-impl From<ForgeApiClient> for ApiClient {
-    fn from(value: ForgeApiClient) -> Self {
+impl From<CarbideApiClient> for ApiClient {
+    fn from(value: CarbideApiClient) -> Self {
         ApiClient(value)
     }
 }
@@ -169,6 +169,7 @@ impl ExpectedRecord {
                 id: None,
                 host_nics: interfaces,
                 replace_host_nics: false,
+                replace_dpu_loopbacks: false,
                 rack_id,
                 default_pause_ingestion_and_poweron: None,
                 #[allow(deprecated)]
@@ -759,6 +760,7 @@ mod tests {
                         id: None,
                         host_nics: vec![nic],
                         replace_host_nics: false,
+                        replace_dpu_loopbacks: false,
                         rack_id: Some(rack_id.clone()),
                         default_pause_ingestion_and_poweron: None,
                         #[allow(deprecated)]
@@ -793,6 +795,7 @@ mod tests {
                         id: None,
                         host_nics: Vec::new(),
                         replace_host_nics: false,
+                        replace_dpu_loopbacks: false,
                         rack_id: None,
                         default_pause_ingestion_and_poweron: None,
                         #[allow(deprecated)]
@@ -900,8 +903,8 @@ mod force_delete_tests {
     use hyper::{Request, Response};
     use hyper_util::rt::{TokioExecutor, TokioIo};
     use prost::Message;
+    use rpc::carbide_tls_client::{ApiConfig, CarbideClientConfig};
     use rpc::forge::{AdminForceDeleteMachineRequest, AdminForceDeleteMachineResponse, BuildInfo};
-    use rpc::forge_tls_client::{ApiConfig, ForgeClientConfig};
     use tokio::net::TcpListener;
 
     use super::*;
@@ -920,8 +923,8 @@ mod force_delete_tests {
                 .expect("mock serves the cleanup RPC");
         });
 
-        let client_config = ForgeClientConfig::default();
-        let client = ForgeApiClient::new(&ApiConfig::new(
+        let client_config = CarbideClientConfig::default();
+        let client = CarbideApiClient::new(&ApiConfig::new(
             &format!("http://{address}"),
             &client_config,
         ));

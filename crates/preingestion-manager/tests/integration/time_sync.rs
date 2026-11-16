@@ -108,6 +108,7 @@ async fn test_preingestion_time_sync_ok(pool: PgPool) -> Result<(), Box<dyn std:
         None,
         env.api().work_lock_manager_handle(),
         config.ntp_servers.clone(),
+        env.api().instrumentation().clone(),
     );
 
     let response = env
@@ -217,6 +218,7 @@ async fn test_preingestion_set_ntp_servers_empty(
         None,
         env.api().work_lock_manager_handle(),
         config.ntp_servers.clone(),
+        env.api().instrumentation().clone(),
     );
 
     let response = env
@@ -289,6 +291,7 @@ async fn test_preingestion_set_ntp_servers_max_attempts(
         None,
         env.api().work_lock_manager_handle(),
         config.ntp_servers.clone(),
+        env.api().instrumentation().clone(),
     );
 
     let response = env
@@ -356,6 +359,7 @@ async fn test_preingestion_time_sync_reset_flow(
         None,
         env.api().work_lock_manager_handle(),
         config.ntp_servers.clone(),
+        env.api().instrumentation().clone(),
     );
 
     let response = env
@@ -488,6 +492,7 @@ async fn test_preingestion_time_sync_reset_accepts_paused_power_state_for_dpu(
         None,
         env.api().work_lock_manager_handle(),
         config.ntp_servers,
+        env.api().instrumentation().clone(),
     );
 
     let dpu_ip = prepare_time_sync_endpoint(
@@ -627,6 +632,7 @@ async fn test_preingestion_time_sync_reset_retries_until_host_reaches_on(
         None,
         env.api().work_lock_manager_handle(),
         config.ntp_servers,
+        env.api().instrumentation().clone(),
     );
     let dpu_ip = prepare_time_sync_endpoint(
         &env,
@@ -791,6 +797,7 @@ async fn test_preingestion_time_sync_reset_counts_host_power_on_timeout_as_attem
         None,
         env.api().work_lock_manager_handle(),
         config.ntp_servers,
+        env.api().instrumentation().clone(),
     );
     let host_ip = prepare_time_sync_endpoint(
         &env,
@@ -866,6 +873,7 @@ async fn test_preingestion_time_sync_reset_rejects_paused_power_state_for_non_dp
         None,
         env.api().work_lock_manager_handle(),
         config.ntp_servers,
+        env.api().instrumentation().clone(),
     );
     let non_dpu_ip = prepare_time_sync_endpoint(
         &env,
@@ -963,6 +971,7 @@ async fn test_time_sync_reset_skipped_for_ingested_host(
         None,
         env.api().work_lock_manager_handle(),
         config.ntp_servers.clone(),
+        env.api().instrumentation().clone(),
     );
 
     // Drive the ingested host's endpoint to the point where initial checks run,
@@ -1040,6 +1049,7 @@ async fn test_preingestion_time_sync_check_error_fails(
         None,
         env.api().work_lock_manager_handle(),
         config.ntp_servers.clone(),
+        env.api().instrumentation().clone(),
     );
 
     let response = env
@@ -1102,6 +1112,7 @@ async fn test_preingestion_time_sync_retry_logic(
         None,
         env.api().work_lock_manager_handle(),
         config.ntp_servers.clone(),
+        env.api().instrumentation().clone(),
     );
 
     let response = env
@@ -1194,6 +1205,7 @@ async fn test_time_sync_retry_reenters_reset_before_failing(
         None,
         env.api().work_lock_manager_handle(),
         config.ntp_servers.clone(),
+        env.api().instrumentation().clone(),
     );
 
     let response = env
@@ -1270,6 +1282,7 @@ async fn test_time_sync_fails_after_max_attempts(
         None,
         env.api().work_lock_manager_handle(),
         config.ntp_servers.clone(),
+        env.api().instrumentation().clone(),
     );
 
     let response = env

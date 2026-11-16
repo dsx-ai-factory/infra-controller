@@ -25,6 +25,13 @@ ARG MOLD_SHA256=258aaf2b7808ea22fca625480efdf7a13830e9ee311716db0ba9c62af1770c07
 ARG CI_COMMIT_SHORT_SHA
 ENV CI_COMMIT_SHORT_SHA $CI_COMMIT_SHORT_SHA
 
+# Bullseye security package downloads return 404 from deb.debian.org.
+# Use Debian's archive so Rust 1.97.1 builds can upgrade CA certificates
+# and install PostgreSQL 13 without changing the base image version.
+RUN sed -i \
+    's|http://deb.debian.org/debian-security|https://archive.debian.org/debian-security|g' \
+    /etc/apt/sources.list
+
 # Change CACHEKEY to whatever so docker doesn't re-use the cache from before if you want apt to actually run.
 #
 # https://github.com/moby/moby/issues/1996

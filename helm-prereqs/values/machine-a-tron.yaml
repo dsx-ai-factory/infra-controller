@@ -67,8 +67,9 @@ machineATron:
   # ("Refusing to create managed host, expected machines entry not found").
   registerExpectedMachines: true
   # Leave the mocks at their factory passwords so site-explorer exercises the
-  # credential rotation flow (seed the host factory default in Vault, see the
-  # kvSeeds comment in helm-prereqs/values.yaml). Drop this block to pin the
+  # credential rotation flow. Seed the host factory default in Vault (refer to the
+  # kvSeeds comment in helm-prereqs/values.yaml), or without Vault run
+  # `nico-admin-cli credential add-host-factory-default`. Drop this block to pin the
   # mocks to the site root from the site credentials Secret like the scale
   # profiles do.
   siteCredentialsSecret:

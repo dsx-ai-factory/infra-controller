@@ -66,6 +66,52 @@ impl crate::machine::MachineRowLockItem for StaleMachineValidationAttempt {
     }
 }
 
+/// One execution attempt joined with its validation run item's test ID.
+#[derive(sqlx::FromRow)]
+pub struct ValidationAttempt {
+    /// Test ID from the owning run item.
+    pub test_id: String,
+    /// Unique ID of this execution attempt.
+    pub attempt_id: MachineValidationAttemptId,
+    /// Attempt number within the owning run item.
+    pub attempt_number: i32,
+    /// Whether the attempt state is `Success`, `Failed`, or `Skipped`.
+    pub terminal: bool,
+    /// Attempt start time, if recorded.
+    pub started_at: Option<DateTime<Utc>>,
+    /// Attempt end time, if recorded.
+    pub ended_at: Option<DateTime<Utc>>,
+    /// Persisted exit code, if recorded.
+    pub exit_code: Option<i32>,
+}
+
+/// Returns every attempt for every item in the run, in unspecified order.
+/// Includes earlier attempts, not only each item's latest attempt.
+pub async fn find_attempts_by_run_id(
+    txn: impl DbReader<'_>,
+    run_id: &MachineValidationId,
+) -> DatabaseResult<Vec<ValidationAttempt>> {
+    const QUERY: &str = "
+        SELECT run_item.test_id, attempt.id AS attempt_id, attempt.attempt_number,
+               attempt.state = ANY($2) AS terminal,
+               attempt.started_at, attempt.ended_at, attempt.exit_code
+        FROM machine_validation_attempts attempt
+        JOIN machine_validation_run_items run_item ON run_item.id = attempt.run_item_id
+        WHERE run_item.run_id = $1";
+    let terminal_states = [
+        MachineValidationAttemptState::Success,
+        MachineValidationAttemptState::Failed,
+        MachineValidationAttemptState::Skipped,
+    ]
+    .map(|state| state.to_string());
+    sqlx::query_as::<_, ValidationAttempt>(QUERY)
+        .bind(run_id)
+        .bind(terminal_states.as_slice())
+        .fetch_all(txn)
+        .await
+        .map_err(|e| DatabaseError::query(QUERY, e))
+}
+
 pub async fn materialize_run_plan(
     txn: &mut PgConnection,
     run_id: &MachineValidationId,

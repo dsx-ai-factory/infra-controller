@@ -472,13 +472,13 @@ unsafe fn discovery_fetch_machine_at(
             //
             let runtime: &tokio::runtime::Runtime = CarbideDhcpContext::get_tokio_runtime();
 
-            let forge_client_config = tls::build_forge_client_config();
+            let carbide_client_config = tls::build_carbide_client_config();
 
             match runtime.block_on(Machine::try_fetch(
                 discovery,
                 url,
                 vendor_class.clone(),
-                &forge_client_config,
+                &carbide_client_config,
             )) {
                 Ok(machine) => {
                     // If any DHCP record had been invalidated after the KEA process started,

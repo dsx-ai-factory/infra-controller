@@ -30,9 +30,9 @@ use hyper::{Request, Response, header};
 use hyper_util::rt::{TokioExecutor, TokioIo};
 use prost::Message;
 use rpc::admin_cli::OutputFormat;
+use rpc::carbide_api_client::CarbideApiClient;
+use rpc::carbide_tls_client::{ApiConfig, CarbideClientConfig};
 use rpc::forge::BuildInfo;
-use rpc::forge_api_client::ForgeApiClient;
-use rpc::forge_tls_client::{ApiConfig, ForgeClientConfig};
 use rpc::protos::mlx_device::{
     MlxAdminDeviceIdentitiesRequest, MlxAdminDeviceIdentitiesResponse, MlxDeviceIdentity,
     MlxDeviceIdentityReport, MlxDeviceInfo,
@@ -234,13 +234,13 @@ async fn dispatch_identities(
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
     let request_timeout = Duration::from_secs(5);
-    let client_config = ForgeClientConfig {
+    let client_config = CarbideClientConfig {
         request_timeout: Some(request_timeout),
         ..Default::default()
     };
     let mut captured = CapturedOutput::new();
     let ctx = RuntimeContext {
-        api_client: ApiClient(ForgeApiClient::new(&ApiConfig::new(
+        api_client: ApiClient(CarbideApiClient::new(&ApiConfig::new(
             &format!("http://{address}"),
             &client_config,
         ))),

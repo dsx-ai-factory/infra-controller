@@ -57,9 +57,9 @@ configured default. `preingest_upgrade_when_below` is not used after ingestion.
 
 The catalog can change through the
 [Host Firmware Config API](api:PUT/v2/org/{org}/nico/firmware-config/host)
-or legacy/static configuration. Machine Update Manager refreshes its
-desired-version snapshot when the runtime configuration changes or the legacy
-firmware directory is modified.
+or legacy/static configuration. When shared capacity allows the scheduler to
+reach host selection, Machine Update Manager refreshes its desired-version
+snapshot if the runtime configuration or legacy firmware directory changed.
 
 ### Scheduling gates
 
@@ -69,24 +69,14 @@ A drifted host becomes eligible only after the relevant gates pass:
 |---|---|
 | Automatic update policy | `firmware_global.autoupdate` supplies the site default. A per-machine override can enable or disable one host independently. |
 | Host state | With `firmware_global.instance_updates_manual_tagging = true`, automatic selection is limited to unassigned hosts in `Ready`. When false, assigned hosts can also be selected. Unassigned hosts are considered first. |
-| Existing work | A host with an existing reprovisioning request is not selected again. Machines already in maintenance or another update workflow count against the shared budget. |
+| Existing work | A host with an existing reprovisioning request is not selected again. Module-reported hosts consume shared capacity. |
 | Explicit start | When the model has `explicit_start_needed = true`, the current time must be inside that machine's firmware update window. |
-| Site capacity | `machine_updater.max_concurrent_machine_updates_absolute` and `machine_updater.max_concurrent_machine_updates_percent` determine the site-wide update ceiling as described below. Machines already in maintenance consume this budget. |
+| Site capacity | The configured shared ceiling must have room for another host. Refer to the capacity policy below. |
 
-Automatic machine updates do not start when both concurrency limits are
-unset, because the resulting update ceiling is zero. Machine Update Manager
-runs every `machine_update_run_interval` seconds; the default is 300 seconds.
-
-`machine_updater.max_concurrent_machine_updates_percent` sets a ceiling based on
-the total number of managed hosts. NICo rounds the percentage of that count up
-to a whole host, then subtracts unhealthy hosts without going below zero. If
-`machine_updater.max_concurrent_machine_updates_absolute` is also set, it caps
-this remaining ceiling. Hosts already in update workflows consume slots from
-the resulting ceiling before NICo starts more updates.
-
-When the percentage is unset, NICo uses the absolute limit directly. A zero or
-negative percentage disables automatic machine updates even if the absolute
-limit is positive.
+Refer to [Shared Host Capacity](../firmware-updates.md#shared-host-capacity)
+for counted hosts, the ceiling calculation, and build requirements for NIC
+accounting and transaction protections. Machine Update Manager runs every
+`machine_update_run_interval` seconds; the default is 300 seconds.
 
 When a host is selected, NICo creates a host reprovisioning request. The
 managed-host state machine then adds the `host-fw-update` health report. This
@@ -261,6 +251,36 @@ All successful routes eventually return to component selection. Scout and
 Redfish updates first pass through NICo's activation and inventory-verification
 states; the legacy script path returns directly to inventory checking.
 
+### Scout Script Execution
+
+Scout script supervision and retained-input recovery are unreleased and require Scout builds containing [the script supervision implementation](https://github.com/dsx-ai-factory/infra-controller/pull/8841). Verify the deployed Scout image's build revision and install matching Scout/helper binaries. Older Scout builds run scripts directly and do not provide this claim, supervision, or retention policy.
+
+Every Scout script component, including UEFI, BMC, CPLD, drives, and CX7, uses the same host claim before downloading. Scout runs `sh` from its inherited `PATH` with the checked script path first, followed by checked artifact paths in task order. The working directory is the staging root. Standard input is `/dev/null`. Staged paths must be UTF-8; Scout checks the temporary root before acquiring the claim or downloading.
+
+Scout inherits its environment and overrides the following variables:
+
+**Scout Script Environment**
+
+| Variable | Value |
+| --- | --- |
+| `DOWNLOAD_DIR` | The staging root's `downloads` child, distinct from the working directory |
+| `COMPONENT_TYPE` | The task's component display name, such as `UEFI`, `CX7`, `CPLD MB`, or `drive-<model>`; it is not the lowercase catalog key |
+| `TARGET_VERSION` | The target version string supplied by the task |
+
+The matching `mlx-firmware-supervisor` must be installed beside `forge-scout`. Linux must enable `CONFIG_PROC_CHILDREN=y`, with readable procfs in the helper's PID namespace. Refer to the [helper prerequisites](https://github.com/dsx-ai-factory/infra-controller/blob/main/crates/libmlx/README.md#firmwareflasher).
+
+`execution_timeout_seconds` covers helper startup, script execution, descendants, and output collection. Each output stream is capped at 1 MiB. Exceeding a stream cap requests termination of the process family, including an active updater. Failure allows up to 5 seconds for descendant cleanup and 5 more for result delivery. Cleanup can remain unconfirmed; process exit does not prove device-internal work stopped. Core has a separate [task deadline and 5-hour cap](configuration.md#scout-script-execution-limits).
+
+Unlike durable NIC operations, scripts use the per-command helper's default policy that requests termination when Scout exits. The helper stays in Scout's service cgroup; `MLX_FIRMWARE_SUPERVISOR_LAUNCH` controls daemon placement, not this helper. Stopping the whole service cgroup can interrupt the updater and prevent cleanup. A Scout restart is not a safe recovery procedure.
+
+After proven non-dispatch or helper-reported success, Scout attempts staging removal and claim release independently. A pre-dispatch timeout also takes this cleanup path. Cleanup failure preserves diagnostics in the result and logs; helper-reported success remains successful. Do not rerun a successful script to repair local cleanup. A release error can follow marker unlink, so inspect actual state instead of assuming the marker remains.
+
+Success cleanup occurs before Scout reports to Core. If that success report is lost or arrives after Core's deadline, Core can request another execution. This differs from losing the helper's execution result, which retains exclusion. Refer to the [script result-delivery limitation](https://github.com/dsx-ai-factory/infra-controller/issues/8840).
+
+Invalid `MLX_FIRMWARE_STATE_DIRECTORY` path syntax or `MLX_FIRMWARE_SUPERVISOR_LAUNCH` values fail during environment parsing, before download or result reporting. Refer to the accepted settings in [Launch and State](https://github.com/dsx-ai-factory/infra-controller/blob/main/crates/libmlx/README.md#launch-and-state). Scout's `ScoutActionHandled` error log records that the script was not attempted and configuration needs repair. The same Core task remains pending, subject to Core's deadline; HTTP-client construction errors follow this policy too. Later state-directory trust, claim-acquisition, or missing/unusable-helper failures are reported to Core as failed attempts.
+
+For nonzero or uncertain execution, follow [Scout Script Recovery](#scout-script-recovery).
+
 ### Platform and OEM procedures
 
 NICo selects the configured component, starts the integrated installation
@@ -345,7 +365,7 @@ Useful metrics are:
 | `carbide_exhausted_reprovision_retry_count` | Unassigned hosts whose top-level firmware retry budget is exhausted. Assigned-host update substates are not included. |
 | `carbide_firmware_updates_total{target="host"}` | Host updates started and completed, separated by the `phase` label. |
 | `carbide_host_reprovision_retries_total` | Automatic retries of failed host firmware reprovisioning. |
-| `carbide_machines_in_maintenance_count` | Machines consuming the shared maintenance budget. |
+| `carbide_machines_in_maintenance_count` | Distinct hosts reported by the shared capacity accounting. |
 | `carbide_concurrent_machine_updates_available` | The calculated site-wide concurrency ceiling for machine updates. |
 
 Refer to [Core Metrics](../../observability/core_metrics.md) for the common metric
@@ -422,6 +442,11 @@ is exhausted, the host remains failed and is counted by
 > the configured interval without reaching the five-retry limit or the
 > exhausted-retry metric.
 
+A retained Scout script claim blocks another script execution, including tasks
+with a fresh UUID. Core still retries at the configured interval; those attempts
+fail before downloading and consume the existing retry budget. Refer to
+[Scout Script Recovery](#scout-script-recovery) before requesting another attempt.
+
 Correct the artifact, script, BMC, inventory matcher, or platform condition
 before forcing another attempt. Then reset host reprovisioning to firmware
 checking and, for an unassigned host, clear the retry count:
@@ -443,3 +468,23 @@ workflow, compare the catalog's `current_version_reported_as` matcher with the
 latest Redfish inventory. A missing matching inventory entry makes the desired
 and reported `Versions` maps differ, but leaves the execution path without a
 component it can install or verify.
+
+### Scout Script Recovery
+
+This guidance applies to Scout builds containing [the script supervision implementation](https://github.com/dsx-ai-factory/infra-controller/pull/8841) and matching Scout/helper binaries. Older builds run scripts directly and do not provide this claim or retention policy.
+
+A nonzero script exit, timeout after dispatch, output overflow, or lost helper result retains the host claim and checked or partial inputs. After claim acquisition, canceling Scout's action also retains them, including during downloads before dispatch. A new task UUID, Scout restart, or `reset-host-reprovisioning` does not clear an existing marker.
+
+The claim coordinates participating Scout scripts, startup and requested NIC inventory, the automatic direct-command loop, lockdown, hardware-touching operator streams, Discovery/Reset IB cleanup, and supervised NIC firmware admission. Automatic inventory and MLX commands defer while it is occupied. Discovery IB cleanup can fail, and Reset can record an IB cleanup error. A script instead reports a failed attempt before downloading when any participant holds the claim, including transient work. A busy claim does not by itself identify a failed script.
+
+This is cooperative exclusion. Core-local scripts, Redfish-based BMC, pre-ingestion, or DPU updates, standalone Scout MLX commands and preflight, direct library calls, and external tools do not acquire Scout's marker. Coordinate those routes separately.
+
+The marker is `<MLX_FIRMWARE_STATE_DIRECTORY>/mutation.json`. The shared `MLX_FIRMWARE_STATE_DIRECTORY` setting defaults to `/run/forge/mlx-firmware`; refer to [Launch and State](https://github.com/dsx-ai-factory/infra-controller/blob/main/crates/libmlx/README.md#launch-and-state). A script marker's `device_identity` records `scout-script task=<task-id> inputs=<staging-path>`. Preserve the marker, retained inputs, original logs, and failed-result diagnostics. A blocked script reports "cannot acquire firmware hardware claim" with "existing work must finish or be reconciled"; Core records the failure reason in `FailedFirmwareUpgrade`.
+
+Scripts have no durable operation receipt. The `mlxconfig-embedded` commands `firmware status` and `firmware cancel` inspect durable NIC operations and cannot resolve a script's `direct-scout-command` marker. NICo provides no generic supported automatic claim-clear or script-recovery procedure.
+
+Recovery requires the platform or site's approved maintenance procedure to prevent new hardware work from all callers, establish that the old script and descendants have stopped, and reconcile the actual component state through the approved vendor recovery or readback procedure. Process reaping, Scout restart, a policy toggle, or reboot alone does not establish device settlement or a safe interrupted flash. Any removal of the exact reconciled marker and obsolete inputs must be authorized by that procedure after both process and hardware settlement, while new work remains prevented. Do not delete a marker merely to admit another attempt. Platform recovery qualification remains tracked in [platform recovery qualification](https://github.com/dsx-ai-factory/infra-controller/issues/6689).
+
+After reconciliation, refer to the existing [firmware failure reset guidance](#firmware-execution-failures) before requesting another attempt. Resetting reprovisioning changes Core's state and retry count; it does not reconcile hardware or clear the host marker.
+
+Inputs remain in the system temporary directory. The default `/run` marker and temporary or PXE storage can disappear on reboot. Exclusion lasts only while the marker survives: losing it can permit another script attempt despite unresolved hardware work. An existing marker continues blocking acquisition after reboot; using persistent marker storage does not preserve temporary inputs or certify hardware settlement. Neither missing state nor whole-service termination proves recovery.
