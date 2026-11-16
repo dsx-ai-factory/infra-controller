@@ -68,7 +68,7 @@ pub fn setup_metrics() -> eyre::Result<MetricsSetup> {
 
     // Counts are process-global, so this also exposes an embedding host's layer.
     carbide_instrument::log_events::register(&meter);
-    forge_http_connector::connector::register_global_metrics(&meter);
+    carbide_http_connector::connector::register_global_metrics(&meter);
 
     Ok(MetricsSetup {
         instrumentation: carbide_instrument::Instrumentation::from_meter_provider(&meter_provider),
