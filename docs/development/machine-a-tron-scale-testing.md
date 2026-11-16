@@ -680,9 +680,8 @@ change as follows.
 - The kube-proxy ipset fill, with the `ipset` command above. Every node must
   hold 98,968 entries once every lease is out. A lower count on one node is
   the cap, and machine creation stalls short of 60,048 when it is hit.
-- Restarts of nico-ssh-console-rs and the nico-rest site workers. Both crash
-  loop at this machine count for the reasons in the caveats, and neither is on
-  the convergence path.
+- Restarts of nico-ssh-console-rs. It crash loops at this machine count for
+  the reason in the caveats, and it is not on the convergence path.
 
 ### Caveats
 
@@ -711,16 +710,13 @@ The caveats of the 10,000-host section apply, with these additions.
   The probe and request settings in the Core values let it start and stay
   Ready for the first hours instead of being killed before it binds port 22,
   and they do not fix it. The console is not on the convergence path.
-- The nico-rest site workers crash loop at their chart default of 1Gi. Their
-  inventory sync loads every machine of a page with up to 1,000 pages in
-  flight, so the working set tracks the machine count: the 1Gi default is
-  exceeded near 1,800 machines, and an 8Gi limit
-  (`nico-rest-workflow.siteWorker.resources` in
-  `helm-prereqs/values/nico-rest.yaml`) reaches about 35,000 before the
-  restarts return
+- The nico-rest site workers hold their chart default of 1Gi. Their inventory
+  sync loads only the rows a page reports, and each worker runs at most
+  `worker.maxConcurrentActivityExecutionSize` activities at once, 32 by
+  default
   ([issue 9000](https://github.com/dsx-ai-factory/infra-controller/issues/9000)).
-  Sizing by limit does not reach 60,048 machines. The workers are not on the
-  convergence path.
+  With both, the working set stays near 300 MiB at this machine count. The
+  workers are not on the convergence path.
 - The DPF simulator runs at its CPU limit through the DPU phase at any limit
   measured, 2 and 8 CPU. Its reconcile concurrency is the next lever
   ([issue 9002](https://github.com/dsx-ai-factory/infra-controller/issues/9002)).

@@ -67,6 +67,12 @@ config:
     user: nico
     # -- Plain-text password. Ignored when secrets.dbCreds is set.
     password: nico
+  # -- Temporal worker tuning. The cloud worker and the site worker read the same config.
+  # worker:
+  #   # Concurrent activity task pollers, 1 to 20. Default 10.
+  #   maxConcurrentActivityPollers: 10
+  #   # Activities executed at once, 1 to 1000. Default 32.
+  #   maxConcurrentActivityExecutionSize: 32
   temporal:
     host: temporal-frontend.temporal
     port: 7233
