@@ -132,7 +132,6 @@ pub(crate) async fn trigger_machine_attestation(
         bmc_info,
         &machine_id,
         redfish_timeout_duration,
-        false, // A gRPC request does not originate from the managed-host controller.
         attester_id_regex.as_ref(),
     )
     .await

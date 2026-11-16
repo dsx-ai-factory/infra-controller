@@ -201,8 +201,7 @@ struct AttestationScheduled {
 
 /// Schedules SPDM attestation for a machine, writing one work row per selected attester.
 ///
-/// `triggered_by_mh_controller` is true only for managed-host lifecycle triggers;
-/// external triggers pass false. Every device row in the job records this origin.
+/// Every device row in the job records an external trigger origin.
 /// Scheduling attempts are recorded through the supplied instrumentation.
 ///
 /// `attester_id_regex`, when present, replaces profile selection for this request,
@@ -219,7 +218,6 @@ pub async fn trigger_attestation(
     bmc_info: &BmcInfo,
     machine_id: &MachineId,
     redfish_timeout_duration: std::time::Duration,
-    triggered_by_mh_controller: bool,
     attester_id_regex: Option<&Regex>,
 ) -> Result<SchedulingResult, StateHandlerError> {
     // Choose the override before profile lookup can skip inventory discovery.
@@ -240,14 +238,8 @@ pub async fn trigger_attestation(
             .await?
         }
     };
-    let (result, txn) = schedule(
-        db_pool,
-        selection,
-        bmc_info,
-        machine_id,
-        triggered_by_mh_controller,
-    )
-    .await?;
+    // Record API-triggered work separately from managed-host lifecycle jobs.
+    let (result, txn) = schedule(db_pool, selection, bmc_info, machine_id, false).await?;
 
     // API triggers have no machine transition to persist with the new job.
     if let Some(txn) = txn {
