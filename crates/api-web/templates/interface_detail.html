@@ -1,37 +1,61 @@
-{% extends "base.html" %}
+{% extends "detail_base.html" %}
 
-{% block title %}Machine Interface{% endblock %}
+{% block title %}Machine Interface {{ id }}{% endblock %}
+{% block entity_label %}Interface{% endblock %}
+{% block entity_id %}{{ id }}{% endblock %}
 
-{% block content %}
-<div id="json"><a id="json-link" href="">JSON</a></div>
-<h1>Machine Interface</h1>
-
-<table class="sortable overview">
-	<tr><th>ID</th><td>{{ id }}</td></tr>
-	<tr><th>Interface Type</th><td>{{ interface_type }}</td></tr>
-	<tr><th>Association Type</th><td>{{ association_type }}</td></tr>
-	<tr>
-		<th>Association ID</th>
-		<td>
-			{% if !machine_id.is_empty() %}
-				{{ machine_id|machine_id_link|safe }}
-			{% else if !switch_id.is_empty() %}
-				{{ switch_id|switch_id_link|safe }}
-			{% else if !power_shelf_id.is_empty() %}
-				{{ power_shelf_id|power_shelf_id_link|safe }}
-			{% endif %}
-		</td>
-	</tr>
-	<tr><th>Attached DPU ID</th><td>{{ dpu_machine_id|machine_id_link|safe }}</td></tr>
-	<tr><th>Segment ID</th><td><a href="/admin/network-segment/{{ segment_id }}">{{ segment_id }}</a></td></tr>
-	<tr><th>Domain ID</th><td><a href="/admin/domain">{{ domain_id }}</a></td></tr>
-	<tr><th>Domain Name</th><td>{{ domain_name }}</td></tr>
-	<tr><th>Hostname</th><td>{{ hostname }}</td></tr>
-	<tr><th>Is Primary?</th><td>{{ is_primary }}</td></tr>
-	<tr><th>MAC Address</th><td>{{ mac_address }}</td></tr>
-	<tr><th>IP Address</th><td>{{ ip_address }}</td></tr>
-	<tr><th>Vendor</th><td>{{ vendor }}</td></tr>
-	<tr><th>Created</th><td>{{ created }}</td></tr>
-	<tr><th>Last DHCP</th><td>{{ last_dhcp }}</td></tr>
-</table>
+{% block detail_content %}
+<section class="entity-summary">
+	<div class="entity-summary-groups">
+		<div class="entity-summary-group">
+			<h4>Association</h4>
+			<dl>
+				<dt>Interface Type</dt>
+				<dd>{{ interface_type }}</dd>
+				<dt>Association Type</dt>
+				<dd>{{ association_type }}</dd>
+				<dt>Associated With</dt>
+				<dd>
+					{% if !machine_id.is_empty() %}
+					{{ machine_id|machine_id_link|safe }}
+					{% else if !switch_id.is_empty() %}
+					{{ switch_id|switch_id_link|safe }}
+					{% else if !power_shelf_id.is_empty() %}
+					{{ power_shelf_id|power_shelf_id_link|safe }}
+					{% else %}
+					<span class="text-muted">None</span>
+					{% endif %}
+				</dd>
+				<dt>Attached DPU</dt>
+				<dd>{% if dpu_machine_id.is_empty() %}<span class="text-muted">None</span>{% else %}{{ dpu_machine_id|machine_id_link|safe }}{% endif %}</dd>
+			</dl>
+		</div>
+		<div class="entity-summary-group">
+			<h4>Addressing</h4>
+			<dl>
+				<dt>MAC Address</dt>
+				<dd><code class="mac">{{ mac_address }}</code>{% if is_primary %}<span class="bubble success">Primary</span>{% endif %}</dd>
+				<dt>IP Address</dt>
+				<dd>{% if ip_address.is_empty() %}<span class="text-muted">None</span>{% else %}{{ ip_address }}{% endif %}</dd>
+				<dt>Hostname</dt>
+				<dd>{{ hostname }}</dd>
+				<dt>Segment</dt>
+				<dd><a href="/admin/network-segment/{{ segment_id }}">{{ segment_id }}</a></dd>
+				<dt>Domain</dt>
+				<dd><a href="/admin/domain" title="{{ domain_id }}">{% if domain_name.is_empty() %}{{ domain_id }}{% else %}{{ domain_name }}{% endif %}</a></dd>
+			</dl>
+		</div>
+		<div class="entity-summary-group">
+			<h4>DHCP</h4>
+			<dl>
+				<dt>Vendor</dt>
+				<dd>{% if vendor.is_empty() %}<span class="text-muted">None</span>{% else %}{{ vendor }}{% endif %}</dd>
+				<dt>Created</dt>
+				<dd>{{ created }}</dd>
+				<dt>Last DHCP</dt>
+				<dd>{% if last_dhcp.is_empty() %}<span class="text-muted">Never</span>{% else %}{{ last_dhcp }}{% endif %}</dd>
+			</dl>
+		</div>
+	</div>
+</section>
 {% endblock %}

@@ -344,12 +344,13 @@ impl AuthenticatedBmc for MockEndpointExplorer {
         &self,
         address: SocketAddr,
         interface: &MachineInterfaceSnapshot,
+        report: Option<&EndpointExplorationReport>,
         boot_interface: Option<&carbide_redfish::boot_interface::BootInterfaceTarget>,
     ) -> Result<(), EndpointExplorationError> {
         match &self.redfish_backend {
             Some(backend) => {
                 backend
-                    .machine_setup(address, interface, boot_interface)
+                    .machine_setup(address, interface, report, boot_interface)
                     .await
             }
             None => Ok(()),

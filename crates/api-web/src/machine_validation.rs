@@ -29,7 +29,7 @@ use rpc::forge::forge_server::Forge;
 use rpc::forge::{self as forgerpc};
 
 use super::Base;
-use super::machine::ValidationRun;
+use super::machine::{ValidationRun, ValidationStatus};
 use super::pagination::{self, PageContext, PaginationParams};
 
 #[derive(Debug)]
@@ -122,7 +122,7 @@ struct ValidationResults {
     validation_id: MachineValidationId,
     machine_id: Option<String>,
     validation_results: Vec<ValidationResult>,
-    status: String,
+    status: ValidationStatus,
     progress: String,
     context: String,
 }
@@ -306,12 +306,7 @@ pub(super) async fn results(
                 .into_response();
         }
     };
-    let status = run
-        .as_ref()
-        .and_then(|run| run.status.as_ref())
-        .and_then(|status| status.machine_validation_state.as_ref())
-        .map(|state| format!("{state:?}"))
-        .unwrap_or_else(|| "Unknown".to_string());
+    let status = ValidationStatus::from_rpc(run.as_ref().and_then(|run| run.status.as_ref()));
     let progress = run
         .as_ref()
         .and_then(|run| run.status.as_ref())

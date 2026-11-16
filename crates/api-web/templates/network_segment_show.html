@@ -5,33 +5,40 @@
 {% macro network_segment_table(network_segments, show_vpc=false) %}
 <table class="sortable overview">
 	<thead>
-		<th>Name</th>
-		<th>Id</th>
-		{% if show_vpc %}
-			<th>VPC ID</th>
-		{% endif %}
-		<th>Created</th>
-		<th>State</th>
-		<th>Sub Domain</th>
-		<th>MTU</th>
-		<th>Prefixes</th>
-		<th>Version</th>
+		<tr>
+			<th>Segment</th>
+			{% if show_vpc %}
+			<th>VPC</th>
+			{% endif %}
+			<th>State</th>
+			<th>Prefixes</th>
+			<th>Sub Domain</th>
+			<th>Version</th>
+		</tr>
 	</thead>
 	<tbody>
 		{% for ns in network_segments %}
 		<tr>
-			<td><a href="/admin/network-segment/{{ ns.id }}">{{ ns.name }}</a></td>
-			<td>{{ ns.id }}</td>
+			<td>
+				<a href="/admin/network-segment/{{ ns.id }}">{{ ns.name }}</a>
+				<span class="cell-sub">{{ ns.id }}</span>
+			</td>
 			{% if show_vpc %}
-				<td><a href="/admin/vpc/{{ ns.vpc_id }}">{{ ns.vpc_id }}</a></td>
+			<td>{% if ns.vpc_id.is_empty() %}<span class="text-muted">None</span>{% else %}<a href="/admin/vpc/{{ ns.vpc_id }}">{{ ns.vpc_id }}</a>{% endif %}</td>
 			{% endif %}
-			<td>{{ ns.created }}</td>
-			<td>{{ ns.state_display|safe }}</td>
+			<td class="state-cell">{{ ns.state_display|safe }}</td>
+			<td>
+				{{ ns.prefixes }}
+				<span class="cell-sub">MTU {{ ns.mtu }}</span>
+			</td>
 			<td>{{ ns.sub_domain }}</td>
-			<td>{{ ns.mtu }}</td>
-			<td>{{ ns.prefixes }}</td>
-			<td>{{ ns.version|config_version|safe }}</td>
+			<td class="cell-nowrap">
+				{{ ns.version|config_version|safe }}
+				<span class="cell-sub">Created {{ ns.created }}</span>
+			</td>
 		</tr>
+		{% else %}
+		<tr><td colspan="{% if show_vpc %}6{% else %}5{% endif %}">No segments.</td></tr>
 		{% endfor %}
 	</tbody>
 </table>

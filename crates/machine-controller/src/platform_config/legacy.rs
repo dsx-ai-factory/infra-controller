@@ -27,20 +27,22 @@ use bmc_platform::{
 };
 use bmc_runtime::ConnectedBmc;
 use carbide_redfish::boot_interface::BootInterfaceTarget;
+use carbide_redfish::libredfish::dpu_bios::is_dpu_bios_attributes_not_ready;
 use carbide_redfish::nv_redfish::RedfishBmc;
+use carbide_uuid::machine::MachineIdSubtypeTrait;
 use libredfish::{BiosProfileVendor, JobState, Redfish};
-use model::machine::ManagedHostStateSnapshot;
+use model::machine::{Machine, ManagedHostStateSnapshot};
 use serde_json::Value;
 use state_controller::state_handler::StateHandlerError;
 
-use super::idrac_job;
+use super::{DpuSettings, idrac_job};
 use crate::config::MachineStateHandlerSiteConfig;
 use crate::context::MachineStateHandlerServices;
 use crate::handler::call_machine_setup_and_handle_no_dpu_error;
 
-/// A host's BMC for its platform settings: the libredfish client the caller
-/// already holds, or the drivers.
-pub(crate) enum PlatformBmc<'a> {
+/// A host's or DPU's BMC for its platform settings: the libredfish client the
+/// caller already holds, or the drivers.
+pub enum PlatformBmc<'a> {
     Libredfish {
         client: &'a dyn Redfish,
         /// libredfish reports a host without a boot interface as an error,
@@ -58,18 +60,39 @@ impl<'a> PlatformBmc<'a> {
         mh_snapshot: &ManagedHostStateSnapshot,
         redfish_client: &'a dyn Redfish,
     ) -> Result<Self, StateHandlerError> {
-        Ok(
-            match services.connect_drivers(&mh_snapshot.host_snapshot).await? {
-                Some(bmc) => Self::Drivers(bmc),
-                None => Self::Libredfish {
-                    client: redfish_client,
-                    expected_dpu_count: mh_snapshot
-                        .host_snapshot
-                        .associated_dpu_machine_ids()
-                        .len(),
-                },
-            },
+        Self::connect_machine(
+            services,
+            mh_snapshot,
+            &mh_snapshot.host_snapshot,
+            redfish_client,
         )
+        .await
+    }
+
+    /// The BMC of `dpu`, one of `mh_snapshot`'s DPUs, through the site's
+    /// `bmc_backend`, reusing `redfish_client` under libredfish.
+    pub(crate) async fn connect_dpu(
+        services: &MachineStateHandlerServices,
+        mh_snapshot: &ManagedHostStateSnapshot,
+        dpu: &Machine<impl MachineIdSubtypeTrait>,
+        redfish_client: &'a dyn Redfish,
+    ) -> Result<Self, StateHandlerError> {
+        Self::connect_machine(services, mh_snapshot, dpu, redfish_client).await
+    }
+
+    async fn connect_machine(
+        services: &MachineStateHandlerServices,
+        mh_snapshot: &ManagedHostStateSnapshot,
+        machine: &Machine<impl MachineIdSubtypeTrait>,
+        redfish_client: &'a dyn Redfish,
+    ) -> Result<Self, StateHandlerError> {
+        Ok(match services.connect_drivers(machine).await? {
+            Some(bmc) => Self::Drivers(bmc),
+            None => Self::Libredfish {
+                client: redfish_client,
+                expected_dpu_count: mh_snapshot.host_snapshot.associated_dpu_machine_ids().len(),
+            },
+        })
     }
 
     /// See [`ConnectedBmc::operation_status`]. libredfish reads only the
@@ -128,6 +151,16 @@ pub(super) async fn in_effect(
         None => client.is_bios_setup(None).await,
     }
     .map_err(platform_error)
+}
+
+/// See [`super::dpu_settings`].
+pub(super) async fn dpu_settings(client: &dyn Redfish) -> Result<DpuSettings, PlatformError> {
+    match client.is_bios_setup(None).await {
+        Ok(true) => Ok(DpuSettings::InEffect),
+        Ok(false) => Ok(DpuSettings::Pending),
+        Err(error) if is_dpu_bios_attributes_not_ready(&error) => Ok(DpuSettings::Unreported),
+        Err(error) => Err(platform_error(error)),
+    }
 }
 
 /// The BIOS and BMC manager profiles the site selected for the BMC with

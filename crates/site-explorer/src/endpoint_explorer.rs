@@ -141,10 +141,13 @@ pub trait AuthenticatedBmc: Send + Sync + 'static {
         interface: &MachineInterfaceSnapshot,
     ) -> Result<Option<bool>, EndpointExplorationError>;
 
+    /// Runs libredfish's `machine_setup`, or under the drivers stages only the
+    /// BIOS settings.
     async fn machine_setup(
         &self,
         address: SocketAddr,
         interface: &MachineInterfaceSnapshot,
+        report: Option<&EndpointExplorationReport>,
         boot_interface: Option<&BootInterfaceTarget>,
     ) -> Result<(), EndpointExplorationError>;
 

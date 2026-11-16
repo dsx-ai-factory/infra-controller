@@ -3413,7 +3413,12 @@ impl SiteExplorer {
             };
 
             self.bmc_client
-                .machine_setup(bmc_target_addr, interface, None)
+                .machine_setup(
+                    bmc_target_addr,
+                    interface,
+                    Some(&host_endpoint.report),
+                    None,
+                )
                 .await
                 .inspect_err(|err| {
                     tracing::error!(

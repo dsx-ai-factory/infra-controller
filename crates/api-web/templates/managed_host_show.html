@@ -14,7 +14,7 @@
 	<h1>All Managed Hosts ({{ page.total_items() }})</h1>
 {% endif %}
 
-<details {% if is_filtered || grouped_hosts.is_some() %}open{% endif %}>
+<details class="table-filters" {% if is_filtered || grouped_hosts.is_some() %}open{% endif %}>
 	<summary>Show filters</summary>
 	<form class="filter-container" action="" method="get">
 		<div class="filter-item">
@@ -154,10 +154,11 @@
 </details>
 
 {% if has_dpf_warning %}
-<div class="bubble warning" style="margin-bottom: 1em;">
-	WARNING: One or more DPUs are using a provisioning strategy (internal) which is deprecated and will be removed in a future release.
-	See <a href="https://docs.nvidia.com/infra-controller/documentation/getting-started/installation-options/dpf-setup">how to enable DPF management for DPUs</a>.
-</div>
+<section class="entity-summary entity-summary-notice" role="alert">
+	<h3 class="entity-summary-notice-title">Deprecated DPU provisioning strategy</h3>
+	<p>One or more DPUs are using a provisioning strategy (internal) which is deprecated and will be removed in a future release.
+	See <a href="https://docs.nvidia.com/infra-controller/documentation/getting-started/installation-options/dpf-setup">how to enable DPF management for DPUs</a>.</p>
+</section>
 {% endif %}
 
 {% if grouped_hosts.is_none() %}

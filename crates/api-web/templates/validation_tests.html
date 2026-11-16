@@ -7,33 +7,33 @@
 <table class="sortable overview">
     <thead>
         <tr>
-            <th>ID</th>
-            <th>Version</th>
-            <th>Name</th>
-            <th>Description</th>
+            <th>Test</th>
+            <th>Status</th>
+            <th class="no-sort">Command</th>
             <th>Contexts</th>
-            <th>Supported Platforms</th>
-            <th>Command</th>
-            <th>Args</th>
+            <th>Platforms</th>
             <th>Tags</th>
-            <th>IsVerified</th>
-            <th>IsEnabled</th>
         </tr>
     </thead>
     <tbody>
         {% for test in validation_tests %}
         <tr>
-            <td>{{ test.id }}</td>
-            <td>{{ test.version }}</td>
-            <td>{{ test.name }}</td>
-            <td>{{ test.description }}</td>
+            <td>
+                <a href="/admin/machinevalidation/tests/{{ test.id }}">{{ test.name }}</a>
+                <span class="cell-sub">{{ test.id }}</span>
+                <span class="cell-sub">Version {{ test.version }}{% if !test.description.is_empty() %} · {{ test.description }}{% endif %}</span>
+            </td>
+            <td class="cell-nowrap">
+                <span class="bubble{% if test.is_enabled %} success{% endif %}">{% if test.is_enabled %}Enabled{% else %}Disabled{% endif %}</span>
+                {% if !test.is_verified %}<span class="cell-sub text-warning">Not verified</span>{% endif %}
+            </td>
+            <td>
+                <code class="cell-chip">{{ test.command }}</code>
+                {% if !test.args.is_empty() %}<span class="cell-sub">{{ test.args }}</span>{% endif %}
+            </td>
             <td>{{ test.contexts }}</td>
             <td>{{ test.supported_platforms }}</td>
-            <td>{{ test.command }}</td>
-            <td>{{ test.args }}</td>
             <td>{{ test.tags }}</td>
-            <td>{{ test.is_verified }}</td>
-            <td>{{ test.is_enabled }}</td>
         </tr>
         {% endfor %}
     </tbody>
