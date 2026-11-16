@@ -30,6 +30,7 @@ state-controller = { path = "../state-controller", default-features = false }
 arc-swap = { workspace = true }
 async-trait = { workspace = true }
 chrono = { workspace = true }
+hex = { workspace = true }
 http = { workspace = true }
 libredfish = { workspace = true }
 mac_address = { workspace = true }
@@ -41,6 +42,7 @@ nv-redfish = { workspace = true, features = [
 reqwest = { workspace = true, default-features = false }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
+sha2 = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
@@ -57,6 +59,7 @@ carbide-test-support = { path = "../test-support" }
 nv-redfish = { workspace = true, features = ["chassis"] }
 rustls = { workspace = true }
 tower = { workspace = true, features = ["util"] }
+tokio-rustls = { workspace = true }
 
 [lints.clippy]
 undocumented_unsafe_blocks = "deny"

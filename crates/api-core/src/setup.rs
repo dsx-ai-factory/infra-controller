@@ -2563,6 +2563,31 @@ async fn initialize_and_start_controllers<'a>(
         .build_and_spawn(join_set, cancel_token.clone())
         .expect("Unable to build SwitchStateController");
 
+    {
+        let pool = db_pool.clone();
+        let bmc_pool = bmc_credential_ops.clone();
+        let work_locks = work_lock_manager_handle.clone();
+        let cancelled = cancel_token.clone();
+        join_set.spawn(async move {
+            let mut interval = tokio::time::interval(
+                carbide_machine_controller::virtual_media::RECONCILE_INTERVAL,
+            );
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            loop {
+                tokio::select! {
+                    _ = cancelled.cancelled() => break,
+                    _ = interval.tick() => {
+                        if let Err(error) = carbide_machine_controller::virtual_media::reconcile_pending(
+                            &pool, bmc_pool.as_ref(), &work_locks,
+                        ).await {
+                            tracing::warn!(%error, "Virtual-media controller sweep failed");
+                        }
+                    }
+                }
+            }
+        });
+    }
+
     IbFabricMonitor::new(
         db_pool.clone(),
         if ib_config.enabled {

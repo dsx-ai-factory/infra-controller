@@ -206,7 +206,23 @@ pub(super) async fn check_host_boot_config(
 
     log_host_config(redfish_client, mh_snapshot).await;
 
-    let inspection = inspect_host_boot_config(redfish_client, mh_snapshot, &boot_interface).await?;
+    let external_media = match mh_snapshot.host_snapshot.status.bmc_info.mac {
+        Some(mac) => crate::virtual_media::has_policy(&ctx.services.db_pool, mac)
+            .await
+            .map_err(StateHandlerError::GenericError)?,
+        None => false,
+    };
+    let inspection = if external_media {
+        HostBootConfigInspection {
+            is_bios_setup: boot_interface
+                .run(|bi| redfish_client.is_bios_setup(Some(bi)))
+                .await
+                .map_err(|error| redfish_error("is_bios_setup", error))?,
+            is_boot_order_setup: None,
+        }
+    } else {
+        inspect_host_boot_config(redfish_client, mh_snapshot, &boot_interface).await?
+    };
     let decision = decide_host_boot_config(inspection);
     let vendor = mh_snapshot.host_snapshot.bmc_vendor();
 

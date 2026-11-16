@@ -3251,6 +3251,47 @@ impl SiteExplorer {
             return Ok(HostIngestDecision::Skip { blocker: None });
         }
 
+        // An external-DHCP policy makes Core's media controller the only
+        // initial boot actuator. In particular, do not run the Lenovo PXE
+        // infinite-boot repair below against a host booting from optical media.
+        let external_boot_policy = match interface {
+            Some(interface) => {
+                db::host_boot::find_by_bmc_mac(&self.database_connection, interface.mac_address)
+                    .await?
+            }
+            None => None,
+        };
+        if let Some(mut intent) = external_boot_policy {
+            use model::host_boot::{HostBootPhase, HostBootPurpose};
+            if intent.cancelled
+                || matches!(
+                    intent.phase,
+                    HostBootPhase::Cancelled | HostBootPhase::Failed
+                )
+            {
+                return Ok(HostIngestDecision::Skip { blocker: None });
+            }
+            if intent.phase == HostBootPhase::Pending && intent.lifecycle_key.is_none() {
+                let key = format!("site-explorer:{}:discovery", intent.generation);
+                intent.begin_lifecycle_attempt(key, HostBootPurpose::Discovery);
+                let mut txn = Transaction::begin(&self.database_connection).await?;
+                db::host_boot::update(&mut txn, &intent).await?;
+                txn.commit().await?;
+            }
+            return Ok(
+                if matches!(
+                    intent.phase,
+                    HostBootPhase::AwaitingAcknowledgement
+                        | HostBootPhase::Detaching
+                        | HostBootPhase::Completed
+                ) {
+                    HostIngestDecision::Ingest
+                } else {
+                    HostIngestDecision::Skip { blocker: None }
+                },
+            );
+        }
+
         let mut ingest_host = true;
         if interface.is_none() {
             tracing::warn!(

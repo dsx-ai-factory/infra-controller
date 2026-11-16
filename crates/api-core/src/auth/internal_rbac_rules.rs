@@ -389,6 +389,11 @@ impl InternalRBACRules {
             vec![ForgeAdminCLI, Flow],
         );
         x.perm("GetDpuInfoList", vec![Agent]);
+        x.perm("SetHostBootIntent", vec![ForgeAdminCLI, SiteAgent]);
+        x.perm("GetHostBootIntent", vec![ForgeAdminCLI, SiteAgent]);
+        x.perm("AcknowledgeHostBoot", vec![ForgeAdminCLI, SiteAgent, Scout]);
+        x.perm("CancelHostBoot", vec![ForgeAdminCLI, SiteAgent]);
+        x.perm("ReleaseHostBootPolicy", vec![ForgeAdminCLI, SiteAgent]);
         x.perm("GetMachineBootOverride", vec![ForgeAdminCLI]);
         x.perm("SetMachineBootOverride", vec![ForgeAdminCLI]);
         x.perm("ClearMachineBootOverride", vec![ForgeAdminCLI]);

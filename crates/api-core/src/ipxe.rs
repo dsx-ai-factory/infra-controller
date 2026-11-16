@@ -198,7 +198,13 @@ impl PxeInstructions {
         mac_address: MacAddress,
         console: &str,
         machine_type: MachineType,
+        host_boot_arguments: &str,
     ) -> String {
+        let host_boot_arguments = if host_boot_arguments.is_empty() {
+            String::new()
+        } else {
+            format!("{host_boot_arguments} ")
+        };
         tracing::info!(
             machine_type = %machine_type,
             machine_interface_id = %machine_interface_id,
@@ -210,7 +216,7 @@ impl PxeInstructions {
                 if machine_type == MachineType::Host || machine_type == MachineType::PredictedHost {
                     InstructionGenerator {
                         kernel: "${base-url}/internal/aarch64/scout.efi".to_string(),
-                        command_line: format!("mac={mac_address} console=tty0 console={console},115200 pci=realloc=off iommu=off cli_cmd=auto-detect machine_id={machine_interface_id} server_uri=[api_url] pxe_uri=[pxe_url] ds=nocloud;s=${{scout-cloudinit-url}}"),
+                        command_line: format!("mac={mac_address} console=tty0 console={console},115200 pci=realloc=off iommu=off cli_cmd=auto-detect {host_boot_arguments}machine_id={machine_interface_id} server_uri=[api_url] pxe_uri=[pxe_url] ds=nocloud;s=${{scout-cloudinit-url}}"),
                         initrd: None,
                     }
                 }
@@ -226,7 +232,7 @@ impl PxeInstructions {
             rpc::MachineArchitecture::X86 => {
                 InstructionGenerator {
                     kernel: "${base-url}/internal/x86_64/scout.efi".to_string(),
-                    command_line: format!("mac={mac_address} console=tty0 console={console},115200 pci=realloc=off iommu=off cli_cmd=auto-detect machine_id={machine_interface_id} server_uri=[api_url] pxe_uri=[pxe_url] ds=nocloud;s=${{scout-cloudinit-url}}"),
+                    command_line: format!("mac={mac_address} console=tty0 console={console},115200 pci=realloc=off iommu=off cli_cmd=auto-detect {host_boot_arguments}machine_id={machine_interface_id} server_uri=[api_url] pxe_uri=[pxe_url] ds=nocloud;s=${{scout-cloudinit-url}}"),
                     initrd: None,
                 }
             }
@@ -342,6 +348,24 @@ exit ||
         let mut console = "ttyS0";
         let mut qcow_imager_url = "chain ${base-url}/internal/x86_64/qcow-imager.efi loglevel=7 console=tty0 pci=realloc=off ";
         let interface = db::machine_interface::find_one(&mut *txn, target.interface_id).await?;
+        let host_boot_arguments = db::host_boot::find_by_boot_mac(&mut *txn, interface.mac_address)
+            .await?
+            .filter(|intent| {
+                !intent.cancelled
+                    && matches!(
+                        intent.phase,
+                        model::host_boot::HostBootPhase::Armed
+                            | model::host_boot::HostBootPhase::Resetting
+                            | model::host_boot::HostBootPhase::AwaitingAcknowledgement
+                    )
+            })
+            .map(|intent| {
+                format!(
+                    "host_boot_expected_machine_id={} host_boot_generation={} host_boot_token={}",
+                    intent.expected_machine_id, intent.generation, intent.acknowledgement_token,
+                )
+            })
+            .unwrap_or_default();
 
         // This custom pxe is different from a customer instance of pxe. It is more for testing one off
         // changes until a real dev env is established and we can just override our existing code to test
@@ -367,6 +391,7 @@ exit ||
                         interface.mac_address,
                         console,
                         MachineType::Dpu,
+                        &host_boot_arguments,
                     ));
                 } else {
                     tracing::warn!(
@@ -411,6 +436,7 @@ exit ||
                 interface.mac_address,
                 console,
                 machine_type,
+                &host_boot_arguments,
             ));
         };
 
@@ -445,6 +471,7 @@ exit ||
                     interface.mac_address,
                     console,
                     machine.id.machine_type(),
+                    &host_boot_arguments,
                 ));
             }
 
@@ -462,6 +489,7 @@ exit ||
                                 interface.mac_address,
                                 console,
                                 machine.id.machine_type(),
+                                &host_boot_arguments,
                             ));
                         }
                         _ => {
@@ -537,6 +565,7 @@ exit ||
                 interface.mac_address,
                 console,
                 machine.id.machine_type(),
+                &host_boot_arguments,
             ),
             ManagedHostState::Assigned { instance_state } => match instance_state {
                 InstanceState::Ready => {
@@ -664,6 +693,7 @@ exit ||
                         interface.mac_address,
                         console,
                         machine.id.machine_type(),
+                        &host_boot_arguments,
                     )
                 }
 

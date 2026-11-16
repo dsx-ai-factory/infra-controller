@@ -1775,6 +1775,51 @@ impl Forge for Api {
         crate::handlers::machine::get_dpu_info_list(self, request).await
     }
 
+    async fn set_host_boot_intent(
+        &self,
+        request: Request<rpc::SetHostBootIntentRequest>,
+    ) -> Result<Response<rpc::HostBootStatus>, Status> {
+        crate::handlers::host_boot::set(self, request)
+            .await
+            .map_err(Into::into)
+    }
+
+    async fn get_host_boot_intent(
+        &self,
+        request: Request<rpc::GetHostBootIntentRequest>,
+    ) -> Result<Response<rpc::HostBootStatus>, Status> {
+        crate::handlers::host_boot::get(self, request)
+            .await
+            .map_err(Into::into)
+    }
+
+    async fn acknowledge_host_boot(
+        &self,
+        request: Request<rpc::AcknowledgeHostBootRequest>,
+    ) -> Result<Response<rpc::HostBootStatus>, Status> {
+        crate::handlers::host_boot::acknowledge(self, request)
+            .await
+            .map_err(Into::into)
+    }
+
+    async fn cancel_host_boot(
+        &self,
+        request: Request<rpc::CancelHostBootRequest>,
+    ) -> Result<Response<rpc::HostBootStatus>, Status> {
+        crate::handlers::host_boot::cancel(self, request)
+            .await
+            .map_err(Into::into)
+    }
+
+    async fn release_host_boot_policy(
+        &self,
+        request: Request<rpc::CancelHostBootRequest>,
+    ) -> Result<Response<()>, Status> {
+        crate::handlers::host_boot::release(self, request)
+            .await
+            .map_err(Into::into)
+    }
+
     async fn get_machine_boot_override(
         &self,
         request: Request<MachineInterfaceId>,

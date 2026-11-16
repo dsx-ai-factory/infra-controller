@@ -13920,6 +13920,25 @@ pub async fn handler_host_power_control_with_location(
     location: &std::panic::Location<'_>,
     requested_at: Option<DateTime<Utc>>,
 ) -> Result<(), StateHandlerError> {
+    if matches!(
+        action,
+        ResetType::On | ResetType::ForceOn | ResetType::ForceRestart | ResetType::GracefulRestart
+    ) {
+        if let Some(purpose) = crate::virtual_media::network_boot_purpose(managedhost_snapshot) {
+            if crate::virtual_media::managed_boot_dispatched(
+                &ctx.services.db_pool,
+                managedhost_snapshot,
+                "network-boot",
+                purpose,
+            )
+            .await?
+            {
+                return Ok(());
+            }
+        }
+    }
+    crate::virtual_media::guard_incidental_power(&ctx.services.db_pool, managedhost_snapshot)
+        .await?;
     let mut action = action;
     let bmc = ctx
         .services
@@ -14869,6 +14888,16 @@ async fn set_host_boot_order(
     explicit_target: Option<&BootInterfaceTarget>,
     set_boot_order_info: SetBootOrderInfo,
 ) -> Result<SetBootOrderOutcome, StateHandlerError> {
+    if let Some(mac) = mh_snapshot.host_snapshot.status.bmc_info.mac {
+        if crate::virtual_media::has_policy(&ctx.services.db_pool, mac)
+            .await
+            .map_err(StateHandlerError::GenericError)?
+        {
+            // BIOS convergence remains owned by its preceding stages. An
+            // optical boot policy does not require the NIC-first order.
+            return Ok(SetBootOrderOutcome::Done);
+        }
+    }
     let boot_interface_resolution =
         resolve_boot_interface_for_step(ctx, mh_snapshot, explicit_target).await?;
     match set_boot_order_info.set_boot_order_state {

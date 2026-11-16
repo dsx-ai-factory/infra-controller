@@ -43,6 +43,8 @@ pub mod per_object;
 pub mod redfish;
 pub(crate) mod rpc;
 pub(crate) mod scout_firmware_scripts;
+/// Durable opt-in external-DHCP boot transport and lifecycle boundaries.
+pub mod virtual_media;
 pub mod write_ops;
 
 /// Fields of span that should be logged for each message.

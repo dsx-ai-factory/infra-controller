@@ -18,6 +18,7 @@
 use std::net::IpAddr;
 
 use ::rpc::forge as rpc;
+use model::host_boot::HostBootPhase;
 use tonic::{Request, Response, Status};
 
 use crate::CarbideError;
@@ -49,12 +50,41 @@ pub(crate) async fn get_pxe_instructions(
         crate::api::log_machine_id(&machine_id);
     }
 
+    let host_boot = db::host_boot::find_by_boot_mac(&mut txn, iface.mac_address).await?;
+    if let Some(intent) = &host_boot {
+        if intent.cancelled
+            || !matches!(
+                intent.phase,
+                HostBootPhase::Armed
+                    | HostBootPhase::Resetting
+                    | HostBootPhase::AwaitingAcknowledgement
+            )
+        {
+            return Err(Status::failed_precondition(
+                "no active Core-owned virtual-media boot attempt",
+            ));
+        }
+        if intent.fixed_ip_address != pxe_request.client_ip {
+            return Err(Status::failed_precondition(
+                "PXE source IP does not match the registered external DHCP lease",
+            ));
+        }
+    }
+
     let input = PxeInstructionsInput {
         interface_id: iface.id,
         arch: pxe_request.arch,
         product: pxe_request.product,
     };
-    let pxe_script = PxeInstructions::get_pxe_instructions(&mut txn, input).await?;
+    let mut pxe_script = PxeInstructions::get_pxe_instructions(&mut txn, input).await?;
+    if let Some(intent) = host_boot {
+        // Reserved variables let supported OS templates forward the exact boot
+        // attempt without rewriting arbitrary tenant scripts.
+        pxe_script = format!(
+            "set host_boot_expected_machine_id {}\nset host_boot_generation {}\nset host_boot_token {}\n{pxe_script}",
+            intent.expected_machine_id, intent.generation, intent.acknowledgement_token,
+        );
+    }
 
     // For interfaces on the static-assignments segment, include
     // URL overrides so external hosts can reach services via an

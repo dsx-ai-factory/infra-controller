@@ -562,6 +562,22 @@ service Forge {
   rpc SetMachineBootOverride(MachineBootOverride) returns (google.protobuf.Empty);
   rpc ClearMachineBootOverride(common.MachineInterfaceId) returns (google.protobuf.Empty);
 
+  // Opt in one registered host to Core-owned virtual-media boot. No request
+  // leaves the host's default native PXE behavior unchanged. Idempotent for
+  // an identical generation; replacement requires completed media cleanup.
+  rpc SetHostBootIntent(SetHostBootIntentRequest) returns (HostBootStatus);
+  // Read the frozen artifact, current attempt and owned-media cleanup state.
+  rpc GetHostBootIntent(GetHostBootIntentRequest) returns (HostBootStatus);
+  // Accept evidence only for the current generation AND current boot nonce.
+  rpc AcknowledgeHostBoot(AcknowledgeHostBootRequest) returns (HostBootStatus);
+  // Stop future boot actions, then remove only this request's owned media.
+  rpc CancelHostBoot(CancelHostBootRequest) returns (HostBootStatus);
+  // Deliberately restore native PXE only after owned-media cleanup is proven.
+  // Cancellation alone never releases policy ownership.
+  rpc ReleaseHostBootPolicy(CancelHostBootRequest) returns (google.protobuf.Empty);
+
+
+
   // Gather one machine's boot-interface view from every store that records it
   // (owned interface rows, predictions, the explored endpoint default, and the
   // retained post-deletion pairs), plus the effective boot interface the
@@ -14557,4 +14573,98 @@ message ComponentFirmwareLocalStage {
   ComponentFirmwareLocalStageState state = 1;
   // Exact preceding system-image handle, not a whole-update identity.
   string system_image_job_id = 2;
+}
+
+// Why Core is preparing a host's explicitly requested boot transport.
+enum HostBootPurpose {
+  HOST_BOOT_PURPOSE_UNSPECIFIED = 0;
+  HOST_BOOT_PURPOSE_DISCOVERY = 1;
+  HOST_BOOT_PURPOSE_INSTALLATION = 2;
+  HOST_BOOT_PURPOSE_CLEANUP = 3;
+  HOST_BOOT_PURPOSE_LOCAL_DISK = 4;
+}
+
+// Persisted external-effect boundary; Resetting never implies a confirmed reset.
+enum HostBootPhase {
+  HOST_BOOT_PHASE_UNSPECIFIED = 0;
+  HOST_BOOT_PHASE_PENDING = 1;
+  HOST_BOOT_PHASE_INSPECTING = 2;
+  HOST_BOOT_PHASE_MOUNTING = 3;
+  HOST_BOOT_PHASE_MOUNTED = 4;
+  HOST_BOOT_PHASE_SETTING_BOOT = 5;
+  HOST_BOOT_PHASE_ARMED = 6;
+  HOST_BOOT_PHASE_RESETTING = 7;
+  HOST_BOOT_PHASE_AWAITING_ACKNOWLEDGEMENT = 8;
+  HOST_BOOT_PHASE_DETACHING = 9;
+  HOST_BOOT_PHASE_COMPLETED = 10;
+  HOST_BOOT_PHASE_CANCELLED = 11;
+  HOST_BOOT_PHASE_FAILED = 12;
+}
+
+// Proof that this attempt no longer depends on the bootstrap medium.
+enum HostBootEvidence {
+  HOST_BOOT_EVIDENCE_UNSPECIFIED = 0;
+  // Sent by the freshly registered Scout with its boot nonce.
+  HOST_BOOT_EVIDENCE_SCOUT_REGISTERED = 1;
+  // A privileged orchestrator has authenticated a matching installer callback
+  // and established that the installer no longer depends on bootstrap media.
+  HOST_BOOT_EVIDENCE_INSTALLER_INDEPENDENT = 2;
+}
+
+message SetHostBootIntentRequest {
+  // Required existing ExpectedMachine UUID. Core does not accept arbitrary BMC paths.
+  common.UUID expected_machine_id = 1;
+  // Required caller-generated UUID. Identical retries return existing progress.
+  string generation = 2;
+  // Required explicit boot operation; Unspecified is rejected.
+  HostBootPurpose purpose = 3;
+  // Immutable absolute HTTP(S) bootstrap ISO URL. Credentials and fragments are
+  // rejected. The BMC must reach it. LocalDisk may omit it to reuse the prior ref.
+  string artifact_url = 4;
+  // Lowercase 64-character hexadecimal SHA-256, frozen with artifact_url.
+  string artifact_sha256 = 5;
+  // Must match an existing Fixed Host interface of ExpectedMachine.
+  string boot_mac_address = 6;
+  // Must equal that interface's configured fixed_ip and the external DHCP lease.
+  string fixed_ip_address = 7;
+  // Required explicit architecture from the selected bootstrap artifact/plan.
+  // This transport supports X86 only; ARM and unknown values are rejected.
+  MachineArchitecture architecture = 8;
+}
+
+message GetHostBootIntentRequest {
+  common.UUID expected_machine_id = 1;
+}
+
+message AcknowledgeHostBootRequest {
+  common.UUID expected_machine_id = 1;
+  string generation = 2;
+  // UUID nonce is regenerated for every boot attempt within one generation.
+  string acknowledgement_token = 3;
+  HostBootEvidence evidence = 4;
+  // Required for Scout evidence and checked against the registered boot MAC.
+  common.MachineId machine_id = 5;
+}
+
+message CancelHostBootRequest {
+  common.UUID expected_machine_id = 1;
+  // Cancellation cannot accidentally affect a later request.
+  string generation = 2;
+}
+
+message HostBootStatus {
+  common.UUID expected_machine_id = 1;
+  string generation = 2;
+  HostBootPurpose purpose = 3;
+  HostBootPhase phase = 4;
+  string artifact_url = 5;
+  string artifact_sha256 = 6;
+  string acknowledgement_token = 7;
+  bool acknowledged = 8;
+  // True only after Core read back owned-media removal and restored boot state.
+  bool cleanup_complete = 9;
+  optional string last_error = 10;
+  optional string owned_media_uri = 11;
+  bool cancelled = 12;
+  int64 revision = 13;
 }

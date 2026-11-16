@@ -59,6 +59,7 @@ pub mod firmware;
 pub mod hardware_dispatch;
 pub mod hardware_info;
 pub mod health;
+pub mod host_boot;
 pub mod host_machine_update;
 pub mod ib;
 pub mod ib_partition;

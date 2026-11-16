@@ -19,3 +19,5 @@ pub mod boot_interface;
 pub mod libredfish;
 pub mod nv_redfish;
 pub mod state_handler;
+/// Authenticated Redfish operations for Core-owned removable boot media.
+pub mod virtual_media;

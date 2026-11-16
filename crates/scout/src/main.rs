@@ -182,6 +182,8 @@ async fn initial_setup(config: &Options) -> Result<(uuid::Uuid, MachineId), eyre
         Err(error) => return Err(report_registration_error(config, error).await),
     };
 
+    discovery::acknowledge_boot(config, &machine_id).await?;
+
     if !Path::new(REBOOT_COMPLETED_PATH).exists() {
         discovery::rebooted(config, &machine_id).await?;
         let mut data_file = File::create(REBOOT_COMPLETED_PATH).expect("creation failed");
