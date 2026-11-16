@@ -494,8 +494,10 @@ impl RmsSim {
 
     /// Queues one generic RMS job-status response for FIFO consumption.
     ///
-    /// The fake returns `Ok(Default::default())` after the queue is
-    /// exhausted.
+    /// After the queue is exhausted, a configured firmware-job error returns
+    /// `Unavailable`; otherwise, the stored record for the requested job is
+    /// returned. If neither an error nor a record is configured for that job,
+    /// the fake returns `NotFound`.
     pub async fn queue_get_job_status_response(
         &self,
         response: Result<rms::GetJobStatusResponse, RackManagerError>,

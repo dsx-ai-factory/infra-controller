@@ -5002,7 +5002,7 @@ async fn test_firmware_upgrade_wait_for_complete_retries_when_job_lookup_fails(
 
     env.rms_sim
         .queue_get_job_status_response(Err(
-            tonic::Status::not_found("Job not found: child-job-1").into()
+            tonic::Status::not_found("job not found: child-job-1").into()
         ))
         .await;
 
@@ -5059,7 +5059,7 @@ async fn test_firmware_upgrade_wait_for_complete_retries_when_job_lookup_fails(
     assert_eq!(job.machines[0].status, FirmwareProgressState::InProgress);
     assert_eq!(
         job.machines[0].error_message.as_deref(),
-        Some("Job not found: child-job-1")
+        Some("job not found: child-job-1")
     );
 
     Ok(())
