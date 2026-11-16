@@ -12525,7 +12525,9 @@ paths:
         Allocation Constraints are never deleted by this operation.
 
         To remove retained REST records, have the owners remove the retained Instance. Then
-        repeat the forced DELETE without allowDeleteWithInstance. Existing quota guards may
+        repeat the forced DELETE with allowDeleteWithInstanceType=true instead of
+        allowDeleteWithInstance, since dropping allowDeleteWithInstance also drops the
+        Instance Type removal it permits. Existing quota guards may
         require the owners to reduce or rebalance Allocation Constraints first. Ordinary
         DELETE also removes the records once the Machine has been missing on Site for 24
         hours without an Instance or Instance Type. If Core rediscovers the Machine first,

@@ -190,7 +190,7 @@ Site with status `Error`, as the next inventory would. A retained Machine keeps
 counting toward Allocation capacity until its Instance Type association is
 removed. HTTP `409` with `Retry-After: 5` means Core confirmed incomplete
 cleanup. Wait at least five seconds and repeat the same forced DELETE. The
-caller must continue the operation, REST does not schedule another attempt
+caller must continue the operation. REST does not schedule another attempt
 automatically.
 
 Forced requests for the same Machine join a Core deletion that is still
@@ -203,7 +203,10 @@ To remove retained REST records:
 1. Have the owners remove the retained Instance. Existing quota guards may
    require the owners to reduce or rebalance Allocation Constraints first.
    This cleanup does not delete Allocation records.
-2. Repeat the forced DELETE without `allowDeleteWithInstance`. Ordinary
+1. Repeat the forced DELETE with `allowDeleteWithInstanceType=true` instead
+   of `allowDeleteWithInstance`. Dropping `allowDeleteWithInstance` also drops
+   the Instance Type removal it permits, so a retained Instance Type
+   association is otherwise rejected. Ordinary
    `DELETE /v2/org/{org}/nico/machine/{machineId}` also removes the records
    once the Machine has been missing on Site for 24 hours without an Instance
    or Instance Type.
