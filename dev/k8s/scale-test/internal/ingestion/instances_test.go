@@ -113,6 +113,15 @@ func (f *instanceSite) machineStatus(id, state string) {
 	}
 	f.state[probeapi.FamilyRestMachines][id] = r
 }
+func (f *instanceSite) hostAssignment(id string, assigned bool) {
+	u := f.state[probeapi.FamilyHost][id]
+	u.Stage, u.State, u.Reason, u.Done = probeapi.StageReady, "Ready", nil, !assigned
+	if assigned {
+		u.Stage, u.State, u.Reason = probeapi.StageRegistered, "Assigned", new("Assigned/Ready")
+	}
+	u.Host.Allocatable = new(!assigned)
+	f.state[probeapi.FamilyHost][id] = u
+}
 func (f *instanceSite) snapshot(family probeapi.Family) []probeapi.Unit {
 	frame := f.meta(probeapi.FamilyHost).SweepStart.Unix()
 	if frame != f.frame {
@@ -298,9 +307,7 @@ func (f *instanceSite) RoundTrip(req *http.Request) (*http.Response, error) {
 			r.RestMachine.TenantID = new(instanceUUID(901))
 			r.RestMachine.IsUsableByTenant = false
 			f.state[probeapi.FamilyRestMachines][machine] = r
-			u := f.state[probeapi.FamilyHost][host]
-			u.Host.Allocatable = new(false)
-			f.state[probeapi.FamilyHost][host] = u
+			f.hostAssignment(host, true)
 			f.state[probeapi.FamilyRestInstances][id] = probeapi.Unit{ID: id, ControllerInstanceID: &id, Type: probeapi.UnitTypeInstance, Source: probeapi.SourceRest, Stage: probeapi.StageReady, State: "Ready", Instance: &probeapi.InstanceFields{Name: &name, Tenant: new(instanceUUID(901)), HostID: &machine, Status: "Ready"}}
 			f.state[probeapi.FamilyInstance][id] = probeapi.Unit{ID: id, Type: probeapi.UnitTypeInstance, Source: probeapi.SourceNicoAPI, Stage: probeapi.StageReady, State: "ready", Instance: &probeapi.InstanceFields{Name: &name, Tenant: new("tenant-org"), HostID: &host, Status: "ready"}}
 			reply = append(reply, map[string]string{"id": id})
@@ -315,9 +322,7 @@ func (f *instanceSite) RoundTrip(req *http.Request) (*http.Response, error) {
 		r.RestMachine.TenantID = nil
 		r.RestMachine.IsUsableByTenant = true
 		f.state[probeapi.FamilyRestMachines][machine] = r
-		h := f.state[probeapi.FamilyHost][r.RestMachine.ControllerID]
-		h.Host.Allocatable = new(true)
-		f.state[probeapi.FamilyHost][h.ID] = h
+		f.hostAssignment(r.RestMachine.ControllerID, false)
 		delete(f.state[probeapi.FamilyRestInstances], id)
 		delete(f.state[probeapi.FamilyInstance], id)
 	} else {
@@ -363,7 +368,9 @@ func (s *instanceMetrics) PoolHealthy(context.Context, time.Time, map[string]str
 	}
 	return []string{"api-1"}, nil
 }
-func (*instanceMetrics) ProbeDemand(context.Context, time.Time, time.Duration) error { return nil }
+func (*instanceMetrics) ProbeDemand(context.Context, time.Time, time.Duration, ...float64) error {
+	return nil
+}
 func (s *instanceMetrics) Summarize(_ context.Context, _ time.Time, f probeapi.Filter, p probeapi.SummaryParams) (probeapi.SummaryResponse, error) {
 	s.summaries++
 	if p.Base == nil {
@@ -815,6 +822,10 @@ func TestInstanceSettings(t *testing.T) {
 		{"singleton", "instance:\n  n: 1", false}, {"missing-pool", "instance:\n  apiPoolReplicas: 0", false},
 		{"too-fast", "observation:\n  intervalSeconds: 29", false},
 		{"bad-label-window", "observation:\n  labelReadbackSeconds: 0", false},
+		{"delete-count-on-create", "instance:\n  deleteCount: 2", false},
+		{"plaintext-auth-without-fixture", "rest:\n  auth: {tokenUrl: http://identity.example/token, credentialsDir: /run/identity}", false},
+		{"https-auth-without-fixture", "rest:\n  auth: {tokenUrl: https://identity.example/token}", false},
+		{"credentials-without-fixture", "rest:\n  auth: {credentialsDir: /run/identity}", false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var node yaml.Node
@@ -838,12 +849,14 @@ func TestInstanceSettings(t *testing.T) {
 			if err = yaml.Unmarshal(raw, &node); err != nil {
 				t.Fatal(err)
 			}
-			s, err := ParseInstanceSettings(node, "instance-create")
-			if (err == nil) != tc.ok {
-				t.Fatalf("settings: %v", err)
-			}
-			if err == nil && (&instanceRun{t: &InstanceTest{s: s}}).createBody(instanceRequest{})["topologyOptimized"] != (tc.name == "topology") {
-				t.Fatal("batch topology option omitted or changed")
+			for _, command := range []string{"instance-create", "instance-lifecycle"} {
+				s, err := ParseInstanceSettings(node, command)
+				if (err == nil) != tc.ok {
+					t.Fatalf("settings %s: %v", command, err)
+				}
+				if err == nil && (&instanceRun{t: &InstanceTest{s: s}}).createBody(instanceRequest{})["topologyOptimized"] != (tc.name == "topology") {
+					t.Fatal("batch topology option omitted or changed")
+				}
 			}
 		})
 	}
@@ -913,6 +926,7 @@ func TestInstanceSettlementReview(t *testing.T) {
 		{"future-dpu-error", false, 6, 2, result.Unresolved, 0},
 		{"future-native-error", true, 6, 2, result.Unresolved, 0},
 		{"future-delete-ready", true, 6, 2, result.Unresolved, 0},
+		{"future-delete-assigned-state", true, 6, 2, result.Unresolved, 0},
 		{"dpu-error", false, 5, 100, result.Failed, 1},
 		{"final-dpu-error", false, 5, 100, result.Failed, 1},
 		{"prior-dpu-error", false, 6, 2, result.Failed, 1},
@@ -954,12 +968,16 @@ func TestInstanceSettlementReview(t *testing.T) {
 						u.Stage = probeapi.StageError
 						f.state[probeapi.FamilyInstance][u.ID] = u
 					case "future-delete-ready":
-						f.state[probeapi.FamilyHost]["h2"].Host.Allocatable = new(true)
+						f.hostAssignment("h2", false)
+					case "future-delete-assigned-state":
+						u := f.state[probeapi.FamilyHost]["h2"]
+						u.Reason = new("Assigned/Initializing")
+						f.state[probeapi.FamilyHost][u.ID] = u
 					case "rest-machine-error", "rest-machine-unknown", "rest-machine-decommissioning":
 						f.machineStatus(instanceUUID(1), map[string]string{"rest-machine-error": "Error", "rest-machine-unknown": "Unknown", "rest-machine-decommissioning": "Decommissioning"}[tc.name])
 					case "host-not-ready":
 						u := f.state[probeapi.FamilyHost]["h0"]
-						u.Stage = probeapi.StageRegistered
+						u.Reason = new("Assigned/Initializing")
 						f.state[probeapi.FamilyHost]["h0"] = u
 					case "host-unknown":
 						u := f.state[probeapi.FamilyHost]["h0"]
@@ -1045,7 +1063,7 @@ func TestInstanceSettlementReview(t *testing.T) {
 						t.Fatal("published ownership without its selector label")
 					}
 				}
-				if tc.name == "future-delete-ready" {
+				if strings.HasPrefix(tc.name, "future-delete-") {
 					store, _ := test.deps.Store(c.Context())
 					if store.Client.(*instanceMetrics).summaries != 0 {
 						t.Fatal("future delete counted in current timing")
@@ -1082,8 +1100,10 @@ func TestInstancePublication(t *testing.T) {
 		want    result.Verdict
 		pending bool
 	}{
+		{"lifecycle-success", result.Passed, false}, {"lifecycle-lost", result.Unresolved, true}, {"lifecycle-delete-unready", result.NotReady, true},
 		{"final-dpu-error", result.Failed, true}, {"burst-dpu-error", result.Failed, true},
 		{"stale", result.NotReady, false}, {"read-error", result.NotReady, false},
+		{"identity-timeout", result.Unresolved, false},
 		{"lost", result.Unresolved, true}, {"journal", result.Aborted, true},
 		{"label-absent", result.Unresolved, true}, {"label-other", result.Unresolved, true},
 		{"evidence", result.Aborted, true}, {"joined-evidence", result.Aborted, true},
@@ -1101,6 +1121,22 @@ func TestInstancePublication(t *testing.T) {
 				cm := &oneCM{}
 				d := run.Deps{Config: cfg, Lock: &lock.SiteLock{Cluster: clustertest.New("mat"), Name: "lock", Timing: lock.DefaultTiming}, CM: cm, Outside: outside}
 				f.mode = tc.name
+				if tc.name == "identity-timeout" {
+					test.rest.settings.Rest.Auth = fixtureAuth{TokenURL: "https://identity.example/token", CredentialsDir: t.TempDir()}
+					if err := writeIdentity(test.rest.settings.Rest.Auth.CredentialsDir, "provider", clientIdentity{"provider", "secret"}); err != nil {
+						t.Fatal(err)
+					}
+					test.rest.authClient = &http.Client{Transport: labelRetryTransport(func(*http.Request) (*http.Response, error) { return nil, context.DeadlineExceeded })}
+				}
+				if strings.HasPrefix(tc.name, "lifecycle-") {
+					cfg.Command = "instance-lifecycle"
+					if tc.name == "lifecycle-lost" {
+						f.mode = "lost"
+					}
+					if tc.name == "lifecycle-delete-unready" {
+						failDeleteReadiness(test)
+					}
+				}
 				if tc.name == "burst-dpu-error" {
 					f.action = func() {
 						if f.created > 0 {
@@ -1154,8 +1190,24 @@ func TestInstancePublication(t *testing.T) {
 				if res.Lock.FinalState == nil || (*res.Lock.FinalState == string(lock.NeedsCleanup)) != tc.pending {
 					t.Fatalf("lock=%+v", res.Lock)
 				}
-				if len(res.Reasons) == 0 {
+				if len(res.Reasons) == 0 && tc.want != result.Passed {
 					t.Fatal("failure reasons lost")
+				}
+				if strings.HasPrefix(tc.name, "lifecycle-") {
+					files, e := filepath.Glob(filepath.Join(dir, "*.result.json"))
+					if e != nil || len(files) != 1 || saved.Test != "instance-lifecycle" {
+						t.Fatal("lifecycle published multiple results")
+					}
+					if tc.want == result.Passed && len(saved.Stages) != 2 {
+						t.Fatal("lifecycle stage timings missing")
+					}
+					if tc.want != result.Passed {
+						for _, call := range f.requests {
+							if strings.HasPrefix(call, "DELETE") {
+								t.Fatal("lifecycle deleted unsettled work")
+							}
+						}
+					}
 				}
 				if tc.name == "final-dpu-error" || tc.name == "burst-dpu-error" || tc.name == "joined-evidence" {
 					if len(res.Stages) != 1 || res.Stages[0].Status != result.StageFailed || res.Stages[0].Units.Failed != 1 {
@@ -1422,6 +1474,382 @@ func TestCalibrationEvidenceQuota(t *testing.T) {
 	}
 }
 
+func TestPartialInstanceDelete(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		f, dir, owned := ownedInstances(t, 6)
+		manifest := "owner.owned.json"
+		var out result.Outcome
+		var err error
+		// Add a stable unrelated instance through the same fake boundary.
+		req, _ := http.NewRequest(http.MethodPost, "https://rest.example/instance/batch", strings.NewReader(`{"count":1,"namePrefix":"unowned","machineLabelSelector":{}}`))
+		req.Header.Set("Authorization", "Bearer test-token")
+		reply, err := f.RoundTrip(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_ = reply.Body.Close()
+		foreign := instanceUUID(1007)
+		unready := owned.Cohort[0].NativeInstanceID
+		u := f.state[probeapi.FamilyInstance][unready]
+		u.Stage, u.State = probeapi.StageError, "Error"
+		f.state[probeapi.FamilyInstance][unready], f.frame = u, -1
+		for _, count := range []uint64{6, 2} {
+			del, dr, dc := instanceCommand(t, f, "instance-delete", fmt.Sprintf("available-%d", count), dir, 6)
+			del.s.Instance.OwnedManifest, del.s.Instance.DeleteCount = manifest, count
+			before := len(f.requests)
+			available, e := runInstance(del, dr, dc, count == 2)
+			if e != nil || len(f.requests) != before {
+				t.Fatalf("availability preflight wrote: %v", e)
+			}
+			if count == 6 {
+				if available.Verdict != result.NotReady || !strings.Contains(strings.Join(available.Reasons, " "), "only 5 available") {
+					t.Fatal("site Ready shortage accepted")
+				}
+			} else {
+				var selected instancePlan
+				if available.Verdict != result.Go || fixtureFile(dir, "available-2.instance-plan.json", &selected, "") != nil || len(selected.Cohort) != 2 || selected.Cohort[0].NativeInstanceID == unready {
+					t.Fatal("non-Ready owned instance selected")
+				}
+			}
+		}
+		u.Stage, u.State = probeapi.StageReady, "ready"
+		f.state[probeapi.FamilyInstance][unready], f.frame = u, -1
+		for step, count := range []uint64{7, 3, 1, 0, 0} {
+			del, dr, dc := instanceCommand(t, f, "instance-delete", fmt.Sprintf("partial-delete-%d", step), dir, 6)
+			del.s.Instance.OwnedManifest = manifest
+			del.s.Instance.DeleteCount = count
+			before := len(f.requests)
+			out, err = runInstance(del, dr, dc, false)
+			if step == 0 {
+				if out.Verdict != result.NotReady || err != nil || len(f.requests) != before {
+					t.Fatal("oversized delete dispatched")
+				}
+				continue
+			}
+			if err != nil || out.Verdict != result.Passed || dr.j.Unsettled() {
+				t.Fatalf("delete %d: %s %v %v", count, out.Verdict, err, out.Reasons)
+			}
+			var detail instanceDetail
+			if json.Unmarshal(out.Detail, &detail) != nil || detail.Manifest == "" {
+				t.Fatal("remaining manifest missing")
+			}
+			remaining, e := readOwned(dir, detail.Manifest)
+			if e != nil {
+				t.Fatal(e)
+			}
+			n := int(count)
+			if count == 0 {
+				n = len(owned.Cohort)
+			}
+			// The public order is burst, then instance name.
+			slices.SortFunc(owned.Cohort, func(a, b CohortHost) int {
+				if a.Burst != b.Burst {
+					return a.Burst - b.Burst
+				}
+				return strings.Compare(a.Name, b.Name)
+			})
+			for _, h := range owned.Cohort[:n] {
+				if f.state[probeapi.FamilyRestInstances][h.InstanceID].ID != "" || !readyHost(f.state[probeapi.FamilyHost][h.ID]) || f.state[probeapi.FamilyRestMachines][h.RestID].RestMachine.Labels[instanceLabel] != "" {
+					t.Fatal("selected instance or host did not settle")
+				}
+			}
+			if len(remaining.Cohort) != len(owned.Cohort)-n || f.state[probeapi.FamilyRestInstances][foreign].ID == "" {
+				t.Fatal("wrong remaining count or foreign instance deleted")
+			}
+			for i, h := range remaining.Cohort {
+				if h.InstanceID != owned.Cohort[n+i].InstanceID || f.state[probeapi.FamilyRestInstances][h.InstanceID].ID == "" || f.state[probeapi.FamilyRestMachines][h.RestID].RestMachine.Labels[instanceLabel] == "" {
+					t.Fatal("retained ownership changed")
+				}
+			}
+			for _, call := range f.requests[before:] {
+				if strings.Contains(call, foreign) {
+					t.Fatal("foreign instance mutated")
+				}
+			}
+			manifest, owned = detail.Manifest, remaining
+		}
+	})
+}
+func TestInstanceLifecycle(t *testing.T) {
+	for _, mode := range []string{"success", "lost", "dry", "delete-unready", "delete-restart", "delete-epoch", "gone"} {
+		t.Run(mode, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				f := instanceFixture(5)
+				if mode == "lost" {
+					f.mode = mode
+				}
+				test, r, c := instanceCommand(t, f, "instance-lifecycle", strings.Repeat("l", 40), t.TempDir(), 4)
+				test.s.Instance.BurstSize = 2
+				if mode == "delete-unready" {
+					failDeleteReadiness(test)
+				}
+				if mode == "delete-restart" || mode == "delete-epoch" || mode == "gone" {
+					ready, calls := test.check, 0
+					test.check = func(ctx context.Context, d readiness.Deps, end time.Time) readiness.Report {
+						calls++
+						if calls == 2 {
+							switch mode {
+							case "delete-restart":
+								test.deps.Pods.(*fakePods).set("core", "replacement")
+							case "gone":
+								owned, e := readOwned(test.cfg.Journal.Dir, "create-"+digest([]byte(test.cfg.RunID))[:32]+".owned.json")
+								if e != nil {
+									t.Fatal(e)
+								}
+								for _, host := range owned.Cohort {
+									absentInstance(f, host)
+								}
+							default:
+								f.process++
+							}
+						}
+						return ready(ctx, d, end)
+					}
+				}
+				out, err := runInstance(test, r, c, mode == "dry")
+				want := map[string]result.Verdict{"success": result.Passed, "lost": result.Unresolved, "dry": result.Go, "delete-unready": result.NotReady, "delete-restart": result.NotReady, "delete-epoch": result.NotReady, "gone": result.Passed}[mode]
+				if err != nil || out.Verdict != want || r.j.Unsettled() != (mode == "lost" || strings.HasPrefix(mode, "delete-")) {
+					t.Fatalf("lifecycle: %s %v", out.Verdict, err)
+				}
+				var phases map[string]instanceDetail
+				if json.Unmarshal(out.Detail, &phases) != nil {
+					t.Fatal("phase detail missing")
+				}
+				if mode == "gone" {
+					if len(out.Stages) != 2 || len(phases["delete"].Bursts) != 0 {
+						t.Fatal("reconciled lifecycle invented delete timing")
+					}
+					for _, call := range f.requests {
+						if strings.HasPrefix(call, "DELETE") {
+							t.Fatal("lifecycle repeated an absent DELETE")
+						}
+					}
+					return
+				}
+				if mode != "success" {
+					if _, ok := phases["delete"]; ok && !strings.HasPrefix(mode, "delete-") {
+						t.Fatal("delete ran after unready create")
+					}
+					for _, call := range f.requests {
+						if strings.HasPrefix(call, "DELETE") {
+							t.Fatal("unsettled work deleted")
+						}
+					}
+					return
+				}
+				created, e := readOwned(test.cfg.Journal.Dir, phases["create"].Manifest)
+				if e != nil || created.OwnerJournalRunID != test.cfg.RunID {
+					t.Fatalf("lifecycle journal provenance lost: %v", e)
+				}
+				if len(out.Stages) != 4 || len(phases["create"].Bursts) != 2 || len(phases["delete"].Bursts) != 2 || len(f.state[probeapi.FamilyRestInstances]) != 0 {
+					t.Fatal("missing phase timings or release")
+				}
+				for i, stage := range out.Stages {
+					prefix := "instance-create."
+					if i >= 2 {
+						prefix = "instance-delete."
+					}
+					if !strings.HasPrefix(string(stage.ID), prefix) || stage.Status != result.StageDone {
+						t.Fatal("phase stages lost")
+					}
+				}
+			})
+		})
+	}
+}
+
+func failDeleteReadiness(test *InstanceTest) {
+	ready, calls := test.check, 0
+	test.check = func(ctx context.Context, d readiness.Deps, end time.Time) readiness.Report {
+		calls++
+		if calls == 2 {
+			return readiness.Report{}
+		}
+		return ready(ctx, d, end)
+	}
+}
+
+func TestPartialDeleteFailureUsesOriginalBurst(t *testing.T) {
+	for _, mixed := range []bool{false, true} {
+		t.Run(fmt.Sprint(mixed), func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				f, dir, owned := ownedInstances(t, 4)
+				owned.Cohort = owned.Cohort[2:]
+				if mixed {
+					absentInstance(f, owned.Cohort[0])
+				}
+				if _, e := writeOnce(dir, "later-burst.owned.json", owned); e != nil {
+					t.Fatal(e)
+				}
+				del, dr, dc := instanceCommand(t, f, "instance-delete", "later-burst", dir, 4)
+				del.s.Instance.OwnedManifest = "later-burst.owned.json"
+				sp, _ := del.deps.Store(context.Background())
+				sp.Client.(*instanceMetrics).afterSummary = func() {
+					f.mu.Lock()
+					defer f.mu.Unlock()
+					u := f.state[probeapi.FamilyDpu][owned.Cohort[1].DPUs[0]]
+					u.Stage = probeapi.StageError
+					f.state[probeapi.FamilyDpu][u.ID] = u
+					f.frame = -1
+				}
+				out, e := runInstance(del, dr, dc, false)
+				if e != nil || out.Verdict != result.Failed || !dr.j.Unsettled() || len(out.Stages) != 1 || out.Stages[0].Status != result.StageFailed || out.Stages[0].Units.Failed != 1 || out.Stages[0].Units.N != map[bool]uint64{false: 2, true: 1}[mixed] {
+					t.Fatalf("later burst failure: %+v %v", out, e)
+				}
+			})
+		})
+	}
+}
+
+func ownedInstances(t *testing.T, n int) (*instanceSite, string, instancePlan) {
+	t.Helper()
+	f, dir := instanceFixture(n+1), t.TempDir()
+	create, r, c := instanceCommand(t, f, "instance-create", "owner", dir, n)
+	create.s.Instance.BurstSize = 2
+	if out, e := runInstance(create, r, c, false); e != nil || out.Verdict != result.Passed {
+		t.Fatalf("create %s %v", out.Verdict, e)
+	}
+	owned, e := readOwned(dir, "owner.owned.json")
+	if e != nil {
+		t.Fatal(e)
+	}
+	return f, dir, owned
+}
+func absentInstance(f *instanceSite, h CohortHost) {
+	delete(f.state[probeapi.FamilyInstance], h.NativeInstanceID)
+	delete(f.state[probeapi.FamilyRestInstances], h.InstanceID)
+	m := f.state[probeapi.FamilyRestMachines][h.RestID]
+	m.RestMachine.InstanceID, m.RestMachine.TenantID = nil, nil
+	m.RestMachine.IsUsableByTenant, m.State = true, "Ready"
+	f.state[probeapi.FamilyRestMachines][h.RestID] = m
+	f.hostAssignment(h.ID, false)
+	f.frame = -1
+}
+func TestPartialMissingCandidate(t *testing.T) {
+	for _, mode := range []string{"absent", "transition", "conflict", "orphan", "tenant-conflict", "type-conflict", "host-error", "dpu-error", "rest-error", "host-unknown", "host-not-ready", "host-free", "all-absent", "all-gone", "all-gone-unlabeled", "all-absent-unready", "all-gone-dry"} {
+		t.Run(mode, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				f, dir, owned := ownedInstances(t, 4)
+				h := owned.Cohort[0]
+				rest := f.state[probeapi.FamilyRestInstances][h.InstanceID]
+				unhealthy := strings.HasSuffix(mode, "-error") || strings.HasPrefix(mode, "host-")
+				if !unhealthy {
+					absentInstance(f, h)
+				}
+				switch mode {
+				case "host-free":
+					f.hostAssignment(h.ID, false)
+				case "host-unknown", "host-not-ready":
+					u := f.state[probeapi.FamilyHost][h.ID]
+					u.Reason = new(map[string]string{"host-unknown": "Assigned/Unknown", "host-not-ready": "Assigned/Initializing"}[mode])
+					f.state[probeapi.FamilyHost][h.ID] = u
+				case "host-error":
+					u := f.state[probeapi.FamilyHost][h.ID]
+					u.Stage = probeapi.StageError
+					f.state[probeapi.FamilyHost][h.ID] = u
+				case "dpu-error":
+					u := f.state[probeapi.FamilyDpu][h.DPUs[0]]
+					u.Stage = probeapi.StageError
+					f.state[probeapi.FamilyDpu][u.ID] = u
+				case "rest-error":
+					f.machineStatus(h.RestID, "Error")
+				}
+				f.frame = -1
+				if mode == "transition" {
+					f.frame = time.Now().Unix() / 30
+				}
+				if mode == "conflict" {
+					f.state[probeapi.FamilyRestMachines][h.RestID].RestMachine.InstanceID = new(instanceUUID(9999))
+				}
+				if mode == "tenant-conflict" {
+					f.state[probeapi.FamilyRestMachines][h.RestID].RestMachine.TenantID = new(instanceUUID(9999))
+				}
+				if mode == "type-conflict" {
+					f.state[probeapi.FamilyRestMachines][h.RestID].RestMachine.InstanceType = new(instanceUUID(9999))
+				}
+				if mode == "orphan" {
+					f.state[probeapi.FamilyRestInstances][h.InstanceID] = rest
+				}
+				del, r, c := instanceCommand(t, f, "instance-delete", "missing-delete", dir, 4)
+				del.s.Instance.OwnedManifest, del.s.Instance.DeleteCount = "owner.owned.json", 2
+				if strings.HasPrefix(mode, "all-") {
+					del.s.Instance.DeleteCount = 0
+					if strings.HasPrefix(mode, "all-gone") {
+						for _, host := range owned.Cohort {
+							absentInstance(f, host)
+							if mode == "all-gone-unlabeled" {
+								delete(f.state[probeapi.FamilyRestMachines][host.RestID].RestMachine.Labels, instanceLabel)
+							}
+						}
+					}
+					if mode == "all-absent-unready" {
+						u := f.state[probeapi.FamilyHost][h.ID]
+						u.Stage = probeapi.StageError
+						f.state[probeapi.FamilyHost][h.ID] = u
+					}
+				}
+				before := len(f.requests)
+				out, e := runInstance(del, r, c, mode == "all-gone-dry")
+				if strings.HasPrefix(mode, "all-") {
+					if mode == "all-gone-dry" {
+						if e != nil || out.Verdict != result.Go || len(f.requests) != before || r.j.Unsettled() {
+							t.Fatal("dry reconciliation planned an unsafe delete")
+						}
+						return
+					}
+					if mode == "all-absent-unready" {
+						if out.Verdict != result.NotReady || len(f.requests) != before {
+							t.Fatal("unsettled absent host was reconciled")
+						}
+						return
+					}
+					var detail instanceDetail
+					if e != nil || out.Verdict != result.Passed || r.j.Unsettled() || json.Unmarshal(out.Detail, &detail) != nil {
+						t.Fatalf("delete-all with prior absence: %s %v %v", out.Verdict, e, out.Reasons)
+					}
+					remaining, err := readOwned(dir, detail.Manifest)
+					want := 0
+					if mode == "all-absent" {
+						want = 3
+					}
+					deletes, units := 0, uint64(0)
+					for _, call := range f.requests[before:] {
+						if strings.HasPrefix(call, "DELETE") {
+							deletes++
+						}
+					}
+					for _, stage := range out.Stages {
+						units += stage.Units.N
+					}
+					if err != nil || len(remaining.Cohort) != 0 || deletes != want || units != uint64(want) || want == 0 && len(out.Stages) != 0 || mode == "all-gone-unlabeled" && len(f.requests) != before {
+						t.Fatalf("absence replayed or timed: deletes=%d units=%d remaining=%d err=%v", deletes, units, len(remaining.Cohort), err)
+					}
+					for _, host := range owned.Cohort {
+						if f.state[probeapi.FamilyRestMachines][host.RestID].RestMachine.Labels[instanceLabel] != "" {
+							t.Fatal("released host retained its selector")
+						}
+					}
+					return
+				}
+				if mode != "absent" && mode != "transition" && !unhealthy {
+					if e != nil || out.Verdict != result.NotReady || len(f.requests) != before {
+						t.Fatalf("conflict wrote: %s %v", out.Verdict, e)
+					}
+					return
+				}
+				var detail instanceDetail
+				if e != nil || out.Verdict != result.Passed || json.Unmarshal(out.Detail, &detail) != nil {
+					t.Fatalf("missing candidate blocked available subset: %s %v", out.Verdict, e)
+				}
+				remaining, e := readOwned(dir, detail.Manifest)
+				if e != nil || len(remaining.Cohort) != 2 || remaining.Cohort[0].InstanceID != h.InstanceID || f.state[probeapi.FamilyRestMachines][h.RestID].RestMachine.Labels[instanceLabel] == "" {
+					t.Fatal("missing ownership was lost")
+				}
+			})
+		})
+	}
+}
+
 // A stalled full read must never become remembered absence at its deadline.
 type labelReadTimeout struct {
 	*instanceSite
@@ -1669,4 +2097,33 @@ func (p *machineLagProbe) Units(ctx context.Context, f probeapi.Filter, name *st
 	}
 	p.mu.Unlock()
 	return p.instanceSite.Units(ctx, f, name, page)
+}
+
+func TestOccupiedHost(t *testing.T) {
+	for _, tc := range []struct {
+		state, reason string
+		stage         probeapi.Stage
+		allocatable   *bool
+		done, want    bool
+	}{
+		{"Assigned", "Assigned/Ready", probeapi.StageRegistered, new(false), false, true},
+		{"Assigned", "Assigned/Ready: healthy", probeapi.StageRegistered, new(false), false, true},
+		{"Assigned", "Assigned/Initializing", probeapi.StageRegistered, new(false), false, false},
+		{"Assigned", "Assigned/ReadyUnknown", probeapi.StageRegistered, new(false), false, false},
+		{"Other", "Assigned/Ready", probeapi.StageRegistered, new(false), false, false},
+		{"Assigned", "Assigned/Ready", probeapi.StageError, new(false), false, false},
+		{"Assigned", "Assigned/Ready", probeapi.StageReady, new(false), false, false},
+		{"Assigned", "Assigned/Ready", probeapi.StageRegistered, new(true), false, false},
+		{"Assigned", "Assigned/Ready", probeapi.StageRegistered, nil, false, false},
+		{"Assigned", "Assigned/Ready", probeapi.StageRegistered, new(false), true, false},
+		{"Assigned", "", probeapi.StageRegistered, new(false), false, false},
+	} {
+		u := probeapi.Unit{Stage: tc.stage, State: tc.state, Done: tc.done, Host: &probeapi.HostFields{Allocatable: tc.allocatable}}
+		if tc.reason != "" {
+			u.Reason = &tc.reason
+		}
+		if occupiedHost(u) != tc.want {
+			t.Fatalf("occupied host mismatch: %+v", tc)
+		}
+	}
 }

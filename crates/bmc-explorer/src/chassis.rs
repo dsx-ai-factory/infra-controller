@@ -373,7 +373,7 @@ impl<B: Bmc> ExploredChassis<B> {
                 Err(err) => {
                     return Err(Error::NvRedfish {
                         context: "chassis assembly",
-                        err,
+                        err: Box::new(err),
                     });
                 }
             }

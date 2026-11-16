@@ -263,6 +263,7 @@ pub(crate) async fn handle_machine_validation_state(
                         .create_redfish_client_from_machine(&mh_snapshot.host_snapshot)
                         .await?;
                     match inspect_host_boot_config(
+                        ctx.services,
                         redfish_client.as_ref(),
                         mh_snapshot,
                         &boot_interface,

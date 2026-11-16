@@ -30,6 +30,7 @@ use crate::jobs::Effect;
 use crate::{RmsMock, rms};
 
 /// Begin a password change on the given switches.
+#[allow(clippy::unused_async)] // needs async for `rack_manager_impl!` macro support
 pub(crate) async fn update_switch_system_password(
     mock: &RmsMock,
     request: tonic::Request<rms::UpdateSwitchSystemPasswordRequest>,
@@ -75,6 +76,7 @@ pub(crate) async fn update_switch_system_password(
 
 /// Begin a factory reset of the given switches. `domain` names TLS material
 /// a simulated switch does not have, so it is accepted and ignored.
+#[allow(clippy::unused_async)] // needs async for `rack_manager_impl!` macro support
 pub(crate) async fn batch_reset_switch_factory_default(
     mock: &RmsMock,
     request: tonic::Request<rms::BatchResetSwitchFactoryDefaultRequest>,

@@ -133,6 +133,7 @@ pub(super) async fn observe_verified_boot_interface(
     };
     let redfish_target: BootInterfaceTarget = desired_boot_interface.value.clone().into();
     let boot_config_inspection = match inspect_host_boot_config(
+        ctx.services,
         redfish_client.as_ref(),
         managed_host_snapshot,
         &redfish_target,

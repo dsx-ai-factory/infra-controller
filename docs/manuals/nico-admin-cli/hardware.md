@@ -1,6 +1,6 @@
 # CLI reference — Hardware
 
-Live hardware and lifecycle operations: machines, BMC, DPUs, firmware and component lifecycle, attestation, low-level passthrough (Redfish, RMS, MLX), and operator utilities.
+Live hardware and lifecycle operations: machines, BMC, DPUs, firmware and component lifecycle, attestation, low-level passthrough (Redfish, MLX), and operator utilities.
 
 For build and connection setup, refer to the [NICo Admin CLI guide](../nico-admin-cli.md). Browse all command groups in the [CLI reference index](./README.md).
 
@@ -32,7 +32,6 @@ For build and connection setup, refer to the [NICo Admin CLI guide](../nico-admi
 | [`power-shelf`](./commands/power-shelf/power-shelf.md) | Power Shelf management. |
 | [`rack`](./commands/rack/rack.md) | Rack Management. |
 | [`redfish`](./commands/redfish/redfish.md) | Redfish BMC actions. |
-| [`rms`](./commands/rms/rms.md) | RMS Actions. |
 | [`scout-stream`](./commands/scout-stream/scout-stream.md) | Scout Stream Connection Handling. |
 | [`set`](./commands/set/set.md) | Set carbide-api dynamic features. |
 | [`sku`](./commands/sku/sku.md) | Manage machine SKUs. |

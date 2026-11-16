@@ -218,7 +218,13 @@ async fn automatic_admission_preserves_a_concurrent_request_and_fills_capacity(
         .firmware_global
         .instance_updates_manual_tagging = false;
     let mut tasks = JoinSet::new();
-    let locks = db::work_lock_manager::start(&mut tasks, pool.clone(), Default::default()).await?;
+    let locks = db::work_lock_manager::start(
+        &mut tasks,
+        pool.clone(),
+        Default::default(),
+        carbide_instrument::Instrumentation::global(),
+    )
+    .await?;
     let work_lock = locks.try_acquire_lock("host-request-race".into()).await?;
     let updating = HashSet::new();
     let snapshots = HashMap::new();
@@ -379,7 +385,13 @@ async fn skipped_candidates_leave_capacity_for_later_hosts(pool: sqlx::PgPool) -
     }
     let candidate_ids: HashSet<_> = candidates.iter().copied().collect();
     let mut tasks = JoinSet::new();
-    let locks = db::work_lock_manager::start(&mut tasks, pool.clone(), Default::default()).await?;
+    let locks = db::work_lock_manager::start(
+        &mut tasks,
+        pool.clone(),
+        Default::default(),
+        carbide_instrument::Instrumentation::global(),
+    )
+    .await?;
     let work_lock = locks
         .try_acquire_lock("host-candidate-skips".into())
         .await?;
@@ -557,7 +569,13 @@ async fn completed_events_follow_the_manager_cleanup_commit(pool: sqlx::PgPool) 
     db::machine::update_update_complete(&host_id, false, &mut txn).await?;
     txn.commit().await?;
     let mut tasks = JoinSet::new();
-    let locks = db::work_lock_manager::start(&mut tasks, pool.clone(), Default::default()).await?;
+    let locks = db::work_lock_manager::start(
+        &mut tasks,
+        pool.clone(),
+        Default::default(),
+        carbide_instrument::Instrumentation::global(),
+    )
+    .await?;
     let manager = MachineUpdateManager::new_with_modules(
         pool.clone(),
         Arc::new(config),
@@ -639,7 +657,13 @@ async fn nic_work_excludes_host_admission_even_with_spare_capacity(
         .max_concurrent_machine_updates_percent = None;
     let config = updater.config.clone();
     let mut tasks = JoinSet::new();
-    let locks = db::work_lock_manager::start(&mut tasks, pool.clone(), Default::default()).await?;
+    let locks = db::work_lock_manager::start(
+        &mut tasks,
+        pool.clone(),
+        Default::default(),
+        carbide_instrument::Instrumentation::global(),
+    )
+    .await?;
     let manager = MachineUpdateManager::new_with_modules(
         pool.clone(),
         config,
@@ -898,7 +922,13 @@ async fn stale_work_lock_cannot_publish_host_firmware(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let test_meter = carbide_utils::test_support::test_meter::TestMeter::default();
     let mut tasks = JoinSet::new();
-    let locks = db::work_lock_manager::start(&mut tasks, pool.clone(), Default::default()).await?;
+    let locks = db::work_lock_manager::start(
+        &mut tasks,
+        pool.clone(),
+        Default::default(),
+        carbide_instrument::Instrumentation::global(),
+    )
+    .await?;
     let work_key = "host-firmware-admission";
     let work_lock = locks.try_acquire_lock(work_key.into()).await?;
     let updating = HashSet::new();
@@ -957,7 +987,13 @@ async fn catalog_retry_keeps_ownership_through_publication_commit(
         .await?;
     let updater = updater("2.0", &test_meter)?;
     let mut tasks = JoinSet::new();
-    let locks = db::work_lock_manager::start(&mut tasks, pool.clone(), Default::default()).await?;
+    let locks = db::work_lock_manager::start(
+        &mut tasks,
+        pool.clone(),
+        Default::default(),
+        carbide_instrument::Instrumentation::global(),
+    )
+    .await?;
     let work_key = "host-catalog-publication";
     let work_lock = locks.try_acquire_lock(work_key.into()).await?;
     let updating = HashSet::new();

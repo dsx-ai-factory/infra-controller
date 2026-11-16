@@ -24,7 +24,6 @@ use carbide_utils::periodic_timer::PeriodicTimer;
 use carbide_uuid::machine::{HostMachineId, MachineId};
 use chrono::TimeDelta;
 use db::ConditionalWrite::{Applied, NotApplied};
-use db::db_read::PgPoolReader;
 use db::work_lock_manager::WorkLockManagerHandle;
 use db::{self, ControllerStateNotCurrent, TransactionVending};
 use metrics::{DpaMonitorIterationFinished, DpaMonitorMetrics};
@@ -51,6 +50,7 @@ mod metrics;
 pub(crate) use carbide_macros::sqlx_test;
 
 pub struct DpaMonitor {
+    instrumentation: carbide_instrument::Instrumentation,
     pub(crate) db_services: DbServices,
     pub(crate) dpa_info: Arc<DpaInfo>,
     pub(crate) config: EwEthersConfig,
@@ -74,14 +74,16 @@ pub(crate) struct HandlerResult {
 impl DpaMonitor {
     const ITERATION_WORK_KEY: &'static str = "DpaMonitor::run_single_iteration";
 
+    /// Creates a monitor whose iteration and command Events use the supplied destination.
+    /// Retain its provider until the monitor stops.
     pub fn new(
         db_pool: PgPool,
-        _db_reader: PgPoolReader,
         dpa_info: Arc<DpaInfo>,
         _meter: opentelemetry::metrics::Meter,
         config: EwEthersConfig,
         host_health: HostHealthConfig,
         work_lock_manager_handle: WorkLockManagerHandle,
+        instrumentation: carbide_instrument::Instrumentation,
     ) -> Self {
         let hold_period = config
             .monitor_run_interval
@@ -90,6 +92,7 @@ impl DpaMonitor {
         let metric_holder = Arc::new(metrics::MetricHolder::new(_meter, hold_period));
 
         Self {
+            instrumentation,
             db_services: DbServices { db_pool },
             dpa_info,
             config,
@@ -150,7 +153,7 @@ impl DpaMonitor {
             .await;
         check_dpa_span.record("metrics", metrics.to_string());
         check_dpa_span.in_scope(|| {
-            carbide_instrument::emit(match result.as_ref().err() {
+            self.instrumentation.emit(match result.as_ref().err() {
                 None => DpaMonitorIterationFinished::Succeeded {
                     latency: metrics.recording_started_at.elapsed(),
                 },
@@ -453,6 +456,7 @@ impl DpaMonitor {
             state.mac_address.to_string(),
             revision_str,
             vni as i32,
+            &self.instrumentation,
         )
         .await
         {

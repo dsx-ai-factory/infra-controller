@@ -112,7 +112,7 @@ pub async fn run_discovery_iteration(
         }
         Ok(None) => {}
         Err(error) => {
-            carbide_instrument::emit(InventoryRefreshFailed {
+            ctx.instrumentation.emit(InventoryRefreshFailed {
                 error: error.to_string(),
             });
         }
@@ -401,10 +401,14 @@ mod tests {
         );
         let mut config = Config::default();
         config.endpoint_sources.carbide_api = Configurable::Disabled;
+        let setup =
+            metrics_endpoint::new_metrics_setup("discovery-test", "forge-system", false).unwrap();
+        let events = carbide_instrument::testing::MetricsCapture::for_registry(&setup.registry);
         let mut ctx = DiscoveryLoopContext::new(
             Arc::new(NoopLimiter),
             metrics_manager.clone(),
             Arc::new(config),
+            setup.instrumentation.clone(),
         )
         .expect("discovery context should start");
         let shard_manager = ShardManager {
@@ -434,6 +438,13 @@ mod tests {
             inventory_exposition(&after_failure),
             inventory_before_failure,
             "failed inventory refresh must retain component, rack, and last-success series"
+        );
+        assert_eq!(
+            events.counter_delta(
+                "carbide_hardware_health_inventory_refresh_failures_total",
+                &[]
+            ),
+            1.0
         );
     }
 
@@ -531,9 +542,13 @@ mod tests {
 
             let metrics_manager = Arc::new(MetricsManager::new("active_endpoint_count").unwrap());
 
-            let mut ctx =
-                DiscoveryLoopContext::new(Arc::new(NoopLimiter), metrics_manager, Arc::new(config))
-                    .unwrap();
+            let mut ctx = DiscoveryLoopContext::new(
+                Arc::new(NoopLimiter),
+                metrics_manager,
+                Arc::new(config),
+                carbide_instrument::Instrumentation::global(),
+            )
+            .unwrap();
 
             let stats = run_discovery_iteration(
                 source,
@@ -589,9 +604,13 @@ mod tests {
                 .expect("metrics manager should start"),
         );
 
-        let mut ctx =
-            DiscoveryLoopContext::new(Arc::new(NoopLimiter), metrics_manager, Arc::new(config))
-                .expect("discovery context should start");
+        let mut ctx = DiscoveryLoopContext::new(
+            Arc::new(NoopLimiter),
+            metrics_manager,
+            Arc::new(config),
+            carbide_instrument::Instrumentation::global(),
+        )
+        .expect("discovery context should start");
 
         let stats = run_discovery_iteration(
             source,
@@ -683,9 +702,13 @@ mod tests {
                 .expect("Prometheus sink should start"),
         );
 
-        let mut ctx =
-            DiscoveryLoopContext::new(Arc::new(NoopLimiter), metrics_manager, Arc::new(config))
-                .expect("discovery context should start");
+        let mut ctx = DiscoveryLoopContext::new(
+            Arc::new(NoopLimiter),
+            metrics_manager,
+            Arc::new(config),
+            carbide_instrument::Instrumentation::global(),
+        )
+        .expect("discovery context should start");
 
         let cancelled = Arc::new(tokio::sync::Notify::new());
         let release = Arc::new(tokio::sync::Notify::new());
@@ -888,7 +911,10 @@ mod tests {
             &reqwest(),
             Some(&base_url),
             10,
-            None,
+            crate::bmc::BmcInstrumentation::new(
+                carbide_instrument::Instrumentation::global(),
+                None,
+            ),
         ));
         let mut config = Config::default();
         config.endpoint_sources.carbide_api = Configurable::Disabled;
@@ -898,9 +924,13 @@ mod tests {
             ..Default::default()
         });
         let metrics = Arc::new(MetricsManager::new("cluster_rotation_iteration").unwrap());
-        let mut ctx =
-            DiscoveryLoopContext::new(Arc::new(NoopLimiter), metrics.clone(), Arc::new(config))
-                .expect("discovery context should start");
+        let mut ctx = DiscoveryLoopContext::new(
+            Arc::new(NoopLimiter),
+            metrics.clone(),
+            Arc::new(config),
+            carbide_instrument::Instrumentation::global(),
+        )
+        .expect("discovery context should start");
         let shard_manager = ShardManager {
             shard: 0,
             shards_count: 1,

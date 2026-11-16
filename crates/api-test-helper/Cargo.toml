@@ -50,7 +50,6 @@ eyre = { workspace = true }
 opentelemetry = { workspace = true }
 serde = { features = ["derive"], workspace = true }
 serde_json = { workspace = true }
-serial_test = { workspace = true }
 sqlx = { workspace = true, features = [
   "runtime-tokio",
   "tls-rustls",
@@ -78,7 +77,6 @@ futures = { workspace = true }
 librms = { workspace = true }
 itertools = { workspace = true }
 ipnet = { workspace = true }
-ctor = { workspace = true }
 temp-dir = { workspace = true }
 rand = { workspace = true }
 lazy_static = { workspace = true }
@@ -87,10 +85,10 @@ thiserror = { workspace = true }
 
 [dev-dependencies]
 carbide-test-support = { path = "../test-support" }
-tokio = { workspace = true, features = ["test-util"] }
 
-[build-dependencies]
-carbide-version = { path = "../version" }
+ctor = { workspace = true }
+serial_test = { workspace = true }
+tokio = { workspace = true, features = ["test-util"] }
 
 [lints]
 workspace = true

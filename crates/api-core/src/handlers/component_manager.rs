@@ -62,6 +62,7 @@ use tonic::{Code, Request, Response, Status};
 
 use crate::CarbideError;
 use crate::api::{Api, log_request_data, log_request_data_redacted};
+use crate::auth::{AuthContext, NV_SWITCH_MANAGER_SERVICE_ID, POWER_SHELF_MANAGER_SERVICE_ID};
 use crate::handlers::firmware::load_desired_firmware_version_entries;
 
 #[cfg(test)]
@@ -77,6 +78,26 @@ const UNTRACKED_SWITCH_FIRMWARE_ERROR: &str = "no firmware job tracked for this 
 // operator limit. This PostgreSQL cap applies after snapshot setup; it does not
 // bound connection acquisition, setup or the total helper duration.
 const EXPECTED_CREDENTIAL_STATEMENT_TIMEOUT: Duration = Duration::from_secs(5);
+
+// Cap each SQL statement of the device checks in `get_component_credentials`
+// at five seconds through PostgreSQL's `statement_timeout`, preserving a
+// shorter operator limit, like the expected-inventory read that can follow
+// them. The cap bounds what PostgreSQL keeps running for a caller that has
+// left; it does not bound connection acquisition or setup.
+const COMPONENT_MEMBERSHIP_STATEMENT_TIMEOUT: Duration = Duration::from_secs(5);
+
+// Bound the whole read of `get_component_credentials` at five seconds. The
+// statement caps above bound one SQL statement each, inside PostgreSQL. They
+// do not bound the wait for a pooled connection, which is 30 seconds by
+// default, snapshot setup, the credential store read, or the sum of the
+// steps. This deadline covers all of them, counted from the first wait. API
+// admission, when enabled, also ends a handler, at the caller's deadline or
+// at `max_execution_time`, which is 300 seconds by default, so this deadline
+// is the one that holds for a caller with a longer deadline or none. It
+// equals the statement caps: a statement still running at the deadline is
+// abandoned with its connection, and its cap then bounds what PostgreSQL
+// keeps running.
+const COMPONENT_CREDENTIAL_READ_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// The core compute-tray backend standalone hosts use. It authenticates with
 /// explicit per-endpoint credentials, which the proxied pool rejects by
@@ -1790,6 +1811,197 @@ async fn fetch_expected_credentials(
             "no credentials found for {component:?} at {bmc_mac}"
         ))
     })
+}
+
+/// The kind of device a credential kind belongs to: a power shelf or a
+/// switch. Core has ingested a device when the table of its kind holds a row
+/// for it that is not soft-deleted. `RackComponent` names the credential and
+/// also has a compute variant, which `get_component_credentials` never serves.
+enum IngestedComponent {
+    PowerShelf,
+    Switch,
+}
+
+/// Returns the credential Core uses to reach an ingested power shelf or switch
+/// to the external manager that operates it.
+///
+/// Each manager identity may request only its own credential kinds. Expected
+/// inventory confers no membership: the device needs a power-shelf or switch
+/// row that is not soft-deleted, and no interface with its MAC address may be
+/// owned by a machine. Resolution then follows dispatch: the credential store,
+/// else expected inventory.
+pub(crate) async fn get_component_credentials(
+    api: &Api,
+    request: Request<rpc::GetComponentCredentialsRequest>,
+) -> Result<Response<rpc::GetComponentCredentialsResponse>, Status> {
+    log_request_data(&request);
+    let caller = request
+        .extensions()
+        .get::<AuthContext>()
+        .and_then(AuthContext::get_spiffe_service_id)
+        .map(str::to_owned);
+    let request = request.into_inner();
+
+    let (component, device, permitted_caller) = match request.kind() {
+        rpc::ComponentCredentialKind::PowerShelfPmc => (
+            RackComponent::PowerShelfPmc,
+            IngestedComponent::PowerShelf,
+            POWER_SHELF_MANAGER_SERVICE_ID,
+        ),
+        rpc::ComponentCredentialKind::SwitchBmc => (
+            RackComponent::SwitchBmc,
+            IngestedComponent::Switch,
+            NV_SWITCH_MANAGER_SERVICE_ID,
+        ),
+        rpc::ComponentCredentialKind::SwitchNvos => (
+            RackComponent::SwitchNvos,
+            IngestedComponent::Switch,
+            NV_SWITCH_MANAGER_SERVICE_ID,
+        ),
+        rpc::ComponentCredentialKind::Unspecified => {
+            // The generated getter also reports a number that names no kind
+            // as unspecified.
+            return Err(
+                CarbideError::InvalidArgument("kind is unspecified or unknown".into()).into(),
+            );
+        }
+    };
+    let bmc_mac: MacAddress = request.bmc_mac_address.parse().map_err(|_| {
+        CarbideError::InvalidArgument("bmc_mac_address is not a MAC address".into())
+    })?;
+    if caller.as_deref() != Some(permitted_caller) {
+        // The RBAC rule admits both managers to this method, so the RBAC
+        // layer logs no denial when one asks for the other's kind. This
+        // warning is the handler's record of the refusal.
+        tracing::warn!(
+            caller_service_id = caller.as_deref(),
+            permitted_service_id = permitted_caller,
+            rack_component = ?component,
+            management_mac_address = %bmc_mac,
+            "component credential request refused for this service identity"
+        );
+        return Err(CarbideError::PermissionDeniedError(format!(
+            "this credential kind is returned only to the {permitted_caller} service identity"
+        ))
+        .into());
+    }
+
+    let credentials = read_component_credentials(
+        api,
+        component,
+        device,
+        bmc_mac,
+        tokio::time::sleep(COMPONENT_CREDENTIAL_READ_TIMEOUT),
+    )
+    .await?;
+    let Credentials::UsernamePassword { username, password } = credentials;
+    Ok(Response::new(rpc::GetComponentCredentialsResponse {
+        credentials: Some(rpc::UsernamePassword { username, password }),
+    }))
+}
+
+/// Runs the device checks and resolves the credential, or answers
+/// `DeadlineExceeded` once `expired` completes. The handler passes the timer
+/// for `COMPONENT_CREDENTIAL_READ_TIMEOUT`. A read that has not finished by
+/// then is dropped, which discards its guarded connection.
+async fn read_component_credentials(
+    api: &Api,
+    component: RackComponent,
+    device: IngestedComponent,
+    bmc_mac: MacAddress,
+    expired: impl Future<Output = ()>,
+) -> Result<Credentials, Status> {
+    tokio::select! {
+        // A read that finished wins over a deadline that expired with it.
+        biased;
+        credentials = resolve_component_credentials(api, component, device, bmc_mac) => credentials,
+        () = expired => {
+            tracing::warn!(
+                rack_component = ?component,
+                management_mac_address = %bmc_mac,
+                "component credential read timed out"
+            );
+            Err(CarbideError::ComponentCredentialReadDeadlineExceeded.into())
+        }
+    }
+}
+
+/// Checks that Core ingested the device and no machine owns its MAC address,
+/// then resolves its credential from the store, else from expected inventory.
+async fn resolve_component_credentials(
+    api: &Api,
+    component: RackComponent,
+    device: IngestedComponent,
+    bmc_mac: MacAddress,
+) -> Result<Credentials, Status> {
+    let not_found = || CarbideError::NotFoundError {
+        kind: "component_credentials",
+        id: bmc_mac.to_string(),
+    };
+
+    // A caller can abandon a read, and its deadline can end it. Dropping this
+    // future discards the guarded connection, so a read left behind a blocked
+    // table does not keep a pool slot.
+    let mut connection = DbSessionGuard::acquire(api.pg_pool())
+        .await
+        .map_err(CarbideError::from)?;
+    let mut txn = connection
+        .begin_read_only_snapshot(COMPONENT_MEMBERSHIP_STATEMENT_TIMEOUT)
+        .await
+        .map_err(CarbideError::from)?;
+
+    // Membership is the credential boundary of this RPC. A power-shelf or
+    // switch row carries a BMC MAC address only after site explorer classified
+    // the explored BMC as that component (`EndpointExplorationReport::
+    // is_power_shelf` and `is_switch`), while expected-inventory rows are
+    // operator input and may name any MAC address. `machines/bmc/{mac}/root`
+    // is shared with hosts and DPUs, so a MAC without such a row is refused.
+    let ingested = match device {
+        IngestedComponent::PowerShelf => db::power_shelf::find_by(
+            txn.as_pgconn(),
+            db::ObjectColumnFilter::One(db::power_shelf::BmcMacAddressColumn, &bmc_mac),
+        )
+        .await
+        .map_err(CarbideError::from)?
+        .iter()
+        .any(|shelf| shelf.deleted.is_none()),
+        IngestedComponent::Switch => db::switch::find_by(
+            txn.as_pgconn(),
+            db::ObjectColumnFilter::One(db::switch::BmcMacAddressColumn, &bmc_mac),
+        )
+        .await
+        .map_err(CarbideError::from)?
+        .iter()
+        .any(|switch| switch.deleted.is_none()),
+    };
+
+    // The classification above is device-reported data, not a constraint, so a
+    // MAC address that a machine also owns is refused as well.
+    let machine_owned = ingested
+        && db::machine_interface::mac_address_has_machine(txn.as_pgconn(), bmc_mac)
+            .await
+            .map_err(CarbideError::from)?;
+
+    // A refusal is a successful read and must also return its healthy session.
+    txn.commit().await.map_err(CarbideError::from)?;
+    connection.return_to_pool();
+    if !ingested || machine_owned {
+        return Err(not_found().into());
+    }
+
+    match fetch_credentials(api, component, bmc_mac).await {
+        Ok(credentials) => Ok(credentials),
+        Err(ComponentManagerError::NotFound(_)) => Err(not_found().into()),
+        Err(error) => {
+            tracing::error!(
+                rack_component = ?component,
+                management_mac_address = %bmc_mac,
+                error = %error,
+                "component credential lookup failed"
+            );
+            Err(CarbideError::internal("component credential lookup failed".to_string()).into())
+        }
+    }
 }
 
 async fn resolve_switch_endpoints(

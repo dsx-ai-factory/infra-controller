@@ -46,6 +46,7 @@ pub(super) enum FmdsUpdater {
     /// which is colocated on the same DPU, possibly in its
     /// own container.
     External {
+        instrumentation: carbide_instrument::Instrumentation,
         address: String,
         machine_identity: MachineIdentityConfig,
         connect_timeout: Duration,
@@ -82,6 +83,7 @@ impl FmdsUpdater {
     ) -> eyre::Result<()> {
         match self {
             FmdsUpdater::External {
+                instrumentation,
                 address,
                 machine_identity,
                 connect_timeout,
@@ -100,12 +102,12 @@ impl FmdsUpdater {
                 // A failed push is dropped: the next main-loop iteration
                 // reconnects and pushes again.
                 match &result {
-                    Ok(()) => FmdsPush::Succeeded.emit(),
+                    Ok(()) => FmdsPush::Succeeded.emit(instrumentation),
                     Err(err) => FmdsPush::Failed {
                         error: format!("{err:#}"),
                         fmds_address: address.clone(),
                     }
-                    .emit(),
+                    .emit(instrumentation),
                 }
                 result
             }
@@ -314,6 +316,7 @@ mod test {
         let last_connect_succeeded = Arc::new(AtomicBool::new(false));
         (
             FmdsUpdater::External {
+                instrumentation: carbide_instrument::Instrumentation::global(),
                 address,
                 machine_identity: MachineIdentityConfig::default(),
                 connect_timeout: Duration::from_millis(500),
