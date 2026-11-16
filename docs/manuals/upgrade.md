@@ -398,10 +398,19 @@ Moving a site off Vault entirely, including certificate issuance and the Vault i
 
 A UFM password that names a certificate directory is no longer supported and is
 now sent to UFM as a token, so UFM rejects it. Before upgrading, replace that
-credential with an empty password to select the default SPIFFE client certificate,
-or set a UFM bearer token. When credentials are stored in Postgres, supply the
-empty UFM password through the environment or file source as described in
-[Credential Sources](../configuration/credential-sources.md).
+credential in one of these ways:
+
+- Set a valid UFM bearer token.
+- Use the default SPIFFE client certificate: give the fabric an empty password
+  in a source that returns it. That is Vault, or the environment or file source
+  with `ufm_source` set to `"local_first"` or `"local"`. UFM must trust that
+  certificate; see
+  [Client Authentication (mTLS)](../playbooks/ib_runbook.md#client-authentication-mtls).
+
+Do not clear the password in Postgres. Postgres reads an empty password as no
+credential, so UFM client creation fails and the fabric monitor cannot load the
+fabric. See
+[UFM Ownership Policy](../configuration/credential-sources.md#ufm-ownership-policy).
 
 ### Upgrades That Introduce Asynchronous Peering Deletion
 
