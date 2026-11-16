@@ -50,9 +50,15 @@ printf 'counts=%s,%s,%s' \"\${PASS}\" \"\${FAIL}\" \"\${SKIP}\"" 2>&1)
         exit 1
     fi
     if [[ "${message}" == *'PASS'* ]]; then
-        [[ "${output}" == *'counts=1,0,0' ]]
+        expected_counts='1,0,0'
     else
-        [[ "${output}" == *'counts=0,1,0' ]]
+        expected_counts='0,1,0'
+    fi
+    actual_counts="${output##*counts=}"
+    if [[ "${actual_counts}" != "${expected_counts}" ]]; then
+        printf '%s: expected counts=%s, got counts=%s\n' \
+            "${name}" "${expected_counts}" "${actual_counts}" >&2
+        exit 1
     fi
 done <<'CASES'
 OK|200|0|200|PASS  probe: HTTP 200
