@@ -11174,6 +11174,86 @@ async fn rack_failed_abort_host_reprovision_outcome(
     ))
 }
 
+/// Finish a host firmware check that has nothing left to install.
+///
+/// A firmware install disables full lockdown before it flashes. Both the
+/// "nothing needs updates" exit and a pass that finds no firmware config for
+/// the host must re-enable lockdown before the host returns to Ready.
+async fn complete_host_firmware_reenabling_lockdown(
+    state: &ManagedHostStateSnapshot,
+    ctx: &mut StateHandlerContext<'_, MachineStateHandlerContextObjects>,
+    scenario: HostFirmwareScenario,
+) -> Result<StateHandlerOutcome<ManagedHostState>, StateHandlerError> {
+    let machine_id = state.host_snapshot.id;
+    let redfish_client = ctx
+        .services
+        .create_redfish_client_from_machine(&state.host_snapshot)
+        .await?;
+
+    let lockdown_disabled = match redfish_client.lockdown_status().await {
+        Ok(status) => !status.is_fully_enabled(), // If it was partial, treat as disabled so we will fully enable it
+        Err(e) => {
+            if let libredfish::RedfishError::NotSupported(_) = e {
+                // Returned when the platform doesn't support lockdown, so here we say it's not disabled
+                // Note that this is different from the place where we do something similar
+                false
+            } else {
+                tracing::warn!(
+                    %machine_id,
+                    error = %e,
+                    "Could not get lockdown status"
+                );
+                return Ok(StateHandlerOutcome::do_nothing());
+            }
+        }
+    };
+
+    if lockdown_disabled && !state.host_snapshot.host_profile.disable_lockdown {
+        tracing::debug!("host firmware update: Reenabling lockdown");
+        if let Err(e) = redfish_client
+            .lockdown(libredfish::EnabledDisabled::Enabled)
+            .await
+        {
+            tracing::error!(%machine_id, error = %e, "Could not set lockdown");
+            return Ok(StateHandlerOutcome::do_nothing());
+        }
+        match scenario {
+            HostFirmwareScenario::Ready => {
+                return Ok(StateHandlerOutcome::transition(
+                    ManagedHostState::HostInit {
+                        machine_state: MachineState::WaitingForLockdown {
+                            lockdown_info: LockdownInfo {
+                                state: LockdownState::PollingLockdownStatus,
+                                mode: Enable,
+                            },
+                        },
+                    },
+                ));
+            }
+            HostFirmwareScenario::Instance => {
+                handler_host_power_control(state, ctx, ResetType::ForceRestart).await?;
+                return Ok(StateHandlerOutcome::transition(scenario.complete_state()));
+            }
+        }
+    }
+
+    if lockdown_disabled && state.host_snapshot.host_profile.disable_lockdown {
+        tracing::info!(
+            %machine_id,
+            "host firmware update: host is NOT locked down -- skipping lockdown re-enable per expected-machine config"
+        );
+    } else if !lockdown_disabled {
+        tracing::debug!(
+            "host firmware update: Don't need to reenable lockdown -- host is already locked down"
+        );
+    }
+
+    if let HostFirmwareScenario::Instance = scenario {
+        handler_host_power_control(state, ctx, ResetType::ForceRestart).await?;
+    }
+    Ok(StateHandlerOutcome::transition(scenario.complete_state()))
+}
+
 impl HostUpgradeState {
     async fn host_firmware_config_snapshot(
         &self,
@@ -11687,7 +11767,15 @@ impl HostUpgradeState {
 
         let fw_config_snapshot = self.host_firmware_config_snapshot(ctx).await?;
         let Some(fw_info) = fw_config_snapshot.find_fw_info_for_host(&explored_endpoint) else {
-            return Ok(StateHandlerOutcome::transition(scenario.complete_state()));
+            // A firmware install disables lockdown before it flashes. A later
+            // pass that finds no config for this host must re-enable lockdown
+            // before the host returns to Ready, the same way the "nothing
+            // needs updates" exit does.
+            tracing::info!(
+                %machine_id,
+                "host firmware update: no firmware config for this host; re-enabling lockdown before completing"
+            );
+            return complete_host_firmware_reenabling_lockdown(state, ctx, scenario).await;
         };
 
         for firmware_type in fw_info.ordering() {
@@ -11832,75 +11920,8 @@ impl HostUpgradeState {
             }
         }
 
-        // Nothing needs updates, return to ready.  But first, we may need to reenable lockdown.
-
-        let redfish_client = ctx
-            .services
-            .create_redfish_client_from_machine(&state.host_snapshot)
-            .await?;
-
-        let lockdown_disabled = match redfish_client.lockdown_status().await {
-            Ok(status) => !status.is_fully_enabled(), // If it was partial, treat as disabled so we will fully enable it
-            Err(e) => {
-                if let libredfish::RedfishError::NotSupported(_) = e {
-                    // Returned when the platform doesn't support lockdown, so here we say it's not disabled
-                    // Note that this is different from the place where we do something similar
-                    false
-                } else {
-                    tracing::warn!(
-                        %machine_id,
-                        error = %e,
-                        "Could not get lockdown status"
-                    );
-                    return Ok(StateHandlerOutcome::do_nothing());
-                }
-            }
-        };
-
-        if lockdown_disabled && !state.host_snapshot.host_profile.disable_lockdown {
-            tracing::debug!("host firmware update: Reenabling lockdown");
-            if let Err(e) = redfish_client
-                .lockdown(libredfish::EnabledDisabled::Enabled)
-                .await
-            {
-                tracing::error!(%machine_id, error = %e, "Could not set lockdown");
-                return Ok(StateHandlerOutcome::do_nothing());
-            }
-            match scenario {
-                HostFirmwareScenario::Ready => {
-                    return Ok(StateHandlerOutcome::transition(
-                        ManagedHostState::HostInit {
-                            machine_state: MachineState::WaitingForLockdown {
-                                lockdown_info: LockdownInfo {
-                                    state: LockdownState::PollingLockdownStatus,
-                                    mode: Enable,
-                                },
-                            },
-                        },
-                    ));
-                }
-                HostFirmwareScenario::Instance => {
-                    handler_host_power_control(state, ctx, ResetType::ForceRestart).await?;
-                    return Ok(StateHandlerOutcome::transition(scenario.complete_state()));
-                }
-            }
-        }
-
-        if lockdown_disabled && state.host_snapshot.host_profile.disable_lockdown {
-            tracing::info!(
-                %machine_id,
-                "host firmware update: host is NOT locked down -- skipping lockdown re-enable per expected-machine config"
-            );
-        } else if !lockdown_disabled {
-            tracing::debug!(
-                "host firmware update: Don't need to reenable lockdown -- host is already locked down"
-            );
-        }
-
-        if let HostFirmwareScenario::Instance = scenario {
-            handler_host_power_control(state, ctx, ResetType::ForceRestart).await?;
-        }
-        Ok(StateHandlerOutcome::transition(scenario.complete_state()))
+        // Nothing needs updates. Re-enable lockdown before returning to Ready.
+        complete_host_firmware_reenabling_lockdown(state, ctx, scenario).await
     }
 
     async fn by_script(
