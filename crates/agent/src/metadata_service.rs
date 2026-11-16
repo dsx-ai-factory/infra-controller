@@ -20,8 +20,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use axum::Router;
+use carbide_dpu_agent_utils::FMDS_IPV6_ADDRESS;
 use eyre::WrapErr;
-use forge_dpu_agent_utils::FMDS_IPV6_ADDRESS;
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 
