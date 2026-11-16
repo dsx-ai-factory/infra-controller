@@ -512,7 +512,7 @@ Resource-status records use `event.type = "redfish.resource_status"` and carry t
 
 The log body is a JSON object with `resources` and `resourcesDropped`. Each resource contains `id`, `name`, and `status`. Status contains the canonical Redfish `state`, `health`, `healthRollup`, and `conditions` fields. Each condition contains `timestamp`, `messageId`, `severity`, and `conditionType`; all except `messageId` can be `null`. A missing individual value is JSON `null`; if the resource omits the entire `Status` object, `status` is `null`. Redfish health values that nv-redfish does not recognize are discarded during decoding and are treated as missing.
 
-The body is limited to 1 MiB, or less when the OTLP target's request-size limit requires space for the surrounding OTLP envelope. At most 64 conditions are retained across the complete report, prioritizing `Critical` conditions, then `Warning`, then all other or missing severities. Included resources and retained conditions preserve their source order. `conditionsDropped` gives the number omitted for each resource, or `0` when `conditions` is `null`. A resource whose base detail cannot fit is omitted, and `resourcesDropped` gives the number omitted. Aggregate health and `redfish.resource.count` still cover every observed resource, including omitted detail.
+The body is limited to 1 MiB, or less when the OTLP target's request-size limit requires space for the surrounding OTLP envelope. Resources whose base detail fits are selected before conditions, so an omitted resource cannot consume a condition slot. At most 64 conditions from included resources are retained, prioritizing `Critical` conditions, then `Warning`, then all other or missing severities; a condition that does not fit in the remaining byte budget is skipped. Included resources and retained conditions preserve their source order. `conditionsDropped` gives the number omitted for each resource, or `0` when `conditions` is `null`. A resource whose base detail cannot fit is omitted, and `resourcesDropped` gives the number omitted. Aggregate health and `redfish.resource.count` still cover every observed resource, including omitted detail.
 
 Aggregate health uses the first matching result in this order:
 
@@ -525,7 +525,7 @@ Record severity follows the aggregate result: `ERROR` for `Critical`, `WARN` for
 
 Because the aggregate covers the complete current report, a platform with resources that never expose status can remain `Unknown` after a separate `Warning` resource recovers to `OK`.
 
-When `[sinks.tracing]` is enabled, each report is also logged as "Redfish resource status report" with `resource_type`, `resource_count`, and up to 16 resource summaries containing ID, health, and health rollup. `resource_summaries_dropped` counts additional summaries omitted from the tracing event.
+When `[sinks.tracing]` is enabled, each report is also logged as "Redfish resource status report" with `resource_type`, `resource_count`, aggregate health across the complete report, and up to 16 resource summaries containing ID, health, and health rollup. `resource_summaries_dropped` counts additional summaries omitted from the tracing event.
 
 ## DPU Health Checks
 

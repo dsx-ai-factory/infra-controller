@@ -37,8 +37,8 @@ use super::resource::Resource;
 use crate::endpoint::SwitchEndpointRole;
 use crate::sink::{
     CollectorEvent, EventContext, HealthReport, HealthReportAlert, HealthReportSuccess,
-    LogSeverity, MetricSample, MetricSemantics, PrometheusSink, ResourceStatusInfo,
-    ResourceStatusReport,
+    LogSeverity, MetricSample, MetricSemantics, PrometheusSink, ResourceStatusHealth,
+    ResourceStatusInfo, ResourceStatusReport,
 };
 
 /// Maximum active conditions serialized across one resource-status OTLP record.
@@ -385,7 +385,7 @@ fn resource_status_attributes(report: &ResourceStatusReport) -> Vec<(&'static st
         ),
         (
             RESOURCE_STATUS_AGGREGATE_HEALTH_KEY,
-            AnyValue::from(resource_status_report_health(report).as_str()),
+            AnyValue::from(report.aggregate_health().as_str()),
         ),
     ]
 }
@@ -461,48 +461,15 @@ fn resource_status_body_resource<'a>(
     )
 }
 
-fn serialize_resource_status_body_resource(
-    resource: &ResourceStatusInfo,
-    selected_conditions: &[usize],
-    condition_limit: usize,
-    max_bytes: usize,
-) -> Result<Option<(String, usize)>, serde_json::Error> {
-    let (detail, included) =
-        resource_status_body_resource(resource, selected_conditions, condition_limit);
-    let serialized = serde_json::to_string(&detail)?;
-    if serialized.len() <= max_bytes {
-        return Ok(Some((serialized, included)));
-    }
-
-    let (detail, _) = resource_status_body_resource(resource, selected_conditions, 0);
-    let serialized = serde_json::to_string(&detail)?;
-    if serialized.len() > max_bytes {
-        return Ok(None);
-    }
-
-    let mut low = 0;
-    let mut high = included;
-    let mut best = serialized;
-    while low < high {
-        let candidate = low + (high - low).div_ceil(2);
-        let (detail, _) = resource_status_body_resource(resource, selected_conditions, candidate);
-        let serialized = serde_json::to_string(&detail)?;
-        if serialized.len() <= max_bytes {
-            low = candidate;
-            best = serialized;
-        } else {
-            high = candidate - 1;
-        }
-    }
-
-    Ok(Some((best, low)))
-}
-
-fn selected_resource_status_conditions(report: &ResourceStatusReport) -> Vec<Vec<usize>> {
+fn resource_status_condition_candidates(
+    report: &ResourceStatusReport,
+    included_resources: &[bool],
+) -> Vec<(usize, usize)> {
     let mut candidates = report
         .resources
         .iter()
         .enumerate()
+        .filter(|(resource_index, _)| included_resources[*resource_index])
         .flat_map(|(resource_index, resource)| {
             resource
                 .status
@@ -522,40 +489,28 @@ fn selected_resource_status_conditions(report: &ResourceStatusReport) -> Vec<Vec
     candidates.sort_by_key(|&(priority, resource_index, condition_index)| {
         (priority, resource_index, condition_index)
     });
-
-    let mut selected = vec![Vec::new(); report.resources.len()];
-    for (_, resource_index, condition_index) in candidates
+    candidates
         .into_iter()
-        .take(MAX_SERIALIZED_RESOURCE_CONDITIONS)
-    {
-        selected[resource_index].push(condition_index);
-    }
-    for indices in &mut selected {
-        indices.sort_unstable();
-    }
-    selected
+        .map(|(_, resource_index, condition_index)| (resource_index, condition_index))
+        .collect()
 }
 
 fn resource_status_body(report: &ResourceStatusReport, max_body_bytes: usize) -> String {
-    let mut resources = Vec::new();
-    let mut serialized_bytes = RESOURCE_STATUS_BODY_FIXED_OVERHEAD;
-    let selected_conditions = selected_resource_status_conditions(report);
     let max_body_bytes = max_body_bytes.clamp(
         RESOURCE_STATUS_BODY_FIXED_OVERHEAD,
         MAX_SERIALIZED_RESOURCE_STATUS_BODY_BYTES,
     );
+    let mut resources = Vec::new();
+    let mut resource_positions = vec![None; report.resources.len()];
+    let mut serialized_bytes = RESOURCE_STATUS_BODY_FIXED_OVERHEAD;
 
-    for (resource, conditions) in report.resources.iter().zip(&selected_conditions) {
+    for (resource_index, resource) in report.resources.iter().enumerate() {
         let separator_bytes = usize::from(!resources.is_empty());
         let available_bytes = max_body_bytes.saturating_sub(serialized_bytes + separator_bytes);
-        let serialized = match serialize_resource_status_body_resource(
-            resource,
-            conditions,
-            conditions.len(),
-            available_bytes,
-        ) {
-            Ok(Some((serialized, _))) => serialized,
-            Ok(None) => continue,
+        let (detail, _) = resource_status_body_resource(resource, &[], 0);
+        let serialized = match serde_json::to_string(&detail) {
+            Ok(serialized) if serialized.len() <= available_bytes => serialized,
+            Ok(_) => continue,
             Err(error) => {
                 tracing::warn!(
                     ?error,
@@ -566,91 +521,73 @@ fn resource_status_body(report: &ResourceStatusReport, max_body_bytes: usize) ->
             }
         };
         serialized_bytes += separator_bytes + serialized.len();
-        resources.push(serialized);
+        resource_positions[resource_index] = Some(resources.len());
+        resources.push((serialized, Vec::<usize>::new()));
+    }
+
+    let included_resources = resource_positions
+        .iter()
+        .map(Option::is_some)
+        .collect::<Vec<_>>();
+    let mut included_condition_count = 0;
+    for (resource_index, condition_index) in
+        resource_status_condition_candidates(report, &included_resources)
+    {
+        if included_condition_count == MAX_SERIALIZED_RESOURCE_CONDITIONS {
+            break;
+        }
+        let Some(resource_position) = resource_positions[resource_index] else {
+            continue;
+        };
+        let (current, selected_conditions) = &mut resources[resource_position];
+        let insertion = selected_conditions
+            .binary_search(&condition_index)
+            .unwrap_or_else(|position| position);
+        selected_conditions.insert(insertion, condition_index);
+        let (detail, _) = resource_status_body_resource(
+            &report.resources[resource_index],
+            selected_conditions,
+            selected_conditions.len(),
+        );
+        let candidate = match serde_json::to_string(&detail) {
+            Ok(candidate) => candidate,
+            Err(error) => {
+                selected_conditions.remove(insertion);
+                tracing::warn!(
+                    ?error,
+                    resource_id = report.resources[resource_index].id,
+                    "failed to serialize Redfish resource status condition"
+                );
+                continue;
+            }
+        };
+        let candidate_total = serialized_bytes
+            .saturating_sub(current.len())
+            .saturating_add(candidate.len());
+        if candidate_total <= max_body_bytes {
+            serialized_bytes = candidate_total;
+            *current = candidate;
+            included_condition_count += 1;
+        } else {
+            selected_conditions.remove(insertion);
+        }
     }
 
     let resources_dropped = report.resources.len().saturating_sub(resources.len());
     let body = format!(
         r#"{{"resources":[{}],"resourcesDropped":{resources_dropped}}}"#,
-        resources.join(",")
+        resources
+            .iter()
+            .map(|(serialized, _)| serialized.as_str())
+            .collect::<Vec<_>>()
+            .join(",")
     );
     debug_assert!(body.len() <= max_body_bytes);
     body
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum ResourceStatusHealth {
-    Ok,
-    Unknown,
-    Warning,
-    Critical,
-}
-
-impl ResourceStatusHealth {
-    const fn as_str(self) -> &'static str {
-        match self {
-            Self::Ok => "OK",
-            Self::Unknown => "Unknown",
-            Self::Warning => "Warning",
-            Self::Critical => "Critical",
-        }
-    }
-
-    const fn worst(self, other: Self) -> Self {
-        match (self, other) {
-            (Self::Critical, _) | (_, Self::Critical) => Self::Critical,
-            (Self::Warning, _) | (_, Self::Warning) => Self::Warning,
-            (Self::Unknown, _) | (_, Self::Unknown) => Self::Unknown,
-            (Self::Ok, Self::Ok) => Self::Ok,
-        }
-    }
-}
-
-fn resource_status_health(info: &ResourceStatusInfo) -> ResourceStatusHealth {
-    let Some(status) = &info.status else {
-        return ResourceStatusHealth::Unknown;
-    };
-    let values = status
-        .health_rollup
-        .iter()
-        .chain(status.health.iter())
-        .chain(
-            status
-                .conditions
-                .iter()
-                .flatten()
-                .filter_map(|condition| condition.severity.as_ref()),
-        );
-    let mut health = ResourceStatusHealth::Ok;
-    let mut observed = false;
-    for value in values {
-        observed = true;
-        let value_health = match value.as_str() {
-            "Critical" => ResourceStatusHealth::Critical,
-            "Warning" => ResourceStatusHealth::Warning,
-            "OK" => ResourceStatusHealth::Ok,
-            _ => ResourceStatusHealth::Unknown,
-        };
-        health = health.worst(value_health);
-    }
-
-    if observed {
-        health
-    } else {
-        ResourceStatusHealth::Unknown
-    }
-}
-
-fn resource_status_report_health(report: &ResourceStatusReport) -> ResourceStatusHealth {
-    let mut resources = report.resources.iter().map(resource_status_health);
-    let Some(first) = resources.next() else {
-        return ResourceStatusHealth::Unknown;
-    };
-    resources.fold(first, ResourceStatusHealth::worst)
-}
-
 fn resource_status_report_severity(report: &ResourceStatusReport) -> LogSeverity {
-    match resource_status_report_health(report) {
+    match report.aggregate_health() {
         ResourceStatusHealth::Critical => LogSeverity::Error,
         ResourceStatusHealth::Warning => LogSeverity::Warn,
         ResourceStatusHealth::Unknown | ResourceStatusHealth::Ok => LogSeverity::Info,
@@ -1676,10 +1613,11 @@ mod tests {
                     }),
                 })
                 .collect();
-            resource_status_report_health(&ResourceStatusReport {
+            ResourceStatusReport {
                 resource_type: RedfishResourceType::Firmware,
                 resources,
-            })
+            }
+            .aggregate_health()
         }
 
         value_scenarios!(
@@ -1716,7 +1654,16 @@ mod tests {
                         state: Some("Enabled".to_string()),
                         health: Some("Critical".to_string()),
                         health_rollup: None,
-                        conditions: None,
+                        conditions: Some(
+                            (0..MAX_SERIALIZED_RESOURCE_CONDITIONS)
+                                .map(|index| RedfishCondition {
+                                    timestamp: None,
+                                    message_id: format!("omitted-critical-{index}"),
+                                    severity: Some("Critical".to_string()),
+                                    condition_type: None,
+                                })
+                                .collect(),
+                        ),
                     }),
                 },
                 ResourceStatusInfo {
@@ -1726,7 +1673,12 @@ mod tests {
                         state: Some("Enabled".to_string()),
                         health: Some("OK".to_string()),
                         health_rollup: None,
-                        conditions: None,
+                        conditions: Some(vec![RedfishCondition {
+                            timestamp: None,
+                            message_id: "included-warning".to_string(),
+                            severity: Some("Warning".to_string()),
+                            condition_type: None,
+                        }]),
                     }),
                 },
             ],
@@ -1739,6 +1691,10 @@ mod tests {
         let body: serde_json::Value = serde_json::from_str(body_text).expect("valid JSON");
         assert_eq!(body["resources"].as_array().map(Vec::len), Some(1));
         assert_eq!(body["resources"][0]["id"], "included");
+        assert_eq!(
+            body["resources"][0]["status"]["conditions"][0]["messageId"],
+            "included-warning"
+        );
         assert_eq!(body["resourcesDropped"], 1);
         assert_eq!(
             attr_int_value(&record.attributes, RESOURCE_COUNT_KEY),
@@ -1902,7 +1858,7 @@ mod tests {
     }
 
     #[test]
-    fn resource_status_resource_keeps_the_largest_partial_condition_set_that_fits() {
+    fn resource_status_report_keeps_a_partial_condition_set_when_that_is_all_that_fits() {
         let resource = ResourceStatusInfo {
             id: "resource".to_string(),
             name: "Resource".to_string(),
@@ -1922,31 +1878,29 @@ mod tests {
                 ),
             }),
         };
-        let selected = (0..10).collect::<Vec<_>>();
-        let base_size =
-            serialize_resource_status_body_resource(&resource, &selected, 0, usize::MAX)
-                .expect("serializable resource")
-                .expect("base detail fits")
-                .0
-                .len();
+        let report = ResourceStatusReport {
+            resource_type: RedfishResourceType::Firmware,
+            resources: vec![resource],
+        };
+        let (base_detail, _) = resource_status_body_resource(&report.resources[0], &[], 0);
+        let base_size = serde_json::to_string(&base_detail)
+            .expect("serializable base detail")
+            .len()
+            + RESOURCE_STATUS_BODY_FIXED_OVERHEAD;
         let full_size =
-            serialize_resource_status_body_resource(&resource, &selected, 10, usize::MAX)
-                .expect("serializable resource")
-                .expect("full detail fits")
-                .0
-                .len();
+            resource_status_body(&report, MAX_SERIALIZED_RESOURCE_STATUS_BODY_BYTES).len();
         let budget = base_size + (full_size - base_size) / 2;
 
-        let (serialized, included) =
-            serialize_resource_status_body_resource(&resource, &selected, 10, budget)
-                .expect("serializable resource")
-                .expect("partial detail fits");
+        let body = resource_status_body(&report, budget);
+        let body_json: serde_json::Value = serde_json::from_str(&body).expect("valid JSON");
+        let included = body_json["resources"][0]["status"]["conditions"]
+            .as_array()
+            .map(Vec::len)
+            .expect("conditions array");
 
-        assert!(serialized.len() <= budget);
+        assert!(body.len() <= budget);
         assert!(included > 0);
         assert!(included < 10);
-        let next = resource_status_body_resource(&resource, &selected, included + 1);
-        assert!(serde_json::to_string(&next.0).expect("serializable").len() > budget);
     }
 
     #[test]

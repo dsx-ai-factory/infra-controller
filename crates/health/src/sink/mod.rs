@@ -52,6 +52,7 @@ pub use switch_health_report::SwitchHealthReportSink;
 pub use tracing::TracingSink;
 
 pub(crate) use self::dedup_queue::DedupQueue;
+pub(crate) use self::events::ResourceStatusHealth;
 #[cfg(not(feature = "bench-hooks"))]
 pub(crate) use self::otlp::OtlpSink;
 #[cfg(feature = "bench-hooks")]

@@ -559,6 +559,47 @@ pub struct ResourceStatusReport {
     pub resources: Vec<ResourceStatusInfo>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ResourceStatusHealth {
+    Ok,
+    Unknown,
+    Warning,
+    Critical,
+}
+
+impl ResourceStatusHealth {
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::Ok => "OK",
+            Self::Unknown => "Unknown",
+            Self::Warning => "Warning",
+            Self::Critical => "Critical",
+        }
+    }
+
+    const fn worst(self, other: Self) -> Self {
+        match (self, other) {
+            (Self::Critical, _) | (_, Self::Critical) => Self::Critical,
+            (Self::Warning, _) | (_, Self::Warning) => Self::Warning,
+            (Self::Unknown, _) | (_, Self::Unknown) => Self::Unknown,
+            (Self::Ok, Self::Ok) => Self::Ok,
+        }
+    }
+}
+
+impl ResourceStatusReport {
+    pub(crate) fn aggregate_health(&self) -> ResourceStatusHealth {
+        let mut resources = self
+            .resources
+            .iter()
+            .map(ResourceStatusInfo::aggregate_health);
+        let Some(first) = resources.next() else {
+            return ResourceStatusHealth::Unknown;
+        };
+        resources.fold(first, ResourceStatusHealth::worst)
+    }
+}
+
 /// One periodically observed top-level Redfish resource and its status.
 #[derive(Clone, Debug)]
 pub struct ResourceStatusInfo {
@@ -581,6 +622,41 @@ impl ResourceStatusInfo {
             id: id.to_string(),
             name: name.to_string(),
             status: status.map(RedfishStatus::from_redfish),
+        }
+    }
+
+    fn aggregate_health(&self) -> ResourceStatusHealth {
+        let Some(status) = &self.status else {
+            return ResourceStatusHealth::Unknown;
+        };
+        let values = status
+            .health_rollup
+            .iter()
+            .chain(status.health.iter())
+            .chain(
+                status
+                    .conditions
+                    .iter()
+                    .flatten()
+                    .filter_map(|condition| condition.severity.as_ref()),
+            );
+        let mut health = ResourceStatusHealth::Ok;
+        let mut observed = false;
+        for value in values {
+            observed = true;
+            let value_health = match value.as_str() {
+                "Critical" => ResourceStatusHealth::Critical,
+                "Warning" => ResourceStatusHealth::Warning,
+                "OK" => ResourceStatusHealth::Ok,
+                _ => ResourceStatusHealth::Unknown,
+            };
+            health = health.worst(value_health);
+        }
+
+        if observed {
+            health
+        } else {
+            ResourceStatusHealth::Unknown
         }
     }
 }
