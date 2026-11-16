@@ -54,24 +54,24 @@ func TestAPIExpectedPowerShelfCreateRequest_Validate(t *testing.T) {
 			expectedError: "defaultBmcUsername: BMC username must be 16 characters or less.",
 		},
 		{
-			desc: "DefaultBmcPassword with 20 multibyte characters",
+			desc: "DefaultBmcPassword with 255 multibyte characters",
 			obj: APIExpectedPowerShelfCreateRequest{
 				BmcMacAddress:      "00:11:22:33:44:55",
 				ShelfSerialNumber:  "SERIAL123",
 				SiteID:             "550e8400-e29b-41d4-a716-446655440000",
-				DefaultBmcPassword: cutil.GetPtr(strings.Repeat("é", 20)),
+				DefaultBmcPassword: cutil.GetPtr(strings.Repeat("é", 255)),
 			},
 		},
 		{
-			desc: "DefaultBmcPassword with 21 multibyte characters",
+			desc: "DefaultBmcPassword with 256 multibyte characters",
 			obj: APIExpectedPowerShelfCreateRequest{
 				BmcMacAddress:      "00:11:22:33:44:55",
 				ShelfSerialNumber:  "SERIAL123",
 				SiteID:             "550e8400-e29b-41d4-a716-446655440000",
-				DefaultBmcPassword: cutil.GetPtr(strings.Repeat("é", 21)),
+				DefaultBmcPassword: cutil.GetPtr(strings.Repeat("é", 256)),
 			},
 			expectErr:     true,
-			expectedError: "defaultBmcPassword: BMC password must be 20 characters or less.",
+			expectedError: "defaultBmcPassword: BMC password must be 255 characters or less.",
 		},
 		{
 			desc: "ShelfSerialNumber with 32 multibyte characters",
@@ -175,27 +175,29 @@ func TestAPIExpectedPowerShelfCreateRequest_Validate(t *testing.T) {
 			},
 			expectErr: true,
 		},
-		// Boundary tests for BMC password (max 20 characters)
+		// Boundary tests for BMC password (max 255 characters)
 		{
-			desc: "ok when BMC password is exactly 20 characters",
+			desc: "ok when BMC password is exactly 255 characters",
 			obj: APIExpectedPowerShelfCreateRequest{
 				SiteID:             "550e8400-e29b-41d4-a716-446655440000",
 				BmcMacAddress:      "00:11:22:33:44:55",
 				DefaultBmcUsername: &validUsername,
-				DefaultBmcPassword: cutil.GetPtr(strings.Repeat("a", 20)),
+				DefaultBmcPassword: cutil.GetPtr(strings.Repeat("a", 255)),
 				ShelfSerialNumber:  validShelfSerial,
 			},
 			expectErr: false,
 		},
 		{
-			desc: "error when BMC password is 21 characters (over limit)",
+			desc: "error when BMC password is 256 characters (over limit)",
 			obj: APIExpectedPowerShelfCreateRequest{
+				SiteID:             "550e8400-e29b-41d4-a716-446655440000",
 				BmcMacAddress:      "00:11:22:33:44:55",
 				DefaultBmcUsername: &validUsername,
-				DefaultBmcPassword: cutil.GetPtr(strings.Repeat("a", 21)),
+				DefaultBmcPassword: cutil.GetPtr(strings.Repeat("a", 256)),
 				ShelfSerialNumber:  validShelfSerial,
 			},
-			expectErr: true,
+			expectErr:     true,
+			expectedError: "defaultBmcPassword: BMC password must be 255 characters or less.",
 		},
 		// Boundary tests for shelf serial number (max 32 characters)
 		{
@@ -444,18 +446,18 @@ func TestAPIExpectedPowerShelfUpdateRequest_Validate(t *testing.T) {
 			expectedError: "defaultBmcUsername: BMC Username must be 1-16 characters.",
 		},
 		{
-			desc: "DefaultBmcPassword with 20 multibyte characters",
+			desc: "DefaultBmcPassword with 255 multibyte characters",
 			obj: APIExpectedPowerShelfUpdateRequest{
-				DefaultBmcPassword: cutil.GetPtr(strings.Repeat("é", 20)),
+				DefaultBmcPassword: cutil.GetPtr(strings.Repeat("é", 255)),
 			},
 		},
 		{
-			desc: "DefaultBmcPassword with 21 multibyte characters",
+			desc: "DefaultBmcPassword with 256 multibyte characters",
 			obj: APIExpectedPowerShelfUpdateRequest{
-				DefaultBmcPassword: cutil.GetPtr(strings.Repeat("é", 21)),
+				DefaultBmcPassword: cutil.GetPtr(strings.Repeat("é", 256)),
 			},
 			expectErr:     true,
-			expectedError: "defaultBmcPassword: BMC Password must be 1-20 characters.",
+			expectedError: "defaultBmcPassword: BMC Password must be 1-255 characters.",
 		},
 		{
 			desc: "ShelfSerialNumber with 32 multibyte characters",
@@ -565,23 +567,23 @@ func TestAPIExpectedPowerShelfUpdateRequest_Validate(t *testing.T) {
 			},
 			expectErr: true,
 		},
-		// Boundary tests for BMC password (max 20 characters)
+		// Boundary tests for BMC password (max 255 characters)
 		{
-			desc: "ok when BMC password is exactly 20 characters",
+			desc: "ok when BMC password is exactly 255 characters",
 			obj: APIExpectedPowerShelfUpdateRequest{
 				ShelfSerialNumber:  &validShelfSerial,
 				DefaultBmcUsername: &validUsername,
-				DefaultBmcPassword: cutil.GetPtr(strings.Repeat("a", 20)),
+				DefaultBmcPassword: cutil.GetPtr(strings.Repeat("a", 255)),
 				Labels:             map[string]string{"env": "test"},
 			},
 			expectErr: false,
 		},
 		{
-			desc: "error when BMC password is 21 characters (over limit)",
+			desc: "error when BMC password is 256 characters (over limit)",
 			obj: APIExpectedPowerShelfUpdateRequest{
 				ShelfSerialNumber:  &validShelfSerial,
 				DefaultBmcUsername: &validUsername,
-				DefaultBmcPassword: cutil.GetPtr(strings.Repeat("a", 21)),
+				DefaultBmcPassword: cutil.GetPtr(strings.Repeat("a", 256)),
 				Labels:             map[string]string{"env": "test"},
 			},
 			expectErr: true,
