@@ -221,6 +221,9 @@ Error: API error 400: Tenant Account status is not Invited
 - Read a set of otherwise provider-only resources, including machines, machine health, SKUs, racks, trays, and expected machines, at the sites of a provider it holds a `Ready` tenant account with, wherever the capability is effective. A site override that disables it also removes these reads at that site.
 - Receive alternative VPC routing profiles from `tenant/current/routing-profile`.
 
+Attaching interfaces to another tenant's VPC is a separate capability. See
+[Granting Cross-Tenant Interface Creation](#granting-cross-tenant-interface-creation).
+
 A Provider Admin configures it per tenant account with the `siteCapabilities` field. This is
 the only supported way to grant it, and it applies to regular tenants as well as
 service-account orgs:
@@ -236,12 +239,15 @@ nicocli tenant-account update \
 - Exactly one entry must have an empty or omitted `siteIds`. That entry sets the account-level default.
 - Any further entry lists site IDs that override the default. Each site must already be associated with the tenant, which happens when the tenant's first allocation at that site is created.
 - No site ID may appear in more than one entry.
-- `targetedInstanceCreation` is required on every entry.
+- Every entry must set at least one capability: `targetedInstanceCreation`, `crossTenantInterfaceCreation`, or both.
+- A site entry may only set capabilities that the account-default entry also sets.
 - The request must not also carry `tenantContactId`, which is the invitation-acceptance field. Sending both returns HTTP 400.
 
-Updates use replace semantics. A per-site override whose site ID is omitted from a later
-payload is cleared. To leave the capability on everywhere except one site, send both
-entries together:
+Updates replace each capability on its own. For every capability set in the account-default
+entry, the default is replaced and any per-site override of that capability whose site ID is
+omitted from the payload is cleared. A capability left out of the account-default entry keeps
+its current default and site overrides. To leave the capability on everywhere except one
+site, send both entries together:
 
 ```json
 {
@@ -276,6 +282,58 @@ Do not read `capabilities.targetedInstanceCreation` from `nicocli tenant current
 
 Use `nicocli tenant-account list` instead.
 </Warning>
+
+### Granting Cross-Tenant Interface Creation
+
+`crossTenantInterfaceCreation` lets a tenant attach non-primary instance interfaces to
+another tenant's VPC or VPC prefix at the same site. The interface selects the VPC with
+`vpcId` or the VPC prefix with `vpcPrefixId` on instance create, batch create, or update. The
+caller must be a Tenant Admin, and the VPC must be a `Ready` FNN VPC. The VPC or VPC prefix ID
+comes from the owning tenant out of band, because the capability does not grant discovery of
+or CRUD access to VPCs or VPC prefixes owned by other Tenants.
+
+These rules still apply with the capability:
+
+- The primary VPC and the primary physical interface must belong to the instance's own tenant.
+- Subnets owned by another tenant are rejected.
+- Instance-level Network Security Group policy takes precedence on every interface, including cross-tenant ones.
+
+A Provider Admin sets it with the same `siteCapabilities` field, following the
+[payload rules](#payload-rules) and [resolution order](#how-the-effective-value-resolves)
+described for `targetedInstanceCreation`. The two capabilities are independent, so this
+request leaves `targetedInstanceCreation` unchanged:
+
+```bash
+nicocli tenant-account update \
+  --data '{"siteCapabilities":[{"siteIds":[],"crossTenantInterfaceCreation":true}]}' \
+  <account-id>
+```
+
+#### After revocation
+
+Revoking the capability does not detach existing cross-tenant interfaces. Only a new
+cross-tenant interface identity needs the capability. After revocation, these requests still
+succeed:
+
+- An instance update that does not include `interfaces`.
+- An `interfaces` replacement that keeps every existing cross-tenant interface unchanged.
+- An `interfaces` replacement that removes one or more cross-tenant interfaces, including removing one while keeping another.
+- Instance deletion.
+
+Adding a cross-tenant interface, or retargeting one to a different VPC or VPC prefix owned by
+another tenant, returns HTTP 403.
+
+#### Seeing cross-tenant interfaces
+
+[`GET /v2/org/{org}/nico/interface`](api:GET/v2/org/:org/nico/interface) lists the interfaces
+on the caller's instances, plus interfaces on other tenants' instances that select one of the
+caller's VPCs or VPC prefixes. Listing does not require either capability. Set
+`crossTenant=true` to return only interfaces whose instance and VPC have different owners. On
+those results, `instanceTenantId` and `vpcTenantId` name the two owners. Both are `null` when
+the owners match. Filter by either owner with the `instanceTenantId` or `vpcTenantId` query
+parameter. `includeRelation` expands the instance or VPC prefix, including another tenant's.
+
+A VPC cannot be deleted while another tenant's instance still has an interface on it.
 
 ## Instance Types
 

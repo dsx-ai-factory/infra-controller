@@ -230,14 +230,19 @@ type InterfaceUpdateInput struct {
 
 // InterfaceFilterInput input parameters for Filter method
 type InterfaceFilterInput struct {
-	InstanceIDs    []uuid.UUID
-	SubnetID       *uuid.UUID
-	VpcPrefixID    *uuid.UUID
-	Device         *string
-	DeviceInstance *int
-	IsPhysical     *bool
-	Statuses       []string
-	IPAddresses    []string
+	InstanceIDs       []uuid.UUID
+	InstanceTenantID  *uuid.UUID
+	VpcTenantID       *uuid.UUID
+	VisibleToTenantID *uuid.UUID
+	CrossTenant       *bool
+	SubnetID          *uuid.UUID
+	VpcID             *uuid.UUID
+	VpcPrefixID       *uuid.UUID
+	Device            *string
+	DeviceInstance    *int
+	IsPhysical        *bool
+	Statuses          []string
+	IPAddresses       []string
 }
 
 // InterfaceClearInput input parameters for Clear method
@@ -349,9 +354,53 @@ func (ifcd InterfaceSQLDAO) setQueryWithFilter(filter InterfaceFilterInput, quer
 		}
 	}
 
+	if filter.VisibleToTenantID != nil ||
+		filter.InstanceTenantID != nil ||
+		filter.VpcTenantID != nil ||
+		filter.CrossTenant != nil ||
+		filter.VpcID != nil {
+		query = query.
+			Join("JOIN instance AS fi ON fi.id = ifc.instance_id AND fi.deleted IS NULL").
+			Join("LEFT JOIN vpc AS fv ON fv.id = ifc.vpc_id AND fv.deleted IS NULL").
+			Join("LEFT JOIN vpc_prefix AS fvp ON fvp.id = ifc.vpc_prefix_id AND fvp.deleted IS NULL")
+	}
+
+	if filter.VisibleToTenantID != nil {
+		query = query.Where(
+			"(fi.tenant_id = ? OR COALESCE(fv.tenant_id, fvp.tenant_id) = ?)",
+			*filter.VisibleToTenantID,
+			*filter.VisibleToTenantID,
+		)
+		cotel.SetAttribute(interfaceDAOSpan, attribute.String("visible_to_tenant_id", filter.VisibleToTenantID.String()))
+	}
+
+	if filter.InstanceTenantID != nil {
+		query = query.Where("fi.tenant_id = ?", *filter.InstanceTenantID)
+		cotel.SetAttribute(interfaceDAOSpan, attribute.String("instance_tenant_id", filter.InstanceTenantID.String()))
+	}
+
+	if filter.VpcTenantID != nil {
+		query = query.Where("COALESCE(fv.tenant_id, fvp.tenant_id) = ?", *filter.VpcTenantID)
+		cotel.SetAttribute(interfaceDAOSpan, attribute.String("vpc_tenant_id", filter.VpcTenantID.String()))
+	}
+
+	if filter.CrossTenant != nil {
+		if *filter.CrossTenant {
+			query = query.Where("COALESCE(fv.tenant_id, fvp.tenant_id) <> fi.tenant_id")
+		} else {
+			query = query.Where("(ifc.subnet_id IS NOT NULL OR COALESCE(fv.tenant_id, fvp.tenant_id) = fi.tenant_id)")
+		}
+		cotel.SetAttribute(interfaceDAOSpan, attribute.Bool("cross_tenant", *filter.CrossTenant))
+	}
+
 	if filter.SubnetID != nil {
 		query = query.Where("ifc.subnet_id = ?", *filter.SubnetID)
 		cotel.SetAttribute(interfaceDAOSpan, attribute.String("subnet_id", filter.SubnetID.String()))
+	}
+
+	if filter.VpcID != nil {
+		query = query.Where("COALESCE(ifc.vpc_id, fvp.vpc_id) = ?", *filter.VpcID)
+		cotel.SetAttribute(interfaceDAOSpan, attribute.String("vpc_id", filter.VpcID.String()))
 	}
 
 	if filter.VpcPrefixID != nil {
@@ -416,20 +465,23 @@ func (ifcd InterfaceSQLDAO) GetAll(ctx context.Context, tx *db.Tx, filter Interf
 
 	// if no order is passed, set default to make sure objects return always in the same order and pagination works properly
 	if page.OrderBy == nil {
-		page.OrderBy = paginator.NewDefaultOrderBy(VpcOrderByDefault)
+		page.OrderBy = paginator.NewDefaultOrderBy(InterfaceOrderByDefault)
 	}
 
-	paginator, err := paginator.NewPaginator(ctx, query, page.Offset, page.Limit, page.OrderBy, InterfaceOrderByFields)
+	dbPaginator, err := paginator.NewPaginator(ctx, query, page.Offset, page.Limit, page.OrderBy, InterfaceOrderByFields)
+	if err != nil {
+		return nil, 0, err
+	}
+	if filter.VpcID != nil || filter.VisibleToTenantID != nil {
+		dbPaginator.Query = dbPaginator.Query.OrderExpr("ifc.id ASC")
+	}
+
+	err = dbPaginator.Query.Limit(dbPaginator.Limit).Offset(dbPaginator.Offset).Scan(ctx)
 	if err != nil {
 		return nil, 0, err
 	}
 
-	err = paginator.Query.Limit(paginator.Limit).Offset(paginator.Offset).Scan(ctx)
-	if err != nil {
-		return nil, 0, err
-	}
-
-	return iss, paginator.Total, nil
+	return iss, dbPaginator.Total, nil
 }
 
 // Update updates specified fields of an existing Interface

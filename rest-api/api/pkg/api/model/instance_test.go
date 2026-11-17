@@ -470,6 +470,18 @@ func TestNewAPIInstance(t *testing.T) {
 		})
 	}
 
+	t.Run("cross-Tenant Interface ownership", func(t *testing.T) {
+		vpcTenantID := uuid.New()
+		crossTenantInterface := dbis1Secondary1
+		crossTenantInterface.Vpc = &cdbm.Vpc{TenantID: vpcTenantID}
+
+		got := NewAPIInstance(dbi1, dbs, []cdbm.Interface{crossTenantInterface}, nil, nil, nil, nil, nil, nil)
+		require.Len(t, got.Interfaces, 1)
+		assert.Equal(t, cutil.GetPtr(dbi1.TenantID.String()), got.Interfaces[0].InstanceTenantID)
+		assert.Equal(t, cutil.GetPtr(vpcTenantID.String()), got.Interfaces[0].VpcTenantID)
+		assert.Nil(t, got.Interfaces[0].Instance)
+	})
+
 	controllerInstanceID := uuid.New()
 	urlPrefix := "ssh://" + controllerInstanceID.String() + "@"
 	serialConsoleTests := []struct {
@@ -524,6 +536,132 @@ func TestAPIInstanceUpdateRequest_PowerProfileJSON(t *testing.T) {
 			var request APIInstanceUpdateRequest
 			require.NoError(t, json.Unmarshal([]byte(tt.payload), &request))
 			assert.Equal(t, tt.want, request.PowerProfile)
+		})
+	}
+}
+
+func TestHasCrossTenantInterface(t *testing.T) {
+	tenantID := uuid.New()
+	otherTenantID := uuid.New()
+	localVpcID := uuid.New()
+	otherVpcID := uuid.New()
+	otherPrefixID := uuid.New()
+
+	vpcs := map[uuid.UUID]*cdbm.Vpc{
+		localVpcID: {ID: localVpcID, TenantID: tenantID},
+		otherVpcID: {ID: otherVpcID, TenantID: otherTenantID},
+	}
+	vpcPrefixes := map[uuid.UUID]*cdbm.VpcPrefix{otherPrefixID: {ID: otherPrefixID, TenantID: otherTenantID}}
+
+	tests := []struct {
+		name       string
+		interfaces []APIInterfaceCreateOrUpdateRequest
+		want       bool
+	}{
+		{name: "same-Tenant VPC", interfaces: []APIInterfaceCreateOrUpdateRequest{{VpcID: cutil.GetPtr(localVpcID.String())}}},
+		{name: "other Tenant's VPC", interfaces: []APIInterfaceCreateOrUpdateRequest{{VpcID: cutil.GetPtr(localVpcID.String())}, {VpcID: cutil.GetPtr(otherVpcID.String())}}, want: true},
+		{name: "other Tenant's VPC Prefix", interfaces: []APIInterfaceCreateOrUpdateRequest{{VpcPrefixID: cutil.GetPtr(otherPrefixID.String())}}, want: true},
+		{name: "selector missing from the maps is left to the not-found checks", interfaces: []APIInterfaceCreateOrUpdateRequest{{VpcID: cutil.GetPtr(uuid.NewString())}}},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Equal(t, tc.want, HasCrossTenantInterface(tc.interfaces, tenantID, vpcs, vpcPrefixes))
+		})
+	}
+}
+
+func TestBuildInterfacesForCrossTenantAuthorization(t *testing.T) {
+	vpcID := uuid.New()
+	vpcPrefixID := uuid.New()
+	device := "eth0"
+	deviceInstance := 1
+	virtualFunctionID := 2
+	requestedIPAddress := "192.0.2.10"
+	vpc := &cdbm.Vpc{ID: vpcID}
+	vpcPrefix := &cdbm.VpcPrefix{ID: vpcPrefixID, VpcID: vpcID}
+
+	requested := BuildInterfacesForCrossTenantAuthorization(
+		[]APIInterfaceCreateOrUpdateRequest{
+			{
+				VpcID:             cutil.GetPtr(vpcID.String()),
+				IPFamilies:        []IPFamily{IPFamilyIPv6},
+				IPAddress:         &requestedIPAddress,
+				Device:            &device,
+				DeviceInstance:    &deviceInstance,
+				VirtualFunctionID: &virtualFunctionID,
+				IsPhysical:        true,
+			},
+			{VpcPrefixID: cutil.GetPtr(vpcPrefixID.String())},
+			{VpcID: cutil.GetPtr(uuid.NewString())},
+			{SubnetID: cutil.GetPtr(uuid.NewString())},
+		},
+		map[uuid.UUID]*cdbm.Vpc{vpcID: vpc},
+		map[uuid.UUID]*cdbm.VpcPrefix{vpcPrefixID: vpcPrefix},
+	)
+
+	require.Len(t, requested, 2)
+	assert.Equal(t, &vpcID, requested[0].VpcID)
+	assert.Same(t, vpc, requested[0].Vpc)
+	assert.Equal(t, cutil.GetPtr(cdbm.InterfaceVpcIPFamilyModeIPv6Only), requested[0].VpcIPFamilyMode)
+	assert.Equal(t, &requestedIPAddress, requested[0].RequestedIpAddress)
+	assert.Equal(t, &device, requested[0].Device)
+	assert.Equal(t, &deviceInstance, requested[0].DeviceInstance)
+	assert.Equal(t, &virtualFunctionID, requested[0].VirtualFunctionID)
+	assert.True(t, requested[0].IsPhysical)
+	assert.Equal(t, &vpcPrefixID, requested[1].VpcPrefixID)
+	assert.Same(t, vpcPrefix, requested[1].VpcPrefix)
+}
+
+func TestHasNewCrossTenantInterface(t *testing.T) {
+	tenantID := uuid.New()
+	crossTenantTenantID := uuid.New()
+	localVpcID := uuid.New()
+	crossTenantVpcID := uuid.New()
+	otherCrossTenantVpcID := uuid.New()
+	device := "eth0"
+	deviceInstance := 1
+
+	local := cdbm.Interface{
+		VpcID:          &localVpcID,
+		Vpc:            &cdbm.Vpc{ID: localVpcID, TenantID: tenantID},
+		Device:         &device,
+		DeviceInstance: &deviceInstance,
+	}
+	crossTenant := cdbm.Interface{
+		VpcID:          &crossTenantVpcID,
+		Vpc:            &cdbm.Vpc{ID: crossTenantVpcID, TenantID: crossTenantTenantID},
+		Device:         &device,
+		DeviceInstance: &deviceInstance,
+	}
+	otherCrossTenant := crossTenant
+	otherCrossTenant.VpcID = &otherCrossTenantVpcID
+	otherCrossTenant.Vpc = &cdbm.Vpc{ID: otherCrossTenantVpcID, TenantID: crossTenantTenantID}
+	changedCrossTenant := crossTenant
+	changedDeviceInstance := 2
+	changedCrossTenant.DeviceInstance = &changedDeviceInstance
+	deletingCrossTenant := crossTenant
+	deletingCrossTenant.Status = cdbm.InterfaceStatusDeleting
+
+	tests := []struct {
+		name      string
+		requested []cdbm.Interface
+		existing  []cdbm.Interface
+		want      bool
+	}{
+		{name: "unchanged cross-Tenant identity", requested: []cdbm.Interface{crossTenant}, existing: []cdbm.Interface{crossTenant}},
+		{name: "remove cross-Tenant Interface", requested: []cdbm.Interface{local}, existing: []cdbm.Interface{crossTenant}},
+		{name: "retarget cross-Tenant Interface", requested: []cdbm.Interface{otherCrossTenant}, existing: []cdbm.Interface{crossTenant}, want: true},
+		{name: "change cross-Tenant Interface identity", requested: []cdbm.Interface{changedCrossTenant}, existing: []cdbm.Interface{crossTenant}, want: true},
+		{name: "duplicate cross-Tenant request needs one match each", requested: []cdbm.Interface{crossTenant, crossTenant}, existing: []cdbm.Interface{crossTenant}, want: true},
+		{name: "deleting Interface cannot be reused", requested: []cdbm.Interface{crossTenant}, existing: []cdbm.Interface{deletingCrossTenant}, want: true},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := HasNewCrossTenantInterface(tenantID, tc.requested, tc.existing)
+			require.NoError(t, err)
+			assert.Equal(t, tc.want, got)
 		})
 	}
 }
