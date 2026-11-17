@@ -186,7 +186,13 @@ async fn configure_bios_against_a_busy_bmc(pool: PgPool) {
                     .unwrap();
                 Arc::new(HostBmcPool {
                     host_bmc,
-                    http: new_pool_with_credential_ops(credentials, http, bmc_address).0,
+                    http: new_pool_with_credential_ops(
+                        credentials,
+                        http,
+                        bmc_address,
+                        carbide_instrument::Instrumentation::noop(),
+                    )
+                    .0,
                     sim,
                 })
             }
