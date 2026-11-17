@@ -84,19 +84,22 @@ pub async fn save(
     job_kind: RmsJobKind,
     job_id: &str,
 ) -> Result<(), DatabaseError> {
-    let sql = format!(
-        "INSERT INTO {} (bmc_mac, job_kind, job_id) \
-               VALUES ($1, $2, $3) ON CONFLICT (bmc_mac, job_kind) \
-               DO UPDATE SET job_id = EXCLUDED.job_id, created = now()",
-        job_kind.table_name()
+    let mut query = sqlx::QueryBuilder::new("INSERT INTO ");
+    query.push(job_kind.table_name());
+    query.push(" (bmc_mac, job_kind, job_id) VALUES (");
+    query
+        .push_bind(bmc_mac)
+        .push(", ")
+        .push_bind(job_kind.as_str());
+    query.push(", ").push_bind(job_id);
+    query.push(
+        ") ON CONFLICT (bmc_mac, job_kind) DO UPDATE SET job_id = EXCLUDED.job_id, created = now()",
     );
-    sqlx::query(&sql)
-        .bind(bmc_mac)
-        .bind(job_kind.as_str())
-        .bind(job_id)
+    query
+        .build()
         .execute(db)
         .await
-        .map_err(|e| DatabaseError::new(&sql, e))?;
+        .map_err(|e| DatabaseError::new("save direct-dispatch RMS reference", e))?;
     Ok(())
 }
 
@@ -106,16 +109,17 @@ pub async fn delete(
     bmc_mac: MacAddress,
     job_kind: RmsJobKind,
 ) -> Result<(), DatabaseError> {
-    let sql = format!(
-        "DELETE FROM {} WHERE bmc_mac = $1 AND job_kind = $2",
-        job_kind.table_name()
-    );
-    sqlx::query(&sql)
-        .bind(bmc_mac)
-        .bind(job_kind.as_str())
+    let mut query = sqlx::QueryBuilder::new("DELETE FROM ");
+    query.push(job_kind.table_name()).push(" WHERE bmc_mac = ");
+    query
+        .push_bind(bmc_mac)
+        .push(" AND job_kind = ")
+        .push_bind(job_kind.as_str());
+    query
+        .build()
         .execute(db)
         .await
-        .map_err(|e| DatabaseError::new(&sql, e))?;
+        .map_err(|e| DatabaseError::new("delete direct-dispatch RMS reference", e))?;
     Ok(())
 }
 
@@ -125,16 +129,17 @@ pub async fn get(
     bmc_mac: MacAddress,
     job_kind: RmsJobKind,
 ) -> Result<Option<String>, DatabaseError> {
-    let sql = format!(
-        "SELECT job_id FROM {} WHERE bmc_mac = $1 AND job_kind = $2",
-        job_kind.table_name()
-    );
-    sqlx::query_scalar(&sql)
-        .bind(bmc_mac)
-        .bind(job_kind.as_str())
+    let mut query = sqlx::QueryBuilder::new("SELECT job_id FROM ");
+    query.push(job_kind.table_name()).push(" WHERE bmc_mac = ");
+    query
+        .push_bind(bmc_mac)
+        .push(" AND job_kind = ")
+        .push_bind(job_kind.as_str());
+    query
+        .build_query_scalar()
         .fetch_optional(db)
         .await
-        .map_err(|e| DatabaseError::new(&sql, e))
+        .map_err(|e| DatabaseError::new("get direct-dispatch RMS reference", e))
 }
 
 /// Fetch firmware references only; reset jobs must not enter firmware status aggregation.
