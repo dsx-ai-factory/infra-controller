@@ -32,7 +32,7 @@ func (f *JSONFormatter) Format(entry *log.Entry) ([]byte, error) {
 	b.WriteString(strings.ToUpper(entry.Level.String()))
 	b.WriteString("] ")
 
-	if entry.HasCaller() {
+	if entry.Caller != nil {
 		var filename string
 		var line int
 		if f.WithCallDepth == 0 { // normal logging

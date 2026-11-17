@@ -3522,7 +3522,8 @@ impl PreingestionManagerStatic {
             }
         };
 
-        match forge_ssh::ssh::check_console_for_markers(bmc_addr, username, password, MARKERS).await
+        match carbide_ssh::ssh::check_console_for_markers(bmc_addr, username, password, MARKERS)
+            .await
         {
             Ok(found) => found,
             Err(e) => {

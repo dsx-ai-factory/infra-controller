@@ -9,68 +9,49 @@
 <table class="sortable overview">
 	<thead>
 	<tr>
-		<th>#</th>
-		<th>ID</th>
+		<th>Machine</th>
 		<th>State</th>
-		<th>Health Alerts</th>
-		<th>Health Reports #</th>
-		<th>Associated DPU/Host</th>
-		<th>Labels</th>
+		<th>Health</th>
+		<th class="no-sort">Address</th>
+		<th>Hardware</th>
 		<th>Instance Type</th>
-		<th>IP Address</th>
-		<th>MAC Address</th>
-		<th>Sys Vendor</th>
-		<th>Product Serial</th>
-		{% if let Some(machine) = machines.first() %}
-			{% if machine.is_host %}
-				<th>GPU #</th>
-				<th>IB IFs #</th>
-				<th>NVLink GPUs #</th>
-			{% endif %}
-		{% endif %}
+		<th class="no-sort">Labels</th>
 	</tr>
 	</thead>
 	<tbody>
 	{% for m in machines %}
 		<tr>
-			<td>{{ page.current_page() * page.limit() + loop.index }}</td>
-			<td>{{ m.id|machine_id_link|safe }}</td>
-			<td>{{ m.state_display|safe }}</td>
 			<td>
-				<a href="/admin/machine/{{ m.id }}/health">
-					{{ m.health_probe_alerts|health_alerts_fmt(false, false)|safe }}
-				</a>
-			</td>
-			<td><a href="/admin/machine/{{ m.id }}/health">{{ m.override_mode_counts }}</a></td>
-			<td>{% if m.is_host %}
+				{{ m.id|machine_id_link|safe }}
+				{% if m.is_host %}
 				{% for dpu_id in m.associated_dpu_ids %}
-				{{ dpu_id|machine_id_link|safe }}
+				<div class="cell-dpu" title="DPU{% if m.associated_dpu_ids.len() > 1 %} {{ loop.index }}{% endif %}">{{ dpu_id|machine_id_link|safe }}</div>
 				{% endfor %}
+				{% else if !m.associated_host_id.is_empty() %}
+				<div class="cell-dpu" title="Host">{{ m.associated_host_id|machine_id_link|safe }}</div>
+				{% endif %}
+			</td>
+			<td class="state-cell">{{ m.state_display|safe }}</td>
+			<td data-sort="{{ m.health_probe_alerts.len() }}">
+				<a class="health-cell" href="/admin/machine/{{ m.id }}?tab=health">{{ m.health_probe_alerts|health_alerts_compact|safe }}</a>
+			</td>
+			<td>
+				{% if m.ip_address.is_empty() %}<span class="text-muted">—</span>{% else %}<div>{{ m.ip_address }}</div>{% endif %}
+				{% if !m.mac_address.is_empty() %}<code class="cell-chip">{{ m.mac_address }}</code>{% endif %}
+			</td>
+			<td class="cell-nowrap">
+				{% if m.sys_vendor.is_empty() %}<span class="text-muted">Unknown vendor</span>{% else %}{{ m.sys_vendor }}{% endif %}
+				{% if !m.product_serial.is_empty() %}<span class="cell-sub" title="Product serial">{{ m.product_serial }}</span>{% endif %}
+				{% if m.is_host %}<span class="cell-sub">{{ m.num_gpus }} GPU · {{ m.num_ib_ifs }} IB · {{ m.num_nvlink_gpus }} NVLink</span>{% endif %}
+			</td>
+			<td>
+				{% if !m.instance_type_id.is_empty() %}
+				<a href="/admin/instance-type/{{ m.instance_type_id }}">{% if !m.instance_type.is_empty() %}{{ m.instance_type }}{% else %}{{ m.instance_type_id }}{% endif %}</a>
 				{% else %}
-				{{ m.associated_host_id|machine_id_link|safe }}
+				<span class="text-muted">None</span>
 				{% endif %}
 			</td>
 			<td>{{ m.metadata.labels|label_list_fmt(true)|safe }}</td>
-			<td>
-				{% if !m.instance_type_id.is_empty() %}
-				<a href="/admin/instance-type/{{ m.instance_type_id }}">
-					{% if !m.instance_type.is_empty() %}
-					{{ m.instance_type }}
-					{% else %}
-					{{ m.instance_type_id }}
-					{% endif %}
-				</a>
-				{% endif %}
-			</td>
-			<td>{{ m.ip_address }}</td>
-			<td>{{ m.mac_address }}</td>
-			<td>{{ m.sys_vendor}}</td>
-			<td>{{ m.product_serial }}</td>
-			{% if m.is_host %}
-				<td>{{ m.num_gpus }}</td>
-				<td>{{ m.num_ib_ifs }}</td>
-				<td>{{ m.num_nvlink_gpus }}</td>
-			{% endif %}
 		</tr>
 	{% endfor %}
 	</tbody>

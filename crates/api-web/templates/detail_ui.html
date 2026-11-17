@@ -1,0 +1,91 @@
+{#
+  Components for detail pages built on detail_base.html.
+  Import with {% import "detail_ui.html" as ui %} and use with
+  {% call ui::name(args) %}{% endcall %}. Macros see only their arguments.
+#}
+
+{# Status bar item: label plus the caller's content. #}
+{% macro stat(label) %}
+<div class="entity-summary-stat">
+	<span class="entity-summary-label">{{ label }}</span>
+	{{ caller() }}
+</div>
+{% endmacro %}
+
+{# Status bar item for a LifecycleDetail: short state, time in state, SLA warning. #}
+{% macro state_stat(lifecycle) %}
+<div class="entity-summary-stat">
+	<span class="entity-summary-label">State</span>
+	{% set full_state = lifecycle.state_display.state|state_with_substate_label %}
+	{% set lowered_state = full_state.to_lowercase() %}
+	<span class="bubble{% if lowered_state.contains("failed") || lowered_state.contains("error") %} error{% else if lifecycle.time_in_state_above_sla %} warning{% else if full_state == "Ready" || full_state == "Assigned/Ready" %} success{% endif %}" title="{{ full_state }}">{{ lifecycle.state_display.state|state_prefix_label }}</span>
+	<span>for {{ lifecycle.time_in_state }}</span>
+</div>
+{% endmacro %}
+
+{# Status bar item for a HealthDetail: alert count linking to the Health tab. #}
+{% macro health_stat(health_detail) %}
+<div class="entity-summary-stat">
+	<span class="entity-summary-label">Health</span>
+	<a href="#health_view">
+	{% if health_detail.health.alerts.is_empty() %}
+		<span class="bubble success">No alerts</span>
+	{% else %}
+		<span class="bubble error">{{ health_detail.health.alerts.len() }} alert{% if health_detail.health.alerts.len() != 1 %}s{% endif %}</span>
+	{% endif %}
+	</a>
+</div>
+{% endmacro %}
+
+{# Health tab body for an Option<health::HealthPanel>. #}
+{% macro health_tab(health_panel) %}
+{% if let Some(health_panel) = health_panel %}
+{{ health_panel|safe }}
+{% else %}
+<p class="cell-error">Health details are unavailable.</p>
+{% endif %}
+{% endmacro %}
+
+{# BMC card for an Option<rpc::forge::BmcInfo>, with the firmware inventory footer. #}
+{% macro bmc_info_card(bmc_info, firmware_inventory) %}
+<h2 id="bmc_info_view">BMC</h2>
+<section class="entity-summary">
+	{% if let Some(bmc_info) = bmc_info %}
+	<div class="entity-summary-groups">
+		<div class="entity-summary-group">
+			<h4>Network</h4>
+			<dl>
+				<dt>IP</dt>
+				<dd>{% if let Some(ip) = bmc_info.ip %}<a href="/admin/explored-endpoint/{{ ip }}">{{ ip }}</a>{% else %}<span class="text-muted">—</span>{% endif %}</dd>
+				<dt>MAC Address</dt>
+				<dd>{% if let Some(mac) = bmc_info.mac %}<code class="mac">{{ mac }}</code>{% else %}<span class="text-muted">—</span>{% endif %}</dd>
+				<dt>Port</dt>
+				<dd>{{ bmc_info.port|option_fmt_or("—") }}</dd>
+				{% if let Some(machine_interface_id) = bmc_info.machine_interface_id %}
+				<dt>Interface</dt>
+				<dd><a href="/admin/interface/{{ machine_interface_id }}">{{ machine_interface_id }}</a></dd>
+				{% endif %}
+			</dl>
+		</div>
+		<div class="entity-summary-group">
+			<h4>Firmware</h4>
+			<dl>
+				<dt>Version</dt>
+				<dd>{{ bmc_info.version|option_fmt_or("—") }}</dd>
+				<dt>Firmware Version</dt>
+				<dd>{{ bmc_info.firmware_version|option_fmt_or("—") }}</dd>
+			</dl>
+		</div>
+	</div>
+	{% else %}
+	<p class="entity-summary-empty">No BMC info available.</p>
+	{% endif %}
+	<div class="entity-summary-details">{{ firmware_inventory|safe }}</div>
+</section>
+{% endmacro %}
+
+{# State history section with a link to the standalone page. #}
+{% macro state_history(history, history_url) %}
+<h2>State History<a href="{{ history_url }}" class="icon-link heading-link" title="Open state history on its own page" aria-label="Open state history on its own page"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7 17 17 7"/><path d="M7 7h10v10"/></svg></a></h2>
+{{ history|safe }}
+{% endmacro %}

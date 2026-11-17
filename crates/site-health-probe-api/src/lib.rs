@@ -221,6 +221,14 @@ pub enum ErrorCode {
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Filter {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub firmware_component: Option<Component>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub firmware_phase: Option<FirmwarePhase>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub firmware_ready: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub vendor: Option<String>,
     #[serde(rename = "type")]
     pub unit_type: UnitType,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -267,6 +275,10 @@ impl Filter {
     pub fn new(unit_type: UnitType) -> Self {
         Self {
             unit_type,
+            firmware_component: None,
+            firmware_phase: None,
+            firmware_ready: None,
+            vendor: None,
             source: None,
             stage: None,
             state: None,
@@ -294,6 +306,8 @@ impl Filter {
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct SweepInfo {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub firmware_config: Option<FirmwareConfigEvidence>,
     /// Newest completed source attempt, including failures newer than this snapshot.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_attempt_succeeded: Option<bool>,
@@ -412,6 +426,16 @@ pub struct RestMachineFields {
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct HostFields {
+    /// Omitted when the update window is unknown (not read, or malformed);
+    /// firmware phases are then unknown.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub firmware_window: Option<FirmwareWindow>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub firmware_policy_eligible: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub firmware_policy_blocking_reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub firmware: Option<HostFirmware>,
     /// nico-api's name of the host's maker, such as `nvidia`, `dell` or
     /// `lenovo`: from the explored report under the compact host read, from
     /// DMI's system vendor without it. `null` for a maker DMI cannot name.
@@ -446,6 +470,70 @@ pub struct HostFields {
     pub nvlink_domain: Option<String>,
     pub rack_id: Option<String>,
     pub dpu_ids: Vec<String>,
+}
+
+/// Source config pinned to an immutable host snapshot.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "camelCase")]
+pub struct FirmwareConfigEvidence {
+    pub revision: u64,
+    pub read_start: DateTime<Utc>,
+    pub read_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "camelCase")]
+/// A known host update window. Both bounds null: no window is set. Both at
+/// the Unix epoch: the window was closed. Otherwise `start` is before `end`.
+pub struct FirmwareWindow {
+    pub start: Option<DateTime<Utc>>,
+    pub end: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "snake_case")]
+pub enum FirmwarePhase {
+    Unknown,
+    Behind,
+    Updating,
+    Failed,
+    Current,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "camelCase")]
+pub struct HostFirmware {
+    pub report_version: Option<String>,
+    pub waiting_for_refresh: Option<bool>,
+    pub components: Vec<FirmwareComponentInventory>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "camelCase")]
+/// One configured firmware component of a host.
+pub struct FirmwareComponentInventory {
+    pub component_name: String,
+    /// Inventory entries NICo matched to this component's configured target,
+    /// not the host's complete hardware inventory.
+    pub entries: Vec<FirmwareInventoryEntry>,
+    /// Derived from the entries, update window, policy and the configuration
+    /// pinned to the host sweep. Unknown when any of that evidence is missing,
+    /// stale or inconsistent, even when entries exist.
+    pub phase: FirmwarePhase,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "camelCase")]
+pub struct FirmwareInventoryEntry {
+    pub service_id: String,
+    pub inventory_id: String,
+    pub version: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -552,6 +640,8 @@ pub struct RestSiteBinding {
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase", from = "flat::ConfigNicoApi")]
 pub struct ConfigNicoApi {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub revision: Option<u64>,
     #[serde(flatten)]
     pub read: ReadInfo,
     pub firmware_targets: Vec<FirmwareTarget>,
@@ -563,6 +653,10 @@ pub struct ConfigNicoApi {
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct FirmwareTarget {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub component_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inventory_name_regex: Option<String>,
     pub vendor: String,
     pub model: String,
     pub component: Component,
@@ -574,6 +668,10 @@ pub struct FirmwareTarget {
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct RuntimeSettings {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub machine_update_run_interval_seconds: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub requires_manual_upgrade: Option<bool>,
     pub max_concurrent_machine_updates_absolute: Option<i64>,
     pub max_concurrent_machine_updates_percent: Option<i64>,
     pub auto_host_firmware_update: Option<bool>,
@@ -791,6 +889,7 @@ mod flat {
         last_attempt_succeeded: Option<bool>,
         #[serde(default)]
         last_attempt_error: Option<String>,
+        firmware_config: Option<FirmwareConfigEvidence>,
         snapshot_id: String,
         family: Family,
         sweep_start: DateTime<Utc>,
@@ -808,6 +907,7 @@ mod flat {
                     last_attempt_error: r.last_attempt_error,
                     snapshot_id: r.snapshot_id,
                     family: r.family,
+                    firmware_config: r.firmware_config,
                     sweep_start: r.sweep_start,
                     read_at: r.read_at,
                     sweep_age_seconds: r.sweep_age_seconds,
@@ -825,6 +925,7 @@ mod flat {
         last_attempt_succeeded: Option<bool>,
         #[serde(default)]
         last_attempt_error: Option<String>,
+        firmware_config: Option<FirmwareConfigEvidence>,
         snapshot_id: String,
         family: Family,
         sweep_start: DateTime<Utc>,
@@ -844,6 +945,7 @@ mod flat {
                     last_attempt_error: r.last_attempt_error,
                     snapshot_id: r.snapshot_id,
                     family: r.family,
+                    firmware_config: r.firmware_config,
                     sweep_start: r.sweep_start,
                     read_at: r.read_at,
                     sweep_age_seconds: r.sweep_age_seconds,
@@ -887,6 +989,7 @@ mod flat {
     #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
     #[serde(rename_all = "camelCase")]
     pub(super) struct ConfigNicoApi {
+        revision: Option<u64>,
         read_start: DateTime<Utc>,
         read_at: DateTime<Utc>,
         read_age_seconds: f64,
@@ -907,6 +1010,7 @@ mod flat {
                     read_interval_seconds: r.read_interval_seconds,
                     last_attempt_error: r.last_attempt_error,
                 },
+                revision: r.revision,
                 firmware_targets: r.firmware_targets,
                 runtime: r.runtime,
                 site_explorer: r.site_explorer,
@@ -991,6 +1095,10 @@ mod tests {
 
     fn full_filter() -> Filter {
         Filter {
+            firmware_component: None,
+            firmware_phase: None,
+            firmware_ready: None,
+            vendor: None,
             unit_type: UnitType::Host,
             source: Some(Source::NicoApi),
             stage: Some(Stage::Ready),
@@ -1015,6 +1123,7 @@ mod tests {
 
     fn sweep_info() -> SweepInfo {
         SweepInfo {
+            firmware_config: None,
             last_attempt_succeeded: None,
             last_attempt_error: None,
             snapshot_id: "s-7".to_string(),
@@ -1216,6 +1325,10 @@ mod tests {
             reason: Some("waiting for DPU".to_string()),
             bmc_ip: Some("10.0.0.5".to_string()),
             host: Some(HostFields {
+                firmware_window: None,
+                firmware_policy_eligible: None,
+                firmware_policy_blocking_reason: None,
+                firmware: None,
                 vendor: Some("NVIDIA".to_string()),
                 model: Some("GB200 NVL".to_string()),
                 instance_type: None,
@@ -1594,9 +1707,12 @@ mod tests {
     #[test]
     fn config_sources_json_golden() {
         let nico_api = ConfigNicoApi {
+            revision: None,
             read: read_info(),
             firmware_targets: vec![],
             runtime: RuntimeSettings {
+                machine_update_run_interval_seconds: None,
+                requires_manual_upgrade: None,
                 max_concurrent_machine_updates_absolute: Some(10),
                 max_concurrent_machine_updates_percent: None,
                 auto_host_firmware_update: Some(true),
@@ -1762,13 +1878,22 @@ mod tests {
         }
 
         let filter = schema::<Filter>();
-        let expected: BTreeSet<String> = serde_json::to_value(full_filter())
+        let mut expected: BTreeSet<String> = serde_json::to_value(full_filter())
             .unwrap()
             .as_object()
             .unwrap()
             .keys()
             .cloned()
             .collect();
+        expected.extend(
+            [
+                "firmwareComponent",
+                "firmwarePhase",
+                "firmwareReady",
+                "vendor",
+            ]
+            .map(str::to_string),
+        );
         assert_eq!(property_names(&filter), expected);
         assert_eq!(filter["required"], json!(["type"]));
         assert_eq!(filter["additionalProperties"], json!(false));

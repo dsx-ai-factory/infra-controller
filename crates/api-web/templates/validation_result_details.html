@@ -1,57 +1,54 @@
-{% extends "base.html" %}
+{% extends "detail_base.html" %}
 
 {% block title %}Machine Validation Run {{ validation_id }} Test {{ test_id }}{% endblock %}
+{% block entity_label %}<a href="/admin/machinevalidation/runs/{{ validation_id }}">Validation Run</a> &rsaquo; Test{% endblock %}
+{% block entity_id %}{{ test_id }}{% endblock %}
+{% block header_links %}{% endblock %}
 
-{% block content %}
-<h1>Machine Validation Run <a href="/admin/machinevalidation/runs/{{ validation_id }}">{{ validation_id }}</a> Test {{ test_id }}</h1>
-
-<table class="sortable overview">
-	{% for result in validation_results %}
-	<tr>
-		<th>Validation ID</th>
-		<td><a href="/admin/machinevalidation/runs/{{ validation_id }}">{{ result.validation_id }}</a></td>
-	</tr>
-	<tr>
-		<th>Name</th>
-		<td>{{ result.name }}</td>
-	</tr>
-	<tr>
-		<th>Context</th>
-		<td>{{ result.context }}</td>
-	</tr>
-	<tr>
-		<th>Status</th>
-		                <td>{% if result.status == "0" %}<span class="bubble success">{% else %}<span class="bubble error">{% endif %}{{ result.status }}</span></td>
-	</tr>
-	<tr>
-		<th>Command</th>
-		<td>{{ result.command }}</td>
-	</tr>
-	<tr>
-		<th>Args</th>
-		<td>{{ result.args }}</td>
-	</tr>
-	<tr>
-		<th>Stdout</th>
-		<td>
-			<pre><code>{{ result.stdout|colorize_output()|safe }}</code></pre>
-		</td>
-	</tr>
-	<tr>
-		<th>Stderr</th>
-		<td>
-			<pre><code>{{ result.stderr|colorize_output()|safe }}</code></pre>
-		</td>
-	</tr>
-	<tr>
-		<th>Start Time</th>
-		<td>{{ result.start_time }}</td>
-	</tr>
-	<tr>
-		<th>End Time</th>
-		<td>{{ result.end_time }}</td>
-	</tr>
-	{% endfor %}
-</table>
-
+{% block detail_content %}
+{% for result in validation_results %}
+<section class="entity-summary">
+	<h3 class="entity-summary-title">{{ result.name }}</h3>
+	<div class="entity-summary-status">
+		<div class="entity-summary-stat">
+			<span class="entity-summary-label">Exit Status</span>
+			<span class="bubble {% if result.status == "0" %}success{% else %}error{% endif %}">{{ result.status }}</span>
+		</div>
+	</div>
+	<div class="entity-summary-groups">
+		<div class="entity-summary-group">
+			<h4>Run</h4>
+			<dl>
+				<dt>Validation Run</dt>
+				<dd><a href="/admin/machinevalidation/runs/{{ validation_id }}">{{ result.validation_id }}</a></dd>
+				<dt>Context</dt>
+				<dd>{{ result.context }}</dd>
+				<dt>Started</dt>
+				<dd>{{ result.start_time }}</dd>
+				<dt>Ended</dt>
+				<dd>{{ result.end_time }}</dd>
+			</dl>
+		</div>
+		<div class="entity-summary-group">
+			<h4>Command</h4>
+			<dl>
+				<dt>Command</dt>
+				<dd><code>{{ result.command }}</code></dd>
+				<dt>Args</dt>
+				<dd>{% if result.args.is_empty() %}<span class="text-muted">None</span>{% else %}<code>{{ result.args }}</code>{% endif %}</dd>
+			</dl>
+		</div>
+	</div>
+	<div class="entity-summary-table">
+		<h4>Stdout</h4>
+		<pre class="entity-summary-pre"><code>{{ result.stdout|colorize_output()|safe }}</code></pre>
+	</div>
+	<div class="entity-summary-table">
+		<h4>Stderr</h4>
+		<pre class="entity-summary-pre"><code>{{ result.stderr|colorize_output()|safe }}</code></pre>
+	</div>
+</section>
+{% else %}
+<section class="entity-summary"><p class="entity-summary-empty">No results for this test.</p></section>
+{% endfor %}
 {% endblock %}

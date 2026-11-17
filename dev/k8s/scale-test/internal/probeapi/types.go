@@ -102,6 +102,17 @@ const (
 	ComponentOther   Component = "other"
 )
 
+// FirmwarePhase is derived from complete matched component inventory.
+type FirmwarePhase string
+
+const (
+	FirmwarePhaseUnknown  FirmwarePhase = "unknown"
+	FirmwarePhaseBehind   FirmwarePhase = "behind"
+	FirmwarePhaseUpdating FirmwarePhase = "updating"
+	FirmwarePhaseFailed   FirmwarePhase = "failed"
+	FirmwarePhaseCurrent  FirmwarePhase = "current"
+)
+
 // MismatchKind is why a device and its expected record do not pair up.
 type MismatchKind string
 
@@ -166,6 +177,7 @@ const (
 )
 
 func init() {
+	jsonx.Enum(FirmwarePhaseUnknown, FirmwarePhaseBehind, FirmwarePhaseUpdating, FirmwarePhaseFailed, FirmwarePhaseCurrent)
 	jsonx.Enum(UnitTypeRack, UnitTypeHost, UnitTypeDpu, UnitTypeSwitch, UnitTypePowerShelf, UnitTypeInstance,
 		UnitTypeExpectedRecord, UnitTypeIdentityMismatch, UnitTypeHostFirmwareRequest, UnitTypeRestTotal)
 	jsonx.Enum(StageExpected, StageRegistered, StageReady, StageError)
@@ -209,6 +221,11 @@ type Filter struct {
 	Kind           *MismatchKind `json:"kind,omitempty"`
 	// Done false selects units that are not done. /v1/units only.
 	Done *bool `json:"done,omitempty"`
+
+	FirmwareComponent *Component     `json:"firmwareComponent,omitempty"`
+	FirmwarePhase     *FirmwarePhase `json:"firmwarePhase,omitempty"`
+	FirmwareReady     *bool          `json:"firmwareReady,omitempty"`
+	Vendor            *string        `json:"vendor,omitempty"`
 }
 
 // JSONClosed makes Decode refuse unknown fields. UnitsQuery gets it through
@@ -218,11 +235,12 @@ func (Filter) JSONClosed() {}
 
 // SweepInfo is the snapshot a count or units reply was read from.
 type SweepInfo struct {
-	LastAttemptError     *string    `json:"lastAttemptError,omitempty"`
-	LastAttemptSucceeded *bool      `json:"lastAttemptSucceeded,omitempty"`
-	SnapshotID           string     `json:"snapshotId"`
-	Family               Family     `json:"family"`
-	SweepStart           jsonx.Time `json:"sweepStart"`
+	FirmwareConfig       *FirmwareConfigEvidence `json:"firmwareConfig,omitempty"`
+	LastAttemptError     *string                 `json:"lastAttemptError,omitempty"`
+	LastAttemptSucceeded *bool                   `json:"lastAttemptSucceeded,omitempty"`
+	SnapshotID           string                  `json:"snapshotId"`
+	Family               Family                  `json:"family"`
+	SweepStart           jsonx.Time              `json:"sweepStart"`
 	// ReadAt is the sweep end. Every unit in the snapshot was read by then.
 	ReadAt               jsonx.Time `json:"readAt"`
 	SweepAgeSeconds      float64    `json:"sweepAgeSeconds"`
@@ -275,6 +293,11 @@ type Unit struct {
 }
 
 type HostFields struct {
+	FirmwareWindow               *FirmwareWindow `json:"firmwareWindow,omitempty"`
+	FirmwarePolicyEligible       *bool           `json:"firmwarePolicyEligible,omitempty"`
+	FirmwarePolicyBlockingReason *string         `json:"firmwarePolicyBlockingReason,omitempty"`
+	Firmware                     *HostFirmware   `json:"firmware,omitempty"`
+
 	Vendor        *string       `json:"vendor"`
 	Model         *string       `json:"model"`
 	InstanceType  *string       `json:"instanceType"`
@@ -370,6 +393,7 @@ type RestSiteBinding struct {
 }
 
 type ConfigNicoAPI struct {
+	Revision *uint64 `json:"revision,omitempty"`
 	ReadInfo
 	FirmwareTargets []FirmwareTarget `json:"firmwareTargets"`
 	Runtime         RuntimeSettings  `json:"runtime"`
@@ -377,6 +401,9 @@ type ConfigNicoAPI struct {
 }
 
 type FirmwareTarget struct {
+	ComponentName      *string `json:"componentName,omitempty"`
+	InventoryNameRegex *string `json:"inventoryNameRegex,omitempty"`
+
 	Vendor        string    `json:"vendor"`
 	Model         string    `json:"model"`
 	Component     Component `json:"component"`
@@ -385,6 +412,9 @@ type FirmwareTarget struct {
 }
 
 type RuntimeSettings struct {
+	MachineUpdateRunIntervalSeconds *uint64 `json:"machineUpdateRunIntervalSeconds,omitempty"`
+	RequiresManualUpgrade           *bool   `json:"requiresManualUpgrade,omitempty"`
+
 	MaxConcurrentMachineUpdatesAbsolute *int64 `json:"maxConcurrentMachineUpdatesAbsolute"`
 	MaxConcurrentMachineUpdatesPercent  *int64 `json:"maxConcurrentMachineUpdatesPercent"`
 	AutoHostFirmwareUpdate              *bool  `json:"autoHostFirmwareUpdate"`
@@ -465,4 +495,30 @@ type FixtureResponse struct {
 	ReadStart           jsonx.Time        `json:"readStart"`
 	ReadAt              jsonx.Time        `json:"readAt"`
 	Objects             []json.RawMessage `json:"objects"`
+}
+
+// FirmwareConfigEvidence pins the configuration used for one host sweep.
+type FirmwareConfigEvidence struct {
+	Revision  uint64     `json:"revision"`
+	ReadStart jsonx.Time `json:"readStart"`
+	ReadAt    jsonx.Time `json:"readAt"`
+}
+type FirmwareWindow struct {
+	Start *jsonx.Time `json:"start"`
+	End   *jsonx.Time `json:"end"`
+}
+type HostFirmware struct {
+	ReportVersion     *string                      `json:"reportVersion"`
+	WaitingForRefresh *bool                        `json:"waitingForRefresh"`
+	Components        []FirmwareComponentInventory `json:"components"`
+}
+type FirmwareComponentInventory struct {
+	ComponentName string                   `json:"componentName"`
+	Entries       []FirmwareInventoryEntry `json:"entries"`
+	Phase         FirmwarePhase            `json:"phase"`
+}
+type FirmwareInventoryEntry struct {
+	ServiceID   string  `json:"serviceId"`
+	InventoryID string  `json:"inventoryId"`
+	Version     *string `json:"version"`
 }

@@ -8,27 +8,34 @@
 
 <table class="sortable overview">
 	<thead>
-		<th>Id</th>
-		<th>Name</th>
-		<th>Labels</th>
-		<th>Tenant</th>
-		<th>Keyset ID</th>
-		<th>Network Virtualization</th>
-		<th>Routing Profile Type</th>
-		<th>VNI</th>
+		<tr>
+			<th>VPC</th>
+			<th>Tenant</th>
+			<th>Network</th>
+			<th>VNI</th>
+			<th class="no-sort">Labels</th>
+		</tr>
 	</thead>
 	<tbody>
 		{% for vpc in vpcs %}
 		<tr>
-			<td><a href="/admin/vpc/{{ vpc.id }}">{{ vpc.id }}</a></td>
-			<td>{{ vpc.metadata.name }}</td>
-			<td>{{ vpc.metadata.labels|label_list_fmt(true)|safe }}</td>
-			<td><a href="/admin/tenant/{{ vpc.tenant_organization_id }}">{{ vpc.tenant_organization_id }}</a></td>
-			<td>{{ vpc.tenant_keyset_id }}</td>
-			<td>{{ vpc.network_virtualization_type }}</td>
-			<td>{{ vpc.routing_profile_type }}</td>
+			<td>
+				<a href="/admin/vpc/{{ vpc.id }}">{% if vpc.metadata.name.is_empty() %}{{ vpc.id }}{% else %}{{ vpc.metadata.name }}{% endif %}</a>
+				{% if !vpc.metadata.name.is_empty() %}<span class="cell-sub">{{ vpc.id }}</span>{% endif %}
+			</td>
+			<td>
+				<a href="/admin/tenant/{{ vpc.tenant_organization_id }}">{{ vpc.tenant_organization_id }}</a>
+				{% if !vpc.tenant_keyset_id.is_empty() %}<span class="cell-sub" title="Keyset">{{ vpc.tenant_keyset_id }}</span>{% endif %}
+			</td>
+			<td>
+				{{ vpc.network_virtualization_type }}
+				<span class="cell-sub" title="Routing profile">{{ vpc.routing_profile_type }}</span>
+			</td>
 			<td>{{ vpc.vni }}</td>
+			<td>{{ vpc.metadata.labels|label_list_fmt(true)|safe }}</td>
 		</tr>
+		{% else %}
+		<tr><td colspan="5">No VPCs.</td></tr>
 		{% endfor %}
 	</tbody>
 </table>

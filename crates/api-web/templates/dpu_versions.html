@@ -9,8 +9,7 @@
 <table class="sortable overview">
 	<thead>
 	<tr>
-		<th>DPU ID</th>
-		<th>Host ID</th>
+		<th>DPU</th>
 		<th>State</th>
 		<th>DPU Type</th>
 		<th>DPU Agent</th>
@@ -23,16 +22,12 @@
 	<tbody>
 	{% for m in machines %}
 		<tr>
-			<td>{{ m.dpu_machine_id|machine_id_link|safe }}</td>
-			<td>{{ m.host_machine_id|machine_id_link|safe }}</td>
 			<td>
-				{% if m.state == "Ready" || m.state == "Assigned/Ready" %}
-					<span class="bubble success">{{ m.state }}</span>
-				{% else if m.state.to_lowercase().contains("failed") %}
-					<span class="bubble error">{{ m.state }}</span>
-				{% else %}
-					<span class="bubble">{{ m.state }}</span>
-				{% endif %}
+				{{ m.dpu_machine_id|machine_id_link|safe }}
+				{% if !m.host_machine_id.is_empty() %}<div class="cell-dpu" title="Host">{{ m.host_machine_id|machine_id_link|safe }}</div>{% endif %}
+			</td>
+			<td class="state-cell">
+				<span class="bubble{% if m.state == "Ready" || m.state == "Assigned/Ready" %} success{% else if m.state.to_lowercase().contains("failed") %} error{% endif %}" title="{{ m.state }}">{{ m.state|slash_breaks|safe }}</span>
 			</td>
 			<td>{{ m.dpu_type }}</td>
 			<td>{{ m.dpu_agent_version }}</td>

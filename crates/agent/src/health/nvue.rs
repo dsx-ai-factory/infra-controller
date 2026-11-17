@@ -691,9 +691,12 @@ mod tests {
     #[tokio::test]
     async fn health_check_reports_service_updates_without_nvue() {
         let socket_directory = tempfile::tempdir().expect("create NVUE socket directory");
-        let nvue_client = NvueClient::new(nvue_client::client::NvueServerAddress::UnixSocket {
-            socket_path: socket_directory.path().join("missing-nvue.sock"),
-        })
+        let nvue_client = NvueClient::new(
+            nvue_client::client::NvueServerAddress::UnixSocket {
+                socket_path: socket_directory.path().join("missing-nvue.sock"),
+            },
+            carbide_instrument::Instrumentation::noop(),
+        )
         .expect("build NVUE client");
         let dhcp_server_update = Err(eyre::eyre!("injected DHCP failure"));
         let fmds_update = Ok(());

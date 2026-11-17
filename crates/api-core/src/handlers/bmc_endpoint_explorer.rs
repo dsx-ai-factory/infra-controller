@@ -19,8 +19,11 @@ use std::net::SocketAddr;
 
 use ::rpc::forge as rpc;
 use ::rpc::model::machine::machine_id::try_parse_machine_id;
+use carbide_machine_controller::config::MachineStateHandlerSiteConfig;
+use carbide_machine_controller::platform_config::{self, PlatformBmc};
 use carbide_redfish::boot_interface::BootInterfaceTarget;
 use carbide_utils::none_if_empty::NoneIfEmpty;
+use carbide_utils::redfish::BmcAccessInfo;
 use carbide_uuid::device::DeviceId;
 use carbide_uuid::machine::{HostMachineId, HostMachineIdSubtype, MachineId};
 use db::WithTransaction;
@@ -607,6 +610,25 @@ pub(crate) async fn is_infinite_boot_enabled(
     }))
 }
 
+pub(crate) async fn reverify_host_boot_configuration(
+    txn: &mut PgConnection,
+    machine_id: HostMachineId,
+) -> Result<Option<bool>, CarbideError> {
+    let Some(desired) = desired_boot_interface_target(txn, Some(machine_id.into())).await? else {
+        return Ok(None);
+    };
+    let reconciliation_eligible =
+        boot_interface_reconciliation_eligible(txn, Some(machine_id)).await?;
+    db::machine_desired_boot_interface::force_reconcile(
+        txn,
+        &machine_id,
+        &desired,
+        BootInterfaceSelectionAuthority::Existing,
+    )
+    .await?;
+    Ok(Some(reconciliation_eligible))
+}
+
 pub(crate) async fn machine_setup(
     api: &Api,
     request: Request<rpc::MachineSetupRequest>,
@@ -671,22 +693,52 @@ pub(crate) async fn machine_setup(
     let (bmc_addr, bmc_mac_address) = resolve_bmc_interface(api, &bmc_endpoint_request).await?;
     let machine_interface = MachineInterfaceSnapshot::mock_with_mac(bmc_mac_address);
 
-    let stored = db::explored_endpoints::find_by_ips(&api.database_connection, vec![bmc_addr.ip()])
-        .await?
-        .into_iter()
-        .next()
-        .and_then(|ep| ep.boot_interface());
+    let explored =
+        db::explored_endpoints::find_by_ips(&api.database_connection, vec![bmc_addr.ip()])
+            .await?
+            .into_iter()
+            .next();
     let boot_interface = resolve_admin_boot_interface_target(
-        stored,
+        explored.as_ref().and_then(|ep| ep.boot_interface()),
         desired.as_ref(),
         candidates.as_ref(),
         entered_mac,
     );
 
-    api.bmc_client
-        .machine_setup(bmc_addr, &machine_interface, boot_interface.as_ref())
-        .await
-        .map_err(|e| CarbideError::internal(e.to_string()))?;
+    let access = BmcAccessInfo {
+        host: bmc_addr.ip().to_string(),
+        port: Some(bmc_addr.port()),
+        mac_address: bmc_mac_address,
+    };
+    match api.connect_drivers(&access).await? {
+        Some(bmc) => {
+            // Like libredfish's `machine_setup` through site-explorer, the RPC
+            // applies no site BIOS or BMC manager profiles.
+            let site_config = MachineStateHandlerSiteConfig {
+                bios_profiles: Default::default(),
+                oem_manager_profiles: Default::default(),
+                ..api.runtime_config.machine_state_handler_site_config()
+            };
+            platform_config::apply(
+                &PlatformBmc::Drivers(bmc),
+                &site_config,
+                boot_interface.as_ref(),
+            )
+            .await
+            .map_err(|e| CarbideError::internal(e.to_string()))?;
+        }
+        None => {
+            api.bmc_client
+                .machine_setup(
+                    bmc_addr,
+                    &machine_interface,
+                    explored.as_ref().map(|ep| &ep.report),
+                    boot_interface.as_ref(),
+                )
+                .await
+                .map_err(|e| CarbideError::internal(e.to_string()))?;
+        }
+    }
 
     tracing::info!(
         bmc_ip_address = %endpoint_address,
@@ -773,10 +825,24 @@ pub(crate) async fn set_dpu_first_boot_order(
         )
     })?;
 
-    api.bmc_client
-        .set_boot_order_dpu_first(bmc_addr, &machine_interface, &boot_interface)
-        .await
-        .map_err(|e| CarbideError::internal(e.to_string()))?;
+    let access = BmcAccessInfo {
+        host: bmc_addr.ip().to_string(),
+        port: Some(bmc_addr.port()),
+        mac_address: bmc_mac_address,
+    };
+    match api.connect_drivers(&access).await? {
+        Some(bmc) => {
+            platform_config::configure_boot_order(&PlatformBmc::Drivers(bmc), &boot_interface)
+                .await
+                .map_err(|e| CarbideError::internal(e.to_string()))?;
+        }
+        None => {
+            api.bmc_client
+                .set_boot_order_dpu_first(bmc_addr, &machine_interface, &boot_interface)
+                .await
+                .map_err(|e| CarbideError::internal(e.to_string()))?;
+        }
+    }
 
     tracing::info!(
         bmc_ip_address = %endpoint_address,

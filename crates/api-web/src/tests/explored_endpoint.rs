@@ -132,7 +132,7 @@ async fn test_endpoint_detail_matches_ip_addresses(pool: sqlx::PgPool) {
         } else {
             let body = std::str::from_utf8(&body).unwrap();
             assert!(
-                body.contains(&format!("<h1>Endpoint {expected_address}</h1>")),
+                body.contains(&format!("<code id=\"entity-id\">{expected_address}</code>")),
                 "GET {uri}"
             );
         }

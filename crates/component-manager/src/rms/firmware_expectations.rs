@@ -212,7 +212,13 @@ impl RmsRackFirmwareUpdateManager {
                     }
                     response.unwrap_or(Err(FirmwareExpectationError::DeadlineExceeded))
                 };
-                let response = red::instrumented("rms", "compare_firmware_object", attempt).await;
+                let response = red::instrumented(
+                    &self.instrumentation,
+                    "rms",
+                    "compare_firmware_object",
+                    attempt,
+                )
+                .await;
                 for (read, node) in batch {
                     if Instant::now() >= deadline {
                         return Ok(results);

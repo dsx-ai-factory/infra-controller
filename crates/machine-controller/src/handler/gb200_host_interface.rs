@@ -60,7 +60,7 @@ pub(super) async fn repair_gb200_host_interface_if_needed(
         return Ok(());
     }
 
-    match ensure_gb200_host_interface_static_ipv4(redfish_client)
+    match ensure_gb200_host_interface_static_ipv4(&ctx.services.instrumentation, redfish_client)
         .await
         .map_err(|error| redfish_error("ensure_gb200_host_interface_static_ipv4", error))?
     {

@@ -101,6 +101,7 @@ macro_rules! capability_operations {
                     Box::pin(async move {
                         let cx = self.bmc.operation_context();
                         observe(
+                            &self.bmc.instrumentation,
                             self.bmc.endpoint(),
                             Some(Capability::$trait),
                             concat!(stringify!($capability), ".", stringify!($method)),

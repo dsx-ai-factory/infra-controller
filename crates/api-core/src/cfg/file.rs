@@ -296,8 +296,12 @@ pub struct CarbideConfig {
     /// FNN prefixes installed as floating blackhole routes in every VPC VRF.
     ///
     /// When omitted, this inherits `site_fabric_prefixes`, includes every retained tenant root,
-    /// and retains removed operator-managed roots until their VpcPrefixes and VPC-attached direct
-    /// NetworkPrefixes are hard-deleted. An explicit list is authoritative. Under mutual isolation,
+    /// and retains removed operator roots through exact VpcPrefix references, contained VpcPrefixes
+    /// without parentage, or contained VPC-attached direct NetworkPrefixes. A direct prefix retains
+    /// retiring roots while its segment exists and no Ready operator root fully covers it, including
+    /// during draining. Adding or restoring that coverage releases the retiring roots without deleting
+    /// the segment. VpcPrefix references remain until hard deletion.
+    /// An explicit list is authoritative. Under mutual isolation,
     /// each new tenant root requires an equal or broader explicit route. Startup and FNN DPU
     /// responses check the same coverage, including unused and Deleting tenant roots. Version
     /// output does not add tenant roots or check their coverage.
@@ -487,6 +491,9 @@ pub struct CarbideConfig {
     /// handshake first.
     #[serde(default)]
     pub scout_boot_interface_correction_enabled: bool,
+
+    #[serde(default)]
+    pub maintenance_end_boot_config_recheck_enabled: bool,
 
     /// `ib_fabrics` defines the InfiniBand fabrics managed by the site.
     /// When `ib_config.enabled` is true, v2.4 accepts at most one fabric,
@@ -7577,6 +7584,7 @@ path = "credentials.yaml"
         assert_eq!(config.dhcpv6_server_preference, None);
         assert!(!config.allow_insecure_discovery);
         assert!(!config.scout_boot_interface_correction_enabled);
+        assert!(!config.maintenance_end_boot_config_recheck_enabled);
         assert!(config.route_servers.is_empty());
         assert!(config.tls.is_none());
         assert!(config.auth.is_none());

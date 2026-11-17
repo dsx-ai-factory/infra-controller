@@ -132,8 +132,7 @@ func (cipbh CreateIPBlockHandler) Handle(c echo.Context) error {
 	var ipb *cdbm.IPBlock
 	var ssd *cdbm.StatusDetail
 	err = cdb.WithTx(ctx, cipbh.dbSession, func(tx *cdb.Tx) error {
-		// Site Config prefix import and IP Block creation share this lock;
-		// SitePrefix inventory reconciliation will use it too. Every routing
+		// SitePrefix inventory and IP Block creation share this lock. Every routing
 		// type takes it, since the overlap check below spans routing types. Run
 		// uniqueness checks after successful acquisition so a retried loser sees
 		// the root that committed first.
@@ -1139,7 +1138,7 @@ func (dipbh DeleteIPBlockHandler) Handle(c echo.Context) error {
 		logger.Error().Str("IP Block ID", ipbID.String()).Err(err).Msg("error retrieving provider IP Block DB entity")
 		return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to retrieve IPBlock, DB error", nil)
 	}
-	const coreLinkedDeleteMessage = "This IP Block is linked to an OperatorManaged SitePrefix; remove the corresponding prefix from Core's site_fabric_prefixes configuration instead"
+	const coreLinkedDeleteMessage = "This IP Block is managed by the Site configuration. Remove its configured address range instead"
 	if ipb.SitePrefixID != nil {
 		return cutil.NewAPIErrorResponse(c, http.StatusConflict, coreLinkedDeleteMessage, nil)
 	}
