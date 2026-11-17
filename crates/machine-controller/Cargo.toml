@@ -84,7 +84,9 @@ uuid = { workspace = true, features = ["v4", "serde"] }
 version-compare = { workspace = true }
 
 [dev-dependencies]
-trace-propagation = { path = "../trace-propagation" }
+arc-swap = { workspace = true }
+axum = { workspace = true }
+bmc-mock = { path = "../bmc-mock" }
 carbide-api-model = { path = "../api-model", default-features = false, features = [
   "test-support",
 ] }
@@ -103,6 +105,7 @@ lazy_static = { workspace = true }
 tempfile = { workspace = true }
 tokio-util = { workspace = true }
 tonic = { workspace = true }
+trace-propagation = { path = "../trace-propagation" }
 
 [build-dependencies]
 carbide-proto-compiler = { path = "../proto-compiler" }

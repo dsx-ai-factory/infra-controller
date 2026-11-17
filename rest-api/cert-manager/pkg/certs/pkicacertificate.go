@@ -18,7 +18,7 @@ type pkiCACertificateHandler struct {
 	certificateIssuer CertificateIssuer
 }
 
-func (h *pkiCACertificateHandler) reply(ctx context.Context, cert string, err Error, w http.ResponseWriter) {
+func (h *pkiCACertificateHandler) reply(ctx context.Context, cert, contentType string, err Error, w http.ResponseWriter) {
 	var resp string
 	log := core.GetLogger(ctx)
 	if err == ErrorNone {
@@ -27,7 +27,7 @@ func (h *pkiCACertificateHandler) reply(ctx context.Context, cert string, err Er
 		resp = err.Error()
 	}
 
-	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	w.Header().Set("Content-Type", contentType)
 	w.WriteHeader(err.Code())
 	_, errWrite := w.Write([]byte(resp))
 	if errWrite != nil {
@@ -43,35 +43,37 @@ func (h *pkiCACertificateHandler) ServeHTTP(w http.ResponseWriter, r *http.Reque
 
 	var cert string
 	var err error
+	contentType := "text/plain; charset=utf-8"
 
 	switch r.URL.Path {
 	case "/v1/pki/ca":
 		cert, err = h.certificateIssuer.GetCACertificate(ctx)
 		if err != nil {
 			log.WithField("err", ErrorRequestCACertificate.String()).Errorf("failed to request PKI CA certificate: %s", err.Error())
-			h.reply(ctx, "", ErrorRequestCACertificate, w)
+			h.reply(ctx, "", contentType, ErrorRequestCACertificate, w)
 			return
 		}
 
 		block, _ := pem.Decode([]byte(cert))
 		if block == nil || block.Type != "CERTIFICATE" {
 			log.WithField("err", ErrorDecodeCACertificate.String()).Errorf("failed to decode PKI CA certificate")
-			h.reply(ctx, "", ErrorDecodeCACertificate, w)
+			h.reply(ctx, "", contentType, ErrorDecodeCACertificate, w)
 			return
 		}
 		cert = string(block.Bytes)
+		contentType = "application/pkix-cert"
 	case "/v1/pki/ca/pem":
 		cert, err = h.certificateIssuer.GetCACertificate(ctx)
 		if err != nil {
 			log.WithField("err", ErrorRequestCACertificate.String()).Errorf("failed to request PKI CA certificate: %s", err.Error())
-			h.reply(ctx, "", ErrorRequestCACertificate, w)
+			h.reply(ctx, "", contentType, ErrorRequestCACertificate, w)
 			return
 		}
 	default:
 		log.WithField("err", ErrorBadPKIRequest.String()).Errorf("invalid path")
-		h.reply(ctx, "", ErrorBadPKIRequest, w)
+		h.reply(ctx, "", contentType, ErrorBadPKIRequest, w)
 		return
 	}
 
-	h.reply(ctx, cert, ErrorNone, w)
+	h.reply(ctx, cert, contentType, ErrorNone, w)
 }

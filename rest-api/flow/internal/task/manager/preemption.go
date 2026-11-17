@@ -67,19 +67,22 @@ func (m *ManagerImpl) createAndExecutePreemptingTask(ctx context.Context, req *o
 			if preserve != nil && preserve(existing.Operation) {
 				continue
 			}
-			err := m.taskStore.UpdateTaskStatus(txCtx, &taskdef.TaskStatusUpdate{
+			updated, err := m.taskStore.UpdateTaskStatus(txCtx, &taskdef.TaskStatusUpdate{
 				ID: existing.ID, Status: taskcommon.TaskStatusTerminated,
 				Message: fmt.Sprintf("Preempted by task %s; resubmit manually when safe", task.ID),
 			})
 			if err != nil {
 				return err
 			}
-			displaced = append(displaced, existing)
+			if updated {
+				displaced = append(displaced, existing)
+			}
 		}
 		task.Status = taskcommon.TaskStatusPending
 		task.Message = "Preempting task: bypassing the conflict queue"
 		if existingReservation {
-			return m.taskStore.UpdateTaskStatus(txCtx, &taskdef.TaskStatusUpdate{ID: task.ID, Status: task.Status, Message: task.Message})
+			_, err := m.taskStore.UpdateTaskStatus(txCtx, &taskdef.TaskStatusUpdate{ID: task.ID, Status: task.Status, Message: task.Message})
+			return err
 		}
 		return m.taskStore.CreateTask(txCtx, &task)
 	})

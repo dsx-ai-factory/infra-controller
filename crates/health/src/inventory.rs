@@ -847,9 +847,9 @@ mod tests {
 
     #[test]
     fn refresh_failure_emits_correlated_metric_and_warning() {
-        let metrics = MetricsCapture::start();
+        let metrics = MetricsCapture::owned();
         let logs = capture_logs(|| {
-            carbide_instrument::emit(InventoryRefreshFailed {
+            metrics.instrumentation().emit(InventoryRefreshFailed {
                 error: "simulated inventory failure".to_string(),
             });
         });

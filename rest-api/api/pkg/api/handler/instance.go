@@ -3515,7 +3515,6 @@ func (uih UpdateInstanceHandler) Handle(c echo.Context) error {
 	}
 
 	// Validate each NVLink Logical Partition
-	dbnvlic := []cdbm.NVLinkInterface{}
 	for _, nvlifc := range apiRequest.NVLinkInterfaces {
 		nvllpID := uuid.MustParse(nvlifc.NVLinkLogicalPartitionID)
 
@@ -3539,8 +3538,6 @@ func (uih UpdateInstanceHandler) Handle(c echo.Context) error {
 			logger.Warn().Msg(fmt.Sprintf("NVLink Logical Partition: %v specified in request data is not in Ready state", nvllpID))
 			return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, fmt.Sprintf("NVLink Logical Partition: %v specified in request data is not in Ready state", nvllpID), nil)
 		}
-
-		dbnvlic = append(dbnvlic, cdbm.NVLinkInterface{NVLinkLogicalPartitionID: nvllp.ID, DeviceInstance: nvlifc.DeviceInstance})
 	}
 
 	// Validate NVLink interfaces if Instance Type has NVLink (GPU) Capability
