@@ -181,6 +181,7 @@ Temporal is the workflow orchestration engine used by NICo REST for multi-step o
 ```bash
 tctl --ns cloud namespace register
 tctl --ns site namespace register
+tctl --ns flow namespace register
 tctl --ns <SITE_UUID> namespace register   # once you know the site UUID
 ```
 

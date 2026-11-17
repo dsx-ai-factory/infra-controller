@@ -757,6 +757,12 @@ kubectl get svc nico-api -n nico-system -o jsonpath='{.status.loadBalancer.ingre
 
 Configure the credentials NICo will apply to BMCs and UEFI after ingestion. These commands write to the configured credential store: Vault by default, or Postgres when the site was set up as described in [Day 0 Credential Store](installation-options/day0-credential-store.md).
 
+When REST is available, prefer the stdin-based workflows for the
+[Site-wide BMC Root](../provisioning/ingesting-hosts.md#store-host-and-dpu-bmc-password)
+and [Host and DPU UEFI Defaults](../provisioning/ingesting-hosts.md#store-host-and-dpu-uefi-passwords).
+They keep passwords out of process arguments; follow their credential-source
+prerequisites and disable shell tracing while entering secrets.
+
 If `nico-api.credentials.bmcSiteWideRootSource` is `local`, skip the first
 command: the local environment-then-file chain owns version 0 of the site-wide
 BMC root, and the API rejects attempts to write that credential to the backend.
@@ -769,10 +775,14 @@ nico-admin-cli -a <api-url> credential add-uefi --kind=dpu --password='<password
 ```
 
 <Warning>
-`nico-admin-cli` accepts these passwords only as command-line arguments, so each
-one lands in your shell history and is visible in the process argument list
-while the command runs. Run them from a shell with history disabled, and clear
-any history file that captured them.
+These CLI commands expose passwords in process arguments and can record them
+in shell history or tracing output. Run them only on a trusted administrative
+host where process inspection and command-argument collection are restricted
+to authorized credential administrators. Disable shell history and tracing,
+and clear any history file that captured a password. Disabling history does
+not hide process arguments. The watched Secret option below supplies the
+site-wide BMC root only; the host and DPU UEFI site defaults still require
+separate setup.
 </Warning>
 
 Site Explorer requires all three — the site-wide BMC root and both the `host`

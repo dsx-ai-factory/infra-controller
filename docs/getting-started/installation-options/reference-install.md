@@ -63,7 +63,7 @@ establish that an external VIP or device path works.
 | 3–4 | Vault install, initialization/unseal, and the Core namespace/SSH host key | Vault is usable when enabled; with `--skip-vault`, the site CA and the Core namespace/SSH key setup still apply. |
 | 5 | ESO and `nico-prereqs`: PostgreSQL, stores, Secrets, and PKI configuration | PostgreSQL is ready; the Core credential and CA Secrets have synced; Vault PKI configuration has completed when enabled. REST and Flow targets sync after their namespaces exist in later phases. |
 | 5b–5c | DPF prerequisites/operator and RMS, unless individually skipped | Required controller rollouts complete; RMS is available; DPF objects match the [DPF Setup](../../manuals/dpf.md). DPU-dependent readiness also needs actual DPU nodes. |
-| 6 | Core, then the optional site overlay and observability install | Core pods and migration jobs succeed; service VIPs are assigned; DHCP, PXE, DNS, and API paths pass [Site Controller Verification](../quick-start.md#step-5--verify-the-site-controller). |
+| 6 | Core, then the optional site overlay and observability install | Core pods are ready, migration jobs succeed, and configured Core service VIPs are assigned. Check Core DHCP, PXE, DNS, and API reachability before continuing. |
 | 7a–7f | REST namespace and CA issuer, database preparation, Keycloak, Temporal TLS, Temporal and namespaces | Database credentials are available; Keycloak and Temporal are ready; required certificates and Temporal namespaces exist. |
 | 7g–7i | REST chart and migrations, Flow, site registration, and Site Agent | REST migrations and rollouts succeed, Flow is available, and the Site Agent confirms its Core and Flow connections. Verify the site through REST. |
 
@@ -74,7 +74,7 @@ skip flags separately when appropriate. `--with-observability` also runs
 when REST is skipped. The [Setup Options](https://github.com/dsx-ai-factory/infra-controller/blob/main/helm-prereqs/README.md#setup-options)
 describe the complete flag and environment-variable behavior.
 
-Finish with the [Site Controller Verification](../quick-start.md#step-5--verify-the-site-controller)
+After phase 7, finish with the [Site Controller Verification](../quick-start.md#step-5--verify-the-site-controller)
 and the prerequisite `health-check.sh`. Treat warnings about unconfirmed
 Site Agent connectivity as a failed pipeline acceptance gate even if setup
 returns success. Before enabling ingestion, complete the

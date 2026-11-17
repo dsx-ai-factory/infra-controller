@@ -19,9 +19,12 @@ artifact images. Their init containers copy the required architecture and
 repository directories into `/forge-boot-artifacts/blobs/internal`; PXE
 serves them under `/public/blobs/internal`. The
 [PXE Chart Values](https://github.com/dsx-ai-factory/infra-controller/blob/main/helm/charts/nico-pxe/values.yaml)
-define the copy commands and mount layout. If the list is empty, PXE serves
-files bundled in its own image instead. An image without the requested
-files returns HTTP 404 and cannot complete network provisioning.
+define the copy commands and mount layout. A nonempty list mounts an
+`emptyDir` over that path, hiding the files bundled in the PXE image. The
+init containers must supply every required file, including DPU artifacts
+served from that path. If the list is empty, PXE serves its bundled files.
+A request for a missing file returns HTTP 404 and cannot complete network
+provisioning.
 
 Place this service on a path reachable from the managed hosts and DPU
 provisioning clients. Keep the service VIP, boot URLs, DHCP configuration,

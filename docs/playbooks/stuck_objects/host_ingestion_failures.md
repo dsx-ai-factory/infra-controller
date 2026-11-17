@@ -18,8 +18,21 @@ to a site.
 1. Check validation and SKU validation results.
 
 Complete the [DHCP Cutover Checklist](../../provisioning/ip-and-network-configuration.md#dhcp-cutover-checklist)
-and [Site-wide Credential Setup](../../getting-started/quick-start.md#set-site-wide-credentials)
-before troubleshooting individual devices.
+and configure the [Site-wide BMC Root](../../provisioning/ingesting-hosts.md#store-host-and-dpu-bmc-password)
+and [Host and DPU UEFI Defaults](../../provisioning/ingesting-hosts.md#store-host-and-dpu-uefi-passwords)
+before troubleshooting individual devices. These REST workflows read passwords
+from stdin through `nicocli --data-file -`.
+
+<Warning>
+The direct Core credential commands in the
+[Quick Start Guide](../../getting-started/quick-start.md#set-site-wide-credentials)
+pass passwords in process arguments.
+Disabling shell history does not hide those arguments. Run them only on a
+trusted administrative host where process inspection and command-argument
+collection are restricted to authorized credential administrators, with shell
+history and tracing disabled. Prefer the stdin-based REST workflows above
+when REST is available, and follow their credential-source prerequisites.
+</Warning>
 
 ## Expected Machine
 

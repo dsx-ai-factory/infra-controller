@@ -16,6 +16,10 @@ NICo supports two service types:
 | `KubernetesPod` | Kubernetes Pod manifest in YAML | DPU agent |
 | `DpfHelmChart` | JSON-encoded Helm chart definition | DPF |
 
+`DpfHelmChart` services require a DPF-managed host. `KubernetesPod` services
+require a host that is not DPF-managed. Core rejects either incompatible
+attachment with `FailedPrecondition`.
+
 The [DPF Helm Chart Services](#dpf-helm-chart-services) section describes the
 Helm lifecycle and placement contract. The Pod workflow and examples in the
 remaining sections apply to `KubernetesPod` services.
@@ -75,18 +79,28 @@ inside `data` is a string in the request body:
 }
 ```
 
-Creation defines the service. To place this demand-driven workload, attach
-the returned service ID and version to an instance through
-`dpuExtensionServiceDeployments`, then verify placement and workload health
-as described below.
+Creation is asynchronous. Poll the
+`GET /v2/org/{org}/nico/dpu-extension-service/{dpuExtensionServiceId}` resource
+until the service status is `Ready` before attaching it to an instance. Core
+rejects a new Helm service attachment in any other lifecycle state with
+`FailedPrecondition`. To place this demand-driven workload, attach the returned
+service ID and version through `dpuExtensionServiceDeployments`, then verify
+placement and workload health as described below.
 
 Helm services retain version number 1. API responses use the full
 configuration-version string, `V1-T<timestamp>`. A definition update replaces
 the complete JSON definition in that version and is accepted only when the
 service is `Ready`. No-op updates are rejected. NICo reconciles changes
 asynchronously through DPF; it does not create a new immutable
-Pod-style version for each change. Metadata-only updates do not request a
-DPF rollout. Remove instance attachments before deleting the service.
+Pod-style version for each change. A definition change affects every instance
+attached to that service; you cannot stage different versions per instance.
+Workloads can run different definitions while the asynchronous rollout
+converges. Rollback requires another definition update: when the service is
+`Ready`, submit the previous complete JSON definition. If reconciliation
+reports `Error` (`Failed` in Core), inspect the service status and controller
+diagnostics; another definition update is rejected while it is not `Ready`.
+Metadata-only updates do not request a DPF rollout. Remove instance attachments
+before deleting the service.
 Omit the version when deleting the service, or supply its full returned
 `V1-T<timestamp>` value. Bare `V1` is rejected. Deletion waits for DPF
 resource cleanup.
@@ -269,7 +283,11 @@ Reference a service when creating or updating an Instance. If `version` is omitt
 * Batch create: `POST /v2/org/{org}/nico/instance/batch`
 * Update Instance: `PATCH /v2/org/{org}/nico/instance/{instanceId}`
 
-Include `dpuExtensionServiceDeployments` in the request body:
+Include `dpuExtensionServiceDeployments` in the request body. For PATCH, a
+supplied array replaces the complete desired list. Include every deployment
+you want to retain: omitting a service from that array requests its
+termination. Omitting the field preserves the existing list; an empty array
+removes all deployments.
 
 ```json
 {
@@ -287,7 +305,7 @@ During Instance provisioning, NICo waits for all configured extension services t
 ### Upgrade a Deployed DPU Extension Service for an Instance
 
 1. Update the service definition to create a new version (see [Update a DPU Extension Service](#update-a-dpu-extension-service)).
-1. Update each affected Instance to reference the new version in `dpuExtensionServiceDeployments`.
+1. Update each affected Instance to reference the new version in `dpuExtensionServiceDeployments`, including every other deployment you want to retain.
 
 The Instance remains in `Ready` state while DPUs asynchronously apply the new configuration. Monitor progress through the Instance deployment status.
 
