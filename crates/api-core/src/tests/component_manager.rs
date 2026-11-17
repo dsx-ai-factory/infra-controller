@@ -1214,16 +1214,22 @@ async fn component_reset_tracks_pre_ingestion_mac_after_ingestion(pool: sqlx::Pg
         .await
         .unwrap();
     txn.commit().await.unwrap();
-    env.api
-        .credential_manager
-        .set_credentials(
-            &CredentialKey::SwitchNvosAdmin {
+    for key in [
+        CredentialKey::BmcCredentials {
+            credential_type: BmcCredentialType::BmcRoot {
                 bmc_mac_address: bmc_mac,
             },
-            &Credentials::new("reset-operator", "test-password"),
-        )
-        .await
-        .unwrap();
+        },
+        CredentialKey::SwitchNvosAdmin {
+            bmc_mac_address: bmc_mac,
+        },
+    ] {
+        env.api
+            .credential_manager
+            .set_credentials(&key, &Credentials::new("reset-operator", "test-password"))
+            .await
+            .unwrap();
+    }
     let reset_jobs = [
         (
             rpc::ComponentResetAction::SdnFactoryReset,
