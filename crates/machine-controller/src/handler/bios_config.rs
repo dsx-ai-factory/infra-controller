@@ -43,6 +43,7 @@ use crate::redfish::{power_state_name, reset_bmc};
 /// Outcome of configure_host_bios function.
 pub(super) enum BiosConfigOutcome {
     Done,
+    WaitingForBmc(String),
     WaitingForReboot(String),
     /// Dell BIOS PATCH returned a job ID; wait for it to complete before boot order.
     WaitingForBiosJob(BiosConfigInfo),
@@ -87,6 +88,19 @@ impl From<BiosRecoveryAttemptOutcome> for BiosConfigJobAdvanceOutcome {
     }
 }
 
+const SERVICE_UNAVAILABLE: u16 = 503;
+
+fn bmc_unavailable(error: &PlatformError) -> bool {
+    matches!(
+        error,
+        PlatformError::Unreachable
+            | PlatformError::Bmc {
+                status: SERVICE_UNAVAILABLE,
+                ..
+            }
+    )
+}
+
 pub(super) async fn configure_host_bios(
     ctx: &mut StateHandlerContext<'_, MachineStateHandlerContextObjects>,
     reachability_params: &ReachabilityParams,
@@ -98,6 +112,16 @@ pub(super) async fn configure_host_bios(
     let bmc = PlatformBmc::connect(ctx.services, mh_snapshot, redfish_client).await?;
     let applied = platform_config::apply(&bmc, &ctx.services.site_config, boot_interface).await;
     let outcome = match applied {
+        Err(e) if bmc_unavailable(&e) => {
+            tracing::warn!(
+                machine_id = %mh_snapshot.host_snapshot.id,
+                error = %e,
+                "applying the platform settings failed because the BMC did not answer. retrying without restarting the host"
+            );
+            return Ok(BiosConfigOutcome::WaitingForBmc(format!(
+                "applying the platform settings failed: {e}; waiting for the BMC to answer"
+            )));
+        }
         Err(e) => {
             tracing::warn!(
                 machine_id = %mh_snapshot.host_snapshot.id,
