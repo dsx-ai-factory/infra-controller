@@ -98,6 +98,16 @@ type ExecutionRequest struct {
 	Async bool
 }
 
+// ExecutionStatus records an engine outcome or Flow's missing-execution recovery
+// decision. It does not verify hardware effects.
+type ExecutionStatus struct {
+	Status taskcommon.TaskStatus
+	// FinishedAt is the engine close time, or the observation time when a missing
+	// execution is failed by Flow recovery. Message distinguishes that case.
+	FinishedAt *time.Time
+	Message    string
+}
+
 // ExecutionResponse holds the result of a task execution submission.
 type ExecutionResponse struct {
 	ExecutionID string
@@ -169,8 +179,8 @@ type TaskReportUpdate struct {
 
 // TaskStatusUpdater is implemented by any store that can persist task status changes.
 type TaskStatusUpdater interface {
-	// UpdateTaskStatus persists the status change described by arg.
-	UpdateTaskStatus(ctx context.Context, arg *TaskStatusUpdate) error
+	// UpdateTaskStatus persists the change and reports whether a row changed.
+	UpdateTaskStatus(ctx context.Context, arg *TaskStatusUpdate) (bool, error)
 }
 
 // TaskReportUpdater persists in-flight report snapshots (best-effort).

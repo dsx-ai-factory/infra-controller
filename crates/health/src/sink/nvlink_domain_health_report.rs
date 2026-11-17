@@ -289,7 +289,7 @@ mod tests {
         let sink = NvLinkDomainHealthReportSink::new(
             &Default::default(),
             &mut SinkWorkers::default(),
-            carbide_instrument::Instrumentation::global(),
+            carbide_instrument::Instrumentation::noop(),
         )
         .expect("sink should start inside a Tokio runtime");
 

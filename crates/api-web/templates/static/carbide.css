@@ -128,7 +128,7 @@ h1, h2, h3, h4, h5, h6 {
 }
 
 h1 {
-  font-size: 2rem;
+  font-size: 1.6rem;
   letter-spacing: -0.02em;
   margin-bottom: 1.5rem;
 }
@@ -522,6 +522,14 @@ main {
   padding: 2rem 3rem;
   min-height: 100vh;
   background-color: var(--bg-secondary);
+}
+
+/* On wide screens the page content stops growing and stays centered. Page
+   corner controls (the JSON link) are positioned against this box. */
+.main-content {
+  position: relative;
+  max-width: 1360px;
+  margin: 0 auto;
 }
 
 /* ------------------------------------------------------------------------
@@ -936,8 +944,8 @@ button.btn-plain:hover:enabled:not(.tab-button) {
 
 div#json {
   position: absolute;
-  top: 2rem;
-  right: 3rem;
+  top: 0;
+  right: 0;
   display: flex;
   gap: 0.75rem;
   align-items: center;
@@ -2343,17 +2351,6 @@ div#json a#refresh-endpoint:hover {
 
 .entity-summary-toolbar input[type="submit"] {
   margin: 0;
-}
-
-/* Status or warning shown above a detail page's tabs */
-.detail-notice {
-  margin: 0 0 1rem;
-  padding: 0.75rem 1.25rem;
-  border: 1px solid var(--warning);
-  border-left-width: 4px;
-  border-radius: 8px;
-  background-color: var(--bg-warning);
-  color: var(--text-secondary);
 }
 
 /* Failure line between the status bar and the groups */

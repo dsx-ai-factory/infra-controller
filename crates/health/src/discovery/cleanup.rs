@@ -403,7 +403,7 @@ mod tests {
             limiter,
             metrics_manager,
             Arc::new(Config::default()),
-            carbide_instrument::Instrumentation::global(),
+            carbide_instrument::Instrumentation::noop(),
         )
         .expect("context should initialize")
     }

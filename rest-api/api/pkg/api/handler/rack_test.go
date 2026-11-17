@@ -1439,17 +1439,55 @@ func TestUpdateRackFirmwareHandler_Handle(t *testing.T) {
 	ctx := context.Background()
 
 	tests := []struct {
-		name           string
-		reqOrg         string
-		user           *cdbm.User
-		rackID         string
-		body           string
-		mockTaskIDs    []*flowv1.UUID
-		mockResultErr  error
-		expectedAuth   string
-		expectedError  string
-		expectedStatus int
+		name            string
+		reqOrg          string
+		user            *cdbm.User
+		rackID          string
+		body            string
+		mockTaskIDs     []*flowv1.UUID
+		mockResultErr   error
+		expectedTargets []string
+		expectedAuth    string
+		expectedError   string
+		expectedStatus  int
 	}{
+		{
+			name:            "success - BMC-only selection",
+			reqOrg:          org,
+			user:            providerUser,
+			rackID:          rackID,
+			body:            fmt.Sprintf(`{"siteId":%q,"targets":["bmc"]}`, site.ID.String()),
+			mockTaskIDs:     []*flowv1.UUID{{Id: uuid.NewString()}},
+			expectedTargets: []string{"bmc"},
+			expectedStatus:  http.StatusOK,
+		},
+		{
+			name:            "success - DPU-only selection",
+			reqOrg:          org,
+			user:            providerUser,
+			rackID:          rackID,
+			body:            fmt.Sprintf(`{"siteId":%q,"targets":["dpu"]}`, site.ID.String()),
+			mockTaskIDs:     []*flowv1.UUID{{Id: uuid.NewString()}},
+			expectedTargets: []string{"dpu"},
+			expectedStatus:  http.StatusOK,
+		},
+		{
+			name:           "success - empty targets keep defaults",
+			reqOrg:         org,
+			user:           providerUser,
+			rackID:         rackID,
+			body:           fmt.Sprintf(`{"siteId":%q,"targets":[]}`, site.ID.String()),
+			mockTaskIDs:    []*flowv1.UUID{{Id: uuid.NewString()}},
+			expectedStatus: http.StatusOK,
+		},
+		{
+			name:           "failure - empty target name",
+			reqOrg:         org,
+			user:           providerUser,
+			rackID:         rackID,
+			body:           fmt.Sprintf(`{"siteId":%q,"targets":[""]}`, site.ID.String()),
+			expectedStatus: http.StatusBadRequest,
+		},
 		{
 			name:           "failure - Flow rejects operation",
 			reqOrg:         org,
@@ -1525,13 +1563,15 @@ func TestUpdateRackFirmwareHandler_Handle(t *testing.T) {
 			}
 			mockTemporalClient.Mock.On("ExecuteWorkflow", mock.Anything, mock.Anything, mock.Anything, mock.Anything).
 				Run(func(args mock.Arguments) {
-					if tt.expectedAuth == "" {
-						return
-					}
 					flowReq := &flowv1.UpgradeFirmwareRequest{}
-					testFlowProxyRequestWithSecrets(t, args, site.ID.String(), tt.expectedAuth, flowReq)
-					assert.Equal(t, tt.expectedAuth, flowReq.GetAuthenticationData().GetShared())
-					assert.True(t, flowReq.GetOverrideVersionCheck())
+					if tt.expectedAuth != "" {
+						testFlowProxyRequestWithSecrets(t, args, site.ID.String(), tt.expectedAuth, flowReq)
+						assert.Equal(t, tt.expectedAuth, flowReq.GetAuthenticationData().GetShared())
+						assert.True(t, flowReq.GetOverrideVersionCheck())
+					} else {
+						testFlowProxyRequest(t, args, flowReq)
+					}
+					assert.Equal(t, tt.expectedTargets, flowReq.GetSubTargets())
 				}).
 				Return(mockWorkflowRun, nil)
 			scp.IDClientMap[site.ID.String()] = mockTemporalClient
@@ -1567,6 +1607,7 @@ func TestUpdateRackFirmwareHandler_Handle(t *testing.T) {
 				return
 			}
 
+			mockTemporalClient.AssertNumberOfCalls(t, "ExecuteWorkflow", 1)
 			var apiResp model.APIUpdateFirmwareResponse
 			err = json.Unmarshal(rec.Body.Bytes(), &apiResp)
 			assert.NoError(t, err)
@@ -1862,16 +1903,50 @@ func TestBatchUpdateRackFirmwareHandler_Handle(t *testing.T) {
 	ctx := context.Background()
 
 	tests := []struct {
-		name           string
-		reqOrg         string
-		user           *cdbm.User
-		body           string
-		mockTaskIDs    []*flowv1.UUID
-		mockResultErr  error
-		expectedAuth   string
-		expectedError  string
-		expectedStatus int
+		name            string
+		reqOrg          string
+		user            *cdbm.User
+		body            string
+		mockTaskIDs     []*flowv1.UUID
+		mockResultErr   error
+		expectedTargets []string
+		expectedAuth    string
+		expectedError   string
+		expectedStatus  int
 	}{
+		{
+			name:            "success - BMC-only selection",
+			reqOrg:          org,
+			user:            providerUser,
+			body:            fmt.Sprintf(`{"siteId":%q,"filter":{"names":["rack-1"]},"targets":["bmc"]}`, site.ID.String()),
+			mockTaskIDs:     []*flowv1.UUID{{Id: uuid.NewString()}},
+			expectedTargets: []string{"bmc"},
+			expectedStatus:  http.StatusOK,
+		},
+		{
+			name:            "success - DPU-only selection",
+			reqOrg:          org,
+			user:            providerUser,
+			body:            fmt.Sprintf(`{"siteId":%q,"filter":{"names":["rack-1"]},"targets":["dpu"]}`, site.ID.String()),
+			mockTaskIDs:     []*flowv1.UUID{{Id: uuid.NewString()}},
+			expectedTargets: []string{"dpu"},
+			expectedStatus:  http.StatusOK,
+		},
+		{
+			name:           "success - empty targets keep defaults",
+			reqOrg:         org,
+			user:           providerUser,
+			body:           fmt.Sprintf(`{"siteId":%q,"filter":{"names":["rack-1"]},"targets":[]}`, site.ID.String()),
+			mockTaskIDs:    []*flowv1.UUID{{Id: uuid.NewString()}},
+			expectedStatus: http.StatusOK,
+		},
+		{
+			name:           "failure - empty target name",
+			reqOrg:         org,
+			user:           providerUser,
+			body:           fmt.Sprintf(`{"siteId":%q,"filter":{"names":["rack-1"]},"targets":[""]}`, site.ID.String()),
+			expectedStatus: http.StatusBadRequest,
+		},
 		{
 			name:           "failure - Flow rejects operation",
 			reqOrg:         org,
@@ -1933,12 +2008,14 @@ func TestBatchUpdateRackFirmwareHandler_Handle(t *testing.T) {
 			}
 			mockTemporalClient.Mock.On("ExecuteWorkflow", mock.Anything, mock.Anything, mock.Anything, mock.Anything).
 				Run(func(args mock.Arguments) {
-					if tt.expectedAuth == "" {
-						return
-					}
 					flowReq := &flowv1.UpgradeFirmwareRequest{}
-					testFlowProxyRequestWithSecrets(t, args, site.ID.String(), tt.expectedAuth, flowReq)
-					assert.Equal(t, tt.expectedAuth, flowReq.GetAuthenticationData().GetShared())
+					if tt.expectedAuth != "" {
+						testFlowProxyRequestWithSecrets(t, args, site.ID.String(), tt.expectedAuth, flowReq)
+						assert.Equal(t, tt.expectedAuth, flowReq.GetAuthenticationData().GetShared())
+					} else {
+						testFlowProxyRequest(t, args, flowReq)
+					}
+					assert.Equal(t, tt.expectedTargets, flowReq.GetSubTargets())
 				}).
 				Return(mockWorkflowRun, nil)
 			scp.IDClientMap[site.ID.String()] = mockTemporalClient
@@ -1974,6 +2051,7 @@ func TestBatchUpdateRackFirmwareHandler_Handle(t *testing.T) {
 				return
 			}
 
+			mockTemporalClient.AssertNumberOfCalls(t, "ExecuteWorkflow", 1)
 			var apiResp model.APIUpdateFirmwareResponse
 			err = json.Unmarshal(rec.Body.Bytes(), &apiResp)
 			assert.NoError(t, err)

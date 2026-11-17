@@ -771,7 +771,7 @@ mod tests {
             Arc::new(crate::limiter::NoopLimiter),
             Arc::new(MetricsManager::new("tls_context").expect("metrics manager")),
             Arc::new(config),
-            carbide_instrument::Instrumentation::global(),
+            carbide_instrument::Instrumentation::noop(),
         )
         .expect("context should initialize");
 
@@ -789,7 +789,7 @@ mod tests {
             Arc::new(crate::limiter::NoopLimiter),
             Arc::new(MetricsManager::new("drain_collectors").expect("metrics manager")),
             Arc::new(Config::default()),
-            carbide_instrument::Instrumentation::global(),
+            carbide_instrument::Instrumentation::noop(),
         )
         .expect("context should initialize");
 
