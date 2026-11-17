@@ -17,6 +17,7 @@
 
 use std::str::FromStr;
 
+use carbide_uuid::machine::AsMachineId;
 use db::machine::update_dpu_agent_health_report;
 use db::{self};
 use health_report::HealthReportApplyMode;
