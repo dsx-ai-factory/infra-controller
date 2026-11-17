@@ -10559,7 +10559,7 @@
         "type": "prometheus",
         "uid": "${datasource}"
       },
-      "description": "DPUs reachable, and DPUs passing every health check.",
+      "description": "Up counts recent DPU network observations; healthy counts clean latest DPU agent health reports, which can be stale. These are independent counts, not an unhealthy-DPU ratio. A present up series, including zero, confirms a fresh controller metrics snapshot; a missing series does not.",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -10639,7 +10639,7 @@
           },
           "editorMode": "code",
           "expr": "max(${metric_prefix}_dpus_up_count{forge_site=~\"$site\",fresh=\"true\"})",
-          "legendFormat": "online",
+          "legendFormat": "recent reports",
           "range": true,
           "instant": false,
           "refId": "A"
@@ -10651,25 +10651,13 @@
           },
           "editorMode": "code",
           "expr": "max(${metric_prefix}_dpus_healthy_count{forge_site=~\"$site\",fresh=\"true\"})",
-          "legendFormat": "healthy",
+          "legendFormat": "clean last reports",
           "range": true,
           "instant": false,
           "refId": "B"
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${datasource}"
-          },
-          "editorMode": "code",
-          "expr": "max(${metric_prefix}_dpus_up_count{forge_site=~\"$site\",fresh=\"true\"}) - max(${metric_prefix}_dpus_healthy_count{forge_site=~\"$site\",fresh=\"true\"})",
-          "legendFormat": "online but unhealthy",
-          "range": true,
-          "instant": false,
-          "refId": "C"
         }
       ],
-      "title": "DPUs online and healthy",
+      "title": "DPU reports and reported health",
       "type": "timeseries",
       "id": 112
     },
@@ -10678,7 +10666,7 @@
         "type": "prometheus",
         "uid": "${datasource}"
       },
-      "description": "Failing DPU health checks, by probe and target.",
+      "description": "DPU health alerts by probe and target. One DPU may fail several probes; counts are not unique unhealthy DPUs or a percentage. No data can mean no failures or missing telemetry; check the fresh up series in the DPU reports panel.",
       "fieldConfig": {
         "defaults": {
           "color": {

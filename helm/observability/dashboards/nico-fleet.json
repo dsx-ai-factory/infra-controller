@@ -4334,7 +4334,7 @@
         "type": "prometheus",
         "uid": "${datasource}"
       },
-      "description": "DPUs that are reachable but fail a health check, per site.",
+      "description": "DPU health alerts per site, probe and target. One DPU may fail several probes; counts are not unique unhealthy DPUs or a percentage. No data can mean no failures or missing telemetry; check the fresh up series in the DPU reports panel.",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -4413,14 +4413,14 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "max by ($site_label) (${metric_prefix}_dpus_up_count{fresh=\"true\"}) - max by ($site_label) (${metric_prefix}_dpus_healthy_count{fresh=\"true\"})",
-          "legendFormat": "{{$site_label}}",
+          "expr": "max by ($site_label, probe_id, probe_target) (${metric_prefix}_dpu_health_check_failed_count{fresh=\"true\"} > 0)",
+          "legendFormat": "{{$site_label}} {{probe_id}} {{probe_target}}",
           "range": true,
           "instant": false,
           "refId": "A"
         }
       ],
-      "title": "Unhealthy DPUs by site",
+      "title": "DPU health check failures by site",
       "type": "timeseries",
       "id": 51
     },
@@ -4429,7 +4429,7 @@
         "type": "prometheus",
         "uid": "${datasource}"
       },
-      "description": "Which DPU health check is failing, summed across sites.",
+      "description": "DPU health alerts by probe and target, summed across sites. One DPU may fail several probes. No data can mean no failures or missing telemetry; check the fresh up series in the DPU reports panel.",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -4524,7 +4524,7 @@
         "type": "prometheus",
         "uid": "${datasource}"
       },
-      "description": "Reachable DPUs and DPUs passing every health check, per site.",
+      "description": "Up counts recent DPU network observations; healthy counts clean latest DPU agent health reports, which can be stale. These are independent counts, not an unhealthy-DPU ratio. A present up series, including zero, confirms a fresh controller metrics snapshot; a missing series does not.",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -4604,7 +4604,7 @@
           },
           "editorMode": "code",
           "expr": "max by ($site_label) (${metric_prefix}_dpus_up_count{fresh=\"true\"})",
-          "legendFormat": "{{$site_label}} online",
+          "legendFormat": "{{$site_label}} recent reports",
           "range": true,
           "instant": false,
           "refId": "A"
@@ -4616,13 +4616,13 @@
           },
           "editorMode": "code",
           "expr": "max by ($site_label) (${metric_prefix}_dpus_healthy_count{fresh=\"true\"})",
-          "legendFormat": "{{$site_label}} healthy",
+          "legendFormat": "{{$site_label}} clean last reports",
           "range": true,
           "instant": false,
           "refId": "B"
         }
       ],
-      "title": "DPUs online and healthy by site",
+      "title": "DPU reports and reported health by site",
       "type": "timeseries",
       "id": 53
     },
