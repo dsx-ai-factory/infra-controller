@@ -1457,8 +1457,8 @@ mod tests {
     use std::sync::Arc;
     use std::time::Duration as StdDuration;
 
+    use carbide_instrument::Instrumentation;
     use carbide_instrument::testing::{CapturedFieldKind, MetricsCapture, capture_logs};
-    use carbide_instrument::{Instrumentation, emit};
     use carbide_redfish::libredfish::BmcCredentialOps;
     use carbide_redfish::libredfish::test_support::RedfishSim;
     use carbide_secrets::credentials::{
@@ -1823,25 +1823,33 @@ mod tests {
 
     fn observe_rotation_event(case: RotationEventCase) -> RotationEventObservation {
         let result = case.result();
-        let metrics = MetricsCapture::start();
+        let metrics = MetricsCapture::owned();
         let logs = capture_logs(|| match case {
-            RotationEventCase::Converged => emit(BmcCredentialRotationConverged::new(
-                test_mac(),
-                TEST_TARGET_VERSION,
-            )),
+            RotationEventCase::Converged => {
+                metrics
+                    .instrumentation()
+                    .emit(BmcCredentialRotationConverged::new(
+                        test_mac(),
+                        TEST_TARGET_VERSION,
+                    ))
+            }
             RotationEventCase::Recovered { change_error } => {
-                emit(BmcCredentialRotationRecovered::new(
-                    test_mac(),
-                    TEST_TARGET_VERSION,
-                    change_error.to_string(),
-                ))
+                metrics
+                    .instrumentation()
+                    .emit(BmcCredentialRotationRecovered::new(
+                        test_mac(),
+                        TEST_TARGET_VERSION,
+                        change_error.to_string(),
+                    ))
             }
             RotationEventCase::Quarantined { error } => {
-                emit(BmcCredentialRotationQuarantined::new(
-                    test_mac(),
-                    TEST_TARGET_VERSION,
-                    error.to_string(),
-                ))
+                metrics
+                    .instrumentation()
+                    .emit(BmcCredentialRotationQuarantined::new(
+                        test_mac(),
+                        TEST_TARGET_VERSION,
+                        error.to_string(),
+                    ))
             }
         })
         .into_iter()

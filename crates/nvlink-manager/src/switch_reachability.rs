@@ -1129,7 +1129,7 @@ mod tests {
             &mut join_set,
             pool.clone(),
             Default::default(),
-            carbide_instrument::Instrumentation::global(),
+            carbide_instrument::Instrumentation::noop(),
         )
         .await?;
         let monitor = SwitchReachabilityMonitor::with_prober(
@@ -1261,7 +1261,7 @@ mod tests {
             &mut join_set,
             pool.clone(),
             Default::default(),
-            carbide_instrument::Instrumentation::global(),
+            carbide_instrument::Instrumentation::noop(),
         )
         .await?;
         let monitor = SwitchReachabilityMonitor::with_prober(
@@ -1312,7 +1312,7 @@ mod tests {
             &mut a_manager,
             pool.clone(),
             keepalive_config,
-            carbide_instrument::Instrumentation::global(),
+            carbide_instrument::Instrumentation::noop(),
         )
         .await?;
         let a = SwitchReachabilityMonitor::with_prober(
@@ -1327,7 +1327,7 @@ mod tests {
             &mut b_manager,
             pool.clone(),
             keepalive_config,
-            carbide_instrument::Instrumentation::global(),
+            carbide_instrument::Instrumentation::noop(),
         )
         .await?;
         let b = SwitchReachabilityMonitor::with_prober(
@@ -1397,7 +1397,7 @@ mod tests {
             &mut stalled,
             pool.clone(),
             Default::default(),
-            carbide_instrument::Instrumentation::global(),
+            carbide_instrument::Instrumentation::noop(),
         )
         .await?;
         let monitor = SwitchReachabilityMonitor::with_prober(
@@ -1435,7 +1435,7 @@ mod tests {
                 interval: Duration::from_secs(3600),
                 timeout: Duration::from_millis(1),
             },
-            carbide_instrument::Instrumentation::global(),
+            carbide_instrument::Instrumentation::noop(),
         )
         .await?;
         tokio::time::sleep(Duration::from_millis(20)).await;
@@ -1498,7 +1498,7 @@ mod tests {
             &mut join_set,
             pool.clone(),
             Default::default(),
-            carbide_instrument::Instrumentation::global(),
+            carbide_instrument::Instrumentation::noop(),
         )
         .await?;
         let mut monitor_tasks = JoinSet::new();

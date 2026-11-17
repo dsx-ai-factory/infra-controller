@@ -53,7 +53,7 @@ async fn test_start_iteration(pool: sqlx::PgPool) -> eyre::Result<()> {
         &mut join_set,
         pool.clone(),
         Default::default(),
-        carbide_instrument::Instrumentation::global(),
+        carbide_instrument::Instrumentation::noop(),
     )
     .await?;
 
@@ -101,7 +101,7 @@ async fn test_delete_outdated_iterations(pool: sqlx::PgPool) -> eyre::Result<()>
         &mut join_set,
         pool.clone(),
         Default::default(),
-        carbide_instrument::Instrumentation::global(),
+        carbide_instrument::Instrumentation::noop(),
     )
     .await?;
 
@@ -507,7 +507,7 @@ async fn test_state_controller_handle_set_wait_all_propagates_panic(
         &mut join_set,
         pool.clone(),
         Default::default(),
-        carbide_instrument::Instrumentation::global(),
+        carbide_instrument::Instrumentation::noop(),
     )
     .await?;
 
@@ -617,7 +617,7 @@ async fn test_state_controller_drains_claimed_work_on_shutdown(
         &mut join_set,
         pool.clone(),
         Default::default(),
-        carbide_instrument::Instrumentation::global(),
+        carbide_instrument::Instrumentation::noop(),
     )
     .await?;
 
@@ -739,7 +739,7 @@ async fn test_state_controller_handler_timeout_bounds_shutdown_drain(
         &mut join_set,
         pool.clone(),
         Default::default(),
-        carbide_instrument::Instrumentation::global(),
+        carbide_instrument::Instrumentation::noop(),
     )
     .await?;
 
@@ -823,7 +823,7 @@ async fn test_multiple_state_controllers_schedule_object_only_once(
         &mut join_set,
         pool.clone(),
         Default::default(),
-        carbide_instrument::Instrumentation::global(),
+        carbide_instrument::Instrumentation::noop(),
     )
     .await?;
 
@@ -960,7 +960,7 @@ async fn test_state_handler_metrics_are_stable(pool: sqlx::PgPool) -> eyre::Resu
         &mut join_set,
         pool.clone(),
         Default::default(),
-        carbide_instrument::Instrumentation::global(),
+        carbide_instrument::Instrumentation::noop(),
     )
     .await?;
 
@@ -1059,7 +1059,7 @@ async fn test_state_change_emitter_emits_events_on_transitions(
         &mut join_set,
         pool.clone(),
         Default::default(),
-        carbide_instrument::Instrumentation::global(),
+        carbide_instrument::Instrumentation::noop(),
     )
     .await?;
 
@@ -1129,7 +1129,7 @@ async fn test_state_controller_manual_enqueuing(pool: sqlx::PgPool) -> eyre::Res
         &mut join_set,
         pool.clone(),
         Default::default(),
-        carbide_instrument::Instrumentation::global(),
+        carbide_instrument::Instrumentation::noop(),
     )
     .await?;
 
@@ -1263,7 +1263,7 @@ where
         &mut join_set,
         pool.clone(),
         Default::default(),
-        carbide_instrument::Instrumentation::global(),
+        carbide_instrument::Instrumentation::noop(),
     )
     .await?;
 
@@ -1744,7 +1744,7 @@ async fn check_invalidated_iteration(
         &mut join_set,
         pool.clone(),
         Default::default(),
-        carbide_instrument::Instrumentation::global(),
+        carbide_instrument::Instrumentation::noop(),
     )
     .await?;
 

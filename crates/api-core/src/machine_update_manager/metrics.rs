@@ -202,9 +202,9 @@ mod tests {
     /// target and phase.
     #[test]
     fn firmware_update_progress_logs_info_and_counts() {
-        let metrics = MetricsCapture::start();
+        let metrics = MetricsCapture::owned();
         let logs = capture_logs(|| {
-            carbide_instrument::emit(FirmwareUpdateProgress {
+            metrics.instrumentation().emit(FirmwareUpdateProgress {
                 target: FirmwareUpdateTarget::SuperNic,
                 phase: FirmwareUpdatePhase::Started,
                 machine_id: machine_id().into(),
@@ -240,10 +240,10 @@ mod tests {
     /// same target: one update crossing both phases moves each counter once.
     #[test]
     fn firmware_update_progress_counts_each_phase_separately() {
-        let metrics = MetricsCapture::start();
+        let metrics = MetricsCapture::owned();
         capture_logs(|| {
             for phase in [FirmwareUpdatePhase::Started, FirmwareUpdatePhase::Completed] {
-                carbide_instrument::emit(FirmwareUpdateProgress {
+                metrics.instrumentation().emit(FirmwareUpdateProgress {
                     target: FirmwareUpdateTarget::Host,
                     phase,
                     machine_id: machine_id().into(),
@@ -269,9 +269,9 @@ mod tests {
     /// independent series.
     #[test]
     fn firmware_update_failed_logs_warn_and_counts_by_cause() {
-        let metrics = MetricsCapture::start();
+        let metrics = MetricsCapture::owned();
         let logs = capture_logs(|| {
-            carbide_instrument::emit(FirmwareUpdateFailed {
+            metrics.instrumentation().emit(FirmwareUpdateFailed {
                 target: FirmwareUpdateTarget::DpuNic,
                 cause: FirmwareUpdateFailureCause::NoUpdateMatch,
                 machine_id: machine_id().into(),
@@ -279,7 +279,7 @@ mod tests {
                     "fm100ptrh18t1lrjg2pqagkh3sfigr9m65dejvkq168ako07sc0uibpp5q0".to_string(),
                 firmware_version: String::new(),
             });
-            carbide_instrument::emit(FirmwareUpdateFailed {
+            metrics.instrumentation().emit(FirmwareUpdateFailed {
                 target: FirmwareUpdateTarget::DpuNic,
                 cause: FirmwareUpdateFailureCause::WrongVersionAfterUpdate,
                 machine_id: machine_id().into(),

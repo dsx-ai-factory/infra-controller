@@ -3179,10 +3179,6 @@ async fn test_site_explorer_main(pool: PgPool) -> Result<(), Box<dyn std::error:
 async fn test_site_explorer_audit_exploration_results(
     pool: PgPool,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    // This iteration records a failed creation; see the mutex's comment.
-    let _failed_creation_guard = super::machine_creator::FAILED_CREATION_METRIC_TEST_SERIAL
-        .lock()
-        .await;
     let env = Env::new(pool.clone()).await;
     let underlay_segment = env.underlay_segment.id;
 
@@ -5305,10 +5301,6 @@ async fn test_site_explorer_pairs_dpu_from_chassis_serial(
     use model::expected_machine::{ExpectedMachine, ExpectedMachineData};
     use model::site_explorer::BlueFieldOperatingMode;
 
-    // This iteration records a failed creation; see the mutex's comment.
-    let _failed_creation_guard = super::machine_creator::FAILED_CREATION_METRIC_TEST_SERIAL
-        .lock()
-        .await;
     let env = Env::new(pool).await;
 
     const CHASSIS_DPU_SERIAL: &str = "chassis-reported-dpu-serial";
@@ -5601,10 +5593,6 @@ async fn test_site_explorer_deduplicates_inventory_serials_and_repairs_persisted
 async fn test_site_explorer_pairs_vr_bf4_from_bluefield_chassis(
     pool: PgPool,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    // This iteration records a failed creation; see the mutex's comment.
-    let _failed_creation_guard = super::machine_creator::FAILED_CREATION_METRIC_TEST_SERIAL
-        .lock()
-        .await;
     let env = Env::new(pool).await;
 
     let reports = generate_managed_host_reports(HardwareType::NvidiaDgxVr).await?;

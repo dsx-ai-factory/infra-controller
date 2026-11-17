@@ -150,7 +150,7 @@ mod tests {
         let state = FmdsState::try_new(
             "https://api.test".to_string(),
             None,
-            carbide_instrument::Instrumentation::global(),
+            carbide_instrument::Instrumentation::noop(),
         )
         .unwrap();
         let mi = FmdsMachineIdentityConfig {
@@ -173,7 +173,7 @@ mod tests {
         let state = FmdsState::try_new(
             "https://api.test".to_string(),
             None,
-            carbide_instrument::Instrumentation::global(),
+            carbide_instrument::Instrumentation::noop(),
         )
         .unwrap();
         let mi1 = FmdsMachineIdentityConfig {
@@ -204,7 +204,7 @@ mod tests {
         let state = FmdsState::try_new(
             "https://api.test".to_string(),
             None,
-            carbide_instrument::Instrumentation::global(),
+            carbide_instrument::Instrumentation::noop(),
         )
         .unwrap();
         assert!(state.config.load_full().is_none());
@@ -216,7 +216,7 @@ mod tests {
         let state = FmdsState::try_new(
             "https://api.test".to_string(),
             None,
-            carbide_instrument::Instrumentation::global(),
+            carbide_instrument::Instrumentation::noop(),
         )
         .unwrap();
         let config = make_test_config();
@@ -238,7 +238,7 @@ mod tests {
         let state = FmdsState::try_new(
             "https://api.test".to_string(),
             None,
-            carbide_instrument::Instrumentation::global(),
+            carbide_instrument::Instrumentation::noop(),
         )
         .unwrap();
         let config = make_test_config();
@@ -255,7 +255,7 @@ mod tests {
         let state = FmdsState::try_new(
             "https://api.test".to_string(),
             None,
-            carbide_instrument::Instrumentation::global(),
+            carbide_instrument::Instrumentation::noop(),
         )
         .unwrap();
         let config = FmdsConfig {
@@ -274,7 +274,7 @@ mod tests {
         let state = FmdsState::try_new(
             "https://api.test".to_string(),
             None,
-            carbide_instrument::Instrumentation::global(),
+            carbide_instrument::Instrumentation::noop(),
         )
         .unwrap();
 

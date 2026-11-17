@@ -2170,19 +2170,19 @@ mod tests {
     /// carbide_site_explorer_bmc_password_rotations_total, split by outcome.
     #[test]
     fn bmc_password_rotation_counts_both_outcomes() {
-        let metrics = MetricsCapture::start();
+        let metrics = MetricsCapture::owned();
         let bmc_ip_address: SocketAddr = "10.2.3.4:443".parse().expect("socket address");
         let bmc_mac_address: MacAddress = "aa:bb:cc:dd:ee:ff".parse().expect("mac address");
 
         let logs = capture_logs(|| {
-            carbide_instrument::emit(BmcPasswordRotationFinished {
+            metrics.instrumentation().emit(BmcPasswordRotationFinished {
                 outcome: Outcome::Ok,
                 bmc_ip_address,
                 bmc_mac_address,
                 vendor: RedfishVendor::Dell,
                 error: String::new(),
             });
-            carbide_instrument::emit(BmcPasswordRotationFinished {
+            metrics.instrumentation().emit(BmcPasswordRotationFinished {
                 outcome: Outcome::Error,
                 bmc_ip_address,
                 bmc_mac_address,

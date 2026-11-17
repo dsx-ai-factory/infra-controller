@@ -380,13 +380,14 @@ mod tests {
     async fn run_handler(
         controller_state: IBPartitionControllerState,
         mut partition: IBPartition,
+        instrumentation: &carbide_instrument::Instrumentation,
     ) -> (
         usize,
         Result<StateHandlerOutcome<IBPartitionControllerState>, StateHandlerError>,
     ) {
         let manager = Arc::new(CountingFabricManager::new());
         let mut services = IBPartitionStateHandlerServices {
-            instrumentation: carbide_instrument::Instrumentation::global(),
+            instrumentation: instrumentation.clone(),
             db_pool: PgPool::connect_lazy("postgres://unused:unused@127.0.0.1:1/unused")
                 .expect("lazy pool"),
             ib_fabric_manager: manager.clone(),
@@ -437,13 +438,17 @@ mod tests {
         };
         let partition = make_partition(None, false);
         let partition_id = partition.id.to_string();
-        let metrics = MetricsCapture::start();
+        let metrics = MetricsCapture::owned();
         let runtime = tokio::runtime::Builder::new_current_thread()
             .build()
             .expect("test runtime");
         let mut handler_result = None;
         let logs = capture_logs(|| {
-            handler_result = Some(runtime.block_on(run_handler(controller_state, partition)));
+            handler_result = Some(runtime.block_on(run_handler(
+                controller_state,
+                partition,
+                metrics.instrumentation(),
+            )));
         });
 
         let (builds, outcome) = handler_result.expect("handler ran");
@@ -520,6 +525,7 @@ mod tests {
         let (builds, outcome) = run_handler(
             IBPartitionControllerState::Provisioning,
             make_partition(Some(0x101), false),
+            &carbide_instrument::Instrumentation::noop(),
         )
         .await;
 
@@ -540,6 +546,7 @@ mod tests {
                 cause: "some earlier failure".to_string(),
             },
             make_partition(Some(0x101), false),
+            &carbide_instrument::Instrumentation::noop(),
         )
         .await;
 
@@ -552,6 +559,7 @@ mod tests {
         let (builds, outcome) = run_handler(
             IBPartitionControllerState::Ready,
             make_partition(Some(0x101), true),
+            &carbide_instrument::Instrumentation::noop(),
         )
         .await;
 
@@ -570,6 +578,7 @@ mod tests {
         let (builds, outcome) = run_handler(
             IBPartitionControllerState::Deleting,
             make_partition(Some(0x101), true),
+            &carbide_instrument::Instrumentation::noop(),
         )
         .await;
 

@@ -1154,17 +1154,19 @@ mod tests {
                 },
             ],
             |case| {
-                let metrics = MetricsCapture::start();
+                let metrics = MetricsCapture::owned();
                 let error = DatabaseError::Internal {
                     message: "rollback unavailable".to_string(),
                 };
                 let logs = capture_logs(|| {
-                    emit(DatabaseTransactionRollbackFailed::new(
-                        case.trigger,
-                        caller,
-                        case.context,
-                        &error,
-                    ));
+                    metrics
+                        .instrumentation()
+                        .emit(DatabaseTransactionRollbackFailed::new(
+                            case.trigger,
+                            caller,
+                            case.context,
+                            &error,
+                        ));
                 });
 
                 assert_eq!(logs.len(), 1, "one emit must produce one log record");

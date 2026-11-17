@@ -428,7 +428,7 @@ mod tests {
                 method: &Method::GET,
                 redirect_mode: RedirectMode::FollowSameOrigin,
                 sensitive_values: &[],
-                instrumentation: &carbide_instrument::Instrumentation::global(),
+                instrumentation: &carbide_instrument::Instrumentation::noop(),
             },
         )
     }
@@ -559,7 +559,7 @@ mod tests {
 
     #[test]
     fn safe_redirect_is_returned_relative_and_counted_once() {
-        let metrics = MetricsCapture::start();
+        let metrics = MetricsCapture::owned();
         let mut headers = HeaderMap::new();
         headers.insert(
             reqwest::header::LOCATION,
@@ -575,7 +575,7 @@ mod tests {
                 method: &Method::GET,
                 redirect_mode: RedirectMode::ReturnToClient,
                 sensitive_values: &[],
-                instrumentation: &carbide_instrument::Instrumentation::global(),
+                instrumentation: metrics.instrumentation(),
             },
         );
 
@@ -600,7 +600,7 @@ mod tests {
 
     #[test]
     fn external_redirect_is_rejected_without_logging_its_location() {
-        let metrics = MetricsCapture::start();
+        let metrics = MetricsCapture::owned();
         let mut headers = HeaderMap::new();
         headers.insert(
             reqwest::header::LOCATION,
@@ -618,7 +618,7 @@ mod tests {
                     method: &Method::GET,
                     redirect_mode: RedirectMode::FollowSameOrigin,
                     sensitive_values: &[],
-                    instrumentation: &carbide_instrument::Instrumentation::global(),
+                    instrumentation: metrics.instrumentation(),
                 },
             ));
         });
@@ -664,7 +664,7 @@ mod tests {
                 "follow_same_origin",
             ),
         ] {
-            let metrics = MetricsCapture::start();
+            let metrics = MetricsCapture::owned();
             let mut headers = HeaderMap::new();
             headers.insert(
                 reqwest::header::LOCATION,
@@ -683,7 +683,7 @@ mod tests {
                         method: &Method::GET,
                         redirect_mode: mode,
                         sensitive_values: &sensitive_values,
-                        instrumentation: &carbide_instrument::Instrumentation::global(),
+                        instrumentation: metrics.instrumentation(),
                     },
                 ));
             });
@@ -717,7 +717,7 @@ mod tests {
                     method: &Method::POST,
                     redirect_mode: mode,
                     sensitive_values: &sensitive_values,
-                    instrumentation: &carbide_instrument::Instrumentation::global(),
+                    instrumentation: metrics.instrumentation(),
                 },
             );
             assert_eq!(created.status(), StatusCode::CREATED);
@@ -727,7 +727,7 @@ mod tests {
 
     #[test]
     fn unsafe_duplicate_location_rejects_the_redirect() {
-        let metrics = MetricsCapture::start();
+        let metrics = MetricsCapture::owned();
         let mut headers = HeaderMap::new();
         headers.append(
             reqwest::header::LOCATION,
@@ -747,7 +747,7 @@ mod tests {
                 method: &Method::GET,
                 redirect_mode: RedirectMode::ReturnToClient,
                 sensitive_values: &[],
-                instrumentation: &carbide_instrument::Instrumentation::global(),
+                instrumentation: metrics.instrumentation(),
             },
         );
 
@@ -769,7 +769,7 @@ mod tests {
 
     #[test]
     fn safe_duplicate_locations_are_never_relayed_ambiguously() {
-        let metrics = MetricsCapture::start();
+        let metrics = MetricsCapture::owned();
         let mut headers = HeaderMap::new();
         headers.append(
             reqwest::header::LOCATION,
@@ -789,7 +789,7 @@ mod tests {
                 method: &Method::GET,
                 redirect_mode: RedirectMode::ReturnToClient,
                 sensitive_values: &[],
-                instrumentation: &carbide_instrument::Instrumentation::global(),
+                instrumentation: metrics.instrumentation(),
             },
         );
         assert_eq!(redirect.status(), StatusCode::BAD_GATEWAY);
@@ -816,7 +816,7 @@ mod tests {
                 method: &Method::POST,
                 redirect_mode: RedirectMode::ReturnToClient,
                 sensitive_values: &[],
-                instrumentation: &carbide_instrument::Instrumentation::global(),
+                instrumentation: metrics.instrumentation(),
             },
         );
         assert_eq!(created.status(), StatusCode::CREATED);
@@ -836,7 +836,6 @@ mod tests {
 
     #[test]
     fn identical_duplicate_locations_are_rejected() {
-        let _metrics = MetricsCapture::start();
         let mut headers = HeaderMap::new();
         for _ in 0..2 {
             headers.append(
@@ -859,7 +858,7 @@ mod tests {
     fn non_redirect_response_keeps_its_status_and_withholds_external_location() {
         value_scenarios!(
                     run = |locations: &[&str]| {
-                        let metrics = MetricsCapture::start();
+                        let metrics = MetricsCapture::owned();
                         let mut headers = HeaderMap::new();
                         for location in locations {
                             headers.append(
@@ -877,7 +876,7 @@ mod tests {
         method: &Method::POST,
         redirect_mode: RedirectMode::FollowSameOrigin,
         sensitive_values: &[],
-        instrumentation: &carbide_instrument::Instrumentation::global(),
+        instrumentation: metrics.instrumentation(),
         },
         );
 
@@ -1059,7 +1058,6 @@ mod tests {
 
     #[tokio::test]
     async fn returned_redirect_body_redacts_the_upstream_credential() {
-        let _metrics = MetricsCapture::start();
         let mut headers = HeaderMap::new();
         headers.insert(
             reqwest::header::LOCATION,

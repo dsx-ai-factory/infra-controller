@@ -269,7 +269,7 @@ mod tests {
             &mut tasks,
             pool.clone(),
             Default::default(),
-            carbide_instrument::Instrumentation::global(),
+            carbide_instrument::Instrumentation::noop(),
         )
         .await
         .expect("start work lock manager");

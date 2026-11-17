@@ -67,11 +67,6 @@ const RPC_TIMEOUT: Duration = Duration::from_secs(30);
 const CONVERGENCE_TIMEOUT: Duration = Duration::from_secs(300);
 const READY_STABILITY_WINDOW: Duration = Duration::from_secs(2);
 
-#[ctor::ctor(unsafe)]
-fn setup() {
-    api_test_helper::setup_logging();
-}
-
 #[test]
 fn preserved_hardware_decommission_and_rebuild_twice() -> eyre::Result<()> {
     utils::api_server_runtime_builder()

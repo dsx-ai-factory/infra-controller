@@ -859,7 +859,7 @@ async fn deliver_command(
             publication = Some(request);
             std::future::ready(Ok(pb::PublishMlxObservationReportResponse::default()))
         },
-        &carbide_instrument::Instrumentation::global(),
+        &carbide_instrument::Instrumentation::noop(),
     )
     .await;
     let report = publication

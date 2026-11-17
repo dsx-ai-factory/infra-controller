@@ -1620,7 +1620,7 @@ mod tests {
         let to_create = reconcile_network_defs(
             &mut txn,
             &declared,
-            &carbide_instrument::Instrumentation::global(),
+            &carbide_instrument::Instrumentation::noop(),
         )
         .await?;
 
@@ -1684,7 +1684,7 @@ mod tests {
         let to_create = reconcile_network_defs(
             &mut txn,
             &declared_one("pre-existing", def.clone()),
-            &carbide_instrument::Instrumentation::global(),
+            &carbide_instrument::Instrumentation::noop(),
         )
         .await?;
         assert!(
@@ -1712,7 +1712,7 @@ mod tests {
         let to_create = reconcile_network_defs(
             &mut txn,
             &declared_one("stable", def.clone()),
-            &carbide_instrument::Instrumentation::global(),
+            &carbide_instrument::Instrumentation::noop(),
         )
         .await?;
         assert!(
@@ -1747,7 +1747,7 @@ mod tests {
         let to_create = reconcile_network_defs(
             &mut txn,
             &declared_one("drifty", drifted.clone()),
-            &carbide_instrument::Instrumentation::global(),
+            &carbide_instrument::Instrumentation::noop(),
         )
         .await?;
         assert!(
@@ -1782,7 +1782,7 @@ mod tests {
         let to_create = reconcile_network_defs(
             &mut txn,
             &empty,
-            &carbide_instrument::Instrumentation::global(),
+            &carbide_instrument::Instrumentation::noop(),
         )
         .await?;
         assert!(
@@ -2012,7 +2012,7 @@ mod tests {
         let to_create = reconcile_network_defs(
             &mut txn,
             &declared_one("ambiguous", def.clone()),
-            &carbide_instrument::Instrumentation::global(),
+            &carbide_instrument::Instrumentation::noop(),
         )
         .await?;
         assert!(

@@ -5585,7 +5585,7 @@ mod machine_group_tests {
             &mut join_set,
             pool.clone(),
             Default::default(),
-            carbide_instrument::Instrumentation::global(),
+            carbide_instrument::Instrumentation::noop(),
         )
         .await?;
         let test_meter = TestMeter::default();
@@ -5764,7 +5764,7 @@ mod machine_group_tests {
             &mut join_set,
             pool.clone(),
             Default::default(),
-            carbide_instrument::Instrumentation::global(),
+            carbide_instrument::Instrumentation::noop(),
         )
         .await?;
         let test_meter = TestMeter::default();
@@ -5882,7 +5882,7 @@ mod machine_group_tests {
             &mut join_set,
             pool.clone(),
             Default::default(),
-            carbide_instrument::Instrumentation::global(),
+            carbide_instrument::Instrumentation::noop(),
         )
         .await?;
         let test_meter = TestMeter::default();
@@ -5963,7 +5963,7 @@ mod machine_group_tests {
             &mut join_set,
             pool.clone(),
             Default::default(),
-            carbide_instrument::Instrumentation::global(),
+            carbide_instrument::Instrumentation::noop(),
         )
         .await?;
 
@@ -6428,7 +6428,7 @@ mod machine_group_tests {
             &mut join_set,
             pool.clone(),
             Default::default(),
-            carbide_instrument::Instrumentation::global(),
+            carbide_instrument::Instrumentation::noop(),
         )
         .await?;
         let test_meter = TestMeter::default();
@@ -6547,7 +6547,7 @@ mod machine_group_tests {
             &mut join_set,
             pool.clone(),
             Default::default(),
-            carbide_instrument::Instrumentation::global(),
+            carbide_instrument::Instrumentation::noop(),
         )
         .await?;
         let test_meter = TestMeter::default();
@@ -6728,7 +6728,7 @@ mod machine_group_tests {
             &mut join_set,
             pool.clone(),
             Default::default(),
-            carbide_instrument::Instrumentation::global(),
+            carbide_instrument::Instrumentation::noop(),
         )
         .await?;
         let nmxc = Arc::new(NmxcSimClient::with_partition(
@@ -6844,7 +6844,7 @@ mod machine_group_tests {
             &mut join_set,
             pool.clone(),
             Default::default(),
-            carbide_instrument::Instrumentation::global(),
+            carbide_instrument::Instrumentation::noop(),
         )
         .await?;
         let test_meter = TestMeter::default();

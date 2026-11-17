@@ -655,7 +655,6 @@ pub(super) fn set_service_healthy(healthy: bool) {
 mod tests {
     use std::ffi::CStr;
 
-    use carbide_instrument::emit;
     use carbide_instrument::testing::{MetricsCapture, capture_logs};
     use carbide_test_support::{Check, check_values};
     use prometheus::{Encoder, TextEncoder};
@@ -1087,22 +1086,22 @@ mod tests {
     /// lines remain the log side).
     #[test]
     fn packet_events_count_under_the_exposed_names_and_never_log() {
-        let metrics = MetricsCapture::start();
+        let metrics = MetricsCapture::owned();
         let logs = capture_logs(|| {
-            emit(DhcpRequestReceived);
-            emit(DhcpRequestDropped {
+            metrics.instrumentation().emit(DhcpRequestReceived);
+            metrics.instrumentation().emit(DhcpRequestDropped {
                 reason: DropReason::TooManyFailuresError,
             });
-            emit(DhcpV6RequestReceived {
+            metrics.instrumentation().emit(DhcpV6RequestReceived {
                 message_type: V6RequestMessageType::Confirm,
             });
-            emit(DhcpV6RequestDropped {
+            metrics.instrumentation().emit(DhcpV6RequestDropped {
                 reason: V6DropReason::NestedRelay,
             });
-            emit(DhcpReplySent {
+            metrics.instrumentation().emit(DhcpReplySent {
                 message_type: ReplyMessageType::Offer,
             });
-            emit(DhcpV6ReplySent {
+            metrics.instrumentation().emit(DhcpV6ReplySent {
                 message_type: V6ReplyMessageType::Reply,
             });
         });

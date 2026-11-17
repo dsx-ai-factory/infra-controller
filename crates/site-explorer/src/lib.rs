@@ -4368,9 +4368,9 @@ mod tests {
         value_scenarios!(
             run = |method: BmcResetMethod| {
                 let method_label = method.to_string();
-                let event_metrics = MetricsCapture::start();
+                let event_metrics = MetricsCapture::owned();
                 let logs = capture_logs(|| {
-                    carbide_instrument::emit(BmcResetTimestampPersistenceFailed {
+                    event_metrics.instrumentation().emit(BmcResetTimestampPersistenceFailed {
                         method,
                         bmc_ip_address,
                         error: "simulated timestamp write failure".to_string(),

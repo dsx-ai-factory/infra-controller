@@ -461,7 +461,7 @@ mod tests {
                 machine_base_path: String::from("/carbide-system/machine/"),
                 additional_issuer_cns: ["usercert-ca.example.com".to_string()].into(),
             },
-            carbide_instrument::Instrumentation::global(),
+            carbide_instrument::Instrumentation::noop(),
         );
 
         for test in table {
