@@ -229,10 +229,10 @@ async fn validation_run_pages_show_progress_current_work_and_logs(pool: sqlx::Pg
         assert!(html.contains(if completed { "5/5" } else { "1/5" }));
         assert!(!html.contains("Click current attempt to expand relevant logs"));
         assert!(!html.contains("Click View logs to expand the relevant attempt logs"));
-        assert!(html.contains("<tr><th>Context</th><td>OnDemand</td></tr>"));
+        assert!(html.contains("<dt>Context</dt><dd>OnDemand</dd>"));
         assert!(html.contains("Basic authentication alone does not grant log access."));
         assert!(html.contains(&format!(
-            "<th>Machine ID</th><td><a href=\"/admin/machine/{machine_id}\">{machine_id}</a></td>"
+            "<dt>Machine</dt><dd><a href=\"/admin/machine/{machine_id}\">{machine_id}</a></dd>"
         )));
         assert!(!html.contains("<h2>Current Work</h2>"));
         let results_table = html
@@ -258,7 +258,9 @@ async fn validation_run_pages_show_progress_current_work_and_logs(pool: sqlx::Pg
         assert!(results_table.contains("Complete (1)"));
         assert!(results_table.contains("Complete (0)"));
         assert!(!html.contains(&pending_attempt_id.to_string()));
-        assert!(!html.contains("<details"));
+        // The sidebar's collapsible groups are <details>; the page content must not be.
+        let content = html.split("<main>").nth(1).unwrap();
+        assert!(!content.contains("<details"));
         assert_eq!(html.matches("<pre hidden><code></code></pre>").count(), 1);
         assert!(html.contains("Select View logs to display one attempt's stdout/stderr here."));
         assert!(results_table.contains("<th>Test Name/ID</th>"));
@@ -333,9 +335,9 @@ async fn validation_run_pages_show_progress_current_work_and_logs(pool: sqlx::Pg
             assert!(row.contains("<td>OnDemand</td>"), "{route}: {row}");
             assert!(
                 row.contains(if completed {
-                    "Completed(Success)"
+                    "<span class=\"bubble success\">Success</span>"
                 } else {
-                    "InProgress(InProgress)"
+                    "<span class=\"bubble\">In Progress</span>"
                 }),
                 "{route}: {row}"
             );

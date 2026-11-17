@@ -98,12 +98,8 @@ RUN rustup component add rustfmt
 RUN rustup toolchain install ${RUST_NIGHTLY} --profile minimal
 RUN rustup component add --toolchain ${RUST_NIGHTLY} rustfmt rust-src rustc-dev llvm-tools-preview
 
-# The mdbook crates need to be installed with matching version numbers
-# in order to be compatible
-# They need to be installed without --locked to avoid build failures
 RUN cargo install cargo-cache cargo-make sccache cargo-watch taplo-cli --locked && \
 	cargo install cargo-deny --version 0.20.2 --locked && \
-	cargo install mdbook@0.4.52 mdbook-plantuml@0.8.0 mdbook-mermaid@0.16.2 && \
 	cargo cache -r registry-index,registry-sources
 
 # install stuff that's not in debian

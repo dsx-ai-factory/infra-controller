@@ -1,31 +1,57 @@
-{% extends "base.html" %}
+{% extends "detail_base.html" %}
 
 {% block title %}Compute Allocation {{ id }}{% endblock %}
+{% block entity_label %}Compute Allocation{% endblock %}
+{% block entity_id %}{{ id }}{% endblock %}
 
-{% block content %}
-<div id="json"><a id="json-link" href="">JSON</a></div>
-<h1>Compute Allocation {{ id }}</h1>
+{% block detail_content %}
+<section class="entity-summary">
+	<div class="entity-summary-groups">
+		<div class="entity-summary-group">
+			<h4>Allocation</h4>
+			<dl>
+				<dt>Tenant</dt>
+				<dd><a href="/admin/tenant/{{ tenant_organization_id }}">{{ tenant_organization_id }}</a></dd>
+				<dt>Instance Type</dt>
+				<dd><a href="/admin/instance-type/{{ instance_type_id }}">{{ instance_type_id }}</a></dd>
+				<dt>Count</dt>
+				<dd>{{ count }}</dd>
+				<dt>Version</dt>
+				<dd>{{ version|config_version|safe }}</dd>
+			</dl>
+		</div>
+		<div class="entity-summary-group">
+			<h4>History</h4>
+			<dl>
+				<dt>Created</dt>
+				<dd>{{ created }}</dd>
+				<dt>Created By</dt>
+				<dd>{{ created_by }}</dd>
+				<dt>Updated By</dt>
+				<dd>{{ updated_by }}</dd>
+			</dl>
+		</div>
+	</div>
+</section>
 
-<form id="compute_allocation_update_action" method="POST" action="/admin/compute-allocation/{{ id }}">
-	<table class="detailsview">
-		<tr>
-			<th>Compute Allocation</th>
-			<td>
-				{{ id }}
-			</td>
-		</tr>
-		<tr><th></th><td>{{ version|config_version|safe }}<input type="hidden" name="version" value="{{ version|safe }}"></td></tr>
-		<tr><th>Tenant Organization ID</th><td>{{ tenant_organization_id }}<input type="hidden" name="tenant_organization_id" value="{{ tenant_organization_id }}"></td></tr>
-		<tr><th>Instance Type ID</th><td><input name="instance_type_id" type="text" value="{{ instance_type_id }}"></td></tr>
-		<tr><th>Count</th><td><input name="count" type="number" min="0" step="1" value="{{ count }}"></td></tr>
-		<tr><th>Created</th><td>{{ created }}</td></tr>
-		<tr><th>Created By</th><td> {{ created_by }} </td></tr>
-		<tr><th>Updated By</th><td> {{ updated_by }} </td></tr>
-		<tr><th>Name</th><td><input name="name" type="text" value="{{ name }}"></td></tr>
-		<tr><th>Description</th><td><textarea name="description">{{ description }}</textarea></td></tr>
-		<tr><th>Labels</th><td><textarea name="labels">{{ labels }}</textarea></td></tr>
-		<tr><th>&nbsp;</th><td><input type="submit" value="Save"></td></tr>
-	</table>
+<h2>Configuration</h2>
+<form id="compute_allocation_update_action" class="entity-summary" method="POST" action="/admin/compute-allocation/{{ id }}">
+	<input type="hidden" name="version" value="{{ version|safe }}">
+	<input type="hidden" name="tenant_organization_id" value="{{ tenant_organization_id }}">
+	<div class="entity-summary-fields">
+		<label for="ca-instance-type">Instance Type ID</label>
+		<div><input id="ca-instance-type" name="instance_type_id" type="text" value="{{ instance_type_id }}"></div>
+		<label for="ca-count">Count</label>
+		<div><input id="ca-count" name="count" type="number" min="0" step="1" value="{{ count }}"></div>
+		<label for="ca-name">Name</label>
+		<div><input id="ca-name" name="name" type="text" value="{{ name }}"></div>
+		<label for="ca-description">Description</label>
+		<div><textarea id="ca-description" name="description">{{ description }}</textarea></div>
+		<label for="ca-labels">Labels</label>
+		<div><textarea id="ca-labels" name="labels">{{ labels }}</textarea></div>
+	</div>
+	<div class="entity-summary-footer">
+		<input type="submit" value="Save">
+	</div>
 </form>
-
 {% endblock %}

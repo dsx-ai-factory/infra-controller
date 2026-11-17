@@ -53,6 +53,7 @@ async fn test_find_switch_by_id(pool: sqlx::PgPool) -> Result<(), Box<dyn std::e
 
     assert_eq!(found_switch.config.as_ref().unwrap().name, "Switch1");
     assert_eq!(found_switch.status.as_ref().unwrap().serial_number, None);
+    assert_eq!(found_switch.status.as_ref().unwrap().power_state, None);
 
     let bmc_ip = found_switch
         .bmc_info
@@ -64,6 +65,10 @@ async fn test_find_switch_by_id(pool: sqlx::PgPool) -> Result<(), Box<dyn std::e
         .parse()?;
 
     let report = model::site_explorer::EndpointExplorationReport {
+        systems: vec![model::site_explorer::ComputerSystem {
+            power_state: model::site_explorer::PowerState::Off,
+            ..Default::default()
+        }],
         chassis: vec![model::site_explorer::Chassis {
             id: "MGX_NVSwitch_0".to_string(),
             serial_number: Some(" BMC-SERIAL ".to_string()),
@@ -77,14 +82,16 @@ async fn test_find_switch_by_id(pool: sqlx::PgPool) -> Result<(), Box<dyn std::e
     db::explored_endpoints::insert(bmc_ip, &report, false, &mut txn).await?;
     txn.commit().await?;
 
-    for (statement, expected_serial) in [
+    for (statement, expected_serial, expected_power) in [
         (
             "ALTER TABLE explored_endpoints RENAME COLUMN preingestion_state TO unavailable_preingestion_state",
+            None,
             None,
         ),
         (
             "ALTER TABLE explored_endpoints RENAME COLUMN unavailable_preingestion_state TO preingestion_state",
             Some("BMC-SERIAL"),
+            Some("off"),
         ),
     ] {
         sqlx::query(sqlx::AssertSqlSafe(statement))
@@ -113,6 +120,7 @@ async fn test_find_switch_by_id(pool: sqlx::PgPool) -> Result<(), Box<dyn std::e
             let status = switches[0].status.as_ref().unwrap();
 
             assert_eq!(status.serial_number.as_deref(), expected_serial);
+            assert_eq!(status.power_state.as_deref(), expected_power);
         }
     }
 

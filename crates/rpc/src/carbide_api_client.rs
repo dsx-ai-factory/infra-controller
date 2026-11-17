@@ -181,33 +181,45 @@ pub fn expected_switch_update_mask(
 }
 
 impl CarbideApiClient {
-    pub fn new(api_config: &ApiConfig<'_>) -> Self {
-        Self::build(CarbideTlsConnectionProvider {
-            urls: NonEmpty::from((
-                api_config.url.to_string(),
-                api_config.additional_urls.to_vec(),
-            )),
-            client_config: api_config.client_config.clone(),
-            retry_config: api_config.retry_config,
-            last_connection_index: 0.into(),
-            fail_over_on: FailOverOn::ConnectionError,
-        })
+    /// Creates a client whose RED metrics use `instrumentation`.
+    pub fn new(
+        api_config: &ApiConfig<'_>,
+        instrumentation: carbide_instrument::Instrumentation,
+    ) -> Self {
+        Self::build(
+            CarbideTlsConnectionProvider {
+                urls: NonEmpty::from((
+                    api_config.url.to_string(),
+                    api_config.additional_urls.to_vec(),
+                )),
+                client_config: api_config.client_config.clone(),
+                retry_config: api_config.retry_config,
+                last_connection_index: 0.into(),
+                fail_over_on: FailOverOn::ConnectionError,
+            },
+            instrumentation,
+        )
     }
 
+    /// Creates a client with the requested failover policy and RED metric destination.
     pub fn new_with_failover_behavior(
         api_config: &ApiConfig<'_>,
         fail_over_on: FailOverOn,
+        instrumentation: carbide_instrument::Instrumentation,
     ) -> Self {
-        Self::build(CarbideTlsConnectionProvider {
-            urls: NonEmpty::from((
-                api_config.url.to_string(),
-                api_config.additional_urls.to_vec(),
-            )),
-            client_config: api_config.client_config.clone(),
-            retry_config: api_config.retry_config,
-            last_connection_index: 0.into(),
-            fail_over_on,
-        })
+        Self::build(
+            CarbideTlsConnectionProvider {
+                urls: NonEmpty::from((
+                    api_config.url.to_string(),
+                    api_config.additional_urls.to_vec(),
+                )),
+                client_config: api_config.client_config.clone(),
+                retry_config: api_config.retry_config,
+                last_connection_index: 0.into(),
+                fail_over_on,
+            },
+            instrumentation,
+        )
     }
 
     /// Applies the named `ExpectedSwitch` fields without replacing omitted fields.
@@ -272,7 +284,7 @@ impl CarbideTlsConnectionProvider {
     fn next_endpoint_url(&self) -> &str {
         let connection_index = self
             .last_connection_index
-            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |current_index| {
+            .try_update(Ordering::SeqCst, Ordering::SeqCst, |current_index| {
                 Some((current_index + 1) % self.urls.len())
             })
             .unwrap(); // SAFETY: we always return Some(), so this will always succeed.

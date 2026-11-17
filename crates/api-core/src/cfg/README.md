@@ -51,8 +51,8 @@ compatibility parsing does not restore their former behavior.
 | `route_servers` | `Vec<String>` | `[]` | `networking` | Route server IPs for L2VPN Ethernet Virtual network support. |
 | `enable_route_servers` | `bool` | `false` | `networking` | Enables route server injection into DPU FRR configs for L2VPN. |
 | `deny_prefixes` | `Vec<IpNetwork>` | `[]` | `networking` | IPv4 and IPv6 CIDR prefixes that tenant instances are blocked from reaching. FNN generates family-specific NVUE ACL policies; all non-FNN virtualizers apply the IPv4 prefixes only. |
-| `site_fabric_prefixes` | `Vec<IpNetwork>` | `[]` | `networking` | IPv4 and IPv6 prefixes assigned for tenant use within this site. With `mutual_isolation`, ETV enforces the IPv4 prefixes with an isolation ACL only when the rendered DPU configuration has no NSG. An NSG replaces that ACL. With `open`, that ACL is not installed. On upgrade, authoritative Core scans persisted Ready and Deleting operator-managed SitePrefixes even when this list is empty. It assigns an unparented legacy VpcPrefix when exactly one operator root contains it; ambiguous parentage blocks startup. With a nonempty list, missing parentage also blocks startup. Listen-only replicas require an authoritative Core to assign unresolved lineage first. |
-| `site_fabric_null_routes` | `Option<Vec<IpNetwork>>` | Inherited roots | `networking` | IPv4 and IPv6 prefixes installed by FNN as blackhole routes under `mutual_isolation`. Omission combines `site_fabric_prefixes`, every retained tenant-managed SitePrefix, and removed operator-managed roots that still contain a VpcPrefix or VPC-attached direct NetworkPrefix, reducing them to their minimal exact union. Soft-deleted children retain operator coverage until their VpcPrefix or segment is hard-deleted. An explicit list is authoritative: each CIDR uses its network address and exact duplicates are removed, but parent, child, and adjacent entries are not aggregated. Under mutual isolation, new tenant roots require an equal or broader explicit route; startup rejects an override that leaves any retained tenant root uncovered. An empty list (`[]`) installs no null routes and cannot support tenant roots under mutual isolation. Routes use administrative distance 250, so an authorized import wins only when it is at least as specific as the applicable blackhole. An effective `/0` null route and `leak_default_route_from_underlay = true` for the same address family are unsupported because the imported default wins the equal-prefix distance comparison. With `open`, the routes are not installed and tenant coverage is not required. Refer to [SitePrefix isolation rules](#siteprefix-isolation-rules) and [overlap checks](#tenant-prefix-overlap-checks). |
+| `site_fabric_prefixes` | `Vec<IpNetwork>` | `[]` | `networking` | IPv4 and IPv6 prefixes assigned for tenant use within this site. With `mutual_isolation`, ETV enforces the IPv4 prefixes with an isolation ACL only when the rendered DPU configuration has no NSG. An NSG replaces that ACL. With `open`, that ACL is not installed. On upgrade, authoritative Core scans persisted Ready and Deleting operator-managed SitePrefixes even when this list is empty. It assigns an unparented legacy VpcPrefix when exactly one operator root contains it; ambiguous parentage blocks startup. With a nonempty list, missing parentage also blocks startup. Listen-only replicas require an authoritative Core to assign unresolved lineage first. See [SitePrefix retirement and admission](#siteprefix-retirement-and-admission) for cleanup and request rules. |
+| `site_fabric_null_routes` | `Option<Vec<IpNetwork>>` | Inherited roots | `networking` | IPv4 and IPv6 prefixes installed by FNN as blackhole routes under `mutual_isolation`. Omission combines `site_fabric_prefixes`, every retained tenant-managed SitePrefix, and removed operator-managed roots retained by an exact VpcPrefix reference, a contained VpcPrefix without parentage, or a contained VPC-attached direct NetworkPrefix, reducing them to their minimal exact union. Direct prefixes retain retiring roots while their segment exists and no Ready operator root fully covers them, including during draining. Adding or restoring Ready operator coverage releases those roots without deleting the segment. VpcPrefix references remain until hard deletion. An explicit list is authoritative: each CIDR uses its network address and exact duplicates are removed, but parent, child, and adjacent entries are not aggregated. Under mutual isolation, new tenant roots require an equal or broader explicit route; startup rejects an override that leaves any retained tenant root uncovered. An empty list (`[]`) installs no null routes and cannot support tenant roots under mutual isolation. Routes use administrative distance 250, so an authorized import wins only when it is at least as specific as the applicable blackhole. An effective `/0` null route and `leak_default_route_from_underlay = true` for the same address family are unsupported because the imported default wins the equal-prefix distance comparison. With `open`, the routes are not installed and tenant coverage is not required. Refer to [SitePrefix isolation rules](#siteprefix-isolation-rules) and [overlap checks](#tenant-prefix-overlap-checks). |
 | `tenant_prefix_overlap_enabled` | `bool` | `false` | `networking` | Site opt-in for [tenant prefix overlap checks](#tenant-prefix-overlap-checks). Keep disabled through the [database cutover](#prefix-overlap-database-cutover). Enablement also requires DPU readiness and [site qualification](https://github.com/dsx-ai-factory/infra-controller/issues/3902). |
 | `max_site_prefixes_per_tenant` | `u32` | `8` | `networking` | Maximum tenant-managed SitePrefixes retained for one tenant at this site. Prefixes awaiting removal still count against this limit and keep their CIDR reserved. |
 | `max_site_prefix_isolation_rules` | `u32` | `64` | `networking` | Maximum compacted legacy DPU site-prefix input for new tenant-root admission under mutual isolation; accepts `0` through `64`. Open isolation does not enforce this limit. This is not an FNN route-capacity limit. Refer to [SitePrefix isolation rules](#siteprefix-isolation-rules). |
@@ -158,6 +158,7 @@ compatibility parsing does not restore their former behavior.
 | `certificates` | `CertificatesConfig` | *(default)* | `security` | Certificate vending backend, selected independently of the credential store; the default shares the credential Vault (see [CertificatesConfig](#certificatesconfig)). |
 | `allow_insecure_discovery` | `bool` | `false` | `machines` | Allows machines to submit discovery without enforcing the request comes from the expected IP address. Needed for *Integration tests only*, should otherwise not be used. |
 | `scout_boot_interface_correction_enabled` | `bool` | `false` | `machines` | Controls whether NICo may reconcile a boot interface selection recorded as `RedfishChassisId` or `RedfishSerialNumber` after ordering DPU-attached Admin interfaces by the `domain:bus:device.function` PCI addresses in scout's `HardwareInfo`. The setting is read at startup. NICo records available comparisons in structured logs and `carbide_scout_pci_evaluations_total` regardless of this setting. When `false`, it does not change the selection. When `true`, reconciliation requires at least two eligible interfaces, a complete and unique candidate, `ManagedHostState::Ready` or `ManagedHostState::HostInit` with `MachineState::Discovered`, no `Instance` or primary interface prediction, and no conflicting or integrated-NIC primary. If the selected MAC is already desired and primary, NICo changes only the source to `ScoutReportPci`. Otherwise it updates the desired target and primary together and enqueues the state handler. A `Ready` host enters `BootConfiguring`; `HostInit` completes its reboot handshake first. |
+| `maintenance_end_boot_config_recheck_enabled` | `bool` | `false` | `machines` | When `true`, ending maintenance on a host checks its BIOS and boot configuration again before it can be allocated. An unassigned `Ready` host enters `BootConfiguring`. A host that is already correct passes without a BIOS write, boot order change or reboot. |
 | `node_auth` | `NodeAuthConfig` | *(default)* | `security` | How Scout and the DPU-agent authenticate: bearer JWTs, machine mTLS client certificates, or both during a migration (see [NodeAuthConfig](#nodeauthconfig)). |
 | `ssh_console_url` | `Option<Url>` | — | `machines` | HTTPS URL to the ssh-console service. Used for live streaming of BMC logs via the `StreamConsoleLogs` gRPC, and the admin-ui's Console Logs page for each machine. |
 | `shutdown_timeout` | `Duration` | `60s` | `server` | How long to wait for the nico-api server to shut down gracefully before forcing background tasks to abort. |
@@ -1313,6 +1314,97 @@ These rules do not originate routes, permit host announcements, select tenant-in
 
 Core configuration changes require an API restart. Accepted VPC override updates take effect through normal DPU reconciliation. Upgrade Core and all applicable DPU agents to a release containing this property before enabling it: older agents and older Core can ignore the added protobuf fields. REST exposure is a separate follow-up. Before downgrading to a version without the property, remove it from configured profiles and replace persisted override definitions with this property omitted, preserving other needed overrides. Setting this property to `[]` clears its rules but retains the JSON field. Removing its tags can withdraw reachability from VRFs that import only those targets.
 
+### SitePrefix retirement and admission
+
+Authoritative Core reconciles `site_fabric_prefixes` at startup. Removing a
+configured operator root marks it `Deleting`. The SitePrefix controller physically
+removes that root after no child requires its coverage. Exact VpcPrefix parentage
+takes precedence over containment; a legacy VpcPrefix without parentage retains every containing
+operator root, including through soft deletion until hard deletion.
+A VPC-attached direct NetworkPrefix retains every containing retiring operator
+root unless a `Ready` operator root fully contains that prefix. Ready replacement
+coverage lets the old root retire while the direct segment remains usable.
+If the replacement later retires without another Ready covering operator root,
+the direct prefix retains it until the segment is hard-deleted or Ready operator
+coverage is added or restored, including while the segment drains.
+Tenant-managed roots and roots covering only part of the direct prefix
+cannot substitute for operator coverage.
+
+Re-adding a root before physical removal restores its existing ID to `Ready`.
+Re-adding it afterward creates a new ID. Consumers that store SitePrefix IDs must
+reconcile this as resource replacement, not an update to the deleted ID. The REST
+SitePrefix inventory publication and retirement work is tracked in
+[PR #8246](https://github.com/dsx-ai-factory/infra-controller/pull/8246); the legacy
+Site Config importer consumes CIDRs rather than Core SitePrefix IDs.
+
+A VpcPrefix request omitting `site_prefix_id` selects a unique containing operator
+root, which must be `Ready`. Retiring roots still participate in that selection,
+so overlapping retained roots remain ambiguous. Once an unused retired root is
+removed, it no longer prevents selection of its replacement roots. Direct segments
+covered by Ready replacement roots do not delay that removal. An explicit
+`site_prefix_id` selects its parent directly and still requires `Ready`, containment,
+and the applicable tenant-ownership and VPC-virtualization checks. An omitted ID
+prefers a unique containing operator root even when the tenant also owns a
+containing root. If no operator root contains the request but a root owned by the
+VPC's tenant does, omitting `site_prefix_id` returns `FailedPrecondition` with a
+request to select that tenant root explicitly. If neither contains the request,
+the configured-range and rootless admission rules below apply.
+
+On replicas with nonempty `site_fabric_prefixes`, a direct `Tenant` segment also
+requires at least one persisted, `Ready`, containing operator root for each
+prefix. Multiple containing roots are permitted because direct prefixes have no
+exact SitePrefix parent. `Underlay` and `HostInband` paths retain their distinct
+infrastructure admission rules.
+
+On replicas with nonempty `site_fabric_prefixes`, a VpcPrefix request omitting
+`site_prefix_id` or a direct `Tenant` prefix inside the configured range returns
+`FailedPrecondition` if no persisted operator root covers it. Explicit VpcPrefix
+attachments follow the parent checks described above. This prevents stale
+configuration from reopening retired space and also applies to newly configured
+roots before authoritative Core has persisted them. Reconcile added roots on authoritative
+Core before serving requests that use them on other replicas, including listen-only
+replicas.
+
+With an omitted ID and no containing operator or VPC-tenant root, a VpcPrefix
+outside the configured range returns `InvalidArgument`. Out-of-range direct
+`Tenant` prefixes also return `InvalidArgument`. Sites with an empty
+configured list retain supported rootless VpcPrefix admission outside persisted
+operator roots and the requesting tenant's roots.
+
+Before enabling configured ranges, inspect the `network_vpc_prefixes` database
+rows whose `site_prefix_id` is NULL, without excluding soft-deleted rows.
+Each remaining row must have exactly one containing operator root after
+reconciliation; account for persisted retiring roots as well as proposed ranges.
+For missing or ambiguous parentage, choose proposed ranges that provide exactly
+one containing root, or drain and delete the VpcPrefix through the API and wait
+for physical removal. Removing a persisted root from configuration only retires
+it; an unparented VpcPrefix still retains every containing retired root.
+
+Remediate existing rows while the API is serving. Then stop serving requests on
+all empty-list replicas and repeat the database inspection before restarting.
+For the `nico-api` Helm chart, set its `replicas` value to `0`
+(`nico-api.replicas` through the umbrella chart) and wait for all API pods to stop
+before final inspection or configuration changes; keep it at zero while applying
+the configuration. Configuration updates can restart pods through Helm's
+`checksum/config` annotation or, when installed, Reloader.
+If the final inspection or startup preflight reports missing or ambiguous
+parentage, restore service with the old configuration to remediate it, then
+repeat the stop and inspection. Start one authoritative Core replica with the
+updated configuration first so reconciliation and lineage backfill succeed
+before restarting other replicas with the same configuration. Resume service only
+on replicas with the updated configuration that have passed startup preflight.
+Keep empty-list replicas stopped throughout the final inspection and restart:
+an empty-list replica can otherwise admit another rootless VpcPrefix outside the
+new ranges, causing authoritative and listen-only startups to fail lineage
+preflight. Stopping requests prevents new admissions but does not repair existing
+lineage.
+
+When upgrading from Core binaries without the persisted-coverage checks, finish
+the binary upgrade on every replica before changing fabric-prefix configuration.
+An already-running older binary does not enforce these checks.
+See [issue #8538](https://github.com/dsx-ai-factory/infra-controller/issues/8538)
+for the unused-root replacement failure these checks address.
+
 ### SitePrefix isolation rules
 
 Core includes current configured `site_fabric_prefixes` and retained tenant-managed
@@ -1328,8 +1420,12 @@ Including a root in this field alone does not prove isolation on an older agent.
 
 FNN uses the separate `site_fabric_null_routes` response field. When the setting
 is omitted, Core includes configured roots, every retained tenant root, and
-retiring operator roots while their VpcPrefixes or VPC-attached direct
-NetworkPrefixes remain. Soft deletion does not end operator-root retention.
+retiring operator roots retained by exact VpcPrefix references, contained
+VpcPrefixes without parentage, or contained VPC-attached direct NetworkPrefixes.
+Direct prefixes retain retiring roots while their segment exists and no Ready
+operator root fully covers them. Adding or restoring that coverage releases the
+retiring roots without deleting the segment.
+Soft deletion alone does not end operator-root retention.
 These routes are reduced to their minimal exact union and sorted by CIDR string.
 The anonymous `Version` RPC keeps its existing operator-route output: configured
 and retained operator roots, without tenant-managed SitePrefixes. Its
@@ -1442,7 +1538,8 @@ an existing site from `open` to `mutual_isolation` is not supported and does not
 restart readiness for prefixes already marked `Ready`.
 
 Retiring operator roots are excluded from the legacy input but remain in inherited
-FNN null routes until their children are hard-deleted.
+FNN null routes while their children require their coverage, following the
+[retention rules](#siteprefix-retirement-and-admission).
 
 Before starting an API with this readiness controller, every API process serving
 DPU configurations must include the tenant-prefix rendering added in
@@ -1824,6 +1921,7 @@ events, so consumers handle them identically.
 | Field | Type | Default | Description |
 | ------- | ------ | --------- | ------------- |
 | `enabled` | `bool` | `false` | Enable DPF Kubernetes deployment. |
+| `multiClusterSupport` | `bool` | `false` | Use DPUService-based Service names and peer addresses in NICo's DHCP, FMDS, dpu-agent, and OTel charts. NICo passes this value as top-level `multiClusterSupport` to all four charts after per-service Helm overrides. Omission or `false` preserves legacy Service names and addresses. Enable only with DPF 30.0 rc.4 or newer, compatible NICo charts, and HBN and DTS versions that name their Services from the DPUService name. Read at startup; changing it requires restarting NICo and coordinating the service rollout. This setting does not modify the HBN or DTS charts or configure additional DPU clusters. |
 | `deployment_scoped_service_interfaces` | `bool` | `false` | Migration knob for deployment-scoped DPUServiceInterfaces. BF3 sites (including BF3 GB200) and BF4-generic-only sites use unscoped interfaces by default for backward compatibility. BF4 Astra requires this setting so the whole DPF namespace uses scoped ServiceInterfaces and legacy unscoped ServiceInterfaces cannot also bind Astra nodes. When enabled, NICo removes legacy unscoped ServiceInterfaces before creating scoped replacements. If cleanup remains incomplete for ten minutes, NICo logs an error and continues waiting. If an operator manually completes unscoped cleanup, NICo creates scoped replacements. The setting is read only at startup. To return to unscoped interfaces, stop NICo, delete the scoped ServiceInterfaces and wait for their deletion, then restart NICo with this set to `false`. If scoped ServiceInterfaces exist, DPF initialization rejects a `false` value. |
 | `pf_total_sf_reserved` | `u32` | `30` | SF capacity reserved beyond the NICo-managed HBN, DHCP, and FMDS endpoints and service-VPC reservations when an intercept-bridging inventory is configured. NICo sets `PF_TOTAL_SF` to the effective inventory's endpoint count plus independent SF reservations and this value for BF3 and generic BF4. Without configured intercept bridging, this value is the complete `PF_TOTAL_SF` for BF3 and generic BF4, preserving the legacy default of `30`. BF4 Astra ignores this setting: configured Astra derives `PF_TOTAL_SF` as `17 + 2V`, where `V` is the configured VF count, and topology-free Astra uses `40`. Changing this value changes the BF3/generic-BF4 flavor. Changing Astra's intercept inventory changes its `DPUFlavorTemplate`; initial topology enablement automatically removes the pre-topology scoped PF/VF ServiceInterfaces described above, while reverse and subsequent topology changes require controlled manual cleanup. Every intercept-inventory change requires DPU re-ingestion, even when the serialized flavor and its hash remain unchanged. Operators must select a value compatible with their platform's SF and BAR capacity. With positive service slots, the BF3/generic-BF4 generated pool must also fit the deployment's `max_sf_per_pf`. GB200 always emits a fixed 128-SF profile, and commitment must always fit 128. Without intercept bridging, commitment must also fit `pf_total_sf_reserved`. With intercept bridging, commitment plus this extra reserve must fit 128 when any of `service_vpc_slot_count`, `max_active_service_vpc_interfaces_per_dpu`, or `additional_managed_sf` is positive. When all three are zero, the shared reserve is excluded from the 128-SF check to preserve existing overrides. With configured intercept bridging, startup rejects commitment plus reserve above `u32::MAX` even when all three are zero. |
 | `dpu_service_sync_enabled` | `bool` | `true` | Whether NICo automatically releases DPF maintenance holds for changed DPUDeployment-owned DPUService revisions whose `upgradePolicy.applyNodeEffect` is `true`, after confirming that the host's DPUs match their DPUDeployment. The setting selects who opens an existing gate; it does not add one. NICo services, HBN, DTS, and extra services use the gated default. The setting does not govern direct, detached DPUService objects, including `nico-service-vpc`. Setting it to `false` leaves service-update holds for deliberate operator release. Provisioning still releases its own NodeEffect holds regardless of this setting and clears pending service-sync markers. |

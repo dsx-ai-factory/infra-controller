@@ -18,11 +18,11 @@
 use std::path::{Path, PathBuf};
 use std::string::ToString;
 
-use carbide_tls::default as tls_default;
-use forge_dpu_agent_utils::machine_identity::defaults::{
+use carbide_dpu_agent_utils::machine_identity::defaults::{
     BURST, REQUESTS_PER_SECOND, SIGN_TIMEOUT_SECS, WAIT_TIMEOUT_SECS,
 };
-use forge_dpu_agent_utils::{FMDS_IPV6_ADDRESS, FMDS_IPV6_GATEWAY};
+use carbide_dpu_agent_utils::{FMDS_IPV6_ADDRESS, FMDS_IPV6_GATEWAY};
+use carbide_tls::default as tls_default;
 use serde::{Deserialize, Serialize};
 
 /// HBN container root
@@ -258,7 +258,7 @@ impl Default for MachineIdentityConfig {
 
 impl MachineIdentityConfig {
     pub fn validate(&self) -> Result<(), String> {
-        use forge_dpu_agent_utils::machine_identity::limits::{
+        use carbide_dpu_agent_utils::machine_identity::limits::{
             BURST_MAX, BURST_MIN, REQUESTS_PER_SECOND_MAX, REQUESTS_PER_SECOND_MIN,
             SIGN_TIMEOUT_SECS_MAX, SIGN_TIMEOUT_SECS_MIN, WAIT_TIMEOUT_SECS_MAX,
             WAIT_TIMEOUT_SECS_MIN,

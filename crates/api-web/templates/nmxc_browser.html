@@ -1,32 +1,32 @@
 {% extends "base.html" %}
+{% import "common_ui.html" as common %}
 
 {% block title %}NMX-C Browser{% endblock %}
 
 {% block content %}
 <h1>NMX-C Browser</h1>
-
-<p>
-Choose an operation and an endpoint — either a chassis serial or a rack ID.
-See the <a href="https://docs.nvidia.com/networking/display/nmxcv11/grpc+api+documentation">NMX-C gRPC API documentation</a> for details.
+<p class="page-intro">
+	Choose an endpoint (a chassis serial or a rack ID) and an operation. See the
+	<a href="https://docs.nvidia.com/networking/display/nmxcv11/grpc+api+documentation">NMX-C gRPC API documentation</a>
+	for details.
 </p>
 
-<form id="nmxc_console" method="GET" action="/admin/nmxc-browser" onsubmit="nmxcSyncEndpointName()">
-	<div>
-		<label for="endpoint_value_input">Endpoint:</label>
-		<div style="display: flex; gap: 0.5rem; align-items: center;">
-			<select id="endpoint_type_select" style="width: auto; flex-shrink: 0;" onchange="nmxcUpdateEndpoint(this)">
+<form id="nmxc_console" class="entity-summary query-console" method="GET" action="/admin/nmxc-browser" onsubmit="nmxcSyncEndpointName()">
+	<div class="query-field query-field-wide">
+		<label for="endpoint_value_input">Endpoint</label>
+		<div class="query-field-group">
+			<select id="endpoint_type_select" aria-label="Endpoint type" onchange="nmxcUpdateEndpoint(this)">
 				<option value="chassis_serial" {% if rack_id.is_empty() %}selected{% endif %}>Chassis serial</option>
 				<option value="rack_id" {% if !rack_id.is_empty() %}selected{% endif %}>Rack ID</option>
 			</select>
-			<input type=text id="endpoint_value_input"
+			<input type="text" id="endpoint_value_input"
 				name="{% if !rack_id.is_empty() %}rack_id{% else %}chassis_serial{% endif %}"
 				value="{% if !rack_id.is_empty() %}{{ rack_id }}{% else %}{{ chassis_serial }}{% endif %}"
-				placeholder="{% if !rack_id.is_empty() %}e.g. ipp6-b03-gb-nvl-124-mini2{% else %}e.g. 1234567890{% endif %}"
-				style="flex: 1;" />
+				placeholder="{% if !rack_id.is_empty() %}e.g. ipp6-b03-gb-nvl-124-mini2{% else %}e.g. 1234567890{% endif %}" />
 		</div>
 	</div>
-	<div>
-		<label for="operation_input">Operation:</label>
+	<div class="query-field">
+		<label for="operation_input">Operation</label>
 		<select id="operation_input" name="operation">
 			<option value="" {% if operation.is_empty() %}selected{% endif %}>— choose —</option>
 			<option value="compute_node_info_list" {% if operation == "compute_node_info_list" %}selected{% endif %}>Compute node info list</option>
@@ -37,58 +37,39 @@ See the <a href="https://docs.nvidia.com/networking/display/nmxcv11/grpc+api+doc
 			<option value="get_domain_properties" {% if operation == "get_domain_properties" %}selected{% endif %}>Get domain properties</option>
 		</select>
 	</div>
-	<div>
-		<label for="gpu_uid_input">GPU UID (required for GPU info):</label>
-		<input type=text size="24" id="gpu_uid_input" name="gpu_uid" value="{{ gpu_uid }}" />
+	<div class="query-field">
+		<label for="gpu_uid_input">GPU UID</label>
+		<input type="text" id="gpu_uid_input" name="gpu_uid" value="{{ gpu_uid }}" placeholder="Required for GPU info" />
 	</div>
 	<input type="submit" value="Run query">
 </form>
 
-{% if !error.is_empty() %}
-<h3>Error</h3>
-<textarea disabled>{{ error }}</textarea>
-{% endif %}
-
-{% if query_was_executed %}
-
-<h3>Metadata</h3>
-<table class="detailsview">
-	<tr><th>HTTP status</th><td>{{ status_code }} {{ status_string }}</td></tr>
-	{% if !response_headers.is_empty() %}
-	<tr>
-		<th>Response Headers</th>
-		<td>
-			<details>
-				<summary>Expand Headers</summary>
-				<table class="detailsview">
-					{% for header in response_headers %}
-					<tr>
-						<td>{{ header.name }}</td>
-						<td>{{ header.value }}</td>
-					</tr>
-					{% endfor %}
-				</table>
-			</details>
-		</td>
-	</tr>
+{% if query_was_executed || !error.is_empty() %}
+<section class="entity-summary">
+	{% if query_was_executed %}
+	<div class="entity-summary-status">
+		{% call common::http_status_stat(status_code, status_string) %}{% endcall %}
+		{% if !operation.is_empty() %}
+		<div class="entity-summary-stat">
+			<span class="entity-summary-label">Operation</span>
+			<code>{{ operation }}</code>
+		</div>
+		{% endif %}
+	</div>
 	{% endif %}
-</table>
-
-{% if !response.is_empty() %}
-<h3>Response</h3>
-<table class="detailsview">
-<tbody>
-	<tr>
-		<td>
-			<div style="overflow: auto;">
-					<pre><code>{{ response|pretty_json }}</code></pre>
-			</div>
-		</td>
-	</tr>
-</tbody>
-</table>
-{% endif %}
-
+	{% if !error.is_empty() %}
+	<div class="entity-summary-alert">{{ error }}</div>
+	{% endif %}
+	{% if query_was_executed %}
+	{% call common::response_headers(response_headers) %}{% endcall %}
+	{% if !response.is_empty() %}
+	<div class="entity-summary-table">
+		<h4>Response</h4>
+		<pre class="entity-summary-pre"><code>{{ response|pretty_json }}</code></pre>
+	</div>
+	{% endif %}
+	{% endif %}
+</section>
 {% endif %}
 
 {% endblock %}

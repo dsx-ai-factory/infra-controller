@@ -11,6 +11,7 @@ import (
 
 	"go.temporal.io/sdk/temporal"
 
+	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/dispatchguard"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/executor/temporalworkflow/common"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/pkg/types"
 	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
@@ -91,6 +92,10 @@ func (m *Manager) SubmitFactoryReset(ctx context.Context, target common.Target, 
 	err := m.ensureTargetOperable(gateCtx, target, types.OperationTypePowerControl, false)
 	if err != nil {
 		return temporal.NewNonRetryableApplicationError("factory reset readiness check failed", "FactoryResetNotReady", err)
+	}
+	err = dispatchguard.Check(ctx)
+	if err != nil {
+		return err
 	}
 	response, err := m.nicoClient.ComponentReset(ctx, &corev1.ComponentResetRequest{
 		Target: &corev1.ComponentResetRequest_SwitchIds{SwitchIds: switchIDsProto(target.Identifiers)},

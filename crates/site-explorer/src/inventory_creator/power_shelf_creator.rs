@@ -73,7 +73,7 @@ impl PowerShelfCreator {
                 continue;
             }
             if ep.report.is_power_shelf() {
-                explored_power_shelves.push((ep.clone(), ep.report.clone()));
+                explored_power_shelves.push((ep.clone(), ep.report));
             }
             //ignore other endpoints
         }

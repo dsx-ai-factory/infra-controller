@@ -1098,7 +1098,7 @@ mod tests {
             limiter,
             metrics_manager,
             Arc::new(config),
-            carbide_instrument::Instrumentation::global(),
+            carbide_instrument::Instrumentation::noop(),
         )
         .expect("context should initialize")
     }
@@ -1957,7 +1957,7 @@ mod tests {
                 10,
                 std::num::NonZeroUsize::MIN,
                 crate::bmc::BmcInstrumentation::new(
-                    carbide_instrument::Instrumentation::global(),
+                    carbide_instrument::Instrumentation::noop(),
                     None,
                 ),
             )
@@ -2245,7 +2245,7 @@ mod tests {
             limiter,
             metrics_manager,
             Arc::new(auto_mode_config(true)),
-            carbide_instrument::Instrumentation::global(),
+            carbide_instrument::Instrumentation::noop(),
         )
         .expect("context should initialize");
 
@@ -2305,7 +2305,7 @@ mod tests {
             limiter,
             metrics_manager,
             Arc::new(auto_mode_config(false)),
-            carbide_instrument::Instrumentation::global(),
+            carbide_instrument::Instrumentation::noop(),
         )
         .expect("context should initialize");
 
@@ -2343,7 +2343,7 @@ mod tests {
             limiter,
             metrics_manager,
             Arc::new(auto_mode_config(false)),
-            carbide_instrument::Instrumentation::global(),
+            carbide_instrument::Instrumentation::noop(),
         )
         .expect("context should initialize");
 

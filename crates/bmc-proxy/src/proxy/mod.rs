@@ -208,7 +208,7 @@ pub(crate) async fn start(
         }),
     );
     let api_config = ApiConfig::new(config.carbide_api.api_url.as_str(), &client_config);
-    let api_client = CarbideApiClient::new(&api_config);
+    let api_client = CarbideApiClient::new(&api_config, instrumentation.clone());
 
     let admission = Admission::start(
         &config.classes,
@@ -585,7 +585,7 @@ fn answer_failed_attempt(
     if let Some(ended) = ended {
         report(slot, class, ended);
     }
-    failed.response
+    *failed.response
 }
 
 /// Counts an exchange that ended as `ended` against `class`'s breaker at the

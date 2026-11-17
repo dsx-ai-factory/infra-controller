@@ -32,6 +32,12 @@ mod test_certs;
 
 pub type AuthContext = carbide_authn::middleware::AuthContext<Authorization>;
 
+/// SPIFFE service identifier of the external power-shelf manager (PSM).
+pub(crate) const POWER_SHELF_MANAGER_SERVICE_ID: &str = "nico-powershelf-manager";
+
+/// SPIFFE service identifier of the external NVSwitch manager (NSM).
+pub(crate) const NV_SWITCH_MANAGER_SERVICE_ID: &str = "nico-nvswitch-manager";
+
 /// `PrincipalClass` keeps the identity labels on authorization decisions
 /// bounded. Both a normal denial and a permissive-mode override use the
 /// strongest principal, so the two counters group callers the same way.

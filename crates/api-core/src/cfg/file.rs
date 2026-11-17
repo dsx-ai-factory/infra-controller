@@ -296,8 +296,12 @@ pub struct CarbideConfig {
     /// FNN prefixes installed as floating blackhole routes in every VPC VRF.
     ///
     /// When omitted, this inherits `site_fabric_prefixes`, includes every retained tenant root,
-    /// and retains removed operator-managed roots until their VpcPrefixes and VPC-attached direct
-    /// NetworkPrefixes are hard-deleted. An explicit list is authoritative. Under mutual isolation,
+    /// and retains removed operator roots through exact VpcPrefix references, contained VpcPrefixes
+    /// without parentage, or contained VPC-attached direct NetworkPrefixes. A direct prefix retains
+    /// retiring roots while its segment exists and no Ready operator root fully covers it, including
+    /// during draining. Adding or restoring that coverage releases the retiring roots without deleting
+    /// the segment. VpcPrefix references remain until hard deletion.
+    /// An explicit list is authoritative. Under mutual isolation,
     /// each new tenant root requires an equal or broader explicit route. Startup and FNN DPU
     /// responses check the same coverage, including unused and Deleting tenant roots. Version
     /// output does not add tenant roots or check their coverage.
@@ -487,6 +491,9 @@ pub struct CarbideConfig {
     /// handshake first.
     #[serde(default)]
     pub scout_boot_interface_correction_enabled: bool,
+
+    #[serde(default)]
+    pub maintenance_end_boot_config_recheck_enabled: bool,
 
     /// `ib_fabrics` defines the InfiniBand fabrics managed by the site.
     /// When `ib_config.enabled` is true, v2.4 accepts at most one fabric,
@@ -2094,6 +2101,13 @@ pub struct DpfConfig {
     /// Enables DPF deployment.
     #[serde(default)]
     pub enabled: bool,
+    /// Uses DPUService-based Service names and peer addresses in NICo's DHCP, FMDS,
+    /// DPU-agent, and OTel charts. Defaults to false to preserve legacy naming.
+    /// Enable only with DPF 30.0 rc.4 or newer and HBN, DTS, and NICo chart versions
+    /// that support this naming scheme.
+    /// This site-wide value overrides per-service Helm values and is read at startup.
+    #[serde(default, rename = "multiClusterSupport")]
+    pub multi_cluster_support: bool,
     /// Opts the DPF namespace into deployment-scoped DPUServiceInterfaces.
     /// BF3 sites (including BF3 GB200) and generic BF4 use the default
     /// unscoped mode; BF4 Astra requires this to be enabled. When enabled, initialization
@@ -2180,6 +2194,7 @@ impl Default for DpfConfig {
     fn default() -> Self {
         Self {
             enabled: false,
+            multi_cluster_support: false,
             deployment_scoped_service_interfaces: false,
             pf_total_sf_reserved: default_dpf_pf_total_sf_reserved(),
             dpu_service_sync_enabled: default_to_true(),
@@ -7569,6 +7584,7 @@ path = "credentials.yaml"
         assert_eq!(config.dhcpv6_server_preference, None);
         assert!(!config.allow_insecure_discovery);
         assert!(!config.scout_boot_interface_correction_enabled);
+        assert!(!config.maintenance_end_boot_config_recheck_enabled);
         assert!(config.route_servers.is_empty());
         assert!(config.tls.is_none());
         assert!(config.auth.is_none());

@@ -571,6 +571,9 @@ async fn run_integration() -> eyre::Result<()> {
     // checks unavailable gauge rendering, while `resource_pool_inspection`
     // exercises the sampler's failure and recovery paths.
     for line in [
+        "# TYPE carbide_machine_update_manager_completed_passes_total counter\n",
+        "\ncarbide_machine_update_manager_completed_passes_total ",
+        "# HELP carbide_machine_update_manager_completed_passes_total Number of successful machine update manager work passes, excluding lock skips and failed or cancelled passes\n",
         r#"carbide_resourcepool_used_count{pool="vpc-vni"}"#,
         r#"carbide_resourcepool_free_count{pool="vpc-vni"}"#,
         r#"carbide_resourcepool_stats_available{pool="vpc-vni"} 1"#,
@@ -957,10 +960,13 @@ async fn exercise_dpf_exploration_suppression(
             key_path: certs.client_key.to_string_lossy().into_owned(),
         }),
     );
-    let client = CarbideApiClient::new(&ApiConfig::new(
-        &format!("https://{}", test_env.carbide_api_addrs[0]),
-        &config,
-    ));
+    let client = CarbideApiClient::new(
+        &ApiConfig::new(
+            &format!("https://{}", test_env.carbide_api_addrs[0]),
+            &config,
+        ),
+        carbide_instrument::Instrumentation::noop(),
+    );
     let result = client
         .refresh_endpoint_report(rpc::forge::RefreshEndpointReportRequest {
             ip_address: address.to_string(),
@@ -1059,10 +1065,13 @@ async fn exercise_admin_address_reconcile_failures(
             key_path: certs.client_key.to_string_lossy().into_owned(),
         }),
     );
-    let client = CarbideApiClient::new(&ApiConfig::new(
-        &format!("https://{}", test_env.carbide_api_addrs[0]),
-        &config,
-    ));
+    let client = CarbideApiClient::new(
+        &ApiConfig::new(
+            &format!("https://{}", test_env.carbide_api_addrs[0]),
+            &config,
+        ),
+        carbide_instrument::Instrumentation::noop(),
+    );
     // The discovery commits and its own reconcile finds no primary to repair.
     client
         .discover_machine(MachineDiscoveryInfo {
@@ -1121,10 +1130,13 @@ async fn exercise_ib_partition_mtu_fallback(
             key_path: certs.client_key.to_string_lossy().into_owned(),
         }),
     );
-    let client = CarbideApiClient::new(&ApiConfig::new(
-        &format!("https://{}", test_env.carbide_api_addrs[0]),
-        &config,
-    ));
+    let client = CarbideApiClient::new(
+        &ApiConfig::new(
+            &format!("https://{}", test_env.carbide_api_addrs[0]),
+            &config,
+        ),
+        carbide_instrument::Instrumentation::noop(),
+    );
     let response = client
         .find_ib_partitions_by_ids(rpc::forge::IbPartitionsByIdsRequest {
             ib_partition_ids: vec![id],

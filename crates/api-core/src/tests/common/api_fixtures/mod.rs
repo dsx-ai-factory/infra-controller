@@ -160,8 +160,10 @@ fn test_nvos_update_manager(
     rms_sim: &RmsSim,
 ) -> Option<Arc<dyn component_manager::NvosUpdateManager>> {
     rms_sim.as_rms_client().map(|client| {
-        Arc::new(component_manager::rms::rms_nvos_update_manager(client))
-            as Arc<dyn component_manager::NvosUpdateManager>
+        Arc::new(component_manager::rms::rms_nvos_update_manager(
+            client,
+            carbide_instrument::Instrumentation::noop(),
+        )) as Arc<dyn component_manager::NvosUpdateManager>
     })
 }
 
@@ -171,6 +173,7 @@ fn test_rack_firmware_update_manager(
     rms_sim.as_rms_client().map(|client| {
         Arc::new(component_manager::rms::rms_rack_firmware_update_manager(
             client,
+            carbide_instrument::Instrumentation::noop(),
         )) as Arc<dyn component_manager::RackFirmwareUpdateManager>
     })
 }
@@ -2635,6 +2638,7 @@ async fn report_network_status(
         astra_config_status: None,
         lldp,
         lldp_snapshot_fingerprint,
+        service_vpc_network_observation: None,
     };
     tracing::trace!(
         network_config_version = %status.network_config_version.as_ref().unwrap(),

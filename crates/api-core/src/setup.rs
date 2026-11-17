@@ -225,6 +225,7 @@ fn create_driver_connector(
     pools: DriverPools,
     credential_manager: Arc<dyn CredentialManager>,
     ipmi_tool: Arc<dyn IPMITool>,
+    instrumentation: carbide_instrument::Instrumentation,
 ) -> eyre::Result<Option<Arc<DriverConnector>>> {
     Ok(match carbide_config.bmc_backend {
         BmcBackend::Libredfish => None,
@@ -234,6 +235,7 @@ fn create_driver_connector(
             "nico-api",
             carbide_config.driver_rules()?,
             ipmi_tool,
+            instrumentation,
         )?)),
     })
 }
@@ -250,6 +252,7 @@ fn enabled_bmc_proxy_config(
 fn create_redfish_pool(
     carbide_config: &CarbideConfig,
     credential_manager: Arc<dyn CredentialManager>,
+    instrumentation: carbide_instrument::Instrumentation,
 ) -> eyre::Result<(Arc<dyn RedfishClientPool>, Arc<dyn BmcCredentialOps>)> {
     let pool = libredfish::RedfishClientPool::builder()
         .danger_accept_invalid_certs()
@@ -298,6 +301,7 @@ fn create_redfish_pool(
         credential_manager,
         pool,
         carbide_config.site_explorer.bmc_proxy.clone(),
+        instrumentation,
     ))
 }
 
@@ -348,8 +352,11 @@ pub async fn start_runtime(runtime_inputs: RuntimeInputs<'_>) -> eyre::Result<So
         )?)
     };
 
-    let (shared_redfish_pool, bmc_credential_ops) =
-        create_redfish_pool(&carbide_config, credential_manager.clone())?;
+    let (shared_redfish_pool, bmc_credential_ops) = create_redfish_pool(
+        &carbide_config,
+        credential_manager.clone(),
+        instrumentation.clone(),
+    )?;
     // Ordinary BMC traffic goes through nico-bmc-proxy when configured,
     // including site-explorer's established-endpoint traffic.
     // Credential-lifecycle work (credential setup, session minting, rotation)
@@ -380,6 +387,7 @@ pub async fn start_runtime(runtime_inputs: RuntimeInputs<'_>) -> eyre::Result<So
         driver_pools,
         credential_manager.clone(),
         ipmi_tool.clone(),
+        instrumentation.clone(),
     )?;
 
     let (rms_client, site_explorer_machine_info_provider, switch_system_image_rms_api) =
@@ -1085,6 +1093,7 @@ fn build_dpf_interfaces_and_services(
         service_vpc_slots,
         &carbide_config.node_auth,
         carbide_config.ewethers_config.as_ref(),
+        carbide_config.dpf.multi_cluster_support,
     );
     (interfaces, mandatory_services)
 }
@@ -1843,13 +1852,16 @@ async fn initialize_and_start_controllers<'a>(
     } = api_service.as_ref();
 
     let nvos_update_manager = rms_client.clone().map(|client| {
-        Arc::new(component_manager::rms::rms_nvos_update_manager(client))
-            as Arc<dyn component_manager::NvosUpdateManager>
+        Arc::new(component_manager::rms::rms_nvos_update_manager(
+            client,
+            api_service.instrumentation.clone(),
+        )) as Arc<dyn component_manager::NvosUpdateManager>
     });
 
     let rack_firmware_update_manager = rms_client.clone().map(|client| {
         Arc::new(component_manager::rms::rms_rack_firmware_update_manager(
             client,
+            api_service.instrumentation.clone(),
         )) as Arc<dyn component_manager::RackFirmwareUpdateManager>
     });
 
@@ -2416,7 +2428,7 @@ async fn initialize_and_start_controllers<'a>(
             ));
         };
 
-        let verifier = Arc::new(VerifierImpl::default());
+        let verifier = Arc::new(VerifierImpl::new(api_service.instrumentation.clone()));
 
         StateController::<SpdmStateControllerIO>::builder()
             .database(db_pool.clone(), work_lock_manager_handle.clone())
@@ -2771,6 +2783,50 @@ mod tests {
         InitialObjectsConfig, VmaasConfig, default_hbn_bridge,
     };
     use crate::cfg::load::parse_carbide_config;
+
+    #[test]
+    fn dpf_multi_cluster_support_reaches_all_nico_helm_templates() {
+        for (input, expected) in [
+            ("", false),
+            ("multiClusterSupport = false", false),
+            ("multiClusterSupport = true", true),
+        ] {
+            let mut config = crate::test_support::default_config::get();
+            config.dpf = toml::from_str(input).unwrap();
+            let services = &mut config.dpf.services;
+            for service in [
+                &mut services.dhcp_server,
+                &mut services.dpu_agent,
+                &mut services.fmds,
+                &mut services.otel,
+            ] {
+                service.extra_helm_values = serde_json::json!({
+                    "multiClusterSupport": !expected,
+                    "dpf": { "preserved": "value" }
+                })
+                .as_object()
+                .cloned();
+            }
+            let (_, services) = build_dpf_interfaces_and_services(
+                &config,
+                &config.dpf.deployments.bf3,
+                DpuDeploymentType::Bf3,
+                ServiceVpcSlots::default(),
+                None,
+            );
+            let templates: Vec<_> = services
+                .iter()
+                .map(|service| carbide_dpf::build_service_template(service, "test-ns", "bf3"))
+                .filter_map(|template| template.spec.helm_chart.values)
+                .filter(|values| values.get("multiClusterSupport").is_some())
+                .collect();
+            assert_eq!(templates.len(), 4, "{input}");
+            for values in templates {
+                assert_eq!(values["multiClusterSupport"], expected, "{input}");
+                assert_eq!(values["dpf"]["preserved"], "value", "{input}");
+            }
+        }
+    }
 
     /// The startup factory shares configured capacity across legacy and NIC transfers.
     #[tokio::test]
@@ -4433,8 +4489,12 @@ mod tests {
         let config = crate::test_support::default_config::get();
         let credential_manager: Arc<dyn CredentialManager> =
             Arc::new(carbide_secrets::test_support::credentials::TestCredentialManager::default());
-        let (direct, _ops) = create_redfish_pool(&config, credential_manager.clone())
-            .expect("direct pool builds from the default test config");
+        let (direct, _ops) = create_redfish_pool(
+            &config,
+            credential_manager.clone(),
+            carbide_instrument::Instrumentation::noop(),
+        )
+        .expect("direct pool builds from the default test config");
         let direct_nv =
             carbide_redfish::nv_redfish::new_pool(config.site_explorer.bmc_proxy.clone());
         (config, credential_manager, direct, direct_nv)
@@ -4550,6 +4610,7 @@ mod tests {
             pools.drivers,
             Arc::new(carbide_secrets::test_support::credentials::TestCredentialManager::default()),
             carbide_ipmi::test_support(),
+            carbide_instrument::Instrumentation::noop(),
         )
         .expect("the proxied pools build a driver connector");
         assert!(connector.is_some(), "drivers mode builds a connector");

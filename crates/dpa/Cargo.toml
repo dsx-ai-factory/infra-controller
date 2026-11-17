@@ -23,14 +23,11 @@ authors.workspace = true
 repository.workspace = true
 
 [dependencies]
-carbide-api-db = { path = "../api-db", default-features = false }
-carbide-api-model = { path = "../api-model", default-features = false }
 carbide-instrument = { path = "../instrument", default-features = false }
 carbide-utils = { path = "../utils", default-features = false }
 carbide-uuid = { path = "../uuid", default-features = false }
 config-version = { path = "../config-version", default-features = false }
 mqttea = { path = "../mqttea", default-features = false }
-state-controller = { path = "../state-controller", default-features = false }
 
 async-trait = { workspace = true }
 chrono = { workspace = true }
@@ -43,9 +40,12 @@ sqlx = { workspace = true }
 tracing = { workspace = true }
 
 [dev-dependencies]
+carbide-api-db = { path = "../api-db", default-features = false }
+carbide-api-model = { path = "../api-model", default-features = false }
 carbide-instrument = { path = "../instrument", features = ["test-support"] }
 carbide-test-support = { path = "../test-support" }
 config-version = { path = "../config-version", default-features = false }
+state-controller = { path = "../state-controller", default-features = false }
 
 mac_address = { workspace = true }
 

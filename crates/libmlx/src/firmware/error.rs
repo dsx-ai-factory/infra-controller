@@ -159,7 +159,7 @@ pub enum FirmwareError {
     },
 
     #[error("SSH transfer failed: {0}")]
-    SshError(#[from] forge_ssh::SshError),
+    SshError(#[from] carbide_ssh::SshError),
 
     #[error("flint error: {0}")]
     FlintError(#[from] crate::lockdown::error::MlxError),

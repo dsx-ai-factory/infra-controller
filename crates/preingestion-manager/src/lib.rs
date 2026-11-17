@@ -2143,7 +2143,7 @@ impl PreingestionManagerStatic {
             );
             return false;
         }
-        if instrument_power_op(
+        instrument_power_op(
             PowerOperation::BmcReset,
             reset_bmc(bmc),
             PowerControlLog::RecoverySequence {
@@ -2152,11 +2152,7 @@ impl PreingestionManagerStatic {
             &self.instrumentation,
         )
         .await
-        .is_err()
-        {
-            return false;
-        }
-        true
+        .is_ok()
     }
 
     /// Helper: Wait for BMC reset and power on the host
@@ -3526,7 +3522,8 @@ impl PreingestionManagerStatic {
             }
         };
 
-        match forge_ssh::ssh::check_console_for_markers(bmc_addr, username, password, MARKERS).await
+        match carbide_ssh::ssh::check_console_for_markers(bmc_addr, username, password, MARKERS)
+            .await
         {
             Ok(found) => found,
             Err(e) => {

@@ -77,7 +77,7 @@ carbide-site-explorer = { path = "../site-explorer" }
 carbide-spdm-controller = { path = "../spdm-controller" }
 carbide-state-controller-common = { path = "../state-controller-common" }
 carbide-switch-controller = { path = "../switch-controller" }
-carbide-utils = { path = "../utils", features = ["sqlx"] }
+carbide-utils = { path = "../utils" }
 carbide-uuid = { path = "../uuid", features = ["sqlx"] }
 carbide-version = { path = "../version" }
 carbide-vpc-prefix-controller = { path = "../vpc-prefix-controller" }

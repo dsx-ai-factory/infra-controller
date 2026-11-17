@@ -232,7 +232,6 @@ struct NetworkSegmentDetail {
     id: String,
     name: String,
     vpc_id: String,
-    version: String,
     created: String,
     updated: String,
     deleted: String,
@@ -292,7 +291,6 @@ impl TryFrom<forgerpc::NetworkSegment> for NetworkSegmentDetail {
         Ok(Self {
             id: segment.id.unwrap_or_default().to_string(),
             name,
-            version: lifecycle_detail.version.clone(),
             vpc_id: config.vpc_id.map(|id| id.to_string()).unwrap_or_default(),
             created: segment.created.unwrap_or_default().to_string(),
             updated: segment.updated.unwrap_or_default().to_string(),

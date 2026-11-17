@@ -262,7 +262,7 @@ async fn find_host_states(
 }
 
 #[crate::sqlx_test]
-async fn find_host_states_rejects_bad_requests(pool: sqlx::PgPool) {
+async fn host_states_window_bounds_unchanged(pool: sqlx::PgPool) {
     let env = create_test_env(pool).await;
     let host = create_managed_host(&env).await;
     let host_id = MachineId::from(host.id);
@@ -316,7 +316,7 @@ async fn stored_endpoint(env: &TestEnv, address: IpAddr) -> ExploredEndpoint {
 /// between its snapshot read and its gate read changes neither, and the next
 /// request sees the commit.
 #[crate::sqlx_test]
-async fn read_snapshot_ignores_concurrent_commit(pool: sqlx::PgPool) {
+async fn host_states_windows_share_snapshot(pool: sqlx::PgPool) {
     let env = create_test_env(pool).await;
     let host_id = MachineId::from(create_managed_host(&env).await.id);
     let hook = SnapshotReadHook::default();
@@ -331,7 +331,7 @@ async fn read_snapshot_ignores_concurrent_commit(pool: sqlx::PgPool) {
     tokio::time::timeout(Duration::from_secs(60), reached)
         .await
         .expect("snapshot read");
-    sqlx::query("UPDATE machines SET firmware_autoupdate = false WHERE id = $1")
+    sqlx::query("UPDATE machines SET firmware_autoupdate = false, firmware_update_time_window_start = to_timestamp(0), firmware_update_time_window_end = to_timestamp(0) WHERE id = $1")
         .bind(host_id)
         .execute(&env.pool)
         .await
@@ -345,9 +345,15 @@ async fn read_snapshot_ignores_concurrent_commit(pool: sqlx::PgPool) {
         (state.firmware_autoupdate, update.eligible, reason, policy)
     };
     let first = reply.await.unwrap().unwrap().into_inner().hosts.remove(0);
+    assert!(first.firmware_update_window_known);
+    assert!(
+        first.firmware_update_window_start.is_none() && first.firmware_update_window_end.is_none()
+    );
     assert_eq!(answers(first), (None, true, None, Some(true)));
     let off = Some("autoupdate_off_host".to_string());
     let next = host_state(&env, host_id).await;
+    assert_eq!(next.firmware_update_window_start.unwrap().seconds, 0);
+    assert_eq!(next.firmware_update_window_end.unwrap().seconds, 0);
     assert_eq!(answers(next), (Some(false), false, off, Some(false)));
 }
 
@@ -957,4 +963,47 @@ async fn compact_inventory_through_handler(pool: sqlx::PgPool) {
         .map(|(component, entries)| (component.to_string(), entries));
         assert_eq!(inventory, expected, "{report:?}");
     }
+}
+
+#[crate::sqlx_test]
+async fn host_states_windows_preserve_presence(pool: sqlx::PgPool) {
+    let env = create_test_env(pool).await;
+    let id = MachineId::from(create_managed_host(&env).await.id);
+    let now = Utc::now().timestamp();
+    for (scenario, start, end) in [
+        ("null", None, None),
+        ("epoch", Some(0), Some(0)),
+        ("open", Some(now - 60), Some(now + 60)),
+        ("future", Some(now + 60), Some(now + 120)),
+        ("expired", Some(now - 120), Some(now - 60)),
+        ("half null", None, Some(now)),
+        ("mixed zero", Some(0), Some(now)),
+        ("inverted", Some(now + 60), Some(now)),
+    ] {
+        sqlx::query("UPDATE machines SET firmware_update_time_window_start = $2, firmware_update_time_window_end = $3 WHERE id = $1")
+            .bind(id).bind(start.map(|n| chrono::DateTime::from_timestamp(n, 0).unwrap())).bind(end.map(|n| chrono::DateTime::from_timestamp(n, 0).unwrap()))
+            .execute(&env.pool).await.unwrap();
+        let state = host_state(&env, id).await;
+        assert!(state.firmware_update_window_known, "{scenario}");
+        assert_eq!(
+            (
+                state.firmware_update_window_start.map(|v| v.seconds),
+                state.firmware_update_window_end.map(|v| v.seconds)
+            ),
+            (start, end),
+            "{scenario}"
+        );
+    }
+    sqlx::query("DELETE FROM machine_interface_addresses WHERE interface_id IN (SELECT id FROM machine_interfaces WHERE machine_id = $1 AND interface_type = 'Bmc')")
+        .bind(id)
+        .execute(&env.pool)
+        .await
+        .unwrap();
+    let state = host_state(&env, id).await;
+    assert!(state.bmc_ip.is_none());
+    assert!(state.firmware_update_window_known);
+    assert_eq!(
+        state.firmware_update_window_start.unwrap().seconds,
+        now + 60
+    );
 }

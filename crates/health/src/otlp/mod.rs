@@ -691,7 +691,6 @@ mod tests {
     use std::collections::HashMap;
     use std::time::{Duration, SystemTime};
 
-    use carbide_instrument::emit;
     use carbide_instrument::testing::{MetricsCapture, capture_logs};
     use carbide_test_support::Outcome::Yields;
     use carbide_test_support::{Case, check_cases_async, value_scenarios};
@@ -938,9 +937,9 @@ mod tests {
     /// logs-signal series, labelled with the gRPC status code.
     #[test]
     fn otlp_export_failure_logs_error_and_ticks_counter() {
-        let metrics = MetricsCapture::start();
+        let metrics = MetricsCapture::owned();
         let logs = capture_logs(|| {
-            emit(OtlpExportFailed {
+            metrics.instrumentation().emit(OtlpExportFailed {
                 signal: OtlpSignal::Logs,
                 code: tonic::Code::Unavailable.into(),
                 error: "connection refused".to_string(),
@@ -966,8 +965,8 @@ mod tests {
     /// gRPC codes render as snake_case label values.
     #[test]
     fn otlp_metrics_export_failure_counts_on_the_metrics_signal_series() {
-        let metrics = MetricsCapture::start();
-        emit(OtlpExportFailed {
+        let metrics = MetricsCapture::owned();
+        metrics.instrumentation().emit(OtlpExportFailed {
             signal: OtlpSignal::Metrics,
             code: tonic::Code::DeadlineExceeded.into(),
             error: "deadline exceeded".to_string(),
@@ -1048,7 +1047,7 @@ mod tests {
     /// Runs `export_items` against a fake target that accepts at most 10
     /// bytes, returning every request it saw and the (virtual) time it took.
     async fn run_export(case: ExportCase) -> (Vec<Vec<usize>>, Duration) {
-        let metrics = MetricsCapture::start();
+        let metrics = MetricsCapture::owned();
 
         let mut export = FakeExport {
             reject_multi_item_requests: case.reject_multi_item_requests,
@@ -1073,7 +1072,7 @@ mod tests {
             &case.items,
             &target,
             OtlpSignal::Logs,
-            &carbide_instrument::Instrumentation::global(),
+            metrics.instrumentation(),
         )
         .await;
 
@@ -1091,7 +1090,7 @@ mod tests {
 
     #[test]
     fn export_response_counts_only_acknowledged_records() {
-        let metrics = MetricsCapture::start();
+        let metrics = MetricsCapture::owned();
 
         let target = OtlpTargetConfig {
             endpoint: "http://response-accounting.example:4317".to_string(),
@@ -1123,12 +1122,7 @@ mod tests {
             };
 
             let logs = capture_logs(|| {
-                response.record(
-                    &target,
-                    OtlpSignal::Logs,
-                    3,
-                    &carbide_instrument::Instrumentation::global(),
-                )
+                response.record(&target, OtlpSignal::Logs, 3, metrics.instrumentation())
             });
 
             assert_eq!(
@@ -1143,7 +1137,7 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn failed_exports_do_not_count_as_acknowledged() {
-        let metrics = MetricsCapture::start();
+        let metrics = MetricsCapture::owned();
 
         let target = OtlpTargetConfig {
             endpoint: "http://failed-export.example:4317".to_string(),
@@ -1173,7 +1167,7 @@ mod tests {
                 &[1, 2, 3],
                 &target,
                 OtlpSignal::Logs,
-                &carbide_instrument::Instrumentation::global(),
+                metrics.instrumentation(),
             )
             .await;
 

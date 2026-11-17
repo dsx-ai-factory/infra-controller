@@ -42,6 +42,7 @@ pub trait VerifierClient: std::fmt::Debug + Send + Sync + 'static {
 
 #[derive(Debug)]
 pub struct NrasVerifierClient {
+    instrumentation: carbide_instrument::Instrumentation,
     config: crate::Config,
     // A `reqwest-tracing` middleware client: it injects the current span's W3C trace context into
     // every outgoing request (issue #2438), so there is no per-call header injection here.
@@ -50,8 +51,13 @@ pub struct NrasVerifierClient {
 
 // TODO: add config which would allow configuring the URL paths for gpu, dpu, cx7
 impl NrasVerifierClient {
-    pub fn new_with_config(config: &crate::Config) -> NrasVerifierClient {
+    /// Creates a verifier whose RED metrics use the supplied destination.
+    pub fn new_with_config(
+        config: &crate::Config,
+        instrumentation: carbide_instrument::Instrumentation,
+    ) -> NrasVerifierClient {
         NrasVerifierClient {
+            instrumentation,
             config: config.clone(),
             http_client: reqwest_middleware::ClientBuilder::new(reqwest::Client::new())
                 .with(reqwest_tracing::TracingMiddleware::default())
@@ -85,7 +91,7 @@ impl VerifierClient for NrasVerifierClient {
         // carbide_external_call_duration_milliseconds{backend="nras", operation="attest_gpu",
         // outcome}. Only the static backend/operation tags are recorded -- never the request
         // or response body (evidence, certificate, nonce).
-        let response_text = red::instrumented("nras", "attest_gpu", async {
+        let response_text = red::instrumented(&self.instrumentation, "nras", "attest_gpu", async {
             let att_response = request.send().await?;
             let status_code = att_response.status();
             if status_code != reqwest::StatusCode::OK {
@@ -153,11 +159,11 @@ impl TryFrom<serde_json::Value> for RawAttestationOutcome {
                     match elem {
                         serde_json::Value::Object(map) => {
                             let (key, value) = extract_map_obj(&map)?;
-                            devices_outcome.insert(key.clone(), value.clone());
+                            devices_outcome.insert(key, value);
                         }
                         serde_json::Value::Array(arr_values) => {
                             let (key, value) = extract_array_obj(&arr_values)?;
-                            overall_outcome = (key.clone(), value.clone());
+                            overall_outcome = (key, value);
                         }
                         _ => {
                             return Err(NrasError::ParsingVerifierResponse(

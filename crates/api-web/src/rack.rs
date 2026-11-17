@@ -67,6 +67,7 @@ struct RackDetail {
     lifecycle_detail: super::LifecycleDetail,
     version: String,
     health_detail: super::HealthDetail,
+    health_panel: Option<super::health::HealthPanel>,
     associated_machines: Vec<String>,
     associated_switches: Vec<RackSwitchRecord>,
     associated_power_shelves: Vec<String>,
@@ -225,16 +226,12 @@ pub(super) async fn detail(
         metadata_version: version.clone(),
     };
 
-    let rack_status = rack.status.as_ref();
-    let health_url = format!("/admin/rack/{rack_id}/health");
     let health_detail = super::HealthDetail::new(
-        health_url,
-        "Go to Rack health reports",
-        rack_status.and_then(|status| status.health.clone()),
-        rack_status
-            .map(|status| status.health_sources.clone())
-            .unwrap_or_default(),
+        rack.status
+            .as_ref()
+            .and_then(|status| status.health.clone()),
     );
+    let health_panel = super::health::rack_health_panel(&api, rack_id.clone()).await;
 
     let history = match super::state_history::fetch_rack_state_history_records(
         &api,
@@ -256,6 +253,7 @@ pub(super) async fn detail(
         lifecycle_detail: lifecycle.into(),
         version,
         health_detail,
+        health_panel,
         associated_machines,
         associated_switches,
         associated_power_shelves,

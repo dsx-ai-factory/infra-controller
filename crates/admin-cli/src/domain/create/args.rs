@@ -28,7 +28,7 @@ Create a domain:
 pub(crate) struct Args {
     #[clap(
         value_name = "NAME",
-        help = "Lowercase domain name. Reverse zones (in-addr.arpa, ip6.arpa) and duplicate live names are rejected"
+        help = "Lowercase domain name. Reverse zones (in-addr.arpa, ip6.arpa) are rejected"
     )]
     pub(super) name: String,
 

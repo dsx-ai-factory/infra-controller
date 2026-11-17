@@ -2239,6 +2239,15 @@ func ExecuteFirmwareUpdateWorkflow(
 		// credential digest in Temporal metadata.
 		workflowID += "-" + uuid.NewString()
 		conflictPolicy = temporalEnums.WORKFLOW_ID_CONFLICT_POLICY_UNSPECIFIED
+	} else if len(targets) > 0 {
+		// A filtered update must not attach to an unfiltered or differently
+		// configured submission already in flight. Only non-secret requests
+		// use this deterministic identity; credential-bearing requests above
+		// retain their fresh IDs.
+		workflowID += "-targets-" + RequestHash(struct {
+			SiteID  string
+			Request *flowv1.UpgradeFirmwareRequest
+		}{siteID, flowRequest})
 	}
 
 	var flowResponse flowv1.SubmitTaskResponse

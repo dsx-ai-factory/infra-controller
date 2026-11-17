@@ -68,6 +68,7 @@ lazy_static = { workspace = true }
 libredfish = { workspace = true }
 mac_address = { workspace = true }
 mockall = { workspace = true, optional = true }
+nv-redfish = { workspace = true, features = ["secure-boot"] }
 opentelemetry = { workspace = true }
 prometheus = { workspace = true }
 prost = { workspace = true }
@@ -83,6 +84,9 @@ uuid = { workspace = true, features = ["v4", "serde"] }
 version-compare = { workspace = true }
 
 [dev-dependencies]
+arc-swap = { workspace = true }
+axum = { workspace = true }
+bmc-mock = { path = "../bmc-mock" }
 carbide-api-model = { path = "../api-model", default-features = false, features = [
   "test-support",
 ] }

@@ -5301,6 +5301,7 @@ mod test {
                 }),
                 fabric_interfaces: Vec::new(),
                 accepted_lldp_snapshot_fingerprint: None,
+                service_vpc_network_observation: None,
             }),
             dpu_agent_health_report: Some(HealthReport {
                 source: HealthReport::DPU_AGENT_SOURCE.to_string(),
@@ -5811,7 +5812,7 @@ mod test {
                     Ok::<_, Box<dyn std::error::Error>>(())
                 };
                 let commit_completion = async {
-                    crate::test_support::postgres::wait_for_blocked_query(
+                    let failure_pid = crate::test_support::postgres::wait_for_blocked_query(
                         &pool,
                         completion_pid,
                         "UPDATE machines SET failure_details",
@@ -5828,14 +5829,16 @@ mod test {
                         .await?,
                         crate::ConditionalWrite::Applied(()),
                     );
+                    // PostgreSQL can briefly leave its reported lock wait while
+                    // handling a signal, even though the row stays locked.
                     assert_eq!(
-                        crate::test_support::postgres::count_blocked_queries(
+                        crate::test_support::postgres::wait_for_blocked_query(
                             &pool,
                             completion_pid,
                             "UPDATE machines SET failure_details",
                         )
                         .await,
-                        1,
+                        failure_pid,
                         "the failure writer must remain blocked after CAS and before commit",
                     );
                     completion.commit().await?;
@@ -7005,6 +7008,7 @@ mod test {
             instance_network_observation: None,
             fabric_interfaces: Vec::new(),
             accepted_lldp_snapshot_fingerprint: None,
+            service_vpc_network_observation: None,
         };
         assert!(matches!(
             super::update_network_status_observation(writer.as_mut(), &dpu_id, &observation)
@@ -7600,6 +7604,7 @@ mod test {
                 instance_network_observation: None,
                 fabric_interfaces: Vec::new(),
                 accepted_lldp_snapshot_fingerprint: None,
+                service_vpc_network_observation: None,
             };
             let mut txn = pool.begin().await?;
             let result =
@@ -7656,6 +7661,7 @@ mod test {
             instance_network_observation: None,
             fabric_interfaces: Vec::new(),
             accepted_lldp_snapshot_fingerprint: None,
+            service_vpc_network_observation: None,
         };
         assert_eq!(
             update_network_status_observation(txn.as_mut(), &machine_id, &initial).await?,
@@ -7675,6 +7681,7 @@ mod test {
             instance_network_observation: None,
             fabric_interfaces: Vec::new(),
             accepted_lldp_snapshot_fingerprint: Some(fingerprint_b),
+            service_vpc_network_observation: None,
         };
         let mut txn = pool.begin().await?;
         assert_eq!(

@@ -39,8 +39,8 @@ pub use events::{
     Classification, CollectorEvent, DiagnosticLogRecord, EventContext, FirmwareInfo, HealthReport,
     HealthReportAlert, HealthReportSuccess, HealthReportTarget, LogRecord, LogSeverity,
     MetricSample, MetricSemantics, Probe, RedfishCondition, RedfishResourceType, RedfishStatus,
-    ReportSource, ResourceStatusInfo, ResourceStatusObservation, SensorAttribution,
-    SensorThresholdContext,
+    ReportSource, ResourceStatusInfo, ResourceStatusObservation, ResourceStatusReport,
+    SensorAttribution, SensorThresholdContext,
 };
 pub use health_report::HealthReportSink;
 pub use log_file::LogFileSink;
@@ -52,6 +52,7 @@ pub use switch_health_report::SwitchHealthReportSink;
 pub use tracing::TracingSink;
 
 pub(crate) use self::dedup_queue::DedupQueue;
+pub(crate) use self::events::ResourceStatusHealth;
 #[cfg(not(feature = "bench-hooks"))]
 pub(crate) use self::otlp::OtlpSink;
 #[cfg(feature = "bench-hooks")]
@@ -396,15 +397,17 @@ mod tests {
     fn health_report_submission_failure_logs_warn_and_ticks_counter() {
         use carbide_instrument::testing::{MetricsCapture, capture_logs};
 
-        let metrics = MetricsCapture::start();
+        let metrics = MetricsCapture::owned();
         let logs = capture_logs(|| {
-            carbide_instrument::emit(super::HealthReportSubmitted {
-                target: super::HealthReportTarget::Rack,
-                outcome: carbide_instrument::Outcome::Error,
-                id: "RACK_1".to_string(),
-                worker_id: 3,
-                error: "connection refused".to_string(),
-            });
+            metrics
+                .instrumentation()
+                .emit(super::HealthReportSubmitted {
+                    target: super::HealthReportTarget::Rack,
+                    outcome: carbide_instrument::Outcome::Error,
+                    id: "RACK_1".to_string(),
+                    worker_id: 3,
+                    error: "connection refused".to_string(),
+                });
         });
 
         assert_eq!(logs.len(), 1);
@@ -424,15 +427,17 @@ mod tests {
     fn health_report_submission_success_counts_without_logging() {
         use carbide_instrument::testing::{MetricsCapture, capture_logs};
 
-        let metrics = MetricsCapture::start();
+        let metrics = MetricsCapture::owned();
         let logs = capture_logs(|| {
-            carbide_instrument::emit(super::HealthReportSubmitted {
-                target: super::HealthReportTarget::Machine,
-                outcome: carbide_instrument::Outcome::Ok,
-                id: "fm100htjtiaehv1n5vh67tbmqq4eabcjdng40f7jupsadbedhruh6rag1l0".to_string(),
-                worker_id: 0,
-                error: String::new(),
-            });
+            metrics
+                .instrumentation()
+                .emit(super::HealthReportSubmitted {
+                    target: super::HealthReportTarget::Machine,
+                    outcome: carbide_instrument::Outcome::Ok,
+                    id: "fm100htjtiaehv1n5vh67tbmqq4eabcjdng40f7jupsadbedhruh6rag1l0".to_string(),
+                    worker_id: 0,
+                    error: String::new(),
+                });
         });
 
         assert!(logs.is_empty(), "successful submissions must not log");
