@@ -27,12 +27,21 @@ use crate::generated::forge::{
 };
 use crate::generated::{common, forge};
 
+impl MockApiServer {
+    async fn delay_reply(&self) {
+        if let Some(reply_delay) = self.reply_delay {
+            tokio::time::sleep(reply_delay).await;
+        }
+    }
+}
+
 #[tonic::async_trait]
 impl Forge for MockApiServer {
     async fn version(
         &self,
         _request: Request<VersionRequest>,
     ) -> Result<Response<BuildInfo>, Status> {
+        self.delay_reply().await;
         Ok(Response::new(BuildInfo {
             build_version: v!(build_version).to_string(),
             build_date: v!(build_date).to_string(),
@@ -49,6 +58,7 @@ impl Forge for MockApiServer {
         &self,
         request: Request<ValidateTenantPublicKeyRequest>,
     ) -> Result<Response<ValidateTenantPublicKeyResponse>, Status> {
+        self.delay_reply().await;
         let request = request.into_inner();
         let Ok(instance_id) = request.instance_id.parse::<Uuid>() else {
             return Err(Status::invalid_argument("invalid instance ID"));
@@ -85,6 +95,7 @@ impl Forge for MockApiServer {
         &self,
         request: Request<InstancesByIdsRequest>,
     ) -> Result<Response<InstanceList>, Status> {
+        self.delay_reply().await;
         let request = request.into_inner();
         let mock_instances = request
             .instance_ids
@@ -119,6 +130,7 @@ impl Forge for MockApiServer {
         &self,
         request: tonic::Request<forge::BmcMetaDataGetRequest>,
     ) -> std::result::Result<tonic::Response<forge::BmcMetaDataGetResponse>, tonic::Status> {
+        self.delay_reply().await;
         let request = request.into_inner();
         let Some(machine_id) = request.machine_id else {
             return Err(Status::invalid_argument("missing machine ID"));
@@ -147,6 +159,7 @@ impl Forge for MockApiServer {
         &self,
         _request: Request<forge::MachineSearchConfig>,
     ) -> Result<Response<common::MachineIdList>, Status> {
+        self.delay_reply().await;
         Ok(Response::new(common::MachineIdList {
             machine_ids: self
                 .mock_hosts

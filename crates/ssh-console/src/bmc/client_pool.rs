@@ -45,6 +45,10 @@ use crate::ssh_server::ServerMetrics;
 /// Connection-detail lookups in flight during one refresh.
 const LOOKUP_CONCURRENCY: usize = 64;
 
+/// Evictions one on-demand connection waits for before it reports a full pool. A refresh or
+/// another console session can take the permit that an eviction frees.
+const MAX_EVICTIONS_PER_CONNECT: usize = 3;
+
 /// Spawn a background task that keeps a bounded pool of BMC connections.
 ///
 /// Up to `max_bmc_connections` machines from the API get a standing connection for console
@@ -90,6 +94,8 @@ pub(crate) fn spawn(
 /// dropped.
 pub(crate) struct Handle {
     connection_store: BmcConnectionStore,
+    /// Resolves when the pool task has started, before its first refresh. Console sessions do not
+    /// need a filled pool: a machine without a pooled connection connects on demand.
     ready_rx: Option<oneshot::Receiver<()>>,
     join_handle: tokio::task::JoinHandle<()>,
     drop_guard: DropGuard,
@@ -115,11 +121,10 @@ impl ReadyHandle for Handle {
 
 type Members = Arc<RwLock<HashMap<MachineId, Member>>>;
 
-/// A pooled BMC client and the pool permit it holds.
+/// A pooled BMC client. The client holds its pool permit until it has shut down.
 struct Member {
     client: ClientHandle,
     origin: Origin,
-    _permit: OwnedSemaphorePermit,
 }
 
 impl Member {
@@ -297,7 +302,7 @@ pub(crate) enum GetConnectionError {
         error: LookupError,
     },
     #[error(
-        "BMC connection pool is full and every connection has an open console session, cannot connect to {machine_id}"
+        "BMC connection pool is full and no connection could be closed to make room, cannot connect to {machine_id}"
     )]
     PoolFull { machine_id: MachineId },
 }
@@ -305,7 +310,8 @@ pub(crate) enum GetConnectionError {
 /// The BMC connection pool: one client per pooled machine, bounded by `permits`.
 struct BmcPool {
     members: Members,
-    /// One permit per pooled connection.
+    /// One permit per client, held from when it joins the pool until it has shut down. A removed
+    /// member keeps its permit while it closes its connection.
     permits: Arc<Semaphore>,
     /// One permit per reachability probe in flight, shared by every client.
     probe_permits: Arc<Semaphore>,
@@ -431,7 +437,10 @@ impl BmcPool {
         // Don't try to catch up if for some reason api refresh takes forever (ie. if the connection
         // is down and we have to retry a long time.)
         api_refresh.set_missed_tick_behavior(MissedTickBehavior::Skip);
-        let mut ready_tx = Some(ready_tx);
+
+        // Ready before the first refresh: until it has filled the pool, console sessions connect
+        // on demand.
+        ready_tx.send(()).ok();
 
         while self
             .cancel_token
@@ -442,8 +451,6 @@ impl BmcPool {
             if let Err(error) = self.refresh_bmcs().await {
                 tracing::error!(%error, "error refreshing BMC list from API");
             }
-            // Inform callers that we're ready once the first API refresh happens.
-            ready_tx.take().map(|ch| ch.send(()).ok());
         }
         tracing::info!("shutting down BmcPool");
 
@@ -497,7 +504,16 @@ impl BmcPool {
             .grpc_total_hosts
             .record(machine_ids.len() as _, &[]);
 
-        let to_add = self.prune_and_pick_additions(&machine_ids);
+        // A pruned client holds its permit until it has shut down. Waiting for that here lets
+        // this refresh give the freed permits to other machines.
+        join_all(
+            self.prune(&machine_ids)
+                .into_iter()
+                .map(ClientHandle::close),
+        )
+        .await;
+
+        let to_add = self.pick_additions(&machine_ids);
 
         // For each one we want to add, get the connection details. Skip any machines which fail
         // here.
@@ -527,11 +543,11 @@ impl BmcPool {
         Ok(())
     }
 
-    /// Remove members that are no longer monitored or have idled out, and pick the machines to
-    /// add: as many as there are free permits. The permits are taken when the members are
-    /// inserted, so a console session that connects on demand during the lookups is not refused.
-    fn prune_and_pick_additions(&self, machine_ids: &HashSet<MachineId>) -> Vec<MachineId> {
+    /// Remove members that are no longer monitored or have idled out, and return their clients.
+    /// Each client holds its pool permit until it has shut down.
+    fn prune(&self, machine_ids: &HashSet<MachineId>) -> Vec<ClientHandle> {
         let mut members = self.members.write().expect("lock poisoned");
+        let mut pruned = Vec::new();
 
         // Remove any machines that are no longer monitored
         let to_remove = members
@@ -541,7 +557,7 @@ impl BmcPool {
             .collect::<Vec<_>>();
         for machine_id in to_remove {
             tracing::info!(%machine_id, "removing machine from console logging, no longer found in carbide");
-            members.remove(&machine_id);
+            pruned.extend(members.remove(&machine_id));
         }
 
         // Close on-demand connections nobody has used for the idle timeout
@@ -552,8 +568,17 @@ impl BmcPool {
             self.config.on_demand_bmc_idle_timeout,
         ) {
             tracing::info!(%machine_id, "closing idle on-demand BMC connection");
-            members.remove(&machine_id);
+            pruned.extend(members.remove(&machine_id));
         }
+
+        pruned.into_iter().map(|member| member.client).collect()
+    }
+
+    /// Pick the machines to give a standing connection. The permits are taken when the members
+    /// are inserted, so a console session that connects on demand during the lookups is not
+    /// refused.
+    fn pick_additions(&self, machine_ids: &HashSet<MachineId>) -> Vec<MachineId> {
+        let members = self.members.read().expect("lock poisoned");
 
         // As many as there are free permits. The rest connect on demand.
         machine_ids
@@ -583,9 +608,8 @@ impl BmcPool {
             members.insert(
                 machine_id,
                 Member {
-                    client: self.spawn_client(connection_details),
+                    client: self.spawn_client(connection_details, permit),
                     origin: Origin::Standing,
-                    _permit: permit,
                 },
             );
         }
@@ -606,6 +630,10 @@ impl BmcPool {
     }
 
     /// Subscribe to a machine's BMC, connecting on demand when it has no pooled connection.
+    ///
+    /// When the pool is full, the member idle the longest is removed and this waits for its client
+    /// to shut down, which frees its permit. For an IPMI client the shutdown includes a SOL
+    /// deactivation of at most 10 seconds.
     async fn connect(
         &self,
         machine_id: MachineId,
@@ -630,49 +658,63 @@ impl BmcPool {
         .await
         .map_err(|error| GetConnectionError::Lookup { machine_id, error })?;
 
-        let mut members = self.members.write().expect("lock poisoned");
-        if let Some(member) = members.get(&machine_id) {
-            return Ok(member.client.subscribe(metrics));
+        let mut evictions = 0;
+        loop {
+            // The lock is released before waiting for an evicted client.
+            let evicted = {
+                let mut members = self.members.write().expect("lock poisoned");
+                if let Some(member) = members.get(&machine_id) {
+                    return Ok(member.client.subscribe(metrics));
+                }
+                if let Ok(permit) = self.permits.clone().try_acquire_owned() {
+                    tracing::info!(%machine_id, "begin on-demand connection to machine");
+                    let client = self.spawn_client(connection_details, permit);
+                    let subscription = client.subscribe(metrics);
+                    members.insert(
+                        machine_id,
+                        Member {
+                            client,
+                            origin: Origin::OnDemand,
+                        },
+                    );
+                    self.metrics.total_machines.record(members.len() as _, &[]);
+                    return Ok(subscription);
+                }
+                if evictions == MAX_EVICTIONS_PER_CONNECT {
+                    tracing::warn!(
+                        %machine_id,
+                        evictions,
+                        "BMC connection pool is still full after closing idle connections"
+                    );
+                    return Err(GetConnectionError::PoolFull { machine_id });
+                }
+                let victim =
+                    preemption_victim(members.iter().map(|(id, member)| (*id, member.view())))
+                        .ok_or(GetConnectionError::PoolFull { machine_id })?;
+                tracing::info!(
+                    machine_id = %victim,
+                    "BMC connection pool is full; closing the connection idle the longest"
+                );
+                members.remove(&victim)
+            };
+            evictions += 1;
+            if let Some(evicted) = evicted {
+                evicted.client.close().await;
+            }
         }
-        let permit = self
-            .take_permit(&mut members)
-            .ok_or(GetConnectionError::PoolFull { machine_id })?;
-        tracing::info!(%machine_id, "begin on-demand connection to machine");
-        members.insert(
-            machine_id,
-            Member {
-                client: self.spawn_client(connection_details),
-                origin: Origin::OnDemand,
-                _permit: permit,
-            },
-        );
-        self.metrics.total_machines.record(members.len() as _, &[]);
-        Ok(members[&machine_id].client.subscribe(metrics))
     }
 
-    /// Take a pool permit, closing the connection idle the longest when the pool is full.
-    fn take_permit(
+    fn spawn_client(
         &self,
-        members: &mut HashMap<MachineId, Member>,
-    ) -> Option<OwnedSemaphorePermit> {
-        if let Ok(permit) = self.permits.clone().try_acquire_owned() {
-            return Some(permit);
-        }
-        let victim = preemption_victim(members.iter().map(|(id, member)| (*id, member.view())))?;
-        tracing::info!(
-            machine_id = %victim,
-            "BMC connection pool is full; closing the connection idle the longest"
-        );
-        members.remove(&victim);
-        self.permits.clone().try_acquire_owned().ok()
-    }
-
-    fn spawn_client(&self, connection_details: ConnectionDetails) -> ClientHandle {
+        connection_details: ConnectionDetails,
+        permit: OwnedSemaphorePermit,
+    ) -> ClientHandle {
         client::spawn(
             connection_details,
             self.config.clone(),
             self.metrics.clone(),
             self.probe_permits.clone(),
+            permit,
             self.cancel_token.clone(),
         )
     }
@@ -917,6 +959,24 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn removed_member_keeps_its_permit_until_its_client_has_shut_down() {
+        let pool = TestPool::new(1, Duration::from_secs(600), 1).await;
+        pool.refresh().await;
+        let Member { client, .. } = pool
+            .pool
+            .members
+            .write()
+            .expect("lock poisoned")
+            .remove(&pool.machines[0])
+            .expect("pooled member");
+
+        assert_eq!(pool.pool.permits.available_permits(), 0);
+        client.shutdown_and_wait().await;
+        assert_eq!(pool.pool.permits.available_permits(), 1);
+        pool.shutdown().await;
+    }
+
+    #[tokio::test]
     async fn console_session_connects_on_demand_by_replacing_an_idle_member() {
         let pool = TestPool::new(2, Duration::from_secs(600), 3).await;
         pool.refresh().await;
@@ -963,7 +1023,7 @@ mod tests {
         let open_session = pool.connect(first).await.expect("on-demand connection");
 
         // The refresh has picked its additions and is looking up their connection details.
-        let picked = pool.pool.prune_and_pick_additions(&machine_ids);
+        let picked = pool.pool.pick_additions(&machine_ids);
         assert_eq!(picked.len(), 2);
         let wanted = pool
             .machines

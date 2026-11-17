@@ -21,6 +21,7 @@ mod generated;
 use std::fs;
 use std::net::{IpAddr, SocketAddr, ToSocketAddrs};
 use std::sync::Arc;
+use std::time::Duration;
 
 use api_test_helper::utils::LOCALHOST_CERTS;
 use tokio::net::TcpListener;
@@ -83,6 +84,8 @@ impl TryFrom<MockHost> for forge::Instance {
 #[derive(Debug)]
 pub struct MockApiServer {
     pub mock_hosts: Arc<Vec<MockHost>>,
+    /// How long every RPC waits before it replies. `None` replies at once.
+    pub reply_delay: Option<Duration>,
 }
 
 pub struct MockApiServerHandle {

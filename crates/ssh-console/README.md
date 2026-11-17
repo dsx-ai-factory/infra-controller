@@ -53,13 +53,15 @@ orphaned tasks running in the background.
 its BMC is not listening, a periodic reachability probe, so the pool is bounded rather than growing with the machine
 count:
 
-- `max_bmc_connections` (default 16384) bounds the clients held at once, standing and on-demand together. Each API
-  poll gives a standing connection to as many machines from nico-api as permits allow, so console logging covers every
-  machine on a site below the bound. Machines beyond it have no standing connection.
+- `max_bmc_connections` (default 16384) bounds the clients held at once, standing and on-demand together. A client
+  that is being closed counts until it has shut down. Each API poll gives a standing connection to as many machines
+  from nico-api as permits allow, so console logging covers every machine on a site below the bound. Machines beyond
+  it have no standing connection.
 - A frontend asking for a machine without a pooled connection connects it on demand. If the pool is full, the pooled
-  connection that has been without a console session the longest is closed to make room, and the request fails only
-  when every pooled connection has an open session. On-demand connections close once idle for
-  `on_demand_bmc_idle_timeout` (default 600s), checked at each API poll.
+  connection that has been without a console session the longest is closed, and the new connection opens once that
+  one has shut down. The request fails when no pooled connection can be closed to make room, which is the case when
+  every one has an open session. On-demand connections close once idle for `on_demand_bmc_idle_timeout` (default
+  600s), checked at each API poll.
 - `max_concurrent_bmc_probes` (default 512) bounds the reachability probes in flight across all clients, so clients
   whose BMC is down wait for a probe slot instead of each holding a pending connection.
 
