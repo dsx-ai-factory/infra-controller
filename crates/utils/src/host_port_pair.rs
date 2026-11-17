@@ -329,7 +329,7 @@ mod tests {
             assert_eq!(pair.to_string(), rendered, "Display of {pair:?}");
             assert_eq!(
                 HostPortPair::from_str(rendered),
-                Ok(pair.clone()),
+                Ok(pair),
                 "round trip of {rendered:?}"
             );
         }

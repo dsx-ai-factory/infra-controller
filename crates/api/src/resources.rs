@@ -116,7 +116,12 @@ pub(crate) async fn setup_resources(
         None
     } else {
         Some(
-            create_vault_client(&vault_config, instrumentation.clone()).wrap_err_with(|| {
+            create_vault_client(
+                &vault_config,
+                instrumentation.clone(),
+                Some((join_set, cancel_token.clone())),
+            )
+            .wrap_err_with(|| {
                 format!(
                     "vault connection settings are required by {}",
                     vault_settings.join(", ")
@@ -140,13 +145,14 @@ pub(crate) async fn setup_resources(
         trust_domain: vault_config.spiffe_trust_domain(),
         machine_base_path: vault_config.spiffe_machine_base_path(),
     };
-    let vault_provider = || -> eyre::Result<Arc<dyn CertificateProvider>> {
+    let mut vault_provider = || -> eyre::Result<Arc<dyn CertificateProvider>> {
         let cert_config = carbide_config.certificates.to_certificate_config()?;
         create_certificate_provider(
             &cert_config,
             vault_client.as_ref(),
             spiffe.clone(),
             instrumentation.clone(),
+            Some((join_set, cancel_token.clone())),
         )
     };
     let certificate_provider: Arc<dyn CertificateProvider> =
@@ -727,6 +733,7 @@ async fn build_kms_backend(
                         .unwrap_or(DEFAULT_TRANSIT_MOUNT)
                         .to_string(),
                     keys.clone(),
+                    instrumentation.clone(),
                 );
                 join_set
                     .build_task()
@@ -758,10 +765,11 @@ async fn build_kms_backend(
                 // Connects now and verifies the server and every key before
                 // any DEK is wrapped; an unreachable server or an unqualified
                 // key fails the boot with a message that names the field.
-                let provider = KmipKmsProvider::connect(client_config, keys.clone())
-                    .await
-                    .map_err(eyre::Report::new)
-                    .wrap_err_with(|| format!("KMS provider {name:?}"))?;
+                let provider =
+                    KmipKmsProvider::connect(client_config, keys.clone(), instrumentation.clone())
+                        .await
+                        .map_err(eyre::Report::new)
+                        .wrap_err_with(|| format!("KMS provider {name:?}"))?;
                 Arc::new(provider)
             }
         };
@@ -1167,7 +1175,7 @@ mod tests {
     }
 
     // The zero acquire timeout fails the database step without touching the
-    // network, and the shared Vault's CA file is missing, so each error shows
+    // network or starting database tasks. A missing shared Vault CA shows
     // which check ran first: a site that names no shared Vault gets past the
     // Vault settings it lacks, and `import_from = "vault"` fails on them before
     // the database could report a completed import. The CA lookup falls back to
@@ -1176,7 +1184,7 @@ mod tests {
     #[tokio::test]
     #[serial]
     async fn startup_checks_shared_vault_settings_only_when_named() {
-        use CredentialBackend::Postgres;
+        use CredentialBackend::{Postgres, Vault};
 
         let _vault_cacert = EnvironmentVariableGuard::remove("VAULT_CACERT");
         let certificate_vault_ca =
@@ -1189,35 +1197,70 @@ mod tests {
             vault_cacert: Some(certificate_vault_ca.path().display().to_string()),
             namespace: None,
         };
-        let credential_config = CredentialConfig {
+        let missing_shared_vault = CredentialConfig {
             vault: VaultConfig {
                 vault_cacert: Some("/nonexistent/vault-ca.crt".to_string()),
                 ..Default::default()
             },
             ..Default::default()
         };
-        for (scenario, secrets, expected_error) in [
+        let configured_shared_vault = CredentialConfig {
+            vault: VaultConfig {
+                address: Some(dedicated_vault.address.clone()),
+                kv_mount_location: Some("secret".to_string()),
+                pki_mount_location: Some(dedicated_vault.pki_mount_location.clone()),
+                pki_role_name: Some(dedicated_vault.pki_role_name.clone()),
+                token: dedicated_vault.token.clone(),
+                vault_cacert: dedicated_vault.vault_cacert.clone(),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        for (scenario, secrets, certificates, credential_config, expected_error, expected_tasks) in [
             (
                 "no setting names the shared vault",
                 Some((vec![Postgres], Postgres, None)),
+                DEDICATED_VAULT,
+                &missing_shared_vault,
                 "database_pool_acquire_timeout",
+                1,
             ),
             (
                 "import_from = vault is checked before the database",
                 Some((vec![Postgres], Postgres, Some(ImportSource::Vault))),
+                DEDICATED_VAULT,
+                &missing_shared_vault,
                 "vault connection settings are required by [secrets] import_from",
+                0,
+            ),
+            (
+                "shared vault used only for certificates has one refresh task",
+                Some((vec![Postgres], Postgres, None)),
+                (false, false, CertBackendKind::SharedVault),
+                &configured_shared_vault,
+                "database_pool_acquire_timeout",
+                1,
+            ),
+            (
+                "shared credentials and dedicated certificates have separate refresh tasks",
+                Some((vec![Vault, Postgres], Postgres, None)),
+                DEDICATED_VAULT,
+                &configured_shared_vault,
+                "database_pool_acquire_timeout",
+                2,
             ),
         ] {
-            let mut config = vault_selection_config(secrets, DEDICATED_VAULT);
+            let mut config = vault_selection_config(secrets, certificates);
             config.certificates.dedicated_vault = Some(dedicated_vault.clone());
             config.database_pool_acquire_timeout = std::time::Duration::ZERO;
+            let mut join_set = JoinSet::new();
             let metrics =
                 metrics_endpoint::new_metrics_setup("resource-validation-tests", "carbide", false)
                     .expect("test metrics setup");
             let error = setup_resources(
                 &config,
-                &credential_config,
-                &mut JoinSet::new(),
+                credential_config,
+                &mut join_set,
                 &CancellationToken::new(),
                 &carbide_instrument::Instrumentation::from_meter_provider(&metrics.meter_provider),
             )
@@ -1228,6 +1271,7 @@ mod tests {
                 format!("{error:#}").contains(expected_error),
                 "{scenario}: got {error:#}"
             );
+            assert_eq!(join_set.len(), expected_tasks, "{scenario}: refresh tasks");
         }
     }
 

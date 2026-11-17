@@ -29,17 +29,24 @@ use crate::carbide_tls_client::{
 use crate::protos::nmx_c_client::NmxCApiClient;
 
 impl NmxCApiClient {
-    pub fn new(nmx_c_config: &ApiConfig<'_>) -> Self {
-        Self::build(NmxCTlsConnectionProvider {
-            urls: NonEmpty::from((
-                nmx_c_config.url.to_string(),
-                nmx_c_config.additional_urls.to_vec(),
-            )),
-            client_config: nmx_c_config.client_config.clone(),
-            retry_config: nmx_c_config.retry_config,
-            last_connection_index: 0.into(),
-            fail_over_on: FailOverOn::ConnectionError,
-        })
+    /// Creates a client whose RED metrics use `instrumentation`.
+    pub fn new(
+        nmx_c_config: &ApiConfig<'_>,
+        instrumentation: carbide_instrument::Instrumentation,
+    ) -> Self {
+        Self::build(
+            NmxCTlsConnectionProvider {
+                urls: NonEmpty::from((
+                    nmx_c_config.url.to_string(),
+                    nmx_c_config.additional_urls.to_vec(),
+                )),
+                client_config: nmx_c_config.client_config.clone(),
+                retry_config: nmx_c_config.retry_config,
+                last_connection_index: 0.into(),
+                fail_over_on: FailOverOn::ConnectionError,
+            },
+            instrumentation,
+        )
     }
 }
 
@@ -63,7 +70,7 @@ impl NmxCTlsConnectionProvider {
     fn next_endpoint_url(&self) -> &str {
         let connection_index = self
             .last_connection_index
-            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |current_index| {
+            .try_update(Ordering::SeqCst, Ordering::SeqCst, |current_index| {
                 Some((current_index + 1) % self.urls.len())
             })
             .unwrap(); // SAFETY: we always return Some(), so this will always succeed.

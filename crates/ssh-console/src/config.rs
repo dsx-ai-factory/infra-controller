@@ -416,7 +416,10 @@ role_separator = {cert_authorization_keyid_format_role_separator:?}
         )
     }
 
-    pub fn make_carbide_api_client(&self) -> CarbideApiClient {
+    pub fn make_carbide_api_client(
+        &self,
+        instrumentation: carbide_instrument::Instrumentation,
+    ) -> CarbideApiClient {
         let carbide_uri_string = self.carbide_uri.to_string();
         tracing::info!(
             carbide_uri = carbide_uri_string.as_str(),
@@ -445,7 +448,7 @@ role_separator = {cert_authorization_keyid_format_role_separator:?}
         );
 
         let api_config = ApiConfig::new(&carbide_uri_string, &client_config);
-        CarbideApiClient::new(&api_config)
+        CarbideApiClient::new(&api_config, instrumentation)
     }
 }
 

@@ -27,7 +27,7 @@ use attestation::{
     handle_spdm_attestation_failed_recovery, handle_spdm_poll_state, handle_spdm_trigger_state,
 };
 use bmc_backend::BackendBmc;
-use bmc_platform::{PowerState, ResetType};
+use bmc_platform::{OperationStatus, PowerState, ResetType, VendorJobId};
 use carbide_credential_rotation::site_explorer_pause::{self, GateDecision};
 use carbide_credential_rotation::{RotationStep, advance};
 use carbide_firmware::{
@@ -52,7 +52,6 @@ use db::db_read::PgPoolReader;
 use db::explored_endpoints::EndpointReportNotCurrent;
 use db::{ConditionalWrite, DatabaseError};
 use eyre::eyre;
-use futures::TryFutureExt;
 use futures_util::FutureExt;
 use health_report::{
     HealthAlertClassification, HealthProbeAlert, HealthProbeId, HealthReport, HealthReportApplyMode,
@@ -62,7 +61,7 @@ use libredfish::model::oem::nvidia_dpu::HostPrivilegeLevel;
 use libredfish::model::service_root::RedfishVendor;
 use libredfish::model::task::TaskState;
 use libredfish::model::update_service::{ComponentType, TransferProtocolType};
-use libredfish::{Boot, EnabledDisabled, Redfish, RedfishError};
+use libredfish::{EnabledDisabled, Redfish, RedfishError};
 use mac_address::MacAddress;
 use machine_validation::{handle_machine_validation_requested, handle_machine_validation_state};
 use measured_boot::records::MeasurementMachineState;
@@ -118,15 +117,14 @@ use tracing::instrument;
 use version_compare::Cmp;
 
 use crate::boot_interface::{BootInterfaceResolution, resolve_boot_interface};
-use crate::config::{
-    FirmwareGlobal, MachineStateHandlerSiteConfig, MachineValidationConfig, TimePeriod,
-};
+use crate::config::{FirmwareGlobal, MachineValidationConfig, TimePeriod};
 use crate::context::{MachineStateHandlerContextObjects, MachineStateHandlerServices};
 use crate::dpf::DpfOperations;
 use crate::handler::firmware_artifact::ResolvedFirmwareArtifactSource;
 use crate::health_report::{
     create_host_update_health_report_dpufw, create_host_update_health_report_hostfw,
 };
+use crate::platform_config::{self, DpuSettings, PlatformBmc};
 use crate::redfish::{
     did_dpu_finish_booting, host_power_control, host_power_control_with_location, power_state,
     power_state_name, reboot_requested_mode, reset_bmc, set_power,
@@ -159,10 +157,10 @@ mod power;
 mod reset;
 mod rotation;
 mod sku;
-#[cfg(test)]
-mod test_machine_setup;
 
-use bios_config::handle_bios_setup_failed_recovery;
+use bios_config::{
+    handle_bios_setup_failed_recovery, platform_settings_in_effect, vendor_job_status,
+};
 use extension_services::{cleanup_terminated_extension_services, get_extension_services_status};
 use helpers::{
     DpuDiscoveringStateHelper, DpuInitStateHelper, ManagedHostStateHelper, NextState,
@@ -3395,11 +3393,7 @@ fn is_dpu_up(state: &ManagedHostStateSnapshot, dpu_snapshot: &DpuMachine) -> boo
         .unwrap_or(DateTime::<Utc>::MIN_UTC);
     let state_change_time = state.host_snapshot.state.version.timestamp();
 
-    if observation_time < state_change_time {
-        return false;
-    }
-
-    true
+    observation_time >= state_change_time
 }
 
 fn is_dpu_observed_since(dpu_snapshot: &DpuMachine, minimum_observed_at: DateTime<Utc>) -> bool {
@@ -5241,10 +5235,15 @@ impl DpuMachineStateHandler {
                 // guaranteed to have POSTed), it will loop through all the interfaces between
                 // IPv4, IPv6 so it may take a while.
                 //
-                dpu_redfish_client
-                    .boot_once(Boot::UefiHttp)
-                    .map_err(|e| redfish_error("boot_once", e))
-                    .await?;
+                let bmc = PlatformBmc::connect_dpu(
+                    ctx.services,
+                    dpu_snapshot,
+                    dpu_redfish_client.as_ref(),
+                )
+                .await?;
+                platform_config::boot_http_once(&bmc)
+                    .await
+                    .map_err(|e| platform_error("boot_once", e))?;
 
                 let next_state = DpuDiscoveringState::RebootAllDPUS
                     .next_state(&state.managed_state, dpu_machine_id)?;
@@ -5485,7 +5484,6 @@ impl DpuMachineStateHandler {
                 // UEFI credential change performed below until DPF credential
                 // management is available.
                 if !dpf_used_for_ingestion {
-                    let boot_interface = None; // libredfish will choose the DPU
                     if self.enable_secure_boot {
                         dpu_redfish_client
                             .set_host_rshim(EnabledDisabled::Disabled)
@@ -5495,35 +5493,38 @@ impl DpuMachineStateHandler {
                             .set_host_privilege_level(HostPrivilegeLevel::Restricted)
                             .await
                             .map_err(|e| redfish_error("set_host_privilege_level", e))?;
-                    } else if let Err(e) = call_machine_setup_and_handle_no_dpu_error(
-                        dpu_redfish_client.as_ref(),
-                        boot_interface,
-                        state.host_snapshot.associated_dpu_machine_ids().len(),
-                        &ctx.services.site_config,
-                    )
-                    .await
-                    {
-                        // TODO(chet): I don't know if this is still a thing, but I'm pretty sure
-                        // it hasn't been fixed/addressed yet, and it appears to be logged all over
-                        // the place now.
-                        let msg = format!(
-                            "redfish machine_setup failed for DPU {}, potentially due to known race condition between UEFI POST and BMC. issuing a force-restart. err: {}",
-                            dpu_snapshot.id, e
-                        );
-                        tracing::warn!(msg);
-                        let reboot_status = trigger_reboot_if_needed(
+                    } else {
+                        let bmc = PlatformBmc::connect_dpu(
+                            ctx.services,
                             dpu_snapshot,
-                            state,
-                            None,
-                            &self.reachability_params,
-                            ctx,
+                            dpu_redfish_client.as_ref(),
                         )
                         .await?;
+                        if let Err(e) =
+                            platform_config::apply_dpu(&bmc, &ctx.services.site_config).await
+                        {
+                            // TODO(chet): I don't know if this is still a thing, but I'm pretty sure
+                            // it hasn't been fixed/addressed yet, and it appears to be logged all over
+                            // the place now.
+                            let msg = format!(
+                                "applying the platform settings failed for DPU {}, potentially due to known race condition between UEFI POST and BMC. issuing a force-restart. err: {}",
+                                dpu_snapshot.id, e
+                            );
+                            tracing::warn!(msg);
+                            let reboot_status = trigger_reboot_if_needed(
+                                dpu_snapshot,
+                                state,
+                                None,
+                                &self.reachability_params,
+                                ctx,
+                            )
+                            .await?;
 
-                        return Ok(StateHandlerOutcome::wait(format!(
-                            "{msg};\nWaiting for DPU {} to reboot: {reboot_status:#?}",
-                            dpu_snapshot.id
-                        )));
+                            return Ok(StateHandlerOutcome::wait(format!(
+                                "{msg};\nWaiting for DPU {} to reboot: {reboot_status:#?}",
+                                dpu_snapshot.id
+                            )));
+                        }
                     }
                 }
 
@@ -5683,28 +5684,31 @@ impl DpuMachineStateHandler {
                     }
                 };
 
-                match dpu_redfish_client.is_bios_setup(None).await {
-                    Ok(true) => {
+                let bmc = PlatformBmc::connect_dpu(
+                    ctx.services,
+                    dpu_snapshot,
+                    dpu_redfish_client.as_ref(),
+                )
+                .await?;
+                match platform_config::dpu_settings(&bmc).await {
+                    Ok(DpuSettings::InEffect) => {
                         tracing::info!(
                             dpu_machine_id = %dpu_snapshot.id,
                             "BIOS setup verified"
                         );
                         Ok(StateHandlerOutcome::transition(next_state))
                     }
-                    Ok(false) => Ok(StateHandlerOutcome::wait(format!(
+                    Ok(DpuSettings::Pending) => Ok(StateHandlerOutcome::wait(format!(
                         "Polling BIOS setup status, waiting for settings to be applied on DPU {}",
                         dpu_snapshot.id
                     ))),
-                    Err(e)
-                        if carbide_redfish::libredfish::dpu_bios::is_dpu_bios_attributes_not_ready(&e) =>
-                    {
+                    Ok(DpuSettings::Unreported) => {
                         let msg = format!(
-                            "DPU {} BIOS attributes not ready ({e}); issuing a force-restart to mitigate the known UEFI POST/BMC race",
+                            "DPU {} BIOS attributes not ready; issuing a force-restart to mitigate the known UEFI POST/BMC race",
                             dpu_snapshot.id
                         );
                         tracing::warn!(
                             machine_id = %dpu_snapshot.id,
-                            error = %e,
                             "DPU BIOS attributes not ready; issuing a force-restart to mitigate the known UEFI POST/BMC race",
                         );
                         let reboot_status = trigger_reboot_if_needed(
@@ -7949,6 +7953,7 @@ async fn handle_ready_boot_config(
                     // This state is restartable, so re-observe after lockdown is
                     // restored rather than trusting an earlier pre-crash read.
                     let inspection = inspect_host_boot_config(
+                        ctx.services,
                         redfish_client.as_ref(),
                         mh_snapshot,
                         &captured_boot_interface,
@@ -8156,6 +8161,7 @@ async fn complete_host_init_lockdown(
     };
     let boot_interface: BootInterfaceTarget = desired.value.clone().into();
     let inspection = match inspect_host_boot_config(
+        ctx.services,
         redfish_client.as_ref(),
         mh_snapshot,
         &boot_interface,
@@ -8536,11 +8542,6 @@ impl StateHandler for HostMachineStateHandler {
                     Box::new(mh_snapshot.managed_state.clone()),
                 )),
                 MachineState::EnableIpmiOverLan => {
-                    let host_redfish_client = ctx
-                        .services
-                        .create_redfish_client_from_machine(&mh_snapshot.host_snapshot)
-                        .await?;
-
                     let bmc = ctx.services.connect_bmc(&mh_snapshot.host_snapshot).await?;
                     let bmc_control = bmc
                         .bmc_control()
@@ -8560,15 +8561,12 @@ impl StateHandler for HostMachineStateHandler {
                             .map_err(|e| platform_error("enable_ipmi_over_lan", e))?;
                     }
 
-                    let machine_state = if mh_snapshot.has_managed_dpus()
-                        && is_vera_rubin_host(host_redfish_client.as_ref()).await?
-                    {
+                    let machine_state = if onboard_nics::isolate(&bmc_control, mh_snapshot).await? {
                         MachineState::DisableOnboardNics {
                             disable_onboard_nics_state:
                                 DisableOnboardNicsState::ConfigureOnboardNics { enable: true },
                         }
                     } else {
-                        // Other platforms and no-DPU hosts retain their onboard NIC settings.
                         MachineState::WaitingForPlatformConfiguration { retry_count: 0 }
                     };
 
@@ -13341,15 +13339,6 @@ fn handler_restart_dpu(
     }
 }
 
-/// Use libredfish's vendor detection to identify Vera Rubin compute-tray BMCs.
-async fn is_vera_rubin_host(redfish_client: &dyn Redfish) -> Result<bool, StateHandlerError> {
-    redfish_client
-        .get_service_root()
-        .await
-        .map(|root| root.is_vera_rubin())
-        .map_err(|error| redfish_error("get_service_root", error))
-}
-
 /// Returns true if the host's current Redfish power state is `Off`.
 async fn is_host_powered_off(
     mh_snapshot: &ManagedHostStateSnapshot,
@@ -14009,18 +13998,23 @@ async fn restart_dpu(
         && services.site_config.dpu_enable_secure_boot;
 
     if !redfish_install && !dpf_used_for_ingestion {
-        let _ = dpu_redfish_client
-            .boot_once(libredfish::Boot::UefiHttp)
-            .await
-            .map_err(|e| {
-                // We use a Dell to mock our BMC responses in the integration tests. UefiHttp boot is not implemented
-                // for Dells, so this call is failing in our tests. Regardless, it is ok to not make this call blocking.
-                tracing::error!(
-                    machine_id = %machine.id,
-                    error = %e,
-                    "Failed to configure DPU to boot once"
-                );
-            });
+        let boot_http_once = async {
+            let bmc = PlatformBmc::connect_dpu(services, machine, dpu_redfish_client.as_ref())
+                .await
+                .map_err(|e| e.to_string())?;
+            platform_config::boot_http_once(&bmc)
+                .await
+                .map_err(|e| e.to_string())
+        };
+        // We use a Dell to mock our BMC responses in the integration tests. UefiHttp boot is not implemented
+        // for Dells, so this call is failing in our tests. Regardless, it is ok to not make this call blocking.
+        if let Err(error) = boot_http_once.await {
+            tracing::error!(
+                machine_id = %machine.id,
+                %error,
+                "Failed to configure DPU to boot once"
+            );
+        }
     }
 
     let bmc = services.connect_bmc(machine).await?;
@@ -14255,77 +14249,6 @@ fn can_restart_reprovision(dpu_snapshots: &[DpuMachine], version: ConfigVersion)
     };
 
     dpu_reprovision_restart_requested_after_state_transition(version, *latest_requested_at)
-}
-
-/// Call [`Redfish::machine_setup`], but ignore any [`RedfishError::NoDpu`] if we expect there to
-/// be no DPUs on the host. Returns `Ok(Some(job_id))` when the vendor (e.g. Dell) creates a BIOS
-/// config job that must complete before configuring boot order; `Ok(None)` when no job to wait for.
-pub async fn call_machine_setup_and_handle_no_dpu_error(
-    redfish_client: &dyn Redfish,
-    boot_interface: Option<&BootInterfaceTarget>,
-    expected_dpu_count: usize,
-    site_config: &MachineStateHandlerSiteConfig,
-) -> Result<Option<String>, RedfishError> {
-    let setup_result = match boot_interface {
-        Some(target) => {
-            target
-                .run(|bi| {
-                    redfish_client.machine_setup(
-                        Some(bi),
-                        &site_config.bios_profiles,
-                        site_config.selected_profile,
-                        &site_config.oem_manager_profiles,
-                    )
-                })
-                .await
-        }
-        None => {
-            redfish_client
-                .machine_setup(
-                    None,
-                    &site_config.bios_profiles,
-                    site_config.selected_profile,
-                    &site_config.oem_manager_profiles,
-                )
-                .await
-        }
-    };
-    handle_no_dpu_error(setup_result, expected_dpu_count, "machine_setup")
-}
-
-async fn set_boot_order_dpu_first_and_handle_no_dpu_error(
-    redfish_client: &dyn Redfish,
-    boot_interface: &BootInterfaceTarget,
-    expected_dpu_count: usize,
-) -> Result<Option<String>, RedfishError> {
-    let setup_result = boot_interface
-        .run(|bi| redfish_client.set_boot_order_dpu_first(bi))
-        .await;
-    handle_no_dpu_error(setup_result, expected_dpu_count, "set_boot_order_dpu_first")
-}
-
-/// Treat `Err(RedfishError::NoDpu)` as `Ok(None)` *only* when the host is
-/// declared zero-DPU (`expected_dpu_count == 0`). Other error variants and
-/// successful results pass through untouched. The host DPU policy gate in
-/// site-explorer is what guarantees `expected_dpu_count == 0` actually
-/// means the host carries no managed DPU -- either `Ignore` or `Nic`.
-/// Neither has a DPU to answer Redfish, so a `NoDpu` error is expected, not a
-/// fault.
-fn handle_no_dpu_error(
-    result: Result<Option<String>, RedfishError>,
-    expected_dpu_count: usize,
-    operation: &'static str,
-) -> Result<Option<String>, RedfishError> {
-    match (result, expected_dpu_count) {
-        (Err(RedfishError::NoDpu), 0) => {
-            tracing::info!(
-                operation,
-                "redfish operation failed with NoDpu on a zero-DPU host; treating as Ok"
-            );
-            Ok(None)
-        }
-        (other, _) => other,
-    }
 }
 
 fn is_machine_validation_requested(state: &ManagedHostStateSnapshot) -> bool {
@@ -14861,6 +14784,13 @@ async fn handle_instance_host_platform_config(
     Ok(StateHandlerOutcome::transition(next_state))
 }
 
+/// The vendor job the boot order write started, which the host waits for.
+fn boot_order_job(info: &SetBootOrderInfo) -> Option<VendorJobId> {
+    info.set_boot_order_jid
+        .clone()
+        .and_then(|job_id| VendorJobId::new(job_id).ok())
+}
+
 async fn set_host_boot_order(
     ctx: &mut StateHandlerContext<'_, MachineStateHandlerContextObjects>,
     reachability_params: &ReachabilityParams,
@@ -14873,18 +14803,6 @@ async fn set_host_boot_order(
         resolve_boot_interface_for_step(ctx, mh_snapshot, explicit_target).await?;
     match set_boot_order_info.set_boot_order_state {
         SetBootOrderState::SetBootOrder => {
-            // There used to be a `force_dpu_nic_mode`-gated short-circuit
-            // here that, for zero-DPU hosts when the flag was set, called
-            // `boot_first(Boot::UefiHttp)` and returned `Done` to skip
-            // the rest of the SetBootOrder flow. Dropped along with the
-            // flag. We don't extend the `boot_first(UefiHttp)` call to
-            // all zero-DPU hosts because libredfish doesn't implement
-            // `boot_first` for every vendor yet (Dell currently returns
-            // `NotSupported`); zero-DPU hosts fall through to the
-            // `set_boot_order_dpu_first` path below, which treats the
-            // resulting `NoDpu` error as `Ok` and still hits `CheckBootOrder`
-            // for verification.
-            //
             // Resolve the boot NIC the same way `CheckHostConfig` does,
             // supporting hosts with DPU(s) and zero DPUs alike. Before the first
             // HostInband lease creates a real row, a zero-DPU/NIC-mode host
@@ -14901,15 +14819,14 @@ async fn set_host_boot_order(
             };
 
             // Don't re-apply a boot config that's already in place. On Dell two
-            // BIOS config writes cannot share one pending job: machine_setup can
-            // commit a job that collides with set_boot_order_dpu_first (iDRAC
-            // `SYS011`). If the HTTP device drifted since the owning lifecycle's
-            // inspection, return to the shared BIOS/job stages before attempting
-            // the order write.
-            let is_bios_setup = boot_interface
-                .run(|bi| redfish_client.is_bios_setup(Some(bi)))
-                .await
-                .map_err(|e| redfish_error("is_bios_setup", e))?;
+            // BIOS config writes cannot share one pending job: the platform
+            // settings can commit a job that collides with the boot order write
+            // (iDRAC `SYS011`). If the HTTP device drifted since the owning
+            // lifecycle's inspection, return to the shared BIOS/job stages
+            // before attempting the order write.
+            let bmc = PlatformBmc::connect(ctx.services, mh_snapshot, redfish_client).await?;
+            let is_bios_setup =
+                platform_settings_in_effect(ctx.services, &bmc, Some(&boot_interface)).await?;
 
             if !is_bios_setup {
                 // The HTTP-boot device drifted after the owning lifecycle's
@@ -14932,14 +14849,13 @@ async fn set_host_boot_order(
                 return Ok(SetBootOrderOutcome::Done);
             }
 
-            // HTTP-boot device is already set, so `machine_setup` was not re-run
-            // this pass -- no pending BIOS job for the boot-order set to collide
-            // with. If the boot order is already set too, there's nothing to
-            // re-apply: go straight to verification.
-            let is_boot_order_setup = boot_interface
-                .run(|bi| redfish_client.is_boot_order_setup(bi))
+            // HTTP-boot device is already set, so the platform settings were not
+            // re-applied this pass -- no pending BIOS job for the boot-order set
+            // to collide with. If the boot order is already set too, there's
+            // nothing to re-apply: go straight to verification.
+            let is_boot_order_setup = platform_config::boot_order_in_effect(&bmc, &boot_interface)
                 .await
-                .map_err(|e| redfish_error("is_boot_order_setup", e))?;
+                .map_err(|e| platform_error("is_boot_order_setup", e))?;
 
             if is_boot_order_setup {
                 tracing::info!(
@@ -14953,14 +14869,10 @@ async fn set_host_boot_order(
                 }));
             }
 
-            let jid = match set_boot_order_dpu_first_and_handle_no_dpu_error(
-                redfish_client,
-                &boot_interface,
-                mh_snapshot.host_snapshot.associated_dpu_machine_ids().len(),
-            )
-            .await
-            {
-                Ok(jid) => jid,
+            let jid = match platform_config::configure_boot_order(&bmc, &boot_interface).await {
+                Ok(outcome) => {
+                    platform_config::vendor_job_id(&outcome).map(|job_id| job_id.to_string())
+                }
                 Err(e) => {
                     // TODO(chet): I don't know if this is still a thing, but I'm pretty sure
                     // it hasn't been fixed/addressed yet, and it appears to be logged all over
@@ -14968,7 +14880,7 @@ async fn set_host_boot_order(
                     tracing::warn!(
                         machine_id = %mh_snapshot.host_snapshot.id,
                         error = %e,
-                        "redfish set_boot_order_dpu_first failed, potentially due to known race condition between UEFI POST and BMC. triggering force-restart if needed"
+                        "configuring the boot order failed, potentially due to known race condition between UEFI POST and BMC. triggering force-restart if needed"
                     );
 
                     let reboot_status = if mh_snapshot
@@ -15008,7 +14920,7 @@ async fn set_host_boot_order(
                     // cause a transaction rollback, leading to a tight reboot loop (since the
                     // reboot timestamp would be lost).
                     return Ok(SetBootOrderOutcome::WaitingForReboot(format!(
-                        "redfish set_boot_order_dpu_first failed: {e}; triggered host reboot: {reboot_status:#?}"
+                        "configuring the boot order failed: {e}; triggered host reboot: {reboot_status:#?}"
                     )));
                 }
             };
@@ -15036,10 +14948,9 @@ async fn set_host_boot_order(
                 RequiredBootInterface::Wait(outcome) => return Ok(outcome),
             };
 
-            let is_bios_setup = boot_interface
-                .run(|bi| redfish_client.is_bios_setup(Some(bi)))
-                .await
-                .map_err(|e| redfish_error("is_bios_setup", e))?;
+            let bmc = PlatformBmc::connect(ctx.services, mh_snapshot, redfish_client).await?;
+            let is_bios_setup =
+                platform_settings_in_effect(ctx.services, &bmc, Some(&boot_interface)).await?;
 
             if is_bios_setup {
                 tracing::info!(
@@ -15085,51 +14996,50 @@ async fn set_host_boot_order(
             )))
         }
         SetBootOrderState::WaitForSetBootOrderJobScheduled => {
-            if let Some(job_id) = &set_boot_order_info.set_boot_order_jid {
-                let job_state = redfish_client
-                    .get_job_state(job_id)
-                    .await
-                    .map_err(|e| redfish_error("get_job_state", e))?;
+            if let Some(job_id) = boot_order_job(&set_boot_order_info) {
+                let job_status =
+                    vendor_job_status(ctx.services, redfish_client, mh_snapshot, &job_id)
+                        .await?
+                        .map_err(|e| platform_error("get_job_state", e))?;
+                match job_status {
+                    OperationStatus::Failed { .. } | OperationStatus::NeedsIntervention { .. } => {
+                        tracing::warn!(
+                            %job_id,
+                            machine_id = %mh_snapshot.host_snapshot.id,
+                            job_status = ?job_status,
+                            "SetBootOrder: job failed while waiting for scheduling, transitioning to HandleJobFailure",
+                        );
 
-                if job_state.is_error_state() {
-                    tracing::warn!(
-                        %job_id,
-                        machine_id = %mh_snapshot.host_snapshot.id,
-                        job_state = ?job_state,
-                        "SetBootOrder: job failed while waiting for scheduling, transitioning to HandleJobFailure",
-                    );
+                        return Ok(SetBootOrderOutcome::Continue(SetBootOrderInfo {
+                            set_boot_order_jid: None,
+                            set_boot_order_state: SetBootOrderState::HandleJobFailure {
+                                failure: format!(
+                                    "Job {job_id} failed while waiting to be scheduled: {job_status:#?}"
+                                ),
+                                power_state: ExpectedPowerState::Off,
+                            },
+                            retry_count: set_boot_order_info.retry_count,
+                        }));
+                    }
+                    OperationStatus::Completed => {
+                        tracing::info!(
+                            %job_id,
+                            machine_id = %mh_snapshot.host_snapshot.id,
+                            "SetBootOrder: job completed before scheduling was observed; skipping reboot",
+                        );
 
-                    return Ok(SetBootOrderOutcome::Continue(SetBootOrderInfo {
-                        set_boot_order_jid: None,
-                        set_boot_order_state: SetBootOrderState::HandleJobFailure {
-                            failure: format!(
-                                "Job {job_id} failed while waiting to be scheduled: {job_state:#?}"
-                            ),
-                            power_state: ExpectedPowerState::Off,
-                        },
-                        retry_count: set_boot_order_info.retry_count,
-                    }));
-                }
-
-                if matches!(job_state, libredfish::JobState::Completed) {
-                    tracing::info!(
-                        %job_id,
-                        machine_id = %mh_snapshot.host_snapshot.id,
-                        "SetBootOrder: job completed before scheduling was observed; skipping reboot",
-                    );
-
-                    return Ok(SetBootOrderOutcome::Continue(SetBootOrderInfo {
-                        set_boot_order_jid: set_boot_order_info.set_boot_order_jid.clone(),
-                        set_boot_order_state: SetBootOrderState::CheckBootOrder,
-                        retry_count: set_boot_order_info.retry_count,
-                    }));
-                }
-
-                if !matches!(job_state, libredfish::JobState::Scheduled) {
-                    return Err(StateHandlerError::GenericError(eyre::eyre!(
-                        "waiting for job {:#?} to be scheduled; current state: {job_state:#?}",
-                        job_id
-                    )));
+                        return Ok(SetBootOrderOutcome::Continue(SetBootOrderInfo {
+                            set_boot_order_jid: set_boot_order_info.set_boot_order_jid.clone(),
+                            set_boot_order_state: SetBootOrderState::CheckBootOrder,
+                            retry_count: set_boot_order_info.retry_count,
+                        }));
+                    }
+                    OperationStatus::Running => {
+                        return Err(StateHandlerError::GenericError(eyre::eyre!(
+                            "waiting for job {job_id} to be scheduled; current state: {job_status:#?}"
+                        )));
+                    }
+                    OperationStatus::AwaitingReset => {}
                 }
             }
 
@@ -15153,68 +15063,70 @@ async fn set_host_boot_order(
         SetBootOrderState::WaitForSetBootOrderJobCompletion => {
             const JOB_QUERY_WAIT_MINUTES: i64 = 5;
 
-            if let Some(job_id) = &set_boot_order_info.set_boot_order_jid {
-                let job_state = match redfish_client.get_job_state(job_id).await {
-                    Ok(state) => state,
-                    Err(e) => {
-                        // Wait 5 minutes before declaring the job was lost or failed.
-                        // This helps differentiate between transient errors and true failures.
-                        let minutes_since_state_change = mh_snapshot
-                            .host_snapshot
-                            .state
-                            .version
-                            .since_state_change()
-                            .num_minutes();
+            if let Some(job_id) = boot_order_job(&set_boot_order_info) {
+                let job_status =
+                    match vendor_job_status(ctx.services, redfish_client, mh_snapshot, &job_id)
+                        .await?
+                    {
+                        Ok(status) => status,
+                        Err(e) => {
+                            // Wait 5 minutes before declaring the job was lost or failed.
+                            // This helps differentiate between transient errors and true failures.
+                            let minutes_since_state_change = mh_snapshot
+                                .host_snapshot
+                                .state
+                                .version
+                                .since_state_change()
+                                .num_minutes();
 
-                        if minutes_since_state_change < JOB_QUERY_WAIT_MINUTES {
-                            return Err(redfish_error("get_job_state", e));
+                            if minutes_since_state_change < JOB_QUERY_WAIT_MINUTES {
+                                return Err(platform_error("get_job_state", e));
+                            }
+
+                            tracing::warn!(
+                                %job_id,
+                                machine_id = %mh_snapshot.host_snapshot.id,
+                                time_in_state_minutes = minutes_since_state_change,
+                                error = %e,
+                                "SetBootOrder: job lookup failed, transitioning to HandleJobFailure"
+                            );
+
+                            return Ok(SetBootOrderOutcome::Continue(SetBootOrderInfo {
+                                set_boot_order_jid: None,
+                                set_boot_order_state: SetBootOrderState::HandleJobFailure {
+                                    failure: format!("Job {} lookup failed: {}", job_id, e),
+                                    power_state: ExpectedPowerState::Off,
+                                },
+                                retry_count: set_boot_order_info.retry_count,
+                            }));
                         }
+                    };
 
-                        tracing::warn!(
-                            %job_id,
-                            machine_id = %mh_snapshot.host_snapshot.id,
-                            time_in_state_minutes = minutes_since_state_change,
-                            error = %e,
-                            "SetBootOrder: job lookup failed, transitioning to HandleJobFailure"
-                        );
-
-                        return Ok(SetBootOrderOutcome::Continue(SetBootOrderInfo {
-                            set_boot_order_jid: None,
-                            set_boot_order_state: SetBootOrderState::HandleJobFailure {
-                                failure: format!("Job {} lookup failed: {}", job_id, e),
-                                power_state: ExpectedPowerState::Off,
-                            },
-                            retry_count: set_boot_order_info.retry_count,
-                        }));
-                    }
-                };
-
-                match job_state {
-                    libredfish::JobState::Completed => {
+                match job_status {
+                    OperationStatus::Completed => {
                         // Job completed successfully, proceed to CheckBootOrder
                     }
-                    _ if job_state.is_error_state() => {
+                    OperationStatus::Failed { .. } | OperationStatus::NeedsIntervention { .. } => {
                         tracing::warn!(
                             %job_id,
                             machine_id = %mh_snapshot.host_snapshot.id,
-                            job_state = ?job_state,
+                            job_status = ?job_status,
                             "SetBootOrder: job failed, transitioning to HandleJobFailure",
                         );
 
                         return Ok(SetBootOrderOutcome::Continue(SetBootOrderInfo {
                             set_boot_order_jid: None,
                             set_boot_order_state: SetBootOrderState::HandleJobFailure {
-                                failure: format!("Job {} failed: {job_state:#?}", job_id),
+                                failure: format!("Job {job_id} failed: {job_status:#?}"),
                                 power_state: ExpectedPowerState::Off,
                             },
                             retry_count: set_boot_order_info.retry_count,
                         }));
                     }
-                    _ => {
+                    OperationStatus::Running | OperationStatus::AwaitingReset => {
                         // Job is still running, wait for completion
                         return Err(StateHandlerError::GenericError(eyre::eyre!(
-                            "waiting for job {:#?} to complete; current state: {job_state:#?}",
-                            job_id
+                            "waiting for job {job_id} to complete; current state: {job_status:#?}"
                         )));
                     }
                 }
@@ -15349,10 +15261,9 @@ async fn set_host_boot_order(
             // device or another managed BIOS attribute. Verify BIOS first for
             // every platform and return to the shared job-aware repair before
             // declaring the overall boot configuration complete.
-            let is_bios_setup = boot_interface
-                .run(|bi| redfish_client.is_bios_setup(Some(bi)))
-                .await
-                .map_err(|e| redfish_error("is_bios_setup", e))?;
+            let bmc = PlatformBmc::connect(ctx.services, mh_snapshot, redfish_client).await?;
+            let is_bios_setup =
+                platform_settings_in_effect(ctx.services, &bmc, Some(&boot_interface)).await?;
 
             if !is_bios_setup {
                 tracing::warn!(
@@ -15375,10 +15286,10 @@ async fn set_host_boot_order(
                 return Ok(SetBootOrderOutcome::Done);
             }
 
-            let boot_order_configured = boot_interface
-                .run(|bi| redfish_client.is_boot_order_setup(bi))
-                .await
-                .map_err(|e| redfish_error("is_boot_order_setup", e))?;
+            let boot_order_configured =
+                platform_config::boot_order_in_effect(&bmc, &boot_interface)
+                    .await
+                    .map_err(|e| platform_error("is_boot_order_setup", e))?;
 
             if boot_order_configured {
                 tracing::info!(
@@ -16282,37 +16193,6 @@ mod tests {
             .expect("stale CX7 inventory should require upgrade");
 
         assert_eq!(to_install.version, target_version);
-    }
-
-    #[test]
-    fn handle_no_dpu_error_treats_as_ok_on_zero_dpu_host() {
-        let result = handle_no_dpu_error(Err(RedfishError::NoDpu), 0, "machine_setup");
-        assert!(matches!(result, Ok(None)));
-    }
-
-    #[test]
-    fn handle_no_dpu_error_surfaces_when_dpus_were_expected() {
-        let result = handle_no_dpu_error(Err(RedfishError::NoDpu), 2, "machine_setup");
-        assert!(matches!(result, Err(RedfishError::NoDpu)));
-    }
-
-    #[test]
-    fn handle_no_dpu_error_passes_through_success() {
-        let job_id = "bios-job-1".to_string();
-        let result = handle_no_dpu_error(Ok(Some(job_id.clone())), 0, "machine_setup");
-        assert!(matches!(result, Ok(Some(ref s)) if s == &job_id));
-
-        let result = handle_no_dpu_error(Ok(None), 2, "machine_setup");
-        assert!(matches!(result, Ok(None)));
-    }
-
-    #[test]
-    fn handle_no_dpu_error_does_not_touch_other_errors() {
-        // Other error variants must surface, even on zero-DPU hosts -- we
-        // only ignore the *specific* NoDpu signal.
-        let result =
-            handle_no_dpu_error(Err(RedfishError::Lockdown), 0, "set_boot_order_dpu_first");
-        assert!(matches!(result, Err(RedfishError::Lockdown)));
     }
 
     #[test]

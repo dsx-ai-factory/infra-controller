@@ -5,8 +5,10 @@ package activity
 
 import (
 	"context"
+
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/componentmanager"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/componentmanager/capability"
+	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/dispatchguard"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/executor/temporalworkflow/common"
 )
 
@@ -34,6 +36,11 @@ const NamePrepareFactoryReset = "PrepareFactoryReset"
 const NameSubmitFactoryReset = "SubmitFactoryReset"
 
 func (a *Activities) PrepareFactoryReset(ctx context.Context, target common.Target) error {
+	ctx = a.dispatchContext(ctx)
+	err := dispatchguard.Check(ctx)
+	if err != nil {
+		return err
+	}
 	manager, err := requireCapableManager[componentmanager.ComponentResetter](a.registry, target, capability.CapabilityComponentReset)
 	if err != nil {
 		return err
@@ -42,6 +49,11 @@ func (a *Activities) PrepareFactoryReset(ctx context.Context, target common.Targ
 }
 
 func (a *Activities) SubmitFactoryReset(ctx context.Context, target common.Target, scope string) error {
+	ctx = a.dispatchContext(ctx)
+	err := dispatchguard.Check(ctx)
+	if err != nil {
+		return err
+	}
 	manager, err := requireCapableManager[componentmanager.ComponentResetter](a.registry, target, capability.CapabilityComponentReset)
 	if err != nil {
 		return err

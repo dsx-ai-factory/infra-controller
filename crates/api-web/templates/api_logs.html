@@ -1,4 +1,5 @@
 {% extends "base.html" %}
+{% import "common_ui.html" as common %}
 
 {% block title %}Logs{% endblock %}
 
@@ -8,67 +9,39 @@
      page-level wiggle), and let that pane fill the leftover height. */
   html, body { overflow: hidden; }
   main { height: 100vh; min-height: 0; box-sizing: border-box; display: flex; flex-direction: column; }
-  .log-source-bar { display: flex; gap: .25rem; margin: .5rem 0; }
-  .log-source-bar button {
-    padding: .3rem .9rem; border: 1px solid var(--border-color); background: var(--bg-tertiary);
-    color: var(--text-secondary);
-    cursor: pointer; border-radius: 4px; font: inherit;
-  }
-  .log-source-bar button.active { background: #2d6cdf; color: #fff; border-color: #2d6cdf; }
-  .log-source-bar button:disabled { background: var(--bg-tertiary); color: var(--text-muted); cursor: not-allowed; }
-  .log-toolbar { display: flex; gap: .6rem; align-items: center; margin: .5rem 0; flex-wrap: wrap; }
-  .log-toolbar input[type=search] { min-width: 18rem; }
-  #log-status { margin-left: auto; color: var(--text-muted); font-size: .85em; }
-  #log-output {
-    font-family: ui-monospace, Menlo, Consolas, monospace;
-    font-size: 12px; line-height: 1.45;
-    flex: 1 1 auto; min-height: 0; overflow-y: auto; overflow-anchor: none; scrollbar-gutter: stable;
-    background: #0f1115; color: #d4d4d4;
-    border: 1px solid #333; border-radius: 6px;
-    padding: .5rem; white-space: pre-wrap; word-break: break-word;
-  }
-  .log-row { display: block; }
-  .log-row .ts  { color: #6a737d; }
-  .log-row .tgt { color: #6a9ad4; }
-  .log-row .loc { color: #6b7280; }
-  .log-row.lvl-ERROR { color: #ff6b6b; }
-  .log-row.lvl-WARN  { color: #ffd166; }
-  .log-row.lvl-INFO  { color: #d4d4d4; }
-  .log-row.lvl-DEBUG { color: #9aa5b1; }
-  .log-row.lvl-TRACE { color: #6b7280; }
-  /* SPAN lines are very frequent, so keep them just slightly dimmer than INFO.
-     TODO(chet): Consider italicizing them too. */
-  .log-row.lvl-SPAN  { color: #9a9a9a; }
-  .log-row .sid { color: #6a9ad4; cursor: pointer; text-decoration: underline dotted; }
-  .log-row.lag { color: #ffa500; font-style: italic; }
-  .log-row.hidden { display: none; }
+  main > .main-content { flex: 1 1 auto; min-height: 0; width: 100%; display: flex; flex-direction: column; }
 </style>
 {% endblock %}
 
 {% block content %}
-<h2>Logs</h2>
-<div class="log-source-bar" role="tablist">
-  <button type="button" class="active" aria-selected="true">API</button>
-  <button type="button" disabled title="Host (Scout)">Scout</button>
-  <button type="button" disabled title="DPU Agent">DPU</button>
-</div>
-<div class="log-toolbar">
-  <label>Level
-    <select id="log-level-filter">
-      <option value="0">TRACE+</option>
-      <option value="1">DEBUG+</option>
-      <option value="2" selected>INFO+</option>
-      <option value="3">WARN+</option>
-      <option value="4">ERROR</option>
-    </select>
-  </label>
-  <input type="search" id="log-text-filter" placeholder="filter by text (target, message, fields)…">
-  <button type="button" id="log-pause">Pause</button>
-  <button type="button" id="log-clear">Clear</button>
-  <label title="Show span-completion summaries"><input type="checkbox" id="log-show-spans" checked> spans</label>
-  <span id="log-status">connecting…</span>
-</div>
-<div id="log-output"></div>
+<h1>Live Logs</h1>
+<section class="entity-summary log-viewer">
+  <div class="log-toolbar">
+    <div class="log-sources" role="tablist" aria-label="Log source">
+      <button type="button" class="btn-plain active" aria-selected="true">API</button>
+      <button type="button" class="btn-plain" disabled title="Host (Scout)">Scout</button>
+      <button type="button" class="btn-plain" disabled title="DPU Agent">DPU</button>
+    </div>
+    <label class="log-field">Level
+      <select id="log-level-filter">
+        <option value="0">TRACE+</option>
+        <option value="1">DEBUG+</option>
+        <option value="2" selected>INFO+</option>
+        <option value="3">WARN+</option>
+        <option value="4">ERROR</option>
+      </select>
+    </label>
+    <div class="table-filter-search log-search">
+      {% call common::search_icon(15, "2") %}{% endcall %}
+      <input type="search" id="log-text-filter" class="table-filter-input" placeholder="Filter by target, message, or fields…" aria-label="Filter log lines">
+    </div>
+    <label class="log-spans" title="Show span-completion summaries"><input type="checkbox" id="log-show-spans" checked> Spans</label>
+    <span id="log-status" class="bubble">Connecting…</span>
+    <button type="button" class="btn-secondary" id="log-pause">Pause</button>
+    <button type="button" class="btn-secondary" id="log-clear">Clear</button>
+  </div>
+  <div id="log-output"></div>
+</section>
 {% endblock %}
 
 {% block script %}
@@ -243,17 +216,22 @@
   pauseBtn.addEventListener('click', function () {
     paused = !paused;
     pauseBtn.textContent = paused ? 'Resume' : 'Pause';
+    pauseBtn.classList.toggle('active', paused);
     if (!paused) out.scrollTop = out.scrollHeight;
   });
   clearBtn.addEventListener('click', function () { out.replaceChildren(); reachedStart = false; });
 
   const es = new EventSource('/admin/logs/api/stream');
-  es.onopen = function () { statusEl.textContent = 'streaming'; };
+  function setStatus(text, kind) {
+    statusEl.textContent = text;
+    statusEl.className = 'bubble' + (kind ? ' ' + kind : '');
+  }
+  es.onopen = function () { setStatus('Streaming', 'success'); };
   es.onmessage = function (e) {
     try { addLine(JSON.parse(e.data)); } catch (_) { /* ignore malformed payload */ }
   };
   es.addEventListener('lag', function (e) { addLag(e.data); });
-  es.onerror = function () { statusEl.textContent = 'reconnecting…'; };
+  es.onerror = function () { setStatus('Reconnecting…', 'warning'); };
 })();
 {% endraw %}
 {% endblock %}

@@ -96,6 +96,7 @@ async fn update_network_status_observation(
             astra_config_status: None,
             lldp: None,
             lldp_snapshot_fingerprint: None,
+            service_vpc_network_observation: None,
         }))
         .await
         .unwrap();
@@ -1608,7 +1609,7 @@ async fn test_network_security_group_propagation_impl(
                 .metadata(Metadata::new_with_default_name())
                 .network_security_group_id(good_network_security_group_id)
                 .rpc(),
-            dpu_count,
+            instance_interface_count,
         )
         .await;
 

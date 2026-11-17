@@ -8,24 +8,24 @@
 <table class="sortable overview">
 	<thead>
 	<tr>
-		<th>ID</th>
-		<th>MAC Address</th>
-		<th>IP Address</th>
-		<th>Association Type</th>
-		<th>Association ID</th>
-		<th>Type</th>
+		<th>Interface</th>
+		<th>Address</th>
+		<th>Associated With</th>
 		<th>Hostname</th>
 		<th>Vendor</th>
-		<th>Domain Name</th>
 	</tr>
 	</thead>
 	<tbody>
 	{% for iface in interfaces %}
 		<tr>
-			<td><a href="/admin/interface/{{ iface.id }}">{{ iface.id }}</a></td>
-			<td>{{ iface.mac_address }}</td>
-			<td>{{ iface.ip_address }}</td>
-			<td>{{ iface.association_type }}</td>
+			<td>
+				<a href="/admin/interface/{{ iface.id }}">{{ iface.id }}</a>
+				<span class="cell-sub">{{ iface.interface_type }}</span>
+			</td>
+			<td>
+				{% if iface.ip_address.is_empty() %}<span class="text-muted">—</span>{% else %}<div class="cell-nowrap">{{ iface.ip_address }}</div>{% endif %}
+				<code class="cell-chip">{{ iface.mac_address }}</code>
+			</td>
 			<td>
 				{% if !iface.machine_id.is_empty() %}
 				{{ iface.machine_id|machine_id_link|safe }}
@@ -33,12 +33,16 @@
 				{{ iface.switch_id|switch_id_link|safe }}
 				{% else if !iface.power_shelf_id.is_empty() %}
 				{{ iface.power_shelf_id|power_shelf_id_link|safe }}
+				{% else %}
+				<span class="text-muted">None</span>
 				{% endif %}
+				<span class="cell-sub">{{ iface.association_type }}</span>
 			</td>
-			<td>{{ iface.interface_type }}</td>
-			<td>{{ iface.hostname }}</td>
-			<td>{{ iface.vendor }}</td>
-			<td>{{ iface.domain_name }}</td>
+			<td>
+				{% if iface.hostname.is_empty() %}<span class="text-muted">—</span>{% else %}{{ iface.hostname }}{% endif %}
+				{% if !iface.domain_name.is_empty() %}<span class="cell-sub">{{ iface.domain_name }}</span>{% endif %}
+			</td>
+			<td>{% if iface.vendor.is_empty() %}<span class="text-muted">—</span>{% else %}{{ iface.vendor }}{% endif %}</td>
 		</tr>
 	{% endfor %}
 	</tbody>

@@ -69,6 +69,7 @@ impl NvLinkDomainHealthReportSink {
             config.connection.client_cert.clone(),
             config.connection.client_key.clone(),
             &config.connection.api_url,
+            instrumentation.clone(),
         );
 
         let queue: Arc<DedupQueue<NvLinkDomainHealthReportKey, Arc<HealthReport>>> =
@@ -268,7 +269,7 @@ mod tests {
     async fn dropping_sink_releases_submission_worker_queue() {
         let sink = NvLinkDomainHealthReportSink::new(
             &Default::default(),
-            carbide_instrument::Instrumentation::global(),
+            carbide_instrument::Instrumentation::noop(),
         )
         .expect("sink should start inside a Tokio runtime");
 

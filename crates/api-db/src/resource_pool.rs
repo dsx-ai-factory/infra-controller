@@ -397,11 +397,11 @@ RETURNING value
     let out = allocated
         .parse()
         .map_err(|e: <T as FromStr>::Err| ResourcePoolError::Parse {
-            e: e.to_string(),
-            v: allocated,
-            pool_name: value.name.clone(),
-            owner_type: owner_type.to_string(),
-            owner_id: owner_id.to_string(),
+            e: e.to_string().into(),
+            v: allocated.into(),
+            pool_name: value.name.as_str().into(),
+            owner_type: owner_type.to_string().into(),
+            owner_id: owner_id.into(),
         })?;
     Ok(out)
 }
@@ -507,11 +507,11 @@ where
             value
                 .parse()
                 .map_err(|error: <T as FromStr>::Err| ResourcePoolError::Parse {
-                    e: error.to_string(),
-                    v: value,
-                    pool_name: pool.name.clone(),
-                    owner_type: owner_type.to_string(),
-                    owner_id: owner_id.to_string(),
+                    e: error.to_string().into(),
+                    v: value.into(),
+                    pool_name: pool.name.as_str().into(),
+                    owner_type: owner_type.to_string().into(),
+                    owner_id: owner_id.into(),
                 })
         })
         .transpose()

@@ -17,8 +17,8 @@
 
 use std::path::Path;
 
+use carbide_dpu_agent_utils::FMDS_IPV6_GATEWAY;
 use carbide_host_support::agent_config::MachineIdentityConfig;
-use forge_dpu_agent_utils::FMDS_IPV6_GATEWAY;
 use tokio::process::{Child, Command};
 use tokio::time::{sleep, timeout};
 

@@ -21,7 +21,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use bmc_backend::BackendBmc;
-use bmc_platform::{PlatformError, PowerState, ResetType};
+use bmc_platform::{BiosSettings, BootInterfaceSelector, PlatformError, PowerState, ResetType};
 use bmc_runtime::DriverConnector;
 use carbide_redfish::boot_interface::BootInterfaceTarget;
 use carbide_redfish::libredfish::{
@@ -473,7 +473,7 @@ impl RedfishClient {
             return manager.reset(reset_type).await.map(drop).map_err(|err| {
                 map_nv_redfish_explore_error(bmc_explorer::Error::NvRedfish {
                     context: "manager reset",
-                    err,
+                    err: Box::new(err),
                 })
             });
         }
@@ -520,7 +520,7 @@ impl RedfishClient {
             return system.reset(Some(action)).await.map(drop).map_err(|err| {
                 map_nv_redfish_explore_error(bmc_explorer::Error::NvRedfish {
                     context: "system reset",
-                    err,
+                    err: Box::new(err),
                 })
             });
         }
@@ -696,12 +696,24 @@ impl RedfishClient {
         &self,
         bmc_ip_address: SocketAddr,
         bmc: EstablishedBmc,
+        report: Option<&EndpointExplorationReport>,
         boot_interface: Option<&BootInterfaceTarget>,
     ) -> Result<(), EndpointExplorationError> {
-        let client = self
-            .create_established_redfish_client(bmc_ip_address, bmc, None)
-            .await
-            .map_err(map_redfish_client_creation_error)?;
+        let client = match self
+            .connect_established(bmc_ip_address, bmc, report)
+            .await?
+        {
+            BackendBmc::Libredfish(client) => client,
+            BackendBmc::Drivers(bmc) => {
+                let boot_interface = boot_interface.map(BootInterfaceSelector::from);
+                bmc.bios()
+                    .map_err(|error| map_platform_error(error.into()))?
+                    .apply(&BiosSettings::default(), boot_interface.as_ref())
+                    .await
+                    .map_err(map_platform_error)?;
+                return Ok(());
+            }
+        };
 
         // We will be redoing machine_setup later and can worry about getting the profile right then.
         // Keep `empty_profiles` outside the closure so the returned future can borrow it.
@@ -952,7 +964,12 @@ async fn primary_system(
 fn nv_error(
     context: &'static str,
 ) -> impl FnOnce(nv_redfish::Error<RedfishBmc>) -> EndpointExplorationError {
-    move |err| map_nv_redfish_explore_error(bmc_explorer::Error::NvRedfish { context, err })
+    move |err| {
+        map_nv_redfish_explore_error(bmc_explorer::Error::NvRedfish {
+            context,
+            err: Box::new(err),
+        })
+    }
 }
 
 /// The libredfish `Manager.Reset` type for `reset_type`; libredfish supports
@@ -1094,7 +1111,7 @@ fn map_nv_redfish_explore_error(
     type BmcError = carbide_redfish::nv_redfish::BmcError;
     use carbide_redfish::nv_redfish::Error;
     match err {
-        bmc_explorer::Error::NvRedfish { context, err } => match err {
+        bmc_explorer::Error::NvRedfish { context, err } => match *err {
             Error::Bmc(err) => match err {
                 BmcError::ReqwestError(err) => {
                     let details = format!(
@@ -1559,6 +1576,7 @@ mod tests {
             "site-explorer-test",
             bmc_drivers::built_in_rules(),
             carbide_ipmi::test_support(),
+            carbide_instrument::Instrumentation::noop(),
         )
         .expect("the pools are in order");
         let mut client = build_redfish_client(Arc::new(RedfishSim::default()));

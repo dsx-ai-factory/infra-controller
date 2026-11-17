@@ -1129,7 +1129,8 @@ scout_run_interval = "5s"
             &app_config.carbide_api_url,
             &carbide_client_config,
         );
-        let carbide_api_client = CarbideApiClient::new(&api_config);
+        let carbide_api_client =
+            CarbideApiClient::new(&api_config, carbide_instrument::Instrumentation::noop());
         let api_client: ApiClient = carbide_api_client.clone().into();
         let pool_config =
             bmc_mock::mac_address_pool::PoolConfig::new(MacAddress::new([2, 0, 0, 0, 0, 0]), 24)

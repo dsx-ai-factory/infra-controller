@@ -101,6 +101,7 @@ macro_rules! capability_operations {
                     Box::pin(async move {
                         let cx = self.bmc.operation_context();
                         observe(
+                            &self.bmc.instrumentation,
                             self.bmc.endpoint(),
                             Some(Capability::$trait),
                             concat!(stringify!($capability), ".", stringify!($method)),
@@ -170,6 +171,8 @@ capability_operations!(bmc_control: BmcControl {
     fn set_ipmi_over_lan(&self, enabled: bool) -> DriverOutcome;
     fn apply_settings(&self, profile: &ManagerSettings) -> DriverOutcome;
     fn settings_status(&self) -> ManagerSettingsStatus;
+    fn host_management_network_access(&self) -> Option<bool>;
+    fn set_host_management_network_access(&self, enabled: bool) -> DriverOutcome;
 });
 
 capability_operations!(boot_order: BootOrder {

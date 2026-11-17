@@ -306,7 +306,9 @@ pub async fn start_api_server_with_config(
         Ok(ready) => ready,
         Err(_error) => match join_handle.await {
             Ok(Err(error)) => return Err(error),
-            Ok(Ok(())) => eyre::bail!("API server exited before reporting readiness"),
+            Ok(Ok(())) => {
+                eyre::bail!("API server exited before reporting readiness");
+            }
             Err(error) => return Err(error.into()),
         },
     };
@@ -319,7 +321,9 @@ pub async fn start_api_server_with_config(
         cancel_token.cancel();
         match join_handle.await {
             Ok(Err(error)) => return Err(error),
-            Ok(Ok(())) => eyre::bail!("API server reported readiness without a metrics listener"),
+            Ok(Ok(())) => {
+                eyre::bail!("API server reported readiness without a metrics listener");
+            }
             Err(error) => return Err(error.into()),
         }
     };

@@ -63,6 +63,7 @@ async fn credentials_round_trip_over_ipv6_tls() -> eyre::Result<()> {
             carbide_instrument::Instrumentation::from_meter_provider(
                 &opentelemetry::metrics::noop::NoopMeterProvider::new(),
             ),
+            None,
         )?;
         client.set_credentials(&key, &expected).await?;
         Ok::<_, eyre::Report>(client.get_credentials(&key).await?)
@@ -110,6 +111,7 @@ async fn setup_vault_with_secrets() -> Option<(
         carbide_instrument::Instrumentation::from_meter_provider(
             &opentelemetry::metrics::noop::NoopMeterProvider::new(),
         ),
+        None,
     )
     .expect("create vault client");
 

@@ -45,6 +45,7 @@ import (
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/componentmanager/providerapi"
 	nicoprovider "github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/componentmanager/providers/nico"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/componentmanager/readiness"
+	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/dispatchguard"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/executor/temporalworkflow/common"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/operations"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/pkg/common/devicetypes"
@@ -154,7 +155,12 @@ func machineIDsProto(ids []string) *corev1.MachineIdList {
 // the operation runs unconditionally; the bypass is logged so it remains
 // auditable from the worker log alone.
 // ensureTargetOperable keeps readiness resolution separate from API targeting.
-func (m *Manager) ensureTargetOperable(ctx context.Context, target common.Target, op types.OperationType, override bool) error {
+func (m *Manager) ensureTargetOperable(ctx context.Context, target common.Target, op types.OperationType, override bool) (err error) {
+	defer func() {
+		if err == nil {
+			err = dispatchguard.Check(ctx)
+		}
+	}()
 	if !target.UsesMACAddresses() {
 		return m.ensureMachinesOperable(ctx, target.Identifiers, op, override)
 	}
@@ -173,7 +179,12 @@ func (m *Manager) ensureMachinesOperable(
 	machineIDs []string,
 	op types.OperationType,
 	overrideReadinessCheck bool,
-) error {
+) (err error) {
+	defer func() {
+		if err == nil {
+			err = dispatchguard.Check(ctx)
+		}
+	}()
 	if len(machineIDs) == 0 {
 		return nil
 	}
@@ -210,6 +221,9 @@ func (m *Manager) InjectExpectation(
 		return fmt.Errorf("nico client is not configured")
 	}
 
+	if err := dispatchguard.Check(ctx); err != nil {
+		return err
+	}
 	if err := m.nicoClient.AddExpectedMachine(ctx, req); err != nil {
 		return fmt.Errorf("failed to add expected machine: %w", err)
 	}
@@ -277,6 +291,9 @@ func (m *Manager) PowerControl(
 		}
 	}
 
+	if err := dispatchguard.Check(ctx); err != nil {
+		return err
+	}
 	resp, err := m.nicoClient.ComponentPowerControl(ctx, req)
 	if err != nil {
 		return fmt.Errorf("ComponentPowerControl failed: %w", err)
@@ -469,6 +486,9 @@ func (m *Manager) firmwareControlComputeTrays(
 		req.AccessToken = &accessToken
 	}
 
+	if err := dispatchguard.Check(ctx); err != nil {
+		return err
+	}
 	resp, err := m.nicoClient.UpdateComponentFirmware(ctx, req)
 	if err != nil {
 		return fmt.Errorf("UpdateComponentFirmware failed: %w", err)
@@ -631,6 +651,9 @@ func (m *Manager) BringUpControl(
 	}
 
 	for _, componentID := range target.Identifiers {
+		if err := dispatchguard.Check(ctx); err != nil {
+			return err
+		}
 		if err := m.nicoClient.AllowIngestionAndPowerOn(ctx, componentID, ""); err != nil {
 			return fmt.Errorf("BringUpControl failed for %s: %w", componentID, err)
 		}
@@ -697,6 +720,9 @@ func (m *Manager) Decommission(
 	}
 
 	for _, machineID := range target.Identifiers {
+		if err := dispatchguard.Check(ctx); err != nil {
+			return err
+		}
 		if err := m.nicoClient.DecommissionMachine(ctx, machineID); err != nil {
 			return fmt.Errorf("DecommissionMachine failed for %s: %w", machineID, err)
 		}

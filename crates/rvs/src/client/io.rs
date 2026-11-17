@@ -21,10 +21,13 @@ pub struct NicoClient {
 }
 
 impl NicoClient {
-    /// Construct from API config.
-    pub fn new(api_config: &ApiConfig<'_>) -> Self {
+    /// Constructs a client from API config and an explicit RED metric destination.
+    pub fn new(
+        api_config: &ApiConfig<'_>,
+        instrumentation: carbide_instrument::Instrumentation,
+    ) -> Self {
         Self {
-            inner: CarbideApiClient::new(api_config),
+            inner: CarbideApiClient::new(api_config, instrumentation),
         }
     }
 

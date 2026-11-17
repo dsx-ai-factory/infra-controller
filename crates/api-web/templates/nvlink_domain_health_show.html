@@ -1,4 +1,5 @@
 {% extends "base.html" %}
+{% import "common_ui.html" as common %}
 
 {% block title %}NVLink Domain Health{% endblock %}
 
@@ -6,41 +7,35 @@
 <div id="json"><a id="json-link" href="{{ json_path }}">JSON</a></div>
 <h1>NVLink Domain Health ({{ page.total_items() }})</h1>
 
-<form action="{{ page.path }}" method="get">
-	<table class="detailsview">
-		<tr>
-			<th><label for="q">Domain ID</label></th>
-			<td>
-				<input type="search" id="q" name="q" value="{{ search_query }}">
-				<input type="hidden" name="limit" value="{{ page.limit() }}">
-				<input type="submit" value="Search">
-				{% if search_query != "" %}
-				<a href="{{ page.path }}?limit={{ page.limit() }}">Clear</a>
-				{% endif %}
-			</td>
-		</tr>
-	</table>
+<form class="table-filter" action="{{ page.path }}" method="get" role="search">
+	<div class="table-filter-search">
+		{% call common::search_icon(15, "2") %}{% endcall %}
+		<input type="search" class="table-filter-input" id="q" name="q" value="{{ search_query }}" placeholder="Search by domain ID…" aria-label="Search by domain ID">
+	</div>
+	<input type="hidden" name="limit" value="{{ page.limit() }}">
+	<button type="submit" class="btn-secondary table-filter-toggle">Search</button>
+	{% if search_query != "" %}
+	<a class="table-filter-count" href="{{ page.path }}?limit={{ page.limit() }}">Clear</a>
+	{% endif %}
 </form>
 
-<table class="sortable overview">
+<table class="sortable overview" data-no-auto-filter>
 	<thead>
-		<th>Domain ID</th>
-		<th>Health Reports</th>
+		<tr>
+			<th>Domain</th>
+			<th class="no-sort"></th>
+		</tr>
 	</thead>
 	<tbody>
 		{% for domain in domains %}
 		<tr>
-			<td>{{ domain.id }}</td>
-			<td><a href="{{ domain.health_url }}">Health reports</a></td>
+			<td><a href="/admin/nvlink-domain/{{ domain.id }}">{{ domain.id }}</a></td>
+			<td class="cell-nowrap"><a href="{{ domain.health_url }}">Health reports</a></td>
 		</tr>
+		{% else %}
+		<tr><td colspan="2">{% if search_query != "" %}No domains match "{{ search_query }}".{% else %}No NVLink domains.{% endif %}</td></tr>
 		{% endfor %}
 	</tbody>
-	<tfoot>
-		<tr>
-			<th>{{ domains.len() }} item{% if domains.len() != 1 %}s{% endif %}</th>
-			<th></th>
-		</tr>
-	</tfoot>
 </table>
 
 {% include "pages_footer.html" %}

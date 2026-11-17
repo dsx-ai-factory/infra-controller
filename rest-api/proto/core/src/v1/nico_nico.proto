@@ -1388,6 +1388,21 @@ service Forge {
   rpc UpdateComponentFirmware(UpdateComponentFirmwareRequest) returns (UpdateComponentFirmwareResponse);
   rpc GetComponentFirmwareStatus(GetComponentFirmwareStatusRequest) returns (GetComponentFirmwareStatusResponse);
   rpc ListComponentFirmwareVersions(ListComponentFirmwareVersionsRequest) returns (ListComponentFirmwareVersionsResponse);
+  // Returns the username and password Core uses to reach an ingested power
+  // shelf or switch that an external component manager (PSM or NSM) operates:
+  // the per-device entry in the credential store, else the expected-inventory
+  // credentials. Credential overrides sent with a dispatch request are not
+  // consulted. Backend registration may persist a pair, including one that
+  // was an override (NSM/PSM store them in Vault). Where Core's credential
+  // store reads the entries a manager wrote, such a pair is a per-device
+  // entry and is returned like any other.
+  // Only the nico-powershelf-manager and nico-nvswitch-manager service
+  // identities may call this, each for its own credential kinds.
+  // Core bounds the device checks and the credential lookup together at five
+  // seconds and returns DeadlineExceeded when that time expires. A failed read
+  // of the credential store returns Internal instead of falling back to
+  // expected inventory, as does a database failure.
+  rpc GetComponentCredentials(GetComponentCredentialsRequest) returns (GetComponentCredentialsResponse);
 
   // Operating System library
   rpc CreateOperatingSystem(CreateOperatingSystemRequest) returns (OperatingSystem);
@@ -2255,9 +2270,14 @@ message RuntimeConfig {
 
   // Operator FNN null routes reported by the anonymous Version RPC. When
   // site_fabric_null_routes is omitted from site configuration, this includes
-  // site_fabric_prefixes and removed operator-managed roots while they contain
-  // a VpcPrefix or VPC-attached direct NetworkPrefix. Tenant-managed roots are
-  // not added here; this is not a complete audit of DPU isolation routes. Use
+  // site_fabric_prefixes and removed operator-managed roots retained by an exact
+  // VpcPrefix reference, a contained VpcPrefix without parentage, or a contained
+  // VPC-attached direct NetworkPrefix. A direct prefix retains retiring roots
+  // while its segment exists and no Ready operator root fully covers it, including
+  // during draining. Adding or restoring that coverage releases the retiring
+  // roots without deleting the segment. VpcPrefix references remain until hard
+  // deletion. Tenant-managed roots are not added here; this is not a complete
+  // audit of DPU isolation routes. Use
   // GetManagedHostNetworkConfig for the tenant-inclusive FNN response, with RBAC
   // enforced. An explicit list is returned without checking tenant coverage.
   // Older Core versions omit this field; an empty items list is authoritative.
@@ -6934,6 +6954,28 @@ message DpuNetworkStatus {
   // Core validates it against the attached interfaces for UPDATED reports
   // and against its accepted fingerprint for UNCHANGED reports.
   optional bytes lldp_snapshot_fingerprint = 19;
+  // Service interfaces from a successfully reconciled network response, independent
+  // of instance_network_config_version. Omission supplies no service applied evidence.
+  // A present empty report acknowledges a configuration with no service interfaces.
+  // Missing or malformed identities, duplicate identities, or invalid NSG metadata
+  // discard the complete service report without rejecting host acknowledgement.
+  optional ServiceVpcNetworkStatusObservation service_vpc_network_observation = 20;
+}
+
+// Reports every distinct service interface in one successfully reconciled response.
+// Entries carry no host function type or VF ID because services are hidden from the tenant OS.
+message ServiceVpcNetworkStatusObservation {
+  // Complete replacement of the reporting DPU's service-interface observations.
+  repeated ServiceVpcInterfaceStatusObservation interfaces = 1;
+}
+
+// Identifies one applied service interface within the reporting DPU.
+message ServiceVpcInterfaceStatusObservation {
+  // Required stable service-interface UUID for correlation with persisted configuration, including its VPC and slot.
+  common.UUID internal_uuid = 1;
+  // Omitted when no NSG is attached. An attached empty NSG still reports its ID and
+  // version. Present values require NSG_SOURCE_VPC, a nonempty ID, and a valid ConfigVersion.
+  NetworkSecurityGroupStatus network_security_group = 2;
 }
 
 message LastDhcpRequest {
@@ -13547,6 +13589,40 @@ message ComponentCredentialOverrides {
   optional UsernamePassword bmc = 1;
   // Switch NVOS credentials. Ignored for compute and power-shelf targets.
   optional UsernamePassword nvos = 2;
+}
+
+// Selects which credential of a rack component GetComponentCredentials returns.
+enum ComponentCredentialKind {
+  // Default enum value; the server rejects it with InvalidArgument.
+  COMPONENT_CREDENTIAL_KIND_UNSPECIFIED = 0;
+  // Power-shelf PMC root credentials. Only the power-shelf manager may request them.
+  COMPONENT_CREDENTIAL_KIND_POWER_SHELF_PMC = 1;
+  // Switch BMC root credentials. Only the switch manager may request them.
+  COMPONENT_CREDENTIAL_KIND_SWITCH_BMC = 2;
+  // Switch NVOS admin credentials. Only the switch manager may request them.
+  COMPONENT_CREDENTIAL_KIND_SWITCH_NVOS = 3;
+}
+
+// Identifies one credential of an ingested power shelf or switch.
+message GetComponentCredentialsRequest {
+  // Required. PMC MAC address of the power shelf, or BMC MAC address of the
+  // switch, in either letter case. The server returns InvalidArgument when it
+  // is not a MAC address, and NotFound when Core has no power shelf, for the
+  // power-shelf kind, or no switch, for a switch kind, with that BMC MAC
+  // address that is not deleted, when a machine owns an interface with that
+  // MAC address, or when neither the credential store nor expected inventory
+  // holds the credential. A device known only from expected inventory is
+  // NotFound.
+  string bmc_mac_address = 1;
+  // Required. The server returns InvalidArgument for an unspecified or unknown
+  // value, and PermissionDenied when the calling identity may not request it.
+  ComponentCredentialKind kind = 2;
+}
+
+// Carries the credential resolved for the requested power shelf or switch.
+message GetComponentCredentialsResponse {
+  // The resolved credential. Always set on success.
+  UsernamePassword credentials = 1;
 }
 
 // --- RMS job diagnostics ---

@@ -688,10 +688,10 @@ async fn fake_nico_api_capturing_headers(
             .await
             .expect("fake nico-api serves");
     });
-    let client = CarbideApiClient::new(&ApiConfig::new(
-        &format!("http://{addr}"),
-        &CarbideClientConfig::default(),
-    ));
+    let client = CarbideApiClient::new(
+        &ApiConfig::new(&format!("http://{addr}"), &CarbideClientConfig::default()),
+        carbide_instrument::Instrumentation::noop(),
+    );
     (client, lookups, headers)
 }
 

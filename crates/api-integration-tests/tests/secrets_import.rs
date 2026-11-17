@@ -256,6 +256,7 @@ async fn exercise_import(test_pool: &PgPool) -> eyre::Result<()> {
         carbide_instrument::Instrumentation::from_meter_provider(
             &opentelemetry::metrics::noop::NoopMeterProvider::new(),
         ),
+        None,
     )?;
 
     // --- Populate Vault with secrets ---

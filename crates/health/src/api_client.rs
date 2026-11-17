@@ -51,9 +51,15 @@ pub struct ApiClientWrapper {
 }
 
 impl ApiClientWrapper {
-    /// Builds clients using the supplied Event and optional latency destinations.
-    /// Retain their providers until the source and its clients stop.
-    pub fn new(root_ca: String, client_cert: String, client_key: String, api_url: &Url) -> Self {
+    /// Builds an API client whose RED metrics use `instrumentation`.
+    /// Retain its provider until the client stops.
+    pub fn new(
+        root_ca: String,
+        client_cert: String,
+        client_key: String,
+        api_url: &Url,
+        instrumentation: carbide_instrument::Instrumentation,
+    ) -> Self {
         let client_config = CarbideClientConfig::new(
             root_ca,
             Some(ClientCert {
@@ -62,7 +68,7 @@ impl ApiClientWrapper {
             }),
         );
         let api_config = ApiConfig::new(api_url.as_str(), &client_config);
-        let client = CarbideApiClient::new(&api_config);
+        let client = CarbideApiClient::new(&api_config, instrumentation);
 
         Self { client }
     }
@@ -1291,7 +1297,7 @@ mod tests {
             None,
             10,
             NonZeroUsize::MIN,
-            BmcInstrumentation::new(carbide_instrument::Instrumentation::global(), None),
+            BmcInstrumentation::new(carbide_instrument::Instrumentation::noop(), None),
         )?))
     }
 
@@ -1352,20 +1358,17 @@ mod tests {
         use crate::otlp::convert::build_metrics_export_request;
         use crate::sink::{EventContext, MetricSample};
 
-        let client = CarbideApiClient::new(&ApiConfig::new(
-            "http://127.0.0.1:1079",
-            &CarbideClientConfig::default(),
-        ));
+        let client = CarbideApiClient::new(
+            &ApiConfig::new("http://127.0.0.1:1079", &CarbideClientConfig::default()),
+            carbide_instrument::Instrumentation::noop(),
+        );
 
         let source = ApiEndpointSource::new(
             Arc::new(ApiClientWrapper { client }),
             reqwest(),
             None,
             10,
-            crate::bmc::BmcInstrumentation::new(
-                carbide_instrument::Instrumentation::global(),
-                None,
-            ),
+            crate::bmc::BmcInstrumentation::new(carbide_instrument::Instrumentation::noop(), None),
         );
 
         for (serial, expected) in [
@@ -1487,14 +1490,12 @@ mod tests {
                 "test-client.pem".to_string(),
                 "test-client-key.pem".to_string(),
                 &Url::parse("https://127.0.0.1:1079").expect("valid API URL"),
+                carbide_instrument::Instrumentation::noop(),
             )),
             reqwest(),
             None,
             10,
-            crate::bmc::BmcInstrumentation::new(
-                carbide_instrument::Instrumentation::global(),
-                None,
-            ),
+            crate::bmc::BmcInstrumentation::new(carbide_instrument::Instrumentation::noop(), None),
         );
         let endpoint = rpc::forge::BmcEndpoint {
             ip: Some("2001:db8::10".into()),
@@ -1759,14 +1760,12 @@ mod tests {
                 "test-client.pem".to_string(),
                 "test-client-key.pem".to_string(),
                 &api_url,
+                carbide_instrument::Instrumentation::noop(),
             )),
             reqwest(),
             None,
             10,
-            crate::bmc::BmcInstrumentation::new(
-                carbide_instrument::Instrumentation::global(),
-                None,
-            ),
+            crate::bmc::BmcInstrumentation::new(carbide_instrument::Instrumentation::noop(), None),
         );
 
         let rack_id = RackId::new("RACK_1");
@@ -1880,14 +1879,12 @@ mod tests {
                 "test-client.pem".to_string(),
                 "test-client-key.pem".to_string(),
                 &Url::parse("https://127.0.0.1:1079").expect("valid API URL"),
+                carbide_instrument::Instrumentation::noop(),
             )),
             reqwest(),
             None,
             10,
-            crate::bmc::BmcInstrumentation::new(
-                carbide_instrument::Instrumentation::global(),
-                None,
-            ),
+            crate::bmc::BmcInstrumentation::new(carbide_instrument::Instrumentation::noop(), None),
         );
         let error = source
             .endpoint_for(
@@ -2146,17 +2143,17 @@ mod tests {
         let mut server = JoinSet::new();
         server.spawn(async move { axum::serve(listener, app).await });
 
-        let client = CarbideApiClient::new(&ApiConfig::new(&url, &CarbideClientConfig::default()));
+        let client = CarbideApiClient::new(
+            &ApiConfig::new(&url, &CarbideClientConfig::default()),
+            carbide_instrument::Instrumentation::noop(),
+        );
 
         let source = ApiEndpointSource::new(
             Arc::new(ApiClientWrapper { client }),
             reqwest(),
             None,
             10,
-            crate::bmc::BmcInstrumentation::new(
-                carbide_instrument::Instrumentation::global(),
-                None,
-            ),
+            crate::bmc::BmcInstrumentation::new(carbide_instrument::Instrumentation::noop(), None),
         );
 
         let cached_client = {
@@ -2411,7 +2408,10 @@ mod tests {
         let mut server = JoinSet::new();
         let app = axum::Router::new().fallback(credentials_response);
         server.spawn(async move { axum::serve(listener, app).await });
-        let client = CarbideApiClient::new(&ApiConfig::new(&url, &CarbideClientConfig::default()));
+        let client = CarbideApiClient::new(
+            &ApiConfig::new(&url, &CarbideClientConfig::default()),
+            carbide_instrument::Instrumentation::noop(),
+        );
 
         // A recorded Redfish BMC over HTTPS, reached through the proxy setting.
         let (_bmc, bmc_url) = bmc_mock::test_support::serve_https(
@@ -2429,7 +2429,7 @@ mod tests {
                 Some(bmc_url),
                 10,
                 crate::bmc::BmcInstrumentation::new(
-                    carbide_instrument::Instrumentation::global(),
+                    carbide_instrument::Instrumentation::noop(),
                     Some(latency),
                 ),
             ),
@@ -2451,7 +2451,7 @@ mod tests {
             Arc::new(NoopLimiter),
             Arc::new(MetricsManager::new("machine_change_iteration").expect("metrics manager")),
             Arc::new(config),
-            carbide_instrument::Instrumentation::global(),
+            carbide_instrument::Instrumentation::noop(),
         )
         .expect("discovery context");
         let shard_manager = ShardManager {
