@@ -60,6 +60,7 @@ pub async fn create(
     txn: &mut PgConnection,
     max_partition_per_tenant: i32,
     status: IBPartitionStatus,
+    instrumentation: &carbide_instrument::Instrumentation,
 ) -> Result<IBPartition, DatabaseError> {
     value.metadata.validate(true).map_err(|e| {
         DatabaseError::InvalidArgument(format!("Invalid metadata for IBPartition: {}", e))
@@ -88,7 +89,7 @@ pub async fn create(
             RETURNING id, name, labels, description, pkey, organization_id, mtu, rate_limit,
                       service_level, config_version, controller_state_version, controller_state,
                       controller_state_outcome, status, deleted";
-    let segment: IBPartition = sqlx::query_as(query)
+    let segment: IBPartition = sqlx::query(query)
         .bind(value.id)
         .bind(&value.metadata.name)
         .bind(sqlx::types::Json(&value.metadata.labels))
@@ -103,6 +104,7 @@ pub async fn create(
         .bind(sqlx::types::Json(state))
         .bind(max_partition_per_tenant)
         .bind(sqlx::types::Json(&status))
+        .try_map(|row| IBPartition::from_row(&row, instrumentation))
         .fetch_one(txn)
         .await
         .map_err(|e| DatabaseError::query(query, e))?;
@@ -128,14 +130,16 @@ pub async fn list_segment_ids(txn: &mut PgConnection) -> Result<Vec<IBPartitionI
 pub async fn for_tenant(
     txn: impl DbReader<'_>,
     tenant_organization_id: String,
+    instrumentation: &carbide_instrument::Instrumentation,
 ) -> Result<Vec<IBPartition>, DatabaseError> {
     let results: Vec<IBPartition> = {
         let query = "SELECT id, name, labels, description, pkey, organization_id, mtu, rate_limit,
                             service_level, config_version, controller_state_version, controller_state,
                             controller_state_outcome, status, deleted
                      FROM ib_partitions WHERE organization_id=$1";
-        sqlx::query_as(query)
+        sqlx::query(query)
             .bind(tenant_organization_id)
+            .try_map(|row| IBPartition::from_row(&row, instrumentation))
             .fetch_all(txn)
             .await
             .map_err(|e| DatabaseError::query(query, e))?
@@ -177,6 +181,7 @@ pub async fn find_ids(
 pub async fn find_by<'a, C: ColumnInfo<'a, TableType = IBPartition>>(
     txn: impl DbReader<'_>,
     filter: ObjectColumnFilter<'a, C>,
+    instrumentation: &carbide_instrument::Instrumentation,
 ) -> Result<Vec<IBPartition>, DatabaseError> {
     let mut query = FilterableQueryBuilder::new(
         "SELECT id, name, labels, description, pkey, organization_id, mtu, rate_limit,
@@ -187,7 +192,8 @@ pub async fn find_by<'a, C: ColumnInfo<'a, TableType = IBPartition>>(
     .filter(&filter);
 
     query
-        .build_query_as()
+        .build()
+        .try_map(|row| IBPartition::from_row(&row, instrumentation))
         .fetch_all(txn)
         .await
         .map_err(|e| DatabaseError::query(query.sql(), e))
@@ -211,14 +217,22 @@ pub async fn find_by<'a, C: ColumnInfo<'a, TableType = IBPartition>>(
 pub async fn find_active_for_share(
     txn: &mut PgConnection,
     partition_ids: &[IBPartitionId],
+    instrumentation: &carbide_instrument::Instrumentation,
 ) -> DatabaseResult<Vec<IBPartition>> {
-    find_active_for_share_with_timeout(txn, partition_ids, ADMISSION_ATTEMPT_TIMEOUT).await
+    find_active_for_share_with_timeout(
+        txn,
+        partition_ids,
+        ADMISSION_ATTEMPT_TIMEOUT,
+        instrumentation,
+    )
+    .await
 }
 
 fn find_active_for_share_with_timeout<'a>(
     txn: &'a mut PgConnection,
     partition_ids: &'a [IBPartitionId],
     attempt_timeout: Duration,
+    instrumentation: &'a carbide_instrument::Instrumentation,
 ) -> impl Future<Output = DatabaseResult<Vec<IBPartition>>> + Send + 'a {
     if partition_ids.is_empty() {
         return Either::Left(ready(Ok(Vec::new())));
@@ -251,8 +265,9 @@ fn find_active_for_share_with_timeout<'a>(
                  FROM ib_partitions
                  WHERE id = ANY($1) AND deleted IS NULL
                  ORDER BY id FOR SHARE";
-            let partitions = sqlx::query_as(query)
+            let partitions = sqlx::query(query)
                 .bind(partition_ids)
+                .try_map(|row| IBPartition::from_row(&row, instrumentation))
                 .fetch_all(&mut *txn)
                 .await
                 .map_err(|error| DatabaseError::query(query, error))?;
@@ -370,13 +385,15 @@ pub async fn update_controller_state_outcome(
 pub async fn mark_as_deleted(
     value: &IBPartition,
     txn: &mut PgConnection,
+    instrumentation: &carbide_instrument::Instrumentation,
 ) -> DatabaseResult<IBPartition> {
     let query = "UPDATE ib_partitions SET updated=NOW(), deleted=NOW() WHERE id=$1
                  RETURNING id, name, labels, description, pkey, organization_id, mtu, rate_limit,
                            service_level, config_version, controller_state_version, controller_state,
                            controller_state_outcome, status, deleted";
-    let segment: IBPartition = sqlx::query_as(query)
+    let segment: IBPartition = sqlx::query(query)
         .bind(value.id)
+        .try_map(|row| IBPartition::from_row(&row, instrumentation))
         .fetch_one(txn)
         .await
         .map_err(|e| DatabaseError::query(query, e))?;
@@ -497,6 +514,7 @@ pub async fn update_metadata(
     expected_version: ConfigVersion,
     metadata: &Metadata,
     txn: &mut PgConnection,
+    instrumentation: &carbide_instrument::Instrumentation,
 ) -> Result<ConditionalWrite<IBPartition, PartitionNotCurrent>, DatabaseError> {
     metadata.validate(true).map_err(|e| {
         DatabaseError::InvalidArgument(format!("Invalid metadata for IBPartition: {}", e))
@@ -508,13 +526,14 @@ pub async fn update_metadata(
                            service_level, config_version, controller_state_version, controller_state,
                            controller_state_outcome, status, deleted";
 
-    let partition: Option<IBPartition> = sqlx::query_as(query)
+    let partition: Option<IBPartition> = sqlx::query(query)
         .bind(&metadata.name)
         .bind(sqlx::types::Json(&metadata.labels))
         .bind(&metadata.description)
         .bind(expected_version.increment())
         .bind(partition_id)
         .bind(expected_version)
+        .try_map(|row| IBPartition::from_row(&row, instrumentation))
         .fetch_optional(txn)
         .await
         .map_err(|e| DatabaseError::query(query, e))?;
@@ -532,6 +551,7 @@ pub async fn update_status(
     partition_id: IBPartitionId,
     status: &Option<IBPartitionStatus>,
     txn: &mut PgConnection,
+    instrumentation: &carbide_instrument::Instrumentation,
 ) -> Result<IBPartition, DatabaseError> {
     let query = "UPDATE ib_partitions SET status=$1::json, updated=NOW()
                  WHERE id=$2::uuid
@@ -539,9 +559,10 @@ pub async fn update_status(
                            service_level, config_version, controller_state_version, controller_state,
                            controller_state_outcome, status, deleted";
 
-    sqlx::query_as(query)
+    sqlx::query(query)
         .bind(sqlx::types::Json(status))
         .bind(partition_id)
+        .try_map(|row| IBPartition::from_row(&row, instrumentation))
         .fetch_one(txn)
         .await
         .map_err(|e| DatabaseError::query(query, e))
@@ -603,6 +624,7 @@ mod tests {
                 service_level: None,
                 pkey: Some(pkey),
             },
+            &carbide_instrument::Instrumentation::noop(),
         )
         .await
         .unwrap()
@@ -673,10 +695,14 @@ mod tests {
                 .execute(successful.as_mut())
                 .await
                 .unwrap();
-            let admitted =
-                find_active_for_share_with_timeout(&mut successful, &[target.id], attempt_timeout)
-                    .await
-                    .unwrap();
+            let admitted = find_active_for_share_with_timeout(
+                &mut successful,
+                &[target.id],
+                attempt_timeout,
+                &carbide_instrument::Instrumentation::noop(),
+            )
+            .await
+            .unwrap();
             assert_eq!(admitted.len(), 1);
             let restored_ms: i64 = sqlx::query_scalar(
                 "SELECT setting::bigint FROM pg_settings WHERE name = 'statement_timeout'",
@@ -717,10 +743,14 @@ mod tests {
                 .execute(txn.as_mut())
                 .await
                 .expect("stage an unrelated write before admission");
-                let error =
-                    find_active_for_share_with_timeout(&mut txn, &[target.id], attempt_timeout)
-                        .await
-                        .expect_err("blocked admission must respect its deadline");
+                let error = find_active_for_share_with_timeout(
+                    &mut txn,
+                    &[target.id],
+                    attempt_timeout,
+                    &carbide_instrument::Instrumentation::noop(),
+                )
+                .await
+                .expect_err("blocked admission must respect its deadline");
                 // If the client timer wins, rollback can first receive the
                 // pending statement-timeout error. SQLx then queues ROLLBACK
                 // on transaction drop; retain the connection and flush it.
@@ -766,10 +796,14 @@ mod tests {
                 count_blocked_queries(&pool, blocker_pid, "FOR SHARE").await,
                 0
             );
-            let persisted = find_by(&pool, ObjectColumnFilter::One(IdColumn, &sentinel.id))
-                .await
-                .unwrap()
-                .remove(0);
+            let persisted = find_by(
+                &pool,
+                ObjectColumnFilter::One(IdColumn, &sentinel.id),
+                &carbide_instrument::Instrumentation::noop(),
+            )
+            .await
+            .unwrap()
+            .remove(0);
             assert_eq!(persisted.metadata.name, "sentinel");
             sqlx::query("SELECT id FROM ib_partitions WHERE id = $1 FOR UPDATE NOWAIT")
                 .bind(sentinel.id)
@@ -785,9 +819,13 @@ mod tests {
 
             blocker.rollback().await.unwrap();
             let mut retry = pool.begin().await.unwrap();
-            let admitted = find_active_for_share(&mut retry, &[target.id])
-                .await
-                .unwrap();
+            let admitted = find_active_for_share(
+                &mut retry,
+                &[target.id],
+                &carbide_instrument::Instrumentation::noop(),
+            )
+            .await
+            .unwrap();
             assert_eq!(admitted.len(), 1);
             assert_eq!(admitted[0].id, target.id);
             retry.commit().await.unwrap();
@@ -817,7 +855,13 @@ mod tests {
             let mut deletion = pool.begin().await.unwrap();
             match kind {
                 DeletionKind::Soft => {
-                    mark_as_deleted(&partition, &mut deletion).await.unwrap();
+                    mark_as_deleted(
+                        &partition,
+                        &mut deletion,
+                        &carbide_instrument::Instrumentation::noop(),
+                    )
+                    .await
+                    .unwrap();
                 }
                 DeletionKind::Physical => {
                     assert_eq!(
@@ -838,9 +882,13 @@ mod tests {
                 .unwrap();
             let admission = async {
                 let mut txn = pool.begin().await.expect("begin waiting admission");
-                let admitted = find_active_for_share(&mut txn, &[partition.id])
-                    .await
-                    .expect("read partition after the deletion wait");
+                let admitted = find_active_for_share(
+                    &mut txn,
+                    &[partition.id],
+                    &carbide_instrument::Instrumentation::noop(),
+                )
+                .await
+                .expect("read partition after the deletion wait");
                 txn.commit().await.expect("commit waiting admission");
                 admitted
             };
@@ -896,11 +944,18 @@ mod tests {
                     service_level: None,
                     pkey: Some(pkey.try_into().unwrap()),
                 },
+                &carbide_instrument::Instrumentation::noop(),
             )
             .await
             .unwrap();
             if deleted {
-                mark_as_deleted(&partition, &mut txn).await.unwrap();
+                mark_as_deleted(
+                    &partition,
+                    &mut txn,
+                    &carbide_instrument::Instrumentation::noop(),
+                )
+                .await
+                .unwrap();
             }
         }
         txn.commit().await.unwrap();
@@ -922,10 +977,13 @@ mod tests {
                 .execute(txn.as_mut())
                 .await
                 .expect("force sequential scan for the ordering proof");
-            let partitions =
-                find_active_for_share(&mut txn, &[high_id, low_id, low_id, missing_id, deleted_id])
-                    .await
-                    .expect("read partitions in lock order");
+            let partitions = find_active_for_share(
+                &mut txn,
+                &[high_id, low_id, low_id, missing_id, deleted_id],
+                &carbide_instrument::Instrumentation::noop(),
+            )
+            .await
+            .expect("read partitions in lock order");
             txn.commit().await.expect("commit ordered admission");
             partitions
                 .into_iter()
@@ -990,11 +1048,15 @@ mod tests {
             name: "renamed".to_string(),
             ..Default::default()
         };
-        let ConditionalWrite::Applied(renamed) =
-            update_metadata(partition.id, partition.version, &renamed_metadata, &mut txn)
-                .await
-                .unwrap()
-        else {
+        let ConditionalWrite::Applied(renamed) = update_metadata(
+            partition.id,
+            partition.version,
+            &renamed_metadata,
+            &mut txn,
+            &carbide_instrument::Instrumentation::noop(),
+        )
+        .await
+        .unwrap() else {
             panic!("the partition metadata must be current");
         };
         assert_eq!(renamed.metadata, renamed_metadata);
@@ -1028,10 +1090,14 @@ mod tests {
         allocation_txn.rollback().await.unwrap();
         txn.commit().await.unwrap();
         assert!(
-            find_by(&pool, ObjectColumnFilter::One(IdColumn, &partition.id))
-                .await
-                .unwrap()
-                .is_empty()
+            find_by(
+                &pool,
+                ObjectColumnFilter::One(IdColumn, &partition.id),
+                &carbide_instrument::Instrumentation::noop(),
+            )
+            .await
+            .unwrap()
+            .is_empty()
         );
         let allocation = crate::resource_pool::find_value(&pool, &u16::from(pkey).to_string())
             .await
@@ -1244,6 +1310,7 @@ mod tests {
                 service_level: None,
                 pkey: Some(42.try_into().unwrap()),
             },
+            &carbide_instrument::Instrumentation::noop(),
         )
         .await
         .unwrap();
@@ -1252,7 +1319,14 @@ mod tests {
         let mut status = snapshot.status.clone();
         status.as_mut().unwrap().partition = Some("first observation".to_string());
         let mut txn = pool.begin().await.unwrap();
-        update_status(snapshot.id, &status, &mut txn).await.unwrap();
+        update_status(
+            snapshot.id,
+            &status,
+            &mut txn,
+            &carbide_instrument::Instrumentation::noop(),
+        )
+        .await
+        .unwrap();
         txn.commit().await.unwrap();
 
         let metadata = Metadata {
@@ -1261,11 +1335,15 @@ mod tests {
             labels: [("owner".to_string(), "tenant".to_string())].into(),
         };
         let mut txn = pool.begin().await.unwrap();
-        let ConditionalWrite::Applied(edited) =
-            update_metadata(snapshot.id, snapshot.version, &metadata, &mut txn)
-                .await
-                .unwrap()
-        else {
+        let ConditionalWrite::Applied(edited) = update_metadata(
+            snapshot.id,
+            snapshot.version,
+            &metadata,
+            &mut txn,
+            &carbide_instrument::Instrumentation::noop(),
+        )
+        .await
+        .unwrap() else {
             panic!("a controller status write must not invalidate the metadata revision");
         };
         txn.commit().await.unwrap();
@@ -1281,13 +1359,24 @@ mod tests {
         let mut status = snapshot.status.clone();
         status.as_mut().unwrap().partition = Some("later observation".to_string());
         let mut txn = pool.begin().await.unwrap();
-        update_status(snapshot.id, &status, &mut txn).await.unwrap();
+        update_status(
+            snapshot.id,
+            &status,
+            &mut txn,
+            &carbide_instrument::Instrumentation::noop(),
+        )
+        .await
+        .unwrap();
         txn.commit().await.unwrap();
 
-        let persisted = find_by(&pool, ObjectColumnFilter::One(IdColumn, &snapshot.id))
-            .await
-            .unwrap()
-            .remove(0);
+        let persisted = find_by(
+            &pool,
+            ObjectColumnFilter::One(IdColumn, &snapshot.id),
+            &carbide_instrument::Instrumentation::noop(),
+        )
+        .await
+        .unwrap()
+        .remove(0);
         assert_eq!(persisted.metadata, metadata);
         assert_eq!(persisted.version, edited.version);
         assert_eq!(persisted.status, status);

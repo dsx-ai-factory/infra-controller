@@ -363,6 +363,7 @@ async fn commit_ib_admission_before_soft_delete<T: std::fmt::Debug>(
     let partition = db::ib_partition::find_by(
         &env.pool,
         ObjectColumnFilter::One(db::ib_partition::IdColumn, &partition_id),
+        &carbide_instrument::Instrumentation::noop(),
     )
     .await
     .unwrap()
@@ -662,10 +663,13 @@ async fn release_records_atomically_and_retry_skips_resolution(pool: sqlx::PgPoo
     let partition_guard_pid = backend_pid(&mut partition_guard).await;
     let resolution = async {
         let mut txn = fixture.env.pool.begin().await.unwrap();
-        let pkeys =
-            crate::instance::load_ib_partition_pkeys(txn.as_mut(), &[&stored.config.infiniband])
-                .await
-                .expect("the release resolver resumes after the partition-read gate");
+        let pkeys = crate::instance::load_ib_partition_pkeys(
+            txn.as_mut(),
+            &[&stored.config.infiniband],
+            &carbide_instrument::Instrumentation::noop(),
+        )
+        .await
+        .expect("the release resolver resumes after the partition-read gate");
         txn.commit().await.unwrap();
         pkeys
     };
@@ -1798,6 +1802,7 @@ async fn test_postpone_partition_deletion_while_instances_reference_it(pool: sql
         let partition = db::ib_partition::find_by(
             &env.pool,
             ObjectColumnFilter::One(db::ib_partition::IdColumn, &ib_partition_id),
+            &carbide_instrument::Instrumentation::noop(),
         )
         .await
         .unwrap()
@@ -1863,13 +1868,18 @@ async fn test_postpone_partition_deletion_while_instances_reference_it(pool: sql
         let db_partition = db::ib_partition::find_by(
             &mut *txn,
             ObjectColumnFilter::One(db::ib_partition::IdColumn, &ib_partition_id),
+            &carbide_instrument::Instrumentation::noop(),
         )
         .await
         .unwrap()
         .remove(0);
-        db::ib_partition::mark_as_deleted(&db_partition, &mut txn)
-            .await
-            .unwrap();
+        db::ib_partition::mark_as_deleted(
+            &db_partition,
+            &mut txn,
+            &carbide_instrument::Instrumentation::noop(),
+        )
+        .await
+        .unwrap();
         txn.commit().await.unwrap();
     }
 

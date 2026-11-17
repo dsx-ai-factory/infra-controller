@@ -107,8 +107,9 @@ impl IntegrationTestEnvironment {
         };
         let root_dir = PathBuf::from(repo_root.clone());
 
+        // Servers receive this environment's metrics directly. Publishing its
+        // provider globally would race with other environments.
         let metrics = carbide::setup_metrics()?;
-        opentelemetry::global::set_meter_provider(metrics.meter_provider.clone());
 
         let unbound_address = SocketAddr::from((Ipv4Addr::LOCALHOST, 0));
         let carbide_api_addrs = vec![unbound_address; usize::from(api_server_count)];
