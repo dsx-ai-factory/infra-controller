@@ -962,6 +962,7 @@ pub(crate) async fn explore(
             expected.as_ref(),
             None,
             boot_interface.as_ref(),
+            Box::new(|| api.endpoint_explorer.load_sitewide_bmc_password()),
         )
         .await
         .map_err(|e| CarbideError::internal(e.to_string()))?;

@@ -19,12 +19,28 @@ use std::sync::Arc;
 
 use carbide_secrets::credentials::{
     BmcCredentialType, CredentialKey, CredentialManager, CredentialType, Credentials,
-    REQUIRED_SITE_DEFAULT_CREDENTIAL_KEYS,
 };
+use futures_util::future::BoxFuture;
 use mac_address::MacAddress;
 use model::site_explorer::EndpointExplorationError;
 
-use super::metrics::SiteExplorationMetrics;
+/// A site-wide BMC root password and the rotation version it belongs to.
+/// Load once per exploration pass and reuse both values through ingestion and fallback.
+#[derive(Clone)]
+pub struct SiteWideBmcPassword {
+    /// Version selected from the site's BMC credential rotation target.
+    pub version: u32,
+    /// Password stored for that version.
+    pub password: String,
+}
+
+/// Creates a password-loading future only when exploration needs the site-wide credential.
+/// The loaded snapshot is reused for password rotation and fallback authentication.
+pub type SiteWideBmcPasswordLoader<'a> = Box<
+    dyn FnOnce() -> BoxFuture<'a, Result<SiteWideBmcPassword, EndpointExplorationError>>
+        + Send
+        + 'a,
+>;
 
 pub(super) fn get_bmc_root_credential_key(bmc_mac_address: MacAddress) -> CredentialKey {
     CredentialKey::BmcCredentials {
@@ -104,25 +120,6 @@ impl CredentialClient {
 
     pub(super) fn new(credential_manager: Arc<dyn CredentialManager>) -> Self {
         Self { credential_manager }
-    }
-
-    pub(super) async fn check_preconditions(
-        &self,
-        _metrics: &mut SiteExplorationMetrics,
-    ) -> Result<(), EndpointExplorationError> {
-        // The required site-wide default credentials (site-wide BMC root, DPU
-        // UEFI, host UEFI) come from the shared canonical list so this check and
-        // the admin UI's "default credentials not set" warning cannot drift.
-        for credential_key in REQUIRED_SITE_DEFAULT_CREDENTIAL_KEYS {
-            if let Some(e) = self.get_credentials(&credential_key).await.err() {
-                return Err(EndpointExplorationError::MissingCredentials {
-                    key: credential_key.to_key_str().to_string(),
-                    cause: e.to_string(),
-                });
-            }
-        }
-
-        Ok(())
     }
 
     /// Read the site-wide BMC root credential at `version`. The caller resolves
@@ -267,26 +264,6 @@ mod tests {
     use model::site_explorer::EndpointExplorationError;
 
     use super::CredentialClient;
-    use crate::metrics::SiteExplorationMetrics;
-
-    #[tokio::test]
-    async fn check_preconditions_should_not_count_missing_credentials_as_endpoint_failures() {
-        let credential_client = CredentialClient::new(Arc::new(TestCredentialManager::default()));
-        let mut metrics = SiteExplorationMetrics::new();
-
-        let error = credential_client
-            .check_preconditions(&mut metrics)
-            .await
-            .expect_err("missing site credentials should fail preconditions");
-
-        assert!(matches!(
-            error,
-            EndpointExplorationError::MissingCredentials { .. }
-        ));
-        assert_eq!(metrics.endpoint_explorations, 0);
-        assert_eq!(metrics.endpoint_explorations_success, 0);
-        assert!(metrics.endpoint_explorations_failures_by_type.is_empty());
-    }
 
     #[tokio::test]
     async fn get_sitewide_dpu_bmc_service_password_returns_existing() {
