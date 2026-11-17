@@ -936,7 +936,7 @@ async fn perform_attestation(
 
 #[cfg(test)]
 mod tests {
-    use carbide_instrument::emit;
+
     use carbide_instrument::testing::{MetricsCapture, capture_logs};
     use carbide_test_support::value_scenarios;
 
@@ -987,18 +987,20 @@ mod tests {
             input.retry_count,
             input.time_in_state,
         );
-        let metrics = MetricsCapture::start();
+        let metrics = MetricsCapture::owned();
         let logs = capture_logs(|| {
             if let Some(task_state) = task_state {
-                emit(SpdmEvidenceCollectionTaskStateUnexpected {
-                    task_state,
-                    next_action,
-                    machine_id: MACHINE_ID.to_string(),
-                    device_id: DEVICE_ID.to_string(),
-                    task_id: TASK_ID.to_string(),
-                    retry_count: input.retry_count,
-                    error: ERROR.to_string(),
-                });
+                metrics
+                    .instrumentation()
+                    .emit(SpdmEvidenceCollectionTaskStateUnexpected {
+                        task_state,
+                        next_action,
+                        machine_id: MACHINE_ID.to_string(),
+                        device_id: DEVICE_ID.to_string(),
+                        task_id: TASK_ID.to_string(),
+                        retry_count: input.retry_count,
+                        error: ERROR.to_string(),
+                    });
             }
         });
         let counter_delta = match task_state {

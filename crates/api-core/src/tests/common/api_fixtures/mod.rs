@@ -1767,6 +1767,9 @@ async fn create_test_env_with_overrides_inner(
     };
 
     let ib_controller = StateController::builder()
+        .io(Arc::new(IBPartitionStateControllerIO::new(
+            api.instrumentation.clone(),
+        )))
         .database(db_pool.clone(), api.work_lock_manager_handle.clone())
         .meter("carbide_machines", test_meter.meter())
         .processor_id(state_controller_id.clone())

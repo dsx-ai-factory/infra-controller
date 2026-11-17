@@ -30,8 +30,23 @@ use state_controller::metrics::NoopMetricsEmitter;
 use crate::context::IBPartitionStateHandlerContextObjects;
 
 /// State Controller IO implementation for Infiniband Partitions
-#[derive(Default, Debug)]
-pub struct IBPartitionStateControllerIO {}
+#[derive(Debug)]
+pub struct IBPartitionStateControllerIO {
+    instrumentation: carbide_instrument::Instrumentation,
+}
+
+impl IBPartitionStateControllerIO {
+    /// Uses the controller's Event destination when decoding stored partitions.
+    pub fn new(instrumentation: carbide_instrument::Instrumentation) -> Self {
+        Self { instrumentation }
+    }
+}
+
+impl Default for IBPartitionStateControllerIO {
+    fn default() -> Self {
+        Self::new(carbide_instrument::Instrumentation::noop())
+    }
+}
 
 #[async_trait::async_trait]
 impl StateControllerIO for IBPartitionStateControllerIO {
@@ -62,6 +77,7 @@ impl StateControllerIO for IBPartitionStateControllerIO {
         let mut partitions = db::ib_partition::find_by(
             txn,
             ObjectColumnFilter::One(db::ib_partition::IdColumn, partition_id),
+            &self.instrumentation,
         )
         .await?;
         if partitions.is_empty() {

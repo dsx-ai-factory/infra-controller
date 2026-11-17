@@ -183,7 +183,7 @@ mod test {
             password: "password".to_string(),
         }));
         let tool =
-            super::IPMIToolImpl::new(cp, Some(1), carbide_instrument::Instrumentation::global());
+            super::IPMIToolImpl::new(cp, Some(1), carbide_instrument::Instrumentation::noop());
 
         assert_eq!(tool.attempts, 1);
     }

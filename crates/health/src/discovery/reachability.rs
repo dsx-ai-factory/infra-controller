@@ -587,7 +587,9 @@ mod tests {
         assert!(ctx.collectors.reachability_specs.is_empty());
         assert!(ctx.collectors.contains(CollectorKind::Sensor, &key));
 
-        let shutdown = ctx.drain_collectors(Duration::from_secs(5)).await;
+        let shutdown = ctx
+            .drain_collectors(tokio::time::Instant::now() + Duration::from_secs(5))
+            .await;
 
         assert_eq!(shutdown.timed_out, 0);
     }

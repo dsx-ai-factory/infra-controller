@@ -418,7 +418,6 @@ impl From<PortMembership> for IBPortMembership {
 mod tests {
     use carbide_test_support::{Check, check_values};
     use model::errors::ModelError;
-    use opentelemetry::global;
     use ufm_mock::{
         InfinibandPortState, InventoryMachine, InventoryPort, InventorySnapshot, UfmAuthToken,
         UfmMock, UfmMockConfig,
@@ -509,7 +508,10 @@ mod tests {
         let ufm_mock = UfmMock::new(
             &UfmMockConfig::default(),
             &auth_token,
-            &global::meter("ib-fabric-ufm-mock-compatibility-test"),
+            &opentelemetry::metrics::MeterProvider::meter(
+                &opentelemetry::metrics::noop::NoopMeterProvider::new(),
+                "ib-fabric-ufm-mock-compatibility-test",
+            ),
         )
         .unwrap();
         ufm_mock

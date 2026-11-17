@@ -2458,6 +2458,9 @@ async fn initialize_and_start_controllers<'a>(
     }
 
     StateController::<IBPartitionStateControllerIO>::builder()
+        .io(Arc::new(IBPartitionStateControllerIO::new(
+            api_service.instrumentation.clone(),
+        )))
         .database(db_pool.clone(), work_lock_manager_handle.clone())
         .meter("carbide_ib_partitions", meter.clone())
         .processor_id(state_controller_id.clone())

@@ -97,7 +97,7 @@ impl TestApiBuilder {
             eth_data: None,
             dpf_sdk: None,
             metric_emitter: None,
-            instrumentation: carbide_instrument::Instrumentation::global(),
+            instrumentation: carbide_instrument::Instrumentation::noop(),
             ib_fabric_manager: None,
             component_manager: None,
             secrets_context: None,
@@ -184,8 +184,10 @@ impl TestApiBuilder {
         }
     }
 
-    /// Selects the Event destination for migrated handlers. Defaults to the
-    /// global compatibility handle; the caller retains the supplied provider.
+    /// Selects the Event destination for migrated handlers. Defaults to
+    /// `Instrumentation::noop()`, which preserves logs without recording metrics.
+    /// To record metrics, pass `Instrumentation::new(meter)` and retain the owning
+    /// meter provider until both recording tasks and metric scrapes finish.
     pub fn with_instrumentation(
         self,
         instrumentation: carbide_instrument::Instrumentation,

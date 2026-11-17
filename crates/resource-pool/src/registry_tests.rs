@@ -646,7 +646,7 @@ async fn remote_runtime(
         tasks,
         database.clone(),
         KeepaliveConfig::default(),
-        carbide_instrument::Instrumentation::global(),
+        carbide_instrument::Instrumentation::noop(),
     )
     .await?;
     let provider = GrpcResourcePoolBackend::new("http://127.0.0.1:1".parse()?, None)?;

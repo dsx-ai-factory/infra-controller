@@ -25,7 +25,7 @@ use carbide_dpf::{
     DetachedDpuServiceInterfaceDefinition, DetachedDpuServiceSecurity, DetachedHelmChart,
     DetachedServiceDaemonSet, DetachedServiceDaemonSetRollingUpdate,
     DetachedServiceDaemonSetUpdateStrategy, DpuServiceObservation, IntOrString, SERVICE_VPC_MTU,
-    ServiceVpcSlots, detached_dpu_service_chain_spec, detached_dpu_service_interface_spec,
+    ServiceVpcSlots, detached_dpu_service_interface_spec, registered_dpu_service_chain_spec,
 };
 use carbide_uuid::extension_service::ExtensionServiceId;
 use model::extension_service::{
@@ -163,6 +163,8 @@ pub fn project_service_vpc_registration(
             namespace: namespace.to_owned(),
             labels: slot_labels.clone(),
             node_selector_labels: slot_selector.clone(),
+            excluded_dpu_ids: Vec::new(),
+            selector_version: None,
             template_labels: slot_labels,
             interface_selectors: vec![generic_selector.clone(), slot_selector],
             service_mtu: SERVICE_VPC_MTU,
@@ -602,11 +604,15 @@ pub(crate) fn verify_service_chain_identity(
 
 /// Reports whether an owned chain parent has the desired mutable specification.
 /// Exact comparison ensures a successful repair covers selectors, ports, and MTU together.
+/// Both template stamps must match the observed management UID; missing identity remains incomplete.
 pub(crate) fn service_chain_spec_matches(
     existing: &DetachedDpfResourceObservation,
     projected: &DetachedDpuServiceChainDefinition,
 ) -> Result<bool, DpuServiceOwnershipConflict> {
-    detached_dpu_service_chain_spec(projected)
+    let Some(uid) = existing.uid.as_deref().filter(|uid| !uid.is_empty()) else {
+        return Ok(false);
+    };
+    registered_dpu_service_chain_spec(projected, uid)
         .map(|spec| existing.spec == spec)
         .map_err(|_| DpuServiceOwnershipConflict::ImmutableField { field: "spec" })
 }
@@ -1362,6 +1368,8 @@ mod tests {
                     namespace: NAMESPACE.to_owned(),
                     labels: slot_labels(0),
                     node_selector_labels: slot_selector(0),
+                    excluded_dpu_ids: Vec::new(),
+                    selector_version: None,
                     template_labels: slot_labels(0),
                     interface_selectors: vec![generic_selector.clone(), slot_selector(0)],
                     service_mtu: SERVICE_VPC_MTU,
@@ -1371,6 +1379,8 @@ mod tests {
                     namespace: NAMESPACE.to_owned(),
                     labels: slot_labels(1),
                     node_selector_labels: slot_selector(1),
+                    excluded_dpu_ids: Vec::new(),
+                    selector_version: None,
                     template_labels: slot_labels(1),
                     interface_selectors: vec![generic_selector, slot_selector(1)],
                     service_mtu: SERVICE_VPC_MTU,
@@ -2072,11 +2082,12 @@ mod tests {
             name: Some(chain.name.clone()),
             namespace: Some(chain.namespace.clone()),
             labels: chain.labels.clone(),
-            spec: detached_dpu_service_chain_spec(chain).unwrap(),
+            spec: registered_dpu_service_chain_spec(chain, "chain-uid").unwrap(),
             uid: Some("chain-uid".to_owned()),
             resource_version: Some("1".to_owned()),
             is_deleting: false,
         };
+        // Confirm matching observations pass complete ownership checks before injecting drift.
         assert_eq!(
             verify_service_interface_ownership(&matching_interface, service_id(), interface),
             Ok(())
@@ -2100,18 +2111,23 @@ mod tests {
             Err(DpuServiceOwnershipConflict::OwnershipLabel)
         );
 
+        // Vary only interfaceType to isolate a switch from service to patch.
         let mut wrong_interface_type = matching_interface.clone();
         wrong_interface_type.spec["template"]["spec"]["template"]["spec"]["interfaceType"] =
             json!("patch");
+        // Vary only serviceID to expose workload rewiring despite otherwise matching identity.
         let mut wrong_service_id = matching_interface.clone();
         wrong_service_id.spec["template"]["spec"]["template"]["spec"]["service"]["serviceID"] =
             json!("another-service");
+        // Vary only interfaceName to expose a different interface inside the service Pod.
         let mut wrong_interface_name = matching_interface.clone();
         wrong_interface_name.spec["template"]["spec"]["template"]["spec"]["service"]["interfaceName"] =
             json!("another0");
+        // Vary only network to distinguish NAD rewiring from repairable placement drift.
         let mut wrong_network = matching_interface.clone();
         wrong_network.spec["template"]["spec"]["template"]["spec"]["service"]["network"] =
             json!(format!("{NAMESPACE}/{SERVICE_VPC_IPV6_NAD}"));
+        // Vary only peerBridge on the patch interface to isolate a different slot datapath.
         let mut wrong_peer_bridge = matching_patch_interface;
         wrong_peer_bridge.spec["template"]["spec"]["template"]["spec"]["patch"]["peerBridge"] =
             json!("another-bridge");
@@ -2181,7 +2197,8 @@ mod tests {
         );
         alternate_chain.service_mtu += 1;
         let mut drifted_chain = matching_chain;
-        drifted_chain.spec = detached_dpu_service_chain_spec(&alternate_chain).unwrap();
+        drifted_chain.spec =
+            registered_dpu_service_chain_spec(&alternate_chain, "chain-uid").unwrap();
         assert_eq!(
             verify_service_chain_identity(&drifted_chain, service_id(), chain),
             Ok(())
@@ -2190,6 +2207,56 @@ mod tests {
         assert_eq!(
             verify_service_chain_ownership(&drifted_chain, service_id(), chain),
             Err(DpuServiceOwnershipConflict::ImmutableField { field: "spec" })
+        );
+    }
+
+    /// Rejects old template stamps after management chain recreation so a same-name replacement
+    /// cannot reuse the previous registration's remote chain identities.
+    #[test]
+    fn chain_template_stamps_require_the_current_management_uid() {
+        // Only the observed UID varies; the spec represents the original registered chain.
+        let resources = project_service_vpc_registration(
+            service_id(),
+            NAMESPACE,
+            &data(None),
+            ServiceVpcAddressFamily::Ipv4,
+            ExtensionServiceInterfaceMac::candidate(service_id(), 0, 0),
+            ServiceVpcSlots::new(1).expect("one slot"),
+        )
+        .expect("networked registration");
+        let chain = &resources.chains[0];
+        let cases = [
+            // A current UID stamp can satisfy the registration's spec check.
+            ("current registration", Some("original"), true),
+            // A same-name replacement must publish its new UID before it can converge.
+            ("recreated registration", Some("replacement"), false),
+            // An incomplete read cannot establish which management object created the templates.
+            ("missing registration UID", None, false),
+        ];
+        carbide_test_support::check_cases(
+            cases
+                .into_iter()
+                .map(|(scenario, uid, expected)| carbide_test_support::Case {
+                    scenario,
+                    input: uid,
+                    expect: carbide_test_support::Outcome::Yields(expected),
+                }),
+            |uid| {
+                // Keep the original templates while varying the management identity being observed.
+                let observed = DetachedDpfResourceObservation {
+                    name: Some(chain.name.clone()),
+                    namespace: Some(chain.namespace.clone()),
+                    labels: chain.labels.clone(),
+                    spec: registered_dpu_service_chain_spec(chain, "original")
+                        .expect("original spec"),
+                    uid: uid.map(str::to_owned), // A changed or absent UID invalidates the old stamps.
+                    resource_version: Some("1".to_owned()),
+                    is_deleting: false,
+                };
+
+                // Compare both template stamps with the management object's current UID.
+                service_chain_spec_matches(&observed, chain)
+            },
         );
     }
 

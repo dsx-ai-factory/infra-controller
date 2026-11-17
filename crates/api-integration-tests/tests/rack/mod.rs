@@ -42,11 +42,6 @@ const UNDERLAY_DHCP_RELAY_ADDRESS: Ipv4Addr = Ipv4Addr::new(172, 20, 1, 1);
 const GB200_PROFILE_ID: &str = "GB200_NVL72_WIWYNN";
 const GB300_PROFILE_ID: &str = "GB300_NVL72_LENOVO";
 
-#[ctor::ctor(unsafe)]
-fn setup() {
-    api_test_helper::setup_logging()
-}
-
 /// Runs rack ingestion checks with the Core binary's worker stack size.
 #[test]
 fn test_machine_a_tron_racks_integration() -> eyre::Result<()> {

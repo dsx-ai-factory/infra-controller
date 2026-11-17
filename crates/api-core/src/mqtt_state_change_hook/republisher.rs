@@ -453,7 +453,7 @@ mod tests {
             &mut join_set,
             pool.clone(),
             Default::default(),
-            carbide_instrument::Instrumentation::global(),
+            carbide_instrument::Instrumentation::noop(),
         )
         .await?;
         let (publisher, mut receiver) = SignalingPublisher::new();

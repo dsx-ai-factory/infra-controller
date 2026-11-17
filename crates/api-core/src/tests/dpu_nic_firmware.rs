@@ -724,7 +724,7 @@ async fn contended_dpu_admission_releases_another_work_manager(
         &mut tasks,
         env.pool.clone(),
         Default::default(),
-        carbide_instrument::Instrumentation::global(),
+        carbide_instrument::Instrumentation::noop(),
     )
     .await?;
     let work_key = "contended-dpu-admission";

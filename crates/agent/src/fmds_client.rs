@@ -228,7 +228,6 @@ impl FmdsGrpcClient {
 mod test {
     use std::net::{Ipv4Addr, SocketAddr};
 
-    use carbide_instrument::testing::MetricsCapture;
     use config_version::ConfigVersion;
     use rpc::fmds::UpdateConfigResponse;
     use rpc::fmds::fmds_config_service_server::{FmdsConfigService, FmdsConfigServiceServer};
@@ -316,7 +315,7 @@ mod test {
         let last_connect_succeeded = Arc::new(AtomicBool::new(false));
         (
             FmdsUpdater::External {
-                instrumentation: carbide_instrument::Instrumentation::global(),
+                instrumentation: carbide_instrument::Instrumentation::noop(),
                 address,
                 machine_identity: MachineIdentityConfig::default(),
                 connect_timeout: Duration::from_millis(500),
@@ -327,7 +326,6 @@ mod test {
     }
 
     async fn update_with_metrics_capture(updater: &mut FmdsUpdater) -> eyre::Result<()> {
-        let _metrics = MetricsCapture::start();
         updater
             .update(Some(Arc::new(test_instance_metadata())), None)
             .await

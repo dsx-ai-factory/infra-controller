@@ -275,7 +275,7 @@ mod tests {
             MachineId::from_str("fm100htes3rn1npvbtm5qd57dkilaag7ljugl1llmm7rfuq1ov50i0rpl30")
                 .expect("a valid machine id");
 
-        let metrics = MetricsCapture::start();
+        let metrics = MetricsCapture::owned();
         let logs = capture_logs(|| {
             for trigger in [
                 WakeupTrigger::RebootCompleted,
@@ -285,7 +285,7 @@ mod tests {
                 WakeupTrigger::BootInterfaceIntent,
                 WakeupTrigger::NicFirmwareObservation,
             ] {
-                carbide_instrument::emit(StateHandlerWakeupFailed {
+                metrics.instrumentation().emit(StateHandlerWakeupFailed {
                     trigger,
                     machine_id,
                     err: "enqueue failed".to_string(),

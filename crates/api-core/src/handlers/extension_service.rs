@@ -18,8 +18,6 @@
 use ::rpc::errors::RpcDataConversionError;
 use ::rpc::forge as rpc;
 use carbide_extension_service_controller::interface_mac::ensure_interface_mac;
-#[cfg(test)]
-use carbide_instrument::emit;
 use carbide_instrument::{Event, LabelValue};
 use carbide_secrets::credentials::{CredentialKey, Credentials};
 use carbide_utils::none_if_empty::NoneIfEmpty;
@@ -1627,22 +1625,22 @@ mod tests {
             run = |case| {
                 let extension_service_id = ExtensionServiceId::nil();
                 let version = VERSION.parse::<ConfigVersion>().unwrap();
-                let metrics = MetricsCapture::start();
+                let metrics = MetricsCapture::owned();
                 let logs = capture_logs(|| match case {
                     CleanupFailureCase::Create => {
-                        emit(ExtensionServiceCredentialCleanupFailed::Create {
+                        metrics.instrumentation().emit(ExtensionServiceCredentialCleanupFailed::Create {
                             extension_service_id,
                             error: "credential delete failed".to_string(),
                         });
                     }
                     CleanupFailureCase::Update => {
-                        emit(ExtensionServiceCredentialCleanupFailed::Update {
+                        metrics.instrumentation().emit(ExtensionServiceCredentialCleanupFailed::Update {
                             extension_service_id,
                             error: "credential delete failed".to_string(),
                         });
                     }
                     CleanupFailureCase::Delete => {
-                        emit(ExtensionServiceCredentialCleanupFailed::Delete {
+                        metrics.instrumentation().emit(ExtensionServiceCredentialCleanupFailed::Delete {
                             extension_service_id,
                             version,
                             error: "credential delete failed".to_string(),

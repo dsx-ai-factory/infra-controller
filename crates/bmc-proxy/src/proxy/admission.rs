@@ -1116,8 +1116,11 @@ mod tests {
         )
     }
 
-    fn proxy_with(admission: &str) -> BmcProxyState {
-        test_state_with_config(&config_with(admission))
+    fn proxy_with(
+        admission: &str,
+        instrumentation: &carbide_instrument::Instrumentation,
+    ) -> BmcProxyState {
+        test_state_with_config(&config_with(admission), instrumentation)
     }
 
     /// A slot at `at` for a `method` request on `path`, held at most
@@ -1176,7 +1179,10 @@ mod tests {
     /// A class's waiting requests get its slot in the order they came.
     #[tokio::test(start_paused = true)]
     async fn a_class_serves_its_requests_in_order() {
-        let state = proxy_with(METRICS_ONE_AT_A_TIME);
+        let state = proxy_with(
+            METRICS_ONE_AT_A_TIME,
+            &carbide_instrument::Instrumentation::noop(),
+        );
         let held = granted(slot(&state, bmc(1), http::Method::GET, METRICS)).await;
         let mut first = pin!(slot(&state, bmc(1), http::Method::GET, METRICS));
         assert!(waits(&mut first).await, "the first waits");
@@ -1194,17 +1200,20 @@ mod tests {
     /// takes no slot, and is not observed.
     #[tokio::test(start_paused = true)]
     async fn other_bmcs_and_classes_do_not_wait() {
-        let metrics = MetricsCapture::start();
+        let metrics = MetricsCapture::owned();
         // A class name no other test uses, so their grants are not counted.
-        let state = proxy_with(&format!(
-            r#"
+        let state = proxy_with(
+            &format!(
+                r#"
             {METRICS_ONE_AT_A_TIME}
 
             [[class]]
             name = "unlimited"
             match = ["PATCH /redfish/v1/**/EnvironmentMetrics"]
             "#
-        ));
+            ),
+            metrics.instrumentation(),
+        );
         let _held = granted(slot(&state, bmc(1), http::Method::GET, METRICS)).await;
         drop(granted(slot(&state, bmc(2), http::Method::GET, METRICS)).await);
         drop(granted(slot(&state, bmc(1), http::Method::PATCH, METRICS)).await);
@@ -1223,7 +1232,7 @@ mod tests {
     /// observed.
     #[tokio::test(start_paused = true)]
     async fn a_request_without_a_slot_is_refused() {
-        let metrics = MetricsCapture::start();
+        let metrics = MetricsCapture::owned();
         let state = proxy_with(
             r#"
             [[class]]
@@ -1233,6 +1242,7 @@ mod tests {
             max_queued = 1
             upstream_timeout = "2s"
             "#,
+            metrics.instrumentation(),
         );
         let _held = granted(slot(&state, bmc(1), http::Method::GET, METRICS)).await;
         let mut waiting = pin!(slot(&state, bmc(1), http::Method::GET, METRICS));
@@ -1281,6 +1291,7 @@ mod tests {
             max_in_flight = 4
             max_queued = 1
             "#,
+            &carbide_instrument::Instrumentation::noop(),
         );
         // Each request is queued on its first poll, before the BMC's runtime
         // hands any of them a slot.
@@ -1319,6 +1330,7 @@ mod tests {
             match = ["GET /redfish/v1/**/EnvironmentMetrics"]
             max_queued = 1
             "#,
+            &carbide_instrument::Instrumentation::noop(),
         );
         let _held = granted(slot(&state, bmc(1), http::Method::PATCH, METRICS)).await;
         let mut waiting = pin!(slot(&state, bmc(1), http::Method::GET, METRICS));
@@ -1341,8 +1353,9 @@ mod tests {
     /// under the per-BMC limit, when the write's class has `priority` and
     /// `held` frees the slot.
     async fn next_granted((priority, held): (u8, Held)) -> &'static str {
-        let state = proxy_with(&format!(
-            r#"
+        let state = proxy_with(
+            &format!(
+                r#"
             [admission]
             max_in_flight_per_bmc = 1
 
@@ -1355,7 +1368,9 @@ mod tests {
             match = ["PATCH /redfish/v1/**/EnvironmentMetrics"]
             priority = {priority}
             "#
-        ));
+            ),
+            &carbide_instrument::Instrumentation::noop(),
+        );
         let held_method = match held {
             Held::Read => http::Method::GET,
             Held::Write => http::Method::PATCH,
@@ -1418,6 +1433,7 @@ mod tests {
             max_in_flight = 1
             max_queued = 1
             "#,
+            &carbide_instrument::Instrumentation::noop(),
         );
         let held = granted(slot(&state, bmc(1), http::Method::GET, METRICS)).await;
         {
@@ -1437,7 +1453,10 @@ mod tests {
     /// waiting request, and the late holder's release frees nothing more.
     #[tokio::test(start_paused = true)]
     async fn a_slot_held_past_its_exchange_is_reclaimed() {
-        let state = proxy_with(METRICS_ONE_AT_A_TIME);
+        let state = proxy_with(
+            METRICS_ONE_AT_A_TIME,
+            &carbide_instrument::Instrumentation::noop(),
+        );
         let stalled = granted(slot_held_for(
             &state,
             bmc(1),
@@ -1472,6 +1491,7 @@ mod tests {
             max_in_flight = 1
             upstream_timeout = "1s"
             "#,
+            &carbide_instrument::Instrumentation::noop(),
         );
         let _expiring = granted(slot_held_for(
             &state,
@@ -1493,7 +1513,10 @@ mod tests {
     /// and keeps serving the ones it tracks.
     #[tokio::test(start_paused = true)]
     async fn too_many_bmcs_are_refused() {
-        let state = proxy_with(METRICS_ONE_AT_A_TIME);
+        let state = proxy_with(
+            METRICS_ONE_AT_A_TIME,
+            &carbide_instrument::Instrumentation::noop(),
+        );
         drop(granted(slot(&state, bmc(1), http::Method::GET, METRICS)).await);
         // Placeholders that share one runtime nobody drives.
         let runtime = Runtime::new(
@@ -1506,7 +1529,7 @@ mod tests {
                 &[],
                 NonZeroUsize::MIN,
                 SloConfig::default(),
-                carbide_instrument::Instrumentation::global(),
+                carbide_instrument::Instrumentation::noop(),
             )
             .0,
         );
@@ -1546,7 +1569,7 @@ mod tests {
             &config.admission,
             shutdown.clone(),
             &mut tasks,
-            carbide_instrument::Instrumentation::global(),
+            carbide_instrument::Instrumentation::noop(),
         );
         let class = config.classes.classify(&http::Method::GET, METRICS, &[]);
         let acquire = || {
@@ -1586,6 +1609,7 @@ mod tests {
             max_in_flight = 1
             upstream_timeout = "30m"
             "#,
+            &carbide_instrument::Instrumentation::noop(),
         );
         let bmcs = || {
             let mut bmcs: Vec<IpAddr> = state
@@ -1714,8 +1738,8 @@ mod tests {
     async fn after_failures(
         (admission, failures): (&'static str, usize),
     ) -> (Option<Refused>, bool, f64, f64) {
-        let metrics = MetricsCapture::start();
-        let state = proxy_with(&format!("{admission}\n{POWER}"));
+        let metrics = MetricsCapture::owned();
+        let state = proxy_with(&format!("{admission}\n{POWER}"), metrics.instrumentation());
         let earlier = granted(slot(&state, bmc(1), http::Method::GET, METRICS)).await;
         for _ in 0..failures {
             fail_an_exchange(&state, bmc(1)).await;
@@ -1770,8 +1794,8 @@ mod tests {
     /// for an exchange that outlasted the cool-down, and let a probe through,
     /// which failed if `probe_fails`; and the breaker's openings reported.
     async fn after_a_probe(probe_fails: bool) -> (Option<Refused>, f64) {
-        let metrics = MetricsCapture::start();
-        let state = proxy_with(BREAKER);
+        let metrics = MetricsCapture::owned();
+        let state = proxy_with(BREAKER, metrics.instrumentation());
         let earlier = granted(slot(&state, bmc(1), http::Method::GET, METRICS)).await;
         fail_an_exchange(&state, bmc(1)).await;
         fail_an_exchange(&state, bmc(1)).await;
@@ -1838,10 +1862,10 @@ mod tests {
     /// does not stop the breaker's clock.
     #[tokio::test]
     async fn a_breaker_under_the_per_bmc_limit_opens_for_its_cool_down() {
-        let _metrics = MetricsCapture::start();
-        let state = proxy_with(&format!(
-            "[admission]\nmax_in_flight_per_bmc = 1\n{BREAKER}"
-        ));
+        let state = proxy_with(
+            &format!("[admission]\nmax_in_flight_per_bmc = 1\n{BREAKER}"),
+            &carbide_instrument::Instrumentation::noop(),
+        );
         for _ in 0..2 {
             let mut held = granted(slot(&state, bmc(1), http::Method::GET, METRICS)).await;
             tokio::time::sleep(COOL_DOWN + COOL_DOWN / 2).await;
@@ -1860,8 +1884,7 @@ mod tests {
     /// has passed.
     #[tokio::test]
     async fn the_sweep_keeps_a_bmc_through_its_breakers_cool_down() {
-        let _metrics = MetricsCapture::start();
-        let state = proxy_with(BREAKER);
+        let state = proxy_with(BREAKER, &carbide_instrument::Instrumentation::noop());
         fail_an_exchange(&state, bmc(1)).await;
         fail_an_exchange(&state, bmc(1)).await;
         let tracked_after_a_sweep = || {
@@ -1894,6 +1917,7 @@ mod tests {
             max_in_flight = 200
             max_queued = 1
             "#,
+            &carbide_instrument::Instrumentation::noop(),
         );
         // Each request is queued on its first poll, before the BMC's runtime
         // takes any, and then stops waiting.
@@ -1954,8 +1978,8 @@ mod tests {
     /// after a request of a class with a latency target there was answered
     /// after `latency`; and the misses counted.
     async fn others_granted_after(latency: Duration) -> (usize, f64) {
-        let metrics = MetricsCapture::start();
-        let state = proxy_with(SLO);
+        let metrics = MetricsCapture::owned();
+        let state = proxy_with(SLO, metrics.instrumentation());
         let power = granted(slot(&state, bmc(1), http::Method::PATCH, METRICS)).await;
         tokio::time::sleep(latency).await;
         power.answered();
@@ -2001,16 +2025,18 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn a_cut_share_shrinks_the_queues_too() {
         // Its miss is counted, so it holds the capture other tests count in.
-        let _metrics = MetricsCapture::start();
-        let state = proxy_with(&format!(
-            r#"
+        let state = proxy_with(
+            &format!(
+                r#"
             {SLO}
 
             [[class]]
             name = "default"
             max_queued = 1
             "#
-        ));
+            ),
+            &carbide_instrument::Instrumentation::noop(),
+        );
         let power = granted(slot(&state, bmc(1), http::Method::PATCH, METRICS)).await;
         tokio::time::sleep(Duration::from_secs(2)).await;
         drop(power);
@@ -2038,7 +2064,7 @@ mod tests {
     /// two-second budget, one request at a time, after a request that ended
     /// as `ending`, two seconds after it arrived.
     async fn misses_after(ending: Ending) -> f64 {
-        let metrics = MetricsCapture::start();
+        let metrics = MetricsCapture::owned();
         let state = proxy_with(
             r#"
             [admission]
@@ -2054,6 +2080,7 @@ mod tests {
             upstream_timeout = "2s"
             slo = { latency = "1s" }
             "#,
+            metrics.instrumentation(),
         );
         let request = || slot(&state, bmc(1), http::Method::PATCH, METRICS);
         match ending {
