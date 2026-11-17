@@ -1260,6 +1260,7 @@ pub(crate) async fn admin_force_delete_machine(
         crate::handlers::instance::record_force_delete_retired_ib_memberships(
             &mut txn,
             instance_id,
+            &api.instrumentation,
         )
         .await?;
     }

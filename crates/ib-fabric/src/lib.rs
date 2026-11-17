@@ -261,7 +261,8 @@ impl IbFabricMonitor {
             }
         };
 
-        let tenant_partitions = match get_tenant_partitions(&mut conn).await {
+        let tenant_partitions = match get_tenant_partitions(&mut conn, &self.instrumentation).await
+        {
             Ok(snapshots) => snapshots,
             Err(e) => {
                 tracing::error!(error = %e, "Failed to load Partition data in IbFabricMonitor");
@@ -1163,6 +1164,7 @@ async fn apply_guid_pkey_changes(
 /// Find all active partitions in order to determine pkeys
 async fn get_tenant_partitions(
     txn: &mut PgConnection,
+    instrumentation: &carbide_instrument::Instrumentation,
 ) -> Result<HashMap<IBPartitionId, IBPartition>, IbError> {
     let partition_ids = db::ib_partition::find_ids(
         &mut *txn,
@@ -1182,6 +1184,7 @@ async fn get_tenant_partitions(
         let partition_data = db::ib_partition::find_by(
             &mut *txn,
             db::ObjectColumnFilter::List(db::ib_partition::IdColumn, next_ids),
+            instrumentation,
         )
         .await?;
 
