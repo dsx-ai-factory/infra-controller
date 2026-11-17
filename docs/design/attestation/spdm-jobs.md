@@ -108,7 +108,9 @@ Empty or invalid patterns are rejected before contacting the BMC. Device
 enablement, SPDM type/version checks, and site-wide SPDM enablement still apply.
 
 The trigger prints the applied regex for an override, the scheduled attester IDs
-in ascending order, and the job ID. A matching override reports
+in ascending order, and the job ID. The outcome names that follow are API model
+values. The CLI renders them as descriptions, such as
+`scheduled using the manual trigger's regex`. A matching override reports
 `IndividualAttesterTriggerScheduled`. No eligible match creates no job:
 `NoAttestersFound` means discovery found no eligible devices, while
 `IndividualAttesterTriggerMatchedNothing` means eligible devices existed but
