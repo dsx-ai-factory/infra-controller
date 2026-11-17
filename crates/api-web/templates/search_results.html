@@ -1,0 +1,42 @@
+{% extends "detail_base.html" %}
+
+{% block title %}Search {{ query }}{% endblock %}
+{% block entity_label %}Search Results{% endblock %}
+{% block entity_id %}{{ query }}{% endblock %}
+{% block header_links %}{% endblock %}
+
+{% block detail_content %}
+{% if found.is_empty() %}
+<section class="entity-summary">
+	<p class="entity-summary-empty">No matches for <code>{{ query }}</code>. Search accepts machine IDs, IP and MAC addresses, UUIDs, and serial numbers.</p>
+</section>
+{% else %}
+<h2>Found in {{ found.len() }} place{% if found.len() != 1 %}s{% endif %}</h2>
+<section class="entity-summary">
+	<div class="data-table-scroll">
+	<table class="data-table search-results">
+		<thead><tr><th>Type</th><th>Object</th><th>Details</th></tr></thead>
+		<tbody>
+		{% for m in found %}
+			<tr>
+				<td>{{ m.name }}</td>
+				<td>
+					{% if m.owner_is_machine %}
+					{{ m.owner|machine_id_link|safe }}
+					{% else if !m.url.is_empty() && !m.owner.is_empty() %}
+					<a class="search-object" href="{{ m.url }}">{{ m.owner }}</a>
+					{% else if !m.url.is_empty() %}
+					<a href="{{ m.url }}">View</a>
+					{% else %}
+					<span class="text-muted">—</span>
+					{% endif %}
+				</td>
+				<td>{{ m.message }}</td>
+			</tr>
+		{% endfor %}
+		</tbody>
+	</table>
+	</div>
+</section>
+{% endif %}
+{% endblock %}

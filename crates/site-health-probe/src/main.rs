@@ -436,16 +436,29 @@ fn build_readers(
     let nico: Arc<dyn nico::NicoConnector> =
         Arc::new(nico::grpc::GrpcConnector::new(state.nico_api.clone()));
     if schedule.devices.enabled {
-        out.push(Arc::new(DevicesReader::new(
-            schedule.devices.clone(),
-            state.nico_api.batch_size,
-            state.nico_api.host_read,
-            Arc::clone(&nico),
-            Arc::clone(&gates.nico_api),
-            Arc::clone(&sink) as _,
+        out.push(Arc::new(
+            DevicesReader::new(
+                schedule.devices.clone(),
+                state.nico_api.batch_size,
+                state.nico_api.host_read,
+                Arc::clone(&nico),
+                Arc::clone(&gates.nico_api),
+                Arc::clone(&sink) as _,
+                process_start,
+            )
+            .with_config_store(sink.store.clone()),
+        ));
+        families.extend(DEVICE_FAMILIES);
+    }
+    if schedule.nico_config.enabled {
+        out.push(Arc::new(readers::nico_config::NicoConfigReader::new(
+            schedule.nico_config.clone(),
+            nico.clone(),
+            gates.nico_api.clone(),
+            sink.clone(),
             process_start,
         )));
-        families.extend(DEVICE_FAMILIES);
+        families.extend(readers::nico_config::NICO_CONFIG_FAMILIES);
     }
     if schedule.rest_inventory.enabled {
         let rest = &state.rest;
@@ -883,7 +896,7 @@ mod tests {
     /// Each enabled reader is built, readiness waits for all of its
     /// families, and only those families' sweep counters start, at 0.
     #[test]
-    fn build_readers_follow_the_schedule() {
+    fn config_readiness_and_wire_compatibility() {
         let mut cfg = Config::default();
         cfg.state.enabled = true;
         cfg.state.rest.target = "https://nico-rest-api:8388".to_string();
@@ -954,7 +967,13 @@ mod tests {
         assert_eq!(names(&cfg), (vec!["rest_inventory"], 1));
         cfg.state.readers.devices.enabled = true;
         assert_eq!(names(&cfg), (vec!["devices", "rest_inventory"], 9));
+        cfg.state.readers.nico_config.enabled = true;
+        assert_eq!(
+            names(&cfg),
+            (vec!["devices", "nico_config", "rest_inventory"], 10)
+        );
         cfg.state.readers.devices.enabled = false;
+        assert_eq!(names(&cfg), (vec!["nico_config", "rest_inventory"], 2));
         cfg.state.enabled = false;
         assert_eq!(names(&cfg), (vec![], 0));
     }

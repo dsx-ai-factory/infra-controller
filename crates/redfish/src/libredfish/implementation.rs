@@ -48,6 +48,7 @@ fn libredfish_endpoint_host(host: &str) -> Cow<'_, str> {
 }
 
 pub(super) struct RedfishClientPoolImpl {
+    instrumentation: carbide_instrument::Instrumentation,
     pool: libredfish::RedfishClientPool,
     credential_reader: Arc<dyn CredentialReader>,
     proxy_address: Arc<ArcSwap<Option<HostPortPair>>>,
@@ -58,8 +59,10 @@ impl RedfishClientPoolImpl {
         credential_reader: Arc<dyn CredentialReader>,
         pool: libredfish::RedfishClientPool,
         proxy_address: Arc<ArcSwap<Option<HostPortPair>>>,
+        instrumentation: carbide_instrument::Instrumentation,
     ) -> Self {
         RedfishClientPoolImpl {
+            instrumentation,
             credential_reader,
             pool,
             proxy_address,
@@ -157,6 +160,7 @@ impl RedfishClientPool for RedfishClientPoolImpl {
         let client = match vendor {
             // Auto-detect vendor from the service root.
             None => instrumented_redfish_initialization(
+                &self.instrumentation,
                 "create_client",
                 authentication_sensitive_values.iter().map(String::as_str),
                 self.pool
@@ -178,6 +182,7 @@ impl RedfishClientPool for RedfishClientPoolImpl {
                 .map(|c| c as Box<dyn Redfish>)?,
             // Use the provided vendor directly.
             Some(vendor) => instrumented_redfish_initialization(
+                &self.instrumentation,
                 "create_client",
                 authentication_sensitive_values.iter().map(String::as_str),
                 self.pool
@@ -192,6 +197,7 @@ impl RedfishClientPool for RedfishClientPoolImpl {
         Ok(Box::new(InstrumentedRedfish::new(
             client,
             authentication_sensitive_values,
+            self.instrumentation.clone(),
         )))
     }
 
@@ -221,6 +227,7 @@ impl super::BmcCredentialOps for RedfishClientPoolImpl {}
 /// credential-lifecycle work is a compile error, so the `Direct` rejection
 /// above is the only credential path left to guard at runtime.
 pub(super) struct ProxiedRedfishClientPoolImpl {
+    instrumentation: carbide_instrument::Instrumentation,
     pool: libredfish::RedfishClientPool,
     credential_reader: Arc<dyn CredentialReader>,
     proxy: HostPortPair,
@@ -231,8 +238,10 @@ impl ProxiedRedfishClientPoolImpl {
         credential_reader: Arc<dyn CredentialReader>,
         pool: libredfish::RedfishClientPool,
         proxy: HostPortPair,
+        instrumentation: carbide_instrument::Instrumentation,
     ) -> Self {
         ProxiedRedfishClientPoolImpl {
+            instrumentation,
             credential_reader,
             pool,
             proxy,
@@ -292,6 +301,7 @@ impl RedfishClientPool for ProxiedRedfishClientPoolImpl {
 
         let client = match vendor {
             None => instrumented_redfish_initialization(
+                &self.instrumentation,
                 "create_client",
                 [],
                 self.pool
@@ -305,6 +315,7 @@ impl RedfishClientPool for ProxiedRedfishClientPoolImpl {
                 .map_err(RedfishClientCreationError::RedfishError)
                 .map(|c| c as Box<dyn Redfish>)?,
             Some(vendor) => instrumented_redfish_initialization(
+                &self.instrumentation,
                 "create_client",
                 [],
                 self.pool
@@ -314,7 +325,11 @@ impl RedfishClientPool for ProxiedRedfishClientPoolImpl {
             .map_err(RedfishClientCreationError::RedfishError)?,
         };
 
-        Ok(Box::new(InstrumentedRedfish::new(client, Vec::new())))
+        Ok(Box::new(InstrumentedRedfish::new(
+            client,
+            Vec::new(),
+            self.instrumentation.clone(),
+        )))
     }
 
     fn credential_reader(&self) -> &dyn CredentialReader {
@@ -341,6 +356,7 @@ mod tests {
                 .build()
                 .expect("test pool builds"),
             HostPortPair::HostAndPort("bmc-proxy.example".to_string(), 1079),
+            carbide_instrument::Instrumentation::noop(),
         )
     }
 

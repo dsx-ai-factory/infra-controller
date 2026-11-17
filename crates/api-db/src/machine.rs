@@ -5812,7 +5812,7 @@ mod test {
                     Ok::<_, Box<dyn std::error::Error>>(())
                 };
                 let commit_completion = async {
-                    crate::test_support::postgres::wait_for_blocked_query(
+                    let failure_pid = crate::test_support::postgres::wait_for_blocked_query(
                         &pool,
                         completion_pid,
                         "UPDATE machines SET failure_details",
@@ -5829,14 +5829,16 @@ mod test {
                         .await?,
                         crate::ConditionalWrite::Applied(()),
                     );
+                    // PostgreSQL can briefly leave its reported lock wait while
+                    // handling a signal, even though the row stays locked.
                     assert_eq!(
-                        crate::test_support::postgres::count_blocked_queries(
+                        crate::test_support::postgres::wait_for_blocked_query(
                             &pool,
                             completion_pid,
                             "UPDATE machines SET failure_details",
                         )
                         .await,
-                        1,
+                        failure_pid,
                         "the failure writer must remain blocked after CAS and before commit",
                     );
                     completion.commit().await?;

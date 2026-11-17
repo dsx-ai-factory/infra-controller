@@ -2737,8 +2737,11 @@ mod tests {
                 .await
                 .expect("NVUE server should stop cleanly");
         });
-        let client = NvueClient::new(NvueServerAddress::UnixSocket { socket_path })
-            .expect("NVUE client should be constructed");
+        let client = NvueClient::new(
+            NvueServerAddress::UnixSocket { socket_path },
+            carbide_instrument::Instrumentation::noop(),
+        )
+        .expect("NVUE client should be constructed");
         let mut context = NvueClientContext::new(client);
 
         // Only the hostname differs; the other fields provide an otherwise empty NVUE configuration.
@@ -3052,7 +3055,10 @@ mod tests {
                 .await
                 .expect("NVUE test server should run");
         });
-        let client = NvueClient::new(NvueServerAddress::UnixSocket { socket_path })?;
+        let client = NvueClient::new(
+            NvueServerAddress::UnixSocket { socket_path },
+            carbide_instrument::Instrumentation::noop(),
+        )?;
         let mut context = NvueClientContext::new(client);
         // Seed the prior REST hash before exercising either publication path.
         context.last_applied_hash = Some(7);

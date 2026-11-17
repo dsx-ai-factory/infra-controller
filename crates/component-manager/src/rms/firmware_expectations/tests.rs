@@ -114,7 +114,10 @@ async fn empty_selection_returns_without_contacting_rms() {
     let rack = RackId::new("rack-a");
     let profile = profile(0, 0, 0);
     let mock = Arc::new(MockRmsApi::new());
-    let manager = crate::rms::rms_rack_firmware_update_manager(mock.clone());
+    let manager = crate::rms::rms_rack_firmware_update_manager(
+        mock.clone(),
+        carbide_instrument::Instrumentation::noop(),
+    );
 
     let result = manager
         .get_firmware_expectations(request(&rack, &profile, &[], &[], &[]))
@@ -209,7 +212,10 @@ async fn public_manager_reuses_apply_policy_without_writes() {
     for response in [compute, switch, shelf] {
         mock.enqueue_compare_firmware_object(Ok(response)).await;
     }
-    let manager = crate::rms::rms_rack_firmware_update_manager(mock.clone());
+    let manager = crate::rms::rms_rack_firmware_update_manager(
+        mock.clone(),
+        carbide_instrument::Instrumentation::noop(),
+    );
     let mut input = request(&rack, &profile, &machines, &switches, &shelves);
     input.components = &filters;
 
@@ -742,7 +748,10 @@ async fn role_batches_preserve_all_slots_at_the_admission_boundary() {
     for devices in [&machines, &switches, &shelves] {
         enqueue(&mock, devices).await;
     }
-    let manager = crate::rms::rms_rack_firmware_update_manager(mock.clone());
+    let manager = crate::rms::rms_rack_firmware_update_manager(
+        mock.clone(),
+        carbide_instrument::Instrumentation::noop(),
+    );
 
     let result = manager
         .get_firmware_expectations(request(&rack, &profile, &machines, &switches, &shelves))
@@ -795,7 +804,10 @@ async fn late_and_cross_role_conflicts_never_send_credentials() {
     let switches = vec![machines[1].clone()];
     let mock = Arc::new(MockRmsApi::new());
     enqueue(&mock, &machines[2..65]).await;
-    let manager = crate::rms::rms_rack_firmware_update_manager(mock.clone());
+    let manager = crate::rms::rms_rack_firmware_update_manager(
+        mock.clone(),
+        carbide_instrument::Instrumentation::noop(),
+    );
 
     let result = manager
         .get_firmware_expectations(request(&rack, &profile, &machines, &switches, &[]))
@@ -836,7 +848,10 @@ async fn invalid_last_slot_prevents_dispatch() {
     let mut missing_id = machines[64].clone();
     missing_id.node_id.clear();
     let mock = Arc::new(MockRmsApi::new());
-    let manager = crate::rms::rms_rack_firmware_update_manager(mock.clone());
+    let manager = crate::rms::rms_rack_firmware_update_manager(
+        mock.clone(),
+        carbide_instrument::Instrumentation::noop(),
+    );
     for (scenario, last) in [
         ("last credential is oversized", oversized),
         ("last node ID is empty", missing_id),
@@ -870,7 +885,10 @@ async fn invalid_role_preserves_healthy_peer_roles() {
     let switches = devices("switch", 1);
     let mock = Arc::new(MockRmsApi::new());
     enqueue(&mock, &switches).await;
-    let manager = crate::rms::rms_rack_firmware_update_manager(mock.clone());
+    let manager = crate::rms::rms_rack_firmware_update_manager(
+        mock.clone(),
+        carbide_instrument::Instrumentation::noop(),
+    );
 
     let result = manager
         .get_firmware_expectations(request(&rack, &profile, &machines, &switches, &[]))
@@ -1086,7 +1104,10 @@ async fn sequential_batches_share_one_owned_thirty_second_deadline() {
         let mock = Arc::new(MockRmsApi::new());
         enqueue(&mock, &machines).await;
         enqueue(&mock, &switches).await;
-        let manager = crate::rms::rms_rack_firmware_update_manager(mock.clone());
+        let manager = crate::rms::rms_rack_firmware_update_manager(
+            mock.clone(),
+            carbide_instrument::Instrumentation::noop(),
+        );
         let (arrival, release) = mock.block_next_compare_firmware_object().await;
         let started = Instant::now();
         let read =
@@ -1151,7 +1172,10 @@ async fn caller_cancellation_drops_the_owned_rpc() {
         let profile = profile(65, 0, 0);
         let machines = devices("compute", 65);
         let mock = Arc::new(MockRmsApi::new());
-        let manager = crate::rms::rms_rack_firmware_update_manager(mock.clone());
+        let manager = crate::rms::rms_rack_firmware_update_manager(
+            mock.clone(),
+            carbide_instrument::Instrumentation::noop(),
+        );
         let (arrival, release) = mock.block_next_compare_firmware_object().await;
         let mut read = Box::pin(manager.get_firmware_expectations(request(
             &rack,
@@ -1264,7 +1288,10 @@ async fn comparison_failures_keep_installed_evidence_separate_and_diagnostics_pr
         mock.enqueue_compare_firmware_object(comparison).await;
         mock.enqueue_compare_firmware_object(Ok(healthy_switch.clone()))
             .await;
-        let manager = crate::rms::rms_rack_firmware_update_manager(mock.clone());
+        let manager = crate::rms::rms_rack_firmware_update_manager(
+            mock.clone(),
+            carbide_instrument::Instrumentation::noop(),
+        );
         let mut input = request(&rack, &profile, &machines, &switches, &[]);
         input.config_json = PRIVATE;
 

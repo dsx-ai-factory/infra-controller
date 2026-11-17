@@ -27,6 +27,7 @@ use axum::routing::{patch, post};
 use axum::{Json, Router};
 use bmc_mock::injection::{Action, InjectionStore, Rule, RuleId, Selector, injection_router};
 use bmc_mock::test_support::{lenovo_thinksystem_sr670_router, serve_https};
+use carbide_instrument::Instrumentation;
 use carbide_redfish::libredfish::test_support::RedfishSim;
 use carbide_redfish::libredfish::{
     RedfishAuth, RedfishClientCreationError, RedfishClientPool, new_pool_with_credential_ops,
@@ -197,7 +198,13 @@ async fn configure_bios_against_a_slow_bmc(pool: PgPool) {
                     .unwrap();
                 Arc::new(HostBmcPool {
                     host_bmc,
-                    http: new_pool_with_credential_ops(credentials, http, bmc_address).0,
+                    http: new_pool_with_credential_ops(
+                        credentials,
+                        http,
+                        bmc_address,
+                        Instrumentation::noop(),
+                    )
+                    .0,
                     sim,
                 })
             }

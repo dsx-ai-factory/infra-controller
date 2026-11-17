@@ -189,9 +189,12 @@ async fn repair_uses_resource_etag_and_accepts_success_responses() {
         let addr = spawn_mock_bmc(state.clone());
         let client = redfish_client(addr);
 
-        let repair = ensure_gb200_host_interface_static_ipv4(client.as_ref())
-            .await
-            .unwrap();
+        let repair = ensure_gb200_host_interface_static_ipv4(
+            &carbide_instrument::Instrumentation::noop(),
+            client.as_ref(),
+        )
+        .await
+        .unwrap();
 
         assert_eq!(repair, HostInterfaceStaticIpv4Repair::Patched);
         assert_eq!(state.get_hits.load(Ordering::SeqCst), 2);
@@ -223,9 +226,12 @@ async fn repair_does_not_patch_an_already_configured_address() {
     let addr = spawn_mock_bmc(state.clone());
     let client = redfish_client(addr);
 
-    let repair = ensure_gb200_host_interface_static_ipv4(client.as_ref())
-        .await
-        .unwrap();
+    let repair = ensure_gb200_host_interface_static_ipv4(
+        &carbide_instrument::Instrumentation::noop(),
+        client.as_ref(),
+    )
+    .await
+    .unwrap();
 
     assert_eq!(repair, HostInterfaceStaticIpv4Repair::AlreadyConfigured);
     assert_eq!(state.get_hits.load(Ordering::SeqCst), 1);
@@ -239,9 +245,12 @@ async fn repair_does_not_patch_without_an_etag() {
     let addr = spawn_mock_bmc(state.clone());
     let client = redfish_client(addr);
 
-    let error = ensure_gb200_host_interface_static_ipv4(client.as_ref())
-        .await
-        .unwrap_err();
+    let error = ensure_gb200_host_interface_static_ipv4(
+        &carbide_instrument::Instrumentation::noop(),
+        client.as_ref(),
+    )
+    .await
+    .unwrap_err();
 
     assert!(error.to_string().contains("missing a usable ETag"));
     assert_eq!(state.get_hits.load(Ordering::SeqCst), 1);
@@ -255,9 +264,12 @@ async fn repair_does_not_patch_when_static_addresses_are_not_reported() {
     let addr = spawn_mock_bmc(state.clone());
     let client = redfish_client(addr);
 
-    let error = ensure_gb200_host_interface_static_ipv4(client.as_ref())
-        .await
-        .unwrap_err();
+    let error = ensure_gb200_host_interface_static_ipv4(
+        &carbide_instrument::Instrumentation::noop(),
+        client.as_ref(),
+    )
+    .await
+    .unwrap_err();
 
     assert!(
         error
@@ -279,9 +291,12 @@ async fn repair_preserves_a_conflicting_static_address() {
     let addr = spawn_mock_bmc(state.clone());
     let client = redfish_client(addr);
 
-    let repair = ensure_gb200_host_interface_static_ipv4(client.as_ref())
-        .await
-        .unwrap();
+    let repair = ensure_gb200_host_interface_static_ipv4(
+        &carbide_instrument::Instrumentation::noop(),
+        client.as_ref(),
+    )
+    .await
+    .unwrap();
 
     assert_eq!(repair, HostInterfaceStaticIpv4Repair::Conflicting);
     assert_eq!(state.get_hits.load(Ordering::SeqCst), 1);
@@ -295,9 +310,12 @@ async fn repair_propagates_a_stale_etag_response() {
     let addr = spawn_mock_bmc(state.clone());
     let client = redfish_client(addr);
 
-    let error = ensure_gb200_host_interface_static_ipv4(client.as_ref())
-        .await
-        .unwrap_err();
+    let error = ensure_gb200_host_interface_static_ipv4(
+        &carbide_instrument::Instrumentation::noop(),
+        client.as_ref(),
+    )
+    .await
+    .unwrap_err();
 
     assert!(matches!(
         error,
@@ -315,9 +333,12 @@ async fn repair_verifies_that_an_accepted_patch_changed_the_address() {
     let addr = spawn_mock_bmc(state.clone());
     let client = redfish_client(addr);
 
-    let error = ensure_gb200_host_interface_static_ipv4(client.as_ref())
-        .await
-        .unwrap_err();
+    let error = ensure_gb200_host_interface_static_ipv4(
+        &carbide_instrument::Instrumentation::noop(),
+        client.as_ref(),
+    )
+    .await
+    .unwrap_err();
 
     assert!(error.to_string().contains("address is still missing"));
     assert_eq!(state.get_hits.load(Ordering::SeqCst), 2);

@@ -37,6 +37,10 @@ const (
 	ConflictStrategyReject ConflictStrategy = iota
 	// ConflictStrategyQueue queues the task until the conflicting task completes.
 	ConflictStrategyQueue
+	// ConflictStrategyPreempt is reserved for trusted internal controllers.
+	// It terminates conflicting work before admitting the new task. Public
+	// protobuf and persisted policy formats do not expose this value.
+	ConflictStrategyPreempt
 )
 
 // String returns the stable name of the conflict strategy.
@@ -46,12 +50,15 @@ func (s ConflictStrategy) String() string {
 		return "reject"
 	case ConflictStrategyQueue:
 		return "queue"
+	case ConflictStrategyPreempt:
+		return "preempt"
 	default:
 		return fmt.Sprintf("ConflictStrategy(%d)", s)
 	}
 }
 
-// ParseConflictStrategy parses a conflict strategy's stable name.
+// ParseConflictStrategy parses user-selectable strategies. Internal preemption
+// is deliberately excluded from public and persisted policy inputs.
 func ParseConflictStrategy(value string) (ConflictStrategy, error) {
 	switch value {
 	case "reject":
@@ -66,7 +73,16 @@ func ParseConflictStrategy(value string) (ConflictStrategy, error) {
 	}
 }
 
-// Request represents the specification of an operation submitted by the user.
+// SubmitOptions contains runtime-only controls for an internal submission.
+// These options are neither accepted from public request converters nor persisted.
+type SubmitOptions struct {
+	// PreserveConflictingTask retains matching work during preemption. The
+	// predicate runs under the rack lock and must not block or mutate state.
+	// Nil preserves no conflicts. It is only valid with ConflictStrategyPreempt.
+	PreserveConflictingTask func(Wrapper) bool
+}
+
+// Request is the internal specification of an operation submission.
 // The Task Manager resolves the TargetSpec, splits by rack, and creates one
 // Task per rack.
 type Request struct {
@@ -77,6 +93,10 @@ type Request struct {
 	// ConflictStrategy controls how the task behaves when a conflict is
 	// detected. Default (ConflictStrategyReject) rejects on conflict.
 	ConflictStrategy ConflictStrategy
+
+	// SubmitOptions are runtime-only caller policy, excluded from JSON and
+	// from the selected fields persisted in task records.
+	SubmitOptions SubmitOptions `json:"-"`
 
 	// QueueTimeout is how long to wait in queue before auto-expiry. Zero
 	// means use the server default. The server may enforce a maximum.
@@ -117,6 +137,15 @@ func (r *Request) HasIdempotencyKey() bool {
 func (r *Request) Validate() error {
 	if r == nil {
 		return fmt.Errorf("request is nil")
+	}
+
+	switch r.ConflictStrategy {
+	case ConflictStrategyReject, ConflictStrategyQueue, ConflictStrategyPreempt:
+	default:
+		return fmt.Errorf("unknown conflict strategy %d", r.ConflictStrategy)
+	}
+	if r.SubmitOptions.PreserveConflictingTask != nil && r.ConflictStrategy != ConflictStrategyPreempt {
+		return fmt.Errorf("task preservation requires the preempt conflict strategy")
 	}
 
 	if !r.Operation.Type.IsValid() {

@@ -18,9 +18,7 @@
 //! BIOS configuration: applying the platform settings, waiting for the BMC
 //! work they start, and PollingBiosSetup escalation.
 
-use bmc_platform::{
-    OperationReference, OperationStatus, PlatformError, PowerState, ResetType, VendorJobId,
-};
+use bmc_platform::{OperationStatus, PlatformError, PowerState, ResetType, VendorJobId};
 use carbide_redfish::boot_interface::BootInterfaceTarget;
 use carbide_redfish::state_handler::state_handler_platform_error as platform_error;
 use chrono::Utc;
@@ -142,10 +140,7 @@ pub(super) async fn configure_host_bios(
         Ok(outcome) => outcome,
     };
 
-    let bios_job_id = outcome.references().find_map(|reference| match reference {
-        OperationReference::VendorJob { job_id, .. } => Some(job_id.to_string()),
-        OperationReference::RedfishTask { .. } => None,
-    });
+    let bios_job_id = platform_config::vendor_job_id(&outcome).map(|job_id| job_id.to_string());
     let bios_config_state = if bios_job_id.is_some() {
         BiosConfigState::WaitForBiosJobScheduled
     } else {
@@ -161,12 +156,10 @@ pub(super) async fn configure_host_bios(
 /// Whether the platform settings are in effect on `mh_snapshot`'s host.
 pub(super) async fn platform_settings_in_effect(
     services: &MachineStateHandlerServices,
-    redfish_client: &dyn Redfish,
-    mh_snapshot: &ManagedHostStateSnapshot,
+    bmc: &PlatformBmc<'_>,
     boot_interface: Option<&BootInterfaceTarget>,
 ) -> Result<bool, StateHandlerError> {
-    let bmc = PlatformBmc::connect(services, mh_snapshot, redfish_client).await?;
-    platform_config::in_effect(&bmc, &services.site_config, boot_interface)
+    platform_config::in_effect(bmc, &services.site_config, boot_interface)
         .await
         .map_err(|e| platform_error("is_bios_setup", e))
 }
@@ -410,9 +403,19 @@ async fn read_bios_job(
                 mh_snapshot.host_snapshot.id
             ))
         })?;
-    let bmc = PlatformBmc::connect(services, mh_snapshot, redfish_client).await?;
-    let status = bmc.operation_status(&idrac_job(job_id.clone())).await;
+    let status = vendor_job_status(services, redfish_client, mh_snapshot, &job_id).await?;
     Ok((job_id, status))
+}
+
+/// What the BMC of `mh_snapshot`'s host reports of the vendor job `job_id`.
+pub(super) async fn vendor_job_status(
+    services: &MachineStateHandlerServices,
+    redfish_client: &dyn Redfish,
+    mh_snapshot: &ManagedHostStateSnapshot,
+    job_id: &VendorJobId,
+) -> Result<Result<OperationStatus, PlatformError>, StateHandlerError> {
+    let bmc = PlatformBmc::connect(services, mh_snapshot, redfish_client).await?;
+    Ok(bmc.operation_status(&idrac_job(job_id.clone())).await)
 }
 
 pub(super) async fn advance_polling_bios_setup(

@@ -84,7 +84,7 @@ pub(super) fn test_state_with_config(config: &str) -> BmcProxyState {
             .expect("test HTTP clients build"),
         ),
         config,
-        api_client: CarbideApiClient::new(&api_config),
+        api_client: CarbideApiClient::new(&api_config, carbide_instrument::Instrumentation::noop()),
         credential_cache: idle_bounded_cache(CREDENTIAL_CACHE_IDLE_TTL),
         ip_cache: bounded_cache(IP_CACHE_TTL),
         admission,

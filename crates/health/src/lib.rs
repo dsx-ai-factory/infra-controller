@@ -229,6 +229,7 @@ async fn build_endpoint_wiring(
             source_cfg.client_cert.clone(),
             source_cfg.client_key.clone(),
             &source_cfg.api_url,
+            instrumentation.clone(),
         ));
         let endpoint_source = Arc::new(ApiEndpointSource::new_with_request_concurrency(
             api_client,

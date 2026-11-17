@@ -9,53 +9,61 @@
 <table class="sortable overview">
 	<thead>
 	<tr>
-		<th>ID</th>
-		<th>Tenant Organization ID</th>
-		<th>Name</th>
-		<th>Description</th>
+		<th>Security Group</th>
+		<th>Tenant</th>
 		<th>Version</th>
-		<th>Created</th>
-		<th></th>
+		<th class="no-sort"></th>
 	</tr>
 	</thead>
 	<tbody>
 	{% for nsg in network_security_groups %}
 		<tr>
-			<td><a href="/admin/network-security-group/{{ nsg.id }}">{{ nsg.id }}</a></td>
-			<td><a href="/admin/tenant/{{ nsg.tenant_organization_id }}">{{ nsg.tenant_organization_id }}</a></td>
-			<td>{{ nsg.name }}</td>
-			<td>{{ nsg.description }}</td>
-			<td>{{ nsg.version }}</td>
-			<td>{{ nsg.created }}</td>
 			<td>
+				<a href="/admin/network-security-group/{{ nsg.id }}">{% if nsg.name.is_empty() %}{{ nsg.id }}{% else %}{{ nsg.name }}{% endif %}</a>
+				{% if !nsg.name.is_empty() %}<span class="cell-sub">{{ nsg.id }}</span>{% endif %}
+				{% if !nsg.description.is_empty() %}<span class="cell-sub">{{ nsg.description }}</span>{% endif %}
+			</td>
+			<td><a href="/admin/tenant/{{ nsg.tenant_organization_id }}">{{ nsg.tenant_organization_id }}</a></td>
+			<td class="cell-nowrap">
+				{{ nsg.version }}
+				<span class="cell-sub">Created {{ nsg.created }}</span>
+			</td>
+			<td class="row-action">
 				<form id="nsg_delete_action" method="POST" action="/admin/network-security-group/{{ nsg.id }}/delete">
 					<input type="hidden" name="tenant_organization_id" value="{{ nsg.tenant_organization_id }}">
-					<input type="submit" value="Delete">
+					<input type="submit" value="Delete" class="delete-button">
 				</form>
 			</td>
 		</tr>
+	{% else %}
+		<tr><td colspan="4">No network security groups.</td></tr>
 	{% endfor %}
 	</tbody>
-	<tfoot>
-		<tr><th colspan="7">
-			{% include "pages_footer.html" %}
-		</th></tr>
-	</tfoot>
 </table>
-<br/>
-<h3>Add Network Security Group</h3>
-<form id="nsg_create_action" method="POST" action="/admin/network-security-group">
-	<table class="detailsview">
-		<tr><th>ID (optional)</th><td><input name="id" type="text" value=""></td></tr>
-		<tr><th>Tenant Organization ID</th><td><input name="tenant_organization_id" type="text" value=""></td></tr>
-		<tr><th>Name</th><td><input name="name" type="text" value=""></td></tr>
-		<tr><th>Description (optional)</th><td><textarea name="description"></textarea></td></tr>
-		<tr><th>Labels (optional)</th><td><textarea name="labels"></textarea></td></tr>
-		<tr><th>Stateful Egress</th><td><input type="checkbox" name="stateful_egress" value="true" /></td></tr>
-		<tr><th>Rules (optional)</th><td><textarea name="rules"></textarea></td></tr>
-		<tr><th>&nbsp;</th><td><input type="submit" value="Create"></td></tr>
-	</table>
-</form>
 
+{% include "pages_footer.html" %}
+
+<h2>Add Network Security Group</h2>
+<form id="nsg_create_action" class="entity-summary" method="POST" action="/admin/network-security-group">
+	<div class="entity-summary-fields">
+		<label for="nsg-new-id">ID (optional)</label>
+		<div><input id="nsg-new-id" name="id" type="text" value=""></div>
+		<label for="nsg-new-tenant">Tenant Organization ID</label>
+		<div><input id="nsg-new-tenant" name="tenant_organization_id" type="text" value=""></div>
+		<label for="nsg-new-name">Name</label>
+		<div><input id="nsg-new-name" name="name" type="text" value=""></div>
+		<label for="nsg-new-description">Description (optional)</label>
+		<div><textarea id="nsg-new-description" name="description"></textarea></div>
+		<label for="nsg-new-labels">Labels (optional)</label>
+		<div><textarea id="nsg-new-labels" name="labels"></textarea></div>
+		<label for="nsg-new-stateful-egress">Stateful Egress</label>
+		<div><input id="nsg-new-stateful-egress" type="checkbox" name="stateful_egress" value="true" /></div>
+		<label for="nsg-new-rules">Rules (optional)</label>
+		<div><textarea id="nsg-new-rules" name="rules"></textarea></div>
+	</div>
+	<div class="entity-summary-footer">
+		<input type="submit" value="Create">
+	</div>
+</form>
 
 {% endblock %}
