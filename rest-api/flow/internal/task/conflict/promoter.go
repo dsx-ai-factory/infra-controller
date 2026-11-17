@@ -198,7 +198,7 @@ func (p *Promoter) processRack(ctx context.Context, rackID uuid.UUID) {
 	candidates := make([]*taskdef.Task, 0, len(waiting))
 	for _, t := range waiting {
 		if t.QueueExpiresAt != nil && now.After(*t.QueueExpiresAt) {
-			if err := p.store.UpdateTaskStatus(ctx, &taskdef.TaskStatusUpdate{
+			if _, err := p.store.UpdateTaskStatus(ctx, &taskdef.TaskStatusUpdate{
 				ID:      t.ID,
 				Status:  taskcommon.TaskStatusTerminated,
 				Message: "Expired: queue timeout reached",
@@ -237,15 +237,19 @@ func (p *Promoter) processRack(ctx context.Context, rackID uuid.UUID) {
 				break // stop; preserve FIFO ordering
 			}
 
-			if err := p.store.UpdateTaskStatus(txCtx,
+			updated, err := p.store.UpdateTaskStatus(txCtx,
 				&taskdef.TaskStatusUpdate{
 					ID:     candidate.ID,
 					Status: taskcommon.TaskStatusPending,
 					Message: "Promoted: no conflicting" +
 						" active tasks",
 				},
-			); err != nil {
+			)
+			if err != nil {
 				return err
+			}
+			if !updated {
+				continue
 			}
 			toExecute = append(toExecute, candidate)
 			workingActive = append(workingActive, candidate)
