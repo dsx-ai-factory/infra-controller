@@ -211,7 +211,7 @@ func (m *mockTaskStore) UpdateScheduledTask(_ context.Context, _ *taskdef.Task) 
 	panic("mockTaskStore.UpdateScheduledTask: not implemented")
 }
 
-func (m *mockTaskStore) UpdateTaskStatus(_ context.Context, _ *taskdef.TaskStatusUpdate) error {
+func (m *mockTaskStore) UpdateTaskStatus(_ context.Context, _ *taskdef.TaskStatusUpdate) (bool, error) {
 	panic("mockTaskStore.UpdateTaskStatus: not implemented")
 }
 
@@ -1364,4 +1364,11 @@ func TestFireNow(t *testing.T) {
 // ListTaskContextForRack fails unexpected context reads in scheduling tests.
 func (m *mockTaskStore) ListTaskContextForRack(_ context.Context, _ uuid.UUID) ([]taskdef.TaskContextMetadata, error) {
 	panic("unexpected task context read")
+}
+
+func (s *mockTaskStore) ListTasksForReconciliation(context.Context, taskcommon.ExecutorType, uuid.UUID, int) ([]*taskdef.Task, error) {
+	panic("unexpected ListTasksForReconciliation")
+}
+func (s *mockTaskStore) FinishTaskExecution(context.Context, *taskdef.Task, *taskdef.ExecutionStatus) (bool, error) {
+	panic("unexpected FinishTaskExecution")
 }

@@ -623,7 +623,7 @@ func TestAllocationConstraintHandler_Update(t *testing.T) {
 			requestedACS:       operatorRootConstraint,
 			acID:               operatorRootConstraint.ID.String(),
 			expectedErr:        true,
-			expectedErrMessage: "linked to an OperatorManaged SitePrefix is not Ready",
+			expectedErrMessage: "is not Ready",
 			expectedStatus:     http.StatusBadRequest,
 			assertState: func(t *testing.T) {
 				constraintAfterUpdate, derr := acDAO.GetByID(ctx, nil, operatorRootConstraint.ID, nil)

@@ -103,7 +103,8 @@ func (a *Activities) UpdateTaskStatus(
 		return fmt.Errorf("invalid task identifier")
 	}
 
-	return a.updater.UpdateTaskStatus(ctx, arg)
+	_, err := a.updater.UpdateTaskStatus(ctx, arg)
+	return err
 }
 
 // UpdateTaskReport is a Temporal activity that merges a structured report

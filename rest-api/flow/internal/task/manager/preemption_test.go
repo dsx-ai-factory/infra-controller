@@ -161,7 +161,9 @@ func testPreemptingAdmission(t *testing.T) {
 				// the terminal reason after its parent workflow was terminated.
 				finishedAt, message := *got.FinishedAt, got.Message
 				for _, late := range []taskcommon.TaskStatus{taskcommon.TaskStatusRunning, taskcommon.TaskStatusCompleted, taskcommon.TaskStatusFailed} {
-					require.NoError(t, persisted.UpdateTaskStatus(t.Context(), &taskdef.TaskStatusUpdate{ID: got.ID, Status: late, Message: "late worker"}))
+					updated, updateErr := persisted.UpdateTaskStatus(t.Context(), &taskdef.TaskStatusUpdate{ID: got.ID, Status: late, Message: "late worker"})
+					require.NoError(t, updateErr)
+					require.False(t, updated)
 				}
 				got, err = persisted.GetTask(t.Context(), original.ID)
 				require.NoError(t, err)
