@@ -53,7 +53,8 @@ const ATTEMPT_BASE_DIR: &str = "/run/nico/machine-validation";
 /// The runtime access granted to an approved plugin revision.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum PluginPrivilege {
-    /// A non-root container with no network and no additional capabilities.
+    /// A container with dropped capabilities and the approved adapter identity
+    /// and namespaces; standard plugins remain non-root and network-isolated.
     Isolated,
     /// A privileged container, without a host-root bind mount.
     Privileged,
@@ -489,7 +490,10 @@ fn validate_invocation(
     privilege: PluginPrivilege,
     contract_dir: &Path,
 ) -> Result<(), String> {
-    if !invocation.mounts.is_empty()
+    if !invocation.socket_mounts.is_empty() && !requirements.host_sockets {
+        return Err("adapter host sockets require a declared host_sockets requirement".to_owned());
+    }
+    if (!invocation.mounts.is_empty() || !invocation.socket_mounts.is_empty())
         && !requirements.run_as_root
         && privilege == PluginPrivilege::Isolated
     {
@@ -497,18 +501,46 @@ fn validate_invocation(
             "plugin host dependencies require approved adapter access or privilege".to_owned(),
         );
     }
-    for mount in &invocation.mounts {
-        validate_contract_dir(&mount.source)?;
-        validate_contract_dir(&mount.target)?;
-        if mount.source == Path::new("/")
-            || mount.target == Path::new("/")
-            || mount.target.starts_with(contract_dir)
-            || contract_dir.starts_with(&mount.target)
+    for (source, target) in invocation
+        .mounts
+        .iter()
+        .map(|mount| (&mount.source, &mount.target))
+        .chain(
+            invocation
+                .socket_mounts
+                .iter()
+                .map(|mount| (&mount.source, &mount.target)),
+        )
+    {
+        validate_contract_dir(source)?;
+        validate_contract_dir(target)?;
+        if source == Path::new("/")
+            || target == Path::new("/")
+            || target.starts_with(contract_dir)
+            || contract_dir.starts_with(target)
         {
             return Err(
                 "adapter dependencies must not mount the host root or replace contract files"
                     .to_owned(),
             );
+        }
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::FileTypeExt;
+        for mount in &invocation.mounts {
+            let metadata = std::fs::metadata(&mount.source)
+                .map_err(|error| format!("cannot inspect adapter data dependency: {error}"))?;
+            if metadata.file_type().is_socket() {
+                return Err("host Unix sockets must be declared as socket mounts".to_owned());
+            }
+        }
+        for mount in &invocation.socket_mounts {
+            let metadata = std::fs::metadata(&mount.source)
+                .map_err(|error| format!("cannot inspect adapter host socket: {error}"))?;
+            if !metadata.file_type().is_socket() {
+                return Err("adapter host socket mount must reference a Unix socket".to_owned());
+            }
         }
     }
     if invocation
@@ -550,7 +582,12 @@ fn plugin_runtime_args(
         "run".to_owned(),
         "--rm".to_owned(),
         "--network".to_owned(),
-        "none".to_owned(),
+        if requirements.host_network {
+            "host"
+        } else {
+            "none"
+        }
+        .to_owned(),
         "--env".to_owned(),
         format!("{PLUGIN_CONTRACT_DIR_ENV}={}", contract_dir.display()),
         "--mount".to_owned(),
@@ -590,6 +627,9 @@ fn plugin_runtime_args(
         ]),
     }
 
+    if requirements.host_pid && spec.privilege != PluginPrivilege::FullHost {
+        args.extend(["--pid".to_owned(), "host".to_owned()]);
+    }
     if requirements.run_as_root && spec.privilege != PluginPrivilege::Isolated {
         args.extend(["--user".to_owned(), "0:0".to_owned()]);
     }
@@ -603,6 +643,18 @@ fn plugin_runtime_args(
         args.extend(["--env".to_owned(), format!("{key}={value}")]);
     }
     for mount in &invocation.mounts {
+        args.extend([
+            "--mount".to_owned(),
+            format!(
+                "type=bind,src={},dst={},readonly",
+                mount.source.display(),
+                mount.target.display()
+            ),
+        ]);
+    }
+    // A read-only socket bind still permits protocol requests. These mounts
+    // are distinct from data dependencies and require explicit site approval.
+    for mount in &invocation.socket_mounts {
         args.extend([
             "--mount".to_owned(),
             format!(
@@ -809,7 +861,12 @@ mod tests {
         let mut runtime = spec(PluginPrivilege::Isolated);
         runtime.image = image;
         runtime.container_plugin_adapter = Some("DSXHealthValidation".to_owned());
-        runtime.entrypoint = vec!["/health-validation".to_owned(), "run".to_owned()];
+        runtime.entrypoint = vec![
+            "/health-validation".to_owned(),
+            "run".to_owned(),
+            "--execution-context".to_owned(),
+            "OPERATOR_INFRA".to_owned(),
+        ];
         let (sender, mut receiver) = mpsc::channel::<PluginLogChunk>(1024);
         let logs = tokio::spawn(async move {
             let mut stdout = String::new();
@@ -848,18 +905,18 @@ mod tests {
         runtime.entrypoint = vec![
             "/bin/sh".to_owned(),
             "-c".to_owned(),
-            "exec sleep 30".to_owned(),
+            "exec sleep 90".to_owned(),
         ];
         let error = execute_plugin(
             &runtime,
             &input,
-            std::time::Duration::from_secs(5),
+            std::time::Duration::from_secs(30),
             Path::new(DEFAULT_PLUGIN_CONTRACT_DIR),
             None,
         )
         .await
         .expect_err("qualification process must time out");
-        assert_eq!(error, "plugin timed out after 5 seconds");
+        assert_eq!(error, "plugin timed out after 30 seconds");
     }
 
     #[test]
@@ -936,11 +993,13 @@ mod tests {
     }
 
     #[test]
-    fn approved_gpu_adapter_uses_root_without_privileged_or_host_root_access() {
-        let requirements = RuntimeRequirements {
-            all_gpus: true,
-            run_as_root: true,
-        };
+    fn approved_gpu_adapter_uses_declared_namespaces_without_privileged_or_host_root_access() {
+        let dependency =
+            std::env::temp_dir().join(format!("adapter-dependency-{}", Uuid::new_v4()));
+        std::fs::write(&dependency, b"fixture").unwrap();
+        let requirements = machine_validation_adapters::resolve(Some("DSXHealthValidation"))
+            .unwrap()
+            .requirements();
         let invocation = AdapterInvocation {
             entrypoint: Some("/custom/check".to_owned()),
             arguments: vec!["run".to_owned()],
@@ -950,9 +1009,10 @@ mod tests {
             )]
             .into(),
             mounts: vec![machine_validation_adapters::ReadOnlyMount {
-                source: "/usr/bin/journalctl".into(),
+                source: dependency.clone(),
                 target: "/usr/bin/journalctl".into(),
             }],
+            socket_mounts: Vec::new(),
         };
         let contract = Path::new(DEFAULT_PLUGIN_CONTRACT_DIR);
         validate_invocation(
@@ -981,35 +1041,142 @@ mod tests {
             requirements,
             &invocation,
         );
+        let mount_argument = format!(
+            "type=bind,src={},dst=/usr/bin/journalctl,readonly",
+            dependency.display()
+        );
         for pair in [
             ["--gpus", "all"],
             ["--user", "0:0"],
             ["--cap-drop", "ALL"],
-            ["--network", "none"],
+            ["--network", "host"],
+            ["--pid", "host"],
             ["--entrypoint", "/custom/check"],
             ["--env", "NVIDIA_DRIVER_CAPABILITIES=utility"],
-            [
-                "--mount",
-                "type=bind,src=/usr/bin/journalctl,dst=/usr/bin/journalctl,readonly",
-            ],
+            ["--mount", mount_argument.as_str()],
         ] {
             assert!(args.windows(2).any(|actual| actual == pair));
         }
         assert!(
             !args
                 .iter()
-                .any(|arg| arg == "--privileged" || arg == "--pid" || arg.contains("dst=/host"))
+                .any(|arg| arg == "--privileged" || arg.contains("dst=/host"))
         );
         assert_eq!(&args[args.len() - 2..], [runtime.image, "run".to_owned()]);
+        std::fs::remove_file(dependency).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn host_service_sockets_require_a_declaration_and_cannot_be_data_mounts() {
+        use std::os::unix::net::UnixDatagram;
+
+        use machine_validation_adapters::{HostSocketMount, ReadOnlyMount};
+        let directory = std::env::temp_dir().join(format!("adapter-socket-{}", Uuid::new_v4()));
+        std::fs::create_dir(&directory).unwrap();
+        let path = directory.join("socket");
+        let _socket = UnixDatagram::bind(&path).unwrap();
+        let mut invocation = AdapterInvocation {
+            socket_mounts: vec![HostSocketMount {
+                source: path.clone(),
+                target: "/run/service/socket".into(),
+            }],
+            ..Default::default()
+        };
+        let mut requirements = RuntimeRequirements {
+            run_as_root: true,
+            ..Default::default()
+        };
+        let contract = Path::new(DEFAULT_PLUGIN_CONTRACT_DIR);
+        assert!(
+            validate_invocation(
+                &invocation,
+                requirements,
+                PluginPrivilege::Isolated,
+                contract
+            )
+            .is_err()
+        );
+        requirements.host_sockets = true;
+        validate_invocation(
+            &invocation,
+            requirements,
+            PluginPrivilege::Isolated,
+            contract,
+        )
+        .unwrap();
+        let args = plugin_runtime_args(
+            &directory,
+            &directory,
+            "socket-test",
+            &spec(PluginPrivilege::Isolated),
+            contract,
+            requirements,
+            &invocation,
+        );
+        assert!(args.windows(2).any(|pair| pair
+            == [
+                "--mount",
+                &format!(
+                    "type=bind,src={},dst=/run/service/socket,readonly",
+                    path.display()
+                )
+            ]));
+        invocation.socket_mounts[0].target = contract.join("input/audit");
+        assert!(
+            validate_invocation(
+                &invocation,
+                requirements,
+                PluginPrivilege::Isolated,
+                contract
+            )
+            .unwrap_err()
+            .contains("replace contract files")
+        );
+        invocation.socket_mounts.clear();
+        invocation.mounts.push(ReadOnlyMount {
+            source: path.clone(),
+            target: "/run/service/socket".into(),
+        });
+        assert!(
+            validate_invocation(
+                &invocation,
+                requirements,
+                PluginPrivilege::Isolated,
+                contract
+            )
+            .is_err()
+        );
+        invocation.mounts.clear();
+        std::fs::remove_file(&path).unwrap();
+        std::fs::write(&path, b"not a socket").unwrap();
+        invocation.socket_mounts.push(HostSocketMount {
+            source: path,
+            target: "/run/service/socket".into(),
+        });
+        assert!(
+            validate_invocation(
+                &invocation,
+                requirements,
+                PluginPrivilege::Isolated,
+                contract
+            )
+            .is_err()
+        );
+        std::fs::remove_dir_all(directory).unwrap();
     }
 
     #[test]
     fn adapter_mounts_cannot_inject_options_or_replace_contract_files() {
-        for (source, target) in [
-            ("/", "/dependency"),
-            ("/host/lib,readonly=false", "/dependency"),
-            ("/host/lib", "/opt/forge/mv/input"),
-            ("/host/lib", "/"),
+        for (source, target, expected) in [
+            ("/", "/dependency", "must not mount"),
+            (
+                "/host/lib,readonly=false",
+                "/dependency",
+                "must not contain commas",
+            ),
+            ("/host/lib", "/opt/forge/mv/input", "replace contract files"),
+            ("/host/lib", "/", "must not mount"),
         ] {
             let invocation = AdapterInvocation {
                 mounts: vec![machine_validation_adapters::ReadOnlyMount {
@@ -1028,7 +1195,8 @@ mod tests {
                     PluginPrivilege::Isolated,
                     Path::new(DEFAULT_PLUGIN_CONTRACT_DIR)
                 )
-                .is_err()
+                .unwrap_err()
+                .contains(expected)
             );
         }
     }

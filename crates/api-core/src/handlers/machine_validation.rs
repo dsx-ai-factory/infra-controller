@@ -1217,6 +1217,9 @@ fn validate_machine_validation_plugin(
             )));
         }
     }
+    config
+        .validate_plugin_runtime_requirements(adapter.requirements())
+        .map_err(CarbideError::InvalidArgument)?;
     adapter
         .validate_registration(&plugin.entrypoint, &parameters)
         .map_err(CarbideError::InvalidArgument)?;
@@ -1972,6 +1975,10 @@ mod img_name_validation_tests {
         };
         assert!(validate_machine_validation_plugin(&plugin, &config).is_err());
         config.allowed_container_plugin_adapters = vec!["DSXHealthValidation".to_owned()];
+        assert!(validate_machine_validation_plugin(&plugin, &config).is_err());
+        config.allow_plugin_host_network = true;
+        config.allow_plugin_host_pid = true;
+        config.allow_plugin_host_sockets = true;
         assert!(validate_machine_validation_plugin(&plugin, &config).is_ok());
         plugin.privileged = true;
         assert!(validate_machine_validation_plugin(&plugin, &config).is_err());

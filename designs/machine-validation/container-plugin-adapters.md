@@ -1,6 +1,6 @@
 # Machine Validation Container Plugin Adapters
 
-**Status:** Agreed design and implementation reference, 2026-10-22. Extends the
+**Status:** Agreed design and implementation reference, updated 2026-11-17. Extends the
 [pluggable framework design](pluggable-machine-validation-framework.md).
 
 ## Purpose and selection
@@ -42,9 +42,11 @@ nico-admin-cli machine-validation plugins create \
   --name dsx-health \
   --type container \
   --container-plugin-adapter DSXHealthValidation \
-  --image 'ghcr.io/dsx-ai-factory/health-validation@sha256:<digest>' \
+  --image 'nvcr.io/0837451325059433/components-dev/health-validation@sha256:abd01453dccba79370e6ac9e88552669b4b5ec5b3bedeebe604792fe779889d1' \
   --entrypoint /health-validation \
   --arg run \
+  --arg=--execution-context \
+  --arg OPERATOR_INFRA \
   --parameters '{"gpu_count":4}' \
   --context OnDemand \
   --platform GB200
@@ -76,15 +78,29 @@ exits, timeouts, and truncated output are execution errors.
 
 Registration and enablement require site approval for named adapters through
 `allowed_container_plugin_adapters`, which defaults to an empty list.
-`DSXHealthValidation` declares all-GPU access and container root with capabilities
-dropped. Its read-only dependencies include host `journalctl`, required non-glibc
-libraries, journal data, and machine identity. The shared runtime enforces this
-profile without requiring privileged or writable host-root access.
+`DSXHealthValidation` declares all-GPU access, container root with capabilities
+dropped, host network/PID namespaces, and host service sockets. The additional
+site approvals `allow_plugin_host_network`, `allow_plugin_host_pid`, and
+`allow_plugin_host_sockets` default to false; all three are required for this
+adapter's static profile. Missing approvals make an approved-adapter site
+configuration invalid and block registration/enablement.
 
-Command arguments select image-specific CLI options. The tested `0.2.0-rc1`
-container does not accept `--execution-context`; newer images can opt in with
-`--arg=--execution-context --arg OPERATOR_INFRA`. The adapter appends only the
-managed identity and configuration flags, without automatic version probing.
+The adapter discovers host `journalctl` and DCGM 4 (`libdcgm.so.4` through
+`ldconfig -p`), mounts their non-glibc dependencies read-only, and sets
+`LD_LIBRARY_PATH`. Host networking reaches `nv-hostengine`; host PID access
+provides node-wide process visibility. A configured GPU-count override also
+requires the host journald socket for native audit entries. Socket mounts are
+explicit service access: a read-only bind still permits sending requests. The
+runtime handles generic declarations, while DCGM discovery and audit behavior
+remain inside the DSX adapter. No privileged or writable host-root access is
+required.
+
+The qualification image is the private NGC image built from HealthValidation
+PR #269's merge commit `412b7a6283c1`, pinned in the example above. It accepts
+`--execution-context` and defaults to `TENANT_GUEST`; NICo qualification selects
+`OPERATOR_INFRA` explicitly. Context remains a configurable command argument.
+This profile targets DCGM 4 images; it does not auto-detect or downgrade access
+for the earlier `0.2.0-rc1` image.
 
 Validate on Scout using the tested GPU and journal setup. A valid `CRITICAL`
 verdict must produce a completed, failed validation rather than an execution

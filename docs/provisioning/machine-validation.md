@@ -233,7 +233,12 @@ separate per-revision approval.
 Registration and enablement of named adapters require an exact entry in
 `allowed_container_plugin_adapters`, which defaults to an empty list. Approving
 an adapter permits its declared container identity, GPU access, and read-only
-host dependencies. The standard contract needs no adapter entry. Unknown adapter
+host dependencies. Adapter requests for host network, host PID, and host Unix socket access also
+require `allow_plugin_host_network`, `allow_plugin_host_pid`, and
+`allow_plugin_host_sockets`, respectively; each defaults to `false`. An approved
+adapter whose static requirements lack these approvals makes site configuration
+invalid and cannot be registered or enabled. The standard contract needs no
+adapter entry and requests none of these additional capabilities. Unknown adapter
 names are rejected in site configuration and plugin registration. Explicit
 privileged or full-host requests continue to require their separate policies.
 
@@ -419,8 +424,10 @@ exact version used by every validation run.
 ### NVIDIA HealthValidation Adapter
 
 [NVIDIA HealthValidation](https://github.com/dsx-ai-factory/health-validation)
-provides hardware checks in a
-[published container](https://github.com/dsx-ai-factory/health-validation/pkgs/container/health-validation).
+provides hardware checks and a
+[container build target](https://github.com/dsx-ai-factory/health-validation/blob/main/toolkit/cmd/health-validation/BUILD.bazel).
+Its CI publishes images to a private NGC repository; deployment images can also
+be built from source.
 The `DSXHealthValidation` adapter prepares its inputs and dependencies and
 normalizes its aggregate health result. HealthValidation owns check selection,
 GPU-count evaluation, and diagnostic findings. NICo owns execution and the
@@ -431,6 +438,10 @@ Upgrade all NICo API instances and target Scouts to a release containing
 older API can discard the new protobuf field, and an older Scout cannot honor
 adapter selection. Use a matching admin CLI to expose the adapter flag. Keep
 adapter revisions disabled during a rollback to versions without this support.
+Disable existing DSX revisions before upgrading to this expanded runtime profile,
+approve the new requirements explicitly, and qualify a new revision before
+enabling it. Policy changes gate configuration, registration, and enablement;
+disable revisions explicitly when their execution must stop.
 
 Allow the registry and adapter in the site's existing policy, retaining other
 registries and settings the site requires:
@@ -439,20 +450,32 @@ registries and settings the site requires:
 [machine_validation_config]
 enabled = true
 allowed_plugin_types = ["container"]
-approved_plugin_registries = ["ghcr.io"]
+approved_plugin_registries = ["nvcr.io"]
 allowed_container_plugin_adapters = ["DSXHealthValidation"]
+allow_plugin_host_network = true
+allow_plugin_host_pid = true
+allow_plugin_host_sockets = true
 ```
 
-Register the tested image digest and a platform supported by its catalog:
+The qualification example pins the private NGC image from
+[HealthValidation PR #269](https://github.com/dsx-ai-factory/health-validation/pull/269),
+merge commit `412b7a6283c1`. Access to that NGC repository is required. Sites can
+also [build their own image](https://github.com/dsx-ai-factory/health-validation/blob/412b7a6283c1767fba6213d4a38bf3a40246d0ef/docs/developer.md#building-container-images-from-source),
+register its digest in an approved registry, and qualify that revision. Select a
+platform supported by the image's catalog. Configure NICo's private-registry
+credential separately from a local Docker login: use registry `nvcr.io` and
+literal username `$oauthtoken` in the credential workflow above.
 
 ```sh
 nico-admin-cli machine-validation plugins create \
   --name dsx-health \
   --type container \
   --container-plugin-adapter DSXHealthValidation \
-  --image 'ghcr.io/dsx-ai-factory/health-validation@sha256:<verified-digest>' \
+  --image 'nvcr.io/0837451325059433/components-dev/health-validation@sha256:abd01453dccba79370e6ac9e88552669b4b5ec5b3bedeebe604792fe779889d1' \
   --entrypoint /health-validation \
   --arg run \
+  --arg=--execution-context \
+  --arg OPERATOR_INFRA \
   --parameters '{"gpu_count":4}' \
   --context OnDemand \
   --platform GB200
@@ -468,25 +491,41 @@ Unknown parameters, invalid counts, and conflicting arguments fail registration.
 NICo does not independently inspect individual check results or GPU-count coverage.
 
 Execution-context flags are image dependent and are not added automatically.
-The tested `0.2.0-rc1` CLI does not accept `--execution-context`. For a newer image
-that supports it, explicitly append `--arg=--execution-context --arg OPERATOR_INFRA`
-when that context is required, and qualify that exact revision.
+The pinned PR #269 image defaults to `TENANT_GUEST`. The example explicitly
+selects `OPERATOR_INFRA`. The earlier `0.2.0-rc1` image does not support that
+flag; this DCGM 4 runtime profile is qualified separately and does not
+automatically downgrade its dependencies or host access for older images.
 
 Scout must have NVIDIA Container Toolkit configured for `nerdctl --gpus all`,
-plus a working host `journalctl` and `ldd`, at least one systemd journal directory,
-and `/etc/machine-id`. The adapter requests all GPUs and sets
+plus a working host `journalctl`, `ldd`, and `ldconfig`, at least one systemd
+journal directory, and `/etc/machine-id`. Install DCGM 4 with `libdcgm.so.4`
+registered in the host library cache, and run `nv-hostengine` on the host's
+localhost endpoint. The adapter requests all GPUs and sets
 `NVIDIA_DRIVER_CAPABILITIES=utility`; GPU devices and driver libraries are supplied
 by the NVIDIA runtime. It discovers `journalctl` on Scout's PATH and mounts that
 binary, its resolved non-glibc libraries, available `/run/log/journal` and
 `/var/log/journal` directories, and machine identity read-only. The host binary
 and libraries must be compatible with the container's glibc. Missing dependencies
-are preparation errors.
+are preparation errors. It also discovers `libdcgm.so.4` through `ldconfig -p`,
+mounts that library and its non-glibc dependencies read-only at the same paths,
+and sets `LD_LIBRARY_PATH` to its container-visible directory. It retains the
+container's glibc and dynamic loader.
+
+When `gpu_count` is configured, the adapter requires and mounts the host Unix
+socket `/run/systemd/journal/socket` for HealthValidation's native threshold
+audit entries. A missing socket or a regular file at that path is a preparation
+error. Without overrides, the socket is not mounted. Host socket access is
+approved separately from read-only data: binding a socket read-only still
+permits requests to the service. The static adapter profile requires socket
+approval even for a revision with no overrides.
 
 Without an additional privileged request, the adapter runs as container root
 with all Linux capabilities dropped and
-`no-new-privileges`, with no network, host PID namespace, or writable host-root
-mount. Approving the named adapter grants this profile; `--privileged` is not
-required. If additional privileged or full-host access is requested, the existing
+`no-new-privileges`. It shares the host network to reach DCGM on localhost and
+the host PID namespace so process checks see workloads across containers.
+These namespace requests require the additional site approvals above. It has
+no writable host-root mount; `--privileged` is not required. If additional
+privileged or full-host access is requested, the existing
 site policies and full-host revision approval still apply. Scout's configured
 native snapshotter is used through the existing nerdctl configuration.
 
@@ -513,10 +552,12 @@ Qualify, verify, and enable the revision through
 
 #### Qualification evidence
 
-The manual Scout run of `0.2.0-rc1` demonstrated GPU and journal access and a
-`CRITICAL` JSON verdict. It did not exercise this adapter's capability-dropping
-profile or NICo's complete execution path. Full Scout qualification of this
-integration remains pending; unit tests alone do not establish hardware support.
+Local Docker checks of the pinned PR #269 image verified its CLI, host journal
+access with dropped capabilities, and interpretation of a real `CRITICAL`
+verdict caused by missing NVML. The local host lacks NVIDIA runtime support,
+so those checks did not exercise GPU collection, DCGM, threshold audit writes,
+or NICo's complete Scout execution path. Full Scout qualification remains
+pending; an expected missing-GPU failure does not establish hardware support.
 
 Before verifying a revision, retain the following evidence with its qualification
 record:
@@ -524,8 +565,8 @@ record:
 | Evidence | Required detail |
 | --- | --- |
 | Software | Exact image digest, NICo API and Scout versions, and adapter name. |
-| Hardware and runtime | Machine ID, CPU architecture, platform, GPU count, driver and NVIDIA Container Toolkit versions. |
-| Execution | Configured command and parameters, native snapshotter, GPU visibility, and successful host journal reads under the adapter's actual profile. |
+| Hardware and runtime | Machine ID, CPU architecture, platform, GPU count, driver, NVIDIA Container Toolkit and DCGM 4 versions, and running hostengine. |
+| Execution | Command and parameters, native snapshotter, GPU visibility, host PID visibility, DCGM collection, journal reads and threshold audit entries under the actual profile. |
 | Results | Raw stdout/stderr and persisted Machine Validation outcome; `CRITICAL` must complete as a failed health assessment. |
 | Cleanup | Timeout removes the container and its attempt directory; diagnostic logs remain available. |
 
@@ -537,7 +578,7 @@ and `sleep` in the image. Pre-pull the digest-pinned image into
 nerdctl's `default` namespace, then run the test on the qualification host:
 
 ```sh
-export NICO_MV_DSX_TEST_IMAGE='ghcr.io/dsx-ai-factory/health-validation@sha256:<verified-digest>'
+export NICO_MV_DSX_TEST_IMAGE='nvcr.io/0837451325059433/components-dev/health-validation@sha256:abd01453dccba79370e6ac9e88552669b4b5ec5b3bedeebe604792fe779889d1'
 export NICO_MV_DSX_EXPECTED_SEVERITY=CRITICAL
 export NICO_MV_DSX_GPU_COUNT=4
 cargo test -p carbide-machine-validation --lib \

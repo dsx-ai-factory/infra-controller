@@ -1644,6 +1644,13 @@ async fn create_test_env_with_overrides_inner(
                         .machine_validation_config
                         .allowed_container_plugin_adapters
                         .clone(),
+                    allow_plugin_host_network: config
+                        .machine_validation_config
+                        .allow_plugin_host_network,
+                    allow_plugin_host_pid: config.machine_validation_config.allow_plugin_host_pid,
+                    allow_plugin_host_sockets: config
+                        .machine_validation_config
+                        .allow_plugin_host_sockets,
                     allow_privileged_plugins: config
                         .machine_validation_config
                         .allow_privileged_plugins,

@@ -52,6 +52,12 @@ pub struct RuntimeRequirements {
     pub all_gpus: bool,
     /// Run as container root to read root-owned dependencies, with capabilities dropped.
     pub run_as_root: bool,
+    /// Share the host network namespace, including services on host localhost.
+    pub host_network: bool,
+    /// Share the host PID namespace for node-wide process visibility.
+    pub host_pid: bool,
+    /// Allow connections to explicitly mounted host Unix sockets.
+    pub host_sockets: bool,
 }
 
 /// Immutable request and filesystem locations supplied for one attempt.
@@ -86,6 +92,16 @@ pub struct ReadOnlyMount {
     pub target: PathBuf,
 }
 
+/// Host Unix socket exposed to a trusted adapter. A read-only bind mount still
+/// permits sending requests, so this access requires separate site approval.
+#[derive(Debug, PartialEq, Eq)]
+pub struct HostSocketMount {
+    /// Absolute Unix socket path on Scout.
+    pub source: PathBuf,
+    /// Absolute socket destination inside the container.
+    pub target: PathBuf,
+}
+
 /// Prepared command and dependencies; image and privilege settings stay with the framework.
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct AdapterInvocation {
@@ -97,6 +113,8 @@ pub struct AdapterInvocation {
     pub environment: BTreeMap<String, String>,
     /// Host dependencies mounted read-only.
     pub mounts: Vec<ReadOnlyMount>,
+    /// Host service sockets, whose protocols can have side effects.
+    pub socket_mounts: Vec<HostSocketMount>,
 }
 
 /// Container-specific behavior behind the generic execution boundary.
