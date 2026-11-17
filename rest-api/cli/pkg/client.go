@@ -32,6 +32,20 @@ type Client struct {
 	TokenRefresh    func() (string, error)
 	AuthRetryMax    int
 	AuthRetryNotify func(AuthRetryEvent)
+	// RequestNotify, when set, is called once for every HTTP request the
+	// client sends, after the response body is read or the request fails.
+	RequestNotify func(RequestEvent)
+}
+
+// RequestEvent describes one finished HTTP request for RequestNotify.
+type RequestEvent struct {
+	Method string
+	// StatusCode is the response status, or 0 when no response was read.
+	StatusCode int
+	// Err is the transport or body-read failure when StatusCode is 0.
+	Err error
+	// Duration runs from sending the request to reading the full body.
+	Duration time.Duration
 }
 
 // http2StreamError matches net/http's private stream error through errors.As.
@@ -254,6 +268,12 @@ func (c *Client) notifyAuthRetry(event AuthRetryEvent) {
 	}
 }
 
+func (c *Client) notifyRequest(event RequestEvent) {
+	if c.RequestNotify != nil {
+		c.RequestNotify(event)
+	}
+}
+
 func canReplayAfterAuthRefresh(method string) bool {
 	switch strings.ToUpper(method) {
 	case http.MethodGet, http.MethodHead, http.MethodOptions:
@@ -303,16 +323,20 @@ func (c *Client) do(ctx context.Context, method, pathTemplate string, pathParams
 		c.Log.Debugf("Request body: %s", formatDebugBody(body))
 	}
 
+	start := time.Now()
 	resp, err := c.HTTPClient.Do(req)
 	if err != nil {
+		c.notifyRequest(RequestEvent{Method: method, Err: err, Duration: time.Since(start)})
 		return nil, nil, fmt.Errorf("executing request: %w", err)
 	}
 	defer resp.Body.Close()
 
 	respBody, err := io.ReadAll(resp.Body)
 	if err != nil {
+		c.notifyRequest(RequestEvent{Method: method, Err: err, Duration: time.Since(start)})
 		return nil, nil, fmt.Errorf("reading response: %w", err)
 	}
+	c.notifyRequest(RequestEvent{Method: method, StatusCode: resp.StatusCode, Duration: time.Since(start)})
 
 	if c.Debug {
 		c.Log.Debugf("API response: %s %s -> %s", method, reqURL, resp.Status)
