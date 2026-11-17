@@ -8120,9 +8120,9 @@ dependencies = [
 
 [[package]]
 name = "nv-redfish"
-version = "0.22.0"
+version = "0.22.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "dc30c999191bff8dfae8669d117bd109322833becc027e2da21ab84356a1adda"
+checksum = "d1e4a7bf9a7ea269a5d7a3bdf27b935638c77297c442e744d0d849449370186c"
 dependencies = [
  "futures-core",
  "futures-util",
@@ -8138,9 +8138,9 @@ dependencies = [
 
 [[package]]
 name = "nv-redfish-bmc-http"
-version = "0.22.0"
+version = "0.22.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "64529e0a1df7a7728e8fc86a5830e043d7b20bb0327b4c97ed79ebfb9bcec6b1"
+checksum = "e187e123ee1df480fdc7722e86efd39e84539c5548e4eae295c6abad45003ff9"
 dependencies = [
  "bytes",
  "futures-core",
@@ -8161,9 +8161,9 @@ dependencies = [
 
 [[package]]
 name = "nv-redfish-core"
-version = "0.22.0"
+version = "0.22.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "26655bc2acc57aec4d95893242c2d03b5daeb12ca88c81f21df9866f5b3e2d52"
+checksum = "eccb48644cc42e3e5c6bb49e3e3892ebdf93887e7690283123c3b806069f1ca6"
 dependencies = [
  "futures-core",
  "futures-io",
@@ -8177,9 +8177,9 @@ dependencies = [
 
 [[package]]
 name = "nv-redfish-csdl-compiler"
-version = "0.22.0"
+version = "0.22.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1bef7727ca258429b42e4ec552118787a550107b797e10629650f22211ea5602"
+checksum = "ad96edbb7b8bdf07309cab584008b6cd83c50f53fbc67323b3df95186533f9f3"
 dependencies = [
  "clap",
  "clap_derive",
@@ -8195,9 +8195,9 @@ dependencies = [
 
 [[package]]
 name = "nv-redfish-dispatcher"
-version = "0.22.0"
+version = "0.22.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "56a82efcac6a4ff3a46f0613a61a3aa1508e28ab250377db174aa03980a32b7a"
+checksum = "0348da99833843c3ef79ac634b10e566606fd4ccfa27bfa26035fa979e010c9b"
 dependencies = [
  "futures-core",
  "futures-util",
@@ -8205,9 +8205,9 @@ dependencies = [
 
 [[package]]
 name = "nv-redfish-quirks"
-version = "0.22.0"
+version = "0.22.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "097eafbfdd6b86e79f9d1ac7aa48ba28882f51c9ca607d07e0c120b63bfd0581"
+checksum = "3013caab4f3aa20144e7d8e87eaa87eb7730da4aa904add6940da5f61b3cc3ac"
 dependencies = [
  "futures-util",
  "nv-redfish-core",
@@ -8218,18 +8218,18 @@ dependencies = [
 
 [[package]]
 name = "nv-redfish-schema"
-version = "0.22.0"
+version = "0.22.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2f38563b90794aa3cb502ed27e339fcce8eb0930ef6b1c71875ccb85c136763b"
+checksum = "dde0dc0195625ceca17c3d89d2fc72479d2137d030c97b897c09f5310b030f93"
 dependencies = [
  "glob",
 ]
 
 [[package]]
 name = "nv-redfish-server-core"
-version = "0.22.0"
+version = "0.22.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fb353a2f7e793e5aef3a8febd7a8437d80510dec4c8426c22826586646066cca"
+checksum = "8d7df3130441a8b4521c8a481beac08b16e4f8e54eb78b30e98dddbf6deb65ee"
 dependencies = [
  "serde",
  "serde_json",
