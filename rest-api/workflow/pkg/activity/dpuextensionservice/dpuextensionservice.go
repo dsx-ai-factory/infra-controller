@@ -132,17 +132,19 @@ func (mde ManageDpuExtensionService) UpdateDpuExtensionServicesInDB(ctx context.
 		var status *string
 		var statusMessage *string
 		var isMissingOnSite *bool
+		if dpuExtensionService.IsMissingOnSite {
+			isMissingOnSite = cutil.GetPtr(false)
+		}
 
 		// Update DPU Extension Service status if necessary
 		if dpuExtensionService.Status == cdbm.DpuExtensionServiceStatusPending {
 			// If the DPU Extension Service is in Pending status, set it to Ready
 			status = cutil.GetPtr(cdbm.DpuExtensionServiceStatusReady)
 			statusMessage = cutil.GetPtr("DPU Extension Service is ready for deployment")
-		} else if dpuExtensionService.IsMissingOnSite && dpuExtensionService.Status == cdbm.DpuExtensionServiceStatusError {
+		} else if dpuExtensionService.IsMissingOnSite && dpuExtensionService.Status != cdbm.DpuExtensionServiceStatusDeleting {
 			// If the DPU Extension Service was previously missing on Site, set it back to Ready
 			status = cutil.GetPtr(cdbm.DpuExtensionServiceStatusReady)
 			statusMessage = cutil.GetPtr("DPU Extension Service was re-detected on Site")
-			isMissingOnSite = cutil.GetPtr(false)
 		}
 
 		var version *string
