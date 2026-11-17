@@ -50,6 +50,8 @@ Print help (see a summary with -h)
 | [`get-firmware-versions`](./component-manager-get-firmware-versions.md) | List available component firmware versions |
 | [`component-power-control`](./component-manager-component-power-control.md) | Issue a power-control action against components (switches, power shelves, compute trays) |
 | [`configure-switch-certificate`](./component-manager-configure-switch-certificate.md) | Rotate or reinstall switch NVOS mTLS certificates via the switch Maintenance phase |
+| [`component-reset`](./component-manager-component-reset.md) | Dispatch a component reset directly (SDN reset disrupts fabric traffic) |
+| [`get-reset-status`](./component-manager-get-reset-status.md) | Get reset status by component and action |
 
 ---
 

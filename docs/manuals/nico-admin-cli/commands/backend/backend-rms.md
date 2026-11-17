@@ -46,6 +46,7 @@ Print help (see a summary with -h)
 | Subcommand | Description |
 |---|---|
 | [`status`](./backend-rms-status.md) | Probe the RMS backend connectivity and version |
+| [`get-job-status`](./backend-rms-get-job-status.md) | Inspect RMS job records through NICo |
 
 ---
 

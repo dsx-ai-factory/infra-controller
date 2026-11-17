@@ -195,7 +195,6 @@ async fn handle_factory_reset_nvos(
     )
     .await?;
     let job_id = match component_manager
-        .nv_switch
         .batch_reset_switch_factory_default(&[endpoint], None)
         .await
     {

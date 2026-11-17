@@ -530,18 +530,45 @@ impl ComponentManager {
     /// Submits a destructive, asynchronous switch factory-default reset through the
     /// selected backend.
     ///
-    /// This method returns as soon as the backend accepts the batch. It does not wait
-    /// for reboot or default-login recovery. Pass the returned opaque job ID to
-    /// [`Self::wait_for_switch_factory_reset_job`] to wait for the terminal result. An
-    /// ambiguous submission error does not prove that resubmission is safe.
+    /// Returns an available parent job ID when at least one target succeeded or
+    /// may have been dispatched, including when recording its reference failed.
+    /// If every target was rejected before dispatch, returns the submission error.
+    /// It does not wait for reboot or default-login recovery. Pass the returned job
+    /// ID to [`Self::wait_for_switch_factory_reset_job`] to wait for the terminal
+    /// result. An ambiguous submission error does not prove that resubmission is safe.
     pub async fn batch_reset_switch_factory_default(
         &self,
         endpoints: &[SwitchEndpoint],
         tls_server_domain: Option<&str>,
     ) -> Result<String, ComponentManagerError> {
-        self.nv_switch
+        let responses = self
+            .nv_switch
             .batch_reset_switch_factory_default(endpoints, tls_server_domain)
-            .await
+            .await?;
+        let mut submission_error = None;
+        for response in responses {
+            let may_have_dispatched = response.result.success
+                || matches!(
+                    &response.result.error,
+                    Some(ComponentManagerError::OperationOutcomeUnknown(_))
+                );
+            if may_have_dispatched
+                && let Some(job_id) = response.parent_job_id.filter(|id| !id.trim().is_empty())
+            {
+                return Ok(job_id);
+            }
+            if let Some(error) = response.result.error
+                && (submission_error.is_none()
+                    || matches!(error, ComponentManagerError::OperationOutcomeUnknown(_)))
+            {
+                submission_error = Some(error);
+            }
+        }
+        Err(submission_error.unwrap_or_else(|| {
+            ComponentManagerError::OperationOutcomeUnknown(
+                "switch factory-reset submission returned no job reference".into(),
+            )
+        }))
     }
 
     /// Waits for a submitted switch factory-reset operation and every target switch to

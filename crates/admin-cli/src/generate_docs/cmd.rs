@@ -409,9 +409,8 @@ fn plain_cli_syntax(line: &str) -> String {
         .replace("\\`", "`")
 }
 
-/// `clap_mangen` omits option operands and ignores explicit usage. Limit Clap's
-/// synopsis replacement to the NIC command tree and Machine Validation logs, whose
-/// required versions and paired selectors must remain visible in the reference.
+/// Use Clap's usage for commands whose required arguments, selector groups, or
+/// explicit usage are not preserved by `clap_mangen`.
 fn uses_clap_synopsis(path: &[String]) -> bool {
     matches!(
         (
@@ -421,6 +420,10 @@ fn uses_clap_synopsis(path: &[String]) -> bool {
         (Some("machine-validation"), Some("logs"))
             | (Some("firmware"), Some("nic"))
             | (Some("spx-maintenance"), _)
+            | (
+                Some("component-manager"),
+                Some("component-reset" | "get-reset-status")
+            )
     )
 }
 
@@ -694,6 +697,30 @@ An inline `HostInband` value and `mac=<mac>` selector.
         assert_eq!(
             command.clone().render_usage().to_string(),
             "Usage: nico-admin-cli firmware nic profile update [OPTIONS] --if-version-match <VERSION> <ID>"
+        );
+    }
+
+    #[test]
+    fn reset_synopses_preserve_required_parent_action_and_target_choice() {
+        let root = command_tree();
+        value_scenarios!(run = |subcommand| {
+            let path = [BIN, "component-manager", subcommand, "switch"].map(String::from);
+            for depth in 3..=path.len() {
+                assert!(uses_clap_synopsis(&path[..depth]));
+            }
+            let command = path[1..].iter().fold(&root, |command, name| {
+                command.find_subcommand(name).expect("reset command exists")
+            });
+            command.clone().render_usage().to_string()
+        };
+            "required action precedes switch and exactly one selector is required" {
+                "component-reset" => "Usage: nico-admin-cli component-manager component-reset \
+                    --action <ACTION> switch [OPTIONS] \
+                    <--switch-id <SWITCH_IDS>...|--mac-address <MAC_ADDRESSES>...>".to_owned(),
+                "get-reset-status" => "Usage: nico-admin-cli component-manager get-reset-status \
+                    --action <ACTION> switch [OPTIONS] \
+                    <--switch-id <SWITCH_IDS>...|--mac-address <MAC_ADDRESSES>...>".to_owned(),
+            }
         );
     }
 }
