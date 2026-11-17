@@ -145,9 +145,11 @@ preserving the generated `pxe_uri=`.
 **In-cluster addresses:** `nico-ntp-0.nico-ntp.nico-system.svc.cluster.local`, `nico-ntp-1.nico-ntp.nico-system.svc.cluster.local`, `nico-ntp-2.nico-ntp.nico-system.svc.cluster.local`
 
 These examples use the default chart name (`nico-ntp`), the default replica
-count (`replicas: 3`), and an installation namespace of `nico-system`.
-`nameOverride` changes the name. The namespace is the Helm release namespace
-unless `namespaceOverride` is set. Pod numbers run from `0` to `replicas - 1`.
+count (`nico-ntp.replicas: 3`), and an installation namespace of `nico-system`.
+When installing the parent chart (`./helm`), `nico-ntp.nameOverride` changes
+the name. The namespace is the Helm release namespace unless
+`nico-ntp.namespaceOverride` is set. Pod numbers run from `0` to one less than
+`nico-ntp.replicas`.
 Use the name, namespace, and replica count configured for your deployment.
 
 Provides NTP time synchronisation for DPU agents and managed hosts. The bundled
