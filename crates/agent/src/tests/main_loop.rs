@@ -271,7 +271,7 @@ async fn record_network_status_before_deadline(
             status,
             &format!("https://{address}"),
             &client_config,
-            &carbide_instrument::Instrumentation::global(),
+            &carbide_instrument::Instrumentation::noop(),
         ),
     )
     .await

@@ -1986,10 +1986,10 @@ mod tests {
 
     #[test]
     fn requested_vni_unavailable_preserves_diagnostic_and_counter_schema() {
-        let metrics = MetricsCapture::start();
+        let metrics = MetricsCapture::owned();
         let logs = capture_logs(|| {
             emit_requested_vni_unavailable(
-                &Instrumentation::global(),
+                metrics.instrumentation(),
                 ValueType::Integer,
                 "vpc-1",
                 42,
@@ -2110,6 +2110,7 @@ mod tests {
                 },
             ],
             |input| {
+                // The production ASN fallback still emits through the global destination.
                 let metrics = MetricsCapture::start();
                 let logs = capture_logs(|| match input {
                     PolicySpecificFailureInput::Release => {
@@ -3470,7 +3471,7 @@ mod tests {
         reconcile_pool_defs(
             &mut txn,
             &declared,
-            &carbide_instrument::Instrumentation::global(),
+            &carbide_instrument::Instrumentation::noop(),
         )
         .await?;
 
@@ -3522,7 +3523,7 @@ mod tests {
         reconcile_pool_defs(
             &mut txn,
             &declared,
-            &carbide_instrument::Instrumentation::global(),
+            &carbide_instrument::Instrumentation::noop(),
         )
         .await?;
 
@@ -3581,7 +3582,7 @@ mod tests {
         let error = reconcile_pool_defs(
             &mut txn,
             &declared,
-            &carbide_instrument::Instrumentation::global(),
+            &carbide_instrument::Instrumentation::noop(),
         )
         .await
         .expect_err("a failed binding read must fail reconciliation");
@@ -3643,7 +3644,7 @@ mod tests {
         let (result, logs) = capture_logs_async(reconcile_pool_defs(
             &mut txn,
             &declared,
-            &carbide_instrument::Instrumentation::global(),
+            &carbide_instrument::Instrumentation::noop(),
         ))
         .await;
         result?;
@@ -3705,7 +3706,7 @@ mod tests {
         let (result, logs) = capture_logs_async(reconcile_pool_defs(
             &mut txn,
             &declared,
-            &carbide_instrument::Instrumentation::global(),
+            &carbide_instrument::Instrumentation::noop(),
         ))
         .await;
         result?;
@@ -3763,7 +3764,7 @@ mod tests {
         let (result, logs) = capture_logs_async(reconcile_pool_defs(
             &mut txn,
             &declared,
-            &carbide_instrument::Instrumentation::global(),
+            &carbide_instrument::Instrumentation::noop(),
         ))
         .await;
         result?;

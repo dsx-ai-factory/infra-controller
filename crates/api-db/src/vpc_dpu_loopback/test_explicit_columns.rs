@@ -141,7 +141,7 @@ async fn exercise_loopback_queries(
             &mut txn,
             &dpu_id,
             &vpc_id,
-            &carbide_instrument::Instrumentation::global(),
+            &carbide_instrument::Instrumentation::noop(),
         )
         .await?;
         loopbacks.push(VpcDpuLoopback::new(dpu_id, vpc_id, loopback_ip));

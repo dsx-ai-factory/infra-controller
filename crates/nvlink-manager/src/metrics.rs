@@ -855,7 +855,7 @@ fn truncate_error_for_metric_label(mut error: String) -> String {
 
 #[cfg(test)]
 mod tests {
-    use carbide_instrument::emit;
+
     use carbide_instrument::testing::{ApproxHistogramSum, MetricsCapture, capture_logs};
     use carbide_test_support::{Check, check_values};
 
@@ -1057,9 +1057,9 @@ mod tests {
                 },
             ],
             |IterationCase { latency, error }| {
-                let metrics = MetricsCapture::start();
+                let metrics = MetricsCapture::owned();
                 let logs = capture_logs(|| {
-                    emit(if error.is_empty() {
+                    metrics.instrumentation().emit(if error.is_empty() {
                         NvlPartitionMonitorIterationFinished::Succeeded { latency }
                     } else {
                         NvlPartitionMonitorIterationFinished::Failed {
@@ -1168,25 +1168,35 @@ mod tests {
         const STAGE_METRIC: &str = "carbide_nvlink_partition_monitor_stage_latency_milliseconds";
         const GROUP_METRIC: &str = "carbide_nvlink_partition_monitor_groups_total";
 
-        let metrics = MetricsCapture::start();
+        let metrics = MetricsCapture::owned();
         let logs = capture_logs(|| {
-            emit(NvlPartitionMonitorStageFinished {
-                stage: MonitorStage::FleetLoad,
-                latency: Duration::from_millis(250),
-            });
-            emit(NvlPartitionMonitorStageFinished {
-                stage: MonitorStage::GroupInventory,
-                latency: Duration::from_millis(40),
-            });
-            emit(NvlPartitionMonitorGroupFinished {
-                outcome: GroupOutcome::Reconciled,
-            });
-            emit(NvlPartitionMonitorGroupFinished {
-                outcome: GroupOutcome::Reconciled,
-            });
-            emit(NvlPartitionMonitorGroupFinished {
-                outcome: GroupOutcome::Unreachable,
-            });
+            metrics
+                .instrumentation()
+                .emit(NvlPartitionMonitorStageFinished {
+                    stage: MonitorStage::FleetLoad,
+                    latency: Duration::from_millis(250),
+                });
+            metrics
+                .instrumentation()
+                .emit(NvlPartitionMonitorStageFinished {
+                    stage: MonitorStage::GroupInventory,
+                    latency: Duration::from_millis(40),
+                });
+            metrics
+                .instrumentation()
+                .emit(NvlPartitionMonitorGroupFinished {
+                    outcome: GroupOutcome::Reconciled,
+                });
+            metrics
+                .instrumentation()
+                .emit(NvlPartitionMonitorGroupFinished {
+                    outcome: GroupOutcome::Reconciled,
+                });
+            metrics
+                .instrumentation()
+                .emit(NvlPartitionMonitorGroupFinished {
+                    outcome: GroupOutcome::Unreachable,
+                });
         });
 
         assert!(logs.is_empty(), "stage and group events must not log");
@@ -1225,13 +1235,15 @@ mod tests {
     fn partition_monitor_overrun_counts_and_warns_with_its_context() {
         const METRIC_NAME: &str = "carbide_nvlink_partition_monitor_iteration_overruns_total";
 
-        let metrics = MetricsCapture::start();
+        let metrics = MetricsCapture::owned();
         let logs = capture_logs(|| {
-            emit(NvlPartitionMonitorIterationOverran {
-                latency_ms: 65_000,
-                interval_ms: 60_000,
-                groups: 400,
-            });
+            metrics
+                .instrumentation()
+                .emit(NvlPartitionMonitorIterationOverran {
+                    latency_ms: 65_000,
+                    interval_ms: 60_000,
+                    groups: 400,
+                });
         });
 
         assert_eq!(metrics.counter_delta(METRIC_NAME, &[]), 1.0);
@@ -1423,9 +1435,9 @@ mod tests {
         });
 
         check_values(checks, |case| {
-            let metrics = MetricsCapture::start();
+            let metrics = MetricsCapture::owned();
             let logs = capture_logs(|| {
-                emit(NmxcOperationFinished {
+                metrics.instrumentation().emit(NmxcOperationFinished {
                     operation: case.operation,
                     status: case.status,
                     latency: Duration::from_micros(1_250),
@@ -1477,8 +1489,8 @@ mod tests {
     fn nmxc_operation_histogram_exposition_stays_stable() {
         const METRIC_NAME: &str = "carbide_nvlink_partition_monitor_nmxc_op_latency_milliseconds";
 
-        let metrics = MetricsCapture::start();
-        emit(NmxcOperationFinished {
+        let metrics = MetricsCapture::owned();
+        metrics.instrumentation().emit(NmxcOperationFinished {
             operation: NmxcMetricOperation::Update,
             status: NmxcMetricOperationStatus::Completed,
             latency: Duration::from_millis(125),
@@ -1515,14 +1527,16 @@ mod tests {
         const METRIC_NAME: &str =
             "carbide_nvlink_partition_monitor_unhealthy_alert_write_failures_total";
 
-        let metrics = MetricsCapture::start();
+        let metrics = MetricsCapture::owned();
         let logs = capture_logs(|| {
-            emit(NvlinkUnhealthyAlertWriteFailed {
-                write: NvlinkUnhealthyAlertWrite::Set,
-                machine_id: "machine-1".to_string(),
-                domain_uuid: "domain-1".to_string(),
-                error: "pool timed out".to_string(),
-            });
+            metrics
+                .instrumentation()
+                .emit(NvlinkUnhealthyAlertWriteFailed {
+                    write: NvlinkUnhealthyAlertWrite::Set,
+                    machine_id: "machine-1".to_string(),
+                    domain_uuid: "domain-1".to_string(),
+                    error: "pool timed out".to_string(),
+                });
         });
 
         let log = logs.first().expect("a write failure must log");
@@ -1554,10 +1568,12 @@ mod tests {
     fn partition_monitor_iteration_histogram_exposition_stays_stable() {
         const METRIC_NAME: &str = "carbide_nvlink_partition_monitor_iteration_latency_milliseconds";
 
-        let metrics = MetricsCapture::start();
-        emit(NvlPartitionMonitorIterationFinished::Succeeded {
-            latency: Duration::from_millis(125),
-        });
+        let metrics = MetricsCapture::owned();
+        metrics
+            .instrumentation()
+            .emit(NvlPartitionMonitorIterationFinished::Succeeded {
+                latency: Duration::from_millis(125),
+            });
 
         let encoded = metrics.render();
         assert!(

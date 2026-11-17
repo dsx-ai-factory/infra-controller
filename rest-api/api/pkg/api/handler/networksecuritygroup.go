@@ -373,7 +373,7 @@ func NewGetAllNetworkSecurityGroupHandler(dbSession *cdb.Session, tc temporalCli
 // @Param status query string false "Query input for status"
 // @Param query query string false "Query input for full text search"
 // @Param includeAttachmentStats query boolean false "Attachment stats to include in response"
-// @Param includeRelation query string false "Related entities to include in response e.g. 'Tenant', 'Site'"
+// @Param includeRelation query []string false "Related entities to include in response e.g. 'Tenant', 'Site'" collectionFormat(multi)
 // @Param pageNumber query integer false "Page number of results returned"
 // @Param pageSize query integer false "Number of results per page"
 // @Param orderBy query string false "Order by field"
@@ -635,7 +635,7 @@ func NewGetNetworkSecurityGroupHandler(dbSession *cdb.Session, tc temporalClient
 // @Security ApiKeyAuth
 // @Param org path string true "Name of NGC organization"
 // @Param includeAttachmentStats query boolean false "Attachment stats to include in response"
-// @Param includeRelation query string false "Related entities to include in response e.g. 'Tenant', 'Site'"
+// @Param includeRelation query []string false "Related entities to include in response e.g. 'Tenant', 'Site'" collectionFormat(multi)
 // @Param pageNumber query integer false "Page number of results returned"
 // @Param pageSize query integer false "Number of results per page"
 // @Param orderBy query string false "Order by field"

@@ -653,7 +653,10 @@ mod tests {
 
     #[tokio::test]
     async fn root_dispatches_targeted_requests_to_the_proxy() {
-        let state = test_state_with_config(ROOT_ROUTE_TEST_CONFIG);
+        let state = test_state_with_config(
+            ROOT_ROUTE_TEST_CONFIG,
+            &carbide_instrument::Instrumentation::noop(),
+        );
         let app = proxy_routes(state);
 
         let banner = Request::builder()

@@ -283,7 +283,6 @@ mod tests {
 
     use axum::Router;
     use axum::routing::get;
-    use carbide_instrument::testing::MetricsCapture;
     use carbide_test_support::{Check, check_values};
     use clap::Parser;
     use sha2::{Digest, Sha256};
@@ -675,7 +674,7 @@ mod tests {
             let inspections = Cell::new(0);
             let result: eyre::Result<Vec<PathBuf>> = args
                 .inspect_with(
-                    || FirmwareStaging::new(Instrumentation::global()),
+                    || FirmwareStaging::new(Instrumentation::noop()),
                     async |files| {
                         inspections.set(inspections.get() + 1);
                         assert_eq!(
@@ -759,7 +758,6 @@ mod tests {
         ];
         // Exhausted artifact retries emit `give_up`, which another test counts
         // exactly. Hold the shared capture lock until both cases finish.
-        let _metrics = MetricsCapture::start();
         for case in cases {
             let image_requests = Arc::new(AtomicUsize::new(0));
             let redirected_requests = Arc::new(AtomicUsize::new(0));
@@ -819,7 +817,7 @@ mod tests {
                 Duration::from_secs(30),
                 args.inspect_with(
                     || {
-                        FirmwareStaging::new(carbide_instrument::Instrumentation::global())
+                        FirmwareStaging::new(carbide_instrument::Instrumentation::noop())
                             .map(|staging| staging.with_retry_backoff(Duration::from_millis(10)))
                     },
                     async |_| {

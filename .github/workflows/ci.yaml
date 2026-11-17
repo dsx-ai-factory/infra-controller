@@ -35,6 +35,9 @@ on:
       - "v[0-9]*.[0-9]*.[0-9]*"
       - "v[0-9][0-9][0-9][0-9].[0-9][0-9].[0-9][0-9]*"
       - "v[0-9].[0-9].[0-9]-rc[0-9]*"
+  merge_group:
+    types: [checks_requested]
+    branches: [main]
 
 permissions:
   contents: read
@@ -1418,7 +1421,7 @@ jobs:
     if: >-
       ${{
         !cancelled()
-        && startsWith(github.ref, 'refs/heads/pull-request/')
+        && (startsWith(github.ref, 'refs/heads/pull-request/') || github.event_name == 'merge_group')
         && needs.prepare.result == 'success'
         && contains('success,skipped', needs.build-container-x86_64.result)
         && contains('success,skipped', needs.build-container-aarch64.result)
@@ -1879,7 +1882,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          if [[ "$GITHUB_REF" == refs/heads/pull-request/* || "$GITHUB_REF" == refs/tags/* ]]; then
+          if [[ "$GITHUB_REF" == refs/heads/pull-request/* || "$GITHUB_REF" == refs/tags/* || "$GITHUB_EVENT_NAME" == "merge_group" ]]; then
             bash .github/ci/resolve-secret-scan-range.sh >> "$GITHUB_OUTPUT"
           else
             BEFORE="${{ github.event.before }}"
@@ -2170,7 +2173,7 @@ jobs:
   proto-police:
     needs:
       - prepare
-    if: ${{ needs.prepare.outputs.proto_files_changed == 'true' && contains(github.ref, 'pull-request/') }}
+    if: ${{ needs.prepare.outputs.proto_files_changed == 'true' && (contains(github.ref, 'pull-request/') || github.event_name == 'merge_group') }}
     runs-on: linux-amd64-cpu4
     container:
       image: yoheimuta/protolint
@@ -2186,7 +2189,7 @@ jobs:
   migration-police:
     needs:
       - changes
-    if: ${{ contains(github.ref, 'pull-request/') }}
+    if: ${{ contains(github.ref, 'pull-request/') || github.event_name == 'merge_group' }}
     runs-on: linux-amd64-cpu4
     steps:
       - name: Checkout code
@@ -2282,7 +2285,7 @@ jobs:
     needs:
       - prepare
       - build-container-x86_64
-    if: ${{ !failure() && !cancelled() && needs.prepare.outputs.source_files_changed == 'true' && contains(github.ref, 'pull-request/') }}
+    if: ${{ !failure() && !cancelled() && needs.prepare.outputs.source_files_changed == 'true' && (contains(github.ref, 'pull-request/') || github.event_name == 'merge_group') }}
     runs-on: linux-amd64-cpu32
     container:
       image: ${{ needs.prepare.outputs.lint_container_ref }}
