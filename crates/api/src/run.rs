@@ -33,7 +33,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::subscriber::NoSubscriber;
 
 use crate::logging::setup_logging;
-use crate::metrics::register_runtime_metrics;
+use crate::metrics::{register_api_ready_gauge, register_runtime_metrics};
 use crate::resources::{RuntimeResources, setup_resources};
 
 /// Effective addresses owned by a running carbide-api server.
@@ -148,6 +148,7 @@ pub async fn run(
     // Keep readiness false until the API listener and a fresh PostgreSQL check are ready.
     let health_controller = metrics_endpoint::HealthController::new();
     health_controller.set_ready(false);
+    register_api_ready_gauge(&meter, health_controller.clone());
 
     let metrics_address = start_metrics_endpoint(
         &mut join_set,
