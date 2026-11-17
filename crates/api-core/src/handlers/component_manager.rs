@@ -3589,7 +3589,7 @@ async fn component_reset_switch_endpoint_by_id(
     api: &Api,
     id: SwitchId,
 ) -> Result<SwitchEndpoint, Status> {
-    let mut resolved = resolve_switch_endpoints(api, &[id], None).await?;
+    let mut resolved = resolve_switch_endpoints(api, &[id]).await?;
     if let Some(endpoint) = resolved.resolved.endpoints.pop() {
         Ok(endpoint)
     } else {
@@ -3622,7 +3622,7 @@ async fn component_reset_switch_endpoint_by_mac(
                 result
             })
     } else {
-        let (mut endpoints, mut errors) = build_pre_ingestion_switch_endpoints(api, &[mac], None)
+        let (mut endpoints, mut errors) = build_pre_ingestion_switch_endpoints(api, &[mac])
             .await
             .map_err(|error| mac_status_result(&mac, &error))?;
         endpoints
