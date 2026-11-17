@@ -187,11 +187,12 @@ impl IBFabricManager for IBFabricManagerImpl {
     /// reads the fabric's credentials from the secret manager -- so rotations
     /// are picked up promptly -- but the client is rebuilt only when that read
     /// returns different credentials, or the fabric's endpoint resolves
-    /// differently, than the cached client was built from. Credentials that
-    /// select certificate authentication name TLS material on disk rather
-    /// than containing it, so a rebuild also happens once any of those files
-    /// is newer than the cached client (certificate rotation), unless another
-    /// is unreadable, such as one missing mid-rotation.
+    /// differently, than the cached client was built from. An empty credential
+    /// selects certificate authentication, whose TLS material is the SPIFFE
+    /// files on disk rather than part of the credential, so a rebuild also
+    /// happens once any of those files is newer than the cached client
+    /// (certificate rotation), unless another is unreadable, such as one
+    /// missing mid-rotation.
     /// [`ClientCache::get_or_build`] owns that lifecycle. Between rebuilds all
     /// callers share one client, whose HTTP pool keeps connections warm across
     /// monitor passes. (`Disable` and `Mock` hand out process-wide shared

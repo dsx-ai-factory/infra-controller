@@ -28,7 +28,7 @@ The UFM url
 The UFM token. Omitting it stores an empty password, which selects the
 SPIFFE default client certificate only if the credential source returns
 it; Postgres reads it as no credential and hides an earlier token. See
-https://github.com/dsx-ai-factory/infra-controller/blob/main/docs/configuration/credential-sources.md#ufm-ownership-policy
+[UFM Ownership Policy](../../../../configuration/credential-sources.md#ufm-ownership-policy)
 
 `--extended`
 
