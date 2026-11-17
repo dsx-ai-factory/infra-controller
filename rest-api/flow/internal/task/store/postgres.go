@@ -138,6 +138,9 @@ func (s *PostgresStore) GetTask(
 ) (*taskdef.Task, error) {
 	taskDao, err := model.GetTask(ctx, s.idb(ctx), id)
 	if err != nil {
+		if stderrors.Is(err, sql.ErrNoRows) {
+			return nil, errors.GRPCErrorNotFound("task not found")
+		}
 		return nil, errors.GRPCErrorInternal(err.Error())
 	}
 	return taskFromDAO(taskDao)
@@ -157,6 +160,9 @@ func (s *PostgresStore) GetTasks(
 
 		taskDao, err := model.GetTask(ctx, s.pg.DB, id)
 		if err != nil {
+			if stderrors.Is(err, sql.ErrNoRows) {
+				return nil, errors.GRPCErrorNotFound("task not found")
+			}
 			return nil, errors.GRPCErrorInternal(err.Error())
 		}
 
