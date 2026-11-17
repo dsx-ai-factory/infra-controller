@@ -1067,8 +1067,8 @@ stateDiagram-v2
     HR_CheckingFirmwareRepeat --> HI_WaitingForLockdown : No FW config, Ready host requires lockdown re-enable
     HR_CheckingFirmware --> hr_completed : No FW config, Ready host requires no lockdown change
     HR_CheckingFirmwareRepeat --> hr_completed : No FW config, Ready host requires no lockdown change
-    HR_CheckingFirmware --> hr_completed : No FW config, Assigned host; ForceRestart
-    HR_CheckingFirmwareRepeat --> hr_completed : No FW config, Assigned host; ForceRestart
+    HR_CheckingFirmware --> hr_completed : No FW config, Assigned host, ForceRestart
+    HR_CheckingFirmwareRepeat --> hr_completed : No FW config, Assigned host, ForceRestart
     HR_CheckingFirmware --> HR_WaitingForUpload
     HR_WaitingForUpload --> HR_CheckingFirmwareRepeat : No upload status upload error
     HR_WaitingForUpload --> HR_WaitingForFirmwareUpgrade : Upload success
