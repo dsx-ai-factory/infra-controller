@@ -107,7 +107,7 @@ async fn main() -> Result<(), RvsError> {
     // pipeline reads the SOT from `cfg.sot_path` and never touches gRPC here.
     let client_config = CarbideClientConfig::new("/dev/null".to_string(), None);
     let api_config = ApiConfig::new(&cfg.nico.url, &client_config);
-    let nico = NicoClient::new(&api_config);
+    let nico = NicoClient::new(&api_config, carbide_instrument::Instrumentation::noop());
 
     let ctx = RvsCtx {
         nico,

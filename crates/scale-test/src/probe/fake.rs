@@ -259,6 +259,7 @@ impl FakeProbe {
     fn sweep_info(&self, stored: &Stored) -> SweepInfo {
         let now = self.clock.now();
         SweepInfo {
+            firmware_config: None,
             snapshot_id: stored.snapshot_id.clone(),
             family: stored.sweep.family,
             sweep_start: stored.sweep.sweep_start,

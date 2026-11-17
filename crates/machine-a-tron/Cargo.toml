@@ -32,6 +32,7 @@ path = "src/main.rs"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
+carbide-instrument = { path = "../instrument" }
 clap = { features = ["derive", "env"], workspace = true }
 lazy_static = { workspace = true }
 logfmt = { path = "../logfmt" }

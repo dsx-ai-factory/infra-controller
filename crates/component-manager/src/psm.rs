@@ -21,16 +21,21 @@ use crate::types::parse_mac;
 
 #[derive(Debug)]
 pub struct PsmPowerShelfBackend {
+    instrumentation: carbide_instrument::Instrumentation,
     client: psm::powershelf_manager_client::PowershelfManagerClient<TraceInjectService<Channel>>,
 }
 
 impl PsmPowerShelfBackend {
+    /// Connects to the backend using the supplied RED metric destination.
+    /// Retain its provider while backend calls can run.
     pub async fn connect(
         url: &str,
         tls: Option<&BackendTlsConfig>,
+        instrumentation: carbide_instrument::Instrumentation,
     ) -> Result<Self, ComponentManagerError> {
         let channel = crate::tls::build_channel(url, tls, "PSM").await?;
         Ok(Self {
+            instrumentation,
             client: psm::powershelf_manager_client::PowershelfManagerClient::new(channel),
         })
     }
@@ -77,6 +82,7 @@ fn mac_strings(endpoints: &[PowerShelfEndpoint]) -> Vec<String> {
 /// registration is primarily about ensuring PSM knows about the device and
 /// has credentials.
 async fn register_with_psm(
+    instrumentation: &carbide_instrument::Instrumentation,
     client: &mut psm::powershelf_manager_client::PowershelfManagerClient<
         TraceInjectService<Channel>,
     >,
@@ -93,6 +99,7 @@ async fn register_with_psm(
         .collect();
 
     let response = red::instrumented(
+        instrumentation,
         "psm",
         "register_powershelves",
         client.register_powershelves(psm::RegisterPowershelvesRequest {
@@ -139,7 +146,7 @@ impl PowerShelfManager for PsmPowerShelfBackend {
         endpoints: &[PowerShelfEndpoint],
         action: PowerAction,
     ) -> Result<Vec<PowerShelfComponentResult>, ComponentManagerError> {
-        register_with_psm(&mut self.client.clone(), endpoints).await?;
+        register_with_psm(&self.instrumentation, &mut self.client.clone(), endpoints).await?;
 
         let pmc_macs = mac_strings(endpoints);
         let request = psm::PowershelfRequest {
@@ -147,20 +154,27 @@ impl PowerShelfManager for PsmPowerShelfBackend {
         };
 
         let response = match action {
-            PowerAction::On => {
-                red::instrumented("psm", "power_on", self.client.clone().power_on(request))
-                    .await?
-                    .into_inner()
-            }
-            PowerAction::ForceOff | PowerAction::GracefulShutdown => {
-                red::instrumented("psm", "power_off", self.client.clone().power_off(request))
-                    .await?
-                    .into_inner()
-            }
+            PowerAction::On => red::instrumented(
+                &self.instrumentation,
+                "psm",
+                "power_on",
+                self.client.clone().power_on(request),
+            )
+            .await?
+            .into_inner(),
+            PowerAction::ForceOff | PowerAction::GracefulShutdown => red::instrumented(
+                &self.instrumentation,
+                "psm",
+                "power_off",
+                self.client.clone().power_off(request),
+            )
+            .await?
+            .into_inner(),
             PowerAction::GracefulRestart
             | PowerAction::ForceRestart
             | PowerAction::AcPowercycle => {
                 let off = red::instrumented(
+                    &self.instrumentation,
                     "psm",
                     "power_off",
                     self.client.clone().power_off(psm::PowershelfRequest {
@@ -191,6 +205,7 @@ impl PowerShelfManager for PsmPowerShelfBackend {
 
                 if !powered_off_macs.is_empty() {
                     let on = red::instrumented(
+                        &self.instrumentation,
                         "psm",
                         "power_on",
                         self.client.clone().power_on(psm::PowershelfRequest {
@@ -242,7 +257,7 @@ impl PowerShelfManager for PsmPowerShelfBackend {
         components: &[PowerShelfComponent],
         _options: &crate::types::FirmwareUpdateOptions,
     ) -> Result<Vec<PowerShelfComponentResult>, ComponentManagerError> {
-        register_with_psm(&mut self.client.clone(), endpoints).await?;
+        register_with_psm(&self.instrumentation, &mut self.client.clone(), endpoints).await?;
 
         let psm_components: Vec<i32> = components
             .iter()
@@ -271,6 +286,7 @@ impl PowerShelfManager for PsmPowerShelfBackend {
         let request = psm::UpdateFirmwareRequest { upgrades };
 
         let response = red::instrumented(
+            &self.instrumentation,
             "psm",
             "update_firmware",
             self.client.clone().update_firmware(request),
@@ -311,7 +327,7 @@ impl PowerShelfManager for PsmPowerShelfBackend {
         &self,
         endpoints: &[PowerShelfEndpoint],
     ) -> Result<Vec<PowerShelfFirmwareUpdateStatus>, ComponentManagerError> {
-        register_with_psm(&mut self.client.clone(), endpoints).await?;
+        register_with_psm(&self.instrumentation, &mut self.client.clone(), endpoints).await?;
 
         let queries = endpoints
             .iter()
@@ -336,6 +352,7 @@ impl PowerShelfManager for PsmPowerShelfBackend {
         let request = psm::GetFirmwareUpdateStatusRequest { queries };
 
         let response = red::instrumented(
+            &self.instrumentation,
             "psm",
             "get_firmware_update_status",
             self.client.clone().get_firmware_update_status(request),
@@ -366,13 +383,14 @@ impl PowerShelfManager for PsmPowerShelfBackend {
         &self,
         endpoints: &[PowerShelfEndpoint],
     ) -> Result<Vec<PowerShelfFirmwareVersions>, ComponentManagerError> {
-        register_with_psm(&mut self.client.clone(), endpoints).await?;
+        register_with_psm(&self.instrumentation, &mut self.client.clone(), endpoints).await?;
 
         let request = psm::PowershelfRequest {
             pmc_macs: mac_strings(endpoints),
         };
 
         let response = red::instrumented(
+            &self.instrumentation,
             "psm",
             "list_available_firmware",
             self.client.clone().list_available_firmware(request),
@@ -404,13 +422,14 @@ impl PowerShelfManager for PsmPowerShelfBackend {
         &self,
         endpoints: &[PowerShelfEndpoint],
     ) -> Result<Vec<ComponentPowerStateResult>, ComponentManagerError> {
-        register_with_psm(&mut self.client.clone(), endpoints).await?;
+        register_with_psm(&self.instrumentation, &mut self.client.clone(), endpoints).await?;
 
         let request = psm::PowershelfRequest {
             pmc_macs: mac_strings(endpoints),
         };
 
         let response = red::instrumented(
+            &self.instrumentation,
             "psm",
             "get_powershelves",
             self.client.clone().get_powershelves(request),
@@ -469,6 +488,7 @@ mod tests {
     async fn registering_power_getter_is_not_a_passive_capability() {
         let channel = Channel::from_static("http://127.0.0.1:1").connect_lazy();
         let backend = PsmPowerShelfBackend {
+            instrumentation: carbide_instrument::Instrumentation::noop(),
             client: psm::powershelf_manager_client::PowershelfManagerClient::new(
                 TraceInjectService::new(channel),
             ),
@@ -702,7 +722,12 @@ mod tests {
         );
 
         let result = tokio::time::timeout(Duration::from_secs(5), async {
-            let backend = PsmPowerShelfBackend::connect(&url, None).await?;
+            let backend = PsmPowerShelfBackend::connect(
+                &url,
+                None,
+                carbide_instrument::Instrumentation::noop(),
+            )
+            .await?;
             backend.get_power_state(&endpoints).await
         })
         .await;
@@ -760,13 +785,14 @@ mod tests {
         let channel = Channel::from_shared(format!("http://{refused_addr}"))
             .expect("endpoint")
             .connect_lazy();
+        let metrics = MetricsCapture::owned();
         let backend = PsmPowerShelfBackend {
+            instrumentation: metrics.instrumentation().clone(),
             client: psm::powershelf_manager_client::PowershelfManagerClient::new(
                 TraceInjectService::new(channel),
             ),
         };
 
-        let metrics = MetricsCapture::start();
         backend
             .list_firmware(&[])
             .await

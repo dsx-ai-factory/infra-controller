@@ -31,7 +31,7 @@
 //! - `handle_validation_boot_config_stage` in `machine_validation.rs`.
 
 use carbide_redfish::boot_interface::BootInterfaceTarget;
-use carbide_redfish::libredfish::error::state_handler_redfish_error as redfish_error;
+use carbide_redfish::state_handler::state_handler_platform_error as platform_error;
 use libredfish::Redfish;
 use model::machine::{
     BiosConfigInfo, ManagedHostStateSnapshot, SetBootOrderInfo, SetBootOrderState,
@@ -50,6 +50,7 @@ use super::{
     trigger_reboot_if_needed,
 };
 use crate::context::{MachineStateHandlerContextObjects, MachineStateHandlerServices};
+use crate::platform_config::{self, PlatformBmc};
 
 /// Runtime projection of the persisted BIOS and boot-order states shared by
 /// HostInit, assigned platform configuration, DPU reprovision, and validation.
@@ -150,9 +151,8 @@ pub(super) async fn inspect_host_boot_config(
     mh_snapshot: &ManagedHostStateSnapshot,
     boot_interface: &BootInterfaceTarget,
 ) -> Result<HostBootConfigInspection, StateHandlerError> {
-    let is_bios_setup =
-        platform_settings_in_effect(services, redfish_client, mh_snapshot, Some(boot_interface))
-            .await?;
+    let bmc = PlatformBmc::connect(services, mh_snapshot, redfish_client).await?;
+    let is_bios_setup = platform_settings_in_effect(services, &bmc, Some(boot_interface)).await?;
 
     if !is_bios_setup || should_skip_boot_order_remediation(mh_snapshot) {
         return Ok(HostBootConfigInspection {
@@ -161,10 +161,9 @@ pub(super) async fn inspect_host_boot_config(
         });
     }
 
-    let is_boot_order_setup = boot_interface
-        .run(|bi| redfish_client.is_boot_order_setup(bi))
+    let is_boot_order_setup = platform_config::boot_order_in_effect(&bmc, boot_interface)
         .await
-        .map_err(|e| redfish_error("is_boot_order_setup", e))?;
+        .map_err(|e| platform_error("is_boot_order_setup", e))?;
 
     Ok(HostBootConfigInspection {
         is_bios_setup,

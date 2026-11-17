@@ -12,6 +12,7 @@ import (
 
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/firmwareauth"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/componentmanager"
+	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/dispatchguard"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/executor/temporalworkflow/common"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/operations"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/task"
@@ -42,6 +43,11 @@ func (a *Activities) InjectExpectation(
 	target common.Target,
 	info operations.InjectExpectationTaskInfo,
 ) error {
+	ctx = a.dispatchContext(ctx)
+	if err := dispatchguard.Check(ctx); err != nil {
+		return err
+	}
+
 	injector, err := requireExpectationInjector(a.registry, target)
 	if err != nil {
 		return err
@@ -57,6 +63,11 @@ func (a *Activities) PowerControl(
 	target common.Target,
 	info operations.PowerControlTaskInfo,
 ) error {
+	ctx = a.dispatchContext(ctx)
+	if err := dispatchguard.Check(ctx); err != nil {
+		return err
+	}
+
 	controller, err := requirePowerController(a.registry, target)
 	if err != nil {
 		return err
@@ -119,6 +130,11 @@ func (a *Activities) FirmwareControl(
 	target common.Target,
 	info operations.FirmwareControlTaskInfo,
 ) error {
+	ctx = a.dispatchContext(ctx)
+	if err := dispatchguard.Check(ctx); err != nil {
+		return err
+	}
+
 	controller, err := requireFirmwareController(a.registry, target)
 	if err != nil {
 		return err
@@ -178,6 +194,11 @@ func (a *Activities) BringUpControl(
 	target common.Target,
 	info operations.BringUpTaskInfo,
 ) error {
+	ctx = a.dispatchContext(ctx)
+	if err := dispatchguard.Check(ctx); err != nil {
+		return err
+	}
+
 	controller, err := requireBringUpController(a.registry, target)
 	if err != nil {
 		return err
@@ -218,6 +239,11 @@ func (a *Activities) DecommissionControl(
 	target common.Target,
 	info operations.DecommissionTaskInfo,
 ) error {
+	ctx = a.dispatchContext(ctx)
+	if err := dispatchguard.Check(ctx); err != nil {
+		return err
+	}
+
 	decommissioner, err := requireDecommissioner(a.registry, target)
 	if err != nil {
 		return err

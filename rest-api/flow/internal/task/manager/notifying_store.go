@@ -5,9 +5,11 @@ package manager
 
 import (
 	"context"
+	"fmt"
 
 	"github.com/google/uuid"
 	"github.com/rs/zerolog/log"
+	"go.temporal.io/sdk/temporal"
 
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/conflict"
 	taskstore "github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/store"
@@ -74,3 +76,19 @@ func (s *notifyingTaskStore) UpdateTaskReport(
 var _ taskdef.TaskStatusUpdater = (*notifyingTaskStore)(nil) //nolint
 
 var _ taskdef.TaskReportUpdater = (*notifyingTaskStore)(nil) //nolint
+
+// CheckTaskDispatch checks persisted ownership before a worker
+// issues another command. Terminal tasks never regain dispatch permission.
+func (s *notifyingTaskStore) CheckTaskDispatch(ctx context.Context, id uuid.UUID) error {
+	task, err := s.GetTask(ctx, id)
+	if err != nil {
+		return err
+	}
+	if task == nil {
+		return fmt.Errorf("task %s not found", id)
+	}
+	if task.Status.IsFinished() {
+		return temporal.NewNonRetryableApplicationError("task no longer owns hardware dispatch", "TaskPreempted", nil)
+	}
+	return nil
+}

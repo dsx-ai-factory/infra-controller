@@ -185,43 +185,32 @@ func (p *Promoter) sweepAllRacks(ctx context.Context) {
 // ordering at the cost of some parallelism, which is the right trade-off
 // for hardware operations where users expect sequential execution.
 func (p *Promoter) processRack(ctx context.Context, rackID uuid.UUID) {
-	waiting, err := p.store.ListWaitingTasksForRack(ctx, rackID)
-	if err != nil {
-		log.Error().Err(err).
-			Str("rack_id", rackID.String()).
-			Msg("promoter: failed to list waiting tasks")
-		return
-	}
-
-	// Split into expired (terminate immediately) and candidates (promote).
-	now := time.Now()
-	candidates := make([]*taskdef.Task, 0, len(waiting))
-	for _, t := range waiting {
-		if t.QueueExpiresAt != nil && now.After(*t.QueueExpiresAt) {
-			if err := p.store.UpdateTaskStatus(ctx, &taskdef.TaskStatusUpdate{
-				ID:      t.ID,
-				Status:  taskcommon.TaskStatusTerminated,
-				Message: "Expired: queue timeout reached",
-			}); err != nil {
-				log.Error().Err(err).
-					Str("task_id", t.ID.String()).
-					Msg("promoter: failed to terminate expired task")
-			}
-			continue
-		}
-		candidates = append(candidates, t)
-	}
-
-	if len(candidates) == 0 {
-		return
-	}
-
-	// Atomically fetch the active set and promote candidates in FIFO
-	// order, stopping at the first conflict.
 	var toExecute []*taskdef.Task
 	txErr := p.store.RunInTransaction(ctx, func(txCtx context.Context) error {
-		toExecute = nil // reset on retry
-
+		toExecute = nil
+		err := p.store.LockRack(txCtx, rackID)
+		if err != nil {
+			return err
+		}
+		waiting, err := p.store.ListWaitingTasksForRack(txCtx, rackID)
+		if err != nil {
+			return err
+		}
+		now := time.Now()
+		candidates := make([]*taskdef.Task, 0, len(waiting))
+		for _, task := range waiting {
+			if task.QueueExpiresAt != nil && now.After(*task.QueueExpiresAt) {
+				err := p.store.UpdateTaskStatus(txCtx, &taskdef.TaskStatusUpdate{ID: task.ID, Status: taskcommon.TaskStatusTerminated, Message: "Expired: queue timeout reached"})
+				if err != nil {
+					return err
+				}
+				continue
+			}
+			candidates = append(candidates, task)
+		}
+		if len(candidates) == 0 {
+			return nil
+		}
 		active, err := p.store.ListActiveTasksForRack(txCtx, rackID)
 		if err != nil {
 			return err

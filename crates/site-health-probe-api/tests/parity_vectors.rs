@@ -97,6 +97,7 @@ fn outcome(filter: &Value, full_host_read: bool) -> Outcome {
     match metrics::series_spec(
         &f,
         &metrics::Capabilities {
+            nico_config: false,
             full_host_read,
             rest_fixture: true,
         },

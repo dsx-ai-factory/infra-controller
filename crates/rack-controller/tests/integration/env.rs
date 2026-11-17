@@ -299,12 +299,16 @@ fn services(
             rack_profiles: config.rack_profiles.clone(),
         }
         .into(),
-        nvos_update_manager: rms_sim
-            .as_rms_client()
-            .map(|client| Arc::new(component_manager::rms::rms_nvos_update_manager(client)) as _),
+        nvos_update_manager: rms_sim.as_rms_client().map(|client| {
+            Arc::new(component_manager::rms::rms_nvos_update_manager(
+                client,
+                carbide_instrument::Instrumentation::noop(),
+            )) as _
+        }),
         rack_firmware_update_manager: rms_sim.as_rms_client().map(|client| {
             Arc::new(component_manager::rms::rms_rack_firmware_update_manager(
                 client,
+                carbide_instrument::Instrumentation::noop(),
             )) as _
         }),
         credential_manager: credentials.clone(),

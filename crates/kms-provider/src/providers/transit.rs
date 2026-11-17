@@ -81,6 +81,7 @@ pub const DEFAULT_TRANSIT_MOUNT: &str = "transit";
 /// Each kek_id corresponds to a named Transit key
 /// on the server.
 pub struct TransitKmsProvider {
+    instrumentation: carbide_instrument::Instrumentation,
     client: Arc<VaultClient>,
     transit_mount: String,
     known_keys: Vec<String>,
@@ -92,13 +93,19 @@ impl TransitKmsProvider {
     /// list of known Transit key names. The known_keys
     /// list is used by can_decrypt_kek to determine
     /// ownership without a network call.
-    pub fn new(client: Arc<VaultClient>, transit_mount: String, known_keys: Vec<String>) -> Self {
+    pub fn new(
+        client: Arc<VaultClient>,
+        transit_mount: String,
+        known_keys: Vec<String>,
+        instrumentation: carbide_instrument::Instrumentation,
+    ) -> Self {
         tracing::info!(
             transit_mount = %transit_mount,
             known_keys = ?known_keys,
             "initialized Transit KMS provider"
         );
         Self {
+            instrumentation,
             client,
             transit_mount,
             known_keys,
@@ -181,6 +188,7 @@ impl KmsBackend for TransitKmsProvider {
         // decoded buffers.
         let plaintext_b64 = Zeroizing::new(BASE64.encode(dek));
         let response = red::instrumented(
+            &self.instrumentation,
             "vault_transit",
             "encrypt_dek",
             transit::data::encrypt(
@@ -212,6 +220,7 @@ impl KmsBackend for TransitKmsProvider {
             .map_err(|_| KmsError::DecryptionFailed("invalid ciphertext encoding".to_string()))?;
 
         let response = red::instrumented(
+            &self.instrumentation,
             "vault_transit",
             "decrypt_dek",
             transit::data::decrypt(
@@ -253,6 +262,7 @@ impl KmsBackend for TransitKmsProvider {
         kek_id: &str,
     ) -> Result<(Zeroizing<[u8; 32]>, EncryptedDek), KmsError> {
         let response = red::instrumented(
+            &self.instrumentation,
             "vault_transit",
             "generate_data_key",
             transit::generate::data_key(
@@ -497,6 +507,7 @@ mod tests {
             vault.client.clone(),
             "transit".to_string(),
             vec!["test-key".to_string()],
+            carbide_instrument::Instrumentation::noop(),
         );
 
         let dek: [u8; 32] = rand::random();
@@ -529,6 +540,7 @@ mod tests {
             vault.client.clone(),
             "transit".to_string(),
             vec!["test-key".to_string()],
+            carbide_instrument::Instrumentation::noop(),
         );
 
         let (dek, wrapped) = provider
@@ -560,6 +572,7 @@ mod tests {
             vault.client.clone(),
             "transit".to_string(),
             vec!["test-key".to_string()],
+            carbide_instrument::Instrumentation::noop(),
         );
 
         let dek: [u8; 32] = rand::random();

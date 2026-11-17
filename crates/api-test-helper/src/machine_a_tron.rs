@@ -196,20 +196,24 @@ pub async fn run_local(
 
     // Switch servers on each RPC without rebuilding their TLS connections.
     let carbide_api_client = if additional_api_urls.is_empty() {
-        CarbideApiClient::new(&api_config)
+        CarbideApiClient::new(&api_config, carbide_instrument::Instrumentation::noop())
     } else {
-        CarbideApiClient::build(RoundRobinConnectionProvider {
-            clients: std::iter::once(&app_config.carbide_api_url)
-                .chain(additional_api_urls.iter())
-                .map(|url| {
-                    CarbideApiClient::new(
-                        &ApiConfig::new(url, &carbide_client_config)
-                            .with_retry_config(api_config.retry_config),
-                    )
-                })
-                .collect(),
-            next_client: AtomicUsize::new(0),
-        })
+        CarbideApiClient::build(
+            RoundRobinConnectionProvider {
+                clients: std::iter::once(&app_config.carbide_api_url)
+                    .chain(additional_api_urls.iter())
+                    .map(|url| {
+                        CarbideApiClient::new(
+                            &ApiConfig::new(url, &carbide_client_config)
+                                .with_retry_config(api_config.retry_config),
+                            carbide_instrument::Instrumentation::noop(),
+                        )
+                    })
+                    .collect(),
+                next_client: AtomicUsize::new(0),
+            },
+            carbide_instrument::Instrumentation::noop(),
+        )
     };
 
     let desired_firmware = carbide_api_client

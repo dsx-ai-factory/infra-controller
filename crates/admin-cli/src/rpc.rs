@@ -3494,10 +3494,10 @@ mod tests {
                     }),
                     ..Default::default()
                 };
-                let client = ApiClient(CarbideApiClient::new(&ApiConfig::new(
-                    "invalid-unconnected-url",
-                    &CarbideClientConfig::default(),
-                )));
+                let client = ApiClient(CarbideApiClient::new(
+                    &ApiConfig::new("invalid-unconnected-url", &CarbideClientConfig::default()),
+                    carbide_instrument::Instrumentation::noop(),
+                ));
                 let request = client
                     .build_instance_request(machine, &args, "vf-test", None)
                     .await

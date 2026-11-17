@@ -75,6 +75,12 @@ pub(crate) trait NicoApi: Send + Sync {
         &self,
         addresses: &[String],
     ) -> Result<Vec<site_explorer::ExploredEndpoint>, CallError>;
+    /// nico-api's redacted runtime config, `None` when the reply has none.
+    async fn runtime_config(&self) -> Result<Option<forge::RuntimeConfig>, CallError>;
+    async fn desired_firmware_versions(
+        &self,
+    ) -> Result<Vec<forge::DesiredFirmwareVersionEntry>, CallError>;
+    async fn host_firmware(&self) -> Result<Vec<forge::AvailableHostFirmware>, CallError>;
 }
 
 /// Opens one nico-api session per sweep, so certificate rotation needs no
