@@ -118,10 +118,11 @@ type ManagerImpl struct {
 	maxWaitingPerRack   int
 	defaultQueueTimeout time.Duration
 
-	ctx       context.Context
-	cancel    context.CancelFunc
-	startOnce sync.Once
-	stopOnce  sync.Once
+	ctx         context.Context
+	cancel      context.CancelFunc
+	startOnce   sync.Once
+	stopOnce    sync.Once
+	reconcileWG sync.WaitGroup
 }
 
 // New creates a new task manager.
@@ -182,6 +183,8 @@ func (m *ManagerImpl) Start(ctx context.Context) error {
 		m.cancel = cancel
 
 		m.promoter.Start(startCtx)
+		m.reconcileWG.Add(1)
+		go m.reconcileLoop(startCtx)
 	})
 
 	return startErr
@@ -194,6 +197,7 @@ func (m *ManagerImpl) Stop(ctx context.Context) {
 			m.cancel()
 		}
 
+		m.reconcileWG.Wait()
 		if m.executor != nil {
 			if err := m.executor.Stop(ctx); err != nil {
 				log.Warn().Err(err).Msg("failed to stop executor")
@@ -873,7 +877,7 @@ func (m *ManagerImpl) resolveAndExecuteTaskWithTransaction(
 		if deferred {
 			return deferErr
 		}
-		if uerr := m.taskStore.UpdateTaskStatus(ctx, &taskdef.TaskStatusUpdate{
+		if _, uerr := m.taskStore.UpdateTaskStatus(ctx, &taskdef.TaskStatusUpdate{
 			ID:      task.ID,
 			Status:  taskcommon.TaskStatusFailed,
 			Message: message.ForFailure(err),
@@ -949,7 +953,7 @@ func (m *ManagerImpl) handleSchedulingPersistenceFailure(
 		context.WithoutCancel(ctx),
 		schedulingCleanupTimeout,
 	)
-	statusErr := m.taskStore.UpdateTaskStatus(statusCtx, &taskdef.TaskStatusUpdate{
+	_, statusErr := m.taskStore.UpdateTaskStatus(statusCtx, &taskdef.TaskStatusUpdate{
 		ID:      persistErr.taskID,
 		Status:  taskcommon.TaskStatusFailed,
 		Message: message.ForFailure(persistErr),
@@ -993,7 +997,7 @@ func (m *ManagerImpl) deferUnlinkedTask(
 			"Expired: target linkage unavailable before queue timeout: %v",
 			unlinkedErr,
 		)
-		if err := m.taskStore.UpdateTaskStatus(ctx, &taskdef.TaskStatusUpdate{
+		if _, err := m.taskStore.UpdateTaskStatus(ctx, &taskdef.TaskStatusUpdate{
 			ID:      task.ID,
 			Status:  status,
 			Message: statusMessage,
@@ -1031,7 +1035,8 @@ func (m *ManagerImpl) deferUnlinkedTask(
 			if status == taskcommon.TaskStatusWaiting {
 				update.QueueExpiresAt = deadline
 			}
-			return m.taskStore.UpdateTaskStatus(txCtx, update)
+			_, err = m.taskStore.UpdateTaskStatus(txCtx, update)
+			return err
 		}
 
 		var err error
@@ -1100,7 +1105,7 @@ func (m *ManagerImpl) CancelTask(ctx context.Context, taskID uuid.UUID) error {
 		}
 	}
 
-	return m.taskStore.UpdateTaskStatus(
+	_, err = m.taskStore.UpdateTaskStatus(
 		ctx,
 		&taskdef.TaskStatusUpdate{
 			ID:      taskID,
@@ -1108,6 +1113,7 @@ func (m *ManagerImpl) CancelTask(ctx context.Context, taskID uuid.UUID) error {
 			Message: "Cancelled by user",
 		},
 	)
+	return err
 }
 
 // loadRackForTask re-fetches the rack for a task and filters its component

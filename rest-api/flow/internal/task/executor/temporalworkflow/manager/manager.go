@@ -201,34 +201,9 @@ func (m *Manager) Type() taskcommon.ExecutorType {
 	return taskcommon.ExecutorTypeTemporal
 }
 
-// CheckStatus decodes the execution ID and queries Temporal for the current
-// workflow execution status, mapping it to a TaskStatus.
-func (m *Manager) CheckStatus(
-	ctx context.Context,
-	encodedExecutionID string,
-) (taskcommon.TaskStatus, error) {
-	executionID, err := common.NewFromEncoded(encodedExecutionID)
-	if err != nil {
-		return taskcommon.TaskStatusUnknown, err
-	}
-
-	// Use empty runID to get the latest execution.
-	resp, err := m.publisherClient.Client().DescribeWorkflowExecution(
-		ctx,
-		executionID.WorkflowID,
-		"",
-	)
-	if err != nil {
-		return taskcommon.TaskStatusUnknown, fmt.Errorf(
-			"failed to describe temporal workflow execution %s: %v",
-			executionID.String(),
-			err,
-		)
-	}
-
-	return taskStatusFromTemporalWorkflowStatus(
-		resp.GetWorkflowExecutionInfo().GetStatus(),
-	), nil
+// CheckStatus describes the persisted run, preserving the engine's close time.
+func (m *Manager) CheckStatus(ctx context.Context, encodedExecutionID string) (*task.ExecutionStatus, error) {
+	return describeExecution(ctx, m.publisherClient.Client(), encodedExecutionID)
 }
 
 // TerminateTask terminates the Temporal workflow backing the given execution ID.
