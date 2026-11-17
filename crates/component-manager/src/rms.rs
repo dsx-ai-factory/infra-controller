@@ -143,7 +143,7 @@ enum RmsTrackedFirmwareJob {
 
 impl RmsTrackedFirmwareJob {
     /// The [`RmsJobKind`] this job persists under in
-    /// `direct_dispatch_rms_jobs`, so it can be rebuilt (and its
+    /// `direct_dispatch_firmware_update_jobs`, so it can be rebuilt (and its
     /// backend re-queried) after a restart clears the in-memory job map.
     fn kind(&self) -> RmsJobKind {
         match self {
@@ -5500,7 +5500,7 @@ impl RmsBackend {
     ///
     /// Shared by the ingested and pre-ingestion paths of `update_firmware`. The
     /// resulting backend job id is persisted to
-    /// `direct_dispatch_rms_jobs` under the BMC MAC and
+    /// `direct_dispatch_firmware_update_jobs` under the BMC MAC and
     /// `RmsJobKind::FirmwareObject`, so status queries survive a nico-api
     /// restart whether or not the tray has a `machines` row yet.
     async fn apply_compute_firmware_object(
@@ -5825,7 +5825,7 @@ impl ComputeTrayManager for RmsBackend {
 
         for ep in endpoints {
             // Either identity source persists the resulting job ID to
-            // `direct_dispatch_rms_jobs`, keyed by BMC MAC and
+            // `direct_dispatch_firmware_update_jobs`, keyed by BMC MAC and
             // `RmsJobKind::FirmwareObject`.
             let identity = match ingested
                 .get(&ep.bmc_ip)
@@ -9833,7 +9833,7 @@ mod tests {
         let endpoints = [make_sw_endpoint(SW_MAC_1), make_sw_endpoint(SW_MAC_2)];
         let tls_server_domain = "switches.example.test";
         sqlx::query(
-            "ALTER TABLE direct_dispatch_rms_jobs ADD CHECK (job_id <> 'unrecorded-reset')",
+            "ALTER TABLE direct_dispatch_reset_jobs ADD CHECK (job_id <> 'unrecorded-reset')",
         )
         .execute(&pool)
         .await

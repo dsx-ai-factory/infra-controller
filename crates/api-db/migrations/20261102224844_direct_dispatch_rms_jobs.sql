@@ -1,2 +1,0 @@
-ALTER TABLE direct_dispatch_firmware_update_jobs
-RENAME TO direct_dispatch_rms_jobs;

@@ -181,7 +181,7 @@ async fn component_reset_replaces_only_accepted_references(pool: sqlx::PgPool) {
     // A storage failure preserves that switch's previous reference and cause,
     // while accepted peers still get recorded under the shared parent.
     sqlx::query(
-        "ALTER TABLE direct_dispatch_rms_jobs ADD CHECK \
+        "ALTER TABLE direct_dispatch_reset_jobs ADD CHECK \
          (job_id <> 'unrecorded-reset' OR bmc_mac <> 'aa:bb:cc:dd:ff:02')",
     )
     .execute(&pool)
