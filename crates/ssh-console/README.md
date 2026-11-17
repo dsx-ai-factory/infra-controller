@@ -53,7 +53,9 @@ orphaned tasks running in the background.
 its BMC is not listening, a periodic reachability probe, so the pool is bounded rather than growing with the machine
 count:
 
-- `max_bmc_connections` (default 16384) bounds the clients held at once, standing and on-demand together. A client
+- `max_bmc_connections` (default 16384) bounds the clients held at once, standing and on-demand together. At startup
+  the bound is lowered, with a warning, to a quarter of the process's soft open-file limit when the configured value
+  is larger, so a full pool at about three descriptors per client stays within three quarters of the limit. A client
   that is being closed counts until it has shut down. Each API poll gives a standing connection to as many machines
   from nico-api as permits allow, so console logging covers every machine on a site below the bound. Machines beyond
   it have no standing connection.
@@ -62,8 +64,9 @@ count:
   one has shut down. The request fails when no pooled connection can be closed to make room, which is the case when
   every one has an open session. On-demand connections close once idle for `on_demand_bmc_idle_timeout` (default
   600s), checked at each API poll.
-- `max_concurrent_bmc_probes` (default 512) bounds the reachability probes in flight across all clients, so clients
-  whose BMC is down wait for a probe slot instead of each holding a pending connection.
+- `max_concurrent_bmc_probes` (default 512) bounds the reachability probes that standing clients have in flight, so
+  standing clients whose BMC is down wait for a probe slot instead of each holding a pending connection. An on-demand
+  client is opened for a console session, so it probes without waiting for a slot. The pool bounds those probes.
 
 The private console-log API only serves machines with a pooled connection.
 

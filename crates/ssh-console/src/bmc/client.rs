@@ -56,7 +56,8 @@ pub(super) struct BmcRecoveryAttempted;
 /// be retried indefinitely, with exponential backoff, until a shutdown is signaled (ie. by dropping
 /// the ClientHandle.)
 ///
-/// `probe_permits` bounds how many reachability probes all clients run at once.
+/// `probe_permits`, when given, bounds how many reachability probes the clients sharing it run
+/// at once. A client without it probes without waiting.
 ///
 /// `pool_permit` is the client's slot in the pool. It is released when the client's task ends,
 /// after its BMC connection task and its console logger have stopped.
@@ -64,7 +65,7 @@ pub(super) fn spawn(
     connection_details: ConnectionDetails,
     config: Arc<Config>,
     metrics: Arc<BmcPoolMetrics>,
-    probe_permits: Arc<Semaphore>,
+    probe_permits: Option<Arc<Semaphore>>,
     pool_permit: OwnedSemaphorePermit,
     cancel_token: CancellationToken,
 ) -> ClientHandle {
@@ -139,7 +140,7 @@ struct BmcClient {
     broadcast_to_frontend_tx: broadcast::Sender<ToFrontendMessage>,
     to_bmc_msg_rx: mpsc::Receiver<ToBmcMessage>,
     metrics: Arc<BmcPoolMetrics>,
-    probe_permits: Arc<Semaphore>,
+    probe_permits: Option<Arc<Semaphore>>,
     logger_handle: Option<console_logger::ConsoleLoggerHandle>,
 }
 
@@ -209,7 +210,7 @@ impl BmcClient {
                 self.connection_details.addr(),
                 self.connection_details.kind(),
                 self.connection_details.machine_id(),
-                &self.probe_permits,
+                self.probe_permits.as_deref(),
                 self.cancel_token.clone(),
             )
             .await
@@ -350,13 +351,13 @@ impl BmcClient {
 /// but some BMCs (eg, NVIDIA DGX GB200) ignore it. Running both ICMP and UDP ASF pings in parallel
 /// provides fast detection in all environments.
 ///
-/// Each probe holds one of `probe_permits` while it runs, so clients whose BMC is down wait for
-/// a slot instead of each keeping a pending connection open.
+/// With `probe_permits`, each probe holds a permit while it runs, so clients whose BMC is down
+/// wait for a slot instead of each keeping a pending connection open.
 async fn wait_until_host_is_up(
     addr: SocketAddr,
     kind: connection::Kind,
     machine_id: MachineId,
-    probe_permits: &Semaphore,
+    probe_permits: Option<&Semaphore>,
     cancel_token: CancellationToken,
 ) -> io::Result<()> {
     let mut interval = tokio::time::interval(Duration::from_secs(5));
@@ -365,10 +366,15 @@ async fn wait_until_host_is_up(
     loop {
         tokio::select! {
             _ = interval.tick() => {
-                let Some(permit) = cancel_token.run_until_cancelled(probe_permits.acquire()).await else {
-                    break Ok(());
+                let _permit = match probe_permits {
+                    Some(probe_permits) => {
+                        let Some(permit) = cancel_token.run_until_cancelled(probe_permits.acquire()).await else {
+                            break Ok(());
+                        };
+                        Some(permit.expect("probe semaphore is never closed"))
+                    }
+                    None => None,
                 };
-                let _permit = permit.expect("probe semaphore is never closed");
                 match kind {
                     connection::Kind::Ssh => {
                         if let Some(Ok(Ok(_))) = cancel_token.run_until_cancelled(tokio::time::timeout(Duration::from_secs(2), TcpStream::connect(addr))).await {
@@ -816,7 +822,7 @@ mod tests {
             }))
         };
         let cancel_token = CancellationToken::new();
-        let probe_permits = Arc::new(Semaphore::new(1));
+        let probe_permits = Some(Arc::new(Semaphore::new(1)));
         let handle = spawn(
             connection_details(listener.local_addr().expect("BMC listener address")),
             config.clone(),
@@ -933,7 +939,7 @@ mod tests {
                 &state.meter,
                 state.instrumentation.clone(),
             )),
-            probe_permits,
+            Some(probe_permits),
             pool_permit(),
             CancellationToken::new(),
         );
@@ -975,7 +981,7 @@ mod tests {
                 &state.meter,
                 state.instrumentation.clone(),
             )),
-            Arc::new(Semaphore::new(1)),
+            None,
             pool_permit(),
             CancellationToken::new(),
         );

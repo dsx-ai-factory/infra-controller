@@ -397,17 +397,19 @@ successful_connection_minimum_duration = {successful_connection_minimum_duration
 ## Upper bound on BMC connections held open at once: the standing connections kept for console
 ## logging plus the connections opened on demand for console sessions. Each holds a socket or PTY,
 ## a console log file and at times a reachability probe, so the default keeps a full pool within
-## three quarters of a 65536 file-descriptor limit. Machines beyond the bound have no standing
-## connection and connect when a console session asks for them, replacing the pooled connection
-## that has been without a session the longest.
+## three quarters of a 65536 file-descriptor limit. A value above a quarter of the process's
+## open-file limit is lowered to that quarter at startup. Machines beyond the bound have no
+## standing connection and connect when a console session asks for them, replacing the pooled
+## connection that has been without a session the longest.
 max_bmc_connections = {max_bmc_connections}
 
 ## How long a connection opened on demand stays open after its last console session ends. Standing
 ## connections are not affected. Idle connections are closed at the next API poll.
 on_demand_bmc_idle_timeout = {on_demand_bmc_idle_timeout:?}
 
-## How many BMC reachability probes may be in flight at once. A client whose BMC is not listening
-## waits for a probe slot instead of holding a pending connection of its own.
+## How many BMC reachability probes standing connections may have in flight at once. A standing
+## connection whose BMC is not listening waits for a probe slot instead of holding a pending
+## connection of its own. A connection opened on demand probes without waiting for a slot.
 max_concurrent_bmc_probes = {max_concurrent_bmc_probes}
 
 ## When rotating console logs, how big should we let it get before we rotate

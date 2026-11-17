@@ -24,6 +24,7 @@ use carbide_uuid::instance::InstanceId;
 use carbide_uuid::machine::{MachineId, MachineType};
 use futures_util::StreamExt;
 use futures_util::future::join_all;
+use nix::sys::resource::{Resource, getrlimit, rlim_t};
 use opentelemetry::KeyValue;
 use opentelemetry::metrics::{Counter, Gauge, Meter, ObservableGauge};
 use rpc::carbide_api_client::CarbideApiClient;
@@ -49,11 +50,49 @@ const LOOKUP_CONCURRENCY: usize = 64;
 /// another console session can take the permit that an eviction frees.
 const MAX_EVICTIONS_PER_CONNECT: usize = 3;
 
+/// Open-file limit budgeted per pooled connection: about three descriptors each, within three
+/// quarters of the limit.
+const OPEN_FILE_BUDGET_PER_CONNECTION: rlim_t = 4;
+
+/// The pool bound: `max_bmc_connections`, lowered when a full pool would not fit the process's
+/// soft open-file limit.
+fn pool_bound(config: &Config) -> usize {
+    let configured = config.max_bmc_connections.get();
+    let open_file_limit = match getrlimit(Resource::RLIMIT_NOFILE) {
+        Ok((soft_limit, _hard_limit)) => soft_limit,
+        Err(error) => {
+            tracing::warn!(
+                %error,
+                "could not read the open-file limit; not checking max_bmc_connections against it"
+            );
+            return configured;
+        }
+    };
+    let bound = bound_within_open_file_limit(configured, open_file_limit);
+    if bound < configured {
+        tracing::warn!(
+            max_bmc_connections = configured,
+            open_file_limit,
+            pool_bound = bound,
+            "max_bmc_connections does not fit the open-file limit; lowering the BMC connection pool bound"
+        );
+    }
+    bound
+}
+
+/// `configured` connections, or as many as fit `open_file_limit` if that is fewer. At least one.
+/// The quotient rounds up, so a limit of 65535 still fits the default bound.
+fn bound_within_open_file_limit(configured: usize, open_file_limit: rlim_t) -> usize {
+    let fitting = usize::try_from(open_file_limit.div_ceil(OPEN_FILE_BUDGET_PER_CONNECTION))
+        .unwrap_or(usize::MAX);
+    configured.min(fitting.max(1))
+}
+
 /// Spawn a background task that keeps a bounded pool of BMC connections.
 ///
-/// Up to `max_bmc_connections` machines from the API get a standing connection for console
-/// logging. Any machine without one connects when a console session asks for it, replacing the
-/// pooled connection that has been without a session the longest if the pool is full.
+/// Up to `pool_bound` machines from the API get a standing connection for console logging.
+/// Any machine without one connects when a console session asks for it, replacing the pooled
+/// connection that has been without a session the longest if the pool is full.
 pub(crate) fn spawn(
     config: Arc<Config>,
     carbide_api_client: CarbideApiClient,
@@ -64,11 +103,11 @@ pub(crate) fn spawn(
     let (cancel_token, drop_guard) = fork_cancel_token(cancel_token);
     let (ready_tx, ready_rx) = oneshot::channel();
     let members: Members = Default::default();
+    let bound = pool_bound(&config);
     let pool = Arc::new(BmcPool {
         members: members.clone(),
-        permits: Arc::new(Semaphore::new(
-            config.max_bmc_connections.get().min(Semaphore::MAX_PERMITS),
-        )),
+        bound,
+        permits: Arc::new(Semaphore::new(bound.min(Semaphore::MAX_PERMITS))),
         probe_permits: Arc::new(Semaphore::new(
             config
                 .max_concurrent_bmc_probes
@@ -310,10 +349,12 @@ pub(crate) enum GetConnectionError {
 /// The BMC connection pool: one client per pooled machine, bounded by `permits`.
 struct BmcPool {
     members: Members,
+    /// How many clients the pool holds at most.
+    bound: usize,
     /// One permit per client, held from when it joins the pool until it has shut down. A removed
     /// member keeps its permit while it closes its connection.
     permits: Arc<Semaphore>,
-    /// One permit per reachability probe in flight, shared by every client.
+    /// One permit per reachability probe in flight, shared by the standing clients.
     probe_permits: Arc<Semaphore>,
     config: Arc<Config>,
     carbide_api_client: CarbideApiClient,
@@ -463,7 +504,7 @@ impl BmcPool {
             .drain()
             .map(|(_machine_id, member)| member.client)
             .collect::<Vec<_>>();
-        join_all(clients.into_iter().map(|client| client.shutdown_and_wait())).await;
+        join_all(clients.into_iter().map(ClientHandle::close)).await;
     }
 
     async fn refresh_bmcs(&self) -> Result<(), RefreshBmcsError> {
@@ -608,7 +649,7 @@ impl BmcPool {
             members.insert(
                 machine_id,
                 Member {
-                    client: self.spawn_client(connection_details, permit),
+                    client: self.spawn_client(connection_details, Origin::Standing, permit),
                     origin: Origin::Standing,
                 },
             );
@@ -623,7 +664,7 @@ impl BmcPool {
         if unpooled > 0 && self.permits.available_permits() == 0 {
             tracing::warn!(
                 unpooled_machine_count = unpooled,
-                max_bmc_connections = self.config.max_bmc_connections.get(),
+                pool_bound = self.bound,
                 "BMC connection pool is full; machines without a pooled connection connect on demand"
             );
         }
@@ -668,7 +709,7 @@ impl BmcPool {
                 }
                 if let Ok(permit) = self.permits.clone().try_acquire_owned() {
                     tracing::info!(%machine_id, "begin on-demand connection to machine");
-                    let client = self.spawn_client(connection_details, permit);
+                    let client = self.spawn_client(connection_details, Origin::OnDemand, permit);
                     let subscription = client.subscribe(metrics);
                     members.insert(
                         machine_id,
@@ -707,13 +748,20 @@ impl BmcPool {
     fn spawn_client(
         &self,
         connection_details: ConnectionDetails,
+        origin: Origin,
         permit: OwnedSemaphorePermit,
     ) -> ClientHandle {
+        // An on-demand client is opened for a console session, so it does not queue for a probe
+        // permit behind the standing clients. The pool bounds the on-demand clients.
+        let probe_permits = match origin {
+            Origin::Standing => Some(self.probe_permits.clone()),
+            Origin::OnDemand => None,
+        };
         client::spawn(
             connection_details,
             self.config.clone(),
             self.metrics.clone(),
-            self.probe_permits.clone(),
+            probe_permits,
             permit,
             self.cancel_token.clone(),
         )
@@ -733,9 +781,11 @@ mod tests {
 
     use carbide_test_support::value_scenarios;
     use carbide_uuid::machine::MachineIdSource;
+    use nix::sys::resource::RLIM_INFINITY;
     use tokio::net::TcpListener;
 
     use super::*;
+    use crate::bmc::connection_impl::ssh;
     use crate::bmc::vendor::{BmcVendor, SshBmcVendor};
     use crate::config::BmcConfig;
     use crate::metrics::MetricsState;
@@ -828,6 +878,26 @@ mod tests {
         );
     }
 
+    #[test]
+    fn pool_bound_fits_the_open_file_limit() {
+        value_scenarios!(
+            run = |(configured, open_file_limit)| {
+                bound_within_open_file_limit(configured, open_file_limit)
+            };
+            "a limit with room for the configured bound keeps it" {
+                (16384, 65536) => 16384,
+                (16384, 65535) => 16384,
+                (16384, RLIM_INFINITY) => 16384,
+            }
+            "a lower limit allows a quarter of it" {
+                (16384, 32768) => 8192,
+            }
+            "the bound never falls below one connection" {
+                (16384, 3) => 1,
+            }
+        );
+    }
+
     /// A pool over machines whose BMC ports are closed, so clients wait for them to listen.
     struct TestPool {
         pool: Arc<BmcPool>,
@@ -870,6 +940,7 @@ mod tests {
             let metrics_state = MetricsState::new();
             let pool = Arc::new(BmcPool {
                 members: members.clone(),
+                bound: max_connections,
                 permits: Arc::new(Semaphore::new(max_connections)),
                 probe_permits: Arc::new(Semaphore::new(config.max_concurrent_bmc_probes.get())),
                 metrics: Arc::new(BmcPoolMetrics::new(
@@ -1061,6 +1132,46 @@ mod tests {
         );
         drop((open_session, subscription));
         pool.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn only_standing_clients_wait_for_a_probe_permit() {
+        for (origin, probes_without_a_permit) in
+            [(Origin::Standing, false), (Origin::OnDemand, true)]
+        {
+            let pool = TestPool::new(1, Duration::from_secs(600), 0).await;
+            // Leave no probe permit free.
+            pool.pool.probe_permits.forget_permits(usize::MAX);
+            let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
+                .await
+                .expect("bind");
+            let client = pool.pool.spawn_client(
+                ConnectionDetails::Ssh(Arc::new(ssh::ConnectionDetails {
+                    machine_id: machine(1),
+                    addr: listener.local_addr().expect("local addr"),
+                    user: "test".to_string(),
+                    password: "test".to_string(),
+                    ssh_key_path: None,
+                    bmc_vendor: SshBmcVendor::Dell,
+                })),
+                origin,
+                pool.pool
+                    .permits
+                    .clone()
+                    .try_acquire_owned()
+                    .expect("free pool permit"),
+            );
+
+            let wait = if probes_without_a_permit {
+                Duration::from_secs(10)
+            } else {
+                Duration::from_millis(200)
+            };
+            let probed = tokio::time::timeout(wait, listener.accept()).await.is_ok();
+            assert_eq!(probed, probes_without_a_permit, "{origin:?}");
+            client.close().await;
+            pool.shutdown().await;
+        }
     }
 
     #[tokio::test]

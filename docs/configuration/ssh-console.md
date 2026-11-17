@@ -290,24 +290,32 @@ access is unaffected by removing Tenant key-group attachments.
 SSH Console keeps a standing connection to each managed BMC so that it can log
 console output, up to `max_bmc_connections` connections (16384 by default).
 Each connection holds about three file descriptors, so the default fits within
-three quarters of the chart's `fileDescriptorLimit` of 65536. A Site with fewer
-machines than the bound is unaffected by it.
+three quarters of the chart's default `fileDescriptorLimit` of 65536. At
+startup, SSH Console lowers the bound to one quarter of its soft open-file
+limit when `max_bmc_connections` is larger, and logs the warning
+`max_bmc_connections does not fit the open-file limit` with the configured
+value, the limit, and the bound in effect. With a limit of 32768, for example,
+the bound is 8192. A Site with fewer machines than the bound is unaffected by
+it.
 
 On a Site with more machines than the bound, the remaining machines have no
 standing connection and no console log. SSH Console connects to such a machine
 when a console session asks for it. If the pool is full, it first closes the
 pooled connection that has been without a session the longest, and it closes
 the on-demand connection `on_demand_bmc_idle_timeout` (600 seconds by default)
-after the session ends. Reachability probes to BMCs that are not listening are
-limited to `max_concurrent_bmc_probes` (512 by default) at a time.
+after the session ends. Reachability probes from standing connections to BMCs
+that are not listening are limited to `max_concurrent_bmc_probes` (512 by
+default) at a time. An on-demand connection probes without waiting for a slot.
 
 The chart writes these settings into the packaged configuration when
 `sshConsole.bmcPool.maxConnections`, `sshConsole.bmcPool.onDemandIdleTimeout`,
 or `sshConsole.bmcPool.maxConcurrentProbes` is set. Raise `maxConnections`
 only together with `fileDescriptorLimit` and the container runtime's hard
-limit, because the chart clamps the soft limit to the hard limit. The log line
-`BMC connection pool is full` at each API poll reports how many machines have
-no pooled connection.
+limit, because the chart clamps the soft limit to the hard limit and SSH
+Console lowers the bound to one quarter of the resulting limit. A
+`fileDescriptorLimit` below 65536 lowers the default bound in the same way.
+The log line `BMC connection pool is full` at each API poll reports how many
+machines have no pooled connection and the bound in effect.
 
 ## Troubleshooting
 
