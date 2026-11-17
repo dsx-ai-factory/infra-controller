@@ -527,6 +527,7 @@ func (mvp ManageVpcPrefix) createOrUpdateVpcPrefixFromSite(
 			VpcID:        vpc.ID,
 			TenantID:     vpc.TenantID,
 			IpBlockID:    &ipBlock.ID,
+			Labels:       reportedVpcPrefix.Labels,
 			Prefix:       reportedVpcPrefix.Prefix,
 			PrefixLength: reportedPrefixLength,
 			Status:       cdbm.VpcPrefixStatusReady,

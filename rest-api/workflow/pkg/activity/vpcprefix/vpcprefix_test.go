@@ -1087,6 +1087,7 @@ func TestManageVpcPrefix_CreateOrUpdateVpcPrefixFromSite(t *testing.T) {
 		wantVpcPrefix       bool
 		wantName            string
 		wantNamePref        string
+		wantLabels          cdbm.Labels
 	}{
 		{
 			name: "unknown parent VPC is rejected",
@@ -1188,10 +1189,17 @@ func TestManageVpcPrefix_CreateOrUpdateVpcPrefixFromSite(t *testing.T) {
 				Config: &corev1.VpcPrefixConfig{
 					Prefix: "10.4.0.0/24",
 				},
-				Metadata: &corev1.Metadata{Name: "rest-id-parent-vpc-prefix"},
+				Metadata: &corev1.Metadata{
+					Name: "rest-id-parent-vpc-prefix",
+					Labels: []*corev1.Label{{
+						Key:   "owner",
+						Value: cutil.GetPtr("networking"),
+					}},
+				},
 			},
 			wantVpcPrefix: true,
 			wantName:      "rest-id-parent-vpc-prefix",
+			wantLabels:    cdbm.Labels{"owner": "networking"},
 		},
 		{
 			name: "ignores a more-specific TenantManaged SitePrefix without legacy IPAM",
@@ -1225,6 +1233,9 @@ func TestManageVpcPrefix_CreateOrUpdateVpcPrefixFromSite(t *testing.T) {
 				if tt.wantNamePref != "" {
 					assert.True(t, len(vpcPrefix.Name) > len(tt.wantNamePref))
 					assert.Equal(t, tt.wantNamePref, vpcPrefix.Name[:len(tt.wantNamePref)])
+				}
+				if tt.wantLabels != nil {
+					assert.Equal(t, tt.wantLabels, vpcPrefix.Labels)
 				}
 			} else {
 				assert.Nil(t, vpcPrefix)
