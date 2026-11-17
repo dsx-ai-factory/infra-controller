@@ -372,21 +372,56 @@ func TestFirmwareControl_EmptySubTargetsSkipsDpu(t *testing.T) {
 		"empty SubTargets must not trigger DPU reprovisioning")
 }
 
-func TestGetFirmwareStatus_HappyPath(t *testing.T) {
-	m := New(nicoapi.NewMockClient(), nil)
+type firmwareStatusClient struct {
+	nicoapi.Client
+	statuses []*corev1.FirmwareUpdateStatus
+}
 
-	target := common.Target{
-		Type:        devicetypes.ComponentTypeCompute,
-		Identifiers: []string{"machine-1"},
+func (c *firmwareStatusClient) GetComponentFirmwareStatus(context.Context, *corev1.GetComponentFirmwareStatusRequest) (*corev1.GetComponentFirmwareStatusResponse, error) {
+	return &corev1.GetComponentFirmwareStatusResponse{Statuses: c.statuses}, nil
+}
+
+func TestManager_GetFirmwareStatus(t *testing.T) {
+	completed := corev1.FirmwareUpdateState_FW_STATE_COMPLETED
+	failed := corev1.FirmwareUpdateState_FW_STATE_FAILED
+	response := func(identifier string, mac bool, state corev1.FirmwareUpdateState) *corev1.FirmwareUpdateStatus {
+		result := &corev1.ComponentResult{}
+		if mac {
+			result.MacAddress = &identifier
+		} else {
+			result.ComponentId = &identifier
+		}
+		return &corev1.FirmwareUpdateStatus{Result: result, State: state}
 	}
-
-	statuses, err := m.GetFirmwareStatus(context.Background(), target)
-	require.NoError(t, err)
-	require.NotNil(t, statuses)
-	// Mock returns no statuses, so the requested machine still appears with
-	// Unknown state.
-	require.Contains(t, statuses, "machine-1")
-	assert.Equal(t, operations.FirmwareUpdateStateUnknown, statuses["machine-1"].State)
+	testCases := []struct {
+		name       string
+		identifier string
+		mac        bool
+		statuses   []*corev1.FirmwareUpdateStatus
+		expected   operations.FirmwareUpdateState
+	}{
+		{name: "missing status remains unknown", identifier: "machine-1", expected: operations.FirmwareUpdateStateUnknown},
+		{name: "manager identifiers stay case sensitive", identifier: "MACHINE-1", statuses: []*corev1.FirmwareUpdateStatus{response("machine-1", false, completed)}, expected: operations.FirmwareUpdateStateUnknown},
+		{name: "uppercase MAC response matches lowercase request", identifier: "ac:3a:e2:49:fa:46", mac: true, statuses: []*corev1.FirmwareUpdateStatus{response("AC:3A:E2:49:FA:46", true, completed)}, expected: operations.FirmwareUpdateStateCompleted},
+		{name: "lowercase MAC response preserves uppercase request key", identifier: "AC:3A:E2:49:FA:46", mac: true, statuses: []*corev1.FirmwareUpdateStatus{response("ac:3a:e2:49:fa:46", true, completed)}, expected: operations.FirmwareUpdateStateCompleted},
+		{name: "mixed MAC casing retains failed subcomponent", identifier: "ac:3a:e2:49:fa:46", mac: true, statuses: []*corev1.FirmwareUpdateStatus{response("AC:3A:E2:49:FA:46", true, failed), response("ac:3a:e2:49:fa:46", true, completed)}, expected: operations.FirmwareUpdateStateFailed},
+	}
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			client := &firmwareStatusClient{Client: nicoapi.NewMockClient(), statuses: tc.statuses}
+			m := New(client, nil)
+			target := common.Target{Type: devicetypes.ComponentTypeCompute, Identifiers: []string{tc.identifier}}
+			if tc.mac {
+				target.IdentifierType = common.IdentifierTypeMACAddress
+			}
+			statuses, err := m.GetFirmwareStatus(context.Background(), target)
+			require.NoError(t, err)
+			require.Len(t, statuses, 1)
+			require.Contains(t, statuses, tc.identifier)
+			assert.Equal(t, tc.identifier, statuses[tc.identifier].ComponentID)
+			assert.Equal(t, tc.expected, statuses[tc.identifier].State)
+		})
+	}
 }
 
 func TestAggregateNICoStatuses(t *testing.T) {

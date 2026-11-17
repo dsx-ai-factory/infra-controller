@@ -37,6 +37,7 @@ import (
 
 	"github.com/rs/zerolog/log"
 
+	flowutils "github.com/NVIDIA/infra-controller/rest-api/flow/internal/common/utils"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/nicoapi"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/componentmanager"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/componentmanager/capability"
@@ -582,12 +583,19 @@ func (m *Manager) GetFirmwareStatusWithCredentials(
 			s.Result.Error = nicoprovider.FirmwareResultDiagnostic(s.GetResult(), target.UsesMACAddresses())
 		}
 		compID := nicoprovider.ResultIdentifier(s.GetResult(), target.UsesMACAddresses())
+		if target.UsesMACAddresses() {
+			compID = flowutils.NormalizeMAC(compID)
+		}
 		grouped[compID] = append(grouped[compID], s)
 	}
 
 	result := make(map[string]operations.FirmwareUpdateStatus, target.Len())
 	for _, compID := range target.Identifiers {
-		result[compID] = aggregateNICoStatuses(compID, grouped[compID])
+		lookupID := compID
+		if target.UsesMACAddresses() {
+			lookupID = flowutils.NormalizeMAC(compID)
+		}
+		result[compID] = aggregateNICoStatuses(compID, grouped[lookupID])
 	}
 
 	return result, nil
