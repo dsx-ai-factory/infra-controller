@@ -27,6 +27,8 @@ var (
 	expectedMachineInterfaceLogicalNameRegexp  = regexp.MustCompile(`^[A-Za-z0-9_.-]+$`)
 )
 
+const validationErrorExpectedMachineDpuPolicy = "dpuPolicy must be manage, nic, or ignore"
+
 const validationErrorExpectedMachineInterfaceMAC = "must be a MAC address of six colon- or hyphen-separated octets"
 
 // APIExpectedMachineInterfaceMacAddressIdentifier is a MAC address that
@@ -382,14 +384,14 @@ func validateExpectedMachineDpuPolicy(policy *string) error {
 		return nil
 	}
 	if *policy == "" {
-		return errors.New("dpuPolicy must be manage, nic, or ignore")
+		return errors.New(validationErrorExpectedMachineDpuPolicy)
 	}
 	return validation.Validate(*policy,
 		validation.In(
 			cdbm.ExpectedMachineDpuPolicyManage,
 			cdbm.ExpectedMachineDpuPolicyNic,
 			cdbm.ExpectedMachineDpuPolicyIgnore,
-		).Error("dpuPolicy must be manage, nic, or ignore"))
+		).Error(validationErrorExpectedMachineDpuPolicy))
 }
 
 // APIExpectedMachineCreateRequest is the data structure to capture instance request to create a new ExpectedMachine
