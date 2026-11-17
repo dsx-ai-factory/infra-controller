@@ -19,8 +19,8 @@ use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr};
 use std::path::PathBuf;
 
+use carbide_dpu_agent_utils::FMDS_IPV6_GATEWAY;
 use eyre::Context;
-use forge_dpu_agent_utils::FMDS_IPV6_GATEWAY;
 use ipnetwork::IpNetwork;
 use serde::{Deserialize, Serialize};
 

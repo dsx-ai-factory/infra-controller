@@ -565,7 +565,7 @@ impl DiscoveryLoopContext {
             };
 
         Ok(Self {
-            instrumentation,
+            instrumentation: instrumentation.clone(),
             collectors: CollectorState::new(),
             discovery_iteration_histogram,
             discovery_endpoint_fetch_histogram,
@@ -601,6 +601,7 @@ impl DiscoveryLoopContext {
                     source_cfg.client_cert.clone(),
                     source_cfg.client_key.clone(),
                     &source_cfg.api_url,
+                    instrumentation,
                 ))),
                 _ => None,
             },

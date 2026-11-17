@@ -250,14 +250,35 @@ impl PartialEq for ApproxHistogramSum {
 /// are measured against the snapshot taken at [`MetricsCapture::start`].
 /// Unrelated emitters can still contribute during a capture; this helper does
 /// not isolate them. Independently owned [`crate::Instrumentation`] instances
-/// need their own providers and registries; use [`Self::for_registry`] to capture
-/// one without acquiring the global capture mutex.
+/// need their own providers and registries; use [`Self::owned`] to create them
+/// or [`Self::for_registry`] to capture an existing registry without acquiring
+/// the global capture mutex.
 pub struct MetricsCapture {
     _serialized: MutexGuard<'static, ()>,
     capture: RegistryMetricsCapture,
 }
 
 impl MetricsCapture {
+    /// Creates an isolated metric destination and snapshots its empty registry.
+    /// The returned capture retains the provider and does not install it globally.
+    pub fn owned() -> OwnedMetricsCapture {
+        let registry = prometheus::Registry::new();
+        let exporter = opentelemetry_prometheus::exporter()
+            .with_registry(registry.clone())
+            .without_scope_info()
+            .without_target_info()
+            .build()
+            .expect("test exporter should build");
+        let provider = opentelemetry_sdk::metrics::SdkMeterProvider::builder()
+            .with_reader(exporter)
+            .build();
+        OwnedMetricsCapture {
+            instrumentation: crate::Instrumentation::from_meter_provider(&provider),
+            capture: Self::for_registry(&registry),
+            _provider: provider,
+        }
+    }
+
     /// Locks the test-metrics window and snapshots current values.
     pub fn start() -> Self {
         static SERIAL: Mutex<()> = Mutex::new(());
@@ -281,6 +302,29 @@ impl MetricsCapture {
 }
 
 impl std::ops::Deref for MetricsCapture {
+    type Target = RegistryMetricsCapture;
+
+    fn deref(&self) -> &Self::Target {
+        &self.capture
+    }
+}
+
+/// An isolated metric capture that owns its instrumentation and meter provider.
+/// Keep it alive until all tasks recording into its destination have finished.
+pub struct OwnedMetricsCapture {
+    instrumentation: crate::Instrumentation,
+    capture: RegistryMetricsCapture,
+    _provider: opentelemetry_sdk::metrics::SdkMeterProvider,
+}
+
+impl OwnedMetricsCapture {
+    /// The destination whose observations this capture reads.
+    pub fn instrumentation(&self) -> &crate::Instrumentation {
+        &self.instrumentation
+    }
+}
+
+impl std::ops::Deref for OwnedMetricsCapture {
     type Target = RegistryMetricsCapture;
 
     fn deref(&self) -> &Self::Target {

@@ -114,12 +114,13 @@ pub async fn gb200_host_interface_static_ipv4_is_missing(
 /// Wiwynn firmware returns HTTP 200 for the successful PATCH; HTTP 204 is
 /// accepted for Redfish implementations that omit a response body.
 pub async fn ensure_gb200_host_interface_static_ipv4(
+    instrumentation: &carbide_instrument::Instrumentation,
     redfish_client: &dyn Redfish,
 ) -> Result<HostInterfaceStaticIpv4Repair, RedfishError> {
     // The typed libredfish operation does not expose response headers. Read the
     // resource directly so the PATCH is conditional on the same representation
     // that was classified immediately before the change.
-    let observation = get_gb200_host_interface_for_repair(redfish_client).await?;
+    let observation = get_gb200_host_interface_for_repair(instrumentation, redfish_client).await?;
     match observation.static_ipv4_status {
         StaticIpv4Status::Present => {
             return Ok(HostInterfaceStaticIpv4Repair::AlreadyConfigured);
@@ -133,9 +134,9 @@ pub async fn ensure_gb200_host_interface_static_ipv4(
     let url = gb200_host_interface_url(redfish_client);
     let etag = required_etag(observation.headers.as_ref(), &url)?;
 
-    patch_gb200_host_interface(redfish_client, etag).await?;
+    patch_gb200_host_interface(instrumentation, redfish_client, etag).await?;
 
-    match get_gb200_host_interface_for_repair(redfish_client)
+    match get_gb200_host_interface_for_repair(instrumentation, redfish_client)
         .await?
         .static_ipv4_status
     {
@@ -155,10 +156,11 @@ pub async fn ensure_gb200_host_interface_static_ipv4(
 
 /// Reads the raw resource because the typed API does not expose its `ETag`.
 async fn get_gb200_host_interface_for_repair(
+    instrumentation: &carbide_instrument::Instrumentation,
     redfish_client: &dyn Redfish,
 ) -> Result<HostInterfaceObservation, RedfishError> {
     let url = gb200_host_interface_url(redfish_client);
-    carbide_instrument::red::instrumented(REDFISH_BACKEND, GET_FOR_REPAIR_OPERATION, async {
+    carbide_instrument::red::instrumented(instrumentation, REDFISH_BACKEND, GET_FOR_REPAIR_OPERATION, async {
         let (_, interface, headers) = redfish_client
             .std_redfish()
             .client
@@ -191,6 +193,7 @@ async fn get_gb200_host_interface_for_repair(
 
 /// Writes the expected address only when the resource still has the observed `ETag`.
 async fn patch_gb200_host_interface(
+    instrumentation: &carbide_instrument::Instrumentation,
     redfish_client: &dyn Redfish,
     etag: String,
 ) -> Result<(), RedfishError> {
@@ -203,32 +206,38 @@ async fn patch_gb200_host_interface(
         }],
     };
 
-    carbide_instrument::red::instrumented(REDFISH_BACKEND, PATCH_OPERATION, async {
-        let (status_code, _, _) = redfish_client
-            .std_redfish()
-            .client
-            .req::<serde_json::Value, _>(
-                Method::PATCH,
-                &url,
-                Some(body),
-                None,
-                None,
-                vec![(IF_MATCH, etag)],
-            )
-            .await?;
+    carbide_instrument::red::instrumented(
+        instrumentation,
+        REDFISH_BACKEND,
+        PATCH_OPERATION,
+        async {
+            let (status_code, _, _) = redfish_client
+                .std_redfish()
+                .client
+                .req::<serde_json::Value, _>(
+                    Method::PATCH,
+                    &url,
+                    Some(body),
+                    None,
+                    None,
+                    vec![(IF_MATCH, etag)],
+                )
+                .await?;
 
-        // Verification assumes the address was applied synchronously, so an
-        // asynchronous success response is not accepted here.
-        match status_code {
-            StatusCode::OK | StatusCode::NO_CONTENT => Ok(()),
-            _ => Err(RedfishError::HTTPErrorCode {
-                url,
-                status_code,
-                response_body: "expected HTTP 200 or 204 while patching the manager host interface"
-                    .to_string(),
-            }),
-        }
-    })
+            // Verification assumes the address was applied synchronously, so an
+            // asynchronous success response is not accepted here.
+            match status_code {
+                StatusCode::OK | StatusCode::NO_CONTENT => Ok(()),
+                _ => Err(RedfishError::HTTPErrorCode {
+                    url,
+                    status_code,
+                    response_body:
+                        "expected HTTP 200 or 204 while patching the manager host interface"
+                            .to_string(),
+                }),
+            }
+        },
+    )
     .await
 }
 

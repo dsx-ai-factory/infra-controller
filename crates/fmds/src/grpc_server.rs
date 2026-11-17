@@ -189,10 +189,10 @@ impl FmdsGrpcServer {
 
 #[cfg(test)]
 mod tests {
+    use carbide_dpu_fmds_shared::machine_identity::MachineIdentityParams;
     use carbide_instrument::testing::{CapturedFieldKind, MetricsCapture, capture_logs};
     use carbide_test_support::Outcome::{Fails, Yields};
     use carbide_test_support::{Check, check_values, scenarios};
-    use forge_dpu_fmds_shared::machine_identity::MachineIdentityParams;
     use rpc::fmds::{FmdsConfigUpdate, FmdsMachineIdentityConfig, IbDevice, IbInstance};
 
     use super::*;

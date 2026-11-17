@@ -96,7 +96,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let certificate = nras::certificate_to_base64(&pem_cert);
 
-    let nras_verifier_client = nras::NrasVerifierClient::new_with_config(&config);
+    let nras_verifier_client = nras::NrasVerifierClient::new_with_config(
+        &config,
+        carbide_instrument::Instrumentation::noop(),
+    );
 
     let supported = SUPPORTED_ARCHITECTURES.join(", ");
     let architecture = parse_architecture(&args.architecture).ok_or_else(|| {
@@ -123,7 +126,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     println!("RawAttestationOutcome is: {:#?}", verifier_response);
 
-    let nras_keystore = nras::NrasKeyStore::new_with_config(&config).await?;
+    let nras_keystore =
+        nras::NrasKeyStore::new_with_config(&config, &carbide_instrument::Instrumentation::noop())
+            .await?;
     let parser = nras::Parser::new_with_config(&config);
 
     let processed_response =

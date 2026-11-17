@@ -90,37 +90,21 @@ struct MetadataDetail {
     metadata_version: String,
 }
 
-/// Reusable template for rendering aggregate health details in entity detail
-/// pages. Render with `{{ health_detail|safe }}`.
-#[derive(Template)]
-#[template(path = "health_detail.html")]
+/// Aggregate health for a detail page's status bar (`ui::health_stat`). The
+/// full reports render in the Health tab from `health::HealthPanel`.
 struct HealthDetail {
-    health_reports_url: String,
-    health_reports_link_text: &'static str,
     health: health_report::HealthReport,
-    health_sources: Vec<String>,
 }
 
 impl HealthDetail {
-    fn new(
-        health_reports_url: String,
-        health_reports_link_text: &'static str,
-        health: Option<rpc::health::HealthReport>,
-        health_sources: Vec<rpc::forge::HealthSourceOrigin>,
-    ) -> Self {
+    fn new(health: Option<rpc::health::HealthReport>) -> Self {
         HealthDetail {
-            health_reports_url,
-            health_reports_link_text,
             health: health
                 .map(|health| {
                     health_report::HealthReport::try_from(health)
                         .unwrap_or_else(health_report::HealthReport::malformed_report)
                 })
                 .unwrap_or_else(health_report::HealthReport::missing_report),
-            health_sources: health_sources
-                .into_iter()
-                .map(|source| source.source)
-                .collect(),
         }
     }
 }
@@ -163,7 +147,7 @@ struct StateSlaDetail {
     state_reason: Option<rpc::forge::ControllerStateReason>,
 }
 
-/// Reusable template for rendering lifecycle fields.
+/// Reusable Lifecycle card for detail pages.
 /// Render with `{{ lifecycle_detail|safe }}`.
 #[derive(Template)]
 #[template(path = "lifecycle_detail.html")]
@@ -176,6 +160,8 @@ struct LifecycleDetail {
     state_sla: String,
     time_in_state_above_sla: bool,
     state_reason: Option<rpc::forge::ControllerStateReason>,
+    /// Shown as an extra row for objects that report reboots.
+    last_reboot: Option<String>,
 }
 
 impl LifecycleDetail {
@@ -202,6 +188,7 @@ impl LifecycleDetail {
             state_sla: format_state_sla(sla.as_ref()),
             time_in_state_above_sla,
             state_reason,
+            last_reboot: None,
         }
     }
 }
@@ -246,6 +233,7 @@ mod tests;
 mod action_status;
 mod attestation;
 mod auth;
+mod browser_response;
 mod compute_allocation;
 mod configuration;
 mod console_logs;

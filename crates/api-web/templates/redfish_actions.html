@@ -4,46 +4,42 @@
 
 {% block content %}
 <h1>Redfish Actions</h1>
-
-<p>
-List of pending and applied actions on Forge-managed BMCs.
-Actions are requested through Carbide's gRPC interface and then applied to 
-BMCs with appropriate credentials.
+<p class="page-intro">
+	Pending and applied actions on managed BMCs. Actions are requested through NICo's gRPC
+	interface and applied to BMCs with the appropriate credentials once approved.
 </p>
 
-<br>
-
 {% if let Some(error) = error %}
-<h3>Error</h3>
-<textarea disabled>{{ error }}</textarea>
+<section class="entity-summary">
+	<div class="entity-summary-alert">{{ error }}</div>
+</section>
 {% endif %}
 
-<details open>
-	<summary>Create Request</summary>
-	<form id="redfish_requester">
-		<div>
-			<label for="ips">Comma-separated List of Machine IPs:</label>
-			<input required type=text id="ip_input" name="ips" placeholder="127.0.0.1, 0.0.0.0"/>
-		</div>
-		<div>
-			<label for="target">Redfish Target Route</label>
-			<input required type=text id="target_input" name="target" placeholder="/redfish/v1/System/Actions/Reset"/>
-		</div>
-		<div>
-			<label for="action">Action Name for Route</label>
-			<input required type=text id="action_input" name="action" placeholder="#System.Action"/>
-		</div>
-		<div>
-			<label for="parameters">Parameters</label>
-			<input required type=text id="parameter_input" name="parameters" value="{}"/>
-		</div>
-		<input required type="submit" value="Request Action">
-	</form>
-</details>
+<form id="redfish_requester" class="entity-summary">
+	<div class="entity-summary-table"><h4>New request</h4></div>
+	<div class="entity-summary-fields">
+		<label for="ip_input">Machine IPs</label>
+		<div><input required type="text" id="ip_input" name="ips" placeholder="127.0.0.1, 0.0.0.0" /></div>
+		<label for="target_input">Redfish target route</label>
+		<div><input required type="text" id="target_input" name="target" placeholder="/redfish/v1/System/Actions/Reset" /></div>
+		<label for="action_input">Action name</label>
+		<div><input required type="text" id="action_input" name="action" placeholder="#System.Action" /></div>
+		<label for="parameter_input">Parameters (JSON)</label>
+		<div><input required type="text" id="parameter_input" name="parameters" value="{}" /></div>
+	</div>
+	<div class="entity-summary-footer">
+		<input type="submit" value="Request action">
+	</div>
+</form>
 
-<div style="overflow: scroll;">
-{{ actions|safe }}
-</div>
+<section class="entity-summary">
+	<div class="entity-summary-table">
+		<h4>Requests</h4>
+		<div class="data-table-scroll">
+		{{ actions|safe }}
+		</div>
+	</div>
+</section>
 
 {% endblock %}
 

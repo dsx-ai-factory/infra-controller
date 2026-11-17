@@ -136,6 +136,7 @@ mod tests {
         CountResponse {
             count: 10,
             sweep: SweepInfo {
+                firmware_config: None,
                 snapshot_id: "s1".to_string(),
                 family: Family::Host,
                 sweep_start: at,

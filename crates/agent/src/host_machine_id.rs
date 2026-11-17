@@ -18,9 +18,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use backon::{ExponentialBuilder, Retryable};
+use carbide_dpu_agent_utils::utils::create_forge_client;
 use carbide_host_support::agent_config::AgentConfig;
 use carbide_uuid::machine::{MachineId, MachineInterfaceId};
-use forge_dpu_agent_utils::utils::create_forge_client;
 use rpc::carbide_tls_client::{CarbideClientConfig, CarbideClientT};
 use rpc::forge::MachineInterface;
 

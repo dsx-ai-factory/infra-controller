@@ -92,6 +92,7 @@ pub(crate) struct DevicesReader {
     seq: AtomicU64,
     attempt: Attempt,
     previous: Mutex<Previous>,
+    config_store: Option<Arc<crate::state::store::SnapshotStore>>,
 }
 
 impl DevicesReader {
@@ -115,7 +116,21 @@ impl DevicesReader {
             seq: AtomicU64::new(0),
             attempt: Attempt::new(Reader::Devices, &DEVICE_FAMILIES),
             previous: Mutex::new(Previous::new()),
+            config_store: None,
         }
+    }
+
+    pub(crate) fn with_config_store(
+        mut self,
+        store: Arc<crate::state::store::SnapshotStore>,
+    ) -> Self {
+        self.config_store = Some(store);
+        self
+    }
+
+    fn firmware_config(&self) -> Option<Arc<dyn crate::snapshot::AnySnapshot>> {
+        let config = super::nico_config::current(self.config_store.as_deref()?)?;
+        (config.meta().process == self.process).then_some(config)
     }
 
     fn previous(&self) -> std::sync::MutexGuard<'_, Previous> {
@@ -211,6 +226,7 @@ struct Sweep<'a> {
 
 /// Every read of one sweep, before the families are built.
 struct Reads {
+    config: Option<Arc<dyn crate::snapshot::AnySnapshot>>,
     machines: Result<(), Failure>,
     hosts: Result<CensusRead<HostDetail>, Failure>,
     dpus: Vec<String>,
@@ -337,6 +353,7 @@ impl Sweep<'_> {
         publisher.deliver_built(&meta, Family::Instance, failed, |previous| {
             instances.map(|r| instance_units(r.rows, previous))
         });
+        let config = publisher.firmware_config();
         let host_start = crate::clock::now();
         let machine_census = self
             .call("find_machine_ids", || nico.machine_ids())
@@ -363,7 +380,16 @@ impl Sweep<'_> {
             })
             .await
             .map_err(|e| Failure::call("list_hosts_waiting_for_reprovisioning", &e));
+        let config = config
+            .zip(publisher.firmware_config())
+            .and_then(|(before, after)| {
+                (before.meta().process == after.meta().process
+                    && super::nico_config::data(before.as_ref())?.revision
+                        == super::nico_config::data(after.as_ref())?.revision)
+                    .then_some(after)
+            });
         let mut reads = Reads {
+            config,
             machines,
             hosts,
             dpus,
@@ -749,7 +775,22 @@ impl DevicesReader {
             match (hosts.as_ref(), open) {
                 (Err(failure), _) => Err(failure.clone()),
                 (Ok(read), Some(Ok(open))) => {
-                    let data = host_units(&read.rows, &open, previous);
+                    let mut data = host_units(
+                        &read.rows,
+                        &open,
+                        previous,
+                        reads.config.as_deref().and_then(super::nico_config::data),
+                    );
+                    if let Some(config) = reads.config.as_deref() {
+                        let content =
+                            super::nico_config::data(config).expect("validated config snapshot");
+                        data.firmware_config =
+                            Some(carbide_site_health_probe_api::FirmwareConfigEvidence {
+                                revision: content.revision,
+                                read_start: config.meta().start.into(),
+                                read_at: config.meta().end.into(),
+                            });
+                    }
                     // Under the compact read, a host without an answer is a row
                     // nico-api sent incomplete.
                     let known = |known: fn(&HostFields) -> bool| {
@@ -979,6 +1020,10 @@ fn host_fields(host: &HostDetail, open: Option<&FirmwareRequest>) -> HostFields 
     let (allocatable, blocking_reason) = known_flag(&host.allocatable);
     let (update_eligible, update_blocking_reason) = known_flag(&host.update_eligible);
     HostFields {
+        firmware_window: host.firmware_window.clone(),
+        firmware_policy_eligible: host.firmware_policy_eligible,
+        firmware_policy_blocking_reason: host.firmware_policy_blocking_reason.clone(),
+        firmware: host.firmware.clone(),
         vendor: host.vendor.clone(),
         model: host.model.clone(),
         instance_type: host.instance_type.clone(),
@@ -1024,6 +1069,7 @@ fn host_units(
     hosts: &BTreeMap<String, HostDetail>,
     open: &BTreeMap<String, FirmwareRequest>,
     previous: &[Arc<Unit>],
+    config: Option<&super::nico_config::NicoConfigData>,
 ) -> UnitsData {
     let mut unknown = 0;
     let units = hosts.iter().map(|(id, host)| {
@@ -1033,7 +1079,7 @@ fn host_units(
         }
         let done = category == "Ready";
         let fields = host_fields(host, open.get(id));
-        Unit {
+        let mut unit = Unit {
             controller_instance_id: None,
             rest_machine: None,
             id: id.clone(),
@@ -1048,7 +1094,11 @@ fn host_units(
             dpu: None,
             instance: None,
             expected: None,
+        };
+        if let Some(config) = config {
+            project_firmware(&mut unit, config);
         }
+        unit
     });
     let mut built = UnitsBuilder::new(previous);
     built.extend(units);
@@ -1461,6 +1511,71 @@ fn mismatch_unit(
     }
 }
 
+/// Phases use every Core-matched inventory entry, without rematching regexes.
+fn project_firmware(unit: &mut Unit, config: &super::nico_config::NicoConfigData) {
+    use carbide_site_health_probe_api::FirmwarePhase::*;
+    let Some(host) = unit.host.as_mut() else {
+        return;
+    };
+    let complete = host.firmware_window.is_some()
+        && host.firmware_policy_eligible.is_some()
+        && unit.state != OTHER;
+    let failed = unit.stage == Stage::Error
+        || unit
+            .reason
+            .as_deref()
+            .is_some_and(|reason| reason.starts_with("HostReprovisioning/FailedFirmwareUpgrade {"));
+    let updating = host.open_firmware_request.is_some();
+    let Some(firmware) = host.firmware.as_mut() else {
+        return;
+    };
+    let report_known = firmware.report_version.is_some()
+        && firmware.waiting_for_refresh.is_some()
+        && host.report_at.is_some()
+        && (host.report_error.is_none() || failed);
+    let mut names = BTreeSet::new();
+    let valid_groups = host
+        .vendor
+        .as_deref()
+        .zip(host.model.as_deref())
+        .is_some_and(|(vendor, model)| {
+            config.target_count(vendor, model) == firmware.components.len()
+                && firmware.components.iter().all(|c| {
+                    names.insert(c.component_name.as_str())
+                        && config.target(vendor, model, &c.component_name).is_some()
+                })
+        });
+    for component in &mut firmware.components {
+        let target = host
+            .vendor
+            .as_deref()
+            .zip(host.model.as_deref())
+            .and_then(|(vendor, model)| config.target(vendor, model, &component.component_name));
+        component.phase = if !valid_groups
+            || !complete
+            || !report_known
+            || target.is_none()
+            || component.entries.is_empty()
+            || component.entries.iter().any(|e| {
+                e.service_id.is_empty() || e.inventory_id.is_empty() || e.version.is_none()
+            }) {
+            Unknown
+        } else if failed {
+            Failed
+        } else if updating || firmware.waiting_for_refresh == Some(true) {
+            Updating
+        } else if component
+            .entries
+            .iter()
+            .all(|e| e.version.as_deref() == target.map(|t| t.version.as_str()))
+        {
+            Current
+        } else {
+            Behind
+        };
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use carbide_site_health_probe_api::VersionSource;
@@ -1472,6 +1587,330 @@ mod tests {
     use crate::snapshot::FailureKind;
     use crate::snapshot::testing::FakeSink;
 
+    fn firmware_host() -> HostDetail {
+        use carbide_site_health_probe_api::*;
+        let mut host = fake::host(1, "Ready", &[]);
+        host.firmware_window = Some(FirmwareWindow {
+            start: None,
+            end: None,
+        });
+        host.firmware_policy_eligible = Some(true);
+        host.report_at = Some(crate::clock::now().into());
+        host.firmware = Some(HostFirmware {
+            report_version: Some("revision".into()),
+            waiting_for_refresh: Some(false),
+            components: [("bmc", "25.06-2"), ("uefi", "1.2"), ("cx7", "28.45")]
+                .into_iter()
+                .map(|(name, version)| FirmwareComponentInventory {
+                    component_name: name.into(),
+                    entries: vec![FirmwareInventoryEntry {
+                        service_id: "Redfish".into(),
+                        inventory_id: name.into(),
+                        version: Some(version.into()),
+                    }],
+                    phase: FirmwarePhase::Unknown,
+                })
+                .collect(),
+        });
+        host
+    }
+
+    #[test]
+    fn firmware_vendor_aliases_require_unambiguous_models() {
+        use carbide_site_health_probe_api::FirmwarePhase;
+
+        use super::super::nico_config::firmware_targets;
+        use super::super::nico_config::tests::{available, desired};
+        for collision in [false, true] {
+            let mut desired_rows = vec![desired("LenovoAMI", "GB200 NVL", &[("bmc", "25.06-2")])];
+            let mut available_rows =
+                vec![available("LenovoAMI", "GB200 NVL", "bmc", "25.06-2", true)];
+            if collision {
+                desired_rows.push(desired("Lenovo", "GB200 NVL", &[("bmc", "25.06-2")]));
+                available_rows.push(available("Lenovo", "GB200 NVL", "bmc", "25.06-2", true));
+            }
+            desired_rows.push(desired("nvidia", "other", &[("bmc", "1")]));
+            available_rows.push(available("nvidia", "other", "bmc", "1", true));
+            let mut config = super::super::nico_config::tests::content();
+            config.firmware_targets = firmware_targets(desired_rows, &available_rows).unwrap();
+            assert_eq!(config.target_count("nvidia", "other"), 1);
+            assert_eq!(
+                config.target_count("lenovo", "GB200 NVL"),
+                usize::from(!collision)
+            );
+            let mut host = firmware_host();
+            host.vendor = Some("lenovo".into());
+            host.firmware.as_mut().unwrap().components.truncate(1);
+            let mut units = host_units(
+                &[(host.id.to_string(), host)].into_iter().collect(),
+                &BTreeMap::new(),
+                &[],
+                None,
+            );
+            let unit = Arc::make_mut(&mut units.units[0]);
+            project_firmware(unit, &config);
+            assert_eq!(
+                unit.host
+                    .as_ref()
+                    .unwrap()
+                    .firmware
+                    .as_ref()
+                    .unwrap()
+                    .components[0]
+                    .phase,
+                if collision {
+                    FirmwarePhase::Unknown
+                } else {
+                    FirmwarePhase::Current
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn firmware_phase_uses_all_inventory_entries() {
+        use carbide_site_health_probe_api::FirmwarePhase::*;
+        type Case = (
+            &'static str,
+            fn(&mut HostDetail),
+            carbide_site_health_probe_api::FirmwarePhase,
+        );
+        let cases: &[Case] = &[
+            ("current", |_| {}, Current),
+            (
+                "replaced group",
+                |h| h.firmware.as_mut().unwrap().components[2].component_name = "nic".into(),
+                Unknown,
+            ),
+            (
+                "missing group",
+                |h| {
+                    h.firmware.as_mut().unwrap().components.pop();
+                },
+                Unknown,
+            ),
+            (
+                "mixed entries",
+                |h| {
+                    let c = &mut h.firmware.as_mut().unwrap().components[0];
+                    let mut old = c.entries[0].clone();
+                    old.version = Some("old".into());
+                    c.entries.push(old);
+                },
+                Behind,
+            ),
+            (
+                "empty entries",
+                |h| h.firmware.as_mut().unwrap().components[0].entries.clear(),
+                Unknown,
+            ),
+            (
+                "unknown version",
+                |h| h.firmware.as_mut().unwrap().components[0].entries[0].version = None,
+                Unknown,
+            ),
+            (
+                "waiting",
+                |h| h.firmware.as_mut().unwrap().waiting_for_refresh = Some(true),
+                Updating,
+            ),
+            (
+                "report error",
+                |h| h.report_error = Some("Unauthorized".into()),
+                Unknown,
+            ),
+            (
+                "reprovision exploration error",
+                |h| {
+                    h.state =
+                        "HostReprovisioning/NewFirmwareReportedWait { final_version: target }"
+                            .into();
+                    h.report_error = Some("RedfishError".into());
+                },
+                Unknown,
+            ),
+            (
+                "terminal firmware failure",
+                |h| {
+                    h.state = "HostReprovisioning/FailedFirmwareUpgrade { firmware_type: Bmc, report_time: None, reason: None }".into()
+                },
+                Failed,
+            ),
+            (
+                "terminal firmware failure with report error",
+                |h| {
+                    h.state = "HostReprovisioning/FailedFirmwareUpgrade { firmware_type: Bmc, report_time: None, reason: None }".into();
+                    h.report_error = Some("RedfishError".into());
+                },
+                Failed,
+            ),
+            (
+                "host error",
+                |h| h.state = "Failed/MachineValidation".into(),
+                Failed,
+            ),
+            ("unknown state", |h| h.state = "NewUnknown".into(), Unknown),
+            ("old server", |h| h.firmware_window = None, Unknown),
+            (
+                "missing policy",
+                |h| h.firmware_policy_eligible = None,
+                Unknown,
+            ),
+            (
+                "unknown waiting",
+                |h| h.firmware.as_mut().unwrap().waiting_for_refresh = None,
+                Unknown,
+            ),
+        ];
+        let config = super::super::nico_config::tests::content();
+        for (name, edit, expected) in cases {
+            let mut host = firmware_host();
+            edit(&mut host);
+            let mut units = host_units(
+                &[(host.id.to_string(), host)].into_iter().collect(),
+                &BTreeMap::new(),
+                &[],
+                None,
+            );
+            let unit = Arc::make_mut(&mut units.units[0]);
+            project_firmware(unit, &config);
+            assert_eq!(
+                unit.host
+                    .as_ref()
+                    .unwrap()
+                    .firmware
+                    .as_ref()
+                    .unwrap()
+                    .components[0]
+                    .phase,
+                *expected,
+                "{name}"
+            );
+        }
+        let host = firmware_host();
+        let id = host.id.to_string();
+        let open = [(
+            id.clone(),
+            FirmwareRequest {
+                initiator: carbide_site_health_probe_api::Initiator::Manual,
+                requested_at: None,
+                initiated_at: None,
+            },
+        )]
+        .into_iter()
+        .collect();
+        let mut units = host_units(&[(id, host)].into_iter().collect(), &open, &[], None);
+        project_firmware(Arc::make_mut(&mut units.units[0]), &config);
+        assert_eq!(
+            carbide_site_health_probe_api::metrics::firmware_phase(
+                &units.units[0],
+                carbide_site_health_probe_api::Component::Bmc
+            ),
+            Updating
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn host_config_is_pinned_across_sweep() {
+        use crate::snapshot::FamilySnapshot;
+        use crate::state::store::SnapshotStore;
+        for change in [
+            "none", "changed", "failed", "stale", "restart", "off", "appears",
+        ] {
+            let mut site = FakeSite::default();
+            site.add_host(firmware_host());
+            let mut h = harness_with(site, HostReadMode::Compact);
+            let store = Arc::new(SnapshotStore::new(&crate::config::Paging::default()));
+            h.reader.config_store = Some(store.clone());
+            let meta = SweepMeta {
+                process: h.reader.process,
+                seq: 1,
+                reader: Reader::NicoConfig,
+                start: crate::clock::now(),
+                end: crate::clock::now(),
+            };
+            let content = super::super::nico_config::tests::content();
+            let publish = |meta, content| {
+                store.publish(
+                    Family::ConfigNicoApi,
+                    Arc::new(FamilySnapshot {
+                        meta,
+                        data: content,
+                    }),
+                )
+            };
+            if !["off", "appears"].contains(&change) {
+                publish(meta.clone(), content.clone());
+            }
+            let during = store.clone();
+            let mut next = content.clone();
+            let mut after = meta.clone();
+            h.nico
+                .after("find_host_states_by_ids", move |_| match change {
+                    "appears" => during.publish(
+                        Family::ConfigNicoApi,
+                        Arc::new(FamilySnapshot {
+                            meta: after,
+                            data: next,
+                        }),
+                    ),
+                    "changed" => {
+                        next.revision += 1;
+                        during.publish(
+                            Family::ConfigNicoApi,
+                            Arc::new(FamilySnapshot {
+                                meta: after,
+                                data: next,
+                            }),
+                        );
+                    }
+                    "failed" => during.failed(
+                        Reader::NicoConfig,
+                        Family::ConfigNicoApi,
+                        FailureKind::Rpc,
+                        "read failed",
+                    ),
+                    "restart" => {
+                        after.process += 1;
+                        during.publish(
+                            Family::ConfigNicoApi,
+                            Arc::new(FamilySnapshot {
+                                meta: after,
+                                data: next,
+                            }),
+                        );
+                    }
+                    _ => {}
+                });
+            if change == "stale" {
+                tokio::time::advance(Duration::from_secs(121)).await;
+            }
+            h.sweep().await.unwrap();
+            let data = h.sink.latest::<UnitsData>(Family::Host).unwrap().1;
+            assert_eq!(data.units.len(), 1);
+            assert_eq!(data.firmware_config.is_some(), change == "none", "{change}");
+            assert_eq!(
+                carbide_site_health_probe_api::metrics::firmware_phase(
+                    &data.units[0],
+                    carbide_site_health_probe_api::Component::Bmc
+                ),
+                if change == "none" {
+                    carbide_site_health_probe_api::FirmwarePhase::Current
+                } else {
+                    carbide_site_health_probe_api::FirmwarePhase::Unknown
+                },
+                "{change}"
+            );
+            if change == "none" {
+                h.sweep().await.unwrap();
+                let again = h.sink.latest::<UnitsData>(Family::Host).unwrap().1;
+                assert!(
+                    Arc::ptr_eq(&data.units[0], &again.units[0]),
+                    "unchanged firmware units must share storage"
+                );
+            }
+        }
+    }
     struct Harness {
         nico: Arc<FakeNico>,
         sink: Arc<FakeSink>,

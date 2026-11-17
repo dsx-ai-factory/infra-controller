@@ -25,14 +25,14 @@ use axum::http::header::HeaderMap;
 use axum::http::{StatusCode, Uri};
 use axum::response::Response;
 use axum::routing::{get, post};
-use carbide_host_support::agent_config::MachineIdentityConfig;
-use carbide_uuid::machine::DpuMachineId;
-use eyre::eyre;
-use forge_dpu_agent_utils::utils::create_forge_client;
-use forge_dpu_fmds_shared::machine_identity::{
+use carbide_dpu_agent_utils::utils::create_forge_client;
+use carbide_dpu_fmds_shared::machine_identity::{
     self, MetaDataIdentityOutcome, MetaDataIdentitySigner, forward_sign_proxy_if_ready,
     sign_machine_identity_with_forge, wait_identity_rate_limit_permit,
 };
+use carbide_host_support::agent_config::MachineIdentityConfig;
+use carbide_uuid::machine::DpuMachineId;
+use eyre::eyre;
 use governor::middleware::NoOpMiddleware;
 use governor::state::{InMemoryState, NotKeyed};
 use governor::{Quota, RateLimiter, clock};

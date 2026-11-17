@@ -209,6 +209,7 @@ impl RmsBackend {
         Ok(stream::iter(jobs)
             .map(|job| async move {
                 let state = observe_job(
+                    &self.instrumentation,
                     self.client.as_ref(),
                     self.switch_system_image_client.as_deref(),
                     &job,
@@ -289,6 +290,7 @@ fn poll_error(error: RackManagerError, job: &RmsTrackedFirmwareJob) -> FirmwareJ
 /// RED measures the client call, including its local deadline. Protocol Failure
 /// or a reported Failed state remains response evidence, not a transport error.
 async fn observe_job(
+    instrumentation: &carbide_instrument::Instrumentation,
     client: &dyn RmsApi,
     system_image_client: Option<&dyn RmsSwitchSystemImageStatusApi>,
     job: &RmsTrackedFirmwareJob,
@@ -302,6 +304,7 @@ async fn observe_job(
     let (status, echoed_id, state) = match job {
         RmsTrackedFirmwareJob::FirmwareObject(job_id) => {
             let response = red::instrumented(
+                instrumentation,
                 "rms",
                 "get_firmware_job_status",
                 before_deadline(deadline, async {
@@ -325,6 +328,7 @@ async fn observe_job(
                 return Err(FirmwareJobReadError::StatusUnavailable);
             };
             let response = red::instrumented(
+                instrumentation,
                 "rms",
                 "get_switch_system_image_job_status",
                 before_deadline(deadline, async {
