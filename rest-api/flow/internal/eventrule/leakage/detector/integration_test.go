@@ -120,6 +120,12 @@ func TestDetector_EventRuleIntegration(t *testing.T) {
 				return tasks.count() == 1
 			}, time.Second, time.Millisecond)
 
+			wantLeakageCalls := 0
+			if test.scope.Type == "" {
+				wantLeakageCalls = 1
+			}
+			require.Equal(t, wantLeakageCalls, tasks.leakageCount())
+
 			wantIDs := test.wantIDs(sourceID, belowID, aboveID)
 			slices.SortFunc(wantIDs, compareUUID)
 			require.Equal(t, wantIDs, tasks.componentIDs())
@@ -247,20 +253,29 @@ func leakageComponent(
 }
 
 type recordingTaskManager struct {
-	mu       sync.Mutex
-	requests []*operation.Request
+	mu              sync.Mutex
+	requests        []*operation.Request
+	leakageRequests int
 }
 
-func (m *recordingTaskManager) SubmitTask(
-	_ context.Context,
-	request *operation.Request,
-) ([]uuid.UUID, error) {
+func (m *recordingTaskManager) SubmitTask(_ context.Context, request *operation.Request) ([]uuid.UUID, error) {
+	return m.record(request, request.ConflictStrategy == operation.ConflictStrategyPreempt)
+}
+
+func (m *recordingTaskManager) record(request *operation.Request, leakage bool) ([]uuid.UUID, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-
 	m.requests = append(m.requests, request)
-
+	if leakage {
+		m.leakageRequests++
+	}
 	return []uuid.UUID{uuid.New()}, nil
+}
+
+func (m *recordingTaskManager) leakageCount() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.leakageRequests
 }
 
 func (m *recordingTaskManager) count() int {

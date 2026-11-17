@@ -1159,6 +1159,7 @@ dependencies = [
  "byteorder",
  "carbide-api-db",
  "carbide-api-model",
+ "carbide-api-test-helper",
  "carbide-authn",
  "carbide-credential-rotation",
  "carbide-dpa",

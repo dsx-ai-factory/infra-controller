@@ -404,6 +404,8 @@ func TestUnwrapWorkflowError(t *testing.T) {
 	grpcInvalid := status.Error(codes.InvalidArgument, "Maximum Limit of Infiniband partitions had been reached")
 	grpcResourceExhausted := status.Error(codes.ResourceExhausted, "VPC prefix capacity exhausted")
 	wrappedResourceExhausted := swe.WrapErr(grpcResourceExhausted)
+	failureConverter := temporal.GetDefaultFailureConverter()
+	grpcAborted := status.Error(codes.Aborted, "rack conflict")
 
 	tests := []struct {
 		name                     string
@@ -412,6 +414,24 @@ func TestUnwrapWorkflowError(t *testing.T) {
 		wantErr                  error
 		wantApplicationErrorType string
 	}{
+		{
+			name:     "maps direct rack conflict",
+			err:      grpcAborted,
+			wantCode: http.StatusConflict,
+			wantErr:  grpcAborted,
+		},
+		{
+			name:                     "maps rack conflict after Temporal serialization",
+			err:                      failureConverter.FailureToError(failureConverter.ErrorToFailure(swe.WrapErr(grpcAborted))),
+			wantCode:                 http.StatusConflict,
+			wantApplicationErrorType: swe.ErrTypeNICoAborted,
+		},
+		{
+			name:                     "preserves failed precondition after Temporal serialization",
+			err:                      failureConverter.FailureToError(failureConverter.ErrorToFailure(swe.WrapErr(status.Error(codes.FailedPrecondition, "switch is not ingested")))),
+			wantCode:                 http.StatusPreconditionFailed,
+			wantApplicationErrorType: swe.ErrTypeNICoFailedPrecondition,
+		},
 		{
 			name:     "unwraps Temporal cause",
 			err:      temporal.NewApplicationErrorWithCause("wrapper", "test-type", causeErr),
@@ -474,7 +494,11 @@ func TestUnwrapWorkflowError(t *testing.T) {
 
 			code, gotErr := UnwrapWorkflowError(tt.err)
 			assert.Equal(t, tt.wantCode, code)
-			assert.Equal(t, tt.wantErr, gotErr)
+			if tt.wantErr != nil {
+				assert.Equal(t, tt.wantErr, gotErr)
+			} else {
+				require.Error(t, gotErr)
+			}
 		})
 	}
 }

@@ -435,6 +435,10 @@
                 </li>
 
                 <li>
+                  <a href="#v1.FactoryResetSwitchesRequest"><span class="badge">M</span>FactoryResetSwitchesRequest</a>
+                </li>
+
+                <li>
                   <a href="#v1.FieldDiff"><span class="badge">M</span>FieldDiff</a>
                 </li>
 
@@ -3328,6 +3332,44 @@ this operation. </p></td>
 
 
 
+        <h3 id="v1.FactoryResetSwitchesRequest">FactoryResetSwitchesRequest</h3>
+        <p>Targets must resolve exclusively to ingested switches. Domain selectors must</p><p>include the NVSwitch component filter. Existing rack conflict handling applies.</p>
+
+
+          <table class="field-table">
+            <thead>
+              <tr><td>Field</td><td>Type</td><td>Label</td><td>Description</td></tr>
+            </thead>
+            <tbody>
+
+                <tr>
+                  <td>target_spec</td>
+                  <td><a href="#v1.OperationTargetSpec">OperationTargetSpec</a></td>
+                  <td></td>
+                  <td><p> </p></td>
+                </tr>
+
+                <tr>
+                  <td>description</td>
+                  <td><a href="#string">string</a></td>
+                  <td></td>
+                  <td><p> </p></td>
+                </tr>
+
+                <tr>
+                  <td>reset_target</td>
+                  <td><a href="#string">string</a></td>
+                  <td></td>
+                  <td><p>Required reset scope: &#34;nvos&#34; or &#34;sdn&#34;. Missing or empty values are rejected. </p></td>
+                </tr>
+
+            </tbody>
+          </table>
+
+
+
+
+
         <h3 id="v1.FieldDiff">FieldDiff</h3>
         <p></p>
 
@@ -3481,8 +3523,9 @@ start_time after conversion. </p></td>
                   <td>sub_targets</td>
                   <td><a href="#string">string</a></td>
                   <td>repeated</td>
-                  <td><p>Optional firmware sub-parts within each selected component. Empty means
-every firmware sub-part supported by that component. </p></td>
+                  <td><p>Optional firmware sub-parts partitioned by tray type within the resolved
+rule, inventory and version scope. Unmatched types skip all their steps;
+each requested name must match in scope. Empty retains backend defaults. </p></td>
                 </tr>
 
                 <tr>
@@ -8771,14 +8814,13 @@ e.g. &#34;Power Reset (forced)&#34; or &#34;Upgrade Firmware to v2.3.1&#34;. </p
                   <td>sub_targets</td>
                   <td><a href="#string">string</a></td>
                   <td>repeated</td>
-                  <td><p>Optional subset of firmware sub-parts to update within each tray
-selected by target_spec, e.g. [&#34;bmc&#34;, &#34;nvos&#34;] for switch trays or
-[&#34;psu&#34;] for powershelf trays. Named &#34;sub_targets&#34; (not &#34;components&#34;)
-to avoid colliding with OperationTargetSpec.components, which selects
-tray INSTANCES rather than sub-parts of a tray.
-Names are lowercase. Empty or omitted means update everything in the
-bundle (current default behavior). Unknown names are rejected by the
-downstream component manager. </p></td>
+                  <td><p>Optional firmware sub-parts within the rule, inventory and version scope.
+Each tray type receives its applicable subset; a type with no match skips
+all its rule steps. For example, bios selects Compute and Switch BIOS and
+skips PowerShelf; nvos selects Switch only; dpu selects Compute only.
+Every name must match a firmware action in scope before dispatch.
+Empty or omitted retains backend defaults (including PMC for nico
+PowerShelf); DPU reprovisioning always requires explicit dpu selection. </p></td>
                 </tr>
 
                 <tr>
@@ -10392,6 +10434,14 @@ becomes available, or can be cancelled explicitly via CancelTask.</p></td>
                 <td><a href="#v1.ACPowerCycleRackRequest">ACPowerCycleRackRequest</a></td>
                 <td><a href="#v1.SubmitTaskResponse">SubmitTaskResponse</a></td>
                 <td><p></p></td>
+              </tr>
+
+              <tr>
+                <td>FactoryResetSwitches</td>
+                <td><a href="#v1.FactoryResetSwitchesRequest">FactoryResetSwitchesRequest</a></td>
+                <td><a href="#v1.SubmitTaskResponse">SubmitTaskResponse</a></td>
+                <td><p>Restores NVOS or SDN configuration defaults on switches. Accepted work is polled;
+uncertain submissions are never automatically repeated. No reprovisioning.</p></td>
               </tr>
 
               <tr>

@@ -20,6 +20,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/rs/zerolog/log"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -32,6 +33,7 @@ import (
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/componentmanager/providerapi"
 	nicoprovider "github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/componentmanager/providers/nico"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/componentmanager/readiness"
+	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/dispatchguard"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/executor/temporalworkflow/common"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/operations"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/pkg/common/devicetypes"
@@ -45,8 +47,7 @@ const (
 	// in the component manager catalog and in YAML / env configuration.
 	ImplementationName = "nicolegacy"
 
-	// healthOverrideSource is the source tag written into health-report
-	// overrides so they can be matched on removal.
+	// healthOverrideSource prefixes invocation-owned maintenance reports.
 	healthOverrideSource = "flow-power-control"
 )
 
@@ -147,6 +148,9 @@ func (m *Manager) InjectExpectation(
 		return fmt.Errorf("nico client is not configured")
 	}
 
+	if err := dispatchguard.Check(ctx); err != nil {
+		return err
+	}
 	if err := m.nicoClient.AddExpectedMachine(ctx, req); err != nil {
 		return fmt.Errorf("failed to add expected machine: %w", err)
 	}
@@ -230,6 +234,9 @@ func (m *Manager) PowerControl(
 
 	// Track which components had health-report overrides inserted so we
 	// can clean them up after the power operation completes.
+	// Activities can overlap during preemption or retry. A unique source
+	// prevents an older invocation's cleanup from removing a newer report.
+	overrideSource := healthOverrideSource + "-" + uuid.NewString()
 	var overrideInserted []string
 
 	defer func() {
@@ -241,7 +248,7 @@ func (m *Manager) PowerControl(
 
 		for _, componentID := range overrideInserted {
 			if err := m.nicoClient.RemoveHealthReportOverride(
-				cleanupCtx, componentID, healthOverrideSource,
+				cleanupCtx, componentID, overrideSource,
 			); err != nil {
 				log.Warn().Err(err).Str("component", componentID).
 					Msg("Failed to remove health report override after power control")
@@ -252,8 +259,11 @@ func (m *Manager) PowerControl(
 	for i, componentID := range target.Identifiers {
 		// Place a health-report override so NICo marks the machine as
 		// under maintenance for the duration of the power operation.
+		if err := dispatchguard.Check(ctx); err != nil {
+			return err
+		}
 		if err := m.nicoClient.InsertHealthReportOverride(
-			ctx, componentID, healthOverrideSource,
+			ctx, componentID, overrideSource,
 		); err != nil {
 			log.Warn().Err(err).Str("component", componentID).
 				Msg("Failed to insert health report override, proceeding anyway")
@@ -263,6 +273,9 @@ func (m *Manager) PowerControl(
 
 		// Set NICo's power-on gate (desired power state) before issuing the
 		// actual power control command so the power manager doesn't conflict.
+		if err := dispatchguard.Check(ctx); err != nil {
+			return err
+		}
 		if err := m.nicoClient.UpdatePowerOption(
 			ctx, componentID, desiredPowerState,
 		); err != nil {
@@ -275,6 +288,10 @@ func (m *Manager) PowerControl(
 					"failed to update power option for %s: %w", componentID, err,
 				)
 			}
+		}
+
+		if err := dispatchguard.Check(ctx); err != nil {
+			return err
 		}
 
 		if err := m.nicoClient.AdminPowerControl(ctx, componentID, action); err != nil {
@@ -524,6 +541,9 @@ func (m *Manager) scheduleComputeTrayFirmware(
 			log.Debug().Str("machine_id", machineID).Msg("firmware_autoupdate already enabled, skipping SetMachineAutoUpdate")
 			continue
 		}
+		if err := dispatchguard.Check(ctx); err != nil {
+			return err
+		}
 		if err := m.nicoClient.SetMachineAutoUpdate(ctx, machineID, true); err != nil {
 			log.Error().Err(err).Str("machine_id", machineID).Msg("Failed to enable auto-update, will continue with remaining machines")
 			autoUpdateErrors = append(autoUpdateErrors, machineID)
@@ -533,6 +553,10 @@ func (m *Manager) scheduleComputeTrayFirmware(
 	}
 	if len(autoUpdateErrors) > 0 {
 		return fmt.Errorf("failed to enable auto-update for %d machine(s): %v", len(autoUpdateErrors), autoUpdateErrors)
+	}
+
+	if err := dispatchguard.Check(ctx); err != nil {
+		return err
 	}
 
 	if err := m.nicoClient.SetFirmwareUpdateTimeWindow(ctx, target.Identifiers, startTime, endTime); err != nil {
@@ -867,6 +891,9 @@ func (m *Manager) BringUpControl(
 	}
 
 	for _, componentID := range target.Identifiers {
+		if err := dispatchguard.Check(ctx); err != nil {
+			return err
+		}
 		if err := m.nicoClient.AllowIngestionAndPowerOn(
 			ctx, componentID, "",
 		); err != nil {
@@ -952,7 +979,12 @@ func (m *Manager) ensureMachinesOperable(
 	machineIDs []string,
 	op types.OperationType,
 	overrideReadinessCheck bool,
-) error {
+) (err error) {
+	defer func() {
+		if err == nil {
+			err = dispatchguard.Check(ctx)
+		}
+	}()
 	// A nil gate is the documented permissive mode: skip rather than
 	// dispatch on a nil interface.
 	if m.readiness == nil {

@@ -115,6 +115,15 @@ func TestPromoter_ProcessRack(t *testing.T) {
 			wantPromotedCount: 0,
 		},
 		{
+			name: "cancelled snapshot is not dispatched when promotion updates no row",
+			setupStore: func(s *mockStore, rackID uuid.UUID) {
+				s.waitingTasks[rackID] = []*taskdef.Task{{ID: uuid.New(), RackID: rackID, Status: taskcommon.TaskStatusWaiting}}
+				s.skipStatusUpdate = true
+			},
+			wantStatusUpdates: []taskdef.TaskStatusUpdate{{Status: taskcommon.TaskStatusPending}},
+			wantPromotedCount: 0,
+		},
+		{
 			name: "expired task is terminated",
 			setupStore: func(s *mockStore, rackID uuid.UUID) {
 				t := &taskdef.Task{

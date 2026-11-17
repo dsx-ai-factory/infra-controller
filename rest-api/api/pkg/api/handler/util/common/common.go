@@ -1315,7 +1315,7 @@ func UnwrapWorkflowError(err error) (code int, unwrappedError error) {
 			code = http.StatusServiceUnavailable
 		case codes.PermissionDenied:
 			code = http.StatusForbidden
-		case codes.AlreadyExists:
+		case codes.AlreadyExists, codes.Aborted:
 			code = http.StatusConflict
 		case codes.FailedPrecondition:
 			code = http.StatusPreconditionFailed
@@ -1344,7 +1344,7 @@ func UnwrapWorkflowError(err error) (code int, unwrappedError error) {
 		code = http.StatusForbidden
 	case swe.ErrTypeNICoUnavailable, swe.ErrTypeCarbideUnavailable:
 		code = http.StatusServiceUnavailable
-	case swe.ErrTypeNICoAlreadyExists, swe.ErrTypeCarbideAlreadyExists:
+	case swe.ErrTypeNICoAlreadyExists, swe.ErrTypeCarbideAlreadyExists, swe.ErrTypeNICoAborted:
 		code = http.StatusConflict
 	case swe.ErrTypeNICoFailedPrecondition, swe.ErrTypeCarbideFailedPrecondition:
 		code = http.StatusPreconditionFailed
@@ -2233,6 +2233,15 @@ func ExecuteFirmwareUpdateWorkflow(
 		// credential digest in Temporal metadata.
 		workflowID += "-" + uuid.NewString()
 		conflictPolicy = temporalEnums.WORKFLOW_ID_CONFLICT_POLICY_UNSPECIFIED
+	} else if len(targets) > 0 {
+		// A filtered update must not attach to an unfiltered or differently
+		// configured submission already in flight. Only non-secret requests
+		// use this deterministic identity; credential-bearing requests above
+		// retain their fresh IDs.
+		workflowID += "-targets-" + RequestHash(struct {
+			SiteID  string
+			Request *flowv1.UpgradeFirmwareRequest
+		}{siteID, flowRequest})
 	}
 
 	var flowResponse flowv1.SubmitTaskResponse
