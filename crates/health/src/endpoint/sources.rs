@@ -427,10 +427,7 @@ mod tests {
             &reqwest(),
             None,
             10,
-            crate::bmc::BmcInstrumentation::new(
-                carbide_instrument::Instrumentation::global(),
-                None,
-            ),
+            crate::bmc::BmcInstrumentation::new(carbide_instrument::Instrumentation::noop(), None),
             test_credentials(),
         );
         let endpoints = source.fetch_bmc_hosts().await.expect("fetch should work");
@@ -474,10 +471,7 @@ mod tests {
             &reqwest(),
             None,
             10,
-            crate::bmc::BmcInstrumentation::new(
-                carbide_instrument::Instrumentation::global(),
-                None,
-            ),
+            crate::bmc::BmcInstrumentation::new(carbide_instrument::Instrumentation::noop(), None),
             test_credentials(),
         );
         let endpoints = source.fetch_bmc_hosts().await.unwrap();
@@ -539,10 +533,7 @@ mod tests {
             &reqwest(),
             None,
             10,
-            crate::bmc::BmcInstrumentation::new(
-                carbide_instrument::Instrumentation::global(),
-                None,
-            ),
+            crate::bmc::BmcInstrumentation::new(carbide_instrument::Instrumentation::noop(), None),
             test_credentials(),
         );
         let endpoints = source.fetch_bmc_hosts().await.unwrap();
@@ -581,10 +572,7 @@ mod tests {
             &reqwest(),
             None,
             10,
-            crate::bmc::BmcInstrumentation::new(
-                carbide_instrument::Instrumentation::global(),
-                None,
-            ),
+            crate::bmc::BmcInstrumentation::new(carbide_instrument::Instrumentation::noop(), None),
             test_credentials(),
         );
         let endpoints = source.fetch_bmc_hosts().await.unwrap();
@@ -624,10 +612,7 @@ mod tests {
             &reqwest(),
             None,
             10,
-            crate::bmc::BmcInstrumentation::new(
-                carbide_instrument::Instrumentation::global(),
-                None,
-            ),
+            crate::bmc::BmcInstrumentation::new(carbide_instrument::Instrumentation::noop(), None),
             test_credentials(),
         );
         let endpoints = source.fetch_bmc_hosts().await.unwrap();
@@ -675,10 +660,7 @@ mod tests {
             &reqwest(),
             None,
             10,
-            crate::bmc::BmcInstrumentation::new(
-                carbide_instrument::Instrumentation::global(),
-                None,
-            ),
+            crate::bmc::BmcInstrumentation::new(carbide_instrument::Instrumentation::noop(), None),
             test_credentials(),
         );
         let endpoints = source.fetch_bmc_hosts().await.unwrap();
@@ -734,10 +716,7 @@ mod tests {
             &reqwest(),
             None,
             10,
-            crate::bmc::BmcInstrumentation::new(
-                carbide_instrument::Instrumentation::global(),
-                None,
-            ),
+            crate::bmc::BmcInstrumentation::new(carbide_instrument::Instrumentation::noop(), None),
             test_credentials(),
         );
         let endpoints = source.fetch_bmc_hosts().await.unwrap();
@@ -770,10 +749,7 @@ mod tests {
             &reqwest(),
             None,
             10,
-            crate::bmc::BmcInstrumentation::new(
-                carbide_instrument::Instrumentation::global(),
-                None,
-            ),
+            crate::bmc::BmcInstrumentation::new(carbide_instrument::Instrumentation::noop(), None),
             test_credentials(),
         );
         let endpoints = source.fetch_bmc_hosts().await.unwrap();
