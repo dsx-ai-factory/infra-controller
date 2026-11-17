@@ -27,9 +27,10 @@ decisions:                         # one key per register entry; value = the opt
   # external-registry-access: Not applicable           # implied by staging-host; state it only to pin it
   build-host: Yes
   dpu-in-the-site-controllers: BF3 DPU in DPU mode
-  managed-host-kinds-in-the-fleet: [DPU hosts booting through the DPU on the Admin segment]
+  managed-host-boot-paths: [DPU hosts booting through the DPU on the Admin segment]
+  rack-profiles: Not applicable                       # no rack-scale systems; without a [rack_profiles] table the files cannot tell
   # Derived: read from the collaterals and the setup section. Uncomment to pin.
-  optional-components: [REST group]                   # pinned: no RMS box, so rms and rack-profiles are implied Not applicable
+  optional-components: [REST group]                   # pinned: no RMS box, so rms and rms-chart-source are implied Not applicable
   # dpf: Install                                        # from setup.command (no --skip-dpf)
   # credential-store: Vault KV                          # from the [secrets] table in the TOML
 
@@ -85,6 +86,7 @@ network:
     vlan: { start: 100, end: 501 }
     vni: { start: 1024500, end: 1024800 }
     externalVpcVni: { start: 51000, end: 51008 }
+    dpuLoopback: { prefix: 10.10.62.0/24 }   # the managed DPUs' loopbacks, the TOML's [pools.lo-ip]; clear of the control-plane DPUs' loopbacks
   fnn:
     controlPlaneVni: 60020
     adminVpcVni: 60100
@@ -93,7 +95,15 @@ network:
     routeTargets: { managedNodeBmc: 900, siteController: 50100, adminNetwork: 50400, jumphost: 101 }
   # Optional pins of values the tool derives; a pinned value that the collateral contradicts is a ✗.
   # denyPrefixes: [10.10.63.64/29, 10.10.248.48/28, 10.10.250.0/25, 10.10.250.128/25]
-  # serviceVips: { api: 10.10.126.208, dhcp: 10.10.126.194, dns0: 10.10.126.195, dns1: 10.10.126.196, pxe: 10.10.126.197, sshConsole: 10.10.126.198 }
+  serviceVips:                     # the VIP of every LoadBalancer Service setup.sh deploys, one per pod for dns and ntp
+    api: 10.10.126.208
+    dhcp: 10.10.126.194
+    dns: [10.10.126.195, 10.10.126.196]
+    ntp: [10.10.126.199, 10.10.126.200, 10.10.126.201]
+    pxe: 10.10.126.197
+    sshConsole: 10.10.126.198
+    unbound: 10.10.126.202         # omit only with the resolver decision External DNS
+    # dhcpV6: fd00:10:10:126::194  # only when nico-dhcp.v6ExternalService is enabled
 
 counts: { hosts: 128, dpus: 128, tenants: 8, racks: 4 }
 
@@ -110,6 +120,7 @@ versions:
   bfb: bf-bundle-3.2.2-125_26.02_ubuntu-22.04_prod.bfb
   doca: 3.2.2
   hbn: 3.2.2
+  bootArtifacts: v2026.10.15       # the boot-artifact image tag nico-pxe copies in
   kubernetesBaseline: v1.30.4
 
 credentials:                       # by source only; read from step 7 (ingestion readiness)

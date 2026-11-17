@@ -78,7 +78,6 @@ pub(crate) enum Outcome {
     /// Blocks the next step until fixed or waived.
     Fail { observed: String, fix: String },
     /// The check does not apply to this site (a decision rules it out).
-    #[allow(dead_code, reason = "no landed check is ruled out by a decision yet")]
     Skip(String),
 }
 
@@ -91,13 +90,8 @@ pub(crate) struct Check {
     pub(crate) id: &'static str,
     /// The expected value or condition, as the row prints it.
     pub(crate) expected: &'static str,
-    /// The spec of the check, one part per line, each starting with its label:
-    /// `Reads:` the fields, files, decisions and endpoints it consults; `Pass:`
-    /// the condition and the observed text; `Warn:` (optional) and `Fail:` each
-    /// condition with what observed names and the fix; `Skip:` the decision that
-    /// rules it out, or `never`; `Test:` the fixture and the minimum cases. Written
-    /// before the function exists, so a coder implements against it; `CHECKS.md`
-    /// prints it. Tests in `checklists/mod.rs` enforce the shape.
+    /// The catalogue's description of the check: what it reads and what it reports, in
+    /// any shape; `nico-pre checks` and CHECKS.md print it.
     pub(crate) detail: &'static str,
     /// `None` while the check is registered but not written; its row says so.
     pub(crate) run: Option<CheckFn>,

@@ -37,11 +37,83 @@ use crate::sitedef::SiteDef;
 /// offending value when an invariant fails.
 pub(crate) fn run(sd: &SiteDef, reg: &Register) -> Vec<Row> {
     let mut rows = Vec::new();
+    site(sd, &mut rows);
     decisions(sd, reg, &mut rows);
     setup(sd, &mut rows, reg);
     network(sd, &mut rows);
+    service_vips(sd, &mut rows);
+    dpu_loopback_pool(sd, &mut rows);
     hosts(sd, &mut rows);
     rows
+}
+
+/// `site.name` becomes `siteName` in the helm-prereqs values and `NICO_SITE_NAME` in
+/// setup.sh, which interpolates it into SQL and refuses anything outside
+/// `[A-Za-z0-9][A-Za-z0-9._-]*`; the same rule applies here, before setup.sh does.
+fn site(sd: &SiteDef, rows: &mut Vec<Row>) {
+    const ROW: &str = "sitedef.site.name";
+    const EXPECTED: &str = "a site name setup.sh accepts: letters, digits, `.`, `_`, `-`, starting with a letter or digit";
+    let name = &sd.site.name;
+    let mut chars = name.chars();
+    let valid = chars.next().is_some_and(|c| c.is_ascii_alphanumeric())
+        && chars.all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'));
+    if valid {
+        rows.push(Row::pass(ROW, EXPECTED, format!("`{name}`")));
+    } else {
+        rows.push(Row::fail(ROW, EXPECTED, format!("`{name}`")).with_fix(
+            "rename the site; setup.sh exits on this name when it seeds the REST site record",
+        ));
+    }
+
+    // `dnsZone` names the zone the site's records go in and `apiHostname` is looked up
+    // by every client, so both have to be DNS names: labels of letters, digits and
+    // hyphens, 1 to 63 characters, not starting or ending with a hyphen, 253 in all.
+    const DNS_ROW: &str = "sitedef.site.dns-names";
+    const DNS_EXPECTED: &str = "dnsZone and apiHostname are DNS names: dot-separated labels of letters, digits and hyphens, 1 to 63 characters each, no leading or trailing hyphen";
+    let problems: Vec<String> = [
+        ("dnsZone", &sd.site.dns_zone),
+        ("apiHostname", &sd.site.api_hostname),
+    ]
+    .into_iter()
+    .filter_map(|(key, value)| dns_name_fault(value).map(|why| format!("{key} `{value}`: {why}")))
+    .collect();
+    if problems.is_empty() {
+        rows.push(Row::pass(
+            DNS_ROW,
+            DNS_EXPECTED,
+            format!("`{}`, `{}`", sd.site.dns_zone, sd.site.api_hostname),
+        ));
+    } else {
+        rows.push(
+            Row::fail(DNS_ROW, DNS_EXPECTED, problems.join("; "))
+                .with_fix("write the name as DNS will carry it"),
+        );
+    }
+}
+
+/// Why `name` is not a DNS name, or `None` when it is one.
+fn dns_name_fault(name: &str) -> Option<&'static str> {
+    if name.is_empty() {
+        return Some("empty");
+    }
+    if name.len() > 253 {
+        return Some("longer than 253 characters");
+    }
+    for label in name.split('.') {
+        if label.is_empty() {
+            return Some("an empty label (two dots, or a leading or trailing dot)");
+        }
+        if label.len() > 63 {
+            return Some("a label longer than 63 characters");
+        }
+        if label.starts_with('-') || label.ends_with('-') {
+            return Some("a label starting or ending with a hyphen");
+        }
+        if !label.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
+            return Some("a character other than a letter, digit or hyphen");
+        }
+    }
+    None
 }
 
 /// `setup.command` is a command line the shell can parse; the gate reads it for the
@@ -180,10 +252,18 @@ pub(crate) struct EffectiveDecisions {
     pub(crate) implied_by: IndexMap<String, String>,
 }
 
-/// True when a stated value is usable: every listed option exists, and a
-/// single-select carries exactly one.
+/// True when a stated value is usable: every listed option exists, a
+/// single-select carries exactly one, and `Not applicable` stands alone.
 fn valid_value(d: &crate::register::Decision, vs: &[String]) -> bool {
-    (d.multiple || vs.len() == 1) && vs.iter().all(|v| d.option(v).is_some())
+    (d.multiple || vs.len() == 1)
+        && vs.iter().all(|v| d.option(v).is_some())
+        && !mixes_not_applicable(vs)
+}
+
+/// `Not applicable` says the entry does not arise for the site, so a list that also
+/// names an option that applies contradicts itself; the checklists never see it.
+fn mixes_not_applicable(vs: &[String]) -> bool {
+    vs.len() > 1 && vs.iter().any(|v| v.eq_ignore_ascii_case("Not applicable"))
 }
 
 /// Applies the register's implication rules to the stated decisions until
@@ -295,6 +375,16 @@ fn decisions(sd: &SiteDef, reg: &Register, rows: &mut Vec<Row>) {
                             format!("`{v}`"),
                         )
                         .with_fix("state the option by its short name"),
+                    );
+                }
+                if mixes_not_applicable(&vs) {
+                    rows.push(
+                        Row::fail(
+                            format!("sitedef.decisions.{id}"),
+                            "`Not applicable` alone, or only the options that apply",
+                            quoted(&vs),
+                        )
+                        .with_fix("drop `Not applicable`, or the options beside it"),
                     );
                 }
             }
@@ -693,6 +783,114 @@ fn network(sd: &SiteDef, rows: &mut Vec<Row>) {
 /// The ASN range holds the site controller ASNs and leaves a per-DPU pool that the
 /// datacenter ASN does not fall into. Derived by convention (routes = start, node i =
 /// start + i) unless `asnLayout` overrides it.
+/// The service VIPs: every one inside `forgeServiceVipPrefix` and distinct, a nico-dns
+/// and a nico-ntp VIP for at least one pod each, and the unbound VIP present exactly
+/// when the resolver decision is not `External DNS`.
+fn service_vips(sd: &SiteDef, rows: &mut Vec<Row>) {
+    const ROW: &str = "sitedef.network.service-vips";
+    const RESOLVER: &str = "recursive-resolver-for-managed-machines";
+    let n = &sd.network;
+    let v = &n.service_vips;
+    let all = v.all();
+    let mut problems: Vec<String> = Vec::new();
+    for (key, ip) in &all {
+        if !n.forge_service_vip_prefix.contains(ip) {
+            problems.push(format!(
+                "serviceVips.{key} {ip} outside forgeServiceVipPrefix {}",
+                n.forge_service_vip_prefix
+            ));
+        }
+    }
+    for (i, (key, ip)) in all.iter().enumerate() {
+        if let Some((other, _)) = all[..i].iter().find(|(_, o)| o == ip) {
+            problems.push(format!(
+                "serviceVips.{key} and serviceVips.{other} both {ip}"
+            ));
+        }
+    }
+    for (key, ips) in [("dns", &v.dns), ("ntp", &v.ntp)] {
+        if ips.is_empty() {
+            problems.push(format!("serviceVips.{key} is empty: one VIP per pod"));
+        }
+    }
+    let external_dns = sd
+        .decisions
+        .get(RESOLVER)
+        .is_some_and(|d| d.values().iter().any(|s| s == "External DNS"));
+    match (v.unbound, external_dns) {
+        (None, false) => problems.push(format!(
+            "serviceVips.unbound absent while `{RESOLVER}` is not External DNS"
+        )),
+        (Some(ip), true) => problems.push(format!(
+            "serviceVips.unbound {ip} stated while `{RESOLVER}` is External DNS"
+        )),
+        _ => {}
+    }
+    let expected = "every service VIP inside forgeServiceVipPrefix and distinct, dns and ntp one \
+                    per pod, unbound exactly when the resolver is not External DNS";
+    if problems.is_empty() {
+        rows.push(Row::pass(
+            ROW,
+            expected,
+            format!("{} VIPs inside {}", all.len(), n.forge_service_vip_prefix),
+        ));
+    } else {
+        rows.push(
+            Row::fail(ROW, expected, problems.join("; "))
+                .with_fix("state the VIP the Core values pin for the Service, inside the prefix"),
+        );
+    }
+}
+
+/// The managed DPUs' loopback pool, when stated: a prefix or ranges (not both), every range
+/// in order, and no address of it a control-plane DPU's loopback (the first N addresses of
+/// `forgeDpuLoopbackPrefix`, one per site controller, as the ISO builder assigns them).
+fn dpu_loopback_pool(sd: &SiteDef, rows: &mut Vec<Row>) {
+    const ROW: &str = "sitedef.network.dpu-loopback-pool";
+    let Some(pool) = &sd.network.pools.dpu_loopback else {
+        return;
+    };
+    let expected = "a prefix or ranges, in order, handing out no control-plane DPU loopback";
+    let mut problems: Vec<String> = Vec::new();
+    match (&pool.prefix, &pool.ranges) {
+        (Some(_), Some(_)) => problems.push("both prefix and ranges stated".to_string()),
+        (None, None) => problems.push("neither prefix nor ranges stated".to_string()),
+        (None, Some(rs)) if rs.is_empty() => problems.push("ranges is empty".to_string()),
+        _ => {}
+    }
+    for r in pool.ranges.iter().flatten() {
+        if r.start > r.end {
+            problems.push(format!("range {}..{} is reversed", r.start, r.end));
+        }
+    }
+    let cp = &sd.network.forge_dpu_loopback_prefix;
+    let taken = (1..=sd.hosts.site_controllers.len() as u32).filter_map(|i| match cp.network() {
+        std::net::IpAddr::V4(a) => Some(std::net::IpAddr::V4(std::net::Ipv4Addr::from(
+            u32::from(a).checked_add(i)?,
+        ))),
+        std::net::IpAddr::V6(_) => None,
+    });
+    for ip in taken {
+        if pool.contains(ip) {
+            problems.push(format!(
+                "hands out {ip}, a control-plane DPU loopback in {cp}"
+            ));
+        }
+    }
+    if problems.is_empty() {
+        rows.push(Row::pass(
+            ROW,
+            expected,
+            format!("{}, clear of {cp}", pool.text()),
+        ));
+    } else {
+        rows.push(
+            Row::fail(ROW, expected, problems.join("; "))
+                .with_fix("state the pool as the TOML's [pools.lo-ip] and start it past the control-plane DPUs' loopbacks"),
+        );
+    }
+}
+
 fn asn_layout(sd: &SiteDef, rows: &mut Vec<Row>) {
     const ROW: &str = "sitedef.network.asn-layout";
     let n = &sd.network;
@@ -940,11 +1138,16 @@ mod tests {
 
     const SAMPLE: &str = include_str!("../examples/site-def.yaml");
 
-    /// The developer-site example is deployed by other scripts: its command makes no
-    /// decision, so the implied `rms: Not applicable` is not contradicted.
+    /// A site another tool deploys: its command makes no decision, so no pinned or
+    /// implied decision is contradicted and the gate passes.
     #[test]
-    fn dev1_example_passes_the_gate() {
-        let sd = parse(include_str!("../examples/site-def-dev1.yaml")).expect("dev1 parses");
+    fn another_deployer_passes_the_gate() {
+        let text = SAMPLE.replacen(
+            "./setup.sh -y --core-values values/nico-core.yaml --metallb-config values/metallb-config.yaml --skip-rms",
+            "python3 tools/deploy-site.py --site site1",
+            1,
+        );
+        let sd = parse(&text).expect("sample with another deployer parses");
         let rows = run(&sd, Register::builtin());
         let failures: Vec<_> = rows.iter().filter(|r| r.status != Status::Pass).collect();
         assert!(failures.is_empty(), "{failures:#?}");
@@ -965,7 +1168,7 @@ mod tests {
         let rows = run(&sd, Register::builtin());
         let failures: Vec<_> = rows.iter().filter(|r| r.status != Status::Pass).collect();
         assert!(failures.is_empty(), "{failures:#?}");
-        assert_eq!(rows.len(), 12, "one pass row per invariant: {rows:#?}");
+        assert_eq!(rows.len(), 16, "one pass row per invariant: {rows:#?}");
     }
 
     /// Combinations the register supports must pass the gate: a reviewer found the
@@ -976,15 +1179,15 @@ mod tests {
         let pins: &[(&str, &str)] = &[
             (
                 "DPF skipped with the iPXE bootstrap CA pinned",
-                "  dpf: Skip\n  dpu-bootstrap-ca-non-dpf-path: legacy_download\n",
+                "  dpf: Skip\n  dpu-bootstrap-ca-ipxe-provisioned: legacy_download\n",
             ),
             (
                 "DPF skipped with BMC rotation",
-                "  dpf: Skip\n  autonomous-bmc-and-uefi-rotation: [BMC rotation]\n",
+                "  dpf: Skip\n  autonomous-bmc-and-uefi-credential-rotation: [BMC rotation]\n",
             ),
             (
                 "DPF installed with a host still on the iPXE path",
-                "  dpf: Install\n  dpu-bootstrap-ca-non-dpf-path: legacy_download\n",
+                "  dpf: Install\n  dpu-bootstrap-ca-ipxe-provisioned: legacy_download\n",
             ),
             (
                 "NVLink partitioning through explicit NMX-C mappings, no RMS",
@@ -992,7 +1195,7 @@ mod tests {
             ),
             (
                 "NGC-only site pulling with a secret",
-                "  staging-host: Connected\n  external-registry-access: Direct\n  registry-host: None\n  registry-authentication: Credentialed pulls\n",
+                "  staging-host: Connected\n  external-registry-access: Direct\n  provider-run-registry-host: Not applicable\n  registry-authentication: Credentialed pulls\n",
             ),
         ];
         for (name, pin) in pins {
@@ -1122,8 +1325,8 @@ mod tests {
                 1,
             )
             .replacen(
-                "  build-host: Yes\n",
-                "  build-host: Yes\n  rack-profiles: Built-in profiles\n",
+                "  rack-profiles: Not applicable",
+                "  rack-profiles: Built-in profiles",
                 1,
             );
         let sd = parse(&text).expect("parses");
@@ -1156,6 +1359,103 @@ mod tests {
 
     /// The example implies `rms: Not applicable` from its component list; a command that
     /// would install RMS anyway is caught at the gate.
+    /// A site name setup.sh would refuse fails the gate; one it accepts passes, dots and all.
+    #[test]
+    fn a_site_name_setup_sh_refuses_fails_the_gate() {
+        for (name, ok) in [
+            ("nvex lab1", false),
+            ("-lab", false),
+            ("nvex-lab1.v2_a", true),
+        ] {
+            let text = SAMPLE.replacen("  name: site1\n", &format!("  name: {name}\n"), 1);
+            assert_ne!(text, SAMPLE, "splice target missing");
+            let sd = parse(&text).expect("parses");
+            let rows = run(&sd, Register::builtin());
+            let row = rows
+                .iter()
+                .find(|r| r.id == "sitedef.site.name")
+                .expect("the name row");
+            assert_eq!(row.status == Status::Pass, ok, "{name}: {}", row.observed);
+        }
+    }
+
+    /// A zone or API hostname that is not a DNS name fails the gate naming the key and why.
+    #[test]
+    fn dns_zone_and_api_hostname_must_be_dns_names() {
+        for (zone, host, why) in [
+            ("site1.dc1.example.net", "api.site1.dc1.example.net", None),
+            (
+                "site_1.example.net",
+                "api.site1.example.net",
+                Some("dnsZone `site_1.example.net`: a character other than"),
+            ),
+            (
+                "site1.example.net",
+                "api.site1..example.net",
+                Some("apiHostname `api.site1..example.net`: an empty label"),
+            ),
+            (
+                "site1.example.net",
+                "-api.site1.example.net",
+                Some("a label starting or ending with a hyphen"),
+            ),
+            (
+                "site1.example.net",
+                &format!("{}.example.net", "a".repeat(64)),
+                Some("a label longer than 63"),
+            ),
+        ] {
+            let text = SAMPLE
+                .replacen(
+                    "  dnsZone: site1.dc1.example.net\n",
+                    &format!("  dnsZone: {zone}\n"),
+                    1,
+                )
+                .replacen(
+                    "  apiHostname: api.site1.dc1.example.net",
+                    &format!("  apiHostname: {host}"),
+                    1,
+                );
+            let sd = parse(&text).expect("parses");
+            let rows = run(&sd, Register::builtin());
+            let row = rows
+                .iter()
+                .find(|r| r.id == "sitedef.site.dns-names")
+                .expect("the dns row");
+            match why {
+                None => assert_eq!(row.status, Status::Pass, "{}", row.observed),
+                Some(why) => {
+                    assert_eq!(row.status, Status::Fail, "{}", row.observed);
+                    assert!(row.observed.contains(why), "{}", row.observed);
+                }
+            }
+        }
+    }
+
+    /// `Not applicable` beside an option that applies contradicts itself and fails the row.
+    #[test]
+    fn not_applicable_beside_another_option_fails_the_decision_row() {
+        let text = SAMPLE.replacen(
+            "  build-host: Yes\n",
+            "  build-host: Yes\n  managed-host-dpu-generation: [BF3, Not applicable]\n",
+            1,
+        );
+        assert_ne!(text, SAMPLE, "splice target missing");
+        let sd = parse(&text).expect("parses");
+        let rows = run(&sd, Register::builtin());
+        let row = rows
+            .iter()
+            .find(|r| {
+                r.id == "sitedef.decisions.managed-host-dpu-generation" && r.status == Status::Fail
+            })
+            .expect("a failing decision row");
+        assert!(
+            row.expected.contains("`Not applicable` alone"),
+            "{}",
+            row.expected
+        );
+    }
+
     #[test]
     fn a_command_against_an_implied_decision_fails_the_gate() {
         let text = SAMPLE.replacen(
@@ -1294,15 +1594,17 @@ mod tests {
             Some("staging-host")
         );
         // A `lacks` rule: the pinned Optional components list has no RMS box, so
-        // rms is implied Not applicable, and through it rack-profiles.
+        // rms is implied Not applicable, and through it the RMS chart source. Rack
+        // profiles stay open: they place hosts in racks whether or not RMS runs.
         assert_eq!(effective.values.get("rms"), Some(&one("Not applicable")));
         assert_eq!(
             effective
                 .implied_by
-                .get("rack-profiles")
+                .get("rms-chart-source")
                 .map(String::as_str),
             Some("rms")
         );
+        assert!(!effective.implied_by.contains_key("rack-profiles"));
         // Stated entries are never overwritten by an implication.
         assert_eq!(effective.values.get("build-host"), Some(&one("Yes")));
         assert!(!effective.implied_by.contains_key("build-host"));
@@ -1346,7 +1648,7 @@ mod tests {
                 from: "  build-host: Yes\n",
                 to: "  build-host: Yes\n  external-registry-access: Not applicable\n",
                 row: "sitedef.decisions",
-                observed: "6 stated",
+                observed: "7 stated",
             },
             Case {
                 name: "stated value contradicts an implication",
@@ -1371,8 +1673,8 @@ mod tests {
             },
             Case {
                 name: "conflict with an unticked box",
-                from: "  build-host: Yes\n",
-                to: "  build-host: Yes\n  rack-profiles: Built-in profiles\n",
+                from: "  rack-profiles: Not applicable",
+                to: "  rack-profiles: Built-in profiles",
                 row: "sitedef.decisions.conflict",
                 observed: "rack-profiles = `Built-in profiles`",
             },
@@ -1431,6 +1733,41 @@ mod tests {
                 to: "gateway: 10.10.248.48, mtu: 1500 }",
                 row: "sitedef.network.gateway-inside",
                 observed: "the network address",
+            },
+            Case {
+                name: "a DPU loopback pool that covers the control-plane DPUs' loopbacks",
+                from: "dpuLoopback: { prefix: 10.10.62.0/24 }",
+                to: "dpuLoopback: { prefix: 10.10.63.128/26 }",
+                row: "sitedef.network.dpu-loopback-pool",
+                observed: "hands out 10.10.63.129, a control-plane DPU loopback",
+            },
+            Case {
+                name: "a DPU loopback pool with both a prefix and ranges",
+                from: "dpuLoopback: { prefix: 10.10.62.0/24 }",
+                to: "dpuLoopback: { prefix: 10.10.62.0/24, ranges: [{ start: 10.10.62.1, end: 10.10.62.9 }] }",
+                row: "sitedef.network.dpu-loopback-pool",
+                observed: "both prefix and ranges stated",
+            },
+            Case {
+                name: "a service VIP outside the prefix",
+                from: "api: 10.10.126.208",
+                to: "api: 10.10.127.208",
+                row: "sitedef.network.service-vips",
+                observed: "serviceVips.api 10.10.127.208 outside forgeServiceVipPrefix",
+            },
+            Case {
+                name: "two services on one VIP",
+                from: "dns: [10.10.126.195, 10.10.126.196]",
+                to: "dns: [10.10.126.195, 10.10.126.195]",
+                row: "sitedef.network.service-vips",
+                observed: "serviceVips.dns[1] and serviceVips.dns[0] both 10.10.126.195",
+            },
+            Case {
+                name: "no unbound VIP while the resolver is the built-in unbound",
+                from: "    unbound: 10.10.126.202",
+                to: "    # unbound: 10.10.126.202",
+                row: "sitedef.network.service-vips",
+                observed: "serviceVips.unbound absent",
             },
             Case {
                 name: "VLAN pool beyond 4094",

@@ -51,6 +51,8 @@ pub(crate) struct SetupCommand {
     /// Whether any simple command on the line runs `setup.sh`; when none does (a developer
     /// site deployed by other scripts) the command decides nothing.
     runs_setup_sh: bool,
+    /// The assignments and `env` controls around the invocation, outermost first.
+    layers: Vec<Layer>,
 }
 
 /// One token of a command line.
@@ -89,6 +91,11 @@ pub(crate) struct Layer {
     clear: bool,
     unset: Vec<String>,
     own: Vec<(String, String)>,
+    /// The shell that expands this layer's words: 0 for the command line, one more for
+    /// each `bash -c` string around the command. The shell expands an assignment before
+    /// any `env` of the same shell runs, so a reference in it is resolved among the
+    /// layers of the shells outside.
+    shell: u8,
 }
 
 impl Layer {
@@ -143,37 +150,68 @@ impl Layer {
     /// an `env`-line assignment wins; a removal or a cleared environment ends the search;
     /// an inherited assignment is next; the outer layers follow, then `setup.env`, whose
     /// secret-sourced values the gate cannot read.
-    fn resolve<'a>(layers: &'a [Layer], name: &str, setup: &'a Setup) -> Resolved<'a> {
+    /// A variable as the program sees it, with the index of the layer that supplied the
+    /// value; `None` when it came from `setup.env` or nowhere. The shell expands an
+    /// assignment in the environment outside its layer, so that index is where a
+    /// reference in the value is followed.
+    fn resolve_at<'a>(
+        layers: &'a [Layer],
+        name: &str,
+        setup: &'a Setup,
+    ) -> (Resolved<'a>, Option<Found>) {
         let last = |list: &'a [(String, String)]| {
             list.iter()
+                .enumerate()
                 .rev()
-                .find(|(k, _)| k == name)
-                .map(|(_, v)| v.as_str())
+                .find(|(_, (k, _))| k == name)
+                .map(|(j, (_, v))| (j, v.as_str()))
         };
-        for layer in layers.iter().rev() {
-            if let Some(v) = last(&layer.own) {
-                return Resolved::Plain(v);
+        for (i, layer) in layers.iter().enumerate().rev() {
+            if let Some((_, v)) = last(&layer.own) {
+                return (
+                    Resolved::Plain(v),
+                    Some(Found {
+                        layer: i,
+                        pre: None,
+                    }),
+                );
             }
             if layer.clear || layer.unset.iter().any(|u| u == name) {
-                return Resolved::Absent;
+                return (Resolved::Absent, None);
             }
-            if let Some(v) = last(&layer.pre) {
-                return Resolved::Plain(v);
+            if let Some((j, v)) = last(&layer.pre) {
+                return (
+                    Resolved::Plain(v),
+                    Some(Found {
+                        layer: i,
+                        pre: Some(j),
+                    }),
+                );
             }
         }
-        match setup.env.get(name) {
+        let from_env = match setup.env.get(name) {
             Some(EnvValue::Plain(v)) => Resolved::Plain(v.as_str()),
             Some(EnvValue::Secret(_)) => Resolved::Secret,
             None => Resolved::Absent,
-        }
+        };
+        (from_env, None)
     }
+}
+
+/// Where `resolve_at` found a value: the layer, and the index among its leading
+/// assignments when it was one of those (an `env`-line assignment has none).
+#[derive(Clone, Copy)]
+struct Found {
+    layer: usize,
+    pre: Option<usize>,
 }
 
 /// What a variable resolves to for the program.
 #[derive(Debug, Clone, Copy, PartialEq)]
-enum Resolved<'a> {
+pub(crate) enum Resolved<'a> {
     Plain(&'a str),
-    /// Named in `setup.env` with a `{from: …}` source: set at run time, unreadable here.
+    /// Named in `setup.env` with a `{from: …}` source, or assigned a shell expression on the
+    /// command line: set at run time, unreadable here.
     Secret,
     Absent,
 }
@@ -679,7 +717,12 @@ impl SetupCommand {
                         parse_error = err;
                     }
                     let mut layers = outer_layers;
-                    layers.extend(Layer::stack(&prefix));
+                    let shell = layers.last().map_or(0, |l| l.shell + 1);
+                    layers.extend(
+                        Layer::stack(&prefix)
+                            .into_iter()
+                            .map(|l| Layer { shell, ..l }),
+                    );
                     expanded.truncate(start);
                     let mut at_segment_start = true;
                     for t in inner {
@@ -714,10 +757,6 @@ impl SetupCommand {
         /// A simple command on the line that names setup.sh.
         struct Naming {
             layers: Vec<Layer>,
-            /// How many of `layers` the command inherits from the shells around it; the
-            /// rest are its own line. The shell expands the command's arguments in the
-            /// inherited environment.
-            inherited: usize,
             args: Vec<String>,
             invokes: bool,
         }
@@ -729,11 +768,14 @@ impl SetupCommand {
                     .iter()
                     .position(|w| !is_assignment(w) && basename(w) == "setup.sh")?;
                 let before = non_assignments(&words[..at]);
-                let inherited = layers.len();
-                layers.extend(Layer::stack(&words[..at]));
+                let shell = layers.last().map_or(0, |l| l.shell + 1);
+                layers.extend(
+                    Layer::stack(&words[..at])
+                        .into_iter()
+                        .map(|l| Layer { shell, ..l }),
+                );
                 Some(Naming {
                     layers,
-                    inherited,
                     args: words[at + 1..].iter().map(|w| w.to_string()).collect(),
                     invokes: is_invocation(&before),
                 })
@@ -747,19 +789,18 @@ impl SetupCommand {
         let runs_setup_sh = segment.is_some();
         // A variable as setup.sh will see it, through every layer of assignments and `env`
         // controls around it, then `setup.env`.
-        let source = |name: &str| {
-            segment.map_or(Resolved::Absent, |n| Layer::resolve(&n.layers, name, setup))
-        };
+        let source =
+            |name: &str| segment.map_or(Resolved::Absent, |n| follow(&n.layers, name, setup));
         // The shell expands the words after setup.sh before setup.sh reads them, in the
-        // shell's own environment: what the shells around the command hand it (an outer
-        // `env` around a `bash -c`), then `setup.env`. A bare reference to a plain value
-        // becomes the words an unquoted expansion yields, none for an empty value, so an
-        // option takes the operand setup.sh will see. Any other expression stays a word of
-        // its own: as an operand it is the value as written; in switch position it is
-        // reported below as not readable, not refused.
+        // shell's own environment: the layers of the shells outside this command's (an
+        // outer `env` around a `bash -c`), then `setup.env`. A bare reference to a plain
+        // value becomes the words an unquoted expansion yields, none for an empty value,
+        // so an option takes the operand setup.sh will see. Any other expression stays a
+        // word of its own: as an operand it is the value as written; in switch position it
+        // is reported below as not readable, not refused.
         let shell_env = |name: &str| {
             segment.map_or(Resolved::Absent, |n| {
-                Layer::resolve(&n.layers[..n.inherited], name, setup)
+                follow(outside_of(&n.layers, n.layers.len() - 1), name, setup)
             })
         };
         let mut words: Vec<String> = Vec::new();
@@ -791,6 +832,7 @@ impl SetupCommand {
             switch_error: None,
             unexpanded: Vec::new(),
             runs_setup_sh,
+            layers: segment.map(|n| n.layers.clone()).unwrap_or_default(),
         };
         let mut i = 0;
         while i < words.len() {
@@ -919,6 +961,64 @@ impl SetupCommand {
         self.runs_setup_sh
     }
 
+    /// A variable as `setup.sh` sees it: through the assignments and `env` controls around
+    /// the invocation, then `setup.env`.
+    pub(crate) fn variable<'a>(&'a self, name: &str, setup: &'a Setup) -> Resolved<'a> {
+        follow(&self.layers, name, setup)
+    }
+}
+
+/// The layers of the shells outside the one that expands layer `at`.
+fn outside_of(layers: &[Layer], at: usize) -> &[Layer] {
+    let shell = layers[at].shell;
+    let first = layers.iter().position(|l| l.shell == shell).unwrap_or(0);
+    &layers[..first]
+}
+
+/// A variable as `setup.sh` sees it through `layers`, with a reference assigned on the
+/// command line followed where the shell expands it.
+fn follow<'a>(layers: &'a [Layer], name: &str, setup: &'a Setup) -> Resolved<'a> {
+    {
+        let is_expression = |v: &str| v.contains(['$', '`']);
+        match Layer::resolve_at(layers, name, setup) {
+            // `NAME="${OTHER}"` on the command line is expanded by the shell before the
+            // command, every `env` of that shell included, runs: a bare reference is
+            // followed in the environment the shell itself had (the layers of the shells
+            // outside, then `setup.env`), which is also where a self-reference
+            // (`TAG="$TAG"`) takes the inherited value from. Any other expression is
+            // unreadable here. A `setup.env` value is a literal and is never expanded. The
+            // words carry no quoting, so a single-quoted `'$X'`, which the shell passes
+            // literally, is followed too; a literal `$X` never equals a version, so the
+            // comparison that reads it errs toward the provider's intent.
+            (Resolved::Plain(v), Some(at)) if is_expression(v) => match reference(v) {
+                Some(other) => {
+                    // An earlier assignment of the same command applies first
+                    // (`TAG=inner NICO_CORE_IMAGE_TAG=$TAG ./setup.sh`).
+                    let earlier = at.pre.and_then(|j| {
+                        layers[at.layer].pre[..j]
+                            .iter()
+                            .rev()
+                            .find(|(k, _)| k == other)
+                            .map(|(_, w)| w.as_str())
+                    });
+                    match earlier {
+                        Some(w) if is_expression(w) => Resolved::Secret,
+                        Some(w) => Resolved::Plain(w),
+                        None => match Layer::resolve_at(outside_of(layers, at.layer), other, setup)
+                        {
+                            (Resolved::Plain(w), Some(_)) if is_expression(w) => Resolved::Secret,
+                            (r, _) => r,
+                        },
+                    }
+                }
+                None => Resolved::Secret,
+            },
+            (r, _) => r,
+        }
+    }
+}
+
+impl SetupCommand {
     /// `setup.sh` installs DPF and RMS unless a switch or a variable says otherwise.
     /// The last of two opposing switches wins, as `setup.sh` applies them in argument
     /// order; the variables decide only when neither switch is given.
@@ -1269,7 +1369,7 @@ mod tests {
         );
         let c = cmd("sh -- ./setup.sh --skip-rms");
         assert!(!c.installs_rms(), "`--` ends the interpreter's options");
-        let c = cmd("python3 tools/nico-dev/deploy-dev-nico.py --site dc1/dev1");
+        let c = cmd("python3 tools/deploy-site.py --site dc1");
         assert!(!c.runs_setup_sh(), "another deployer decides nothing");
         assert!(c.switches.is_empty(), "{:?}", c.switches);
         let c = cmd("./setup.sh --skip-rms && echo --skip-dpf");
@@ -1523,6 +1623,109 @@ mod tests {
         );
     }
 
+    /// A reference assigned on the command line is expanded where it stands: through the
+    /// layers around it, then `setup.env`; a self-reference passes the inherited value on.
+    #[test]
+    fn a_reference_on_the_command_line_is_expanded_where_it_stands() {
+        let setup = |command: &str, env: &[(&str, &str)]| Setup {
+            command: command.to_string(),
+            env: env
+                .iter()
+                .map(|(k, v)| (k.to_string(), EnvValue::Plain(v.to_string())))
+                .collect(),
+        };
+        let s = setup(
+            "env TAG=v2 bash -c 'NICO_CORE_IMAGE_TAG=$TAG ./setup.sh --skip-dpf --skip-rms'",
+            &[("TAG", "v1"), ("NICO_CORE_IMAGE_TAG", "v0")],
+        );
+        assert!(
+            matches!(
+                SetupCommand::parse(&s).variable("NICO_CORE_IMAGE_TAG", &s),
+                Resolved::Plain("v2")
+            ),
+            "the outer `env` layer is the environment the reference expands in"
+        );
+        let s = setup(
+            "NICO_CORE_IMAGE_TAG=\"${NICO_CORE_IMAGE_TAG}\" ./setup.sh",
+            &[("NICO_CORE_IMAGE_TAG", "v1")],
+        );
+        assert!(
+            matches!(
+                SetupCommand::parse(&s).variable("NICO_CORE_IMAGE_TAG", &s),
+                Resolved::Plain("v1")
+            ),
+            "a self-reference passes the inherited value through"
+        );
+        let s = setup("NICO_CORE_IMAGE_TAG=$(date) ./setup.sh", &[]);
+        assert!(
+            matches!(
+                SetupCommand::parse(&s).variable("NICO_CORE_IMAGE_TAG", &s),
+                Resolved::Secret
+            ),
+            "any other expression is unreadable here"
+        );
+        let s = setup(
+            "NICO_CORE_IMAGE_TAG=$TAG env TAG=v2 ./setup.sh",
+            &[("TAG", "v1")],
+        );
+        assert!(
+            matches!(
+                SetupCommand::parse(&s).variable("NICO_CORE_IMAGE_TAG", &s),
+                Resolved::Plain("v1")
+            ),
+            "the shell expands the assignment before `env` sets TAG"
+        );
+        let s = setup(
+            "NICO_CORE_IMAGE_TAG=\"$NICO_CORE_IMAGE_TAG\" env ./setup.sh",
+            &[("NICO_CORE_IMAGE_TAG", "v1")],
+        );
+        assert!(
+            matches!(
+                SetupCommand::parse(&s).variable("NICO_CORE_IMAGE_TAG", &s),
+                Resolved::Plain("v1")
+            ),
+            "a self-reference through a bare `env` still reads the inherited value"
+        );
+        let s = setup(
+            "env TAG=v2 env NICO_CORE_IMAGE_TAG=$TAG ./setup.sh",
+            &[("TAG", "v1")],
+        );
+        assert!(
+            matches!(
+                SetupCommand::parse(&s).variable("NICO_CORE_IMAGE_TAG", &s),
+                Resolved::Plain("v1")
+            ),
+            "the shell expands every assignment before either `env` runs"
+        );
+        let s = setup(
+            "TAG=inner NICO_CORE_IMAGE_TAG=$TAG ./setup.sh",
+            &[("TAG", "outer")],
+        );
+        assert!(
+            matches!(
+                SetupCommand::parse(&s).variable("NICO_CORE_IMAGE_TAG", &s),
+                Resolved::Plain("inner")
+            ),
+            "an earlier assignment of the same command applies first"
+        );
+        let s = setup(
+            "NICO_SKIP_DPF=$SKIP ./setup.sh --skip-rms",
+            &[("SKIP", "true")],
+        );
+        assert!(
+            !SetupCommand::parse(&s).installs_dpf(),
+            "a control assigned through a reference is read as setup.sh will see it"
+        );
+        let s = setup("./setup.sh", &[("NICO_CORE_IMAGE_TAG", "v$1")]);
+        assert!(
+            matches!(
+                SetupCommand::parse(&s).variable("NICO_CORE_IMAGE_TAG", &s),
+                Resolved::Plain("v$1")
+            ),
+            "a setup.env value is a literal, never expanded"
+        );
+    }
+
     #[test]
     fn install_variables_must_be_true_or_false_unless_overridden() {
         let with_env = |command: &str, pairs: &[(&str, &str)]| {
@@ -1596,5 +1799,126 @@ mod tests {
     fn an_unterminated_quote_is_reported() {
         let c = cmd(r#"./setup.sh "--skip-dpf"#);
         assert_eq!(c.parse_error.as_deref(), Some("unterminated double quote"));
+    }
+}
+
+/// The environment variables `setup.sh` reads: every `${NAME:-default}` input of the script
+/// (`helm-prereqs/setup.sh`), the undefaulted ones it requires, and `KUBECONFIG`, which
+/// kubectl reads for it. A variable outside this list is one setup.sh ignores, so a
+/// misspelling in `setup.env` would pass silently; `config.setup.env` warns on it. A test
+/// keeps the list equal to the script's.
+pub(crate) const SETUP_SH_VARIABLES: &[&str] = &[
+    "CERT_MANAGER_NS",
+    "KEYCLOAK_NS",
+    "KUBECONFIG",
+    "NICO_CORE_IMAGE_TAG",
+    "NICO_DPF_BMC_ROOT_PASSWORD",
+    "NICO_DPF_CP_LABEL_VALUE",
+    "NICO_DPF_DHCP_SERVER_CHART_VERSION",
+    "NICO_DPF_DPU_AGENT_CHART_VERSION",
+    "NICO_DPF_DPU_CLUSTER_VIP",
+    "NICO_DPF_DPU_INTERFACE",
+    "NICO_DPF_FMDS_CHART_VERSION",
+    "NICO_DPF_HELM_REPO_CARBIDE",
+    "NICO_DPF_HELM_REPO_HTTPS",
+    "NICO_DPF_HELM_REPO_OCI",
+    "NICO_DPF_IMAGE_PULL_SECRET",
+    "NICO_DPF_IMAGE_REPO",
+    "NICO_DPF_IMAGE_TAG",
+    "NICO_DPF_K8S_API_PORT",
+    "NICO_DPF_K8S_API_VIP",
+    "NICO_DPF_METALLB_POOL",
+    "NICO_DPF_NGC_API_KEY",
+    "NICO_DPF_NICO_NGC_API_KEY",
+    "NICO_DPF_OTEL_CHART_VERSION",
+    "NICO_DPF_SRC",
+    "NICO_IMAGE_REGISTRY",
+    "NICO_INSTALL_CONTOUR",
+    "NICO_INSTALL_DPF",
+    "NICO_INSTALL_RMS",
+    "NICO_INSTALL_VAULT",
+    "NICO_KMIP_CLIENT_DIR",
+    "NICO_MANAGE_DEFAULT_STORAGE_CLASS",
+    "NICO_ORG",
+    "NICO_REST_DIR",
+    "NICO_REST_HELM_DIR",
+    "NICO_REST_IMAGE_TAG",
+    "NICO_RMS_CHART",
+    "NICO_RMS_IMAGE_REPO",
+    "NICO_RMS_IMAGE_TAG",
+    "NICO_RMS_NGC_API_KEY",
+    "NICO_SERVICEMONITORS",
+    "NICO_SITE_NAME",
+    "NICO_SITE_UUID",
+    "NICO_SKIP_DPF",
+    "NICO_SKIP_RMS",
+    "NICO_SKIP_VAULT",
+    "NICO_STORAGE_CLASS",
+    "REGISTRY_PULL_SECRET",
+    "REGISTRY_PULL_USERNAME",
+    "VAULT_NS",
+    "WITH_OBSERVABILITY",
+];
+
+#[cfg(test)]
+mod variable_tests {
+    use super::SETUP_SH_VARIABLES;
+
+    const SETUP_SH: &str = include_str!("../../../helm-prereqs/setup.sh");
+
+    /// Variables the script defaults with `${NAME:-...}` but assigns itself before reading,
+    /// so the environment cannot set them.
+    const INTERNAL: &[&str] = &["CORE_VALUES"];
+
+    /// The names the script defaults from the environment: `${NAME:-`, `${NAME:=` or
+    /// `${NAME:?` with an upper-case name not starting with `_`.
+    fn defaulted_in_script() -> Vec<String> {
+        let mut out: Vec<String> = Vec::new();
+        for (i, _) in SETUP_SH.match_indices("${") {
+            let rest = &SETUP_SH[i + 2..];
+            let name: String = rest
+                .chars()
+                .take_while(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || *c == '_')
+                .collect();
+            let after = &rest[name.len()..];
+            if !name.is_empty()
+                && !name.starts_with('_')
+                && name.chars().next().is_some_and(|c| c.is_ascii_uppercase())
+                && (after.starts_with(":-") || after.starts_with(":=") || after.starts_with(":?"))
+                && !out.contains(&name)
+            {
+                out.push(name);
+            }
+        }
+        out.sort();
+        out
+    }
+
+    /// Every variable the script defaults from the environment is in the list, and every
+    /// listed variable is one the script mentions: the list follows setup.sh, both ways.
+    #[test]
+    fn the_list_follows_setup_sh() {
+        let missing: Vec<String> = defaulted_in_script()
+            .into_iter()
+            .filter(|n| {
+                !INTERNAL.contains(&n.as_str()) && !SETUP_SH_VARIABLES.contains(&n.as_str())
+            })
+            .collect();
+        assert!(
+            missing.is_empty(),
+            "setup.sh reads these; add them to SETUP_SH_VARIABLES: {missing:?}"
+        );
+        let stale: Vec<&&str> = SETUP_SH_VARIABLES
+            .iter()
+            .filter(|n| {
+                !SETUP_SH.contains(&format!("${{{n}"))
+                    && !SETUP_SH.contains(&format!("${n}"))
+                    && !SETUP_SH.contains(**n)
+            })
+            .collect();
+        assert!(stale.is_empty(), "setup.sh no longer mentions: {stale:?}");
+        let mut sorted = SETUP_SH_VARIABLES.to_vec();
+        sorted.sort_unstable();
+        assert_eq!(sorted, SETUP_SH_VARIABLES, "keep the list sorted");
     }
 }

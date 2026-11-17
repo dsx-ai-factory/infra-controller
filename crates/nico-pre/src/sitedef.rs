@@ -121,7 +121,7 @@ fn yaml_scalar(s: &str) -> String {
     }
 }
 
-/// `setup` (setup.sh mints and seeds the UUID) or `fixed: <uuid>`.
+/// `setup` (setup.sh mints and seeds the UUID) or the site's own UUID.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(try_from = "String")]
 pub(crate) enum UuidSource {
@@ -137,16 +137,12 @@ impl TryFrom<String> for UuidSource {
         if value == "setup" {
             return Ok(UuidSource::Setup);
         }
-        match value.strip_prefix("fixed:") {
-            Some(rest) => rest
-                .trim()
-                .parse::<Uuid>()
-                .map(UuidSource::Fixed)
-                .map_err(|e| format!("uuidSource `{value}`: not a UUID: {e}")),
-            None => Err(format!(
-                "uuidSource must be `setup` or `fixed: <uuid>`, got `{value}`"
-            )),
-        }
+        // A UUID on its own is the fixed value; `fixed: <uuid>` (quoted, or YAML reads a
+        // nested key) is accepted as the older spelling.
+        let uuid = value.strip_prefix("fixed:").map_or(value, str::trim);
+        uuid.parse::<Uuid>()
+            .map(UuidSource::Fixed)
+            .map_err(|e| format!("uuidSource must be `setup` or a UUID, got `{value}`: {e}"))
     }
 }
 
@@ -163,7 +159,9 @@ pub(crate) struct Collaterals {
     pub(crate) core_values: PathBuf,
     pub(crate) rest_values: PathBuf,
     pub(crate) site_agent_values: PathBuf,
-    pub(crate) metallb_config: PathBuf,
+    /// Absent when another tool renders MetalLB: the rows that read it skip.
+    #[serde(default)]
+    pub(crate) metallb_config: Option<PathBuf>,
     /// Needed from step 7.
     #[serde(default)]
     pub(crate) expected_machines: Option<PathBuf>,
@@ -322,8 +320,7 @@ pub(crate) struct Network {
     /// Optional pin of a derived value; a pinned value the collateral contradicts is a ✗.
     #[serde(default)]
     pub(crate) deny_prefixes: Option<Vec<IpNet>>,
-    #[serde(default)]
-    pub(crate) service_vips: Option<ServiceVips>,
+    pub(crate) service_vips: ServiceVips,
 }
 
 impl Network {
@@ -420,6 +417,53 @@ pub(crate) struct Pools {
     pub(crate) vni: Range,
     #[serde(default)]
     pub(crate) external_vpc_vni: Option<Range>,
+    /// The managed DPUs' loopback pool, the TOML's `[pools.lo-ip]`: a prefix or inclusive
+    /// ranges, never both; clear of the control-plane DPUs' loopbacks.
+    #[serde(default)]
+    pub(crate) dpu_loopback: Option<AddressPool>,
+}
+
+/// An IPv4 pool as the TOML spells it: every address of `prefix`, or the inclusive `ranges`.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub(crate) struct AddressPool {
+    #[serde(default)]
+    pub(crate) prefix: Option<IpNet>,
+    #[serde(default)]
+    pub(crate) ranges: Option<Vec<AddressRange>>,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct AddressRange {
+    pub(crate) start: IpAddr,
+    pub(crate) end: IpAddr,
+}
+
+impl AddressPool {
+    /// The pool as the TOML comparison prints it: the prefix, or `start..end` per range.
+    pub(crate) fn text(&self) -> String {
+        match (&self.prefix, &self.ranges) {
+            (Some(p), _) => p.to_string(),
+            (None, Some(rs)) => rs
+                .iter()
+                .map(|r| format!("{}..{}", r.start, r.end))
+                .collect::<Vec<_>>()
+                .join(", "),
+            (None, None) => String::new(),
+        }
+    }
+
+    /// Whether the pool hands out `ip`.
+    pub(crate) fn contains(&self, ip: IpAddr) -> bool {
+        if let Some(p) = &self.prefix {
+            return p.contains(&ip);
+        }
+        self.ranges
+            .iter()
+            .flatten()
+            .any(|r| r.start <= ip && ip <= r.end)
+    }
 }
 
 #[derive(Debug, Clone, Copy, Deserialize)]
@@ -441,15 +485,58 @@ pub(crate) struct Fnn {
     pub(crate) route_targets: IndexMap<String, u32>,
 }
 
+/// The VIP of every LoadBalancer Service setup.sh deploys, as the Core values pin them
+/// and `helm-prereqs/check-external-service-vips.py` requires them: one each for nico-api,
+/// nico-dhcp, nico-pxe, nico-ssh-console-rs and unbound, one per pod for nico-dns and
+/// nico-ntp.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub(crate) struct ServiceVips {
     pub(crate) api: IpAddr,
     pub(crate) dhcp: IpAddr,
-    pub(crate) dns0: IpAddr,
-    pub(crate) dns1: IpAddr,
+    /// nico-dhcp's DHCPv6 relay Service, only when `v6ExternalService` is enabled.
+    #[serde(default)]
+    pub(crate) dhcp_v6: Option<IpAddr>,
+    /// One per nico-dns pod, in pod order.
+    pub(crate) dns: Vec<IpAddr>,
+    /// One per nico-ntp pod, in pod order.
+    pub(crate) ntp: Vec<IpAddr>,
     pub(crate) pxe: IpAddr,
     pub(crate) ssh_console: IpAddr,
+    /// Absent only with `External DNS`, when unbound is not deployed.
+    #[serde(default)]
+    pub(crate) unbound: Option<IpAddr>,
+}
+
+impl ServiceVips {
+    /// Every stated VIP with its key as the site definition spells it (`dns[0]`).
+    pub(crate) fn all(&self) -> Vec<(String, IpAddr)> {
+        let mut out = vec![
+            ("api".to_string(), self.api),
+            ("dhcp".to_string(), self.dhcp),
+        ];
+        if let Some(ip) = self.dhcp_v6 {
+            out.push(("dhcpV6".to_string(), ip));
+        }
+        out.extend(
+            self.dns
+                .iter()
+                .enumerate()
+                .map(|(i, ip)| (format!("dns[{i}]"), *ip)),
+        );
+        out.extend(
+            self.ntp
+                .iter()
+                .enumerate()
+                .map(|(i, ip)| (format!("ntp[{i}]"), *ip)),
+        );
+        out.push(("pxe".to_string(), self.pxe));
+        out.push(("sshConsole".to_string(), self.ssh_console));
+        if let Some(ip) = self.unbound {
+            out.push(("unbound".to_string(), ip));
+        }
+        out
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -502,6 +589,9 @@ pub(crate) struct Versions {
     pub(crate) doca: Option<String>,
     #[serde(default)]
     pub(crate) hbn: Option<String>,
+    /// Tag of the boot-artifact images nico-pxe copies in (`bootArtifactContainers`).
+    #[serde(default)]
+    pub(crate) boot_artifacts: Option<String>,
     pub(crate) kubernetes_baseline: String,
 }
 
@@ -554,6 +644,19 @@ pub(crate) fn load(path: &Path) -> Result<SiteDef> {
 const SCHEMA_VERSION: u32 = 1;
 
 pub(crate) fn parse(text: &str) -> Result<SiteDef> {
+    // A template's placeholders are named before the parser trips over their type.
+    let unfilled = crate::sitedef_template::unfilled(text);
+    if let [(line, key), rest @ ..] = unfilled.as_slice() {
+        eyre::bail!(
+            "{key} still {} (line {line}){}",
+            crate::sitedef_template::REQUIRED,
+            match rest.len() {
+                0 => String::new(),
+                1 => ", and one more".to_string(),
+                n => format!(", and {n} more"),
+            }
+        );
+    }
     let sd: SiteDef = serde_yaml::from_str(text)?;
     eyre::ensure!(
         sd.schema_version == SCHEMA_VERSION,
@@ -577,18 +680,42 @@ mod tests {
 
     pub(crate) const SAMPLE: &str = include_str!("../examples/site-def.yaml");
 
+    /// `uuidSource` takes `setup`, a bare UUID, or the older quoted `fixed: <uuid>`; anything
+    /// else is refused naming the key.
+    #[test]
+    fn uuid_source_forms() {
+        let uuid: Uuid = "8b3a9c0e-2d4f-4b6a-9e1c-5f7d3a2b1c0d".parse().unwrap();
+        for (text, want) in [
+            ("setup", Ok(UuidSource::Setup)),
+            (
+                "8b3a9c0e-2d4f-4b6a-9e1c-5f7d3a2b1c0d",
+                Ok(UuidSource::Fixed(uuid)),
+            ),
+            (
+                "fixed: 8b3a9c0e-2d4f-4b6a-9e1c-5f7d3a2b1c0d",
+                Ok(UuidSource::Fixed(uuid)),
+            ),
+            ("later", Err(())),
+        ] {
+            let got = UuidSource::try_from(text.to_string());
+            match want {
+                Ok(w) => assert_eq!(got.as_ref().ok(), Some(&w), "{text}: {got:?}"),
+                Err(()) => assert!(
+                    got.as_ref()
+                        .is_err_and(|e| e.contains("uuidSource must be")),
+                    "{text}: {got:?}"
+                ),
+            }
+        }
+    }
+
     #[test]
     fn sample_parses() {
         let sd = parse(SAMPLE).expect("the sample site definition parses");
         assert_eq!(sd.site.name, "site1");
         assert_eq!(sd.hosts.site_controllers.len(), 3);
-        assert_eq!(sd.decisions.len(), 5);
-        assert_eq!(
-            sd.decisions["managed-host-kinds-in-the-fleet"]
-                .values()
-                .len(),
-            1
-        );
+        assert_eq!(sd.decisions.len(), 6);
+        assert_eq!(sd.decisions["managed-host-boot-paths"].values().len(), 1);
         assert!(matches!(sd.site.uuid_source, UuidSource::Setup));
         assert_eq!(sd.network.default_route, Some(DefaultRoute::Bgp));
         assert_eq!(
@@ -607,7 +734,14 @@ mod tests {
 
     #[test]
     fn rendered_values_read_back_as_the_same_yaml() {
-        for v in ["REST group", "foo: bar", "a # b", "no", "[x]", "Option 1"] {
+        for v in [
+            "REST group",
+            "foo: bar",
+            "a # b",
+            "no",
+            "[x]",
+            "ToR peering",
+        ] {
             let text = format!("k: {}", DecisionValue::One(v.to_string()).render());
             let back: serde_yaml::Value = serde_yaml::from_str(&text).unwrap();
             assert_eq!(back["k"].as_str(), Some(v), "{text}");

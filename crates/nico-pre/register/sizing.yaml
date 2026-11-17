@@ -1,0 +1,16 @@
+# The Postgres a NICo control plane needs for a fleet of up to `maxHosts` managed hosts, one
+# row per ceiling in ascending order. `config.consistency.site-controllers` holds the
+# helm-prereqs values and the TOML against the first row the site's `counts.hosts` fits.
+#
+# `source` names where the numbers come from. Columns a row leaves out are not judged.
+#
+# postgresMemoryGi follows the guidance in helm-prereqs/values.yaml (postgresql.resources),
+# measured on a 4,500-host, 13,500-machine ingestion: a 4Gi limit OOM-killed Postgres 531
+# times and never completed; 24Gi peaked at 8.7 GiB with no kills. Beyond 5,000 hosts the
+# guidance is 32Gi and measure. Volume size and connection counts have no measurement yet
+# and are left out; the chart's Postgres accepts 1024 connections regardless.
+source: helm-prereqs/values.yaml postgresql.resources guidance, 4,500-host ingestion measurement
+rows:
+  - { maxHosts: 500,  postgresMemoryGi: 4 }
+  - { maxHosts: 1500, postgresMemoryGi: 8 }
+  - { maxHosts: 5000, postgresMemoryGi: 16 }

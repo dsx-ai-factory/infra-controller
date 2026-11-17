@@ -113,31 +113,13 @@ mod tests {
         }
     }
 
-    /// Every check carries its spec: the labelled parts in order, `Warn:` optional,
-    /// so an engineer can implement a `run: None` entry from the table alone.
+    /// Every check describes itself: `detail` says what it reads and what it reports, so
+    /// the catalogue and a `run: None` entry mean something to a reader. Its shape is free.
     #[test]
-    fn every_check_carries_a_complete_spec() {
-        const ORDER: [&str; 6] = ["Reads:", "Pass:", "Warn:", "Fail:", "Skip:", "Test:"];
+    fn every_check_carries_a_description() {
         for m in Checklist::ALL {
             for c in m.checks() {
-                let labels: Vec<&str> = c
-                    .detail
-                    .lines()
-                    .map(|l| l.split_once(' ').map_or(l, |(label, _)| label))
-                    .collect();
-                let mut want: Vec<&str> = ORDER.to_vec();
-                if !labels.contains(&"Warn:") {
-                    want.retain(|l| *l != "Warn:");
-                }
-                assert_eq!(labels, want, "{}: spec parts out of order or missing", c.id);
-                for line in c.detail.lines() {
-                    assert!(
-                        line.split_once(' ')
-                            .is_some_and(|(_, rest)| !rest.trim().is_empty()),
-                        "{}: empty spec part `{line}`",
-                        c.id
-                    );
-                }
+                assert!(!c.detail.trim().is_empty(), "{} lacks a description", c.id);
             }
         }
     }
