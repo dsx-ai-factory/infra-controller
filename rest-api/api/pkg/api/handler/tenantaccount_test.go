@@ -904,6 +904,36 @@ func TestTenantAccountHandler_UpdateSiteCapabilities(t *testing.T) {
 	blockedTenantSite, err := tenantSiteDAO.GetByTenantIDAndSiteID(ctx, nil, tenant.ID, blockedSite.ID, nil)
 	require.NoError(t, err)
 	assert.Equal(t, cutil.GetPtr(false), blockedTenantSite.Config.TargetedInstanceCreation, "a listed Site without a Tenant/Site association can be blocked")
+
+	crossTenantSite := testTenantAccountBuildSite(t, dbSession, ip, "cross-tenant-site", ipUser)
+	sendUpdate(model.APITenantAccountSiteCapabilitiesUpdateRequest{
+		{CrossTenantInterfaceCreation: cutil.GetPtr(true)},
+		{
+			SiteIDs:                      []string{crossTenantSite.ID.String()},
+			CrossTenantInterfaceCreation: cutil.GetPtr(false),
+		},
+	})
+	updatedTenantAccount, err = tenantAccountDAO.GetByID(ctx, nil, tenantAccount.ID, nil)
+	require.NoError(t, err)
+	assert.True(t, updatedTenantAccount.Config.TargetedInstanceCreation, "cross-Tenant capability update preserves targeted Instance creation")
+	assert.True(t, updatedTenantAccount.Config.CrossTenantInterfaceCreation)
+	crossTenantSiteConfig, err := tenantSiteDAO.GetByTenantIDAndSiteID(ctx, nil, tenant.ID, crossTenantSite.ID, nil)
+	require.NoError(t, err)
+	assert.Equal(t, cutil.GetPtr(false), crossTenantSiteConfig.Config.CrossTenantInterfaceCreation)
+	blockedTenantSite, err = tenantSiteDAO.GetByID(ctx, nil, blockedTenantSite.ID, nil)
+	require.NoError(t, err)
+	assert.Equal(t, cutil.GetPtr(false), blockedTenantSite.Config.TargetedInstanceCreation, "cross-Tenant capability update preserves targeted override")
+
+	sendUpdate(model.APITenantAccountSiteCapabilitiesUpdateRequest{
+		{CrossTenantInterfaceCreation: cutil.GetPtr(false)},
+	})
+	updatedTenantAccount, err = tenantAccountDAO.GetByID(ctx, nil, tenantAccount.ID, nil)
+	require.NoError(t, err)
+	assert.True(t, updatedTenantAccount.Config.TargetedInstanceCreation)
+	assert.False(t, updatedTenantAccount.Config.CrossTenantInterfaceCreation)
+	crossTenantSiteConfig, err = tenantSiteDAO.GetByID(ctx, nil, crossTenantSiteConfig.ID, nil)
+	require.NoError(t, err)
+	assert.Nil(t, crossTenantSiteConfig.Config.CrossTenantInterfaceCreation)
 }
 
 func TestTenantAccountHandler_GetByID(t *testing.T) {

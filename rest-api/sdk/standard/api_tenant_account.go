@@ -652,7 +652,7 @@ Update a Tenant Account.
 
 Tenant Admins may accept an invitation sent by an Infrastructure Provider by supplying `tenantContactId`.
 
-Provider Admins may replace `siteCapabilities` to configure the Tenant Account default and overrides for specific Sites. When `siteCapabilities` is sent, it must be non-empty, include exactly one entry with empty or omitted `siteIds`, and must not repeat any `siteId` across entries. Requests containing both `tenantContactId` and `siteCapabilities` are rejected with 400.
+Provider Admins may replace one or more capabilities through `siteCapabilities` to configure the Tenant Account default and overrides for specific Sites. When `siteCapabilities` is sent, it must be non-empty, include exactly one entry with empty or omitted `siteIds`, and must not repeat any `siteId` across entries. Requests containing both `tenantContactId` and `siteCapabilities` are rejected with 400.
 
 Org must have a Tenant entity whose ID matches the `tenantId` of the Tenant Account object when accepting an invite. User must have authorization role with `TENANT_ADMIN` suffix to accept; `PROVIDER_ADMIN` suffix to update `siteCapabilities`. Tenant Admins can only update a Tenant Account that has `Invited` status.
 

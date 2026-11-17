@@ -20,7 +20,7 @@ import (
 // checks if the InstanceUpdateRequest type satisfies the MappedNullable interface at compile time
 var _ MappedNullable = &InstanceUpdateRequest{}
 
-// InstanceUpdateRequest Request data to update Instance
+// InstanceUpdateRequest Request data to update an Instance.  A complete `interfaces` replacement may select a same-Site Ready FNN VPC or explicit VPC Prefix owned by another Tenant on a non-primary Interface only while the Instance Tenant has effective `crossTenantInterfaceCreation` capability at the Site. Revoking the capability does not detach existing Interfaces: an update without `interfaces`, an unchanged complete `interfaces` replacement, an `interfaces` replacement that removes cross-Tenant Interfaces, and Instance deletion remain allowed. Adding a cross-Tenant Interface, retargeting one to another cross-Tenant VPC or VPC Prefix, or changing its identity returns 403 after revocation.  The Tenant-owned primary VPC and primary physical Interface rules remain enforced, and cross-Tenant Subnets remain unsupported. The capability does not grant cross-Tenant VPC or VPC Prefix discovery or CRUD access. Instance-level Network Security Group policy continues to take precedence over VPC-level policy on all Interfaces.
 type InstanceUpdateRequest struct {
 	// Updated name for the Instance
 	Name NullableString `json:"name,omitempty"`
@@ -38,7 +38,7 @@ type InstanceUpdateRequest struct {
 	IpxeScript NullableString `json:"ipxeScript,omitempty"`
 	// Specify a new list of SSH Key Group IDs that will provide Serial over LAN and SSH access.  This will overwrite an existing list.
 	SshKeyGroupIds []string `json:"sshKeyGroupIds,omitempty"`
-	// ID of the Network Security Group to attach to the Instance
+	// ID of the Network Security Group to attach to the Instance. This Instance-level policy takes precedence over VPC-level policy on every Interface, including cross-Tenant VPC Interfaces.
 	NetworkSecurityGroupId NullableString `json:"networkSecurityGroupId,omitempty"`
 	// Power profile to apply to the Instance. A non-empty value requires the Site's `dpsPowerManagement` capability to be `true`. Omission or `null` preserves the current profile; an empty string clears it when DPS power management is disabled.
 	PowerProfile NullableString `json:"powerProfile,omitempty"`
@@ -50,9 +50,9 @@ type InstanceUpdateRequest struct {
 	PhoneHomeEnabled NullableBool `json:"phoneHomeEnabled,omitempty"`
 	// Update labels of the Instance. The labels will be replaced with the labels sent in the request. Any labels not included in the request will be removed. To retain existing labels, fetch them first and include them in this request.
 	Labels map[string]string `json:"labels,omitempty"`
-	// IDs of additional VPCs the Instance should attach to through non-primary interfaces. This field may only be specified when every entry in `interfaces` uses `vpcPrefixId` or `vpcId`. IDs must be unique, must be valid UUIDs, and must not include the primary `vpcId`.
+	// Complete IDs of additional VPCs the Instance should attach to through non-primary Interfaces. With effective `crossTenantInterfaceCreation`, these may include same-Site FNN VPC IDs owned by another Tenant, obtained out of band; the capability does not expose them through VPC discovery. This field may only be specified when every entry in `interfaces` uses `vpcPrefixId` or `vpcId`. IDs must be unique, valid UUIDs, and must not include the primary `vpcId`.
 	SecondaryVpcIds []string `json:"secondaryVpcIds,omitempty"`
-	// Complete updated Interface configuration for the Instance. Interfaces must all be Subnet-backed or all be VPC-backed; VPC-backed interfaces may use an explicit `vpcPrefixId` or ask the Controller to select a prefix using `vpcId` and `ipFamilies`. Mutually exclusive with `autoNetwork`: when `autoNetwork` is true this list MUST be empty.
+	// Complete updated Interface configuration for the Instance. Interfaces must all be Subnet-backed or all be VPC-backed; VPC-backed interfaces may use an explicit `vpcPrefixId` or ask the Controller to select a prefix using `vpcId` and `ipFamilies`. Adding or retargeting a cross-Tenant Interface requires effective `crossTenantInterfaceCreation`; unchanged and removed cross-Tenant Interfaces do not. Cross-Tenant Subnets remain unsupported, and the primary physical Interface must still select the Instance Tenant-owned primary VPC. Mutually exclusive with `autoNetwork`: when `autoNetwork` is true this list MUST be empty.
 	Interfaces []InterfaceCreateRequest `json:"interfaces,omitempty"`
 	// When set, asks NICo to auto-resolve the Instance's network interfaces from the host's underlay (HostInband) segments. `null` leaves the value unchanged; `true` (re-)resolves; `false` returns to explicit interface configuration. When `true`, the Instance's VPC MUST already have `networkVirtualizationType: FLAT`, `interfaces` MUST be empty or omitted, and `secondaryVpcIds` MUST be empty or omitted.
 	AutoNetwork NullableBool `json:"autoNetwork,omitempty"`

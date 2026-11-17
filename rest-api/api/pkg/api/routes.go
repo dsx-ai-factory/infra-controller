@@ -417,9 +417,14 @@ func NewAPIRoutes(dbSession *cdb.Session, tc tClient.Client, tnc tClient.Namespa
 		},
 		// Interface endpoints
 		{
+			Path:    apiPathPrefix + "/interface",
+			Method:  http.MethodGet,
+			Handler: apiHandler.NewGetAllInterfaceHandler(dbSession, tc, cfg, nil),
+		},
+		{
 			Path:    apiPathPrefix + "/instance/:instanceId/interface",
 			Method:  http.MethodGet,
-			Handler: apiHandler.NewGetAllInterfaceHandler(dbSession, tc, cfg),
+			Handler: apiHandler.NewGetAllInstanceInterfaceHandler(dbSession, tc, cfg),
 		},
 		// Instance InfiniBandInterface endpoints
 		{

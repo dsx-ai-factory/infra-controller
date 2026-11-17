@@ -10,6 +10,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	otrace "go.opentelemetry.io/otel/trace"
 
 	"github.com/NVIDIA/infra-controller/rest-api/common/pkg/roles"
@@ -688,19 +689,36 @@ func TestTenantSiteSQLDAO_Update(t *testing.T) {
 		})
 	}
 
-	t.Run("remove targetedInstanceCreation", func(t *testing.T) {
-		tsWithOverride := TestBuildTenantSite(t, dbSession, tn, TestBuildSite(t, dbSession, ip, "Test Site 2", ipu),
-			&TenantSiteConfig{TargetedInstanceCreation: cutil.GetPtr(false)}, tnu)
+}
 
-		tssd := TenantSiteSQLDAO{dbSession: dbSession}
-		got, err := tssd.Update(ctx, nil, TenantSiteUpdateInput{
-			TenantSiteID: tsWithOverride.ID,
-			Config:       &TenantSiteConfig{},
-		})
-		assert.NoError(t, err)
-		assert.Nil(t, got.Config.TargetedInstanceCreation)
+func TestTenantSiteSQLDAO_Clear(t *testing.T) {
+	ctx := context.Background()
+	dbSession := util.TestInitDB(t)
+	defer dbSession.Close()
+
+	TestSetupSchema(t, dbSession)
+
+	ipOrg := "clear-provider-org"
+	tnOrg := "clear-tenant-org"
+	ipu := TestBuildUser(t, dbSession, uuid.NewString(), ipOrg, []string{roles.ProviderAdminRole})
+	ip := TestBuildInfrastructureProvider(t, dbSession, "Clear Provider", ipOrg, ipu)
+	tnu := TestBuildUser(t, dbSession, uuid.NewString(), tnOrg, []string{roles.TenantAdminRole})
+	tn := TestBuildTenant(t, dbSession, "Clear Tenant", tnOrg, tnu)
+	site := TestBuildSite(t, dbSession, ip, "Clear Site", ipu)
+	ts := TestBuildTenantSite(t, dbSession, tn, site, &TenantSiteConfig{
+		TargetedInstanceCreation:     cutil.GetPtr(false),
+		CrossTenantInterfaceCreation: cutil.GetPtr(false),
+	}, tnu)
+
+	got, err := NewTenantSiteDAO(dbSession).Clear(ctx, nil, TenantSiteClearInput{
+		TenantSiteID: ts.ID,
+		Config: TenantAccountConfig{
+			TargetedInstanceCreation: true,
+		},
 	})
-
+	require.NoError(t, err)
+	assert.Nil(t, got.Config.TargetedInstanceCreation)
+	assert.Equal(t, cutil.GetPtr(false), got.Config.CrossTenantInterfaceCreation)
 }
 
 func TestTenantSiteSQLDAO_Delete(t *testing.T) {

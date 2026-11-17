@@ -357,6 +357,13 @@ func TestBuildTenantAccount(t *testing.T, dbSession *cdb.Session, ip *cdbm.Infra
 // so tests that exercise privileged Tenant paths must enable it on the account rather
 // than only on the legacy Tenant config.
 func TestBuildTenantAccountWithTargetedInstanceCreation(t *testing.T, dbSession *cdb.Session, ip *cdbm.InfrastructureProvider, tenantID *uuid.UUID, tenantOrg string, status string, user *cdbm.User) *cdbm.TenantAccount {
+	return TestBuildTenantAccountWithCapabilities(t, dbSession, ip, tenantID, tenantOrg, status, user, cdbm.TenantAccountConfig{
+		TargetedInstanceCreation: true,
+	})
+}
+
+// TestBuildTenantAccountWithCapabilities creates a TenantAccount with the supplied capability defaults.
+func TestBuildTenantAccountWithCapabilities(t *testing.T, dbSession *cdb.Session, ip *cdbm.InfrastructureProvider, tenantID *uuid.UUID, tenantOrg string, status string, user *cdbm.User, config cdbm.TenantAccountConfig) *cdbm.TenantAccount {
 	taDAO := cdbm.NewTenantAccountDAO(dbSession)
 
 	ta, err := taDAO.Create(context.Background(), nil, cdbm.TenantAccountCreateInput{
@@ -365,7 +372,7 @@ func TestBuildTenantAccountWithTargetedInstanceCreation(t *testing.T, dbSession 
 		TenantOrg:                tenantOrg,
 		InfrastructureProviderID: ip.ID,
 		Status:                   status,
-		Config:                   &cdbm.TenantAccountConfig{TargetedInstanceCreation: true},
+		Config:                   &config,
 		CreatedBy:                user.ID,
 	})
 	require.NoError(t, err)
