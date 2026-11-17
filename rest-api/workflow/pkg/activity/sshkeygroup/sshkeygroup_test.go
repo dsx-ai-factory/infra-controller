@@ -1816,6 +1816,15 @@ func TestManageSSHKeyGroup_UpdateSSHKeyGroupsInDB(t *testing.T) {
 							},
 							Version: "recovered-version",
 						},
+						{
+							// No Tenant owns this org, so the keyset cannot be recovered
+							// and its key data must not be fetched from the Site.
+							KeysetIdentifier: &corev1.TenantKeysetIdentifier{
+								OrganizationId: "ssh-key-group-unknown-org",
+								KeysetId:       uuid.NewString(),
+							},
+							Version: "unrecoverable-version",
+						},
 					},
 				},
 			},
