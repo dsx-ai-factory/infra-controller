@@ -226,10 +226,18 @@ token (not free text) identifying the failure cause.
 **Manual intervention ratio:**
 
 ```text
-count(carbide_object_manual_intervention_required{object_type="machine"} == 1)
+(
+  count(carbide_object_manual_intervention_required{object_type="machine"} == 1)
+  or vector(0)
+)
   /
 count(carbide_object_state_entered_timestamp_seconds{object_type="machine"})
 ```
+
+The intervention metric is emitted only while operator action is needed. The
+numerator falls back to zero when that metric has no matching series. The
+denominator has no fallback, so missing machine-state telemetry leaves the ratio
+without a result.
 
 ### Joining with object traits
 
