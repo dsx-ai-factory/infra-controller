@@ -4,7 +4,7 @@
 
 An SPDM attestation job records one attempt to check a machine's selected
 devices. The [profile design](attestation-profiles.md)
-explains the default selection; manual triggers can override it with a regex.
+explains the default selection; a trigger can override it with an attester regex.
 The job gives that attempt its own identity, progress, and results.
 
 ## Job identity
@@ -110,13 +110,13 @@ enablement, SPDM type/version checks, and site-wide SPDM enablement still apply.
 The trigger prints the applied regex for an override, the scheduled attester IDs
 in ascending order, and the job ID. The outcome names that follow are API model
 values. The CLI renders them as descriptions, such as
-`scheduled using the manual trigger's regex`. A matching override reports
-`IndividualAttesterTriggerScheduled`. No eligible match creates no job:
+`scheduled using the manual attester override`. A matching override reports
+`AttesterOverrideScheduled`. No eligible match creates no job:
 `NoAttestersFound` means discovery found no eligible devices, while
-`IndividualAttesterTriggerMatchedNothing` means eligible devices existed but
-none matched the regex. Manual overrides apply no profile, so their scheduling
+`AttesterOverrideMatchedNothing` means eligible devices existed but
+none matched the regex. An attester override applies no profile, so its scheduling
 events report `profile_source=unprofiled` even when a profile exists. The distinct
-manual outcomes separate successful selection and unmatched regexes from
+override outcomes separate successful selection and unmatched regexes from
 profile-driven `Scheduled` and `PolicyMatchedNothing` attempts. Inspect the
 targeted run through its job ID; machine assessment still uses the current
 profile's selection.

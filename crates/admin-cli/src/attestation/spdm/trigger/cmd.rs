@@ -48,11 +48,11 @@ fn outcome(outcome: i32) -> &'static str {
         Ok(SpdmSchedulingOutcome::NoProfile) => {
             "nothing scheduled: neither this class nor any has a profile"
         }
-        Ok(SpdmSchedulingOutcome::IndividualAttesterTriggerMatchedNothing) => {
-            "nothing scheduled: the manual trigger's regex matched no eligible attester"
+        Ok(SpdmSchedulingOutcome::AttesterOverrideMatchedNothing) => {
+            "nothing scheduled: the manual attester override matched no eligible attester"
         }
-        Ok(SpdmSchedulingOutcome::IndividualAttesterTriggerScheduled) => {
-            "scheduled using the manual trigger's regex"
+        Ok(SpdmSchedulingOutcome::AttesterOverrideScheduled) => {
+            "scheduled using the manual attester override"
         }
         Ok(SpdmSchedulingOutcome::Unspecified) | Err(_) => {
             "unknown to this client; the server is newer"
@@ -82,7 +82,7 @@ pub(super) async fn trigger(args: Args, api_client: &ApiClient) -> CarbideCliRes
     println!("  outcome:        {}", outcome(res.outcome));
     // Report the server's applied selector, rather than inferring it from the request.
     if let Some(pattern) = &res.attester_id_regex {
-        println!("  selection:      manual override ({pattern})");
+        println!("  selection:      manual attester override ({pattern})");
     }
     println!("  devices:        {}", res.devices_under_attestation);
     if !res.attester_ids.is_empty() {
