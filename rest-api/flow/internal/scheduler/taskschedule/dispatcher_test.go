@@ -206,7 +206,7 @@ func (m *mockTaskStore) UpdateScheduledTask(_ context.Context, _ *taskdef.Task) 
 	panic("mockTaskStore.UpdateScheduledTask: not implemented")
 }
 
-func (m *mockTaskStore) UpdateTaskStatus(_ context.Context, _ *taskdef.TaskStatusUpdate) (bool, error) {
+func (m *mockTaskStore) UpdateTaskStatus(_ context.Context, _ *taskdef.TaskStatusUpdate) error {
 	panic("mockTaskStore.UpdateTaskStatus: not implemented")
 }
 
@@ -1330,11 +1330,4 @@ func TestFireNow(t *testing.T) {
 		_, err := d.FireNow(context.Background(), schedID)
 		require.ErrorContains(t, err, "db error")
 	})
-}
-
-func (s *mockTaskStore) ListTasksForReconciliation(context.Context, taskcommon.ExecutorType, uuid.UUID, int) ([]*taskdef.Task, error) {
-	panic("unexpected ListTasksForReconciliation")
-}
-func (s *mockTaskStore) FinishTaskExecution(context.Context, *taskdef.Task, *taskdef.ExecutionStatus) (bool, error) {
-	panic("unexpected FinishTaskExecution")
 }

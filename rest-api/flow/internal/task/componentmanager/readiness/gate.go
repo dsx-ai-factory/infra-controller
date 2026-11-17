@@ -30,7 +30,6 @@ import (
 
 	"github.com/rs/zerolog/log"
 
-	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/dispatchguard"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/pkg/common/devicetypes"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/pkg/types"
 )
@@ -143,9 +142,6 @@ func (g *DBGate) waitReady(ctx context.Context, externalIDs []string, op types.O
 	deadline := time.Now().Add(g.timeout)
 	attempt := 0
 	for {
-		if err := dispatchguard.Check(ctx); err != nil {
-			return err
-		}
 		attempt++
 		blocking, err := findBlocking(ctx, unique, op)
 		if err != nil {

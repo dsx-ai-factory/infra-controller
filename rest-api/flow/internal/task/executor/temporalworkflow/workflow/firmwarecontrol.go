@@ -13,7 +13,6 @@ import (
 
 	taskcommon "github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/common"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/executor/temporalworkflow/common"
-	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/firmwareplan"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/operations"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/task"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/pkg/common/devicetypes"
@@ -36,8 +35,6 @@ var firmwareControlActivityOptions = workflow.ActivityOptions{
 		BackoffCoefficient: 2,
 	},
 }
-
-const firmwareSubTargetSelectionChangeID = "firmware-subtarget-selection"
 
 const firmwareLayeredComponentSelectionChangeID = "firmware-layered-component-selection"
 
@@ -69,31 +66,12 @@ func firmwareControl(
 		executionTargets = selectFirmwareTargets(typeToTargets, info.TargetVersion)
 	}
 
-	var operationInfo any = info
-	if len(info.SubTargets) > 0 && workflow.GetVersion(ctx, firmwareSubTargetSelectionChangeID, workflow.DefaultVersion, 1) != workflow.DefaultVersion {
-		plan, err := firmwareplan.Build(reqInfo, *info)
-		if err != nil {
-			return updateFinishedTaskStatus(ctx, reqInfo.TaskID, err, nil)
-		}
-		executionTargets = maps.Clone(executionTargets)
-		byType := make(componentOperationInfo, len(plan))
-		for typ := range executionTargets {
-			selected, ok := plan[typ]
-			if ok {
-				byType[typ] = &selected
-			} else {
-				delete(executionTargets, typ)
-			}
-		}
-		operationInfo = byType
-	}
-
 	report, err := executeRuleBasedOperation(
 		ctx,
 		reqInfo.TaskID,
 		executionTargets,
 		typeToTargets,
-		operationInfo,
+		info,
 		reqInfo.RuleDefinition,
 	)
 

@@ -1019,7 +1019,6 @@ impl InternalRBACRules {
         x.perm("ListRackProfiles", vec![ForgeAdminCLI]);
         x.perm("RackManagerCall", vec![ForgeAdminCLI]);
         x.perm("GetRmsVersion", vec![ForgeAdminCLI]);
-        x.perm("GetRmsJobStatus", vec![ForgeAdminCLI]);
         x.perm("ScoutStream", vec![Scout]);
         x.perm("ScoutStreamShowConnections", vec![ForgeAdminCLI]);
         x.perm("ScoutStreamDisconnect", vec![ForgeAdminCLI]);
@@ -1093,8 +1092,6 @@ impl InternalRBACRules {
         x.perm("DeleteComputeAllocation", vec![ForgeAdminCLI, SiteAgent]);
         x.perm("ComponentPowerControl", vec![ForgeAdminCLI, Flow]);
         x.perm("GetComponentPowerDetails", vec![ForgeAdminCLI, Flow]);
-        x.perm("ComponentReset", vec![ForgeAdminCLI, Flow]);
-        x.perm("GetComponentResetStatus", vec![ForgeAdminCLI, Flow]);
         x.perm("GetComponentInventory", vec![ForgeAdminCLI, Flow]);
         x.perm("UpdateComponentFirmware", vec![ForgeAdminCLI, Flow]);
         x.perm(
@@ -1328,49 +1325,44 @@ mod rbac_rule_tests {
         }
     }
 
-    /// Component power details and reset operations belong to operator and
-    /// Flow callers; unrelated device and site services must remain denied.
+    /// Power details belong to operator and Flow callers; unrelated device and
+    /// site services must not gain access through this additive RPC.
     #[test]
-    fn component_operator_permissions() {
+    fn component_power_details_operator_permissions() {
         use carbide_test_support::{Check, check_values};
 
         check_values(
             [
                 Check {
-                    scenario: "admin CLI may access component operations",
+                    scenario: "admin CLI may read power details",
                     input: Principal::ExternalUser(ExternalUserInfo::new(
                         None,
                         "nico-cli-client".into(),
                         None,
                     )),
-                    expect: [true; 4],
+                    expect: true,
                 },
                 Check {
-                    scenario: "Flow may access component operations",
+                    scenario: "Flow may compose power details",
                     input: Principal::SpiffeServiceIdentifier("nico-flow".into()),
-                    expect: [true, true, true, false],
+                    expect: true,
                 },
                 Check {
                     scenario: "site agent has no operator access",
                     input: Principal::SpiffeServiceIdentifier("elektra-site-agent".into()),
-                    expect: [false; 4],
+                    expect: false,
                 },
                 Check {
                     scenario: "machine identity has no operator access",
                     input: Principal::SpiffeMachineIdentifier("host".into()),
-                    expect: [false; 4],
+                    expect: false,
                 },
             ],
             |principal| {
-                [
+                InternalRBACRules::allowed_from_static(
                     "GetComponentPowerDetails",
-                    "ComponentReset",
-                    "GetComponentResetStatus",
-                    "GetRmsJobStatus",
-                ]
-                .map(|method| {
-                    InternalRBACRules::allowed_from_static(method, std::slice::from_ref(&principal))
-                })
+                    std::slice::from_ref(&principal),
+                )
             },
         );
     }

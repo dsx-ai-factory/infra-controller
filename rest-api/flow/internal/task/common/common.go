@@ -14,7 +14,6 @@ import (
 type TaskType string
 
 const (
-	TaskTypeComponentReset    TaskType = "component_reset"
 	TaskTypeUnknown           TaskType = "unknown"
 	TaskTypeInjectExpectation TaskType = "inject_expectation"
 	TaskTypePowerControl      TaskType = "power_control"
@@ -25,8 +24,6 @@ const (
 
 func TaskTypeFromString(s string) TaskType {
 	switch s {
-	case TaskTypeComponentReset.String():
-		return TaskTypeComponentReset
 	case TaskTypeInjectExpectation.String():
 		return TaskTypeInjectExpectation
 	case TaskTypePowerControl.String():

@@ -17,7 +17,6 @@ import (
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/componentmanager/providerapi"
 	nicoprovider "github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/componentmanager/providers/nico"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/componentmanager/readiness"
-	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/dispatchguard"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/executor/temporalworkflow/common"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/operations"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/pkg/common/devicetypes"
@@ -126,12 +125,7 @@ func powerShelfIDsProto(ids []string) *corev1.PowerShelfIdList {
 // Shelves not associated with a rack in Core are skipped with a warning
 // (see the equivalent NVSwitch helper for the reasoning).
 // ensureTargetOperable keeps readiness resolution separate from API targeting.
-func (m *Manager) ensureTargetOperable(ctx context.Context, target common.Target, op types.OperationType, override bool) (err error) {
-	defer func() {
-		if err == nil {
-			err = dispatchguard.Check(ctx)
-		}
-	}()
+func (m *Manager) ensureTargetOperable(ctx context.Context, target common.Target, op types.OperationType, override bool) error {
 	if !target.UsesMACAddresses() {
 		return m.ensureRackOperable(ctx, target.Identifiers, op, override)
 	}
@@ -150,12 +144,7 @@ func (m *Manager) ensureRackOperable(
 	shelfIDs []string,
 	op types.OperationType,
 	overrideReadinessCheck bool,
-) (err error) {
-	defer func() {
-		if err == nil {
-			err = dispatchguard.Check(ctx)
-		}
-	}()
+) error {
 	if len(shelfIDs) == 0 {
 		return nil
 	}
@@ -273,9 +262,6 @@ func (m *Manager) PowerControl(
 		}
 	}
 
-	if err := dispatchguard.Check(ctx); err != nil {
-		return err
-	}
 	resp, err := m.nicoClient.ComponentPowerControl(ctx, req)
 	if err != nil {
 		return fmt.Errorf("ComponentPowerControl failed: %w", err)
@@ -376,9 +362,6 @@ func (m *Manager) FirmwareControl(
 		req.AccessToken = &info.AccessToken
 	}
 
-	if err := dispatchguard.Check(ctx); err != nil {
-		return err
-	}
 	resp, err := m.nicoClient.UpdateComponentFirmware(ctx, req)
 	if err != nil {
 		return fmt.Errorf("UpdateComponentFirmware failed: %w", err)

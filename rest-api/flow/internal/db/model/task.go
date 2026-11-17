@@ -147,8 +147,6 @@ func (t *Task) UpdateScheduledTask(
 // UpdateTaskStatus updates the status of the task. Non-nil report and
 // queueExpiresAt values replace their corresponding stored columns. Finished
 // statuses clear queueExpiresAt because the deadline applies only while waiting.
-// The result reports whether a row changed. Terminal records retain their status,
-// reason and completion time despite delayed worker updates or reconciliation.
 func (t *Task) UpdateTaskStatus(
 	ctx context.Context,
 	idb bun.IDB,
@@ -156,7 +154,7 @@ func (t *Task) UpdateTaskStatus(
 	message string,
 	report json.RawMessage,
 	queueExpiresAt *time.Time,
-) (bool, error) {
+) error {
 	t.Status = status
 	t.Message = message
 	t.UpdatedAt = time.Now().UTC()
@@ -182,21 +180,13 @@ func (t *Task) UpdateTaskStatus(
 		}
 	}
 
-	result, err := idb.NewUpdate().
+	_, err := idb.NewUpdate().
 		Model(t).
 		Column(columns...).
 		Where("id = ?", t.ID).
-		Where("status IN (?)", bun.In(taskcommon.NonTerminalTaskStatuses())).
 		Exec(ctx)
 
-	if err != nil {
-		return false, err
-	}
-	count, err := result.RowsAffected()
-	if err != nil {
-		return false, err
-	}
-	return count == 1, nil
+	return err
 }
 
 // UpdateTaskReport updates the structured report without changing status or message.
