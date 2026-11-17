@@ -84,14 +84,14 @@ pub(crate) const CHECKS: &[Check] = &[
         id: "build.registry.push",
         expected: "registry login and a scratch push succeed",
         detail: "Reads: `hosts.registryHost` (url, caSource), credentials by source; the \
-                 `source-of-the-nico-images` and `registry-host` decisions.\n\
+                 `source-of-the-nico-images` and `provider-run-registry-host` decisions.\n\
                  Pass: login succeeds and a scratch tag under a `nico-pre/` repository pushes and \
                  is deleted; with images pulled from NGC, login to `nvcr.io` and a pull test per \
                  repository at the `versions` tags with the entitlement reported per artifact; \
                  observed `registry.site1: login ok, scratch push ok`.\n\
                  Fail: login refused, push refused (401, 403, 413), TLS not trusted via \
                  `caSource`; observed the step and the status; fix per status.\n\
-                 Skip: the local-registry row when `registry-host` is `None` (only the NGC row \
+                 Skip: the provider-run registry check when `provider-run-registry-host` is `Not applicable` (only the NGC row \
                  runs); everything when `build-host` is `No`.\n\
                  Test: a local `registry:2` container with and without basic auth; cases: \
                  anonymous push passes; wrong credentials fail at login; a read-only registry \
@@ -108,9 +108,9 @@ pub(crate) const CHECKS: &[Check] = &[
                  /v2/<repo>/manifests/<tag>`) at the exact tag; observed `23 images present`.\n\
                  Fail: a reference missing; observed one clause per image \
                  (`nico/nico-api:v2026.10.15 missing`); fix: push it.\n\
-                 Skip: when `registry-host` is `None`; the RMS and DPF images per their \
+                 Skip: when `provider-run-registry-host` is `Not applicable`; the RMS and DPF images per their \
                  decisions.\n\
-                 Test: a local registry seeded with tags in the test; cases: all present passes; \
+                 Test: a registry container seeded with tags in the test; cases: all present passes; \
                  one missing fails by name; RMS unticked does not require the RMS images.",
         run: None,
     },

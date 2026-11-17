@@ -42,9 +42,14 @@ pub(crate) struct Decision {
     /// True for an "Any of" entry: the site definition states a list, possibly empty.
     #[serde(default)]
     pub(crate) multiple: bool,
-    /// Single option name, or several joined with ` ; ` for a multi-select.
+    /// The option the reference architecture recommends; advice, not a value any file
+    /// yields. Single option name, or several joined with ` ; ` for a multi-select.
     #[serde(default)]
-    pub(crate) default: Option<String>,
+    pub(crate) recommended: Option<String>,
+    /// What the collaterals mean when they are silent on the entry: the code's own default,
+    /// which the derived readers report. Absent when silence is ambiguous.
+    #[serde(default)]
+    pub(crate) code_default: Option<String>,
     #[serde(default)]
     pub(crate) check: Option<String>,
 }
@@ -56,6 +61,49 @@ pub(crate) struct OptionDef {
     pub(crate) name: String,
     /// The register's full option text.
     pub(crate) text: String,
+    /// The checks that validate a site which chose this option, by id; a test keeps them
+    /// real. Empty with no `coverage` means the coverage is not recorded yet.
+    #[serde(default)]
+    pub(crate) checked_by: Vec<String>,
+    /// What those checks cover and, above all, what this build does not validate for the
+    /// option: the provider reads it beside the option in the template and the UI.
+    #[serde(default)]
+    pub(crate) coverage: Option<String>,
+}
+
+impl OptionDef {
+    /// One line on the option's validation, or `None` when none is recorded: the checks by
+    /// id, each marked when registered but not implemented, then the coverage text.
+    pub(crate) fn coverage_line(&self) -> Option<String> {
+        if self.checked_by.is_empty() && self.coverage.is_none() {
+            return None;
+        }
+        let mut parts = Vec::new();
+        if !self.checked_by.is_empty() {
+            let ids: Vec<String> = self
+                .checked_by
+                .iter()
+                .map(|id| {
+                    let implemented = crate::checklists::Checklist::ALL
+                        .iter()
+                        .flat_map(|m| m.checks())
+                        .any(|c| c.id == id && c.implemented());
+                    if implemented {
+                        id.clone()
+                    } else {
+                        format!("{id} (not implemented)")
+                    }
+                })
+                .collect();
+            parts.push(format!("checked by {}", ids.join(", ")));
+        } else {
+            parts.push("not validated by this build".to_string());
+        }
+        if let Some(text) = &self.coverage {
+            parts.push(text.clone());
+        }
+        Some(parts.join("; "))
+    }
 }
 
 /// A decision and the options of it that trigger a rule or a conflict.
@@ -174,19 +222,46 @@ impl Trigger {
 mod tests {
     use super::*;
 
+    /// Every check an option names exists in the catalogue.
+    #[test]
+    fn checked_by_names_registered_checks() {
+        let ids: Vec<&str> = crate::checklists::Checklist::ALL
+            .iter()
+            .flat_map(|m| m.checks())
+            .map(|c| c.id)
+            .collect();
+        for d in &Register::builtin().decisions {
+            for o in &d.options {
+                for id in &o.checked_by {
+                    assert!(
+                        ids.contains(&id.as_str()),
+                        "{}: option `{}` names unknown check {id}",
+                        d.id,
+                        o.name
+                    );
+                }
+            }
+        }
+    }
+
     #[test]
     fn builtin_register_is_consistent() {
         let reg = Register::builtin();
-        assert_eq!(reg.decisions.len(), 38);
+        assert_eq!(reg.decisions.len(), 49);
         assert_eq!(reg.stated().count(), 5);
         for d in &reg.decisions {
             assert!(!d.options.is_empty(), "{} has no options", d.id);
-            if let Some(default) = &d.default {
-                assert!(
-                    default.split(" ; ").all(|part| d.option(part).is_some()),
-                    "{} default `{default}` is not an option",
-                    d.id
-                );
+            for (label, value) in [
+                ("recommended", &d.recommended),
+                ("code_default", &d.code_default),
+            ] {
+                if let Some(value) = value {
+                    assert!(
+                        value.split(" ; ").all(|part| d.option(part).is_some()),
+                        "{} {label} `{value}` is not an option",
+                        d.id
+                    );
+                }
             }
         }
         let check = |id: &str, option: &str| {

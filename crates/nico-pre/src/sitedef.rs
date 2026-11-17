@@ -121,7 +121,7 @@ fn yaml_scalar(s: &str) -> String {
     }
 }
 
-/// `setup` (setup.sh mints and seeds the UUID) or `fixed: <uuid>`.
+/// `setup` (setup.sh mints and seeds the UUID) or the site's own UUID.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(try_from = "String")]
 pub(crate) enum UuidSource {
@@ -137,16 +137,12 @@ impl TryFrom<String> for UuidSource {
         if value == "setup" {
             return Ok(UuidSource::Setup);
         }
-        match value.strip_prefix("fixed:") {
-            Some(rest) => rest
-                .trim()
-                .parse::<Uuid>()
-                .map(UuidSource::Fixed)
-                .map_err(|e| format!("uuidSource `{value}`: not a UUID: {e}")),
-            None => Err(format!(
-                "uuidSource must be `setup` or `fixed: <uuid>`, got `{value}`"
-            )),
-        }
+        // A UUID on its own is the fixed value; `fixed: <uuid>` (quoted, or YAML reads a
+        // nested key) is accepted as the older spelling.
+        let uuid = value.strip_prefix("fixed:").map_or(value, str::trim);
+        uuid.parse::<Uuid>()
+            .map(UuidSource::Fixed)
+            .map_err(|e| format!("uuidSource must be `setup` or a UUID, got `{value}`: {e}"))
     }
 }
 
@@ -163,7 +159,9 @@ pub(crate) struct Collaterals {
     pub(crate) core_values: PathBuf,
     pub(crate) rest_values: PathBuf,
     pub(crate) site_agent_values: PathBuf,
-    pub(crate) metallb_config: PathBuf,
+    /// Absent when another tool renders MetalLB: the rows that read it skip.
+    #[serde(default)]
+    pub(crate) metallb_config: Option<PathBuf>,
     /// Needed from step 7.
     #[serde(default)]
     pub(crate) expected_machines: Option<PathBuf>,
@@ -322,8 +320,7 @@ pub(crate) struct Network {
     /// Optional pin of a derived value; a pinned value the collateral contradicts is a ✗.
     #[serde(default)]
     pub(crate) deny_prefixes: Option<Vec<IpNet>>,
-    #[serde(default)]
-    pub(crate) service_vips: Option<ServiceVips>,
+    pub(crate) service_vips: ServiceVips,
 }
 
 impl Network {
@@ -420,6 +417,103 @@ pub(crate) struct Pools {
     pub(crate) vni: Range,
     #[serde(default)]
     pub(crate) external_vpc_vni: Option<Range>,
+    /// The managed DPUs' loopback pool, the TOML's `[pools.lo-ip]`: a prefix or inclusive
+    /// ranges, never both; clear of the control-plane DPUs' loopbacks.
+    #[serde(default)]
+    pub(crate) dpu_loopback: Option<AddressPool>,
+}
+
+/// An IPv4 pool as the TOML spells it: every address of `prefix`, or the inclusive `ranges`.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub(crate) struct AddressPool {
+    #[serde(default)]
+    pub(crate) prefix: Option<IpNet>,
+    #[serde(default)]
+    pub(crate) ranges: Option<Vec<AddressRange>>,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct AddressRange {
+    pub(crate) start: IpAddr,
+    pub(crate) end: IpAddr,
+}
+
+impl AddressPool {
+    /// The pool as the TOML comparison prints it: the prefix, or `start..end` per range.
+    pub(crate) fn text(&self) -> String {
+        match (&self.prefix, &self.ranges) {
+            (Some(p), _) => p.to_string(),
+            (None, Some(rs)) => rs
+                .iter()
+                .map(|r| format!("{}..{}", r.start, r.end))
+                .collect::<Vec<_>>()
+                .join(", "),
+            (None, None) => String::new(),
+        }
+    }
+
+    /// Addresses the pool hands out: every address of the prefix, or the distinct addresses
+    /// of the ranges (an overlap counts once; a reversed range counts none).
+    pub(crate) fn capacity(&self) -> u64 {
+        if let Some(p) = &self.prefix {
+            return match p {
+                IpNet::V4(n) => 1u64 << (32 - n.prefix_len()),
+                IpNet::V6(n) => 1u64 << (128u32.saturating_sub(u32::from(n.prefix_len()))).min(63),
+            };
+        }
+        // Ranges as numeric spans, merged where they touch or overlap, so an address two
+        // ranges hand out is counted once.
+        let mut spans: Vec<(u128, u128)> = self
+            .ranges
+            .iter()
+            .flatten()
+            .filter_map(|r| match (r.start, r.end) {
+                (IpAddr::V4(s), IpAddr::V4(e)) if s <= e => {
+                    Some((u128::from(u32::from(s)), u128::from(u32::from(e))))
+                }
+                (IpAddr::V6(s), IpAddr::V6(e)) if s <= e => Some((u128::from(s), u128::from(e))),
+                _ => None,
+            })
+            .collect();
+        spans.sort_unstable();
+        // Operator-written ranges: a total past u64 is as good as unlimited.
+        let count = |s: u128, e: u128| u64::try_from((e - s).saturating_add(1)).unwrap_or(u64::MAX);
+        let mut total = 0u64;
+        let mut open: Option<(u128, u128)> = None;
+        for (start, end) in spans {
+            match open {
+                Some((s, e)) if start <= e.saturating_add(1) => open = Some((s, e.max(end))),
+                Some((s, e)) => {
+                    total = total.saturating_add(count(s, e));
+                    open = Some((start, end));
+                }
+                None => open = Some((start, end)),
+            }
+        }
+        if let Some((s, e)) = open {
+            total = total.saturating_add(count(s, e));
+        }
+        total
+    }
+
+    /// Whether the pool hands out `ip`.
+    pub(crate) fn contains(&self, ip: IpAddr) -> bool {
+        if let Some(p) = &self.prefix {
+            return p.contains(&ip);
+        }
+        // A range is read within one address family; one mixing them (which the gate
+        // refuses) hands out nothing.
+        self.ranges
+            .iter()
+            .flatten()
+            .any(|r| match (r.start, r.end, ip) {
+                (IpAddr::V4(s), IpAddr::V4(e), IpAddr::V4(i)) => s <= i && i <= e,
+                (IpAddr::V6(s), IpAddr::V6(e), IpAddr::V6(i)) => s <= i && i <= e,
+                _ => false,
+            })
+    }
 }
 
 #[derive(Debug, Clone, Copy, Deserialize)]
@@ -441,15 +535,58 @@ pub(crate) struct Fnn {
     pub(crate) route_targets: IndexMap<String, u32>,
 }
 
+/// The VIP of every LoadBalancer Service setup.sh deploys, as the Core values pin them
+/// and `helm-prereqs/check-external-service-vips.py` requires them: one each for nico-api,
+/// nico-dhcp, nico-pxe, nico-ssh-console-rs and unbound, one per pod for nico-dns and
+/// nico-ntp.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub(crate) struct ServiceVips {
     pub(crate) api: IpAddr,
     pub(crate) dhcp: IpAddr,
-    pub(crate) dns0: IpAddr,
-    pub(crate) dns1: IpAddr,
+    /// nico-dhcp's DHCPv6 relay Service, only when `v6ExternalService` is enabled.
+    #[serde(default)]
+    pub(crate) dhcp_v6: Option<IpAddr>,
+    /// One per nico-dns pod, in pod order.
+    pub(crate) dns: Vec<IpAddr>,
+    /// One per nico-ntp pod, in pod order.
+    pub(crate) ntp: Vec<IpAddr>,
     pub(crate) pxe: IpAddr,
     pub(crate) ssh_console: IpAddr,
+    /// Absent only with `External DNS`, when unbound is not deployed.
+    #[serde(default)]
+    pub(crate) unbound: Option<IpAddr>,
+}
+
+impl ServiceVips {
+    /// Every stated VIP with its key as the site definition spells it (`dns[0]`).
+    pub(crate) fn all(&self) -> Vec<(String, IpAddr)> {
+        let mut out = vec![
+            ("api".to_string(), self.api),
+            ("dhcp".to_string(), self.dhcp),
+        ];
+        if let Some(ip) = self.dhcp_v6 {
+            out.push(("dhcpV6".to_string(), ip));
+        }
+        out.extend(
+            self.dns
+                .iter()
+                .enumerate()
+                .map(|(i, ip)| (format!("dns[{i}]"), *ip)),
+        );
+        out.extend(
+            self.ntp
+                .iter()
+                .enumerate()
+                .map(|(i, ip)| (format!("ntp[{i}]"), *ip)),
+        );
+        out.push(("pxe".to_string(), self.pxe));
+        out.push(("sshConsole".to_string(), self.ssh_console));
+        if let Some(ip) = self.unbound {
+            out.push(("unbound".to_string(), ip));
+        }
+        out
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -502,6 +639,9 @@ pub(crate) struct Versions {
     pub(crate) doca: Option<String>,
     #[serde(default)]
     pub(crate) hbn: Option<String>,
+    /// Tag of the boot-artifact images nico-pxe copies in (`bootArtifactContainers`).
+    #[serde(default)]
+    pub(crate) boot_artifacts: Option<String>,
     pub(crate) kubernetes_baseline: String,
 }
 
@@ -553,7 +693,29 @@ pub(crate) fn load(path: &Path) -> Result<SiteDef> {
 /// The one schema this build reads; `SITE-DEF.md` documents it.
 const SCHEMA_VERSION: u32 = 1;
 
+/// The `decisions` section alone, read from a file that may not parse as a whole yet: a
+/// template still carrying `REQUIRED` elsewhere keeps the decisions it states.
+pub(crate) fn decisions_of(value: &serde_yaml::Value) -> Result<IndexMap<String, DecisionValue>> {
+    match value.get("decisions") {
+        None | Some(serde_yaml::Value::Null) => Ok(IndexMap::new()),
+        Some(d) => serde_yaml::from_value(d.clone()).wrap_err("reading the decisions section"),
+    }
+}
+
 pub(crate) fn parse(text: &str) -> Result<SiteDef> {
+    // A template's placeholders are named before the parser trips over their type.
+    let unfilled = crate::sitedef_template::unfilled(text);
+    if let [(line, key), rest @ ..] = unfilled.as_slice() {
+        eyre::bail!(
+            "{key} still {} (line {line}){}",
+            crate::sitedef_template::REQUIRED,
+            match rest.len() {
+                0 => String::new(),
+                1 => ", and one more".to_string(),
+                n => format!(", and {n} more"),
+            }
+        );
+    }
     let sd: SiteDef = serde_yaml::from_str(text)?;
     eyre::ensure!(
         sd.schema_version == SCHEMA_VERSION,
@@ -577,18 +739,42 @@ mod tests {
 
     pub(crate) const SAMPLE: &str = include_str!("../examples/site-def.yaml");
 
+    /// `uuidSource` takes `setup`, a bare UUID, or the older quoted `fixed: <uuid>`; anything
+    /// else is refused naming the key.
+    #[test]
+    fn uuid_source_forms() {
+        let uuid: Uuid = "8b3a9c0e-2d4f-4b6a-9e1c-5f7d3a2b1c0d".parse().unwrap();
+        for (text, want) in [
+            ("setup", Ok(UuidSource::Setup)),
+            (
+                "8b3a9c0e-2d4f-4b6a-9e1c-5f7d3a2b1c0d",
+                Ok(UuidSource::Fixed(uuid)),
+            ),
+            (
+                "fixed: 8b3a9c0e-2d4f-4b6a-9e1c-5f7d3a2b1c0d",
+                Ok(UuidSource::Fixed(uuid)),
+            ),
+            ("later", Err(())),
+        ] {
+            let got = UuidSource::try_from(text.to_string());
+            match want {
+                Ok(w) => assert_eq!(got.as_ref().ok(), Some(&w), "{text}: {got:?}"),
+                Err(()) => assert!(
+                    got.as_ref()
+                        .is_err_and(|e| e.contains("uuidSource must be")),
+                    "{text}: {got:?}"
+                ),
+            }
+        }
+    }
+
     #[test]
     fn sample_parses() {
         let sd = parse(SAMPLE).expect("the sample site definition parses");
         assert_eq!(sd.site.name, "site1");
         assert_eq!(sd.hosts.site_controllers.len(), 3);
-        assert_eq!(sd.decisions.len(), 5);
-        assert_eq!(
-            sd.decisions["managed-host-kinds-in-the-fleet"]
-                .values()
-                .len(),
-            1
-        );
+        assert_eq!(sd.decisions.len(), 7);
+        assert_eq!(sd.decisions["managed-host-boot-paths"].values().len(), 1);
         assert!(matches!(sd.site.uuid_source, UuidSource::Setup));
         assert_eq!(sd.network.default_route, Some(DefaultRoute::Bgp));
         assert_eq!(
@@ -607,11 +793,37 @@ mod tests {
 
     #[test]
     fn rendered_values_read_back_as_the_same_yaml() {
-        for v in ["REST group", "foo: bar", "a # b", "no", "[x]", "Option 1"] {
+        for v in [
+            "REST group",
+            "foo: bar",
+            "a # b",
+            "no",
+            "[x]",
+            "ToR peering",
+        ] {
             let text = format!("k: {}", DecisionValue::One(v.to_string()).render());
             let back: serde_yaml::Value = serde_yaml::from_str(&text).unwrap();
             assert_eq!(back["k"].as_str(), Some(v), "{text}");
         }
+    }
+
+    /// The decisions of a file that does not parse yet (a template still carrying
+    /// `REQUIRED`) are read on their own, so re-templating keeps them.
+    #[test]
+    fn decisions_are_read_from_a_file_that_does_not_parse_yet() {
+        let text = "schemaVersion: 1\nsite: { name: REQUIRED }\ndecisions:\n  build-host: Yes\n  optional-components: [REST group]\n";
+        assert!(parse(text).is_err());
+        let value: serde_yaml::Value = serde_yaml::from_str(text).unwrap();
+        let d = decisions_of(&value).unwrap();
+        assert_eq!(d.len(), 2);
+        assert_eq!(
+            d.get("build-host").map(DecisionValue::values),
+            Some(vec!["Yes".to_string()])
+        );
+        let none: serde_yaml::Value = serde_yaml::from_str("site: {}\n").unwrap();
+        assert!(decisions_of(&none).unwrap().is_empty());
+        let bad: serde_yaml::Value = serde_yaml::from_str("decisions: 3\n").unwrap();
+        assert!(decisions_of(&bad).is_err());
     }
 
     #[test]
@@ -643,5 +855,27 @@ mod tests {
             let text = SAMPLE.replacen(from, to, 1);
             assert!(parse(&text).is_err(), "{name}: should not parse");
         }
+    }
+
+    /// Loopback ranges are operator input: the count saturates instead of wrapping, and a
+    /// range mixing address families counts and contains nothing (the gate refuses it).
+    #[test]
+    fn loopback_ranges_count_saturating_within_one_family() {
+        let all = "{ start: '::', end: 'ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff' }";
+        let twice: AddressPool = serde_yaml::from_str(&format!("ranges: [{all}, {all}]")).unwrap();
+        assert_eq!(twice.capacity(), u64::MAX);
+        let mixed: AddressPool =
+            serde_yaml::from_str("ranges: [{ start: 10.10.64.1, end: 'fd00::1' }]").unwrap();
+        assert_eq!(mixed.capacity(), 0);
+        assert!(!mixed.contains("10.10.64.5".parse().unwrap()));
+        let plain: AddressPool =
+            serde_yaml::from_str("ranges: [{ start: 10.10.64.1, end: 10.10.64.4 }]").unwrap();
+        assert_eq!(plain.capacity(), 4);
+        assert!(plain.contains("10.10.64.4".parse().unwrap()));
+        let overlapping: AddressPool = serde_yaml::from_str(
+            "ranges: [{ start: 10.10.62.1, end: 10.10.62.80 }, { start: 10.10.62.41, end: 10.10.62.120 }]",
+        )
+        .unwrap();
+        assert_eq!(overlapping.capacity(), 120, "an overlap is counted once");
     }
 }

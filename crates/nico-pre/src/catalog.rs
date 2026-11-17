@@ -16,8 +16,8 @@
  */
 
 //! The check catalogue: every registered check of every checklist, indexed by
-//! id, with its expected condition, whether it is implemented, and its spec
-//! (what it reads, when it passes, warns, fails or skips, and how it is tested).
+//! id, with its expected condition, whether it is implemented, and its description
+//! (what it reads and what it reports).
 //! `nico-pre checks` prints it; `CHECKS.md` is its Markdown form, regenerated
 //! with `nico-pre checks --format md` and kept current by a test.
 

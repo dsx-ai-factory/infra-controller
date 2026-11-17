@@ -37,11 +37,85 @@ use crate::sitedef::SiteDef;
 /// offending value when an invariant fails.
 pub(crate) fn run(sd: &SiteDef, reg: &Register) -> Vec<Row> {
     let mut rows = Vec::new();
+    site(sd, &mut rows);
     decisions(sd, reg, &mut rows);
     setup(sd, &mut rows, reg);
     network(sd, &mut rows);
+    let effective = effective_decisions(sd, reg);
+    service_vips(sd, &effective, &mut rows);
+    dpu_loopback_pool(sd, &effective, &mut rows);
+    vpc_vrf_loopback(sd, &mut rows);
     hosts(sd, &mut rows);
     rows
+}
+
+/// `site.name` becomes `siteName` in the helm-prereqs values and `NICO_SITE_NAME` in
+/// setup.sh, which interpolates it into SQL and refuses anything outside
+/// `[A-Za-z0-9][A-Za-z0-9._-]*`; the same rule applies here, before setup.sh does.
+fn site(sd: &SiteDef, rows: &mut Vec<Row>) {
+    const ROW: &str = "sitedef.site.name";
+    const EXPECTED: &str = "a site name setup.sh accepts: letters, digits, `.`, `_`, `-`, starting with a letter or digit";
+    let name = &sd.site.name;
+    let mut chars = name.chars();
+    let valid = chars.next().is_some_and(|c| c.is_ascii_alphanumeric())
+        && chars.all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'));
+    if valid {
+        rows.push(Row::pass(ROW, EXPECTED, format!("`{name}`")));
+    } else {
+        rows.push(Row::fail(ROW, EXPECTED, format!("`{name}`")).with_fix(
+            "rename the site; setup.sh exits on this name when it seeds the REST site record",
+        ));
+    }
+
+    // `dnsZone` names the zone the site's records go in and `apiHostname` is looked up
+    // by every client, so both have to be DNS names: labels of letters, digits and
+    // hyphens, 1 to 63 characters, not starting or ending with a hyphen, 253 in all.
+    const DNS_ROW: &str = "sitedef.site.dns-names";
+    const DNS_EXPECTED: &str = "dnsZone and apiHostname are DNS names: dot-separated labels of letters, digits and hyphens, 1 to 63 characters each, no leading or trailing hyphen";
+    let problems: Vec<String> = [
+        ("dnsZone", &sd.site.dns_zone),
+        ("apiHostname", &sd.site.api_hostname),
+    ]
+    .into_iter()
+    .filter_map(|(key, value)| dns_name_fault(value).map(|why| format!("{key} `{value}`: {why}")))
+    .collect();
+    if problems.is_empty() {
+        rows.push(Row::pass(
+            DNS_ROW,
+            DNS_EXPECTED,
+            format!("`{}`, `{}`", sd.site.dns_zone, sd.site.api_hostname),
+        ));
+    } else {
+        rows.push(
+            Row::fail(DNS_ROW, DNS_EXPECTED, problems.join("; "))
+                .with_fix("write the name as DNS will carry it"),
+        );
+    }
+}
+
+/// Why `name` is not a DNS name, or `None` when it is one.
+fn dns_name_fault(name: &str) -> Option<&'static str> {
+    if name.is_empty() {
+        return Some("empty");
+    }
+    if name.len() > 253 {
+        return Some("longer than 253 characters");
+    }
+    for label in name.split('.') {
+        if label.is_empty() {
+            return Some("an empty label (two dots, or a leading or trailing dot)");
+        }
+        if label.len() > 63 {
+            return Some("a label longer than 63 characters");
+        }
+        if label.starts_with('-') || label.ends_with('-') {
+            return Some("a label starting or ending with a hyphen");
+        }
+        if !label.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
+            return Some("a character other than a letter, digit or hyphen");
+        }
+    }
+    None
 }
 
 /// `setup.command` is a command line the shell can parse; the gate reads it for the
@@ -180,10 +254,18 @@ pub(crate) struct EffectiveDecisions {
     pub(crate) implied_by: IndexMap<String, String>,
 }
 
-/// True when a stated value is usable: every listed option exists, and a
-/// single-select carries exactly one.
+/// True when a stated value is usable: every listed option exists, a
+/// single-select carries exactly one, and `Not applicable` stands alone.
 fn valid_value(d: &crate::register::Decision, vs: &[String]) -> bool {
-    (d.multiple || vs.len() == 1) && vs.iter().all(|v| d.option(v).is_some())
+    (d.multiple || vs.len() == 1)
+        && vs.iter().all(|v| d.option(v).is_some())
+        && !mixes_not_applicable(vs)
+}
+
+/// `Not applicable` says the entry does not arise for the site, so a list that also
+/// names an option that applies contradicts itself; the checklists never see it.
+fn mixes_not_applicable(vs: &[String]) -> bool {
+    vs.len() > 1 && vs.iter().any(|v| v.eq_ignore_ascii_case("Not applicable"))
 }
 
 /// Applies the register's implication rules to the stated decisions until
@@ -295,6 +377,16 @@ fn decisions(sd: &SiteDef, reg: &Register, rows: &mut Vec<Row>) {
                             format!("`{v}`"),
                         )
                         .with_fix("state the option by its short name"),
+                    );
+                }
+                if mixes_not_applicable(&vs) {
+                    rows.push(
+                        Row::fail(
+                            format!("sitedef.decisions.{id}"),
+                            "`Not applicable` alone, or only the options that apply",
+                            quoted(&vs),
+                        )
+                        .with_fix("drop `Not applicable`, or the options beside it"),
                     );
                 }
             }
@@ -693,11 +785,240 @@ fn network(sd: &SiteDef, rows: &mut Vec<Row>) {
 /// The ASN range holds the site controller ASNs and leaves a per-DPU pool that the
 /// datacenter ASN does not fall into. Derived by convention (routes = start, node i =
 /// start + i) unless `asnLayout` overrides it.
+/// The service VIPs: every one inside `forgeServiceVipPrefix` and distinct, a nico-dns
+/// and a nico-ntp VIP for at least one pod each, and the unbound VIP present exactly
+/// when the resolver decision, pinned or implied, is not `External DNS`; with the
+/// decision open, `config.helm-prereqs.rules` reads the Core values and decides.
+fn service_vips(sd: &SiteDef, effective: &EffectiveDecisions, rows: &mut Vec<Row>) {
+    const ROW: &str = "sitedef.network.service-vips";
+    const RESOLVER: &str = "recursive-resolver-for-managed-machines";
+    let n = &sd.network;
+    let v = &n.service_vips;
+    let all = v.all();
+    let mut problems: Vec<String> = Vec::new();
+    for (key, ip) in &all {
+        if !n.forge_service_vip_prefix.contains(ip) {
+            problems.push(format!(
+                "serviceVips.{key} {ip} outside forgeServiceVipPrefix {}",
+                n.forge_service_vip_prefix
+            ));
+        }
+    }
+    for (i, (key, ip)) in all.iter().enumerate() {
+        if let Some((other, _)) = all[..i].iter().find(|(_, o)| o == ip) {
+            problems.push(format!(
+                "serviceVips.{key} and serviceVips.{other} both {ip}"
+            ));
+        }
+    }
+    for (key, ips) in [("dns", &v.dns), ("ntp", &v.ntp)] {
+        if ips.is_empty() {
+            problems.push(format!("serviceVips.{key} is empty: one VIP per pod"));
+        }
+    }
+    let external_dns = effective
+        .values
+        .get(RESOLVER)
+        .map(|vs| vs.iter().any(|s| s == "External DNS"));
+    match (v.unbound, external_dns) {
+        (None, Some(false)) => problems.push(format!(
+            "serviceVips.unbound absent while `{RESOLVER}` is not External DNS"
+        )),
+        (Some(ip), Some(true)) => problems.push(format!(
+            "serviceVips.unbound {ip} stated while `{RESOLVER}` is External DNS"
+        )),
+        _ => {}
+    }
+    let expected = "every service VIP inside forgeServiceVipPrefix and distinct, dns and ntp one \
+                    per pod, unbound exactly when the decided resolver is not External DNS";
+    if problems.is_empty() {
+        rows.push(Row::pass(
+            ROW,
+            expected,
+            format!("{} VIPs inside {}", all.len(), n.forge_service_vip_prefix),
+        ));
+    } else {
+        rows.push(
+            Row::fail(ROW, expected, problems.join("; "))
+                .with_fix("state the VIP the Core values pin for the Service, inside the prefix"),
+        );
+    }
+}
+
+/// The managed DPUs' loopback pool, when stated: a prefix or ranges (not both), every range
+/// in order, at least one address per managed DPU (`counts.dpus`), and no address of it a
+/// control-plane DPU's loopback (the first N addresses of `forgeDpuLoopbackPrefix`, one per
+/// site controller, as the ISO builder assigns them).
+fn dpu_loopback_pool(sd: &SiteDef, effective: &EffectiveDecisions, rows: &mut Vec<Row>) {
+    const ROW: &str = "sitedef.network.dpu-loopback-pool";
+    let Some(pool) = &sd.network.pools.dpu_loopback else {
+        return;
+    };
+    let expected = "an IPv4 prefix or ranges, in order, one address per managed DPU, handing out no control-plane DPU loopback";
+    let mut problems: Vec<String> = Vec::new();
+    match (&pool.prefix, &pool.ranges) {
+        (Some(_), Some(_)) => problems.push("both prefix and ranges stated".to_string()),
+        (None, None) => problems.push("neither prefix nor ranges stated".to_string()),
+        (None, Some(rs)) if rs.is_empty() => problems.push("ranges is empty".to_string()),
+        _ => {}
+    }
+    // `[pools.lo-ip]` is Core's IPv4 loopback pool, and the TOML sizing check reads it so;
+    // IPv6 loopbacks are the separate `[pools.lo-ip-v6]`, which this key does not describe.
+    let ipv6 = pool
+        .prefix
+        .as_ref()
+        .is_some_and(|p| matches!(p, IpNet::V6(_)))
+        || pool
+            .ranges
+            .iter()
+            .flatten()
+            .any(|r| r.start.is_ipv6() || r.end.is_ipv6());
+    if ipv6 {
+        problems.push(
+            "network.pools.dpuLoopback holds an IPv6 address; [pools.lo-ip] is Core's IPv4 loopback pool (IPv6 loopbacks are [pools.lo-ip-v6])"
+                .to_string(),
+        );
+    } else {
+        for r in pool.ranges.iter().flatten() {
+            if r.start > r.end {
+                problems.push(format!("range {}..{} is reversed", r.start, r.end));
+            }
+        }
+        // Two ranges handing out one address are that address once, as the capacity
+        // counts it; the overlap is named so the pool is corrected, not read as larger.
+        let ordered: Vec<_> = pool
+            .ranges
+            .iter()
+            .flatten()
+            .filter(|r| r.start <= r.end)
+            .collect();
+        for (i, a) in ordered.iter().enumerate() {
+            for b in &ordered[i + 1..] {
+                if a.start <= b.end && b.start <= a.end {
+                    problems.push(format!(
+                        "ranges {}..{} and {}..{} overlap",
+                        a.start, a.end, b.start, b.end
+                    ));
+                }
+            }
+        }
+    }
+    let capacity = pool.capacity();
+    let dpus = u64::from(sd.counts.dpus);
+    if capacity < dpus {
+        problems.push(format!(
+            "{capacity} addresses for {dpus} managed DPUs (counts.dpus)"
+        ));
+    }
+    let cp = &sd.network.forge_dpu_loopback_prefix;
+    // Plain-NIC controllers (`dpu-in-the-site-controllers: no DPU`) take no loopback here.
+    let controllers_with_dpus = !effective
+        .values
+        .get("dpu-in-the-site-controllers")
+        .is_some_and(|vs| vs.iter().any(|s| s == "no DPU"));
+    let reserved = if controllers_with_dpus {
+        sd.hosts.site_controllers.len() as u32
+    } else {
+        0
+    };
+    let taken = (1..=reserved).filter_map(|i| match cp.network() {
+        std::net::IpAddr::V4(a) => Some(std::net::IpAddr::V4(std::net::Ipv4Addr::from(
+            u32::from(a).checked_add(i)?,
+        ))),
+        std::net::IpAddr::V6(_) => None,
+    });
+    for ip in taken {
+        if pool.contains(ip) {
+            problems.push(format!(
+                "hands out {ip}, a control-plane DPU loopback in {cp}"
+            ));
+        }
+    }
+    if problems.is_empty() {
+        rows.push(Row::pass(
+            ROW,
+            expected,
+            format!(
+                "{}: {capacity} addresses for {dpus} DPUs, clear of {cp}",
+                pool.text()
+            ),
+        ));
+    } else {
+        rows.push(
+            Row::fail(ROW, expected, problems.join("; "))
+                .with_fix("state the pool as the TOML's [pools.lo-ip], sized for counts.dpus and starting past the control-plane DPUs' loopbacks"),
+        );
+    }
+}
+
+/// `fnn.vpcVrfLoopbackPrefix`, when FNN is planned: the control-plane DPUs take its first
+/// addresses, one per site controller, and `[pools.vpc-dpu-lo]` the rest, where each managed
+/// DPU needs one address per VPC it carries once `use_vpc_vrf_loopback` is on. The prefix is
+/// overlay-private, so fewer addresses than `counts.dpus` left over is a warning to widen it.
+fn vpc_vrf_loopback(sd: &SiteDef, rows: &mut Vec<Row>) {
+    const ROW: &str = "sitedef.network.vpc-vrf-loopback";
+    let Some(fnn) = &sd.network.fnn else {
+        return;
+    };
+    let prefix = fnn.vpc_vrf_loopback_prefix;
+    let total: u64 = match prefix {
+        IpNet::V4(n) => 1u64 << (32 - n.prefix_len()),
+        IpNet::V6(n) => 1u64 << (128u32.saturating_sub(u32::from(n.prefix_len()))).min(63),
+    };
+    let controllers = sd.hosts.site_controllers.len() as u64;
+    let left = total.saturating_sub(controllers);
+    let dpus = u64::from(sd.counts.dpus);
+    let expected = "after the control-plane DPUs' addresses, at least one left per managed DPU";
+    let observed = format!(
+        "{prefix}: {total} addresses, {controllers} for the control-plane DPUs, {left} left for {dpus} managed DPUs"
+    );
+    if left < dpus {
+        rows.push(Row::new(ROW, crate::check::Status::Warn, expected, observed).with_fix(
+            "widen fnn.vpcVrfLoopbackPrefix: it is overlay-private and never routed outside the \
+                 VPC VRFs, so a /16 costs nothing; once fnn.use_vpc_vrf_loopback is on each DPU \
+                 needs one address per VPC it carries",
+        ));
+    } else {
+        rows.push(Row::pass(ROW, expected, observed));
+    }
+}
+
 fn asn_layout(sd: &SiteDef, rows: &mut Vec<Row>) {
     const ROW: &str = "sitedef.network.asn-layout";
     let n = &sd.network;
     let range = n.bgp_asn_start..=n.bgp_asn_end;
     let mut problems: Vec<(String, String)> = Vec::new();
+
+    // The ISO builder validates every ASN it renders as 1..=4294967295; a u32 lets 0 in.
+    let mut asns: Vec<(String, u32)> = vec![
+        ("network.datacenterAsn".to_string(), n.datacenter_asn),
+        ("network.bgpAsnStart".to_string(), n.bgp_asn_start),
+        (
+            "the routes ASN (asnLayout.siteControllerRoutes or bgpAsnStart)".to_string(),
+            n.site_controller_routes_asn(),
+        ),
+    ];
+    asns.extend(sd.hosts.site_controllers.iter().map(|c| {
+        (
+            format!("nodeId {}'s ASN", c.node_id),
+            n.site_controller_asn(c.node_id),
+        )
+    }));
+    asns.extend(
+        sd.hosts
+            .site_controllers
+            .iter()
+            .flat_map(|c| c.tor_peers.iter().flatten())
+            .map(|p| (format!("torPeers {}", p.address), p.asn)),
+    );
+    for (key, asn) in asns {
+        if asn == 0 {
+            problems.push((
+                format!("{key} = 0"),
+                "ASNs are 1..=4294967295, as the ISO builder requires".to_string(),
+            ));
+        }
+    }
 
     if range.contains(&n.datacenter_asn) {
         problems.push((
@@ -940,11 +1261,16 @@ mod tests {
 
     const SAMPLE: &str = include_str!("../examples/site-def.yaml");
 
-    /// The developer-site example is deployed by other scripts: its command makes no
-    /// decision, so the implied `rms: Not applicable` is not contradicted.
+    /// A site another tool deploys: its command makes no decision, so no pinned or
+    /// implied decision is contradicted and the gate passes.
     #[test]
-    fn dev1_example_passes_the_gate() {
-        let sd = parse(include_str!("../examples/site-def-dev1.yaml")).expect("dev1 parses");
+    fn another_deployer_passes_the_gate() {
+        let text = SAMPLE.replacen(
+            "./setup.sh -y --core-values values/nico-core.yaml --metallb-config values/metallb-config.yaml --skip-rms",
+            "python3 tools/deploy-site.py --site site1",
+            1,
+        );
+        let sd = parse(&text).expect("sample with another deployer parses");
         let rows = run(&sd, Register::builtin());
         let failures: Vec<_> = rows.iter().filter(|r| r.status != Status::Pass).collect();
         assert!(failures.is_empty(), "{failures:#?}");
@@ -959,13 +1285,136 @@ mod tests {
         );
     }
 
+    /// The unbound VIP is required only once the resolver decision is known: pinned to the
+    /// built-in unbound it is a failure to omit it; left open, the Core values decide later.
+    #[test]
+    fn unbound_vip_presence_follows_the_decided_resolver() {
+        let without = SAMPLE.replace("    unbound: 10.10.126.202", "    # unbound: 10.10.126.202");
+        let open = parse(&without).unwrap();
+        let rows = run(&open, Register::builtin());
+        let row = rows
+            .iter()
+            .find(|r| r.id == "sitedef.network.service-vips")
+            .unwrap();
+        assert_eq!(row.status, Status::Pass, "{}", row.observed);
+        let pinned = without.replace(
+            "  dpu-in-the-site-controllers: BF3 DPU in DPU mode\n",
+            "  dpu-in-the-site-controllers: BF3 DPU in DPU mode\n  recursive-resolver-for-managed-machines: Built-in unbound\n",
+        );
+        let sd = parse(&pinned).unwrap();
+        let rows = run(&sd, Register::builtin());
+        let row = rows
+            .iter()
+            .find(|r| r.id == "sitedef.network.service-vips")
+            .unwrap();
+        assert_eq!(row.status, Status::Fail, "{}", row.observed);
+        assert!(
+            row.observed.contains("serviceVips.unbound absent"),
+            "{}",
+            row.observed
+        );
+    }
+
+    /// Plain-NIC controllers take no loopback from forgeDpuLoopbackPrefix, so a managed
+    /// pool over that prefix is fine for them and a failure for controllers with DPUs.
+    #[test]
+    fn controller_loopbacks_are_reserved_only_with_dpus() {
+        let over_cp = SAMPLE.replace(
+            "dpuLoopback: { prefix: 10.10.62.0/24 }",
+            "dpuLoopback: { prefix: 10.10.63.0/24 }",
+        );
+        let rows = run(&parse(&over_cp).unwrap(), Register::builtin());
+        let row = rows
+            .iter()
+            .find(|r| r.id == "sitedef.network.dpu-loopback-pool")
+            .unwrap();
+        assert_eq!(row.status, Status::Fail, "{}", row.observed);
+        let plain_nic = over_cp.replace(
+            "  dpu-in-the-site-controllers: BF3 DPU in DPU mode\n",
+            "  dpu-in-the-site-controllers: no DPU\n",
+        );
+        let rows = run(&parse(&plain_nic).unwrap(), Register::builtin());
+        let row = rows
+            .iter()
+            .find(|r| r.id == "sitedef.network.dpu-loopback-pool")
+            .unwrap();
+        assert_eq!(row.status, Status::Pass, "{}", row.observed);
+    }
+
+    /// `[pools.lo-ip]` is Core's IPv4 pool: an IPv6 prefix, or a range with an IPv6 end,
+    /// is refused before it is sized, naming the pool IPv6 loopbacks come from.
+    #[test]
+    fn an_ipv6_loopback_pool_is_refused() {
+        for to in [
+            "dpuLoopback: { ranges: [{ start: 10.10.62.1, end: 'fd00::1' }] }",
+            "dpuLoopback: { prefix: 'fd00:62::/120' }",
+        ] {
+            let text = SAMPLE.replace("dpuLoopback: { prefix: 10.10.62.0/24 }", to);
+            let rows = run(&parse(&text).unwrap(), Register::builtin());
+            let row = rows
+                .iter()
+                .find(|r| r.id == "sitedef.network.dpu-loopback-pool")
+                .unwrap();
+            assert_eq!(row.status, Status::Fail, "{to}: {}", row.observed);
+            assert!(
+                row.observed.contains(
+                    "holds an IPv6 address; [pools.lo-ip] is Core's IPv4 loopback pool (IPv6 loopbacks are [pools.lo-ip-v6])"
+                ),
+                "{to}: {}",
+                row.observed
+            );
+        }
+    }
+
+    /// Overlapping ranges are named and counted once: two ranges of 80 covering 120
+    /// addresses are short for 128 DPUs.
+    #[test]
+    fn overlapping_loopback_ranges_are_named_and_counted_once() {
+        let text = SAMPLE.replace(
+            "dpuLoopback: { prefix: 10.10.62.0/24 }",
+            "dpuLoopback: { ranges: [{ start: 10.10.62.1, end: 10.10.62.80 }, { start: 10.10.62.41, end: 10.10.62.120 }] }",
+        );
+        let rows = run(&parse(&text).unwrap(), Register::builtin());
+        let row = rows
+            .iter()
+            .find(|r| r.id == "sitedef.network.dpu-loopback-pool")
+            .unwrap();
+        assert_eq!(row.status, Status::Fail, "{}", row.observed);
+        assert!(
+            row.observed
+                .contains("ranges 10.10.62.1..10.10.62.80 and 10.10.62.41..10.10.62.120 overlap"),
+            "{}",
+            row.observed
+        );
+        assert!(
+            row.observed.contains("120 addresses for 128 managed DPUs"),
+            "{}",
+            row.observed
+        );
+    }
+
+    /// A short VRF loopback prefix warns and does not block: the row is `Warn`, not `Fail`.
+    #[test]
+    fn a_short_vrf_loopback_prefix_warns_without_blocking() {
+        let text = SAMPLE.replace(
+            "vpcVrfLoopbackPrefix: 10.10.255.0/24",
+            "vpcVrfLoopbackPrefix: 10.10.255.0/27",
+        );
+        let rows = run(&parse(&text).unwrap(), Register::builtin());
+        let row = rows
+            .iter()
+            .find(|r| r.id == "sitedef.network.vpc-vrf-loopback")
+            .unwrap();
+        assert_eq!(row.status, Status::Warn, "{}", row.observed);
+    }
+
     #[test]
     fn sample_passes_the_gate() {
         let sd = parse(SAMPLE).expect("sample parses");
         let rows = run(&sd, Register::builtin());
         let failures: Vec<_> = rows.iter().filter(|r| r.status != Status::Pass).collect();
         assert!(failures.is_empty(), "{failures:#?}");
-        assert_eq!(rows.len(), 12, "one pass row per invariant: {rows:#?}");
+        assert_eq!(rows.len(), 17, "one pass row per invariant: {rows:#?}");
     }
 
     /// Combinations the register supports must pass the gate: a reviewer found the
@@ -976,15 +1425,15 @@ mod tests {
         let pins: &[(&str, &str)] = &[
             (
                 "DPF skipped with the iPXE bootstrap CA pinned",
-                "  dpf: Skip\n  dpu-bootstrap-ca-non-dpf-path: legacy_download\n",
+                "  dpf: Skip\n  dpu-bootstrap-ca-ipxe-provisioned: legacy_download\n",
             ),
             (
                 "DPF skipped with BMC rotation",
-                "  dpf: Skip\n  autonomous-bmc-and-uefi-rotation: [BMC rotation]\n",
+                "  dpf: Skip\n  autonomous-bmc-and-uefi-credential-rotation: [BMC rotation]\n",
             ),
             (
                 "DPF installed with a host still on the iPXE path",
-                "  dpf: Install\n  dpu-bootstrap-ca-non-dpf-path: legacy_download\n",
+                "  dpf: Install\n  dpu-bootstrap-ca-ipxe-provisioned: legacy_download\n",
             ),
             (
                 "NVLink partitioning through explicit NMX-C mappings, no RMS",
@@ -992,7 +1441,7 @@ mod tests {
             ),
             (
                 "NGC-only site pulling with a secret",
-                "  staging-host: Connected\n  external-registry-access: Direct\n  registry-host: None\n  registry-authentication: Credentialed pulls\n",
+                "  staging-host: Connected\n  external-registry-access: Direct\n  provider-run-registry-host: Not applicable\n  registry-authentication: Credentialed pulls\n",
             ),
         ];
         for (name, pin) in pins {
@@ -1122,8 +1571,8 @@ mod tests {
                 1,
             )
             .replacen(
-                "  build-host: Yes\n",
-                "  build-host: Yes\n  rack-profiles: Built-in profiles\n",
+                "  rack-profiles: Not applicable",
+                "  rack-profiles: Built-in profiles",
                 1,
             );
         let sd = parse(&text).expect("parses");
@@ -1156,6 +1605,103 @@ mod tests {
 
     /// The example implies `rms: Not applicable` from its component list; a command that
     /// would install RMS anyway is caught at the gate.
+    /// A site name setup.sh would refuse fails the gate; one it accepts passes, dots and all.
+    #[test]
+    fn a_site_name_setup_sh_refuses_fails_the_gate() {
+        for (name, ok) in [
+            ("nvex lab1", false),
+            ("-lab", false),
+            ("nvex-lab1.v2_a", true),
+        ] {
+            let text = SAMPLE.replacen("  name: site1\n", &format!("  name: {name}\n"), 1);
+            assert_ne!(text, SAMPLE, "splice target missing");
+            let sd = parse(&text).expect("parses");
+            let rows = run(&sd, Register::builtin());
+            let row = rows
+                .iter()
+                .find(|r| r.id == "sitedef.site.name")
+                .expect("the name row");
+            assert_eq!(row.status == Status::Pass, ok, "{name}: {}", row.observed);
+        }
+    }
+
+    /// A zone or API hostname that is not a DNS name fails the gate naming the key and why.
+    #[test]
+    fn dns_zone_and_api_hostname_must_be_dns_names() {
+        for (zone, host, why) in [
+            ("site1.dc1.example.net", "api.site1.dc1.example.net", None),
+            (
+                "site_1.example.net",
+                "api.site1.example.net",
+                Some("dnsZone `site_1.example.net`: a character other than"),
+            ),
+            (
+                "site1.example.net",
+                "api.site1..example.net",
+                Some("apiHostname `api.site1..example.net`: an empty label"),
+            ),
+            (
+                "site1.example.net",
+                "-api.site1.example.net",
+                Some("a label starting or ending with a hyphen"),
+            ),
+            (
+                "site1.example.net",
+                &format!("{}.example.net", "a".repeat(64)),
+                Some("a label longer than 63"),
+            ),
+        ] {
+            let text = SAMPLE
+                .replacen(
+                    "  dnsZone: site1.dc1.example.net\n",
+                    &format!("  dnsZone: {zone}\n"),
+                    1,
+                )
+                .replacen(
+                    "  apiHostname: api.site1.dc1.example.net",
+                    &format!("  apiHostname: {host}"),
+                    1,
+                );
+            let sd = parse(&text).expect("parses");
+            let rows = run(&sd, Register::builtin());
+            let row = rows
+                .iter()
+                .find(|r| r.id == "sitedef.site.dns-names")
+                .expect("the dns row");
+            match why {
+                None => assert_eq!(row.status, Status::Pass, "{}", row.observed),
+                Some(why) => {
+                    assert_eq!(row.status, Status::Fail, "{}", row.observed);
+                    assert!(row.observed.contains(why), "{}", row.observed);
+                }
+            }
+        }
+    }
+
+    /// `Not applicable` beside an option that applies contradicts itself and fails the row.
+    #[test]
+    fn not_applicable_beside_another_option_fails_the_decision_row() {
+        let text = SAMPLE.replacen(
+            "  build-host: Yes\n",
+            "  build-host: Yes\n  managed-host-dpu-generation: [BF3, Not applicable]\n",
+            1,
+        );
+        assert_ne!(text, SAMPLE, "splice target missing");
+        let sd = parse(&text).expect("parses");
+        let rows = run(&sd, Register::builtin());
+        let row = rows
+            .iter()
+            .find(|r| {
+                r.id == "sitedef.decisions.managed-host-dpu-generation" && r.status == Status::Fail
+            })
+            .expect("a failing decision row");
+        assert!(
+            row.expected.contains("`Not applicable` alone"),
+            "{}",
+            row.expected
+        );
+    }
+
     #[test]
     fn a_command_against_an_implied_decision_fails_the_gate() {
         let text = SAMPLE.replacen(
@@ -1294,15 +1840,17 @@ mod tests {
             Some("staging-host")
         );
         // A `lacks` rule: the pinned Optional components list has no RMS box, so
-        // rms is implied Not applicable, and through it rack-profiles.
+        // rms is implied Not applicable, and through it the RMS chart source. Rack
+        // profiles stay open: they place hosts in racks whether or not RMS runs.
         assert_eq!(effective.values.get("rms"), Some(&one("Not applicable")));
         assert_eq!(
             effective
                 .implied_by
-                .get("rack-profiles")
+                .get("rms-chart-source")
                 .map(String::as_str),
             Some("rms")
         );
+        assert!(!effective.implied_by.contains_key("rack-profiles"));
         // Stated entries are never overwritten by an implication.
         assert_eq!(effective.values.get("build-host"), Some(&one("Yes")));
         assert!(!effective.implied_by.contains_key("build-host"));
@@ -1346,7 +1894,7 @@ mod tests {
                 from: "  build-host: Yes\n",
                 to: "  build-host: Yes\n  external-registry-access: Not applicable\n",
                 row: "sitedef.decisions",
-                observed: "6 stated",
+                observed: "8 stated",
             },
             Case {
                 name: "stated value contradicts an implication",
@@ -1354,6 +1902,20 @@ mod tests {
                 to: "  build-host: Yes\n  external-registry-access: Direct\n",
                 row: "sitedef.decisions.external-registry-access",
                 observed: "`Direct`",
+            },
+            Case {
+                name: "an rms component-manager role without any RMS",
+                from: "  build-host: Yes\n",
+                to: "  build-host: Yes\n  component-manager-backends: RMS for every role\n",
+                row: "sitedef.decisions.conflict",
+                observed: "component-manager-backends = `RMS for every role`",
+            },
+            Case {
+                name: "machines registered without a TPM cannot be attested",
+                from: "  build-host: Yes\n",
+                to: "  build-host: Yes\n  tpm-required: Not required\n  measured-boot-attestation: 'On'\n",
+                row: "sitedef.decisions.conflict",
+                observed: "tpm-required = `Not required`",
             },
             Case {
                 name: "conflict between held options",
@@ -1371,8 +1933,8 @@ mod tests {
             },
             Case {
                 name: "conflict with an unticked box",
-                from: "  build-host: Yes\n",
-                to: "  build-host: Yes\n  rack-profiles: Built-in profiles\n",
+                from: "  rack-profiles: Not applicable",
+                to: "  rack-profiles: Built-in profiles",
                 row: "sitedef.decisions.conflict",
                 observed: "rack-profiles = `Built-in profiles`",
             },
@@ -1433,6 +1995,48 @@ mod tests {
                 observed: "the network address",
             },
             Case {
+                name: "a DPU loopback pool that covers the control-plane DPUs' loopbacks",
+                from: "dpuLoopback: { prefix: 10.10.62.0/24 }",
+                to: "dpuLoopback: { prefix: 10.10.63.128/26 }",
+                row: "sitedef.network.dpu-loopback-pool",
+                observed: "hands out 10.10.63.129, a control-plane DPU loopback",
+            },
+            Case {
+                name: "a VRF loopback prefix with fewer addresses left than managed DPUs warns",
+                from: "vpcVrfLoopbackPrefix: 10.10.255.0/24",
+                to: "vpcVrfLoopbackPrefix: 10.10.255.0/27",
+                row: "sitedef.network.vpc-vrf-loopback",
+                observed: "32 addresses, 3 for the control-plane DPUs, 29 left for 128 managed DPUs",
+            },
+            Case {
+                name: "a DPU loopback pool too small for the managed DPUs",
+                from: "dpuLoopback: { prefix: 10.10.62.0/24 }",
+                to: "dpuLoopback: { ranges: [{ start: 10.10.62.1, end: 10.10.62.2 }] }",
+                row: "sitedef.network.dpu-loopback-pool",
+                observed: "2 addresses for 128 managed DPUs (counts.dpus)",
+            },
+            Case {
+                name: "a DPU loopback pool with both a prefix and ranges",
+                from: "dpuLoopback: { prefix: 10.10.62.0/24 }",
+                to: "dpuLoopback: { prefix: 10.10.62.0/24, ranges: [{ start: 10.10.62.1, end: 10.10.62.9 }] }",
+                row: "sitedef.network.dpu-loopback-pool",
+                observed: "both prefix and ranges stated",
+            },
+            Case {
+                name: "a service VIP outside the prefix",
+                from: "api: 10.10.126.208",
+                to: "api: 10.10.127.208",
+                row: "sitedef.network.service-vips",
+                observed: "serviceVips.api 10.10.127.208 outside forgeServiceVipPrefix",
+            },
+            Case {
+                name: "two services on one VIP",
+                from: "dns: [10.10.126.195, 10.10.126.196]",
+                to: "dns: [10.10.126.195, 10.10.126.195]",
+                row: "sitedef.network.service-vips",
+                observed: "serviceVips.dns[1] and serviceVips.dns[0] both 10.10.126.195",
+            },
+            Case {
                 name: "VLAN pool beyond 4094",
                 from: "vlan: { start: 100, end: 501 }",
                 to: "vlan: { start: 100, end: 4095 }",
@@ -1452,6 +2056,13 @@ mod tests {
                 to: "datacenterAsn: 4244766865",
                 row: "sitedef.network.asn-layout",
                 observed: "network.datacenterAsn",
+            },
+            Case {
+                name: "a zero ASN, which the ISO builder rejects",
+                from: "datacenterAsn: 65034",
+                to: "datacenterAsn: 0",
+                row: "sitedef.network.asn-layout",
+                observed: "network.datacenterAsn = 0",
             },
             Case {
                 name: "ASN range too small for the site controllers and a DPU",

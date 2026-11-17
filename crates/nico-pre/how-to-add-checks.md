@@ -27,6 +27,29 @@ function and the table entry, and a test. Nothing else.
 | Code several checks of one checklist share (a Redfish client, a TOML loader) | A sibling module the checklist file declares, for example `src/checklists/host/redfish.rs` with `mod redfish;` in `host.rs`. |
 | A new checklist (a new stage) | A new file `src/checklists/<name>.rs` with its own `CHECKS` table; in `src/checklists/mod.rs` one `mod <name>;` line, one enum variant with its `name()`/`checks()` arms, and the variant added to `Checklist::ALL` (and its array length), which is what `nico-pre checks` and `CHECKS.md` enumerate; and one subcommand in `src/main.rs`. Rare; agree on it first. |
 
+## The principles
+
+nico-pre will grow as we learn how providers use NICo: checks get added, split, tightened
+and loosened. The code is arranged so that a change to one check touches one file, and these
+are the only rules that hold across changes:
+
+- **An id never changes once it has shipped.** `--only`, `--skip` and the result files refer
+  to it. Add a new id rather than rename; retire one by removing its entry.
+- **`expected` is one sentence a provider understands without the code**, the rule as the
+  output prints it, no trailing period.
+- **`observed` names the actual values**, both sides when two things disagree:
+  "datacenterAsn 4266030000 in site-def, 4266030001 in the CP-DPU site yaml".
+- **`fix` is an action the provider can take**, not a restatement of the failure.
+- **One check, one condition.** Several problems under that condition are joined into one
+  `Fail` or `Warn`, as `admin_segment` does; do not return the first one found.
+- **A check decides or declines.** `Skip` when a decision rules it out for this site, `?` when
+  it cannot reach a verdict; never a guess and never a panic on site data.
+- **Every behaviour the check reports has a test case**, spliced from the example.
+
+Everything else, which checks exist, what each one reads and how strict it is, is expected to
+change. Changing a check is changing its function, its `expected` and its tests; nothing has
+to be agreed first.
+
 ## The two things you write
 
 ### 1. The function
@@ -39,46 +62,32 @@ Every check has this exact signature. `Ctx` and `Outcome` come from `crate::harn
 
 ### 2. The table entry
 
-Find your check's id in the file's `CHECKS` table. It is registered already with `run: None`,
-which prints as ⚠ "not implemented yet". Point it at your function:
+Find your check's id in the file's `CHECKS` table, or add one in the position where the line
+should print. An entry registered ahead of its implementation has `run: None` and prints as
+⚠ "not implemented yet". Point it at your function:
 
 ```rust
 Check {
     id: "config.segments.admin",
     expected: "the admin segment fits the fleet: usable addresses beyond the reserved block \
                cover counts.hosts with headroom, and its MTU is within pathMtu",
-    detail: "Reads: `network.segments.admin`, `network.pathMtu`, `counts.hosts`.\n\
-             Pass: usable addresses at or above `counts.hosts` with 20% spare ...\n\
-             Warn: under 20% spare ...\n\
-             Fail: fewer usable addresses than hosts, or MTU above `pathMtu` ...\n\
-             Skip: never.\n\
-             Test: the example spliced one line at a time; cases: ...",
-    // the registered spec, kept as is: a test checks that every entry carries all its labelled lines
+    detail: "Reads `network.segments.admin`, `network.pathMtu`, `counts.hosts`; usable \
+             addresses at or above `counts.hosts` with 20% spare pass, under 20% warns, fewer \
+             than hosts or MTU above `pathMtu` fails naming the values",
     run: Some(admin_segment),
 },
 ```
 
-- `id` is `<checklist>.<area>.<name>`, lower-case, dot-separated. It is stable: `--only`,
-  `--skip` and the result files refer to it. Do not rename an id that has shipped.
-- `expected` is the condition as the row prints it, one sentence, no trailing period. Write it
-  so the provider understands the rule without reading code.
-- `detail` is the spec of the check, and it is already written for every registered entry.
-  One part per line, in this order, each starting with its label:
-  - `Reads:` the site-def fields, collaterals, decisions and endpoints the check consults.
-  - `Pass:` the condition and the observed text, with numbers.
-  - `Warn:` (optional) and `Fail:` each condition, what `observed` names, and the fix text.
-  - `Skip:` the decision that rules the check out, or `never`.
-  - `Test:` the fixture and the minimum cases: the passing case, one per fail or warn branch,
-    the skip.
+- `id` is `<checklist>.<area>.<name>`, lower-case, dot-separated.
+- `expected` is the rule as the output prints it.
+- `detail` is the description the catalogue shows (`nico-pre checks`, `CHECKS.md`): what the
+  check reads and what it reports, in whatever shape reads best. Entries registered from the
+  design carry a longer text with `Reads`, `Pass`, `Warn`, `Fail`, `Skip` and `Test` parts;
+  keep that shape if you like it, shorten it if you do not. When the behaviour changes, change
+  the description with it. It is not a contract the function has to be argued against.
 
-  Implement what the spec says. If the spec turns out wrong or incomplete (a field that does
-  not exist, a branch that cannot happen), change the spec in the same PR and say so in the
-  description; the spec and the function must agree when the check lands. [`CHECKS.md`](CHECKS.md)
-  renders the spec under the check's id; a test in `src/checklists/mod.rs` enforces the shape.
-
-If your check is not in the table yet, add an entry in the position where the row should print.
 A test in `src/checklists/mod.rs` fails the build when an id is duplicated, carries the wrong
-checklist prefix or has an empty `expected`.
+checklist prefix, or has an empty `expected` or `detail`.
 
 ## How you get the data
 
@@ -92,8 +101,8 @@ Nothing is global. The harness builds one `Ctx` per run and passes it to every c
 | `ctx.evidence` | `Option<&Path>`: a directory the operator asked for with `--evidence`, to keep raw output (a Redfish response, a command transcript) next to the result. Absent most of the time; never required. |
 | `ctx.site_def_path` | Where site-def.yaml was read from. Rarely needed directly; `resolve` uses it. |
 
-A check reads what `ctx.sd` names, plus the external inputs its own spec's `Reads:` line
-names (the `PATH` for a tool probe, a variable the spec calls out such as `NICO_RMS_CHART`,
+A check reads what `ctx.sd` names, plus the external inputs its description
+names (the `PATH` for a tool probe, a variable such as `NICO_RMS_CHART`,
 a file a collateral points at). It never looks at argv or at other environment variables,
 never prints, never writes anywhere but `ctx.evidence`.
 
@@ -114,7 +123,7 @@ not in the harness.
 Rules of thumb:
 
 - `observed` names the actual values, both sides when two things disagree: "datacenterAsn
-  4266030000 in site-def, 4266030001 in ytl.yaml".
+  4266030000 in site-def, 4266030001 in the CP-DPU site yaml".
 - `fix` is an action the provider can take, not a restatement of the failure.
 - Several problems in one check: join them with "; " into one `Fail`, as `admin_segment` does.
   Do not return the first one you find.
@@ -152,6 +161,15 @@ A check that reads a collateral tests against a fixture file under `examples/` o
 directory; one that talks to a BMC tests against `bmc-mock` profiles; one that talks to a
 cluster against kind. Say in the PR which fixture the test uses.
 
+The collaterals of the example live under `examples/` at the paths `examples/site-def.yaml`
+names (`control-plane-dpu/site.yaml`, `helm-prereqs/values.yaml`, `helm-prereqs/values/*.yaml`,
+`expected-machines.yaml`), and they agree with the example site definition, so
+`nico-pre config` on the example passes. A check that reads them tests through
+`crate::fixture::Example`: `Example::new()` copies the whole tree into a temporary directory,
+`.splice(file, from, to)` edits one line of one copy (and panics if `from` is not there), and
+`.run(check)` runs the function against the copy. The `config` checklist's test modules are the
+pattern; keep each case to one splice where you can, so a failing case names its cause.
+
 ## Running it
 
 ```bash
@@ -162,23 +180,19 @@ cargo run -q -p nico-pre -- config --site-def <a real site-def.yaml> -o json   #
 cargo make clippy && cargo make check-format-nightly                          # before the PR
 ```
 
-`CHECKS.md` is generated from the tables and a test fails while it is stale:
+`CHECKS.md` is a rendering of the tables, committed so the catalogue can be read on GitHub
+without a build. Never edit it; regenerate it, and a test fails while it is stale:
 
 ```bash
 cargo run -q -p nico-pre -- checks --format md > crates/nico-pre/CHECKS.md
 ```
 
-A site's own test script, kept with its site definition, runs every checklist and asserts that
-each registered id appears exactly once. When you add an entry to `CHECKS`, add your id to the
-table of every such script your team keeps.
-
 ## Checklist for the PR
 
-- [ ] Table entry points at the function; `expected` reads as a rule; `detail` (the spec)
-      agrees with what the function does, every branch it names implemented.
+- [ ] Table entry points at the function; `expected` reads as a rule; `detail` describes
+      what the function does now.
 - [ ] `CHECKS.md` regenerated.
 - [ ] Function returns `Skip` when a decision rules it out, `?` for things that stop it, one
       `Fail` or `Warn` with every problem it found and a fix.
-- [ ] Test module with the cases the spec's `Test:` line names, at least.
+- [ ] Test module with the passing case and one case per failure or warning reported.
 - [ ] `cargo test`, `cargo make clippy`, `cargo make check-format-nightly` clean.
-- [ ] Id added to `sites/ytl/test-checklists.sh` if the entry is new.

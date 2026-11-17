@@ -1,0 +1,114 @@
+# The top-level keys of the NICo Core site TOML at release v2.0.10: the fields of
+# `CarbideConfig` in `crates/api-core/src/cfg/file.rs` at tag v2.0.10, less the one serde
+# skips, with each field's TOML type and the deprecations its doc comment or the config
+# reference (`crates/api-core/src/cfg/README.md`) states. `config.toml.keys` holds a site's
+# TOML to the catalogue of the release in `versions.infraController`: a key not listed
+# fails, a value of another TOML type fails, a deprecated key warns. Keys the chart layers
+# in (`database_url`, `listen`) are listed like any other and never required of the site.
+# One file per release; `any` leaves the type unjudged.
+release: v2.0.10
+source: crates/api-core/src/cfg/file.rs at v2.0.10, struct CarbideConfig
+keys:
+  - { name: listen, type: string }   # SocketAddr
+  - { name: listen_only, type: boolean }   # bool
+  - { name: metrics_endpoint, type: string }   # Option<SocketAddr>
+  - { name: alt_metric_prefix, type: string }   # Option<String>
+  - { name: database_url, type: string }   # String
+  - { name: max_database_connections, type: integer }   # u32
+  - { name: ib_config, type: table }   # Option<IBFabricConfig>
+  - { name: asn, type: integer }   # u32
+  - { name: dhcp_servers, type: array }   # Vec<Ipv4Addr>
+  - { name: ntp_servers, type: array }   # Vec<Ipv4Addr>
+  - { name: route_servers, type: array }   # Vec<IpAddr>
+  - { name: enable_route_servers, type: boolean }   # bool
+  - { name: deny_prefixes, type: array }   # Vec<Ipv4Network>
+  - { name: site_fabric_prefixes, type: array }   # Vec<IpNetwork>
+  - { name: anycast_site_prefixes, type: array, deprecated: "Use routing_profiles.allowed_anycast_prefixes instead" }   # Vec<Ipv4Network>
+  - { name: common_tenant_host_asn, type: integer }   # Option<u32>
+  - { name: vpc_isolation_behavior, type: string }   # VpcIsolationBehaviorType
+  - { name: host_naming_strategy, type: string }   # HostNamingStrategyKind
+  - { name: dpu_network_monitor_pinger_type, type: string }   # Option<String>
+  - { name: tls, type: table }   # Option<TlsConfig>
+  - { name: listen_mode, type: string }   # ListenMode
+  - { name: auth, type: table }   # Option<AuthConfig>
+  - { name: pools, type: table }   # Option<HashMap<String, ResourcePoolDef>>
+  - { name: networks, type: table }   # Option<HashMap<String, NetworkDefinition>>
+  - { name: vpcs, type: table }   # Option<HashMap<String, VpcDefinition>>
+  - { name: dpu_ipmi_tool_impl, type: string }   # Option<String>
+  - { name: dpu_ipmi_reboot_attempts, type: integer }   # Option<u32>
+  - { name: bmc_session_lockout_threshold, type: integer }   # u32
+  - { name: allow_bmc_basic_auth_fallback, type: boolean }   # bool
+  - { name: ib_fabrics, type: table }   # HashMap<String, IbFabricDefinition>
+  - { name: initial_domain_name, type: string }   # Option<String>
+  - { name: initial_dpu_agent_upgrade_policy, type: string }   # Option<AgentUpgradePolicyChoice>
+  - { name: max_concurrent_machine_updates, type: integer, deprecated: "use machine_updater" }   # Option<i32>
+  - { name: machine_update_run_interval, type: integer }   # Option<u64>
+  - { name: retained_boot_interface_window, type: string }   # Option<chrono::Duration>, read from a duration string ("30d")
+  - { name: site_explorer, type: table }   # SiteExplorerConfig
+  - { name: vpc_peering_policy, type: string }   # Option<VpcPeeringPolicy>
+  - { name: vpc_peering_policy_on_existing, type: string }   # Option<VpcPeeringPolicy>
+  - { name: attestation_enabled, type: boolean }   # bool
+  - { name: tpm_required, type: boolean }   # bool
+  - { name: machine_state_controller, type: table }   # MachineStateControllerConfig
+  - { name: network_segment_state_controller, type: table }   # NetworkSegmentStateControllerConfig
+  - { name: vpc_prefix_state_controller, type: table }   # VpcPrefixStateControllerConfig
+  - { name: ib_partition_state_controller, type: table }   # IbPartitionStateControllerConfig
+  - { name: dpa_interface_state_controller, type: table }   # DpaInterfaceStateControllerConfig
+  - { name: rack_state_controller, type: table }   # RackStateControllerConfig
+  - { name: power_shelf_state_controller, type: table }   # PowerShelfStateControllerConfig
+  - { name: switch_state_controller, type: table }   # SwitchStateControllerConfig
+  - { name: spdm_state_controller, type: table }   # SpdmStateControllerConfig
+  - { name: host_models, type: table }   # HashMap<String, Firmware>
+  - { name: firmware_global, type: table }   # FirmwareGlobal
+  - { name: machine_updater, type: table }   # MachineUpdater
+  - { name: max_find_by_ids, type: integer }   # u32
+  - { name: network_security_group, type: table }   # NetworkSecurityGroupConfig
+  - { name: min_dpu_functioning_links, type: integer }   # Option<u32>
+  - { name: host_health, type: table }   # HostHealthConfig
+  - { name: observability, type: table }   # ObservabilityConfig
+  - { name: internet_l3_vni, type: integer }   # u32
+  - { name: measured_boot_collector, type: table }   # MeasuredBootMetricsCollectorConfig
+  - { name: machine_validation_config, type: table }   # MachineValidationConfig
+  - { name: rack_validation_config, type: table }   # RackValidationConfig
+  - { name: machine_identity, type: table }   # MachineIdentityConfig
+  - { name: bypass_rbac, type: boolean }   # bool
+  - { name: dpu_config, type: table }   # DpuConfig
+  - { name: fnn, type: table }   # Option<FnnConfig>
+  - { name: bom_validation, type: table }   # BomValidationConfig
+  - { name: bios_profiles, type: table }   # libredfish::BiosProfileVendor, a map of profiles
+  - { name: selected_profile, type: string }   # libredfish::BiosProfileType
+  - { name: oem_manager_profiles, type: table }   # libredfish::BiosProfileVendor, a map of profiles
+  - { name: dpa_config, type: table }   # Option<DpaConfig>
+  - { name: dsx_exchange_event_bus, type: table }   # Option<DsxExchangeEventBusConfig>
+  - { name: datacenter_asn, type: integer }   # u32
+  - { name: nvlink_config, type: table }   # Option<NvLinkConfig>
+  - { name: power_manager_options, type: table }   # PowerManagerOptions
+  - { name: sitename, type: string }   # Option<String>
+  - { name: auto_machine_repair_plugin, type: table }   # AutoMachineRepairPluginConfig (a struct; `= true` is not it)
+  - { name: vmaas_config, type: table }   # Option<VmaasConfig>
+  - { name: mlx-config-profiles, type: table }  # Option<HashMap<String, MlxConfigProfile>>, serde rename
+  - { name: rack_management_enabled, type: boolean }   # bool
+  - { name: rms, type: table }   # RmsConfig
+  - { name: rack_profiles, type: table }   # model::rack_type::RackProfileConfig
+  - { name: spdm, type: table }   # SpdmConfig
+  - { name: site_global_vpc_vni, type: integer }   # Option<u32>
+  - { name: dpf, type: table }   # DpfConfig
+  - { name: x86_pxe_boot_url_override, type: string }   # Option<String>
+  - { name: arm_pxe_boot_url_override, type: string }   # Option<String>
+  - { name: pxe_public_base_url, type: string }   # String
+  - { name: set_http_boot_uri_for_vendors, type: array }   # Vec<BMCVendor>
+  - { name: external_api_url, type: string }   # Option<String>
+  - { name: external_pxe_url, type: string }   # Option<String>
+  - { name: external_static_pxe_url, type: string }   # Option<String>
+  - { name: compute_allocation_enforcement, type: string }   # ComputeAllocationEnforcement
+  - { name: supernic_firmware_profiles, type: table }   # HashMap<String, HashMap<String, FirmwareFlasherProfile>>
+  - { name: component_manager, type: table }   # Option<component_manager::config::ComponentManagerConfig>
+  - { name: bgp_leaf_session_password, type: string }   # Option<BgpLeafSessionPassword>, a string variant ("SiteWide")
+  - { name: default_tenant_routing_profile_type, type: string }   # String
+  - { name: initial_objects_file, type: string }   # Option<PathBuf>
+  - { name: enable_admin_ui, type: boolean }   # bool
+  - { name: web_ui_sidebar_tools, type: array }   # Vec<ToolLink>
+  - { name: log_history, type: table }   # LogHistoryConfig
+  - { name: tracing, type: table }   # TracingConfig
+  - { name: secrets, type: table }   # Option<SecretsConfig>
+  - { name: dhcp_lease_expiry_handling, type: boolean }   # bool

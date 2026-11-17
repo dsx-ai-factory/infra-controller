@@ -15,23 +15,30 @@ rules:
     - Air-gapped with a transfer path
     - Strictly air-gapped
   set:
-  - id: registry-host
+  - id: provider-run-registry-host
     option: Provider-run
   - id: external-registry-access
     option: Not applicable
 - when:
     id: source-of-the-nico-images
     options:
-    - Pulled from a local registry
+    - Pulled from a provider-run registry
   set:
-  - id: registry-host
+  - id: provider-run-registry-host
     option: Provider-run
+- when:
+    id: source-of-the-nico-images
+    options:
+    - Pulled from NGC
+  set:
+  - id: provider-run-registry-host
+    option: Not applicable
 - when:
     id: dpf
     options:
     - Skip
   set:
-  - id: dpu-agent-bootstrap-ca-dpf-path
+  - id: dpu-agent-bootstrap-ca-dpf-provisioned
     option: Not applicable
   - id: dpu-os-login-password-dpf
     option: Not applicable
@@ -56,8 +63,6 @@ rules:
     - Not applicable
   set:
   - id: rms-chart-source
-    option: Not applicable
-  - id: rack-profiles
     option: Not applicable
 - when:
     id: rms
@@ -108,7 +113,7 @@ conflicts:
   - id: source-of-the-nico-images
     options:
     - Pulled from NGC
-  reason: an air-gapped site cannot pull from NGC; the images have to be hosted in a local registry
+  reason: an air-gapped site cannot pull from NGC; the images have to be hosted in a provider-run registry
 - between:
   - id: optional-components
     options:
@@ -132,7 +137,7 @@ conflicts:
     options:
     - UFM
     lacks: true
-  - id: certificate-issuance
+  - id: certificate-issuance-overrides
     options:
     - cert-manager for UFM certificates
   reason: UFM certificates exist only when InfiniBand fabric management through UFM is ticked
@@ -168,7 +173,7 @@ conflicts:
   - id: dpf
     options:
     - Install
-  - id: autonomous-bmc-and-uefi-rotation
+  - id: autonomous-bmc-and-uefi-credential-rotation
     options:
     - BMC rotation
   reason: the pinned DPF v26.4.0 authenticates every DPU BMC with one shared Secret and cannot follow
@@ -217,3 +222,21 @@ conflicts:
     - Not applicable
     lacks: true
   reason: the Postgres store needs at least one KEK provider; an empty list names none
+- between:
+  - id: tpm-required
+    options:
+    - Not required
+  - id: measured-boot-attestation
+    options:
+    - 'On'
+  reason: measured-boot attestation reads the TPM; a site that registers machines without one cannot attest them
+- between:
+  - id: component-manager-backends
+    options:
+    - RMS for every role
+    - Mixed backends
+  - id: rms
+    options:
+    - Not applicable
+  reason: a component-manager role on the rms backend calls RMS, in the cluster or external; without an RMS the role
+    has to be core, nsm or psm

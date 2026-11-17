@@ -1,0 +1,41 @@
+# helm-prereqs values for the example site (helm-prereqs/values.yaml), the keys the config
+# checklist reads. Agrees with ../site-def.yaml.
+siteName: "site1"
+namespace: nico-system
+vault:
+  address: "https://vault.vault.svc.cluster.local:8200"
+  kvSeeds:
+    - path: "machines/all_dpus/factory_default/bmc-metadata-items/root"
+      data:
+        UsernamePassword:
+          username: "root"
+          password: "0penBmc"
+    - path: "machines/all_dpus/factory_default/uefi-metadata-items/auth"
+      data:
+        UsernamePassword:
+          username: ""
+          password: "bluefield"
+siteCredentials:
+  enabled: false
+certManager:
+  siteRoot:
+    create: true
+rest:
+  enabled: true
+  namespace: nico-rest
+rms:
+  enabled: false
+postgresql:
+  enabled: true
+  instances: 3
+  synchronousMode: true
+  volumeSize: "50Gi"
+  storageClass: "local-path-persistent"
+  host: "nico-pg-cluster.postgres.svc.cluster.local"
+  resources:
+    limits:
+      cpu: "4"
+      memory: "8Gi"
+    requests:
+      cpu: "2"
+      memory: "4Gi"

@@ -1,0 +1,76 @@
+# MetalLB site configuration for the example site: the service VIP prefix 10.10.126.192/27 split
+# into the internal pool (DHCP, DNS, PXE, SSH console, NTP, unbound) and the external pool
+# (nico-api); one BGPPeer per site controller, peering with its own DPU over the control-plane
+# /31 (myASN = bgpAsnStart, peerASN = bgpAsnStart + nodeId, peerAddress = the DPU's /31 address).
+apiVersion: metallb.io/v1beta1
+kind: IPAddressPool
+metadata:
+  name: vip-pool-internal
+  namespace: metallb-system
+spec:
+  addresses:
+    - 10.10.126.194-10.10.126.207
+---
+apiVersion: metallb.io/v1beta1
+kind: IPAddressPool
+metadata:
+  name: vip-pool-external
+  namespace: metallb-system
+spec:
+  addresses:
+    - 10.10.126.208/28
+---
+apiVersion: metallb.io/v1beta2
+kind: BGPPeer
+metadata:
+  name: sc1-bgp-peer
+  namespace: metallb-system
+spec:
+  myASN: 4244766860
+  peerASN: 4244766861
+  peerAddress: 10.10.248.88
+  nodeSelectors:
+    - matchExpressions:
+        - key: kubernetes.io/hostname
+          operator: In
+          values: [sc1]
+---
+apiVersion: metallb.io/v1beta2
+kind: BGPPeer
+metadata:
+  name: sc2-bgp-peer
+  namespace: metallb-system
+spec:
+  myASN: 4244766860
+  peerASN: 4244766862
+  peerAddress: 10.10.248.90
+  nodeSelectors:
+    - matchExpressions:
+        - key: kubernetes.io/hostname
+          operator: In
+          values: [sc2]
+---
+apiVersion: metallb.io/v1beta2
+kind: BGPPeer
+metadata:
+  name: sc3-bgp-peer
+  namespace: metallb-system
+spec:
+  myASN: 4244766860
+  peerASN: 4244766863
+  peerAddress: 10.10.248.92
+  nodeSelectors:
+    - matchExpressions:
+        - key: kubernetes.io/hostname
+          operator: In
+          values: [sc3]
+---
+apiVersion: metallb.io/v1beta1
+kind: BGPAdvertisement
+metadata:
+  name: vip-advertisement
+  namespace: metallb-system
+spec:
+  ipAddressPools:
+    - vip-pool-internal
+    - vip-pool-external
