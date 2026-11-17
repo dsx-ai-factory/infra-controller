@@ -510,6 +510,10 @@ impl NvlPartitionMonitorInstruments {
             .f64_histogram("carbide_nvlink_partition_monitor_nvlink_config_apply_latency")
             .with_description("Time since nvlink config was requested for this instance")
             .with_unit("ms")
+            .with_boundaries(vec![
+                0.0, 5.0, 10.0, 25.0, 50.0, 75.0, 100.0, 250.0, 500.0, 750.0, 1000.0, 2500.0,
+                5000.0, 7500.0, 10000.0, 15000.0, 30000.0, 60000.0, 120000.0, 300000.0,
+            ])
             .build();
 
         {
@@ -858,8 +862,69 @@ mod tests {
     use carbide_instrument::emit;
     use carbide_instrument::testing::{ApproxHistogramSum, MetricsCapture, capture_logs};
     use carbide_test_support::{Check, check_values};
+    use carbide_utils::test_support::test_meter::TestMeter;
 
     use super::*;
+
+    #[test]
+    fn pending_config_ages_resolve_slow_observations_in_finite_buckets() {
+        const METRIC_NAME: &str =
+            "carbide_nvlink_partition_monitor_nvlink_config_apply_latency_milliseconds";
+
+        let meter = TestMeter::default();
+        let holder = MetricHolder::new(meter.meter(), Duration::from_secs(60));
+        let ages_ms = vec![28084.0, 45000.0, 300000.0, 300001.0];
+        let expected_sum: f64 = ages_ms.iter().sum();
+        let mut metrics = NvlPartitionMonitorMetrics::new();
+        metrics.nvlink_config_apply_durations_ms = ages_ms;
+        holder.update_metrics(metrics);
+
+        let buckets = meter.parsed_metrics(&format!("{METRIC_NAME}_bucket"));
+        check_values(
+            [
+                Check {
+                    scenario: "existing ten-second boundary is preserved",
+                    input: "10000",
+                    expect: Some("0"),
+                },
+                Check {
+                    scenario: "reported pending age has finite resolution",
+                    input: "30000",
+                    expect: Some("1"),
+                },
+                Check {
+                    scenario: "longer pending age has a distinct finite bucket",
+                    input: "60000",
+                    expect: Some("2"),
+                },
+                Check {
+                    scenario: "five-minute boundary includes an exact match",
+                    input: "300000",
+                    expect: Some("3"),
+                },
+                Check {
+                    scenario: "ages beyond five minutes remain in overflow",
+                    input: "+Inf",
+                    expect: Some("4"),
+                },
+            ],
+            |boundary| {
+                let label = format!("{{le=\"{boundary}\"}}");
+                buckets
+                    .iter()
+                    .find(|(labels, _)| labels == &label)
+                    .map(|(_, value)| value.as_str())
+            },
+        );
+        assert_eq!(
+            meter.formatted_metric(&format!("{METRIC_NAME}_count")),
+            Some("4".to_string())
+        );
+        assert_eq!(
+            meter.formatted_metric(&format!("{METRIC_NAME}_sum")),
+            Some(expected_sum.to_string())
+        );
+    }
 
     #[test]
     fn merge_from_sums_group_fields_and_preserves_caller_owned() {
