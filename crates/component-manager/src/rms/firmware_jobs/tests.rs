@@ -26,7 +26,7 @@ fn backend(pool: PgPool) -> (Arc<MockRmsApi>, RmsBackend) {
         pool,
         Arc::default(),
         true,
-        carbide_instrument::Instrumentation::global(),
+        carbide_instrument::Instrumentation::noop(),
     );
     (mock, backend)
 }

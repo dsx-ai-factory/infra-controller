@@ -2252,7 +2252,7 @@ mod tests {
             txn,
             &dpu_id,
             &vpc_id,
-            &carbide_instrument::Instrumentation::global(),
+            &carbide_instrument::Instrumentation::noop(),
         )
         .await
         .expect("allocate target service loopback");

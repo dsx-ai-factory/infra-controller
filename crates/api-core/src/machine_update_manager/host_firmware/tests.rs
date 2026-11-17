@@ -222,7 +222,7 @@ async fn automatic_admission_preserves_a_concurrent_request_and_fills_capacity(
         &mut tasks,
         pool.clone(),
         Default::default(),
-        carbide_instrument::Instrumentation::global(),
+        carbide_instrument::Instrumentation::noop(),
     )
     .await?;
     let work_lock = locks.try_acquire_lock("host-request-race".into()).await?;
@@ -389,7 +389,7 @@ async fn skipped_candidates_leave_capacity_for_later_hosts(pool: sqlx::PgPool) -
         &mut tasks,
         pool.clone(),
         Default::default(),
-        carbide_instrument::Instrumentation::global(),
+        carbide_instrument::Instrumentation::noop(),
     )
     .await?;
     let work_lock = locks
@@ -573,7 +573,7 @@ async fn completed_events_follow_the_manager_cleanup_commit(pool: sqlx::PgPool) 
         &mut tasks,
         pool.clone(),
         Default::default(),
-        carbide_instrument::Instrumentation::global(),
+        carbide_instrument::Instrumentation::noop(),
     )
     .await?;
     let manager = MachineUpdateManager::new_with_modules(
@@ -661,7 +661,7 @@ async fn nic_work_excludes_host_admission_even_with_spare_capacity(
         &mut tasks,
         pool.clone(),
         Default::default(),
-        carbide_instrument::Instrumentation::global(),
+        carbide_instrument::Instrumentation::noop(),
     )
     .await?;
     let manager = MachineUpdateManager::new_with_modules(
@@ -926,7 +926,7 @@ async fn stale_work_lock_cannot_publish_host_firmware(
         &mut tasks,
         pool.clone(),
         Default::default(),
-        carbide_instrument::Instrumentation::global(),
+        carbide_instrument::Instrumentation::noop(),
     )
     .await?;
     let work_key = "host-firmware-admission";
@@ -991,7 +991,7 @@ async fn catalog_retry_keeps_ownership_through_publication_commit(
         &mut tasks,
         pool.clone(),
         Default::default(),
-        carbide_instrument::Instrumentation::global(),
+        carbide_instrument::Instrumentation::noop(),
     )
     .await?;
     let work_key = "host-catalog-publication";

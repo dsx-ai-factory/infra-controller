@@ -6809,7 +6809,7 @@ mod tests {
             pool,
             Arc::new(rack_profile_config()),
             true,
-            carbide_instrument::Instrumentation::global(),
+            carbide_instrument::Instrumentation::noop(),
         );
         let action = PowerAction::AcPowercycle;
         for (component, error) in [
@@ -6861,7 +6861,7 @@ mod tests {
             Some(pool),
             Some(redfish.clone()),
             None,
-            carbide_instrument::Instrumentation::global(),
+            carbide_instrument::Instrumentation::noop(),
         )
         .await
         .unwrap();
@@ -7693,11 +7693,11 @@ mod tests {
         ))
         .await;
 
-        let metrics = MetricsCapture::start();
+        let metrics = MetricsCapture::owned();
         let (status, logs) = capture_logs_async(rms_get_configure_switch_certificate_job_status(
             &mock,
             "cert-job-1",
-            &carbide_instrument::Instrumentation::global(),
+            metrics.instrumentation(),
         ))
         .await;
         let status = status.expect("unknown RMS state keeps certificate polling active");
@@ -7978,7 +7978,7 @@ mod tests {
             let error = rms_get_configure_switch_certificate_job_status(
                 &mock,
                 "cert-job-1",
-                &carbide_instrument::Instrumentation::global(),
+                &carbide_instrument::Instrumentation::noop(),
             )
             .await
             .expect_err("a missing RMS job must be reported");
@@ -9696,7 +9696,7 @@ mod tests {
             limited_pool.clone(),
             Arc::new(rack_profile_config()),
             true,
-            carbide_instrument::Instrumentation::global(),
+            carbide_instrument::Instrumentation::noop(),
         );
         let endpoint = make_ct_endpoint(CT_IP_1, CT_MAC_1);
 
@@ -9905,7 +9905,7 @@ mod tests {
             pool.clone(),
             Arc::new(rack_profile_config()),
             true,
-            carbide_instrument::Instrumentation::global(),
+            carbide_instrument::Instrumentation::noop(),
         );
         (mock, backend, rack_id, ps1, ps2, sw1, sw2)
     }
@@ -9936,7 +9936,7 @@ mod tests {
             pool.clone(),
             Arc::new(rack_profile_config()),
             true,
-            carbide_instrument::Instrumentation::global(),
+            carbide_instrument::Instrumentation::noop(),
         );
         (mock, backend, rack_id, ct1, ct2)
     }
@@ -10355,7 +10355,7 @@ mod tests {
             pool.clone(),
             Arc::new(rack_profile_config()),
             true,
-            carbide_instrument::Instrumentation::global(),
+            carbide_instrument::Instrumentation::noop(),
         );
 
         let pmc_mac: MacAddress = PS_MAC_1.parse().unwrap();
@@ -11160,7 +11160,7 @@ mod tests {
             pool,
             Arc::new(rack_profile_config()),
             true,
-            carbide_instrument::Instrumentation::global(),
+            carbide_instrument::Instrumentation::noop(),
         );
 
         mock.enqueue_batch_get_firmware_inventory(Ok(rms::BatchGetFirmwareInventoryResponse {
@@ -12629,7 +12629,7 @@ mod tests {
             read_pool.clone(),
             Arc::default(),
             true,
-            carbide_instrument::Instrumentation::global(),
+            carbide_instrument::Instrumentation::noop(),
         );
         for (mac, kind, id) in [
             (CT_MAC_1, StoredJobKind::FirmwareObject, "compute-job"),
@@ -13336,7 +13336,7 @@ mod tests {
                 pool.clone(),
                 Arc::new(rack_profile_config()),
                 true,
-                carbide_instrument::Instrumentation::global(),
+                carbide_instrument::Instrumentation::noop(),
             );
 
             // Power responses summarize batch success. Queue enough successes
@@ -13435,7 +13435,7 @@ mod tests {
                 pool.clone(),
                 Arc::new(rack_profile_config()),
                 true,
-                carbide_instrument::Instrumentation::global(),
+                carbide_instrument::Instrumentation::noop(),
             );
 
             // A command rejected before dispatch must preserve both job stores.
@@ -13693,7 +13693,7 @@ mod tests {
             pool.clone(),
             Arc::new(rack_profile_config()),
             true,
-            carbide_instrument::Instrumentation::global(),
+            carbide_instrument::Instrumentation::noop(),
         );
 
         let bmc_mac: MacAddress = CT_MAC_1.parse().unwrap();
@@ -13751,7 +13751,7 @@ mod tests {
             pool.clone(),
             Arc::new(rack_profile_config()),
             true,
-            carbide_instrument::Instrumentation::global(),
+            carbide_instrument::Instrumentation::noop(),
         );
 
         let eps = vec![make_ct_endpoint(CT_IP_1, CT_MAC_1)];

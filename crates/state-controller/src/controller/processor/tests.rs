@@ -408,7 +408,7 @@ async fn renamed_object_keeps_single_aggregate_count(pool: sqlx::PgPool) -> eyre
         &mut join_set,
         pool.clone(),
         Default::default(),
-        carbide_instrument::Instrumentation::global(),
+        carbide_instrument::Instrumentation::noop(),
     )
     .await?;
     let mut txn = pool.begin().await?;
@@ -599,7 +599,7 @@ async fn late_result_for_id_absent_from_database_does_not_contribute(
         &mut join_set,
         pool.clone(),
         Default::default(),
-        carbide_instrument::Instrumentation::global(),
+        carbide_instrument::Instrumentation::noop(),
     )
     .await?;
     let mut txn = pool.begin().await?;
@@ -739,7 +739,7 @@ async fn failed_object_id_read_preserves_existing_object_error_metrics(
         &mut join_set,
         pool.clone(),
         Default::default(),
-        carbide_instrument::Instrumentation::global(),
+        carbide_instrument::Instrumentation::noop(),
     )
     .await?;
     let io = Arc::new(TestStateControllerIO::default());
@@ -848,7 +848,7 @@ async fn non_lock_winner_refreshes_object_ids_from_database(
         &mut join_set,
         pool.clone(),
         Default::default(),
-        carbide_instrument::Instrumentation::global(),
+        carbide_instrument::Instrumentation::noop(),
     )
     .await?;
     let mut txn = pool.begin().await?;

@@ -88,7 +88,7 @@ fn manager(
         pool.clone(),
         Arc::new(profiles.clone()),
         true,
-        carbide_instrument::Instrumentation::global(),
+        carbide_instrument::Instrumentation::noop(),
     ));
 
     PreingestionManager::new(

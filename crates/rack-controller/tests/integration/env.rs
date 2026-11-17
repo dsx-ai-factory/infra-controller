@@ -137,7 +137,7 @@ async fn create_test_env_inner(pool: PgPool, overrides: TestEnvOverrides) -> Tes
         Some(pool.clone()),
         None,
         None,
-        carbide_instrument::Instrumentation::global(),
+        carbide_instrument::Instrumentation::noop(),
     )
     .await
     .expect("test component manager should build");
