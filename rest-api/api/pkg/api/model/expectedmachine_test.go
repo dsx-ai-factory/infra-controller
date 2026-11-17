@@ -34,40 +34,40 @@ func TestAPIExpectedMachineCreateRequest_Validate(t *testing.T) {
 		expectedError string
 	}{
 		{
-			desc: "DefaultBmcUsername with 16 multibyte characters",
+			desc: "DefaultBmcUsername with 255 multibyte characters",
 			obj: APIExpectedMachineCreateRequest{
 				BmcMacAddress:       "00:11:22:33:44:55",
 				ChassisSerialNumber: "SERIAL123",
-				DefaultBmcUsername:  cutil.GetPtr(strings.Repeat("é", 16)),
+				DefaultBmcUsername:  cutil.GetPtr(strings.Repeat("é", 255)),
 			},
 		},
 		{
-			desc: "DefaultBmcUsername with 17 multibyte characters",
+			desc: "DefaultBmcUsername with 256 multibyte characters",
 			obj: APIExpectedMachineCreateRequest{
 				BmcMacAddress:       "00:11:22:33:44:55",
 				ChassisSerialNumber: "SERIAL123",
-				DefaultBmcUsername:  cutil.GetPtr(strings.Repeat("é", 17)),
+				DefaultBmcUsername:  cutil.GetPtr(strings.Repeat("é", 256)),
 			},
 			expectErr:     true,
-			expectedError: "defaultBmcUsername: BMC username must be 16 characters or less.",
+			expectedError: "defaultBmcUsername: BMC username must be 255 characters or less.",
 		},
 		{
-			desc: "DefaultBmcPassword with 20 multibyte characters",
+			desc: "DefaultBmcPassword with 255 multibyte characters",
 			obj: APIExpectedMachineCreateRequest{
 				BmcMacAddress:       "00:11:22:33:44:55",
 				ChassisSerialNumber: "SERIAL123",
-				DefaultBmcPassword:  cutil.GetPtr(strings.Repeat("é", 20)),
+				DefaultBmcPassword:  cutil.GetPtr(strings.Repeat("é", 255)),
 			},
 		},
 		{
-			desc: "DefaultBmcPassword with 21 multibyte characters",
+			desc: "DefaultBmcPassword with 256 multibyte characters",
 			obj: APIExpectedMachineCreateRequest{
 				BmcMacAddress:       "00:11:22:33:44:55",
 				ChassisSerialNumber: "SERIAL123",
-				DefaultBmcPassword:  cutil.GetPtr(strings.Repeat("é", 21)),
+				DefaultBmcPassword:  cutil.GetPtr(strings.Repeat("é", 256)),
 			},
 			expectErr:     true,
-			expectedError: "defaultBmcPassword: BMC password must be 20 characters or less.",
+			expectedError: "defaultBmcPassword: BMC password must be 255 characters or less.",
 		},
 		{
 			desc: "ChassisSerialNumber with 32 multibyte characters",
@@ -179,44 +179,44 @@ func TestAPIExpectedMachineCreateRequest_Validate(t *testing.T) {
 			},
 			expectErr: true,
 		},
-		// Boundary tests for BMC username (max 16 characters)
+		// Boundary tests for BMC username (max 255 characters)
 		{
-			desc: "ok when BMC username is exactly 16 characters",
+			desc: "ok when BMC username is exactly 255 characters",
 			obj: APIExpectedMachineCreateRequest{
 				BmcMacAddress:       "00:11:22:33:44:55",
-				DefaultBmcUsername:  cutil.GetPtr(strings.Repeat("a", 16)),
+				DefaultBmcUsername:  cutil.GetPtr(strings.Repeat("a", 255)),
 				DefaultBmcPassword:  &validPassword,
 				ChassisSerialNumber: validChassisSerial,
 			},
 			expectErr: false,
 		},
 		{
-			desc: "error when BMC username is 17 characters (over limit)",
+			desc: "error when BMC username is 256 characters (over limit)",
 			obj: APIExpectedMachineCreateRequest{
 				BmcMacAddress:       "00:11:22:33:44:55",
-				DefaultBmcUsername:  cutil.GetPtr(strings.Repeat("a", 17)),
+				DefaultBmcUsername:  cutil.GetPtr(strings.Repeat("a", 256)),
 				DefaultBmcPassword:  &validPassword,
 				ChassisSerialNumber: validChassisSerial,
 			},
 			expectErr: true,
 		},
-		// Boundary tests for BMC password (max 20 characters)
+		// Boundary tests for BMC password (max 255 characters)
 		{
-			desc: "ok when BMC password is exactly 20 characters",
+			desc: "ok when BMC password is exactly 255 characters",
 			obj: APIExpectedMachineCreateRequest{
 				BmcMacAddress:       "00:11:22:33:44:55",
 				DefaultBmcUsername:  &validUsername,
-				DefaultBmcPassword:  cutil.GetPtr(strings.Repeat("a", 20)),
+				DefaultBmcPassword:  cutil.GetPtr(strings.Repeat("a", 255)),
 				ChassisSerialNumber: validChassisSerial,
 			},
 			expectErr: false,
 		},
 		{
-			desc: "error when BMC password is 21 characters (over limit)",
+			desc: "error when BMC password is 256 characters (over limit)",
 			obj: APIExpectedMachineCreateRequest{
 				BmcMacAddress:       "00:11:22:33:44:55",
 				DefaultBmcUsername:  &validUsername,
-				DefaultBmcPassword:  cutil.GetPtr(strings.Repeat("a", 21)),
+				DefaultBmcPassword:  cutil.GetPtr(strings.Repeat("a", 256)),
 				ChassisSerialNumber: validChassisSerial,
 			},
 			expectErr: true,
@@ -1069,32 +1069,32 @@ func TestAPIExpectedMachineUpdateRequest_Validate(t *testing.T) {
 		expectedError string
 	}{
 		{
-			desc: "DefaultBmcUsername with 16 multibyte characters",
+			desc: "DefaultBmcUsername with 255 multibyte characters",
 			obj: APIExpectedMachineUpdateRequest{
-				DefaultBmcUsername: cutil.GetPtr(strings.Repeat("é", 16)),
+				DefaultBmcUsername: cutil.GetPtr(strings.Repeat("é", 255)),
 			},
 		},
 		{
-			desc: "DefaultBmcUsername with 17 multibyte characters",
+			desc: "DefaultBmcUsername with 256 multibyte characters",
 			obj: APIExpectedMachineUpdateRequest{
-				DefaultBmcUsername: cutil.GetPtr(strings.Repeat("é", 17)),
+				DefaultBmcUsername: cutil.GetPtr(strings.Repeat("é", 256)),
 			},
 			expectErr:     true,
-			expectedError: "defaultBmcUsername: BMC Username must be 1-16 characters.",
+			expectedError: "defaultBmcUsername: BMC Username must be 1-255 characters.",
 		},
 		{
-			desc: "DefaultBmcPassword with 20 multibyte characters",
+			desc: "DefaultBmcPassword with 255 multibyte characters",
 			obj: APIExpectedMachineUpdateRequest{
-				DefaultBmcPassword: cutil.GetPtr(strings.Repeat("é", 20)),
+				DefaultBmcPassword: cutil.GetPtr(strings.Repeat("é", 255)),
 			},
 		},
 		{
-			desc: "DefaultBmcPassword with 21 multibyte characters",
+			desc: "DefaultBmcPassword with 256 multibyte characters",
 			obj: APIExpectedMachineUpdateRequest{
-				DefaultBmcPassword: cutil.GetPtr(strings.Repeat("é", 21)),
+				DefaultBmcPassword: cutil.GetPtr(strings.Repeat("é", 256)),
 			},
 			expectErr:     true,
-			expectedError: "defaultBmcPassword: BMC Password must be 1-20 characters.",
+			expectedError: "defaultBmcPassword: BMC Password must be 1-255 characters.",
 		},
 		{
 			desc: "ChassisSerialNumber with 32 multibyte characters",
@@ -1281,44 +1281,44 @@ func TestAPIExpectedMachineUpdateRequest_Validate(t *testing.T) {
 			},
 			expectErr: false,
 		},
-		// Boundary tests for BMC username (max 16 characters)
+		// Boundary tests for BMC username (max 255 characters)
 		{
-			desc: "ok when BMC username is exactly 16 characters",
+			desc: "ok when BMC username is exactly 255 characters",
 			obj: APIExpectedMachineUpdateRequest{
 				ChassisSerialNumber: &validChassisSerial,
-				DefaultBmcUsername:  cutil.GetPtr(strings.Repeat("a", 16)),
+				DefaultBmcUsername:  cutil.GetPtr(strings.Repeat("a", 255)),
 				DefaultBmcPassword:  &validPassword,
 				Labels:              map[string]string{"env": "test"},
 			},
 			expectErr: false,
 		},
 		{
-			desc: "error when BMC username is 17 characters (over limit)",
+			desc: "error when BMC username is 256 characters (over limit)",
 			obj: APIExpectedMachineUpdateRequest{
 				ChassisSerialNumber: &validChassisSerial,
-				DefaultBmcUsername:  cutil.GetPtr(strings.Repeat("a", 17)),
+				DefaultBmcUsername:  cutil.GetPtr(strings.Repeat("a", 256)),
 				DefaultBmcPassword:  &validPassword,
 				Labels:              map[string]string{"env": "test"},
 			},
 			expectErr: true,
 		},
-		// Boundary tests for BMC password (max 20 characters)
+		// Boundary tests for BMC password (max 255 characters)
 		{
-			desc: "ok when BMC password is exactly 20 characters",
+			desc: "ok when BMC password is exactly 255 characters",
 			obj: APIExpectedMachineUpdateRequest{
 				ChassisSerialNumber: &validChassisSerial,
 				DefaultBmcUsername:  &validUsername,
-				DefaultBmcPassword:  cutil.GetPtr(strings.Repeat("a", 20)),
+				DefaultBmcPassword:  cutil.GetPtr(strings.Repeat("a", 255)),
 				Labels:              map[string]string{"env": "test"},
 			},
 			expectErr: false,
 		},
 		{
-			desc: "error when BMC password is 21 characters (over limit)",
+			desc: "error when BMC password is 256 characters (over limit)",
 			obj: APIExpectedMachineUpdateRequest{
 				ChassisSerialNumber: &validChassisSerial,
 				DefaultBmcUsername:  &validUsername,
-				DefaultBmcPassword:  cutil.GetPtr(strings.Repeat("a", 21)),
+				DefaultBmcPassword:  cutil.GetPtr(strings.Repeat("a", 256)),
 				Labels:              map[string]string{"env": "test"},
 			},
 			expectErr: true,
