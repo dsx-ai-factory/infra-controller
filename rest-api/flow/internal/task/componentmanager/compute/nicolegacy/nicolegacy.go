@@ -20,6 +20,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/rs/zerolog/log"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -46,8 +47,7 @@ const (
 	// in the component manager catalog and in YAML / env configuration.
 	ImplementationName = "nicolegacy"
 
-	// healthOverrideSource is the source tag written into health-report
-	// overrides so they can be matched on removal.
+	// healthOverrideSource prefixes invocation-owned maintenance reports.
 	healthOverrideSource = "flow-power-control"
 )
 
@@ -234,6 +234,9 @@ func (m *Manager) PowerControl(
 
 	// Track which components had health-report overrides inserted so we
 	// can clean them up after the power operation completes.
+	// Activities can overlap during preemption or retry. A unique source
+	// prevents an older invocation's cleanup from removing a newer report.
+	overrideSource := healthOverrideSource + "-" + uuid.NewString()
 	var overrideInserted []string
 
 	defer func() {
@@ -245,7 +248,7 @@ func (m *Manager) PowerControl(
 
 		for _, componentID := range overrideInserted {
 			if err := m.nicoClient.RemoveHealthReportOverride(
-				cleanupCtx, componentID, healthOverrideSource,
+				cleanupCtx, componentID, overrideSource,
 			); err != nil {
 				log.Warn().Err(err).Str("component", componentID).
 					Msg("Failed to remove health report override after power control")
@@ -260,7 +263,7 @@ func (m *Manager) PowerControl(
 			return err
 		}
 		if err := m.nicoClient.InsertHealthReportOverride(
-			ctx, componentID, healthOverrideSource,
+			ctx, componentID, overrideSource,
 		); err != nil {
 			log.Warn().Err(err).Str("component", componentID).
 				Msg("Failed to insert health report override, proceeding anyway")
