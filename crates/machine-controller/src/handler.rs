@@ -11209,7 +11209,10 @@ async fn complete_host_firmware_reenabling_lockdown(
     };
 
     if lockdown_disabled && !state.host_snapshot.host_profile.disable_lockdown {
-        tracing::debug!("host firmware update: Reenabling lockdown");
+        tracing::info!(
+            %machine_id,
+            "host firmware update: re-enabling lockdown"
+        );
         if let Err(e) = redfish_client
             .lockdown(libredfish::EnabledDisabled::Enabled)
             .await
@@ -11767,13 +11770,12 @@ impl HostUpgradeState {
 
         let fw_config_snapshot = self.host_firmware_config_snapshot(ctx).await?;
         let Some(fw_info) = fw_config_snapshot.find_fw_info_for_host(&explored_endpoint) else {
-            // A firmware install disables lockdown before it flashes. A later
-            // pass that finds no config for this host must re-enable lockdown
-            // before the host returns to Ready, the same way the "nothing
-            // needs updates" exit does.
+            // A firmware install disables lockdown before it flashes. Finish
+            // through the same helper as the "nothing needs updates" exit.
+            // That helper re-enables lockdown only when the host still needs it.
             tracing::info!(
                 %machine_id,
-                "host firmware update: no firmware config for this host; re-enabling lockdown before completing"
+                "host firmware update: no firmware config for this host; completing the firmware check"
             );
             return complete_host_firmware_reenabling_lockdown(state, ctx, scenario).await;
         };
