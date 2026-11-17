@@ -15,7 +15,6 @@ type OperationOptions struct {
 
 var (
 	defaultOperationOptions = map[taskcommon.TaskType]OperationOptions{
-		taskcommon.TaskTypeComponentReset: {Timeout: 60 * time.Minute},
 		taskcommon.TaskTypePowerControl: {
 			Timeout: 60 * time.Minute,
 		},

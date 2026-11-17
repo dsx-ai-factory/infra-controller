@@ -74,8 +74,6 @@ func New(typ taskcommon.TaskType, info json.RawMessage) (Operation, error) {
 
 func newEmpty(typ taskcommon.TaskType) (Operation, error) {
 	switch typ {
-	case taskcommon.TaskTypeComponentReset:
-		return &ComponentResetTaskInfo{}, nil
 	case taskcommon.TaskTypePowerControl:
 		return &PowerControlTaskInfo{}, nil
 	case taskcommon.TaskTypeFirmwareControl:
@@ -297,10 +295,8 @@ type FirmwareControlTaskInfo struct {
 	// colliding with the carbide tray-level Component vocabulary used for
 	// OperationTargetSpec / ExecutionInfo.Components, which select tray
 	// INSTANCES rather than sub-parts of a tray.
-	// Explicit names are partitioned by tray type before new executions. Types
-	// with no intersection skip their rule steps; unmatched names reject admission.
-	// Empty or nil retains backend defaults and does not opt into DPU updates.
-	// Mapping from
+	// Names are lowercase and case-sensitive. Empty or nil means "update
+	// everything in the bundle" (the historical default). Mapping from
 	// these strings to component-manager-specific enums is done in each
 	// FirmwareControl implementation (see pkg/common/firmwarecomponents).
 	SubTargets []string `json:"sub_targets,omitempty"`

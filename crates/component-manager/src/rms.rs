@@ -15,7 +15,7 @@
  * limitations under the License.
  */
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap};
 use std::future::Future;
 use std::net::IpAddr;
 use std::sync::{Arc, Mutex};
@@ -35,7 +35,7 @@ use carbide_rack::rms_node_type::{
 use carbide_secrets::credentials::Credentials;
 use carbide_uuid::rack::{RackId, RackProfileId};
 use carbide_uuid::switch::SwitchId;
-use db::direct_dispatch_rms_job::RmsJobKind;
+use db::direct_dispatch_firmware_job::FirmwareJobKind;
 use librms::protos::{rack_manager as rms, rack_manager_v2 as rms_v2};
 use librms::{RackManagerError, RmsApi};
 use mac_address::MacAddress;
@@ -66,13 +66,12 @@ use crate::machine_info_provider::{
     MachineInfoProvider, MachineLocationError, MachineLocationObservation, MachineLocationTarget,
 };
 use crate::nv_switch_manager::{
-    Backend as NvSwitchBackend, ComponentResetState, ComponentResetStatus,
-    ConfigureSwitchCertificateJobStatus, NvSwitchManager, ScaleUpFabricManagerJobStatus,
-    ScaleUpFabricResponseStatus, ScaleUpFabricServiceStatuses, ScaleUpFabricStatus,
-    ScaleUpFabricSwitchStatus, SwitchCertificateEndpoint, SwitchComponentResult, SwitchEndpoint,
-    SwitchFactoryResetJobStatus, SwitchFactoryResetState, SwitchFirmwareUpdateStatus,
-    SwitchMtlsDisableJobStatus, SwitchMtlsDisableState, SwitchPasswordRotationState,
-    SwitchResetResponse, SwitchSlotAndTrayResult,
+    Backend as NvSwitchBackend, ConfigureSwitchCertificateJobStatus, NvSwitchManager,
+    ScaleUpFabricManagerJobStatus, ScaleUpFabricResponseStatus, ScaleUpFabricServiceStatuses,
+    ScaleUpFabricStatus, ScaleUpFabricSwitchStatus, SwitchCertificateEndpoint,
+    SwitchComponentResult, SwitchEndpoint, SwitchFactoryResetJobStatus, SwitchFactoryResetState,
+    SwitchFirmwareUpdateStatus, SwitchMtlsDisableJobStatus, SwitchMtlsDisableState,
+    SwitchPasswordRotationState, SwitchSlotAndTrayResult,
 };
 use crate::power_shelf_manager::{
     Backend as PowerShelfBackend, PowerShelfComponentResult, PowerShelfEndpoint,
@@ -142,13 +141,13 @@ enum RmsTrackedFirmwareJob {
 }
 
 impl RmsTrackedFirmwareJob {
-    /// The [`RmsJobKind`] this job persists under in
+    /// The [`FirmwareJobKind`] this job persists under in
     /// `direct_dispatch_firmware_update_jobs`, so it can be rebuilt (and its
     /// backend re-queried) after a restart clears the in-memory job map.
-    fn kind(&self) -> RmsJobKind {
+    fn kind(&self) -> FirmwareJobKind {
         match self {
-            RmsTrackedFirmwareJob::FirmwareObject(_) => RmsJobKind::FirmwareObject,
-            RmsTrackedFirmwareJob::SwitchSystemImage(_) => RmsJobKind::SwitchSystemImage,
+            RmsTrackedFirmwareJob::FirmwareObject(_) => FirmwareJobKind::FirmwareObject,
+            RmsTrackedFirmwareJob::SwitchSystemImage(_) => FirmwareJobKind::SwitchSystemImage,
         }
     }
 
@@ -161,11 +160,10 @@ impl RmsTrackedFirmwareJob {
     }
 
     /// Rebuild a tracked job from a persisted `(job_kind, job_id)` row.
-    fn from_persisted(job_kind: RmsJobKind, job_id: String) -> Option<Self> {
+    fn from_persisted(job_kind: FirmwareJobKind, job_id: String) -> Self {
         match job_kind {
-            RmsJobKind::FirmwareObject => Some(RmsTrackedFirmwareJob::FirmwareObject(job_id)),
-            RmsJobKind::SwitchSystemImage => Some(RmsTrackedFirmwareJob::SwitchSystemImage(job_id)),
-            RmsJobKind::SwitchSdnFactoryReset | RmsJobKind::SwitchNvosFactoryReset => None,
+            FirmwareJobKind::FirmwareObject => RmsTrackedFirmwareJob::FirmwareObject(job_id),
+            FirmwareJobKind::SwitchSystemImage => RmsTrackedFirmwareJob::SwitchSystemImage(job_id),
         }
     }
 }
@@ -1286,12 +1284,12 @@ impl RmsBackend {
         bmc_mac: MacAddress,
         jobs: Vec<RmsTrackedFirmwareJob>,
     ) {
-        let persisted: Vec<(RmsJobKind, String)> = jobs
+        let persisted: Vec<(FirmwareJobKind, String)> = jobs
             .iter()
             .map(|job| (job.kind(), job.job_id().to_owned()))
             .collect();
         if let Err(e) =
-            db::direct_dispatch_rms_job::replace_firmware_jobs(&self.db, bmc_mac, &persisted).await
+            db::direct_dispatch_firmware_job::replace(&self.db, bmc_mac, &persisted).await
         {
             tracing::warn!(
                 bmc_mac_address = %bmc_mac,
@@ -1321,7 +1319,8 @@ impl RmsBackend {
         job: RmsTrackedFirmwareJob,
     ) {
         if let Err(e) =
-            db::direct_dispatch_rms_job::save(&self.db, bmc_mac, job.kind(), job.job_id()).await
+            db::direct_dispatch_firmware_job::save(&self.db, bmc_mac, job.kind(), job.job_id())
+                .await
         {
             tracing::warn!(
                 bmc_mac_address = %bmc_mac,
@@ -1583,220 +1582,6 @@ impl RmsBackend {
             Ok(job_id)
         } else {
             Err(error.unwrap_or_else(|| "RMS switch firmware-object update failed".to_owned()))
-        }
-    }
-
-    /// Resolves and submits reset targets, recording accepted jobs by device and action.
-    async fn submit_switch_reset_batch(
-        &self,
-        endpoints: &[SwitchEndpoint],
-        job_kind: RmsJobKind,
-        domain_name: Option<&str>,
-    ) -> Result<Vec<SwitchResetResponse>, ComponentManagerError> {
-        if endpoints.is_empty() {
-            return Err(ComponentManagerError::InvalidArgument(
-                "switch reset requires at least one endpoint".into(),
-            ));
-        }
-        if job_kind == RmsJobKind::SwitchSdnFactoryReset
-            && domain_name.is_some_and(|domain| domain.trim().is_empty())
-        {
-            return Err(ComponentManagerError::InvalidArgument(
-                "SDN certificate domain must be non-empty when supplied".into(),
-            ));
-        }
-
-        let macs: Vec<_> = endpoints.iter().map(|endpoint| endpoint.bmc_mac).collect();
-        let mut identities = resolve_switch_identities(&self.db, &macs).await?;
-        let pre_ingestion_macs: Vec<_> = macs
-            .into_iter()
-            .filter(|mac| !identities.contains_key(mac))
-            .collect();
-        identities
-            .extend(resolve_pre_ingestion_switch_identities(&self.db, &pre_ingestion_macs).await?);
-        let hostnames = resolve_switch_machine_interface_hostnames(&self.db, endpoints).await?;
-
-        let mut switches = Vec::with_capacity(endpoints.len());
-        let mut responses = Vec::with_capacity(endpoints.len());
-        for endpoint in endpoints {
-            let resolved = match self.resolve_switch_or_power_shelf_node(
-                &identities,
-                endpoint.bmc_mac,
-                SwitchOrPowerShelfRole::Switch,
-            ) {
-                Ok(resolved) => resolved,
-                Err(error) => {
-                    responses.push(SwitchResetResponse {
-                        result: SwitchComponentResult {
-                            bmc_mac: endpoint.bmc_mac,
-                            success: false,
-                            error: Some(ComponentManagerError::RejectedBeforeDispatch(error)),
-                        },
-                        parent_job_id: None,
-                    });
-                    continue;
-                }
-            };
-            let node = build_switch_node_info(
-                endpoint,
-                &resolved,
-                hostnames.get(&endpoint.nvos_mac).cloned(),
-            );
-            switches.push((endpoint.bmc_mac, node));
-        }
-        if switches.is_empty() {
-            return Ok(responses);
-        }
-
-        let submitted_macs: Vec<_> = switches.iter().map(|(bmc_mac, _)| *bmc_mac).collect();
-        let submission =
-            rms_batch_reset_switch(self.client.as_ref(), switches, job_kind, domain_name).await;
-        match submission {
-            Ok(submitted) => responses.extend(submitted),
-            Err(error) => {
-                for bmc_mac in submitted_macs {
-                    responses.push(SwitchResetResponse {
-                        result: SwitchComponentResult {
-                            bmc_mac,
-                            success: false,
-                            error: Some(error.clone()),
-                        },
-                        parent_job_id: None,
-                    });
-                }
-            }
-        }
-        for response in &mut responses {
-            let result = &mut response.result;
-            let bmc_mac = result.bmc_mac;
-            if result.success {
-                // Only accepted switches replace their previous job references.
-                let saved = match response.parent_job_id.as_deref() {
-                    Some(parent_job_id) => db::direct_dispatch_rms_job::save(
-                        &self.db,
-                        bmc_mac,
-                        job_kind,
-                        parent_job_id,
-                    )
-                    .await
-                    .map_err(|error| {
-                        tracing::error!(
-                            %bmc_mac,
-                            rms_job_id = %parent_job_id,
-                            %error,
-                            "could not record component reset job"
-                        );
-                        ComponentManagerError::OperationOutcomeUnknown(format!(
-                            "RMS accepted the reset but NICo could not record its reference: {error}; do not automatically resubmit"
-                        ))
-                    }),
-                    None => Err(ComponentManagerError::OperationOutcomeUnknown(
-                        "RMS accepted the reset but returned no job reference".into(),
-                    )),
-                };
-                if let Err(error) = saved {
-                    result.success = false;
-                    result.error = Some(error);
-                }
-            }
-        }
-        Ok(responses)
-    }
-
-    async fn get_component_reset_status(
-        &self,
-        bmc_macs: &[MacAddress],
-        job_kind: RmsJobKind,
-    ) -> Result<Vec<ComponentResetStatus>, ComponentManagerError> {
-        if bmc_macs.is_empty() {
-            return Ok(Vec::new());
-        }
-        let switch_ids: HashMap<_, _> = db::switch::find_ids_by_bmc_macs(&self.db, bmc_macs)
-            .await
-            .map_err(|error| {
-                ComponentManagerError::Internal(format!(
-                    "failed to resolve switch reset identities: {error}"
-                ))
-            })?
-            .into_iter()
-            .map(|row| (row.bmc_mac_address, row.id))
-            .collect();
-
-        let mut statuses = Vec::with_capacity(bmc_macs.len());
-        for &bmc_mac in bmc_macs {
-            let state = self
-                .get_reset_status_for_switch(bmc_mac, switch_ids.get(&bmc_mac).copied(), job_kind)
-                .await;
-            statuses.push(ComponentResetStatus { bmc_mac, state });
-        }
-        Ok(statuses)
-    }
-
-    /// Reads one stored reset reference and observes only this switch's RMS child.
-    async fn get_reset_status_for_switch(
-        &self,
-        bmc_mac: MacAddress,
-        switch_id: Option<SwitchId>,
-        job_kind: RmsJobKind,
-    ) -> Result<ComponentResetState, ComponentManagerError> {
-        let parent_job_id = db::direct_dispatch_rms_job::get(&self.db, bmc_mac, job_kind)
-            .await
-            .map_err(|error| ComponentManagerError::Internal(error.to_string()))?
-            .ok_or_else(|| {
-                ComponentManagerError::NotFound(
-                    "NICo has no tracked reset for this device and action".into(),
-                )
-            })?;
-        let job_labels = job_kind.to_labels()?;
-        let jobs =
-            rms_get_switch_job_tree(self.client.as_ref(), job_labels, &parent_job_id).await?;
-        let parent = jobs
-            .iter()
-            .find(|job| job.job_id == parent_job_id)
-            .ok_or_else(|| {
-                ComponentManagerError::OperationOutcomeUnknown(format!(
-                    "RMS returned no state for {} job {parent_job_id}",
-                    job_labels.operation
-                ))
-            })?;
-        let mac_node_id = bmc_mac.to_string();
-        let switch_node_id = switch_id.map(|id| id.to_string());
-        // Pre-ingestion jobs retain the MAC node ID after NICo ingests the
-        // switch. Match only this device's direct child; peers may still be
-        // running or may have failed independently of this reset.
-        let mut children = jobs.iter().filter(|job| {
-            let belongs_to_batch = job.parent_job_id.as_deref() == Some(parent_job_id.as_str())
-                || parent.child_job_ids.contains(&job.job_id);
-            let matches_switch = job.node_id.as_deref().is_some_and(|node_id| {
-                node_id == mac_node_id || Some(node_id) == switch_node_id.as_deref()
-            });
-            job.job_id != parent_job_id && belongs_to_batch && matches_switch
-        });
-        let child = children.next().ok_or_else(|| {
-            ComponentManagerError::OperationOutcomeUnknown(format!(
-                "RMS returned no {} child for switch {bmc_mac} in job {parent_job_id}",
-                job_labels.operation
-            ))
-        })?;
-        if children.next().is_some() {
-            return Err(ComponentManagerError::OperationOutcomeUnknown(format!(
-                "RMS returned multiple {} children for switch {bmc_mac} in job {parent_job_id}",
-                job_labels.operation
-            )));
-        }
-        match rms::JobExecutionState::try_from(child.execution_state) {
-            Ok(rms::JobExecutionState::Queued) => Ok(ComponentResetState::Queued),
-            Ok(rms::JobExecutionState::Running) => Ok(ComponentResetState::InProgress),
-            Ok(rms::JobExecutionState::Completed) => Ok(ComponentResetState::Completed),
-            Ok(rms::JobExecutionState::Failed) => Ok(ComponentResetState::Failed(
-                rms_switch_job_failure(job_labels, child),
-            )),
-            Ok(rms::JobExecutionState::Unspecified) | Err(_) => {
-                Err(ComponentManagerError::OperationOutcomeUnknown(format!(
-                    "RMS {} child {} returned unknown execution state {}",
-                    job_labels.operation, child.job_id, child.execution_state
-                )))
-            }
         }
     }
 
@@ -2404,10 +2189,10 @@ impl PowerShelfManager for RmsBackend {
                             ep.pmc_mac,
                             vec![RmsTrackedFirmwareJob::FirmwareObject(job_id.clone())],
                         );
-                        if let Err(e) = db::direct_dispatch_rms_job::save(
+                        if let Err(e) = db::direct_dispatch_firmware_job::save(
                             &self.db,
                             ep.pmc_mac,
-                            RmsJobKind::FirmwareObject,
+                            FirmwareJobKind::FirmwareObject,
                             &job_id,
                         )
                         .await
@@ -2427,10 +2212,10 @@ impl PowerShelfManager for RmsBackend {
                         // (which, after a restart, reads the DB) would recover
                         // the stale job and report its state for this request.
                         self.firmware_jobs.lock().unwrap().remove(&ep.pmc_mac);
-                        if let Err(e) = db::direct_dispatch_rms_job::delete(
+                        if let Err(e) = db::direct_dispatch_firmware_job::delete(
                             &self.db,
                             ep.pmc_mac,
-                            RmsJobKind::FirmwareObject,
+                            FirmwareJobKind::FirmwareObject,
                         )
                         .await
                         {
@@ -2498,10 +2283,10 @@ impl PowerShelfManager for RmsBackend {
             let resolved_job_id: Option<String> = if in_memory_job.is_some() {
                 in_memory_job.clone()
             } else {
-                match db::direct_dispatch_rms_job::get(
+                match db::direct_dispatch_firmware_job::get(
                     &self.db,
                     *pmc_mac,
-                    RmsJobKind::FirmwareObject,
+                    FirmwareJobKind::FirmwareObject,
                 )
                 .await
                 {
@@ -3695,7 +3480,7 @@ impl NvSwitchManager for RmsBackend {
                     results.push(SwitchComponentResult {
                         bmc_mac: ep.bmc_mac,
                         success: false,
-                        error: Some(ComponentManagerError::Internal(error)),
+                        error: Some(error),
                     });
                     continue;
                 }
@@ -3724,7 +3509,7 @@ impl NvSwitchManager for RmsBackend {
                     results.push(SwitchComponentResult {
                         bmc_mac: ep.bmc_mac,
                         success,
-                        error: error.map(ComponentManagerError::Internal),
+                        error,
                     });
                 }
                 Err(e) => {
@@ -3736,7 +3521,7 @@ impl NvSwitchManager for RmsBackend {
                     results.push(SwitchComponentResult {
                         bmc_mac: ep.bmc_mac,
                         success: false,
-                        error: Some(ComponentManagerError::Internal(e.to_string())),
+                        error: Some(e.to_string()),
                     });
                 }
             }
@@ -3790,7 +3575,7 @@ impl NvSwitchManager for RmsBackend {
                     results.push(SwitchComponentResult {
                         bmc_mac: ep.bmc_mac,
                         success: false,
-                        error: Some(ComponentManagerError::Internal(error)),
+                        error: Some(error),
                     });
                     continue;
                 }
@@ -3968,8 +3753,7 @@ impl NvSwitchManager for RmsBackend {
             results.push(SwitchComponentResult {
                 bmc_mac: ep.bmc_mac,
                 success,
-                error: (!errors.is_empty())
-                    .then(|| ComponentManagerError::Internal(errors.join("; "))),
+                error: (!errors.is_empty()).then(|| errors.join("; ")),
             });
         }
 
@@ -3999,12 +3783,10 @@ impl NvSwitchManager for RmsBackend {
             let jobs: Vec<RmsTrackedFirmwareJob> = if !in_memory_jobs.is_empty() {
                 in_memory_jobs.clone()
             } else {
-                match db::direct_dispatch_rms_job::get_firmware_jobs(&self.db, bmc_mac).await {
+                match db::direct_dispatch_firmware_job::get_all(&self.db, bmc_mac).await {
                     Ok(rows) => rows
                         .into_iter()
-                        .filter_map(|(kind, job_id)| {
-                            RmsTrackedFirmwareJob::from_persisted(kind, job_id)
-                        })
+                        .map(|(kind, job_id)| RmsTrackedFirmwareJob::from_persisted(kind, job_id))
                         .collect(),
                     Err(e) => {
                         tracing::warn!(
@@ -4279,46 +4061,40 @@ impl NvSwitchManager for RmsBackend {
         rms_get_configure_switch_certificate_job_status(self.client.as_ref(), job_id).await
     }
 
-    #[instrument(skip(self, endpoints, domain_name), fields(backend = "rms"))]
-    async fn batch_reset_sdn_factory_default(
-        &self,
-        endpoints: &[SwitchEndpoint],
-        domain_name: Option<&str>,
-    ) -> Result<Vec<SwitchResetResponse>, ComponentManagerError> {
-        self.submit_switch_reset_batch(endpoints, RmsJobKind::SwitchSdnFactoryReset, domain_name)
-            .await
-    }
-
-    #[instrument(skip(self, bmc_macs), fields(backend = "rms"))]
-    async fn get_sdn_factory_reset_status(
-        &self,
-        bmc_macs: &[MacAddress],
-    ) -> Result<Vec<ComponentResetStatus>, ComponentManagerError> {
-        self.get_component_reset_status(bmc_macs, RmsJobKind::SwitchSdnFactoryReset)
-            .await
-    }
-
-    #[instrument(skip(self, bmc_macs), fields(backend = "rms"))]
-    async fn get_nvos_factory_reset_status(
-        &self,
-        bmc_macs: &[MacAddress],
-    ) -> Result<Vec<ComponentResetStatus>, ComponentManagerError> {
-        self.get_component_reset_status(bmc_macs, RmsJobKind::SwitchNvosFactoryReset)
-            .await
-    }
-
     #[instrument(skip(self, endpoints, tls_server_domain), fields(backend = "rms"))]
     async fn batch_reset_switch_factory_default(
         &self,
         endpoints: &[SwitchEndpoint],
         tls_server_domain: Option<&str>,
-    ) -> Result<Vec<SwitchResetResponse>, ComponentManagerError> {
-        self.submit_switch_reset_batch(
-            endpoints,
-            RmsJobKind::SwitchNvosFactoryReset,
-            tls_server_domain,
-        )
-        .await
+    ) -> Result<String, ComponentManagerError> {
+        if endpoints.is_empty() {
+            return Err(ComponentManagerError::InvalidArgument(
+                "switch factory reset requires at least one endpoint".to_string(),
+            ));
+        }
+
+        let macs: Vec<MacAddress> = endpoints.iter().map(|endpoint| endpoint.bmc_mac).collect();
+        let identities = resolve_switch_identities(&self.db, &macs).await?;
+        let hostnames = resolve_switch_machine_interface_hostnames(&self.db, endpoints).await?;
+        let mut nodes = Vec::with_capacity(endpoints.len());
+
+        for endpoint in endpoints {
+            let resolved = self
+                .resolve_switch_or_power_shelf_node(
+                    &identities,
+                    endpoint.bmc_mac,
+                    SwitchOrPowerShelfRole::Switch,
+                )
+                .map_err(ComponentManagerError::Internal)?;
+
+            nodes.push(build_switch_node_info(
+                endpoint,
+                &resolved,
+                hostnames.get(&endpoint.nvos_mac).cloned(),
+            ));
+        }
+
+        rms_batch_reset_switch_factory_default(self.client.as_ref(), nodes, tls_server_domain).await
     }
 
     #[instrument(skip(self), fields(backend = "rms", job_id))]
@@ -4619,215 +4395,60 @@ fn map_rms_password_rotation_state(job: &rms::JobStatus) -> SwitchPasswordRotati
     }
 }
 
-/// Submits switch resets and associates each admission result with its BMC MAC.
-async fn rms_batch_reset_switch(
+/// Submits a factory-reset batch and requires RMS to return a job ID.
+///
+/// `tls_server_domain` overrides the RMS switch domain. If omitted, RMS uses its
+/// configured domain.
+/// The request enables SSH fallback for NVUE connection or TLS failures before
+/// reset submission.
+async fn rms_batch_reset_switch_factory_default(
     client: &dyn RmsApi,
-    switches: Vec<(MacAddress, rms::NodeInfo)>,
-    job_kind: RmsJobKind,
-    domain_name: Option<&str>,
-) -> Result<Vec<SwitchResetResponse>, ComponentManagerError> {
-    let submitted_switches: Vec<_> = switches
-        .iter()
-        .map(|(bmc_mac, node)| (*bmc_mac, node.node_id.clone()))
-        .collect();
-    let nodes = Some(rms::NodeSet {
-        nodes: switches.into_iter().map(|(_, node)| node).collect(),
-    });
-    let domain = domain_name.map(str::to_owned);
-    let job_labels = job_kind.to_labels()?;
-    let response = match job_kind {
-        RmsJobKind::SwitchSdnFactoryReset => red::instrumented(
-            "rms",
-            "batch_reset_switch_sdn_factory_default",
-            client.batch_reset_switch_sdn_factory_default(
-                rms::BatchResetSwitchSdnFactoryDefaultRequest { nodes, domain },
-            ),
+    nodes: Vec<rms::NodeInfo>,
+    tls_server_domain: Option<&str>,
+) -> Result<String, ComponentManagerError> {
+    let request = rms::BatchResetSwitchFactoryDefaultRequest {
+        allow_ssh_fallback: true,
+        nodes: Some(rms::NodeSet { nodes }),
+        domain: tls_server_domain.map(str::to_owned),
+    };
+
+    let response = red::instrumented(
+        "rms",
+        "batch_reset_switch_factory_default",
+        client.batch_reset_switch_factory_default(request),
+    )
+    .await
+    .map_err(|error| match error {
+        // The contract guarantees that an unimplemented RPC accepted no reset work.
+        // Other status or transport failures can arrive after dispatch, so they must
+        // not invite an automatic retry of this destructive operation.
+        RackManagerError::ApiInvocationError(status)
+            if status.code() == tonic::Code::Unimplemented =>
+        {
+            ComponentManagerError::Unsupported(
+                "RMS does not support switch factory reset".to_string(),
+            )
+        }
+        _ => ComponentManagerError::OperationOutcomeUnknown(
+            "RMS switch factory-reset submission returned no durable job ID".to_string(),
+        ),
+    })?;
+
+    let batch = response.response.ok_or_else(|| {
+        ComponentManagerError::OperationOutcomeUnknown(
+            "RMS switch factory-reset submission returned no operation response or job ID"
+                .to_string(),
         )
-        .await
-        .map(|response| response.response),
-        RmsJobKind::SwitchNvosFactoryReset => red::instrumented(
-            "rms",
-            "batch_reset_switch_factory_default",
-            client.batch_reset_switch_factory_default(rms::BatchResetSwitchFactoryDefaultRequest {
-                nodes,
-                domain,
-                allow_ssh_fallback: true,
-            }),
-        )
-        .await
-        .map(|response| response.response),
-        RmsJobKind::FirmwareObject | RmsJobKind::SwitchSystemImage => {
-            return Err(ComponentManagerError::Internal(format!(
-                "expected a reset job kind, got {job_kind:?}"
-            )));
-        }
-    };
-    let batch = response
-        .map_err(|error| match error {
-            // Only Unimplemented proves that the submission accepted no reset work.
-            RackManagerError::ApiInvocationError(status)
-                if status.code() == tonic::Code::Unimplemented =>
-            {
-                ComponentManagerError::Unsupported(format!(
-                    "RMS does not support {}",
-                    job_labels.operation
-                ))
-            }
-            error => ComponentManagerError::OperationOutcomeUnknown(format!(
-                "RMS {} submission returned no observable result: {error}",
-                job_labels.operation
-            )),
-        })?
-        .ok_or_else(|| {
-            ComponentManagerError::OperationOutcomeUnknown(format!(
-                "RMS {} response is missing its batch response",
-                job_labels.operation
-            ))
-        })?;
-    interpret_switch_reset_response(batch, submitted_switches, job_kind)
-}
+    })?;
 
-/// Interprets action-specific RMS admission records into common per-switch results.
-fn interpret_switch_reset_response(
-    batch: rms::NodeBatchResponse,
-    submitted_switches: Vec<(MacAddress, String)>,
-    job_kind: RmsJobKind,
-) -> Result<Vec<SwitchResetResponse>, ComponentManagerError> {
-    let job_labels = job_kind.to_labels()?;
-    let node_results_by_id: HashMap<_, _> = batch
-        .node_results
-        .iter()
-        .map(|result| (result.node_id.as_str(), result))
-        .collect();
-    let validation = if job_kind == RmsJobKind::SwitchSdnFactoryReset {
-        let submitted_node_ids: Vec<_> = submitted_switches
-            .iter()
-            .map(|(_, node_id)| node_id.clone())
-            .collect();
-        validate_sdn_reset_batch_response(&batch, &submitted_node_ids)
-    } else if node_results_by_id.len() != batch.node_results.len() {
-        Err("contains duplicate node IDs")
-    } else {
-        Ok(())
-    };
-    if let Err(error) = validation {
-        // Preserve a candidate handle for investigation without recording
-        // it as an accepted reset.
-        if !batch.job_id.trim().is_empty() {
-            tracing::warn!(
-                rms_job_id = %batch.job_id,
-                operation = job_labels.operation,
-                error,
-                "RMS reset response was ambiguous; inspect candidate job before retrying"
-            );
-        }
-        return Err(ComponentManagerError::OperationOutcomeUnknown(format!(
-            "RMS {} response {error}",
-            job_labels.operation
-        )));
-    }
-    let all_rejected = batch
-        .stats
-        .as_ref()
-        .is_some_and(|stats| stats.successful_nodes == 0);
-    let parent_job_id = (!batch.job_id.trim().is_empty()).then_some(batch.job_id.as_str());
-
-    Ok(submitted_switches
-        .into_iter()
-        .map(|(bmc_mac, node_id)| {
-            let node_result = node_results_by_id.get(node_id.as_str());
-            let status = match job_kind {
-                // SDN lists only rejections. Validated counts establish whether
-                // an omitted node was accepted or the entire batch was rejected.
-                RmsJobKind::SwitchSdnFactoryReset => {
-                    Some(if all_rejected || node_result.is_some() {
-                        rms::ReturnCode::Failure
-                    } else {
-                        rms::ReturnCode::Success
-                    })
-                }
-                // NVOS explicitly reports every accepted or rejected node.
-                RmsJobKind::SwitchNvosFactoryReset => {
-                    node_result.and_then(|result| rms::ReturnCode::try_from(result.status).ok())
-                }
-                RmsJobKind::FirmwareObject | RmsJobKind::SwitchSystemImage => None,
-            };
-            let error = match status {
-                Some(rms::ReturnCode::Failure) => {
-                    let reason = node_result
-                        .map(|result| result.error_message.as_str())
-                        .filter(|message| !message.is_empty())
-                        .unwrap_or(&batch.message);
-                    Some(ComponentManagerError::RejectedBeforeDispatch(format!(
-                        "RMS rejected {} for node {node_id}: {reason}",
-                        job_labels.operation
-                    )))
-                }
-                Some(rms::ReturnCode::Success) if parent_job_id.is_some() => None,
-                Some(rms::ReturnCode::Success) => {
-                    Some(ComponentManagerError::OperationOutcomeUnknown(
-                        "RMS accepted the reset but returned no job reference".into(),
-                    ))
-                }
-                _ => Some(ComponentManagerError::OperationOutcomeUnknown(format!(
-                    "RMS did not establish {} acceptance for node {node_id}",
-                    job_labels.operation
-                ))),
-            };
-            SwitchResetResponse {
-                result: SwitchComponentResult {
-                    bmc_mac,
-                    success: error.is_none(),
-                    error,
-                },
-                parent_job_id: parent_job_id.map(str::to_owned),
-            }
-        })
-        .collect())
-}
-
-/// Verifies that RMS accounts for every submitted node before acceptance is inferred.
-fn validate_sdn_reset_batch_response(
-    batch: &rms::NodeBatchResponse,
-    submitted_node_ids: &[String],
-) -> Result<(), &'static str> {
-    let stats = batch.stats.as_ref().ok_or("is missing node counts")?;
-    if stats.total_nodes as usize != submitted_node_ids.len()
-        || stats.successful_nodes.checked_add(stats.failed_nodes) != Some(stats.total_nodes)
-    {
-        return Err("has inconsistent node counts");
-    }
-    let expected_status = if stats.failed_nodes == 0 {
-        rms::ReturnCode::Success
-    } else {
-        rms::ReturnCode::Failure
-    };
-    if batch.status != expected_status as i32 {
-        return Err("has a status that contradicts its node counts");
+    if !batch.job_id.trim().is_empty() {
+        return Ok(batch.job_id);
     }
 
-    let mut unreported_node_ids: HashSet<_> =
-        submitted_node_ids.iter().map(String::as_str).collect();
-    if unreported_node_ids.len() != submitted_node_ids.len() {
-        return Err("cannot distinguish duplicate submitted node IDs");
-    }
-    for result in &batch.node_results {
-        let node_id = result.node_id.as_str();
-        if !unreported_node_ids.remove(node_id) {
-            return Err("contains unknown or duplicate node IDs");
-        }
-        if result.status != rms::ReturnCode::Failure as i32 {
-            return Err("contains a node result that is not a rejection");
-        }
-    }
-
-    // RMS lists only rejections. Partial acceptance requires every rejection
-    // to be identified. Parent-job creation can fail before RMS lists every
-    // rejected node, in which case the zero successful count rejects the batch.
-    if stats.successful_nodes > 0 && batch.node_results.len() != stats.failed_nodes as usize {
-        return Err("does not identify every rejected node");
-    }
-    Ok(())
+    Err(ComponentManagerError::OperationOutcomeUnknown(format!(
+        "RMS switch factory-reset submission returned no job ID (status {}); the operation outcome is unknown",
+        batch.status
+    )))
 }
 
 /// Names an asynchronous switch operation in aggregated RMS job diagnostics.
@@ -4839,27 +4460,6 @@ struct RmsSwitchJobLabels {
     /// Noun for the outcome that cannot be established, such as `reset`.
     outcome: &'static str,
 }
-
-trait RmsJobKindExt {
-    fn to_labels(self) -> Result<RmsSwitchJobLabels, ComponentManagerError>;
-}
-
-impl RmsJobKindExt for RmsJobKind {
-    fn to_labels(self) -> Result<RmsSwitchJobLabels, ComponentManagerError> {
-        match self {
-            Self::SwitchSdnFactoryReset => Ok(SDN_RESET_JOB_LABELS),
-            Self::SwitchNvosFactoryReset => Ok(FACTORY_RESET_JOB_LABELS),
-            Self::FirmwareObject | Self::SwitchSystemImage => Err(ComponentManagerError::Internal(
-                format!("expected a reset job kind, got {self:?}"),
-            )),
-        }
-    }
-}
-
-const SDN_RESET_JOB_LABELS: RmsSwitchJobLabels = RmsSwitchJobLabels {
-    operation: "switch SDN factory-reset",
-    outcome: "reset",
-};
 
 const FACTORY_RESET_JOB_LABELS: RmsSwitchJobLabels = RmsSwitchJobLabels {
     operation: "switch factory-reset",
@@ -5499,10 +5099,9 @@ impl RmsBackend {
     /// Apply a firmware object to one compute node and record the resulting job.
     ///
     /// Shared by the ingested and pre-ingestion paths of `update_firmware`. The
-    /// resulting backend job id is persisted to
-    /// `direct_dispatch_firmware_update_jobs` under the BMC MAC and
-    /// `RmsJobKind::FirmwareObject`, so status queries survive a nico-api
-    /// restart whether or not the tray has a `machines` row yet.
+    /// resulting backend job id is persisted to `compute_firmware_object_jobs`
+    /// keyed by BMC MAC so status queries survive a nico-api restart, whether or
+    /// not the tray has a `machines` row yet.
     async fn apply_compute_firmware_object(
         &self,
         ep: &ComputeTrayEndpoint,
@@ -5565,10 +5164,10 @@ impl RmsBackend {
                             ep.bmc_mac,
                             vec![RmsTrackedFirmwareJob::FirmwareObject(job_id.clone())],
                         );
-                        if let Err(e) = db::direct_dispatch_rms_job::save(
+                        if let Err(e) = db::direct_dispatch_firmware_job::save(
                             &self.db,
                             ep.bmc_mac,
-                            RmsJobKind::FirmwareObject,
+                            FirmwareJobKind::FirmwareObject,
                             job_id,
                         )
                         .await
@@ -5824,9 +5423,10 @@ impl ComputeTrayManager for RmsBackend {
         let mut results = Vec::with_capacity(endpoints.len());
 
         for ep in endpoints {
-            // Either identity source persists the resulting job ID to
-            // `direct_dispatch_firmware_update_jobs`, keyed by BMC MAC and
-            // `RmsJobKind::FirmwareObject`.
+            // Ingested trays resolve their RMS identity from the machine row by
+            // BMC IP; pre-ingestion trays fall back to expected inventory by BMC
+            // MAC. Either way the resulting job id is persisted uniformly to
+            // compute_firmware_object_jobs (keyed by BMC MAC).
             let identity = match ingested
                 .get(&ep.bmc_ip)
                 .or_else(|| pre_ingestion.get(&ep.bmc_mac))
@@ -5893,10 +5493,10 @@ impl ComputeTrayManager for RmsBackend {
             let resolved_job_id: Option<String> = if in_memory_job.is_some() {
                 in_memory_job
             } else {
-                match db::direct_dispatch_rms_job::get(
+                match db::direct_dispatch_firmware_job::get(
                     &self.db,
                     ep.bmc_mac,
-                    RmsJobKind::FirmwareObject,
+                    FirmwareJobKind::FirmwareObject,
                 )
                 .await
                 {
@@ -9177,10 +8777,10 @@ mod tests {
         // The failed submission must clear the persisted job, not just the
         // in-memory entry, so a restart cannot resurrect it.
         assert_eq!(
-            db::direct_dispatch_rms_job::get(
+            db::direct_dispatch_firmware_job::get(
                 &pool,
                 PS_MAC_1.parse::<MacAddress>().unwrap(),
-                RmsJobKind::FirmwareObject,
+                FirmwareJobKind::FirmwareObject,
             )
             .await
             .unwrap(),
@@ -9285,10 +8885,10 @@ mod tests {
 
         // The job id is persisted under the PMC MAC so a restart can recover it.
         assert_eq!(
-            db::direct_dispatch_rms_job::get(
+            db::direct_dispatch_firmware_job::get(
                 &pool,
                 PS_MAC_1.parse::<MacAddress>().unwrap(),
-                RmsJobKind::FirmwareObject,
+                FirmwareJobKind::FirmwareObject,
             )
             .await
             .unwrap(),
@@ -9815,79 +9415,40 @@ mod tests {
         ));
     }
 
-    include!("rms/reset_tests.rs");
-
     #[carbide_macros::sqlx_test]
-    async fn sw_batch_reset_switch_factory_default_preserves_parent_for_aggregate_polling(
+    async fn sw_batch_reset_switch_factory_default_maps_endpoints_and_returns_job_id(
         pool: sqlx::PgPool,
     ) {
-        let (mock, backend, _, _, _, sw1, sw2) = make_backend(&pool).await;
-        let manager = crate::component_manager::ComponentManager::new(
-            Arc::new(backend),
-            Arc::new(crate::mock::MockPowerShelfManager),
-            Arc::new(crate::mock::MockComputeTrayManager),
-            false,
-            false,
-            false,
-        );
-        let endpoints = [make_sw_endpoint(SW_MAC_1), make_sw_endpoint(SW_MAC_2)];
+        let (mock, backend, _, _, _, sw1, _) = make_backend(&pool).await;
+
+        let expected_response = rms::BatchResetSwitchFactoryDefaultResponse {
+            response: Some(rms::NodeBatchResponse {
+                status: rms::ReturnCode::Success as i32,
+                job_id: "factory-reset-job-1".to_string(),
+                ..Default::default()
+            }),
+        };
+
+        mock.enqueue_batch_reset_switch_factory_default(Ok(expected_response))
+            .await;
+
+        let endpoint = make_sw_endpoint(SW_MAC_1);
+
         let tls_server_domain = "switches.example.test";
-        sqlx::query(
-            "ALTER TABLE direct_dispatch_reset_jobs ADD CHECK (job_id <> 'unrecorded-reset')",
+
+        let job_id = NvSwitchManager::batch_reset_switch_factory_default(
+            &backend,
+            std::slice::from_ref(&endpoint),
+            Some(tls_server_domain),
         )
-        .execute(&pool)
         .await
         .unwrap();
-        for (scenario, response, targets, expected_parent) in [
-            (
-                "accepted reset",
-                nvos_reset_batch_response("factory-reset-job-1", &[&sw1.to_string()], &[]),
-                &endpoints[..1],
-                Some("factory-reset-job-1"),
-            ),
-            (
-                "all targets rejected despite a parent ID",
-                nvos_reset_batch_response("factory-reset-job-1", &[], &[&sw1.to_string()]),
-                &endpoints[..1],
-                None,
-            ),
-            (
-                "known parent survives tracking failure",
-                nvos_reset_batch_response("unrecorded-reset", &[&sw1.to_string()], &[]),
-                &endpoints[..1],
-                Some("unrecorded-reset"),
-            ),
-            (
-                "rejected first target does not hide accepted peer",
-                nvos_reset_batch_response(
-                    "partial-reset-job",
-                    &[&sw2.to_string()],
-                    &[&sw1.to_string()],
-                ),
-                &endpoints[..],
-                Some("partial-reset-job"),
-            ),
-        ] {
-            mock.enqueue_batch_reset_switch_factory_default(Ok(response))
-                .await;
-            let result = manager
-                .batch_reset_switch_factory_default(targets, Some(tls_server_domain))
-                .await;
-            match expected_parent {
-                Some(expected) => assert_eq!(result.unwrap(), expected, "{scenario}"),
-                None => assert!(
-                    matches!(
-                        result,
-                        Err(ComponentManagerError::RejectedBeforeDispatch(_))
-                    ),
-                    "{scenario}: {result:?}",
-                ),
-            }
-        }
+
+        assert_eq!(job_id, "factory-reset-job-1");
 
         let calls = mock.batch_reset_switch_factory_default_calls().await;
 
-        assert_eq!(calls.len(), 4);
+        assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].domain.as_deref(), Some(tls_server_domain));
         assert!(calls[0].allow_ssh_fallback);
 
@@ -9901,112 +9462,35 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn sw_batch_reset_switch_factory_default_requires_observable_admission() {
-        let response = nvos_reset_batch_response("parent", &["node-1", "node-2"], &[]);
-        let mut duplicate = response.clone();
-        let batch = duplicate.response.as_mut().unwrap();
-        batch.node_results.push(batch.node_results[0].clone());
-        let mut missing_node = response.clone();
-        missing_node.response.as_mut().unwrap().node_results.pop();
-        let mut unknown_status = response;
-        unknown_status.response.as_mut().unwrap().node_results[1].status = 999;
-        carbide_test_support::check_cases_async(
-            [
-                (
-                    "missing response",
-                    rms::BatchResetSwitchFactoryDefaultResponse::default(),
-                    None,
-                    None,
-                ),
-                ("duplicate node ID", duplicate, None, None),
-                (
-                    "missing node preserves accepted peer",
-                    missing_node,
-                    Some(["accepted", "unknown"]),
-                    Some("parent"),
-                ),
-                (
-                    "unknown node status preserves accepted peer",
-                    unknown_status,
-                    Some(["accepted", "unknown"]),
-                    Some("parent"),
-                ),
-                (
-                    "missing parent preserves explicit rejection",
-                    nvos_reset_batch_response(" \t", &["node-1"], &["node-2"]),
-                    Some(["unknown", "rejected"]),
-                    None,
-                ),
-            ]
-            .into_iter()
-            .map(|(scenario, input, outcomes, parent_job_id)| Case {
-                scenario,
-                input,
-                expect: Yields((outcomes.map(Vec::from), parent_job_id.map(str::to_owned))),
-            }),
-            |response| async move {
-                let mock = MockRmsApi::new();
-                mock.enqueue_batch_reset_switch_factory_default(Ok(response))
-                    .await;
-                let switches =
-                    [(SW_MAC_1, "node-1"), (SW_MAC_2, "node-2")].map(|(mac, node_id)| {
-                        (
-                            mac.parse::<MacAddress>().unwrap(),
-                            rms::NodeInfo {
-                                node_id: node_id.to_owned(),
-                                ..Default::default()
-                            },
-                        )
-                    });
-                let result = rms_batch_reset_switch(
-                    &mock,
-                    switches.into(),
-                    RmsJobKind::SwitchNvosFactoryReset,
-                    None,
-                )
+    async fn sw_batch_reset_switch_factory_default_requires_durable_job_id() {
+        let cases = [
+            (
+                "missing response",
+                rms::BatchResetSwitchFactoryDefaultResponse::default(),
+            ),
+            (
+                "empty job ID",
+                rms::BatchResetSwitchFactoryDefaultResponse {
+                    response: Some(rms::NodeBatchResponse::default()),
+                },
+            ),
+        ];
+
+        for (scenario, response) in cases {
+            let mock = MockRmsApi::new();
+            mock.enqueue_batch_reset_switch_factory_default(Ok(response))
                 .await;
-                assert_eq!(
-                    mock.batch_reset_switch_factory_default_calls().await.len(),
-                    1
-                );
-                let responses = match result {
-                    Ok(responses) => responses,
-                    Err(ComponentManagerError::OperationOutcomeUnknown(_)) => {
-                        return Ok((None, None));
-                    }
-                    Err(error) => return Err(format!("unexpected submission error: {error:?}")),
-                };
-                assert_eq!(responses.len(), 2);
-                let parent_job_id = responses[0].parent_job_id.clone();
-                assert!(
-                    responses
-                        .iter()
-                        .all(|response| response.parent_job_id == parent_job_id)
-                );
-                let responses: HashMap<_, _> = responses
-                    .into_iter()
-                    .map(|response| (response.result.bmc_mac, response.result))
-                    .collect();
-                let outcomes = [SW_MAC_1, SW_MAC_2]
-                    .into_iter()
-                    .map(|mac| {
-                        let result = &responses[&mac.parse::<MacAddress>().unwrap()];
-                        match (&result.error, result.success) {
-                            (None, true) => Ok("accepted"),
-                            (Some(ComponentManagerError::RejectedBeforeDispatch(_)), false) => {
-                                Ok("rejected")
-                            }
-                            (Some(ComponentManagerError::OperationOutcomeUnknown(_)), false) => {
-                                Ok("unknown")
-                            }
-                            other => Err(format!("unexpected reset result: {other:?}")),
-                        }
-                    })
-                    .collect::<Result<Vec<_>, _>>()?;
-                Ok((Some(outcomes), parent_job_id))
-            },
-        )
-        .await;
+
+            let error =
+                rms_batch_reset_switch_factory_default(&mock, vec![rms::NodeInfo::default()], None)
+                    .await
+                    .expect_err(scenario);
+
+            assert!(matches!(
+                error,
+                ComponentManagerError::OperationOutcomeUnknown(_)
+            ));
+        }
     }
 
     #[tokio::test]
@@ -10018,14 +9502,10 @@ mod tests {
         )))
         .await;
 
-        let error = rms_batch_reset_switch(
-            &mock,
-            vec![(SW_MAC_1.parse().unwrap(), rms::NodeInfo::default())],
-            RmsJobKind::SwitchNvosFactoryReset,
-            None,
-        )
-        .await
-        .unwrap_err();
+        let error =
+            rms_batch_reset_switch_factory_default(&mock, vec![rms::NodeInfo::default()], None)
+                .await
+                .unwrap_err();
 
         assert!(matches!(
             error,
@@ -10042,10 +9522,9 @@ mod tests {
             )))
             .await;
 
-        let error = rms_batch_reset_switch(
+        let error = rms_batch_reset_switch_factory_default(
             &invalid_argument,
-            vec![(SW_MAC_1.parse().unwrap(), rms::NodeInfo::default())],
-            RmsJobKind::SwitchNvosFactoryReset,
+            vec![rms::NodeInfo::default()],
             None,
         )
         .await
@@ -10063,10 +9542,9 @@ mod tests {
             )))
             .await;
 
-        let error = rms_batch_reset_switch(
+        let error = rms_batch_reset_switch_factory_default(
             &unimplemented,
-            vec![(SW_MAC_1.parse().unwrap(), rms::NodeInfo::default())],
-            RmsJobKind::SwitchNvosFactoryReset,
+            vec![rms::NodeInfo::default()],
             None,
         )
         .await

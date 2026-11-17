@@ -23,11 +23,10 @@ type mockStore struct {
 	racksWithWaiting []uuid.UUID
 	statusUpdates    []*taskdef.TaskStatusUpdate
 
-	listActiveErr    error
-	listWaitingErr   error
-	listRacksErr     error
-	updateStatusErr  error
-	skipStatusUpdate bool
+	listActiveErr   error
+	listWaitingErr  error
+	listRacksErr    error
+	updateStatusErr error
 }
 
 func newMockStore() *mockStore {
@@ -70,12 +69,12 @@ func (m *mockStore) UpdateTaskReport(_ context.Context, _ *taskdef.TaskReportUpd
 	return nil
 }
 
-func (m *mockStore) UpdateTaskStatus(ctx context.Context, arg *taskdef.TaskStatusUpdate) (bool, error) {
+func (m *mockStore) UpdateTaskStatus(ctx context.Context, arg *taskdef.TaskStatusUpdate) error {
 	if m.updateStatusErr != nil {
-		return false, m.updateStatusErr
+		return m.updateStatusErr
 	}
 	m.statusUpdates = append(m.statusUpdates, arg)
-	return !m.skipStatusUpdate, nil
+	return nil
 }
 
 // --- methods not used by the conflict package ---
@@ -85,7 +84,7 @@ func (m *mockStore) CreateTask(_ context.Context, _ *taskdef.Task) error {
 }
 
 func (m *mockStore) LockRack(_ context.Context, _ uuid.UUID) error {
-	return nil
+	panic("mockStore.LockRack: not implemented")
 }
 
 func (m *mockStore) LockIdempotencyKey(_ context.Context, _ string) error {
@@ -177,11 +176,4 @@ func (m *mockStore) GetRackRuleAssociation(_ context.Context, _ uuid.UUID, _ tas
 
 func (m *mockStore) ListRackRuleAssociations(_ context.Context, _ uuid.UUID) ([]*operationrules.RackRuleAssociation, error) {
 	panic("mockStore.ListRackRuleAssociations: not implemented")
-}
-
-func (s *mockStore) ListTasksForReconciliation(context.Context, taskcommon.ExecutorType, uuid.UUID, int) ([]*taskdef.Task, error) {
-	panic("unexpected ListTasksForReconciliation")
-}
-func (s *mockStore) FinishTaskExecution(context.Context, *taskdef.Task, *taskdef.ExecutionStatus) (bool, error) {
-	panic("unexpected FinishTaskExecution")
 }

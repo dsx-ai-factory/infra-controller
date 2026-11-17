@@ -17,7 +17,6 @@
 
 use std::str::FromStr;
 
-use carbide_uuid::machine::AsMachineId;
 use db::machine::update_dpu_agent_health_report;
 use db::{self};
 use health_report::HealthReportApplyMode;
@@ -32,78 +31,6 @@ use crate::tests::common::api_fixtures::{
     network_configured_with_health, remove_health_report_entry, send_health_report_entry,
     simulate_hardware_health_report,
 };
-
-#[crate::sqlx_test]
-async fn stale_health_report_cleanup_preserves_concurrent_replacement(pool: sqlx::PgPool) {
-    let env = create_env(pool.clone()).await;
-    let (host_id, _) = create_managed_host(&env).await.into();
-    send_health_report_entry(
-        &env,
-        &host_id,
-        (
-            health_report::HealthReport::empty("old-power".into()),
-            HealthReportApplyMode::Replace,
-        ),
-    )
-    .await;
-
-    let mut replacement = pool.begin().await.unwrap();
-    db::machine::lock_by_id_for_update(&mut replacement, &host_id)
-        .await
-        .unwrap();
-    let blocker: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
-        .fetch_one(&mut *replacement)
-        .await
-        .unwrap();
-    let cleanup = env.api.remove_machine_health_report(Request::new(
-        rpc::forge::RemoveMachineHealthReportRequest {
-            machine_id: Some(host_id.to_machine_id()),
-            source: "old-power".into(),
-        },
-    ));
-    tokio::pin!(cleanup);
-
-    // Wait until cleanup actually reaches the held row lock. Without source
-    // serialization it has already read old-power and is blocked on DELETE.
-    let blocked = async {
-        loop {
-            let waiting: bool = sqlx::query_scalar(
-                "SELECT EXISTS (SELECT 1 FROM pg_stat_activity WHERE $1 = ANY(pg_blocking_pids(pid)))",
-            ).bind(blocker).fetch_one(&pool).await.unwrap();
-            if waiting {
-                break;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-        }
-    };
-    tokio::select! {
-        result = &mut cleanup => panic!("cleanup did not wait for replacement: {result:?}"),
-        result = tokio::time::timeout(std::time::Duration::from_secs(5), blocked) => result.unwrap(),
-    }
-    db::machine::insert_health_report(
-        &mut replacement,
-        &host_id,
-        HealthReportApplyMode::Replace,
-        &health_report::HealthReport::empty("replacement-power".into()),
-        false,
-    )
-    .await
-    .unwrap();
-    replacement.commit().await.unwrap();
-    assert_eq!(cleanup.await.unwrap_err().code(), tonic::Code::NotFound);
-    let reports = env
-        .api
-        .list_machine_health_reports(Request::new(host_id.to_machine_id()))
-        .await
-        .unwrap()
-        .into_inner();
-    assert!(reports.health_report_entries.iter().any(|entry| {
-        entry
-            .report
-            .as_ref()
-            .is_some_and(|report| report.source == "replacement-power")
-    }));
-}
 
 /// Tests whether DPU agent health reports are stored as a standard health source.
 #[crate::sqlx_test]

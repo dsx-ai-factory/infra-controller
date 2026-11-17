@@ -124,7 +124,7 @@ func TestComponentsByTypeRejectsInvalidInput(t *testing.T) {
 	}{
 		"empty": {
 			components: nil,
-			wantErr:    "non-empty ComponentsByType is required",
+			wantErr:    "Non-empty ComponentsByType is required",
 		},
 		"unknown type": {
 			components: ComponentsByType{

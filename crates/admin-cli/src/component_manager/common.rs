@@ -336,7 +336,6 @@ fn component_result_status_name(status: i32) -> &'static str {
         Ok(rpc::forge::ComponentManagerStatusCode::NotFound) => "not-found",
         Ok(rpc::forge::ComponentManagerStatusCode::AlreadyExists) => "already-exists",
         Ok(rpc::forge::ComponentManagerStatusCode::Unavailable) => "unavailable",
-        Ok(rpc::forge::ComponentManagerStatusCode::OutcomeUnknown) => "outcome-unknown",
         Err(_) => "unknown",
     }
 }
@@ -439,7 +438,7 @@ pub(super) fn component_result_json(
     }
 }
 
-pub(crate) fn timestamp_string(timestamp: Option<&rpc::Timestamp>) -> String {
+pub(super) fn timestamp_string(timestamp: Option<&rpc::Timestamp>) -> String {
     let Some(timestamp) = timestamp else {
         return "-".to_string();
     };
@@ -452,7 +451,7 @@ pub(crate) fn timestamp_string(timestamp: Option<&rpc::Timestamp>) -> String {
         .unwrap_or_else(|| timestamp.seconds.to_string())
 }
 
-pub(crate) fn timestamp_json(timestamp: Option<&rpc::Timestamp>) -> serde_json::Value {
+pub(super) fn timestamp_json(timestamp: Option<&rpc::Timestamp>) -> serde_json::Value {
     match timestamp {
         Some(timestamp) => serde_json::json!({
             "seconds": timestamp.seconds,

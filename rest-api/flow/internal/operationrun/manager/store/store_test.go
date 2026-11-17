@@ -188,7 +188,7 @@ func TestCreateTargetsValidatesComponentsByType(t *testing.T) {
 		{
 			name:             "empty map",
 			componentsByType: operation.ComponentsByType{},
-			wantErr:          "non-empty ComponentsByType is required",
+			wantErr:          "Non-empty ComponentsByType is required",
 		},
 		{
 			name: "unknown component type",

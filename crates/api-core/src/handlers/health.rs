@@ -62,13 +62,12 @@ async fn remove_by_source(
     machine_id: MachineId,
     source: String,
 ) -> Result<(), CarbideError> {
-    // Lock before reading so a concurrent replacement cannot change the
-    // source between choosing the report slot and deleting it.
-    db::machine::lock_by_id_for_update(&mut *txn, &machine_id).await?;
     let machine = db::machine::find_one(
         &mut *txn,
         &machine_id,
         MachineSearchConfig {
+            // Technically,  an update is going to happen,
+            // but we don't seem to need coordination/locking.
             for_update: false,
             ..Default::default()
         },

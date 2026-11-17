@@ -45,7 +45,6 @@ func TestConflictStrategy_String(t *testing.T) {
 	}{
 		"reject":  {strategy: ConflictStrategyReject, want: "reject"},
 		"queue":   {strategy: ConflictStrategyQueue, want: "queue"},
-		"preempt": {strategy: ConflictStrategyPreempt, want: "preempt"},
 		"unknown": {strategy: ConflictStrategy(42), want: "ConflictStrategy(42)"},
 	}
 
@@ -62,9 +61,8 @@ func TestParseConflictStrategy(t *testing.T) {
 		want    ConflictStrategy
 		wantErr string
 	}{
-		"reject": {value: "reject", want: ConflictStrategyReject},
-		"queue":  {value: "queue", want: ConflictStrategyQueue},
-		"internal preempt is not a public strategy": {value: "preempt", want: ConflictStrategyReject, wantErr: `unknown conflict strategy "preempt"`},
+		"reject":  {value: "reject", want: ConflictStrategyReject},
+		"queue":   {value: "queue", want: ConflictStrategyQueue},
 		"unknown": {value: "wait", want: ConflictStrategyReject, wantErr: `unknown conflict strategy "wait"`},
 	}
 
@@ -88,17 +86,11 @@ func TestRequest_Validate(t *testing.T) {
 	triggerID := uuid.New()
 	zeroTriggerID := uuid.Nil
 	tests := map[string]struct {
-		strategy    ConflictStrategy
-		preserve    bool
 		triggerType TriggerType
 		triggerID   *uuid.UUID
 		wantErr     string
 	}{
-		"no trigger":                            {},
-		"internal preempt with preservation":    {strategy: ConflictStrategyPreempt, preserve: true},
-		"internal preempt without preservation": {strategy: ConflictStrategyPreempt},
-		"unknown conflict strategy":             {strategy: ConflictStrategy(42), wantErr: "unknown conflict strategy 42"},
-		"queue rejects internal preservation":   {strategy: ConflictStrategyQueue, preserve: true, wantErr: "task preservation requires the preempt conflict strategy"},
+		"no trigger": {},
 		"type only": {
 			triggerType: TriggerTypeAPI,
 		},
@@ -141,10 +133,6 @@ func TestRequest_Validate(t *testing.T) {
 				TriggerID:   test.triggerID,
 			}
 
-			request.ConflictStrategy = test.strategy
-			if test.preserve {
-				request.SubmitOptions.PreserveConflictingTask = func(Wrapper) bool { return true }
-			}
 			err := request.Validate()
 			if test.wantErr != "" {
 				require.ErrorContains(t, err, test.wantErr)
@@ -155,17 +143,4 @@ func TestRequest_Validate(t *testing.T) {
 			require.NoError(t, err)
 		})
 	}
-}
-
-func TestRequest_RuntimeOptionsJSON(t *testing.T) {
-	t.Run("preservation policy is neither serialized nor accepted from JSON", func(t *testing.T) {
-		request := Request{SubmitOptions: SubmitOptions{PreserveConflictingTask: func(Wrapper) bool { return true }}}
-		encoded, err := json.Marshal(request)
-		require.NoError(t, err)
-		require.NotContains(t, string(encoded), "SubmitOptions")
-		var decoded Request
-		err = json.Unmarshal([]byte(`{"SubmitOptions":{"PreserveConflictingTask":true}}`), &decoded)
-		require.NoError(t, err)
-		require.Nil(t, decoded.SubmitOptions.PreserveConflictingTask)
-	})
 }

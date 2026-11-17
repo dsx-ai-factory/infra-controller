@@ -5,11 +5,9 @@ package manager
 
 import (
 	"context"
-	"fmt"
 
 	"github.com/google/uuid"
 	"github.com/rs/zerolog/log"
-	"go.temporal.io/sdk/temporal"
 
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/conflict"
 	taskstore "github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/store"
@@ -41,13 +39,12 @@ func newNotifyingTaskStore(
 func (s *notifyingTaskStore) UpdateTaskStatus(
 	ctx context.Context,
 	u *taskdef.TaskStatusUpdate,
-) (bool, error) {
-	updated, err := s.Store.UpdateTaskStatus(ctx, u)
-	if err != nil {
-		return false, err
+) error {
+	if err := s.Store.UpdateTaskStatus(ctx, u); err != nil {
+		return err
 	}
-	if !updated || !u.Status.IsFinished() {
-		return updated, nil
+	if !u.Status.IsFinished() {
+		return nil
 	}
 
 	// Delegate explicitly so a future wrapper override cannot change this
@@ -57,11 +54,11 @@ func (s *notifyingTaskStore) UpdateTaskStatus(
 		log.Warn().
 			Str("task_id", u.ID.String()).
 			Msg("notifying store: could not look up task for promotion")
-		return updated, nil
+		return nil
 	}
 
 	s.promoter.Notify(tasks[0].RackID)
-	return updated, nil
+	return nil
 }
 
 // UpdateTaskReport delegates to the underlying store.
@@ -77,19 +74,3 @@ func (s *notifyingTaskStore) UpdateTaskReport(
 var _ taskdef.TaskStatusUpdater = (*notifyingTaskStore)(nil) //nolint
 
 var _ taskdef.TaskReportUpdater = (*notifyingTaskStore)(nil) //nolint
-
-// CheckTaskDispatch checks persisted ownership before a worker
-// issues another command. Terminal tasks never regain dispatch permission.
-func (s *notifyingTaskStore) CheckTaskDispatch(ctx context.Context, id uuid.UUID) error {
-	task, err := s.GetTask(ctx, id)
-	if err != nil {
-		return err
-	}
-	if task == nil {
-		return fmt.Errorf("task %s not found", id)
-	}
-	if task.Status.IsFinished() {
-		return temporal.NewNonRetryableApplicationError("task no longer owns hardware dispatch", "TaskPreempted", nil)
-	}
-	return nil
-}

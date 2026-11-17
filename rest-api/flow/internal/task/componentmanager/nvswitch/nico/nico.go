@@ -18,7 +18,6 @@ import (
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/componentmanager/providerapi"
 	nicoprovider "github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/componentmanager/providers/nico"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/componentmanager/readiness"
-	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/dispatchguard"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/executor/temporalworkflow/common"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/operations"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/pkg/common/devicetypes"
@@ -80,7 +79,6 @@ func Descriptor() cmcatalog.Descriptor {
 		},
 		RequiredProviders: []string{nicoprovider.ProviderName},
 		Capabilities: capability.CapabilitySet{
-			capability.CapabilityComponentReset,
 			capability.CapabilityDecommissionControl,
 			capability.CapabilityDecommissionStatus,
 			capability.CapabilityFirmwareConsistencyCheck,
@@ -158,12 +156,7 @@ func switchIDsProto(ids []string) *corev1.SwitchIdList {
 // skipped: failing closed would block bring-up flows for switches that
 // have not yet been ingested into the rack topology.
 // ensureTargetOperable keeps readiness resolution separate from API targeting.
-func (m *Manager) ensureTargetOperable(ctx context.Context, target common.Target, op types.OperationType, override bool) (err error) {
-	defer func() {
-		if err == nil {
-			err = dispatchguard.Check(ctx)
-		}
-	}()
+func (m *Manager) ensureTargetOperable(ctx context.Context, target common.Target, op types.OperationType, override bool) error {
 	if !target.UsesMACAddresses() {
 		return m.ensureRackOperable(ctx, target.Identifiers, op, override)
 	}
@@ -182,12 +175,7 @@ func (m *Manager) ensureRackOperable(
 	switchIDs []string,
 	op types.OperationType,
 	overrideReadinessCheck bool,
-) (err error) {
-	defer func() {
-		if err == nil {
-			err = dispatchguard.Check(ctx)
-		}
-	}()
+) error {
 	if len(switchIDs) == 0 {
 		return nil
 	}
@@ -282,9 +270,6 @@ func (m *Manager) PowerControl(
 		}
 	}
 
-	if err := dispatchguard.Check(ctx); err != nil {
-		return err
-	}
 	resp, err := m.nicoClient.ComponentPowerControl(ctx, req)
 	if err != nil {
 		return fmt.Errorf("ComponentPowerControl failed: %w", err)
@@ -379,9 +364,6 @@ func (m *Manager) FirmwareControl(ctx context.Context, target common.Target, inf
 		req.AccessToken = &info.AccessToken
 	}
 
-	if err := dispatchguard.Check(ctx); err != nil {
-		return err
-	}
 	resp, err := m.nicoClient.UpdateComponentFirmware(ctx, req)
 	if err != nil {
 		return fmt.Errorf("UpdateComponentFirmware failed: %w", err)

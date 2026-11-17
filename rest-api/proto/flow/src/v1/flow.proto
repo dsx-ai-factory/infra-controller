@@ -50,9 +50,6 @@ service Flow {
     rpc PowerOffRack(PowerOffRackRequest) returns (SubmitTaskResponse);
     rpc PowerResetRack(PowerResetRackRequest) returns (SubmitTaskResponse);
     rpc ACPowerCycleRack(ACPowerCycleRackRequest) returns (SubmitTaskResponse);
-    // Restores NVOS or SDN configuration defaults on switches. Accepted work is polled;
-    // uncertain submissions are never automatically repeated. No reprovisioning.
-    rpc FactoryResetSwitches(FactoryResetSwitchesRequest) returns (SubmitTaskResponse);
 
     // Component CRUD
     rpc GetComponentInfoByID(GetComponentInfoByIDRequest) returns (GetComponentInfoResponse);
@@ -611,13 +608,14 @@ message UpgradeFirmwareRequest {
     string description = 5;                             // optional: task description
     optional QueueOptions queue_options = 6;
     optional UUID rule_id = 7;                          // optional: override rule resolution with a specific rule
-    // Optional firmware sub-parts within the rule, inventory and version scope.
-    // Each tray type receives its applicable subset; a type with no match skips
-    // all its rule steps. For example, bios selects Compute and Switch BIOS and
-    // skips PowerShelf; nvos selects Switch only; dpu selects Compute only.
-    // Every name must match a firmware action in scope before dispatch.
-    // Empty or omitted retains backend defaults (including PMC for nico
-    // PowerShelf); DPU reprovisioning always requires explicit dpu selection.
+    // Optional subset of firmware sub-parts to update within each tray
+    // selected by target_spec, e.g. ["bmc", "nvos"] for switch trays or
+    // ["psu"] for powershelf trays. Named "sub_targets" (not "components")
+    // to avoid colliding with OperationTargetSpec.components, which selects
+    // tray INSTANCES rather than sub-parts of a tray.
+    // Names are lowercase. Empty or omitted means update everything in the
+    // bundle (current default behavior). Unknown names are rejected by the
+    // downstream component manager.
     repeated string sub_targets = 8;
     // When true, proceed with the firmware update even if one or more
     // target components (or, for rack-scoped components, any host on the
@@ -813,15 +811,6 @@ message PowerOnRackRequest {
     bool override_readiness_check = 5;
 }
 
-// Targets must resolve exclusively to ingested switches. Domain selectors must
-// include the NVSwitch component filter. Existing rack conflict handling applies.
-message FactoryResetSwitchesRequest {
-    OperationTargetSpec target_spec = 1;
-    string description = 2;
-    // Required reset scope: "nvos" or "sdn". Missing or empty values are rejected.
-    string reset_target = 3;
-}
-
 message PowerOffRackRequest {
     OperationTargetSpec target_spec = 1;  // Target racks or NVLink domains with an optional type filter, or specific components
     bool forced = 2;
@@ -1003,9 +992,8 @@ message FirmwareControlTaskOperation {
     // start_time after conversion.
     optional google.protobuf.Timestamp start_time = 3;
     optional google.protobuf.Timestamp end_time = 4;
-    // Optional firmware sub-parts partitioned by tray type within the resolved
-    // rule, inventory and version scope. Unmatched types skip all their steps;
-    // each requested name must match in scope. Empty retains backend defaults.
+    // Optional firmware sub-parts within each selected component. Empty means
+    // every firmware sub-part supported by that component.
     repeated string sub_targets = 5;
     // Bypasses the component readiness gate when the task executes.
     bool override_readiness_check = 6;

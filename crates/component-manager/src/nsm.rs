@@ -176,9 +176,7 @@ impl NvSwitchManager for NsmSwitchBackend {
                 None => results.push(SwitchComponentResult {
                     bmc_mac: ep.bmc_mac,
                     success: false,
-                    error: Some(ComponentManagerError::Internal(
-                        "NSM registration failed for switch".into(),
-                    )),
+                    error: Some("NSM registration failed for switch".into()),
                 }),
             }
         }
@@ -218,7 +216,7 @@ impl NvSwitchManager for NsmSwitchBackend {
                     error: if r.error.is_empty() {
                         None
                     } else {
-                        Some(ComponentManagerError::Internal(r.error))
+                        Some(r.error)
                     },
                 });
             }
@@ -247,9 +245,7 @@ impl NvSwitchManager for NsmSwitchBackend {
                 None => results.push(SwitchComponentResult {
                     bmc_mac: ep.bmc_mac,
                     success: false,
-                    error: Some(ComponentManagerError::Internal(
-                        "NSM registration failed for switch".into(),
-                    )),
+                    error: Some("NSM registration failed for switch".into()),
                 }),
             }
         }
@@ -286,7 +282,7 @@ impl NvSwitchManager for NsmSwitchBackend {
                     error: if r.error.is_empty() {
                         None
                     } else {
-                        Some(ComponentManagerError::Internal(r.error))
+                        Some(r.error)
                     },
                 });
             }

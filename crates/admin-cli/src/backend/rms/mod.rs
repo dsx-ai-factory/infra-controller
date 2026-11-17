@@ -15,7 +15,6 @@
  * limitations under the License.
  */
 
-mod get_job_status;
 mod status;
 
 use clap::Parser;
@@ -26,7 +25,4 @@ use crate::cfg::dispatch::Dispatch;
 pub(crate) enum Cmd {
     #[clap(about = "Probe the RMS backend connectivity and version")]
     Status(status::Args),
-
-    #[clap(about = "Inspect RMS job records through NICo")]
-    GetJobStatus(get_job_status::Args),
 }

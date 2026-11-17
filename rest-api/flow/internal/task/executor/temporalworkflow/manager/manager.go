@@ -24,7 +24,6 @@ import (
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/executor/temporalworkflow/activity"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/executor/temporalworkflow/common"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/executor/temporalworkflow/workflow"
-	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/firmwareplan"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/operations"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/task"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/pkg/common/devicetypes"
@@ -202,9 +201,34 @@ func (m *Manager) Type() taskcommon.ExecutorType {
 	return taskcommon.ExecutorTypeTemporal
 }
 
-// CheckStatus describes the persisted run, preserving the engine's close time.
-func (m *Manager) CheckStatus(ctx context.Context, encodedExecutionID string) (*task.ExecutionStatus, error) {
-	return describeExecution(ctx, m.publisherClient.Client(), encodedExecutionID)
+// CheckStatus decodes the execution ID and queries Temporal for the current
+// workflow execution status, mapping it to a TaskStatus.
+func (m *Manager) CheckStatus(
+	ctx context.Context,
+	encodedExecutionID string,
+) (taskcommon.TaskStatus, error) {
+	executionID, err := common.NewFromEncoded(encodedExecutionID)
+	if err != nil {
+		return taskcommon.TaskStatusUnknown, err
+	}
+
+	// Use empty runID to get the latest execution.
+	resp, err := m.publisherClient.Client().DescribeWorkflowExecution(
+		ctx,
+		executionID.WorkflowID,
+		"",
+	)
+	if err != nil {
+		return taskcommon.TaskStatusUnknown, fmt.Errorf(
+			"failed to describe temporal workflow execution %s: %v",
+			executionID.String(),
+			err,
+		)
+	}
+
+	return taskStatusFromTemporalWorkflowStatus(
+		resp.GetWorkflowExecutionInfo().GetStatus(),
+	), nil
 }
 
 // TerminateTask terminates the Temporal workflow backing the given execution ID.
@@ -270,11 +294,6 @@ func validateOperationOptions(
 		return fmt.Errorf("unexpected firmware operation payload %T", op)
 	}
 
-	plan, err := firmwareplan.Build(info, *firmwareInfo)
-	if err != nil {
-		return err
-	}
-
 	requirements, err := capabilityrequirements.Required(
 		info.RuleDefinition,
 		executionComponentTypes(info.Components),
@@ -295,11 +314,7 @@ func validateOperationOptions(
 		if !ok {
 			continue
 		}
-		selected := *firmwareInfo
-		if plan != nil {
-			selected = plan[requirement.ComponentType]
-		}
-		if err := validator.ValidateFirmwareControl(selected); err != nil {
+		if err := validator.ValidateFirmwareControl(*firmwareInfo); err != nil {
 			return fmt.Errorf(
 				"component type %s rejected firmware options: %w",
 				devicetypes.ComponentTypeToString(requirement.ComponentType),
@@ -353,44 +368,17 @@ func (m *Manager) Validate(req *task.ExecutionRequest) error {
 		)
 	}
 
-	validationInfo := req.Info
-	if req.Info.OperationType == taskcommon.TaskTypeFirmwareControl {
-		op, err := operations.New(req.Info.OperationType, req.Info.OperationInfo)
-		if err != nil {
-			return err
-		}
-		firmware, ok := op.(*operations.FirmwareControlTaskInfo)
-		if !ok {
-			return fmt.Errorf("unexpected firmware operation payload %T", op)
-		}
-		plan, err := firmwareplan.Build(req.Info, *firmware)
-		if err != nil {
-			return err
-		}
-		if plan != nil {
-			rule := *req.Info.RuleDefinition
-			rule.Steps = nil
-			for _, step := range req.Info.RuleDefinition.Steps {
-				_, selected := plan[step.ComponentType]
-				if selected {
-					rule.Steps = append(rule.Steps, step)
-				}
-			}
-			validationInfo.RuleDefinition = &rule
-		}
-	}
-
 	// Fail fast before submitting a Temporal workflow that the active component
 	// managers cannot execute. Activity-level checks still enforce the same
 	// capability contract at the operation boundary.
-	err := validateRequiredCapabilities(validationInfo, m.conf.ComponentManagerRegistry)
+	err := validateRequiredCapabilities(req.Info, m.conf.ComponentManagerRegistry)
 	if err != nil {
 		return fmt.Errorf(
 			"component manager capability pre-dispatch validation failed: %w",
 			err,
 		)
 	}
-	if err := validateOperationOptions(validationInfo, m.conf.ComponentManagerRegistry); err != nil {
+	if err := validateOperationOptions(req.Info, m.conf.ComponentManagerRegistry); err != nil {
 		return fmt.Errorf(
 			"component manager option pre-dispatch validation failed: %w",
 			err,

@@ -16,8 +16,6 @@ func TestOperationCodeValidateFor(t *testing.T) {
 		wantErr        bool
 		wantErrMessage string
 	}{
-		"NVOS reset": {taskType: TaskTypeComponentReset, code: OpCodeNVOSFactoryReset},
-		"SDN reset":  {taskType: TaskTypeComponentReset, code: OpCodeSDNFactoryReset},
 		"inject expectation": {
 			taskType: TaskTypeInjectExpectation,
 			code:     OpCodeInjectExpectation,
