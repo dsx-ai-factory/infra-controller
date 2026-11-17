@@ -16,6 +16,29 @@ Before configuring the items on this page, complete:
 
 This page assumes the underlay and overlay routing decisions described in those pages have already been made.
 
+### DHCP Cutover Checklist
+
+Before connecting a rack for ingestion:
+
+1. Agree a cutover window with the site owner. Have the owner stop the
+   previous DHCP service from answering on the managed networks, including
+   through old relay destinations, and verify that its replies have stopped
+   before activating relay to NICo. Competing offers can give devices the
+   wrong address, boot server, or DNS settings.
+1. Activate DHCP relay to the NICo DHCP VIP on those networks, as described
+   in [BMC and Out-of-Band Setup](../getting-started/prerequisites/bmc-oob-setup.md).
+1. Verify the MAC-to-IP mapping for every Fixed allocation. A reservation for
+   the host BMC does not reserve addresses for the DPU BMC or DPU OS. Account
+   for each interface separately using
+   [Expected Interface IP Allocation](#13-expected-interface-ip-allocation).
+1. Exclude addresses still used by static devices or an external allocator
+   from NICo's allocatable ranges. NICo's address-uniqueness checks cannot
+   protect against another DHCP server or an unrecorded static assignment.
+1. Check relay traffic, the resulting leases, and device MACs before ingesting
+   the rest of the rack. If an IP has changed owners, follow the
+   [Stale Exploration Record](../playbooks/stuck_objects/host_ingestion_failures.md#stale-exploration-record)
+   checks before retrying discovery.
+
 ---
 
 ## 1. IP Pool Allocation
@@ -493,27 +516,27 @@ To configure these flows:
    above. Each relay/link address must fall within the intended segment prefix,
    except a separately configured DHCPv6 link-address can select its segment by
    exact match.
-2. **Configure the DHCP relay on every applicable switch** to forward DHCP
+1. **Configure the DHCP relay on every applicable switch** to forward DHCP
    traffic to the `nico-dhcp` LoadBalancer VIP (the IP assigned to the
    `nico-dhcp` service by MetalLB in
    [Quick Start Step 3h](../getting-started/quick-start.md#3h-assign-service-vips)).
    The relay-facing interface must cover the L2 broadcast domain whose clients
    it serves. In the shared HostInband topology, both the host BMC and host OS
    paths must produce relay metadata for that HostInband prefix.
-3. **For Fixed policies**, upload `expected_machines.json` with the applicable
+1. **For Fixed policies**, upload `expected_machines.json` with the applicable
    interface reservations before the device first powers on. If the family
    already has a DHCP or Static allocation, changing the template does not
    replace it. Follow the targeted address update procedure in
    [Address Allocation Lifetime](expected-machine-interfaces.md#address-allocation-lifetime).
-4. **For reservation-only segments**, set
+1. **For reservation-only segments**, set
    `allocation_strategy = "reserved"` and configure every Fixed reservation
    before DHCP. Dynamic and Retained declarations cannot acquire their first
    address when no reservation exists.
-5. **Set `dhcp_servers`** in `siteConfig` to the list of DHCP server IPs
+1. **Set `dhcp_servers`** in `siteConfig` to the list of DHCP server IPs
    reachable from bare-metal hosts. This list is informational and is passed
    through to agents; it does not change how `nico-dhcp` itself serves leases.
    May be left as `[]`.
-6. **Set `ntp_servers`** in `siteConfig` to your IPv4 NTP server IPs. NICo uses this list to configure BMC NTP through Redfish during pre-ingestion, includes it in `DiscoverDhcp` responses, and passes it to DPU agents for DHCPv4 option 42.
+1. **Set `ntp_servers`** in `siteConfig` to your IPv4 NTP server IPs. NICo uses this list to configure BMC NTP through Redfish during pre-ingestion, includes it in `DiscoverDhcp` responses, and passes it to DPU agents for DHCPv4 option 42.
 
 The values that `nico-dhcp` returns in DHCP options (nameservers, NTP servers, next-server, boot file, etc.) are sourced from:
 
@@ -591,9 +614,9 @@ For the record catalog these zones serve - machine, BMC, and instance names, plu
 To configure `nico-dns`:
 
 1. Set `initial_domain_name` in `siteConfig` to your site's DNS domain.
-2. Deploy the `nico-dns` StatefulSet; the binary listens on UDP/TCP 53 by default (`--listen=[::]:53`).
-3. Assign a stable LoadBalancer VIP to the `nico-dns` service that listens on UDP/TCP 53 (one per replica via `perPodAnnotations`; see [Quick Start Step 3h](../getting-started/quick-start.md#3h-assign-service-vips)).
-4. Delegate the `initial_domain_name` zone from your upstream DNS to those VIPs, or configure your recursive resolver to forward queries for the zone to them.
+1. Deploy the `nico-dns` StatefulSet; the binary listens on UDP/TCP 53 by default (`--listen=[::]:53`).
+1. Assign a stable LoadBalancer VIP to the `nico-dns` service that listens on UDP/TCP 53 (one per replica via `perPodAnnotations`; see [Quick Start Step 3h](../getting-started/quick-start.md#3h-assign-service-vips)).
+1. Delegate the `initial_domain_name` zone from your upstream DNS to those VIPs, or configure your recursive resolver to forward queries for the zone to them.
 
 ### 3.2 `unbound` Recursive Resolver for Managed Machines
 
@@ -610,8 +633,8 @@ The resolver is responsible for:
 To configure `unbound`:
 
 1. Populate the `local_data.conf` ConfigMap consumed by the `unbound` Helm chart with an A record for each IPv4 service VIP. To advertise the NTP fallback through DHCPv6 option 56, also add AAAA records for reachable IPv6 NTP endpoints, as described in [NICo DNS Service Endpoints](#33-nico-dns-service-endpoints). The chart derives the record type from each address in `unbound.localData`.
-2. Add a forward zone entry for `initial_domain_name` pointing at the `nico-dns` VIPs.
-3. Allow public-internet recursion (the default for the upstream `unbound` image) unless your site is fully air-gapped.
+1. Add a forward zone entry for `initial_domain_name` pointing at the `nico-dns` VIPs.
+1. Allow public-internet recursion (the default for the upstream `unbound` image) unless your site is fully air-gapped.
 
 The Unbound Deployment declares a ConfigMap Reloader annotation. Where that controller is installed, configuration changes trigger a rollout. Otherwise, restart the Deployment through the site's normal workflow. [Unbound IPv6 Transport](../configuration/dns.md#unbound-ipv6-transport) describes optional IPv6 DNS and metrics exposure, including the supplied-image contract and listener restart requirements. For external resolver VIPs, refer to [Unbound External Services](../configuration/dns.md#unbound-external-services).
 

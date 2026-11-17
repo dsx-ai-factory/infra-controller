@@ -10,12 +10,16 @@ to a site.
 ## Quick Checks
 
 1. Confirm the host is listed in expected machines.
-2. Confirm the host BMC is reachable over the out-of-band network.
-3. Confirm BMC credentials are available through Vault.
-4. Check Site Explorer output.
-5. Check DHCP and PXE/HTTP boot logs.
-6. Check `nico-scout` logs on the host.
-7. Check validation and SKU validation results.
+1. Confirm the host BMC is reachable over the out-of-band network.
+1. Confirm BMC credentials are available through the configured credential source.
+1. Check Site Explorer output.
+1. Check DHCP and PXE/HTTP boot logs.
+1. Check `nico-scout` logs on the host.
+1. Check validation and SKU validation results.
+
+Complete the [DHCP Cutover Checklist](../../provisioning/ip-and-network-configuration.md#dhcp-cutover-checklist)
+and [Site-wide Credential Setup](../../getting-started/quick-start.md#set-site-wide-credentials)
+before troubleshooting individual devices.
 
 ## Expected Machine
 
@@ -37,7 +41,7 @@ Check:
 
 - BMC IP is reachable from the site controller.
 - BMC credentials are present and valid.
-- Vault access from `nico-api` is healthy.
+- Access from `nico-api` to the configured credential source is healthy.
 - Site Explorer can scrape the endpoint.
 
 ```bash
@@ -52,6 +56,56 @@ Look in `nico-api` logs for:
 - HTTP 401 or 403
 - TLS failures
 - timeout or route failures
+
+### BMC Refuses HTTPS but IPMI Works
+
+A responding IPMI interface does not prove that the BMC's Redfish HTTPS
+service is running. After confirming the BMC IP belongs to the intended
+device, distinguish connection refusal on TCP 443 from a TLS validation
+error, authentication failure, or network timeout. Check the BMC's HTTPS
+and Redfish service configuration.
+
+If the HTTPS service stopped responding after a BMC reset, use the hardware
+vendor's supported BMC cold-reset procedure during a maintenance window,
+then wait for Redfish to return before retrying exploration. Save the logs
+and escalate persistent failures to the hardware owner. A BMC reset is
+different from a factory reset; do not erase its configuration or credentials
+as a connectivity diagnostic.
+
+### Stale Exploration Record
+
+After DHCP changes, compare the BMC IP, MAC, and chassis identity in the
+Site Explorer report with the device now using that address. An exploration
+report from the previous IP owner can mislead pairing and discovery.
+
+Fix duplicate assignments and DHCP reservations first. If a stale endpoint
+is not part of a managed host, remove only that exploration record with
+[`site-explorer delete`](https://github.com/dsx-ai-factory/infra-controller/blob/main/docs/manuals/nico-admin-cli/commands/site-explorer/site-explorer-delete.md).
+Site Explorer can rediscover a reachable endpoint on a later exploration.
+The API rejects deletion when the endpoint belongs to a managed host.
+Investigate its identity with the lifecycle owner rather than force-deleting
+the host to clear the report.
+
+### DPU IP Conflicts
+
+Check host BMC, DPU BMC, and DPU OS addresses separately. Reserving the host
+BMC address does not reserve either DPU address. Match each lease to its
+interface MAC, remove competing DHCP offers or static assignments, and
+verify that the pools have capacity for every interface. The
+[DHCP Cutover Checklist](../../provisioning/ip-and-network-configuration.md#dhcp-cutover-checklist)
+and [Expected Interface IP Allocation](../../provisioning/ip-and-network-configuration.md#13-expected-interface-ip-allocation)
+cover those inputs. Clear a stale exploration record only after resolving
+the conflict.
+
+### Reported Chassis Serial Does Not Match Inventory
+
+Compare the Expected Machine chassis serial with the physical chassis label
+and the BMC's Redfish chassis and system inventory. A component serial,
+such as a power distribution board serial, must not replace the chassis
+identity. Correct an erroneous Expected Machine source entry; if Redfish
+reports the wrong hardware identity, have the hardware owner correct that
+record or firmware. Do not change the expected chassis serial merely to
+make ingestion accept a different component's serial.
 
 ## DHCP and PXE
 

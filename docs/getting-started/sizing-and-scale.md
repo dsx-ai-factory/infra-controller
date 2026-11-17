@@ -347,6 +347,9 @@ split in these cases:
 
 ## Related Limits
 
+For registry, OS repository, and boot-image placement and download capacity,
+use the [Scale FAQ](scale-faq.md).
+
 | Limit | Value | Reference |
 |---|---|---|
 | BMC endpoints and machines per rack | 71 and 54 for GB200 NVL72 with 2 DPUs per tray, from the rack profile | [What Limits Scale](#what-limits-scale) |

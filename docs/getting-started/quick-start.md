@@ -78,6 +78,9 @@ helm plugin install https://github.com/databus23/helm-diff
 
 Review this entire step **before** running `setup.sh` and complete every item that applies to your environment. Missing required values can cause setup to fail or produce an incorrectly configured deployment that is hard to fix afterward.
 
+Complete the [Control-Plane Network Requirements and Site Worksheet](https://github.com/dsx-ai-factory/infra-controller/blob/main/scripts/control-plane-dpu/control-plane-network.md)
+with your network team before filling in the site values below.
+
 ### 3a. Set Deployment Environment Variables
 
 ```bash
@@ -378,6 +381,14 @@ Add or remove `BGPPeer` blocks to match your node count, with one block per work
 
 <Note>If your environment does not use BGP (local dev, flat network), comment out the `BGPPeer` and `BGPAdvertisement` sections and uncomment the `L2Advertisement` section at the bottom of the file.</Note>
 
+In [MetalLB layer 2 mode](https://metallb.io/concepts/layer2/), one elected
+node advertises each service VIP and receives its incoming traffic. Multiple
+running speaker pods do not demonstrate VIP failover. Before relying on this
+mode, test loss of the advertising node and verify that DHCP, PXE, DNS, and
+API clients can reach their VIPs through another eligible node. Check the
+`L2Advertisement` node and interface selectors and client ARP/NDP cache
+updates if a VIP remains unreachable.
+
 ### 3h. Assign Service VIPs
 
 Each NICo Core service that exposes a LoadBalancer needs a **specific, stable IP** from your MetalLB pool. Without explicit assignments, MetalLB picks IPs randomly on each install, which means your DHCP relay, DNS records, PXE config, and API hostname cannot be pre-configured and will break on redeploy.
@@ -653,10 +664,10 @@ auth:
 This `GET` endpoint lazily initializes the org on first call as follows:
 
 1. Checks if service account is enabled in the auth config
-2. Creates an **InfrastructureProvider** for the org if one doesn't exist
-3. Creates a **Tenant** for the org if one doesn't exist
-4. Creates a **TenantAccount** linking the provider and tenant if one doesn't exist, already in `Ready` status with the `targetedInstanceCreation` capability enabled
-5. Returns the service account status with the provider and tenant IDs
+1. Creates an **InfrastructureProvider** for the org if one doesn't exist
+1. Creates a **Tenant** for the org if one doesn't exist
+1. Creates a **TenantAccount** linking the provider and tenant if one doesn't exist, already in `Ready` status with the `targetedInstanceCreation` capability enabled
+1. Returns the service account status with the provider and tenant IDs
 
 Without this call, site operations return 404. Subsequent calls are read-only.
 
@@ -716,7 +727,7 @@ Configure the out-of-band network to relay BMC DHCP requests to the NICo DHCP se
 
 1. *Configure the DHCP relay* on your OOB switches to forward DHCP requests to the `nico-dhcp` LoadBalancer VIP (assigned in Step 3h).
 
-2. *Verify DHCP requests are reaching NICo* by checking the DHCP service logs:
+1. *Verify DHCP requests are reaching NICo* by checking the DHCP service logs:
 
    ```bash
    kubectl logs -n nico-system -l app.kubernetes.io/name=nico-dhcp --tail=20

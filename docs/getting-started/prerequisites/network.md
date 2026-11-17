@@ -2,6 +2,11 @@
 
 This page covers the networking infrastructure that must be in place before deploying NICo, including IP allocations, BGP configuration, EVPN overlay setup, and physical cabling.
 
+Agree the control-plane routing and address allocations with your network team
+using the [Control-Plane Network Requirements and Site Worksheet](https://github.com/dsx-ai-factory/infra-controller/blob/main/scripts/control-plane-dpu/control-plane-network.md).
+It covers the Secure Management Network (SMN), route-target ownership, and
+site controllers with and without DPUs.
+
 ![Simplified diagram of the network topology](../../static/ncp_overview.png)
 
 At a high level, these are the networking requirements:
