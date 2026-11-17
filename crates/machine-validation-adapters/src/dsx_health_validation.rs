@@ -14,8 +14,8 @@ use serde::Deserialize;
 use serde_json::Value;
 
 use crate::{
-    AdapterContext, AdapterInvocation, AdapterOutput, ContainerPluginAdapter, PluginResult,
-    ReadOnlyMount, RuntimeRequirements,
+    AdapterContext, AdapterInvocation, AdapterOutput, ContainerPluginAdapter, HostSocketMount,
+    PluginResult, ReadOnlyMount, RuntimeRequirements,
 };
 
 pub(super) struct DsxHealthValidation;
@@ -48,6 +48,9 @@ impl ContainerPluginAdapter for DsxHealthValidation {
         RuntimeRequirements {
             all_gpus: true,
             run_as_root: true,
+            host_network: true,
+            host_pid: true,
+            host_sockets: true,
         }
     }
 
@@ -87,26 +90,33 @@ impl ContainerPluginAdapter for DsxHealthValidation {
             self.validate_registration(entrypoint, &context.input["parameters"])?;
             let arguments = prepare_input(context, entrypoint)?;
             let journalctl = find_journalctl()?;
-            let output = tokio::time::timeout(
-                Duration::from_secs(5),
-                tokio::process::Command::new("ldd")
-                    .arg(&journalctl)
-                    .kill_on_drop(true)
-                    .output(),
-            )
-            .await
-            .map_err(|_| "timed out inspecting journalctl libraries".to_owned())?
-            .map_err(|error| format!("cannot inspect journalctl libraries: {error}"))?;
-            if !output.status.success() {
-                return Err("ldd could not inspect the host journalctl binary".to_owned());
-            }
-            let mounts = journal_mounts(
+            let dcgm = discover_dcgm_library().await?;
+            let mut mounts = journal_mounts(
                 &journalctl,
-                &String::from_utf8_lossy(&output.stdout),
+                &inspect_dependencies(&journalctl).await?,
                 &[Path::new("/run/log/journal"), Path::new("/var/log/journal")],
                 Path::new("/etc/machine-id"),
             )?;
-            Ok(invocation(entrypoint, arguments, mounts, &journalctl))
+            for mount in library_mounts(&dcgm, &inspect_dependencies(&dcgm).await?)? {
+                if !mounts
+                    .iter()
+                    .any(|existing| existing.target == mount.target)
+                {
+                    mounts.push(mount);
+                }
+            }
+            let socket_mounts = audit_socket_mounts(
+                &Parameters::parse(&context.input["parameters"])?,
+                Path::new("/run/systemd/journal/socket"),
+            )?;
+            Ok(invocation(
+                entrypoint,
+                arguments,
+                mounts,
+                socket_mounts,
+                &journalctl,
+                &dcgm,
+            ))
         })
     }
 
@@ -182,14 +192,24 @@ fn invocation(
     entrypoint: &[String],
     arguments: Vec<String>,
     mounts: Vec<ReadOnlyMount>,
+    socket_mounts: Vec<HostSocketMount>,
     journalctl: &Path,
+    dcgm: &Path,
 ) -> AdapterInvocation {
     let journal_bin_dir = journalctl.parent().unwrap_or(Path::new("/usr/bin"));
     AdapterInvocation {
         entrypoint: entrypoint.first().cloned(),
         arguments,
         mounts,
+        socket_mounts,
         environment: BTreeMap::from([
+            (
+                "LD_LIBRARY_PATH".to_owned(),
+                dcgm.parent()
+                    .expect("absolute DCGM library path has a parent")
+                    .display()
+                    .to_string(),
+            ),
             (
                 "NVIDIA_DRIVER_CAPABILITIES".to_owned(),
                 "utility".to_owned(),
@@ -203,6 +223,97 @@ fn invocation(
             ),
         ]),
     }
+}
+
+async fn inspect_dependencies(path: &Path) -> Result<String, String> {
+    let output = tokio::time::timeout(
+        Duration::from_secs(5),
+        tokio::process::Command::new("ldd")
+            .arg(path)
+            .kill_on_drop(true)
+            .output(),
+    )
+    .await
+    .map_err(|_| format!("timed out inspecting host dependency {}", path.display()))?
+    .map_err(|error| format!("cannot inspect host dependency {}: {error}", path.display()))?;
+    if !output.status.success() {
+        return Err(format!(
+            "ldd could not inspect host dependency {}",
+            path.display()
+        ));
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
+async fn discover_dcgm_library() -> Result<PathBuf, String> {
+    let output = tokio::time::timeout(
+        Duration::from_secs(5),
+        tokio::process::Command::new("ldconfig")
+            .arg("-p")
+            .kill_on_drop(true)
+            .output(),
+    )
+    .await
+    .map_err(|_| "timed out discovering the host DCGM library".to_owned())?
+    .map_err(|error| format!("cannot discover the host DCGM library with ldconfig: {error}"))?;
+    if !output.status.success() {
+        return Err("ldconfig could not inspect the host library cache".to_owned());
+    }
+    dcgm_library_from_cache(&String::from_utf8_lossy(&output.stdout))
+}
+
+fn dcgm_library_from_cache(cache: &str) -> Result<PathBuf, String> {
+    for line in cache.lines() {
+        let Some((metadata, path)) = line.split_once("=>") else {
+            continue;
+        };
+        if metadata.split_whitespace().next() != Some("libdcgm.so.4") {
+            continue;
+        }
+        let path = Path::new(path.trim());
+        if path.is_absolute() {
+            return Ok(path.to_owned());
+        }
+    }
+    Err(
+        "HealthValidation requires host DCGM 4: libdcgm.so.4 must be present in the ldconfig cache"
+            .to_owned(),
+    )
+}
+
+fn library_mounts(library: &Path, ldd_output: &str) -> Result<Vec<ReadOnlyMount>, String> {
+    let mut mounts = vec![file_mount(library, library)?];
+    for dependency in dependency_paths_from_ldd(ldd_output)? {
+        mounts.push(file_mount(&dependency, &dependency)?);
+    }
+    Ok(mounts)
+}
+
+fn audit_socket_mounts(
+    parameters: &Parameters,
+    path: &Path,
+) -> Result<Vec<HostSocketMount>, String> {
+    if parameters.gpu_count.is_none() {
+        return Ok(Vec::new());
+    }
+    let metadata = std::fs::metadata(path).map_err(|error| {
+        format!(
+            "HealthValidation threshold overrides require the host journald socket {}: {error}",
+            path.display()
+        )
+    })?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::FileTypeExt;
+        if metadata.file_type().is_socket() {
+            return Ok(vec![HostSocketMount {
+                source: std::fs::canonicalize(path).map_err(|error| error.to_string())?,
+                target: path.to_owned(),
+            }]);
+        }
+    }
+    let _ = metadata;
+    Err("HealthValidation threshold audit path must be a Unix socket".to_owned())
 }
 
 fn journal_mounts(
@@ -286,7 +397,7 @@ fn dependency_paths_from_ldd(output: &str) -> Result<Vec<PathBuf>, String> {
         }
         if fields.get(2..4) == Some(&["not", "found"][..]) {
             return Err(format!(
-                "journalctl has an unresolved library: {}",
+                "host dependency has an unresolved library: {}",
                 fields[0]
             ));
         }
@@ -307,7 +418,7 @@ fn dependency_paths_from_ldd(output: &str) -> Result<Vec<PathBuf>, String> {
             .get(2)
             .map(Path::new)
             .filter(|path| path.is_absolute())
-            .ok_or_else(|| format!("invalid journalctl library path in {line:?}"))?;
+            .ok_or_else(|| format!("invalid host library path in {line:?}"))?;
         if !paths.iter().any(|existing| existing == path) {
             paths.push(path.to_owned());
         }
@@ -384,7 +495,9 @@ mod tests {
             &command,
             arguments,
             vec![],
+            vec![],
             Path::new("/usr/bin/journalctl"),
+            Path::new("/usr/lib/libdcgm.so.4"),
         );
         assert_eq!(invocation.entrypoint.as_deref(), Some("/custom/hv"));
         assert_eq!(
@@ -393,6 +506,10 @@ mod tests {
         );
         assert!(DsxHealthValidation.requirements().all_gpus);
         assert!(DsxHealthValidation.requirements().run_as_root);
+        assert!(DsxHealthValidation.requirements().host_network);
+        assert!(DsxHealthValidation.requirements().host_pid);
+        assert!(DsxHealthValidation.requirements().host_sockets);
+        assert_eq!(invocation.environment["LD_LIBRARY_PATH"], "/usr/lib");
         std::fs::remove_dir_all(directory).unwrap();
     }
 
@@ -433,6 +550,70 @@ mod tests {
     fn unresolved_journal_libraries_are_preparation_errors() {
         assert!(dependency_paths_from_ldd("libsystemd.so => not found").is_err());
         assert!(dependency_paths_from_ldd("libsystemd.so => relative/path (0x01)").is_err());
+    }
+
+    #[test]
+    fn dcgm_discovery_and_dependencies_require_version_four_without_replacing_glibc() {
+        let directory = std::env::temp_dir().join(format!("dsx-dcgm-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&directory).unwrap();
+        let library = directory.join("libdcgm.so.4");
+        let dependency = directory.join("libnuma.so.1");
+        for path in [&library, &dependency] {
+            std::fs::write(path, b"fixture").unwrap();
+        }
+        let cache = format!(
+            "libdcgm.so.3 (libc6,x86-64) => /old/libdcgm.so.3\nlibdcgm.so.4 (libc6,x86-64) => {}",
+            library.display()
+        );
+        assert_eq!(dcgm_library_from_cache(&cache).unwrap(), library);
+        for cache in [
+            "",
+            "libdcgm.so.3 (libc6) => /old/libdcgm.so.3",
+            "libdcgm.so.4 (libc6) => relative/libdcgm.so.4",
+        ] {
+            assert!(dcgm_library_from_cache(cache).is_err());
+        }
+        let ldd = format!(
+            "libnuma.so.1 => {} (0x01)\nlibc.so.6 => /container/glibc (0x02)",
+            dependency.display()
+        );
+        let mounts = library_mounts(&library, &ldd).unwrap();
+        assert_eq!(
+            mounts.iter().map(|mount| &mount.target).collect::<Vec<_>>(),
+            [&library, &dependency]
+        );
+        assert!(library_mounts(&library, "libnuma.so.1 => not found").is_err());
+        std::fs::remove_file(&library).unwrap();
+        assert!(library_mounts(&library, &ldd).is_err());
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn threshold_overrides_require_a_real_journald_socket_but_defaults_do_not() {
+        use std::os::unix::net::UnixDatagram;
+        let directory = std::env::temp_dir().join(format!("dsx-audit-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&directory).unwrap();
+        let path = directory.join("socket");
+        let overrides = Parameters { gpu_count: Some(4) };
+        assert!(
+            audit_socket_mounts(&Parameters::default(), &path)
+                .unwrap()
+                .is_empty()
+        );
+        assert!(audit_socket_mounts(&overrides, &path).is_err());
+        std::fs::write(&path, b"not a socket").unwrap();
+        assert!(audit_socket_mounts(&overrides, &path).is_err());
+        std::fs::remove_file(&path).unwrap();
+        let _socket = UnixDatagram::bind(&path).unwrap();
+        assert_eq!(
+            audit_socket_mounts(&overrides, &path).unwrap(),
+            vec![HostSocketMount {
+                source: std::fs::canonicalize(&path).unwrap(),
+                target: path
+            }]
+        );
+        std::fs::remove_dir_all(directory).unwrap();
     }
 
     #[test]
