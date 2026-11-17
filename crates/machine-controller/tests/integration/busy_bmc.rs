@@ -27,6 +27,7 @@ use axum::routing::{patch, post};
 use axum::{Json, Router};
 use bmc_mock::injection::{Action, InjectionStore, Rule, RuleId, Selector, injection_router};
 use bmc_mock::test_support::{lenovo_thinksystem_sr670_router, serve_https};
+use carbide_instrument::Instrumentation;
 use carbide_redfish::libredfish::test_support::RedfishSim;
 use carbide_redfish::libredfish::{
     RedfishAuth, RedfishClientCreationError, RedfishClientPool, new_pool_with_credential_ops,
@@ -190,9 +191,7 @@ async fn configure_bios_against_a_busy_bmc(pool: PgPool) {
                         credentials,
                         http,
                         bmc_address,
-                        carbide_instrument::Instrumentation::from_meter_provider(
-                            &opentelemetry::metrics::noop::NoopMeterProvider::new(),
-                        ),
+                        Instrumentation::noop(),
                     )
                     .0,
                     sim,
