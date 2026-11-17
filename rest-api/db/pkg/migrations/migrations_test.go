@@ -67,6 +67,70 @@ func TestMigrations(t *testing.T) {
 	}
 }
 
+func TestVpcPrefixLabelsMigration(t *testing.T) {
+	ctx := context.Background()
+	dbSession := util.GetTestDBSession(t, true)
+	defer dbSession.Close()
+
+	existingID := uuid.New()
+	_, err := dbSession.DB.ExecContext(ctx, `CREATE TABLE vpc_prefix (id UUID PRIMARY KEY)`)
+	require.NoError(t, err)
+	_, err = dbSession.DB.ExecContext(ctx, `INSERT INTO vpc_prefix (id) VALUES (?)`, existingID)
+	require.NoError(t, err)
+
+	targetMigrations := migrate.NewMigrations()
+	for _, migration := range Migrations.Sorted() {
+		if migration.Name == "20261117190500" {
+			targetMigrations.Add(migration)
+		}
+	}
+	require.Len(t, targetMigrations.Sorted(), 1)
+
+	migrator := migrate.NewMigrator(
+		dbSession.DB,
+		targetMigrations,
+		migrate.WithTableName("vpc_prefix_labels_migrations_test"),
+		migrate.WithLocksTableName("vpc_prefix_labels_migration_locks_test"),
+		migrate.WithMarkAppliedOnSuccess(true),
+	)
+	require.NoError(t, migrator.Init(ctx))
+	_, err = migrator.Migrate(ctx)
+	require.NoError(t, err)
+
+	var labels string
+	err = dbSession.DB.QueryRowContext(
+		ctx,
+		`SELECT labels::text FROM vpc_prefix WHERE id = ?`,
+		existingID,
+	).Scan(&labels)
+	require.NoError(t, err)
+	assert.JSONEq(t, `{}`, labels)
+
+	newID := uuid.New()
+	_, err = dbSession.DB.ExecContext(ctx, `INSERT INTO vpc_prefix (id) VALUES (?)`, newID)
+	require.NoError(t, err)
+	err = dbSession.DB.QueryRowContext(
+		ctx,
+		`SELECT labels::text FROM vpc_prefix WHERE id = ?`,
+		newID,
+	).Scan(&labels)
+	require.NoError(t, err)
+	assert.JSONEq(t, `{}`, labels)
+
+	var nullable string
+	var defaultExpression string
+	err = dbSession.DB.QueryRowContext(ctx, `
+		SELECT is_nullable, column_default
+		FROM information_schema.columns
+		WHERE table_schema = 'public'
+		  AND table_name = 'vpc_prefix'
+		  AND column_name = 'labels'
+	`).Scan(&nullable, &defaultExpression)
+	require.NoError(t, err)
+	assert.Equal(t, "NO", nullable)
+	assert.Contains(t, defaultExpression, "'{}'::jsonb")
+}
+
 func TestMachineLabelsGinOpsMigration(t *testing.T) {
 	ctx := context.Background()
 	dbSession := util.GetTestDBSession(t, true)

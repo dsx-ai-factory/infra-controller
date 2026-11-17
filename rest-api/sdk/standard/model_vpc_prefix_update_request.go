@@ -22,10 +22,12 @@ import (
 // checks if the VpcPrefixUpdateRequest type satisfies the MappedNullable interface at compile time
 var _ MappedNullable = &VpcPrefixUpdateRequest{}
 
-// VpcPrefixUpdateRequest Request data for updating a VPC Prefix. The allocated `prefix`, `prefixLength`, and `ipBlockId` are immutable.
+// VpcPrefixUpdateRequest Request data for updating a VPC Prefix. The `name` field remains required. The allocated `prefix`, `prefixLength`, and `ipBlockId` are immutable. Omitting `labels` preserves the stored labels.
 type VpcPrefixUpdateRequest struct {
 	// Name of the VPCPrefix
 	Name string `json:"name"`
+	// Update labels of the VPC Prefix. The supplied map replaces all stored labels; an empty object clears them, while omission preserves them
+	Labels map[string]string `json:"labels,omitempty"`
 }
 
 type _VpcPrefixUpdateRequest VpcPrefixUpdateRequest
@@ -72,6 +74,38 @@ func (o *VpcPrefixUpdateRequest) SetName(v string) {
 	o.Name = v
 }
 
+// GetLabels returns the Labels field value if set, zero value otherwise.
+func (o *VpcPrefixUpdateRequest) GetLabels() map[string]string {
+	if o == nil || IsNil(o.Labels) {
+		var ret map[string]string
+		return ret
+	}
+	return o.Labels
+}
+
+// GetLabelsOk returns a tuple with the Labels field value if set, an empty map otherwise
+// and a boolean to check if the value has been set.
+func (o *VpcPrefixUpdateRequest) GetLabelsOk() (map[string]string, bool) {
+	if o == nil || IsNil(o.Labels) {
+		return map[string]string{}, false
+	}
+	return o.Labels, true
+}
+
+// HasLabels returns a boolean if a field has been set.
+func (o *VpcPrefixUpdateRequest) HasLabels() bool {
+	if o != nil && !IsNil(o.Labels) {
+		return true
+	}
+
+	return false
+}
+
+// SetLabels gets a reference to the given map[string]string and assigns it to the Labels field.
+func (o *VpcPrefixUpdateRequest) SetLabels(v map[string]string) {
+	o.Labels = v
+}
+
 func (o VpcPrefixUpdateRequest) MarshalJSON() ([]byte, error) {
 	toSerialize, err := o.ToMap()
 	if err != nil {
@@ -83,6 +117,9 @@ func (o VpcPrefixUpdateRequest) MarshalJSON() ([]byte, error) {
 func (o VpcPrefixUpdateRequest) ToMap() (map[string]interface{}, error) {
 	toSerialize := map[string]interface{}{}
 	toSerialize["name"] = o.Name
+	if !IsNil(o.Labels) {
+		toSerialize["labels"] = o.Labels
+	}
 	return toSerialize, nil
 }
 

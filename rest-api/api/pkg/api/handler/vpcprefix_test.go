@@ -312,7 +312,14 @@ func TestVpcPrefixHandler_Create(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, parentPrefOccupied)
 
-	okBody, err := json.Marshal(model.APIVpcPrefixCreateRequest{Name: "ok1", VpcID: vpc1.ID.String(), IPBlockID: cutil.GetPtr(ipb1.ID.String()), PrefixLength: cutil.GetPtr(24)})
+	vpcPrefixLabels := map[string]string{"owner": "networking"}
+	okBody, err := json.Marshal(model.APIVpcPrefixCreateRequest{
+		Name:         "ok1",
+		Labels:       vpcPrefixLabels,
+		VpcID:        vpc1.ID.String(),
+		IPBlockID:    cutil.GetPtr(ipb1.ID.String()),
+		PrefixLength: cutil.GetPtr(24),
+	})
 	assert.Nil(t, err)
 
 	okBodyFG, err := json.Marshal(model.APIVpcPrefixCreateRequest{Name: "okFG", VpcID: vpc1.ID.String(), IPBlockID: cutil.GetPtr(ipbFG.ID.String()), PrefixLength: cutil.GetPtr(16)})
@@ -402,6 +409,7 @@ func TestVpcPrefixHandler_Create(t *testing.T) {
 		expectedIpam       bool
 		expectedErrMsg     string
 		expectedPrefix     string
+		expectedLabels     map[string]string
 		unexpectedPrefix   string
 		expectedFullGrant  *cdbm.IPBlock
 		verifyChildSpanner bool
@@ -554,6 +562,7 @@ func TestVpcPrefixHandler_Create(t *testing.T) {
 			expectedErr:    false,
 			expectedStatus: http.StatusCreated,
 			expectedPrefix: "192.168.0.0/24",
+			expectedLabels: vpcPrefixLabels,
 		},
 		{
 			name:               "success case with Full Grant",
@@ -796,6 +805,10 @@ func TestVpcPrefixHandler_Create(t *testing.T) {
 			require.NoError(t, err)
 			assert.Equal(t, actualPrefix, persistedVpcPrefix.Prefix)
 			assert.Equal(t, expectedPrefix.Bits(), persistedVpcPrefix.PrefixLength)
+			if tc.expectedLabels != nil {
+				assert.Equal(t, model.APILabels(tc.expectedLabels), resp.Labels)
+				assert.Equal(t, cdbm.Labels(tc.expectedLabels), persistedVpcPrefix.Labels)
+			}
 
 			// Validate ipam exists for vpcprefix
 			if tc.expectedIpam {
@@ -826,6 +839,11 @@ func TestVpcPrefixHandler_Create(t *testing.T) {
 			require.True(t, ok)
 			assert.Equal(t, resp.Name, temporalReq.Metadata.Name)
 			assert.Equal(t, *resp.Prefix, temporalReq.Config.Prefix)
+			if tc.expectedLabels != nil {
+				require.Len(t, temporalReq.Metadata.Labels, 1)
+				assert.Equal(t, "owner", temporalReq.Metadata.Labels[0].GetKey())
+				assert.Equal(t, "networking", temporalReq.Metadata.Labels[0].GetValue())
+			}
 
 			if tc.verifyChildSpanner {
 				span := oteltrace.SpanFromContext(ec.Request().Context())
@@ -1073,6 +1091,7 @@ func TestVpcPrefixHandler_GetAll(t *testing.T) {
 	assert.NotNil(t, parentPref2)
 
 	totalCount := 30
+	listLabels := map[string]string{"source": "list"}
 
 	vpDAO := cdbm.NewVpcPrefixDAO(dbSession)
 	ss := []cdbm.VpcPrefix{}
@@ -1087,7 +1106,13 @@ func TestVpcPrefixHandler_GetAll(t *testing.T) {
 			ipbID = ipb2.ID
 		}
 		prefixLen := 24
-		vpcprefixBody, err := json.Marshal(model.APIVpcPrefixCreateRequest{Name: fmt.Sprintf("vpcprefix-%02d", i), VpcID: vpcID.String(), IPBlockID: cutil.GetPtr(ipbID.String()), PrefixLength: cutil.GetPtr(prefixLen)})
+		vpcprefixBody, err := json.Marshal(model.APIVpcPrefixCreateRequest{
+			Name:         fmt.Sprintf("vpcprefix-%02d", i),
+			Labels:       listLabels,
+			VpcID:        vpcID.String(),
+			IPBlockID:    cutil.GetPtr(ipbID.String()),
+			PrefixLength: cutil.GetPtr(prefixLen),
+		})
 		assert.Nil(t, err)
 		apiVpcPrefix := testCreateVpcPrefix(t, dbSession, scp, ipamStorage, tnu, tnOrg1, vpcprefixBody)
 		assert.NotNil(t, apiVpcPrefix)
@@ -1426,6 +1451,7 @@ func TestVpcPrefixHandler_GetAll(t *testing.T) {
 
 			for _, apisn := range resp {
 				assert.Equal(t, 2, len(apisn.StatusHistory))
+				assert.Equal(t, model.APILabels(listLabels), apisn.Labels)
 			}
 
 			if tc.verifyChildSpanner {
@@ -1491,7 +1517,14 @@ func TestVpcPrefixHandler_Get(t *testing.T) {
 	assert.Nil(t, err)
 	assert.NotNil(t, parentPref1)
 	prefixLen := 24
-	parentIpbBody, err := json.Marshal(model.APIVpcPrefixCreateRequest{Name: "ok1", VpcID: vpc1.ID.String(), IPBlockID: cutil.GetPtr(ipb1.ID.String()), PrefixLength: cutil.GetPtr(prefixLen)})
+	getLabels := map[string]string{"source": "get"}
+	parentIpbBody, err := json.Marshal(model.APIVpcPrefixCreateRequest{
+		Name:         "ok1",
+		Labels:       getLabels,
+		VpcID:        vpc1.ID.String(),
+		IPBlockID:    cutil.GetPtr(ipb1.ID.String()),
+		PrefixLength: cutil.GetPtr(prefixLen),
+	})
 	assert.Nil(t, err)
 
 	vpcprefix := testCreateVpcPrefix(t, dbSession, scp, ipamStorage, tnu, tnOrg1, parentIpbBody)
@@ -1721,6 +1754,9 @@ func TestVpcPrefixHandler_Get(t *testing.T) {
 				assert.Nil(t, err)
 				// validate response fields
 				assert.Equal(t, 1, len(rsp.StatusHistory))
+				if tc.id == vpcprefix.ID {
+					assert.Equal(t, model.APILabels(getLabels), rsp.Labels)
+				}
 
 				expanded := tc.queryIncludeRelations1 != nil || tc.queryIncludeRelations2 != nil || tc.queryIncludeRelations3 != nil || tc.expectUsageStatsNonNil || tc.expectUsageStatsNil
 				if expanded {
@@ -1839,10 +1875,22 @@ func TestVpcPrefixHandler_Update(t *testing.T) {
 	assert.Nil(t, err)
 	assert.NotNil(t, parentPref1)
 	prefixLen := 24
-	vpcprefixBody, err := json.Marshal(model.APIVpcPrefixCreateRequest{Name: "test-vpcprefix-1", VpcID: vpc1.ID.String(), IPBlockID: cutil.GetPtr(ipb1.ID.String()), PrefixLength: cutil.GetPtr(prefixLen)})
+	vpcprefixBody, err := json.Marshal(model.APIVpcPrefixCreateRequest{
+		Name:         "test-vpcprefix-1",
+		Labels:       map[string]string{"owner": "original"},
+		VpcID:        vpc1.ID.String(),
+		IPBlockID:    cutil.GetPtr(ipb1.ID.String()),
+		PrefixLength: cutil.GetPtr(prefixLen),
+	})
 	assert.Nil(t, err)
 
-	vpcprefixBody2, err := json.Marshal(model.APIVpcPrefixCreateRequest{Name: "test-vpcprefix-2", VpcID: vpc1.ID.String(), IPBlockID: cutil.GetPtr(ipb1.ID.String()), PrefixLength: cutil.GetPtr(prefixLen)})
+	vpcprefixBody2, err := json.Marshal(model.APIVpcPrefixCreateRequest{
+		Name:         "test-vpcprefix-2",
+		Labels:       map[string]string{"preserved": "true"},
+		VpcID:        vpc1.ID.String(),
+		IPBlockID:    cutil.GetPtr(ipb1.ID.String()),
+		PrefixLength: cutil.GetPtr(prefixLen),
+	})
 	assert.Nil(t, err)
 
 	tscCallCount := 0
@@ -1865,7 +1913,16 @@ func TestVpcPrefixHandler_Update(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	okBody1, err := json.Marshal(model.APIVpcPrefixUpdateRequest{Name: cutil.GetPtr("test-vpcprefix-updated-1")})
+	okBody1, err := json.Marshal(model.APIVpcPrefixUpdateRequest{
+		Name:   cutil.GetPtr("test-vpcprefix-updated-1"),
+		Labels: map[string]string{"owner": "networking"},
+	})
+	assert.Nil(t, err)
+
+	clearLabelsBody, err := json.Marshal(model.APIVpcPrefixUpdateRequest{
+		Name:   cutil.GetPtr("test-vpcprefix-updated-1"),
+		Labels: map[string]string{},
+	})
 	assert.Nil(t, err)
 
 	okBody3, err := json.Marshal(model.APIVpcPrefixUpdateRequest{Name: cutil.GetPtr("test-vpcprefix-2")})
@@ -1886,6 +1943,7 @@ func TestVpcPrefixHandler_Update(t *testing.T) {
 		expectedDesc       *string
 		expectedStoredName string
 		expectedPrefix     string
+		expectedLabels     map[string]string
 		verifyChildSpanner bool
 	}{
 		{
@@ -1986,6 +2044,17 @@ func TestVpcPrefixHandler_Update(t *testing.T) {
 			expectedStatus: http.StatusOK,
 			expectedName:   "test-vpcprefix-updated-1",
 			expectedDesc:   nil,
+			expectedLabels: map[string]string{"owner": "networking"},
+		},
+		{
+			name:           "success when an empty labels object clears labels",
+			reqOrgName:     tnOrg1,
+			reqBody:        clearLabelsBody,
+			user:           tnu,
+			id:             vpcprefix.ID,
+			expectedStatus: http.StatusOK,
+			expectedName:   "test-vpcprefix-updated-1",
+			expectedLabels: map[string]string{},
 		},
 		{
 			name:           "success case when name is updated with the same value",
@@ -1996,6 +2065,7 @@ func TestVpcPrefixHandler_Update(t *testing.T) {
 			expectedErr:    false,
 			expectedStatus: http.StatusOK,
 			expectedName:   "test-vpcprefix-2",
+			expectedLabels: map[string]string{"preserved": "true"},
 		},
 	}
 
@@ -2054,8 +2124,15 @@ func TestVpcPrefixHandler_Update(t *testing.T) {
 			// validate response fields
 			assert.Equal(t, 1, len(resp.StatusHistory))
 			assert.Equal(t, tc.expectedName, resp.Name)
+			assert.Equal(t, model.APILabels(tc.expectedLabels), resp.Labels)
 
 			assert.False(t, resp.Updated.Equal(previousUpdated), "updated timestamp did not change: previous=%v actual=%v", previousUpdated, resp.Updated)
+
+			vpcPrefixID, err := uuid.Parse(tc.id)
+			require.NoError(t, err)
+			persistedVpcPrefix, err := cdbm.NewVpcPrefixDAO(dbSession).GetByID(ctx, nil, vpcPrefixID, nil)
+			require.NoError(t, err)
+			assert.Equal(t, cdbm.Labels(tc.expectedLabels), persistedVpcPrefix.Labels)
 
 			require.Equal(t, tscCallCount+1, len(tsc.Calls))
 			tscCallCount++
@@ -2066,6 +2143,13 @@ func TestVpcPrefixHandler_Update(t *testing.T) {
 			temporalReq, ok := tsc.Calls[len(tsc.Calls)-1].Arguments[3].(*corev1.VpcPrefixUpdateRequest)
 			require.True(t, ok)
 			assert.Equal(t, resp.Name, temporalReq.Metadata.Name)
+			require.Len(t, temporalReq.Metadata.Labels, len(tc.expectedLabels))
+			if len(tc.expectedLabels) == 1 {
+				for key, value := range tc.expectedLabels {
+					assert.Equal(t, key, temporalReq.Metadata.Labels[0].GetKey())
+					assert.Equal(t, value, temporalReq.Metadata.Labels[0].GetValue())
+				}
+			}
 
 			if tc.verifyChildSpanner {
 				span := oteltrace.SpanFromContext(ec.Request().Context())
