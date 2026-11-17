@@ -26,13 +26,30 @@ set nico-after-network nico_ready
 goto configure_network
 
 :nico_ready
+set nico-boot-attempt:int32 0
+set nico-boot-max-attempts 100
+
+:fetch_nico_boot
+inc nico-boot-attempt
 imgfree nico-boot ||
 set nico-retry-provisioning 0
-time chain --name nico-boot ${nico-pxe-base}/api/v0/pxe/boot?buildarch=${buildarch}&platform=${platform}&manufacturer=${manufacturer}&product=${product}&serial=${serial} && goto exit_to_firmware || goto retry_nico_boot
+echo NICo boot attempt ${nico-boot-attempt}/${nico-boot-max-attempts}
+time imgfetch --name nico-boot ${nico-pxe-base}/api/v0/pxe/boot?buildarch=${buildarch}&platform=${platform}&manufacturer=${manufacturer}&product=${product}&serial=${serial} || goto retry_nico_download
+time imgexec nico-boot && goto exit_to_firmware || goto retry_nico_boot
+
+:retry_nico_download
+set nico-boot-error ${errno:hexraw}
+
+:retry_nico_attempt
+echo NICo boot attempt ${nico-boot-attempt}/${nico-boot-max-attempts} failed: ${nico-boot-error} (https://ipxe.org/${nico-boot-error})
+iseq ${nico-boot-attempt} ${nico-boot-max-attempts} && goto error_handler ||
+prompt --key p --timeout 10000 Hit the ${bold}p${boldoff} key to open NICo menu; retrying in 10 seconds... && goto nico_menu ||
+goto fetch_nico_boot
 
 # Core sets this flag to 1 when the response consumes a one-time custom PXE request.
 :retry_nico_boot
-iseq ${nico-retry-provisioning} 1 || goto error_handler
+set nico-boot-error ${errno:hexraw}
+iseq ${nico-retry-provisioning} 1 || goto retry_nico_attempt
 imgstat nico-boot || goto error_handler
 prompt --key p --timeout 30000 Hit the ${bold}p${boldoff} key to open NICo menu; retrying in 30 seconds... && goto nico_menu ||
 time imgexec nico-boot && goto exit_to_firmware || goto retry_nico_boot
