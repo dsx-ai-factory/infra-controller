@@ -22,6 +22,7 @@ use carbide_redfish::boot_interface::BootInterfaceTarget;
 use libredfish::RoleId;
 use libredfish::model::service_root::RedfishVendor;
 use model::expected_entity::ExpectedEntity;
+use model::expected_machine::HostDpuPolicy;
 use model::machine::MachineInterfaceSnapshot;
 use model::site_explorer::{
     BlueFieldOperatingMode, EndpointExplorationError, EndpointExplorationReport, LockdownStatus,
@@ -46,8 +47,10 @@ pub trait EndpointExplorer: Send + Sync + 'static {
         boot_interface: Option<&BootInterfaceTarget>,
     ) -> Result<EndpointExplorationReport, EndpointExplorationError>;
 
+    /// Checks the site-wide default credentials `site_dpu_policy` requires.
     async fn check_preconditions(
         &self,
+        site_dpu_policy: Option<HostDpuPolicy>,
         metrics: &mut SiteExplorationMetrics,
     ) -> Result<(), EndpointExplorationError>;
 }

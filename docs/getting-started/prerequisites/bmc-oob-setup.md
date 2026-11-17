@@ -78,7 +78,9 @@ These are configured via `nico-admin-cli` after NICo is deployed. Refer to the [
 
 Host ingestion does not start until these credentials are set. Site Explorer verifies the
 site-wide BMC root and both UEFI site defaults before contacting any BMC, and
-aborts each run with `MissingCredentials` while any of them is missing. They can
+aborts each run with `MissingCredentials` while any of them is missing. Site
+Explorer does not require the DPU UEFI site-default password when
+`[site_explorer] dpu_policy = "ignore"`. They can
 also be seeded directly into the credential store before NICo is deployed —
 refer to [Set the site-wide BMC root credential](../../manuals/dpf.md#36-set-the-site-wide-bmc-root-credential).
 

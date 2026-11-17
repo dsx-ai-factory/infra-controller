@@ -25,6 +25,7 @@ use carbide_redfish::boot_interface::BootInterfaceTarget;
 use libredfish::RoleId;
 use libredfish::model::service_root::RedfishVendor;
 use model::expected_entity::ExpectedEntity;
+use model::expected_machine::HostDpuPolicy;
 use model::machine::MachineInterfaceSnapshot;
 use model::site_explorer::{
     BlueFieldOperatingMode, EndpointExplorationError, EndpointExplorationReport,
@@ -190,6 +191,7 @@ impl MockEndpointExplorer {
 impl EndpointExplorer for MockEndpointExplorer {
     async fn check_preconditions(
         &self,
+        _site_dpu_policy: Option<HostDpuPolicy>,
         _metrics: &mut SiteExplorationMetrics,
     ) -> Result<(), EndpointExplorationError> {
         self.precondition_result.lock().unwrap().clone()

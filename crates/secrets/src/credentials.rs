@@ -635,12 +635,14 @@ pub enum CredentialKey {
     },
 }
 
-/// The site-wide default credentials endpoint exploration requires before it
+/// The site-wide default credentials endpoint exploration can require before it
 /// can run (validated by `SiteExplorer::check_preconditions`).
 ///
 /// Single source of truth: the explorer's precondition check and the admin UI's
-/// "default credentials not set" warning both iterate this list so the two
-/// cannot drift apart. Order matches the explorer's original check order.
+/// "default credentials not set" warning both select from this list through
+/// `carbide_site_explorer::required_site_default_credential_keys`, which omits
+/// the DPU UEFI default when the site ignores DPUs. Order matches the explorer's
+/// original check order.
 pub const REQUIRED_SITE_DEFAULT_CREDENTIAL_KEYS: [CredentialKey; 3] = [
     CredentialKey::BmcCredentials {
         credential_type: BmcCredentialType::SiteWideRoot,

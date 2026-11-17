@@ -128,6 +128,9 @@ The required credentials include the following:
 - Host UEFI password
 - DPU UEFI password
 
+Site Explorer does not require the DPU UEFI site-default password when
+`[site_explorer] dpu_policy = "ignore"`.
+
 <Note>
 The following commands use the `<api-url>` placeholder, which is typically the following:
 
