@@ -345,8 +345,7 @@ impl Network {
     }
 }
 
-/// Overrides for a site that did not lay its ASNs out by the convention; each key is
-/// optional and the convention stands for whatever is absent.
+/// How the site controllers and the DPUs get their default route.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub(crate) enum DefaultRoute {
@@ -356,6 +355,8 @@ pub(crate) enum DefaultRoute {
     Static,
 }
 
+/// Overrides for a site that did not lay its ASNs out by the convention; each key is
+/// optional and the convention stands for whatever is absent.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub(crate) struct AsnLayout {

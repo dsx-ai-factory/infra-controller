@@ -80,8 +80,6 @@ pub(crate) enum Outcome {
     /// The check does not apply to this site (a decision rules it out).
     #[allow(dead_code, reason = "no landed check is ruled out by a decision yet")]
     Skip(String),
-    /// Registered, not written yet.
-    Todo,
 }
 
 pub(crate) type CheckFn = fn(&Ctx) -> eyre::Result<Outcome>;
@@ -101,21 +99,15 @@ pub(crate) struct Check {
     /// before the function exists, so a coder implements against it; `CHECKS.md`
     /// prints it. Tests in `checklists/mod.rs` enforce the shape.
     pub(crate) detail: &'static str,
-    pub(crate) run: CheckFn,
+    /// `None` while the check is registered but not written; its row says so.
+    pub(crate) run: Option<CheckFn>,
 }
 
 impl Check {
-    /// False while the entry still points at [`todo`].
+    /// False while the entry has no function yet.
     pub(crate) fn implemented(&self) -> bool {
-        !std::ptr::fn_addr_eq(self.run, todo as CheckFn)
+        self.run.is_some()
     }
-}
-
-/// The function of a registered check that is not written yet. Keep it the
-/// only function in the crate with this body: [`Check::implemented`] compares
-/// addresses, and the compiler may merge identical functions.
-pub(crate) fn todo(_: &Ctx) -> eyre::Result<Outcome> {
-    Ok(Outcome::Todo)
 }
 
 /// Runs a table against a site. `only` non-empty restricts to those ids;
@@ -157,7 +149,12 @@ pub(crate) fn run(checks: &[Check], ctx: &Ctx, only: &[String], skip: &[String])
 
 fn run_one(c: &Check, ctx: &Ctx) -> Row {
     let started = Instant::now();
-    let outcome = catch_unwind(AssertUnwindSafe(|| (c.run)(ctx)));
+    let Some(run) = c.run else {
+        let mut row = Row::new(c.id, Status::Warn, c.expected, "not implemented yet");
+        row.duration_ms = Some(0);
+        return row;
+    };
+    let outcome = catch_unwind(AssertUnwindSafe(|| run(ctx)));
     let mut row = match outcome {
         Ok(Ok(Outcome::Pass(observed))) => Row::pass(c.id, c.expected, observed),
         Ok(Ok(Outcome::Warn { observed, fix })) => {
@@ -172,7 +169,6 @@ fn run_one(c: &Check, ctx: &Ctx) -> Row {
             c.expected,
             format!("not applicable: {why}"),
         ),
-        Ok(Ok(Outcome::Todo)) => Row::new(c.id, Status::Warn, c.expected, "not implemented yet"),
         Ok(Err(e)) => Row::error(c.id, c.expected, format!("{e:#}"))
             .with_fix("the check could not run; see observed"),
         Err(payload) => {
@@ -218,25 +214,25 @@ mod tests {
             id: "t.a",
             expected: "a",
             detail: "",
-            run: passes,
+            run: Some(passes),
         },
         Check {
             id: "t.b",
             expected: "b",
             detail: "",
-            run: errs,
+            run: Some(errs),
         },
         Check {
             id: "t.c",
             expected: "c",
             detail: "",
-            run: panics,
+            run: Some(panics),
         },
         Check {
             id: "t.d",
             expected: "d",
             detail: "",
-            run: todo,
+            run: None,
         },
     ];
 

@@ -17,7 +17,7 @@
 
 //! `nico-pre-install`: NICo as a system after setup.sh, nothing ingested.
 
-use crate::harness::{Check, todo};
+use crate::harness::Check;
 
 pub(crate) const CHECKS: &[Check] = &[
     Check {
@@ -35,7 +35,7 @@ pub(crate) const CHECKS: &[Check] = &[
                  Test: fixture workload lists; cases: all ready passes; a Deployment at 0/1 fails \
                  naming it; a pod in CrashLoopBackOff fails; REST unticked with no REST pods \
                  passes.",
-        run: todo,
+        run: None,
     },
     Check {
         id: "install.api.reachable",
@@ -52,7 +52,7 @@ pub(crate) const CHECKS: &[Check] = &[
                  Test: a local TLS server with a test CA and a stub DNS; cases: matching passes; \
                  `apiHostname` resolving elsewhere fails naming both addresses; a certificate \
                  without the SAN fails naming its names; another CA fails.",
-        run: todo,
+        run: None,
     },
     Check {
         id: "install.dpf.ready",
@@ -66,6 +66,6 @@ pub(crate) const CHECKS: &[Check] = &[
                  Skip: when `dpf` is `Skip`.\n\
                  Test: fixture resources; cases: Ready passes; a condition False fails quoting \
                  the reason; absent fails; `Skip` skips.",
-        run: todo,
+        run: None,
     },
 ];
