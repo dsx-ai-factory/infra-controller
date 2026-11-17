@@ -39,12 +39,13 @@ func newNotifyingTaskStore(
 func (s *notifyingTaskStore) UpdateTaskStatus(
 	ctx context.Context,
 	u *taskdef.TaskStatusUpdate,
-) error {
-	if err := s.Store.UpdateTaskStatus(ctx, u); err != nil {
-		return err
+) (bool, error) {
+	updated, err := s.Store.UpdateTaskStatus(ctx, u)
+	if err != nil {
+		return false, err
 	}
-	if !u.Status.IsFinished() {
-		return nil
+	if !updated || !u.Status.IsFinished() {
+		return updated, nil
 	}
 
 	// Delegate explicitly so a future wrapper override cannot change this
@@ -54,11 +55,11 @@ func (s *notifyingTaskStore) UpdateTaskStatus(
 		log.Warn().
 			Str("task_id", u.ID.String()).
 			Msg("notifying store: could not look up task for promotion")
-		return nil
+		return updated, nil
 	}
 
 	s.promoter.Notify(tasks[0].RackID)
-	return nil
+	return updated, nil
 }
 
 // UpdateTaskReport delegates to the underlying store.
