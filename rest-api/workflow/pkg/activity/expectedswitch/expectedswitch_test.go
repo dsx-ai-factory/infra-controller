@@ -114,9 +114,9 @@ func (h *testExpectedSwitchAfterReadHook) AfterQuery(ctx context.Context, event 
 	if h.rowID != uuid.Nil && (ctx.Value(testExpectedSwitchReconcileContextKey{}) != h || !strings.Contains(event.Query, h.rowID.String()) || !strings.Contains(event.Query, "FOR UPDATE")) {
 		return
 	}
-	// The Site ID snapshot reads no row values, so it is not the inventory read.
+	// The deletion snapshot reads only row versions, so it is not the inventory read.
 	if h.afterRead == nil || event.Err != nil || event.Operation() != "SELECT" ||
-		strings.HasPrefix(event.Query, "SELECT count(") || strings.HasPrefix(event.Query, `SELECT "es"."id" FROM`) ||
+		strings.HasPrefix(event.Query, "SELECT count(") || strings.HasPrefix(event.Query, `SELECT "es"."id", "es"."updated" FROM`) ||
 		!strings.Contains(event.Query, `FROM "expected_switch"`) {
 		return
 	}
@@ -150,8 +150,8 @@ func (h *testExpectedSwitchBeforeDeleteHook) AfterQuery(ctx context.Context, eve
 
 // testExpectedSwitchRowLoadHook counts the rows the activity reads in full.
 type testExpectedSwitchRowLoadHook struct {
-	rowsLoaded  int64
-	idSnapshots int64
+	rowsLoaded int64
+	snapshots  int64
 }
 
 func (h *testExpectedSwitchRowLoadHook) BeforeQuery(ctx context.Context, _ *bun.QueryEvent) context.Context {
@@ -163,8 +163,8 @@ func (h *testExpectedSwitchRowLoadHook) AfterQuery(ctx context.Context, event *b
 		!strings.Contains(event.Query, `FROM "expected_switch"`) {
 		return
 	}
-	if strings.HasPrefix(event.Query, `SELECT "es"."id" FROM`) {
-		h.idSnapshots++
+	if strings.HasPrefix(event.Query, `SELECT "es"."id", "es"."updated" FROM`) {
+		h.snapshots++
 		return
 	}
 	if !strings.Contains(event.Query, `"es"."updated"`) {
@@ -720,23 +720,23 @@ func TestManageExpectedSwitch_UpdateExpectedSwitchesInDB(t *testing.T) {
 			name                  string
 			page                  int32
 			wantRowsLoaded        int64
-			wantIDSnapshots       int64
+			wantSnapshots         int64
 			wantUnreportedDeleted bool
 		}{
 			{name: "a page before the last loads the row it reports", page: 1, wantRowsLoaded: 1},
-			{name: "the last page also loads and deletes the unreported row", page: 2, wantRowsLoaded: 2, wantIDSnapshots: 1, wantUnreportedDeleted: true},
+			{name: "the last page deletes the unreported row without loading it", page: 2, wantRowsLoaded: 1, wantSnapshots: 1, wantUnreportedDeleted: true},
 		}
 		for _, step := range steps {
 			t.Run(step.name, func(t *testing.T) {
 				hook.rowsLoaded = 0
-				hook.idSnapshots = 0
+				hook.snapshots = 0
 				require.NoError(t, mei.UpdateExpectedSwitchesInDB(activityCtx, site.ID, &corev1.ExpectedSwitchInventory{
 					ExpectedSwitches: reported[step.page-1 : step.page],
 					InventoryStatus:  corev1.InventoryStatus_INVENTORY_STATUS_SUCCESS,
 					InventoryPage:    &corev1.InventoryPage{CurrentPage: step.page, TotalPages: 2, PageSize: 1, TotalItems: 2, ItemIds: itemIDs},
 				}))
 				assert.Equal(t, step.wantRowsLoaded, hook.rowsLoaded)
-				assert.Equal(t, step.wantIDSnapshots, hook.idSnapshots)
+				assert.Equal(t, step.wantSnapshots, hook.snapshots)
 				_, err := esDAO.Get(ctx, nil, unreported.ID, nil, false)
 				if step.wantUnreportedDeleted {
 					require.ErrorIs(t, err, cdb.ErrDoesNotExist)
@@ -858,6 +858,62 @@ func TestManageExpectedSwitch_UpdateExpectedSwitchesInDB(t *testing.T) {
 		require.ErrorIs(t, err, cdb.ErrDoesNotExist)
 	})
 
+	t.Run("API write after the deletion snapshot survives deletion", func(t *testing.T) {
+		site := cwu.TestBuildSite(t, dbSession, ip, "edit-after-snapshot-site", cdbm.SiteStatusRegistered, nil, ipu)
+		row, err := esDAO.Create(ctx, nil, cdbm.ExpectedSwitchCreateInput{
+			ExpectedSwitchID:   uuid.New(),
+			SiteID:             site.ID,
+			BmcMacAddress:      "00:11:22:33:99:07",
+			SwitchSerialNumber: "SN-EDIT-AFTER-SNAPSHOT",
+			Name:               cutil.GetPtr("original-name"),
+			CreatedBy:          ipu.ID,
+		})
+		require.NoError(t, err)
+		reported, err := esDAO.Create(ctx, nil, cdbm.ExpectedSwitchCreateInput{
+			ExpectedSwitchID:   uuid.New(),
+			SiteID:             site.ID,
+			BmcMacAddress:      "00:11:22:33:99:08",
+			SwitchSerialNumber: "SN-STILL-REPORTED",
+			CreatedBy:          ipu.ID,
+		})
+		require.NoError(t, err)
+		cwu.TestInventoryAgeUpdatedTimestamp(ctx, t, dbSession, (*cdbm.ExpectedSwitch)(nil))
+		beforeEdit, err := esDAO.Get(ctx, nil, row.ID, nil, false)
+		require.NoError(t, err)
+
+		// Commit the API edit after the page lookup, which follows the deletion snapshot.
+		// The edit is already older than the inventory interval, so only its changed
+		// `Updated` value keeps the row.
+		editedAt := beforeEdit.Updated.Add(time.Second)
+		require.False(t, site.IsTimeWithinStaleInventoryThreshold(editedAt))
+		var writeErr error
+		fired := false
+		hook := &testExpectedSwitchAfterReadHook{afterRead: func() {
+			fired = true
+			_, writeErr = dbSession.DB.NewUpdate().Model((*cdbm.ExpectedSwitch)(nil)).
+				Set("name = ?", "API-name").Set("updated = ?", editedAt).Where("id = ?", row.ID).Exec(ctx)
+		}}
+		dbSession.DB.AddQueryHook(hook)
+		defer func() { hook.afterRead = nil }()
+		deleteHook := &testExpectedSwitchBeforeDeleteHook{rowID: row.ID}
+		dbSession.DB.AddQueryHook(deleteHook)
+		mei := ManageExpectedSwitch{dbSession: dbSession}
+		require.NoError(t, mei.UpdateExpectedSwitchesInDB(ctx, site.ID, &corev1.ExpectedSwitchInventory{
+			InventoryStatus: corev1.InventoryStatus_INVENTORY_STATUS_SUCCESS,
+			ExpectedSwitches: []*corev1.ExpectedSwitch{{
+				ExpectedSwitchId:   &corev1.UUID{Value: reported.ID.String()},
+				BmcMacAddress:      reported.BmcMacAddress,
+				SwitchSerialNumber: reported.SwitchSerialNumber,
+			}},
+		}))
+		require.True(t, fired)
+		require.NoError(t, writeErr)
+		require.True(t, deleteHook.fired)
+		stored, err := esDAO.Get(ctx, nil, row.ID, nil, false)
+		require.NoError(t, err)
+		assert.Equal(t, cutil.GetPtr("API-name"), stored.Name)
+	})
+
 	t.Run("delete failure allows other deletions and retries on later inventory", func(t *testing.T) {
 		site := cwu.TestBuildSite(t, dbSession, ip, "failed-delete-site", cdbm.SiteStatusRegistered, nil, ipu)
 		row, err := esDAO.Create(ctx, nil, cdbm.ExpectedSwitchCreateInput{
@@ -877,7 +933,7 @@ func TestManageExpectedSwitch_UpdateExpectedSwitchesInDB(t *testing.T) {
 		})
 		require.NoError(t, err)
 		cwu.TestInventoryAgeUpdatedTimestamp(ctx, t, dbSession, (*cdbm.ExpectedSwitch)(nil))
-		// `GetAll` orders by `created`, so process the failing row first.
+		// The sweep visits rows in `created` order, so process the failing row first.
 		_, err = dbSession.DB.NewUpdate().Model((*cdbm.ExpectedSwitch)(nil)).
 			Set("created = ?", companion.Created.Add(-time.Hour)).Where("id = ?", row.ID).Exec(ctx)
 		require.NoError(t, err)

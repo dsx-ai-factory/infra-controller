@@ -40,7 +40,7 @@ type ManageExpectedSwitch struct {
 // The reconciliation logic is as follows:
 // - UUID existing in NICo but not in DB: create record in DB
 // - UUID existing in both NICo and DB with differences: update record in DB
-// - UUID existing in DB but not in NICo: delete the stale record if it has not changed since the deletion sweep read it
+// - UUID existing in DB but not in NICo: delete the stale record if it has not changed since the initial read
 func (mei ManageExpectedSwitch) UpdateExpectedSwitchesInDB(ctx context.Context, siteID uuid.UUID, expectedSwitchInventory *corev1.ExpectedSwitchInventory) error {
 	logger := log.With().Str("Activity", "UpdateExpectedSwitchesInDB").Str("Site ID", siteID.String()).Logger()
 
@@ -77,12 +77,13 @@ func (mei ManageExpectedSwitch) UpdateExpectedSwitchesInDB(ctx context.Context, 
 	// Initialize ExpectedSwitch DAO (used for reconciliation of expected instances)
 	esDAO := cdbm.NewExpectedSwitchDAO(mei.dbSession)
 
-	// The deletion sweep only considers Expected Switches that existed before this page is applied.
-	var siteExpectedSwitchIDs []uuid.UUID
+	// The deletion sweep only considers Expected Switches that existed before this page is applied,
+	// and only deletes one that has not changed since.
+	var siteExpectedSwitchVersions []cdbm.ExpectedSwitchVersion
 	if util.ShouldReconcileDeletions(expectedSwitchInventory.GetInventoryPage()) {
-		siteExpectedSwitchIDs, err = esDAO.GetAllIDs(ctx, nil, cdbm.ExpectedSwitchFilterInput{SiteIDs: []uuid.UUID{siteID}})
+		siteExpectedSwitchVersions, err = esDAO.GetAllVersions(ctx, nil, cdbm.ExpectedSwitchFilterInput{SiteIDs: []uuid.UUID{siteID}})
 		if err != nil {
-			logger.Error().Err(err).Msg("failed to get ExpectedSwitch IDs for Site from DB")
+			logger.Error().Err(err).Msg("failed to get ExpectedSwitch versions for Site from DB")
 			return err
 		}
 	}
@@ -260,26 +261,12 @@ func (mei ManageExpectedSwitch) UpdateExpectedSwitchesInDB(ctx context.Context, 
 
 	// Delete stale records missing from `reportedIDs` only after the final page
 	// (or when paging is disabled). Matching the saved `Updated` timestamp in
-	// `DeleteIfUnchanged` preserves API edits committed after the sweep's read.
+	// `DeleteIfUnchanged` preserves API edits committed after our initial read.
 	if util.ShouldReconcileDeletions(expectedSwitchInventory.GetInventoryPage()) {
-		// Only the Expected Switches the Site stopped reporting are loaded in full.
-		unreportedExpectedSwitchIDs := []uuid.UUID{}
-		for _, id := range siteExpectedSwitchIDs {
-			if !reportedIDs[id] {
-				unreportedExpectedSwitchIDs = append(unreportedExpectedSwitchIDs, id)
+		for _, es := range siteExpectedSwitchVersions {
+			if _, keep := reportedIDs[es.ID]; keep {
+				continue
 			}
-		}
-
-		unreportedExpectedSwitches := []cdbm.ExpectedSwitch{}
-		if len(unreportedExpectedSwitchIDs) > 0 {
-			unreportedExpectedSwitches, _, err = esDAO.GetAll(ctx, nil, cdbm.ExpectedSwitchFilterInput{SiteIDs: []uuid.UUID{siteID}, ExpectedSwitchIDs: unreportedExpectedSwitchIDs}, cdbp.PageInput{Limit: cutil.GetPtr(cdbp.TotalLimit)}, nil)
-			if err != nil {
-				logger.Error().Err(err).Msg("failed to get unreported ExpectedSwitches from DB")
-				return err
-			}
-		}
-
-		for _, es := range unreportedExpectedSwitches {
 			// Avoid destructive actions inside race-condition window
 			if site.IsTimeWithinStaleInventoryThreshold(es.Updated) {
 				continue

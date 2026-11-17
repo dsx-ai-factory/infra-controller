@@ -6,8 +6,6 @@ package model
 import (
 	"context"
 	"database/sql"
-	"slices"
-	"strings"
 	"testing"
 	"time"
 
@@ -841,7 +839,7 @@ func TestExpectedMachineSQLDAO_Get_MachineRelation_NoMatch(t *testing.T) {
 	assert.Nil(t, got.Machine, "Machine relation should be nil when MachineID is null")
 }
 
-func TestExpectedMachineSQLDAO_GetAllIDs(t *testing.T) {
+func TestExpectedMachineSQLDAO_GetAllVersions(t *testing.T) {
 	ctx := context.Background()
 	dbSession := testInitDB(t)
 	defer dbSession.Close()
@@ -853,47 +851,50 @@ func TestExpectedMachineSQLDAO_GetAllIDs(t *testing.T) {
 	site2 := TestBuildSite(t, dbSession, ip, "test-site-2", user)
 	emsd := NewExpectedMachineDAO(dbSession)
 
-	createExpectedMachine := func(site *Site, bmcMacAddress string) uuid.UUID {
+	createExpectedMachine := func(site *Site, id uuid.UUID, bmcMacAddress string) ExpectedMachineVersion {
 		t.Helper()
 		created, err := emsd.Create(ctx, nil, ExpectedMachineCreateInput{
-			ExpectedMachineID:   uuid.New(),
+			ExpectedMachineID:   id,
 			SiteID:              site.ID,
 			BmcMacAddress:       bmcMacAddress,
 			ChassisSerialNumber: "CHASSIS-" + bmcMacAddress,
 			CreatedBy:           user.ID,
 		})
 		require.NoError(t, err)
-		return created.ID
+		return ExpectedMachineVersion{ID: created.ID, Updated: created.Updated}
 	}
 
-	siteIDs := []uuid.UUID{createExpectedMachine(site, "00:1B:44:11:3A:B7"), createExpectedMachine(site, "00:1B:44:11:3A:B8")}
-	slices.SortFunc(siteIDs, func(a, b uuid.UUID) int { return strings.Compare(a.String(), b.String()) })
-	createExpectedMachine(site2, "00:1B:44:11:3A:B9")
+	// The row created first has the higher ID, so creation order differs from ID order.
+	siteVersions := []ExpectedMachineVersion{
+		createExpectedMachine(site, uuid.MustParse("00000000-0000-0000-0000-000000000002"), "00:1B:44:11:3A:B7"),
+		createExpectedMachine(site, uuid.MustParse("00000000-0000-0000-0000-000000000001"), "00:1B:44:11:3A:B8"),
+	}
+	createExpectedMachine(site2, uuid.New(), "00:1B:44:11:3A:B9")
 
 	tests := []struct {
 		desc     string
 		filter   ExpectedMachineFilterInput
-		expected []uuid.UUID
+		expected []ExpectedMachineVersion
 	}{
 		{
-			desc:     "Site filter excludes other Sites",
+			desc:     "Site filter excludes other Sites and keeps creation order",
 			filter:   ExpectedMachineFilterInput{SiteIDs: []uuid.UUID{site.ID}},
-			expected: siteIDs,
+			expected: siteVersions,
 		},
 		{
 			desc:     "no matching ExpectedMachines returns an empty slice",
 			filter:   ExpectedMachineFilterInput{SiteIDs: []uuid.UUID{uuid.New()}},
-			expected: []uuid.UUID{},
+			expected: []ExpectedMachineVersion{},
 		},
 		{
 			desc:     "empty ExpectedMachine ID filter returns an empty slice",
 			filter:   ExpectedMachineFilterInput{ExpectedMachineIDs: []uuid.UUID{}},
-			expected: []uuid.UUID{},
+			expected: []ExpectedMachineVersion{},
 		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.desc, func(t *testing.T) {
-			got, err := emsd.GetAllIDs(ctx, nil, tc.filter)
+			got, err := emsd.GetAllVersions(ctx, nil, tc.filter)
 			require.NoError(t, err)
 			assert.Equal(t, tc.expected, got)
 		})

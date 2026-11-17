@@ -6,8 +6,6 @@ package model
 import (
 	"context"
 	"database/sql"
-	"slices"
-	"strings"
 	"testing"
 	"time"
 
@@ -494,7 +492,7 @@ func TestExpectedSwitchSQLDAO_Get_includeRelations(t *testing.T) {
 	assert.NotNil(t, got.Site)
 }
 
-func TestExpectedSwitchSQLDAO_GetAllIDs(t *testing.T) {
+func TestExpectedSwitchSQLDAO_GetAllVersions(t *testing.T) {
 	ctx := context.Background()
 	dbSession := testInitDB(t)
 	defer dbSession.Close()
@@ -506,47 +504,50 @@ func TestExpectedSwitchSQLDAO_GetAllIDs(t *testing.T) {
 	site2 := TestBuildSite(t, dbSession, ip, "test-site-2", user)
 	essd := NewExpectedSwitchDAO(dbSession)
 
-	createExpectedSwitch := func(site *Site, bmcMacAddress string) uuid.UUID {
+	createExpectedSwitch := func(site *Site, id uuid.UUID, bmcMacAddress string) ExpectedSwitchVersion {
 		t.Helper()
 		created, err := essd.Create(ctx, nil, ExpectedSwitchCreateInput{
-			ExpectedSwitchID:   uuid.New(),
+			ExpectedSwitchID:   id,
 			SiteID:             site.ID,
 			BmcMacAddress:      bmcMacAddress,
 			SwitchSerialNumber: "SWITCH-" + bmcMacAddress,
 			CreatedBy:          user.ID,
 		})
 		require.NoError(t, err)
-		return created.ID
+		return ExpectedSwitchVersion{ID: created.ID, Updated: created.Updated}
 	}
 
-	siteIDs := []uuid.UUID{createExpectedSwitch(site, "00:1B:44:11:3A:B7"), createExpectedSwitch(site, "00:1B:44:11:3A:B8")}
-	slices.SortFunc(siteIDs, func(a, b uuid.UUID) int { return strings.Compare(a.String(), b.String()) })
-	createExpectedSwitch(site2, "00:1B:44:11:3A:B9")
+	// The row created first has the higher ID, so creation order differs from ID order.
+	siteVersions := []ExpectedSwitchVersion{
+		createExpectedSwitch(site, uuid.MustParse("00000000-0000-0000-0000-000000000002"), "00:1B:44:11:3A:B7"),
+		createExpectedSwitch(site, uuid.MustParse("00000000-0000-0000-0000-000000000001"), "00:1B:44:11:3A:B8"),
+	}
+	createExpectedSwitch(site2, uuid.New(), "00:1B:44:11:3A:B9")
 
 	tests := []struct {
 		desc     string
 		filter   ExpectedSwitchFilterInput
-		expected []uuid.UUID
+		expected []ExpectedSwitchVersion
 	}{
 		{
-			desc:     "Site filter excludes other Sites",
+			desc:     "Site filter excludes other Sites and keeps creation order",
 			filter:   ExpectedSwitchFilterInput{SiteIDs: []uuid.UUID{site.ID}},
-			expected: siteIDs,
+			expected: siteVersions,
 		},
 		{
 			desc:     "no matching ExpectedSwitches returns an empty slice",
 			filter:   ExpectedSwitchFilterInput{SiteIDs: []uuid.UUID{uuid.New()}},
-			expected: []uuid.UUID{},
+			expected: []ExpectedSwitchVersion{},
 		},
 		{
 			desc:     "empty ExpectedSwitch ID filter returns an empty slice",
 			filter:   ExpectedSwitchFilterInput{ExpectedSwitchIDs: []uuid.UUID{}},
-			expected: []uuid.UUID{},
+			expected: []ExpectedSwitchVersion{},
 		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.desc, func(t *testing.T) {
-			got, err := essd.GetAllIDs(ctx, nil, tc.filter)
+			got, err := essd.GetAllVersions(ctx, nil, tc.filter)
 			require.NoError(t, err)
 			assert.Equal(t, tc.expected, got)
 		})
