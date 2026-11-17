@@ -253,7 +253,7 @@ func NewGetAllTenantAccountHandler(dbSession *cdb.Session, tc temporalClient.Cli
 // @Param tenantId query string false "Filter TenantAccounts by Tenant ID (Provider role only; for Tenant role the tenant is inferred from org membership and this param is ignored)"
 // @Param status query string false "Query input for status"
 // @Param query query string false "Search query string"
-// @Param includeRelation query string false "Related entities to include in response e.g. 'InfrastructureProvider', 'Tenant'"
+// @Param includeRelation query []string false "Related entities to include in response e.g. 'InfrastructureProvider', 'Tenant'" collectionFormat(multi)
 // @Param pageNumber query integer false "Page number of results returned"
 // @Param pageSize query integer false "Number of results per page"
 // @Param orderBy query string false "Order by field"
@@ -520,7 +520,7 @@ func NewGetTenantAccountHandler(dbSession *cdb.Session, tc temporalClient.Client
 // @Param id path string true "ID of Tenant Account"
 // @Param infrastructureProviderId query string false "Deprecated: ID of Infrastructure Provider"
 // @Param tenantId query string false "Deprecated: ID of Tenant"
-// @Param includeRelation query string false "Related entities to include in response e.g. 'InfrastructureProvider', 'Tenant'"
+// @Param includeRelation query []string false "Related entities to include in response e.g. 'InfrastructureProvider', 'Tenant'" collectionFormat(multi)
 // @Success 200 {object} model.APITenantAccount
 // @Router /v2/org/{org}/nico/tenant/account/{id} [get]
 func (gtah GetTenantAccountHandler) Handle(c echo.Context) error {

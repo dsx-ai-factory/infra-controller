@@ -245,7 +245,7 @@ func NewGetAllExpectedRackHandler(dbSession *cdb.Session, cfg *config.Config) Ge
 // @Param org path string true "Name of NGC organization"
 // @Param siteId query string false "ID of Site (optional, filters results to specific site)"
 // @Param pageNumber query integer false "Page number of results returned"
-// @Param includeRelation query string false "Related entities to include in response e.g. 'Site'"
+// @Param includeRelation query []string false "Related entities to include in response e.g. 'Site'" collectionFormat(multi)
 // @Param pageSize query integer false "Number of results per page"
 // @Param orderBy query string false "Order by field"
 // @Success 200 {object} []model.APIExpectedRack
@@ -409,7 +409,7 @@ func NewGetExpectedRackHandler(dbSession *cdb.Session, cfg *config.Config) GetEx
 // @Security ApiKeyAuth
 // @Param org path string true "Name of NGC organization"
 // @Param id path string true "ID of Expected Rack"
-// @Param includeRelation query string false "Related entities to include in response e.g. 'Site'"
+// @Param includeRelation query []string false "Related entities to include in response e.g. 'Site'" collectionFormat(multi)
 // @Success 200 {object} model.APIExpectedRack
 // @Router /v2/org/{org}/expected-rack/{id} [get]
 func (gerh GetExpectedRackHandler) Handle(c echo.Context) error {

@@ -825,7 +825,7 @@ type ApiGetAllMachineRequest struct {
 	capabilityName  *[]string
 	hwSkuDeviceType *[]string
 	query           *string
-	includeRelation *string
+	includeRelation *[]string
 	pageNumber      *int32
 	pageSize        *int32
 	orderBy         *string
@@ -909,8 +909,8 @@ func (r ApiGetAllMachineRequest) Query(query string) ApiGetAllMachineRequest {
 	return r
 }
 
-// Related entity to expand
-func (r ApiGetAllMachineRequest) IncludeRelation(includeRelation string) ApiGetAllMachineRequest {
+// Related entity to expand. Repeat the parameter to specify multiple values.
+func (r ApiGetAllMachineRequest) IncludeRelation(includeRelation []string) ApiGetAllMachineRequest {
 	r.includeRelation = &includeRelation
 	return r
 }
@@ -1067,7 +1067,15 @@ func (a *MachineAPIService) GetAllMachineExecute(r ApiGetAllMachineRequest) ([]M
 		parameterAddToHeaderOrQuery(localVarQueryParams, "query", r.query, "form", "")
 	}
 	if r.includeRelation != nil {
-		parameterAddToHeaderOrQuery(localVarQueryParams, "includeRelation", r.includeRelation, "form", "")
+		t := *r.includeRelation
+		if reflect.TypeOf(t).Kind() == reflect.Slice {
+			s := reflect.ValueOf(t)
+			for i := 0; i < s.Len(); i++ {
+				parameterAddToHeaderOrQuery(localVarQueryParams, "includeRelation", s.Index(i).Interface(), "form", "multi")
+			}
+		} else {
+			parameterAddToHeaderOrQuery(localVarQueryParams, "includeRelation", t, "form", "multi")
+		}
 	}
 	if r.pageNumber != nil {
 		parameterAddToHeaderOrQuery(localVarQueryParams, "pageNumber", r.pageNumber, "form", "")
@@ -1157,7 +1165,7 @@ type ApiGetAllMachineCapabilitiesRequest struct {
 	frequency       *string
 	capacity        *string
 	vendor          *string
-	inactiveDevices *string
+	inactiveDevices *[]int32
 	count           *string
 	pageNumber      *int32
 	pageSize        *int32
@@ -1207,7 +1215,7 @@ func (r ApiGetAllMachineCapabilitiesRequest) Vendor(vendor string) ApiGetAllMach
 }
 
 // Filter Capabilities by Inactive Devices value. Since the value is an array, multiple query parameters should be specified in the correct order. For example, to filter for [1, 3], specify inactiveDevices&#x3D;1&amp;inactiveDevices&#x3D;3
-func (r ApiGetAllMachineCapabilitiesRequest) InactiveDevices(inactiveDevices string) ApiGetAllMachineCapabilitiesRequest {
+func (r ApiGetAllMachineCapabilitiesRequest) InactiveDevices(inactiveDevices []int32) ApiGetAllMachineCapabilitiesRequest {
 	r.inactiveDevices = &inactiveDevices
 	return r
 }
@@ -1305,7 +1313,15 @@ func (a *MachineAPIService) GetAllMachineCapabilitiesExecute(r ApiGetAllMachineC
 		parameterAddToHeaderOrQuery(localVarQueryParams, "vendor", r.vendor, "form", "")
 	}
 	if r.inactiveDevices != nil {
-		parameterAddToHeaderOrQuery(localVarQueryParams, "inactiveDevices", r.inactiveDevices, "form", "")
+		t := *r.inactiveDevices
+		if reflect.TypeOf(t).Kind() == reflect.Slice {
+			s := reflect.ValueOf(t)
+			for i := 0; i < s.Len(); i++ {
+				parameterAddToHeaderOrQuery(localVarQueryParams, "inactiveDevices", s.Index(i).Interface(), "form", "multi")
+			}
+		} else {
+			parameterAddToHeaderOrQuery(localVarQueryParams, "inactiveDevices", t, "form", "multi")
+		}
 	}
 	if r.count != nil {
 		parameterAddToHeaderOrQuery(localVarQueryParams, "count", r.count, "form", "")
@@ -2385,12 +2401,12 @@ type ApiGetMachineRequest struct {
 	ApiService      *MachineAPIService
 	org             string
 	machineId       string
-	includeRelation *string
+	includeRelation *[]string
 	includeMetadata *bool
 }
 
-// Related entity to expand
-func (r ApiGetMachineRequest) IncludeRelation(includeRelation string) ApiGetMachineRequest {
+// Related entity to expand. Repeat the parameter to specify multiple values.
+func (r ApiGetMachineRequest) IncludeRelation(includeRelation []string) ApiGetMachineRequest {
 	r.includeRelation = &includeRelation
 	return r
 }
@@ -2453,7 +2469,15 @@ func (a *MachineAPIService) GetMachineExecute(r ApiGetMachineRequest) (*Machine,
 	localVarFormParams := url.Values{}
 
 	if r.includeRelation != nil {
-		parameterAddToHeaderOrQuery(localVarQueryParams, "includeRelation", r.includeRelation, "form", "")
+		t := *r.includeRelation
+		if reflect.TypeOf(t).Kind() == reflect.Slice {
+			s := reflect.ValueOf(t)
+			for i := 0; i < s.Len(); i++ {
+				parameterAddToHeaderOrQuery(localVarQueryParams, "includeRelation", s.Index(i).Interface(), "form", "multi")
+			}
+		} else {
+			parameterAddToHeaderOrQuery(localVarQueryParams, "includeRelation", t, "form", "multi")
+		}
 	}
 	if r.includeMetadata != nil {
 		parameterAddToHeaderOrQuery(localVarQueryParams, "includeMetadata", r.includeMetadata, "form", "")
