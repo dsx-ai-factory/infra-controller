@@ -49,7 +49,7 @@ Schema version: `schemaVersion: 1`. Source of truth: `src/sitedef.rs` (types) an
 | `coreValues` | yes | The Core values file (`values/nico-core.yaml`); carries the NICo TOML under `nicoApiSiteConfig`. |
 | `restValues` | yes | The REST values file (`values/nico-rest.yaml`). |
 | `siteAgentValues` | yes | The site-agent values file. |
-| `metallbConfig` | yes | The MetalLB configuration passed with `--metallb-config`: a manifest file or a kustomize directory. |
+| `metallbConfig` | only when a MetalLB file exists | The MetalLB configuration passed with `--metallb-config`: a manifest file or a kustomize directory. Omit when another tool renders MetalLB; the MetalLB rows then skip. |
 | `expectedMachines` | from step 7 | The expected-machines file the ingestion checklist reads. |
 
 ## `decisions`
@@ -68,7 +68,7 @@ commented out with its default.
   `managed-host-kinds-in-the-fleet`, `managed-host-dpu-generation`, `pxe-and-http-boot-url`,
   `key-wrapping-for-the-postgres-store`, `certificate-issuance`,
   `autonomous-bmc-and-uefi-rotation`, `optional-components`. A list given to any other entry
-  is an error.
+  is an error, as is `Not applicable` beside an option that applies.
 - Implication rules fill in what a stated answer implies (an air-gapped staging host implies
   `external-registry-access: Not applicable`); a stated value that contradicts an implication,
   and any pair the register declares exclusive, fails the gate and names both values.
@@ -147,8 +147,6 @@ for alignment only.
 
 - `examples/site-def.yaml`: an illustrative air-gapped site with three site controllers
   carrying BF3 DPUs.
-- `examples/site-def-dev1.yaml`: the nico-dev `dev1` developer VM, written from the site's own
-  records, with stand-ins marked where the simulation has no real counterpart.
 
-Both pass `nico-pre validate`; the crate's tests splice broken values into the first one and
-assert the gate names the offending row.
+It passes `nico-pre validate`; the crate's tests splice broken values into it and assert the
+gate names the offending row.

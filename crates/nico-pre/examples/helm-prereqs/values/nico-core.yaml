@@ -1,0 +1,174 @@
+# Core values for the example site: the umbrella chart's values with the NICo TOML under
+# nico-api.siteConfig.nicoApiSiteConfig. Agrees with ../../site-def.yaml; the config checklist's
+# tests splice it one line at a time.
+nico-api:
+  externalService:
+    enabled: true
+    annotations:
+      metallb.universe.tf/loadBalancerIPs: 10.10.126.208   # external pool
+  siteConfig:
+    enabled: true
+    nicoApiSiteConfig: |
+      sitename = "site1"
+      initial_domain_name = "site1.dc1.example.net"
+      attestation_enabled = false
+      max_concurrent_machine_updates = 20
+      enable_route_servers = false
+      datacenter_asn = 65034
+      dhcp_servers = ["10.10.126.194"]
+      route_servers = []
+      site_fabric_prefixes = ["10.10.0.0/16"]
+      deny_prefixes = ["10.10.63.64/29", "10.10.248.48/28", "10.10.250.0/25", "10.10.250.128/25"]
+
+      [site_explorer]
+      run_interval = "30s"
+      dpu_policy = "manage"
+
+      [secrets]
+      backends = ["vault"]
+      writer = "vault"
+
+      [pools.lo-ip]
+      type = "ipv4"
+      prefix = "10.10.62.0/24"
+
+      [pools.vlan-id]
+      type = "integer"
+      ranges = [{ start = "100", end = "501" }]
+
+      [pools.vni]
+      type = "integer"
+      ranges = [{ start = "1024500", end = "1024800" }]
+
+      [pools.vpc-vni]
+      type = "integer"
+      ranges = [{ start = "60101", end = "61124" }]
+
+      [pools.fnn-asn]
+      type = "integer"
+      ranges = [{ start = "4244766864", end = "4244767060" }]
+
+      [pools.vpc-dpu-lo]
+      type = "ipv4"
+      prefix = "10.10.255.0/24"
+
+      [pools.external-vpc-vni]
+      type = "integer"
+      ranges = [{ start = "51000", end = "51008" }]
+
+      [networks.admin]
+      type = "admin"
+      prefix = "10.10.60.0/24"
+      gateway = "10.10.60.1"
+      mtu = 9000
+      reserve_first = 5
+
+      [networks.rack1]
+      type = "underlay"
+      prefix = "10.10.72.0/23"
+      gateway = "10.10.72.1"
+      mtu = 9000
+      reserve_first = 2
+
+      [firmware_global]
+      autoupdate = false
+
+      [fnn.admin_vpc]
+      enabled = true
+      vpc_vni = 60100
+
+      [fnn.routing_profiles.INTERNAL]
+      internal = true
+      access_tier = 1
+      route_target_imports = [{ asn = 65034, vni = 101 }, { asn = 65034, vni = 50100 }]
+      route_targets_on_exports = [{ asn = 65034, vni = 50200 }]
+
+      [fnn.routing_profiles.EXTERNAL]
+      internal = false
+      access_tier = 3
+      route_target_imports = [{ asn = 65034, vni = 50100 }]
+      route_targets_on_exports = [{ asn = 65034, vni = 50500 }]
+
+      [fnn.admin_vpc.routing_profile]
+      internal = true
+      route_target_imports = [{ asn = 65034, vni = 101 }, { asn = 65034, vni = 50100 }]
+      route_targets_on_exports = [{ asn = 65034, vni = 50400 }]
+
+      [dpf]
+      enabled = true
+
+      [dpf.services.dpu_agent]
+      name = "dpu-agent"
+      helm_repo_url = "oci://registry.site1.dc1.example.net/nico-charts"
+      helm_chart = "dpu-agent"
+      helm_version = ""
+      docker_repo_url = "registry.site1.dc1.example.net/nico/dpu-agent"
+      docker_image_tag = "v2026.10.15"
+
+nico-dhcp:
+  externalService:
+    enabled: true
+    annotations:
+      metallb.universe.tf/loadBalancerIPs: 10.10.126.194
+  config:
+    kea:
+      hookParameters:
+        nameservers: 10.10.126.202
+        ntpServer: 10.10.126.199,10.10.126.200,10.10.126.201
+        provisioningServer: 10.10.126.197
+
+nico-dns:
+  externalService:
+    enabled: true
+    perPodAnnotations:
+      - metallb.universe.tf/loadBalancerIPs: 10.10.126.195
+      - metallb.universe.tf/loadBalancerIPs: 10.10.126.196
+
+nico-pxe:
+  externalService:
+    enabled: true
+    annotations:
+      metallb.universe.tf/loadBalancerIPs: 10.10.126.197
+
+nico-ssh-console-rs:
+  externalService:
+    enabled: true
+    annotations:
+      metallb.universe.tf/loadBalancerIPs: 10.10.126.198
+
+nico-ntp:
+  externalService:
+    enabled: true
+    perPodAnnotations:
+      - metallb.universe.tf/loadBalancerIPs: 10.10.126.199
+      - metallb.universe.tf/loadBalancerIPs: 10.10.126.200
+      - metallb.universe.tf/loadBalancerIPs: 10.10.126.201
+
+unbound:
+  externalService:
+    enabled: true
+    annotations:
+      metallb.universe.tf/loadBalancerIPs: 10.10.126.202
+  localConfig:
+    forwarders.conf: |
+      forward-zone:
+          name: .
+          forward-addr: 10.10.0.11
+          forward-addr: 10.10.0.12
+  localData:
+    - name: carbide-api.forge
+      addresses: [10.10.126.208]
+    - name: nico-api.forge
+      addresses: [10.10.126.208]
+    - name: carbide-pxe.forge
+      addresses: [10.10.126.197]
+    - name: nico-pxe.forge
+      addresses: [10.10.126.197]
+    - name: carbide-static-pxe.forge
+      addresses: [10.10.126.197]
+    - name: carbide-ntp.forge
+      addresses: [10.10.126.199, 10.10.126.200, 10.10.126.201]
+    - name: nico-ntp.forge
+      addresses: [10.10.126.199, 10.10.126.200, 10.10.126.201]
+    - name: unbound.forge
+      addresses: [10.10.126.202]

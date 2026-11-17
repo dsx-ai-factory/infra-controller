@@ -24,6 +24,10 @@
 mod catalog;
 mod check;
 mod checklists;
+mod collaterals;
+mod derived;
+#[cfg(test)]
+mod fixture;
 mod gate;
 mod harness;
 mod register;

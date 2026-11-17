@@ -163,7 +163,9 @@ pub(crate) struct Collaterals {
     pub(crate) core_values: PathBuf,
     pub(crate) rest_values: PathBuf,
     pub(crate) site_agent_values: PathBuf,
-    pub(crate) metallb_config: PathBuf,
+    /// Absent when another tool renders MetalLB: the rows that read it skip.
+    #[serde(default)]
+    pub(crate) metallb_config: Option<PathBuf>,
     /// Needed from step 7.
     #[serde(default)]
     pub(crate) expected_machines: Option<PathBuf>,

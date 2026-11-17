@@ -1,0 +1,7 @@
+# NICo site-agent values for the example site (helm-prereqs/values/nico-site-agent.yaml).
+replicaCount: 3
+envConfig:
+  CORE_GRPC_ADDRESS: "nico-api.nico-system.svc.cluster.local:1079"
+  DB_ADDR: "nico-pg-cluster.postgres.svc.cluster.local"
+  DB_DATABASE: "nico_rest"
+  TEMPORAL_HOST: "temporal-frontend.temporal"

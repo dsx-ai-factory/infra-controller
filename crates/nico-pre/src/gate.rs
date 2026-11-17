@@ -180,10 +180,18 @@ pub(crate) struct EffectiveDecisions {
     pub(crate) implied_by: IndexMap<String, String>,
 }
 
-/// True when a stated value is usable: every listed option exists, and a
-/// single-select carries exactly one.
+/// True when a stated value is usable: every listed option exists, a
+/// single-select carries exactly one, and `Not applicable` stands alone.
 fn valid_value(d: &crate::register::Decision, vs: &[String]) -> bool {
-    (d.multiple || vs.len() == 1) && vs.iter().all(|v| d.option(v).is_some())
+    (d.multiple || vs.len() == 1)
+        && vs.iter().all(|v| d.option(v).is_some())
+        && !mixes_not_applicable(vs)
+}
+
+/// `Not applicable` says the entry does not arise for the site, so a list that also
+/// names an option that applies contradicts itself; the checklists never see it.
+fn mixes_not_applicable(vs: &[String]) -> bool {
+    vs.len() > 1 && vs.iter().any(|v| v.eq_ignore_ascii_case("Not applicable"))
 }
 
 /// Applies the register's implication rules to the stated decisions until
@@ -295,6 +303,16 @@ fn decisions(sd: &SiteDef, reg: &Register, rows: &mut Vec<Row>) {
                             format!("`{v}`"),
                         )
                         .with_fix("state the option by its short name"),
+                    );
+                }
+                if mixes_not_applicable(&vs) {
+                    rows.push(
+                        Row::fail(
+                            format!("sitedef.decisions.{id}"),
+                            "`Not applicable` alone, or only the options that apply",
+                            quoted(&vs),
+                        )
+                        .with_fix("drop `Not applicable`, or the options beside it"),
                     );
                 }
             }
@@ -940,11 +958,16 @@ mod tests {
 
     const SAMPLE: &str = include_str!("../examples/site-def.yaml");
 
-    /// The developer-site example is deployed by other scripts: its command makes no
-    /// decision, so the implied `rms: Not applicable` is not contradicted.
+    /// A site another tool deploys: its command makes no decision, so no pinned or
+    /// implied decision is contradicted and the gate passes.
     #[test]
-    fn dev1_example_passes_the_gate() {
-        let sd = parse(include_str!("../examples/site-def-dev1.yaml")).expect("dev1 parses");
+    fn another_deployer_passes_the_gate() {
+        let text = SAMPLE.replacen(
+            "./setup.sh -y --core-values values/nico-core.yaml --metallb-config values/metallb-config.yaml --skip-rms",
+            "python3 tools/deploy-site.py --site site1",
+            1,
+        );
+        let sd = parse(&text).expect("sample with another deployer parses");
         let rows = run(&sd, Register::builtin());
         let failures: Vec<_> = rows.iter().filter(|r| r.status != Status::Pass).collect();
         assert!(failures.is_empty(), "{failures:#?}");
@@ -1156,6 +1179,30 @@ mod tests {
 
     /// The example implies `rms: Not applicable` from its component list; a command that
     /// would install RMS anyway is caught at the gate.
+    /// `Not applicable` beside an option that applies contradicts itself and fails the row.
+    #[test]
+    fn not_applicable_beside_another_option_fails_the_decision_row() {
+        let text = SAMPLE.replacen(
+            "  build-host: Yes\n",
+            "  build-host: Yes\n  managed-host-dpu-generation: [BF3, Not applicable]\n",
+            1,
+        );
+        assert_ne!(text, SAMPLE, "splice target missing");
+        let sd = parse(&text).expect("parses");
+        let rows = run(&sd, Register::builtin());
+        let row = rows
+            .iter()
+            .find(|r| {
+                r.id == "sitedef.decisions.managed-host-dpu-generation" && r.status == Status::Fail
+            })
+            .expect("a failing decision row");
+        assert!(
+            row.expected.contains("`Not applicable` alone"),
+            "{}",
+            row.expected
+        );
+    }
+
     #[test]
     fn a_command_against_an_implied_decision_fails_the_gate() {
         let text = SAMPLE.replacen(

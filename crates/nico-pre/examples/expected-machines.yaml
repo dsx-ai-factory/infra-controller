@@ -1,0 +1,7 @@
+# Expected machines for step 7 (nico-admin-cli em replace-all). One entry per managed host;
+# the BMC password is the factory default the host ships with, not a site secret.
+expected_machines:
+  - bmc_mac_address: "c4:5a:b1:c8:38:0d"
+    bmc_username: root
+    bmc_password: calvin
+    chassis_serial_number: XE9680-0001

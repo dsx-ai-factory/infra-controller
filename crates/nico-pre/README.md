@@ -31,10 +31,10 @@ cargo run -q -p nico-pre -- config --site-def crates/nico-pre/examples/site-def.
 ```
 
 The site-definition schema is documented key by key in [`SITE-DEF.md`](SITE-DEF.md).
-`examples/site-def.yaml` is the illustrative sample; `examples/site-def-dev1.yaml` describes the
-nico-dev `dev1` developer site. The register compiled in under `register/` is the source of
-truth for the decisions, their options and the rules between them; edit it in the same PR as
-the checks that read it.
+`examples/site-def.yaml` is the illustrative sample, with the collaterals it names beside it under
+`examples/` (no config check fails on them). The register compiled in under `register/` is the
+source of truth for the decisions, their options and the rules between them; edit it in the same
+PR as the checks that read it.
 
 ## Building and installing the binary
 
@@ -84,18 +84,18 @@ writes the result file. To land a check:
 
 1. Find its entry in the table (registered as `run: None`, shown as ⚠ "not implemented yet")
    or add one: a stable id `<checklist>.<area>.<name>`, the expected value as the row prints
-   it, and `detail`, the spec: what it reads, when it passes, warns, fails or skips, and how
-   it is tested. Every registered entry already carries one; implement against it.
+   it, and `detail`, a description for the catalogue: what it reads and what it reports.
+   Registered entries carry one from the design; it is a starting point, not a contract.
 2. Write `fn <name>(ctx: &Ctx) -> eyre::Result<Outcome>` in the same file. `ctx.sd` is the site
    definition, `ctx.resolve(path)` a collateral path, `ctx.decided(id, option)` a decision.
    Return `Pass(observed)`, `Warn { observed, fix }`, `Fail { observed, fix }` or `Skip(why)`
    when a decision rules the check out. Use `?` for anything that stops the check from running;
    never panic on site data.
-3. Point the entry at it and add a test next to it against the fixture the spec's `Test:`
-   line names (a bmc-mock profile, the dev1 collaterals, a kind cluster), with at least the
-   cases it lists.
+3. Point the entry at it and add a test next to it against the fitting fixture (the example
+   collaterals, a bmc-mock profile, a kind cluster): the passing case and one case per
+   failure or warning the check reports.
 4. Regenerate the catalogue: `cargo run -q -p nico-pre -- checks --format md > crates/nico-pre/CHECKS.md`.
-   A test fails while it is stale.
+   CHECKS.md is a rendering of the tables, never edited by hand; a test fails while it is stale.
 
 `config.segments.admin` in `src/checklists/config.rs` is the worked example;
 [`how-to-add-checks.md`](how-to-add-checks.md) walks through it: where the code goes, what the
