@@ -3,7 +3,7 @@
 # health-check.sh
 #
 # Validates the health of an NVIDIA Infra Controller Kubernetes deployment.
-# Requires: kubectl, curl (inside pods), openssl (inside nico-api pod)
+# Requires: kubectl, jq, curl (inside pods), openssl (inside nico-api pod)
 #
 # Usage:
 #   KUBECONFIG=/path/to/kubeconfig ./health-check.sh
@@ -16,10 +16,11 @@
 # and so does a missing Vault that NICo is still configured to use.
 # The Vault integration checks (PKI Job, ClusterIssuer, token Secrets, the
 # vault-cluster-info keys) run only while NICo is integrated with Vault: a
-# Deployment in the NICo namespace references VAULT_ADDR, a cert-manager
-# Certificate in any namespace is issued by vault-nico-issuer, or, before Core
-# is installed, nico-prereqs renders vault-cluster-info. setup.sh --skip-vault
-# turns them off once nothing references Vault.
+# Deployment in the NICo namespace references Vault (VAULT_ADDR, or the
+# nico-prereqs Vault Secrets or ConfigMap), a cert-manager Certificate in any
+# namespace is issued by vault-nico-issuer, or, before Core is installed,
+# nico-prereqs renders vault-cluster-info. setup.sh --skip-vault turns them
+# off once nothing references Vault.
 # =============================================================================
 set -uo pipefail
 
@@ -128,10 +129,13 @@ elif ! grep -qiE 'not found' "${_VAULT_SS_ERR}"; then
   _VAULT_SS_ERROR="$(head -n 1 "${_VAULT_SS_ERR}")"
 fi
 rm -f "${_VAULT_SS_ERR}"
+# _vault_deployment_references, shared with preflight.sh.
+# shellcheck source=vault-consumers.sh
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/vault-consumers.sh"
 # NICo is integrated with Vault while anything still consumes it, the rule of
 # _vault_consumers in preflight.sh (same probes): a Deployment in its
-# namespace with a container env entry named VAULT_ADDR, which the nico-api
-# chart renders only while nico-api.vault.enabled (no Deployment name is
+# namespace that references Vault, by VAULT_ADDR or by the nico-prereqs Vault
+# Secrets and ConfigMap (_vault_deployment_references; no Deployment name is
 # assumed, so a renamed Core counts), or a cert-manager Certificate in any
 # namespace issued by vault-nico-issuer, which renews through the Vault
 # resources (Flow and the site-agent after --skip-vault --skip-rest, for
@@ -144,18 +148,18 @@ rm -f "${_VAULT_SS_ERR}"
 # when integrated; a Vault that runs without being used is reported in the
 # Vault section.
 # _VAULT_INTEGRATED_BY records the first evidence for the failure message below.
-# _VAULT_INTEGRATION_KNOWN goes false when a probe fails, so an incomplete
-# inventory is never reported as "not configured" or as a Vault to remove.
+# _VAULT_INTEGRATION_KNOWN goes false when a probe fails or jq is missing, so an
+# incomplete inventory is never reported as "not configured" or as a Vault to
+# remove.
 _VAULT_INTEGRATED=false
 _VAULT_INTEGRATED_BY=""
 _VAULT_INTEGRATION_KNOWN=true
 _NICO_DEPLOYMENTS_KNOWN=true
-if _NICO_DEPLOYMENTS=$(kc get deployments -n "${NICO_NS}" \
-     -o jsonpath='{range .items[*]}{.metadata.name}{" "}{range .spec.template.spec.containers[*].env[*]}{.name}{","}{end}{"\n"}{end}'); then
-  while read -r _DEP _ENVS; do
-    if [[ -n "${_DEP}" && ",${_ENVS}" == *,VAULT_ADDR,* ]]; then
+if _NICO_DEPLOYMENTS=$(_vault_deployment_references "${NICO_NS}" 2>/dev/null); then
+  while read -r _DEP _REFERENCES; do
+    if [[ -n "${_DEP}" && -n "${_REFERENCES}" ]]; then
       _VAULT_INTEGRATED=true
-      _VAULT_INTEGRATED_BY="deployment/${_DEP} references VAULT_ADDR"
+      _VAULT_INTEGRATED_BY="deployment/${_DEP} references ${_REFERENCES}"
       break
     fi
   done <<< "${_NICO_DEPLOYMENTS}"
@@ -163,7 +167,7 @@ else
   _NICO_DEPLOYMENTS=""
   _NICO_DEPLOYMENTS_KNOWN=false
   _VAULT_INTEGRATION_KNOWN=false
-  warn "could not list the Deployments in ${NICO_NS}; Vault integration is decided from Certificates and vault-cluster-info alone"
+  warn "could not inspect the Deployments in ${NICO_NS} (kubectl failed or jq is not installed); Vault integration is decided from Certificates and vault-cluster-info alone"
 fi
 # A missing Certificate CRD (cert-manager not installed) means no Certificates;
 # any other failure is reported and never read as none.

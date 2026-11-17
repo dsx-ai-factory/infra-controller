@@ -230,7 +230,7 @@ The tables below summarize the keys that must be set per site.
 |-----|---------|-------------|-------------|
 | `siteName` | `"TMP_SITE"` | **Yes** | Site identifier, injected into postgres pods as `TMP_SITE` |
 | `imagePullSecrets.ngcNicoPull` | `""` | No (auto) | Pull secret for NICo Core images. Set automatically by `setup.sh` from `REGISTRY_PULL_SECRET` when provided. |
-| `vault.enabled` | `true` | No | Render the chart's Vault resources: the `vault-nico-issuer` ClusterIssuer, the cert-manager Vault-auth ServiceAccount, the `vault-pki-config` Job, the `nico-vault-token` and `nico-vault-approle-tokens` Secrets, the `vault-cluster-info` ConfigMap, and the Vault TLS bootstrap Certificates. Running `setup.sh --skip-vault` sets it to `false` through `values/nico-prereqs-dynamic.yaml.gotmpl`. The finer `vault.*` toggles below only apply while it is `true`. Setting it to `false` never uninstalls Vault. While any consumer in the cluster still references Vault (a Deployment in `nico-system` whose environment has `VAULT_ADDR`, or a cert-manager Certificate issued by `vault-nico-issuer`), `setup.sh --skip-vault` keeps the release's Vault resources and removes them at the end of a run that leaves no such consumer; a direct `helm upgrade` that sets it to `false` removes them immediately, while those consumers still rely on them. Refer to [Installing without Vault](#installing-without-vault). |
+| `vault.enabled` | `true` | No | Render the chart's Vault resources: the `vault-nico-issuer` ClusterIssuer, the cert-manager Vault-auth ServiceAccount, the `vault-pki-config` Job, the `nico-vault-token` and `nico-vault-approle-tokens` Secrets, the `vault-cluster-info` ConfigMap, and the Vault TLS bootstrap Certificates. Running `setup.sh --skip-vault` sets it to `false` through `values/nico-prereqs-dynamic.yaml.gotmpl`. The finer `vault.*` toggles below only apply while it is `true`. Setting it to `false` never uninstalls Vault. While any consumer in the cluster still references Vault (a Deployment in `nico-system` whose environment has `VAULT_ADDR` or whose pod references the Vault Secrets or ConfigMap, or a cert-manager Certificate issued by `vault-nico-issuer`), `setup.sh --skip-vault` keeps the release's Vault resources and removes them at the end of a run that leaves no such consumer; a direct `helm upgrade` that sets it to `false` removes them immediately, while those consumers still rely on them. Refer to [Installing without Vault](#installing-without-vault). |
 | `certManager.siteIssuer.create` | `true` | No | Create the `site-issuer` ClusterIssuer, a cert-manager CA issuer backed by the `site-root` Secret in the cert-manager namespace. It issues the Vault TLS bootstrap certificates and, with `--skip-vault`, the Core, RMS, Flow, and site-agent service certificates. On a Vault site it renders only while `vault.tls.create` is also `true`, so a site that manages its own `site-issuer` keeps that opt-out; with `vault.enabled: false` it renders regardless of `vault.tls.create`. With `false`, `setup.sh` leaves the issuer out of its phase 2 bootstrap render, and a ClusterIssuer named `site-issuer` must exist before the Core release. The issuer is a Helm hook with `before-hook-creation`, so each `nico-prereqs` sync deletes and recreates it; a certificate issued or renewed in that brief window waits for cert-manager's retry. |
 | `vault.nicoCliClientRole.enabled` | `true` | No | Create the Vault PKI role for short-lived NICo CLI client certificates. This only defines the certificate profile; issuance access must be granted separately. |
 | `vault.nicoCliClientRole.name` | `"nico-cli-client"` | No | Vault role name, and the certificate `SubjectOU` when `ou` is empty. |
@@ -625,16 +625,23 @@ With `--skip-vault`:
   `vault` namespace; without that Secret it prints
   `nico-vault-token is absent, so the sync reads vaultroottoken in the vault namespace`
   and reads it. A
-  consumer is a Deployment in `nico-system` whose environment has `VAULT_ADDR`
+  consumer is a Deployment in `nico-system` that references Vault
   (a renamed Core such as `nico-api.nameOverride: carbide-api` counts too), or
   a cert-manager `Certificate` in any namespace whose `issuerRef.name` is
   `vault-nico-issuer`, whether it belongs to Core, RMS, Flow, the site-agent,
-  or anything else; an absent Certificate CRD counts as no Certificates. Setup
+  or anything else; an absent Certificate CRD counts as no Certificates. A
+  Deployment references Vault when a container or init container has an
+  environment variable named `VAULT_ADDR`, or when its pod references the
+  `nico-vault-token` or `nico-vault-approle-tokens` Secret or the
+  `vault-cluster-info` ConfigMap through `env[].valueFrom`, `envFrom`, or a
+  `secret`, `configMap`, or `projected` volume. Setup
   prints `These still reference Vault:`, the consumers as
-  `deployment/nico-system/<name> (VAULT_ADDR)` and
+  `deployment/nico-system/<name> (VAULT_ADDR)`, or, for a Deployment without
+  `VAULT_ADDR`, with the Secrets and ConfigMap it references, as in
+  `deployment/nico-system/<name> (secret/nico-vault-token)`, and
   `certificate/<namespace>/<name> (vault-nico-issuer)` lines, and
   `Keeping the Vault resources in nico-prereqs (the Vault ConfigMap and token Secrets, and the cert-manager Vault-auth ServiceAccount and token that vault-nico-issuer renews through) until no consumer references Vault.`
-  A `kubectl` failure during that probe stops setup before phase 5 with
+  A `kubectl` failure during that probe, or a missing `jq`, stops setup before phase 5 with
   `Error: could not inspect the Vault consumers (Deployments in nico-system and cert-manager Certificates) to decide whether the Vault resources can go; fix cluster access and rerun`
   instead of being read as "no consumers". Whether the resources are removed
   is decided at the end of the run; refer to the last bullet below and to
@@ -890,14 +897,16 @@ The health check detects the NICo namespace from the
 - **Is NICo integrated with Vault?** Yes when any Deployment in the NICo
   namespace references `VAULT_ADDR` in its environment, which the nico-api
   chart renders only while `nico-api.vault.enabled` is `true`, under whatever
-  name the Core Deployment has, or when any cert-manager `Certificate` in any
+  name the Core Deployment has, or references the Vault Secrets or ConfigMap
+  as described for the installer, or when any cert-manager `Certificate` in any
   namespace is issued by `vault-nico-issuer`, the same consumer rule the
   installer applies. The check looks at Deployments first, then Certificates,
   and consults the `vault-cluster-info` ConfigMap, which `nico-prereqs`
   renders only while `vault.enabled` is `true`, only when no Deployment exists
   or the Deployment list failed, as before Core is installed. When the
-  Deployments cannot be listed, it warns
-  `could not list the Deployments in <namespace>; Vault integration is decided from Certificates and vault-cluster-info alone`;
+  Deployments cannot be inspected, because `kubectl` failed or `jq` is not
+  installed, it warns
+  `could not inspect the Deployments in <namespace> (kubectl failed or jq is not installed); Vault integration is decided from Certificates and vault-cluster-info alone`;
   when the Certificates cannot be listed, it warns
   `could not list cert-manager Certificates; Vault integration is decided without them`,
   while a missing Certificate CRD counts as no Certificates. When NICo is
@@ -925,7 +934,9 @@ while Flow or site-agent Certificates are still issued by `vault-nico-issuer`,
 stays integrated and gets no such warning. A site that is integrated but has
 lost its StatefulSet fails with
 `statefulset/vault: not found, but NICo is configured to use Vault (<evidence>)`,
-where the evidence is `deployment/<name> references VAULT_ADDR` for the first
+where the evidence is `deployment/<name> references VAULT_ADDR`, or
+`deployment/<name> references secret/nico-vault-token` with the Secrets and
+ConfigMap it references, for the first
 Deployment found, `certificate/<namespace>/<name> is issued by vault-nico-issuer`
 for the first such Certificate, or, when no Deployment exists or the
 Deployment list failed, `vault-cluster-info exists in <namespace>`.
@@ -1009,7 +1020,8 @@ Three things differ from a fresh install:
 
 - Phase 5 keeps the release's Vault resources while any consumer still
   references Vault: a Deployment in `nico-system` whose environment has
-  `VAULT_ADDR`, or a cert-manager `Certificate` in any namespace issued by
+  `VAULT_ADDR` or whose pod references the Vault Secrets or ConfigMap, or a
+  cert-manager `Certificate` in any namespace issued by
   `vault-nico-issuer`, which covers Core, RMS, Flow, and the site-agent. Those
   consumers keep working during the run, and their certificates keep renewing
   while Vault stays unsealed.
@@ -1068,10 +1080,9 @@ Three things differ from a fresh install:
   that message covers live rows only, and restoring a Postgres backup taken
   before the re-wrap still needs the Transit key. Third,
   nothing outside the installer's releases may still use this Vault. The
-  consumer probe sees only Deployments in `nico-system` whose container
-  environment names `VAULT_ADDR`, as the chart renders it, and cert-manager
-  Certificates; a workload that consumes the Vault Secrets through `envFrom`
-  or a volume mount is invisible to it; a REST `powershelf-manager` or
+  consumer probe sees only Deployments in `nico-system` and cert-manager
+  Certificates; a StatefulSet, DaemonSet, Job, or CronJob that consumes the
+  Vault Secrets or ConfigMap is invisible to it; a REST `powershelf-manager` or
   `nvswitch-manager` deployed
   outside the installer with its persistent credential store on this Vault
   (`VAULT_ADDR` and `VAULT_TOKEN`), or any other client, loses access to its
