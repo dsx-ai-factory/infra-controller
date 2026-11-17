@@ -163,9 +163,10 @@ impl UrlResolver {
 }
 
 /// The PXE server's addresses, or none when `carbide-pxe.forge` doesn't resolve. The agent
-/// still starts, and the network reconcile fails where DHCP needs a PXE address: a managed
-/// host with an IPv4 loopback needs an IPv4 one even with `booturl` overrides, and an
-/// interface without an explicit `booturl` needs one too.
+/// still starts and retries the lookup on each reconcile. Until it resolves, the reconcile
+/// fails where DHCP needs a PXE address: a managed host with an IPv4 loopback needs an IPv4
+/// one even with `booturl` overrides, and an interface without an explicit `booturl` needs
+/// one too.
 fn pxe_ips_or_empty(resolved: Result<Vec<IpAddr>, eyre::Report>) -> Vec<IpAddr> {
     match resolved {
         Ok(ips) => {
@@ -176,9 +177,9 @@ fn pxe_ips_or_empty(resolved: Result<Vec<IpAddr>, eyre::Report>) -> Vec<IpAddr> 
         Err(e) => {
             tracing::warn!(
                 error = %e,
-                "carbide-pxe could not be resolved; DHCP will offer no PXE boot address. \
-                 The network reconcile fails for a host with an IPv4 loopback or an \
-                 interface without an explicit booturl."
+                "carbide-pxe could not be resolved; DHCP will offer no PXE boot address \
+                 until it does. The network reconcile fails for a host with an IPv4 \
+                 loopback or an interface without an explicit booturl."
             );
             vec![]
         }
@@ -227,6 +228,25 @@ impl ServiceAddresses {
             ntpservers,
             nameservers,
         })
+    }
+
+    /// Looks up `carbide-pxe.forge` again while it has no addresses, so the reconcile recovers
+    /// once DNS does without an agent restart.
+    pub(super) async fn retry_unresolved_pxe(&mut self) {
+        self.retry_unresolved_pxe_with(|| async {
+            UrlResolver::try_new()?.resolve("carbide-pxe.forge").await
+        })
+        .await
+    }
+
+    async fn retry_unresolved_pxe_with<F, Fut>(&mut self, lookup: F)
+    where
+        F: FnOnce() -> Fut,
+        Fut: std::future::Future<Output = Result<Vec<IpAddr>, eyre::Report>>,
+    {
+        if self.pxe_ips.is_empty() {
+            self.pxe_ips = pxe_ips_or_empty(lookup().await);
+        }
     }
 
     fn fake() -> Self {
@@ -409,6 +429,31 @@ mod tests {
             pxe_ips_or_empty(Err(eyre::eyre!("no record for carbide-pxe.forge"))),
             Vec::<IpAddr>::new()
         );
+    }
+
+    #[tokio::test]
+    async fn an_unresolved_pxe_name_is_looked_up_again_until_it_resolves() {
+        let ip: IpAddr = "192.0.2.80".parse().unwrap();
+        let mut addrs = ServiceAddresses {
+            pxe_ips: vec![],
+            ntpservers: vec![],
+            nameservers: vec![],
+        };
+
+        addrs
+            .retry_unresolved_pxe_with(|| async { Err(eyre::eyre!("still no record")) })
+            .await;
+        assert!(addrs.pxe_ips.is_empty());
+
+        addrs
+            .retry_unresolved_pxe_with(|| async move { Ok(vec![ip]) })
+            .await;
+        assert_eq!(addrs.pxe_ips, vec![ip]);
+
+        addrs
+            .retry_unresolved_pxe_with(|| async { panic!("resolved addresses are kept") })
+            .await;
+        assert_eq!(addrs.pxe_ips, vec![ip]);
     }
 
     #[test]

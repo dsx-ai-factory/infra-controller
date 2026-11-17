@@ -1224,6 +1224,7 @@ impl MainLoop {
                     should_check_ipv6_unicast =
                         ipv6_unicast_health_enabled(&conf, virtualization_type);
 
+                    self.service_addrs.retry_unresolved_pxe().await;
                     let dhcp_result = ethernet_virtualization::update_dhcp(
                         &self.agent_config.hbn.root_dir,
                         &conf,
