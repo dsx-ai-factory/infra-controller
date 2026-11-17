@@ -291,7 +291,7 @@ func NewGetAllExpectedMachineHandler(dbSession *cdb.Session, cfg *config.Config)
 // @Param org path string true "Name of NGC organization"
 // @Param siteId query string false "ID of Site (optional, filters results to specific site)"
 // @Param pageNumber query integer false "Page number of results returned"
-// @Param includeRelation query string false "Related entities to include in response e.g. 'Site', 'SKU'"
+// @Param includeRelation query []string false "Related entities to include in response e.g. 'Site', 'SKU'" collectionFormat(multi)
 // @Param pageSize query integer false "Number of results per page"
 // @Param orderBy query string false "Order by field"
 // @Success 200 {object} []model.APIExpectedMachine
@@ -478,7 +478,7 @@ func NewGetExpectedMachineHandler(dbSession *cdb.Session, cfg *config.Config) Ge
 // @Security ApiKeyAuth
 // @Param org path string true "Name of NGC organization"
 // @Param id path string true "ID of Expected Machine"
-// @Param includeRelation query string false "Related entities to include in response e.g. 'Site', 'SKU'"
+// @Param includeRelation query []string false "Related entities to include in response e.g. 'Site', 'SKU'" collectionFormat(multi)
 // @Success 200 {object} model.APIExpectedMachine
 // @Router /v2/org/{org}/nico/expected-machine/{id} [get]
 func (gemh GetExpectedMachineHandler) Handle(c echo.Context) error {

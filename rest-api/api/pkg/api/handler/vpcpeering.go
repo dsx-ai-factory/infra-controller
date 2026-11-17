@@ -419,10 +419,10 @@ func NewGetAllVpcPeeringHandler(dbSession *cdb.Session, tc tclient.Client, cfg *
 // @Param org path string true "Name of NGC organization"
 // @Param siteId query string false "Filter by Site ID"
 // @Param isMultiTenant query bool false "Filter by single-tenant or multi-tenant peerings"
-// @Param status query string false "Filter by status (repeatable for multiple values)"
-// @Param vpcId query string false "Filter by VPC ID involved in the peering (as vpc1 or vpc2)"
-// @Param peerTenantId query string false "Filter by tenant ID of a VPC involved in the peering (repeatable for multiple values)"
-// @Param includeRelation query string false "Related entities to include in response e.g. 'Vpc1', 'Vpc2', 'Site'"
+// @Param status query []string false "Filter by status (repeatable for multiple values)" collectionFormat(multi)
+// @Param vpcId query []string false "Filter by VPC ID involved in the peering (as vpc1 or vpc2)" collectionFormat(multi)
+// @Param peerTenantId query []string false "Filter by tenant ID of a VPC involved in the peering (repeatable for multiple values)" collectionFormat(multi)
+// @Param includeRelation query []string false "Related entities to include in response e.g. 'Vpc1', 'Vpc2', 'Site'" collectionFormat(multi)
 // @Param pageNumber query integer false "Page number of results returned"
 // @Param pageSize query integer false "Number of results per page"
 // @Param orderBy query string false "Order by field"
@@ -715,7 +715,7 @@ func NewGetVpcPeeringHandler(dbSession *cdb.Session, tc tclient.Client, cfg *con
 // @Security ApiKeyAuth
 // @Param org path string true "Name of NGC organization"
 // @Param id path string true "ID of VPC Peering"
-// @Param includeRelation query string false "Related entities to include in response e.g. 'Vpc1', 'Vpc2', 'Site', 'Tenant'""
+// @Param includeRelation query []string false "Related entities to include in response e.g. 'Vpc1', 'Vpc2', 'Site', 'Tenant'. Repeat the parameter to specify multiple values." collectionFormat(multi)
 // @Success 200 {object} model.APIVpcPeering
 // @Router /v2/org/{org}/nico/vpc-peering/{id} [get]
 func (gvph GetVpcPeeringHandler) Handle(c echo.Context) error {

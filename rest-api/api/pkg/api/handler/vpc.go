@@ -1384,7 +1384,7 @@ func NewGetVPCHandler(dbSession *cdb.Session, tc temporalClient.Client, cfg *con
 // @Security ApiKeyAuth
 // @Param org path string true "Name of NGC organization"
 // @Param id path string true "ID of Vpc"
-// @Param includeRelation query string false "Related entities to include in response e.g. 'InfrastructureProvider', 'Site', 'Tenant'"
+// @Param includeRelation query []string false "Related entities to include in response e.g. 'InfrastructureProvider', 'Site', 'Tenant'" collectionFormat(multi)
 // @Success 200 {object} model.APIVpc
 // @Router /v2/org/{org}/nico/vpc/{id} [get]
 func (gvh GetVPCHandler) Handle(c echo.Context) error {
@@ -1513,14 +1513,15 @@ func NewGetAllVPCHandler(dbSession *cdb.Session, tc temporalClient.Client, cfg *
 // @Produce json
 // @Security ApiKeyAuth
 // @Param org path string true "Name of NGC organization"
-// @Param siteId query string false "Site ID"
-// @Param nvLinkLogicalPartitionId query string false "NVLink Logical Partition ID"
-// @Param status query string false "Filter by status" e.g. 'Pending', 'Error'"
+// @Param siteId query []string false "Site ID" collectionFormat(multi)
+// @Param nvLinkLogicalPartitionId query []string false "NVLink Logical Partition ID" collectionFormat(multi)
+// @Param status query []string false "Filter VPCs by Status e.g. 'Pending', 'Error'. Can be specified multiple times to filter on more than one Status." collectionFormat(multi)
 // @Param query query string false "Query input for full text search"
-// @Param includeRelation query string false "Related entities to include in response e.g. 'InfrastructureProvider', 'Site', 'Tenant'"
+// @Param includeRelation query []string false "Related entities to include in response e.g. 'InfrastructureProvider', 'Site', 'Tenant'" collectionFormat(multi)
 // @Param pageNumber query integer false "Page number of results returned"
 // @Param pageSize query integer false "Number of results per page"
 // @Param orderBy query string false "Order by field"
+// @Param networkSecurityGroupId query []string false "Filter by networkSecurityGroupId; repeat the parameter to specify multiple values" collectionFormat(multi)
 // @Success 200 {array} []model.APIVpc
 // @Router /v2/org/{org}/nico/vpc [get]
 func (gavh GetAllVPCHandler) Handle(c echo.Context) error {
