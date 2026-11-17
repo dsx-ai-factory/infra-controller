@@ -627,7 +627,7 @@ request rate, and the admission control gate.
 token lifetime, Postgres secrets operations, inbound TLS handshakes, certificate
 reloads, and outbound TCP connect outcomes.
 
-**DPUs and firmware** - DPUs online compared with healthy, failing health checks,
+**DPUs and firmware** - DPU report freshness and last reported health, failing health checks,
 firmware and dpu-agent versions, DPU inventory component versions, and the DPU NIC and
 host firmware update backlogs.
 
