@@ -1297,7 +1297,7 @@ mod tests {
             None,
             10,
             NonZeroUsize::MIN,
-            BmcInstrumentation::new(carbide_instrument::Instrumentation::global(), None),
+            BmcInstrumentation::new(carbide_instrument::Instrumentation::noop(), None),
         )?))
     }
 
@@ -1368,10 +1368,7 @@ mod tests {
             reqwest(),
             None,
             10,
-            crate::bmc::BmcInstrumentation::new(
-                carbide_instrument::Instrumentation::global(),
-                None,
-            ),
+            crate::bmc::BmcInstrumentation::new(carbide_instrument::Instrumentation::noop(), None),
         );
 
         for (serial, expected) in [
@@ -1498,10 +1495,7 @@ mod tests {
             reqwest(),
             None,
             10,
-            crate::bmc::BmcInstrumentation::new(
-                carbide_instrument::Instrumentation::global(),
-                None,
-            ),
+            crate::bmc::BmcInstrumentation::new(carbide_instrument::Instrumentation::noop(), None),
         );
         let endpoint = rpc::forge::BmcEndpoint {
             ip: Some("2001:db8::10".into()),
@@ -1771,10 +1765,7 @@ mod tests {
             reqwest(),
             None,
             10,
-            crate::bmc::BmcInstrumentation::new(
-                carbide_instrument::Instrumentation::global(),
-                None,
-            ),
+            crate::bmc::BmcInstrumentation::new(carbide_instrument::Instrumentation::noop(), None),
         );
 
         let rack_id = RackId::new("RACK_1");
@@ -1893,10 +1884,7 @@ mod tests {
             reqwest(),
             None,
             10,
-            crate::bmc::BmcInstrumentation::new(
-                carbide_instrument::Instrumentation::global(),
-                None,
-            ),
+            crate::bmc::BmcInstrumentation::new(carbide_instrument::Instrumentation::noop(), None),
         );
         let error = source
             .endpoint_for(
@@ -2165,10 +2153,7 @@ mod tests {
             reqwest(),
             None,
             10,
-            crate::bmc::BmcInstrumentation::new(
-                carbide_instrument::Instrumentation::global(),
-                None,
-            ),
+            crate::bmc::BmcInstrumentation::new(carbide_instrument::Instrumentation::noop(), None),
         );
 
         let cached_client = {
@@ -2444,7 +2429,7 @@ mod tests {
                 Some(bmc_url),
                 10,
                 crate::bmc::BmcInstrumentation::new(
-                    carbide_instrument::Instrumentation::global(),
+                    carbide_instrument::Instrumentation::noop(),
                     Some(latency),
                 ),
             ),
@@ -2466,7 +2451,7 @@ mod tests {
             Arc::new(NoopLimiter),
             Arc::new(MetricsManager::new("machine_change_iteration").expect("metrics manager")),
             Arc::new(config),
-            carbide_instrument::Instrumentation::global(),
+            carbide_instrument::Instrumentation::noop(),
         )
         .expect("discovery context");
         let shard_manager = ShardManager {

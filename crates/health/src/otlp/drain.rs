@@ -48,6 +48,7 @@ impl OtlpDrainTask {
 
     pub(crate) async fn run(self) {
         let include_alert_details = self.target.include_alert_details;
+        let max_request_bytes = self.target.max_request_bytes;
         run_drain(
             self.queue,
             self.target,
@@ -55,6 +56,7 @@ impl OtlpDrainTask {
             move |channel| LogsExport {
                 client: LogsServiceClient::new(channel),
                 include_alert_details,
+                max_request_bytes,
             },
             self.instrumentation,
         )
@@ -67,6 +69,7 @@ impl OtlpDrainTask {
 struct LogsExport {
     client: LogsServiceClient<Channel>,
     include_alert_details: bool,
+    max_request_bytes: usize,
 }
 
 impl OtlpExport for LogsExport {
@@ -74,7 +77,12 @@ impl OtlpExport for LogsExport {
     type Request = ExportLogsServiceRequest;
 
     fn build(&self, items: &[Self::Item], observed_nanos: u64) -> Self::Request {
-        build_export_request(items, observed_nanos, self.include_alert_details)
+        build_export_request(
+            items,
+            observed_nanos,
+            self.include_alert_details,
+            self.max_request_bytes,
+        )
     }
 
     fn record_count(request: &Self::Request) -> usize {

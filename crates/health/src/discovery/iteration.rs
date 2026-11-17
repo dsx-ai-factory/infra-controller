@@ -546,7 +546,7 @@ mod tests {
                 Arc::new(NoopLimiter),
                 metrics_manager,
                 Arc::new(config),
-                carbide_instrument::Instrumentation::global(),
+                carbide_instrument::Instrumentation::noop(),
             )
             .unwrap();
 
@@ -608,7 +608,7 @@ mod tests {
             Arc::new(NoopLimiter),
             metrics_manager,
             Arc::new(config),
-            carbide_instrument::Instrumentation::global(),
+            carbide_instrument::Instrumentation::noop(),
         )
         .expect("discovery context should start");
 
@@ -706,7 +706,7 @@ mod tests {
             Arc::new(NoopLimiter),
             metrics_manager,
             Arc::new(config),
-            carbide_instrument::Instrumentation::global(),
+            carbide_instrument::Instrumentation::noop(),
         )
         .expect("discovery context should start");
 
@@ -911,10 +911,7 @@ mod tests {
             &reqwest(),
             Some(&base_url),
             10,
-            crate::bmc::BmcInstrumentation::new(
-                carbide_instrument::Instrumentation::global(),
-                None,
-            ),
+            crate::bmc::BmcInstrumentation::new(carbide_instrument::Instrumentation::noop(), None),
         ));
         let mut config = Config::default();
         config.endpoint_sources.carbide_api = Configurable::Disabled;
@@ -928,7 +925,7 @@ mod tests {
             Arc::new(NoopLimiter),
             metrics.clone(),
             Arc::new(config),
-            carbide_instrument::Instrumentation::global(),
+            carbide_instrument::Instrumentation::noop(),
         )
         .expect("discovery context should start");
         let shard_manager = ShardManager {

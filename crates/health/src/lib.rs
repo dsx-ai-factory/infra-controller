@@ -270,6 +270,7 @@ async fn build_endpoint_wiring(
 fn build_data_sink(
     config: &Config,
     metrics_manager: Arc<MetricsManager>,
+    meter: &opentelemetry::metrics::Meter,
     instrumentation: &carbide_instrument::Instrumentation,
 ) -> Result<Option<Arc<dyn DataSink>>, HealthError> {
     let mut sinks: Vec<Arc<dyn DataSink>> = Vec::new();
@@ -368,6 +369,7 @@ fn build_data_sink(
             mapper,
             &metrics_manager,
             &config.metrics.prefix,
+            meter,
             instrumentation,
         )?;
 
@@ -542,6 +544,7 @@ pub async fn run_service(
     let data_sink = build_data_sink(
         &config,
         metrics_manager.clone(),
+        &framework_metrics.meter,
         &framework_metrics.instrumentation,
     )?;
 

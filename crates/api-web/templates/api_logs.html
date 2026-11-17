@@ -9,6 +9,7 @@
      page-level wiggle), and let that pane fill the leftover height. */
   html, body { overflow: hidden; }
   main { height: 100vh; min-height: 0; box-sizing: border-box; display: flex; flex-direction: column; }
+  main > .main-content { flex: 1 1 auto; min-height: 0; width: 100%; display: flex; flex-direction: column; }
 </style>
 {% endblock %}
 
