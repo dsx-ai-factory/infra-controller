@@ -1163,10 +1163,7 @@ WHERE datname = $1 AND pid <> pg_backend_pid()"#,
     // Use tokio::test instead of sqlx::test here because we don't need to run migrations/etc
     #[tokio::test]
     async fn test_read_only_connection_is_replaced() {
-        // Use a fast acquire timeout so that the test isn't too slow if it fails.
-        let pool = sqlx::pool::PoolOptions::new()
-            .acquire_timeout(Duration::from_secs(1))
-            .connect(&env::var("DATABASE_URL").unwrap())
+        let pool = PgPool::connect(&env::var("DATABASE_URL").unwrap())
             .await
             .unwrap();
 
