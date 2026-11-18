@@ -130,8 +130,8 @@ use sqlx::{
 ///     }
 /// }
 ///
-/// async fn has_a_transaction(txn: &mut crate::Transaction<'_>) -> sqlx::Result<()> {
-///     // Transactions always must be passed with `.as_mut()` to convert them to a PgConnection
+/// async fn has_a_transaction(txn: &mut db::Transaction<'_>) -> sqlx::Result<()> {
+///     // Use `.as_mut()` to borrow the transaction's underlying PgConnection.
 ///     db_funcs::callable_from_everything(txn.as_mut()).await?;
 ///     db_funcs::callable_from_all_but_pgpool(txn.as_mut()).await?;
 ///     db_funcs::callable_from_all_but_pgpool(txn.as_mut()).await?;
