@@ -419,6 +419,24 @@ the rollout. Subsequent scheduled runs resume Site metadata updates.
 The Site Agent needs NICo Core `2.1.0` or later. With an older Core, collection fails
 and IP Blocks are left unchanged.
 
+### UFM Certificate-Directory Passwords Are No Longer Supported
+
+A UFM password that names a certificate directory is no longer supported and is
+now sent to UFM as a token, so UFM rejects it. Before upgrading, replace that
+credential in one of these ways:
+
+- Set a valid UFM bearer token.
+- Use the default SPIFFE client certificate: give the fabric an empty password
+  in a source that returns it. That is Vault, or the environment or file source
+  with `ufm_source` set to `"local_first"` or `"local"`. UFM must trust that
+  certificate; see
+  [Client Authentication (mTLS)](../playbooks/ib_runbook.md#client-authentication-mtls).
+
+Do not clear the password in Postgres. Postgres reads an empty password as no
+credential, so UFM client creation fails and the fabric monitor cannot load the
+fabric. See
+[UFM Ownership Policy](../configuration/credential-sources.md#ufm-ownership-policy).
+
 ### Upgrades That Introduce Asynchronous Peering Deletion
 
 Follow these steps the first time you upgrade to the peering deletion behavior
