@@ -122,6 +122,13 @@ func (k *KeycloakAuthService) InitiateAuthFlow(ctx context.Context, email, redir
 		"login_hint":    {email},
 	}
 
+	state, err := k.generateOAuthState(email, redirectURI)
+	if err != nil {
+		return nil, fmt.Errorf("failed to generate oauth state: %w", err)
+	}
+
+	authParams.Set("state", state)
+
 	// Add redirect_uri if provided
 	if redirectURI != "" {
 		authParams.Set("redirect_uri", redirectURI)
@@ -131,7 +138,7 @@ func (k *KeycloakAuthService) InitiateAuthFlow(ctx context.Context, email, redir
 
 	return &model.APILoginResponse{
 		AuthURL:   authURL,
-		State:     "", // No state needed for broker flow
+		State:     state,
 		IDP:       idpAlias,
 		RealmName: k.config.Realm,
 	}, nil
@@ -140,7 +147,11 @@ func (k *KeycloakAuthService) InitiateAuthFlow(ctx context.Context, email, redir
 // ExchangeCodeForTokens exchanges authorization code for access and refresh tokens
 // For confidential clients, we use standard OAuth flow without PKCE
 // The codeVerifier parameter is ignored for confidential clients
-func (k *KeycloakAuthService) ExchangeCodeForTokens(ctx context.Context, code string, redirectURI string, codeVerifier string) (*model.APITokenResponse, error) {
+func (k *KeycloakAuthService) ExchangeCodeForTokens(ctx context.Context, code string, redirectURI string, state string, codeVerifier string) (*model.APITokenResponse, error) {
+	if err := k.ValidateOAuthState(state, redirectURI); err != nil {
+		return nil, err
+	}
+
 	// Use gocloak GetToken for standard confidential client flow
 	tokenOptions := gocloak.TokenOptions{
 		ClientID:     &k.config.ClientID,

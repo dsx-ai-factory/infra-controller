@@ -186,6 +186,8 @@ func TestLoginHandler_Handle_EmailAuth(t *testing.T) {
 				assert.Contains(t, resp.AuthURL, "john.doe%40testorg.com")
 				assert.Equal(t, "testorg-idp", resp.IDP)
 				assert.Equal(t, "test-realm", resp.RealmName)
+				assert.NotEmpty(t, resp.State)
+				assert.Contains(t, resp.AuthURL, "state=")
 			},
 			wantErr: false,
 		},
@@ -595,6 +597,10 @@ func TestCallbackHandler_Handle(t *testing.T) {
 	keycloakAuth := caa.NewKeycloakAuthService(keycloakConfig)
 	handler := NewCallbackHandler(keycloakAuth)
 
+	authResponse, err := keycloakAuth.InitiateAuthFlow(context.Background(), "john.doe@testorg.com", "http://localhost:3000/callback")
+	require.NoError(t, err)
+	validState := authResponse.State
+
 	tests := []struct {
 		name           string
 		requestBody    cam.APICallbackRequest
@@ -607,7 +613,7 @@ func TestCallbackHandler_Handle(t *testing.T) {
 			requestBody: cam.APICallbackRequest{
 				Code:        "valid-auth-code",
 				RedirectURI: "http://localhost:3000/callback",
-				State:       "state-123",
+				State:       validState,
 			},
 			expectedStatus: http.StatusOK,
 			validateResp: func(t *testing.T, resp *cam.APITokenResponse) {
@@ -623,11 +629,22 @@ func TestCallbackHandler_Handle(t *testing.T) {
 			requestBody: cam.APICallbackRequest{
 				Code:        "invalid-code",
 				RedirectURI: "http://localhost:3000/callback",
-				State:       "state-123",
+				State:       validState,
 			},
 			expectedStatus: http.StatusUnauthorized,
 			validateResp:   nil,
 			wantErr:        false, // Handler returns HTTP error, not Go error
+		},
+		{
+			name: "invalid oauth state",
+			requestBody: cam.APICallbackRequest{
+				Code:        "valid-auth-code",
+				RedirectURI: "http://localhost:3000/callback",
+				State:       "invalid-state",
+			},
+			expectedStatus: http.StatusUnauthorized,
+			validateResp:   nil,
+			wantErr:        false,
 		},
 	}
 

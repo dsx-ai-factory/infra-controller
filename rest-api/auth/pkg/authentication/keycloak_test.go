@@ -220,6 +220,8 @@ func TestKeycloakAuthService_InitiateAuthFlow_WithMock(t *testing.T) {
 				assert.Equal(t, tt.wantRealmName, authResponse.RealmName)
 				assert.Contains(t, authResponse.AuthURL, tt.wantIDP)
 				assert.Contains(t, authResponse.AuthURL, "john.doe%40testorg.com")
+				assert.NotEmpty(t, authResponse.State)
+				assert.NoError(t, service.ValidateOAuthState(authResponse.State, tt.redirectURI))
 			}
 		})
 	}
@@ -295,7 +297,7 @@ func TestKeycloakAuthService_InitiateAuthFlow(t *testing.T) {
 		name           string
 		email          string
 		redirectURI    string
-		wantResponse   *model.APILoginResponse
+		validateResp   func(*testing.T, *KeycloakAuthService, *model.APILoginResponse)
 		wantErr        bool
 		expectedErrMsg string
 	}{
@@ -303,11 +305,13 @@ func TestKeycloakAuthService_InitiateAuthFlow(t *testing.T) {
 			name:        "successful auth flow initiation",
 			email:       "john.doe@testorg.com",
 			redirectURI: "http://localhost:3000/callback",
-			wantResponse: &model.APILoginResponse{
-				AuthURL:   testServer.URL + "/realms/nico/protocol/openid-connect/auth?client_id=test-client&kc_idp_hint=testorg-idp&login_hint=john.doe%40testorg.com&redirect_uri=http%3A%2F%2Flocalhost%3A3000%2Fcallback&response_type=code&scope=openid",
-				State:     "",
-				IDP:       "testorg-idp",
-				RealmName: "nico",
+			validateResp: func(t *testing.T, service *KeycloakAuthService, response *model.APILoginResponse) {
+				assert.Equal(t, "testorg-idp", response.IDP)
+				assert.Equal(t, "nico", response.RealmName)
+				assert.NotEmpty(t, response.State)
+				assert.Contains(t, response.AuthURL, "state="+url.QueryEscape(response.State))
+				assert.Contains(t, response.AuthURL, "testorg-idp")
+				assert.NoError(t, service.ValidateOAuthState(response.State, "http://localhost:3000/callback"))
 			},
 			wantErr: false,
 		},
@@ -315,7 +319,6 @@ func TestKeycloakAuthService_InitiateAuthFlow(t *testing.T) {
 			name:           "invalid email format",
 			email:          "invalid-email",
 			redirectURI:    "http://localhost:3000/callback",
-			wantResponse:   nil,
 			wantErr:        true,
 			expectedErrMsg: "invalid email format: invalid-email",
 		},
@@ -323,7 +326,6 @@ func TestKeycloakAuthService_InitiateAuthFlow(t *testing.T) {
 			name:           "IDP not found for domain",
 			email:          "john.doe@unknown.com",
 			redirectURI:    "http://localhost:3000/callback",
-			wantResponse:   nil,
 			wantErr:        true,
 			expectedErrMsg: "failed to find identity provider for domain unknown.com",
 		},
@@ -331,11 +333,12 @@ func TestKeycloakAuthService_InitiateAuthFlow(t *testing.T) {
 			name:        "no redirect URI provided",
 			email:       "john.doe@testorg.com",
 			redirectURI: "",
-			wantResponse: &model.APILoginResponse{
-				AuthURL:   testServer.URL + "/realms/nico/protocol/openid-connect/auth?client_id=test-client&kc_idp_hint=testorg-idp&login_hint=john.doe%40testorg.com&response_type=code&scope=openid",
-				State:     "",
-				IDP:       "testorg-idp",
-				RealmName: "nico",
+			validateResp: func(t *testing.T, service *KeycloakAuthService, response *model.APILoginResponse) {
+				assert.Equal(t, "testorg-idp", response.IDP)
+				assert.Equal(t, "nico", response.RealmName)
+				assert.NotEmpty(t, response.State)
+				assert.Contains(t, response.AuthURL, "state="+url.QueryEscape(response.State))
+				assert.NoError(t, service.ValidateOAuthState(response.State, ""))
 			},
 			wantErr: false,
 		},
@@ -361,7 +364,9 @@ func TestKeycloakAuthService_InitiateAuthFlow(t *testing.T) {
 				assert.Nil(t, response)
 			} else {
 				assert.NoError(t, err)
-				assert.Equal(t, tt.wantResponse, response)
+				if tt.validateResp != nil {
+					tt.validateResp(t, service, response)
+				}
 			}
 		})
 	}
@@ -373,6 +378,7 @@ func TestKeycloakAuthService_ExchangeCodeForTokens(t *testing.T) {
 		name           string
 		code           string
 		redirectURI    string
+		state          string
 		wantResponse   *model.APITokenResponse
 		wantErr        bool
 		expectedErrMsg string
@@ -396,6 +402,15 @@ func TestKeycloakAuthService_ExchangeCodeForTokens(t *testing.T) {
 			wantResponse:   nil,
 			wantErr:        true,
 			expectedErrMsg: "failed to exchange authorization code",
+		},
+		{
+			name:           "invalid oauth state",
+			code:           "valid-auth-code",
+			redirectURI:    "http://localhost:3000/callback",
+			state:          "not-a-valid-state",
+			wantResponse:   nil,
+			wantErr:        true,
+			expectedErrMsg: "invalid oauth state",
 		},
 	}
 
@@ -436,7 +451,14 @@ func TestKeycloakAuthService_ExchangeCodeForTokens(t *testing.T) {
 
 			service := NewKeycloakAuthServiceWithClient(keycloakConfig, client)
 
-			response, err := service.ExchangeCodeForTokens(context.Background(), tt.code, tt.redirectURI, "")
+			state := tt.state
+			if state == "" {
+				generatedState, stateErr := service.generateOAuthState("john.doe@testorg.com", tt.redirectURI)
+				require.NoError(t, stateErr)
+				state = generatedState
+			}
+
+			response, err := service.ExchangeCodeForTokens(context.Background(), tt.code, tt.redirectURI, state, "")
 
 			if tt.wantErr {
 				assert.Error(t, err)
@@ -779,7 +801,7 @@ func TestKeycloakAuthService_Integration(t *testing.T) {
 		assert.Contains(t, authResponse.AuthURL, "testorg-idp")
 
 		// 2. Exchange code for tokens
-		tokenResponse, err := service.ExchangeCodeForTokens(context.Background(), "valid-auth-code", "http://localhost:3000/callback", "")
+		tokenResponse, err := service.ExchangeCodeForTokens(context.Background(), "valid-auth-code", "http://localhost:3000/callback", authResponse.State, "")
 		assert.NoError(t, err)
 		assert.NotNil(t, tokenResponse)
 		assert.Equal(t, "test-access-token", tokenResponse.AccessToken)
@@ -1583,7 +1605,10 @@ func TestKeycloakAuthService_RealServerIntegration(t *testing.T) {
 
 		service := NewKeycloakAuthService(keycloakConfig)
 
-		tokenResponse, err := service.ExchangeCodeForTokens(context.Background(), "valid-auth-code", "http://localhost:3000/callback", "")
+		authResponse, err := service.InitiateAuthFlow(context.Background(), "john.doe@testorg.com", "http://localhost:3000/callback")
+		require.NoError(t, err)
+
+		tokenResponse, err := service.ExchangeCodeForTokens(context.Background(), "valid-auth-code", "http://localhost:3000/callback", authResponse.State, "")
 		assert.NoError(t, err)
 		require.NotNil(t, tokenResponse)
 		assert.Equal(t, "test-access-token", tokenResponse.AccessToken)
@@ -1829,7 +1854,10 @@ func TestKeycloakAuthService_ErrorScenarios(t *testing.T) {
 
 		service := NewKeycloakAuthService(keycloakConfig)
 
-		tokenResponse, err := service.ExchangeCodeForTokens(context.Background(), "expired-code", "http://localhost:3000/callback", "")
+		state, stateErr := service.generateOAuthState("test@example.com", "http://localhost:3000/callback")
+		require.NoError(t, stateErr)
+
+		tokenResponse, err := service.ExchangeCodeForTokens(context.Background(), "expired-code", "http://localhost:3000/callback", state, "")
 		assert.Error(t, err)
 		assert.Contains(t, err.Error(), "failed to exchange authorization code")
 		assert.Nil(t, tokenResponse)
