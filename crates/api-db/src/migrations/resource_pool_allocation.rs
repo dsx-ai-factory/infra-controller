@@ -14,6 +14,7 @@ use sqlx::PgPool;
 
 use super::{IgnoringMissing, MIGRATION_LAYOUT, Migrator};
 use crate::ConditionalWrite::Applied;
+use crate::TransactionVending as _;
 use crate::db_read::DbReader;
 use crate::resource_pool::{self, allocation};
 use crate::test_support::postgres::wait_for_blocked_query;
@@ -104,12 +105,12 @@ async fn allocation_migration_backfills_existing_allocations(pool: PgPool) -> ey
 
     // Pool setup writes its binding before inventory. The migration must wait
     // for that writer before taking the inventory lock it needs for backfill.
-    let mut writer = pool.begin().await?;
+    let mut writer = pool.txn_begin().await?;
     let writer_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
-        .fetch_one(&mut *writer)
+        .fetch_one(writer.as_mut())
         .await?;
     sqlx::query("UPDATE resource_pool_binding SET backend_name = backend_name")
-        .execute(&mut *writer)
+        .execute(writer.as_mut())
         .await?;
     let migration = allocation_migration();
     let (migration_result, writer_result) = tokio::time::timeout(Duration::from_secs(35), async {
@@ -130,7 +131,7 @@ async fn allocation_migration_backfills_existing_allocations(pool: PgPool) -> ey
                 eyre::bail!("migration locked inventory before waiting for the binding writer");
             }
             sqlx::query("UPDATE resource_pool SET value = value WHERE name = 'vpc-vni'")
-                .execute(&mut *writer)
+                .execute(writer.as_mut())
                 .await?;
             writer.commit().await?;
             Ok::<_, eyre::Report>(())

@@ -6671,6 +6671,7 @@ mod tests {
     use carbide_uuid::power_shelf::PowerShelfId;
     use carbide_uuid::rack::RackId;
     use carbide_uuid::switch::SwitchId;
+    use db::TransactionVending as _;
     use model::rack::FirmwareUpgradeDeviceInfo;
     use model::rack_type::{
         RackCapabilitiesSet, RackCapabilityCompute, RackCapabilityPowerShelf, RackCapabilitySwitch,
@@ -8964,7 +8965,7 @@ mod tests {
         capabilities.compute.count = 1;
         capabilities.switch.count = 2;
         capabilities.power_shelf.count = 2;
-        let mut txn = pool.begin().await.unwrap();
+        let mut txn = pool.txn_begin().await.unwrap();
         let ct1 = seed_machine(&mut txn, CT_MAC_1, CT_IP_1, "CT-001", &rack_id).await;
         seed_pre_ingestion_compute_tray(&mut txn, CT_MAC_2, &expected_rack, false).await;
         txn.commit().await.unwrap();
@@ -9236,7 +9237,7 @@ mod tests {
         capabilities.compute.count = 1;
         capabilities.switch.count = 2;
         capabilities.power_shelf.count = 2;
-        let mut txn = pool.begin().await.unwrap();
+        let mut txn = pool.txn_begin().await.unwrap();
         seed_machine(&mut txn, CT_MAC_1, CT_IP_1, "hostname-from-db", &rack).await;
         txn.commit().await.unwrap();
         let mut first = make_sw_endpoint(SW_MAC_1);
@@ -9344,7 +9345,7 @@ mod tests {
         capabilities.compute.count = 1;
         capabilities.switch.count = 2;
         capabilities.power_shelf.count = 2;
-        let mut txn = pool.begin().await.unwrap();
+        let mut txn = pool.txn_begin().await.unwrap();
         let ct1 = seed_machine(&mut txn, CT_MAC_1, CT_IP_1, "CT-001", &rack_id).await;
         txn.commit().await.unwrap();
         let compute = [make_ct_endpoint(CT_IP_1, CT_MAC_1)];
@@ -9422,18 +9423,18 @@ mod tests {
                 Ok(Vec::new())
             );
 
-            let mut blocker = pool.begin().await.unwrap();
+            let mut blocker = pool.txn_begin().await.unwrap();
             let lock_statement = match role {
                 ROLE_COMPUTE => "LOCK TABLE machines IN ACCESS EXCLUSIVE MODE",
                 ROLE_SWITCH => "LOCK TABLE switches IN ACCESS EXCLUSIVE MODE",
                 _ => "LOCK TABLE power_shelves IN ACCESS EXCLUSIVE MODE",
             };
             sqlx::query(lock_statement)
-                .execute(&mut *blocker)
+                .execute(blocker.as_mut())
                 .await
                 .unwrap();
             let blocker_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
-                .fetch_one(&mut *blocker)
+                .fetch_one(blocker.as_mut())
                 .await
                 .unwrap();
             let mut read = Box::pin(request());
@@ -9486,7 +9487,7 @@ mod tests {
     #[carbide_macros::sqlx_test]
     async fn power_observations_identify_management_macs_in_endpoint_order(pool: sqlx::PgPool) {
         let (mock, backend, rack_id, ps1, ps2, sw1, sw2) = make_backend(&pool).await;
-        let mut txn = pool.begin().await.expect("begin compute setup");
+        let mut txn = pool.txn_begin().await.expect("begin compute setup");
         let ct1 = seed_machine(&mut txn, CT_MAC_1, CT_IP_1, "CT-001", &rack_id).await;
         let ct2 = seed_machine(&mut txn, CT_MAC_2, CT_IP_2, "CT-002", &rack_id).await;
         txn.commit().await.expect("commit compute setup");
@@ -9667,7 +9668,10 @@ mod tests {
     async fn compute_power_read_resolves_expected_inventory(pool: sqlx::PgPool) {
         let (mock, backend, _, _, _, _, _) = make_backend(&pool).await;
         let rack_id = RackId::new("expected-compute-rack");
-        let mut txn = pool.begin().await.expect("begin expected compute setup");
+        let mut txn = pool
+            .txn_begin()
+            .await
+            .expect("begin expected compute setup");
         seed_pre_ingestion_compute_tray(&mut txn, CT_MAC_1, &rack_id, false).await;
         txn.commit().await.expect("commit expected compute setup");
         let endpoint = make_ct_endpoint(CT_IP_1, CT_MAC_1);
@@ -9694,7 +9698,10 @@ mod tests {
     async fn compute_power_read_rejects_ip_owner_without_rack(pool: sqlx::PgPool) {
         let (mock, backend, owner_rack_id, _, _, _, _) = make_backend(&pool).await;
         let expected_rack_id = RackId::new("expected-compute-rack");
-        let mut txn = pool.begin().await.expect("begin conflicting owner setup");
+        let mut txn = pool
+            .txn_begin()
+            .await
+            .expect("begin conflicting owner setup");
 
         // The requested MAC has valid expected inventory, while a different
         // machine owns its supplied IP without belonging to any managed rack.
@@ -9702,7 +9709,7 @@ mod tests {
         let owner_id = seed_machine(&mut txn, CT_MAC_2, CT_IP_1, "CT-002", &owner_rack_id).await;
         let update = sqlx::query("UPDATE machines SET rack_id = NULL WHERE id = $1")
             .bind(owner_id)
-            .execute(&mut *txn)
+            .execute(txn.as_mut())
             .await
             .expect("clear the current owner's rack");
         assert_eq!(update.rows_affected(), 1);
@@ -9768,7 +9775,7 @@ mod tests {
     async fn shelf_power_read_resolves_expected_inventory(pool: sqlx::PgPool) {
         let (mock, backend, _, _, _, _, _) = make_backend(&pool).await;
         let rack_id = RackId::new("expected-shelf-rack");
-        let mut txn = pool.begin().await.expect("begin expected shelf setup");
+        let mut txn = pool.txn_begin().await.expect("begin expected shelf setup");
         seed_pre_ingestion_power_shelf(&mut txn, UNKNOWN_MAC, &rack_id, false).await;
         txn.commit().await.expect("commit expected shelf setup");
         let endpoint = make_ps_endpoint(UNKNOWN_MAC);
@@ -10464,7 +10471,7 @@ mod tests {
     async fn make_compute_tray_backend(
         pool: &sqlx::PgPool,
     ) -> (Arc<MockRmsApi>, RmsBackend, RackId, MachineId, MachineId) {
-        let mut txn = pool.begin().await.unwrap();
+        let mut txn = pool.txn_begin().await.unwrap();
         let rack_id = RackId::new(uuid::Uuid::new_v4().to_string());
         let rack_profile_id = RackProfileId::new(TEST_RACK_PROFILE_ID);
         db::rack::create(
@@ -10895,7 +10902,7 @@ mod tests {
         // a pre-ingestion power shelf, which previously failed with an
         // identity-lookup error.
         let rack_id = RackId::new(uuid::Uuid::new_v4().to_string());
-        let mut txn = pool.begin().await.unwrap();
+        let mut txn = pool.txn_begin().await.unwrap();
         seed_pre_ingestion_power_shelf(&mut txn, PS_MAC_1, &rack_id, false).await;
         txn.commit().await.unwrap();
 
@@ -11703,7 +11710,7 @@ mod tests {
     #[carbide_macros::sqlx_test]
     async fn ps_list_firmware_pre_ingestion_uses_expected_rack_profile(pool: sqlx::PgPool) {
         let rack_id = RackId::new(uuid::Uuid::new_v4().to_string());
-        let mut txn = pool.begin().await.unwrap();
+        let mut txn = pool.txn_begin().await.unwrap();
 
         seed_pre_ingestion_power_shelf(&mut txn, PS_MAC_1, &rack_id, false).await;
         txn.commit().await.unwrap();
@@ -14265,7 +14272,7 @@ mod tests {
         // entirely from the expected inventory, with the node id synthesized
         // from the BMC MAC.
         let rack_id = RackId::new(uuid::Uuid::new_v4().to_string());
-        let mut txn = pool.begin().await.unwrap();
+        let mut txn = pool.txn_begin().await.unwrap();
         seed_pre_ingestion_compute_tray(&mut txn, CT_MAC_1, &rack_id, false).await;
         txn.commit().await.unwrap();
 

@@ -30,6 +30,7 @@ use carbide_secrets::SecretsError;
 use carbide_secrets::credentials::{
     CredentialKey, CredentialReader, CredentialWriter, Credentials,
 };
+use db::TransactionVending as _;
 use db::work_lock_manager::{self, AcquireLockError, KeepaliveConfig, WorkLockManagerHandle};
 use tokio::sync::Notify;
 use tokio::task::JoinSet;
@@ -285,18 +286,18 @@ async fn set_after_create_absence_check_remains_current(pool: sqlx::PgPool) {
 
     // Run `insert_if_missing`'s steps separately so the setter can run
     // after the absence check but before the insert.
-    let mut create_txn = pool.begin().await.expect("begin create transaction");
+    let mut create_txn = pool.txn_begin().await.expect("begin create transaction");
     db::secrets::lock_path(&mut create_txn, &path)
         .await
         .expect("lock credential path for create");
     assert!(
-        !db::secrets::exists(&mut *create_txn, &path)
+        !db::secrets::exists(create_txn.as_mut(), &path)
             .await
             .expect("check credential absence"),
         "test path must start empty"
     );
     let create_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
-        .fetch_one(&mut *create_txn)
+        .fetch_one(create_txn.as_mut())
         .await
         .expect("read creator backend PID");
 
@@ -390,7 +391,7 @@ async fn second_write_wins_on_created_at_ties(pool: sqlx::PgPool) {
     let routing = catch_all_routing("k1");
     let path = "tie/test/path";
 
-    let mut txn = pool.begin().await.expect("begin");
+    let mut txn = pool.txn_begin().await.expect("begin");
     let first = super::encrypt_envelope(&routing, kms.as_ref(), path, b"\"first\"")
         .await
         .expect("encrypt first");
@@ -546,7 +547,7 @@ async fn bulk_secret_write_blocks_create_before_exists_check(pool: sqlx::PgPool)
         kms_with_keys(&[("k1", 1)]),
         &test_meter,
     );
-    let mut bulk_txn = pool.begin().await.expect("begin bulk transaction");
+    let mut bulk_txn = pool.txn_begin().await.expect("begin bulk transaction");
     db::secrets::lock_for_bulk_write(&mut bulk_txn)
         .await
         .expect("lock secrets for bulk write");
@@ -639,12 +640,15 @@ async fn create_waiting_on_path_lock_does_not_block_bulk_write(pool: sqlx::PgPoo
     // Model a create from an older replica: it takes the path advisory lock,
     // checks for an existing entry, and does not request its table-write lock
     // until the later INSERT.
-    let mut legacy_txn = pool.begin().await.expect("begin legacy create transaction");
+    let mut legacy_txn = pool
+        .txn_begin()
+        .await
+        .expect("begin legacy create transaction");
     db::secrets::lock_path_advisory(&mut legacy_txn, &path)
         .await
         .expect("take legacy path advisory lock");
     assert!(
-        !db::secrets::exists(&mut *legacy_txn, &path)
+        !db::secrets::exists(legacy_txn.as_mut(), &path)
             .await
             .expect("check legacy path"),
         "test path must start empty"
@@ -680,9 +684,9 @@ async fn create_waiting_on_path_lock_does_not_block_bulk_write(pool: sqlx::PgPoo
     .await
     .expect("create did not wait on the legacy path lock");
 
-    let mut bulk_txn = pool.begin().await.expect("begin bulk transaction");
+    let mut bulk_txn = pool.txn_begin().await.expect("begin bulk transaction");
     sqlx::query("SET LOCAL lock_timeout = '250ms'")
-        .execute(&mut *bulk_txn)
+        .execute(bulk_txn.as_mut())
         .await
         .expect("set bulk table-lock timeout");
     let bulk_lock_result = db::secrets::lock_for_bulk_write(&mut bulk_txn).await;

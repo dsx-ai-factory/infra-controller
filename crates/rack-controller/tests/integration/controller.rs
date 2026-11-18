@@ -26,7 +26,9 @@ use carbide_rack_controller::io::RackStateControllerIO;
 use carbide_test_harness::prelude::{sqlx_test, sqlx_testing};
 use carbide_uuid::rack::{RackId, RackProfileId};
 use db::db_read::DbReader;
-use db::{self, ObjectColumnFilter, machine as db_machine, rack as db_rack};
+use db::{
+    self, ObjectColumnFilter, TransactionVending as _, machine as db_machine, rack as db_rack,
+};
 use model::expected_machine::ExpectedMachineData;
 use model::machine::ManagedHostState;
 use model::machine::machine_search_config::MachineSearchConfig;
@@ -130,9 +132,9 @@ impl StateHandler for TestRackStateHandler {
             },
             RackState::Deleting => {
                 // Rack is being deleted
-                let mut txn = ctx.services.db_pool.begin().await?;
+                let mut txn = ctx.services.db_pool.txn_begin().await?;
                 db::rack::final_delete(&mut txn, rack_id).await?;
-                return Ok(StateHandlerOutcome::deleted().with_txn(txn));
+                return Ok(StateHandlerOutcome::deleted().with_txn(txn.into()));
             }
             _ => return Ok(StateHandlerOutcome::do_nothing()),
         };
@@ -320,9 +322,9 @@ async fn test_can_retrieve_rack_state_history_with_real_handler(
     // partition ("p0") and marked "pass", which is the minimal happy path:
     // one partition, all nodes validated.
     {
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
         let machines = db_machine::find(
-            &mut *txn,
+            txn.as_mut(),
             db::ObjectFilter::List(&[machine_id_1, machine_id_2]),
             MachineSearchConfig::default(),
         )
@@ -569,7 +571,7 @@ async fn test_rack_controller_state_version_increment(
 ) -> Result<(), Box<dyn std::error::Error>> {
     // Create a rack
     let rack_id = RackId::new(uuid::Uuid::new_v4().to_string());
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
     db_rack::create(
         &mut txn,
         &rack_id,
@@ -649,7 +651,7 @@ async fn test_rack_maintenance_termination_latch_blocks_maintenance_transition_a
     pool: sqlx::PgPool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let rack_id = RackId::new(uuid::Uuid::new_v4().to_string());
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
     let rack = db_rack::create(
         txn.as_mut(),
         &rack_id,
@@ -731,7 +733,7 @@ async fn test_stale_rack_maintenance_termination_latch_does_not_block_non_mainte
     pool: sqlx::PgPool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let rack_id = RackId::new(uuid::Uuid::new_v4().to_string());
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
     let rack = db_rack::create(
         txn.as_mut(),
         &rack_id,

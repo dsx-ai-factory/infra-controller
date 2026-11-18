@@ -21,6 +21,7 @@ pub(in crate::tests) mod tests {
     use carbide_uuid::machine::MachineId;
     use chrono::{DateTime, Utc};
     use config_version::ConfigVersion;
+    use db::TransactionVending as _;
     use model::attestation::profile::{
         ANY_HARDWARE_CLASS, AttestationPolicyDocument, AttesterSelection, AttesterSelectionMode,
         ComponentIdMatch,
@@ -491,12 +492,12 @@ pub(in crate::tests) mod tests {
 
         for case in cases {
             // Isolate each policy case from the jobs scheduled by earlier cases.
-            let mut txn = env.pool.begin().await?;
+            let mut txn = env.pool.txn_begin().await?;
             sqlx::query("DELETE FROM attestation_profiles")
-                .execute(&mut *txn)
+                .execute(txn.as_mut())
                 .await?;
             sqlx::query("DELETE FROM spdm_machine_devices_attestation")
-                .execute(&mut *txn)
+                .execute(txn.as_mut())
                 .await?;
             for (hardware_class, selection) in (case.reprofile)() {
                 db::attestation_profile::create(
@@ -508,7 +509,7 @@ pub(in crate::tests) mod tests {
                 .await?;
             }
             let profiles_before: serde_json::Value = sqlx::query_scalar(profile_snapshot_query)
-                .fetch_one(&mut *txn)
+                .fetch_one(txn.as_mut())
                 .await?;
             txn.commit().await?;
 
@@ -709,9 +710,9 @@ pub(in crate::tests) mod tests {
             .set_create_client_error("the BMC cannot be reached");
 
         for case in cases {
-            let mut txn = env.pool.begin().await?;
+            let mut txn = env.pool.txn_begin().await?;
             sqlx::query("DELETE FROM attestation_profiles")
-                .execute(&mut *txn)
+                .execute(txn.as_mut())
                 .await?;
             for (hardware_class, selection) in (case.profiles)() {
                 db::attestation_profile::create(
@@ -774,9 +775,9 @@ pub(in crate::tests) mod tests {
         .await;
         let (machine_id, _dpu_id) = create_managed_host(&env).await.into();
 
-        let mut txn = env.pool.begin().await?;
+        let mut txn = env.pool.txn_begin().await?;
         sqlx::query("DELETE FROM attestation_profiles")
-            .execute(&mut *txn)
+            .execute(txn.as_mut())
             .await?;
         db::attestation_profile::create(
             &mut txn,
@@ -952,7 +953,7 @@ pub(in crate::tests) mod tests {
         assert_eq!(1, machine_ids.len());
 
         // redfish will return an error
-        let mut txn = env.pool.begin().await.unwrap();
+        let mut txn = env.pool.txn_begin().await.unwrap();
 
         let object_ids = db::attestation::spdm::find_machine_ids_for_attestation(&mut txn)
             .await
@@ -1010,7 +1011,7 @@ pub(in crate::tests) mod tests {
 
         assert_eq!(1, machine_ids.len());
 
-        let mut txn = env.pool.begin().await.unwrap();
+        let mut txn = env.pool.txn_begin().await.unwrap();
 
         // Reach polling, then model a BMC that removed tasks after cancellation
         // completed without the controller's waiting-state transition being saved.
@@ -2625,13 +2626,13 @@ pub(in crate::tests) mod tests {
         .await;
         let (host_id, _) = create_managed_host(&env).await.into();
         let machine_id: MachineId = host_id.into();
-        let mut txn = env.pool.begin().await?;
+        let mut txn = env.pool.txn_begin().await?;
         sqlx::query("DELETE FROM spdm_machine_devices_attestation WHERE machine_id = $1")
             .bind(machine_id)
-            .execute(&mut *txn)
+            .execute(txn.as_mut())
             .await?;
         sqlx::query("DELETE FROM attestation_profiles")
-            .execute(&mut *txn)
+            .execute(txn.as_mut())
             .await?;
         db::attestation_profile::create(
             &mut txn,
@@ -2677,7 +2678,7 @@ pub(in crate::tests) mod tests {
             ),
         ] {
             sqlx::query("INSERT INTO spdm_machine_devices_attestation (machine_id, device_id, nonce, state, job_id, started_at, triggered_by_mh_controller, completed_at) VALUES ($1, $2, gen_random_uuid(), $3, $4, $5, $6, $5)")
-                .bind(machine_id).bind(device).bind(sqlx::types::Json(state)).bind(job).bind(time + chrono::Duration::seconds(seconds)).bind(controller).execute(&mut *txn).await?;
+                .bind(machine_id).bind(device).bind(sqlx::types::Json(state)).bind(job).bind(time + chrono::Duration::seconds(seconds)).bind(controller).execute(txn.as_mut()).await?;
         }
         txn.commit().await?;
         let fleet = env
@@ -2786,9 +2787,9 @@ pub(in crate::tests) mod tests {
             }
         }
         // Partial policy coverage stays explicit even when all selected devices passed.
-        let mut txn = env.pool.begin().await?;
+        let mut txn = env.pool.txn_begin().await?;
         sqlx::query("DELETE FROM attestation_profiles")
-            .execute(&mut *txn)
+            .execute(txn.as_mut())
             .await?;
         let mut selection = gpu_allowlist();
         selection
@@ -2851,9 +2852,9 @@ pub(in crate::tests) mod tests {
             assert_eq!(error.code(), expected, "{scenario}");
         }
         // The deadline covers database waits too; inject one rather than relying on BMC timing.
-        let mut blocker = env.pool.begin().await?;
+        let mut blocker = env.pool.txn_begin().await?;
         sqlx::query("LOCK TABLE machines IN ACCESS EXCLUSIVE MODE")
-            .execute(&mut *blocker)
+            .execute(blocker.as_mut())
             .await?;
         let result = env
             .api

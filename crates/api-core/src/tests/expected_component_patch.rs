@@ -15,6 +15,7 @@
  * limitations under the License.
  */
 use carbide_uuid::machine::MachineInterfaceId;
+use db::TransactionVending as _;
 use model::address_selection_strategy::AddressSelectionStrategy;
 use model::allocation_type::AllocationType;
 use model::expected_machine::{
@@ -146,7 +147,7 @@ async fn power_shelf_row(pool: &PgPool, id: Uuid) -> Value {
 }
 
 async fn static_interface(pool: &PgPool, mac: &str, address: &str) -> MachineInterfaceId {
-    let mut txn = pool.begin().await.unwrap();
+    let mut txn = pool.txn_begin().await.unwrap();
     let address = address.parse().unwrap();
     let segment = db::network_segment::for_static_address(&mut txn, address)
         .await
@@ -384,7 +385,7 @@ async fn patch_expected_machine_dpu_loopback_reservations(pool: PgPool) {
     let loopback_pool = env.api.common_pools.ethernet.pool_loopback_ip.as_ref();
     let free: IpAddr = "192.0.2.10".parse().unwrap();
     let auto_assign: IpAddr = "192.0.2.20".parse().unwrap();
-    let mut txn = pool.begin().await.unwrap();
+    let mut txn = pool.txn_begin().await.unwrap();
     db::resource_pool::populate(loopback_pool, &mut txn, vec![free], false)
         .await
         .unwrap();
@@ -492,7 +493,7 @@ async fn patch_expected_machine_dpu_loopback_reservation_restore_owned(pool: PgP
     // A single reservable (non-auto-assign) address in the loopback pool.
     let loopback_pool = env.api.common_pools.ethernet.pool_loopback_ip.as_ref();
     let reserved: IpAddr = "192.0.2.30".parse().unwrap();
-    let mut txn = pool.begin().await.unwrap();
+    let mut txn = pool.txn_begin().await.unwrap();
     db::resource_pool::populate(loopback_pool, &mut txn, vec![reserved], false)
         .await
         .unwrap();
@@ -555,9 +556,9 @@ async fn patch_expected_machine_dpu_loopback_reservation_restore_owned(pool: PgP
         ..Default::default()
     };
     let dpu_id = from_hardware_info_with_type(&dpu_hw, MachineType::Dpu).unwrap();
-    let mut txn = pool.begin().await.unwrap();
+    let mut txn = pool.txn_begin().await.unwrap();
     let blocker_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
-        .fetch_one(&mut *txn)
+        .fetch_one(txn.as_mut())
         .await
         .unwrap();
     db::expected_dpu_loopback_reservation::find_by_dpu_oob_net0_mac_for_update(
@@ -1295,7 +1296,7 @@ async fn patch_expected_switch_allows_unrelated_updates_on_a_zero_port_row(pool:
     let env = create_test_env(pool).await;
     let id = Uuid::new_v4();
     // Seed a legacy record directly: new API creates require NVOS ports.
-    let mut txn = env.pool.begin().await.unwrap();
+    let mut txn = env.pool.txn_begin().await.unwrap();
     db::expected_switch::create(
         &mut txn,
         model::expected_switch::ExpectedSwitch {
@@ -1711,15 +1712,15 @@ async fn patch_expected_machine_merges_after_a_concurrent_writer_commits(
         .await?;
     let mut expected = machine_row(&env.pool, id).await;
 
-    let mut blocker = env.pool.begin().await?;
+    let mut blocker = env.pool.txn_begin().await?;
     let blocker_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
-        .fetch_one(&mut *blocker)
+        .fetch_one(blocker.as_mut())
         .await?;
     sqlx::query("UPDATE expected_machines SET bmc_username=$1, bmc_password=$2 WHERE id=$3")
         .bind("concurrent-user")
         .bind("concurrent-password")
         .bind(id)
-        .execute(&mut *blocker)
+        .execute(blocker.as_mut())
         .await?;
     let api = env.api.clone();
     let patch_task = tokio::spawn(async move {
@@ -1770,9 +1771,9 @@ async fn expected_power_shelf_update_locks_inventory_before_interface(
         addressless_interface(&env, &fixture.bmc_mac_address, &fixture.bmc_ip_address).await;
     let mut expected = power_shelf_row(&env.pool, id).await;
 
-    let mut blocker = env.pool.begin().await?;
+    let mut blocker = env.pool.txn_begin().await?;
     let blocker_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
-        .fetch_one(&mut *blocker)
+        .fetch_one(blocker.as_mut())
         .await?;
     db::expected_power_shelf::find_by_id_for_update(&mut blocker, id)
         .await?
@@ -1789,11 +1790,11 @@ async fn expected_power_shelf_update_locks_inventory_before_interface(
 
     // PATCH already owns the inventory lock. A legacy update waiting for
     // that lock must not hold the interface lock PATCH acquires next.
-    let mut probe = env.pool.begin().await?;
+    let mut probe = env.pool.txn_begin().await?;
     let interface_lock: Result<MachineInterfaceId, _> =
         sqlx::query_scalar("SELECT id FROM machine_interfaces WHERE id=$1 FOR UPDATE NOWAIT")
             .bind(interface_id)
-            .fetch_one(&mut *probe)
+            .fetch_one(probe.as_mut())
             .await;
     probe.rollback().await?;
     blocker.commit().await?;
@@ -1802,7 +1803,7 @@ async fn expected_power_shelf_update_locks_inventory_before_interface(
 
     expected["bmc_username"] = json!("after lock");
     assert_eq!(power_shelf_row(&env.pool, id).await, expected);
-    let mut txn = env.pool.begin().await?;
+    let mut txn = env.pool.txn_begin().await?;
     let addresses =
         db::machine_interface_address::find_for_interface(&mut txn, interface_id).await?;
     assert_eq!(addresses.len(), 1);
@@ -1841,9 +1842,9 @@ async fn expected_switch_update_locks_inventory_before_interface(
         addressless_interface(&env, &fixture.bmc_mac_address, &fixture.bmc_ip_address).await;
     let mut expected = switch_row(&env.pool, id).await;
 
-    let mut blocker = env.pool.begin().await?;
+    let mut blocker = env.pool.txn_begin().await?;
     let blocker_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
-        .fetch_one(&mut *blocker)
+        .fetch_one(blocker.as_mut())
         .await?;
     db::expected_switch::find_for_update(
         &mut blocker,
@@ -1864,11 +1865,11 @@ async fn expected_switch_update_locks_inventory_before_interface(
     });
     wait_for_blocked_query(&env.pool, blocker_pid, "expected_switches:write").await;
 
-    let mut probe = env.pool.begin().await?;
+    let mut probe = env.pool.txn_begin().await?;
     let interface_lock: Result<MachineInterfaceId, _> =
         sqlx::query_scalar("SELECT id FROM machine_interfaces WHERE id=$1 FOR UPDATE NOWAIT")
             .bind(interface_id)
-            .fetch_one(&mut *probe)
+            .fetch_one(probe.as_mut())
             .await;
     probe.rollback().await?;
     blocker.commit().await?;
@@ -1877,7 +1878,7 @@ async fn expected_switch_update_locks_inventory_before_interface(
 
     expected["bmc_username"] = json!("after lock");
     assert_eq!(switch_row(&env.pool, id).await, expected);
-    let mut txn = env.pool.begin().await?;
+    let mut txn = env.pool.txn_begin().await?;
     let addresses =
         db::machine_interface_address::find_for_interface(&mut txn, interface_id).await?;
     assert_eq!(addresses.len(), 1);

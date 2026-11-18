@@ -695,7 +695,7 @@ mod test {
     use model::machine::ManagedHostState;
 
     use super::{DpaNetworkConfigNotCurrent, try_update_network_config};
-    use crate::{ConditionalWrite, machine};
+    use crate::{ConditionalWrite, TransactionVending as _, machine};
 
     /// The observation loader must return only this host's SVPC cards in ID
     /// order. Fixed IDs keep insertion order from accidentally proving sorting.
@@ -710,7 +710,7 @@ mod test {
             .try_into()
             .unwrap()
         });
-        let mut txn = pool.begin().await.unwrap();
+        let mut txn = pool.txn_begin().await.unwrap();
         for host in hosts {
             machine::create(&mut txn, None, &host, ManagedHostState::Ready, None, 2)
                 .await
@@ -733,13 +733,13 @@ mod test {
             .bind(MacAddress::from([0, 0x11, 0x22, 0x33, 0x44, ordinal]))
             .bind(format!("0000:{ordinal:02x}:00.0"))
             .bind(interface_type)
-            .execute(&mut *txn)
+            .execute(txn.as_mut())
             .await
             .unwrap();
         }
         txn.commit().await.unwrap();
 
-        let mut txn = pool.begin().await.unwrap();
+        let mut txn = pool.txn_begin().await.unwrap();
         let cards = super::find_svpc_by_machine_id_for_update(&mut txn, hosts[0])
             .await
             .unwrap();
@@ -773,7 +773,7 @@ mod test {
             n: usize,
         ) -> Result<Vec<MachineId>, Box<dyn std::error::Error>> {
             let mut ids = Vec::with_capacity(n);
-            let mut txn = pool.begin().await?;
+            let mut txn = pool.txn_begin().await?;
             for i in offset..(offset + n) {
                 let mut hash = [0u8; 32];
                 hash[..8].copy_from_slice(&(i as u64).to_be_bytes());
@@ -950,7 +950,7 @@ mod test {
     async fn network_config_requires_current_interface(
         pool: sqlx::PgPool,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
         let machine_id =
             MachineId::from_str("fm100htes3rn1npvbtm5qd57dkilaag7ljugl1llmm7rfuq1ov50i0rpl30")?;
         machine::create(
@@ -982,7 +982,7 @@ mod test {
             use_admin_network: Some(false),
             ..Default::default()
         };
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
         assert_eq!(
             try_update_network_config(&mut txn, &interface.id, old_version, &desired).await?,
             ConditionalWrite::Applied(interface.id)
@@ -993,7 +993,7 @@ mod test {
             ("stale snapshot", interface.id),
             ("missing interface", DpaInterfaceId::nil()),
         ] {
-            let mut txn = pool.begin().await?;
+            let mut txn = pool.txn_begin().await?;
             assert_eq!(
                 try_update_network_config(
                     &mut txn,
@@ -1022,7 +1022,7 @@ mod test {
 
     #[crate::sqlx_test]
     async fn test_find_interfaces(pool: sqlx::PgPool) -> Result<(), Box<dyn std::error::Error>> {
-        let mut txn: sqlx::Transaction<'_, sqlx::Postgres> = pool.begin().await.unwrap();
+        let mut txn = pool.txn_begin().await.unwrap();
 
         let id =
             MachineId::from_str("fm100htes3rn1npvbtm5qd57dkilaag7ljugl1llmm7rfuq1ov50i0rpl30")?;
@@ -1058,7 +1058,7 @@ mod test {
     async fn deleting_interface_retains_state_history(
         pool: sqlx::PgPool,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
         let machine_id =
             MachineId::from_str("fm100htes3rn1npvbtm5qd57dkilaag7ljugl1llmm7rfuq1ov50i0rpl30")?;
         machine::create(
@@ -1147,7 +1147,7 @@ mod test {
     async fn deleting_machine_retains_dpa_interface_state_history(
         pool: sqlx::PgPool,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
         let machine_id =
             MachineId::from_str("fm100htes3rn1npvbtm5qd57dkilaag7ljugl1llmm7rfuq1ov50i0rpl30")?;
         machine::create(
@@ -1210,7 +1210,7 @@ mod test {
     // both times without error, ensuring that ensure ensures as ensured!
     #[crate::sqlx_test]
     async fn test_ensure_idempotent(pool: sqlx::PgPool) -> Result<(), Box<dyn std::error::Error>> {
-        let mut txn = pool.begin().await.unwrap();
+        let mut txn = pool.txn_begin().await.unwrap();
 
         let machine_id =
             MachineId::from_str("fm100htes3rn1npvbtm5qd57dkilaag7ljugl1llmm7rfuq1ov50i0rpl30")?;
@@ -1269,7 +1269,7 @@ mod test {
         let machine_id =
             MachineId::from_str("fm100htes3rn1npvbtm5qd57dkilaag7ljugl1llmm7rfuq1ov50i0rpl30")
                 .unwrap();
-        let mut txn = pool.begin().await.unwrap();
+        let mut txn = pool.txn_begin().await.unwrap();
         machine::create(
             &mut txn,
             None,
@@ -1305,7 +1305,7 @@ mod test {
                 "0000:dd:00.0",
             ),
         ] {
-            let mut txn = pool.begin().await.unwrap();
+            let mut txn = pool.txn_begin().await.unwrap();
             let mut card = super::persist(
                 NewDpaInterface {
                     machine_id,
@@ -1365,7 +1365,7 @@ mod test {
                 .await
                 .unwrap();
 
-            let mut txn = pool.begin().await.unwrap();
+            let mut txn = pool.txn_begin().await.unwrap();
             let reported = super::ensure(
                 NewDpaInterface {
                     machine_id,
@@ -1405,7 +1405,7 @@ mod test {
     async fn test_device_info_roundtrip(
         pool: sqlx::PgPool,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        let mut txn = pool.begin().await.unwrap();
+        let mut txn = pool.txn_begin().await.unwrap();
 
         let machine_id =
             MachineId::from_str("fm100htes3rn1npvbtm5qd57dkilaag7ljugl1llmm7rfuq1ov50i0rpl30")?;

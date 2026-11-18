@@ -2181,20 +2181,21 @@ mod tests {
             env.api.work_lock_manager_handle.clone(),
         )
         .build();
-        let mut blocker = pool.begin().await?;
+        use db::TransactionVending as _;
+        let mut blocker = pool.txn_begin().await?;
         sqlx::query("SELECT pg_advisory_xact_lock(8555)")
-            .execute(&mut *blocker)
+            .execute(blocker.as_mut())
             .await?;
         let pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
-            .fetch_one(&mut *blocker)
+            .fetch_one(blocker.as_mut())
             .await?;
         let phase = run_vni_phase(&api, "native timing test", |mut txn| async move {
             let timeout: String = sqlx::query_scalar("SHOW statement_timeout")
-                .fetch_one(txn.as_pgconn())
+                .fetch_one(txn.as_mut())
                 .await
                 .map_err(|error| db::DatabaseError::query("read statement timeout", error))?;
             sqlx::query("SELECT pg_advisory_xact_lock(8555)")
-                .execute(txn.as_pgconn())
+                .execute(txn.as_mut())
                 .await
                 .map_err(|error| db::DatabaseError::query("wait for advisory lock", error))?;
             txn.commit().await?;

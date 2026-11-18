@@ -825,6 +825,7 @@ enum WriteFailure {
 #[cfg(test)]
 mod tests {
     use carbide_test_support::{Check, check_values};
+    use db::TransactionVending as _;
 
     use super::*;
 
@@ -1075,7 +1076,7 @@ mod tests {
         switch_id: &SwitchId,
         state: &model::switch::SwitchControllerState,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
         let fresh = db::switch::find_by_id(txn.as_mut(), switch_id)
             .await?
             .expect("switch exists");
@@ -1101,7 +1102,7 @@ mod tests {
         use model::switch::SwitchControllerState;
 
         // A ready primary switch with a seeded NVOS IP.
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
         let switch =
             db::test_support::switch::create_seeded_discovered(txn.as_mut(), 1, "Switch1").await?;
         txn.commit().await?;
@@ -1240,7 +1241,7 @@ mod tests {
         use model::switch::SwitchControllerState;
 
         for seed in 1..=4u8 {
-            let mut txn = pool.begin().await?;
+            let mut txn = pool.txn_begin().await?;
             let switch = db::test_support::switch::create_seeded_discovered(
                 txn.as_mut(),
                 seed,
@@ -1291,7 +1292,7 @@ mod tests {
         use db::work_lock_manager::KeepaliveConfig;
         use model::switch::SwitchControllerState;
 
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
         let switch =
             db::test_support::switch::create_seeded_discovered(txn.as_mut(), 1, "Switch1").await?;
         txn.commit().await?;
@@ -1385,7 +1386,7 @@ mod tests {
     ) -> Result<(), Box<dyn std::error::Error>> {
         use db::work_lock_manager::KeepaliveConfig;
 
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
         let switch =
             db::test_support::switch::create_seeded_discovered(txn.as_mut(), 1, "Switch1").await?;
         txn.commit().await?;
@@ -1487,7 +1488,7 @@ mod tests {
     ) -> Result<(), Box<dyn std::error::Error>> {
         use model::switch::SwitchControllerState;
 
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
         let switch =
             db::test_support::switch::create_seeded_discovered(txn.as_mut(), 1, "Switch1").await?;
         txn.commit().await?;

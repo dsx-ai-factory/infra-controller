@@ -552,7 +552,7 @@ mod tests {
 
     use super::*;
     use crate::test_support::postgres::wait_for_blocked_query;
-    use crate::{DatabaseError, tenant};
+    use crate::{DatabaseError, TransactionVending as _, tenant};
 
     /// Synthetic P-256 SPKI public PEMs for tests (not secret). Prefer real PEM so validation stays
     /// aligned with `SigningKeyPublicV1` / JWKS expectations.
@@ -667,7 +667,7 @@ ecbC7Qcisdw2/9l8bk/zfF9gvu4kh3hXZzMWgk+vj1e8KSX+NYswYiacQA==
     async fn machine_lookup_requires_enabled_config_for_active_instance_tenant(pool: sqlx::PgPool) {
         // The join must decode every selected column before reloading the
         // matching organization. Each exclusion changes one lookup condition.
-        let mut txn = pool.begin().await.expect("begin machine lookup test");
+        let mut txn = pool.txn_begin().await.expect("begin machine lookup test");
         let org_id = test_org_id();
         let other_org_id = "OtherIdentityConfigOrg".parse().unwrap();
         ensure_tenant(&mut txn, &org_id).await;
@@ -688,13 +688,13 @@ ecbC7Qcisdw2/9l8bk/zfF9gvu4kh3hXZzMWgk+vj1e8KSX+NYswYiacQA==
         );
         sqlx::query("INSERT INTO machines (id, dpf) VALUES ($1, '{}'::jsonb)")
             .bind(machine_id)
-            .execute(&mut *txn)
+            .execute(txn.as_mut())
             .await
             .expect("create instance machine");
         sqlx::query("INSERT INTO instances (machine_id, tenant_org) VALUES ($1, $2)")
             .bind(machine_id)
             .bind(&org_id)
-            .execute(&mut *txn)
+            .execute(txn.as_mut())
             .await
             .expect("create tenant instance");
 
@@ -747,7 +747,7 @@ ecbC7Qcisdw2/9l8bk/zfF9gvu4kh3hXZzMWgk+vj1e8KSX+NYswYiacQA==
                 .bind(machine_id)
                 .bind(case.instance_org)
                 .bind(case.deleted.then(Utc::now))
-                .execute(&mut *txn)
+                .execute(txn.as_mut())
                 .await
                 .expect("set instance lookup conditions");
             sqlx::query(
@@ -755,7 +755,7 @@ ecbC7Qcisdw2/9l8bk/zfF9gvu4kh3hXZzMWgk+vj1e8KSX+NYswYiacQA==
             )
             .bind(&org_id)
             .bind(case.enabled)
-            .execute(&mut *txn)
+            .execute(txn.as_mut())
             .await
             .expect("set identity config lookup conditions");
 
@@ -778,7 +778,7 @@ ecbC7Qcisdw2/9l8bk/zfF9gvu4kh3hXZzMWgk+vj1e8KSX+NYswYiacQA==
     #[crate::sqlx_test]
     async fn config_update_preserves_concurrent_signing_key_rotation(pool: sqlx::PgPool) {
         let org_id = test_org_id();
-        let mut setup = pool.begin().await.expect("begin setup");
+        let mut setup = pool.txn_begin().await.expect("begin setup");
         ensure_tenant(&mut setup, &org_id).await;
         set(
             &org_id,
@@ -790,7 +790,7 @@ ecbC7Qcisdw2/9l8bk/zfF9gvu4kh3hXZzMWgk+vj1e8KSX+NYswYiacQA==
         .expect("create identity config");
         setup.commit().await.expect("commit setup");
 
-        let mut rotation = pool.begin().await.expect("begin rotation");
+        let mut rotation = pool.txn_begin().await.expect("begin rotation");
         let rotated = set(
             &org_id,
             &base_identity_config(true, Some(3600)),
@@ -803,7 +803,7 @@ ecbC7Qcisdw2/9l8bk/zfF9gvu4kh3hXZzMWgk+vj1e8KSX+NYswYiacQA==
         .await
         .expect("rotate signing key");
         let blocker_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
-            .fetch_one(&mut *rotation)
+            .fetch_one(rotation.as_mut())
             .await
             .expect("get rotation backend");
         let config = IdentityConfig {
@@ -812,7 +812,7 @@ ecbC7Qcisdw2/9l8bk/zfF9gvu4kh3hXZzMWgk+vj1e8KSX+NYswYiacQA==
             ..base_identity_config(false, None)
         };
         let update = async {
-            let mut txn = pool.begin().await.expect("begin config update");
+            let mut txn = pool.txn_begin().await.expect("begin config update");
             set(&org_id, &config, None, &mut txn)
                 .await
                 .expect("update config without rotating");
@@ -854,7 +854,7 @@ ecbC7Qcisdw2/9l8bk/zfF9gvu4kh3hXZzMWgk+vj1e8KSX+NYswYiacQA==
         for collection_time in [CollectionTime::DuringOverlap, CollectionTime::AtExpiry] {
             let org_id = format!("{collection_time:?}").parse().unwrap();
             let now = Utc::now();
-            let mut setup = pool.begin().await.expect("begin setup");
+            let mut setup = pool.txn_begin().await.expect("begin setup");
             ensure_tenant(&mut setup, &org_id).await;
             set(
                 &org_id,
@@ -882,12 +882,12 @@ ecbC7Qcisdw2/9l8bk/zfF9gvu4kh3hXZzMWgk+vj1e8KSX+NYswYiacQA==
             )
             .bind(org_id.as_str())
             .bind(now - ChronoDuration::seconds(60))
-            .execute(&mut *setup)
+            .execute(setup.as_mut())
             .await
             .expect("expire the first signing slot");
             setup.commit().await.expect("commit setup");
 
-            let mut rotation = pool.begin().await.expect("begin rotation");
+            let mut rotation = pool.txn_begin().await.expect("begin rotation");
             let rotated = set(
                 &org_id,
                 &base_identity_config(true, Some(3600)),
@@ -934,11 +934,11 @@ ecbC7Qcisdw2/9l8bk/zfF9gvu4kh3hXZzMWgk+vj1e8KSX+NYswYiacQA==
                 CollectionTime::AtExpiry => expires_at,
             };
             let blocker_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
-                .fetch_one(&mut *rotation)
+                .fetch_one(rotation.as_mut())
                 .await
                 .expect("get rotation backend");
             let collect = async {
-                let mut txn = pool.begin().await.expect("begin garbage collection");
+                let mut txn = pool.txn_begin().await.expect("begin garbage collection");
                 gc_expired_non_active_signing_key_at(&org_id, &mut txn, collect_at)
                     .await
                     .expect("collect expired signing key");
@@ -958,7 +958,7 @@ ecbC7Qcisdw2/9l8bk/zfF9gvu4kh3hXZzMWgk+vj1e8KSX+NYswYiacQA==
                 panic!("{collection_time:?}: garbage collection and rotation must finish")
             });
 
-            let mut txn = pool.begin().await.expect("begin verification");
+            let mut txn = pool.txn_begin().await.expect("begin verification");
             let persisted = find(&org_id, txn.as_mut())
                 .await
                 .expect("reload identity config")
@@ -992,12 +992,12 @@ ecbC7Qcisdw2/9l8bk/zfF9gvu4kh3hXZzMWgk+vj1e8KSX+NYswYiacQA==
     #[crate::sqlx_test]
     async fn concurrent_initial_creation_preserves_first_signing_key(pool: sqlx::PgPool) {
         let org_id = test_org_id();
-        let mut setup = pool.begin().await.expect("begin setup");
+        let mut setup = pool.txn_begin().await.expect("begin setup");
         ensure_tenant(&mut setup, &org_id).await;
         setup.commit().await.expect("commit tenant");
 
         let config = base_identity_config(false, None);
-        let mut first_txn = pool.begin().await.expect("begin first creation");
+        let mut first_txn = pool.txn_begin().await.expect("begin first creation");
         let first = set(
             &org_id,
             &config,
@@ -1007,7 +1007,7 @@ ecbC7Qcisdw2/9l8bk/zfF9gvu4kh3hXZzMWgk+vj1e8KSX+NYswYiacQA==
         .await
         .expect("create first identity config");
         let blocker_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
-            .fetch_one(&mut *first_txn)
+            .fetch_one(first_txn.as_mut())
             .await
             .expect("get first creation backend");
         let competing_config = IdentityConfig {
@@ -1019,7 +1019,7 @@ ecbC7Qcisdw2/9l8bk/zfF9gvu4kh3hXZzMWgk+vj1e8KSX+NYswYiacQA==
             ..test_signing_key_material_from_es256_public_pem(TEST_ES256_PUB_1)
         };
         let create = async {
-            let mut txn = pool.begin().await.expect("begin competing creation");
+            let mut txn = pool.txn_begin().await.expect("begin competing creation");
             let result = set(
                 &org_id,
                 &competing_config,
@@ -1047,7 +1047,10 @@ ecbC7Qcisdw2/9l8bk/zfF9gvu4kh3hXZzMWgk+vj1e8KSX+NYswYiacQA==
                 if id == org_id.as_str()
         ));
 
-        let mut txn = pool.begin().await.expect("begin stale preflight attempt");
+        let mut txn = pool
+            .txn_begin()
+            .await
+            .expect("begin stale preflight attempt");
         // Key generation can also finish after the other creation commits,
         // before `set` performs its first read.
         let result = set(&org_id, &competing_config, Some(competing_key), &mut txn).await;
@@ -1074,7 +1077,7 @@ ecbC7Qcisdw2/9l8bk/zfF9gvu4kh3hXZzMWgk+vj1e8KSX+NYswYiacQA==
 
     #[crate::sqlx_test]
     async fn test_tenant_identity_config_set_find_delete(pool: sqlx::PgPool) {
-        let mut txn = pool.begin().await.unwrap();
+        let mut txn = pool.txn_begin().await.unwrap();
         let org_id = test_org_id();
         ensure_tenant(&mut txn, &org_id).await;
 
@@ -1125,7 +1128,7 @@ ecbC7Qcisdw2/9l8bk/zfF9gvu4kh3hXZzMWgk+vj1e8KSX+NYswYiacQA==
 
     #[crate::sqlx_test]
     async fn test_token_delegation_set_get_delete(pool: sqlx::PgPool) {
-        let mut txn = pool.begin().await.unwrap();
+        let mut txn = pool.txn_begin().await.unwrap();
         let created_at: DateTime<Utc> = sqlx::query_scalar("SELECT now()")
             .fetch_one(txn.as_mut())
             .await
@@ -1196,7 +1199,7 @@ ecbC7Qcisdw2/9l8bk/zfF9gvu4kh3hXZzMWgk+vj1e8KSX+NYswYiacQA==
 
     #[crate::sqlx_test]
     async fn test_tenant_identity_second_rotation_ok_while_overlap_active(pool: sqlx::PgPool) {
-        let mut txn = pool.begin().await.unwrap();
+        let mut txn = pool.txn_begin().await.unwrap();
         let org_id = test_org_id();
         ensure_tenant(&mut txn, &org_id).await;
 
@@ -1249,7 +1252,7 @@ ecbC7Qcisdw2/9l8bk/zfF9gvu4kh3hXZzMWgk+vj1e8KSX+NYswYiacQA==
     async fn test_tenant_identity_rotate_rejects_dual_public_without_overlap_deadline(
         pool: sqlx::PgPool,
     ) {
-        let mut txn = pool.begin().await.unwrap();
+        let mut txn = pool.txn_begin().await.unwrap();
         let org_id = test_org_id();
         ensure_tenant(&mut txn, &org_id).await;
 
@@ -1283,7 +1286,7 @@ ecbC7Qcisdw2/9l8bk/zfF9gvu4kh3hXZzMWgk+vj1e8KSX+NYswYiacQA==
                WHERE organization_id = $1"#,
         )
         .bind(org_id.as_str())
-        .execute(&mut *txn)
+        .execute(txn.as_mut())
         .await
         .unwrap();
 
@@ -1308,7 +1311,7 @@ ecbC7Qcisdw2/9l8bk/zfF9gvu4kh3hXZzMWgk+vj1e8KSX+NYswYiacQA==
     async fn test_tenant_identity_rotate_rejects_future_overlap_with_single_public(
         pool: sqlx::PgPool,
     ) {
-        let mut txn = pool.begin().await.unwrap();
+        let mut txn = pool.txn_begin().await.unwrap();
         let org_id = test_org_id();
         ensure_tenant(&mut txn, &org_id).await;
 
@@ -1330,7 +1333,7 @@ ecbC7Qcisdw2/9l8bk/zfF9gvu4kh3hXZzMWgk+vj1e8KSX+NYswYiacQA==
                WHERE organization_id = $1"#,
         )
         .bind(org_id.as_str())
-        .execute(&mut *txn)
+        .execute(txn.as_mut())
         .await
         .unwrap();
 

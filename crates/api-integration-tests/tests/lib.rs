@@ -15,6 +15,7 @@
  * limitations under the License.
  */
 // Keep these suites in one executable so libtest can run their environments in parallel.
+use db::TransactionVending as _;
 mod decommission;
 mod rack;
 
@@ -109,7 +110,7 @@ async fn run_integration() -> eyre::Result<()> {
 
     // Persist a predecessor root without a protection request before either API
     // starts, then verify that the background controller makes it ready.
-    let mut txn = test_env.db_pool.begin().await?;
+    let mut txn = test_env.db_pool.txn_begin().await?;
     let recovery_tenant_id = "site-prefix-recovery";
     db::tenant::create_and_persist(
         recovery_tenant_id.to_string(),
@@ -290,7 +291,7 @@ async fn run_integration() -> eyre::Result<()> {
     // Startup rejects remote bindings, so add this fixture after both servers
     // start. Its missing accepted definition makes the direct poll below emit
     // the unavailable counter for the catalogue.
-    let mut txn = test_env.db_pool.begin().await?;
+    let mut txn = test_env.db_pool.txn_begin().await?;
     db::resource_pool::binding::bind_or_verify(
         &mut txn,
         &model::resource_pool::ResourcePoolSelection {
@@ -331,7 +332,7 @@ async fn run_integration() -> eyre::Result<()> {
     // Extension-service controller families only appear in the catalogue
     // scrape once the controller processes an object. The controller only
     // reconciles DPF Helm chart services; without DPF this one waits in Creating.
-    let mut txn = test_env.db_pool.begin().await?;
+    let mut txn = test_env.db_pool.txn_begin().await?;
     db::extension_service::create(
         &mut txn,
         ConfigVersion::initial(),
@@ -937,7 +938,7 @@ async fn exercise_dpf_exploration_suppression(
     )
     .fetch_one(&test_env.db_pool)
     .await?;
-    let mut txn = test_env.db_pool.begin().await?;
+    let mut txn = test_env.db_pool.txn_begin().await?;
     db::bmc_suppression::upsert(
         &mut txn,
         &NewBmcSuppression {
@@ -969,7 +970,7 @@ async fn exercise_dpf_exploration_suppression(
             ip_address: address.to_string(),
         })
         .await;
-    let mut txn = test_env.db_pool.begin().await?;
+    let mut txn = test_env.db_pool.txn_begin().await?;
     db::bmc_suppression::delete(
         &mut txn,
         mac,
@@ -1047,7 +1048,7 @@ async fn exercise_admin_address_reconcile_failures(
     .hardware_info
     .context("the chosen host's DPU recorded hardware info")?;
 
-    let mut txn = test_env.db_pool.begin().await?;
+    let mut txn = test_env.db_pool.txn_begin().await?;
     db::machine_interface::set_primary_interface(&primary_id, false, &mut txn).await?;
     // The next explorer run revisits the host and its steady-state repair
     // fails the same way.
@@ -1092,7 +1093,7 @@ async fn exercise_admin_address_reconcile_failures(
         .await?;
     }
 
-    let mut txn = test_env.db_pool.begin().await?;
+    let mut txn = test_env.db_pool.txn_begin().await?;
     db::machine_interface::set_primary_interface(&primary_id, true, &mut txn).await?;
     txn.commit().await?;
     Ok(())
@@ -2305,9 +2306,9 @@ async fn prepare_dpu_certificate_expiry(
         .observed_machine_id()
         .context("ready DPU has no observed machine ID")?
         .try_into()?;
-    let mut txn = test_env.db_pool.begin().await?;
+    let mut txn = test_env.db_pool.txn_begin().await?;
     let mut observation = db::machine::find_one(
-        &mut *txn,
+        txn.as_mut(),
         &dpu_id,
         model::machine::machine_search_config::MachineSearchConfig {
             include_dpus: true,

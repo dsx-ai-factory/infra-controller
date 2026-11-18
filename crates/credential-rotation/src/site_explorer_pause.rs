@@ -177,6 +177,7 @@ pub async fn resume_after_credential_change(
 
 #[cfg(test)]
 mod tests {
+    use db::TransactionVending as _;
     use mac_address::MacAddress;
     use model::bmc_suppression::{BmcSuppressionSource, BmcSuppressionSubsystem};
     use sqlx::PgPool;
@@ -214,7 +215,7 @@ mod tests {
         );
 
         // Acknowledging only one leaves the gate waiting.
-        let mut txn = pool.begin().await.unwrap();
+        let mut txn = pool.txn_begin().await.unwrap();
         assert!(
             db::bmc_suppression::acknowledge(
                 &mut txn,
@@ -237,7 +238,7 @@ mod tests {
         );
 
         // Once site-explorer has acknowledged both, the gate proceeds.
-        let mut txn = pool.begin().await.unwrap();
+        let mut txn = pool.txn_begin().await.unwrap();
         assert!(
             db::bmc_suppression::acknowledge(
                 &mut txn,

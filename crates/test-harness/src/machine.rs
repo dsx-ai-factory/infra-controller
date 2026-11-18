@@ -67,8 +67,7 @@ pub trait TestMachine {
         async move {
             let mut txn = self
                 .api()
-                .database_connection
-                .begin()
+                .txn_begin()
                 .await
                 .expect("database transaction should start");
             let machine = self.db_machine(&mut txn).await;

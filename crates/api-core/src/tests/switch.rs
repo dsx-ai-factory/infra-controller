@@ -15,7 +15,7 @@
  * limitations under the License.
  */
 use carbide_uuid::switch::SwitchId;
-use db::switch as db_switch;
+use db::{TransactionVending as _, switch as db_switch};
 use model::switch::{
     NewSwitch, SwitchConfig, SwitchControllerState, SwitchSearchFilter, SwitchStatus,
 };
@@ -77,7 +77,7 @@ async fn test_find_switch_by_id(pool: sqlx::PgPool) -> Result<(), Box<dyn std::e
         ..Default::default()
     };
 
-    let mut txn = env.pool.begin().await?;
+    let mut txn = env.pool.txn_begin().await?;
 
     db::explored_endpoints::insert(bmc_ip, &report, false, &mut txn).await?;
     txn.commit().await?;
@@ -265,7 +265,7 @@ async fn test_delete_switch_not_found(
 async fn test_switch_database_operations(
     pool: sqlx::PgPool,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
 
     // Test NewSwitch creation
     let config = SwitchConfig {
@@ -316,7 +316,7 @@ async fn test_switch_database_operations(
 
 #[crate::sqlx_test]
 async fn test_switch_status_update(pool: sqlx::PgPool) -> Result<(), Box<dyn std::error::Error>> {
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
 
     // Create a switch
     let config = SwitchConfig {
@@ -363,7 +363,7 @@ async fn test_switch_status_update(pool: sqlx::PgPool) -> Result<(), Box<dyn std
 async fn test_switch_controller_state_transitions(
     pool: sqlx::PgPool,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
 
     // Create a switch
     let config = SwitchConfig {
@@ -469,7 +469,7 @@ async fn test_switch_controller_state_transitions(
 async fn test_switch_conversion_roundtrip(
     pool: sqlx::PgPool,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
 
     // Create a switch with status
     let config = SwitchConfig {
@@ -520,7 +520,7 @@ async fn test_switch_conversion_roundtrip(
 
 #[crate::sqlx_test]
 async fn test_switch_find_all(pool: sqlx::PgPool) -> Result<(), Box<dyn std::error::Error>> {
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
 
     // Create multiple switches
     let configs = vec![("Switch1"), ("Switch2"), ("Switch3")];
@@ -569,7 +569,7 @@ async fn test_switch_find_all(pool: sqlx::PgPool) -> Result<(), Box<dyn std::err
 async fn test_switch_controller_state_outcome(
     pool: sqlx::PgPool,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
 
     // Create a switch
     let config = SwitchConfig {
@@ -674,7 +674,7 @@ async fn test_find_switch_bmc_info_no_matching_data(
         tray_index: Some(0),
     };
 
-    let mut txn = env.pool.begin().await.unwrap();
+    let mut txn = env.pool.txn_begin().await.unwrap();
     db_switch::create(&mut txn, &new_switch_record).await?;
     txn.commit().await.unwrap();
 
@@ -708,7 +708,7 @@ async fn test_force_delete_switch_success(
 
     let switch_id = new_switch(&env, None, None).await?;
 
-    let mut txn = env.pool.begin().await?;
+    let mut txn = env.pool.txn_begin().await?;
     db::state_history::persist(
         &mut txn,
         db::state_history::StateHistoryTableId::Switch,

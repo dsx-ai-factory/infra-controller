@@ -6,6 +6,7 @@ use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use carbide_resource_pool_api::v1;
+use db::TransactionVending as _;
 use db::resource_pool::{binding, registration as storage};
 use db::test_support::postgres::{wait_for_blocked_queries, wait_for_blocked_query};
 use model::resource_pool::registration::ResourcePoolRegistration;
@@ -44,7 +45,10 @@ impl Harness {
     /// Save the binding without any pool definitions so registration must write
     /// its own request.
     async fn new(database: PgPool, fault: Fault) -> Self {
-        let mut txn = database.begin().await.expect("begin binding transaction");
+        let mut txn = database
+            .txn_begin()
+            .await
+            .expect("begin binding transaction");
         let binding = binding::bind_or_verify(&mut txn, &selection())
             .await
             .expect("save pool binding");
@@ -483,7 +487,7 @@ async fn failed_acknowledgement_leaves_provider_acceptance_replayable(
 async fn latest_accepted_keeps_the_previous_revision_during_pending_growth(
     database: PgPool,
 ) -> TestResult {
-    let mut txn = database.begin().await?;
+    let mut txn = database.txn_begin().await?;
     let binding = binding::bind_or_verify(&mut txn, &selection()).await?;
     txn.commit().await?;
     assert_eq!(latest_accepted(&database, &binding).await?, None);
@@ -509,7 +513,7 @@ async fn latest_accepted_keeps_the_previous_revision_during_pending_growth(
         .eligibility
         .push(range(6, 10, v1::AssignmentMode::Automatic));
 
-    let mut txn = database.begin().await?;
+    let mut txn = database.txn_begin().await?;
     storage::lock_binding(&mut txn, binding.binding_id).await?;
     storage::insert(
         &mut txn,
@@ -550,7 +554,7 @@ async fn latest_accepted_keeps_the_previous_revision_during_pending_growth(
     assert_eq!(latest_accepted(&database, &binding).await?, Some(original));
 
     // Committing acceptance makes the newer revision available to inspection.
-    let mut txn = database.begin().await?;
+    let mut txn = database.txn_begin().await?;
     storage::acknowledge(&mut txn, binding.binding_id, 2).await?;
     txn.commit().await?;
     assert_eq!(latest_accepted(&database, &binding).await?, Some(grown));
@@ -701,11 +705,11 @@ async fn growth_waits_for_the_competing_successor_before_checking_its_predecesso
         request: winning_request.encode_to_vec(),
         accepted: false,
     };
-    let mut writer = harness.database.begin().await?;
+    let mut writer = harness.database.txn_begin().await?;
     storage::lock_binding(&mut writer, harness.binding.binding_id).await?;
     storage::insert(&mut writer, &winner).await?;
     let writer_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
-        .fetch_one(&mut *writer)
+        .fetch_one(writer.as_mut())
         .await?;
     let mut competing_growth = eligibility();
     competing_growth
@@ -861,7 +865,7 @@ async fn invalid_registration_input_never_saves_or_defines(database: PgPool) -> 
             selection.remote_pool = selection.pool_name.clone();
             selection.backend_name = None;
         }
-        let mut txn = database.begin().await?;
+        let mut txn = database.txn_begin().await?;
         let mut binding = binding::bind_or_verify(&mut txn, &selection).await?;
         txn.commit().await?;
         let provider = FaultProvider::new(provider(), case.fault);
@@ -1035,12 +1039,12 @@ async fn cancelled_registration_reads_return_the_only_connection(database: PgPoo
         LatestAccepted,
     }
     let harness = Harness::new(database, Fault::None).await;
-    let mut blocker = harness.database.begin().await?;
+    let mut blocker = harness.database.txn_begin().await?;
     let blocker_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
-        .fetch_one(&mut *blocker)
+        .fetch_one(blocker.as_mut())
         .await?;
     sqlx::query("LOCK TABLE resource_pool_registration IN ACCESS EXCLUSIVE MODE")
-        .execute(&mut *blocker)
+        .execute(blocker.as_mut())
         .await?;
     // Configure every pool before starting reads so fixture setup does not
     // consume their PostgreSQL statement deadlines.

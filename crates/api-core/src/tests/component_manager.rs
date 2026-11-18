@@ -22,6 +22,7 @@ use carbide_secrets::credentials::{BmcCredentialType, CredentialKey, Credentials
 use carbide_uuid::rack::{RackId, RackProfileId};
 use carbide_uuid::switch::SwitchId;
 use component_manager::mock::MockNvSwitchManager;
+use db::TransactionVending as _;
 use mac_address::MacAddress;
 use model::rack::{
     FirmwareProgressState, FirmwareUpgradeDeviceStatus, FirmwareUpgradeJob, MaintenanceActivity,
@@ -55,7 +56,7 @@ async fn compute_restart_and_ac_cycle_preserve_intent_and_routing(pool: sqlx::Pg
         MachineType::Host,
     );
     let host_id = HostMachineId::try_from(machine_id).unwrap();
-    let mut txn = pool.begin().await.unwrap();
+    let mut txn = pool.txn_begin().await.unwrap();
     TestRackDbBuilder::new()
         .with_rack_id(rack_id.clone())
         .persist(&mut txn)
@@ -133,7 +134,7 @@ async fn compute_restart_and_ac_cycle_preserve_intent_and_routing(pool: sqlx::Pg
         rpc::ComponentManagerStatusCode::Success as i32
     );
 
-    let mut txn = pool.begin().await.unwrap();
+    let mut txn = pool.txn_begin().await.unwrap();
     let machine = db::machine::find_one(txn.as_mut(), &host_id, Default::default())
         .await
         .unwrap()
@@ -195,7 +196,7 @@ async fn compute_restart_and_ac_cycle_preserve_intent_and_routing(pool: sqlx::Pg
     .with_component_manager(Arc::new(manager))
     .build();
     // Complete the previous request before queuing a different operation.
-    let mut txn = pool.begin().await.unwrap();
+    let mut txn = pool.txn_begin().await.unwrap();
     assert_eq!(
         db::machine::clear_machine_maintenance_requested(&mut txn, host_id, &request)
             .await
@@ -224,7 +225,7 @@ async fn compute_restart_and_ac_cycle_preserve_intent_and_routing(pool: sqlx::Pg
         response.results[0].status,
         rpc::ComponentManagerStatusCode::Success as i32
     );
-    let mut txn = pool.begin().await.unwrap();
+    let mut txn = pool.txn_begin().await.unwrap();
     let machine = db::machine::find_one(txn.as_mut(), &host_id, Default::default())
         .await
         .unwrap()
@@ -352,7 +353,7 @@ async fn switch_firmware_status_uses_only_current_cycle_persistence(
         force_update: false,
     };
 
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
     for (index, switch_id) in switch_ids.iter().enumerate() {
         db::switch::create(
             txn.as_mut(),
@@ -502,7 +503,7 @@ async fn create_terminal_rack_switch_firmware_failure(
     let rack_id = RackId::new(uuid::Uuid::new_v4().to_string());
     let started_at = chrono::Utc::now() - chrono::Duration::minutes(2);
     let completed_at = chrono::Utc::now() - chrono::Duration::minutes(1);
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
 
     db::rack::create(
         txn.as_mut(),
@@ -779,7 +780,7 @@ async fn untracked_backend_switch_job_is_unknown_for_every_switch_target(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let (env, rack_id, switch_id, bmc_mac) =
         create_terminal_rack_switch_firmware_failure(pool.clone()).await?;
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
 
     db::rack::update_firmware_upgrade_job(txn.as_mut(), &rack_id, None).await?;
     db::switch::update_firmware_upgrade_status(txn.as_mut(), switch_id, None).await?;
@@ -788,7 +789,7 @@ async fn untracked_backend_switch_job_is_unknown_for_every_switch_target(
     let by_switch_id = get_switch_firmware_status(&env.api, switch_id).await?;
     let by_ingested_bmc_mac = get_switch_firmware_status_by_bmc_mac(&env.api, bmc_mac).await?;
 
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
     db::switch::final_delete(switch_id, txn.as_mut()).await?;
     txn.commit().await?;
 
@@ -996,7 +997,7 @@ async fn component_reset_dispatches_valid_targets_and_polls_by_identity(pool: sq
     );
 
     let rack_id = RackId::new("sdn-reset-rack");
-    let mut txn = pool.begin().await.unwrap();
+    let mut txn = pool.txn_begin().await.unwrap();
     crate::tests::common::api_fixtures::site_explorer::TestRackDbBuilder::new()
         .with_rack_id(rack_id.clone())
         .persist(&mut txn)
@@ -1024,7 +1025,7 @@ async fn component_reset_dispatches_valid_targets_and_polls_by_identity(pool: sq
         sqlx::query("UPDATE switches SET rack_id = $1 WHERE id = $2")
             .bind(&rack_id)
             .bind(id)
-            .execute(&mut *txn)
+            .execute(txn.as_mut())
             .await
             .unwrap();
     }
@@ -1496,7 +1497,7 @@ async fn component_reset_tracks_pre_ingestion_mac_after_ingestion(pool: sqlx::Pg
     .with_component_manager(Arc::new(cm))
     .build();
     let rack_id = RackId::new("pre-ingestion-reset-rack");
-    let mut txn = pool.begin().await.unwrap();
+    let mut txn = pool.txn_begin().await.unwrap();
     crate::tests::common::api_fixtures::site_explorer::TestRackDbBuilder::new()
         .with_rack_id(rack_id.clone())
         .persist(&mut txn)
@@ -1510,12 +1511,12 @@ async fn component_reset_tracks_pre_ingestion_mac_after_ingestion(pool: sqlx::Pg
     sqlx::query("UPDATE expected_switches SET rack_id = $1 WHERE bmc_mac_address = $2")
         .bind(&rack_id)
         .bind(bmc_mac)
-        .execute(&mut *txn)
+        .execute(txn.as_mut())
         .await
         .unwrap();
     sqlx::query("DELETE FROM switches WHERE id = $1")
         .bind(switch.id)
-        .execute(&mut *txn)
+        .execute(txn.as_mut())
         .await
         .unwrap();
     txn.commit().await.unwrap();
@@ -1617,7 +1618,7 @@ async fn component_reset_tracks_pre_ingestion_mac_after_ingestion(pool: sqlx::Pg
         assert_eq!(*domain, None);
     }
 
-    let mut txn = pool.begin().await.unwrap();
+    let mut txn = pool.txn_begin().await.unwrap();
     db::switch::create(
         &mut txn,
         &NewSwitch {

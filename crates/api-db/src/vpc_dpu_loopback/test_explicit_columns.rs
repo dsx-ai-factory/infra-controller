@@ -28,6 +28,7 @@ use model::resource_pool::{
 use sqlx::{Connection, PgPool};
 
 use super::*;
+use crate::TransactionVending as _;
 
 /// Verifies loopback queries tolerate additive columns and release only DPU/VPC allocations absent
 /// from both host and service memberships, keeping each resource-pool allocation consistent with
@@ -41,12 +42,12 @@ async fn loopback_queries_survive_added_columns(
     assert!(api_connection.cached_statements_size() > 0);
 
     // Keep prepared statements on the API connection while a migration commits.
-    let mut migration = pool.begin().await?;
+    let mut migration = pool.txn_begin().await?;
     sqlx::raw_sql(
         "SET LOCAL lock_timeout = '5s';
          ALTER TABLE vpc_dpu_loopbacks ADD COLUMN test_added_column text;",
     )
-    .execute(&mut *migration)
+    .execute(migration.as_mut())
     .await?;
     migration.commit().await?;
 
@@ -57,7 +58,7 @@ async fn loopback_queries_survive_added_columns(
 async fn exercise_loopback_queries(
     connection: &mut PgConnection,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let mut txn = connection.begin().await?;
+    let mut txn = crate::Transaction::begin_inner(&mut *connection).await?;
     let common_pools = CommonPools {
         ethernet: EthernetPools {
             pool_loopback_ip: Arc::new(ResourcePool::new(
@@ -119,7 +120,7 @@ async fn exercise_loopback_queries(
         "fm100ds7blqjsadm2uuh3qqbf1h7k8pmf47um6v9uckrg7l03po8mhqgvng".parse()?;
     sqlx::query("INSERT INTO machines (id, dpf) VALUES ($1, '{}')")
         .bind(dpu_id)
-        .execute(&mut *txn)
+        .execute(txn.as_mut())
         .await?;
     let admin_vpc_id: VpcId = "28dc4893-c081-4efc-9a63-a82e62ccbe12".parse()?;
     let selected_vpc_id: VpcId = "a2dbd9a4-a0bf-40a3-9329-239d5416c313".parse()?;
@@ -134,7 +135,7 @@ async fn exercise_loopback_queries(
             .bind(vpc_id)
             .bind(name)
             .bind(ConfigVersion::initial())
-            .execute(&mut *txn)
+            .execute(txn.as_mut())
             .await?;
         let loopback_ip = get_or_allocate_loopback_ip_for_vpc(
             &common_pools,
@@ -152,7 +153,7 @@ async fn exercise_loopback_queries(
     )
     .bind(admin_vpc_id)
     .bind(ConfigVersion::initial())
-    .execute(&mut *txn)
+    .execute(txn.as_mut())
     .await?;
     assert_loopback_allocations(
         &mut txn,
@@ -169,7 +170,7 @@ async fn exercise_loopback_queries(
     );
     sqlx::query("INSERT INTO machines (id, dpf) VALUES ($1, '{}')")
         .bind(host_id)
-        .execute(&mut *txn)
+        .execute(txn.as_mut())
         .await?;
     let instance_id = InstanceId::new();
     sqlx::query(
@@ -178,7 +179,7 @@ async fn exercise_loopback_queries(
     )
     .bind(instance_id)
     .bind(host_id)
-    .execute(&mut *txn)
+    .execute(txn.as_mut())
     .await?;
     crate::instance::find_by_id_for_update(&mut txn, instance_id)
         .await?

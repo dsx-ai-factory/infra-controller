@@ -27,7 +27,7 @@ use sqlx::{PgConnection, PgPool};
 use super::{
     can_apply_expected_allocation, find_optional_for_update_by_ip, lock_for_address_assignment,
 };
-use crate::machine_interface_address as addresses;
+use crate::{TransactionVending as _, machine_interface_address as addresses};
 
 const REMOVAL_MIGRATION: &str =
     include_str!("../../migrations/20260911055455_machine_interface_allocation_removal.sql");
@@ -53,18 +53,18 @@ async fn create_interface(txn: &mut PgConnection) -> crate::DatabaseResult<Machi
 async fn discovery_ip_lookup_locks_interface_before_address(
     pool: PgPool,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
     let interface_id = create_interface(&mut txn).await?;
     let address = "192.0.2.1".parse()?;
     addresses::insert(&mut txn, interface_id, address, AllocationType::Dhcp).await?;
     txn.commit().await?;
 
-    let mut owner_txn = pool.begin().await?;
+    let mut owner_txn = pool.txn_begin().await?;
     lock_for_address_assignment(&mut owner_txn, interface_id).await?;
     let owner_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
         .fetch_one(owner_txn.as_mut())
         .await?;
-    let mut lookup_txn = pool.begin().await?;
+    let mut lookup_txn = pool.txn_begin().await?;
     let lookup_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
         .fetch_one(lookup_txn.as_mut())
         .await?;
@@ -93,7 +93,7 @@ async fn discovery_ip_lookup_locks_interface_before_address(
         .await
         .expect("discovery lookup must wait for the interface lock")?;
 
-        let mut probe_txn = observer_pool.begin().await?;
+        let mut probe_txn = observer_pool.txn_begin().await?;
         let address_lock_result: Result<MachineInterfaceId, sqlx::Error> = sqlx::query_scalar(
             "SELECT interface_id FROM machine_interface_addresses
              WHERE interface_id = $1 AND address = $2::inet FOR UPDATE NOWAIT",
@@ -186,7 +186,7 @@ async fn only_removed_stateful_families_are_recorded(
         },
     ];
     for case in cases {
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
         let interface_id = create_interface(&mut txn).await?;
         let address: std::net::IpAddr = case.address.parse()?;
         let family = address.address_family();
@@ -230,7 +230,7 @@ async fn only_removed_stateful_families_are_recorded(
             }
         }
         let recorded: (bool, bool) = sqlx::query_as("SELECT ipv4_allocation_removed, ipv6_allocation_removed FROM machine_interfaces WHERE id = $1")
-            .bind(interface_id).fetch_one(&mut *txn).await?;
+            .bind(interface_id).fetch_one(txn.as_mut()).await?;
         let expected = match family {
             IpAddressFamily::Ipv4 => (case.recorded, false),
             IpAddressFamily::Ipv6 => (false, case.recorded),
@@ -260,7 +260,7 @@ async fn only_removed_stateful_families_are_recorded(
 async fn removal_evidence_rolls_back_with_the_address(
     pool: PgPool,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let mut txn = crate::Transaction::begin(&pool).await?;
+    let mut txn = pool.txn_begin().await?;
     let interface_id = create_interface(&mut txn).await?;
     addresses::insert(
         &mut txn,
@@ -281,7 +281,7 @@ async fn removal_evidence_rolls_back_with_the_address(
     let recorded: bool =
         sqlx::query_scalar("SELECT ipv4_allocation_removed FROM machine_interfaces WHERE id = $1")
             .bind(interface_id)
-            .fetch_one(txn.as_pgconn())
+            .fetch_one(txn.as_mut())
             .await?;
     assert!(!recorded);
     assert_eq!(
@@ -298,9 +298,9 @@ async fn removal_evidence_rolls_back_with_the_address(
 async fn migration_preserves_addresses_and_does_not_guess_removals(
     pool: PgPool,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
     sqlx::raw_sql("ALTER TABLE machine_interfaces DROP COLUMN ipv4_allocation_removed, DROP COLUMN ipv6_allocation_removed")
-        .execute(&mut *txn).await?;
+        .execute(txn.as_mut()).await?;
     let interface_id = create_interface(&mut txn).await?;
     addresses::insert(
         &mut txn,
@@ -318,11 +318,13 @@ async fn migration_preserves_addresses_and_does_not_guess_removals(
     .await?;
     sqlx::query("UPDATE machine_interfaces SET last_dhcp = now() WHERE id = $1")
         .bind(interface_id)
-        .execute(&mut *txn)
+        .execute(txn.as_mut())
         .await?;
-    sqlx::raw_sql(REMOVAL_MIGRATION).execute(&mut *txn).await?;
+    sqlx::raw_sql(REMOVAL_MIGRATION)
+        .execute(txn.as_mut())
+        .await?;
     let recorded: (bool, bool) = sqlx::query_as("SELECT ipv4_allocation_removed, ipv6_allocation_removed FROM machine_interfaces WHERE id = $1")
-        .bind(interface_id).fetch_one(&mut *txn).await?;
+        .bind(interface_id).fetch_one(txn.as_mut()).await?;
     assert_eq!(recorded, (false, false));
     assert!(!can_apply_expected_allocation(&mut txn, interface_id, IpAddressFamily::Ipv4).await?);
     assert!(can_apply_expected_allocation(&mut txn, interface_id, IpAddressFamily::Ipv6).await?);

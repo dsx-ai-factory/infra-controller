@@ -101,7 +101,7 @@ async fn reset_host_to_dpf_state(
     let state_json = serde_json::to_value(&state).unwrap();
     let version = format!("V999-T{}", chrono::Utc::now().timestamp_micros());
 
-    let mut txn = pool.begin().await.unwrap();
+    let mut txn = pool.txn_begin().await.unwrap();
     sqlx::query(
         "UPDATE machines SET \
             controller_state = $1, \

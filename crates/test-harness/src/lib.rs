@@ -85,10 +85,10 @@ impl TestHarness {
 
     pub async fn db_txn(&self) -> PgTransaction<'static> {
         self.api
-            .database_connection
-            .begin()
+            .txn_begin()
             .await
             .expect("database transaction should start")
+            .into()
     }
 
     pub async fn test_domain(&self) -> TestDomain {

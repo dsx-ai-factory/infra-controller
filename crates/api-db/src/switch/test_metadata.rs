@@ -21,12 +21,13 @@ use model::metadata::Metadata;
 use model::switch::{NewSwitch, SwitchConfig};
 
 use crate as db;
+use crate::TransactionVending as _;
 
 #[crate::sqlx_test]
 async fn test_switch_metadata_defaults(
     pool: sqlx::PgPool,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
     let switch_id = SwitchId::from(uuid::Uuid::new_v4());
 
     let new_switch = NewSwitch {
@@ -59,7 +60,7 @@ async fn test_switch_metadata_defaults(
 async fn test_switch_metadata_from_expected(
     pool: sqlx::PgPool,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
     let switch_id = SwitchId::from(uuid::Uuid::new_v4());
 
     let expected_metadata = Metadata {
@@ -96,7 +97,7 @@ async fn test_switch_metadata_from_expected(
 
 #[crate::sqlx_test]
 async fn test_switch_metadata_update(pool: sqlx::PgPool) -> Result<(), Box<dyn std::error::Error>> {
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
     let switch_id = SwitchId::from(uuid::Uuid::new_v4());
 
     let new_switch = NewSwitch {
@@ -149,7 +150,7 @@ async fn test_switch_metadata_update(pool: sqlx::PgPool) -> Result<(), Box<dyn s
 async fn test_switch_metadata_version_conflict(
     pool: sqlx::PgPool,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
     let switch_id = SwitchId::from(uuid::Uuid::new_v4());
 
     let new_switch = NewSwitch {

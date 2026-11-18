@@ -168,27 +168,28 @@ mod tests {
     use sqlx::PgPool;
 
     use super::*;
+    use crate::TransactionVending as _;
 
     #[crate::sqlx_test]
     async fn config_readers_share_the_lock_and_exclude_writers(
         pool: PgPool,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        let mut first = pool.begin().await?;
+        let mut first = pool.txn_begin().await?;
         lock_config(&mut first).await?;
-        let mut second = pool.begin().await?;
+        let mut second = pool.txn_begin().await?;
         tokio::time::timeout(Duration::from_secs(5), lock_config(&mut second)).await??;
-        let mut writer = pool.begin().await?;
+        let mut writer = pool.txn_begin().await?;
         let query = "SELECT pg_try_advisory_xact_lock(\
             hashtextextended('tenant_prefix_overlap:checks', 0))";
         assert!(
             !sqlx::query_scalar::<_, bool>(query)
-                .fetch_one(&mut *writer)
+                .fetch_one(writer.as_mut())
                 .await?
         );
         first.rollback().await?;
         assert!(
             !sqlx::query_scalar::<_, bool>(query)
-                .fetch_one(&mut *writer)
+                .fetch_one(writer.as_mut())
                 .await?
         );
         second.commit().await?;
@@ -202,15 +203,15 @@ mod tests {
     async fn rollback_releases_overlap_checks_lock(
         pool: PgPool,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        let mut holder = pool.begin().await?;
+        let mut holder = pool.txn_begin().await?;
         lock_checks(&mut holder).await?;
         let holder_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
-            .fetch_one(&mut *holder)
+            .fetch_one(holder.as_mut())
             .await?;
 
-        let mut waiter = pool.begin().await?;
+        let mut waiter = pool.txn_begin().await?;
         let waiter_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
-            .fetch_one(&mut *waiter)
+            .fetch_one(waiter.as_mut())
             .await?;
 
         let wait_for_lock = async {

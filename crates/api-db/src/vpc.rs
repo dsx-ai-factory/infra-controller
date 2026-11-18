@@ -654,6 +654,7 @@ pub async fn increment_vpc_version(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::TransactionVending as _;
 
     #[crate::sqlx_test]
     async fn routing_profile_migration_preserves_rows_and_active_vni_uniqueness(
@@ -715,7 +716,7 @@ mod tests {
     async fn try_delete_ignores_references_to_already_deleted_vpc(pool: sqlx::PgPool) {
         let vpc_id = VpcId::new();
         let machine_id = uuid::Uuid::new_v4();
-        let mut txn = pool.begin().await.unwrap();
+        let mut txn = pool.txn_begin().await.unwrap();
         sqlx::query(
             "INSERT INTO vpcs (id, name, version, deleted) \
              VALUES ($1, 'already-deleted-vpc', 'V1-T0', NOW())",

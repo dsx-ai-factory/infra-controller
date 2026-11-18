@@ -12,6 +12,7 @@ use carbide_secrets::SecretsError;
 use carbide_secrets::credentials::CompositeCredentialManager;
 use carbide_secrets::test_support::credentials::TestCredentialManager;
 use carbide_uuid::machine::{MachineId, MachineIdSource, MachineType};
+use db::TransactionVending as _;
 use db::test_support::postgres::wait_for_blocked_query;
 use model::address_selection_strategy::AddressSelectionStrategy;
 use model::expected_machine::{ExpectedMachine, ExpectedMachineData};
@@ -156,7 +157,7 @@ async fn direct_dispatch_credentials_only_query_expected_inventory_on_vault_miss
 async fn direct_dispatch_credentials_use_the_matching_expected_component(pool: sqlx::PgPool) {
     // Distinct credentials at the same MAC prove each kind selects its own table.
     let mac = MacAddress::new([2, 0, 0, 0, 0, 1]);
-    let mut txn = pool.begin().await.unwrap();
+    let mut txn = pool.txn_begin().await.unwrap();
     db::expected_machine::create(
         &mut txn,
         ExpectedMachine {
@@ -283,12 +284,12 @@ async fn expected_credentials_cancellation_releases_pool_capacity(
         .await?;
     assert_eq!(reused_pid, reader_pid);
 
-    let mut blocker = pool.begin().await?;
+    let mut blocker = pool.txn_begin().await?;
     sqlx::query("LOCK TABLE expected_switches IN ACCESS EXCLUSIVE MODE")
-        .execute(&mut *blocker)
+        .execute(blocker.as_mut())
         .await?;
     let blocker_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
-        .fetch_one(&mut *blocker)
+        .fetch_one(blocker.as_mut())
         .await?;
     let mut read = Box::pin(fetch_expected_credentials(
         RackComponent::SwitchBmc,
@@ -431,7 +432,7 @@ async fn component_credentials_are_scoped_to_ingested_components(pool: sqlx::PgP
     let deleted_switch = mac(0x06);
     let switch_without_nvos = mac(0x07);
 
-    let mut txn = pool.begin().await.unwrap();
+    let mut txn = pool.txn_begin().await.unwrap();
     create_shelf(&mut txn, "stored-shelf", stored_shelf, true).await;
     create_shelf(&mut txn, "unstored-shelf", unstored_shelf, true).await;
     create_shelf(&mut txn, "exp-only-shelf", expected_only_shelf, false).await;
@@ -747,7 +748,7 @@ async fn component_credentials_are_scoped_to_ingested_components(pool: sqlx::PgP
 async fn component_credentials_store_failure_is_internal_without_detail(pool: sqlx::PgPool) {
     let env = crate::tests::create_test_env(pool.clone()).await;
     let shelf = MacAddress::new([0x02, 0, 0, 0, 0x0b, 0x01]);
-    let mut txn = pool.begin().await.unwrap();
+    let mut txn = pool.txn_begin().await.unwrap();
     create_shelf(&mut txn, "failing-shelf", shelf, true).await;
     txn.commit().await.unwrap();
 
@@ -822,7 +823,7 @@ async fn component_credentials_cancellation_releases_pool_capacity(
     let env = crate::tests::create_test_env(pool.clone()).await;
     let shelf = MacAddress::new([2, 0, 0, 0, 0x0c, 1]);
     let unknown = MacAddress::new([2, 0, 0, 0, 0x0c, 2]);
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
     create_shelf(&mut txn, "pool-shelf", shelf, true).await;
     txn.commit().await?;
 
@@ -869,12 +870,12 @@ async fn component_credentials_cancellation_releases_pool_capacity(
     assert_eq!(reader_session(&reader_pool).await?, reader_pid);
 
     let reader_pid = reader_session(&reader_pool).await?;
-    let mut blocker = pool.begin().await?;
+    let mut blocker = pool.txn_begin().await?;
     sqlx::query("LOCK TABLE power_shelves IN ACCESS EXCLUSIVE MODE")
-        .execute(&mut *blocker)
+        .execute(blocker.as_mut())
         .await?;
     let blocker_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
-        .fetch_one(&mut *blocker)
+        .fetch_one(blocker.as_mut())
         .await?;
     let mut read = Box::pin(api.get_component_credentials(request(shelf)));
     let blocked_pid = tokio::select! {
@@ -916,7 +917,7 @@ async fn component_credentials_cancellation_releases_pool_capacity(
 async fn component_credentials_read_ends_at_its_deadline(pool: sqlx::PgPool) -> eyre::Result<()> {
     let env = crate::tests::create_test_env(pool.clone()).await;
     let shelf = MacAddress::new([2, 0, 0, 0, 0x0d, 1]);
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
     create_shelf(&mut txn, "deadline-shelf", shelf, true).await;
     txn.commit().await?;
 
@@ -1000,10 +1001,10 @@ async fn component_credentials_read_ends_at_its_deadline(pool: sqlx::PgPool) -> 
         ),
     ] {
         let reader_pid = reader_session(&reader_pool).await?;
-        let mut blocker = pool.begin().await?;
-        sqlx::query(lock_table).execute(&mut *blocker).await?;
+        let mut blocker = pool.txn_begin().await?;
+        sqlx::query(lock_table).execute(blocker.as_mut()).await?;
         let blocker_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
-            .fetch_one(&mut *blocker)
+            .fetch_one(blocker.as_mut())
             .await?;
         let (expire, expired) = tokio::sync::oneshot::channel();
         let mut stalled = Box::pin(read(expired));

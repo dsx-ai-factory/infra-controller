@@ -42,12 +42,12 @@ async fn validation_run_queries_survive_added_columns(
 
     // The migration uses another connection while the API keeps its cached statements.
     let mut migration_connection = pool.acquire().await?;
-    let mut migration = migration_connection.begin().await?;
+    let mut migration = crate::Transaction::begin_inner(&mut migration_connection).await?;
     sqlx::raw_sql(
         "SET LOCAL lock_timeout = '5s';
          ALTER TABLE machine_validation ADD COLUMN test_added_column text;",
     )
-    .execute(&mut *migration)
+    .execute(migration.as_mut())
     .await?;
     migration.commit().await?;
 
@@ -76,7 +76,7 @@ async fn create_host(connection: &mut PgConnection) -> DatabaseResult<MachineId>
 async fn exercise_run_queries(
     connection: &mut PgConnection,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let mut txn = connection.begin().await?;
+    let mut txn = crate::Transaction::begin_inner(&mut *connection).await?;
     let machine_id = create_host(txn.as_mut()).await?;
     let filter = MachineValidationFilter {
         tags: vec!["diagnostic".to_string()],
@@ -238,12 +238,12 @@ async fn external_config_queries_survive_added_columns(
     assert!(api_connection.cached_statements_size() > 0);
 
     let mut migration_connection = pool.acquire().await?;
-    let mut migration = migration_connection.begin().await?;
+    let mut migration = crate::Transaction::begin_inner(&mut migration_connection).await?;
     sqlx::raw_sql(
         "SET LOCAL lock_timeout = '5s';
          ALTER TABLE machine_validation_external_config ADD COLUMN test_added_column text;",
     )
-    .execute(&mut *migration)
+    .execute(migration.as_mut())
     .await?;
     migration.commit().await?;
 
@@ -254,7 +254,7 @@ async fn external_config_queries_survive_added_columns(
 async fn exercise_config_queries(
     connection: &mut PgConnection,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let mut txn = connection.begin().await?;
+    let mut txn = crate::Transaction::begin_inner(&mut *connection).await?;
     let name = "projection-config";
     let description = "validation parameters";
     let config = b"{\"iterations\":7}".to_vec();
@@ -293,7 +293,7 @@ async fn validation_execution_queries_survive_added_columns(
     assert!(api_connection.cached_statements_size() > 0);
 
     let mut migration_connection = pool.acquire().await?;
-    let mut migration = migration_connection.begin().await?;
+    let mut migration = crate::Transaction::begin_inner(&mut migration_connection).await?;
     sqlx::raw_sql(
         "SET LOCAL lock_timeout = '5s';
          ALTER TABLE machine_validation_tests ADD COLUMN test_added_column text;
@@ -302,7 +302,7 @@ async fn validation_execution_queries_survive_added_columns(
          ALTER TABLE machine_validation_attempt_logs ADD COLUMN test_added_column text;
          ALTER TABLE machine_validation_results ADD COLUMN test_added_column text;",
     )
-    .execute(&mut *migration)
+    .execute(migration.as_mut())
     .await?;
     migration.commit().await?;
 
@@ -313,7 +313,7 @@ async fn validation_execution_queries_survive_added_columns(
 async fn exercise_execution_queries(
     connection: &mut PgConnection,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let mut txn = connection.begin().await?;
+    let mut txn = crate::Transaction::begin_inner(&mut *connection).await?;
     let machine_id = create_host(txn.as_mut()).await?;
     let run = create_new_run(
         txn.as_mut(),

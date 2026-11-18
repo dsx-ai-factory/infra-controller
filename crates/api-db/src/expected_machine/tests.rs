@@ -11,6 +11,7 @@ use model::metadata::Metadata;
 use sqlx::Connection;
 
 use super::*;
+use crate::TransactionVending as _;
 
 #[crate::sqlx_test]
 async fn expected_machine_queries_survive_alter_bmc_password_and_bmc_username_columns(
@@ -94,12 +95,12 @@ async fn expected_machine_queries_survive_added_columns(
     assert!(api_connection.cached_statements_size() > 0);
 
     // Keep the API's prepared statements while another connection applies DDL.
-    let mut migration = pool.begin().await?;
+    let mut migration = pool.txn_begin().await?;
     sqlx::raw_sql(
         "SET LOCAL lock_timeout = '5s';
          ALTER TABLE expected_machines ADD COLUMN test_added_column text;",
     )
-    .execute(&mut *migration)
+    .execute(migration.as_mut())
     .await?;
     migration.commit().await?;
 
@@ -110,7 +111,7 @@ async fn expected_machine_queries_survive_added_columns(
 async fn exercise_expected_machine_queries(
     connection: &mut PgConnection,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let mut txn = connection.begin().await?;
+    let mut txn = crate::Transaction::begin_inner(&mut *connection).await?;
     let id = Uuid::new_v4();
     let rack_id = RackId::new("projection-rack");
     let interface_mac: MacAddress = "02:00:00:00:01:02".parse()?;
@@ -164,8 +165,8 @@ async fn exercise_expected_machine_queries(
     assert_machine(&create(&mut txn, expected.clone()).await?, &expected);
 
     for found in [
-        find_by_bmc_mac_address(&mut *txn, expected.bmc_mac_address).await?,
-        find_by_id(&mut *txn, id).await?,
+        find_by_bmc_mac_address(txn.as_mut(), expected.bmc_mac_address).await?,
+        find_by_id(txn.as_mut(), id).await?,
         find_by_interface_mac_address(&mut txn, interface_mac).await?,
         find_for_update(
             &mut txn,
@@ -188,7 +189,7 @@ async fn exercise_expected_machine_queries(
     }
 
     for found in [
-        find_all(&mut *txn).await?,
+        find_all(txn.as_mut()).await?,
         find_all_for_replace(&mut txn).await?,
         find_all_by_rack_id(&mut txn, &rack_id).await?,
     ] {

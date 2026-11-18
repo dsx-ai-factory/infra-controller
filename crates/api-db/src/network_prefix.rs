@@ -420,6 +420,7 @@ mod tests {
     use config_version::ConfigVersion;
 
     use super::*;
+    use crate::TransactionVending as _;
 
     #[test]
     fn overlap_constraint_names_share_one_error_classification() {
@@ -446,14 +447,14 @@ mod tests {
         let sibling_parent_id = VpcPrefixId::new();
         let parent: IpNetwork = "10.70.0.0/24".parse()?;
         let version = ConfigVersion::initial();
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
 
         sqlx::query(
             "INSERT INTO tenants (organization_id, organization_name, version)
                      VALUES ('occupancy', 'occupancy', $1)",
         )
         .bind(version)
-        .execute(&mut *txn)
+        .execute(txn.as_mut())
         .await?;
         let root: carbide_uuid::site_prefix::SitePrefixId = sqlx::query_scalar(
             "INSERT INTO site_prefixes
@@ -463,7 +464,7 @@ mod tests {
         )
         .bind(carbide_uuid::site_prefix::SitePrefixId::new())
         .bind(version)
-        .fetch_one(&mut *txn)
+        .fetch_one(txn.as_mut())
         .await?;
 
         for (vpc_id, name) in [(target_vpc_id, "target VPC"), (other_vpc_id, "other VPC")] {
@@ -474,7 +475,7 @@ mod tests {
             .bind(vpc_id)
             .bind(name)
             .bind(version)
-            .execute(&mut *txn)
+            .execute(txn.as_mut())
             .await?;
         }
 
@@ -491,7 +492,7 @@ mod tests {
             .bind(name)
             .bind(vpc_id)
             .bind(root)
-            .execute(&mut *txn)
+            .execute(txn.as_mut())
             .await?;
         }
 
@@ -556,7 +557,7 @@ mod tests {
             } else {
                 model::network_segment::NetworkSegmentType::HostInband
             })
-            .execute(&mut *txn)
+            .execute(txn.as_mut())
             .await?;
             let network_prefix: NetworkPrefix = sqlx::query_as(
                 r#"
@@ -576,14 +577,14 @@ mod tests {
             .bind(case.parent_id)
             .bind(case.parent_id.map(|_| parent))
             .bind(case.scope)
-            .fetch_one(&mut *txn)
+            .fetch_one(txn.as_mut())
             .await?;
             if case.occupies_target {
                 expected.push(network_prefix.id);
             }
         }
 
-        let occupancy = find_allocation_occupancy(&mut *txn, target_parent_id, parent).await?;
+        let occupancy = find_allocation_occupancy(txn.as_mut(), target_parent_id, parent).await?;
         let occupied =
             occupied_prefix_count(parent, 31, occupancy.iter().map(|prefix| prefix.prefix));
         let mut actual: Vec<NetworkPrefixId> = occupancy.iter().map(|prefix| prefix.id).collect();
@@ -608,13 +609,13 @@ mod tests {
         // its child first to preserve the exact-parent scope foreign key.
         sqlx::query("UPDATE network_prefixes SET overlap_vpc_id = NULL WHERE vpc_prefix_id = $1")
             .bind(target_parent_id)
-            .execute(&mut *txn)
+            .execute(txn.as_mut())
             .await?;
         sqlx::query("UPDATE network_vpc_prefixes SET overlap_vpc_id = NULL WHERE id = $1")
             .bind(target_parent_id)
-            .execute(&mut *txn)
+            .execute(txn.as_mut())
             .await?;
-        let occupancy = find_allocation_occupancy(&mut *txn, target_parent_id, parent).await?;
+        let occupancy = find_allocation_occupancy(txn.as_mut(), target_parent_id, parent).await?;
         assert_eq!(occupancy.len(), 5);
         let loaded = crate::vpc_prefix::get_by_id(
             &mut txn,

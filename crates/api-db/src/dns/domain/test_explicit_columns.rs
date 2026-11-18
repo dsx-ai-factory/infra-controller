@@ -32,13 +32,13 @@ async fn domain_queries_survive_added_columns(
     // Keep the API connection and its prepared statements while another
     // connection applies the schema change, just as a migration would.
     let mut migration_connection = pool.acquire().await?;
-    let mut migration = migration_connection.begin().await?;
+    let mut migration = crate::Transaction::begin_inner(&mut migration_connection).await?;
     sqlx::raw_sql(
         "SET LOCAL lock_timeout = '5s';
          ALTER TABLE domains ADD COLUMN test_added_column text;
          ALTER TABLE domain_metadata ADD COLUMN test_added_column text;",
     )
-    .execute(&mut *migration)
+    .execute(migration.as_mut())
     .await?;
     migration.commit().await?;
 
@@ -49,7 +49,7 @@ async fn domain_queries_survive_added_columns(
 async fn exercise_domain_queries(
     connection: &mut PgConnection,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let mut txn = connection.begin().await?;
+    let mut txn = crate::Transaction::begin_inner(&mut *connection).await?;
     let first_input = NewDomain {
         default_ttl: Some(ZoneTtl::try_from(600)?),
         ..NewDomain::new("first.example.com")
@@ -84,7 +84,7 @@ async fn exercise_domain_queries(
     )
     .bind(&allowed_transfers)
     .bind(domain.id)
-    .execute(&mut *txn)
+    .execute(txn.as_mut())
     .await?;
 
     domain.default_ttl = Some(ZoneTtl::try_from(1200)?);
@@ -100,18 +100,21 @@ async fn exercise_domain_queries(
     for (operation, domains) in [
         (
             "find_by",
-            find_by(&mut *txn, ObjectColumnFilter::One(IdColumn, &domain.id)).await?,
+            find_by(txn.as_mut(), ObjectColumnFilter::One(IdColumn, &domain.id)).await?,
         ),
         (
             "find_longest_live_zone",
-            find_longest_live_zone(&mut *txn, &Fqdn::parse("1.0.10.in-addr.arpa.")?.suffixes())
-                .await?
-                .into_iter()
-                .collect(),
+            find_longest_live_zone(
+                txn.as_mut(),
+                &Fqdn::parse("1.0.10.in-addr.arpa.")?.suffixes(),
+            )
+            .await?
+            .into_iter()
+            .collect(),
         ),
         (
             "find_reverse_zone_by_normalized_name",
-            find_reverse_zone_by_normalized_name(&mut *txn, "0.10.IN-ADDR.ARPA.").await?,
+            find_reverse_zone_by_normalized_name(txn.as_mut(), "0.10.IN-ADDR.ARPA.").await?,
         ),
     ] {
         assert_eq!(domains.len(), 1, "{operation}");
@@ -136,7 +139,7 @@ async fn exercise_domain_queries(
         serde_json::to_value(&deleted)?,
         serde_json::to_value(&domain)?
     );
-    let stored = find_by_uuid(&mut *txn, domain.id)
+    let stored = find_by_uuid(txn.as_mut(), domain.id)
         .await?
         .expect("the soft-deleted domain is retained");
     assert_eq!(

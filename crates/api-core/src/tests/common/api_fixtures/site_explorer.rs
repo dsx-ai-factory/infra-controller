@@ -26,7 +26,8 @@ use carbide_uuid::rack::{RackId, RackProfileId};
 use carbide_uuid::switch::SwitchId;
 use db::machine_interface::find_by_mac_address;
 use db::{
-    DatabaseError, expected_machine as db_expected_machine, rack as db_rack, switch as db_switch,
+    DatabaseError, TransactionVending as _, expected_machine as db_expected_machine,
+    rack as db_rack, switch as db_switch,
 };
 use futures_util::FutureExt;
 use health_report::HealthReport;
@@ -73,7 +74,7 @@ async fn ensure_admin_interface_primary(
     env: &TestEnv,
     mac: mac_address::MacAddress,
 ) -> eyre::Result<()> {
-    let mut txn = env.pool.begin().await?;
+    let mut txn = env.pool.txn_begin().await?;
     let interfaces = db::machine_interface::find_by_mac_address(txn.as_mut(), mac).await?;
     if let Some(interface) = interfaces.first()
         && !interface.primary_interface
@@ -519,7 +520,7 @@ impl<'a> MockExploredHost<'a> {
             return self;
         }
 
-        let mut txn = self.test_env.pool.begin().await.unwrap();
+        let mut txn = self.test_env.pool.txn_begin().await.unwrap();
 
         let dpu_machine_id = self.dpu_machine_ids[&0];
         let host_machine_id =
@@ -617,7 +618,7 @@ impl<'a> MockExploredHost<'a> {
             return self;
         }
 
-        let mut txn = self.test_env.pool.begin().await.unwrap();
+        let mut txn = self.test_env.pool.txn_begin().await.unwrap();
 
         let dpu_machine_id = self.dpu_machine_ids[&0];
         let host_machine_id =
@@ -726,7 +727,7 @@ impl<'a> MockExploredHost<'a> {
             return self;
         }
 
-        let mut txn = self.test_env.pool.begin().await.unwrap();
+        let mut txn = self.test_env.pool.txn_begin().await.unwrap();
 
         let dpu_machine_id = self.dpu_machine_ids[&0];
         let host_machine_id =
@@ -1094,7 +1095,7 @@ impl<'a> MockExploredHost<'a> {
             .copied()
             .chain(iter::once(self.host_bmc_ip.unwrap()))
             .collect::<Vec<_>>();
-        let mut txn = self.test_env.pool.begin().await?;
+        let mut txn = self.test_env.pool.txn_begin().await?;
         for ip in ips {
             db::explored_endpoints::set_preingestion_complete(ip, &mut txn).await?;
         }
@@ -1252,7 +1253,7 @@ impl<'a> MockExploredHost<'a> {
             if error.is_some() {
                 self.test_env.run_machine_state_controller_iteration().await;
 
-                let mut txn = self.test_env.pool.begin().await.unwrap();
+                let mut txn = self.test_env.pool.txn_begin().await.unwrap();
                 let machine = db::machine::find_one(
                     txn.as_mut(),
                     &self.dpu_machine_ids[&0],
@@ -1381,7 +1382,7 @@ impl<'a> MockExploredHost<'a> {
                 return state;
             }
 
-            let mut txn = self.test_env.pool.begin().await.unwrap();
+            let mut txn = self.test_env.pool.txn_begin().await.unwrap();
             tracing::info!("generating sku");
             let sku = db::sku::generate_sku_from_machine(txn.as_mut(), host_machine_id)
                 .await
@@ -1422,7 +1423,7 @@ impl<'a> MockExploredHost<'a> {
 
             tracing::info!("updating inventory");
             // discovery time is based on transaction start time, so this needs a new transaction
-            let mut txn = self.test_env.pool.begin().await.unwrap();
+            let mut txn = self.test_env.pool.txn_begin().await.unwrap();
             db::machine::update_discovery_time(host_machine_id, &mut txn)
                 .await
                 .unwrap();
@@ -1503,7 +1504,7 @@ async fn switch_interface_ip(
 pub(in crate::tests) async fn register_expected_switch_exploration_results(
     env: &TestEnv,
 ) -> eyre::Result<()> {
-    let mut txn = env.pool.begin().await?;
+    let mut txn = env.pool.txn_begin().await?;
     let expected_switches = db::expected_switch::find_all(&mut txn).await?;
     let mut endpoints = Vec::new();
     for expected_switch in expected_switches {
@@ -1914,7 +1915,7 @@ async fn new_dpu_in_network_install_inner(
         .boxed()
         .await;
 
-    let mut txn = env.pool.begin().await.unwrap();
+    let mut txn = env.pool.txn_begin().await.unwrap();
     let dpu_machine_id = mock_explored_host.dpu_machine_ids[&0];
     let host_machine_id = db::machine::find_host_by_dpu_machine_id(&mut txn, &dpu_machine_id)
         .await
@@ -2022,7 +2023,7 @@ pub(in crate::tests) async fn new_switch(
     name: Option<String>,
     _location: Option<String>,
 ) -> eyre::Result<SwitchId> {
-    let mut txn = env.pool.begin().await.unwrap();
+    let mut txn = env.pool.txn_begin().await.unwrap();
 
     let expected_switches = create_expected_switches(&mut txn).await;
     let expected_switch = match name {
@@ -2067,7 +2068,7 @@ pub(in crate::tests) async fn new_switch(
     // machine_interface back to the switch and annotate it `Bmc`, so that
     // `bmc_info` resolves via the interface link.
     let bmc_interfaces =
-        db::machine_interface::find_by_mac_address(&mut *txn, expected_switch.bmc_mac_address)
+        db::machine_interface::find_by_mac_address(txn.as_mut(), expected_switch.bmc_mac_address)
             .await
             .map_err(|e| eyre::eyre!("failed to find BMC machine interface: {:?}", e))?;
     if let Some(interface) = bmc_interfaces.first() {

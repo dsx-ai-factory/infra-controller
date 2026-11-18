@@ -25,6 +25,7 @@ use model::vpc::routing_profile::VpcRoutingProfileOverrides;
 use sqlx::{Connection, PgPool};
 
 use super::*;
+use crate::TransactionVending as _;
 
 #[crate::sqlx_test]
 async fn vpc_queries_survive_added_columns(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
@@ -44,12 +45,12 @@ async fn vpc_queries_survive_added_columns(pool: PgPool) -> Result<(), Box<dyn s
 
     // Keep the API connection's prepared statements while a migration
     // adds an unrelated column to the populated table.
-    let mut migration = pool.begin().await?;
+    let mut migration = pool.txn_begin().await?;
     sqlx::raw_sql(
         "SET LOCAL lock_timeout = '5s';
          ALTER TABLE vpcs ADD COLUMN test_added_column text;",
     )
-    .execute(&mut *migration)
+    .execute(migration.as_mut())
     .await?;
     migration.commit().await?;
 
@@ -61,7 +62,7 @@ async fn exercise_vpc_queries(
     connection: &mut PgConnection,
     vni: i32,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let mut txn = connection.begin().await?;
+    let mut txn = crate::Transaction::begin_inner(&mut *connection).await?;
     let id = VpcId::new();
     let nsg_id = NetworkSecurityGroupId::from(uuid::Uuid::new_v4());
     sqlx::query(
@@ -70,7 +71,7 @@ async fn exercise_vpc_queries(
     )
     .bind(&nsg_id)
     .bind(id.to_string())
-    .execute(&mut *txn)
+    .execute(txn.as_mut())
     .await?;
     let metadata = Metadata {
         name: format!("projection-{id}"),
@@ -128,13 +129,13 @@ async fn exercise_vpc_queries(
     .bind(segment_id)
     .bind(id.to_string())
     .bind(id)
-    .execute(&mut *txn)
+    .execute(txn.as_mut())
     .await?;
 
     for (operation, rows) in [
         (
             "find_by",
-            find_by(&mut *txn, ObjectColumnFilter::One(IdColumn, &id)).await?,
+            find_by(txn.as_mut(), ObjectColumnFilter::One(IdColumn, &id)).await?,
         ),
         (
             "find_by_with_lock",
@@ -148,7 +149,7 @@ async fn exercise_vpc_queries(
         ("find_by_vni", find_by_vni(&mut txn, vni).await?),
         (
             "find_by_segment",
-            find_by_segment(&mut *txn, segment_id)
+            find_by_segment(txn.as_mut(), segment_id)
                 .await?
                 .into_iter()
                 .collect(),
@@ -215,7 +216,7 @@ async fn exercise_vpc_queries(
     vpc.config.network_virtualization_type = VpcVirtualizationType::Fnn;
     assert_eq!(updated, vpc);
     assert_eq!(
-        find_by(&mut *txn, ObjectColumnFilter::One(IdColumn, &id)).await?,
+        find_by(txn.as_mut(), ObjectColumnFilter::One(IdColumn, &id)).await?,
         vec![vpc.clone()]
     );
 

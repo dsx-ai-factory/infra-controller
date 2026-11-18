@@ -20,6 +20,7 @@ use std::time::Duration;
 use carbide_test_support::{Case, Outcome};
 use carbide_uuid::site_prefix::SitePrefixId;
 use carbide_uuid::vpc::{VpcId, VpcPrefixId};
+use db::TransactionVending as _;
 use model::metadata::Metadata;
 use model::site_prefix::{NewTenantManagedSitePrefix, SitePrefixLifecycleState};
 use model::vpc_prefix::{NewVpcPrefix, VpcPrefixConfig};
@@ -126,7 +127,7 @@ async fn retained_startup_audit_shares_read_lock_and_waits_for_writes(pool: PgPo
         false,
     )
     .await;
-    let mut reader = env.pool.begin().await.unwrap();
+    let mut reader = env.pool.txn_begin().await.unwrap();
     db::tenant_prefix_overlap::lock_config(&mut reader)
         .await
         .unwrap();
@@ -137,18 +138,18 @@ async fn retained_startup_audit_shares_read_lock_and_waits_for_writes(pool: PgPo
     reader.commit().await.unwrap();
     let other_vpc = create_other_vpc(&env).await;
 
-    let mut writer = env.pool.begin().await.unwrap();
+    let mut writer = env.pool.txn_begin().await.unwrap();
     db::tenant_prefix_overlap::lock_checks(&mut writer)
         .await
         .unwrap();
     let writer_pid = sqlx::query_scalar("SELECT pg_backend_pid()")
-        .fetch_one(&mut *writer)
+        .fetch_one(writer.as_mut())
         .await
         .unwrap();
     let prefix_id = retain_prefix(&env, &mut writer, &other_vpc, "10.118.1.0/24").await;
     sqlx::query("UPDATE network_vpc_prefixes SET deleted = NOW() WHERE id = $1")
         .bind(prefix_id)
-        .execute(&mut *writer)
+        .execute(writer.as_mut())
         .await
         .unwrap();
 
@@ -161,12 +162,12 @@ async fn retained_startup_audit_shares_read_lock_and_waits_for_writes(pool: PgPo
     assert_eq!(error.code(), tonic::Code::InvalidArgument);
     let mut expected = vec![tenant_vpc_id, other_vpc.id.unwrap()];
     expected.sort_unstable();
-    let mut txn = env.pool.begin().await.unwrap();
+    let mut txn = env.pool.txn_begin().await.unwrap();
     db::tenant_prefix_overlap::lock_checks(&mut txn)
         .await
         .unwrap();
     assert_eq!(
-        db::tenant_prefix_overlap::find_duplicate_vpc_ids(&mut *txn, false)
+        db::tenant_prefix_overlap::find_duplicate_vpc_ids(txn.as_mut(), false)
             .await
             .unwrap(),
         expected
@@ -183,7 +184,7 @@ async fn retained_startup_audit_shares_read_lock_and_waits_for_writes(pool: PgPo
             expect: Outcome::Yields(true),
         },
     ] {
-        let txn = &mut *txn;
+        let txn = txn.as_mut();
         case.check_async(|source_ids| async move {
             db::tenant_prefix_overlap::vpcs_use_duplicate_space(txn, &source_ids)
                 .await
@@ -192,12 +193,12 @@ async fn retained_startup_audit_shares_read_lock_and_waits_for_writes(pool: PgPo
         .await;
     }
     assert!(
-        !db::tenant_prefix_overlap::has_direct_prefix_overlap(&mut *txn, &[])
+        !db::tenant_prefix_overlap::has_direct_prefix_overlap(txn.as_mut(), &[])
             .await
             .unwrap()
     );
     assert!(
-        !db::tenant_prefix_overlap::has_direct_prefix_overlap(&mut *txn, &[VpcId::new()])
+        !db::tenant_prefix_overlap::has_direct_prefix_overlap(txn.as_mut(), &[VpcId::new()])
             .await
             .unwrap()
     );
@@ -226,7 +227,7 @@ async fn admin_startup_overlap_rejection_rolls_back_attachment(pool: PgPool) {
     )
     .await;
     let other_vpc = create_other_vpc(&env).await;
-    let mut txn = env.pool.begin().await.unwrap();
+    let mut txn = env.pool.txn_begin().await.unwrap();
     db::tenant_prefix_overlap::lock_checks(&mut txn)
         .await
         .unwrap();
@@ -247,7 +248,7 @@ async fn admin_startup_overlap_rejection_rolls_back_attachment(pool: PgPool) {
             .unwrap()
             .is_empty()
     );
-    let mut txn = env.pool.begin().await.unwrap();
+    let mut txn = env.pool.txn_begin().await.unwrap();
     let segments = db::network_segment::admin(&mut txn).await.unwrap();
     assert!(!segments.is_empty());
     assert!(

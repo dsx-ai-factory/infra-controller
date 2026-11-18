@@ -289,11 +289,11 @@ pub async fn load_by_organization_ids(
 
 #[cfg(test)]
 mod tests {
-    use std::ops::DerefMut;
 
     use sqlx::Connection;
 
     use super::*;
+    use crate::TransactionVending as _;
 
     #[crate::sqlx_test]
     async fn tenant_queries_survive_added_columns(
@@ -305,12 +305,12 @@ mod tests {
 
         // Keep the API connection and its prepared statements while another
         // connection applies the schema change, just as a migration would.
-        let mut migration = pool.begin().await?;
+        let mut migration = pool.txn_begin().await?;
         sqlx::raw_sql(
             "SET LOCAL lock_timeout = '5s';
              ALTER TABLE tenants ADD COLUMN test_added_column text;",
         )
-        .execute(&mut *migration)
+        .execute(migration.as_mut())
         .await?;
         migration.commit().await?;
 
@@ -321,7 +321,7 @@ mod tests {
     async fn exercise_tenant_queries(
         connection: &mut PgConnection,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        let mut txn = connection.begin().await?;
+        let mut txn = crate::Transaction::begin_inner(&mut *connection).await?;
         let metadata = Metadata {
             name: "projection tenant".to_string(),
             ..Default::default()
@@ -371,7 +371,7 @@ mod tests {
 
     #[crate::sqlx_test]
     async fn test_null_organization_name(pool: sqlx::PgPool) {
-        let mut txn = pool.begin().await.unwrap();
+        let mut txn = pool.txn_begin().await.unwrap();
         let result = sqlx::query(
             r#"
             INSERT INTO tenants (organization_id, version, organization_name)
@@ -379,7 +379,7 @@ mod tests {
             ('zqrrhxea4ktv', 'V1-T1733777281821769', NULL)
             "#,
         )
-        .execute(txn.deref_mut())
+        .execute(txn.as_mut())
         .await;
         let Err(sqlx::Error::Database(e)) = result else {
             panic!("Inserting a NULL should have failed");

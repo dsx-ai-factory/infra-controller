@@ -202,6 +202,7 @@ mod test {
     use sqlx::Connection;
 
     use super::*;
+    use crate::TransactionVending as _;
 
     const OPERATOR: &str = "external-role/nico-admin";
 
@@ -225,24 +226,28 @@ mod test {
     #[crate::sqlx_test]
     async fn attestation_profile_queries_survive_added_columns(pool: sqlx::PgPool) {
         let mut api_connection = pool.acquire().await.unwrap();
-        let mut txn = api_connection.begin().await.unwrap();
+        let mut txn = crate::Transaction::begin_inner(&mut api_connection)
+            .await
+            .unwrap();
         exercise_profile_queries(&mut txn).await;
         // Release the row lock and fixture, but keep the connection's cached statements.
         txn.rollback().await.unwrap();
         assert!(api_connection.cached_statements_size() > 0);
 
         // A migration commits on another connection while the API connection stays open.
-        let mut migration = pool.begin().await.unwrap();
+        let mut migration = pool.txn_begin().await.unwrap();
         sqlx::raw_sql(
             "SET LOCAL lock_timeout = '5s';
              ALTER TABLE attestation_profiles ADD COLUMN test_added_column text;",
         )
-        .execute(&mut *migration)
+        .execute(migration.as_mut())
         .await
         .unwrap();
         migration.commit().await.unwrap();
 
-        let mut txn = api_connection.begin().await.unwrap();
+        let mut txn = crate::Transaction::begin_inner(&mut api_connection)
+            .await
+            .unwrap();
         let updated = exercise_profile_queries(&mut txn).await;
         txn.commit().await.unwrap();
 
@@ -327,7 +332,7 @@ mod test {
 
     #[crate::sqlx_test]
     async fn create_stores_a_policy_that_reads_back_unchanged(pool: sqlx::PgPool) {
-        let mut txn = pool.begin().await.unwrap();
+        let mut txn = pool.txn_begin().await.unwrap();
 
         let created = create(
             &mut txn,
@@ -346,21 +351,24 @@ mod test {
         );
         assert_eq!(created.updated_by, OPERATOR);
 
-        let found = find(&mut *txn, "dell-inc_poweredge-r750")
+        let found = find(txn.as_mut(), "dell-inc_poweredge-r750")
             .await
             .unwrap()
             .unwrap();
         assert_eq!(found.policy_document, gpu_allowlist());
         assert_eq!(found.version, created.version);
         assert!(
-            find(&mut *txn, "nvidia_dgx-gb200").await.unwrap().is_none(),
+            find(txn.as_mut(), "nvidia_dgx-gb200")
+                .await
+                .unwrap()
+                .is_none(),
             "a class with no profile reads as absent, not as a default"
         );
     }
 
     #[crate::sqlx_test]
     async fn a_class_can_hold_only_one_profile(pool: sqlx::PgPool) {
-        let mut txn = pool.begin().await.unwrap();
+        let mut txn = pool.txn_begin().await.unwrap();
         create(
             &mut txn,
             "dell-inc_poweredge-r750",
@@ -387,7 +395,7 @@ mod test {
 
     #[crate::sqlx_test]
     async fn update_moves_the_version_on_and_refuses_a_stale_one(pool: sqlx::PgPool) {
-        let mut txn = pool.begin().await.unwrap();
+        let mut txn = pool.txn_begin().await.unwrap();
         let created = create(
             &mut txn,
             "dell-inc_poweredge-r750",
@@ -431,7 +439,7 @@ mod test {
             matches!(error, DatabaseError::ConcurrentModificationError(..)),
             "expected a concurrent-modification error, got {error:?}"
         );
-        let stored = find(&mut *txn, "dell-inc_poweredge-r750")
+        let stored = find(txn.as_mut(), "dell-inc_poweredge-r750")
             .await
             .unwrap()
             .unwrap();
@@ -445,7 +453,7 @@ mod test {
     async fn delete_refuses_a_stale_version_and_a_later_create_cannot_be_mistaken_for_the_old_row(
         pool: sqlx::PgPool,
     ) {
-        let mut txn = pool.begin().await.unwrap();
+        let mut txn = pool.txn_begin().await.unwrap();
         let created = create(
             &mut txn,
             "dell-inc_poweredge-r750",
@@ -472,7 +480,7 @@ mod test {
             "expected a concurrent-modification error, got {error:?}"
         );
         assert!(
-            find(&mut *txn, "dell-inc_poweredge-r750")
+            find(txn.as_mut(), "dell-inc_poweredge-r750")
                 .await
                 .unwrap()
                 .is_some(),
@@ -483,7 +491,7 @@ mod test {
             .await
             .unwrap();
         assert!(
-            find(&mut *txn, "dell-inc_poweredge-r750")
+            find(txn.as_mut(), "dell-inc_poweredge-r750")
                 .await
                 .unwrap()
                 .is_none()
@@ -567,7 +575,7 @@ mod test {
         ];
 
         for case in cases {
-            let mut txn = pool.begin().await.unwrap();
+            let mut txn = pool.txn_begin().await.unwrap();
             for class in case.stored {
                 create(&mut txn, class, &gpu_allowlist(), OPERATOR)
                     .await
@@ -583,13 +591,13 @@ mod test {
 
     #[crate::sqlx_test]
     async fn list_orders_by_class(pool: sqlx::PgPool) {
-        let mut txn = pool.begin().await.unwrap();
+        let mut txn = pool.txn_begin().await.unwrap();
         let all = policy(AttesterSelectionMode::All, vec![]);
         for class in ["dell-inc_poweredge-r750", "any", "nvidia_dgx-gb200"] {
             create(&mut txn, class, &all, OPERATOR).await.unwrap();
         }
 
-        let classes: Vec<_> = list(&mut *txn)
+        let classes: Vec<_> = list(txn.as_mut())
             .await
             .unwrap()
             .into_iter()

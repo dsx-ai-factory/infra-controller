@@ -97,8 +97,7 @@ impl TestManagedHost {
     pub async fn advance_state(&self, state: ManagedHostState) {
         let mut txn = self
             .api
-            .database_connection
-            .begin()
+            .txn_begin()
             .await
             .expect("database transaction should start");
         let machine = self.host.db_machine(&mut txn).await;
@@ -117,8 +116,7 @@ impl TestManagedHost {
     pub async fn advance_to_converged_ready(&self) {
         let mut txn = self
             .api
-            .database_connection
-            .begin()
+            .txn_begin()
             .await
             .expect("database transaction should start");
         let machine = self.host.db_machine(&mut txn).await;

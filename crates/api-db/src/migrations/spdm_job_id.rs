@@ -7,6 +7,7 @@ use model::machine::{AttestationMode, MachineState, ManagedHostState, SpdmMeasur
 use sqlx::PgPool;
 
 use super::{IgnoringMissing, MIGRATION_LAYOUT, Migrator};
+use crate::TransactionVending as _;
 
 const VERSION: i64 = 20260917113009;
 const MIGRATION: &str = include_str!("../../migrations/20260917113009_spdm_job_id.sql");
@@ -102,29 +103,32 @@ async fn spdm_job_migration_restarts_legacy_polling(
     )
     .execute(&pool)
     .await?;
-    let mut writer = pool.begin().await?;
+    let mut writer = pool.txn_begin().await?;
     let writer_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
-        .fetch_one(&mut *writer)
+        .fetch_one(writer.as_mut())
         .await?;
     sqlx::query(
         "UPDATE machines SET controller_state = $1::jsonb, name = 'live legacy writer'
          WHERE id = 'spdm-migration-0'",
     )
     .bind(cases[0].input)
-    .execute(&mut *writer)
+    .execute(writer.as_mut())
     .await?;
 
-    let mut migration = pool.begin().await?;
+    let mut migration = pool.txn_begin().await?;
     let migration_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
-        .fetch_one(&mut *migration)
+        .fetch_one(migration.as_mut())
         .await?;
     // Commit the old writer only once the migration is waiting on its row.
     // PostgreSQL must recheck that row and reset the freshly committed legacy state.
     tokio::time::timeout(Duration::from_secs(10), async {
         tokio::try_join!(
             async {
-                sqlx::raw_sql(MIGRATION).execute(&mut *migration).await?;
-                migration.commit().await
+                sqlx::raw_sql(MIGRATION).execute(migration.as_mut()).await?;
+                migration
+                    .commit()
+                    .await
+                    .map_err(Box::<dyn std::error::Error>::from)
             },
             async {
                 loop {
@@ -138,7 +142,10 @@ async fn spdm_job_migration_restarts_legacy_polling(
                     }
                     tokio::task::yield_now().await;
                 }
-                writer.commit().await
+                writer
+                    .commit()
+                    .await
+                    .map_err(Box::<dyn std::error::Error>::from)
             }
         )
     })

@@ -29,7 +29,7 @@ use common::api_fixtures::ib_partition::{DEFAULT_TENANT, create_ib_partition};
 use common::api_fixtures::instance::{config_for_ib_config, create_instance_with_ib_config};
 use common::api_fixtures::{TestEnv, create_managed_host};
 use config_version::ConfigVersion;
-use db::ObjectColumnFilter;
+use db::{ObjectColumnFilter, TransactionVending as _};
 use model::controller_outcome::PersistentStateHandlerOutcome;
 use model::ib::{DEFAULT_IB_FABRIC_NAME, IbMembership};
 use model::ib_partition::{IBPartitionControllerState, PartitionKey};
@@ -316,7 +316,7 @@ async fn commit_ib_admission_before_soft_delete<T: std::fmt::Debug>(
     write_query: &str,
     writer: impl Future<Output = Result<T, tonic::Status>>,
 ) -> T {
-    let mut guard = env.pool.begin().await.unwrap();
+    let mut guard = env.pool.txn_begin().await.unwrap();
     sqlx::query("LOCK TABLE instances IN SHARE MODE")
         .execute(guard.as_mut())
         .await
@@ -601,7 +601,7 @@ async fn release_records_atomically_and_retry_skips_resolution(pool: sqlx::PgPoo
     let fixture = create_ib_transition_fixture(pool).await;
     // Permit the Instance read and retirement insert, but stop the subsequent
     // deletion write. Cancellation must roll back the completed retirement too.
-    let mut deletion_guard = fixture.env.pool.begin().await.unwrap();
+    let mut deletion_guard = fixture.env.pool.txn_begin().await.unwrap();
     sqlx::query("LOCK TABLE instances IN SHARE MODE")
         .execute(deletion_guard.as_mut())
         .await
@@ -655,14 +655,14 @@ async fn release_records_atomically_and_retry_skips_resolution(pool: sqlx::PgPoo
         .await
         .unwrap()
         .unwrap();
-    let mut partition_guard = fixture.env.pool.begin().await.unwrap();
+    let mut partition_guard = fixture.env.pool.txn_begin().await.unwrap();
     sqlx::query("LOCK TABLE ib_partitions IN ACCESS EXCLUSIVE MODE")
         .execute(partition_guard.as_mut())
         .await
         .unwrap();
     let partition_guard_pid = backend_pid(&mut partition_guard).await;
     let resolution = async {
-        let mut txn = fixture.env.pool.begin().await.unwrap();
+        let mut txn = fixture.env.pool.txn_begin().await.unwrap();
         let pkeys = crate::instance::load_ib_partition_pkeys(
             txn.as_mut(),
             &[&stored.config.infiniband],
@@ -740,7 +740,7 @@ async fn config_update_does_not_rebase_and_rolls_back_membership_transition(pool
     // Hold the Instance while the request performs its initial unlocked read.
     // Once the request waits for this record, advance the version in the
     // guarding transaction so its captured optimistic token becomes stale.
-    let mut instance_guard = fixture.env.pool.begin().await.unwrap();
+    let mut instance_guard = fixture.env.pool.txn_begin().await.unwrap();
     sqlx::query("SELECT id FROM instances WHERE id = $1 FOR UPDATE")
         .bind(fixture.instance_id)
         .fetch_one(instance_guard.as_mut())
@@ -878,7 +878,7 @@ async fn force_deletion_wins_waiting_ib_config_update(pool: sqlx::PgPool) {
     let fixture = create_ib_transition_fixture(pool).await;
     insert_retired_ib_membership(&fixture.env.pool, &fixture.requested_membership).await;
 
-    let mut force_deletion = fixture.env.pool.begin().await.unwrap();
+    let mut force_deletion = fixture.env.pool.txn_begin().await.unwrap();
     let machine = db::machine::find_one(
         force_deletion.as_mut(),
         &fixture.machine_id,
@@ -942,7 +942,7 @@ async fn ib_update_finishes_before_waiting_release(pool: sqlx::PgPool) {
     insert_retired_ib_membership(&fixture.env.pool, &fixture.requested_membership).await;
     // Pause reuse after the config update owns both records, then start release
     // and verify it waits for the Instance before rereading the replacement.
-    let mut membership_guard = fixture.env.pool.begin().await.unwrap();
+    let mut membership_guard = fixture.env.pool.txn_begin().await.unwrap();
     sqlx::query(
         "SELECT fabric FROM retired_ib_memberships \
          WHERE fabric = $1 AND pkey = $2 AND guid = $3 FOR UPDATE",
@@ -1437,7 +1437,7 @@ async fn test_can_not_create_instance_for_inactive_ib_device(pool: sqlx::PgPool)
     // Assign a SKU to the machine (required for IbPortDown alert tracking)
     // BOM validation is disabled in test config, so manually assign a SKU
     {
-        let mut txn = env.pool.begin().await.unwrap();
+        let mut txn = env.pool.txn_begin().await.unwrap();
         let sku = db::sku::generate_sku_from_machine(txn.as_mut(), &mh.id)
             .await
             .unwrap();
@@ -1539,7 +1539,7 @@ async fn test_ib_skip_update_infiniband_status(pool: sqlx::PgPool) {
     let mut txn = env
         .pool
         .clone()
-        .begin()
+        .txn_begin()
         .await
         .expect("Unable to create transaction on database pool");
 
@@ -1715,10 +1715,10 @@ async fn test_count_instances_referencing_partition(pool: sqlx::PgPool) {
     );
 
     // Mark the instance as deleted (set the deleted timestamp).
-    let mut txn = env.pool.begin().await.unwrap();
+    let mut txn = env.pool.txn_begin().await.unwrap();
     sqlx::query("UPDATE instances SET deleted = NOW() WHERE id = $1::uuid")
         .bind(tinstance.id)
-        .execute(&mut *txn)
+        .execute(txn.as_mut())
         .await
         .unwrap();
     txn.commit().await.unwrap();
@@ -1732,15 +1732,15 @@ async fn test_count_instances_referencing_partition(pool: sqlx::PgPool) {
         "Instance marked as deleted should still be counted (cleanup not finished)"
     );
 
-    let mut txn = env.pool.begin().await.unwrap();
+    let mut txn = env.pool.txn_begin().await.unwrap();
     sqlx::query("DELETE FROM instance_addresses WHERE instance_id = $1::uuid")
         .bind(tinstance.id)
-        .execute(&mut *txn)
+        .execute(txn.as_mut())
         .await
         .unwrap();
     sqlx::query("DELETE FROM instances WHERE id = $1::uuid")
         .bind(tinstance.id)
-        .execute(&mut *txn)
+        .execute(txn.as_mut())
         .await
         .unwrap();
     txn.commit().await.unwrap();
@@ -1864,9 +1864,9 @@ async fn test_postpone_partition_deletion_while_instances_reference_it(pool: sql
     // handler which rejects deletion when instances are still bound.
     // This test exercises the controller's postponement logic, not the handler guard.
     {
-        let mut txn = env.pool.begin().await.unwrap();
+        let mut txn = env.pool.txn_begin().await.unwrap();
         let db_partition = db::ib_partition::find_by(
-            &mut *txn,
+            txn.as_mut(),
             ObjectColumnFilter::One(db::ib_partition::IdColumn, &ib_partition_id),
             &carbide_instrument::Instrumentation::noop(),
         )
@@ -1894,10 +1894,10 @@ async fn test_postpone_partition_deletion_while_instances_reference_it(pool: sql
     // Soft-delete the instance (mark as deleted). The row is still in the DB
     // so the controller must continue to wait — the instance state handler
     // may still need to unbind IB ports during its cleanup sequence.
-    let mut txn = env.pool.begin().await.unwrap();
+    let mut txn = env.pool.txn_begin().await.unwrap();
     sqlx::query("UPDATE instances SET deleted = NOW() WHERE id = $1::uuid")
         .bind(tinstance.id)
-        .execute(&mut *txn)
+        .execute(txn.as_mut())
         .await
         .unwrap();
     txn.commit().await.unwrap();
@@ -1910,7 +1910,7 @@ async fn test_postpone_partition_deletion_while_instances_reference_it(pool: sql
     // Gate the final recount on this tombstone while its reference exists.
     // Admission already rejects the tombstone. Counting before this lock wait
     // would retain a stale count of one after the Instance cleanup below.
-    let mut partition_guard = env.pool.begin().await.unwrap();
+    let mut partition_guard = env.pool.txn_begin().await.unwrap();
     sqlx::query("SELECT id FROM ib_partitions WHERE id = $1 FOR SHARE")
         .bind(ib_partition_id)
         .fetch_one(partition_guard.as_mut())
@@ -1928,21 +1928,21 @@ async fn test_postpone_partition_deletion_while_instances_reference_it(pool: sql
         ) => pid,
     };
 
-    let mut txn = env.pool.begin().await.unwrap();
+    let mut txn = env.pool.txn_begin().await.unwrap();
     sqlx::query("DELETE FROM instance_addresses WHERE instance_id = $1::uuid")
         .bind(tinstance.id)
-        .execute(&mut *txn)
+        .execute(txn.as_mut())
         .await
         .unwrap();
     sqlx::query("DELETE FROM instances WHERE id = $1::uuid")
         .bind(tinstance.id)
-        .execute(&mut *txn)
+        .execute(txn.as_mut())
         .await
         .unwrap();
     txn.commit().await.unwrap();
 
     let pkey_pool = &env.common_pools.infiniband.pkey_pools[DEFAULT_IB_FABRIC_NAME];
-    let mut pkey_guard = env.pool.begin().await.unwrap();
+    let mut pkey_guard = env.pool.txn_begin().await.unwrap();
     sqlx::query("SELECT state FROM resource_pool WHERE name = $1 AND value = $2 FOR UPDATE")
         .bind(pkey_pool.name())
         .bind(pkey_u16.to_string())
@@ -1953,7 +1953,7 @@ async fn test_postpone_partition_deletion_while_instances_reference_it(pool: sql
 
     // Stop DELETE before it can acquire its own row lock, so the NOWAIT
     // probe can only observe the earlier lock_for_delete protection.
-    let mut delete_guard = env.pool.begin().await.unwrap();
+    let mut delete_guard = env.pool.txn_begin().await.unwrap();
     sqlx::query("LOCK TABLE ib_partitions IN SHARE MODE")
         .execute(delete_guard.as_mut())
         .await

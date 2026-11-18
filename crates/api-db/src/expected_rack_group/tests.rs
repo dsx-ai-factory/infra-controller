@@ -7,25 +7,24 @@ use carbide_uuid::rack::RackId;
 use model::expected_rack_group::ExpectedRackGroupMember;
 
 use super::*;
+use crate::TransactionVending as _;
 
 #[crate::sqlx_test]
 async fn expected_rack_group_migration_requires_empty_table(
     pool: sqlx::PgPool,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    use sqlx::Acquire;
-
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
     // Reconstruct the predecessor schema before tables depending on rack groups existed.
     sqlx::raw_sql("DROP TABLE nvlink_domain_members; DROP TABLE nvlink_domains;")
-        .execute(&mut *txn)
+        .execute(txn.as_mut())
         .await?;
     sqlx::query("DROP TABLE expected_rack_groups")
-        .execute(&mut *txn)
+        .execute(txn.as_mut())
         .await?;
     sqlx::raw_sql(include_str!(
         "../../migrations/20260919210839_expected_rack_groups.sql"
     ))
-    .execute(&mut *txn)
+    .execute(txn.as_mut())
     .await?;
     let migration = include_str!("../../migrations/20260922172535_expected_rack_group_racks.sql");
 
@@ -39,11 +38,11 @@ async fn expected_rack_group_migration_requires_empty_table(
         ),
     ] {
         sqlx::query("INSERT INTO expected_rack_groups (rack_group_id, topology, rack_ids, members) VALUES ('legacy', 'topology', $1, $2)")
-            .bind(&rack_ids).bind(&members).execute(&mut *txn).await?;
+            .bind(&rack_ids).bind(&members).execute(txn.as_mut()).await?;
         // Match the migration runner's transaction boundary.
-        let mut attempt = txn.begin().await?;
+        let mut attempt = crate::Transaction::begin_inner(&mut txn).await?;
         let error = sqlx::raw_sql(migration)
-            .execute(&mut *attempt)
+            .execute(attempt.as_mut())
             .await
             .unwrap_err();
         assert_eq!(
@@ -54,12 +53,12 @@ async fn expected_rack_group_migration_requires_empty_table(
         let retained: (serde_json::Value, serde_json::Value) = sqlx::query_as(
             "SELECT rack_ids, members FROM expected_rack_groups WHERE rack_group_id='legacy'",
         )
-        .fetch_one(&mut *txn)
+        .fetch_one(txn.as_mut())
         .await?;
         assert_eq!(retained, (rack_ids, members));
         let schema: Vec<(String, String)> = sqlx::query_as(
             "SELECT column_name::text, is_nullable::text FROM information_schema.columns WHERE table_schema='public' AND table_name='expected_rack_groups' AND column_name IN ('racks', 'rack_ids', 'members') ORDER BY column_name"
-        ).fetch_all(&mut *txn).await?;
+        ).fetch_all(txn.as_mut()).await?;
         assert_eq!(
             schema,
             vec![
@@ -68,19 +67,19 @@ async fn expected_rack_group_migration_requires_empty_table(
             ]
         );
         sqlx::query("DELETE FROM expected_rack_groups WHERE rack_group_id='legacy'")
-            .execute(&mut *txn)
+            .execute(txn.as_mut())
             .await?;
     }
 
-    sqlx::raw_sql(migration).execute(&mut *txn).await?;
+    sqlx::raw_sql(migration).execute(txn.as_mut()).await?;
     sqlx::raw_sql(include_str!(
         "../../migrations/20261002183132_expected_rack_group_protocol.sql"
     ))
-    .execute(&mut *txn)
+    .execute(txn.as_mut())
     .await?;
-    let mut old_writer = txn.begin().await?;
+    let mut old_writer = crate::Transaction::begin_inner(&mut txn).await?;
     let error = sqlx::query("INSERT INTO expected_rack_groups (rack_group_id, topology, rack_ids, members) VALUES ('old-writer', 'topology', '[]', '[]')")
-        .execute(&mut *old_writer).await.unwrap_err();
+        .execute(old_writer.as_mut()).await.unwrap_err();
     let error = error.as_database_error().unwrap();
     assert_eq!(error.code().as_deref(), Some("23502"));
     assert_eq!(
@@ -100,7 +99,7 @@ async fn expected_rack_group_migration_requires_empty_table(
         }
         create(&mut txn, &boundary).await?;
         let untouched: bool = sqlx::query_scalar("SELECT rack_ids IS NULL AND members IS NULL AND racks IS NOT NULL FROM expected_rack_groups WHERE rack_group_id=$1")
-            .bind(&boundary.rack_group_id).fetch_one(&mut *txn).await?;
+            .bind(&boundary.rack_group_id).fetch_one(txn.as_mut()).await?;
         assert!(untouched);
         assert_eq!(
             find_by_rack_group_id(&mut txn, &boundary.rack_group_id).await?,
@@ -119,18 +118,18 @@ async fn expected_rack_group_concurrent_replacements(
 
     // Exercise an empty table (no row to lock), then an existing snapshot.
     for populated in [false, true] {
-        let mut first = pool.begin().await?;
+        let mut first = pool.txn_begin().await?;
         clear(&mut first).await?;
         if populated {
             create(&mut first, &group("old")).await?;
         }
         first.commit().await?;
 
-        let mut first = pool.begin().await?;
+        let mut first = pool.txn_begin().await?;
         clear(&mut first).await?;
-        let mut second = pool.begin().await?;
+        let mut second = pool.txn_begin().await?;
         let pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
-            .fetch_one(&mut *second)
+            .fetch_one(second.as_mut())
             .await?;
         let writer = tokio::spawn(async move {
             clear(&mut second).await.unwrap();
@@ -164,7 +163,7 @@ async fn expected_rack_group_concurrent_replacements(
         create(&mut first, &group("first")).await?;
         first.commit().await?;
         tokio::time::timeout(Duration::from_secs(5), writer).await??;
-        let mut reader = pool.begin().await?;
+        let mut reader = pool.txn_begin().await?;
         assert_eq!(find_all(&mut reader).await?, vec![group("second")]);
         reader.rollback().await?;
     }
@@ -207,7 +206,7 @@ fn group(id: &str) -> ExpectedRackGroup {
 async fn legacy_members_require_indexes_only_when_replaced(
     pool: sqlx::PgPool,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
     let mut legacy = group("legacy");
     legacy.racks[0].members[0].cartridge_index = None;
     create(&mut txn, &legacy).await?;
@@ -226,7 +225,7 @@ async fn legacy_members_require_indexes_only_when_replaced(
     replacement.racks[0].members[0].cartridge_index = Some(0);
     update(&mut txn, &replacement).await?;
     txn.commit().await?;
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
     assert_eq!(
         find_by_rack_group_id(&mut txn, &replacement.rack_group_id).await?,
         Some(replacement)
@@ -239,7 +238,7 @@ async fn legacy_members_require_indexes_only_when_replaced(
 async fn expected_rack_group_persistence(
     pool: sqlx::PgPool,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
     let mut expected = group("group-b");
     expected.racks[0].members[0].cartridge_index = Some(0);
     create(&mut txn, &expected).await?;
@@ -286,10 +285,10 @@ async fn expected_rack_group_persistence(
     );
     txn.commit().await?;
 
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
     delete(&mut txn, &expected.rack_group_id).await?;
     txn.rollback().await?;
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
     assert!(
         find_by_rack_group_id(&mut txn, &expected.rack_group_id)
             .await?

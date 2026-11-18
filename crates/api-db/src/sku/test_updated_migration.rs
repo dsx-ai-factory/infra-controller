@@ -21,6 +21,8 @@
 use chrono::{DateTime, Utc};
 use sqlx::PgPool;
 
+use crate::TransactionVending as _;
+
 const UPDATED_MIGRATION: &str =
     include_str!("../../migrations/20261023025000_sku_updated_timestamp.sql");
 
@@ -48,8 +50,10 @@ async fn existing_skus_keep_null_updated_and_new_rows_get_default(
         .execute(&pool)
         .await?;
 
-    let mut txn = pool.begin().await?;
-    sqlx::raw_sql(UPDATED_MIGRATION).execute(&mut *txn).await?;
+    let mut txn = pool.txn_begin().await?;
+    sqlx::raw_sql(UPDATED_MIGRATION)
+        .execute(txn.as_mut())
+        .await?;
     txn.commit().await?;
 
     assert_eq!(updated_of(&pool, "existing").await, None);

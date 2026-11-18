@@ -226,6 +226,7 @@ mod tests {
     use sqlx::Connection;
 
     use super::*;
+    use crate::TransactionVending as _;
 
     #[crate::sqlx_test]
     async fn tenant_keyset_queries_survive_added_columns(
@@ -237,12 +238,12 @@ mod tests {
 
         // Keep the API connection and its prepared statements while another
         // connection applies the schema change, just as a migration would.
-        let mut migration = pool.begin().await?;
+        let mut migration = pool.txn_begin().await?;
         sqlx::raw_sql(
             "SET LOCAL lock_timeout = '5s';
              ALTER TABLE tenant_keysets ADD COLUMN test_added_column text;",
         )
-        .execute(&mut *migration)
+        .execute(migration.as_mut())
         .await?;
         migration.commit().await?;
 
@@ -253,7 +254,7 @@ mod tests {
     async fn exercise_tenant_keyset_queries(
         connection: &mut PgConnection,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        let mut txn = connection.begin().await?;
+        let mut txn = crate::Transaction::begin_inner(&mut *connection).await?;
         let mut expected = TenantKeyset {
             keyset_identifier: TenantKeysetIdentifier {
                 organization_id: "projection-tenant".parse()?,
@@ -294,7 +295,7 @@ mod tests {
         for (operation, keysets) in [
             (
                 "find_by_ids",
-                find_by_ids(&mut *txn, vec![expected.keyset_identifier.clone()], true).await?,
+                find_by_ids(txn.as_mut(), vec![expected.keyset_identifier.clone()], true).await?,
             ),
             (
                 "find all for tenant",

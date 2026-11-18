@@ -809,6 +809,7 @@ async fn update_interface_hostname(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::TransactionVending as _;
 
     fn mac() -> MacAddress {
         "aa:bb:cc:dd:ee:ff".parse().unwrap()
@@ -1384,7 +1385,7 @@ mod tests {
             interface_id: None,
             domain_id: None,
         };
-        let mut txn = pool.begin().await.unwrap();
+        let mut txn = pool.txn_begin().await.unwrap();
         assert_eq!(
             SerialNumberHostNamingStrategy
                 .preview(&mut txn, &ctx)
@@ -1395,14 +1396,14 @@ mod tests {
         let wrote_nothing: bool = sqlx::query_scalar(
             "SELECT backend_xid IS NULL FROM pg_stat_activity WHERE pid = pg_backend_pid()",
         )
-        .fetch_one(&mut *txn)
+        .fetch_one(txn.as_mut())
         .await
         .unwrap();
         assert!(wrote_nothing, "preview must not write or lock a row");
         let sibling: String = sqlx::query_scalar(
             "SELECT hostname FROM machine_interfaces WHERE mac_address = '02:00:00:00:00:99'::macaddr",
         )
-        .fetch_one(&mut *txn)
+        .fetch_one(txn.as_mut())
         .await
         .unwrap();
         assert_eq!(sibling, "sn-test-123");

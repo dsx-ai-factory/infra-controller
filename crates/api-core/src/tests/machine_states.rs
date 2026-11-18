@@ -46,6 +46,7 @@ use common::api_fixtures::{
     create_test_env, create_test_env_with_overrides, get_config, network_configured_with_health,
     simulate_hardware_health_report,
 };
+use db::TransactionVending as _;
 use health_report::{HealthAlertClassification, HealthProbeAlert, HealthProbeId, HealthReport};
 use ipnetwork::IpNetwork;
 use mac_address::MacAddress;
@@ -1182,7 +1183,7 @@ async fn test_failed_state_host(pool: sqlx::PgPool) {
 async fn test_nvme_clean_failed_state_host(pool: sqlx::PgPool) {
     let env = create_test_env(pool).await;
     let mh = common::api_fixtures::create_managed_host(&env).await;
-    let mut txn = env.pool.begin().await.unwrap();
+    let mut txn = env.pool.txn_begin().await.unwrap();
     let host = mh.host().db_machine(&mut txn).await;
 
     let clean_failed_req = tonic::Request::new(rpc::MachineCleanupInfo {
@@ -1274,7 +1275,7 @@ async fn test_nvme_clean_failed_state_host(pool: sqlx::PgPool) {
     env.run_machine_state_controller_iteration().await;
 
     // Check that we've moved the machine to the WaitingForCleanup state.
-    let mut txn = env.pool.begin().await.unwrap();
+    let mut txn = env.pool.txn_begin().await.unwrap();
     let host = mh.host().db_machine(&mut txn).await;
     assert!(matches!(
         host.current_state(),
@@ -1571,7 +1572,7 @@ async fn test_repeated_initial_discovery_cleanup_failure_preserves_host_init_sou
 async fn test_hdd_clean_failed_state_host(pool: sqlx::PgPool) {
     let env = create_test_env(pool).await;
     let mh = common::api_fixtures::create_managed_host(&env).await;
-    let mut txn = env.pool.begin().await.unwrap();
+    let mut txn = env.pool.txn_begin().await.unwrap();
     let host = mh.host().db_machine(&mut txn).await;
 
     let clean_failed_req = tonic::Request::new(rpc::MachineCleanupInfo {
@@ -2350,7 +2351,7 @@ async fn test_measurement_failed_state_transition(pool: sqlx::PgPool) {
         env.run_machine_state_controller_iteration().await;
     }
 
-    let mut txn = env.pool.begin().await.unwrap();
+    let mut txn = env.pool.txn_begin().await.unwrap();
     let host = mh.host().db_machine(&mut txn).await;
     assert!(matches!(
         host.current_state(),
@@ -3305,7 +3306,7 @@ async fn drive_until_past_set_boot_order(
 /// way the admin boot-interface resolution tests locate it), since a zero-DPU
 /// host boots from its HostInband NIC.
 async fn host_inband_nic_mac(env: &TestEnv, host_id: impl MachineIdSubtypeTrait) -> MacAddress {
-    let mut txn = env.pool.begin().await.unwrap();
+    let mut txn = env.pool.txn_begin().await.unwrap();
     db::machine_interface::find_by_machine_ids(txn.as_mut(), &[host_id])
         .await
         .unwrap()
@@ -7912,7 +7913,7 @@ async fn zero_dpu_host_with_instance(pool: sqlx::PgPool) -> (TestEnv, TestManage
     // `network_config` defaults to '{}' but `InstanceNetworkConfig` requires
     // an `interfaces` field; and `nvlink_config` defaults to '{"nvlink_gpus": []}'
     // but the struct expects `gpu_configs`). I want to say lol here, so lol.
-    let mut txn = env.pool.begin().await.unwrap();
+    let mut txn = env.pool.txn_begin().await.unwrap();
     sqlx::query(
         "INSERT INTO instances (machine_id, network_config, nvlink_config) \
          VALUES ($1, '{\"interfaces\": []}'::jsonb, '{\"gpu_configs\": []}'::jsonb)",

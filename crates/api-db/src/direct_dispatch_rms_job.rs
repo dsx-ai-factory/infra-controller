@@ -268,6 +268,7 @@ mod tests {
         RmsJobKind, delete, find_macs_with_firmware_job, get, get_firmware_jobs,
         replace_firmware_jobs, save,
     };
+    use crate::TransactionVending as _;
 
     const FW_OBJECT: RmsJobKind = RmsJobKind::FirmwareObject;
     const SYS_IMAGE: RmsJobKind = RmsJobKind::SwitchSystemImage;
@@ -384,30 +385,30 @@ mod tests {
 
     #[crate::sqlx_test]
     async fn rename_migration_preserves_firmware_references(pool: sqlx::PgPool) {
-        let mut txn = pool.begin().await.unwrap();
+        let mut txn = pool.txn_begin().await.unwrap();
         sqlx::raw_sql(
             "ALTER TABLE direct_dispatch_rms_jobs RENAME TO direct_dispatch_firmware_update_jobs;
              INSERT INTO direct_dispatch_firmware_update_jobs (bmc_mac, job_kind, job_id, created)
              VALUES ('02:00:00:00:00:01', 'firmware_object', 'old-fw', '2026-10-01 10:00:00+00'),
                     ('02:00:00:00:00:01', 'switch_system_image', 'old-image', '2026-10-02 10:00:00+00')",
         )
-        .execute(&mut *txn)
+        .execute(txn.as_mut())
         .await
         .unwrap();
         let predecessor: Vec<(String, String, String)> = sqlx::query_as(
             "SELECT job_kind, job_id, created::text FROM direct_dispatch_firmware_update_jobs ORDER BY job_kind",
         )
-        .fetch_all(&mut *txn)
+        .fetch_all(txn.as_mut())
         .await
         .unwrap();
         sqlx::raw_sql(RENAME_MIGRATION)
-            .execute(&mut *txn)
+            .execute(txn.as_mut())
             .await
             .unwrap();
         let migrated: Vec<(String, String, String)> = sqlx::query_as(
             "SELECT job_kind, job_id, created::text FROM direct_dispatch_rms_jobs ORDER BY job_kind",
         )
-        .fetch_all(&mut *txn)
+        .fetch_all(txn.as_mut())
         .await
         .unwrap();
         assert_eq!(migrated, predecessor);

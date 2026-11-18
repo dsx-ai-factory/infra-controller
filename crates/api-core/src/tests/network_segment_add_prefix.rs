@@ -6,6 +6,7 @@
 use std::collections::HashMap;
 
 use carbide_uuid::network::NetworkSegmentId;
+use db::TransactionVending as _;
 use model::allocation_type::AllocationType;
 use model::network_prefix::NewNetworkPrefix;
 use model::network_segment::{AllocationStrategy, NetworkDefinition, NetworkDefinitionSegmentType};
@@ -75,7 +76,7 @@ fn config_version(segment: &forge::NetworkSegment) -> config_version::ConfigVers
 async fn added_ipv6_prefix_serves_existing_bmc(pool: sqlx::PgPool) -> eyre::Result<()> {
     let env = create_test_env(pool.clone()).await;
     let host = create_managed_host(&env).await;
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
     let bmc = db::machine_interface::find_all(txn.as_mut())
         .await?
         .into_iter()
@@ -124,7 +125,7 @@ async fn added_ipv6_prefix_serves_existing_bmc(pool: sqlx::PgPool) -> eyre::Resu
             RPC_MESSAGE_KIND_V6_INFO_REQUEST,
         ))
         .await?;
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
     let inferred = db::machine_interface_address::find_for_interface(&mut txn, bmc.id)
         .await?
         .into_iter()
@@ -150,7 +151,7 @@ async fn added_ipv6_prefix_serves_existing_bmc(pool: sqlx::PgPool) -> eyre::Resu
     assert_eq!(lease.machine_interface_id, Some(bmc.id));
     assert_eq!(lease.segment_id, Some(bmc.segment_id));
     assert_eq!(lease.prefix, "2001:db8:53::/64");
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
     let after = db::machine_interface::find_one(txn.as_mut(), bmc.id).await?;
     assert_eq!(after.machine_id, bmc.machine_id);
     assert_eq!(after.attached_dpu_machine_id, bmc.attached_dpu_machine_id);
@@ -212,7 +213,7 @@ async fn added_prefixes_survive_retry_and_startup(pool: sqlx::PgPool) -> eyre::R
     ] {
         let seeds = HashMap::from([(name.to_string(), seed.clone())]);
         crate::db_init::create_initial_networks(&env.api, &pool, &seeds).await?;
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
         let stored = db::network_segment::find_by_name(&mut txn, name).await?;
         txn.commit().await?;
         let before = read_segment(&env.api, stored.id).await;
@@ -262,7 +263,7 @@ async fn added_prefixes_survive_retry_and_startup(pool: sqlx::PgPool) -> eyre::R
             seed.infer_slaac_eui64_addresses
         );
         // Allocation strategy is stored policy, not part of the public config.
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
         let persisted = db::network_segment::find_by_name(&mut txn, name).await?;
         assert_eq!(
             persisted.config.allocation_strategy,
@@ -298,7 +299,7 @@ async fn added_prefixes_survive_retry_and_startup(pool: sqlx::PgPool) -> eyre::R
         // Startup must not overwrite live prefixes with the single-family seed.
         crate::db_init::create_initial_networks(&env.api, &pool, &seeds).await?;
         assert_eq!(read_segment(&env.api, stored.id).await, applied);
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
         assert_eq!(
             db::network_segment::stored_def(txn.as_mut(), name).await?,
             Some(seed)
@@ -370,7 +371,7 @@ async fn add_prefix_rejections_preserve_segment(pool: sqlx::PgPool) -> eyre::Res
         model::site_prefix::SitePrefixLifecycleState::Ready,
     )
     .await;
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
     let target = db::network_segment::find_by_name(&mut txn, "target").await?;
     let ipv6_target = db::network_segment::find_by_name(&mut txn, "occupied").await?;
     let vpc = db::vpc::find_by_name(txn.as_mut(), "attached-target")
@@ -629,7 +630,7 @@ async fn add_prefix_dns_failure_rolls_back_and_retries(pool: sqlx::PgPool) -> ey
         underlay_seed("192.0.49.0/24", Some("192.0.49.1")),
     )]);
     crate::db_init::create_initial_networks(&env.api, &pool, &seeds).await?;
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
     let target = db::network_segment::find_by_name(&mut txn, "dns-failure").await?;
     txn.commit().await?;
     let before = read_segment(&env.api, target.id).await;
@@ -690,11 +691,11 @@ async fn competing_prefix_additions_serialize(pool: sqlx::PgPool) -> eyre::Resul
         underlay_seed("192.0.50.0/24", Some("192.0.50.1")),
     )]);
     crate::db_init::create_initial_networks(&env.api, &pool, &seeds).await?;
-    let mut blocker = pool.begin().await?;
+    let mut blocker = pool.txn_begin().await?;
     let target = db::network_segment::find_by_name(&mut blocker, "concurrent").await?;
     db::tenant_prefix_overlap::lock_checks(&mut blocker).await?;
     let blocker_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
-        .fetch_one(&mut *blocker)
+        .fetch_one(blocker.as_mut())
         .await?;
     let first = forge::AddNetworkSegmentPrefixRequest {
         network_segment_id: Some(target.id),
@@ -735,7 +736,7 @@ async fn competing_prefix_additions_serialize(pool: sqlx::PgPool) -> eyre::Resul
     );
     assert_eq!(winner.config.as_ref().expect("config").prefixes.len(), 2);
     assert_eq!(read_segment(&env.api, target.id).await, winner);
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
     let mut zones = 0;
     for prefix in ["2001:db8:50::/64", "2001:db8:51::/64"] {
         let zone = db::dns::cidr_to_reverse_zone(prefix.parse()?).expect("aligned prefix");
@@ -759,11 +760,11 @@ async fn deletion_reads_prefixes_after_pending_addition(pool: sqlx::PgPool) -> e
         underlay_seed("192.0.52.0/24", Some("192.0.52.1")),
     )]);
     crate::db_init::create_initial_networks(&env.api, &pool, &seeds).await?;
-    let mut addition = pool.begin().await?;
+    let mut addition = pool.txn_begin().await?;
     db::tenant_prefix_overlap::lock_checks(&mut addition).await?;
     let target = db::network_segment::find_by_name(&mut addition, "delete-race").await?;
     let blocker_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
-        .fetch_one(&mut *addition)
+        .fetch_one(addition.as_mut())
         .await?;
     let prefix = NewNetworkPrefix {
         prefix: "2001:db8:52::/64".parse()?,
@@ -804,7 +805,7 @@ async fn deletion_reads_prefixes_after_pending_addition(pool: sqlx::PgPool) -> e
     released?;
     deleted?;
     assert!(read_segment(&env.api, target.id).await.deleted.is_some());
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
     for prefix in [target.prefixes[0].prefix, prefix.prefix] {
         let zone = db::dns::cidr_to_reverse_zone(prefix).expect("aligned prefix");
         assert!(

@@ -30,7 +30,7 @@ use carbide_uuid::rack::RackProfileId;
 use carbide_uuid::switch::SwitchId;
 use component_manager::mock::MockNvSwitchManager;
 use component_manager::nv_switch_manager::ConfigureSwitchCertificateJobStatus;
-use db::switch as db_switch;
+use db::{TransactionVending as _, switch as db_switch};
 use librms::protos::rack_manager as rms;
 use model::component_manager::ConfigureSwitchCertificateState;
 use model::switch::{
@@ -273,7 +273,7 @@ async fn reset_preserves_restart_intent_through_queue_and_controller_reload(pool
             .await
             .unwrap();
     }
-    let mut txn = pool.begin().await.unwrap();
+    let mut txn = pool.txn_begin().await.unwrap();
     set_switch_rack_id(&mut txn, &switch_id, &rack.id)
         .await
         .unwrap();
@@ -418,7 +418,7 @@ async fn preserves_replacement_maintenance_after_power_completion(pool: sqlx::Pg
             .await
             .unwrap();
     }
-    let mut txn = pool.begin().await.unwrap();
+    let mut txn = pool.txn_begin().await.unwrap();
     set_switch_rack_id(&mut txn, &switch_id, &rack.id)
         .await
         .unwrap();
@@ -551,7 +551,7 @@ async fn certificate_completion_preserves_replacement_after_controller_reload(po
         (ConfigureSwitchCertificateState::Failed, false),
         (ConfigureSwitchCertificateState::Completed, true),
     ] {
-        let mut txn = pool.begin().await.unwrap();
+        let mut txn = pool.txn_begin().await.unwrap();
         set_switch_rack_id(&mut txn, &switch_id, &"rack-id-1".into())
             .await
             .unwrap();

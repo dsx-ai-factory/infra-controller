@@ -1218,6 +1218,7 @@ mod tests {
     use model::site_explorer::{Chassis, EndpointExplorationError, EndpointType, NetworkAdapter};
 
     use super::*;
+    use crate::TransactionVending as _;
 
     #[crate::sqlx_test]
     async fn reset_failed_preingestion_reports_applied_or_not_applicable(pool: sqlx::PgPool) {
@@ -1252,7 +1253,7 @@ mod tests {
         ];
 
         for case in cases {
-            let mut txn = pool.begin().await.unwrap();
+            let mut txn = pool.txn_begin().await.unwrap();
             let address = "10.0.4.1".parse().unwrap();
             if let Some(state) = case.state {
                 seed_endpoint(&mut txn, "10.0.4.1", state).await;
@@ -1277,9 +1278,9 @@ mod tests {
 
     #[crate::sqlx_test]
     async fn reset_failed_preingestion_propagates_database_errors(pool: sqlx::PgPool) {
-        let mut txn = pool.begin().await.unwrap();
+        let mut txn = pool.txn_begin().await.unwrap();
         sqlx::query("SET TRANSACTION READ ONLY")
-            .execute(&mut *txn)
+            .execute(txn.as_mut())
             .await
             .unwrap();
 
@@ -1296,7 +1297,7 @@ mod tests {
 
     #[crate::sqlx_test]
     async fn re_exploration_request_preserves_report_version(pool: sqlx::PgPool) {
-        let mut txn = pool.begin().await.unwrap();
+        let mut txn = pool.txn_begin().await.unwrap();
         let address = "10.0.3.1".parse().unwrap();
         assert_eq!(
             re_explore_if_version_matches(address, ConfigVersion::initial(), &mut txn)
@@ -1335,7 +1336,7 @@ mod tests {
     async fn a_failed_first_probe_persists_an_initial_row_that_later_failures_advance(
         pool: sqlx::PgPool,
     ) {
-        let mut txn = pool.begin().await.unwrap();
+        let mut txn = pool.txn_begin().await.unwrap();
         let address: IpAddr = "10.0.5.1".parse().unwrap();
         let refused = EndpointExplorationError::ConnectionRefused {
             details: "connection refused".to_string(),
@@ -1419,7 +1420,7 @@ mod tests {
     /// win is rows + per-row jsonb decode, N -> 0.
     #[crate::sqlx_test]
     async fn count_matches_find_not_waiting_not_error(pool: sqlx::PgPool) {
-        let mut txn = pool.begin().await.unwrap();
+        let mut txn = pool.txn_begin().await.unwrap();
         // Three endpoints still in preingestion (not complete), not waiting, no error.
         seed_endpoint(&mut txn, "10.0.0.1", PreingestionState::Initial).await;
         seed_endpoint(&mut txn, "10.0.0.2", PreingestionState::RecheckVersions).await;
@@ -1427,10 +1428,10 @@ mod tests {
         // One that is complete -> excluded by the predicate.
         seed_endpoint(&mut txn, "10.0.0.4", PreingestionState::Complete).await;
 
-        let rows = find_preingest_not_waiting_not_error(&mut *txn)
+        let rows = find_preingest_not_waiting_not_error(txn.as_mut())
             .await
             .unwrap();
-        let count = count_preingest_not_waiting_not_error(&mut *txn)
+        let count = count_preingest_not_waiting_not_error(txn.as_mut())
             .await
             .unwrap();
 
@@ -1444,14 +1445,14 @@ mod tests {
     /// per-row jsonb reports.
     #[crate::sqlx_test]
     async fn count_matches_find_installing(pool: sqlx::PgPool) {
-        let mut txn = pool.begin().await.unwrap();
+        let mut txn = pool.txn_begin().await.unwrap();
         seed_endpoint(&mut txn, "10.0.1.1", installing_state()).await;
         seed_endpoint(&mut txn, "10.0.1.2", installing_state()).await;
         // Not installing -> excluded.
         seed_endpoint(&mut txn, "10.0.1.3", PreingestionState::Initial).await;
 
-        let rows = find_preingest_installing(&mut *txn).await.unwrap();
-        let count = count_preingest_installing(&mut *txn).await.unwrap();
+        let rows = find_preingest_installing(txn.as_mut()).await.unwrap();
+        let count = count_preingest_installing(txn.as_mut()).await.unwrap();
 
         assert_eq!(rows.len(), 2, "two endpoints are installing firmware");
         assert_eq!(count, 2, "count agrees with the row count");
@@ -1496,7 +1497,7 @@ mod tests {
     /// unrecognised.
     #[crate::sqlx_test]
     async fn hardware_class_is_written_from_the_report(pool: sqlx::PgPool) {
-        let mut txn = pool.begin().await.unwrap();
+        let mut txn = pool.txn_begin().await.unwrap();
         let classified: IpAddr = "10.0.2.1".parse().unwrap();
         let unclassified: IpAddr = "10.0.2.2".parse().unwrap();
 
@@ -1569,7 +1570,7 @@ mod tests {
             .expect("read attester_digest")
         }
 
-        let mut txn = pool.begin().await.unwrap();
+        let mut txn = pool.txn_begin().await.unwrap();
         let address: IpAddr = "10.0.6.1".parse().unwrap();
         let eight_gpus = report_with_attesters(Some(&[
             "HGX_ERoT_GPU_0",
@@ -1625,7 +1626,7 @@ mod tests {
             .expect("read the class and digest")
         }
 
-        let mut txn = pool.begin().await.unwrap();
+        let mut txn = pool.txn_begin().await.unwrap();
         let address: IpAddr = "10.0.6.2".parse().unwrap();
         let observed = EndpointExplorationReport {
             hardware_class: Some(HARDWARE_CLASS.to_string()),
@@ -1675,7 +1676,7 @@ mod tests {
     ) {
         const DEPARTED_HARDWARE_CLASS: &str = "lenovo_thinksystem-sr680a-v3";
 
-        let mut txn = pool.begin().await.unwrap();
+        let mut txn = pool.txn_begin().await.unwrap();
         for (address, class) in [
             ("10.0.3.1", Some(HARDWARE_CLASS)),
             ("10.0.3.2", Some(HARDWARE_CLASS)),
@@ -1709,7 +1710,7 @@ mod tests {
             .await
             .unwrap();
 
-        let counts = hardware_class_counts(&mut *txn).await.unwrap();
+        let counts = hardware_class_counts(txn.as_mut()).await.unwrap();
 
         let tallied: Vec<_> = counts
             .iter()
@@ -1730,7 +1731,7 @@ mod tests {
     /// class an endpoint recorded and for nothing else.
     #[crate::sqlx_test]
     async fn hardware_class_recorded_answers_for_the_classes_endpoints_carry(pool: sqlx::PgPool) {
-        let mut txn = pool.begin().await.unwrap();
+        let mut txn = pool.txn_begin().await.unwrap();
         insert(
             "10.0.4.1".parse().unwrap(),
             &report_with_class(Some(HARDWARE_CLASS)),
@@ -1741,12 +1742,12 @@ mod tests {
         .unwrap();
 
         assert!(
-            hardware_class_recorded(&mut *txn, HARDWARE_CLASS)
+            hardware_class_recorded(txn.as_mut(), HARDWARE_CLASS)
                 .await
                 .unwrap()
         );
         assert!(
-            !hardware_class_recorded(&mut *txn, OTHER_HARDWARE_CLASS)
+            !hardware_class_recorded(txn.as_mut(), OTHER_HARDWARE_CLASS)
                 .await
                 .unwrap()
         );
@@ -1754,7 +1755,7 @@ mod tests {
 
     #[crate::sqlx_test]
     async fn find_by_mac_address_includes_adapter_ports(pool: sqlx::PgPool) {
-        let mut txn = pool.begin().await.unwrap();
+        let mut txn = pool.txn_begin().await.unwrap();
         let mac_address = "94:6d:ae:53:cb:9b".parse().unwrap();
         let address = "10.0.2.1".parse().unwrap();
         let report = EndpointExplorationReport {
@@ -1772,7 +1773,9 @@ mod tests {
 
         insert(address, &report, false, &mut txn).await.unwrap();
 
-        let endpoints = find_by_mac_address(&mut *txn, mac_address).await.unwrap();
+        let endpoints = find_by_mac_address(txn.as_mut(), mac_address)
+            .await
+            .unwrap();
         assert_eq!(endpoints.len(), 1);
         assert_eq!(endpoints[0].address, address);
     }

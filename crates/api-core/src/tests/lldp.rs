@@ -20,6 +20,7 @@ use carbide_authn::middleware::Principal;
 use carbide_uuid::machine::{DpuMachineId, MachineId};
 use common::api_fixtures::create_test_env;
 use common::api_fixtures::dpu::create_dpu_machine;
+use db::TransactionVending as _;
 use itertools::Itertools;
 use rpc::forge::LldpReportResult::*;
 use rpc::forge::forge_server::Forge;
@@ -162,7 +163,7 @@ async fn test_lldp_topology_update(pool: sqlx::PgPool) -> Result<(), Box<dyn std
             .is_empty()
     );
 
-    let mut txn = env.pool.begin().await.unwrap();
+    let mut txn = env.pool.txn_begin().await.unwrap();
 
     let machine_interface_id =
         db::machine_interface::find_by_machine_ids(&mut txn, &[dpu_machine_id])
@@ -174,11 +175,11 @@ async fn test_lldp_topology_update(pool: sqlx::PgPool) -> Result<(), Box<dyn std
 
     let query =
         "UPDATE port_to_network_device_map SET network_device_id=NULL WHERE local_port='oob_net0'";
-    sqlx::query(query).execute(&mut *txn).await.unwrap();
+    sqlx::query(query).execute(txn.as_mut()).await.unwrap();
     let query = "UPDATE network_devices SET id='mac=a1:b1:c1:00:00:11', name='Test' WHERE id='mac=a1:b1:c1:00:00:01'";
-    sqlx::query(query).execute(&mut *txn).await.unwrap();
+    sqlx::query(query).execute(txn.as_mut()).await.unwrap();
     let query = "UPDATE port_to_network_device_map SET network_device_id='mac=a1:b1:c1:00:00:11' WHERE local_port='oob_net0'";
-    sqlx::query(query).execute(&mut *txn).await.unwrap();
+    sqlx::query(query).execute(txn.as_mut()).await.unwrap();
     txn.commit().await.unwrap();
 
     let topology = env

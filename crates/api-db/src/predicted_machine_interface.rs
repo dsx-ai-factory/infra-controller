@@ -257,6 +257,7 @@ mod test_bulk_host_interfaces {
     use carbide_uuid::machine::{MachineIdSource, MachineType};
 
     use super::*;
+    use crate::TransactionVending as _;
 
     #[crate::sqlx_test]
     async fn bulk_host_interface_predictions_preserve_omitted_ids(
@@ -267,7 +268,7 @@ mod test_bulk_host_interfaces {
             [0x91; 32],
             MachineType::Host,
         );
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
         sqlx::query("INSERT INTO machines (id, dpf) VALUES ($1, '{}'::jsonb)")
             .bind(machine_id)
             .execute(txn.as_mut())

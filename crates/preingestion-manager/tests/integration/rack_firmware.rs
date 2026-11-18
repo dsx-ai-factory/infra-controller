@@ -18,6 +18,7 @@ use carbide_test_harness::prelude::*;
 use carbide_test_harness::test_support::default_config;
 use carbide_uuid::rack::{RackId, RackProfileId};
 use component_manager::rms::RmsBackend;
+use db::TransactionVending as _;
 use librms::protos::rack_manager as rms;
 use mac_address::MacAddress;
 use model::allocation_type::AllocationType;
@@ -198,7 +199,7 @@ async fn compute_submission_is_device_scoped_and_resumes_polling(
     let rack_id = RackId::from("rack-compute");
     let bmc_mac: MacAddress = "02:00:00:00:00:10".parse()?;
     let addresses: [IpAddr; 2] = ["192.0.1.10".parse()?, "fd00::10".parse()?];
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
 
     seed_expected_rack(txn.as_mut(), &rack_id).await?;
     seed_compute(txn.as_mut(), &rack_id, bmc_mac, addresses[0]).await?;
@@ -277,7 +278,7 @@ async fn compute_submission_is_device_scoped_and_resumes_polling(
 
     let polling_manager = manager(&pool, &env, rms.clone(), rack_profiles(Some(TOKEN_NAME)));
 
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
     db::explored_endpoints::set_waiting_for_explorer_refresh(addresses[0], txn.as_mut()).await?;
 
     db::explored_endpoints::set_preingestion_for_addresses(
@@ -345,7 +346,7 @@ async fn successful_response_without_job_completes(
     let rack_id = RackId::from("rack-noop");
     let bmc_mac: MacAddress = "02:00:00:00:00:20".parse()?;
     let bmc_ip: IpAddr = "192.0.1.20".parse()?;
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
 
     seed_expected_rack(txn.as_mut(), &rack_id).await?;
     seed_compute(txn.as_mut(), &rack_id, bmc_mac, bmc_ip).await?;
@@ -387,7 +388,7 @@ async fn failed_submission_with_job_id_fails_without_resubmitting(
     let rack_id = RackId::from("rack-rejected-job");
     let bmc_mac: MacAddress = "02:00:00:00:00:21".parse()?;
     let bmc_ip: IpAddr = "192.0.1.21".parse()?;
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
 
     seed_expected_rack(txn.as_mut(), &rack_id).await?;
     seed_compute(txn.as_mut(), &rack_id, bmc_mac, bmc_ip).await?;
@@ -431,7 +432,7 @@ async fn submission_timeout_fails_without_resubmitting(
     let rack_id = RackId::from("rack-submit-timeout");
     let bmc_mac: MacAddress = "02:00:00:00:00:23".parse()?;
     let bmc_ip: IpAddr = "192.0.1.23".parse()?;
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
 
     seed_expected_rack(txn.as_mut(), &rack_id).await?;
     seed_compute(txn.as_mut(), &rack_id, bmc_mac, bmc_ip).await?;
@@ -482,7 +483,7 @@ async fn polling_timeout_preserves_job_and_retries(
     let rack_id = RackId::from("rack-poll-timeout");
     let bmc_mac: MacAddress = "02:00:00:00:00:24".parse()?;
     let bmc_ip: IpAddr = "192.0.1.24".parse()?;
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
 
     seed_expected_rack(txn.as_mut(), &rack_id).await?;
     seed_compute(txn.as_mut(), &rack_id, bmc_mac, bmc_ip).await?;
@@ -553,7 +554,7 @@ async fn failed_firmware_job_fails_preingestion(
     let rack_id = RackId::from("rack-failed-job");
     let bmc_mac: MacAddress = "02:00:00:00:00:22".parse()?;
     let bmc_ip: IpAddr = "192.0.1.22".parse()?;
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
 
     seed_expected_rack(txn.as_mut(), &rack_id).await?;
     seed_compute(txn.as_mut(), &rack_id, bmc_mac, bmc_ip).await?;
@@ -597,7 +598,7 @@ async fn rack_compute_without_firmware_object_skips_standalone_update(
     let rack_id = RackId::from("rack-no-firmware-object");
     let bmc_mac: MacAddress = "02:00:00:00:00:26".parse()?;
     let bmc_ip: IpAddr = "192.0.1.26".parse()?;
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
 
     seed_expected_rack(txn.as_mut(), &rack_id).await?;
     seed_compute(txn.as_mut(), &rack_id, bmc_mac, bmc_ip).await?;
@@ -635,7 +636,7 @@ async fn missing_job_id_fails_closed_without_resubmitting(
     let bmc_mac: MacAddress = "02:00:00:00:00:30".parse()?;
     let bmc_ip: IpAddr = "192.0.1.30".parse()?;
 
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
     seed_expected_rack(txn.as_mut(), &rack_id).await?;
 
     seed_compute(txn.as_mut(), &rack_id, bmc_mac, bmc_ip).await?;
@@ -678,7 +679,7 @@ async fn expected_switch_skips_compute_firmware(
     let rack_id = RackId::from("rack-switch");
     let bmc_mac: MacAddress = "02:00:00:00:00:40".parse()?;
     let bmc_ip: IpAddr = "192.0.1.40".parse()?;
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
 
     seed_expected_rack(txn.as_mut(), &rack_id).await?;
 

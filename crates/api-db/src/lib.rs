@@ -1079,8 +1079,8 @@ mod tests {
                 .map_err(|e| DatabaseError::query(query, e))
         }
 
-        let mut first = pool.begin().await?;
-        let mut second = pool.begin().await?;
+        let mut first = pool.txn_begin().await?;
+        let mut second = pool.txn_begin().await?;
         lock(&mut first, 1).await?;
         lock(&mut second, 2).await?;
         let (first_result, second_result) = tokio::join!(lock(&mut first, 2), lock(&mut second, 1));
@@ -1099,10 +1099,10 @@ mod tests {
 
     #[crate::sqlx_test]
     async fn read_only_snapshot_rejects_writes(pool: PgPool) {
-        let mut txn = pool.begin().await.unwrap();
+        let mut txn = pool.txn_begin().await.unwrap();
         set_read_only_snapshot(&mut txn).await.unwrap();
         let error = sqlx::query("CREATE TABLE read_only_snapshot_probe (id int)")
-            .execute(&mut *txn)
+            .execute(txn.as_mut())
             .await
             .expect_err("a read-only transaction rejects writes");
         // read_only_sql_transaction
@@ -1217,6 +1217,24 @@ mod tests {
                 }
             },
         );
+    }
+
+    #[tokio::test]
+    async fn transaction_extension_retains_caller_location() {
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .connect_lazy("postgresql://unused/unused")
+            .unwrap();
+        pool.close().await;
+
+        let caller_line = line!() + 1;
+        let begin = pool.txn_begin();
+        let DatabaseError::Sqlx(error) = begin.await.unwrap_err() else {
+            panic!("closed pool should return a SQLx error");
+        };
+        assert!(matches!(error.source, sqlx::Error::PoolClosed));
+        assert_eq!(error.query, "transaction begin");
+        assert_eq!(error.file, file!());
+        assert_eq!(error.line, caller_line);
     }
 
     #[test]

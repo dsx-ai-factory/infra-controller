@@ -22,6 +22,7 @@ use carbide_test_harness::test_support::fixture_config::{
 };
 use carbide_uuid::machine::{HostMachineId, MachineId, MachineIdSource, MachineType};
 use config_version::ConfigVersion;
+use db::TransactionVending as _;
 use db::state_history::StateHistoryTableId;
 use model::machine::ManagedHostState;
 use model::machine::machine_search_config::MachineSearchConfig;
@@ -47,7 +48,7 @@ async fn controller_state_rejects_stale_snapshots_without_changing_group_history
         .chain(host.dpus.iter().map(TestMachine::id))
         .collect();
     let io = MachineStateControllerIO::default();
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
     let snapshot = io
         .load_object_state(&mut txn, &host.host.id)
         .await?
@@ -103,7 +104,7 @@ async fn controller_state_rejects_stale_snapshots_without_changing_group_history
             expected: db::ConditionalWrite::NotApplied(db::ControllerStateNotCurrent),
         },
     ] {
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
         assert_eq!(
             io.persist_controller_state(
                 &mut txn,
@@ -120,7 +121,7 @@ async fn controller_state_rejects_stale_snapshots_without_changing_group_history
         // Even committing a rejection must not add history or change a DPU.
         txn.commit().await?;
 
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
         let histories = db::state_history::find_by_object_ids(
             &mut txn,
             StateHistoryTableId::Machine,
@@ -182,7 +183,7 @@ async fn controller_state_rejects_a_missing_host_without_recording_history(
     )
     .try_into()?;
     let old_version = ConfigVersion::initial();
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
     assert_eq!(
         MachineStateControllerIO::default()
             .persist_controller_state(
@@ -197,7 +198,7 @@ async fn controller_state_rejects_a_missing_host_without_recording_history(
     );
     txn.commit().await?;
 
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
     assert!(
         db::state_history::for_object(&mut txn, StateHistoryTableId::Machine, &host_id)
             .await?

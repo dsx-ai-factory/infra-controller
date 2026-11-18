@@ -15,9 +15,9 @@ use sqlx::{PgConnection, PgPool};
 use uuid::Uuid;
 
 use super::{acknowledge, insert, latest, load, lock_binding};
-use crate::DatabaseError;
 use crate::resource_pool::binding::bind_or_verify;
 use crate::test_support::postgres::wait_for_blocked_query;
+use crate::{DatabaseError, TransactionVending as _};
 
 /// Create a remote integer pool binding without seeding inventory or registrations.
 async fn new_binding(txn: &mut PgConnection, name: &str) -> eyre::Result<ResourcePoolBinding> {
@@ -38,7 +38,7 @@ async fn new_binding(txn: &mut PgConnection, name: &str) -> eyre::Result<Resourc
 /// Database constraints reject each invalid write without replacing saved bytes.
 #[crate::sqlx_test]
 async fn registration_constraints_preserve_the_saved_request(pool: PgPool) -> eyre::Result<()> {
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
     let binding = new_binding(&mut txn, "constraints").await?;
     let saved = ResourcePoolRegistration {
         binding_id: binding.binding_id,
@@ -93,7 +93,7 @@ async fn registration_constraints_preserve_the_saved_request(pool: PgPool) -> ey
         |(registration, constraint)| {
             let pool = &pool;
             async move {
-                let mut txn = pool.begin().await?;
+                let mut txn = pool.txn_begin().await?;
                 let error = insert(&mut txn, &registration)
                     .await
                     .expect_err("invalid registration must fail");
@@ -115,7 +115,7 @@ async fn registration_constraints_preserve_the_saved_request(pool: PgPool) -> ey
 async fn caller_transactions_preserve_history_and_pending_revisions(
     pool: PgPool,
 ) -> eyre::Result<()> {
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
     let binding = new_binding(&mut txn, "history").await?;
     let other_binding = new_binding(&mut txn, "other").await?;
     txn.commit().await?;
@@ -128,7 +128,7 @@ async fn caller_transactions_preserve_history_and_pending_revisions(
     assert_eq!(latest(&pool, binding.binding_id).await?, None);
 
     // Abandoning preparation must leave no request for a later worker to send.
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
     assert!(matches!(
         lock_binding(&mut txn, Uuid::new_v4()).await,
         Err(DatabaseError::NotFoundError { .. })
@@ -136,13 +136,13 @@ async fn caller_transactions_preserve_history_and_pending_revisions(
     assert_eq!(lock_binding(&mut txn, binding.binding_id).await?, binding);
     insert(&mut txn, &pending).await?;
     assert_eq!(
-        load(&mut *txn, binding.binding_id, 1).await?,
+        load(txn.as_mut(), binding.binding_id, 1).await?,
         Some(pending.clone())
     );
     txn.rollback().await?;
     assert_eq!(latest(&pool, binding.binding_id).await?, None);
 
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
     insert(&mut txn, &pending).await?;
     // Another binding can register while this one still awaits its provider.
     let other = ResourcePoolRegistration {
@@ -157,17 +157,17 @@ async fn caller_transactions_preserve_history_and_pending_revisions(
         accepted: true,
         ..pending.clone()
     };
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
     acknowledge(&mut txn, binding.binding_id, 1).await?;
     assert_eq!(
-        load(&mut *txn, binding.binding_id, 1).await?,
+        load(txn.as_mut(), binding.binding_id, 1).await?,
         Some(accepted.clone())
     );
     txn.rollback().await?;
     assert_eq!(load(&pool, binding.binding_id, 1).await?, Some(pending));
 
     // Acceptance frees the pending slot while keeping the old request for retries.
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
     acknowledge(&mut txn, binding.binding_id, 1).await?;
     acknowledge(&mut txn, binding.binding_id, 1).await?;
     let successor = ResourcePoolRegistration {
@@ -195,32 +195,32 @@ async fn caller_transactions_preserve_history_and_pending_revisions(
 async fn binding_lock_serializes_registration_and_allows_key_shares(
     pool: PgPool,
 ) -> eyre::Result<()> {
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
     let binding = new_binding(&mut txn, "locking").await?;
     txn.commit().await?;
 
-    let mut first_txn = pool.begin().await?;
+    let mut first_txn = pool.txn_begin().await?;
     assert_eq!(
         lock_binding(&mut first_txn, binding.binding_id).await?,
         binding
     );
     let first_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
-        .fetch_one(&mut *first_txn)
+        .fetch_one(first_txn.as_mut())
         .await?;
 
     // Foreign-key checks take this lock when an allocation references the binding.
-    let mut key_share_txn = pool.begin().await?;
+    let mut key_share_txn = pool.txn_begin().await?;
     let referenced_id: Uuid = sqlx::query_scalar(
         "SELECT binding_id FROM resource_pool_binding
          WHERE binding_id = $1 FOR KEY SHARE NOWAIT",
     )
     .bind(binding.binding_id)
-    .fetch_one(&mut *key_share_txn)
+    .fetch_one(key_share_txn.as_mut())
     .await?;
     assert_eq!(referenced_id, binding.binding_id);
     key_share_txn.commit().await?;
 
-    let mut second_txn = pool.begin().await?;
+    let mut second_txn = pool.txn_begin().await?;
     let second_binding = async {
         let second = lock_binding(&mut second_txn, binding.binding_id).await?;
         second_txn.commit().await?;
@@ -263,11 +263,11 @@ async fn original_migration_preserves_pools_and_requires_true_singleton(
     let inventory_query = "SELECT to_jsonb(resource_pool) FROM resource_pool ORDER BY name, value";
     let before: Vec<Value> = sqlx::query_scalar(inventory_query).fetch_all(&pool).await?;
 
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
     sqlx::raw_sql(include_str!(
         "../../../migrations/20261021212048_resource_pool_registration.sql"
     ))
-    .execute(&mut *txn)
+    .execute(txn.as_mut())
     .await?;
     txn.commit().await?;
 

@@ -21,6 +21,7 @@ use carbide_uuid::network::NetworkSegmentId;
 use carbide_uuid::vpc::{VpcId, VpcPrefixId};
 use carbide_uuid::vpc_peering::VpcPeeringId;
 use config_version::ConfigVersion;
+use db::TransactionVending as _;
 use futures_util::{FutureExt, TryFutureExt};
 use model::metadata::Metadata;
 use model::vpc_prefix::{DeleteVpcPrefix, NewVpcPrefix, VpcPrefixConfig};
@@ -67,7 +68,7 @@ pub(super) fn deletion_controller(
 
 /// Simulates every receiver DPU applying its current network configuration.
 async fn acknowledge_peering_receivers(env: &TestEnv, id: VpcPeeringId) {
-    let mut txn = env.pool.begin().await.unwrap();
+    let mut txn = env.pool.txn_begin().await.unwrap();
     let peering = db::vpc_peering::find_by_ids(&mut txn, vec![id])
         .await
         .unwrap()
@@ -442,10 +443,10 @@ async fn vpc_peering_rejects_direct_and_sibling_retained_prefixes(
         }))
         .await?;
 
-    let mut txn = env.pool.begin().await?;
+    let mut txn = env.pool.txn_begin().await?;
     db::tenant_prefix_overlap::lock_checks(&mut txn).await?;
     let blocker_pid = sqlx::query_scalar("SELECT pg_backend_pid()")
-        .fetch_one(&mut *txn)
+        .fetch_one(txn.as_mut())
         .await?;
     let retained_prefix_id = retain_peering_overlap_prefix(&mut txn, &vpcs[2]).await?;
 
@@ -542,7 +543,7 @@ async fn vpc_peering_overlap_gate_off_freezes_new_duplicate_source(
         .run_single_iteration_ext(false)
         .await;
 
-    let mut txn = env.pool.begin().await?;
+    let mut txn = env.pool.txn_begin().await?;
     retain_peering_overlap_prefix(&mut txn, &vpcs[2]).await?;
     txn.commit().await?;
     // The other copy is not a peer. Gate-off still prohibits gaining the
@@ -582,7 +583,7 @@ async fn active_peerings_block_receiver_vpc_type_changes(
     )
     .await?;
     let receiver_id = vpcs[0].id.unwrap();
-    let mut txn = env.pool.begin().await?;
+    let mut txn = env.pool.txn_begin().await?;
     retain_peering_overlap_prefix(&mut txn, &vpcs[2]).await?;
 
     // Reconstruct legacy ETV/FNN rows that current creation admission rejects.
@@ -654,14 +655,14 @@ async fn inactive_peerings_do_not_block_vpc_type_changes(
     )
     .await?;
     let receiver_id = vpcs[0].id.unwrap();
-    let mut txn = env.pool.begin().await?;
+    let mut txn = env.pool.txn_begin().await?;
     retain_peering_overlap_prefix(&mut txn, &vpcs[2]).await?;
     txn.commit().await?;
 
     // Preserve legacy cross-virtualizer rows without going through creation
     // admission. The explicit `none` policy keeps every peer import inactive,
     // so changing the receiver type cannot expose the overlapping sources.
-    let mut txn = env.pool.begin().await?;
+    let mut txn = env.pool.txn_begin().await?;
     for source in &vpcs[1..] {
         db::vpc_peering::create(
             &mut txn,
@@ -1149,7 +1150,7 @@ async fn deprecated_mixed_policy_does_not_activate_existing_fnn_etv_peering(
         .await;
 
     // Simulate a row retained from a release where Mixed admitted this pair.
-    let mut txn = env.pool.begin().await?;
+    let mut txn = env.pool.txn_begin().await?;
     db::vpc_peering::create(
         &mut txn,
         fnn_vpc_id.unwrap(),
@@ -1246,7 +1247,7 @@ async fn etv_peering_removal_must_finish_before_vpc_deletion(
     assert_eq!(error.code(), tonic::Code::FailedPrecondition);
     assert!(error.message().contains("delete its peerings"));
 
-    let mut txn = env.pool.begin().await?;
+    let mut txn = env.pool.txn_begin().await?;
     assert_eq!(
         db::resource_pool::find_owned_allocation(
             &env.common_pools.ethernet.pool_vpc_vni,
@@ -1306,7 +1307,7 @@ async fn etv_peering_removal_must_finish_before_vpc_deletion(
             id: Some(peer_vpc_id),
         }))
         .await?;
-    let mut txn = env.pool.begin().await?;
+    let mut txn = env.pool.txn_begin().await?;
     assert!(
         db::resource_pool::find_owned_allocation(
             &env.common_pools.ethernet.pool_vpc_vni,

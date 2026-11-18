@@ -662,6 +662,7 @@ mod tests {
     use carbide_uuid::machine_validation::{
         MachineValidationAttemptId, MachineValidationId, MachineValidationRunItemId,
     };
+    use db::TransactionVending as _;
     use model::machine_validation::MachineValidationAttemptState;
 
     use super::*;
@@ -699,7 +700,7 @@ mod tests {
             "fm100htes3rn1npvbtm5qd57dkilaag7ljugl1llmm7rfuq1ov50i0rpl30".parse()?;
         let run_item_id = MachineValidationRunItemId::new();
         let attempt_id = MachineValidationAttemptId::new();
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
         sqlx::query(
             "INSERT INTO machine_validation (
                 id, machine_id, start_time, name, context, total, completed,
@@ -734,7 +735,7 @@ mod tests {
         .await?;
         txn.commit().await?;
 
-        let mut monitor_txn = pool.begin().await?;
+        let mut monitor_txn = pool.txn_begin().await?;
         let selected = db::machine_validation_execution::find_stale_active_attempts(
             monitor_txn.as_mut(),
             heartbeat_timeout,
@@ -747,7 +748,7 @@ mod tests {
 
         // The API can commit a heartbeat after selection but before the
         // monitor acquires the parent run lock. Reuse that snapshot below.
-        let mut heartbeat_txn = pool.begin().await?;
+        let mut heartbeat_txn = pool.txn_begin().await?;
         assert_eq!(
             db::machine_validation_execution::record_heartbeat(
                 heartbeat_txn.as_mut(),

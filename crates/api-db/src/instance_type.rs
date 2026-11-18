@@ -248,6 +248,7 @@ mod tests {
     use sqlx::Connection;
 
     use super::*;
+    use crate::TransactionVending as _;
 
     #[crate::sqlx_test]
     async fn instance_type_queries_survive_added_columns(
@@ -259,12 +260,12 @@ mod tests {
 
         // Keep the API connection and its prepared statements while another
         // connection applies the schema change, just as a migration would.
-        let mut migration = pool.begin().await?;
+        let mut migration = pool.txn_begin().await?;
         sqlx::raw_sql(
             "SET LOCAL lock_timeout = '5s';
              ALTER TABLE instance_types ADD COLUMN test_added_column text;",
         )
-        .execute(&mut *migration)
+        .execute(migration.as_mut())
         .await?;
         migration.commit().await?;
 
@@ -275,7 +276,7 @@ mod tests {
     async fn exercise_instance_type_queries(
         connection: &mut PgConnection,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        let mut txn = connection.begin().await?;
+        let mut txn = crate::Transaction::begin_inner(&mut *connection).await?;
         let id: InstanceTypeId = "projection-instance-type".parse()?;
         let metadata = Metadata {
             name: "projection instance type".to_string(),
@@ -329,7 +330,7 @@ mod tests {
     #[crate::sqlx_test]
     async fn instance_type_crud(pool: sqlx::PgPool) {
         let mut txn = pool
-            .begin()
+            .txn_begin()
             .await
             .expect("Unable to create transaction on database pool");
 

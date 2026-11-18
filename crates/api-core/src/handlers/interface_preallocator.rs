@@ -368,6 +368,7 @@ mod tests {
     use carbide_utils::test_support::test_meter::TestMeter;
     use carbide_uuid::machine::MachineInterfaceId;
     use carbide_uuid::network::NetworkSegmentId;
+    use db::TransactionVending as _;
     use model::allocation_type::AllocationType;
     use opentelemetry::metrics::noop::NoopMeterProvider;
 
@@ -382,7 +383,7 @@ mod tests {
         let env = crate::tests::create_test_env(pool).await;
         let pool = &env.api.database_connection;
         let mac_address = "02:00:00:00:41:88".parse()?;
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
         let interface = db::machine_interface::find_or_create_observed_machine_interface(
             &mut txn,
             None,
@@ -404,7 +405,7 @@ mod tests {
 
         // A successful assignment must not hold the segment lock while the
         // enclosing ExpectedMachine update processes other declarations.
-        let mut allocating = pool.begin().await?;
+        let mut allocating = pool.txn_begin().await?;
         let result = preallocator
             .update_expected_interface(&mut allocating, &expected_interface)
             .await?;
@@ -415,9 +416,9 @@ mod tests {
         assert_eq!(addresses.len(), 1);
         assert_eq!(Some(addresses[0].address), expected_interface.fixed_ip);
         assert_eq!(addresses[0].allocation_type, AllocationType::Static);
-        let mut probe = pool.begin().await?;
+        let mut probe = pool.txn_begin().await?;
         sqlx::query("SET LOCAL lock_timeout = '1s'")
-            .execute(&mut *probe)
+            .execute(probe.as_mut())
             .await?;
         db::machine_interface::lock_network_segments_exclusive(
             &mut probe,
@@ -427,14 +428,14 @@ mod tests {
         probe.rollback().await?;
         allocating.rollback().await?;
 
-        let mut assigning = pool.begin().await?;
+        let mut assigning = pool.txn_begin().await?;
         let assigning_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
-            .fetch_one(&mut *assigning)
+            .fetch_one(assigning.as_mut())
             .await?;
         db::machine_interface::lock_for_address_assignment(&mut assigning, interface.id).await?;
-        let mut outer_txn = pool.begin().await?;
+        let mut outer_txn = pool.txn_begin().await?;
         let applying_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
-            .fetch_one(&mut *outer_txn)
+            .fetch_one(outer_txn.as_mut())
             .await?;
         let applying_interface = expected_interface.clone();
         let mut applying = tokio::task::JoinSet::new();
@@ -475,10 +476,10 @@ mod tests {
 
         // A skipped declaration must release its locks even while the
         // enclosing ExpectedMachine update still has more declarations.
-        let mut probe = pool.begin().await?;
+        let mut probe = pool.txn_begin().await?;
         sqlx::query("SELECT id FROM machine_interfaces WHERE id = $1 FOR UPDATE NOWAIT")
             .bind(interface.id)
-            .fetch_one(&mut *probe)
+            .fetch_one(probe.as_mut())
             .await?;
         let addresses =
             db::machine_interface_address::find_for_interface(&mut probe, interface.id).await?;
@@ -489,7 +490,7 @@ mod tests {
         outer_txn.rollback().await?;
 
         // Removing the allocation does not make this family eligible again.
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
         assert!(
             db::machine_interface_address::delete_by_interface_and_address(
                 &mut txn,
@@ -501,7 +502,7 @@ mod tests {
         );
         txn.commit().await?;
 
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
         let result = preallocator
             .update_expected_interface(&mut txn, &expected_interface)
             .await?;
@@ -542,12 +543,12 @@ mod tests {
     ) -> Result<(), Box<dyn std::error::Error>> {
         let instrumentation = Instrumentation::from_meter_provider(&NoopMeterProvider::new());
         let preallocator = InterfacePreallocator::new(&instrumentation, None);
-        let mut setup = pool.begin().await?;
+        let mut setup = pool.txn_begin().await?;
         let segment_id: NetworkSegmentId = sqlx::query_scalar(
             "INSERT INTO network_segments (name, version)
              VALUES ('expected-update-skip', 'V1-T0') RETURNING id",
         )
-        .fetch_one(&mut *setup)
+        .fetch_one(setup.as_mut())
         .await?;
         let mac_address: MacAddress = "02:00:00:00:53:99".parse()?;
         let interface_id: MachineInterfaceId = sqlx::query_scalar(
@@ -556,7 +557,7 @@ mod tests {
         )
         .bind(segment_id)
         .bind(mac_address)
-        .fetch_one(&mut *setup)
+        .fetch_one(setup.as_mut())
         .await?;
         let address = "2001:db8::5398".parse()?;
         db::machine_interface_address::insert(
@@ -568,7 +569,7 @@ mod tests {
         .await?;
         setup.commit().await?;
 
-        let mut update_txn = pool.begin().await?;
+        let mut update_txn = pool.txn_begin().await?;
         let result = preallocator
             .update_interface(&mut update_txn, mac_address, "2001:db8::5399".parse()?)
             .await?;
@@ -576,10 +577,10 @@ mod tests {
 
         // Keep the expected update open. A primary-interface or inventory
         // writer must still be able to lock the skipped interface.
-        let mut competing_txn = pool.begin().await?;
+        let mut competing_txn = pool.txn_begin().await?;
         sqlx::query("SELECT id FROM machine_interfaces WHERE id = $1 FOR UPDATE NOWAIT")
             .bind(interface_id)
-            .execute(&mut *competing_txn)
+            .execute(competing_txn.as_mut())
             .await?;
         let addresses =
             db::machine_interface_address::find_for_interface(&mut competing_txn, interface_id)
@@ -598,12 +599,12 @@ mod tests {
     ) -> Result<(), Box<dyn std::error::Error>> {
         let instrumentation = Instrumentation::from_meter_provider(&NoopMeterProvider::new());
         let preallocator = InterfacePreallocator::new(&instrumentation, None);
-        let mut setup = pool.begin().await?;
+        let mut setup = pool.txn_begin().await?;
         let segment_id: NetworkSegmentId = sqlx::query_scalar(
             "INSERT INTO network_segments (name, version)
              VALUES ('expected-update-race', 'V1-T0') RETURNING id",
         )
-        .fetch_one(&mut *setup)
+        .fetch_one(setup.as_mut())
         .await?;
         let mac_address: MacAddress = "02:00:00:00:53:98".parse()?;
         let interface_id: MachineInterfaceId = sqlx::query_scalar(
@@ -612,15 +613,15 @@ mod tests {
         )
         .bind(segment_id)
         .bind(mac_address)
-        .fetch_one(&mut *setup)
+        .fetch_one(setup.as_mut())
         .await?;
         setup.commit().await?;
 
         let inferred_address = "2001:db8::5398".parse()?;
-        let mut holder = pool.begin().await?;
+        let mut holder = pool.txn_begin().await?;
         sqlx::query("SELECT id FROM machine_interfaces WHERE id = $1 FOR UPDATE")
             .bind(interface_id)
-            .execute(&mut *holder)
+            .execute(holder.as_mut())
             .await?;
         db::machine_interface_address::insert(
             &mut holder,
@@ -630,11 +631,11 @@ mod tests {
         )
         .await?;
         let holder_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
-            .fetch_one(&mut *holder)
+            .fetch_one(holder.as_mut())
             .await?;
-        let mut waiter = pool.begin().await?;
+        let mut waiter = pool.txn_begin().await?;
         let waiter_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
-            .fetch_one(&mut *waiter)
+            .fetch_one(waiter.as_mut())
             .await?;
 
         // The expected-data update starts with an addressless snapshot. Its

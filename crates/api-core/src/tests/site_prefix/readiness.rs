@@ -18,6 +18,7 @@
 use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
+use db::TransactionVending as _;
 use model::controller_outcome::PersistentStateHandlerOutcome;
 use model::machine::{
     FailureCause, FailureDetails, FailureSource, InstanceState, ManagedHostState,
@@ -114,7 +115,7 @@ async fn creation_waits_for_every_host_and_dpu_without_repeating_fanout(pool: sq
             .await
             .unwrap()
             .into_inner();
-        let mut txn = env.pool.begin().await.unwrap();
+        let mut txn = env.pool.txn_begin().await.unwrap();
         let hosts = [&host, &second_host];
         let before = [
             host.snapshot(&mut txn).await,
@@ -137,7 +138,7 @@ async fn creation_waits_for_every_host_and_dpu_without_repeating_fanout(pool: sq
         let first_requested_at = requested_at(&env, id)
             .await
             .expect("creation requests protection");
-        let mut txn = env.pool.begin().await.unwrap();
+        let mut txn = env.pool.txn_begin().await.unwrap();
         let after = [
             host.snapshot(&mut txn).await,
             second_host.snapshot(&mut txn).await,
@@ -161,7 +162,7 @@ async fn creation_waits_for_every_host_and_dpu_without_repeating_fanout(pool: sq
         network_configured_with_health(&env, &host.dpu_ids[0], None).await;
         // A soft-deleted Instance may still be forwarding. Both hosts must remain
         // included until their DPUs acknowledge the requested configuration.
-        let mut txn = env.pool.begin().await.unwrap();
+        let mut txn = env.pool.txn_begin().await.unwrap();
         for instance in [instance, second_instance] {
             db::instance::mark_as_deleted(instance.id.unwrap(), &mut txn)
                 .await
@@ -188,7 +189,7 @@ async fn creation_waits_for_every_host_and_dpu_without_repeating_fanout(pool: sq
             .execute(&env.pool)
             .await
             .unwrap();
-        let mut writer = env.pool.begin().await.unwrap();
+        let mut writer = env.pool.txn_begin().await.unwrap();
         db::tenant_prefix_overlap::lock_checks(&mut writer)
             .await
             .unwrap();
@@ -204,7 +205,7 @@ async fn creation_waits_for_every_host_and_dpu_without_repeating_fanout(pool: sq
             stored_outcome(&env, id).await,
             PersistentStateHandlerOutcome::Wait { .. }
         ));
-        let mut txn = env.pool.begin().await.unwrap();
+        let mut txn = env.pool.txn_begin().await.unwrap();
         for (host, target_version) in hosts.iter().zip(target_versions) {
             let resumed = host.snapshot(&mut txn).await;
             assert_eq!(resumed.host_snapshot.network_config.version, target_version);
@@ -232,12 +233,12 @@ async fn creation_waits_for_every_host_and_dpu_without_repeating_fanout(pool: sq
         network_configured_with_health(&env, &host.dpu_ids[1], None).await;
         // Both hosts now appear current. Change a host after the unlocked scan,
         // while the authoritative check waits for the routing lock.
-        let mut blocker = env.pool.begin().await.unwrap();
+        let mut blocker = env.pool.txn_begin().await.unwrap();
         db::tenant_prefix_overlap::lock_checks(&mut blocker)
             .await
             .unwrap();
         let blocker_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
-            .fetch_one(&mut *blocker)
+            .fetch_one(blocker.as_mut())
             .await
             .unwrap();
         let mut readiness = controller(&env);
@@ -270,7 +271,7 @@ async fn creation_waits_for_every_host_and_dpu_without_repeating_fanout(pool: sq
         );
         sqlx::query("UPDATE site_prefixes SET controller_state_outcome = NULL WHERE id = $1")
             .bind(id)
-            .execute(&mut *blocker)
+            .execute(blocker.as_mut())
             .await
             .unwrap();
         blocker.commit().await.unwrap();
@@ -340,7 +341,7 @@ async fn creation_waits_for_every_host_and_dpu_without_repeating_fanout(pool: sq
                     .into_inner(),
                 history
             );
-            let mut txn = env.pool.begin().await.unwrap();
+            let mut txn = env.pool.txn_begin().await.unwrap();
             for (host, target_version) in hosts.iter().zip(target_versions) {
                 let snapshot = host.snapshot(&mut txn).await;
                 assert_eq!(
@@ -359,7 +360,7 @@ async fn creation_waits_for_every_host_and_dpu_without_repeating_fanout(pool: sq
 
         // Retirement has no second DPU acknowledgement or fanout. A host with
         // an unrelated outstanding version must not retain a childless root.
-        let mut txn = env.pool.begin().await.unwrap();
+        let mut txn = env.pool.txn_begin().await.unwrap();
         let before = host.snapshot(&mut txn).await;
         assert_eq!(
             db::machine::try_update_network_config(
@@ -382,7 +383,7 @@ async fn creation_waits_for_every_host_and_dpu_without_repeating_fanout(pool: sq
                 .unwrap()
                 .is_empty()
         );
-        let mut txn = env.pool.begin().await.unwrap();
+        let mut txn = env.pool.txn_begin().await.unwrap();
         let after = host.snapshot(&mut txn).await;
         assert_eq!(
             after.host_snapshot.network_config.version,
@@ -407,7 +408,7 @@ async fn open_readiness_skips_fanout_and_stale_dpu_acknowledgements(pool: sqlx::
         .await
         .unwrap();
     host.network_configured(&env).await;
-    let mut txn = env.pool.begin().await.unwrap();
+    let mut txn = env.pool.txn_begin().await.unwrap();
     let acknowledged = host.snapshot(&mut txn).await;
     assert!(acknowledged.managed_host_network_config_version_synced());
     assert_eq!(
@@ -472,7 +473,7 @@ async fn open_readiness_skips_fanout_and_stale_dpu_acknowledgements(pool: sqlx::
             PersistentStateHandlerOutcome::Transition { .. }
         ));
     }
-    let mut txn = env.pool.begin().await.unwrap();
+    let mut txn = env.pool.txn_begin().await.unwrap();
     let after = host.snapshot(&mut txn).await;
     assert!(!after.managed_host_network_config_version_synced());
     for (name, actual, expected) in [
@@ -502,7 +503,7 @@ async fn fanout_failure_rolls_back_and_recovery_retries(pool: sqlx::PgPool) {
         .allocate_instance(Request::new(allocation_request(&host, segment_id)))
         .await
         .unwrap();
-    let mut txn = env.pool.begin().await.unwrap();
+    let mut txn = env.pool.txn_begin().await.unwrap();
     let before = host.snapshot(&mut txn).await;
     txn.commit().await.unwrap();
 
@@ -547,7 +548,7 @@ async fn fanout_failure_rolls_back_and_recovery_retries(pool: sqlx::PgPool) {
         stored_outcome(&env, legacy.id).await,
         PersistentStateHandlerOutcome::Error { .. }
     ));
-    let mut txn = env.pool.begin().await.unwrap();
+    let mut txn = env.pool.txn_begin().await.unwrap();
     let failed = host.snapshot(&mut txn).await;
     for (name, actual, expected) in [
         (
@@ -573,12 +574,12 @@ async fn fanout_failure_rolls_back_and_recovery_retries(pool: sqlx::PgPool) {
         .execute(&env.pool)
         .await
         .unwrap();
-    let mut reader = env.pool.begin().await.unwrap();
+    let mut reader = env.pool.txn_begin().await.unwrap();
     db::tenant_prefix_overlap::lock_config(&mut reader)
         .await
         .unwrap();
     let reader_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
-        .fetch_one(&mut *reader)
+        .fetch_one(reader.as_mut())
         .await
         .unwrap();
     let mut readiness = controller(&env);
@@ -596,7 +597,7 @@ async fn fanout_failure_rolls_back_and_recovery_retries(pool: sqlx::PgPool) {
         stored_prefix(&env, legacy.id).await.status.lifecycle_state,
         SitePrefixLifecycleState::Provisioning
     );
-    let mut txn = env.pool.begin().await.unwrap();
+    let mut txn = env.pool.txn_begin().await.unwrap();
     assert_ne!(
         host.snapshot(&mut txn)
             .await
@@ -628,12 +629,12 @@ async fn retirement_wins_before_readiness_promotion(pool: sqlx::PgPool) {
         )))
         .await
         .unwrap();
-    let mut blocker = env.pool.begin().await.unwrap();
+    let mut blocker = env.pool.txn_begin().await.unwrap();
     db::tenant_prefix_overlap::lock_checks(&mut blocker)
         .await
         .unwrap();
     let blocker_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
-        .fetch_one(&mut *blocker)
+        .fetch_one(blocker.as_mut())
         .await
         .unwrap();
     let mut readiness = controller(&env);
@@ -678,7 +679,7 @@ async fn idle_hosts_skip_fanout_and_later_assignment_receives_the_prefix(pool: s
     create_fixture_tenant(&env, "prefix-owner").await.unwrap();
     let host = create_managed_host(&env).await;
     let segment_id = env.create_vpc_and_tenant_segment().await;
-    let mut txn = env.pool.begin().await.unwrap();
+    let mut txn = env.pool.txn_begin().await.unwrap();
     let before = host.snapshot(&mut txn).await;
     txn.commit().await.unwrap();
     let id = SitePrefixId::new();
@@ -695,7 +696,7 @@ async fn idle_hosts_skip_fanout_and_later_assignment_receives_the_prefix(pool: s
         stored_prefix(&env, id).await.status.lifecycle_state,
         SitePrefixLifecycleState::Ready
     );
-    let mut txn = env.pool.begin().await.unwrap();
+    let mut txn = env.pool.txn_begin().await.unwrap();
     let after = host.snapshot(&mut txn).await;
     assert_eq!(
         after.host_snapshot.network_config.version,
@@ -742,7 +743,7 @@ async fn failed_host_with_admin_applied_does_not_delay_readiness(pool: sqlx::PgP
 
     // The fixture starts on Admin. Arrange teardown with an Instance still
     // present, then acknowledge Admin before injecting the cleanup failure.
-    let mut txn = env.pool.begin().await.unwrap();
+    let mut txn = env.pool.txn_begin().await.unwrap();
     db::instance::mark_as_deleted(instance_id, &mut txn)
         .await
         .unwrap();
@@ -759,7 +760,7 @@ async fn failed_host_with_admin_applied_does_not_delay_readiness(pool: sqlx::PgP
     .unwrap();
     txn.commit().await.unwrap();
     host.network_configured(&env).await;
-    let mut txn = env.pool.begin().await.unwrap();
+    let mut txn = env.pool.txn_begin().await.unwrap();
     let acknowledged = host.snapshot(&mut txn).await;
     assert!(acknowledged.use_admin_network());
     assert!(acknowledged.managed_host_network_config_version_synced());
@@ -779,7 +780,7 @@ async fn failed_host_with_admin_applied_does_not_delay_readiness(pool: sqlx::PgP
         .await
         .unwrap();
     env.run_machine_state_controller_iteration().await;
-    let mut txn = env.pool.begin().await.unwrap();
+    let mut txn = env.pool.txn_begin().await.unwrap();
     let failed = host.snapshot(&mut txn).await;
     assert!(matches!(
         &failed.managed_state,
@@ -815,7 +816,7 @@ async fn failed_host_with_admin_applied_does_not_delay_readiness(pool: sqlx::PgP
         )))
         .await
         .unwrap();
-    let mut txn = env.pool.begin().await.unwrap();
+    let mut txn = env.pool.txn_begin().await.unwrap();
     let after = host.snapshot(&mut txn).await;
     for (name, actual, expected) in [
         (

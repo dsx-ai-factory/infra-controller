@@ -20,6 +20,7 @@ use std::sync::Arc;
 
 use carbide_utils::redfish::BmcAccessInfo;
 use carbide_uuid::machine::{MachineId, MachineIdSubtypeTrait};
+use db::TransactionVending as _;
 use model::machine::{Machine, ManagedHostState};
 use rpc::forge::forge_server::Forge;
 use tonic::Request;
@@ -64,7 +65,7 @@ where
 
     pub(in crate::tests) async fn next_iteration_machine(&self, env: &TestEnv) -> Box<Machine<ID>> {
         env.run_machine_state_controller_iteration().await;
-        let mut txn = env.pool.begin().await.unwrap();
+        let mut txn = env.pool.txn_begin().await.unwrap();
         let dpu = self.db_machine(&mut txn).await;
         txn.commit().await.unwrap();
         dpu

@@ -23,6 +23,7 @@ use carbide_redfish::libredfish::test_support::RedfishSimAction;
 use carbide_secrets::credentials::{CredentialKey, Credentials};
 use carbide_test_harness::prelude::*;
 use carbide_test_harness::test_support::fixture_config::FixtureDefault as _;
+use db::TransactionVending as _;
 use db::credential_rotation::CredentialRotationType::HostUefi;
 use db::credential_rotation::device_rotation_status;
 use model::machine::{
@@ -85,7 +86,7 @@ async fn lenovo_uefi_setup_unlocks_supported_bmc_controls(pool: PgPool) {
     // The controller reads the vendor from Scout discovery, not exploration.
     let mut hardware_info = mh.host.hardware_info();
     hardware_info.dmi_data.as_mut().unwrap().sys_vendor = "Lenovo".to_string();
-    let mut txn = pool.begin().await.unwrap();
+    let mut txn = pool.txn_begin().await.unwrap();
     db::machine_topology::set_topology_update_needed(&mut txn, &mh.host.id.into(), true)
         .await
         .unwrap();

@@ -90,9 +90,9 @@ async fn sample(pool: &PgPool, metrics: &SharedMetricsHolder<i64>) {
 #[cfg(test)]
 mod tests {
     use carbide_utils::test_support::test_meter::TestMeter;
-    use db::ConditionalWrite;
     use db::resource_pool::{binding, remote};
     use db::test_support::postgres::wait_for_blocked_query;
+    use db::{ConditionalWrite, TransactionVending as _};
     use model::resource_pool::allocation::{AllocationState, AssignmentMode, ResourcePoolValue};
     use model::resource_pool::remote::{
         AllocationAssignment, AllocationResult, AllocationSelection, CleanupConfirmation,
@@ -158,7 +158,7 @@ mod tests {
                 [AllocationState::Attached, AllocationState::ReleaseRequested],
             ),
         ] {
-            let mut txn = pool.begin().await?;
+            let mut txn = pool.txn_begin().await?;
             let binding = binding::bind_or_verify(
                 &mut txn,
                 &ResourcePoolSelection {
@@ -203,7 +203,7 @@ mod tests {
                 .bind(state)
                 .bind(Json(&parameters))
                 .bind(Json(result))
-                .execute(&mut *txn)
+                .execute(txn.as_mut())
                 .await?;
                 match state {
                     AllocationState::CancelRequested => {
@@ -244,12 +244,12 @@ mod tests {
             Some("{fresh=\"false\"} 2")
         );
 
-        let mut blocker = pool.begin().await?;
+        let mut blocker = pool.txn_begin().await?;
         sqlx::query("LOCK TABLE resource_pool_allocations IN ACCESS EXCLUSIVE MODE")
-            .execute(&mut *blocker)
+            .execute(blocker.as_mut())
             .await?;
         let blocker_pid = sqlx::query_scalar("SELECT pg_backend_pid()")
-            .fetch_one(&mut *blocker)
+            .fetch_one(blocker.as_mut())
             .await?;
         let mut pending = Box::pin(sample(&pool, &metrics));
         tokio::select! {
@@ -270,7 +270,7 @@ mod tests {
         );
         blocker.rollback().await?;
 
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
         for (request_id, confirmation) in cleanup {
             assert_eq!(
                 remote::confirm_cleanup(&mut txn, request_id, confirmation).await?,
@@ -290,12 +290,12 @@ mod tests {
         let meter = TestMeter::default();
         let mut tasks = JoinSet::new();
         let cancel = CancellationToken::new();
-        let mut blocker = pool.begin().await?;
+        let mut blocker = pool.txn_begin().await?;
         sqlx::query("LOCK TABLE resource_pool_allocations IN ACCESS EXCLUSIVE MODE")
-            .execute(&mut *blocker)
+            .execute(blocker.as_mut())
             .await?;
         let blocker_pid = sqlx::query_scalar("SELECT pg_backend_pid()")
-            .fetch_one(&mut *blocker)
+            .fetch_one(blocker.as_mut())
             .await?;
         start_cleanup_metrics(pool.clone(), meter.meter(), &mut tasks, cancel.clone())?;
         wait_for_blocked_query(
@@ -308,12 +308,12 @@ mod tests {
         blocker.rollback().await?;
         wait_for_count(&meter, 0).await;
 
-        let mut blocker = pool.begin().await?;
+        let mut blocker = pool.txn_begin().await?;
         sqlx::query("LOCK TABLE resource_pool_allocations IN ACCESS EXCLUSIVE MODE")
-            .execute(&mut *blocker)
+            .execute(blocker.as_mut())
             .await?;
         let blocker_pid = sqlx::query_scalar("SELECT pg_backend_pid()")
-            .fetch_one(&mut *blocker)
+            .fetch_one(blocker.as_mut())
             .await?;
         tokio::time::pause();
         tokio::time::advance(SAMPLE_INTERVAL + Duration::from_millis(1)).await;

@@ -71,9 +71,9 @@ async fn test_update_with_bmc_and_nvos_ips_preallocates_both_interfaces(
         }))
         .await?;
 
-    let mut txn = env.api().database_connection.begin().await?;
+    let mut txn = env.api().txn_begin().await?;
     for (mac, ip) in [(bmc_mac, bmc_ip), (nvos_mac, nvos_ip)] {
-        let interfaces = db::machine_interface::find_by_mac_address(&mut *txn, mac).await?;
+        let interfaces = db::machine_interface::find_by_mac_address(txn.as_mut(), mac).await?;
         assert_eq!(interfaces.len(), 1, "should create one interface for {mac}");
         assert!(
             interfaces[0].addresses.contains(&ip.parse()?),

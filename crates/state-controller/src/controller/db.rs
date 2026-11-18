@@ -287,13 +287,13 @@ mod tests {
         // Keep the API connection and its prepared statements while another
         // connection applies the schema change, just as a migration would.
         let mut migration_connection = pool.acquire().await?;
-        let mut migration = migration_connection.begin().await?;
+        let mut migration = ::db::Transaction::begin_inner(&mut migration_connection).await?;
         sqlx::raw_sql(
             "SET LOCAL lock_timeout = '5s';
              ALTER TABLE test_state_controller_iteration_ids ADD COLUMN test_added_column text;
              ALTER TABLE test_state_controller_queued_objects ADD COLUMN test_added_column text;",
         )
-        .execute(&mut *migration)
+        .execute(migration.as_mut())
         .await?;
         migration.commit().await?;
 
@@ -302,7 +302,7 @@ mod tests {
     }
 
     async fn exercise_controller_queries(connection: &mut PgConnection) -> eyre::Result<()> {
-        let mut txn = connection.begin().await?;
+        let mut txn = ::db::Transaction::begin_inner(&mut *connection).await?;
         let iteration =
             create_iteration(&mut txn, TestStateControllerIO::DB_ITERATION_ID_TABLE_NAME).await?;
         let stored = fetch_iterations(

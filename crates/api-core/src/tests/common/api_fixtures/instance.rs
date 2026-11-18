@@ -25,6 +25,7 @@ use carbide_uuid::machine_validation::MachineValidationId;
 use carbide_uuid::network::{NetworkPrefixId, NetworkSegmentId};
 use carbide_uuid::vpc::VpcPrefixId;
 use config_version::ConfigVersion;
+use db::TransactionVending as _;
 use mac_address::MacAddress;
 use model::instance::config::extension_services::InstanceExtensionServiceConfig;
 use model::instance::config::network::{DeviceLocator, InstanceServiceInterfaceConfig};
@@ -700,7 +701,7 @@ pub(in crate::tests) async fn handle_delete_post_bootingwithdiscoveryimage(
     env: &TestEnv,
     mh: &TestManagedHost,
 ) {
-    let mut txn = env.pool.begin().await.unwrap();
+    let mut txn = env.pool.txn_begin().await.unwrap();
     let machine = mh.host().db_machine(&mut txn).await;
     db::machine::update_reboot_time(&machine, &mut txn)
         .await
@@ -748,7 +749,7 @@ pub(in crate::tests) async fn handle_delete_post_bootingwithdiscoveryimage(
     )
     .await;
 
-    let mut txn = env.pool.begin().await.unwrap();
+    let mut txn = env.pool.txn_begin().await.unwrap();
     let machine = mh.host().db_machine(&mut txn).await;
     db::machine::update_reboot_time(&machine, &mut txn)
         .await
@@ -796,7 +797,7 @@ pub(in crate::tests) async fn handle_delete_post_bootingwithdiscoveryimage(
     machine_validation_result.validation_id = Some(validation_id.parse().unwrap());
     persist_machine_validation_result(env, machine_validation_result.clone()).await;
 
-    let mut txn = env.pool.begin().await.unwrap();
+    let mut txn = env.pool.txn_begin().await.unwrap();
     db::machine::update_machine_validation_time(&mh.host().id, &mut txn)
         .await
         .unwrap();
@@ -813,7 +814,7 @@ pub(in crate::tests) async fn handle_delete_post_bootingwithdiscoveryimage(
     )
     .await;
 
-    let mut txn = env.pool.begin().await.unwrap();
+    let mut txn = env.pool.txn_begin().await.unwrap();
     let machine = mh.host().db_machine(&mut txn).await;
     db::machine::update_reboot_time(&machine, &mut txn)
         .await

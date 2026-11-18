@@ -28,6 +28,7 @@ use model::network_segment::{
 };
 
 use crate as db;
+use crate::TransactionVending as _;
 
 async fn init_dwrt1_domain(txn: &mut sqlx::PgTransaction<'_>) -> db::DatabaseResult<Domain> {
     db::dns::domain::persist(NewDomain::new("dwrt1.com"), txn.as_mut()).await
@@ -35,7 +36,7 @@ async fn init_dwrt1_domain(txn: &mut sqlx::PgTransaction<'_>) -> db::DatabaseRes
 
 #[crate::sqlx_test]
 async fn find_by_address_bmc(pool: sqlx::PgPool) -> Result<(), Box<dyn std::error::Error>> {
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
     let domain = init_dwrt1_domain(&mut txn).await?;
 
     let new_ns = NewNetworkSegment {

@@ -33,6 +33,7 @@ use common::api_fixtures::{
     create_test_env_with_overrides,
 };
 use config_version::ConfigVersion;
+use db::TransactionVending as _;
 use mac_address::MacAddress;
 use model::instance::config::extension_services::{
     InstanceExtensionServiceConfig, InstanceExtensionServicesConfig,
@@ -857,7 +858,7 @@ async fn instance_overlap_stored_pairs_validate_startup_and_dpu_config(pool: sql
         let peering_id = carbide_uuid::vpc_peering::VpcPeeringId::new();
         // Model state retained across a configuration change or an older
         // writer. Public admission must not be bypassed to create the pair.
-        let mut txn = env.pool.begin().await.unwrap();
+        let mut txn = env.pool.txn_begin().await.unwrap();
         match failure {
             RetainedFailure::PairPolicy => {
                 sqlx::query("UPDATE vpcs SET routing_profile_overrides = $1 WHERE id = $2")
@@ -866,7 +867,7 @@ async fn instance_overlap_stored_pairs_validate_startup_and_dpu_config(pool: sql
                         ..Default::default()
                     }))
                     .bind(second_vpc_id)
-                    .execute(&mut *txn)
+                    .execute(txn.as_mut())
                     .await
                     .unwrap();
             }
@@ -876,7 +877,7 @@ async fn instance_overlap_stored_pairs_validate_startup_and_dpu_config(pool: sql
                         vni: Some(second_vpc.status.vni.unwrap() + 100000),
                     }))
                     .bind(second_vpc_id)
-                    .execute(&mut *txn)
+                    .execute(txn.as_mut())
                     .await
                     .unwrap();
             }
@@ -3925,7 +3926,7 @@ async fn observe_active_vpc_resources(
     assert!(!addresses.is_empty());
 
     // Preserve internal allocation state that is not fully exposed through RPC.
-    let mut txn = env.pool.begin().await.unwrap();
+    let mut txn = env.pool.txn_begin().await.unwrap();
     let initial_snapshot = tinstance.db_instance(&mut txn).await;
     let internal_interface = initial_snapshot.config.network.interfaces[0].clone();
     txn.rollback().await.unwrap();
@@ -4038,7 +4039,7 @@ async fn assert_staged_automatic_vpc_request(
     active: &ActiveVpcResources,
 ) {
     // Pending automatic intent is hidden from RPC until promotion, so inspect it internally.
-    let mut txn = env.pool.begin().await.unwrap();
+    let mut txn = env.pool.txn_begin().await.unwrap();
     let pending_snapshot = tinstance.db_instance(&mut txn).await;
     let pending_request = pending_snapshot
         .update_network_config_request
@@ -4168,7 +4169,7 @@ async fn assert_repeated_update_reuses_active_resources(
     promoted_network_version: &ConfigVersion,
 ) {
     // An identical update must leave no controller work or allocation changes.
-    let mut txn = env.pool.begin().await.unwrap();
+    let mut txn = env.pool.txn_begin().await.unwrap();
     let repeated_snapshot = tinstance.db_instance(&mut txn).await;
     assert!(repeated_snapshot.update_network_config_request.is_none());
     assert_eq!(

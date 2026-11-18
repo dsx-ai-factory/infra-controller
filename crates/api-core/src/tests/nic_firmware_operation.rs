@@ -29,6 +29,7 @@ use carbide_secrets::credentials::{CredentialKey, CredentialWriter, Credentials,
 use carbide_uuid::machine::{HostMachineId, MachineId};
 use carbide_uuid::network::NetworkSegmentId;
 use chrono::Utc;
+use db::TransactionVending as _;
 use libredfish::SystemPowerControl;
 use model::controller_outcome::PersistentStateHandlerOutcome;
 use model::dpa_interface::{DpaInterfaceType, NewDpaInterface};
@@ -151,7 +152,11 @@ async fn operation(env: &TestEnv, host_id: HostMachineId) -> NicFirmwareOperatio
 // The real controller and RPC handlers perform every subsequent transition.
 async fn seed(env: &TestEnv, host_id: HostMachineId, operation: NicFirmwareOperation) {
     operation.validate().expect("valid admitted fixture");
-    let mut txn = env.pool.begin().await.expect("begin fixture transaction");
+    let mut txn = env
+        .pool
+        .txn_begin()
+        .await
+        .expect("begin fixture transaction");
     db::machine::update_state(
         &mut txn,
         &host_id,
@@ -981,7 +986,7 @@ async fn retried_firmware_report_commits_before_queueing(pool: sqlx::PgPool) {
     let mut newer = admitted.clone();
     newer.targets[0].diagnostic = Some("newer controller diagnostic".into());
     let winner_version = before.state.version.increment();
-    let mut winner = env.pool.begin().await.unwrap();
+    let mut winner = env.pool.txn_begin().await.unwrap();
     let winner_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
         .fetch_one(winner.as_mut())
         .await
@@ -1023,7 +1028,7 @@ async fn retried_firmware_report_commits_before_queueing(pool: sqlx::PgPool) {
 
     // This fixture has its own database. Pause only its queue insert so an
     // independent connection can prove the retry's receipt already committed.
-    let mut queue_gate = env.pool.begin().await.unwrap();
+    let mut queue_gate = env.pool.txn_begin().await.unwrap();
     let queue_gate_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
         .fetch_one(queue_gate.as_mut())
         .await
@@ -1249,7 +1254,7 @@ async fn cards_converge_sequentially_after_inventory_retry_and_lockdown_readback
     // may have changed hardware, so the next committed step is another read.
     // A mixed batch has two independent destinations: generic progress stays
     // on the machine, while the legacy profile observation stays on its DPA.
-    let mut txn = env.pool.begin().await.unwrap();
+    let mut txn = env.pool.txn_begin().await.unwrap();
     let legacy = db::dpa_interface::persist(
         NewDpaInterface {
             machine_id: host_id,
@@ -2473,7 +2478,7 @@ async fn scout_submission_rechecks_failure_after_contact_write_waits(pool: sqlx:
         fac::mlx_device_action::Command::UpdateFirmware(_)
     ));
 
-    let mut writer = env.pool.begin().await.unwrap();
+    let mut writer = env.pool.txn_begin().await.unwrap();
     let writer_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
         .fetch_one(writer.as_mut())
         .await
@@ -2570,7 +2575,7 @@ async fn lost_allocation_owner_recovery(pool: sqlx::PgPool) {
         .await
         .unwrap();
     seed(&env, host_id, before_submission.clone()).await;
-    let mut txn = env.pool.begin().await.unwrap();
+    let mut txn = env.pool.txn_begin().await.unwrap();
     db::instance::mark_as_deleted(owner.id(), txn.as_mut())
         .await
         .unwrap();
@@ -2686,7 +2691,7 @@ async fn lost_allocation_owner_recovery(pool: sqlx::PgPool) {
     ));
     // Explicitly clearing the recorded failure permits the retained ordinary
     // release proof to continue with the same deleted owner and firmware state.
-    let mut txn = env.pool.begin().await.unwrap();
+    let mut txn = env.pool.txn_begin().await.unwrap();
     db::machine::clear_failure_details(&dpu_id.into(), txn.as_mut())
         .await
         .unwrap();
@@ -2740,7 +2745,7 @@ async fn lost_allocation_owner_recovery(pool: sqlx::PgPool) {
         env.redfish_sim.actions_since(&handoff_power).all_hosts(),
         vec![RedfishSimAction::Power(SystemPowerControl::ForceRestart)]
     );
-    let mut txn = env.pool.begin().await.unwrap();
+    let mut txn = env.pool.txn_begin().await.unwrap();
     let retained_owner = db::instance::find_by_id(txn.as_mut(), owner.id())
         .await
         .unwrap()
@@ -2874,7 +2879,7 @@ async fn safe_completion_resumes_the_frozen_lifecycle_owner(pool: sqlx::PgPool) 
                         },
                     )
                 } else {
-                    let mut txn = env.pool.begin().await.unwrap();
+                    let mut txn = env.pool.txn_begin().await.unwrap();
                     db::instance::mark_as_deleted(owner.id(), txn.as_mut())
                         .await
                         .unwrap();
@@ -3250,7 +3255,7 @@ async fn firmware_report_deadline_rolls_back_before_retry(pool: sqlx::PgPool) {
             FirmwareResult::Receipt(receipt.clone().into()),
         ),
     );
-    let mut gate = env.pool.begin().await.unwrap();
+    let mut gate = env.pool.txn_begin().await.unwrap();
     let gate_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
         .fetch_one(gate.as_mut())
         .await
@@ -3536,7 +3541,7 @@ async fn hardware_dispatch_blocks_saved_nic_work_until_exact_settlement(pool: sq
         command: MlxAdminCommand::ConfigSet,
     };
     let token = uuid::Uuid::new_v4();
-    let mut txn = env.pool.begin().await.unwrap();
+    let mut txn = env.pool.txn_begin().await.unwrap();
     db::hardware_dispatch::begin(&mut txn, token, &owner)
         .await
         .unwrap();
@@ -3570,7 +3575,7 @@ async fn hardware_dispatch_blocks_saved_nic_work_until_exact_settlement(pool: sq
 
     // Exact settlement permits saved work to resume. No
     // baseline selection or automatic admission is enabled by this test.
-    let mut txn = env.pool.begin().await.unwrap();
+    let mut txn = env.pool.txn_begin().await.unwrap();
     assert!(
         db::hardware_dispatch::settle(&mut txn, host_id, token, &owner)
             .await
