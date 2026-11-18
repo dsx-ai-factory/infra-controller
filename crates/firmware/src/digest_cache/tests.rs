@@ -17,7 +17,6 @@
 
 use std::time::Duration;
 
-use carbide_instrument::testing::MetricsCapture;
 use carbide_test_support::Outcome::{Fails, Yields};
 use carbide_test_support::{Case, check_cases};
 use sha2::{Digest, Sha256};
@@ -220,7 +219,6 @@ async fn construction_and_invalid_sources_do_not_touch_storage() {
 
 #[tokio::test]
 async fn repeated_reader_errors_do_not_poll_a_completed_worker() {
-    let _metrics = MetricsCapture::start();
     let directory = tempfile::tempdir().unwrap();
     let cache = cache(directory.path(), 8, 1);
     let wanted = digest(b"data");
@@ -540,7 +538,6 @@ fn cancelled_open_keeps_retention_until_its_physical_worker_finishes() {
 // must stay inside the managed namespace, even with a legacy cache next to it.
 #[tokio::test]
 async fn digest_shares_origins_and_eviction_preserves_legacy_files() {
-    let _metrics = MetricsCapture::start();
     let directory = tempfile::tempdir().unwrap();
     let legacy = directory
         .path()
@@ -600,7 +597,6 @@ async fn digest_shares_origins_and_eviction_preserves_legacy_files() {
 // must allow another artifact without ever contacting its source while full.
 #[tokio::test]
 async fn readers_and_current_retention_prevent_eviction_before_source_access() {
-    let _metrics = MetricsCapture::start();
     let directory = tempfile::tempdir().unwrap();
     let mut server = mockito::Server::new_async().await;
     let first = server
@@ -644,7 +640,6 @@ async fn readers_and_current_retention_prevent_eviction_before_source_access() {
 // settle physical accounting without relying on a subsequent cache request.
 #[tokio::test]
 async fn physical_completion_and_cancellation_settle_reservations_without_polling() {
-    let _metrics = MetricsCapture::start();
     for (scenario, complete) in [("completed transfer", true), ("cancelled transfer", false)] {
         let directory = tempfile::tempdir().unwrap();
         let cache = cache(directory.path(), 8, 2);
@@ -721,7 +716,6 @@ async fn physical_completion_and_cancellation_settle_reservations_without_pollin
 // verify owned files and preserve unrelated files and symlink targets.
 #[tokio::test]
 async fn restart_removes_owned_partials_refills_corruption_and_preserves_unknown_entries() {
-    let _metrics = MetricsCapture::start();
     let directory = tempfile::tempdir().unwrap();
     let namespace = directory.path().join(NAMESPACE);
     fs::create_dir(&namespace).unwrap();
@@ -782,7 +776,6 @@ async fn restart_removes_owned_partials_refills_corruption_and_preserves_unknown
 // URL downloader must still follow its existing redirect policy.
 #[tokio::test]
 async fn managed_redirects_are_rejected_and_legacy_redirects_still_work() {
-    let _metrics = MetricsCapture::start();
     let directory = tempfile::tempdir().unwrap();
     let mut server = mockito::Server::new_async().await;
     let redirect = server
@@ -959,7 +952,6 @@ fn dropping_a_reader_keeps_its_lease_until_a_queued_physical_read_finishes() {
 // slow response must not prevent legacy downloads from using that worker.
 #[tokio::test]
 async fn ready_readers_do_not_starve_the_legacy_download_pool() {
-    let _metrics = MetricsCapture::start();
     let directory = tempfile::tempdir().unwrap();
     let cache = cache(directory.path(), 8, 1);
     fs::create_dir_all(&cache.inner.directory).unwrap();
@@ -1005,7 +997,6 @@ async fn ready_readers_do_not_starve_the_legacy_download_pool() {
 
 #[tokio::test]
 async fn unlinked_content_stays_charged_until_its_last_reader_drops() {
-    let _metrics = MetricsCapture::start();
     let directory = tempfile::tempdir().unwrap();
     let cache = cache(directory.path(), 8, 2);
     let image = digest(b"data");
@@ -1127,7 +1118,6 @@ async fn eviction_skips_an_obstructed_candidate_and_prunes_stale_empty_entries()
 
 #[tokio::test]
 async fn cold_concurrent_origins_share_one_physical_digest_download() {
-    let _metrics = MetricsCapture::start();
     let directory = tempfile::tempdir().unwrap();
     let cache = cache(directory.path(), 8, 2);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -1180,7 +1170,6 @@ async fn cold_concurrent_origins_share_one_physical_digest_download() {
 
 #[test]
 fn owner_shutdown_joins_a_cancelled_queued_managed_write_before_settlement() {
-    let _metrics = MetricsCapture::start();
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .max_blocking_threads(1)
@@ -1354,7 +1343,6 @@ impl io::Write for CapturedLogs {
 
 #[tokio::test]
 async fn managed_failures_keep_the_request_span_without_recording_source_path_secrets() {
-    let _metrics = MetricsCapture::start();
     carbide_instrument::testing::keep_callsites_enabled();
     let directory = tempfile::tempdir().unwrap();
     let cache = cache(directory.path(), 8, 1);
@@ -1424,7 +1412,6 @@ async fn managed_failures_keep_the_request_span_without_recording_source_path_se
 // observable bytes even when that digest is never opened again.
 #[tokio::test]
 async fn unrelated_reservations_refresh_grown_and_deleted_retained_files() {
-    let _metrics = MetricsCapture::start();
     enum Change {
         GrowInactive,
         DeleteRetained,
@@ -1476,7 +1463,6 @@ async fn unrelated_reservations_refresh_grown_and_deleted_retained_files() {
 
 #[tokio::test]
 async fn recreated_path_is_charged_with_its_live_old_reader_before_unrelated_reservation() {
-    let _metrics = MetricsCapture::start();
     let directory = tempfile::tempdir().unwrap();
     let cache = cache(directory.path(), 12, 2);
     fs::create_dir_all(&cache.inner.directory).unwrap();

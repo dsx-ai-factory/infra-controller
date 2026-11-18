@@ -226,10 +226,18 @@ token (not free text) identifying the failure cause.
 **Manual intervention ratio:**
 
 ```text
-count(carbide_object_manual_intervention_required{object_type="machine"} == 1)
+(
+  count(carbide_object_manual_intervention_required{object_type="machine"} == 1)
+  or vector(0)
+)
   /
 count(carbide_object_state_entered_timestamp_seconds{object_type="machine"})
 ```
+
+The intervention metric is emitted only while operator action is needed. The
+numerator falls back to zero when that metric has no matching series. The
+denominator has no fallback, so missing machine-state telemetry leaves the ratio
+without a result.
 
 ### Joining with object traits
 
@@ -243,10 +251,16 @@ Use `carbide_object_info` to add context (rack, SKU, vendor, model) to alerts:
     max by (object_type, object_id, state, substate)
         (carbide_object_state_sla_seconds)
 )
-  * on(object_type, object_id) group_left(rack, sku, vendor, model)
-    max by (object_type, object_id, rack, sku, vendor, model)
-        (carbide_object_info)
+  * on(object_type, object_id) group_left(rack_id, sku, vendor, model)
+    topk by (object_type, object_id) (1,
+      max by (object_type, object_id, rack_id, sku, vendor, model)
+          (carbide_object_info)
+    )
 ```
+
+`topk` keeps one info series per object so conflicting replica traits cannot
+break the join. Since info values are all `1`, selection among conflicting
+traits is arbitrary and does not identify the newest traits.
 
 ### Multi-replica considerations
 

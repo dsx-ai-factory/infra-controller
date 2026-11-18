@@ -1309,7 +1309,7 @@ func TestFixtureCurrentWriteEvidence(t *testing.T) {
 						if err != nil {
 							t.Fatal(err)
 						}
-						f.in.evidence, err = openEvidence(t.TempDir(), "resume")
+						f.in.evidence, err = openEvidence(t.TempDir(), "resume", 256<<20)
 						if err != nil {
 							t.Fatal(err)
 						}
@@ -1392,7 +1392,7 @@ func TestFixtureAuthorizationAfterPreparation(t *testing.T) {
 				var err error
 				if mode == "measurement" {
 					var err error
-					f.in.evidence, err = openEvidence(t.TempDir(), "auth-measurement")
+					f.in.evidence, err = openEvidence(t.TempDir(), "auth-measurement", 256<<20)
 					if err != nil {
 						t.Fatal(err)
 					}
@@ -1512,7 +1512,7 @@ func TestFixtureWriteHealth(t *testing.T) {
 					var err error
 					if phase == "labels" {
 						f.in.t.s.preparing, f.in.fixturePhase = false, false
-						f.in.evidence, err = openEvidence(t.TempDir(), "health-labels")
+						f.in.evidence, err = openEvidence(t.TempDir(), "health-labels", 256<<20)
 						if err != nil {
 							t.Fatal(err)
 						}

@@ -1217,14 +1217,26 @@ pub(crate) fn mandatory_services(
                 .expect("naming values are an object"),
         );
     }
-    let mut service_vec = vec![
-        dts_service(&resolved.base.dts),
-        doca_hbn_service(&resolved.base.doca_hbn, interfaces, service_vpc_slots),
-        dhcp,
-        agent,
-        fmds,
-        otel,
-    ];
+    let mut hbn = doca_hbn_service(&resolved.base.doca_hbn, interfaces, service_vpc_slots);
+    let mut dts = dts_service(&resolved.base.dts);
+    let external_naming_values = serde_json::json!({
+        "service": {
+            "nameSource": if multi_cluster_support { "dpuService" } else { "release" }
+        }
+    });
+    for service in [&mut hbn, &mut dts] {
+        merge_helm_values(
+            service
+                .helm_values
+                .as_mut()
+                .and_then(serde_json::Value::as_object_mut)
+                .expect("HBN and DTS services have generated Helm values"),
+            external_naming_values
+                .as_object()
+                .expect("external naming values are an object"),
+        );
+    }
+    let mut service_vec = vec![dts, hbn, dhcp, agent, fmds, otel];
 
     for (service, cfg) in &resolved.extra {
         match service {

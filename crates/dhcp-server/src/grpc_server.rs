@@ -473,7 +473,6 @@ mod tests {
     use std::sync::Arc;
     use std::time::Duration;
 
-    use carbide_instrument::testing::MetricsCapture;
     use carbide_test_support::Outcome::*;
     use carbide_test_support::scenarios;
     use dhcproto::v4::{DhcpOption, Message, MessageType};
@@ -928,9 +927,6 @@ mod tests {
     /// usable host and service configuration.
     #[test]
     fn control_rpc_publishes_service_only_dpu_and_rejects_atomically() {
-        // Serialize this live OFFER producer with process-global metric-delta assertions in the binary.
-        let _metrics_guard = MetricsCapture::start();
-
         // Reserve unprivileged loopback ports while leaving host.yaml absent to exercise clean service-only startup.
         let directory = tempfile::tempdir().unwrap();
         let live = directory.path().join("dhcp.yaml");

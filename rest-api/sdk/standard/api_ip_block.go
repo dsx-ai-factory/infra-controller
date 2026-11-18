@@ -19,6 +19,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"reflect"
 	"strings"
 )
 
@@ -339,7 +340,7 @@ type ApiGetAllDerivedIpblockRequest struct {
 	ipBlockId       string
 	status          *string
 	query           *string
-	includeRelation *string
+	includeRelation *[]string
 	pageNumber      *int32
 	pageSize        *int32
 	orderBy         *string
@@ -357,8 +358,8 @@ func (r ApiGetAllDerivedIpblockRequest) Query(query string) ApiGetAllDerivedIpbl
 	return r
 }
 
-// Related entity to expand
-func (r ApiGetAllDerivedIpblockRequest) IncludeRelation(includeRelation string) ApiGetAllDerivedIpblockRequest {
+// Related entity to expand. Repeat the parameter to specify multiple values.
+func (r ApiGetAllDerivedIpblockRequest) IncludeRelation(includeRelation []string) ApiGetAllDerivedIpblockRequest {
 	r.includeRelation = &includeRelation
 	return r
 }
@@ -439,7 +440,15 @@ func (a *IPBlockAPIService) GetAllDerivedIpblockExecute(r ApiGetAllDerivedIpbloc
 		parameterAddToHeaderOrQuery(localVarQueryParams, "query", r.query, "form", "")
 	}
 	if r.includeRelation != nil {
-		parameterAddToHeaderOrQuery(localVarQueryParams, "includeRelation", r.includeRelation, "form", "")
+		t := *r.includeRelation
+		if reflect.TypeOf(t).Kind() == reflect.Slice {
+			s := reflect.ValueOf(t)
+			for i := 0; i < s.Len(); i++ {
+				parameterAddToHeaderOrQuery(localVarQueryParams, "includeRelation", s.Index(i).Interface(), "form", "multi")
+			}
+		} else {
+			parameterAddToHeaderOrQuery(localVarQueryParams, "includeRelation", t, "form", "multi")
+		}
 	}
 	if r.pageNumber != nil {
 		parameterAddToHeaderOrQuery(localVarQueryParams, "pageNumber", r.pageNumber, "form", "")
@@ -539,7 +548,7 @@ type ApiGetAllIpblockRequest struct {
 	status                   *string
 	includeUsageStats        *bool
 	query                    *string
-	includeRelation          *string
+	includeRelation          *[]string
 	pageNumber               *int32
 	pageSize                 *int32
 	orderBy                  *string
@@ -583,8 +592,8 @@ func (r ApiGetAllIpblockRequest) Query(query string) ApiGetAllIpblockRequest {
 	return r
 }
 
-// Related entity to expand
-func (r ApiGetAllIpblockRequest) IncludeRelation(includeRelation string) ApiGetAllIpblockRequest {
+// Related entity to expand. Repeat the parameter to specify multiple values.
+func (r ApiGetAllIpblockRequest) IncludeRelation(includeRelation []string) ApiGetAllIpblockRequest {
 	r.includeRelation = &includeRelation
 	return r
 }
@@ -672,7 +681,15 @@ func (a *IPBlockAPIService) GetAllIpblockExecute(r ApiGetAllIpblockRequest) ([]I
 		parameterAddToHeaderOrQuery(localVarQueryParams, "query", r.query, "form", "")
 	}
 	if r.includeRelation != nil {
-		parameterAddToHeaderOrQuery(localVarQueryParams, "includeRelation", r.includeRelation, "form", "")
+		t := *r.includeRelation
+		if reflect.TypeOf(t).Kind() == reflect.Slice {
+			s := reflect.ValueOf(t)
+			for i := 0; i < s.Len(); i++ {
+				parameterAddToHeaderOrQuery(localVarQueryParams, "includeRelation", s.Index(i).Interface(), "form", "multi")
+			}
+		} else {
+			parameterAddToHeaderOrQuery(localVarQueryParams, "includeRelation", t, "form", "multi")
+		}
 	}
 	if r.pageNumber != nil {
 		parameterAddToHeaderOrQuery(localVarQueryParams, "pageNumber", r.pageNumber, "form", "")
@@ -759,7 +776,7 @@ type ApiGetIpblockRequest struct {
 	infrastructureProviderId *string
 	tenantId                 *string
 	includeUsageStats        *bool
-	includeRelation          *string
+	includeRelation          *[]string
 }
 
 // Filter IP Blocks by Infrastructure Provider ID. Deprecated: Infrastructure Provider is now inferred from the org&#39;s membership.
@@ -782,8 +799,8 @@ func (r ApiGetIpblockRequest) IncludeUsageStats(includeUsageStats bool) ApiGetIp
 	return r
 }
 
-// Related entity to expand
-func (r ApiGetIpblockRequest) IncludeRelation(includeRelation string) ApiGetIpblockRequest {
+// Related entity to expand. Repeat the parameter to specify multiple values.
+func (r ApiGetIpblockRequest) IncludeRelation(includeRelation []string) ApiGetIpblockRequest {
 	r.includeRelation = &includeRelation
 	return r
 }
@@ -847,7 +864,15 @@ func (a *IPBlockAPIService) GetIpblockExecute(r ApiGetIpblockRequest) (*IpBlock,
 		parameterAddToHeaderOrQuery(localVarQueryParams, "includeUsageStats", r.includeUsageStats, "form", "")
 	}
 	if r.includeRelation != nil {
-		parameterAddToHeaderOrQuery(localVarQueryParams, "includeRelation", r.includeRelation, "form", "")
+		t := *r.includeRelation
+		if reflect.TypeOf(t).Kind() == reflect.Slice {
+			s := reflect.ValueOf(t)
+			for i := 0; i < s.Len(); i++ {
+				parameterAddToHeaderOrQuery(localVarQueryParams, "includeRelation", s.Index(i).Interface(), "form", "multi")
+			}
+		} else {
+			parameterAddToHeaderOrQuery(localVarQueryParams, "includeRelation", t, "form", "multi")
+		}
 	}
 	// to determine the Content-Type header
 	localVarHTTPContentTypes := []string{}

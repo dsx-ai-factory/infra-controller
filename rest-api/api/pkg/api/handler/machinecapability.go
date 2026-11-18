@@ -44,6 +44,7 @@ func NewGetAllMachineCapabilityHandler(dbSession *cdb.Session) GetAllMachineCapa
 // @Security ApiKeyAuth
 // @Param org path string true "Name of NGC organization"
 // @Param site_id query string true "Filter by site ID"
+// @Param inactiveDevices query []int false "Filter by inactiveDevices; repeat the parameter to specify multiple values" collectionFormat(multi)
 // @Success 200 {object} model.APIUser
 // @Router /v2/org/{org}/nico/machine-capability [get]
 func (gamch GetAllMachineCapabilityHandler) Handle(c echo.Context) error {

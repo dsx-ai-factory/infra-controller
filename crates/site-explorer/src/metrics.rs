@@ -1462,7 +1462,7 @@ impl MetricHolder {
 
 #[cfg(test)]
 mod tests {
-    use carbide_instrument::emit;
+
     use carbide_instrument::testing::{ApproxHistogramSum, MetricsCapture, capture_logs};
     use carbide_test_support::Outcome::*;
     use carbide_test_support::{Check, check_values, scenarios, value_scenarios};
@@ -1594,8 +1594,8 @@ mod tests {
 
         value_scenarios!(
             run = |ManagedHostCreationCase { event, outcome }| {
-                let metrics = MetricsCapture::start();
-                let logs = capture_logs(|| emit(event));
+                let metrics = MetricsCapture::owned();
+                let logs = capture_logs(|| metrics.instrumentation().emit(event));
                 let log = logs.first();
 
                 ManagedHostCreationObservation {
@@ -1679,8 +1679,8 @@ mod tests {
 
         value_scenarios!(
             run = |stage: ManagedHostCreationStage| {
-                let metrics = MetricsCapture::start();
-                emit(ManagedHostCreationStageFinished {
+                let metrics = MetricsCapture::owned();
+                metrics.instrumentation().emit(ManagedHostCreationStageFinished {
                     stage,
                     latency: Duration::from_millis(20),
                 });
@@ -1722,9 +1722,9 @@ mod tests {
 
         value_scenarios!(
             run = |BootInterfaceSelectionCase { source, mechanism }| {
-                let metrics = MetricsCapture::start();
+                let metrics = MetricsCapture::owned();
                 let logs = capture_logs(|| {
-                    emit(
+                    metrics.instrumentation().emit(
                         BootInterfaceSelected::from_selection_source(
                             source,
                             "192.0.2.10".parse().unwrap(),
@@ -1996,24 +1996,24 @@ mod tests {
                     }
                     SlotTrayFailureCase::DatabaseUpdate => "database_update",
                 };
-                let metrics = MetricsCapture::start();
+                let metrics = MetricsCapture::owned();
                 let logs = capture_logs(|| match case {
                     SlotTrayFailureCase::RmsRequest => {
-                        emit(SiteExplorerMachineSlotTrayFetchFailed::new(
+                        metrics.instrumentation().emit(SiteExplorerMachineSlotTrayFetchFailed::new(
                             ERROR.to_string(),
                         ));
                     }
                     SlotTrayFailureCase::ResponseMissing => {
-                        emit(SiteExplorerMachineSlotTrayResponseMissing::new());
+                        metrics.instrumentation().emit(SiteExplorerMachineSlotTrayResponseMissing::new());
                     }
                     SlotTrayFailureCase::SlotNumberOutOfRange => {
-                        emit(SiteExplorerMachineSlotTrayValueInvalid::SlotNumber { value: OUT_OF_RANGE });
+                        metrics.instrumentation().emit(SiteExplorerMachineSlotTrayValueInvalid::SlotNumber { value: OUT_OF_RANGE });
                     }
                     SlotTrayFailureCase::TrayIndexOutOfRange => {
-                        emit(SiteExplorerMachineSlotTrayValueInvalid::TrayIndex { value: OUT_OF_RANGE });
+                        metrics.instrumentation().emit(SiteExplorerMachineSlotTrayValueInvalid::TrayIndex { value: OUT_OF_RANGE });
                     }
                     SlotTrayFailureCase::DatabaseUpdate => {
-                        emit(SiteExplorerMachineSlotTrayPersistenceFailed::new(
+                        metrics.instrumentation().emit(SiteExplorerMachineSlotTrayPersistenceFailed::new(
                             ERROR.to_string(),
                             HOST_MACHINE_ID.to_string(),
                         ));
@@ -2106,9 +2106,9 @@ mod tests {
                 },
             ],
             |IterationCase { latency, error }| {
-                let metrics = MetricsCapture::start();
+                let metrics = MetricsCapture::owned();
                 let logs = capture_logs(|| {
-                    emit(if error.is_empty() {
+                    metrics.instrumentation().emit(if error.is_empty() {
                         SiteExplorerIterationFinished::Succeeded { latency }
                     } else {
                         SiteExplorerIterationFinished::Failed {
@@ -2143,10 +2143,12 @@ mod tests {
     fn site_explorer_iteration_histogram_exposition_stays_stable() {
         const EXPOSED_METRIC: &str = "carbide_site_explorer_iteration_latency_milliseconds";
 
-        let metrics = MetricsCapture::start();
-        emit(SiteExplorerIterationFinished::Succeeded {
-            latency: Duration::from_millis(125),
-        });
+        let metrics = MetricsCapture::owned();
+        metrics
+            .instrumentation()
+            .emit(SiteExplorerIterationFinished::Succeeded {
+                latency: Duration::from_millis(125),
+            });
 
         let encoded = metrics.render();
         assert!(

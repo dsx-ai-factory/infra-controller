@@ -54,6 +54,23 @@ if [[ "$GITHUB_REF" =~ ^refs/heads/pull-request/([1-9][0-9]*)$ ]]; then
 		merge-base "$pull_request_base" "$GITHUB_SHA"); then
 		fail "could not compute a merge base for the pull request base and workflow commit"
 	fi
+elif [[ "${GITHUB_EVENT_NAME:-}" == "merge_group" ]]; then
+	[[ -n "${GITHUB_EVENT_PATH:-}" ]] \
+		|| fail "\`GITHUB_EVENT_PATH\` is not set"
+
+	if ! base_sha=$(jq --exit-status --raw-output \
+		'.merge_group.base_sha | select(type == "string")' \
+		"$GITHUB_EVENT_PATH"); then
+		  fail "could not read merge-group base SHA from the event payload"
+	fi
+
+	[[ "$base_sha" =~ $commit_pattern ]] \
+		|| fail "GitHub passed an invalid merge-group base"
+
+	if ! git -C "$GITHUB_WORKSPACE" merge-base --is-ancestor \
+		"$base_sha" "$GITHUB_SHA"; then
+			fail "could not verify the merge-group base-to-head range in this checkout"
+	fi
 elif [[ "$GITHUB_REF" == refs/tags/* ]] \
 	&& git check-ref-format "$GITHUB_REF"; then
 	if ! tag_head=$(git -C "$GITHUB_WORKSPACE" \

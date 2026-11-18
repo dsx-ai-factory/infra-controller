@@ -963,7 +963,12 @@ async fn release_one_instance(
         }
     }
 
-    let pkeys = load_ib_partition_pkeys(txn.as_mut(), &[&instance.infiniband_config]).await?;
+    let pkeys = load_ib_partition_pkeys(
+        txn.as_mut(),
+        &[&instance.infiniband_config],
+        &api.instrumentation,
+    )
+    .await?;
     let memberships = ib_memberships_from_config(&instance.infiniband_config, &pkeys);
     for membership in memberships {
         db::retired_ib_membership::record(txn.as_mut(), &membership).await?;
@@ -1860,8 +1865,14 @@ pub(crate) async fn update_instance_config(
     // Checks if the instance IB configuration was updated
     // If yes - assign devices (GUIDs) to the new configuration, update
     // the database and increment the IB version number
-    update_instance_infiniband_config(&mh_snapshot, instance, &mut config.infiniband, &mut txn)
-        .await?;
+    update_instance_infiniband_config(
+        &mh_snapshot,
+        instance,
+        &mut config.infiniband,
+        &mut txn,
+        &api.instrumentation,
+    )
+    .await?;
 
     tracing::debug!(
         instance_id = %instance.id,
@@ -2267,6 +2278,7 @@ async fn update_instance_infiniband_config(
     instance: &InstanceSnapshot,
     ib_config: &mut InstanceInfinibandConfig,
     txn: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    instrumentation: &carbide_instrument::Instrumentation,
 ) -> Result<(), CarbideError> {
     if !instance
         .config
@@ -2289,6 +2301,7 @@ async fn update_instance_infiniband_config(
         txn,
         &instance.config.tenant.tenant_organization_id,
         ib_config,
+        instrumentation,
     )
     .await?;
 
@@ -2297,8 +2310,12 @@ async fn update_instance_infiniband_config(
 
     *ib_config = ib_config_with_ports;
 
-    let pkeys =
-        load_ib_partition_pkeys(txn.as_mut(), &[&instance.config.infiniband, &*ib_config]).await?;
+    let pkeys = load_ib_partition_pkeys(
+        txn.as_mut(),
+        &[&instance.config.infiniband, &*ib_config],
+        instrumentation,
+    )
+    .await?;
     let current_memberships = ib_memberships_from_config(&instance.config.infiniband, &pkeys);
     let requested_memberships = ib_memberships_from_config(ib_config, &pkeys);
 
@@ -2523,13 +2540,15 @@ pub(super) fn snapshot_to_optional_instance(
 pub(super) async fn record_force_delete_retired_ib_memberships(
     txn: &mut PgConnection,
     instance_id: InstanceId,
+    instrumentation: &carbide_instrument::Instrumentation,
 ) -> CarbideResult<()> {
     let instance = db::instance::find_by_id(&mut *txn, instance_id)
         .await?
         .ok_or_else(|| {
             CarbideError::internal(format!("could not find an instance for {instance_id}"))
         })?;
-    let pkeys = load_ib_partition_pkeys(txn, &[&instance.config.infiniband]).await?;
+    let pkeys =
+        load_ib_partition_pkeys(txn, &[&instance.config.infiniband], instrumentation).await?;
     for membership in ib_memberships_from_config(&instance.config.infiniband, &pkeys) {
         db::retired_ib_membership::record(txn, &membership).await?;
     }

@@ -64,6 +64,8 @@ type input struct {
 	// bound to it. interval is the family's reader cadence, for the freshness
 	// of the baseline.
 	process, interval float64
+	scrape            float64
+	firmwareRevision  uint64
 }
 
 // target is ceil(q*n), the count that crosses the fixed quantile q, and
@@ -262,13 +264,16 @@ func Prepare(ctx context.Context, c Context, f probeapi.Filter, p probeapi.Summa
 	if !(p.AddWindowSeconds >= 0 && p.AddWindowSeconds <= maxWindow.Seconds()) {
 		return nil, InvalidInput{"addWindowSeconds", "addWindowSeconds must be from 0 to the longest window"}
 	}
+	if spec.Metric == "hosts_firmware" && (c.Probe.FirmwareRevision == 0 || c.Probe.FirmwareRevision > probeapi.MaxCount || c.Probe.ReaderIntervals[probeapi.FamilyConfigNicoAPI] != interval) {
+		return nil, Unsupported{"firmware requires a frozen revision and equal host/config intervals"}
+	}
 	base := p.Base
 	if base != nil {
 		copy := *base
 		base = &copy
 	}
 	r := &Request{Spec: spec, Start: p.Start.Time, End: p.End.Time, in: input{
-		base: base, family: spec.Family, start: unixSecs(p.Start.Time), end: unixSecs(p.End.Time), n: p.N, addWindowSeconds: p.AddWindowSeconds,
+		scrape: c.Probe.ScrapeInterval.Seconds(), firmwareRevision: c.Probe.FirmwareRevision, base: base, family: spec.Family, start: unixSecs(p.Start.Time), end: unixSecs(p.End.Time), n: p.N, addWindowSeconds: p.AddWindowSeconds,
 		process: c.Probe.Info.ProcessStartSeconds, interval: interval.Seconds(),
 	}}
 	// A request checked past the deadline, or after a cancel, is not taken.
@@ -288,7 +293,11 @@ func (r *Request) points(s Samples) ([]point, error) {
 			caps[i].series = s.Caps[i]
 		}
 	}
-	return join(s.Counts, probeapi.GaugeLabels(r.Spec.Metric), s.Times, caps)
+	points, err := join(s.Counts, probeapi.GaugeLabels(r.Spec.Metric), s.Times, caps)
+	if err == nil && r.Spec.Metric == "hosts_firmware" {
+		err = firmwarePoints(r, points, s)
+	}
+	return points, err
 }
 
 // finalScrape reports whether points hold a whole scrape of the run's

@@ -122,6 +122,7 @@ impl EndpointExplorationService {
         expected: Option<&ExpectedEntity>,
         last_exploration_error: Option<&EndpointExplorationError>,
         boot_interface: Option<BootInterfaceTarget>,
+        load_sitewide_bmc_password: crate::SiteWideBmcPasswordLoader<'_>,
     ) -> Option<EndpointProbeResult> {
         let guard = self.locks.try_claim(address.ip())?;
 
@@ -134,6 +135,7 @@ impl EndpointExplorationService {
                 expected,
                 last_exploration_error,
                 boot_interface.as_ref(),
+                load_sitewide_bmc_password,
             )
             .await;
         let redfish_explore_duration = redfish_explore_started_at.elapsed();
@@ -255,6 +257,7 @@ impl EndpointExplorationService {
                     expected.as_ref(),
                     existing_report.last_exploration_error.as_ref(),
                     boot_interface,
+                    Box::new(|| service.endpoint_explorer.load_sitewide_bmc_password()),
                 )
                 .await
                 .ok_or(EndpointExplorationServiceError::AlreadyInProgress(bmc_ip))?;

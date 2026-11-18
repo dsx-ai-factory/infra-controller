@@ -6,6 +6,8 @@
 
 SELECT
 m.*,
+(SELECT id FROM cm_actions WHERE machine_id = m.id
+ AND request_key = m.machine_maintenance_requested->>'requested_at') AS maintenance_action_id,
 COALESCE(nic_firmware.json, '[]') AS nic_firmware_card_selections,
 boot_interface.desired_mac_address AS desired_boot_interface_mac,
 boot_interface.desired_interface_id AS desired_boot_interface_id,

@@ -61,12 +61,6 @@ use super::machine_fixtures::{
 // the other needs until `wait_for_blocked_queries` times out.
 static ADMIN_LOCK_ADMISSION_TEST_SERIAL: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
-// Serializes tests that emit or assert failed creation and reconciliation metrics.
-// MetricsCapture cannot exclude failures emitted by non-asserting parallel tests
-// from the process-wide registry.
-pub(super) static FAILED_CREATION_METRIC_TEST_SERIAL: tokio::sync::Mutex<()> =
-    tokio::sync::Mutex::const_new(());
-
 async fn assert_no_machines_created(pool: &PgPool) -> Result<(), Box<dyn std::error::Error>> {
     let machines = db::machine::find(
         pool,
@@ -817,7 +811,6 @@ async fn test_host_reconciler_counts_a_failed_admin_address_reconcile(
 ) -> Result<(), Box<dyn std::error::Error>> {
     const NUM_DPUS: usize = 2;
 
-    let _failed_creation_guard = FAILED_CREATION_METRIC_TEST_SERIAL.lock().await;
     let env = Env::new(pool).await;
     let host = ManagedHostConfig::default().with_dpu_count(NUM_DPUS);
     let (explorer, fixtures) =
@@ -1262,7 +1255,6 @@ async fn test_host_reconciliation_is_independent_of_creation_policy(
 async fn test_host_reconciler_rolls_back_conflicting_oob_ownership(
     pool: PgPool,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let _failed_creation_guard = FAILED_CREATION_METRIC_TEST_SERIAL.lock().await;
     let env = Env::new(pool).await;
     let host = ManagedHostConfig::default().with_dpu_count(2);
     let (explorer, fixtures) =
@@ -2204,7 +2196,6 @@ async fn test_create_machines_continues_when_the_rack_pre_creation_fails(
 async fn test_create_machines_moves_on_after_a_failed_attempt_within_the_cap(
     pool: PgPool,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let _failed_creation_guard = FAILED_CREATION_METRIC_TEST_SERIAL.lock().await;
     let env = Env::new(pool).await;
     let rack_a = RackId::new(format!("rack-a-{}", uuid::Uuid::new_v4()));
     let rack_b = RackId::new(format!("rack-b-{}", uuid::Uuid::new_v4()));

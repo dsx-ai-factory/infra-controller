@@ -971,11 +971,11 @@ mod tests {
             run = |bios_attrs: serde_json::Value| {
                 let bios_attrs: std::collections::HashMap<String, serde_json::Value> =
                     serde_json::from_value(bios_attrs).expect("valid test BIOS response");
-                let metrics = MetricsCapture::start();
+                let metrics = MetricsCapture::owned();
                 let mut skipped = false;
                 let logs = capture_logs(|| {
                     skipped = emit_dpu_uefi_password_setup_skipped_if_needed(&bios_attrs,
-                        &Instrumentation::global(),
+                        metrics.instrumentation(),
                     );
                 });
                 let logs = logs
@@ -1659,7 +1659,7 @@ mod tests {
                 &double_access(),
                 true,
                 site_creds(),
-                &Instrumentation::global(),
+                &Instrumentation::noop(),
             )
             .await
             .expect_err("client creation failure must fail the op");
@@ -1692,7 +1692,7 @@ mod tests {
                 &double_access(),
                 true,
                 site_creds(),
-                &Instrumentation::global(),
+                &Instrumentation::noop(),
             )
             .await
             .expect_err("store read failure must fail the op");

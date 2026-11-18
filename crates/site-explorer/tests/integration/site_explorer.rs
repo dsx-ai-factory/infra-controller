@@ -1253,10 +1253,13 @@ async fn test_preingestion_refresh_wait_is_served_within_the_budget(
 }
 
 #[sqlx_test]
-async fn test_suppression_is_acknowledged_before_precondition_failure(
+async fn test_suppression_is_acknowledged_before_credential_loading_failure(
     pool: PgPool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let env = Env::new(pool).await;
+    // Leave an unsuppressed endpoint eligible, so a missing snapshot must prevent a probe.
+    let mut machine = env.new_machine("02:00:00:00:12:02", "Vendor");
+    machine.discover_dhcp(env.api()).await?;
     let suppressed_mac: MacAddress = "02:00:00:00:12:01".parse()?;
     let mut txn = env.pool.begin().await?;
     db::bmc_suppression::upsert(
@@ -1267,16 +1270,16 @@ async fn test_suppression_is_acknowledged_before_precondition_failure(
     txn.commit().await?;
 
     let explorer = env.test_site_explorer(suppression_test_config(1));
-    explorer.endpoint_explorer().set_precondition_result(Err(
-        EndpointExplorationError::MissingCredentials {
+    explorer
+        .endpoint_explorer()
+        .set_sitewide_bmc_password_result(Err(EndpointExplorationError::MissingCredentials {
             key: LAST_RUN_MISSING_CREDENTIAL_KEY.to_string(),
             cause: "missing site-wide credential".to_string(),
-        },
-    ));
+        }));
     explorer
         .run_single_iteration()
         .await
-        .expect_err("credential precondition should fail the iteration");
+        .expect_err("credential loading should fail the iteration");
 
     assert_eq!(
         explorer.endpoint_explorer().explore_endpoint_call_count(),
@@ -2883,6 +2886,12 @@ async fn test_site_explorer_main(pool: PgPool) -> Result<(), Box<dyn std::error:
         ..Default::default()
     };
     let explorer = env::test_site_explorer(&test_harness, explorer_config);
+    explorer
+        .endpoint_explorer()
+        .set_sitewide_bmc_password_result(Ok(carbide_site_explorer::SiteWideBmcPassword {
+            version: 7,
+            password: "pass-wide-bmc-password".to_string(),
+        }));
     explorer.insert_endpoint_results(vec![
         (machines[0].ip.parse().unwrap(), Ok(mock_dpu.clone().into())),
         (
@@ -2925,6 +2934,27 @@ async fn test_site_explorer_main(pool: PgPool) -> Result<(), Box<dyn std::error:
     let test_meter = &test_harness.test_meter;
 
     explorer.run_single_iteration().await.unwrap();
+    assert_eq!(
+        explorer
+            .endpoint_explorer()
+            .sitewide_bmc_password_loads
+            .load(std::sync::atomic::Ordering::Relaxed),
+        1,
+        "one credential load serves every probe in the pass"
+    );
+    {
+        let calls = explorer
+            .endpoint_explorer()
+            .explore_endpoint_calls
+            .lock()
+            .unwrap();
+        assert_eq!(calls.len(), 2);
+        assert!(
+            calls
+                .iter()
+                .all(|call| call.sitewide_bmc_password_version == Some(7))
+        );
+    }
     // Since we configured a limit of 2 entries, we should have those 2 results now
     let mut txn = pool.begin().await?;
     let explored = db::explored_endpoints::find_all(txn.as_mut())
@@ -2988,8 +3018,34 @@ async fn test_site_explorer_main(pool: PgPool) -> Result<(), Box<dyn std::error:
         "0"
     );
 
-    // Running again should yield all 3 entries
+    // The next pass must load a fresh snapshot and share it across its probes.
+    explorer
+        .endpoint_explorer()
+        .set_sitewide_bmc_password_result(Ok(carbide_site_explorer::SiteWideBmcPassword {
+            version: 8,
+            password: "next-pass-wide-bmc-password".to_string(),
+        }));
     explorer.run_single_iteration().await.unwrap();
+    assert_eq!(
+        explorer
+            .endpoint_explorer()
+            .sitewide_bmc_password_loads
+            .load(std::sync::atomic::Ordering::Relaxed),
+        2,
+    );
+    {
+        let calls = explorer
+            .endpoint_explorer()
+            .explore_endpoint_calls
+            .lock()
+            .unwrap();
+        assert!(calls.len() > 2);
+        assert!(
+            calls[2..]
+                .iter()
+                .all(|call| call.sitewide_bmc_password_version == Some(8))
+        );
+    }
     // Since we configured a limit of 2 entries, we should have those 2 results now
     let mut txn = pool.begin().await?;
     let explored = db::explored_endpoints::find_all(txn.as_mut())
@@ -3179,10 +3235,6 @@ async fn test_site_explorer_main(pool: PgPool) -> Result<(), Box<dyn std::error:
 async fn test_site_explorer_audit_exploration_results(
     pool: PgPool,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    // This iteration records a failed creation; see the mutex's comment.
-    let _failed_creation_guard = super::machine_creator::FAILED_CREATION_METRIC_TEST_SERIAL
-        .lock()
-        .await;
     let env = Env::new(pool.clone()).await;
     let underlay_segment = env.underlay_segment.id;
 
@@ -5305,10 +5357,6 @@ async fn test_site_explorer_pairs_dpu_from_chassis_serial(
     use model::expected_machine::{ExpectedMachine, ExpectedMachineData};
     use model::site_explorer::BlueFieldOperatingMode;
 
-    // This iteration records a failed creation; see the mutex's comment.
-    let _failed_creation_guard = super::machine_creator::FAILED_CREATION_METRIC_TEST_SERIAL
-        .lock()
-        .await;
     let env = Env::new(pool).await;
 
     const CHASSIS_DPU_SERIAL: &str = "chassis-reported-dpu-serial";
@@ -5601,10 +5649,6 @@ async fn test_site_explorer_deduplicates_inventory_serials_and_repairs_persisted
 async fn test_site_explorer_pairs_vr_bf4_from_bluefield_chassis(
     pool: PgPool,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    // This iteration records a failed creation; see the mutex's comment.
-    let _failed_creation_guard = super::machine_creator::FAILED_CREATION_METRIC_TEST_SERIAL
-        .lock()
-        .await;
     let env = Env::new(pool).await;
 
     let reports = generate_managed_host_reports(HardwareType::NvidiaDgxVr).await?;

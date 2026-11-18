@@ -179,7 +179,7 @@ async fn routed_metadata() {
             "http://127.0.0.1:1".to_string(),
             Arc::new(CarbideClientConfig::default()),
             MachineIdentityConfig::default(),
-            carbide_instrument::Instrumentation::global(),
+            carbide_instrument::Instrumentation::noop(),
         )
         .expect("metadata state"),
     );
@@ -205,8 +205,11 @@ async fn routed_metadata() {
     crate::metadata_service::spawn_metadata_service(
         "0.0.0.0:7777".to_string(),
         create_metrics(
-            opentelemetry::global::meter("embedded-routing-test"),
-            carbide_instrument::Instrumentation::global(),
+            opentelemetry::metrics::MeterProvider::meter(
+                &opentelemetry::metrics::noop::NoopMeterProvider::new(),
+                "embedded-routing-test",
+            ),
+            carbide_instrument::Instrumentation::noop(),
         ),
         state.clone(),
         false,
@@ -218,8 +221,11 @@ async fn routed_metadata() {
     let mut pending = Some(PendingMetadataService {
         address: format!("[{FMDS_IPV6_ADDRESS}]:7777"),
         metrics: create_metrics(
-            opentelemetry::global::meter("embedded-routing-test"),
-            carbide_instrument::Instrumentation::global(),
+            opentelemetry::metrics::MeterProvider::meter(
+                &opentelemetry::metrics::noop::NoopMeterProvider::new(),
+                "embedded-routing-test",
+            ),
+            carbide_instrument::Instrumentation::noop(),
         ),
         state,
     });

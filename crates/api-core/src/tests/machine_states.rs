@@ -6965,9 +6965,10 @@ async fn test_legacy_http_boot_wait_migrates_to_shared_bios_repair(pool: sqlx::P
 
     // Plant the host mid-wait with the window already expired (backdated past
     // the 10-minute apply window). Pass 1 migrates its persisted state; pass 2
-    // runs machine_setup through the common BIOS driver.
+    // runs machine_setup through the common BIOS driver; pass 3 restarts the host.
     set_host_controller_state_stuck_in(&env, host_id, &stuck_waiting(0), 11).await;
     let checkpoint = env.redfish_sim.timepoint();
+    env.run_machine_state_controller_iteration().await;
     env.run_machine_state_controller_iteration().await;
     env.run_machine_state_controller_iteration().await;
     let actions = env.redfish_sim.actions_since(&checkpoint).all_hosts();
@@ -7541,6 +7542,49 @@ async fn test_hpc_polling_bios_setup_exhausted_enters_failed_and_recovers_when_b
             host.current_state()
         );
     }
+}
+
+#[crate::sqlx_test]
+async fn test_host_reprovision_without_firmware_config_restores_lockdown(pool: sqlx::PgPool) {
+    let mut config = crate::tests::common::api_fixtures::get_config();
+    config.host_models = HashMap::new();
+    let overrides = TestEnvOverrides::with_config(config);
+    let env = create_zero_dpu_test_env_with_overrides(pool, overrides).await;
+    let mh = create_managed_host_with_config(&env, ManagedHostConfig::zero_dpu()).await;
+    let state = ManagedHostState::HostReprovision {
+        reprovision_state: model::machine::HostReprovisionState::CheckingFirmwareV2 {
+            firmware_type: None,
+            firmware_number: None,
+        },
+        retry_count: 1,
+    };
+    set_host_controller_state_stuck_in(&env, mh.host().id, &state, 0).await;
+    env.redfish_sim
+        .set_lockdown(libredfish::EnabledDisabled::Disabled);
+
+    env.run_machine_state_controller_iteration().await;
+
+    let mut txn = env.db_txn().await;
+    let host = mh.host().db_machine(&mut txn).await;
+    drop(txn);
+    assert!(
+        matches!(
+            host.current_state(),
+            ManagedHostState::HostInit {
+                machine_state: MachineState::WaitingForLockdown { lockdown_info },
+            } if lockdown_info.mode == LockdownMode::Enable
+        ),
+        "leaving a host reprovision without firmware config should restore lockdown, got {:?}",
+        host.current_state()
+    );
+    assert!(
+        env.redfish_sim
+            .lockdown_states()
+            .iter()
+            .all(|state| *state == libredfish::EnabledDisabled::Enabled),
+        "{:?}",
+        env.redfish_sim.lockdown_states()
+    );
 }
 
 async fn set_host_controller_state_stuck_in(

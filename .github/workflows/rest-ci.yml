@@ -13,6 +13,9 @@ on:
       - "v[0-9]*.[0-9]*.[0-9]*"
       - "v[0-9][0-9][0-9][0-9].[0-9][0-9].[0-9][0-9]*"
       - "v[0-9].[0-9].[0-9]-rc[0-9]*"
+  merge_group:
+    types: [checks_requested]
+    branches: [main]
 
 concurrency:
   group: ${{ github.event_name == 'push' && github.run_attempt == '1' && startsWith(github.ref, 'refs/heads/pull-request/') && format('rest-pr-{0}', github.ref_name) || format('rest-run-{0}-{1}', github.run_id, github.run_attempt) }}
@@ -141,7 +144,7 @@ jobs:
           fetch-depth: 0
       - name: Compute TruffleHog scan range
         id: scan-range
-        if: startsWith(github.ref, 'refs/heads/pull-request/') || (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/'))
+        if: startsWith(github.ref, 'refs/heads/pull-request/') || (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')) || github.event_name == 'merge_group'
         env:
           GH_TOKEN: ${{ github.token }}
         run: bash .github/ci/resolve-secret-scan-range.sh >> "$GITHUB_OUTPUT"
@@ -163,7 +166,7 @@ jobs:
   # push refs has to be expressed as two mutually exclusive jobs.
   build-and-push:
     name: Build and Push Docker Images
-    if: ${{ !startsWith(github.ref, 'refs/heads/pull-request/') }}
+    if: ${{ !startsWith(github.ref, 'refs/heads/pull-request/') && github.event_name != 'merge_group' }}
     needs:
       - prepare
       - lint-and-test
@@ -209,7 +212,7 @@ jobs:
   # when `push_enabled` is false either.
   build-and-push-pr:
     name: Build Docker Images
-    if: ${{ startsWith(github.ref, 'refs/heads/pull-request/') }}
+    if: ${{ startsWith(github.ref, 'refs/heads/pull-request/') || github.event_name == 'merge_group' }}
     needs:
       - prepare
     permissions:

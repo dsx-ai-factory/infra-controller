@@ -37,11 +37,17 @@ pub(crate) struct SetupCommand {
     env_skip_rms: bool,
     env_observability: bool,
     env_contour: bool,
-    /// An unterminated quote in `setup.command`; the shell would refuse it too.
-    pub(crate) quoting_error: Option<String>,
+    /// What the shell would refuse in `setup.command`: an unterminated quote, backtick,
+    /// command or process substitution, or a redirection without a target.
+    pub(crate) parse_error: Option<String>,
     /// A `NICO_INSTALL_DPF` or `NICO_INSTALL_RMS` value setup.sh rejects, when no skip
     /// variable or switch overrides it; the message is the one setup.sh prints.
     pub(crate) env_error: Option<String>,
+    /// A word setup.sh does not accept; it exits 1 on one, a misspelled switch included.
+    pub(crate) switch_error: Option<String>,
+    /// Words after `setup.sh` the shell would expand that cannot be read here (`$FLAGS`
+    /// with a secret or unset variable, `$(…)`): whatever they add is not compared.
+    pub(crate) unexpanded: Vec<String>,
     /// Whether any simple command on the line runs `setup.sh`; when none does (a developer
     /// site deployed by other scripts) the command decides nothing.
     runs_setup_sh: bool,
@@ -86,12 +92,11 @@ pub(crate) struct Layer {
 }
 
 impl Layer {
-    /// The layer the words before a program describe.
-    fn of(prefix: &[&str]) -> Layer {
-        let env_at = prefix
-            .iter()
-            .position(|w| !is_assignment(w) && basename(w) == "env")
-            .unwrap_or(prefix.len());
+    /// The layers the words before a program describe: the assignments before the first
+    /// `env` are the inherited environment, and every `env` invocation after that is a
+    /// layer of its own, so `env A=1 env -u A cmd` removes `A` in the inner layer after
+    /// the outer one set it.
+    fn stack(prefix: &[&str]) -> Vec<Layer> {
         let assignments = |ws: &[&str]| -> Vec<(String, String)> {
             ws.iter()
                 .filter(|w| is_assignment(w))
@@ -99,33 +104,46 @@ impl Layer {
                 .map(|(k, v)| (k.to_string(), v.to_string()))
                 .collect()
         };
-        let mut layer = Layer {
-            pre: assignments(&prefix[..env_at]),
-            own: assignments(&prefix[env_at..]),
-            ..Layer::default()
-        };
-        let mut it = prefix[env_at..]
+        let env_at: Vec<usize> = prefix
             .iter()
-            .skip(1)
-            .filter(|w| !is_assignment(w));
-        while let Some(w) = it.next() {
-            match *w {
-                "-i" | "--ignore-environment" => layer.clear = true,
-                "-u" | "--unset" => layer.unset.extend(it.next().map(|n| n.to_string())),
-                _ if w.starts_with("--unset=") => {
-                    layer.unset.push(w["--unset=".len()..].to_string())
+            .enumerate()
+            .filter(|(_, w)| !is_assignment(w) && basename(w) == "env")
+            .map(|(i, _)| i)
+            .collect();
+        let first = env_at.first().copied().unwrap_or(prefix.len());
+        let mut layers = vec![Layer {
+            pre: assignments(&prefix[..first]),
+            ..Layer::default()
+        }];
+        for (n, &at) in env_at.iter().enumerate() {
+            let until = env_at.get(n + 1).copied().unwrap_or(prefix.len());
+            let words = &prefix[at + 1..until];
+            let mut layer = Layer {
+                own: assignments(words),
+                ..Layer::default()
+            };
+            let mut it = words.iter().filter(|w| !is_assignment(w));
+            while let Some(w) = it.next() {
+                match *w {
+                    "-i" | "--ignore-environment" => layer.clear = true,
+                    "-u" | "--unset" => layer.unset.extend(it.next().map(|n| n.to_string())),
+                    _ if w.starts_with("--unset=") => {
+                        layer.unset.push(w["--unset=".len()..].to_string())
+                    }
+                    _ if w.starts_with("-u") && w.len() > 2 => layer.unset.push(w[2..].to_string()),
+                    _ => {}
                 }
-                _ if w.starts_with("-u") && w.len() > 2 => layer.unset.push(w[2..].to_string()),
-                _ => {}
             }
+            layers.push(layer);
         }
-        layer
+        layers
     }
 
     /// A variable as the program sees it through this stack of layers, innermost last:
     /// an `env`-line assignment wins; a removal or a cleared environment ends the search;
-    /// an inherited assignment is next; the outer layers follow, then `setup.env`.
-    fn resolve<'a>(layers: &'a [Layer], name: &str, setup: &'a Setup) -> Option<&'a str> {
+    /// an inherited assignment is next; the outer layers follow, then `setup.env`, whose
+    /// secret-sourced values the gate cannot read.
+    fn resolve<'a>(layers: &'a [Layer], name: &str, setup: &'a Setup) -> Resolved<'a> {
         let last = |list: &'a [(String, String)]| {
             list.iter()
                 .rev()
@@ -134,20 +152,42 @@ impl Layer {
         };
         for layer in layers.iter().rev() {
             if let Some(v) = last(&layer.own) {
-                return Some(v);
+                return Resolved::Plain(v);
             }
             if layer.clear || layer.unset.iter().any(|u| u == name) {
-                return None;
+                return Resolved::Absent;
             }
             if let Some(v) = last(&layer.pre) {
-                return Some(v);
+                return Resolved::Plain(v);
             }
         }
         match setup.env.get(name) {
-            Some(EnvValue::Plain(v)) => Some(v.as_str()),
-            _ => None,
+            Some(EnvValue::Plain(v)) => Resolved::Plain(v.as_str()),
+            Some(EnvValue::Secret(_)) => Resolved::Secret,
+            None => Resolved::Absent,
         }
     }
+}
+
+/// What a variable resolves to for the program.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum Resolved<'a> {
+    Plain(&'a str),
+    /// Named in `setup.env` with a `{from: …}` source: set at run time, unreadable here.
+    Secret,
+    Absent,
+}
+
+/// The variable a value made of one bare reference names (`$NAME`, `${NAME}`).
+fn reference(v: &str) -> Option<&str> {
+    let name = v
+        .strip_prefix("${")
+        .and_then(|r| r.strip_suffix('}'))
+        .or_else(|| v.strip_prefix('$'))?;
+    let valid = !name.is_empty()
+        && !name.starts_with(|c: char| c.is_ascii_digit())
+        && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
+    valid.then_some(name)
 }
 
 /// `NAME=value` with a name the shell accepts.
@@ -222,6 +262,11 @@ pub(crate) fn shell_words(line: &str) -> (Vec<Token>, Option<String>) {
                         }
                     }
                 }
+                '`' => {
+                    if !read_backticks(chars, word) {
+                        return false;
+                    }
+                }
                 '(' => depth += 1,
                 ')' => {
                     depth -= 1;
@@ -229,6 +274,22 @@ pub(crate) fn shell_words(line: &str) -> (Vec<Token>, Option<String>) {
                         return true;
                     }
                 }
+                _ => {}
+            }
+        }
+        false
+    }
+    /// Reads a backtick substitution verbatim into `word` up to and including the closing
+    /// backtick, honouring backslash escapes. Returns whether it was closed.
+    fn read_backticks(
+        chars: &mut std::iter::Peekable<std::str::Chars<'_>>,
+        word: &mut String,
+    ) -> bool {
+        while let Some(q) = chars.next() {
+            word.push(q);
+            match q {
+                '\\' => word.extend(chars.next()),
+                '`' => return true,
                 _ => {}
             }
         }
@@ -308,9 +369,11 @@ pub(crate) fn shell_words(line: &str) -> (Vec<Token>, Option<String>) {
                 word_quoted = false;
                 in_word = false;
                 let mut more = 0usize;
-                while matches!(chars.peek(), Some('>') | Some('<')) {
+                while let Some(&next) = chars.peek()
+                    && matches!(next, '>' | '<')
+                {
                     chars.next();
-                    more += 1;
+                    more += usize::from(next == c);
                 }
                 // A here-document's body (`<<`, `<<-`) would read as commands; the gate
                 // refuses the line rather than guess where the body ends. A here-string
@@ -420,6 +483,15 @@ pub(crate) fn shell_words(line: &str) -> (Vec<Token>, Option<String>) {
                             closed = true;
                             break;
                         }
+                        // A backtick substitution inside the quotes is kept verbatim too.
+                        '`' => {
+                            word.push('`');
+                            if !read_backticks(&mut chars, &mut word) {
+                                error.get_or_insert_with(|| {
+                                    "unterminated backtick substitution".to_string()
+                                });
+                            }
+                        }
                         // A substitution keeps its own quotes; it is kept verbatim.
                         '$' if chars.peek() == Some(&'(') => {
                             word.push('$');
@@ -448,6 +520,16 @@ pub(crate) fn shell_words(line: &str) -> (Vec<Token>, Option<String>) {
                     error = Some("unterminated double quote".to_string());
                 }
             }
+            // A backtick substitution is part of its word, kept verbatim like `$(…)`; a `;`
+            // or `#` inside it is not a boundary or a comment.
+            '`' => {
+                in_word = true;
+                word_quoted = true;
+                word.push('`');
+                if !read_backticks(&mut chars, &mut word) {
+                    error.get_or_insert_with(|| "unterminated backtick substitution".to_string());
+                }
+            }
             other => {
                 in_word = true;
                 word.push(other);
@@ -472,7 +554,7 @@ impl SetupCommand {
     /// components (`NICO_SKIP_DPF`, `NICO_INSTALL_DPF`, `NICO_SKIP_RMS`, `NICO_INSTALL_RMS`,
     /// `WITH_OBSERVABILITY`, `NICO_INSTALL_CONTOUR`); a switch wins over its variable.
     pub(crate) fn parse(setup: &Setup) -> Self {
-        let (tokens, quoting_error) = shell_words(&setup.command);
+        let (tokens, parse_error) = shell_words(&setup.command);
         // The switches belong to the simple command that runs setup.sh. The line may `cd`
         // first, or reach the script through `env`, `sudo`, `nohup` or an interpreter with
         // options of their own, so the script is found by name within its command, and
@@ -533,7 +615,51 @@ impl SetupCommand {
         // environment the words around the interpreter describe, resolved at that
         // boundary, and anything after the string is `$0` and positional parameters, not
         // switches. A `bash` that is another command's argument is left alone.
-        let mut quoting_error = quoting_error;
+        // What an interpreter in command position does with what follows it.
+        enum Interpreter<'a> {
+            /// `-c`: runs the string, the first word after the option clusters (`-c`,
+            /// `-lc`, `-l -c`, `-xe -c`); the count is the words up to and including it.
+            Runs(usize, &'a str),
+            /// `-n` in a cluster: reads without running, so the command does nothing.
+            NoExec,
+            /// Anything else, including an option with an operand (`-o pipefail`): the
+            /// words are left alone.
+            Other,
+        }
+        // Option clusters are read in order: a `-` cluster sets its letters, a `+` cluster
+        // clears them (`-n +n` runs after all), and the outcome is decided at the first
+        // word that is not a cluster, or at the end of the command.
+        fn interpreter_does(words: &[Token]) -> Interpreter<'_> {
+            let mut has_c = false;
+            let mut no_exec = false;
+            let mut n = 0;
+            while let Some(Token::Word(w)) = words.get(n) {
+                let cluster = w.len() > 1
+                    && w.starts_with(['-', '+'])
+                    && w[1..].chars().all(|c| c.is_ascii_alphabetic());
+                if !cluster {
+                    break;
+                }
+                let sets = w.starts_with('-');
+                if w.contains('n') {
+                    no_exec = sets;
+                }
+                if w.contains('c') {
+                    has_c = sets;
+                }
+                n += 1;
+            }
+            // `--` ends the options; the string follows it.
+            if matches!(words.get(n), Some(Token::Word(w)) if w == "--") {
+                n += 1;
+            }
+            match words.get(n) {
+                _ if no_exec => Interpreter::NoExec,
+                Some(Token::Word(w)) if has_c => Interpreter::Runs(n + 1, w.as_str()),
+                _ => Interpreter::Other,
+            }
+        }
+        let mut parse_error = parse_error;
         let mut expanded: Vec<Token> = Vec::with_capacity(tokens.len());
         let mut i = 0;
         while i < tokens.len() {
@@ -541,40 +667,57 @@ impl SetupCommand {
             let (outer_layers, prefix) = prefix_of(&expanded[start..]);
             let interpreter = matches!(&tokens[i], Token::Word(w)
                 if matches!(basename(w), "bash" | "sh" | "dash" | "zsh"));
-            if interpreter
-                && is_invocation(&non_assignments(&prefix))
-                && matches!(tokens.get(i + 1), Some(Token::Word(f)) if f == "-c")
-                && let Some(Token::Word(script)) = tokens.get(i + 2)
-            {
-                let (inner, err) = shell_words(script);
-                if quoting_error.is_none() {
-                    quoting_error = err;
-                }
-                let mut layers = outer_layers;
-                layers.push(Layer::of(&prefix));
-                expanded.truncate(start);
-                let mut at_segment_start = true;
-                for t in inner {
-                    if t.is_op() {
-                        at_segment_start = true;
-                    } else if at_segment_start {
-                        expanded.push(Token::Inherits(layers.clone()));
-                        at_segment_start = false;
+            let does = if interpreter && is_invocation(&non_assignments(&prefix)) {
+                interpreter_does(&tokens[i + 1..])
+            } else {
+                Interpreter::Other
+            };
+            match does {
+                Interpreter::Runs(skip, script) => {
+                    let (inner, err) = shell_words(script);
+                    if parse_error.is_none() {
+                        parse_error = err;
                     }
-                    expanded.push(t);
+                    let mut layers = outer_layers;
+                    layers.extend(Layer::stack(&prefix));
+                    expanded.truncate(start);
+                    let mut at_segment_start = true;
+                    for t in inner {
+                        if t.is_op() {
+                            at_segment_start = true;
+                        } else if at_segment_start {
+                            expanded.push(Token::Inherits(layers.clone()));
+                            at_segment_start = false;
+                        }
+                        expanded.push(t);
+                    }
+                    i += 1 + skip;
+                    while i < tokens.len() && !tokens[i].is_op() {
+                        i += 1;
+                    }
                 }
-                i += 3;
-                while i < tokens.len() && !tokens[i].is_op() {
+                // A command that runs nothing cannot name the script that runs: it is
+                // dropped, prefix included, so a line with only `bash -n ./setup.sh` is
+                // one that does not run setup.sh.
+                Interpreter::NoExec => {
+                    expanded.truncate(start);
+                    while i < tokens.len() && !tokens[i].is_op() {
+                        i += 1;
+                    }
+                }
+                Interpreter::Other => {
+                    expanded.push(tokens[i].clone());
                     i += 1;
                 }
-            } else {
-                expanded.push(tokens[i].clone());
-                i += 1;
             }
         }
         /// A simple command on the line that names setup.sh.
         struct Naming {
             layers: Vec<Layer>,
+            /// How many of `layers` the command inherits from the shells around it; the
+            /// rest are its own line. The shell expands the command's arguments in the
+            /// inherited environment.
+            inherited: usize,
             args: Vec<String>,
             invokes: bool,
         }
@@ -586,9 +729,11 @@ impl SetupCommand {
                     .iter()
                     .position(|w| !is_assignment(w) && basename(w) == "setup.sh")?;
                 let before = non_assignments(&words[..at]);
-                layers.push(Layer::of(&words[..at]));
+                let inherited = layers.len();
+                layers.extend(Layer::stack(&words[..at]));
                 Some(Naming {
                     layers,
+                    inherited,
                     args: words[at + 1..].iter().map(|w| w.to_string()).collect(),
                     invokes: is_invocation(&before),
                 })
@@ -600,12 +745,36 @@ impl SetupCommand {
             .or_else(|| (!naming.is_empty()).then_some(0))
             .map(|i| &naming[i]);
         let runs_setup_sh = segment.is_some();
-        let words: Vec<&str> = segment
-            .map(|n| n.args.iter().map(String::as_str).collect())
-            .unwrap_or_default();
         // A variable as setup.sh will see it, through every layer of assignments and `env`
         // controls around it, then `setup.env`.
-        let plain = |name: &str| Layer::resolve(&segment?.layers, name, setup);
+        let source = |name: &str| {
+            segment.map_or(Resolved::Absent, |n| Layer::resolve(&n.layers, name, setup))
+        };
+        // The shell expands the words after setup.sh before setup.sh reads them, in the
+        // shell's own environment: what the shells around the command hand it (an outer
+        // `env` around a `bash -c`), then `setup.env`. A bare reference to a plain value
+        // becomes the words an unquoted expansion yields, none for an empty value, so an
+        // option takes the operand setup.sh will see. Any other expression stays a word of
+        // its own: as an operand it is the value as written; in switch position it is
+        // reported below as not readable, not refused.
+        let shell_env = |name: &str| {
+            segment.map_or(Resolved::Absent, |n| {
+                Layer::resolve(&n.layers[..n.inherited], name, setup)
+            })
+        };
+        let mut words: Vec<String> = Vec::new();
+        for w in segment.map(|n| n.args.as_slice()).unwrap_or_default() {
+            match reference(w).map(shell_env) {
+                Some(Resolved::Plain(v)) if !v.contains(['$', '`']) => {
+                    words.extend(v.split_whitespace().map(String::from));
+                }
+                _ => words.push(w.clone()),
+            }
+        }
+        let plain = |name: &str| match source(name) {
+            Resolved::Plain(v) => Some(v),
+            _ => None,
+        };
         let mut c = SetupCommand {
             switches: Vec::new(),
             core_values: None,
@@ -617,43 +786,17 @@ impl SetupCommand {
                 || plain("NICO_INSTALL_RMS") == Some("false"),
             env_observability: plain("WITH_OBSERVABILITY") == Some("true"),
             env_contour: plain("NICO_INSTALL_CONTOUR") == Some("true"),
-            quoting_error,
+            parse_error,
             env_error: None,
+            switch_error: None,
+            unexpanded: Vec::new(),
             runs_setup_sh,
         };
-        // setup.sh starts from NICO_INSTALL_*, lets NICO_SKIP_*=true and then the switches
-        // override it, and exits unless the result is exactly `true` or `false`.
-        let invalid_install = |install: &str, skip: &str, skip_sw: &str, install_sw: &str| {
-            let overridden = plain(skip) == Some("true")
-                || words.iter().any(|w| *w == skip_sw || *w == install_sw);
-            match plain(install) {
-                // `${NICO_INSTALL_DPF:-true}`: setup.sh takes an empty value as unset.
-                Some(v) if !v.is_empty() && !overridden && v != "true" && v != "false" => {
-                    Some(format!("{install} must be true or false (got '{v}')"))
-                }
-                _ => None,
-            }
-        };
-        if runs_setup_sh {
-            c.env_error = invalid_install(
-                "NICO_INSTALL_DPF",
-                "NICO_SKIP_DPF",
-                "--skip-dpf",
-                "--install-dpf",
-            )
-            .or_else(|| {
-                invalid_install(
-                    "NICO_INSTALL_RMS",
-                    "NICO_SKIP_RMS",
-                    "--skip-rms",
-                    "--install-rms",
-                )
-            });
-        }
         let mut i = 0;
         while i < words.len() {
-            let w = words[i];
-            let value = words.get(i + 1).map(|v| v.to_string());
+            let w = words[i].clone();
+            let w = w.as_str();
+            let value = words.get(i + 1).cloned();
             let takes_value = value.is_some();
             match w {
                 "--core-values" => {
@@ -669,10 +812,99 @@ impl SetupCommand {
                     i += usize::from(takes_value);
                 }
                 "--flow-values" => i += usize::from(takes_value),
-                _ if w.starts_with("--") => c.switches.push(w.to_string()),
-                _ => {}
+                "-y"
+                | "--ignore-preflight-errors"
+                | "--skip-core"
+                | "--skip-rest"
+                | "--install-dpf"
+                | "--skip-dpf"
+                | "--install-rms"
+                | "--skip-rms"
+                | "--install-vault"
+                | "--skip-vault"
+                | "--with-observability"
+                | "--install-contour"
+                | "--debug" => c.switches.push(w.to_string()),
+                // An expression the shell would expand that the expansion above could not
+                // read: what it adds is unknown, so it is reported, not refused.
+                _ if w.contains(['$', '`']) => c.unexpanded.push(w.to_string()),
+                // setup.sh's usage arm exits 1 on any other word, a misspelled switch
+                // included.
+                _ => {
+                    c.switch_error
+                        .get_or_insert_with(|| format!("setup.sh does not accept `{w}`"));
+                }
             }
             i += 1;
+        }
+        // setup.sh starts from NICO_INSTALL_*, lets NICO_SKIP_*=true and then the switches
+        // override it, and exits unless the result is exactly `true` or `false`. Checked
+        // against the switches as parsed, since a word an option consumed as its value
+        // (`--core-values --skip-rms`) decides nothing.
+        let invalid_install = |install: &str, skip: &str, skip_sw: &str, install_sw: &str| {
+            let overridden = plain(skip) == Some("true") || c.has(skip_sw) || c.has(install_sw);
+            match plain(install) {
+                // `${NICO_INSTALL_DPF:-true}`: setup.sh takes an empty value as unset.
+                Some(v) if !v.is_empty() && !overridden && v != "true" && v != "false" => {
+                    Some(format!("{install} must be true or false (got '{v}')"))
+                }
+                _ => None,
+            }
+        };
+        if runs_setup_sh {
+            // Every component control setup.sh reads: the install variable it validates,
+            // the skip variable and the two switches that override both.
+            const CONTROLS: [(&str, &str, &str, &str); 3] = [
+                (
+                    "NICO_INSTALL_DPF",
+                    "NICO_SKIP_DPF",
+                    "--skip-dpf",
+                    "--install-dpf",
+                ),
+                (
+                    "NICO_INSTALL_RMS",
+                    "NICO_SKIP_RMS",
+                    "--skip-rms",
+                    "--install-rms",
+                ),
+                (
+                    "NICO_INSTALL_VAULT",
+                    "NICO_SKIP_VAULT",
+                    "--skip-vault",
+                    "--install-vault",
+                ),
+            ];
+            const FLAGS: [(&str, &str); 2] = [
+                ("WITH_OBSERVABILITY", "--with-observability"),
+                ("NICO_INSTALL_CONTOUR", "--install-contour"),
+            ];
+            // A secret-sourced control is unreadable here, unless a switch, or the other
+            // control of the pair with a plain value (`NICO_SKIP_*=true` for the install
+            // variable, `NICO_INSTALL_*=false` for the skip variable), settles the
+            // component whatever the secret holds.
+            let secret = |name: &str, switches: &[&str], settles: Option<(&str, &str)>| {
+                let decided = switches.iter().any(|s| c.has(s))
+                    || settles.is_some_and(|(var, value)| plain(var) == Some(value));
+                (matches!(source(name), Resolved::Secret) && !decided).then(|| {
+                    format!(
+                        "{name} comes from a secret source the gate cannot read; set a plain \
+                         value or decide it with {}",
+                        switches.join("/")
+                    )
+                })
+            };
+            c.env_error = CONTROLS
+                .iter()
+                .find_map(|(install, skip, skip_sw, install_sw)| {
+                    secret(install, &[skip_sw, install_sw], Some((skip, "true")))
+                        .or_else(|| secret(skip, &[skip_sw, install_sw], Some((install, "false"))))
+                        .or_else(|| invalid_install(install, skip, skip_sw, install_sw))
+                })
+                .or_else(|| {
+                    FLAGS
+                        .iter()
+                        .find_map(|(name, sw)| secret(name, &[sw], None))
+                });
         }
         c
     }
@@ -739,7 +971,7 @@ mod tests {
         assert!(!c.installs_dpf(), "a quoted switch is still the switch");
         assert!(!c.installs_rms());
         assert_eq!(c.core_values.as_deref(), Some("values/my site.yaml"));
-        assert!(c.quoting_error.is_none());
+        assert!(c.parse_error.is_none());
         let c = cmd(r#"./setup.sh --metallb-config values/a\ b.yaml"#);
         assert_eq!(c.metallb_config.as_deref(), Some("values/a b.yaml"));
     }
@@ -835,6 +1067,36 @@ mod tests {
         assert!(c.installs_dpf(), "a bare & still ends the command");
     }
 
+    /// `-c` inside an option cluster, or after other options, runs the string too.
+    #[test]
+    fn dash_c_in_an_option_cluster_runs_the_string() {
+        for line in [
+            "bash -lc './setup.sh --skip-dpf --skip-rms'",
+            "bash -l -c './setup.sh --skip-dpf --skip-rms'",
+            "bash -xe -c './setup.sh --skip-dpf --skip-rms' bash --install-rms",
+        ] {
+            let c = cmd(line);
+            assert!(
+                !c.installs_rms() && !c.installs_dpf() && c.parse_error.is_none(),
+                "{line}"
+            );
+        }
+        let c = cmd("bash -nc './setup.sh --skip-dpf'; ./setup.sh --skip-rms");
+        assert!(c.installs_dpf() && !c.installs_rms(), "`-n` runs nothing");
+        let c = cmd("bash -c -n ./setup.sh --skip-rms; ./setup.sh --skip-dpf");
+        assert!(
+            !c.installs_dpf() && c.installs_rms(),
+            "unquoted `-n` command"
+        );
+        let c = cmd("cd helm-prereqs && bash -n ./setup.sh --skip-rms");
+        assert!(!c.runs_setup_sh(), "`-n` alone runs nothing");
+        let c = cmd("bash -n +n ./setup.sh --skip-rms");
+        assert!(
+            c.runs_setup_sh() && !c.installs_rms(),
+            "`+n` turns noexec off"
+        );
+    }
+
     #[test]
     fn switches_come_from_the_simple_command_that_runs_setup_sh() {
         let c = cmd("cd helm-prereqs && ./setup.sh --skip-rms --skip-dpf");
@@ -892,7 +1154,7 @@ mod tests {
             Some("$(printf '%s' 'site(.yaml')"),
             "quotes inside a substitution"
         );
-        assert!(!c.installs_rms() && c.quoting_error.is_none());
+        assert!(!c.installs_rms() && c.parse_error.is_none());
         let c = cmd(r#"./setup.sh --core-values "$(printf '%s' "site;values.yaml")" --skip-rms"#);
         assert_eq!(
             c.core_values.as_deref(),
@@ -904,38 +1166,38 @@ mod tests {
         );
         let c = cmd("./setup.sh --skip-rms <<< 'yes'");
         assert!(
-            !c.installs_rms() && c.quoting_error.is_none(),
+            !c.installs_rms() && c.parse_error.is_none(),
             "a here-string is a plain redirection"
         );
         let c = cmd(
             "./setup.sh --core-values \"$(printf values.yaml # user's directory\n)\" --skip-rms",
         );
         assert!(
-            c.core_values.is_some() && !c.installs_rms() && c.quoting_error.is_none(),
+            c.core_values.is_some() && !c.installs_rms() && c.parse_error.is_none(),
             "a comment inside a substitution is skipped: {:?}",
-            c.quoting_error
+            c.parse_error
         );
         let c = cmd("cat <<EOF\n./setup.sh --skip-dpf\nEOF\n./setup.sh --skip-rms");
         assert!(
-            c.quoting_error
+            c.parse_error
                 .as_deref()
                 .is_some_and(|e| e.contains("here-document")),
             "a here-document is refused rather than read as commands: {:?}",
-            c.quoting_error
+            c.parse_error
         );
         let c = cmd("./setup.sh --skip-rms >|setup.log");
         assert!(
-            !c.installs_rms() && c.quoting_error.is_none(),
+            !c.installs_rms() && c.parse_error.is_none(),
             "`>|` is one redirection"
         );
         let c = cmd(r#"TAG=$(echo "$(echo "(")") ./setup.sh --skip-rms"#);
         assert!(
-            !c.installs_rms() && c.quoting_error.is_none(),
+            !c.installs_rms() && c.parse_error.is_none(),
             "nested substitutions in quotes"
         );
         let c = cmd("./setup.sh > >(tee setup.log) --skip-rms");
         assert!(
-            !c.installs_rms() && c.quoting_error.is_none(),
+            !c.installs_rms() && c.parse_error.is_none(),
             "a process substitution is one target"
         );
         let c = cmd("NICO_SKIP_RMS=true bash -c 'cd helm-prereqs && ./setup.sh --skip-dpf'");
@@ -1068,6 +1330,199 @@ mod tests {
         );
     }
 
+    fn with(command: &str, env: &[(&str, EnvValue)]) -> SetupCommand {
+        SetupCommand::parse(&Setup {
+            command: command.to_string(),
+            env: env
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.clone()))
+                .collect(),
+        })
+    }
+
+    fn secret() -> EnvValue {
+        EnvValue::Secret(crate::sitedef::SecretSource {
+            from: "env".to_string(),
+            path: None,
+            name: Some("SITE_SKIP_RMS".to_string()),
+        })
+    }
+
+    #[test]
+    fn each_env_wrapper_is_its_own_layer() {
+        let c = cmd("env NICO_SKIP_RMS=true env -u NICO_SKIP_RMS ./setup.sh");
+        assert!(
+            c.installs_rms(),
+            "the inner removal wins over the outer assignment"
+        );
+    }
+
+    #[test]
+    fn a_secret_sourced_control_needs_a_plain_value_or_a_decision() {
+        let c = with("./setup.sh", &[("NICO_SKIP_RMS", secret())]);
+        assert!(
+            c.env_error
+                .as_deref()
+                .is_some_and(|e| e.contains("NICO_SKIP_RMS") && e.contains("secret")),
+            "{:?}",
+            c.env_error
+        );
+        let c = with("./setup.sh --skip-rms", &[("NICO_SKIP_RMS", secret())]);
+        assert!(
+            c.env_error.is_none() && !c.installs_rms(),
+            "a switch decides over the secret"
+        );
+        let c = with(
+            "./setup.sh --core-values --skip-rms",
+            &[("NICO_SKIP_RMS", secret())],
+        );
+        assert!(
+            c.env_error.is_some(),
+            "a word consumed as an option's value decides nothing"
+        );
+        let c = with(
+            "./setup.sh",
+            &[
+                ("NICO_INSTALL_DPF", secret()),
+                ("NICO_SKIP_DPF", EnvValue::Plain("true".into())),
+            ],
+        );
+        assert!(
+            c.env_error.is_none() && !c.installs_dpf(),
+            "a plain skip decides before setup.sh reads the install variable"
+        );
+        let c = with("./setup.sh", &[("WITH_OBSERVABILITY", secret())]);
+        assert!(
+            c.env_error.is_some(),
+            "the observability flag is a control too"
+        );
+    }
+
+    /// `./setup.sh $FLAGS`: the shell expands the reference before setup.sh reads it.
+    #[test]
+    fn a_reference_after_setup_sh_is_expanded_or_reported() {
+        let c = with(
+            "./setup.sh $FLAGS",
+            &[("FLAGS", EnvValue::Plain("--skip-rms --skip-dpf".into()))],
+        );
+        assert!(
+            !c.installs_rms() && !c.installs_dpf() && c.switch_error.is_none(),
+            "a plain value is split into the switches it holds"
+        );
+        let c = with(
+            "env FLAGS=--skip-dpf ./setup.sh $FLAGS --skip-rms",
+            &[("FLAGS", EnvValue::Plain("--install-dpf".into()))],
+        );
+        assert!(
+            c.installs_dpf() && !c.installs_rms(),
+            "the shell expands the argument before `env` sets FLAGS for setup.sh"
+        );
+        let c = with(
+            "env FLAGS=--install-dpf bash -c './setup.sh $FLAGS --skip-rms'",
+            &[("FLAGS", EnvValue::Plain("--skip-dpf".into()))],
+        );
+        assert!(
+            c.installs_dpf() && !c.installs_rms(),
+            "the inner shell expands the argument in the environment it inherited"
+        );
+        let c = with(
+            "./setup.sh --core-values $EMPTY values/nico-core.yaml --skip-rms",
+            &[("EMPTY", EnvValue::Plain(String::new()))],
+        );
+        assert_eq!(
+            c.core_values.as_deref(),
+            Some("values/nico-core.yaml"),
+            "an empty expansion vanishes before the option takes its operand"
+        );
+        assert!(!c.installs_rms() && c.switch_error.is_none());
+        let c = with("./setup.sh $FLAGS --skip-rms", &[("FLAGS", secret())]);
+        assert!(
+            c.switch_error.is_none() && !c.installs_rms(),
+            "an unreadable value is not an unknown switch"
+        );
+        assert_eq!(c.unexpanded, vec!["$FLAGS".to_string()]);
+        let c = cmd("./setup.sh $(cat flags)");
+        assert_eq!(c.unexpanded, vec!["$(cat flags)".to_string()]);
+    }
+
+    #[test]
+    fn a_plain_install_false_settles_a_secret_skip() {
+        let c = with(
+            "./setup.sh",
+            &[
+                ("NICO_SKIP_DPF", secret()),
+                ("NICO_INSTALL_DPF", EnvValue::Plain("false".into())),
+            ],
+        );
+        assert!(
+            c.env_error.is_none() && !c.installs_dpf(),
+            "the component is skipped whatever the secret holds"
+        );
+    }
+
+    #[test]
+    fn a_double_dash_ends_the_interpreter_options_before_the_string() {
+        let c = cmd("bash -c -- './setup.sh --skip-rms'");
+        assert!(c.runs_setup_sh() && !c.installs_rms());
+    }
+
+    #[test]
+    fn a_read_write_redirection_is_not_a_here_document() {
+        let c = cmd("./setup.sh --skip-rms <>/dev/null");
+        assert!(!c.installs_rms() && c.parse_error.is_none());
+    }
+
+    #[test]
+    fn the_vault_install_variable_is_validated_like_the_others() {
+        let c = with(
+            "./setup.sh",
+            &[("NICO_INSTALL_VAULT", EnvValue::Plain("yes".into()))],
+        );
+        assert_eq!(
+            c.env_error.as_deref(),
+            Some("NICO_INSTALL_VAULT must be true or false (got 'yes')")
+        );
+    }
+
+    #[test]
+    fn a_word_setup_sh_does_not_accept_is_refused() {
+        let c = cmd("./setup.sh --skip-rsm --skip-dpf");
+        assert_eq!(
+            c.switch_error.as_deref(),
+            Some("setup.sh does not accept `--skip-rsm`")
+        );
+        assert!(!c.installs_dpf(), "the known switch still counts");
+        let c = cmd("./setup.sh --core-values values/a.yaml extra");
+        assert!(
+            c.switch_error.is_some(),
+            "a stray word is refused like setup.sh does"
+        );
+    }
+
+    #[test]
+    fn backticks_are_one_word_and_an_unterminated_one_is_an_error() {
+        let c = cmd("./setup.sh --core-values `echo v;x` --skip-rms");
+        assert_eq!(
+            c.core_values.as_deref(),
+            Some("`echo v;x`"),
+            "a `;` inside backticks does not split the command"
+        );
+        assert!(!c.installs_rms() && c.parse_error.is_none());
+        let c = cmd("TAG=`echo '#'` ./setup.sh --skip-rms");
+        assert!(
+            !c.installs_rms() && c.parse_error.is_none(),
+            "a `#` inside backticks is text"
+        );
+        let c = cmd("./setup.sh --core-values \"`echo a`.yaml\" --skip-rms");
+        assert_eq!(c.core_values.as_deref(), Some("`echo a`.yaml"));
+        let c = cmd("./setup.sh `echo --skip-rms");
+        assert!(
+            c.parse_error
+                .as_deref()
+                .is_some_and(|e| e.contains("backtick"))
+        );
+    }
+
     #[test]
     fn install_variables_must_be_true_or_false_unless_overridden() {
         let with_env = |command: &str, pairs: &[(&str, &str)]| {
@@ -1140,9 +1595,6 @@ mod tests {
     #[test]
     fn an_unterminated_quote_is_reported() {
         let c = cmd(r#"./setup.sh "--skip-dpf"#);
-        assert_eq!(
-            c.quoting_error.as_deref(),
-            Some("unterminated double quote")
-        );
+        assert_eq!(c.parse_error.as_deref(), Some("unterminated double quote"));
     }
 }

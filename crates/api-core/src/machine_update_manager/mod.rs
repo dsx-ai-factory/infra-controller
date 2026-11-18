@@ -348,10 +348,10 @@ impl MachineUpdateManager {
 /// duration are not bounded here. A worker replaced by a takeover is rejected;
 /// nominal lease expiry without takeover still permits the transaction.
 /// Keep filesystem and network work outside this transaction.
-async fn update_transaction<'a>(
-    pool: &'a PgPool,
+async fn update_transaction(
+    pool: &PgPool,
     work_lock: &WorkLock,
-) -> CarbideResult<Transaction<'a>> {
+) -> CarbideResult<Transaction<'static>> {
     let mut txn = Transaction::begin(pool).await?;
     sqlx::query(
         "SELECT set_config('statement_timeout', \

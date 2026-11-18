@@ -24,6 +24,7 @@ pub mod bmc_metadata;
 pub mod bmc_redfish_session;
 pub mod bmc_suppression;
 pub mod carbide_version;
+pub mod cm_action;
 pub mod compute_allocation;
 mod conditional_write;
 mod config_drift;
@@ -119,6 +120,9 @@ pub mod vpc_peering;
 pub mod vpc_prefix;
 pub mod work_lock_manager;
 mod writable_pool;
+
+#[cfg(test)]
+mod test_maintenance_correlation;
 
 pub use conditional_write::{
     ConditionalWrite, ControllerStateNotCurrent, MaintenanceRequestNotCurrent,
@@ -813,6 +817,10 @@ fn record_database_transaction_rollback_failure(
     ));
 }
 
+/// A transaction owning a pooled connection or borrowing an existing connection.
+///
+/// Pooled transactions have lifetime `'static`; [`Self::begin_inner`] instead
+/// borrows its connection for `'a`.
 #[derive(Debug)]
 pub struct Transaction<'a> {
     inner: sqlx::PgTransaction<'a>,
@@ -825,12 +833,13 @@ impl<'a> AsMut<sqlx::PgTransaction<'a>> for Transaction<'a> {
     }
 }
 
-impl<'a> Transaction<'a> {
+impl Transaction<'static> {
     // This function can just async when
     // https://github.com/rust-lang/rust/issues/110011 will be
     // implemented
+    /// Starts a transaction that owns its connection and does not borrow the pool.
     #[track_caller]
-    pub fn begin(pool: &'a sqlx::PgPool) -> impl Future<Output = Result<Self, DatabaseError>> {
+    pub fn begin(pool: &sqlx::PgPool) -> impl Future<Output = Result<Self, DatabaseError>> {
         let loc = Location::caller();
         async move {
             pool.begin()
@@ -840,6 +849,7 @@ impl<'a> Transaction<'a> {
         }
     }
 
+    /// Starts an owned pooled transaction with an explicit diagnostic caller location.
     pub async fn begin_with_location(
         pool: &sqlx::PgPool,
         loc: &'static Location<'static>,
@@ -849,7 +859,9 @@ impl<'a> Transaction<'a> {
             .map_err(|e| DatabaseError::txn_begin(e, loc))
             .map(|inner| Self { inner })
     }
+}
 
+impl<'a> Transaction<'a> {
     // This function can just async when
     // https://github.com/rust-lang/rust/issues/110011 will be
     // implemented
@@ -1009,15 +1021,17 @@ pub async fn set_read_only_snapshot(txn: &mut sqlx::PgConnection) -> Result<(), 
     Ok(())
 }
 
+/// Starts transactions that own a connection acquired from a PostgreSQL pool.
 pub trait TransactionVending {
-    fn txn_begin(&self) -> impl Future<Output = Result<Transaction<'_>, DatabaseError>>;
+    /// Starts a transaction without retaining a borrow of the pool.
+    fn txn_begin(&self) -> impl Future<Output = Result<Transaction<'static>, DatabaseError>>;
 }
 
 impl TransactionVending for PgPool {
     #[track_caller]
     // This returns an `impl Future` instead of being async, so that we can use #[track_caller],
     // which is unsupported with async fn's.
-    fn txn_begin(&self) -> impl Future<Output = Result<Transaction<'_>, DatabaseError>> {
+    fn txn_begin(&self) -> impl Future<Output = Result<Transaction<'static>, DatabaseError>> {
         Transaction::begin(self)
     }
 }
@@ -1154,17 +1168,19 @@ mod tests {
                 },
             ],
             |case| {
-                let metrics = MetricsCapture::start();
+                let metrics = MetricsCapture::owned();
                 let error = DatabaseError::Internal {
                     message: "rollback unavailable".to_string(),
                 };
                 let logs = capture_logs(|| {
-                    emit(DatabaseTransactionRollbackFailed::new(
-                        case.trigger,
-                        caller,
-                        case.context,
-                        &error,
-                    ));
+                    metrics
+                        .instrumentation()
+                        .emit(DatabaseTransactionRollbackFailed::new(
+                            case.trigger,
+                            caller,
+                            case.context,
+                            &error,
+                        ));
                 });
 
                 assert_eq!(logs.len(), 1, "one emit must produce one log record");

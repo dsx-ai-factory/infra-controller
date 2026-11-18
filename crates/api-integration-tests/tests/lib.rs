@@ -14,6 +14,10 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+// Keep these suites in one executable so libtest can run their environments in parallel.
+mod decommission;
+mod rack;
+
 use std::collections::{BTreeMap, HashMap};
 use std::future::Future;
 use std::net::{Ipv4Addr, SocketAddr, TcpListener};
@@ -66,7 +70,6 @@ use tokio::time::sleep;
 use tokio_util::sync::CancellationToken;
 
 const UNDERLAY_DHCP_RELAY_ADDRESS: Ipv4Addr = Ipv4Addr::new(172, 20, 1, 1);
-const SSH_METRIC_CATALOGUE_OUTPUT: &str = "CARBIDE_SSH_METRIC_CATALOGUE_OUTPUT";
 
 #[ctor::ctor(unsafe)]
 fn setup() {
@@ -76,12 +79,6 @@ fn setup() {
 /// Run multiple machine-a-tron integration tests in parallel against a shared carbide API instance.
 #[test]
 fn test_integration() -> eyre::Result<()> {
-    if let Some(output_path) = std::env::var_os(SSH_METRIC_CATALOGUE_OUTPUT) {
-        return utils::api_server_runtime_builder()
-            .worker_threads(2)
-            .build()?
-            .block_on(write_ssh_console_metric_info(output_path.into()));
-    }
     utils::api_server_runtime_builder()
         .build()?
         .block_on(run_integration())
@@ -1189,7 +1186,7 @@ async fn exercise_nvlink_partition_monitor(
         &mut work_lock_tasks,
         test_env.db_pool.clone(),
         db::work_lock_manager::KeepaliveConfig::default(),
-        carbide_instrument::Instrumentation::global(),
+        carbide_instrument::Instrumentation::noop(),
     )
     .await?;
     let nmxc_client_pool = libnmxc::NmxcClientPool::builder()
@@ -1221,33 +1218,6 @@ async fn exercise_nvlink_partition_monitor(
 }
 
 async fn collect_ssh_console_metric_info() -> eyre::Result<metrics::MetricInfo> {
-    // A separate process prevents SSH Console from replacing the API server's
-    // global meter provider or binding its cached Events to that provider.
-    let output_dir = temp_dir::TempDir::with_prefix("ssh-metric-catalogue")?;
-    let output_path = output_dir.path().join("metric.json");
-    let mut child = tokio::process::Command::new(std::env::current_exe()?)
-        .args(["--exact", "test_integration", "--nocapture"])
-        .env(SSH_METRIC_CATALOGUE_OUTPUT, &output_path)
-        .kill_on_drop(true)
-        .spawn()?;
-    // This child only starts local listeners, scrapes once, and shuts down.
-    let status = match tokio::time::timeout(Duration::from_secs(30), child.wait()).await {
-        Ok(status) => status?,
-        Err(error) => {
-            child.kill().await?;
-            return Err(error).wrap_err("SSH metric catalogue subprocess timed out");
-        }
-    };
-    eyre::ensure!(
-        status.success(),
-        "SSH metric catalogue subprocess failed: {status}"
-    );
-    let (name, ty, help): (String, String, String) =
-        serde_json::from_slice(&std::fs::read(output_path)?)?;
-    Ok(metrics::MetricInfo { name, ty, help })
-}
-
-async fn write_ssh_console_metric_info(output_path: PathBuf) -> eyre::Result<()> {
     use ssh_console::shutdown_handle::ShutdownHandle;
 
     let certs = &utils::LOCALHOST_CERTS;
@@ -1277,11 +1247,7 @@ async fn write_ssh_console_metric_info(output_path: PathBuf) -> eyre::Result<()>
         !info.help.is_empty(),
         "the SSH recovery counter needs HELP text"
     );
-    std::fs::write(
-        output_path,
-        serde_json::to_vec(&(info.name, info.ty, info.help))?,
-    )?;
-    Ok(())
+    Ok(info)
 }
 
 fn generate_core_metric_docs(mut infos: Vec<metrics::MetricInfo>) {

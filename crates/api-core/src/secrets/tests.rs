@@ -140,7 +140,7 @@ async fn start_test_work_lock_manager(pool: &sqlx::PgPool) -> (WorkLockManagerHa
         &mut tasks,
         pool.clone(),
         Default::default(),
-        carbide_instrument::Instrumentation::global(),
+        carbide_instrument::Instrumentation::noop(),
     )
     .await
     .expect("start work lock manager");
@@ -917,7 +917,7 @@ async fn stale_vault_import_owner_cannot_write_or_mark_after_takeover(pool: sqlx
         &mut work_lock_tasks,
         pool.clone(),
         keepalive_config,
-        carbide_instrument::Instrumentation::global(),
+        carbide_instrument::Instrumentation::noop(),
     )
     .await
     .expect("start owner work lock manager");
@@ -925,7 +925,7 @@ async fn stale_vault_import_owner_cannot_write_or_mark_after_takeover(pool: sqlx
         &mut work_lock_tasks,
         pool.clone(),
         keepalive_config,
-        carbide_instrument::Instrumentation::global(),
+        carbide_instrument::Instrumentation::noop(),
     )
     .await
     .expect("start replacement work lock manager");

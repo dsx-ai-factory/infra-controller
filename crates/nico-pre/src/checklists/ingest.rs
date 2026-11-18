@@ -17,7 +17,7 @@
 
 //! `nico-pre-ingest`: ingestion readiness before the first host is approved.
 
-use crate::harness::{Check, todo};
+use crate::harness::Check;
 
 pub(crate) const CHECKS: &[Check] = &[
     Check {
@@ -35,7 +35,7 @@ pub(crate) const CHECKS: &[Check] = &[
                  Test: fixture files; cases: matching passes; a model not in fleet fails naming \
                  the serial; a duplicate serial fails; 100 of 128 warns; malformed YAML fails \
                  with the line.",
-        run: todo,
+        run: None,
     },
     Check {
         id: "ingest.credentials.sources",
@@ -51,7 +51,7 @@ pub(crate) const CHECKS: &[Check] = &[
                  Test: a temporary file and an environment variable set in the test; cases: both \
                  present passes; an empty file fails; the variable unset fails naming it; the \
                  observed text never contains the test value (asserted in every case).",
-        run: todo,
+        run: None,
     },
     Check {
         id: "ingest.bmc.reach",
@@ -69,6 +69,6 @@ pub(crate) const CHECKS: &[Check] = &[
                  Test: bmc-mock instances with the test host as the probe host; cases: all answer \
                  passes; a few unreachable warns naming them; all 401 fails naming the \
                  credential.",
-        run: todo,
+        run: None,
     },
 ];

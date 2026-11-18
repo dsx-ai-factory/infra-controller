@@ -1687,7 +1687,7 @@ mod tests {
                 published = Some(request);
                 std::future::ready(Ok(PublishMlxObservationReportResponse::default()))
             },
-            &carbide_instrument::Instrumentation::global(),
+            &carbide_instrument::Instrumentation::noop(),
         ))
         .await;
 

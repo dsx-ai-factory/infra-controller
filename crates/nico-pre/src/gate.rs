@@ -52,8 +52,11 @@ fn setup(sd: &SiteDef, rows: &mut Vec<Row>, reg: &Register) {
         "a command line the shell can parse, agreeing with the pinned and implied decisions";
     let cmd = crate::setup_cmd::SetupCommand::parse(&sd.setup);
     let mut problems: Vec<(String, String)> = Vec::new();
-    if let Some(e) = &cmd.quoting_error {
-        problems.push((e.clone(), "close the quote in setup.command".to_string()));
+    if let Some(e) = &cmd.parse_error {
+        problems.push((
+            e.clone(),
+            "fix the shell syntax of setup.command".to_string(),
+        ));
     }
     if let Some(e) = &cmd.env_error {
         problems.push((
@@ -61,11 +64,17 @@ fn setup(sd: &SiteDef, rows: &mut Vec<Row>, reg: &Register) {
             "set the variable in setup.env to true or false".to_string(),
         ));
     }
+    if let Some(e) = &cmd.switch_error {
+        problems.push((
+            e.clone(),
+            "use only the switches setup.sh's usage line lists".to_string(),
+        ));
+    }
     // What the command will do, against what the site definition pins or its rules imply:
     // a disagreement there is the first thing setup.sh would get wrong.
     let without_command = effective_decisions_from(&sd.decisions, reg);
     let from_command = if cmd.runs_setup_sh() {
-        command_decisions(&cmd).to_vec()
+        command_decisions(&cmd, components(&without_command)).to_vec()
     } else {
         Vec::new()
     };
@@ -97,21 +106,36 @@ fn setup(sd: &SiteDef, rows: &mut Vec<Row>, reg: &Register) {
             ));
         }
     }
+    // Words the gate could not read are named on every row, a failing one most of all:
+    // what they add to the command is not what the row compared.
+    let caveat = if cmd.unexpanded.is_empty() {
+        String::new()
+    } else {
+        format!(
+            "; not readable here, not compared: {}",
+            cmd.unexpanded.join(" ")
+        )
+    };
     if problems.is_empty() {
         let observed = if cmd.runs_setup_sh() {
-            format!("{} switches", cmd.switches.len())
+            format!("{} switches{caveat}", cmd.switches.len())
         } else {
             "the command does not run setup.sh; no decision to compare".to_string()
         };
         rows.push(Row::pass(ROW, EXPECTED, observed));
     }
     for (observed, fix) in problems {
-        rows.push(Row::fail(ROW, EXPECTED, observed).with_fix(fix));
+        rows.push(Row::fail(ROW, EXPECTED, format!("{observed}{caveat}")).with_fix(fix));
     }
 }
 
 /// The register entries `setup.command` decides, with the option it selects.
-fn command_decisions(cmd: &crate::setup_cmd::SetupCommand) -> [(&'static str, &'static str); 3] {
+/// `components` is the `optional-components` value in effect: `--skip-rms` with RMS among
+/// them means an external RMS, without them no RMS at all.
+fn command_decisions(
+    cmd: &crate::setup_cmd::SetupCommand,
+    components: Option<&[String]>,
+) -> [(&'static str, &'static str); 3] {
     [
         (
             "dpf",
@@ -125,6 +149,8 @@ fn command_decisions(cmd: &crate::setup_cmd::SetupCommand) -> [(&'static str, &'
             "rms",
             if cmd.installs_rms() {
                 "In-cluster nv-rms"
+            } else if components.is_some_and(|c| c.iter().any(|o| o == "RMS")) {
+                "External RMS"
             } else {
                 "Not applicable"
             },
@@ -138,6 +164,11 @@ fn command_decisions(cmd: &crate::setup_cmd::SetupCommand) -> [(&'static str, &'
             },
         ),
     ]
+}
+
+/// The `optional-components` value in effect, for [`command_decisions`].
+fn components(e: &EffectiveDecisions) -> Option<&[String]> {
+    e.values.get("optional-components").map(Vec::as_slice)
 }
 
 /// The decisions in effect after the implication rules: stated ones first,
@@ -164,12 +195,12 @@ pub(crate) fn effective_decisions(sd: &SiteDef, reg: &Register) -> EffectiveDeci
     // (a BF4 fleet with `--skip-dpf`, for one) before any checklist runs.
     let cmd = crate::setup_cmd::SetupCommand::parse(&sd.setup);
     let mut stated = sd.decisions.clone();
+    let mut effective = effective_decisions_from(&stated, reg);
     let from_command = if cmd.runs_setup_sh() {
-        command_decisions(&cmd).to_vec()
+        command_decisions(&cmd, components(&effective)).to_vec()
     } else {
         Vec::new()
     };
-    let mut effective = effective_decisions_from(&stated, reg);
     let mut added = Vec::new();
     for (id, option) in from_command {
         if !effective.values.contains_key(id) {
@@ -424,6 +455,18 @@ fn prefixes(sd: &SiteDef) -> Vec<(String, IpNet)> {
     out
 }
 
+/// `denyPrefixes`: aggregates that cover planned prefixes by design, so they are checked
+/// for alignment and left out of the overlap matrix.
+fn deny_prefixes(sd: &SiteDef) -> Vec<(String, IpNet)> {
+    sd.network
+        .deny_prefixes
+        .iter()
+        .flatten()
+        .enumerate()
+        .map(|(i, p)| (format!("network.denyPrefixes[{i}]"), *p))
+        .collect()
+}
+
 struct SegmentRef {
     prefix: IpNet,
     gateway: std::net::IpAddr,
@@ -471,13 +514,18 @@ fn segments(sd: &SiteDef) -> Vec<(String, SegmentRef)> {
 fn network(sd: &SiteDef, rows: &mut Vec<Row>) {
     let n = &sd.network;
     let prefixes = prefixes(sd);
+    let deny = deny_prefixes(sd);
 
-    let misaligned: Vec<_> = prefixes.iter().filter(|(_, p)| p.trunc() != *p).collect();
+    let misaligned: Vec<_> = prefixes
+        .iter()
+        .chain(&deny)
+        .filter(|(_, p)| p.trunc() != *p)
+        .collect();
     if misaligned.is_empty() {
         rows.push(Row::pass(
             "sitedef.network.prefix-aligned",
             "every prefix is aligned to its mask",
-            format!("{} prefixes", prefixes.len()),
+            format!("{} prefixes", prefixes.len() + deny.len()),
         ));
     }
     for (key, p) in misaligned {
@@ -1022,9 +1070,25 @@ mod tests {
         );
     }
 
-    /// `dpf` is read from the command when it is not pinned, so a conflict that depends
-    /// on it fires at the gate.
     /// An external RMS runs with `--skip-rms`.
+    /// A word the gate cannot read is named on the failing row too, where it matters most.
+    #[test]
+    fn an_unreadable_word_is_named_on_a_failing_row() {
+        let text = SAMPLE.replacen("--skip-rms", "$REGISTRY_PULL_SECRET", 1);
+        let sd = parse(&text).expect("parses");
+        let rows = run(&sd, Register::builtin());
+        let failing: Vec<_> = rows
+            .iter()
+            .filter(|r| r.id == "sitedef.setup.command" && r.status == Status::Fail)
+            .collect();
+        assert!(
+            failing.iter().any(|r| r
+                .observed
+                .contains("not readable here, not compared: $REGISTRY_PULL_SECRET")),
+            "{failing:#?}"
+        );
+    }
+
     #[test]
     fn an_external_rms_passes_the_gate_with_skip_rms() {
         let text = SAMPLE
@@ -1044,6 +1108,32 @@ mod tests {
             .iter()
             .filter(|r| r.id == "sitedef.setup.command" && r.status == Status::Fail)
             .collect();
+        assert!(failing.is_empty(), "{failing:#?}");
+    }
+
+    /// `--skip-rms` with RMS among the components is an external RMS, so a pinned rack
+    /// profile is not contradicted by an implied `rms: Not applicable`.
+    #[test]
+    fn an_unpinned_rms_with_skip_rms_is_external_when_the_components_include_rms() {
+        let text = SAMPLE
+            .replacen(
+                "  optional-components: [REST group]",
+                "  optional-components: [REST group, RMS]",
+                1,
+            )
+            .replacen(
+                "  build-host: Yes\n",
+                "  build-host: Yes\n  rack-profiles: Built-in profiles\n",
+                1,
+            );
+        let sd = parse(&text).expect("parses");
+        let dec = effective_decisions(&sd, Register::builtin());
+        assert_eq!(
+            dec.values.get("rms").map(Vec::as_slice),
+            Some(&["External RMS".to_string()][..])
+        );
+        let rows = run(&sd, Register::builtin());
+        let failing: Vec<_> = rows.iter().filter(|r| r.status == Status::Fail).collect();
         assert!(failing.is_empty(), "{failing:#?}");
     }
 
@@ -1107,6 +1197,8 @@ mod tests {
         }
     }
 
+    /// `dpf` is read from the command when it is not pinned, so a conflict that depends
+    /// on it fires at the gate.
     #[test]
     fn a_skip_dpf_command_makes_a_bf4_fleet_fail_the_gate() {
         let text = SAMPLE
@@ -1318,6 +1410,13 @@ mod tests {
                 to: "--skip-rms \"--skip-dpf",
                 row: "sitedef.setup.command",
                 observed: "unterminated double quote",
+            },
+            Case {
+                name: "a switch setup.sh does not know",
+                from: "--skip-rms",
+                to: "--skip-rms --skpi-dpf",
+                row: "sitedef.setup.command",
+                observed: "does not accept `--skpi-dpf`",
             },
             Case {
                 name: "an install variable setup.sh would reject",

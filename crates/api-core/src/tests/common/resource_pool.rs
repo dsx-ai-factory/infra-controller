@@ -364,7 +364,7 @@ impl RemotePoolFixture {
             let (result, logs) = capture_logs_async(db::resource_pool::reconcile_pool_defs(
                 &mut txn,
                 &self.definitions,
-                &carbide_instrument::Instrumentation::global(),
+                &carbide_instrument::Instrumentation::noop(),
             ))
             .await;
             result?;

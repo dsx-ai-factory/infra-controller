@@ -88,7 +88,7 @@ fn manager(
         pool.clone(),
         Arc::new(profiles.clone()),
         true,
-        carbide_instrument::Instrumentation::global(),
+        carbide_instrument::Instrumentation::noop(),
     ));
 
     PreingestionManager::new(
@@ -289,8 +289,9 @@ async fn compute_submission_is_device_scoped_and_resumes_polling(
 
     txn.commit().await?;
 
-    rms.enqueue_get_firmware_job_status(Ok(MockRmsApi::firmware_job_status_ok(
-        rms::FirmwareJobState::Unspecified,
+    rms.enqueue_get_job_status(Ok(MockRmsApi::job_status_ok(
+        "compute-job",
+        rms::JobExecutionState::Unspecified,
     )))
     .await;
 
@@ -303,8 +304,9 @@ async fn compute_submission_is_device_scoped_and_resumes_polling(
         }
     );
 
-    rms.enqueue_get_firmware_job_status(Ok(MockRmsApi::firmware_job_status_ok(
-        rms::FirmwareJobState::Running,
+    rms.enqueue_get_job_status(Ok(MockRmsApi::job_status_ok(
+        "compute-job",
+        rms::JobExecutionState::Running,
     )))
     .await;
 
@@ -317,13 +319,11 @@ async fn compute_submission_is_device_scoped_and_resumes_polling(
         }
     );
 
-    assert_eq!(
-        rms.get_firmware_job_status_calls().await[0].job_id,
-        "compute-job"
-    );
+    assert_eq!(rms.get_job_status_calls().await[0].job_id, "compute-job");
 
-    rms.enqueue_get_firmware_job_status(Ok(MockRmsApi::firmware_job_status_ok(
-        rms::FirmwareJobState::Completed,
+    rms.enqueue_get_job_status(Ok(MockRmsApi::job_status_ok(
+        "compute-job",
+        rms::JobExecutionState::Completed,
     )))
     .await;
 
@@ -503,12 +503,13 @@ async fn polling_timeout_preserves_job_and_retries(
 
     set_rack_firmware_request_timeout(&mut preingestion_manager, Duration::from_secs(1));
 
-    rms.enqueue_get_firmware_job_status(Ok(MockRmsApi::firmware_job_status_ok(
-        rms::FirmwareJobState::Completed,
+    rms.enqueue_get_job_status(Ok(MockRmsApi::job_status_ok(
+        "poll-timeout-job",
+        rms::JobExecutionState::Completed,
     )))
     .await;
 
-    let (mut arrived, release) = rms.block_next_get_firmware_job_status().await;
+    let (mut arrived, release) = rms.block_next_job_status_requests(1).await.pop().unwrap();
 
     tokio::time::timeout(
         Duration::from_secs(10),
@@ -536,7 +537,7 @@ async fn polling_timeout_preserves_job_and_retries(
 
     assert_eq!(rms.apply_firmware_object_calls().await.len(), 1);
 
-    let calls = rms.get_firmware_job_status_calls().await;
+    let calls = rms.get_job_status_calls().await;
 
     assert_eq!(calls.len(), 2);
     assert!(calls.iter().all(|call| call.job_id == "poll-timeout-job"));
@@ -569,9 +570,9 @@ async fn failed_firmware_job_fails_preingestion(
     txn.commit().await?;
 
     let rms = Arc::new(MockRmsApi::new());
-    let mut response = MockRmsApi::firmware_job_status_ok(rms::FirmwareJobState::Failed);
-    response.error_message = "component update failed".to_string();
-    rms.enqueue_get_firmware_job_status(Ok(response)).await;
+    let mut response = MockRmsApi::job_status_ok("failed-job", rms::JobExecutionState::Failed);
+    response.job_states[0].error_message = "component update failed".to_string();
+    rms.enqueue_get_job_status(Ok(response)).await;
 
     manager(&pool, &env, rms, rack_profiles(None))
         .run_single_iteration()

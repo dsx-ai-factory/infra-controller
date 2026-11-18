@@ -95,6 +95,7 @@ async fn exercise_power_shelf_reader(
         source_ref: None,
     });
     expected.power_shelf_maintenance_requested = Some(PowerShelfMaintenanceRequest {
+        action_id: None,
         requested_at: timestamp,
         initiator: "projection-test".to_string(),
         operation: PowerShelfMaintenanceOperation::PowerOn,

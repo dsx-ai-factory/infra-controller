@@ -2516,6 +2516,27 @@ pub async fn handle_maintenance(
     maintenance_state: &RackMaintenanceState,
     ctx: &mut StateHandlerContext<'_, RackStateHandlerContextObjects>,
 ) -> Result<StateHandlerOutcome<RackState>, StateHandlerError> {
+    let action_id = state
+        .config
+        .maintenance_requested
+        .as_ref()
+        .and_then(|scope| scope.action_id);
+    let pool = ctx.services.db_pool.clone();
+    db::cm_action::resume(
+        &pool,
+        action_id,
+        handle_maintenance_inner(id, state, rack_profile_id, maintenance_state, ctx),
+    )
+    .await
+}
+
+async fn handle_maintenance_inner(
+    id: &RackId,
+    state: &mut Rack,
+    rack_profile_id: Option<&RackProfileId>,
+    maintenance_state: &RackMaintenanceState,
+    ctx: &mut StateHandlerContext<'_, RackStateHandlerContextObjects>,
+) -> Result<StateHandlerOutcome<RackState>, StateHandlerError> {
     if state.config.maintenance_termination_requested {
         return terminate_active_rack_maintenance(
             id,
@@ -4020,12 +4041,12 @@ mod tests {
             run = |delete_fails: bool| {
                 let credential_manager = TestCredentialManager::default();
                 credential_manager.set_delete_credentials_failure(delete_fails);
-                let metrics = MetricsCapture::start();
+                let metrics = MetricsCapture::owned();
                 let logs = capture_logs(|| {
                     runtime.block_on(delete_rack_maintenance_access_token(
                         &credential_manager,
                         &rack_id,
-                        &carbide_instrument::Instrumentation::global(),
+                        metrics.instrumentation(),
                     ));
                 })
                 .into_iter()

@@ -46,6 +46,13 @@ type Test interface {
 	Run(ctx RunCtx, w *writer.Writer) (result.Outcome, error)
 }
 
+// FirmwareFinalizer is the firmware command's bounded, close-only cleanup phase.
+// It runs after ordinary attempts join, while the Lease and journal stay live.
+type FirmwareFinalizer interface {
+	FirmwareCleanupBudget() time.Duration
+	CloseFirmwareWindows(context.Context, *writer.Writer) (json.RawMessage, error)
+}
+
 // Deps are what a run needs. The lower fields are seams tests set; a production run leaves them zero.
 type Deps struct {
 	Config *config.Config
@@ -118,6 +125,9 @@ func (e *execution) shutdownBudget() time.Duration {
 	if e.deps.ShutdownBudget > 0 {
 		return e.deps.ShutdownBudget
 	}
+	if f, ok := e.test.(FirmwareFinalizer); ok {
+		return Drain + min(max(f.FirmwareCleanupBudget(), time.Second), time.Hour) + CleanupBudget + 30*time.Second
+	}
 	return ShutdownBudget
 }
 
@@ -167,6 +177,12 @@ func (e *execution) drive() result.Verdict {
 	if err := cfg.CheckDryRun(e.test.Writes()); err != nil {
 		e.reason(err.Error())
 		return result.Refused
+	}
+	if f, ok := e.test.(FirmwareFinalizer); ok {
+		if d := f.FirmwareCleanupBudget(); e.test.Name() != "firmware" || d < time.Second || d > time.Hour {
+			e.reason("invalid firmware cleanup budget or command")
+			return result.Refused
+		}
 	}
 	me := lock.HolderRecord{Kind: e.test.LockKind(), RunID: cfg.RunID, ExecutionID: cfg.ExecutionID, State: lock.Running, Test: ptr(e.test.Name())}
 	held, err := e.deps.Lock.Acquire(e.outside, me)
@@ -279,6 +295,9 @@ func (e *execution) verdictOf(outcome result.Outcome, runErr error) result.Verdi
 func (e *execution) finish(verdict result.Verdict) result.RunResult {
 	wd := armWatchdog(e.shutdownBudget(), e.watchdogAction)
 	defer wd.disarm()
+	if f, ok := e.test.(FirmwareFinalizer); ok {
+		verdict = e.finishFirmware(f, verdict)
+	}
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(e.outside), CleanupBudget)
 	defer cancel()
 
@@ -544,4 +563,49 @@ func jsonxPtr(t *time.Time) *jsonx.Time {
 		return nil
 	}
 	return &jsonx.Time{Time: *t}
+}
+
+// finishFirmware must precede Seal, Freeze and the publication context. A join
+// that does not return is bounded by the same shutdown watchdog as cleanup.
+func (e *execution) finishFirmware(f FirmwareFinalizer, verdict result.Verdict) result.Verdict {
+	e.control.stopper.stop()
+	e.joinRun()
+	if e.writer != nil {
+		e.writer.Close()
+	}
+	cleanup, _ := json.Marshal(map[string]any{"status": "skipped", "pending": e.unsettled()})
+	if e.held != nil && e.journal != nil && e.writer != nil && !e.abandoned && e.journal.Counts().Known && e.held.Gate().Check() == nil {
+		ctx, cancel := context.WithTimeout(context.WithoutCancel(e.outside), f.FirmwareCleanupBudget())
+		w := writer.NewFirmwareCleanup(e.journal, e.held.Gate(), time.Now().Add(f.FirmwareCleanupBudget()))
+		var err error
+		cleanup, err = f.CloseFirmwareWindows(ctx, w)
+		cancel()
+		w.Close()
+		if err != nil {
+			reason := "unsettled"
+			switch {
+			case errors.Is(err, writer.ErrLockLost):
+				reason = "lock-lost"
+			case errors.Is(err, journal.ErrIO):
+				reason = "journal-error"
+			case errors.Is(err, context.Canceled):
+				reason = "cancelled"
+			case errors.Is(err, context.DeadlineExceeded):
+				reason = "deadline"
+			}
+			cleanup, _ = json.Marshal(map[string]any{"status": "unsettled", "pending": true, "reason": reason})
+			e.reason("firmware cleanup did not settle owned windows")
+			verdict = result.NotClean(verdict)
+		}
+	}
+	detail, err := json.Marshal(struct {
+		Benchmark json.RawMessage `json:"benchmark"`
+		Cleanup   json.RawMessage `json:"cleanup"`
+	}{e.detail, cleanup})
+	if err != nil {
+		e.reason("firmware cleanup detail is invalid")
+		return result.NotClean(verdict)
+	}
+	e.detail = detail
+	return verdict
 }

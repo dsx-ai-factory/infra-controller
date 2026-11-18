@@ -304,7 +304,6 @@ mod tests {
     use std::net::TcpListener;
     use std::process::Stdio;
 
-    use carbide_instrument::emit;
     use carbide_instrument::testing::{MetricsCapture, capture_logs};
     use carbide_test_support::{Check, check_values};
     use serial_test::serial;
@@ -367,10 +366,10 @@ mod tests {
                 },
             ],
             |stage| {
-                let metrics = MetricsCapture::start();
+                let metrics = MetricsCapture::owned();
                 let logs = capture_logs(|| {
                     let error = "vault unavailable".to_string();
-                    emit(match stage {
+                    metrics.instrumentation().emit(match stage {
                         TokenMaintenanceStage::Lookup => TokenMaintenanceFailed::Lookup { error },
                         TokenMaintenanceStage::Renew => TokenMaintenanceFailed::Renew { error },
                     });

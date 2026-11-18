@@ -41,7 +41,7 @@ fn test_metrics() {
 
     let metrics = crate::instrumentation::create_metrics(
         meter.clone(),
-        carbide_instrument::Instrumentation::global(),
+        carbide_instrument::Instrumentation::noop(),
     );
     let fmds_connection_status = register_external_connection_metric(&meter);
     fmds_connection_status.store(true, Ordering::Relaxed);
@@ -120,10 +120,8 @@ fn client_cert_expiry_gauge_exports_nothing_without_a_certificate() {
         .build();
     let meter = meter_provider.meter("agent");
 
-    let metrics = crate::instrumentation::create_metrics(
-        meter,
-        carbide_instrument::Instrumentation::global(),
-    );
+    let metrics =
+        crate::instrumentation::create_metrics(meter, carbide_instrument::Instrumentation::noop());
     metrics.record_client_cert_expiry_time(|| None);
 
     let exported: Vec<String> = prometheus_registry

@@ -17,8 +17,8 @@
 
 //! The checklists, one per deployment step. Each checklist is a table of
 //! checks in its own module (`host.rs`, `config.rs`, ...); the harness runs
-//! the table. A check that is registered but not written yet is a `todo`
-//! entry and shows as a ⚠ row until it lands.
+//! the table. A check that is registered but not written yet has `run: None`
+//! and shows as a ⚠ row until it lands.
 
 mod build;
 mod config;
@@ -114,7 +114,7 @@ mod tests {
     }
 
     /// Every check carries its spec: the labelled parts in order, `Warn:` optional,
-    /// so an engineer can implement a `todo` entry from the table alone.
+    /// so an engineer can implement a `run: None` entry from the table alone.
     #[test]
     fn every_check_carries_a_complete_spec() {
         const ORDER: [&str; 6] = ["Reads:", "Pass:", "Warn:", "Fail:", "Skip:", "Test:"];

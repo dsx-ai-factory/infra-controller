@@ -541,7 +541,7 @@ exit 1
             flow_uuid,
             machine_id,
             request.clone(),
-            &carbide_instrument::Instrumentation::global(),
+            &carbide_instrument::Instrumentation::noop(),
         );
 
         assert_eq!(response.flow_uuid, Some(flow_uuid.into()));
@@ -573,7 +573,7 @@ exit 1
             flow_uuid,
             machine_id,
             request,
-            &carbide_instrument::Instrumentation::global(),
+            &carbide_instrument::Instrumentation::noop(),
         );
         assert_eq!(response.flow_uuid, Some(flow_uuid.into()));
         let Some(scout_stream_api_bound_message::Payload::MlxDeviceLockdownResponse(response)) =

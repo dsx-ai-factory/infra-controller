@@ -11723,7 +11723,7 @@ impl HostUpgradeState {
 
         let fw_config_snapshot = self.host_firmware_config_snapshot(ctx).await?;
         let Some(fw_info) = fw_config_snapshot.find_fw_info_for_host(&explored_endpoint) else {
-            return Ok(StateHandlerOutcome::transition(scenario.complete_state()));
+            return Self::relock_and_complete(state, ctx, machine_id, scenario).await;
         };
 
         for firmware_type in fw_info.ordering() {
@@ -11869,8 +11869,15 @@ impl HostUpgradeState {
             }
         }
 
-        // Nothing needs updates, return to ready.  But first, we may need to reenable lockdown.
+        Self::relock_and_complete(state, ctx, machine_id, scenario).await
+    }
 
+    async fn relock_and_complete(
+        state: &ManagedHostStateSnapshot,
+        ctx: &mut StateHandlerContext<'_, MachineStateHandlerContextObjects>,
+        machine_id: &MachineId,
+        scenario: HostFirmwareScenario,
+    ) -> Result<StateHandlerOutcome<ManagedHostState>, StateHandlerError> {
         let redfish_client = ctx
             .services
             .create_redfish_client_from_machine(&state.host_snapshot)
