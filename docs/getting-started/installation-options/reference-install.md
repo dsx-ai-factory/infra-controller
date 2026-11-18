@@ -65,7 +65,7 @@ establish that an external VIP or device path works.
 | 5b–5c | DPF prerequisites/operator and RMS, unless individually skipped | Required controller rollouts complete; RMS is available; DPF objects match the [DPF Setup](../../manuals/dpf.md). DPU-dependent readiness also needs actual DPU nodes. |
 | 6 | Core, then the optional site overlay and observability install | Core pods are ready, migration jobs succeed, and configured Core service VIPs are assigned. Check Core DHCP, PXE, DNS, and API reachability before continuing. |
 | 7a–7f | REST namespace and CA issuer, database preparation, Keycloak, Temporal TLS, Temporal and namespaces | Database credentials are available; Keycloak and Temporal are ready; required certificates and Temporal namespaces exist. |
-| 7g–7i | REST chart and migrations, Flow, site registration, and Site Agent | REST migrations and rollouts succeed, Flow is available, and the Site Agent confirms its Core and Flow connections. Verify the site through REST. |
+| 7g–7i | REST chart and migrations, Flow, `nico-rest-site-agent-bootstrap` Helm hook Job, and Site Agent | REST migrations and rollouts succeed. Flow is available. The bootstrap Job registers the site and stores its UUID and one-time password (OTP) in the `site-registration` Secret. The Site Agent confirms its Core and Flow connections. Verify the site through REST. |
 
 `--skip-core` skips the Core Helm release. An optional site overlay and
 `--with-observability` still run. `--skip-rest` skips all REST phases,

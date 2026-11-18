@@ -681,7 +681,7 @@ curl -sS -H "Authorization: Bearer $TOKEN" \
 
 #### 6. Verify your Site
 
-**Do not run `nicocli site create`.** `setup.sh` Phase 7g already bootstraps and registers the site automatically via the `nico-rest-site-agent` bootstrap Job (`POST /v1/site` to `nico-rest-site-manager`), obtains a one-time password (OTP), and stores the registration in the `site-registration` Secret. Running `nicocli site create` would create a second site that the already-deployed site-agent cannot use — the site-agent is bound to the UUID generated during setup and cannot be reassigned without a full redeploy.
+**Do not run `nicocli site create`.** In `setup.sh` phase 7i, the `nico-rest-site-agent-bootstrap` Helm hook Job registers the site (`POST /v1/site` to `nico-rest-site-manager`). It obtains the one-time password (OTP) from site-manager and stores the registration in the `site-registration` Secret before the Site Agent starts. Running `nicocli site create` would create a second site that the already-deployed site-agent cannot use — the site-agent is bound to the UUID generated during setup and cannot be reassigned without a full redeploy.
 
 This is a **one-to-one deployment**: one site per NICo installation. The site is managed by `setup.sh`; do not create additional sites manually.
 
