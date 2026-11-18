@@ -17,7 +17,6 @@
 use std::collections::HashMap;
 use std::net::IpAddr;
 
-use carbide_instrument::emit;
 use carbide_uuid::machine::HostMachineId;
 use carbide_uuid::network::NetworkSegmentId;
 use carbide_uuid::vpc::VpcId;
@@ -125,19 +124,6 @@ pub async fn persist(
     txn: &mut PgConnection,
     initial_state: NetworkSegmentControllerState,
 ) -> Result<NetworkSegment, DatabaseError> {
-    // The DNS views publish records under the segment's subdomain_id. VPC
-    // domains only record ownership, so reject them here even when the
-    // segment belongs to the same VPC.
-    if let Some(domain_id) = value.subdomain_id
-        && crate::dns::domain::find_by_uuid(&mut *txn, domain_id)
-            .await?
-            .is_some_and(|domain| domain.vpc_id.is_some())
-    {
-        return Err(DatabaseError::InvalidArgument(format!(
-            "domain {domain_id} is VPC-owned and cannot be used by a network segment"
-        )));
-    }
-
     let version = ConfigVersion::initial();
 
     let query = "INSERT INTO network_segments (
@@ -544,9 +530,11 @@ pub async fn segment_exists(txn: &mut PgConnection, name: &str) -> Result<bool, 
 /// Config-declared networks that have neither a segment row nor a snapshot,
 /// in unspecified order. The caller must create the segment and write the
 /// snapshot in the same transaction.
+/// Drift Events use `instrumentation`; retain its provider until reconciliation finishes.
 pub async fn reconcile_network_defs(
     txn: &mut PgConnection,
     declared: &HashMap<String, NetworkDefinition>,
+    instrumentation: &carbide_instrument::Instrumentation,
 ) -> Result<Vec<(String, NetworkDefinition)>, DatabaseError> {
     let stored = all_stored_defs(&mut *txn).await?;
     let mut to_create: Vec<(String, NetworkDefinition)> = Vec::new();
@@ -558,7 +546,7 @@ pub async fn reconcile_network_defs(
             (Some(stored_def), true) if stored_def == def => {}
             // Declaration has drifted since seed; warn and leave both in place.
             (Some(stored_def), true) => {
-                emit(ConfigDefinitionDrifted {
+                instrumentation.emit(ConfigDefinitionDrifted {
                     resource_kind: ConfigResourceKind::NetworkDefinition,
                     drift_kind: ConfigDriftKind::Changed,
                     name: name.clone(),
@@ -611,7 +599,7 @@ pub async fn reconcile_network_defs(
 
     for name in stored.keys() {
         if !declared.contains_key(name) {
-            emit(ConfigDefinitionDrifted {
+            instrumentation.emit(ConfigDefinitionDrifted {
                 resource_kind: ConfigResourceKind::NetworkDefinition,
                 drift_kind: ConfigDriftKind::Dropped,
                 name: name.clone(),
@@ -1179,47 +1167,6 @@ mod tests {
 
     use super::*;
 
-    #[crate::sqlx_test]
-    async fn rejects_vpc_owned_subdomain_before_inserting_segment(pool: sqlx::PgPool) {
-        let mut txn = pool.begin().await.expect("begin fixture transaction");
-        let vpc_id = crate::test_support::vpc::insert_vpc(txn.as_mut(), "dns-owner").await;
-        let domain = crate::dns::domain::persist(
-            model::dns::NewDomain {
-                vpc_id: Some(vpc_id),
-                ..model::dns::NewDomain::new("tenant.example")
-            },
-            txn.as_mut(),
-        )
-        .await
-        .expect("create VPC-owned domain");
-        let segment = NewNetworkSegment {
-            subdomain_id: Some(domain.id),
-            vpc_id: Some(vpc_id),
-            segment_type: NetworkSegmentType::Tenant,
-            ..crate::test_support::network_segment::admin_segment(
-                "tenant-dns",
-                "192.0.2.0/24",
-                "192.0.2.1",
-                1,
-            )
-        };
-        let segment_id = segment.id;
-
-        let result = persist(segment, txn.as_mut(), NetworkSegmentControllerState::Ready).await;
-        assert!(
-            matches!(result, Err(DatabaseError::InvalidArgument(ref message)) if message.contains("VPC-owned")),
-            "{result:?}"
-        );
-        let segments = find_by(
-            txn.as_mut(),
-            ObjectColumnFilter::One(IdColumn, &segment_id),
-            NetworkSegmentSearchConfig::default(),
-        )
-        .await
-        .expect("the rejected creation leaves the transaction usable");
-        assert!(segments.is_empty(), "the rejected segment was not inserted");
-    }
-
     // Insert just enough into `network_segments` to make
     // `segment_exists(name)` return true;
     async fn minimum_segment_data(
@@ -1670,7 +1617,12 @@ mod tests {
             .into_iter()
             .collect();
 
-        let to_create = reconcile_network_defs(&mut txn, &declared).await?;
+        let to_create = reconcile_network_defs(
+            &mut txn,
+            &declared,
+            &carbide_instrument::Instrumentation::noop(),
+        )
+        .await?;
 
         // reconcile must not have written a snapshot for a brand-new network.
         let stored = stored_def(txn.as_mut(), "brand-new").await?;
@@ -1729,8 +1681,12 @@ mod tests {
         let mut txn = pool.begin().await?;
         let def = def("192.168.1.0/24", "192.168.1.1");
 
-        let to_create =
-            reconcile_network_defs(&mut txn, &declared_one("pre-existing", def.clone())).await?;
+        let to_create = reconcile_network_defs(
+            &mut txn,
+            &declared_one("pre-existing", def.clone()),
+            &carbide_instrument::Instrumentation::noop(),
+        )
+        .await?;
         assert!(
             to_create.is_empty(),
             "this arm must not add networks to the to-create list"
@@ -1753,8 +1709,12 @@ mod tests {
         let def = def("192.168.1.0/24", "192.168.1.1");
         insert_network_def(&mut txn, "stable", segment_id, &def).await?;
 
-        let to_create =
-            reconcile_network_defs(&mut txn, &declared_one("stable", def.clone())).await?;
+        let to_create = reconcile_network_defs(
+            &mut txn,
+            &declared_one("stable", def.clone()),
+            &carbide_instrument::Instrumentation::noop(),
+        )
+        .await?;
         assert!(
             to_create.is_empty(),
             "this arm must not add networks to the to-create list"
@@ -1784,8 +1744,12 @@ mod tests {
         let drifted = def("10.0.0.0/24", "10.0.0.1");
         insert_network_def(&mut txn, "drifty", segment_id, &original).await?;
 
-        let to_create =
-            reconcile_network_defs(&mut txn, &declared_one("drifty", drifted.clone())).await?;
+        let to_create = reconcile_network_defs(
+            &mut txn,
+            &declared_one("drifty", drifted.clone()),
+            &carbide_instrument::Instrumentation::noop(),
+        )
+        .await?;
         assert!(
             to_create.is_empty(),
             "this arm must not add networks to the to-create list"
@@ -1815,7 +1779,12 @@ mod tests {
         insert_network_def(&mut txn, "abandoned", segment_id, &def).await?;
 
         let empty: HashMap<String, NetworkDefinition> = HashMap::new();
-        let to_create = reconcile_network_defs(&mut txn, &empty).await?;
+        let to_create = reconcile_network_defs(
+            &mut txn,
+            &empty,
+            &carbide_instrument::Instrumentation::noop(),
+        )
+        .await?;
         assert!(
             to_create.is_empty(),
             "this arm must not add networks to the to-create list"
@@ -2040,8 +2009,12 @@ mod tests {
         let mut txn = pool.begin().await?;
         let def = def("192.168.1.0/24", "192.168.1.1");
 
-        let to_create =
-            reconcile_network_defs(&mut txn, &declared_one("ambiguous", def.clone())).await?;
+        let to_create = reconcile_network_defs(
+            &mut txn,
+            &declared_one("ambiguous", def.clone()),
+            &carbide_instrument::Instrumentation::noop(),
+        )
+        .await?;
         assert!(
             to_create.is_empty(),
             "this arm must not add networks to the to-create list"

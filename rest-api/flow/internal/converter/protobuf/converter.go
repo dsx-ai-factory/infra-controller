@@ -902,13 +902,14 @@ func RackTo(r *rack.Rack) *pb.Rack {
 	}
 
 	result := &pb.Rack{
-		Info:            DeviceInfoTo(&r.Info),
-		ExternalId:      r.ExternalID,
-		RackProfileId:   r.RackProfileID,
-		Location:        LocationTo(&r.Loc),
-		Components:      components,
-		OperationStatus: PhaseTo(r.OperationStatus),
-		Health:          HealthReportTo(r.Health),
+		Info:                   DeviceInfoTo(&r.Info),
+		ExternalId:             r.ExternalID,
+		RackProfileId:          r.RackProfileID,
+		Location:               LocationTo(&r.Loc),
+		Components:             components,
+		OperationStatus:        PhaseTo(r.OperationStatus),
+		OperationStatusDetails: r.OperationStatusDetails.ToProto(),
+		Health:                 HealthReportTo(r.Health),
 	}
 	if r.NVLDomainID != uuid.Nil {
 		result.NvlDomainIds = UUIDsTo([]uuid.UUID{r.NVLDomainID})
@@ -1721,6 +1722,8 @@ func QueueOptionsFrom(
 // without a known API kind map to Unspecified.
 func TaskKindTo(kind taskcommon.TaskType) pb.TaskKind {
 	switch kind {
+	case taskcommon.TaskTypeComponentReset:
+		return pb.TaskKind_TASK_KIND_COMPONENT_RESET
 	case taskcommon.TaskTypePowerControl:
 		return pb.TaskKind_TASK_KIND_POWER_CONTROL
 	case taskcommon.TaskTypeFirmwareControl:

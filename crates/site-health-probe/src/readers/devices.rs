@@ -92,6 +92,7 @@ pub(crate) struct DevicesReader {
     seq: AtomicU64,
     attempt: Attempt,
     previous: Mutex<Previous>,
+    config_store: Option<Arc<crate::state::store::SnapshotStore>>,
 }
 
 impl DevicesReader {
@@ -115,7 +116,21 @@ impl DevicesReader {
             seq: AtomicU64::new(0),
             attempt: Attempt::new(Reader::Devices, &DEVICE_FAMILIES),
             previous: Mutex::new(Previous::new()),
+            config_store: None,
         }
+    }
+
+    pub(crate) fn with_config_store(
+        mut self,
+        store: Arc<crate::state::store::SnapshotStore>,
+    ) -> Self {
+        self.config_store = Some(store);
+        self
+    }
+
+    fn firmware_config(&self) -> Option<Arc<dyn crate::snapshot::AnySnapshot>> {
+        let config = super::nico_config::current(self.config_store.as_deref()?)?;
+        (config.meta().process == self.process).then_some(config)
     }
 
     fn previous(&self) -> std::sync::MutexGuard<'_, Previous> {
@@ -149,7 +164,15 @@ impl Probe for DevicesReader {
         let start = crate::clock::now();
         let seq = self.seq.fetch_add(1, Ordering::SeqCst) + 1;
         self.attempt.begin();
-        // Every RPC of the sweep happens here, before any family is built.
+        let base = SweepMeta {
+            process: self.process,
+            seq,
+            reader: Reader::Devices,
+            start,
+            end: start,
+        };
+        let mut failed = Incomplete::default();
+        // Publish complete fast families before reading unrelated devices.
         let reads = match self.nico.connect().await {
             Ok(nico) => Ok(Sweep {
                 nico,
@@ -160,11 +183,11 @@ impl Probe for DevicesReader {
                 host_compact: AtomicBool::new(self.host_read.begin_sweep()),
                 host_compact_read: AtomicBool::new(false),
             }
-            .read()
+            .read(self, &base, &mut failed)
             .await),
             Err(err) => Err(Failure::call("connect", &err)),
         };
-        // One time for every family: the sweep ended with its last read.
+        // Slow families retain the full sweep bounds, including their joins.
         let meta = SweepMeta {
             process: self.process,
             seq,
@@ -174,7 +197,6 @@ impl Probe for DevicesReader {
         };
         // Each family is built, delivered and dropped before the next, so
         // only one new family coexists with the published snapshots.
-        let mut failed = Incomplete::default();
         match reads {
             Ok((reads, links)) => self.build(reads, links, &meta, &mut failed),
             Err(failure) => {
@@ -204,13 +226,13 @@ struct Sweep<'a> {
 
 /// Every read of one sweep, before the families are built.
 struct Reads {
+    config: Option<Arc<dyn crate::snapshot::AnySnapshot>>,
     machines: Result<(), Failure>,
     hosts: Result<CensusRead<HostDetail>, Failure>,
     dpus: Vec<String>,
     switches: Result<CensusRead<LifecycleRow>, Failure>,
     shelves: Result<CensusRead<LifecycleRow>, Failure>,
     racks: Result<CensusRead<LifecycleRow>, Failure>,
-    instances: Result<CensusRead<InstanceRow>, Failure>,
     firmware: Result<Vec<HostReprovisioningListItem>, Failure>,
     /// Whether every host batch was read compact.
     compact_host_read: bool,
@@ -306,8 +328,33 @@ impl Sweep<'_> {
         }
     }
 
-    async fn read_all(&self) -> (Reads, Result<ExpectedReads, Failure>) {
+    async fn read_all(
+        &self,
+        publisher: &DevicesReader,
+        base: &SweepMeta,
+        failed: &mut Incomplete,
+    ) -> (Reads, Result<ExpectedReads, Failure>) {
         let nico = &self.nico;
+        let instances = self
+            .census(
+                "instances",
+                ("find_instance_ids", move || nico.instance_ids()),
+                ("find_instances_by_ids", move |ids: Vec<_>| async move {
+                    let rows = nico.instances_by_ids(&ids).await?;
+                    Ok(rows.into_iter().map(InstanceRow::from).collect())
+                }),
+                |i: &InstanceRow| i.id.clone(),
+            )
+            .await;
+        let meta = SweepMeta {
+            end: crate::clock::now(),
+            ..base.clone()
+        };
+        publisher.deliver_built(&meta, Family::Instance, failed, |previous| {
+            instances.map(|r| instance_units(r.rows, previous))
+        });
+        let config = publisher.firmware_config();
+        let host_start = crate::clock::now();
         let machine_census = self
             .call("find_machine_ids", || nico.machine_ids())
             .await
@@ -327,6 +374,40 @@ impl Sweep<'_> {
             }
             Err(failure) => (Err(failure.clone()), Err(failure), Vec::new()),
         };
+        let firmware = self
+            .call("list_hosts_waiting_for_reprovisioning", || {
+                nico.hosts_waiting_for_reprovisioning()
+            })
+            .await
+            .map_err(|e| Failure::call("list_hosts_waiting_for_reprovisioning", &e));
+        let config = config
+            .zip(publisher.firmware_config())
+            .and_then(|(before, after)| {
+                (before.meta().process == after.meta().process
+                    && super::nico_config::data(before.as_ref())?.revision
+                        == super::nico_config::data(after.as_ref())?.revision)
+                    .then_some(after)
+            });
+        let mut reads = Reads {
+            config,
+            machines,
+            hosts,
+            dpus,
+            firmware,
+            compact_host_read: self.host_compact.load(Ordering::SeqCst),
+            switches: Err(Failure::unresolved("not read".into())),
+            shelves: Err(Failure::unresolved("not read".into())),
+            racks: Err(Failure::unresolved("not read".into())),
+        };
+        publisher.build_fast(
+            &reads,
+            &SweepMeta {
+                start: host_start,
+                end: crate::clock::now(),
+                ..base.clone()
+            },
+            failed,
+        );
         let switches = self
             .census(
                 "switches",
@@ -363,35 +444,10 @@ impl Sweep<'_> {
             )
             .await
             .map(drop_deleted(|r: &LifecycleRow| r.deleted));
-        let instances = self
-            .census(
-                "instances",
-                ("find_instance_ids", move || nico.instance_ids()),
-                ("find_instances_by_ids", move |ids: Vec<_>| async move {
-                    let rows = nico.instances_by_ids(&ids).await?;
-                    Ok(rows.into_iter().map(InstanceRow::from).collect())
-                }),
-                |i: &InstanceRow| i.id.clone(),
-            )
-            .await;
         let expected = self.read_expected().await;
-        let firmware = self
-            .call("list_hosts_waiting_for_reprovisioning", || {
-                nico.hosts_waiting_for_reprovisioning()
-            })
-            .await
-            .map_err(|e| Failure::call("list_hosts_waiting_for_reprovisioning", &e));
-        let reads = Reads {
-            machines,
-            hosts,
-            dpus,
-            switches,
-            shelves,
-            racks,
-            instances,
-            firmware,
-            compact_host_read: self.host_compact.load(Ordering::SeqCst),
-        };
+        reads.switches = switches;
+        reads.shelves = shelves;
+        reads.racks = racks;
         (reads, expected)
     }
 
@@ -539,8 +595,13 @@ impl Sweep<'_> {
 
     /// Every read of the sweep, the explorer reads for unlinked expected
     /// records included. Nothing after this calls nico-api.
-    async fn read(&self) -> (Reads, Result<ExpectedLinks, Failure>) {
-        let (reads, expected) = self.read_all().await;
+    async fn read(
+        &self,
+        publisher: &DevicesReader,
+        base: &SweepMeta,
+        failed: &mut Incomplete,
+    ) -> (Reads, Result<ExpectedLinks, Failure>) {
+        let (reads, expected) = self.read_all(publisher, base, failed).await;
         let links = match expected {
             Ok(expected) => self.expected_links(expected, &reads).await,
             Err(failure) => Err(failure),
@@ -669,27 +730,16 @@ impl DevicesReader {
         }
     }
 
-    /// Builds and delivers the families of one sweep's reads, one at a time.
-    /// Each family's rows are dropped once its snapshot is built.
-    fn build(
-        &self,
-        reads: Reads,
-        links: Result<ExpectedLinks, Failure>,
-        meta: &SweepMeta,
-        failed: &mut Incomplete,
-    ) {
+    fn build_fast(&self, reads: &Reads, meta: &SweepMeta, failed: &mut Incomplete) {
         let Reads {
             machines,
             hosts,
             dpus,
-            switches,
-            shelves,
-            racks,
-            instances,
             firmware,
             compact_host_read,
+            ..
         } = reads;
-
+        let compact_host_read = *compact_host_read;
         // Firmware requests join to this sweep's hosts. Host units carry
         // their open request, so without the request read a host snapshot
         // could not tell "no request" from "unknown": the host family then
@@ -697,13 +747,13 @@ impl DevicesReader {
         // only their open-request map waits for the hosts.
         let mut open = None;
         self.deliver_built(meta, Family::HostFirmwareRequests, failed, |previous| {
-            let joined = match (firmware, &hosts) {
+            let joined = match (firmware.as_ref(), hosts.as_ref()) {
                 (Err(failure), _) => {
                     open = Some(Err(failure.needed_by(Family::Host)));
-                    return Err(failure);
+                    return Err(failure.clone());
                 }
                 (_, Err(failure)) => return Err(failure.needed_by(Family::HostFirmwareRequests)),
-                (Ok(items), Ok(read)) => firmware_requests(&items, &read.rows, previous),
+                (Ok(items), Ok(read)) => firmware_requests(items, &read.rows, previous),
             };
             open = Some(Ok(joined.open));
             if joined.unjoinable > 0 {
@@ -716,37 +766,72 @@ impl DevicesReader {
         });
         self.deliver_built(meta, Family::Dpu, failed, |previous| {
             match (&machines, &hosts) {
-                (Ok(()), Ok(read)) => Ok(dpu_units(&dpus, &read.rows, previous)),
+                (Ok(()), Ok(read)) => Ok(dpu_units(dpus, &read.rows, previous)),
                 (Err(failure), _) | (_, Err(failure)) => Err(failure.needed_by(Family::Dpu)),
             }
         });
-        drop(dpus);
-        self.deliver_built(meta, Family::Host, failed, |previous| match (hosts, open) {
-            (Err(failure), _) => Err(failure),
-            (Ok(read), Some(Ok(open))) => {
-                let data = host_units(read.rows, &open, previous);
-                // Under the compact read, a host without an answer is a row
-                // nico-api sent incomplete.
-                let known = |known: fn(&HostFields) -> bool| {
-                    compact_host_read
-                        && data
-                            .units
-                            .iter()
-                            .filter_map(|unit| unit.host.as_ref())
-                            .all(known)
-                };
-                Ok(UnitsData {
-                    compact_host_read,
-                    allocatable_known: known(|host| host.allocatable.is_some()),
-                    update_eligible_known: known(|host| host.update_eligible.is_some()),
-                    ..data
-                })
+
+        self.deliver_built(meta, Family::Host, failed, |previous| {
+            match (hosts.as_ref(), open) {
+                (Err(failure), _) => Err(failure.clone()),
+                (Ok(read), Some(Ok(open))) => {
+                    let mut data = host_units(
+                        &read.rows,
+                        &open,
+                        previous,
+                        reads.config.as_deref().and_then(super::nico_config::data),
+                    );
+                    if let Some(config) = reads.config.as_deref() {
+                        let content =
+                            super::nico_config::data(config).expect("validated config snapshot");
+                        data.firmware_config =
+                            Some(carbide_site_health_probe_api::FirmwareConfigEvidence {
+                                revision: content.revision,
+                                read_start: config.meta().start.into(),
+                                read_at: config.meta().end.into(),
+                            });
+                    }
+                    // Under the compact read, a host without an answer is a row
+                    // nico-api sent incomplete.
+                    let known = |known: fn(&HostFields) -> bool| {
+                        compact_host_read
+                            && data
+                                .units
+                                .iter()
+                                .filter_map(|unit| unit.host.as_ref())
+                                .all(known)
+                    };
+                    Ok(UnitsData {
+                        compact_host_read,
+                        allocatable_known: known(|host| host.allocatable.is_some()),
+                        update_eligible_known: known(|host| host.update_eligible.is_some()),
+                        ..data
+                    })
+                }
+                (Ok(_), Some(Err(failure))) => Err(failure),
+                (Ok(_), None) => Err(Failure::unresolved(
+                    "the firmware request join did not run".to_string(),
+                )),
             }
-            (Ok(_), Some(Err(failure))) => Err(failure),
-            (Ok(_), None) => Err(Failure::unresolved(
-                "the firmware request join did not run".to_string(),
-            )),
         });
+    }
+
+    /// Builds and delivers the families of one sweep's reads, one at a time.
+    /// Each family's rows are dropped once its snapshot is built.
+    fn build(
+        &self,
+        reads: Reads,
+        links: Result<ExpectedLinks, Failure>,
+        meta: &SweepMeta,
+        failed: &mut Incomplete,
+    ) {
+        let Reads {
+            switches,
+            shelves,
+            racks,
+            ..
+        } = reads;
+
         self.deliver_built(meta, Family::Expected, failed, |previous| {
             links.map(|links| expected_units(links, previous))
         });
@@ -758,9 +843,6 @@ impl DevicesReader {
         });
         self.deliver_built(meta, Family::Rack, failed, |previous| {
             racks.map(|r| lifecycle_units(UnitType::Rack, r.rows, previous))
-        });
-        self.deliver_built(meta, Family::Instance, failed, |previous| {
-            instances.map(|r| instance_units(r.rows, previous))
         });
     }
 }
@@ -889,6 +971,8 @@ fn firmware_requests(
         let mut fields = host_fields(host, None);
         fields.open_firmware_request = Some(request);
         units.push(Unit {
+            controller_instance_id: None,
+            rest_machine: None,
             id,
             unit_type: UnitType::HostFirmwareRequest,
             source: Source::NicoApi,
@@ -936,6 +1020,10 @@ fn host_fields(host: &HostDetail, open: Option<&FirmwareRequest>) -> HostFields 
     let (allocatable, blocking_reason) = known_flag(&host.allocatable);
     let (update_eligible, update_blocking_reason) = known_flag(&host.update_eligible);
     HostFields {
+        firmware_window: host.firmware_window.clone(),
+        firmware_policy_eligible: host.firmware_policy_eligible,
+        firmware_policy_blocking_reason: host.firmware_policy_blocking_reason.clone(),
+        firmware: host.firmware.clone(),
         vendor: host.vendor.clone(),
         model: host.model.clone(),
         instance_type: host.instance_type.clone(),
@@ -978,32 +1066,39 @@ fn not_done_reason(state: &str, message: Option<&str>) -> String {
 
 /// Host units, each with its open firmware request.
 fn host_units(
-    hosts: BTreeMap<String, HostDetail>,
+    hosts: &BTreeMap<String, HostDetail>,
     open: &BTreeMap<String, FirmwareRequest>,
     previous: &[Arc<Unit>],
+    config: Option<&super::nico_config::NicoConfigData>,
 ) -> UnitsData {
     let mut unknown = 0;
-    let units = hosts.into_iter().map(|(id, host)| {
+    let units = hosts.iter().map(|(id, host)| {
         let (category, known) = host_state(&host.state);
         if !known {
             unknown += 1;
         }
         let done = category == "Ready";
-        let fields = host_fields(&host, open.get(&id));
-        Unit {
-            id,
+        let fields = host_fields(host, open.get(id));
+        let mut unit = Unit {
+            controller_instance_id: None,
+            rest_machine: None,
+            id: id.clone(),
             unit_type: UnitType::Host,
             source: Source::NicoApi,
             stage: stage(done, category == "Failed"),
             done,
             state: category.to_string(),
             reason: (!done).then(|| not_done_reason(&host.state, host.state_reason.as_deref())),
-            bmc_ip: host.bmc_ip,
+            bmc_ip: host.bmc_ip.clone(),
             host: Some(fields),
             dpu: None,
             instance: None,
             expected: None,
+        };
+        if let Some(config) = config {
+            project_firmware(&mut unit, config);
         }
+        unit
     });
     let mut built = UnitsBuilder::new(previous);
     built.extend(units);
@@ -1029,6 +1124,8 @@ fn dpu_units(
                 let (category, _) = host_state(&host.state);
                 let done = dpu_done_under(category);
                 Unit {
+                    controller_instance_id: None,
+                    rest_machine: None,
                     id: id.clone(),
                     unit_type: UnitType::Dpu,
                     source: Source::NicoApi,
@@ -1046,6 +1143,8 @@ fn dpu_units(
                 }
             }
             None => Unit {
+                controller_instance_id: None,
+                rest_machine: None,
                 id: id.clone(),
                 unit_type: UnitType::Dpu,
                 source: Source::NicoApi,
@@ -1127,6 +1226,8 @@ fn lifecycle_units(
             .and_then(|r| r.outcome_msg.as_deref())
             .filter(|m| !m.is_empty());
         Unit {
+            controller_instance_id: None,
+            rest_machine: None,
             id,
             unit_type,
             source: Source::NicoApi,
@@ -1188,6 +1289,8 @@ fn instance_units(rows: BTreeMap<String, InstanceRow>, previous: &[Arc<Unit>]) -
             .map(|t| t.state_details.as_str())
             .filter(|d| !d.is_empty());
         Unit {
+            controller_instance_id: None,
+            rest_machine: None,
             id,
             unit_type: UnitType::Instance,
             source: Source::NicoApi,
@@ -1277,6 +1380,8 @@ impl Record {
             },
         });
         Unit {
+            controller_instance_id: None,
+            rest_machine: None,
             id: self.id.clone(),
             unit_type: UnitType::ExpectedRecord,
             source: Source::NicoApi,
@@ -1343,6 +1448,8 @@ fn linked_devices(records: &[Record], record_type: RecordType) -> BTreeSet<Strin
 /// An expected rack or rack group record.
 fn plain_record(record_type: RecordType, id: String, linked: bool, device: Option<String>) -> Unit {
     Unit {
+        controller_instance_id: None,
+        rest_machine: None,
         id,
         unit_type: UnitType::ExpectedRecord,
         source: Source::NicoApi,
@@ -1377,6 +1484,8 @@ fn mismatch_unit(
         MismatchKind::NoExpectedRecord => "no_expected_record",
     };
     Unit {
+        controller_instance_id: None,
+        rest_machine: None,
         id,
         unit_type: UnitType::IdentityMismatch,
         source: Source::NicoApi,
@@ -1402,6 +1511,71 @@ fn mismatch_unit(
     }
 }
 
+/// Phases use every Core-matched inventory entry, without rematching regexes.
+fn project_firmware(unit: &mut Unit, config: &super::nico_config::NicoConfigData) {
+    use carbide_site_health_probe_api::FirmwarePhase::*;
+    let Some(host) = unit.host.as_mut() else {
+        return;
+    };
+    let complete = host.firmware_window.is_some()
+        && host.firmware_policy_eligible.is_some()
+        && unit.state != OTHER;
+    let failed = unit.stage == Stage::Error
+        || unit
+            .reason
+            .as_deref()
+            .is_some_and(|reason| reason.starts_with("HostReprovisioning/FailedFirmwareUpgrade {"));
+    let updating = host.open_firmware_request.is_some();
+    let Some(firmware) = host.firmware.as_mut() else {
+        return;
+    };
+    let report_known = firmware.report_version.is_some()
+        && firmware.waiting_for_refresh.is_some()
+        && host.report_at.is_some()
+        && (host.report_error.is_none() || failed);
+    let mut names = BTreeSet::new();
+    let valid_groups = host
+        .vendor
+        .as_deref()
+        .zip(host.model.as_deref())
+        .is_some_and(|(vendor, model)| {
+            config.target_count(vendor, model) == firmware.components.len()
+                && firmware.components.iter().all(|c| {
+                    names.insert(c.component_name.as_str())
+                        && config.target(vendor, model, &c.component_name).is_some()
+                })
+        });
+    for component in &mut firmware.components {
+        let target = host
+            .vendor
+            .as_deref()
+            .zip(host.model.as_deref())
+            .and_then(|(vendor, model)| config.target(vendor, model, &component.component_name));
+        component.phase = if !valid_groups
+            || !complete
+            || !report_known
+            || target.is_none()
+            || component.entries.is_empty()
+            || component.entries.iter().any(|e| {
+                e.service_id.is_empty() || e.inventory_id.is_empty() || e.version.is_none()
+            }) {
+            Unknown
+        } else if failed {
+            Failed
+        } else if updating || firmware.waiting_for_refresh == Some(true) {
+            Updating
+        } else if component
+            .entries
+            .iter()
+            .all(|e| e.version.as_deref() == target.map(|t| t.version.as_str()))
+        {
+            Current
+        } else {
+            Behind
+        };
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use carbide_site_health_probe_api::VersionSource;
@@ -1413,6 +1587,330 @@ mod tests {
     use crate::snapshot::FailureKind;
     use crate::snapshot::testing::FakeSink;
 
+    fn firmware_host() -> HostDetail {
+        use carbide_site_health_probe_api::*;
+        let mut host = fake::host(1, "Ready", &[]);
+        host.firmware_window = Some(FirmwareWindow {
+            start: None,
+            end: None,
+        });
+        host.firmware_policy_eligible = Some(true);
+        host.report_at = Some(crate::clock::now().into());
+        host.firmware = Some(HostFirmware {
+            report_version: Some("revision".into()),
+            waiting_for_refresh: Some(false),
+            components: [("bmc", "25.06-2"), ("uefi", "1.2"), ("cx7", "28.45")]
+                .into_iter()
+                .map(|(name, version)| FirmwareComponentInventory {
+                    component_name: name.into(),
+                    entries: vec![FirmwareInventoryEntry {
+                        service_id: "Redfish".into(),
+                        inventory_id: name.into(),
+                        version: Some(version.into()),
+                    }],
+                    phase: FirmwarePhase::Unknown,
+                })
+                .collect(),
+        });
+        host
+    }
+
+    #[test]
+    fn firmware_vendor_aliases_require_unambiguous_models() {
+        use carbide_site_health_probe_api::FirmwarePhase;
+
+        use super::super::nico_config::firmware_targets;
+        use super::super::nico_config::tests::{available, desired};
+        for collision in [false, true] {
+            let mut desired_rows = vec![desired("LenovoAMI", "GB200 NVL", &[("bmc", "25.06-2")])];
+            let mut available_rows =
+                vec![available("LenovoAMI", "GB200 NVL", "bmc", "25.06-2", true)];
+            if collision {
+                desired_rows.push(desired("Lenovo", "GB200 NVL", &[("bmc", "25.06-2")]));
+                available_rows.push(available("Lenovo", "GB200 NVL", "bmc", "25.06-2", true));
+            }
+            desired_rows.push(desired("nvidia", "other", &[("bmc", "1")]));
+            available_rows.push(available("nvidia", "other", "bmc", "1", true));
+            let mut config = super::super::nico_config::tests::content();
+            config.firmware_targets = firmware_targets(desired_rows, &available_rows).unwrap();
+            assert_eq!(config.target_count("nvidia", "other"), 1);
+            assert_eq!(
+                config.target_count("lenovo", "GB200 NVL"),
+                usize::from(!collision)
+            );
+            let mut host = firmware_host();
+            host.vendor = Some("lenovo".into());
+            host.firmware.as_mut().unwrap().components.truncate(1);
+            let mut units = host_units(
+                &[(host.id.to_string(), host)].into_iter().collect(),
+                &BTreeMap::new(),
+                &[],
+                None,
+            );
+            let unit = Arc::make_mut(&mut units.units[0]);
+            project_firmware(unit, &config);
+            assert_eq!(
+                unit.host
+                    .as_ref()
+                    .unwrap()
+                    .firmware
+                    .as_ref()
+                    .unwrap()
+                    .components[0]
+                    .phase,
+                if collision {
+                    FirmwarePhase::Unknown
+                } else {
+                    FirmwarePhase::Current
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn firmware_phase_uses_all_inventory_entries() {
+        use carbide_site_health_probe_api::FirmwarePhase::*;
+        type Case = (
+            &'static str,
+            fn(&mut HostDetail),
+            carbide_site_health_probe_api::FirmwarePhase,
+        );
+        let cases: &[Case] = &[
+            ("current", |_| {}, Current),
+            (
+                "replaced group",
+                |h| h.firmware.as_mut().unwrap().components[2].component_name = "nic".into(),
+                Unknown,
+            ),
+            (
+                "missing group",
+                |h| {
+                    h.firmware.as_mut().unwrap().components.pop();
+                },
+                Unknown,
+            ),
+            (
+                "mixed entries",
+                |h| {
+                    let c = &mut h.firmware.as_mut().unwrap().components[0];
+                    let mut old = c.entries[0].clone();
+                    old.version = Some("old".into());
+                    c.entries.push(old);
+                },
+                Behind,
+            ),
+            (
+                "empty entries",
+                |h| h.firmware.as_mut().unwrap().components[0].entries.clear(),
+                Unknown,
+            ),
+            (
+                "unknown version",
+                |h| h.firmware.as_mut().unwrap().components[0].entries[0].version = None,
+                Unknown,
+            ),
+            (
+                "waiting",
+                |h| h.firmware.as_mut().unwrap().waiting_for_refresh = Some(true),
+                Updating,
+            ),
+            (
+                "report error",
+                |h| h.report_error = Some("Unauthorized".into()),
+                Unknown,
+            ),
+            (
+                "reprovision exploration error",
+                |h| {
+                    h.state =
+                        "HostReprovisioning/NewFirmwareReportedWait { final_version: target }"
+                            .into();
+                    h.report_error = Some("RedfishError".into());
+                },
+                Unknown,
+            ),
+            (
+                "terminal firmware failure",
+                |h| {
+                    h.state = "HostReprovisioning/FailedFirmwareUpgrade { firmware_type: Bmc, report_time: None, reason: None }".into()
+                },
+                Failed,
+            ),
+            (
+                "terminal firmware failure with report error",
+                |h| {
+                    h.state = "HostReprovisioning/FailedFirmwareUpgrade { firmware_type: Bmc, report_time: None, reason: None }".into();
+                    h.report_error = Some("RedfishError".into());
+                },
+                Failed,
+            ),
+            (
+                "host error",
+                |h| h.state = "Failed/MachineValidation".into(),
+                Failed,
+            ),
+            ("unknown state", |h| h.state = "NewUnknown".into(), Unknown),
+            ("old server", |h| h.firmware_window = None, Unknown),
+            (
+                "missing policy",
+                |h| h.firmware_policy_eligible = None,
+                Unknown,
+            ),
+            (
+                "unknown waiting",
+                |h| h.firmware.as_mut().unwrap().waiting_for_refresh = None,
+                Unknown,
+            ),
+        ];
+        let config = super::super::nico_config::tests::content();
+        for (name, edit, expected) in cases {
+            let mut host = firmware_host();
+            edit(&mut host);
+            let mut units = host_units(
+                &[(host.id.to_string(), host)].into_iter().collect(),
+                &BTreeMap::new(),
+                &[],
+                None,
+            );
+            let unit = Arc::make_mut(&mut units.units[0]);
+            project_firmware(unit, &config);
+            assert_eq!(
+                unit.host
+                    .as_ref()
+                    .unwrap()
+                    .firmware
+                    .as_ref()
+                    .unwrap()
+                    .components[0]
+                    .phase,
+                *expected,
+                "{name}"
+            );
+        }
+        let host = firmware_host();
+        let id = host.id.to_string();
+        let open = [(
+            id.clone(),
+            FirmwareRequest {
+                initiator: carbide_site_health_probe_api::Initiator::Manual,
+                requested_at: None,
+                initiated_at: None,
+            },
+        )]
+        .into_iter()
+        .collect();
+        let mut units = host_units(&[(id, host)].into_iter().collect(), &open, &[], None);
+        project_firmware(Arc::make_mut(&mut units.units[0]), &config);
+        assert_eq!(
+            carbide_site_health_probe_api::metrics::firmware_phase(
+                &units.units[0],
+                carbide_site_health_probe_api::Component::Bmc
+            ),
+            Updating
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn host_config_is_pinned_across_sweep() {
+        use crate::snapshot::FamilySnapshot;
+        use crate::state::store::SnapshotStore;
+        for change in [
+            "none", "changed", "failed", "stale", "restart", "off", "appears",
+        ] {
+            let mut site = FakeSite::default();
+            site.add_host(firmware_host());
+            let mut h = harness_with(site, HostReadMode::Compact);
+            let store = Arc::new(SnapshotStore::new(&crate::config::Paging::default()));
+            h.reader.config_store = Some(store.clone());
+            let meta = SweepMeta {
+                process: h.reader.process,
+                seq: 1,
+                reader: Reader::NicoConfig,
+                start: crate::clock::now(),
+                end: crate::clock::now(),
+            };
+            let content = super::super::nico_config::tests::content();
+            let publish = |meta, content| {
+                store.publish(
+                    Family::ConfigNicoApi,
+                    Arc::new(FamilySnapshot {
+                        meta,
+                        data: content,
+                    }),
+                )
+            };
+            if !["off", "appears"].contains(&change) {
+                publish(meta.clone(), content.clone());
+            }
+            let during = store.clone();
+            let mut next = content.clone();
+            let mut after = meta.clone();
+            h.nico
+                .after("find_host_states_by_ids", move |_| match change {
+                    "appears" => during.publish(
+                        Family::ConfigNicoApi,
+                        Arc::new(FamilySnapshot {
+                            meta: after,
+                            data: next,
+                        }),
+                    ),
+                    "changed" => {
+                        next.revision += 1;
+                        during.publish(
+                            Family::ConfigNicoApi,
+                            Arc::new(FamilySnapshot {
+                                meta: after,
+                                data: next,
+                            }),
+                        );
+                    }
+                    "failed" => during.failed(
+                        Reader::NicoConfig,
+                        Family::ConfigNicoApi,
+                        FailureKind::Rpc,
+                        "read failed",
+                    ),
+                    "restart" => {
+                        after.process += 1;
+                        during.publish(
+                            Family::ConfigNicoApi,
+                            Arc::new(FamilySnapshot {
+                                meta: after,
+                                data: next,
+                            }),
+                        );
+                    }
+                    _ => {}
+                });
+            if change == "stale" {
+                tokio::time::advance(Duration::from_secs(121)).await;
+            }
+            h.sweep().await.unwrap();
+            let data = h.sink.latest::<UnitsData>(Family::Host).unwrap().1;
+            assert_eq!(data.units.len(), 1);
+            assert_eq!(data.firmware_config.is_some(), change == "none", "{change}");
+            assert_eq!(
+                carbide_site_health_probe_api::metrics::firmware_phase(
+                    &data.units[0],
+                    carbide_site_health_probe_api::Component::Bmc
+                ),
+                if change == "none" {
+                    carbide_site_health_probe_api::FirmwarePhase::Current
+                } else {
+                    carbide_site_health_probe_api::FirmwarePhase::Unknown
+                },
+                "{change}"
+            );
+            if change == "none" {
+                h.sweep().await.unwrap();
+                let again = h.sink.latest::<UnitsData>(Family::Host).unwrap().1;
+                assert!(
+                    Arc::ptr_eq(&data.units[0], &again.units[0]),
+                    "unchanged firmware units must share storage"
+                );
+            }
+        }
+    }
     struct Harness {
         nico: Arc<FakeNico>,
         sink: Arc<FakeSink>,
@@ -1487,6 +1985,42 @@ mod tests {
         site.expected_racks.push(fake::expected_rack(1));
         site.add_instance(fake::instance(1, 1, forge::TenantState::Ready));
         site
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn fast_families_publish_before_a_failed_slow_read() {
+        for failure in ["none", "instance", "host"] {
+            let h = harness(small_site());
+            for call in [
+                match failure {
+                    "instance" => "find_instance_ids",
+                    "host" => "find_machine_ids",
+                    _ => "find_switch_ids",
+                },
+                "find_switch_ids",
+            ] {
+                for _ in 0..=MAX_RETRIES {
+                    h.nico
+                        .fail_next(call, CallError::Status("unavailable".into()));
+                }
+            }
+            let sink = Arc::clone(&h.sink);
+            h.nico.after("find_switch_ids", move |_| {
+                assert_eq!(
+                    sink.count(Family::Instance),
+                    usize::from(failure != "instance")
+                );
+                assert_eq!(sink.count(Family::Host), usize::from(failure != "host"));
+                assert_eq!(sink.count(Family::Switch), 0);
+            });
+            assert!(h.sweep().await.is_err(), "slow family failed");
+            assert_eq!(
+                h.sink.count(Family::Instance),
+                usize::from(failure != "instance")
+            );
+            assert_eq!(h.sink.count(Family::Host), usize::from(failure != "host"));
+            assert_eq!(h.sink.count(Family::Switch), 0);
+        }
     }
 
     fn count_linked(units: &[Unit], record_type: RecordType) -> usize {
@@ -1682,9 +2216,19 @@ mod tests {
 
         assert_eq!(sink.count(Family::Host), 1, "the first snapshot stays");
         for family in DEVICE_FAMILIES {
+            let expected = if family == Family::Instance {
+                assert_eq!(
+                    sink.count(family),
+                    2,
+                    "instance publishes before host stalls"
+                );
+                vec![]
+            } else {
+                vec![FailureKind::Timeout]
+            };
             assert_eq!(
                 sink.failure_kinds(family),
-                vec![FailureKind::Timeout],
+                expected,
                 "{family:?}: one timeout from the watchdog, none from the late run"
             );
         }
@@ -2042,10 +2586,18 @@ mod tests {
                         );
                     }
                 }
-                // Every family of this sweep shares its times.
-                let this = published.last().unwrap().1.clone();
-                for (_, meta, _) in published.iter().filter(|(_, m, _)| m.seq == this.seq) {
-                    assert_eq!(meta, &this);
+                // Only families built from the same read phase share times.
+                let phase = |f| match f {
+                    Family::Host | Family::Dpu | Family::HostFirmwareRequests => 0,
+                    Family::Instance => 1,
+                    _ => 2,
+                };
+                let (family, this, _) = published.last().unwrap();
+                for (_, meta, _) in published
+                    .iter()
+                    .filter(|(f, m, _)| m.seq == this.seq && phase(*f) == phase(*family))
+                {
+                    assert_eq!(meta, this);
                 }
             }
 

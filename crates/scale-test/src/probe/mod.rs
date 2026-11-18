@@ -630,6 +630,10 @@ pub(crate) mod tests {
         Unit {
             stage,
             host: Some(wire::HostFields {
+                firmware_window: None,
+                firmware_policy_eligible: None,
+                firmware_policy_blocking_reason: None,
+                firmware: None,
                 vendor: None,
                 model: model.map(str::to_string),
                 instance_type: instance_type.map(str::to_string),
@@ -1134,12 +1138,15 @@ pub(crate) mod tests {
         let at = at();
         Ok(UnitsResponse {
             sweep: wire::SweepInfo {
+                firmware_config: None,
                 snapshot_id: snapshot.to_string(),
                 family: Family::Host,
                 sweep_start: at,
                 read_at: at,
                 sweep_age_seconds: age,
                 sweep_interval_seconds: 20.0,
+                last_attempt_succeeded: None,
+                last_attempt_error: None,
             },
             units: ids
                 .iter()

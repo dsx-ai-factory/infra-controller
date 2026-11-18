@@ -17,7 +17,7 @@
 use std::collections::BTreeMap;
 use std::net::SocketAddr;
 
-use carbide_instrument::emit;
+use carbide_instrument::Instrumentation;
 use carbide_rpc_utils::dhcp::{
     DhcpConfig as ModelDhcpConfig, DhcpTimestamps, DhcpTimestampsFilePath,
     HostConfig as ModelHostConfig, InterfaceInfo as ModelInterfaceInfo,
@@ -299,6 +299,7 @@ impl TryFrom<proto::ServiceConfig> for ModelServiceConfig {
 // ── gRPC service implementation ───────────────────────────────────────────────
 
 struct DhcpServerControlService {
+    instrumentation: Instrumentation,
     ctrl_tx: mpsc::Sender<ControlRequest>,
     retained_host_config_path: Option<String>,
 }
@@ -424,7 +425,7 @@ impl DhcpServerControl for DhcpServerControlService {
     ) -> Result<Response<GetDhcpTimestampsResponse>, Status> {
         let mut ts = DhcpTimestamps::new(DhcpTimestampsFilePath::Hbn);
         if let Err(e) = ts.read() {
-            emit(DhcpTimestampFileFailed::Read {
+            self.instrumentation.emit(DhcpTimestampFileFailed::Read {
                 dhcp_timestamps_path: DhcpTimestampsFilePath::Hbn.path_str().to_string(),
                 error: e.to_string(),
             });
@@ -447,8 +448,10 @@ pub(super) async fn run_grpc_server(
     addr: SocketAddr,
     ctrl_tx: mpsc::Sender<ControlRequest>,
     retained_host_config_path: Option<String>,
+    instrumentation: Instrumentation,
 ) {
     let service = DhcpServerControlService {
+        instrumentation,
         ctrl_tx,
         retained_host_config_path,
     };
@@ -470,7 +473,6 @@ mod tests {
     use std::sync::Arc;
     use std::time::Duration;
 
-    use carbide_instrument::testing::MetricsCapture;
     use carbide_test_support::Outcome::*;
     use carbide_test_support::scenarios;
     use dhcproto::v4::{DhcpOption, Message, MessageType};
@@ -719,6 +721,9 @@ mod tests {
         for case in cases {
             let (ctrl_tx, mut ctrl_rx) = mpsc::channel(1);
             let service = DhcpServerControlService {
+                instrumentation: carbide_instrument::Instrumentation::from_meter_provider(
+                    &opentelemetry::metrics::noop::NoopMeterProvider::new(),
+                ),
                 ctrl_tx,
                 retained_host_config_path: None,
             };
@@ -780,6 +785,9 @@ mod tests {
             let host_config = stateful_host_config();
             let (ctrl_tx, mut ctrl_rx) = mpsc::channel(1);
             let service = DhcpServerControlService {
+                instrumentation: carbide_instrument::Instrumentation::from_meter_provider(
+                    &opentelemetry::metrics::noop::NoopMeterProvider::new(),
+                ),
                 ctrl_tx,
                 retained_host_config_path: None,
             };
@@ -828,6 +836,9 @@ mod tests {
         .unwrap();
         let (ctrl_tx, mut ctrl_rx) = mpsc::channel(1);
         let service = DhcpServerControlService {
+            instrumentation: carbide_instrument::Instrumentation::from_meter_provider(
+                &opentelemetry::metrics::noop::NoopMeterProvider::new(),
+            ),
             ctrl_tx,
             retained_host_config_path: Some(retained_host_path.display().to_string()),
         };
@@ -874,6 +885,9 @@ mod tests {
         for (name, service_config) in cases {
             let (ctrl_tx, mut ctrl_rx) = mpsc::channel(1);
             let service = DhcpServerControlService {
+                instrumentation: carbide_instrument::Instrumentation::from_meter_provider(
+                    &opentelemetry::metrics::noop::NoopMeterProvider::new(),
+                ),
                 ctrl_tx,
                 retained_host_config_path: None,
             };
@@ -913,9 +927,6 @@ mod tests {
     /// usable host and service configuration.
     #[test]
     fn control_rpc_publishes_service_only_dpu_and_rejects_atomically() {
-        // Serialize this live OFFER producer with process-global metric-delta assertions in the binary.
-        let _metrics_guard = MetricsCapture::start();
-
         // Reserve unprivileged loopback ports while leaving host.yaml absent to exercise clean service-only startup.
         let directory = tempfile::tempdir().unwrap();
         let live = directory.path().join("dhcp.yaml");
@@ -1137,11 +1148,18 @@ mod tests {
                 assert_eq!(response.yiaddr(), "192.0.2.11".parse::<Ipv4Addr>().unwrap());
 
                 // Reopen the retained files and construct a DISCOVER for the retained host interface.
-                let retained_config =
-                    crate::load_config(&args, &args.dhcp_config, args.host_config.clone(), false)
-                        .await
-                        .unwrap()
-                        .with_service_config(ModelServiceConfig::try_from(service_config).unwrap());
+                let retained_config = crate::load_config(
+                    &args,
+                    &args.dhcp_config,
+                    args.host_config.clone(),
+                    false,
+                    &carbide_instrument::Instrumentation::from_meter_provider(
+                        &opentelemetry::metrics::noop::NoopMeterProvider::new(),
+                    ),
+                )
+                .await
+                .unwrap()
+                .with_service_config(ModelServiceConfig::try_from(service_config).unwrap());
                 let mut host_discover = Message::new(
                     Ipv4Addr::UNSPECIFIED,
                     Ipv4Addr::UNSPECIFIED,
@@ -1196,7 +1214,11 @@ mod tests {
                 assert_eq!(std::fs::read(&sidecar).unwrap(), b"corrupt identity");
             };
             tokio::select! {
-                result = crate::run_with_grpc_control(control_args, address, 0) => {
+                result = crate::run_with_grpc_control(control_args, address, 0,
+                    carbide_instrument::Instrumentation::from_meter_provider(
+                        &opentelemetry::metrics::noop::NoopMeterProvider::new(),
+                    ),
+                ) => {
                     panic!("control loop exited during configuration updates: {result:?}");
                 }
                 result = tokio::time::timeout(Duration::from_secs(15), exercise) => {
@@ -1219,6 +1241,9 @@ mod tests {
         ] {
             let (ctrl_tx, mut ctrl_rx) = mpsc::channel(1);
             let service = DhcpServerControlService {
+                instrumentation: carbide_instrument::Instrumentation::from_meter_provider(
+                    &opentelemetry::metrics::noop::NoopMeterProvider::new(),
+                ),
                 ctrl_tx,
                 retained_host_config_path: None,
             };
@@ -1291,6 +1316,9 @@ mod tests {
         ] {
             let (ctrl_tx, mut ctrl_rx) = mpsc::channel(1);
             let service = DhcpServerControlService {
+                instrumentation: carbide_instrument::Instrumentation::from_meter_provider(
+                    &opentelemetry::metrics::noop::NoopMeterProvider::new(),
+                ),
                 ctrl_tx,
                 retained_host_config_path: None,
             };

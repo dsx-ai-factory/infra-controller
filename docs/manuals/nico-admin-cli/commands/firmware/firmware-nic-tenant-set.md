@@ -18,7 +18,7 @@ nico-admin-cli firmware nic tenant set [OPTIONS] --tenant-org-id <ID> --profile 
 Select a live NIC firmware profile for a tenant using its complete
 observed tenant version from firmware nic tenant show. The token is
 shared with ordinary tenant updates and identity-configuration updates,
-not the profiles edit version. Every successful write advances the
+not the profile's edit version. Every successful write advances the
 tenant version, even if the same profile is already set. A missing
 tenant or profile returns NOT_FOUND; a stale tenant token returns
 FAILED_PRECONDITION. Core checks that the profile exists before checking
@@ -100,7 +100,7 @@ Sort output by specified field
 
 `-h, --help`
 
-Print help (see a summary with -h)
+Print help (see a summary with '-h')
 
 ## Examples
 

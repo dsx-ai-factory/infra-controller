@@ -17,6 +17,7 @@
 
 // Keep the suites in one executable: sqlx-testing's migrated template is process-local.
 mod bmc_rotation;
+mod busy_bmc;
 mod controller_state;
 mod dpu_uefi_rotation;
 mod env;
@@ -32,3 +33,4 @@ mod power_management;
 mod rack_firmware_upgrade;
 mod reboot_verification;
 mod spdm;
+mod task_progress;

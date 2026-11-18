@@ -528,6 +528,9 @@ async fn generated_linknets_inherit_scope_but_adopted_segments_stay_global(
     pool: PgPool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let env = create_test_env_with_overrides(pool, tenant_prefix_overlap_overrides(true)).await;
+    let mut txn = env.pool.begin().await?;
+    db::site_prefix::reconcile_configured(&mut txn, &env.config.site_fabric_prefixes).await?;
+    txn.commit().await?;
     let tenant = "scope-inheritance";
     create_overlap_tenant(&env, tenant).await?;
     let vpc_id = create_fnn_vpc_for_tenant(&env, tenant, "scoped VPC", Some("OVERLAP")).await;
@@ -604,6 +607,9 @@ async fn configured_networks_reject_scoped_children_but_preserve_global_parents(
     pool: PgPool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let env = create_test_env_with_overrides(pool, tenant_prefix_overlap_overrides(true)).await;
+    let mut txn = env.pool.begin().await?;
+    db::site_prefix::reconcile_configured(&mut txn, &env.config.site_fabric_prefixes).await?;
+    txn.commit().await?;
     let tenant = "configured-network-overlap";
     let vpc_name = "configured network VPC";
     create_overlap_tenant(&env, tenant).await?;
@@ -734,6 +740,25 @@ async fn eligible_exact_overlap_uses_distinct_vpc_scopes(
     let vpc_b = create_fnn_vpc_for_tenant(&env, tenant_b, "overlap VPC B", Some("OVERLAP")).await;
     let same_tenant_vpc =
         create_fnn_vpc_for_tenant(&env, tenant_a, "same tenant VPC", Some("OVERLAP")).await;
+    // Free external inventory can share an internal VNI. Prefix isolation
+    // depends on actual ownership, not disjointness of the entire pools.
+    let mut txn = env.pool.begin().await?;
+    let active_vni = db::resource_pool::find_owned_allocation(
+        &env.common_pools.ethernet.pool_vpc_vni,
+        &mut txn,
+        OwnerType::Vpc,
+        &vpc_a.to_string(),
+    )
+    .await?
+    .expect("VPC A owns its active VNI");
+    db::resource_pool::populate(
+        &env.common_pools.ethernet.pool_external_vpc_vni,
+        &mut txn,
+        vec![active_vni],
+        false,
+    )
+    .await?;
+    txn.commit().await?;
     let root_a = seed_tenant_managed_site_prefix(
         &env,
         tenant_a,
@@ -1271,6 +1296,9 @@ async fn vpc_prefix_and_attached_segment_recheck_both_commit_orders(
     pool: PgPool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let env = create_test_env_with_overrides(pool, tenant_prefix_overlap_overrides(false)).await;
+    let mut txn = env.pool.begin().await?;
+    db::site_prefix::reconcile_configured(&mut txn, &env.config.site_fabric_prefixes).await?;
+    txn.commit().await?;
     let tenant_a = "serialized-cross-table-a";
     let tenant_b = "serialized-cross-table-b";
     create_overlap_tenant(&env, tenant_a).await?;
@@ -2410,22 +2438,47 @@ async fn test_reject_create_with_invalid_metadata(
 
 #[crate::sqlx_test]
 async fn test_invalid_vpc_prefixes(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
-    let env = create_test_env(pool).await;
+    let mut config = api_fixtures::get_config();
+    config.site_fabric_prefixes = TEST_SITE_PREFIXES.clone();
+    let env = create_test_env_with_overrides(pool, TestEnvOverrides::with_config(config)).await;
+    create_fixture_tenant(&env, FIXTURE_TENANT_ORG_ID).await?;
+    let mut txn = env.pool.begin().await?;
+    db::site_prefix::reconcile_configured(&mut txn, &env.config.site_fabric_prefixes).await?;
+    txn.commit().await?;
     env.create_vpc_and_tenant_segment().await;
     let vpc_id = get_vpc_fixture_id(&env).await;
+    seed_tenant_managed_site_prefix(
+        &env,
+        FIXTURE_TENANT_ORG_ID,
+        "10.80.0.0/16",
+        SitePrefixLifecycleState::Ready,
+    )
+    .await;
 
-    for (prefix, description) in [
+    for (prefix, description, code, message) in [
         (
             "198.51.100.0/24",
             "This VPC prefix is not within the site prefixes",
+            tonic::Code::InvalidArgument,
+            "not contained within the site fabric prefixes",
         ),
         (
             "2001:db8::/64",
             "This IPv6 VPC prefix is also not within the site prefixes",
+            tonic::Code::InvalidArgument,
+            "not contained within the site fabric prefixes",
         ),
         (
             "192.0.2.255/25",
             "This VPC prefix is not specified in canonical form (bits after the prefix are set to 1)",
+            tonic::Code::InvalidArgument,
+            "canonical format",
+        ),
+        (
+            "10.80.1.0/24",
+            "Tenant-managed space outside operator roots requires explicit parentage",
+            tonic::Code::FailedPrecondition,
+            "specify site_prefix_id explicitly",
         ),
     ] {
         let bad_vpc_prefix = VpcPrefixCreationRequest {
@@ -2445,10 +2498,9 @@ async fn test_invalid_vpc_prefixes(pool: PgPool) -> Result<(), Box<dyn std::erro
         let request = Request::new(bad_vpc_prefix);
         let response = env.api.create_vpc_prefix(request).await;
 
-        assert!(
-            response.is_err(),
-            "A prefix ({prefix}) with description \"{description}\" was accepted when it should have been rejected"
-        );
+        let error = response.expect_err(description);
+        assert_eq!(error.code(), code, "{prefix}: {error}");
+        assert!(error.message().contains(message), "{prefix}: {error}");
     }
 
     Ok(())

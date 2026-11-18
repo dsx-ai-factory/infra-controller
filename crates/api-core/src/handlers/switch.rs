@@ -28,6 +28,7 @@ use health_report::HealthReportApplyMode;
 use mac_address::MacAddress;
 use model::bmc_suppression::BmcSuppressionSubsystem;
 use model::metadata::Metadata;
+use model::site_explorer::EndpointExplorationReport;
 use model::switch::{Switch, SwitchControllerState};
 use sqlx::PgConnection;
 use tonic::{Request, Response, Status};
@@ -135,13 +136,30 @@ fn populate_switch_nvos_info(
     }
 }
 
-/// Loads cached BMC serials for a switch response without querying devices.
+fn populate_switch_inventory(
+    status: &mut rpc::SwitchStatus,
+    report: Option<&EndpointExplorationReport>,
+) {
+    status.serial_number = report
+        .and_then(|report| report.switch_chassis())
+        .and_then(|chassis| chassis.serial_number.as_deref())
+        .map(|serial| serial.trim().to_string());
+    status.power_state = report
+        .and_then(|report| report.systems.first())
+        .map(|system| {
+            ::rpc::site_explorer::PowerState::from(system.power_state)
+                .as_str_name()
+                .to_lowercase()
+        });
+}
+
+/// Loads last-observed BMC serials and power states without querying devices.
 ///
-/// Cache lookup failures are logged and omit serials from the response.
-async fn load_switch_serial_numbers(
+/// Missing inventory and cache lookup failures leave those response fields unset.
+async fn load_switch_inventory(
     db: impl DbReader<'_>,
     switches: &[Switch],
-) -> HashMap<IpAddr, String> {
+) -> HashMap<IpAddr, EndpointExplorationReport> {
     let addresses: Vec<_> = switches
         .iter()
         .filter_map(|switch| switch.bmc_info.as_ref()?.ip)
@@ -154,24 +172,14 @@ async fn load_switch_serial_numbers(
     let endpoints = match db::explored_endpoints::find_by_ips(db, addresses).await {
         Ok(endpoints) => endpoints,
         Err(error) => {
-            tracing::warn!(%error, "Failed to load cached switch chassis serials");
+            tracing::warn!(%error, "Failed to load cached switch inventory");
             return HashMap::new();
         }
     };
 
     endpoints
         .into_iter()
-        .filter_map(|endpoint| {
-            let serial = endpoint
-                .report
-                .switch_chassis()?
-                .serial_number
-                .as_deref()?
-                .trim()
-                .to_string();
-
-            Some((endpoint.address, serial))
-        })
+        .map(|endpoint| (endpoint.address, endpoint.report))
         .collect()
 }
 
@@ -233,8 +241,7 @@ pub(crate) async fn find_switch(
     })?;
 
     // Optional cache reads use the pool so a failure cannot abort the switch transaction.
-    let serials_by_address =
-        load_switch_serial_numbers(&api.database_connection, &switch_list).await;
+    let inventory_by_address = load_switch_inventory(&api.database_connection, &switch_list).await;
 
     let switches: Vec<rpc::Switch> = switch_list
         .into_iter()
@@ -242,14 +249,14 @@ pub(crate) async fn find_switch(
             let id = s.id;
             let nvos_ports = nvos_info_by_switch.remove(&id).unwrap_or_default();
 
-            let serial_number = s
+            let inventory = s
                 .bmc_info
                 .as_ref()
                 .and_then(|bmc| bmc.ip)
-                .and_then(|ip| serials_by_address.get(&ip).cloned());
+                .and_then(|ip| inventory_by_address.get(&ip));
 
             rpc::Switch::try_from(s).map(|mut rpc_switch| {
-                rpc_switch.status.get_or_insert_default().serial_number = serial_number;
+                populate_switch_inventory(rpc_switch.status.get_or_insert_default(), inventory);
                 populate_switch_nvos_info(&mut rpc_switch, nvos_ports);
                 rpc_switch
             })
@@ -312,8 +319,7 @@ pub(crate) async fn find_by_ids(
     txn.rollback_or_log("read-only load of switches by id")
         .await;
 
-    let serials_by_address =
-        load_switch_serial_numbers(&api.database_connection, &switch_list).await;
+    let inventory_by_address = load_switch_inventory(&api.database_connection, &switch_list).await;
 
     let switches: Vec<rpc::Switch> = switch_list
         .into_iter()
@@ -321,14 +327,14 @@ pub(crate) async fn find_by_ids(
             let id = s.id;
             let nvos_ports = nvos_info_by_switch.remove(&id).unwrap_or_default();
 
-            let serial_number = s
+            let inventory = s
                 .bmc_info
                 .as_ref()
                 .and_then(|bmc| bmc.ip)
-                .and_then(|ip| serials_by_address.get(&ip).cloned());
+                .and_then(|ip| inventory_by_address.get(&ip));
 
             rpc::Switch::try_from(s).map(|mut rpc_switch| {
-                rpc_switch.status.get_or_insert_default().serial_number = serial_number;
+                populate_switch_inventory(rpc_switch.status.get_or_insert_default(), inventory);
                 populate_switch_nvos_info(&mut rpc_switch, nvos_ports);
                 rpc_switch
             })
@@ -793,6 +799,44 @@ async fn remove_switch_health_report_by_source(
     db_switch::remove_health_report(&mut *txn, &switch.id, mode, &source).await?;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod switch_inventory_tests {
+    use carbide_test_support::value_scenarios;
+    use model::site_explorer::{ComputerSystem, PowerState};
+
+    use super::{EndpointExplorationReport, populate_switch_inventory, rpc};
+
+    #[test]
+    fn cached_power_preserves_the_first_system_state() {
+        value_scenarios!(run = |states: Vec<PowerState>| {
+            let report = EndpointExplorationReport {
+                systems: states.into_iter().map(|power_state| ComputerSystem {
+                    power_state,
+                    ..Default::default()
+                }).collect(),
+                ..Default::default()
+            };
+            let mut status = rpc::SwitchStatus::default();
+            populate_switch_inventory(&mut status, Some(&report));
+            assert_eq!(status.serial_number, None);
+            status.power_state
+        };
+            "no system leaves power unset" {
+                vec![] => None,
+            }
+            "only the first system supplies power" {
+                vec![PowerState::On, PowerState::Off] => Some("on".to_string()),
+            }
+            "transitional states are preserved" {
+                vec![PowerState::PoweringOn] => Some("poweringon".to_string()),
+            }
+            "paused is preserved" {
+                vec![PowerState::Paused] => Some("paused".to_string()),
+            }
+        );
+    }
 }
 
 #[cfg(test)]

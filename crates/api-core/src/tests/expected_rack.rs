@@ -24,7 +24,7 @@ async fn expected_rack_derived_profile(pool: sqlx::PgPool) {
     let env = create_test_env_with_overrides(
         pool.clone(),
         TestEnvOverrides {
-            config: Some(config),
+            config: Some(Box::new(config)),
             ..Default::default()
         },
     )
@@ -44,11 +44,13 @@ async fn expected_rack_derived_profile(pool: sqlx::PgPool) {
             rack_id: Some(rack_id),
             members: vec![
                 forge::ExpectedRackGroupMember {
+                    cartridge_index: Some(0),
                     r#type: "Compute".into(),
                     manufacturer: "WiWynn".into(),
                     id: "compute-01".into(),
                 },
                 forge::ExpectedRackGroupMember {
+                    cartridge_index: Some(0),
                     r#type: "Switch".into(),
                     manufacturer: "NVIDIA".into(),
                     id: "switch-01".into(),

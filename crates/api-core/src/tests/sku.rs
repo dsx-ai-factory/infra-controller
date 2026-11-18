@@ -17,7 +17,7 @@
 pub(in crate::tests) mod tests {
     use std::time::Duration;
 
-    use carbide_uuid::machine::MachineId;
+    use carbide_uuid::machine::{MachineId, StableHostMachineId};
     use db::sku::CURRENT_SKU_VERSION;
     use db::{self, DatabaseError, ObjectFilter, WithTransaction};
     use futures_util::FutureExt;
@@ -116,6 +116,7 @@ pub(in crate::tests) mod tests {
         "id": "sku id",
         "description": "PowerEdge R760; 2xCPU; 8xGPU; 256 GiB",
         "created": "2025-01-22T04:33:27.950438037Z",
+        "updated": "2025-01-22T04:33:27.950438037Z",
         "machines_associated_count": 0,
         "components": {
           "chassis": {
@@ -173,6 +174,7 @@ pub(in crate::tests) mod tests {
   "id": "sku id",
   "description": "PowerEdge R750; 1xCPU; 1xGPU; 2 GiB; 6xIB",
   "created": "2025-01-24T21:51:12.465131195Z",
+  "updated": "2025-01-24T21:51:12.465131195Z",
   "machines_associated_count": 0,
   "components": {
     "chassis": {
@@ -286,7 +288,7 @@ pub(in crate::tests) mod tests {
         if let Some(find_match_interval) = find_match_interval {
             config.bom_validation.find_match_interval = find_match_interval;
         }
-        overrides.config = Some(config);
+        overrides.config = Some(Box::new(config));
 
         let test_env = create_test_env_with_overrides(db_pool, overrides).await;
 
@@ -301,7 +303,7 @@ pub(in crate::tests) mod tests {
         config.bom_validation.enabled = true;
         config.bom_validation.ignore_unassigned_machines = true;
         config.bom_validation.allow_allocation_on_validation_failure = false;
-        overrides.config = Some(config);
+        overrides.config = Some(Box::new(config));
 
         create_test_env_with_overrides(db_pool, overrides).await
     }
@@ -349,15 +351,12 @@ pub(in crate::tests) mod tests {
         .ok_or_else(|| eyre::eyre!("machine not found: {}", machine_id))
     }
 
-    /// Helper: Test SKU version compatibility and backward compatibility
-    /// Creates a machine with latest SKU version, then generates an older version SKU
-    /// from the same hardware to verify version handling and diff behavior
+    /// Generate an older SKU from an ingested host to check version and diff behavior.
     async fn test_match_sku_versions(
         env: &TestEnv,
+        machine_id: StableHostMachineId,
         old_schema_version: u32,
     ) -> Result<(), eyre::Error> {
-        let (machine_id, _dpu_id) = create_managed_host(env).await.into();
-
         let mut txn = env.pool.begin().await?;
         let machine = db::machine::find(
             txn.as_mut(),
@@ -417,8 +416,9 @@ pub(in crate::tests) mod tests {
         let mut actual_sku = db::sku::find(&mut txn, std::slice::from_ref(&expected_sku.id))
             .await?
             .remove(0);
-        // cheat the created timestamp
+        // cheat the created/updated timestamps (DB sets both to now())
         actual_sku.created = expected_sku.created;
+        actual_sku.updated = expected_sku.updated;
 
         let actual_sku_json = serde_json::ser::to_string_pretty(&actual_sku)?;
 
@@ -746,9 +746,10 @@ pub(in crate::tests) mod tests {
         let expected_sku: Sku = serde_json::de::from_str::<rpc::forge::Sku>(SKU_DATA)?.into();
 
         let mut actual_sku = db::sku::generate_sku_from_machine(&pool, &machine_id).await?;
-        // cheat the created timestamp and id
+        // cheat the created/updated timestamps (DB sets both to now()) and id
         actual_sku.id = "sku id".to_string();
         actual_sku.created = expected_sku.created;
+        actual_sku.updated = expected_sku.updated;
 
         let actual_sku_json: String = serde_json::ser::to_string_pretty(&actual_sku)?;
         tracing::info!(
@@ -1137,6 +1138,7 @@ pub(in crate::tests) mod tests {
                     bmc_ip_allocation: Default::default(),
                     host_lifecycle_profile: Default::default(),
                     server_name: None,
+                    replace_dpu_loopbacks: false,
                 },
             },
         )
@@ -1234,6 +1236,7 @@ pub(in crate::tests) mod tests {
                     bmc_ip_allocation: Default::default(),
                     host_lifecycle_profile: Default::default(),
                     server_name: None,
+                    replace_dpu_loopbacks: false,
                 },
             },
         )
@@ -1306,6 +1309,7 @@ pub(in crate::tests) mod tests {
                     bmc_ip_allocation: Default::default(),
                     host_lifecycle_profile: Default::default(),
                     server_name: None,
+                    replace_dpu_loopbacks: false,
                 },
             },
         )
@@ -1395,6 +1399,7 @@ pub(in crate::tests) mod tests {
                     bmc_ip_allocation: Default::default(),
                     host_lifecycle_profile: Default::default(),
                     server_name: None,
+                    replace_dpu_loopbacks: false,
                 },
             },
         )
@@ -1884,6 +1889,7 @@ pub(in crate::tests) mod tests {
                     bmc_ip_allocation: Default::default(),
                     host_lifecycle_profile: Default::default(),
                     server_name: None,
+                    replace_dpu_loopbacks: false,
                 },
             },
         )
@@ -2198,8 +2204,10 @@ pub(in crate::tests) mod tests {
     #[crate::sqlx_test]
     async fn test_match_all_sku_versions(pool: sqlx::PgPool) -> Result<(), eyre::Error> {
         let env = create_test_env_for_bom_validation(pool.clone(), false, None, false).await;
+        let (machine_id, _dpu_id) = create_managed_host(&env).await.into();
+
         for old_sku_version in 0..CURRENT_SKU_VERSION {
-            test_match_sku_versions(&env, old_sku_version).await?;
+            test_match_sku_versions(&env, machine_id, old_sku_version).await?;
         }
         Ok(())
     }
@@ -2403,12 +2411,11 @@ pub(in crate::tests) mod tests {
         let replacement_sku_json = serde_json::ser::to_string_pretty(&replacement_sku)?;
         tracing::info!(replacement_sku_json, "replacment");
 
-        let expected_sku = Sku {
+        let mut expected_sku = Sku {
             schema_version: CURRENT_SKU_VERSION,
             components: replacement_sku.components,
             ..original_sku
         };
-        let expected_sku_json = serde_json::ser::to_string_pretty(&expected_sku)?;
 
         let returned_sku = db::sku::replace(&mut txn, &expected_sku).await?;
 
@@ -2416,9 +2423,11 @@ pub(in crate::tests) mod tests {
 
         let mut actual_sku = db::sku::find(&mut txn, &[sku_id]).await?.remove(0);
 
-        // cheat the created timestamp
+        // cheat the created timestamp; preserve the persisted replacement timestamp for comparison
         actual_sku.created = expected_sku.created;
+        expected_sku.updated = actual_sku.updated;
 
+        let expected_sku_json = serde_json::ser::to_string_pretty(&expected_sku)?;
         let actual_sku_json = serde_json::ser::to_string_pretty(&actual_sku)?;
 
         assert_eq!(actual_sku_json, returned_sku_json);
@@ -2990,6 +2999,74 @@ pub(in crate::tests) mod tests {
             original_verify_request_time,
             "rejected components must not request verification"
         );
+
+        Ok(())
+    }
+
+    #[crate::sqlx_test]
+    async fn test_sku_updates_use_transaction_timestamp(
+        pool: sqlx::PgPool,
+    ) -> Result<(), eyre::Error> {
+        use rpc::forge::forge_server::Forge;
+
+        let env = create_test_env(pool.clone()).await;
+        let mut connection = pool.acquire().await?;
+        let (machine_id, _) = create_managed_host(&env).await.into();
+        let machine_id: MachineId = machine_id.into();
+
+        let original_sku =
+            db::sku::generate_sku_from_machine(connection.as_mut(), &machine_id).await?;
+        db::sku::create(&mut connection, &original_sku).await?;
+
+        let fetched = db::sku::find(&mut connection, std::slice::from_ref(&original_sku.id))
+            .await?
+            .pop()
+            .expect("created SKU should exist");
+        assert_eq!(fetched.updated, Some(fetched.created));
+
+        let mut txn = db::Transaction::begin_inner(connection.as_mut()).await?;
+        let metadata_updated: chrono::DateTime<chrono::Utc> = sqlx::query_scalar("SELECT NOW()")
+            .fetch_one(txn.as_pgconn())
+            .await?;
+        db::sku::update_metadata(
+            txn.as_pgconn(),
+            original_sku.id.clone(),
+            Some("updated description".to_string()),
+            None,
+        )
+        .await?;
+        txn.commit().await?;
+
+        let after_metadata = db::sku::find(&mut connection, std::slice::from_ref(&original_sku.id))
+            .await?
+            .pop()
+            .expect("SKU should exist after metadata update");
+        assert_eq!(after_metadata.description, "updated description");
+        assert_eq!(after_metadata.updated, Some(metadata_updated));
+
+        let mut replace_req = original_sku.clone();
+        replace_req.description = "replaced description".to_string();
+        let mut txn = db::Transaction::begin_inner(connection.as_mut()).await?;
+        let replacement_updated: chrono::DateTime<chrono::Utc> = sqlx::query_scalar("SELECT NOW()")
+            .fetch_one(txn.as_pgconn())
+            .await?;
+        let replaced_sku = db::sku::replace(txn.as_pgconn(), &replace_req).await?;
+        txn.commit().await?;
+        assert_eq!(replaced_sku.description, "replaced description");
+        assert_eq!(replaced_sku.created, fetched.created);
+        assert_eq!(replaced_sku.updated, Some(replacement_updated));
+
+        // Verify across gRPC boundary
+        let rpc_res = env
+            .api
+            .find_skus_by_ids(tonic::Request::new(rpc::forge::SkusByIdsRequest {
+                ids: vec![original_sku.id],
+            }))
+            .await?
+            .into_inner();
+        let rpc_sku = &rpc_res.skus[0];
+        assert!(rpc_sku.created.is_some());
+        assert_eq!(rpc_sku.updated, replaced_sku.updated.map(Into::into));
 
         Ok(())
     }

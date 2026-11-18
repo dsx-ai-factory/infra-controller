@@ -166,18 +166,18 @@ func NewGetAllMachineHandler(dbSession *cdb.Session, tc temporalClient.Client, c
 // @Security ApiKeyAuth
 // @Param org path string true "Name of NGC organization"
 // @Param siteId query string true "ID of Site"
-// @Param id query string true "ID of Machine"
+// @Param id query []string false "Filter by Machine IDs" collectionFormat(multi)
 // @Param hasInstance query boolean false "Filter Machines by whether machine is assigned to an Instance."
 // @Param hasInstanceType query boolean false "Filter by assigned an InstanceType to include in response"
-// @Param instanceTypeId query string true "Filter by InstanceType ID"
-// @Param tenantId query string false "Filter by Tenant ID"
+// @Param instanceTypeId query []string false "Filter by Instance Type IDs" collectionFormat(multi)
+// @Param tenantId query []string false "Filter by Tenant IDs" collectionFormat(multi)
 // @Param capabilityType query string true "Filter by CapabilityType" e.g "'InfiniBand', 'CPU'"
-// @Param capabilityName query string true "Filter by CapabilityName" e.g. "'MT2910 Family [ConnectX-7]', 'Dell Ent NVMe CM6 RI 1.92TB'"
-// @Param status query string false "Filter by status" e.g. 'Pending', 'Error'"
-// @Param hwSkuDeviceType query string false "Filter by hardware SKU device type" e.g. 'gpu', 'cpu', 'storage', 'cache'"
+// @Param capabilityName query []string false "Filter by Capability Names" collectionFormat(multi)
+// @Param status query []string false "Filter by Machine Statuses" collectionFormat(multi)
+// @Param hwSkuDeviceType query []string false "Filter by hardware SKU Device Types" collectionFormat(multi)
 // @Param query query string false "Query input for full text search"
 // @Param includeMetadata query boolean false "Include metadata info in response"
-// @Param includeRelation query string false "Related entities to include in response e.g. 'InfrastructureProvider', 'Site', 'InstanceType'"
+// @Param includeRelation query []string false "Related entities to include in response e.g. 'InfrastructureProvider', 'Site', 'InstanceType'" collectionFormat(multi)
 // @Param pageNumber query integer false "Page number of results returned"
 // @Param pageSize query integer false "Number of results per page"
 // @Param orderBy query string false "Order by field"
@@ -546,6 +546,7 @@ func NewGetMachineHandler(dbSession *cdb.Session, tc temporalClient.Client, cfg 
 // @Param org path string true "Name of NGC organization"
 // @Param id path string true "ID of Machine"
 // @Param includeMetadata query boolean false "Include metadata info in response"
+// @Param includeRelation query []string false "Related entities to include in response e.g. 'InfrastructureProvider', 'Site', 'InstanceType'. Repeat the parameter to request multiple relations." collectionFormat(multi)
 // @Success 200 {object} model.APIMachine
 // @Router /v2/org/{org}/nico/machine/{id} [get]
 func (gmh GetMachineHandler) Handle(c echo.Context) error {
@@ -2488,6 +2489,9 @@ func (h DecommissionMachineHandler) Handle(c echo.Context) error {
 	}
 	if machine.IsMissingOnSite {
 		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Machine is missing on site, unable to decommission", nil)
+	}
+	if machine.IsAssigned {
+		return cutil.NewAPIErrorResponse(c, http.StatusPreconditionFailed, "Machine is currently in use by an Instance and cannot be decommissioned", nil)
 	}
 	if machine.Site == nil {
 		logger.Error().Msg("Related Site was not returned for Machine DB entity")

@@ -33,6 +33,7 @@ use std::time::Duration;
 
 use carbide_secrets::credentials::CredentialManager;
 use db::work_lock_manager::WorkLockManagerHandle;
+pub use ib_fabric::ib_fabric_test_manager;
 use model::resource_pool::common::CommonPools;
 pub use rpc;
 use tokio::task::JoinSet;
@@ -50,6 +51,11 @@ pub fn default_credential_key(credential: &crate::api::DefaultCredential) -> &st
 }
 
 impl Api {
+    /// Returns the Event metric destination shared with this fixture's components.
+    pub fn instrumentation(&self) -> &carbide_instrument::Instrumentation {
+        &self.instrumentation
+    }
+
     pub fn work_lock_manager_handle(&self) -> WorkLockManagerHandle {
         self.work_lock_manager_handle.clone()
     }

@@ -20,10 +20,13 @@ mod boot_interface_resolution;
 mod chassis_reset;
 mod client_resolution;
 pub(in crate::tests) mod common;
+mod component_firmware_details;
 mod component_manager;
 mod component_power_details;
 mod dhcp_cross_family_regression_test;
+mod domain;
 mod dpf;
+mod dpu_asn_backfill;
 mod dpu_machine_update;
 mod dpu_nic_firmware;
 mod dpu_remediation;
@@ -31,7 +34,6 @@ mod dpu_remote;
 mod dpu_reprovisioning;
 mod expected_component_patch;
 mod expected_machine;
-mod expected_nvlink_domain;
 mod expected_rack;
 mod expected_rack_group;
 mod expected_switch;
@@ -85,6 +87,7 @@ mod nic_firmware_artifact;
 mod nic_firmware_operation;
 mod nvl_instance;
 mod nvl_logical_partition;
+mod nvlink_domain;
 mod preingestion_bfb_identity;
 mod preingestion_dpu_nic_mode;
 mod primary_interface;
@@ -124,3 +127,5 @@ pub(crate) use crate::tests::common::sqlx_fixtures::sqlx_fixture_from_str;
 fn setup_test_logging() {
     crate::test_support::setup_test_logging()
 }
+
+mod machine_tracing;

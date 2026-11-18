@@ -19,16 +19,16 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
+use ::rpc::carbide_tls_client::CarbideClientConfig;
 use ::rpc::forge::{self as rpc};
-use ::rpc::forge_tls_client::ForgeClientConfig;
 use axum::Router;
 use axum::extract::State as AxumState;
 use axum::http::{StatusCode, Uri};
 use axum::response::IntoResponse;
 use axum::routing::{get, post};
 use carbide_host_support::agent_config::AgentConfig;
+use carbide_tls::client_config::ClientCert;
 use eyre::{Context, Result};
-use forge_tls::client_config::ClientCert;
 use opentelemetry::metrics::{Meter, MeterProvider};
 use opentelemetry_sdk::metrics;
 use prometheus::{Encoder, TextEncoder};
@@ -61,7 +61,7 @@ async fn test_network_monitor() -> eyre::Result<()> {
             ::rpc::service_path!("GetDpuInfoList"),
             post(handle_get_dpu_info_list),
         )
-        // ForgeApiClient needs a working Version route for connection retrying
+        // CarbideApiClient needs a working Version route for connection retrying
         .route(::rpc::service_path!("Version"), post(handle_version))
         .fallback(handler)
         .with_state(state.clone());
@@ -92,8 +92,8 @@ async fn test_network_monitor() -> eyre::Result<()> {
         ),
     };
 
-    let forge_client_config = Arc::new(
-        ForgeClientConfig::new(
+    let carbide_client_config = Arc::new(
+        CarbideClientConfig::new(
             agent.forge_system.root_ca.clone(),
             Some(ClientCert {
                 cert_path: agent.forge_system.client_cert.clone(),
@@ -114,7 +114,7 @@ async fn test_network_monitor() -> eyre::Result<()> {
 
     // Initialize network monitor
     let forge_api_clone = forge_api.clone();
-    let forge_client_config_clone = Arc::clone(&forge_client_config);
+    let carbide_client_config_clone = Arc::clone(&carbide_client_config);
     let (close_sender, mut close_receiver) = watch::channel(false);
 
     info!("Initializing network monitor");
@@ -129,7 +129,7 @@ async fn test_network_monitor() -> eyre::Result<()> {
         network_monitor
             .run(
                 &forge_api_clone,
-                forge_client_config_clone,
+                carbide_client_config_clone,
                 &mut close_receiver,
             )
             .await

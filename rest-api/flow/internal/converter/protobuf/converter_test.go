@@ -1805,6 +1805,7 @@ func TestTaskKindTo(t *testing.T) {
 		want pb.TaskKind
 	}{
 		// These are distinct wire values, not one shared "other task" category.
+		{taskcommon.TaskTypeComponentReset, pb.TaskKind_TASK_KIND_COMPONENT_RESET},
 		{taskcommon.TaskTypePowerControl, pb.TaskKind_TASK_KIND_POWER_CONTROL},
 		{taskcommon.TaskTypeFirmwareControl, pb.TaskKind_TASK_KIND_FIRMWARE_CONTROL},
 		{taskcommon.TaskTypeBringUp, pb.TaskKind_TASK_KIND_BRING_UP},
@@ -1818,4 +1819,11 @@ func TestTaskKindTo(t *testing.T) {
 			require.Equal(t, tc.want, TaskKindTo(tc.kind))
 		})
 	}
+}
+
+func TestQueueOptionsFrom(t *testing.T) {
+	t.Run("internal preempt numeric value remains public reject", func(t *testing.T) {
+		strategy, _ := QueueOptionsFrom(&pb.QueueOptions{ConflictStrategy: pb.ConflictStrategy(operation.ConflictStrategyPreempt)})
+		require.Equal(t, operation.ConflictStrategyReject, strategy)
+	})
 }

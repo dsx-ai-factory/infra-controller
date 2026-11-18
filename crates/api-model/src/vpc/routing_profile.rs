@@ -108,6 +108,10 @@ impl RouteTargetConfig {
     }
 }
 
+/// Adds symbolic or literal route targets to selected exports using the shared prefix contract.
+pub type PrefixRouteTargetConfig =
+    carbide_network::virtualization::PrefixRouteTargetConfig<RouteTargetConfig>;
+
 /// An entry used by a DPU prefix-list policy.
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -127,6 +131,9 @@ pub struct PrefixFilterPolicyEntry {
 pub struct VpcRoutingProfileOverrides {
     pub route_target_imports: Option<Vec<RouteTargetConfig>>,
     pub route_targets_on_exports: Option<Vec<RouteTargetConfig>>,
+    /// Replaces inherited conditional exports when present; an empty list clears them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub route_targets_on_exports_by_prefix: Option<Vec<PrefixRouteTargetConfig>>,
     pub leak_default_route_from_underlay: Option<bool>,
     pub leak_tenant_host_routes_to_underlay: Option<bool>,
     pub tenant_leak_communities_accepted: Option<bool>,
@@ -163,6 +170,28 @@ mod tests {
                     vni_self: false, // Defaults the absent predecessor field.
                 }]),
                 ..Default::default()
+            }
+        );
+    }
+
+    /// Verifies unused conditional exports are omitted from stored JSON for downgrade removal,
+    /// while an explicit empty list retains its inherited-policy clearing meaning.
+    #[test]
+    fn conditional_exports_preserve_json_omission_and_explicit_clearing() {
+        carbide_test_support::value_scenarios!(run = |entries| {
+            // Serialize through the exact model stored in VPC override JSONB.
+            let overrides = VpcRoutingProfileOverrides {
+                route_targets_on_exports_by_prefix: entries,
+                ..Default::default()
+            };
+            serde_json::to_value(overrides).expect("serializable overrides")
+                .get("route_targets_on_exports_by_prefix").cloned()
+        };
+            "stored conditional export presence" {
+                // Unused rules must not leave a null field rejected by older Core models.
+                None => None,
+                // Clearing inherited rules must retain an explicit empty collection.
+                Some(vec![]) => Some(serde_json::json!([])),
             }
         );
     }

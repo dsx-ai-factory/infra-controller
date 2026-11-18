@@ -113,9 +113,16 @@ pub struct Config {
     #[serde(with = "humantime_serde")]
     pub endpoint_discovery_interval: Duration,
 
-    /// Budget for draining started collectors on SIGTERM or SIGINT; collectors
-    /// still running when it passes are abandoned. Defaults to 20 seconds and
-    /// must be greater than zero.
+    /// Budget for graceful shutdown, starting when the service observes SIGTERM
+    /// or SIGINT. Discovery completion, collector draining, and the sink flush
+    /// share one deadline: collectors that run up to it leave the sink flush no
+    /// time. The deadline stops waiting but does not guarantee that remaining
+    /// collectors and sink deliveries terminate immediately; records still
+    /// queued or in delivery at the deadline are logged as dropped, and records
+    /// an abandoned collector never queued are not counted. Counts are in
+    /// queued entries and are approximate for entries in transit at the
+    /// deadline and for partially rejected OTLP exports. Defaults to 20 seconds
+    /// and must be greater than zero.
     #[serde(with = "humantime_serde")]
     pub shutdown_timeout: Duration,
 
@@ -1111,7 +1118,7 @@ pub struct CollectorsConfig {
     /// Firmware collector configuration (if present, firmware collector is enabled)
     pub firmware: Configurable<FirmwareCollectorConfig>,
 
-    /// Power shelf Manager collector configuration (if present, manager collector is enabled).
+    /// Redfish Manager collector configuration (if present, manager collector is enabled).
     pub manager: Configurable<ManagerCollectorConfig>,
 
     /// Leak detector collector configuration (if present, leak detector collector is enabled)
@@ -1389,6 +1396,9 @@ pub struct ProcessorsConfig {
 
     /// Rack-level leak processor: aggregates tray leak reports per rack.
     pub rack_leak: Configurable<RackLeakProcessorConfig>,
+
+    /// Projects source collector observations into structured resource-status logs.
+    pub resource_status: Configurable<ResourceStatusProcessorConfig>,
 }
 
 impl Default for ProcessorsConfig {
@@ -1396,9 +1406,15 @@ impl Default for ProcessorsConfig {
         Self {
             leak_detection: Configurable::Enabled(LeakDetectionProcessorConfig::default()),
             rack_leak: Configurable::Enabled(RackLeakProcessorConfig::default()),
+            resource_status: Configurable::Disabled,
         }
     }
 }
+
+/// Configuration for structured Redfish resource-status log projection.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct ResourceStatusProcessorConfig {}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -1470,7 +1486,7 @@ impl Default for FirmwareCollectorConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ManagerCollectorConfig {
-    /// Interval between power-shelf manager (PMC) status polls.
+    /// Interval between Redfish Manager polls.
     #[serde(with = "humantime_serde")]
     pub poll_interval: Duration,
 }
@@ -2825,8 +2841,9 @@ impl<P: Provider> Provider for CanonicalNicoApiProvider<P> {
 }
 
 impl Config {
-    /// Loads defaults, an optional TOML file, and `CARBIDE_HEALTH__` environment
-    /// overrides, in that order, then validates the resulting configuration.
+    /// Loads defaults, an optional TOML file, `CARBIDE_HEALTH__` environment
+    /// overrides, and `NICO_HEALTH__` environment overrides, in that order, then
+    /// validates the resulting configuration.
     /// Malformed enabled sections return an error instead of falling back to defaults.
     pub fn load(config_path: Option<&Path>) -> Result<Self, String> {
         let mut figment = Figment::new().merge(Serialized::defaults(Config::default()));
@@ -2835,17 +2852,24 @@ impl Config {
             figment = figment.merge(CanonicalNicoApiProvider(Toml::file(path)));
         }
 
-        figment = figment.merge(CanonicalNicoApiProvider(
-            Env::prefixed("CARBIDE_HEALTH__").split("__"),
-        ));
+        // Dual-prefix for the carbide->nico transition; NICO_HEALTH__ wins if both set.
+        figment = figment
+            .merge(CanonicalNicoApiProvider(
+                Env::prefixed("CARBIDE_HEALTH__").split("__"),
+            ))
+            .merge(CanonicalNicoApiProvider(
+                Env::prefixed("NICO_HEALTH__").split("__"),
+            ));
 
         let config: Config = figment.extract().map_err(|error| {
             let sources = match config_path {
                 Some(path) => format!(
-                    "{} and CARBIDE_HEALTH__ environment variables",
+                    "{} and CARBIDE_HEALTH__/NICO_HEALTH__ environment variables",
                     path.display()
                 ),
-                None => "defaults and CARBIDE_HEALTH__ environment variables".to_string(),
+                None => {
+                    "defaults and CARBIDE_HEALTH__/NICO_HEALTH__ environment variables".to_string()
+                }
             };
 
             let location = if error.path.is_empty() {
@@ -3412,6 +3436,7 @@ mod tests {
 
         assert!(config.collectors.sensors.is_enabled());
         assert!(config.collectors.firmware.is_enabled());
+        assert!(config.processors.resource_status.is_enabled());
         if let Configurable::Enabled(ref manager) = config.collectors.manager {
             assert_eq!(manager.poll_interval, Duration::from_secs(120));
         } else {
@@ -3586,6 +3611,7 @@ cache_size = 50
         }
 
         assert!(!config.collectors.firmware.is_enabled());
+        assert!(!config.processors.resource_status.is_enabled());
         if let Configurable::Enabled(ref manager) = config.collectors.manager {
             assert_eq!(manager.poll_interval, Duration::from_secs(300));
         } else {
@@ -4718,6 +4744,80 @@ reload_interval = "30s"
                 (&[][..], &["CARBIDE_API", "NICO_API"][..]) => "https://nico-api.example:1079/".to_string(),
             }
         );
+    }
+
+    #[test]
+    #[allow(clippy::result_large_err)] // Figment controls the error representation.
+    fn env_prefixes_layer_over_defaults() {
+        // Loads the config inside a jail with only the given environment variables set.
+        let load_with = |vars: &[(&str, &str)]| {
+            let mut config = None;
+            figment::Jail::expect_with(|jail| {
+                jail.clear_env();
+                for (key, value) in vars {
+                    jail.set_env(key, value);
+                }
+                config = Some(Config::load(None).expect("config should load"));
+                Ok(())
+            });
+            config.expect("config should be produced")
+        };
+        let nico_api_url = |config: &Config| {
+            config
+                .endpoint_sources
+                .carbide_api
+                .as_option()
+                .expect("NICo API source should stay enabled")
+                .api_url
+                .to_string()
+        };
+
+        // 1. Nothing set: compiled-in defaults.
+        let config = load_with(&[]);
+        assert_eq!(config.cache_size, 100);
+        assert_eq!(config.shards_count, 1);
+        assert_eq!(config.bmc_proxy_url, None);
+        assert_eq!(
+            nico_api_url(&config),
+            "https://nico-api.nico-system.svc.cluster.local:1079/"
+        );
+
+        // 2. Legacy CARBIDE_HEALTH__ prefix overrides the defaults.
+        let legacy = [
+            ("CARBIDE_HEALTH__CACHE_SIZE", "250"),
+            ("CARBIDE_HEALTH__SHARDS_COUNT", "3"),
+            (
+                "CARBIDE_HEALTH__BMC_PROXY_URL",
+                "https://legacy-proxy.example/",
+            ),
+            (
+                "CARBIDE_HEALTH__ENDPOINT_SOURCES__CARBIDE_API__API_URL",
+                "https://carbide-api.example:1079/",
+            ),
+        ];
+        let config = load_with(&legacy);
+        assert_eq!(config.cache_size, 250);
+        assert_eq!(config.shards_count, 3);
+        assert_eq!(
+            config.bmc_proxy_url.as_ref().map(ToString::to_string),
+            Some("https://legacy-proxy.example/".to_string())
+        );
+        assert_eq!(nico_api_url(&config), "https://carbide-api.example:1079/");
+
+        // 3. NICO_HEALTH__ overrides one legacy key; the other legacy keys still apply.
+        let mut both = legacy.to_vec();
+        both.push(("NICO_HEALTH__CACHE_SIZE", "999"));
+        let config = load_with(&both);
+        assert_eq!(
+            config.cache_size, 999,
+            "NICO_HEALTH__ should win over CARBIDE_HEALTH__"
+        );
+        assert_eq!(config.shards_count, 3);
+        assert_eq!(
+            config.bmc_proxy_url.as_ref().map(ToString::to_string),
+            Some("https://legacy-proxy.example/".to_string())
+        );
+        assert_eq!(nico_api_url(&config), "https://carbide-api.example:1079/");
     }
 
     #[test]

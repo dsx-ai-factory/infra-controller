@@ -46,22 +46,34 @@ type DynTLSCfg struct {
 	logger   *logrus.Logger
 }
 
-// NewDynTLSCfg returns a DynTLSCfg
-func NewDynTLSCfg(keyPath, certPath, cacertPath string) (*DynTLSCfg, error) {
+// NewDynTLSCfg returns a DynTLSCfg. An optional logger receives startup and
+// renewal diagnostics without being reconfigured. Omitted or nil uses a private
+// text logger. At most one logger may be supplied.
+func NewDynTLSCfg(keyPath, certPath, cacertPath string, loggers ...*logrus.Logger) (*DynTLSCfg, error) {
+	if len(loggers) > 1 {
+		return nil, fmt.Errorf("at most one TLS logger may be supplied")
+	}
+	var logger *logrus.Logger
+	if len(loggers) == 1 {
+		logger = loggers[0]
+	}
+	if logger == nil {
+		logger = logrus.New()
+		logger.SetFormatter(&logrus.TextFormatter{
+			FullTimestamp:   true,
+			TimestampFormat: "2006-01-02T15:04:05.999Z07:00",
+			CallerPrettyfier: func(f *runtime.Frame) (string, string) {
+				return "", fmt.Sprintf("%s:%d", filepath.Base(f.File), f.Line)
+			},
+		})
+		logger.SetReportCaller(true)
+	}
 	d := &DynTLSCfg{
 		keyPath:    keyPath,
 		certPath:   certPath,
 		cacertPath: cacertPath,
-		logger:     logrus.New(),
+		logger:     logger,
 	}
-	d.logger.SetFormatter(&logrus.TextFormatter{
-		FullTimestamp:   true,
-		TimestampFormat: "2006-01-02T15:04:05.999Z07:00",
-		CallerPrettyfier: func(f *runtime.Frame) (string, string) {
-			return "", fmt.Sprintf("%s:%d", filepath.Base(f.File), f.Line)
-		},
-	})
-	d.logger.SetReportCaller(true)
 
 	caCert, err := os.ReadFile(cacertPath)
 	if err != nil {

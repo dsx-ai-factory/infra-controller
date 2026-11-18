@@ -33,7 +33,7 @@ VPC that owns the domain. A VPC owns at most one live domain
 
 `--default-ttl <SECONDS>`
 
-Default TTL for the zones records, 30 to 86400 seconds. Omit for the
+Default TTL for the zone's records, 30 to 86400 seconds. Omit for the
 site default
 
 `--extended`
@@ -56,12 +56,12 @@ Sort output by specified field
 
 `-h, --help`
 
-Print help (see a summary with -h)
+Print help (see a summary with '-h')
 
 `<NAME>`
 
-Domain name. Reverse zones (in-addr.arpa, ip6.arpa) and duplicate live
-names are rejected
+Lowercase domain name. Reverse zones (in-addr.arpa, ip6.arpa) and
+duplicate live names are rejected
 
 ## Examples
 

@@ -156,6 +156,7 @@ async fn proxied_client(
         Arc::new(NoCredentials),
         inner,
         HostPortPair::HostAndPort("127.0.0.1".to_string(), proxy_addr.port()),
+        carbide_instrument::Instrumentation::noop(),
     )
     .create_client(
         "192.0.2.10",

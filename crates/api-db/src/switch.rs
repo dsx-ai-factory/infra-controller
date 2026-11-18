@@ -1320,6 +1320,60 @@ pub async fn insert_health_report(
         .await
 }
 
+/// A switch the reachability monitor should probe: ready, not deleted, with its
+/// rack and whether it is the rack's primary (NMX-hosting) switch.
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub struct SwitchReachabilityTargetRow {
+    pub switch_id: SwitchId,
+    pub rack_id: Option<RackId>,
+    pub is_primary: bool,
+}
+
+/// Lists the switches in the `ready` controller state. Switches in other
+/// states are being configured, decommissioned, or repaired and may be
+/// legitimately unreachable, so the reachability monitor does not probe them.
+pub async fn find_reachability_targets(
+    db: impl DbReader<'_>,
+) -> Result<Vec<SwitchReachabilityTargetRow>, DatabaseError> {
+    sqlx::query_as(
+        r#"
+        SELECT id AS switch_id, rack_id, is_primary
+        FROM switches
+        WHERE deleted IS NULL
+          AND controller_state->>'state' = $1
+        ORDER BY id
+        "#,
+    )
+    .bind(model::switch::SWITCH_CONTROLLER_STATE_READY)
+    .fetch_all(db)
+    .await
+    .map_err(|e| DatabaseError::new("switch::find_reachability_targets", e))
+}
+
+/// Returns the merge-mode health report stored under `source` for every
+/// non-deleted switch that has one.
+pub async fn find_health_reports_by_merge_source(
+    db: impl DbReader<'_>,
+    source: &str,
+) -> Result<Vec<(SwitchId, HealthReport)>, DatabaseError> {
+    let rows: Vec<(SwitchId, sqlx::types::Json<HealthReport>)> = sqlx::query_as(
+        r#"
+        SELECT id, health_reports->'merges'->$1
+        FROM switches
+        WHERE deleted IS NULL
+          AND coalesce(health_reports, '{"merges": {}}'::jsonb)->'merges' ? $1
+        "#,
+    )
+    .bind(source)
+    .fetch_all(db)
+    .await
+    .map_err(|e| DatabaseError::new("switch::find_health_reports_by_merge_source", e))?;
+    Ok(rows
+        .into_iter()
+        .map(|(id, report)| (id, report.0))
+        .collect())
+}
+
 pub async fn remove_health_report(
     txn: &mut PgConnection,
     switch_id: &SwitchId,

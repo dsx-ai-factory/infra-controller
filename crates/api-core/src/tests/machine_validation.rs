@@ -985,7 +985,7 @@ async fn test_machine_validation_disabled_waits_for_in_flight_reboot(
 
     let mut machine_validation_config = env.config.machine_validation_config.clone();
     machine_validation_config.enabled = false;
-    let handler = MachineStateHandlerBuilder::builder()
+    let handler = MachineStateHandlerBuilder::builder(env.api.instrumentation.clone())
         .hardware_models(env.config.get_firmware_config())
         .reachability_params(env.reachability_params)
         .attestation_enabled(env.attestation_enabled)
@@ -2661,9 +2661,8 @@ async fn test_machine_validation_m1_persists_selected_test_and_idempotent_result
     crate::machine_validation::MachineValidationManager::new(
         env.pool.clone(),
         config,
-        opentelemetry::global::meter(
-            "test_machine_validation_m1_persists_selected_test_and_idempotent_result",
-        ),
+        env.test_meter.meter(),
+        env.api.instrumentation.clone(),
     )
     .run_single_iteration()
     .await?;
@@ -2834,9 +2833,8 @@ async fn test_machine_validation_manager_reconciles_stale_active_attempt(
     crate::machine_validation::MachineValidationManager::new(
         env.pool.clone(),
         config,
-        opentelemetry::global::meter(
-            "test_machine_validation_manager_reconciles_stale_active_attempt",
-        ),
+        env.test_meter.meter(),
+        env.api.instrumentation.clone(),
     )
     .run_single_iteration()
     .await?;
@@ -3010,16 +3008,14 @@ async fn test_machine_validation_manager_reconciles_stale_run(
 
     let mut config = env.config.machine_validation_config.clone();
     config.stale_run_timeout = std::time::Duration::from_secs(1);
-    // Reconciling the stale run is the run's one completion, so the outcome
-    // counter must move exactly once under the stale-run cause. Only this
-    // test drives that cause through the product funnel, and the emit-level
-    // test serializes behind the same capture lock, so the exact delta is
-    // race-free.
-    let metrics = carbide_instrument::testing::MetricsCapture::start();
+    // Reconciliation and late RPC completions share this environment's registry.
+    let metrics =
+        carbide_instrument::testing::MetricsCapture::for_registry(env.test_meter.registry());
     crate::machine_validation::MachineValidationManager::new(
         env.pool.clone(),
         config,
-        opentelemetry::global::meter("test_machine_validation_manager_reconciles_stale_run"),
+        env.test_meter.meter(),
+        env.api.instrumentation.clone(),
     )
     .run_single_iteration()
     .await?;

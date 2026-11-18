@@ -330,7 +330,7 @@ func NewGetAllTrayHandler(dbSession *cdb.Session, tc tClient.Client, scp *sc.Cli
 // @Param rackId query string false "Filter by Rack ID"
 // @Param rackName query string false "Filter by Rack name"
 // @Param type query string false "Filter by tray type (Compute, NVSwitch, PowerShelf)"
-// @Param id query string false "Filter by component ID (use repeated params for multiple values)"
+// @Param id query []string false "Filter by component ID (use repeated params for multiple values)" collectionFormat(multi)
 // @Param slotId query int false "Filter by rack slot ID (position.slotId). Requires rackId or rackName. Composes with other filters via AND."
 // @Param orderBy query string false "Order by field (e.g. name_ASC, manufacturer_DESC)"
 // @Param pageNumber query int false "Page number (1-based)"
@@ -707,10 +707,10 @@ func NewValidateTraysHandler(dbSession *cdb.Session, tc tClient.Client, scp *sc.
 // @Param siteId query string true "ID of the Site"
 // @Param rackId query string false "Scope to a specific Rack by ID (mutually exclusive with rackName)"
 // @Param rackName query string false "Scope to a specific Rack by name (mutually exclusive with rackId)"
-// @Param name query string false "Filter trays by name"
-// @Param manufacturer query string false "Filter trays by manufacturer"
+// @Param name query []string false "Filter trays by name" collectionFormat(multi)
+// @Param manufacturer query []string false "Filter trays by manufacturer" collectionFormat(multi)
 // @Param type query string false "Filter trays by type (Compute, NVSwitch, PowerShelf)"
-// @Param id query string false "Filter by component ID (mutually exclusive with rackId/rackName; use repeated params for multiple values)"
+// @Param id query []string false "Filter by component ID (mutually exclusive with rackId/rackName; use repeated params for multiple values)" collectionFormat(multi)
 // @Param slotId query int false "Validate only trays at this rack slot (position.slotId). Requires rackId or rackName. Composes via AND."
 // @Success 200 {object} model.APIRackValidationResult
 // @Router /v2/org/{org}/nico/tray/validation [get]

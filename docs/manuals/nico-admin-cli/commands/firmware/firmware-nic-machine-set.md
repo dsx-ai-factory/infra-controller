@@ -15,12 +15,12 @@ nico-admin-cli firmware nic machine set [OPTIONS] --if-version-match <VERSION> <
 
 ## DESCRIPTION
 
-Atomically set or clear a hosts machine and card NIC firmware selections
-at the observed Machine.version from firmware nic machine show. Choose
-exactly one of --profile or --clear-profile, even when changing only
-cards. Resubmitting a machine profile rechecks compatibility for devices
-inheriting it; clearing it restores allocation/site inheritance without
-clearing saved cards.
+Atomically set or clear a host's machine and card NIC firmware
+selections at the observed Machine.version from firmware nic machine
+show. Choose exactly one of --profile or --clear-profile, even when
+changing only cards. Resubmitting a machine profile rechecks
+compatibility for devices inheriting it; clearing it restores
+allocation/site inheritance without clearing saved cards.
 
 Omitting --cards-file preserves all saved card selections. Supplying it
 replaces the complete card list in the same request; include every
@@ -67,8 +67,8 @@ request
 `--cards-file <PATH>`
 
 Read a complete UTF-8 JSON array of card selections. Omission preserves
-saved cards without reading stdin; - reads stdin until EOF and any other
-value is a file path. [] clears all card selections. Null, an
+saved cards without reading stdin; '-' reads stdin until EOF and any
+other value is a file path. [] clears all card selections. Null, an
 enclosing object, or YAML is not accepted. Each entry requires selector
 and profile_id. The selector is exactly one case-sensitive BaseMac or
 BaseGuid tag containing a string.
@@ -88,7 +88,7 @@ priority. To reuse machine show JSON output, extract card_selections as
 JSON. A terminal stdin prints a reading hint to stderr. Unreadable or
 invalid JSON fails before the configuration RPC.
 
-Example replacement (use identities from the hosts stored device
+Example replacement (use identities from the host's stored device
 report):
 
 ```json
@@ -119,7 +119,7 @@ Sort output by specified field
 
 `-h, --help`
 
-Print help (see a summary with -h)
+Print help (see a summary with '-h')
 
 `<HOST>`
 

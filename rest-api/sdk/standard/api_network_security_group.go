@@ -19,6 +19,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"reflect"
 	"strings"
 )
 
@@ -388,7 +389,7 @@ type ApiGetAllNetworkSecurityGroupRequest struct {
 	siteId                 *string
 	status                 *string
 	query                  *string
-	includeRelation        *string
+	includeRelation        *[]string
 	pageNumber             *int32
 	pageSize               *int32
 	orderBy                *string
@@ -413,8 +414,8 @@ func (r ApiGetAllNetworkSecurityGroupRequest) Query(query string) ApiGetAllNetwo
 	return r
 }
 
-// Related entity to expand
-func (r ApiGetAllNetworkSecurityGroupRequest) IncludeRelation(includeRelation string) ApiGetAllNetworkSecurityGroupRequest {
+// Related entity to expand. Repeat the parameter to specify multiple values.
+func (r ApiGetAllNetworkSecurityGroupRequest) IncludeRelation(includeRelation []string) ApiGetAllNetworkSecurityGroupRequest {
 	r.includeRelation = &includeRelation
 	return r
 }
@@ -499,7 +500,15 @@ func (a *NetworkSecurityGroupAPIService) GetAllNetworkSecurityGroupExecute(r Api
 		parameterAddToHeaderOrQuery(localVarQueryParams, "query", r.query, "form", "")
 	}
 	if r.includeRelation != nil {
-		parameterAddToHeaderOrQuery(localVarQueryParams, "includeRelation", r.includeRelation, "form", "")
+		t := *r.includeRelation
+		if reflect.TypeOf(t).Kind() == reflect.Slice {
+			s := reflect.ValueOf(t)
+			for i := 0; i < s.Len(); i++ {
+				parameterAddToHeaderOrQuery(localVarQueryParams, "includeRelation", s.Index(i).Interface(), "form", "multi")
+			}
+		} else {
+			parameterAddToHeaderOrQuery(localVarQueryParams, "includeRelation", t, "form", "multi")
+		}
 	}
 	if r.pageNumber != nil {
 		parameterAddToHeaderOrQuery(localVarQueryParams, "pageNumber", r.pageNumber, "form", "")
@@ -619,11 +628,11 @@ type ApiGetNetworkSecurityGroupRequest struct {
 	ApiService             *NetworkSecurityGroupAPIService
 	org                    string
 	networkSecurityGroupId string
-	includeRelation        *string
+	includeRelation        *[]string
 }
 
-// Related entity to expand
-func (r ApiGetNetworkSecurityGroupRequest) IncludeRelation(includeRelation string) ApiGetNetworkSecurityGroupRequest {
+// Related entity to expand. Repeat the parameter to specify multiple values.
+func (r ApiGetNetworkSecurityGroupRequest) IncludeRelation(includeRelation []string) ApiGetNetworkSecurityGroupRequest {
 	r.includeRelation = &includeRelation
 	return r
 }
@@ -678,7 +687,15 @@ func (a *NetworkSecurityGroupAPIService) GetNetworkSecurityGroupExecute(r ApiGet
 	localVarFormParams := url.Values{}
 
 	if r.includeRelation != nil {
-		parameterAddToHeaderOrQuery(localVarQueryParams, "includeRelation", r.includeRelation, "form", "")
+		t := *r.includeRelation
+		if reflect.TypeOf(t).Kind() == reflect.Slice {
+			s := reflect.ValueOf(t)
+			for i := 0; i < s.Len(); i++ {
+				parameterAddToHeaderOrQuery(localVarQueryParams, "includeRelation", s.Index(i).Interface(), "form", "multi")
+			}
+		} else {
+			parameterAddToHeaderOrQuery(localVarQueryParams, "includeRelation", t, "form", "multi")
+		}
 	}
 	// to determine the Content-Type header
 	localVarHTTPContentTypes := []string{}

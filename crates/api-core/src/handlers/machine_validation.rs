@@ -213,7 +213,7 @@ pub(crate) async fn mark_machine_validation_complete(
 
     txn.commit().await?;
 
-    carbide_instrument::emit(completion);
+    api.instrumentation.emit(completion);
     Ok(Response::new(rpc::MachineValidationCompletedResponse {}))
 }
 
@@ -286,6 +286,7 @@ pub(crate) async fn persist_validation_result(
             return Err(CarbideError::InvalidArgument("wrong validation ID".to_string()).into());
         }
     };
+    crate::api::log_machine_snapshot(&machine);
     if caller.is_some_and(|caller| caller != machine.id) {
         return Err(CarbideError::PermissionDeniedError(
             "machine identity does not own this machine validation run".to_string(),

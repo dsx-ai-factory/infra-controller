@@ -17,7 +17,6 @@
 
 use std::time::Duration;
 
-use carbide_instrument::testing::MetricsCapture;
 use carbide_test_support::Outcome::{Fails, Yields};
 use carbide_test_support::{Case, check_cases};
 use sha2::{Digest, Sha256};
@@ -57,11 +56,16 @@ impl CacheFixture {
 }
 
 fn cache(root: &Path, capacity: u64, workers: usize) -> CacheFixture {
-    let downloader = FirmwareDownloader::with_config(FirmwareDownloadConfig {
-        max_concurrent_downloads: workers,
-        max_download_bytes: 8,
-        ..FirmwareDownloadConfig::default()
-    })
+    let downloader = FirmwareDownloader::with_config(
+        FirmwareDownloadConfig {
+            max_concurrent_downloads: workers,
+            max_download_bytes: 8,
+            ..FirmwareDownloadConfig::default()
+        },
+        carbide_instrument::Instrumentation::from_meter_provider(
+            &opentelemetry::metrics::noop::NoopMeterProvider::new(),
+        ),
+    )
     .unwrap();
     let mut owners = JoinSet::new();
     let cache = FirmwareArtifactCache::new(
@@ -162,10 +166,15 @@ async fn construction_and_invalid_sources_do_not_touch_storage() {
         ("below maximum artifact size", 7),
         ("above hard capacity ceiling", MAX_CAPACITY_BYTES + 1),
     ] {
-        let downloader = FirmwareDownloader::with_config(FirmwareDownloadConfig {
-            max_download_bytes: 8,
-            ..FirmwareDownloadConfig::default()
-        })
+        let downloader = FirmwareDownloader::with_config(
+            FirmwareDownloadConfig {
+                max_download_bytes: 8,
+                ..FirmwareDownloadConfig::default()
+            },
+            carbide_instrument::Instrumentation::from_meter_provider(
+                &opentelemetry::metrics::noop::NoopMeterProvider::new(),
+            ),
+        )
         .unwrap();
         let mut owners = JoinSet::new();
         assert!(
@@ -210,7 +219,6 @@ async fn construction_and_invalid_sources_do_not_touch_storage() {
 
 #[tokio::test]
 async fn repeated_reader_errors_do_not_poll_a_completed_worker() {
-    let _metrics = MetricsCapture::start();
     let directory = tempfile::tempdir().unwrap();
     let cache = cache(directory.path(), 8, 1);
     let wanted = digest(b"data");
@@ -232,11 +240,304 @@ async fn repeated_reader_errors_do_not_poll_a_completed_worker() {
     cache.finish().await;
 }
 
+// The retention owner is released after eviction or reader acquisition, before any
+// download. A failed release must discard either kind of successful open.
+#[tokio::test]
+async fn retention_release_precedes_transfer_and_failure_releases_cache_ownership() {
+    for (scenario, warm, release_succeeds) in [
+        ("download starts after release", false, true),
+        ("failed release settles reservation", false, false),
+        ("failed release drops reader", true, false),
+    ] {
+        let directory = tempfile::tempdir().unwrap();
+        let cache = cache(directory.path(), 8, 1);
+        let image = digest(b"data");
+        fs::create_dir_all(&cache.inner.directory).unwrap();
+        if warm {
+            fs::write(cache.inner.path(image), b"data").unwrap();
+        }
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let source = format!("http://{}/firmware", listener.local_addr().unwrap())
+            .parse()
+            .unwrap();
+        let retained = HashSet::from([image]);
+        let (entered_tx, entered) = oneshot::channel();
+        let (release, released) = oneshot::channel();
+        let mut opening =
+            Box::pin(
+                cache.open_with_retention_lock(&source, image, &retained, async move {
+                    entered_tx.send(()).unwrap();
+                    released.await.unwrap();
+                    if release_succeeds {
+                        Ok(())
+                    } else {
+                        Err(CacheError::RetentionLockRelease)
+                    }
+                }),
+            );
+        assert!(futures_util::poll!(&mut opening).is_pending());
+        within("physical open reaches release", entered)
+            .await
+            .unwrap();
+        assert!(futures_util::poll!(&mut opening).is_pending(), "{scenario}");
+        assert_eq!(
+            cache.inner.state.lock().unwrap().entries[&image]
+                .readers
+                .load(Ordering::Acquire),
+            usize::from(warm),
+            "{scenario}"
+        );
+        {
+            let state = cache.inner.state.lock().unwrap();
+            assert_eq!(state.entries[&image].downloading, !warm, "{scenario}");
+            assert_eq!(
+                state.entries[&image].charged_bytes,
+                if warm { 4 } else { 8 },
+                "{scenario}"
+            );
+        }
+        let mut accepted = Box::pin(listener.accept());
+        assert!(
+            futures_util::poll!(&mut accepted).is_pending(),
+            "no source access before release"
+        );
+
+        release.send(()).unwrap();
+        let result = within("open settles after release", opening).await;
+        if release_succeeds {
+            assert!(matches!(result, Ok(CacheLookup::Pending)), "{scenario}");
+        } else {
+            assert!(
+                matches!(result, Err(CacheError::RetentionLockRelease)),
+                "{scenario}"
+            );
+            assert!(
+                futures_util::poll!(&mut accepted).is_pending(),
+                "failed release starts no transfer"
+            );
+            {
+                let state = cache.inner.state.lock().unwrap();
+                assert_eq!(
+                    state.entries[&image].readers.load(Ordering::Acquire),
+                    0,
+                    "{scenario}"
+                );
+                assert!(!state.entries[&image].downloading, "{scenario}");
+                assert!(
+                    state.entries[&image].failure.is_none(),
+                    "{scenario}: no source transfer failed"
+                );
+                assert_eq!(
+                    state.entries[&image].charged_bytes,
+                    if warm { 4 } else { 0 },
+                    "{scenario}"
+                );
+            }
+            assert!(
+                cache.inner.downloader.try_capacity().is_some(),
+                "{scenario}"
+            );
+            // Actual reuse protects against leaked reader permits or reservations
+            // that would not be visible in the flags alone.
+            let retried = within(
+                "open after failed release",
+                cache.open(&source, image, &retained),
+            )
+            .await
+            .unwrap();
+            assert!(
+                matches!(retried, CacheLookup::Ready(_)) == warm,
+                "{scenario}"
+            );
+            drop(retried);
+        }
+        if !warm {
+            let (mut stream, _) = within("transfer reaches origin", accepted).await.unwrap();
+            // Bound the entire fixture exchange, including a stalled peer after
+            // connect, and finish transfer before shutting down its owner.
+            within("complete origin exchange", async {
+                let mut request = Vec::new();
+                while !request.ends_with(b"\r\n\r\n") {
+                    request.push(stream.read_u8().await.unwrap());
+                }
+                stream
+                    .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 4\r\n\r\ndata")
+                    .await
+                    .unwrap();
+            })
+            .await;
+            drop(stream);
+            drop(ready(&cache, &source, image, &retained).await);
+        }
+        cache.finish().await;
+    }
+}
+
+// Early source rejection polls release, while losing registration to shutdown
+// drops the unpolled owner. Neither path may touch storage or retain capacity.
+#[tokio::test]
+async fn retention_owner_cleans_up_on_early_and_registration_rejection() {
+    for (scenario, closed) in [
+        ("invalid source polls the release before returning", false),
+        ("closed registry drops release without polling", true),
+    ] {
+        let directory = tempfile::tempdir().unwrap();
+        let cache = cache(directory.path(), 8, 1);
+        if closed {
+            // Model registration losing the race with the shutdown owner after
+            // the caller's earlier cancellation check already passed.
+            cache.inner.work.state.lock().unwrap().closed = true;
+        }
+        let observed = Arc::new(AtomicBool::new(false));
+        let owner = observed.clone();
+        let source = if closed {
+            "http://127.0.0.1:1/unused"
+        } else {
+            "file:///invalid-source"
+        }
+        .parse()
+        .unwrap();
+        let result = cache
+            .open_with_retention_lock(&source, digest(b"data"), &HashSet::new(), async move {
+                owner.store(true, Ordering::Release);
+                Err(CacheError::RetentionLockRelease)
+            })
+            .await;
+        if closed {
+            assert!(matches!(result, Err(CacheError::Cancelled)), "{scenario}");
+        } else {
+            assert!(
+                matches!(result, Err(CacheError::RetentionLockRelease)),
+                "{scenario}"
+            );
+        }
+        assert_eq!(observed.load(Ordering::Acquire), !closed, "{scenario}");
+        assert_eq!(
+            Arc::strong_count(&observed),
+            1,
+            "{scenario}: release owner dropped"
+        );
+        assert!(!cache.inner.directory.exists(), "{scenario}");
+        assert!(
+            cache.inner.downloader.try_capacity().is_some(),
+            "{scenario}"
+        );
+        cache.finish().await;
+    }
+}
+
+// A consumed source failure must still be reported once if releasing exclusion
+// also fails. The release callback runs, but cannot replace that prior error.
+#[tokio::test]
+async fn stored_download_failure_survives_a_simultaneous_release_failure() {
+    let directory = tempfile::tempdir().unwrap();
+    let cache = cache(directory.path(), 8, 1);
+    let image = digest(b"data");
+    let retained = HashSet::from([image]);
+    assert!(matches!(
+        cache.inner.clone().open(image, &retained),
+        Ok(OpenResult::Download)
+    ));
+    cache
+        .inner
+        .settle(image, Some("prior transfer failed".into()));
+    let called = Arc::new(AtomicBool::new(false));
+    let observed = called.clone();
+    let result = cache
+        .open_with_retention_lock(
+            &"http://127.0.0.1:1/unused".parse().unwrap(),
+            image,
+            &retained,
+            async move {
+                observed.store(true, Ordering::Release);
+                Err(CacheError::RetentionLockRelease)
+            },
+        )
+        .await;
+    assert!(matches!(result, Err(CacheError::Download(error)) if error == "prior transfer failed"));
+    assert!(called.load(Ordering::Acquire));
+    assert!(
+        cache.inner.state.lock().unwrap().entries[&image]
+            .failure
+            .is_none()
+    );
+    cache.finish().await;
+}
+
+// Dropping the caller future must not drop the retention owner while physical open
+// is queued. The one-thread blocking pool gives an explicit, bounded gate.
+#[test]
+fn cancelled_open_keeps_retention_until_its_physical_worker_finishes() {
+    struct RetentionOwner(Arc<AtomicBool>);
+    impl Drop for RetentionOwner {
+        fn drop(&mut self) {
+            self.0.store(true, Ordering::Release);
+        }
+    }
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .max_blocking_threads(1)
+        .build()
+        .unwrap();
+    runtime.block_on(async {
+        let directory = tempfile::tempdir().unwrap();
+        let cache = cache(directory.path(), 8, 1);
+        let image = digest(b"data");
+        fs::create_dir_all(&cache.inner.directory).unwrap();
+        fs::write(cache.inner.path(image), b"data").unwrap();
+        let (started_tx, started) = oneshot::channel();
+        let (release, released) = std::sync::mpsc::channel();
+        let blocker = tokio::task::spawn_blocking(move || {
+            started_tx.send(()).unwrap();
+            released
+                .recv_timeout(Duration::from_secs(10))
+                .expect("release blocking gate");
+        });
+        within("blocking gate starts", started).await.unwrap();
+
+        let dropped = Arc::new(AtomicBool::new(false));
+        let owner = RetentionOwner(dropped.clone());
+        let (finished_tx, finished) = oneshot::channel();
+        let inner = cache.inner.clone();
+        let source = "http://127.0.0.1:1/unused".parse().unwrap();
+        let retained = HashSet::from([image]);
+        let mut opening =
+            Box::pin(
+                cache.open_with_retention_lock(&source, image, &retained, async move {
+                    assert_eq!(
+                        inner.state.lock().unwrap().entries[&image]
+                            .readers
+                            .load(Ordering::Acquire),
+                        1,
+                        "physical reader acquired before retention ends"
+                    );
+                    drop(owner);
+                    finished_tx.send(()).unwrap();
+                    Ok(())
+                }),
+            );
+        assert!(futures_util::poll!(&mut opening).is_pending());
+        // Register and poll the cache task while its physical open cannot run.
+        tokio::task::yield_now().await;
+        drop(opening);
+        assert!(!dropped.load(Ordering::Acquire));
+        assert!(cache.inner.downloader.try_capacity().is_none());
+
+        release.send(()).unwrap();
+        blocker.await.unwrap();
+        within("physical open releases retention", finished)
+            .await
+            .unwrap();
+        assert!(dropped.load(Ordering::Acquire));
+        assert_eq!(fs::read(cache.inner.path(image)).unwrap(), b"data");
+        cache.finish().await;
+    });
+}
+
 // Two URLs naming the same bytes must share one verified file. Later eviction
 // must stay inside the managed namespace, even with a legacy cache next to it.
 #[tokio::test]
 async fn digest_shares_origins_and_eviction_preserves_legacy_files() {
-    let _metrics = MetricsCapture::start();
     let directory = tempfile::tempdir().unwrap();
     let legacy = directory
         .path()
@@ -296,7 +597,6 @@ async fn digest_shares_origins_and_eviction_preserves_legacy_files() {
 // must allow another artifact without ever contacting its source while full.
 #[tokio::test]
 async fn readers_and_current_retention_prevent_eviction_before_source_access() {
-    let _metrics = MetricsCapture::start();
     let directory = tempfile::tempdir().unwrap();
     let mut server = mockito::Server::new_async().await;
     let first = server
@@ -340,7 +640,6 @@ async fn readers_and_current_retention_prevent_eviction_before_source_access() {
 // settle physical accounting without relying on a subsequent cache request.
 #[tokio::test]
 async fn physical_completion_and_cancellation_settle_reservations_without_polling() {
-    let _metrics = MetricsCapture::start();
     for (scenario, complete) in [("completed transfer", true), ("cancelled transfer", false)] {
         let directory = tempfile::tempdir().unwrap();
         let cache = cache(directory.path(), 8, 2);
@@ -417,7 +716,6 @@ async fn physical_completion_and_cancellation_settle_reservations_without_pollin
 // verify owned files and preserve unrelated files and symlink targets.
 #[tokio::test]
 async fn restart_removes_owned_partials_refills_corruption_and_preserves_unknown_entries() {
-    let _metrics = MetricsCapture::start();
     let directory = tempfile::tempdir().unwrap();
     let namespace = directory.path().join(NAMESPACE);
     fs::create_dir(&namespace).unwrap();
@@ -478,7 +776,6 @@ async fn restart_removes_owned_partials_refills_corruption_and_preserves_unknown
 // URL downloader must still follow its existing redirect policy.
 #[tokio::test]
 async fn managed_redirects_are_rejected_and_legacy_redirects_still_work() {
-    let _metrics = MetricsCapture::start();
     let directory = tempfile::tempdir().unwrap();
     let mut server = mockito::Server::new_async().await;
     let redirect = server
@@ -655,7 +952,6 @@ fn dropping_a_reader_keeps_its_lease_until_a_queued_physical_read_finishes() {
 // slow response must not prevent legacy downloads from using that worker.
 #[tokio::test]
 async fn ready_readers_do_not_starve_the_legacy_download_pool() {
-    let _metrics = MetricsCapture::start();
     let directory = tempfile::tempdir().unwrap();
     let cache = cache(directory.path(), 8, 1);
     fs::create_dir_all(&cache.inner.directory).unwrap();
@@ -701,7 +997,6 @@ async fn ready_readers_do_not_starve_the_legacy_download_pool() {
 
 #[tokio::test]
 async fn unlinked_content_stays_charged_until_its_last_reader_drops() {
-    let _metrics = MetricsCapture::start();
     let directory = tempfile::tempdir().unwrap();
     let cache = cache(directory.path(), 8, 2);
     let image = digest(b"data");
@@ -823,7 +1118,6 @@ async fn eviction_skips_an_obstructed_candidate_and_prunes_stale_empty_entries()
 
 #[tokio::test]
 async fn cold_concurrent_origins_share_one_physical_digest_download() {
-    let _metrics = MetricsCapture::start();
     let directory = tempfile::tempdir().unwrap();
     let cache = cache(directory.path(), 8, 2);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -876,7 +1170,6 @@ async fn cold_concurrent_origins_share_one_physical_digest_download() {
 
 #[test]
 fn owner_shutdown_joins_a_cancelled_queued_managed_write_before_settlement() {
-    let _metrics = MetricsCapture::start();
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .max_blocking_threads(1)
@@ -1050,7 +1343,6 @@ impl io::Write for CapturedLogs {
 
 #[tokio::test]
 async fn managed_failures_keep_the_request_span_without_recording_source_path_secrets() {
-    let _metrics = MetricsCapture::start();
     carbide_instrument::testing::keep_callsites_enabled();
     let directory = tempfile::tempdir().unwrap();
     let cache = cache(directory.path(), 8, 1);
@@ -1120,7 +1412,6 @@ async fn managed_failures_keep_the_request_span_without_recording_source_path_se
 // observable bytes even when that digest is never opened again.
 #[tokio::test]
 async fn unrelated_reservations_refresh_grown_and_deleted_retained_files() {
-    let _metrics = MetricsCapture::start();
     enum Change {
         GrowInactive,
         DeleteRetained,
@@ -1172,7 +1463,6 @@ async fn unrelated_reservations_refresh_grown_and_deleted_retained_files() {
 
 #[tokio::test]
 async fn recreated_path_is_charged_with_its_live_old_reader_before_unrelated_reservation() {
-    let _metrics = MetricsCapture::start();
     let directory = tempfile::tempdir().unwrap();
     let cache = cache(directory.path(), 12, 2);
     fs::create_dir_all(&cache.inner.directory).unwrap();

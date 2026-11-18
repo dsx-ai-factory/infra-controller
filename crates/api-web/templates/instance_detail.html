@@ -1,94 +1,216 @@
-{% extends "base.html" %}
+{% extends "detail_base.html" %}
+{% import "detail_ui.html" as ui %}
 
-{% block title %}Instance Detail{% endblock %}
+{% block title %}Instance {{ id }}{% endblock %}
+{% block entity_label %}Instance{% endblock %}
+{% block entity_id %}{{ id }}{% endblock %}
 
-{% block content %}
-<div id="json"><a id="json-link" href="">JSON</a></div>
-<h1>Instance {{ id }}</h1>
+{% block detail_content %}
+<div class="tab-nav">
+	<button class="tab-button active" data-tab="overview">Overview</button>
+	<button class="tab-button" data-tab="network">Network</button>
+	<button class="tab-button" data-tab="os">Operating System</button>
+	<div class="tab-indicator"></div>
+</div>
 
-<table class="detailsview">
-	<tr><th>Machine ID</th><td>{{ machine_id|machine_id_link|safe}}</td></tr>
-	<tr><th>Tenant Org</th><td><a href="/admin/tenant/{{ tenant_org }}">{{ tenant_org }}</a></td></tr>
-	<tr><th>Tenant State</th><td>{{ tenant_state }}</td></tr>
-	<tr><th>Tenant State Details</th><td>{{ tenant_state_details }}</td></tr>
-	<tr><th>Config Version</th><td>{{ config_version|config_version|safe }}</td></tr>
-	<tr><th>Configs Synced</th><td>{{ configs_synced }}</td></tr>
-	<tr><th>Network Config Synced</th><td>{{ network_config_synced }}</td></tr>
-	<tr><th>Network Config Version</th><td>{{ network_config_version|config_version|safe }}</td></tr>
-	<tr><th>InfiniBand Config Synced</th><td>{{ ib_config_synced }}</td></tr>
-	<tr><th>InfiniBand Config Version</th><td>{{ ib_config_version|config_version|safe }}</td></tr>
-	<tr><th>NvLink Config Synced</th><td>{{ nvlink_config_synced }}</td></tr>
-	<tr><th>NvLink Config Version</th><td>{{ nvlink_config_version|config_version|safe }}</td></tr>
+<!-- Overview Tab -->
+<div class="tab-content active" id="tab-overview">
+	<section class="entity-summary">
+		<div class="entity-summary-status">
+			{% call ui::stat("Tenant State") %}
+				<span class="bubble{% if tenant_state == "Ready" %} success{% else if tenant_state.contains("Fail") %} error{% endif %}">{% if tenant_state.is_empty() %}Unknown{% else %}{{ tenant_state }}{% endif %}</span>
+				{% if !tenant_state_details.is_empty() %}<span>{{ tenant_state_details }}</span>{% endif %}
+			{% endcall %}
+			{% call ui::stat("Configs") %}<span class="bubble{% if configs_synced == "Synced" %} success{% else %} warning{% endif %}">{{ configs_synced }}</span>{% endcall %}
+			{% call ui::stat("Network") %}<span class="bubble{% if network_config_synced == "Synced" %} success{% else %} warning{% endif %}">{{ network_config_synced }}</span>{% endcall %}
+			{% if !ib_config_synced.is_empty() %}
+			{% call ui::stat("InfiniBand") %}<span class="bubble{% if ib_config_synced == "Synced" %} success{% else %} warning{% endif %}">{{ ib_config_synced }}</span>{% endcall %}
+			{% endif %}
+			{% if !nvlink_config_synced.is_empty() %}
+			{% call ui::stat("NVLink") %}<span class="bubble{% if nvlink_config_synced == "Synced" %} success{% else %} warning{% endif %}">{{ nvlink_config_synced }}</span>{% endcall %}
+			{% endif %}
+		</div>
+		<div class="entity-summary-groups">
+			<div class="entity-summary-group">
+				<h4>Config Versions</h4>
+				<dl>
+					<dt>Config</dt>
+					<dd>{{ config_version|config_version|safe }}</dd>
+					<dt>Network</dt>
+					<dd>{{ network_config_version|config_version|safe }}</dd>
+					<dt>InfiniBand</dt>
+					<dd>{{ ib_config_version|config_version|safe }}</dd>
+					<dt>NVLink</dt>
+					<dd>{{ nvlink_config_version|config_version|safe }}</dd>
+				</dl>
+			</div>
+			<div class="entity-summary-group">
+				<h4>Assignment</h4>
+				<dl>
+					<dt>Machine</dt>
+					<dd>{{ machine_id|machine_id_link|safe }}</dd>
+					<dt>Tenant Org</dt>
+					<dd><a href="/admin/tenant/{{ tenant_org }}">{{ tenant_org }}</a></dd>
+				</dl>
+			</div>
+		</div>
+	</section>
 
-</table>
+	<h2>Metadata</h2>
+	{{ metadata_detail|safe }}
 
-<h2>Metadata</h2>
-<table class="detailsview">
-	<tr><th>Name</th><td>{{ metadata.name }}</td></tr>
-	<tr><th>Description</th><td>{{ metadata.description }}</td></tr>
-	<tr><th>Labels</th><td>{{ metadata.labels|label_list_fmt(false)|safe }}</td></tr>
-</table>
+	<h2>Keysets</h2>
+	<section class="entity-summary">
+		{% if keysets.is_empty() %}
+		<p class="entity-summary-empty">No keysets.</p>
+		{% else %}
+		<div class="data-table-scroll">
+		<table class="data-table">
+			<thead><tr><th>Keyset</th></tr></thead>
+			<tbody>
+			{% for keyset in keysets %}
+				<tr><td><a href="/admin/tenant_keyset/{{ tenant_org }}/{{ keyset }}">{{ keyset }}</a></td></tr>
+			{% endfor %}
+			</tbody>
+		</table>
+		</div>
+		{% endif %}
+	</section>
+</div>
 
-<h2>Operating System</h2>
-<table class="detailsview">
-	{% if !os.os_id.is_empty() %}
-	<tr><th>OS Definition</th><td><a href="/admin/operating-system/{{ os.os_id }}">{{ os.os_id }}</a></td></tr>
-	{% endif %}
+<!-- Network Tab -->
+<div class="tab-content" id="tab-network">
+	<h2>Interfaces</h2>
+	<section class="entity-summary">
+		{% if interfaces.is_empty() %}
+		<p class="entity-summary-empty">No interfaces.</p>
+		{% else %}
+		<div class="data-table-scroll">
+		<table class="data-table">
+			<thead>
+				<tr>
+					<th>MAC Address</th>
+					<th>Function</th>
+					<th>Addresses</th>
+					<th>Prefixes</th>
+					<th>Gateways</th>
+					<th>Segment</th>
+					<th>VPC</th>
+				</tr>
+			</thead>
+			<tbody>
+			{% for interface in interfaces %}
+				<tr>
+					<td class="cell-mac"><code class="mac">{{ interface.mac_address }}</code></td>
+					<td>{{ interface.function_type }}{% if !interface.vf_id.is_empty() %}<span class="cell-sub">VF {{ interface.vf_id }}</span>{% endif %}</td>
+					<td>{% if interface.addresses.is_empty() %}<span class="text-muted">—</span>{% else %}{{ interface.addresses }}{% endif %}</td>
+					<td>{% if interface.prefixes.is_empty() %}<span class="text-muted">—</span>{% else %}{{ interface.prefixes }}{% endif %}</td>
+					<td>{% if interface.gateways.is_empty() %}<span class="text-muted">—</span>{% else %}{{ interface.gateways }}{% endif %}</td>
+					<td>{% if interface.segment_id.is_empty() %}<span class="text-muted">—</span>{% else %}<a href="/admin/network-segment/{{ interface.segment_id }}">{{ interface.segment_id }}</a>{% endif %}</td>
+					<td>{% if interface.vpc_id.is_empty() %}<span class="text-muted">—</span>{% else %}<a href="/admin/vpc/{{ interface.vpc_id }}">{{ interface.vpc_name }}</a>{% endif %}</td>
+				</tr>
+			{% endfor %}
+			</tbody>
+		</table>
+		</div>
+		{% endif %}
+	</section>
+
+	<h2>InfiniBand Interfaces</h2>
+	<section class="entity-summary">
+		{% if ib_interfaces.is_empty() %}
+		<p class="entity-summary-empty">No InfiniBand interfaces.</p>
+		{% else %}
+		<div class="data-table-scroll">
+		<table class="data-table">
+			<thead>
+				<tr>
+					<th>GUID</th>
+					<th>Device</th>
+					<th>Instance</th>
+					<th>Function</th>
+					<th>IB Partition</th>
+					<th>PF GUID</th>
+					<th>LID</th>
+				</tr>
+			</thead>
+			<tbody>
+			{% for interface in ib_interfaces %}
+				<tr>
+					<td><code>{{ interface.guid }}</code></td>
+					<td>{{ interface.device }}<span class="cell-sub">{{ interface.vendor }}</span></td>
+					<td>{{ interface.device_instance }}</td>
+					<td>{{ interface.function_type }}{% if !interface.vf_id.is_empty() %}<span class="cell-sub">VF {{ interface.vf_id }}</span>{% endif %}</td>
+					<td>{% if interface.ib_partition_id.is_empty() %}<span class="text-muted">—</span>{% else %}<a href="/admin/ib-partition/{{ interface.ib_partition_id }}">{{ interface.ib_partition_id }}</a>{% endif %}</td>
+					<td><code>{{ interface.pf_guid }}</code></td>
+					<td>{{ interface.lid }}</td>
+				</tr>
+			{% endfor %}
+			</tbody>
+		</table>
+		</div>
+		{% endif %}
+	</section>
+
+	<h2>NVLink GPUs</h2>
+	<section class="entity-summary">
+		{% if nvlink_gpus.is_empty() %}
+		<p class="entity-summary-empty">No NVLink GPUs.</p>
+		{% else %}
+		<div class="data-table-scroll">
+		<table class="data-table">
+			<thead><tr><th>GPU</th><th>Device UID</th><th>Logical Partition</th></tr></thead>
+			<tbody>
+			{% for gpu in nvlink_gpus %}
+				<tr>
+					<td>{{ gpu.device_instance }}</td>
+					<td><code>{{ gpu.device_guid }}</code></td>
+					<td>{{ gpu.logical_partition_id }}</td>
+				</tr>
+			{% endfor %}
+			</tbody>
+		</table>
+		</div>
+		{% endif %}
+	</section>
+</div>
+
+<!-- Operating System Tab -->
+<div class="tab-content" id="tab-os">
+	<h2>Operating System</h2>
+	<section class="entity-summary">
+		<div class="entity-summary-groups">
+			<div class="entity-summary-group">
+				<h4>Image</h4>
+				<dl>
+					<dt>OS Definition</dt>
+					<dd>{% if os.os_id.is_empty() %}<span class="text-muted">None</span>{% else %}<a href="/admin/operating-system/{{ os.os_id }}">{{ os.os_id }}</a>{% endif %}</dd>
+				</dl>
+			</div>
+			<div class="entity-summary-group">
+				<h4>Provisioning</h4>
+				<dl>
+					<dt>Run On Every Boot</dt>
+					<dd>{% if os.run_provisioning_instructions_on_every_boot %}Yes{% else %}No{% endif %}</dd>
+					<dt>Phone Home</dt>
+					<dd>{% if os.phone_home_enabled %}Enabled{% else %}Disabled{% endif %}</dd>
+				</dl>
+			</div>
+		</div>
+	</section>
+
 	{% if !os.ipxe_script.is_empty() %}
-	<tr><th>iPXE Script</th><td><textarea disabled>{{ os.ipxe_script }}</textarea></td></tr>
+	<h2>iPXE Script</h2>
+	<section class="entity-summary">
+		<pre class="entity-summary-pre"><code>{{ os.ipxe_script }}</code></pre>
+	</section>
 	{% endif %}
+
 	{% if !os.userdata.is_empty() %}
-	<tr><th>Userdata</th><td><textarea disabled>{{ os.userdata }}</textarea></td></tr>
+	<h2>User Data</h2>
+	<section class="entity-summary">
+		<pre class="entity-summary-pre"><code>{{ os.userdata }}</code></pre>
+	</section>
 	{% endif %}
-	<tr><th>Run Provisioning Instructions On Every Boot</th><td>{{ os.run_provisioning_instructions_on_every_boot }}</td></tr>
-	<tr><th>Phone Home Enabled</th><td>{{ os.phone_home_enabled }}</td></tr>
-</table>
-
-<h2>Interfaces</h2>
-{% for interface in interfaces %}
-<table class="detailsview">
-	<tr><th>Function type</th><td>{{ interface.function_type }}</td></tr>
-	<tr><th>VF ID</th><td>{{ interface.vf_id }}</td></tr>
-	<tr><th>Segment ID</th><td>{% if !interface.segment_id.is_empty() %}<a href="/admin/network-segment/{{ interface.segment_id }}">{{ interface.segment_id }}</a>{% endif %}</td></tr>
-	<tr><th>MAC Address</th><td>{{ interface.mac_address }}</td></tr>
-	<tr><th>IP Addresses</th><td>{{ interface.addresses }}</td></tr>
-	<tr><th>IP Prefixes</th><td>{{ interface.prefixes }}</td></tr>
-	<tr><th>Gateways</th><td>{{ interface.gateways }}</td></tr>
-	<tr><th>VPC Id</th><td><a href="/admin/vpc/{{ interface.vpc_id }}">{{ interface.vpc_id }}</a></td></tr>
-	<tr><th>VPC Name</th><td>{{ interface.vpc_name }}</td></tr>
-</table>
-{% endfor %}
-
-<h2>InfiniBand Interfaces</h2>
-{% for interface in ib_interfaces %}
-<table class="detailsview">
-	<tr><th>Device</th><td>{{ interface.device }}</td></tr>
-	<tr><th>Vendor</th><td>{{ interface.vendor }}</td></tr>
-	<tr><th>Device Instance</th><td>{{ interface.device_instance }}</td></tr>
-	<tr><th>Function type</th><td>{{ interface.function_type }}</td></tr>
-	<tr><th>VF ID</th><td>{{ interface.vf_id }}</td></tr>
-	<tr><th>IB Partition ID</th><td><a href="/admin/ib-partition/{{ interface.ib_partition_id }}">{{ interface.ib_partition_id }}</a></td></tr>
-	<tr><th>PF GUID</th><td>{{ interface.pf_guid }}</td></tr>
-	<tr><th>GUID</th><td>{{ interface.guid }}</td></tr>
-	<tr><th>LID</th><td>{{ interface.lid }}</td></tr>
-</table>
-{% endfor %}
-
-<h2>Keysets</h2>
-{% for keyset in keysets %}
-<table class="detailsview">
-	<tr><th>ID</th><td><a href="/admin/tenant_keyset/{{ tenant_org }}/{{ keyset }}">{{ keyset }}</a></td></tr>
-</table>
-{% endfor %}
-
-<h2>NVLink GPUs</h2>
-{% for gpu in nvlink_gpus %}
-<table class="detailsview">
-	<tr><th>Device Instance</th><td>{{ gpu.device_instance }}</td></tr>
-	<tr><th>Device UID</th><td>{{ gpu.device_guid}}</td></tr>
-	<tr><th>Logical Partition </th><td>{{ gpu.logical_partition_id}}</td></tr>
-</table>
-{% endfor %}
-
-
+</div>
 {% endblock %}

@@ -18,7 +18,7 @@ use axum::extract::{FromRequestParts, Query};
 use axum::http::request::Parts;
 use serde::{Deserialize, Serialize};
 
-use crate::common::MachineInterface;
+use crate::common::{AppState, MachineInterface};
 use crate::extractors::machine_architecture::MachineArchitecture;
 use crate::rpc_error::PxeRequestError;
 
@@ -38,19 +38,19 @@ struct MaybeMachineInterface {
     asset: Option<String>,
 }
 
-impl<S> FromRequestParts<S> for MachineInterface
-where
-    S: Send + Sync,
-{
+impl FromRequestParts<AppState> for MachineInterface {
     type Rejection = PxeRequestError;
 
-    async fn from_request_parts(parts: &mut Parts, state: &S) -> Result<Self, Self::Rejection> {
+    async fn from_request_parts(
+        parts: &mut Parts,
+        state: &AppState,
+    ) -> Result<Self, Self::Rejection> {
         // A missing or malformed build architecture is a boot outcome
         // operators watch for, so both rejection shapes count as one --
         // even though the client gets a real 4xx rather than a template.
         // This extractor serves only the boot route.
         let count_bad_architecture = || {
-            carbide_instrument::emit(crate::metrics::PxeBootOutcome {
+            state.instrumentation.emit(crate::metrics::PxeBootOutcome {
                 endpoint: crate::metrics::BootEndpoint::Boot,
                 reason: crate::metrics::OutcomeReason::ArchitectureNotFound,
             });

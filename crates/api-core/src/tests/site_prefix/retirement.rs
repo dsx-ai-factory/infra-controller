@@ -21,6 +21,344 @@ use super::readiness::{controller, stored_outcome};
 use super::*;
 
 #[crate::sqlx_test]
+async fn retired_operator_prefix_does_not_block_split_ranges(pool: sqlx::PgPool) {
+    let split_prefixes: Vec<IpNetwork> = ["192.0.2.0/25", "192.0.2.128/25"]
+        .into_iter()
+        .map(|prefix| prefix.parse().unwrap())
+        .collect();
+    let mut config = get_config();
+    config.site_fabric_prefixes = split_prefixes.clone();
+    let env = create_test_env_with_overrides(
+        pool,
+        TestEnvOverrides {
+            site_prefixes: Some(split_prefixes.clone()),
+            ..TestEnvOverrides::with_config(config).with_fnn_config(None)
+        },
+    )
+    .await;
+    create_fixture_tenant(&env, FIXTURE_TENANT_ORG_ID)
+        .await
+        .unwrap();
+    let vpc_id = env
+        .api
+        .create_vpc(
+            VpcCreationRequest::builder(FIXTURE_TENANT_ORG_ID)
+                .network_virtualization_type(rpc::forge::VpcVirtualizationType::Fnn)
+                .tonic_request(),
+        )
+        .await
+        .unwrap()
+        .into_inner()
+        .id
+        .unwrap();
+    let retired = persist_configured_site_prefix(&env, "192.0.2.0/24").await;
+    let mut txn = env.pool.begin().await.unwrap();
+    db::site_prefix::reconcile_configured(&mut txn, &split_prefixes)
+        .await
+        .unwrap();
+    assert!(
+        db::site_prefix::find_operator_managed_prefixes_with_retained_vpc_prefixes(&mut *txn)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    txn.commit().await.unwrap();
+
+    controller(&env).run_single_iteration_ext(false).await;
+    let mut failures = Vec::new();
+    for (parent, child) in [
+        (split_prefixes[0], "192.0.2.0/29"),
+        (split_prefixes[1], "192.0.2.128/29"),
+    ] {
+        let parent_id = db::site_prefix::find_ids(
+            &env.pool,
+            model::site_prefix::SitePrefixSearchFilter {
+                authority: Some(SitePrefixAuthority::OperatorManaged),
+                prefix_match: Some(model::site_prefix::PrefixMatch::Exact(parent)),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap()[0];
+        let id = VpcPrefixId::new();
+        let result = env
+            .api
+            .create_vpc_prefix(Request::new(rpc::forge::VpcPrefixCreationRequest {
+                id: Some(id),
+                prefix: String::new(),
+                vpc_id: Some(vpc_id),
+                site_prefix_id: None,
+                config: Some(rpc::forge::VpcPrefixConfig {
+                    prefix: child.to_string(),
+                }),
+                metadata: Some(rpc_metadata("split prefix child")),
+            }))
+            .await;
+        match result {
+            Ok(created) => {
+                assert_eq!(created.into_inner().site_prefix_id, Some(parent_id));
+                let stored_parent: Option<SitePrefixId> = sqlx::query_scalar(
+                    "SELECT site_prefix_id FROM network_vpc_prefixes WHERE id = $1",
+                )
+                .bind(id)
+                .fetch_one(&env.pool)
+                .await
+                .unwrap();
+                assert_eq!(stored_parent, Some(parent_id));
+            }
+            Err(error) => failures.push(format!("{child}: {error}")),
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+    assert!(
+        db::site_prefix::find_by_ids(&env.pool, &[retired.id])
+            .await
+            .unwrap()
+            .is_empty(),
+        "the unused operator root must be physically removed"
+    );
+}
+
+#[crate::sqlx_test]
+async fn retired_operator_prefix_releases_direct_segment_to_ready_replacement(pool: sqlx::PgPool) {
+    let left: IpNetwork = "198.51.100.0/25".parse().unwrap();
+    let right: IpNetwork = "198.51.100.128/25".parse().unwrap();
+    let mut config = get_config();
+    // Model a replica that has already removed the right half from its config:
+    // persisted coverage must protect the segment throughout both retirements.
+    config.site_fabric_prefixes = vec![left];
+    config.site_fabric_null_routes = None;
+    let env = create_test_env_with_overrides(
+        pool,
+        TestEnvOverrides {
+            site_prefixes: Some(vec![left, right]),
+            network_segments_drain_period: Some(chrono::Duration::zero()),
+            ..TestEnvOverrides::with_config(config).with_fnn_config(None)
+        },
+    )
+    .await;
+    create_fixture_tenant(&env, FIXTURE_TENANT_ORG_ID)
+        .await
+        .unwrap();
+    let vpc_id = env
+        .api
+        .create_vpc(
+            VpcCreationRequest::builder(FIXTURE_TENANT_ORG_ID)
+                .network_virtualization_type(rpc::forge::VpcVirtualizationType::Fnn)
+                .tonic_request(),
+        )
+        .await
+        .unwrap()
+        .into_inner()
+        .id
+        .unwrap();
+    let retired = persist_configured_site_prefix(&env, "198.51.100.0/24").await;
+    let mut txn = env.pool.begin().await.unwrap();
+    db::site_prefix::reconcile_configured(&mut txn, &[left, right])
+        .await
+        .unwrap();
+    txn.commit().await.unwrap();
+    let replacement_id = db::site_prefix::find_ids(
+        &env.pool,
+        model::site_prefix::SitePrefixSearchFilter {
+            authority: Some(SitePrefixAuthority::OperatorManaged),
+            prefix_match: Some(model::site_prefix::PrefixMatch::Exact(right)),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap()[0];
+
+    // Public direct admission can win the race with the old root's first
+    // cleanup iteration. It must not pin that root under Ready coverage.
+    let segment =
+        NetworkSegmentHelper::new_with_tenant_prefix("198.51.100.128/26", "198.51.100.129", vpc_id)
+            .create_with_api(&env.api)
+            .await
+            .unwrap();
+    let segment_id = segment.id.unwrap();
+    env.run_network_segment_controller_iteration().await;
+    env.run_network_segment_controller_iteration().await;
+    controller(&env).run_single_iteration_ext(false).await;
+    assert!(
+        db::site_prefix::find_by_ids(&env.pool, &[retired.id])
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    let replacement = db::site_prefix::find_by_ids(&env.pool, &[replacement_id])
+        .await
+        .unwrap()
+        .pop()
+        .unwrap();
+    assert_eq!(
+        replacement.status.lifecycle_state,
+        SitePrefixLifecycleState::Ready
+    );
+    assert_eq!(
+        runtime_config_null_routes(&env).await,
+        vec!["198.51.100.0/24"],
+        "configured and persisted replacement coverage must retain the exact union",
+    );
+    let child = env
+        .api
+        .create_vpc_prefix(Request::new(rpc::forge::VpcPrefixCreationRequest {
+            vpc_id: Some(vpc_id),
+            config: Some(rpc::forge::VpcPrefixConfig {
+                prefix: "198.51.100.0/29".to_string(),
+            }),
+            metadata: Some(rpc_metadata("replacement child")),
+            ..Default::default()
+        }))
+        .await
+        .unwrap()
+        .into_inner();
+    assert!(child.site_prefix_id.is_some());
+
+    // Retiring the replacement cannot withdraw its coverage while the direct
+    // segment remains, including during soft deletion and draining.
+    let mut txn = env.pool.begin().await.unwrap();
+    db::site_prefix::reconcile_configured(&mut txn, &[left])
+        .await
+        .unwrap();
+    txn.commit().await.unwrap();
+    assert_operator_retirement_waits(&env, replacement_id).await;
+    env.api
+        .delete_network_segment(Request::new(NetworkSegmentDeletionRequest {
+            id: Some(segment_id),
+        }))
+        .await
+        .unwrap();
+    assert_operator_retirement_waits(&env, replacement_id).await;
+    assert_eq!(
+        runtime_config_null_routes(&env).await,
+        vec!["198.51.100.0/24"]
+    );
+    for _ in 0..3 {
+        env.run_network_segment_controller_iteration().await;
+    }
+    assert!(
+        env.api
+            .find_network_segments_by_ids(Request::new(NetworkSegmentsByIdsRequest {
+                network_segments_ids: vec![segment_id],
+                include_history: false,
+                include_num_free_ips: false,
+            }))
+            .await
+            .unwrap()
+            .into_inner()
+            .network_segments
+            .is_empty()
+    );
+    controller(&env).run_single_iteration_ext(false).await;
+    assert!(
+        db::site_prefix::find_by_ids(&env.pool, &[replacement_id])
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(
+        runtime_config_null_routes(&env).await,
+        vec![left.to_string()]
+    );
+}
+
+#[crate::sqlx_test]
+async fn retired_operator_roots_do_not_reopen_stale_config_admission(pool: sqlx::PgPool) {
+    let original: Vec<IpNetwork> = ["203.0.113.0/24", "198.51.100.0/24"]
+        .into_iter()
+        .map(|prefix| prefix.parse().unwrap())
+        .collect();
+    let replacement: Vec<IpNetwork> = ["203.0.113.0/25", "203.0.113.128/25"]
+        .into_iter()
+        .map(|prefix| prefix.parse().unwrap())
+        .collect();
+    let mut config = get_config();
+    config.site_fabric_prefixes = original.clone();
+    let env = create_test_env_with_overrides(
+        pool,
+        TestEnvOverrides {
+            site_prefixes: Some(original.clone()),
+            ..TestEnvOverrides::with_config(config).with_fnn_config(None)
+        },
+    )
+    .await;
+    create_fixture_tenant(&env, FIXTURE_TENANT_ORG_ID)
+        .await
+        .unwrap();
+    let vpc_id = env
+        .api
+        .create_vpc(
+            VpcCreationRequest::builder(FIXTURE_TENANT_ORG_ID)
+                .network_virtualization_type(rpc::forge::VpcVirtualizationType::Fnn)
+                .tonic_request(),
+        )
+        .await
+        .unwrap()
+        .into_inner()
+        .id
+        .unwrap();
+    let mut txn = env.pool.begin().await.unwrap();
+    db::site_prefix::reconcile_configured(&mut txn, &original)
+        .await
+        .unwrap();
+    db::site_prefix::reconcile_configured(&mut txn, &replacement)
+        .await
+        .unwrap();
+    txn.commit().await.unwrap();
+    controller(&env).run_single_iteration_ext(false).await;
+    let retired_count: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM site_prefixes WHERE prefix = ANY($1)")
+            .bind(&original)
+            .fetch_one(&env.pool)
+            .await
+            .unwrap();
+    assert_eq!(retired_count, 0);
+
+    let vpc_prefix = env
+        .api
+        .create_vpc_prefix(Request::new(rpc::forge::VpcPrefixCreationRequest {
+            id: Some(VpcPrefixId::new()),
+            vpc_id: Some(vpc_id),
+            config: Some(rpc::forge::VpcPrefixConfig {
+                prefix: original[0].to_string(),
+            }),
+            metadata: Some(rpc_metadata("stale spanning prefix")),
+            ..Default::default()
+        }))
+        .await;
+    let direct_prefix =
+        NetworkSegmentHelper::new_with_tenant_prefix("198.51.100.0/29", "198.51.100.1", vpc_id)
+            .create_with_api(&env.api)
+            .await;
+    assert_eq!(
+        [
+            (
+                "spanning VPC prefix",
+                vpc_prefix.map(|_| ()).map_err(|error| error.code())
+            ),
+            (
+                "direct tenant prefix",
+                direct_prefix.map(|_| ()).map_err(|error| error.code())
+            ),
+        ],
+        [
+            ("spanning VPC prefix", Err(Code::FailedPrecondition)),
+            ("direct tenant prefix", Err(Code::FailedPrecondition)),
+        ],
+    );
+    let persisted: i64 = sqlx::query_scalar(
+        "SELECT (SELECT count(*) FROM network_vpc_prefixes WHERE vpc_id = $1) + \
+         (SELECT count(*) FROM network_segments WHERE vpc_id = $1)",
+    )
+    .bind(vpc_id)
+    .fetch_one(&env.pool)
+    .await
+    .unwrap();
+    assert_eq!(persisted, 0);
+}
+
+#[crate::sqlx_test]
 async fn retirement_waits_for_exact_children_and_preserves_other_roots(pool: sqlx::PgPool) {
     let env = create_test_env(pool).await;
     for tenant in ["tenant-a", "tenant-b"] {
@@ -150,26 +488,75 @@ async fn retirement_waits_for_exact_children_and_preserves_other_roots(pool: sql
         vec![other.config.prefix]
     );
 
-    // Operator removal must remain reversible, with the same identity.
-    let retained = db::site_prefix::find_by_ids(&env.pool, &[operator.id])
-        .await
-        .unwrap();
-    assert_eq!(
-        retained[0].status.lifecycle_state,
-        SitePrefixLifecycleState::Deleting
+    // Reintroducing a physically removed operator root creates a new identity.
+    assert!(
+        db::site_prefix::find_by_ids(&env.pool, &[operator.id])
+            .await
+            .unwrap()
+            .is_empty()
     );
     let mut txn = env.pool.begin().await.unwrap();
     db::site_prefix::reconcile_configured(&mut txn, &[operator.config.prefix])
         .await
         .unwrap();
     txn.commit().await.unwrap();
-    let restored = db::site_prefix::find_by_ids(&env.pool, &[operator.id])
+    let restored_ids = db::site_prefix::find_ids(
+        &env.pool,
+        model::site_prefix::SitePrefixSearchFilter {
+            authority: Some(SitePrefixAuthority::OperatorManaged),
+            lifecycle_state: Some(SitePrefixLifecycleState::Ready),
+            prefix_match: Some(model::site_prefix::PrefixMatch::Exact(
+                operator.config.prefix,
+            )),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(restored_ids.len(), 1);
+    assert_ne!(restored_ids[0], operator.id);
+}
+
+#[crate::sqlx_test]
+async fn operator_restoration_invalidates_pending_retirement(pool: sqlx::PgPool) {
+    let env = create_test_env(pool).await;
+    let root = persist_configured_site_prefix(&env, "203.0.113.0/24").await;
+    let mut txn = env.pool.begin().await.unwrap();
+    db::site_prefix::reconcile_configured(&mut txn, &[])
         .await
         .unwrap();
+    txn.commit().await.unwrap();
+
+    let mut restoration = env.pool.begin().await.unwrap();
+    db::site_prefix::find_by_id_for_update(&mut restoration, root.id)
+        .await
+        .unwrap();
+    let restoration_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *restoration)
+        .await
+        .unwrap();
+    let mut retirement = controller(&env);
+    let iteration = tokio::spawn(async move {
+        retirement.run_single_iteration_ext(false).await;
+    });
+    wait_for_blocked_query(&env.pool, restoration_pid, "FROM site_prefixes").await;
+    db::site_prefix::reconcile_configured(&mut restoration, &[root.config.prefix])
+        .await
+        .unwrap();
+    restoration.commit().await.unwrap();
+    iteration.await.unwrap();
+    controller(&env).run_single_iteration_ext(false).await;
+
+    let restored = db::site_prefix::find_by_ids(&env.pool, &[root.id])
+        .await
+        .unwrap();
+    assert_eq!(restored.len(), 1);
     assert_eq!(
         restored[0].status.lifecycle_state,
         SitePrefixLifecycleState::Ready
     );
+    assert_eq!(restored[0].config, root.config);
+    assert_ne!(restored[0].version, root.version);
 }
 
 #[crate::sqlx_test]

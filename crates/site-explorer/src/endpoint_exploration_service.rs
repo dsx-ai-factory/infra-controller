@@ -122,6 +122,7 @@ impl EndpointExplorationService {
         expected: Option<&ExpectedEntity>,
         last_exploration_error: Option<&EndpointExplorationError>,
         boot_interface: Option<BootInterfaceTarget>,
+        load_sitewide_bmc_password: crate::SiteWideBmcPasswordLoader<'_>,
     ) -> Option<EndpointProbeResult> {
         let guard = self.locks.try_claim(address.ip())?;
 
@@ -134,6 +135,7 @@ impl EndpointExplorationService {
                 expected,
                 last_exploration_error,
                 boot_interface.as_ref(),
+                load_sitewide_bmc_password,
             )
             .await;
         let redfish_explore_duration = redfish_explore_started_at.elapsed();
@@ -162,10 +164,12 @@ impl EndpointExplorationService {
     }
 
     /// Refreshes an endpoint immediately, or queues it during DPF provisioning.
+    /// Deferred-request Events use the supplied instrumentation.
     /// Queued refreshes return the cached report with `exploration_requested` set.
     pub async fn refresh_endpoint_report(
         &self,
         bmc_ip: IpAddr,
+        instrumentation: &carbide_instrument::Instrumentation,
     ) -> Result<ExploredEndpoint, EndpointExplorationServiceError> {
         let mut txn = db::Transaction::begin(&self.database_connection).await?;
 
@@ -190,6 +194,7 @@ impl EndpointExplorationService {
             bmc_ip,
             bmc_interface.mac_address,
             crate::suppression::ExplorationRequest::Refresh,
+            instrumentation,
         )
         .await
         {
@@ -243,6 +248,7 @@ impl EndpointExplorationService {
         let boot_interface = existing_endpoint.boot_interface_target().map(Into::into);
         let existing_report = existing_endpoint.report;
 
+        let instrumentation = instrumentation.clone();
         let join_handle = tokio::spawn(async move {
             let probe = service
                 .try_explore_endpoint(
@@ -251,6 +257,7 @@ impl EndpointExplorationService {
                     expected.as_ref(),
                     existing_report.last_exploration_error.as_ref(),
                     boot_interface,
+                    Box::new(|| service.endpoint_explorer.load_sitewide_bmc_password()),
                 )
                 .await
                 .ok_or(EndpointExplorationServiceError::AlreadyInProgress(bmc_ip))?;
@@ -280,7 +287,7 @@ impl EndpointExplorationService {
             .await?
             {
                 ConditionalWrite::Applied(()) => {
-                    attester_inventory::record(&report, &mut txn).await?;
+                    attester_inventory::record(&report, &mut txn, &instrumentation).await?;
                 }
                 ConditionalWrite::NotApplied(EndpointReportNotCurrent) => {
                     return Err(EndpointExplorationServiceError::ConcurrentModification {

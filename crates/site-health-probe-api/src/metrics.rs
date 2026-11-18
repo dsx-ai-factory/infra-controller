@@ -82,6 +82,21 @@ pub const HOSTS_UPDATE_ELIGIBLE: Gauge = Gauge {
     help: "Hosts per model and firmware update eligibility (true, false, unknown) with the blocking reason.",
     labels: &["model", "eligible", "reason"],
 };
+pub const HOSTS_FIRMWARE: Gauge = Gauge {
+    name: "hosts_firmware",
+    help: "Hosts per vendor, model, firmware component, phase and native readiness.",
+    labels: &["vendor", "model", "component", "phase", "ready"],
+};
+pub const FIRMWARE_CONFIG_REVISION: Gauge = Gauge {
+    name: "firmware_config_revision",
+    help: "Latest successful firmware configuration revision.",
+    labels: &[],
+};
+pub const HOST_FIRMWARE_CONFIG_REVISION: Gauge = Gauge {
+    name: "host_firmware_config_revision",
+    help: "Configuration revision pinned to host firmware evidence.",
+    labels: &[],
+};
 pub const HOST_FIRMWARE_REQUESTS: Gauge = Gauge {
     name: "host_firmware_requests",
     help: "Open host firmware requests per model and initiator (automatic, manual, other).",
@@ -156,6 +171,9 @@ pub const HOST_PREDICATES_KNOWN: Gauge = Gauge {
 
 /// Every gauge the probe publishes today, in declaration order.
 pub const GAUGES: &[Gauge] = &[
+    HOSTS_FIRMWARE,
+    FIRMWARE_CONFIG_REVISION,
+    HOST_FIRMWARE_CONFIG_REVISION,
     UNITS,
     HOSTS,
     HOSTS_UPDATE_ELIGIBLE,
@@ -322,16 +340,21 @@ pub fn flag_label(value: Option<bool>) -> String {
 /// What the answering side can know about hosts before any sweep.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Capabilities {
+    pub nico_config: bool,
     /// Hosts are read with the full machine record, which never has
     /// allocatability or update eligibility: those filters fail at once.
     /// Otherwise they compile to [`Need::CompactHostRead`], checked per
     /// sweep.
     pub full_host_read: bool,
+    /// The REST reader is enabled with a tenant fixture, so REST instances and machines are
+    /// listed. Otherwise `source=rest` is refused at once.
+    pub rest_fixture: bool,
 }
 
 /// A capability a filter needs from the sweep it is answered from.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Need {
+    Firmware,
     /// A REST total exists only on a site with NICo Flow for it.
     RestTotal(RestResource),
     /// The named host filter (`allocatable` or `updateEligible`) is known
@@ -352,6 +375,11 @@ pub struct Capability {
 impl Need {
     pub fn capability(&self) -> Capability {
         match self {
+            Need::Firmware => Capability {
+                gauge: HOST_READ_MODE,
+                label: "mode",
+                value: "compact".into(),
+            },
             Need::RestTotal(resource) => Capability {
                 gauge: REST_TOTALS_AVAILABLE,
                 label: "resource",
@@ -542,6 +570,9 @@ fn units_spec(filter: &Filter) -> SeriesSpec {
 }
 
 fn host_spec(filter: &Filter, caps: &Capabilities) -> Result<SeriesSpec, FilterError> {
+    if firmware_filter(filter) {
+        return firmware_spec(filter, caps);
+    }
     let needs = host_read_needs(filter, caps)?;
     if filter.stage == Some(Stage::Expected) {
         return expected_stage_spec(filter);
@@ -686,19 +717,21 @@ pub fn series_spec(filter: &Filter, caps: &Capabilities) -> Result<SeriesSpec, F
     }
 }
 
-/// The tenant's REST instances, per status and one by one, wait for the
-/// instance tests (#8152). Site totals are `type=rest_total`.
+/// REST count series remain unavailable. Site totals use `type=rest_total`.
+/// REST units are listed only with a configured tenant fixture.
 fn rest_source(filter: &Filter) -> Result<(), FilterError> {
-    match filter.source {
-        Some(Source::Rest) if filter.unit_type == UnitType::Instance => {
-            Err(FilterError::unavailable(
-                "source",
-                "the tenant's REST instances are not read until the instance tests (#8152)",
-            ))
-        }
-        Some(Source::Rest) => Err(FilterError::unsupported(
+    match (filter.source, filter.unit_type) {
+        (Some(Source::Rest), UnitType::Instance) => Err(FilterError::unavailable(
             "source",
-            format!("type={} has no REST source", wire(filter.unit_type)),
+            "REST instances are not counted and need a configured tenant fixture to list",
+        )),
+        (Some(Source::Rest), UnitType::Host) => Err(FilterError::unsupported(
+            "source",
+            "type=host has no REST count and needs a configured tenant fixture to list".to_string(),
+        )),
+        (Some(Source::Rest), kind) => Err(FilterError::unsupported(
+            "source",
+            format!("type={} has no REST source", wire(kind)),
         )),
         _ => Ok(()),
     }
@@ -745,6 +778,27 @@ pub fn name_filter(filter: &Filter) -> Result<(), FilterError> {
 /// Validates a units listing of `filter` and names its family. A `name`
 /// filter is checked apart, by [`name_filter`].
 pub fn units_listing(filter: &Filter, caps: &Capabilities) -> Result<UnitsListing, FilterError> {
+    if firmware_filter(filter) {
+        let spec = firmware_spec(filter, caps)?;
+        return Ok(UnitsListing {
+            family: spec.family,
+            needs: spec.needs,
+        });
+    }
+    if caps.rest_fixture
+        && filter.source == Some(Source::Rest)
+        && matches!(filter.unit_type, UnitType::Instance | UnitType::Host)
+    {
+        only(filter, &["stage", "state", "done"])?;
+        return Ok(UnitsListing {
+            family: if filter.unit_type == UnitType::Host {
+                Family::RestMachines
+            } else {
+                Family::RestInstances
+            },
+            needs: vec![],
+        });
+    }
     rest_source(filter)?;
     let mut needs = Vec::new();
     let family = match filter.unit_type {
@@ -791,15 +845,126 @@ pub fn units_listing(filter: &Filter, caps: &Capabilities) -> Result<UnitsListin
     Ok(UnitsListing { family, needs })
 }
 
+/// Fold catalog vendors, host makers and query values to the same label.
+pub fn normalize_vendor(vendor: &str) -> String {
+    match vendor.to_ascii_lowercase().as_str() {
+        "lenovoami" => "lenovo".into(),
+        other => other.into(),
+    }
+}
+
+/// Whether the additive firmware predicate was requested.
+pub fn firmware_filter(filter: &Filter) -> bool {
+    filter.firmware_component.is_some()
+        || filter.firmware_phase.is_some()
+        || filter.firmware_ready.is_some()
+}
+
+fn firmware_spec(filter: &Filter, caps: &Capabilities) -> Result<SeriesSpec, FilterError> {
+    only(
+        filter,
+        &[
+            "vendor",
+            "model",
+            "firmwareComponent",
+            "firmwarePhase",
+            "firmwareReady",
+        ],
+    )?;
+    if !caps.nico_config || caps.full_host_read {
+        return Err(FilterError {
+            code: ErrorCode::FieldUnavailable,
+            field: "firmwareComponent".into(),
+            reason: "firmware requires the config reader and compact host reads".into(),
+        });
+    }
+    if filter.unit_type != UnitType::Host
+        || filter.source == Some(Source::Rest)
+        || !matches!(
+            filter.firmware_component,
+            Some(crate::Component::Bmc | crate::Component::Uefi)
+        )
+        || filter.vendor.as_ref().is_none_or(|v| v.trim().is_empty())
+        || filter.model.as_ref().is_none_or(|v| v.trim().is_empty())
+    {
+        return Err(FilterError::unsupported(
+            "firmwareComponent",
+            "firmware requires native hosts, bmc or uefi, exact vendor and model".into(),
+        ));
+    }
+    let mut matchers = vec![
+        (
+            "vendor",
+            normalize_vendor(filter.vendor.as_deref().unwrap_or_default()),
+        ),
+        ("model", filter.model.clone().unwrap_or_default()),
+        (
+            "component",
+            wire(filter.firmware_component.expect("validated component")),
+        ),
+    ];
+    if let Some(phase) = filter.firmware_phase {
+        matchers.push(("phase", wire(phase)));
+    }
+    if let Some(ready) = filter.firmware_ready {
+        matchers.push(("ready", ready.to_string()));
+    }
+    Ok(SeriesSpec {
+        metric: HOSTS_FIRMWARE.name,
+        family: Family::Host,
+        matchers,
+        needs: vec![Need::Firmware],
+    })
+}
+
+pub fn vendor_label(host: &HostFields) -> String {
+    host.vendor.clone().unwrap_or_else(|| UNKNOWN.into())
+}
+
+pub fn firmware_ready(unit: &crate::Unit) -> bool {
+    unit.stage == Stage::Ready
+        && unit.done
+        && unit
+            .host
+            .as_ref()
+            .is_some_and(|h| h.allocatable == Some(true))
+}
+
+/// Aggregate every matching group. Missing evidence cannot become current.
+pub fn firmware_phase(unit: &crate::Unit, component: crate::Component) -> crate::FirmwarePhase {
+    use crate::FirmwarePhase::*;
+    let Some(firmware) = unit.host.as_ref().and_then(|h| h.firmware.as_ref()) else {
+        return Unknown;
+    };
+    let name = wire(component);
+    firmware
+        .components
+        .iter()
+        .filter(|c| c.component_name == name || c.component_name == "combinedbmcuefi")
+        .map(|c| c.phase)
+        .min_by_key(|phase| match phase {
+            Unknown => 0,
+            Failed => 1,
+            Updating => 2,
+            Behind => 3,
+            Current => 4,
+        })
+        .unwrap_or(Unknown)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     const FULL: Capabilities = Capabilities {
+        nico_config: false,
         full_host_read: true,
+        rest_fixture: true,
     };
     const COMPACT: Capabilities = Capabilities {
+        nico_config: false,
         full_host_read: false,
+        rest_fixture: true,
     };
 
     fn filter(query: &str) -> Filter {
@@ -858,8 +1023,8 @@ mod tests {
         "type=host&updateEligible=true => field_unavailable updateEligible update eligibility is unknown until nico-api serves the compact host read",
         "type=host&uefiVersion=u1&allocatable=true => field_unavailable uefiVersion exact host versions are not counted until the firmware tests (#8154)",
         "type=host&done=true => unsupported_filter done done is a /v1/units filter",
-        "type=host&source=rest => unsupported_filter source type=host has no REST source",
-        "type=instance&source=rest => field_unavailable source the tenant's REST instances are not read until the instance tests (#8152)",
+        "type=host&source=rest => unsupported_filter source type=host has no REST count and needs a configured tenant fixture to list",
+        "type=instance&source=rest => field_unavailable source REST instances are not counted and need a configured tenant fixture to list",
         "type=dpu&stage=expected => unsupported_filter stage type=dpu has no expected records",
         "type=dpu&model=x => unsupported_filter model model is not a filter of type=dpu",
         "type=expected_record => unsupported_filter recordType type=expected_record needs recordType",
@@ -884,7 +1049,7 @@ mod tests {
         "name type=host => unsupported_filter name name is a filter of type=instance",
         "name type=rest_total&resource=rack => unsupported_filter name name is a filter of type=instance",
         "type=rest_total&resource=rack => unsupported_filter type type=rest_total is a count, not units",
-        "name type=instance&source=rest => field_unavailable source the tenant's REST instances are not read until the instance tests (#8152)",
+        "name type=instance&source=rest => ok rest_instances",
         "type=expected_record => unsupported_filter recordType type=expected_record needs recordType",
         "type=identity_mismatch&recordType=rack => unsupported_filter recordType identity mismatches exist for host, switch and power_shelf records",
         "type=dpu&model=x => unsupported_filter model model is not a filter of type=dpu",
@@ -926,7 +1091,6 @@ mod tests {
             "type=host&tenant=t",
             "type=dpu&stage=error",
             "type=dpu&model=x",
-            "type=instance&source=rest",
             "type=switch&source=rest",
             "type=expected_record&recordType=rack&linked=true",
             "type=expected_record",
@@ -947,6 +1111,33 @@ mod tests {
                     (count, units) => panic!("{query}: count {count:?}, units {units:?}"),
                 }
             }
+        }
+    }
+
+    #[test]
+    fn rest_fixture_lists_without_claiming_count_series() {
+        for (kind, family) in [
+            ("host", Family::RestMachines),
+            ("instance", Family::RestInstances),
+        ] {
+            let f = filter(&format!("type={kind}&source=rest"));
+            assert_eq!(units_listing(&f, &FULL).unwrap().family, family);
+            assert!(series_spec(&f, &FULL).is_err());
+        }
+    }
+
+    #[test]
+    fn rest_listing_needs_a_configured_fixture() {
+        let caps = Capabilities {
+            rest_fixture: false,
+            ..FULL
+        };
+        for (kind, code) in [
+            ("instance", ErrorCode::FieldUnavailable),
+            ("host", ErrorCode::UnsupportedFilter),
+        ] {
+            let err = units_listing(&filter(&format!("type={kind}&source=rest")), &caps);
+            assert_eq!(err.unwrap_err().code, code, "{kind}");
         }
     }
 
@@ -1049,6 +1240,9 @@ mod tests {
     /// label or label order here changes meaning.
     const CONTRACT: &str = r#"
 version 1
+hosts_firmware [vendor,model,component,phase,ready]
+firmware_config_revision []
+host_firmware_config_revision []
 units [type,stage,state]
 hosts [model,instance_type,state,allocatable,update_complete]
 hosts_update_eligible [model,eligible,reason]

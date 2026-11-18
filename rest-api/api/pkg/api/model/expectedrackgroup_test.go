@@ -15,6 +15,39 @@ import (
 
 const rackGroupTestSiteID = "550e8400-e29b-41d4-a716-446655440000"
 
+func TestAPIExpectedRackGroupMember_ToDBModel(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		field   string
+		index   *uint32
+		invalid bool
+	}{
+		{name: "omitted"},
+		{name: "null", field: `,"cartridgeIndex":null`},
+		{name: "zero", field: `,"cartridgeIndex":0`, index: cutil.GetPtr(uint32(0))},
+		{name: "maximum", field: `,"cartridgeIndex":4294967295`, index: cutil.GetPtr(^uint32(0))},
+		{name: "negative", field: `,"cartridgeIndex":-1`, invalid: true},
+		{name: "overflow", field: `,"cartridgeIndex":4294967296`, invalid: true},
+		{name: "fraction", field: `,"cartridgeIndex":0.5`, invalid: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var member APIExpectedRackGroupMember
+			err := json.Unmarshal([]byte(`{"type":"NVSwitch","manufacturer":"NVIDIA","id":"switch-01"`+tc.field+`}`), &member)
+			if tc.invalid {
+				require.Error(t, err)
+				return
+			}
+			require.NoError(t, err)
+			var result APIExpectedRackGroupMember
+			result.FromDBModel(member.ToDBModel())
+			require.Equal(t, tc.index, result.CartridgeIndex)
+			encoded, err := json.Marshal(result)
+			require.NoError(t, err)
+			require.Contains(t, string(encoded), `"cartridgeIndex":`)
+		})
+	}
+}
+
 type rackGroupValidationCase struct {
 	name    string
 	request APIExpectedRackGroupUpdateRequest
@@ -23,8 +56,15 @@ type rackGroupValidationCase struct {
 
 // Both public write DTOs must enforce the same Core metadata contract.
 func rackGroupValidationCases() []rackGroupValidationCase {
-	device := APIExpectedRackGroupMember{Type: "NVSwitch", Manufacturer: "NVIDIA", ID: "rack-01"}
+	device := APIExpectedRackGroupMember{Type: "NVSwitch", Manufacturer: "NVIDIA", ID: "rack-01", CartridgeIndex: cutil.GetPtr(uint32(0))}
+	legacyDevice := device
+	legacyDevice.CartridgeIndex = nil
+	indexedDevice := device
+	indexedDevice.CartridgeIndex = cutil.GetPtr(uint32(7))
 	return []rackGroupValidationCase{
+		{"missing cartridge index", APIExpectedRackGroupUpdateRequest{Racks: []APIExpectedRackGroupRack{{RackID: "rack-01", Members: []APIExpectedRackGroupMember{legacyDevice}}}}, true},
+		{"duplicate device with different index", APIExpectedRackGroupUpdateRequest{Racks: []APIExpectedRackGroupRack{{RackID: "rack-01", Members: []APIExpectedRackGroupMember{device, indexedDevice}}}}, true},
+		{"device in two racks with different index", APIExpectedRackGroupUpdateRequest{Racks: []APIExpectedRackGroupRack{{RackID: "rack-01", Members: []APIExpectedRackGroupMember{device}}, {RackID: "rack-02", Members: []APIExpectedRackGroupMember{indexedDevice}}}}, true},
 		{"device in two racks", APIExpectedRackGroupUpdateRequest{Racks: []APIExpectedRackGroupRack{{RackID: "rack-01", Members: []APIExpectedRackGroupMember{device}}, {RackID: "rack-02", Members: []APIExpectedRackGroupMember{device}}}}, true},
 		{"replace racks", APIExpectedRackGroupUpdateRequest{Racks: []APIExpectedRackGroupRack{{RackID: "rack-01"}, {RackID: "rack-02"}}}, false},
 		{"clear racks", APIExpectedRackGroupUpdateRequest{Racks: []APIExpectedRackGroupRack{}}, false},
@@ -48,6 +88,13 @@ func rackGroupValidationCases() []rackGroupValidationCase {
 }
 
 func TestAPIExpectedRackGroupCreateRequest_Validate(t *testing.T) {
+	for _, field := range []string{"", `,"cartridgeIndex":null`} {
+		t.Run("reject unspecified index"+field, func(t *testing.T) {
+			var request APIExpectedRackGroupCreateRequest
+			require.NoError(t, json.Unmarshal([]byte(`{"siteId":"`+rackGroupTestSiteID+`","rackGroupId":"group","topology":"gb200_nvl72r1_c2g4","racks":[{"rackId":"rack-01","members":[{"type":"NVSwitch","manufacturer":"NVIDIA","id":"switch-01"`+field+`}]}]}`), &request))
+			require.Error(t, request.Validate())
+		})
+	}
 	t.Run("missing protocol", func(t *testing.T) {
 		request := APIExpectedRackGroupCreateRequest{
 			SiteID: rackGroupTestSiteID, RackGroupID: "group", Topology: "gb200_nvl72r1_c2g4",

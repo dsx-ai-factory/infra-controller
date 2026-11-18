@@ -141,6 +141,10 @@ impl GatewayConfig {
             !self.rms.request_timeout.is_zero(),
             "rms.request_timeout must be nonzero"
         );
+        eyre::ensure!(
+            !self.rms.job_retention.is_zero() && self.rms.job_retention <= MAX_RMS_JOB_RETENTION,
+            "rms.job_retention must be nonzero and at most 7d"
+        );
         Ok(())
     }
 }
@@ -278,12 +282,21 @@ pub struct RmsConfig {
         serialize_with = "as_std_duration"
     )]
     pub request_timeout: Duration,
+    /// How long a job id is kept after it was last issued or polled; a job's first status
+    /// poll must arrive within this time. Nonzero, at most [`MAX_RMS_JOB_RETENTION`].
+    #[serde(
+        default = "default_rms_job_retention",
+        deserialize_with = "deserialize_duration",
+        serialize_with = "as_std_duration"
+    )]
+    pub job_retention: Duration,
 }
 
 impl Default for RmsConfig {
     fn default() -> Self {
         Self {
             request_timeout: default_rms_request_timeout(),
+            job_retention: default_rms_job_retention(),
         }
     }
 }
@@ -328,6 +341,13 @@ fn default_rms_request_timeout() -> Duration {
     Duration::from_secs(30)
 }
 
+fn default_rms_job_retention() -> Duration {
+    Duration::from_secs(24 * 60 * 60)
+}
+
+/// Upper bound for `rms.job_retention`; the job table holds every id issued within it.
+const MAX_RMS_JOB_RETENTION: Duration = Duration::from_secs(7 * 24 * 60 * 60);
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -339,6 +359,7 @@ mod tests {
         assert_eq!(config.controller.sources_url.as_str(), DEFAULT_SOURCES_URL);
         assert_eq!(config.listen_address.port(), 9888);
         assert!(config.tls.is_none());
+        assert_eq!(config.rms.job_retention, Duration::from_secs(24 * 60 * 60));
         config.validate().unwrap();
     }
 
@@ -429,6 +450,7 @@ mod tests {
 
                 [rms]
                 request_timeout = "45s"
+                job_retention = "2h"
                 "#,
             ))
             .extract()
@@ -439,6 +461,7 @@ mod tests {
         assert_eq!(config.ownership.request_timeout, Duration::from_secs(5));
         assert_eq!(config.ownership.stale_after, Duration::from_secs(45));
         assert_eq!(config.rms.request_timeout, Duration::from_secs(45));
+        assert_eq!(config.rms.job_retention, Duration::from_secs(2 * 60 * 60));
         assert_eq!(
             config.tls.as_ref().unwrap().cert_path,
             PathBuf::from("/certs/tls.crt")
@@ -465,6 +488,8 @@ mod tests {
                 "ownership.stale_after",
             ),
             ("[rms]\nrequest_timeout = \"0s\"", "rms.request_timeout"),
+            ("[rms]\njob_retention = \"0s\"", "rms.job_retention"),
+            ("[rms]\njob_retention = \"8d\"", "rms.job_retention"),
         ] {
             let config: GatewayConfig = Figment::new().merge(Toml::string(toml)).extract().unwrap();
             let error = config.validate().unwrap_err().to_string();

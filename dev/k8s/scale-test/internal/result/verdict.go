@@ -36,13 +36,16 @@ func ExitCode(v Verdict) int {
 	}
 }
 
-// Outcome is a verdict and the exit code it gives, never set apart. It flattens into RunResult and Status. Reasons and
-// Detail are what a test found; the runner moves them into the RunResult, so they are never written from here.
+// Outcome is a verdict and the exit code it gives, never set apart. It flattens into RunResult and Status. Reasons,
+// Detail, Stages and Invariants are what a test found; the runner moves them into the RunResult, so they are never
+// written from here.
 type Outcome struct {
-	Verdict  Verdict         `json:"verdict"`
-	ExitCode int             `json:"exitCode"`
-	Reasons  []string        `json:"-"`
-	Detail   json.RawMessage `json:"-"`
+	Verdict    Verdict           `json:"verdict"`
+	ExitCode   int               `json:"exitCode"`
+	Reasons    []string          `json:"-"`
+	Detail     json.RawMessage   `json:"-"`
+	Stages     []StageResult     `json:"-"`
+	Invariants []InvariantResult `json:"-"`
 }
 
 func OutcomeOf(v Verdict) Outcome { return Outcome{Verdict: v, ExitCode: ExitCode(v)} }

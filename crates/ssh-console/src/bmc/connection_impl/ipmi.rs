@@ -1093,7 +1093,13 @@ mod tests {
             from_frontend_rx,
             to_frontend_tx,
             ready_tx: Some(ready_tx),
-            metrics: Arc::new(BmcPoolMetrics::for_test()),
+            metrics: Arc::new(BmcPoolMetrics::for_test(
+                &opentelemetry::metrics::MeterProvider::meter(
+                    &opentelemetry::metrics::noop::NoopMeterProvider::new(),
+                    "ssh-console-ipmi-test",
+                ),
+                carbide_instrument::Instrumentation::noop(),
+            )),
             sol_session_operational: false,
             escape_was_pending: false,
             pending_line: PendingOutputLine::with_max_size(1024),

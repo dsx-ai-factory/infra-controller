@@ -26,6 +26,7 @@ type APIUser struct {
 }
 
 // NewAPIUserFromDBUser creates and returns a new APIUser object
+// Empty emails are represented as nil to satisfy the nullable email schema.
 func NewAPIUserFromDBUser(dbUser cdbm.User) *APIUser {
 	apiUser := &APIUser{
 		ID:        dbUser.ID.String(),
@@ -34,6 +35,10 @@ func NewAPIUserFromDBUser(dbUser cdbm.User) *APIUser {
 		Email:     dbUser.Email,
 		Created:   dbUser.Created,
 		Updated:   dbUser.Updated,
+	}
+
+	if apiUser.Email != nil && *apiUser.Email == "" {
+		apiUser.Email = nil
 	}
 
 	return apiUser

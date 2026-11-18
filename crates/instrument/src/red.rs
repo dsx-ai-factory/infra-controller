@@ -27,41 +27,42 @@
 //! fixed backend tag), never data from the wire -- the type is the
 //! cardinality guard. For a streaming call, the recorded duration covers
 //! connection and response headers (time to the stream handle), not the
-//! stream's lifetime.
+//! stream's lifetime. Pass the caller's [`Instrumentation`] to select the metric
+//! destination, and retain its provider while calls can run.
 
 use std::fmt::Display;
-use std::sync::OnceLock;
 use std::time::Instant;
 
 use opentelemetry::KeyValue;
-use opentelemetry::metrics::Histogram;
+use opentelemetry::metrics::{Histogram, Meter};
+
+use crate::Instrumentation;
 
 /// The exposed name is `carbide_external_call_duration_milliseconds`; the
 /// exporter appends the unit suffix (the `carbide-instrument` convention).
 const INSTRUMENT_NAME: &str = "carbide_external_call_duration";
 
-fn histogram() -> &'static Histogram<f64> {
-    static HISTOGRAM: OnceLock<Histogram<f64>> = OnceLock::new();
-    HISTOGRAM.get_or_init(|| {
-        opentelemetry::global::meter("carbide-instrument")
-            .f64_histogram(INSTRUMENT_NAME)
-            .with_unit("ms")
-            .with_description(
-                "Duration of outbound calls by backend, operation, and outcome; the _count \
+pub(crate) fn histogram(meter: &Meter) -> Histogram<f64> {
+    meter
+        .f64_histogram(INSTRUMENT_NAME)
+        .with_unit("ms")
+        .with_description(
+            "Duration of outbound calls by backend, operation, and outcome; the _count \
                  series, split by outcome, gives the request and error rates.",
-            )
-            // Preserve existing `le` series and resolve slow calls through five minutes.
-            .with_boundaries(vec![
-                0.0, 5.0, 10.0, 25.0, 50.0, 75.0, 100.0, 250.0, 500.0, 750.0, 1000.0, 2500.0,
-                5000.0, 7500.0, 10000.0, 15000.0, 30000.0, 60000.0, 120000.0, 180000.0, 300000.0,
-            ])
-            .build()
-    })
+        )
+        // Preserve existing `le` series and resolve slow calls through five minutes.
+        .with_boundaries(vec![
+            0.0, 5.0, 10.0, 25.0, 50.0, 75.0, 100.0, 250.0, 500.0, 750.0, 1000.0, 2500.0, 5000.0,
+            7500.0, 10000.0, 15000.0, 30000.0, 60000.0, 120000.0, 180000.0, 300000.0,
+        ])
+        .build()
 }
 
 /// Times `call`, records the RED histogram on every completion, and logs a
 /// WARN only on failure. Returns the call's result untouched.
+/// Metrics use `instrumentation`; retain its provider until the call completes.
 pub async fn instrumented<T, E: Display>(
+    instrumentation: &Instrumentation,
     backend: &'static str,
     operation: &'static str,
     call: impl Future<Output = Result<T, E>>,
@@ -70,6 +71,7 @@ pub async fn instrumented<T, E: Display>(
     let result = call.await;
     let outcome = if result.is_ok() { "ok" } else { "error" };
     record(
+        instrumentation,
         backend,
         operation,
         outcome,
@@ -81,17 +83,18 @@ pub async fn instrumented<T, E: Display>(
     result
 }
 
-/// Records one completed outbound call on the shared RED histogram. This is
+/// Records one completed outbound call on `instrumentation`'s RED histogram. This is
 /// the low-level half of [`instrumented`] for callers whose backend needs its
 /// own outcome vocabulary or logging policy (a refusal that is an answer, not
 /// a failure); `outcome` is a label value and must be a compile-time literal.
 pub fn record(
+    instrumentation: &Instrumentation,
     backend: &'static str,
     operation: &'static str,
     outcome: &'static str,
     elapsed_ms: f64,
 ) {
-    histogram().record(
+    instrumentation.red_histogram().record(
         elapsed_ms,
         &[
             KeyValue::new("backend", backend),

@@ -18,19 +18,11 @@
 //! Exercises DSX message Events end to end: public metric names keep one
 //! `_total` suffix, and Events with logs retain their level, message, and
 //! diagnostic context.
-//!
-//! These tests live in their own binary (its own process-global registry) to
-//! keep the `counter_delta` measurements deterministic: the crate's other unit
-//! tests emit these same events -- the message counters here, and the
-//! health-report persist failure below -- but from a different test process, so
-//! they cannot advance a shared counter between a test's baseline and delta.
-
 use carbide_dsx_exchange_consumer::messages::LeakPointType;
 use carbide_dsx_exchange_consumer::metrics::{
     DroppedMessageType, HealthReportPersistFailed, LeakAlertDetected, MessageDeduplicated,
     MessageDropped, MessageProcessed, MessageReceived,
 };
-use carbide_instrument::emit;
 use carbide_instrument::testing::{CapturedLog, MetricsCapture, capture_logs};
 use carbide_test_support::{Check, check_values, value_scenarios};
 
@@ -149,23 +141,23 @@ fn message_events_preserve_metrics_and_logs() {
         (LeakPointType::LeakSensorFaultRack, "LeakSensorFaultRack"),
     ];
 
-    let metrics = MetricsCapture::start();
+    let metrics = MetricsCapture::owned();
     let logs = capture_logs(|| {
-        emit(MessageReceived);
-        emit(MessageProcessed);
-        emit(MessageDropped {
+        metrics.instrumentation().emit(MessageReceived);
+        metrics.instrumentation().emit(MessageProcessed);
+        metrics.instrumentation().emit(MessageDropped {
             message_type: DroppedMessageType::Metadata,
         });
-        emit(MessageDropped {
+        metrics.instrumentation().emit(MessageDropped {
             message_type: DroppedMessageType::Value,
         });
-        emit(MessageDeduplicated {
+        metrics.instrumentation().emit(MessageDeduplicated {
             point_path: "site/rack/point".to_string(),
             point_type: LeakPointType::LeakDetectRack,
             value: "Faulting".to_string(),
         });
         for &(point_type, _) in &alert_cases {
-            emit(LeakAlertDetected {
+            metrics.instrumentation().emit(LeakAlertDetected {
                 point_type,
                 point_path: "site/rack/point".to_string(),
                 rack_id: "rack-42".to_string(),
@@ -278,14 +270,12 @@ fn message_events_preserve_metrics_and_logs() {
 }
 
 /// `HealthReportPersistFailed` exposes the failed rack and moves its zero-label
-/// counter from the same `emit`. Keep this check in its own integration-test
-/// process: unit tests emit the same Event without `MetricsCapture`, so a
-/// shared registry would make the counter delta depend on test order.
+/// counter from the same `emit` into the test's own registry.
 #[test]
 fn health_report_persist_failed_logs_warn_and_counts() {
-    let metrics = MetricsCapture::start();
+    let metrics = MetricsCapture::owned();
     let logs = capture_logs(|| {
-        emit(HealthReportPersistFailed {
+        metrics.instrumentation().emit(HealthReportPersistFailed {
             rack_id: "rack-42".to_string(),
             error: "API call failed: deadline exceeded".to_string(),
         });

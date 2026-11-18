@@ -14,10 +14,11 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+
 use ::rpc::errors::RpcDataConversionError;
 use ::rpc::forge as rpc;
 use carbide_extension_service_controller::interface_mac::ensure_interface_mac;
-use carbide_instrument::{Event, LabelValue, emit};
+use carbide_instrument::{Event, LabelValue};
 use carbide_secrets::credentials::{CredentialKey, Credentials};
 use carbide_utils::none_if_empty::NoneIfEmpty;
 use carbide_uuid::extension_service::ExtensionServiceId;
@@ -331,10 +332,11 @@ pub(crate) async fn create(
                     delete_extension_service_credential(&api.credential_manager, credential_key)
                         .await
                 {
-                    emit(ExtensionServiceCredentialCleanupFailed::Create {
-                        extension_service_id: service_id,
-                        error: delete_err.to_string(),
-                    });
+                    api.instrumentation
+                        .emit(ExtensionServiceCredentialCleanupFailed::Create {
+                            extension_service_id: service_id,
+                            error: delete_err.to_string(),
+                        });
                 }
             }
             return Err(e.into());
@@ -737,10 +739,11 @@ async fn update_kubernetes_pod(
                     delete_extension_service_credential(&api.credential_manager, credential_key)
                         .await
                 {
-                    emit(ExtensionServiceCredentialCleanupFailed::Update {
-                        extension_service_id: service_id,
-                        error: delete_error.to_string(),
-                    });
+                    api.instrumentation
+                        .emit(ExtensionServiceCredentialCleanupFailed::Update {
+                            extension_service_id: service_id,
+                            error: delete_error.to_string(),
+                        });
                 }
             }
             Err(error.into())
@@ -875,11 +878,12 @@ pub(crate) async fn delete(
                     delete_extension_service_credential(&api.credential_manager, credential_key)
                         .await
                 {
-                    emit(ExtensionServiceCredentialCleanupFailed::Delete {
-                        extension_service_id: service_id,
-                        version: *version,
-                        error: error.to_string(),
-                    });
+                    api.instrumentation
+                        .emit(ExtensionServiceCredentialCleanupFailed::Delete {
+                            extension_service_id: service_id,
+                            version: *version,
+                            error: error.to_string(),
+                        });
                 }
             }
         }
@@ -1621,22 +1625,22 @@ mod tests {
             run = |case| {
                 let extension_service_id = ExtensionServiceId::nil();
                 let version = VERSION.parse::<ConfigVersion>().unwrap();
-                let metrics = MetricsCapture::start();
+                let metrics = MetricsCapture::owned();
                 let logs = capture_logs(|| match case {
                     CleanupFailureCase::Create => {
-                        emit(ExtensionServiceCredentialCleanupFailed::Create {
+                        metrics.instrumentation().emit(ExtensionServiceCredentialCleanupFailed::Create {
                             extension_service_id,
                             error: "credential delete failed".to_string(),
                         });
                     }
                     CleanupFailureCase::Update => {
-                        emit(ExtensionServiceCredentialCleanupFailed::Update {
+                        metrics.instrumentation().emit(ExtensionServiceCredentialCleanupFailed::Update {
                             extension_service_id,
                             error: "credential delete failed".to_string(),
                         });
                     }
                     CleanupFailureCase::Delete => {
-                        emit(ExtensionServiceCredentialCleanupFailed::Delete {
+                        metrics.instrumentation().emit(ExtensionServiceCredentialCleanupFailed::Delete {
                             extension_service_id,
                             version,
                             error: "credential delete failed".to_string(),

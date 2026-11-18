@@ -14,11 +14,12 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+use bmc_platform::ResetType;
 use carbide_uuid::machine_validation::MachineValidationId;
 use chrono::Utc;
 use db::ConditionalWrite;
 use db::machine_validation::ValidationNotActive;
-use libredfish::{EnabledDisabled, RedfishError, SystemPowerControl};
+use libredfish::{EnabledDisabled, RedfishError};
 use model::machine::{
     FailureCause, FailureDetails, FailureSource, MachineState, MachineValidatingState,
     ManagedHostState, ManagedHostStateSnapshot, StateMachineArea, UnlockHostState, ValidationState,
@@ -212,7 +213,7 @@ pub(crate) async fn handle_machine_validation_state(
                     .await
                     .map_err(|err| StateHandlerError::GenericError(err.into()))?;
 
-            handler_host_power_control(mh_snapshot, ctx, SystemPowerControl::ForceRestart).await?;
+            handler_host_power_control(mh_snapshot, ctx, ResetType::ForceRestart).await?;
 
             let next_state = ManagedHostState::Validation {
                 validation_state: ValidationState::MachineValidation {
@@ -262,6 +263,7 @@ pub(crate) async fn handle_machine_validation_state(
                         .create_redfish_client_from_machine(&mh_snapshot.host_snapshot)
                         .await?;
                     match inspect_host_boot_config(
+                        ctx.services,
                         redfish_client.as_ref(),
                         mh_snapshot,
                         &boot_interface,
@@ -325,8 +327,7 @@ pub(crate) async fn handle_machine_validation_state(
                             machine_validation.context.clone().unwrap_or_default(),
                         ))
                         .or_default() = status.total - status.completed;
-                    handler_host_power_control(mh_snapshot, ctx, SystemPowerControl::ForceRestart)
-                        .await?;
+                    handler_host_power_control(mh_snapshot, ctx, ResetType::ForceRestart).await?;
                     return Ok(StateHandlerOutcome::transition(
                         ManagedHostState::HostInit {
                             machine_state: MachineState::Discovered {
@@ -437,10 +438,11 @@ pub(crate) async fn handle_machine_validation_state(
                     }
                 }
                 UnlockHostState::RebootHost => {
+                    let bmc = ctx.services.connect_bmc(&mh_snapshot.host_snapshot).await?;
                     host_power_control(
-                        redfish_client.as_ref(),
+                        &bmc,
                         &mh_snapshot.host_snapshot,
-                        SystemPowerControl::ForceRestart,
+                        ResetType::ForceRestart,
                         ctx,
                     )
                     .await

@@ -18,6 +18,7 @@
 use std::ffi::OsString;
 use std::time::Duration;
 
+use carbide_instrument::Instrumentation;
 use libmlx::firmware::error::{AttemptError, AttemptFailure};
 use libmlx::firmware::operation::{DirectMlxClaim, SupervisorConfig};
 use libmlx::runner::FirmwareToolExecutor;
@@ -28,6 +29,64 @@ use crate::firmware_staging::{FirmwareStaging, LoggableFirmwareUrl};
 use crate::metrics::FirmwareDownloadKind;
 
 const SCRIPT_DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Retains the completed task and bounded report while the control loop retries it.
+/// This receipt is process-local; it does not survive a Scout restart.
+#[derive(Default)]
+pub(super) struct ScoutFirmwareUpgradeState {
+    completed: Option<FirmwareUpgradeReceipt>,
+}
+
+struct FirmwareUpgradeReceipt {
+    task: FirmwareUpgradeTask,
+    result: FirmwareUpgradeResult,
+}
+
+impl ScoutFirmwareUpgradeState {
+    pub(super) async fn run(
+        &mut self,
+        client: &reqwest::Client,
+        task: &FirmwareUpgradeTask,
+        config: &SupervisorConfig,
+        instrumentation: &Instrumentation,
+    ) -> scout::CarbideClientResult<&FirmwareUpgradeResult> {
+        if let Some(completed) = &self.completed
+            && completed.task.upgrade_task_id == task.upgrade_task_id
+        {
+            if completed.task != *task {
+                return Err(scout::CarbideClientError::GenericError(
+                    "firmware task ID reused with different contents".into(),
+                ));
+            }
+        } else {
+            let result = handle_firmware_upgrade(client, task, config, instrumentation).await;
+            let result = FirmwareUpgradeResult {
+                stdout: crate::truncate(
+                    &result.stdout,
+                    crate::MAX_FIRMWARE_UPGRADE_STATUS_FIELD_SIZE,
+                ),
+                stderr: crate::truncate(
+                    &result.stderr,
+                    crate::MAX_FIRMWARE_UPGRADE_STATUS_FIELD_SIZE,
+                ),
+                error: crate::truncate(
+                    &result.error,
+                    crate::MAX_FIRMWARE_UPGRADE_STATUS_FIELD_SIZE,
+                ),
+                ..result
+            };
+            self.completed = Some(FirmwareUpgradeReceipt {
+                task: task.clone(),
+                result,
+            });
+        }
+        Ok(&self
+            .completed
+            .as_ref()
+            .expect("completed task was retained")
+            .result)
+    }
+}
 
 fn firmware_task_text_context(value: &str, task: &FirmwareUpgradeTask) -> String {
     let urls = task.script.iter().map(|script| script.url.as_str()).chain(
@@ -66,8 +125,9 @@ pub(super) async fn handle_firmware_upgrade(
     client: &reqwest::Client,
     task: &FirmwareUpgradeTask,
     config: &SupervisorConfig,
+    instrumentation: &Instrumentation,
 ) -> FirmwareUpgradeResult {
-    let result = match run_firmware_upgrade(client, task, config).await {
+    let result = match run_firmware_upgrade(client, task, config, instrumentation).await {
         Ok(result) => result,
         Err(e) => FirmwareUpgradeResult {
             success: false,
@@ -92,8 +152,9 @@ impl ScriptAttempt {
     fn acquire(
         config: &SupervisorConfig,
         task: &FirmwareUpgradeTask,
+        instrumentation: Instrumentation,
     ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
-        let mut staging = FirmwareStaging::new()?;
+        let mut staging = FirmwareStaging::new(instrumentation)?;
         staging
             .work_dir()
             .to_str()
@@ -217,13 +278,14 @@ async fn run_firmware_upgrade(
     client: &reqwest::Client,
     task: &FirmwareUpgradeTask,
     config: &SupervisorConfig,
+    instrumentation: &Instrumentation,
 ) -> Result<FirmwareUpgradeResult, Box<dyn std::error::Error + Send + Sync>> {
     tracing::info!(
         component_type = %task.component_type,
         target_version = %task.target_version,
         "[firmware_upgrade] starting",
     );
-    let mut attempt = ScriptAttempt::acquire(config, task)?;
+    let mut attempt = ScriptAttempt::acquire(config, task, instrumentation.clone())?;
     let command = match stage_script(client, task, &mut attempt.staging).await {
         Ok(command) => command,
         Err(error) => {
@@ -395,7 +457,13 @@ pub(super) async fn handle_firmware_upgrade_for_test(
     task: &FirmwareUpgradeTask,
 ) -> FirmwareUpgradeResult {
     let fixture = FirmwareUpgradeFixture::new();
-    handle_firmware_upgrade(client, task, &fixture.config).await
+    handle_firmware_upgrade(
+        client,
+        task,
+        &fixture.config,
+        &carbide_instrument::Instrumentation::noop(),
+    )
+    .await
 }
 
 #[cfg(test)]
@@ -435,6 +503,83 @@ mod tests {
             url: format!("{base}{path}"),
             sha256: sha256_hex(content),
         }
+    }
+
+    #[tokio::test]
+    async fn redelivery_reuses_bounded_completion() {
+        let fixture = FirmwareUpgradeFixture::new();
+        let instrumentation = Instrumentation::global();
+        let directory = tempfile::tempdir().unwrap();
+        let marker = directory.path().join("executions");
+        let script = format!(
+            "#!/bin/sh\nprintf run >> '{}'\necho complete\nprintf '{}'",
+            marker.display(),
+            "x".repeat(3000)
+        );
+        let body = script.clone();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(async move {
+            axum::serve(
+                listener,
+                Router::new().route(
+                    "/upgrade.sh",
+                    get(move || {
+                        let body = body.clone();
+                        async move { body }
+                    }),
+                ),
+            )
+            .await
+            .unwrap();
+        });
+        let task = FirmwareUpgradeTask {
+            upgrade_task_id: "receipt-task".into(),
+            script: Some(script_artifact(&base, "/upgrade.sh", &script)),
+            execution_timeout_seconds: 5,
+            ..Default::default()
+        };
+        let client = reqwest::Client::new();
+        let mut state = ScoutFirmwareUpgradeState::default();
+        let result = state
+            .run(&client, &task, &fixture.config, &instrumentation)
+            .await
+            .unwrap();
+        assert!(result.success);
+        assert_eq!(
+            result.stdout.len(),
+            crate::MAX_FIRMWARE_UPGRADE_STATUS_FIELD_SIZE
+        );
+        let reported_stdout = result.stdout.clone();
+        assert_eq!(std::fs::read_to_string(&marker).unwrap(), "run");
+        // Simulate loss of the completion report: Core delivers the same task again.
+        let result = state
+            .run(&client, &task, &fixture.config, &instrumentation)
+            .await
+            .unwrap();
+        assert!(result.success);
+        assert_eq!(result.stdout, reported_stdout);
+        assert_eq!(std::fs::read_to_string(&marker).unwrap(), "run");
+
+        let mut changed = task.clone();
+        changed.target_version = "different".into();
+        assert!(
+            state
+                .run(&client, &changed, &fixture.config, &instrumentation)
+                .await
+                .is_err()
+        );
+        assert_eq!(std::fs::read_to_string(&marker).unwrap(), "run");
+
+        changed.upgrade_task_id = "next-task".into();
+        assert!(
+            state
+                .run(&client, &changed, &fixture.config, &instrumentation)
+                .await
+                .unwrap()
+                .success
+        );
+        assert_eq!(std::fs::read_to_string(&marker).unwrap(), "runrun");
     }
 
     fn test_runtime() -> tokio::runtime::Runtime {
@@ -556,6 +701,7 @@ mod tests {
             &reqwest::Client::new(),
             &task,
             &fixture.config,
+            &carbide_instrument::Instrumentation::noop(),
         ))
         .await;
         assert!(!result.success);
@@ -594,7 +740,12 @@ mod tests {
                 upgrade_task_id: "cleanup-fault".into(),
                 ..FirmwareUpgradeTask::default()
             };
-            let attempt = ScriptAttempt::acquire(&fixture.config, &task).unwrap();
+            let attempt = ScriptAttempt::acquire(
+                &fixture.config,
+                &task,
+                carbide_instrument::Instrumentation::noop(),
+            )
+            .unwrap();
             let inputs = attempt.staging.work_dir().to_path_buf();
             let marker = fixture.config.state_directory.join("mutation.json");
             match fault {
@@ -655,6 +806,7 @@ printf 'mutation completed'
             &reqwest::Client::new(),
             &task,
             &fixture.config,
+            &carbide_instrument::Instrumentation::noop(),
         ))
         .await;
         let inputs = std::path::PathBuf::from(result.stdout.lines().next().unwrap());
@@ -711,7 +863,13 @@ echo "upgrade complete"
         };
 
         let fixture = FirmwareUpgradeFixture::new();
-        let result = handle_firmware_upgrade(&reqwest::Client::new(), &task, &fixture.config).await;
+        let result = handle_firmware_upgrade(
+            &reqwest::Client::new(),
+            &task,
+            &fixture.config,
+            &carbide_instrument::Instrumentation::noop(),
+        )
+        .await;
 
         assert!(
             result.success,
@@ -784,8 +942,13 @@ echo "upgrade complete"
         let before = std::fs::read(fixture.config.state_directory.join("mutation.json")).unwrap();
         let mut retry = task.clone();
         retry.upgrade_task_id = "fresh-core-task-id".into();
-        let result =
-            handle_firmware_upgrade(&reqwest::Client::new(), &retry, &fixture.config).await;
+        let result = handle_firmware_upgrade(
+            &reqwest::Client::new(),
+            &retry,
+            &fixture.config,
+            &carbide_instrument::Instrumentation::noop(),
+        )
+        .await;
         assert!(!result.success);
         assert!(
             result.error.contains("existing work must finish"),
@@ -814,7 +977,13 @@ exit 42
 "#;
         let (task, downloads) = counted_script_task(script).await;
         let fixture = FirmwareUpgradeFixture::new();
-        let result = handle_firmware_upgrade(&reqwest::Client::new(), &task, &fixture.config).await;
+        let result = handle_firmware_upgrade(
+            &reqwest::Client::new(),
+            &task,
+            &fixture.config,
+            &carbide_instrument::Instrumentation::noop(),
+        )
+        .await;
         assert!(!result.success);
         assert_eq!(result.exit_code, 42);
         assert!(result.stderr.contains("something went wrong"));
@@ -851,6 +1020,7 @@ exit 42
             &reqwest::Client::new(),
             &task,
             &fixture.config,
+            &carbide_instrument::Instrumentation::noop(),
         ))
         .await;
         let inputs = logs
@@ -879,7 +1049,13 @@ exit 42
 
         fixture.config.supervisor_path = helper;
         task.upgrade_task_id = "fresh-task-after-no-dispatch".into();
-        let result = handle_firmware_upgrade(&reqwest::Client::new(), &task, &fixture.config).await;
+        let result = handle_firmware_upgrade(
+            &reqwest::Client::new(),
+            &task,
+            &fixture.config,
+            &carbide_instrument::Instrumentation::noop(),
+        )
+        .await;
         assert!(result.success, "{}", result.error);
         assert_eq!(downloads.load(Ordering::SeqCst), 2);
     }
@@ -913,7 +1089,13 @@ wait
             }
             let fixture = FirmwareUpgradeFixture::new();
             let client = reqwest::Client::new();
-            let mut execution = Box::pin(handle_firmware_upgrade(&client, &task, &fixture.config));
+            let instrumentation = Instrumentation::noop();
+            let mut execution = Box::pin(handle_firmware_upgrade(
+                &client,
+                &task,
+                &fixture.config,
+                &instrumentation,
+            ));
             let ready = async {
                 tokio::time::timeout(Duration::from_secs(5), async {
                     loop {
@@ -1158,7 +1340,13 @@ test "$(cd "$DOWNLOAD_DIR" && pwd -P)" = "$PWD/downloads"
         };
 
         let fixture = FirmwareUpgradeFixture::new();
-        let result = handle_firmware_upgrade(&reqwest::Client::new(), &task, &fixture.config).await;
+        let result = handle_firmware_upgrade(
+            &reqwest::Client::new(),
+            &task,
+            &fixture.config,
+            &carbide_instrument::Instrumentation::noop(),
+        )
+        .await;
 
         assert!(!result.success);
         assert!(result.error.contains("checksum mismatch"));

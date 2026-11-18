@@ -46,6 +46,13 @@ type Test interface {
 	Run(ctx RunCtx, w *writer.Writer) (result.Outcome, error)
 }
 
+// FirmwareFinalizer is the firmware command's bounded, close-only cleanup phase.
+// It runs after ordinary attempts join, while the Lease and journal stay live.
+type FirmwareFinalizer interface {
+	FirmwareCleanupBudget() time.Duration
+	CloseFirmwareWindows(context.Context, *writer.Writer) (json.RawMessage, error)
+}
+
 // Deps are what a run needs. The lower fields are seams tests set; a production run leaves them zero.
 type Deps struct {
 	Config *config.Config
@@ -92,6 +99,8 @@ type execution struct {
 
 	reasons      []string
 	detail       json.RawMessage // the test's findings, kept for result.json
+	stages       []result.StageResult
+	invariants   []result.InvariantResult
 	knownFailure string
 	timedOut     bool
 	abandoned    bool // the Run callback did not stop within the drain
@@ -115,6 +124,9 @@ func Execute(d Deps, test Test) result.RunResult {
 func (e *execution) shutdownBudget() time.Duration {
 	if e.deps.ShutdownBudget > 0 {
 		return e.deps.ShutdownBudget
+	}
+	if f, ok := e.test.(FirmwareFinalizer); ok {
+		return Drain + min(max(f.FirmwareCleanupBudget(), time.Second), time.Hour) + CleanupBudget + 30*time.Second
 	}
 	return ShutdownBudget
 }
@@ -165,6 +177,12 @@ func (e *execution) drive() result.Verdict {
 	if err := cfg.CheckDryRun(e.test.Writes()); err != nil {
 		e.reason(err.Error())
 		return result.Refused
+	}
+	if f, ok := e.test.(FirmwareFinalizer); ok {
+		if d := f.FirmwareCleanupBudget(); e.test.Name() != "firmware" || d < time.Second || d > time.Hour {
+			e.reason("invalid firmware cleanup budget or command")
+			return result.Refused
+		}
 	}
 	me := lock.HolderRecord{Kind: e.test.LockKind(), RunID: cfg.RunID, ExecutionID: cfg.ExecutionID, State: lock.Running, Test: ptr(e.test.Name())}
 	held, err := e.deps.Lock.Acquire(e.outside, me)
@@ -245,10 +263,10 @@ func (e *execution) runTest(ctx RunCtx) (result.Outcome, error) {
 }
 
 // verdictOf is the run-level verdict: a lost lock or a hard cancel outranks the outcome; a soft stop is soft stopped.
-// The test's reasons and findings are kept whatever the verdict.
+// The test's reasons, findings, stages and invariants are kept whatever the verdict.
 func (e *execution) verdictOf(outcome result.Outcome, runErr error) result.Verdict {
 	e.reasons = append(e.reasons, outcome.Reasons...)
-	e.detail = outcome.Detail
+	e.detail, e.stages, e.invariants = outcome.Detail, outcome.Stages, outcome.Invariants
 	hard := e.timedOut || e.outside.Err() != nil || e.control.Cancelled()
 	if runErr != nil {
 		e.reason(runErr.Error())
@@ -277,6 +295,9 @@ func (e *execution) verdictOf(outcome result.Outcome, runErr error) result.Verdi
 func (e *execution) finish(verdict result.Verdict) result.RunResult {
 	wd := armWatchdog(e.shutdownBudget(), e.watchdogAction)
 	defer wd.disarm()
+	if f, ok := e.test.(FirmwareFinalizer); ok {
+		verdict = e.finishFirmware(f, verdict)
+	}
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(e.outside), CleanupBudget)
 	defer cancel()
 
@@ -478,7 +499,7 @@ func (e *execution) result(verdict result.Verdict) result.RunResult {
 		DryRun: cfg.DryRun, Outcome: result.OutcomeOf(verdict), Reasons: append([]string{}, e.reasons...),
 		Clock: result.RunClock{StartedAt: jsonx.Time{Time: e.bounds.Started}, Deadline: jsonxTime(e.bounds.Deadline),
 			EndedAt: jsonx.Time{Time: e.clock.Now()}, ClockSyncAssumption: result.ClockSyncAssumption},
-		Lock: e.lock, Stages: []result.StageResult{}, Invariants: []result.InvariantResult{},
+		Lock: e.lock, Stages: append([]result.StageResult{}, e.stages...), Invariants: append([]result.InvariantResult{}, e.invariants...),
 		Journal: e.journalCounts(), Result: e.resultRef(), Detail: e.detail,
 	}
 }
@@ -507,11 +528,14 @@ func (e *execution) claimResult(ctx context.Context) error {
 	return nil
 }
 
-// journalCounts is what F1 can report without a replay: none_written when there is no journal, else unknown (nil)
-// counts. The real counts arrive when ingestion wires the writer's accounting.
+// journalCounts is none_written when there is no journal, else the journal's own snapshot (see journal.Counts: attempts
+// are RPCs that went out or may have, so a dry run reports none), or unknown (nil) once a journal write has failed.
 func (e *execution) journalCounts() result.JournalSummary {
 	if e.journal == nil {
 		return result.NoneWritten()
+	}
+	if c := e.journal.Counts(); c.Known {
+		return result.JournalSummary{Ops: &c.Ops, Attempts: &c.Attempts, Unclear: &c.Unclear}
 	}
 	return result.JournalSummary{}
 }
@@ -539,4 +563,49 @@ func jsonxPtr(t *time.Time) *jsonx.Time {
 		return nil
 	}
 	return &jsonx.Time{Time: *t}
+}
+
+// finishFirmware must precede Seal, Freeze and the publication context. A join
+// that does not return is bounded by the same shutdown watchdog as cleanup.
+func (e *execution) finishFirmware(f FirmwareFinalizer, verdict result.Verdict) result.Verdict {
+	e.control.stopper.stop()
+	e.joinRun()
+	if e.writer != nil {
+		e.writer.Close()
+	}
+	cleanup, _ := json.Marshal(map[string]any{"status": "skipped", "pending": e.unsettled()})
+	if e.held != nil && e.journal != nil && e.writer != nil && !e.abandoned && e.journal.Counts().Known && e.held.Gate().Check() == nil {
+		ctx, cancel := context.WithTimeout(context.WithoutCancel(e.outside), f.FirmwareCleanupBudget())
+		w := writer.NewFirmwareCleanup(e.journal, e.held.Gate(), time.Now().Add(f.FirmwareCleanupBudget()))
+		var err error
+		cleanup, err = f.CloseFirmwareWindows(ctx, w)
+		cancel()
+		w.Close()
+		if err != nil {
+			reason := "unsettled"
+			switch {
+			case errors.Is(err, writer.ErrLockLost):
+				reason = "lock-lost"
+			case errors.Is(err, journal.ErrIO):
+				reason = "journal-error"
+			case errors.Is(err, context.Canceled):
+				reason = "cancelled"
+			case errors.Is(err, context.DeadlineExceeded):
+				reason = "deadline"
+			}
+			cleanup, _ = json.Marshal(map[string]any{"status": "unsettled", "pending": true, "reason": reason})
+			e.reason("firmware cleanup did not settle owned windows")
+			verdict = result.NotClean(verdict)
+		}
+	}
+	detail, err := json.Marshal(struct {
+		Benchmark json.RawMessage `json:"benchmark"`
+		Cleanup   json.RawMessage `json:"cleanup"`
+	}{e.detail, cleanup})
+	if err != nil {
+		e.reason("firmware cleanup detail is invalid")
+		return result.NotClean(verdict)
+	}
+	e.detail = detail
+	return verdict
 }

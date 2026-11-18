@@ -21,16 +21,15 @@ use std::process::Stdio;
 use std::sync::Arc;
 use std::time::Duration;
 
-use carbide_instrument::emit;
 use carbide_utils::none_if_empty::NoneIfEmpty;
 use carbide_uuid::dpu_remediations::RemediationId;
 use carbide_uuid::machine::DpuMachineId;
 use rand::RngExt;
 use rpc::Metadata;
+use rpc::carbide_tls_client::CarbideClientConfig;
 use rpc::forge::{
     GetNextRemediationForMachineRequest, RemediationApplicationStatus, RemediationAppliedRequest,
 };
-use rpc::forge_tls_client::ForgeClientConfig;
 
 use crate::metrics::{
     RemediationApplyFailed, RemediationClientCreationFailed, RemediationFetchFailed,
@@ -65,20 +64,25 @@ impl MachineInfo {
 }
 
 pub struct RemediationExecutor {
+    instrumentation: carbide_instrument::Instrumentation,
     forge_api_server: String,
-    forge_client_config: Arc<ForgeClientConfig>,
+    carbide_client_config: Arc<CarbideClientConfig>,
     machine_info: MachineInfo,
 }
 
 impl RemediationExecutor {
+    /// Creates an executor whose remediation Events use the supplied destination.
+    /// Retain its provider until execution stops.
     pub fn new(
         forge_api_server: String,
-        forge_client_config: Arc<ForgeClientConfig>,
+        carbide_client_config: Arc<CarbideClientConfig>,
         machine_info: MachineInfo,
+        instrumentation: carbide_instrument::Instrumentation,
     ) -> Self {
         Self {
+            instrumentation,
             forge_api_server,
-            forge_client_config,
+            carbide_client_config,
             machine_info,
         }
     }
@@ -87,7 +91,7 @@ impl RemediationExecutor {
         &self,
         remediation_id: RemediationId,
         script: String,
-        mut client: rpc::forge_tls_client::ForgeClientT,
+        mut client: rpc::carbide_tls_client::CarbideClientT,
     ) -> Result<(), Box<dyn Error>> {
         // setup tmp dir with new random UUID
         let tmp_dir_location = format!("/tmp/remediations/{}", uuid::Uuid::new_v4());
@@ -137,11 +141,13 @@ impl RemediationExecutor {
                             {
                                 Ok(results) => results,
                                 Err(error) => {
-                                    emit(RemediationStatusOutputDecodeFailed::new(
-                                        self.machine_info.machine_id.into(),
-                                        remediation_id,
-                                        format!("{error:?}"),
-                                    ));
+                                    self.instrumentation.emit(
+                                        RemediationStatusOutputDecodeFailed::new(
+                                            self.machine_info.machine_id.into(),
+                                            remediation_id,
+                                            format!("{error:?}"),
+                                        ),
+                                    );
                                     HashMap::new()
                                 }
                             }
@@ -206,9 +212,9 @@ impl RemediationExecutor {
 
         // setup log rotation for tmpdir so we don't fill the disk
         loop {
-            match forge_dpu_agent_utils::utils::create_forge_client(
+            match carbide_dpu_agent_utils::utils::create_forge_client(
                 self.forge_api_server.as_str(),
-                &self.forge_client_config,
+                &self.carbide_client_config,
             )
             .await
             {
@@ -237,7 +243,7 @@ impl RemediationExecutor {
                                             tracing::debug!("Remediation successfully applied.");
                                         }
                                         Err(error) => {
-                                            emit(RemediationApplyFailed::new(
+                                            self.instrumentation.emit(RemediationApplyFailed::new(
                                                 self.machine_info.machine_id.into(),
                                                 *remediation_id,
                                                 format!("{error:?}"),
@@ -249,7 +255,7 @@ impl RemediationExecutor {
                                     tracing::debug!("no remediation this loop, nothing to do.");
                                 }
                                 _ => {
-                                    emit(RemediationResponseInvalid::new(
+                                    self.instrumentation.emit(RemediationResponseInvalid::new(
                                         self.machine_info.machine_id.into(),
                                         next_remediation.remediation_script.is_some(),
                                         next_remediation.remediation_id.is_some(),
@@ -258,7 +264,7 @@ impl RemediationExecutor {
                             }
                         }
                         Err(remediation_fetch_error) => {
-                            emit(RemediationFetchFailed::new(
+                            self.instrumentation.emit(RemediationFetchFailed::new(
                                 self.machine_info.machine_id.into(),
                                 format!("{remediation_fetch_error:?}"),
                             ));
@@ -266,10 +272,11 @@ impl RemediationExecutor {
                     }
                 }
                 Err(client_creation_error) => {
-                    emit(RemediationClientCreationFailed::new(
-                        self.machine_info.machine_id.into(),
-                        format!("{client_creation_error:?}"),
-                    ));
+                    self.instrumentation
+                        .emit(RemediationClientCreationFailed::new(
+                            self.machine_info.machine_id.into(),
+                            format!("{client_creation_error:?}"),
+                        ));
                 }
             }
 

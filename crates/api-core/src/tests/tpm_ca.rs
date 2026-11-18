@@ -90,7 +90,7 @@ pub(in crate::tests) mod tests {
         // hardware_info is never inserted via db::machine_topology::create_or_update thus triggering an error
         let hardware_info = HardwareInfo::from(&host_config);
         let machine_id = from_hardware_info(&hardware_info).unwrap();
-        let _machine = db::machine::get_or_create(&mut txn, None, &machine_id, &iface)
+        let _machine = db::machine::get_or_create(&mut txn, None, &machine_id, &iface, None)
             .await
             .unwrap();
 
@@ -139,7 +139,7 @@ pub(in crate::tests) mod tests {
         .unwrap();
         let mut hardware_info = HardwareInfo::from(&host_config);
         let machine_id = from_hardware_info(&hardware_info).unwrap();
-        let machine = db::machine::get_or_create(&mut txn, None, &machine_id, &iface)
+        let machine = db::machine::get_or_create(&mut txn, None, &machine_id, &iface, None)
             .await
             .unwrap();
 
@@ -1206,7 +1206,7 @@ pub(in crate::tests) mod tests {
         .unwrap();
         let hardware_info = HardwareInfo::from(&host_config);
         let machine_id = from_hardware_info(&hardware_info).unwrap();
-        let machine = db::machine::get_or_create(&mut txn, None, &machine_id, &iface)
+        let machine = db::machine::get_or_create(&mut txn, None, &machine_id, &iface, None)
             .await
             .unwrap();
 

@@ -31,6 +31,8 @@ use std::str::FromStr;
 
 use askama_escape::Escaper;
 use carbide_uuid::machine::MachineId;
+use carbide_uuid::power_shelf::PowerShelfId;
+use carbide_uuid::switch::SwitchId;
 
 /// Generates HTML links for Machine IDs
 #[askama::filter_fn]
@@ -46,21 +48,21 @@ pub(super) fn machine_link(id: impl Display, path: impl Display) -> ::askama::Re
     let id = id.to_string();
     let link_path: String = url::form_urlencoded::byte_serialize(id.as_bytes()).collect();
 
-    let short_id = if MachineId::from_str(&id).is_err() {
+    if MachineId::from_str(&id).is_err() {
         // Not a Machine ID. Escape HTML to make it safe for post processing with safe filter
         let mut output = String::new();
         askama_escape::Html.write_escaped(&mut output, &id)?;
         return Ok(output);
-    } else {
-        // "fm100dsbiu5ckus880v8407u0mkcensa39cule26im5gnpvmuufckacguc0" -> "acguc0"
-        &id[id.len() - 6..]
-    };
+    }
+    // The halves join into the full ID; CSS cuts the first half's end when space is short,
+    // so "fm100dsbiu5ckus880v8407u0mkcensa39cule26im5gnpvmuufckacguc0" -> "fm100ds…acguc0".
+    let (head, tail) = id.split_at(id.len() - 6);
 
     let formatted = format!(
         r#"
     <a href="/admin/{path}/{link_path}">
         <div class="machine_id">
-            <div>{id}</div><div>{short_id}</div>
+            <div>{head}</div><div>{tail}</div>
         </div>
     </a>"#
     );
@@ -76,28 +78,24 @@ fn escaped_shortened_id_link(id: impl Display, path: impl Display) -> ::askama::
     }
     let link_path: String = url::form_urlencoded::byte_serialize(id.as_bytes()).collect();
 
-    let mut escaped_id = String::new();
-    askama_escape::Html.write_escaped(&mut escaped_id, &id)?;
-
     if id.chars().count() <= 6 {
+        let mut escaped_id = String::new();
+        askama_escape::Html.write_escaped(&mut escaped_id, &id)?;
         return Ok(format!(
             r#"<a href="/admin/{path}/{link_path}">{escaped_id}</a>"#
         ));
     }
 
-    let short_id = id
-        .char_indices()
-        .rev()
-        .nth(5)
-        .map(|(index, _)| &id[index..])
-        .unwrap_or(&id);
-    let mut escaped_short_id = String::new();
-    askama_escape::Html.write_escaped(&mut escaped_short_id, short_id)?;
+    let (head, tail) = id.split_at(id.char_indices().rev().nth(5).map_or(0, |(index, _)| index));
+    let mut escaped_head = String::new();
+    askama_escape::Html.write_escaped(&mut escaped_head, head)?;
+    let mut escaped_tail = String::new();
+    askama_escape::Html.write_escaped(&mut escaped_tail, tail)?;
     let formatted = format!(
         r#"
     <a href="/admin/{path}/{link_path}">
         <div class="machine_id">
-            <div>{escaped_id}</div><div>{escaped_short_id}</div>
+            <div>{escaped_head}</div><div>{escaped_tail}</div>
         </div>
     </a>"#
     );
@@ -114,6 +112,14 @@ pub(super) fn rack_id_link(
 }
 
 #[askama::filter_fn]
+pub(super) fn interface_id_link(
+    id: impl Display,
+    _env: &dyn askama::Values,
+) -> ::askama::Result<String> {
+    escaped_shortened_id_link(id, "interface")
+}
+
+#[askama::filter_fn]
 pub(super) fn power_shelf_id_link(
     id: impl Display,
     _env: &dyn askama::Values,
@@ -127,6 +133,51 @@ pub(super) fn switch_id_link(
     _env: &dyn askama::Values,
 ) -> ::askama::Result<String> {
     escaped_shortened_id_link(id, "switch")
+}
+
+/// Links a health alert target to its object page as a shortened ID when it
+/// is a machine, switch, or power shelf ID; any other target is escaped text.
+#[askama::filter_fn]
+pub(super) fn health_target_link(
+    target: impl Display,
+    _env: &dyn askama::Values,
+) -> ::askama::Result<String> {
+    health_target_html(&target.to_string())
+}
+
+/// Escapes `text` and lets it wrap after each `/`, so long state names such as
+/// `Assigned/BootingWithDiscoveryImage` break between levels.
+#[askama::filter_fn]
+pub(super) fn slash_breaks(
+    text: impl Display,
+    _env: &dyn askama::Values,
+) -> ::askama::Result<String> {
+    slash_breaks_html(&text.to_string())
+}
+
+fn slash_breaks_html(text: &str) -> ::askama::Result<String> {
+    let mut html = String::new();
+    for (index, part) in text.split('/').enumerate() {
+        if index > 0 {
+            html.push_str("/<wbr>");
+        }
+        askama_escape::Html.write_escaped(&mut html, part)?;
+    }
+    Ok(html)
+}
+
+fn health_target_html(target: &str) -> ::askama::Result<String> {
+    if MachineId::from_str(target).is_ok() {
+        machine_link(target, "machine")
+    } else if SwitchId::from_str(target).is_ok() {
+        escaped_shortened_id_link(target, "switch")
+    } else if PowerShelfId::from_str(target).is_ok() {
+        escaped_shortened_id_link(target, "power-shelf")
+    } else {
+        let mut output = String::new();
+        askama_escape::Html.write_escaped(&mut output, target)?;
+        Ok(output)
+    }
 }
 
 /// Formats labels into HTML
@@ -210,6 +261,73 @@ pub(super) fn health_alerts_fmt(
         result += r#"</span>"#;
     }
     Ok(result)
+}
+
+/// One line per alert for list tables: the alert ID in a chip, then its target,
+/// with the full "ID [Target: target]: message" as the line's tooltip.
+#[askama::filter_fn]
+pub(super) fn health_alerts_compact(
+    alerts: &[health_report::HealthProbeAlert],
+    _env: &dyn askama::Values,
+) -> ::askama::Result<String> {
+    health_alerts_compact_html(alerts)
+}
+
+fn health_alerts_compact_html(
+    alerts: &[health_report::HealthProbeAlert],
+) -> ::askama::Result<String> {
+    if alerts.is_empty() {
+        return Ok(r#"<span class="bubble success">Healthy</span>"#.to_string());
+    }
+
+    let mut result = String::new();
+    for alert in alerts {
+        let id = alert.id.to_string();
+        let mut full = id.clone();
+        if let Some(target) = alert.target.as_ref() {
+            write!(&mut full, " [Target: {target}]").unwrap();
+        }
+        write!(&mut full, ": {}", alert.message).unwrap();
+
+        result += r#"<div class="health-alert-line" title=""#;
+        askama_escape::Html.write_escaped(&mut result, &full)?;
+        result += r#""><span class="health-alert-chip">"#;
+        askama_escape::Html.write_escaped(&mut result, &id)?;
+        result += "</span>";
+        if let Some(target) = alert.target.as_ref() {
+            result += r#"<span class="health-alert-target">"#;
+            match middle_cut(target) {
+                // Both forms are rendered; table_filter.js shows the full one
+                // when the table has room for it.
+                Some(short) => {
+                    result += r#"<span class="fit-short">"#;
+                    askama_escape::Html.write_escaped(&mut result, &short)?;
+                    result += r#"</span><span class="fit-full-only">"#;
+                    askama_escape::Html.write_escaped(&mut result, target)?;
+                    result += "</span>";
+                }
+                None => askama_escape::Html.write_escaped(&mut result, target)?,
+            }
+            result += "</span>";
+        }
+        result += "</div>";
+    }
+    Ok(result)
+}
+
+/// Shortens long text, such as a machine ID used as an alert target, to its
+/// first eight and last six characters around an ellipsis. `None` when the
+/// text is already short.
+fn middle_cut(text: &str) -> Option<String> {
+    const HEAD: usize = 8;
+    const TAIL: usize = 6;
+    let count = text.chars().count();
+    if count <= HEAD + TAIL + 4 {
+        return None;
+    }
+    let head: String = text.chars().take(HEAD).collect();
+    let tail: String = text.chars().skip(count - TAIL).collect();
+    Some(format!("{head}…{tail}"))
 }
 
 /// Formats a list of Health Alert Classifications
@@ -373,6 +491,67 @@ pub(super) fn state_with_substate_label(
     })
 }
 
+/// Top-level state name only, for compact displays such as a detail page
+/// header where nested per-DPU sub-states would not fit.
+#[askama::filter_fn]
+pub(super) fn state_prefix_label(
+    state: impl Display,
+    _env: &dyn askama::Values,
+) -> ::askama::Result<String> {
+    Ok(state_prefix(&state.to_string()))
+}
+
+fn state_prefix(state_json: &str) -> String {
+    state_path(state_json).swap_remove(0)
+}
+
+/// Readable state hierarchy, outermost first, e.g. `["WaitingForCleanup", "HostCleanup"]`.
+/// Never empty.
+fn state_path(state_json: &str) -> Vec<String> {
+    let label = match serde_json::from_str::<model::machine::ManagedHostState>(state_json) {
+        Ok(state) => state.to_string(),
+        Err(_) => {
+            let (state, substate) = state_and_substate_labels(state_json);
+            if substate.is_empty() {
+                state
+            } else {
+                format!("{state}/{substate}")
+            }
+        }
+    };
+    // `ManagedHostState` renders as `Prefix/sub/...`, except `Maintenance(op)`
+    // and sub-states rendered with `Debug`, such as `RebootHost { .. }`.
+    let mut parts = label.split('/');
+    let first = parts.next().unwrap_or_default().trim();
+    let name = leading_name(first);
+    let mut path = vec![if name.is_empty() {
+        "Unknown".to_string()
+    } else {
+        name.to_string()
+    }];
+    if let Some(inner) = first[name.len()..].strip_prefix('(') {
+        let inner = leading_name(inner);
+        if !inner.is_empty() {
+            path.push(inner.to_string());
+        }
+    }
+    path.extend(
+        parts
+            .map(leading_name)
+            .filter(|part| !part.is_empty())
+            .map(str::to_string),
+    );
+    path
+}
+
+fn leading_name(label: &str) -> &str {
+    label
+        .trim()
+        .split([' ', '{', '('])
+        .next()
+        .unwrap_or_default()
+}
+
 fn format_substate_label(value: &serde_json::Value) -> String {
     value
         .as_str()
@@ -474,9 +653,137 @@ pub(super) fn controller_state_reason_fmt(
 
 #[cfg(test)]
 mod tests {
-    use carbide_test_support::{Check, check_values};
+    use std::str::FromStr;
 
-    use super::{escaped_shortened_id_link, format_json};
+    use carbide_test_support::{Check, check_values};
+    use health_report::{HealthProbeAlert, HealthProbeId};
+
+    use super::{
+        escaped_shortened_id_link, format_json, health_target_html, state_path, state_prefix,
+    };
+
+    #[test]
+    fn compact_health_alerts_list_each_alert_with_full_text_on_hover() {
+        let alert = |target: Option<&str>| HealthProbeAlert {
+            id: HealthProbeId::from_str("HeartbeatTimeout").unwrap(),
+            target: target.map(str::to_string),
+            in_alert_since: None,
+            message: "Last seen over <PT300S> ago".to_string(),
+            tenant_message: None,
+            classifications: vec![],
+        };
+        let compact =
+            |alerts: &[HealthProbeAlert]| super::health_alerts_compact_html(alerts).unwrap();
+        check_values(
+            [
+                Check {
+                    scenario: "no alerts",
+                    input: vec![],
+                    expect: r#"<span class="bubble success">Healthy</span>"#.to_string(),
+                },
+                Check {
+                    scenario: "alert with target",
+                    input: vec![alert(Some("forge-dpu-agent"))],
+                    expect: concat!(
+                        r#"<div class="health-alert-line" title="HeartbeatTimeout [Target: forge-dpu-agent]: "#,
+                        r#"Last seen over &#60;PT300S&#62; ago">"#,
+                        r#"<span class="health-alert-chip">HeartbeatTimeout</span>"#,
+                        r#"<span class="health-alert-target">forge-dpu-agent</span></div>"#
+                    )
+                    .to_string(),
+                },
+                Check {
+                    scenario: "long target renders shortened and full forms",
+                    input: vec![alert(Some(
+                        "fm100ds33vkic2i020dsma4nv9elgfuoq26foi7daf44tulvkt7r2iemvtg",
+                    ))],
+                    expect: concat!(
+                        r#"<div class="health-alert-line" title="HeartbeatTimeout [Target: "#,
+                        "fm100ds33vkic2i020dsma4nv9elgfuoq26foi7daf44tulvkt7r2iemvtg]: ",
+                        r#"Last seen over &#60;PT300S&#62; ago">"#,
+                        r#"<span class="health-alert-chip">HeartbeatTimeout</span>"#,
+                        r#"<span class="health-alert-target"><span class="fit-short">fm100ds3…iemvtg</span>"#,
+                        r#"<span class="fit-full-only">"#,
+                        "fm100ds33vkic2i020dsma4nv9elgfuoq26foi7daf44tulvkt7r2iemvtg",
+                        "</span></span></div>"
+                    )
+                    .to_string(),
+                },
+                Check {
+                    scenario: "alert without target",
+                    input: vec![alert(None)],
+                    expect: concat!(
+                        r#"<div class="health-alert-line" title="HeartbeatTimeout: Last seen over &#60;PT300S&#62; ago">"#,
+                        r#"<span class="health-alert-chip">HeartbeatTimeout</span></div>"#
+                    )
+                    .to_string(),
+                },
+            ],
+            |alerts| compact(&alerts),
+        );
+    }
+
+    #[test]
+    fn state_path_lists_each_nesting_level() {
+        check_values(
+            [
+                Check {
+                    scenario: "unparsed state with a sub-state",
+                    input: r#"{"state": "futurestate", "future_state": {"state": "step2"}}"#,
+                    expect: vec!["Futurestate".to_string(), "Step2".to_string()],
+                },
+                Check {
+                    scenario: "sub-state that is not a named state is omitted",
+                    input: r#"{"state": "futurestate", "future_state": {"detail": [1, 2]}}"#,
+                    expect: vec!["Futurestate".to_string()],
+                },
+                Check {
+                    scenario: "unreadable state",
+                    input: "{",
+                    expect: vec!["Unknown".to_string()],
+                },
+            ],
+            state_path,
+        );
+    }
+
+    #[test]
+    fn state_prefix_keeps_only_the_top_level_state() {
+        check_values(
+            [
+                Check {
+                    scenario: "state without sub-state",
+                    input: r#"{"state": "ready"}"#,
+                    expect: "Ready".to_string(),
+                },
+                Check {
+                    scenario: "per-DPU sub-states",
+                    input: concat!(
+                        r#"{"state": "dpureprovision", "dpu_states": {"states": {"#,
+                        r#""fm100ds60gqhm763jb1tdpv4orrig5b5eqfr8p8i3iv5i1dja5p8jc144m0": "#,
+                        r#"{"dpfstates": {"substate": {"dpfstate": "waitingforready", "phase_detail": "DpuClusterConfig"}}}, "#,
+                        r#""fm100dsvt9g1b3si4njfseurqcm5an22lvjjpoi4sb6qq76q1g7di7mt3s0": "#,
+                        r#"{"dpfstates": {"substate": {"dpfstate": "waitingforready", "phase_detail": "DpuClusterConfig"}}}}}}"#,
+                    ),
+                    expect: "Reprovisioning".to_string(),
+                },
+                Check {
+                    scenario: "validation sub-state rendered as a struct",
+                    input: concat!(
+                        r#"{"state": "validation", "validation_state": {"validation_type": "machinevalidation", "#,
+                        r#""machine_validation": {"reboothost": {"validation_id": "554aa7f6-2f56-467f-ac7b-1e33a460d495"}}}}"#,
+                    ),
+                    expect: "MachineValidation".to_string(),
+                },
+                Check {
+                    scenario: "unparsed state falls back to the state field",
+                    input: r#"{"state": "futurestate", "future_state": {"detail": [1, 2, 3]}}"#,
+                    expect: "Futurestate".to_string(),
+                },
+            ],
+            state_prefix,
+        );
+    }
 
     #[test]
     fn shortened_id_links_render_exact_output() {
@@ -493,7 +800,7 @@ mod tests {
                     expect: concat!(
                         "\n    <a href=\"/admin/rack/rack-a12\">\n",
                         "        <div class=\"machine_id\">\n",
-                        "            <div>rack-a12</div><div>ck-a12</div>\n",
+                        "            <div>ra</div><div>ck-a12</div>\n",
                         "        </div>\n",
                         "    </a>"
                     )
@@ -517,7 +824,7 @@ mod tests {
                         "%C3%A1%C3%A9%C3%AD%C3%B3%C3%BA%C3%B1%C3%BC",
                         "\">\n",
                         "        <div class=\"machine_id\">\n",
-                        "            <div>áéíóúñü</div><div>éíóúñü</div>\n",
+                        "            <div>á</div><div>éíóúñü</div>\n",
                         "        </div>\n",
                         "    </a>"
                     )
@@ -529,7 +836,7 @@ mod tests {
                     expect: concat!(
                         "\n    <a href=\"/admin/rack/rack-abcde%C3%A5\">\n",
                         "        <div class=\"machine_id\">\n",
-                        "            <div>rack-abcdeå</div><div>abcdeå</div>\n",
+                        "            <div>rack-</div><div>abcdeå</div>\n",
                         "        </div>\n",
                         "    </a>"
                     )
@@ -541,7 +848,7 @@ mod tests {
                     expect: concat!(
                         "\n    <a href=\"/admin/rack/rack-%3C%26abcd\">\n",
                         "        <div class=\"machine_id\">\n",
-                        "            <div>rack-&#60;&#38;abcd</div>",
+                        "            <div>rack-</div>",
                         "<div>&#60;&#38;abcd</div>\n",
                         "        </div>\n",
                         "    </a>"
@@ -550,6 +857,68 @@ mod tests {
                 },
             ],
             |id| escaped_shortened_id_link(id, "rack").unwrap(),
+        );
+    }
+
+    #[test]
+    fn slash_breaks_escape_and_break_after_each_slash() {
+        check_values(
+            [
+                Check {
+                    scenario: "single level",
+                    input: "Ready",
+                    expect: "Ready".to_string(),
+                },
+                Check {
+                    scenario: "nested levels",
+                    input: "Assigned/BootingWithDiscoveryImage",
+                    expect: "Assigned/<wbr>BootingWithDiscoveryImage".to_string(),
+                },
+                Check {
+                    scenario: "markup in a level is escaped",
+                    input: "Failed/<b>",
+                    expect: "Failed/<wbr>&#60;b&#62;".to_string(),
+                },
+            ],
+            |text| super::slash_breaks_html(text).unwrap(),
+        );
+    }
+
+    #[test]
+    fn health_targets_link_to_their_object_page() {
+        check_values(
+            [
+                Check {
+                    scenario: "machine ID",
+                    input: "fm100ht09g4atrqgjb0b83b2to1qa1hfugks9mhutb0umcng1rkr54vliqg",
+                    expect: "/admin/machine/fm100ht09g4atrqgjb0b83b2to1qa1hfugks9mhutb0umcng1rkr54vliqg"
+                        .to_string(),
+                },
+                Check {
+                    scenario: "switch ID",
+                    input: "sw100nsatkhogcptl4dgkaerckihe0ji51mj1scfh3745ffhlq5bpnr0chg",
+                    expect: "/admin/switch/sw100nsatkhogcptl4dgkaerckihe0ji51mj1scfh3745ffhlq5bpnr0chg"
+                        .to_string(),
+                },
+                Check {
+                    scenario: "power shelf ID",
+                    input: "ps100htjtiaehv1n5vh67tbmqq4eabcjdng40f7jupsadbedhruh6rag1l0",
+                    expect: "/admin/power-shelf/ps100htjtiaehv1n5vh67tbmqq4eabcjdng40f7jupsadbedhruh6rag1l0"
+                        .to_string(),
+                },
+                Check {
+                    scenario: "other target stays escaped text",
+                    input: "HostBMC <&>",
+                    expect: "HostBMC &#60;&#38;&#62;".to_string(),
+                },
+            ],
+            |target| {
+                let html = health_target_html(target).unwrap();
+                match html.split_once("href=\"") {
+                    Some((_, rest)) => rest.split('"').next().unwrap_or_default().to_string(),
+                    None => html,
+                }
+            },
         );
     }
 

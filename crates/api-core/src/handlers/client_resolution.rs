@@ -509,6 +509,7 @@ pub(super) async fn resolve_cloud_init_instructions(
     match resolved_ip {
         ResolvedClient::Instance(owner) => {
             let instance = owner.instance;
+            crate::api::log_machine_id(&instance.machine_id.into());
             let local_hostname = if HOSTNAME_RE.is_match(&instance.metadata.name) {
                 Some(instance.metadata.name.clone())
             } else {
@@ -534,6 +535,9 @@ pub(super) async fn resolve_cloud_init_instructions(
             })
         }
         ResolvedClient::MachineInterface(machine_interface) => {
+            if let Some(machine_id) = machine_interface.machine_id {
+                crate::api::log_machine_id(&machine_id);
+            }
             let domain = match machine_interface.domain_id {
                 Some(domain_id) => Some(
                     db::dns::domain::find_by_uuid(&mut *conn, domain_id)

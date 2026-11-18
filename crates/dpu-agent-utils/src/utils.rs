@@ -14,14 +14,14 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-use rpc::forge_tls_client::{ApiConfig, ForgeClientConfig, ForgeClientT, ForgeTlsClient};
+use rpc::carbide_tls_client::{ApiConfig, CarbideClientConfig, CarbideClientT, CarbideTlsClient};
 
 // Forge Communication
 pub async fn create_forge_client(
     forge_api: &str,
-    client_config: &ForgeClientConfig,
-) -> Result<ForgeClientT, eyre::Error> {
-    match ForgeTlsClient::retry_build(&ApiConfig::new(forge_api, client_config)).await {
+    client_config: &CarbideClientConfig,
+) -> Result<CarbideClientT, eyre::Error> {
+    match CarbideTlsClient::retry_build(&ApiConfig::new(forge_api, client_config)).await {
         Ok(client) => Ok(client),
         Err(err) => Err(eyre::eyre!(
             "could not connect to forge API server at {}: {err}",

@@ -431,15 +431,18 @@ mod tests {
             |(method, status, grpc_error)| async move {
                 let captured = StatusCapture::default();
                 let subscriber = tracing_subscriber::registry().with(captured.clone());
-                let service = LogLayer::new(opentelemetry::global::meter("http_logging_test"))
-                    .layer(tower::service_fn(move |_: Request<Body>| {
-                        let mut response = Response::new(Body::empty());
-                        *response.status_mut() = status;
-                        if let Some(error) = &grpc_error {
-                            response.extensions_mut().insert(error.clone());
-                        }
-                        std::future::ready(Ok::<_, Infallible>(response))
-                    }));
+                let service = LogLayer::new(opentelemetry::metrics::MeterProvider::meter(
+                    &opentelemetry::metrics::noop::NoopMeterProvider::new(),
+                    "http_logging_test",
+                ))
+                .layer(tower::service_fn(move |_: Request<Body>| {
+                    let mut response = Response::new(Body::empty());
+                    *response.status_mut() = status;
+                    if let Some(error) = &grpc_error {
+                        response.extensions_mut().insert(error.clone());
+                    }
+                    std::future::ready(Ok::<_, Infallible>(response))
+                }));
                 service
                     .oneshot(
                         Request::builder()

@@ -24,7 +24,8 @@ pub mod packet_handler_v6;
 mod rpc;
 pub mod util;
 
-use ::rpc::forge_tls_client::ForgeClientConfig;
+use ::rpc::carbide_tls_client::CarbideClientConfig;
+use carbide_instrument::Instrumentation;
 use carbide_rpc_utils::dhcp::{
     DhcpConfig, DhcpDataError, DhcpV4Config, DhcpV6ServerId, HostConfig, ServiceConfig,
 };
@@ -69,10 +70,11 @@ fn stateful_lifetimes(dhcp_config: &DhcpConfig) -> Result<(u32, u32), DhcpError>
 /// Runtime configuration shared by the DHCPv4 and DHCPv6 packet paths.
 #[derive(Debug, Clone)]
 pub struct Config {
+    pub(crate) instrumentation: Instrumentation,
     pub(crate) dhcp_config: DhcpConfig,
     pub(crate) host_config: Option<HostConfig>,
     pub(crate) relay_response_port: u16,
-    pub(crate) forge_client_config: ForgeClientConfig,
+    pub(crate) carbide_client_config: CarbideClientConfig,
     pub(crate) service_config: ServiceConfig,
     pub(crate) reply_retirement: ReplyRetirement,
 }
@@ -120,6 +122,11 @@ impl ReplyRetirement {
 }
 
 impl Config {
+    /// Returns the Event destination shared by this generation and its prepared replies.
+    pub fn instrumentation(&self) -> &Instrumentation {
+        &self.instrumentation
+    }
+
     /// `ipv4` returns this generation's DHCPv4 settings, or `None` when
     /// DHCPv4 is disabled. Incomplete IPv4 configuration is an error.
     pub fn ipv4(&self) -> Result<Option<DhcpV4Config>, DhcpDataError> {
@@ -138,18 +145,20 @@ impl Config {
         stateful_lifetimes(&self.dhcp_config)
     }
 
-    /// Build one immutable server configuration for a listener generation.
+    /// Builds one immutable listener generation with the supplied Event instrumentation.
     pub fn new(
         dhcp_config: DhcpConfig,
         host_config: Option<HostConfig>,
         relay_response_port: u16,
-        forge_client_config: ForgeClientConfig,
+        carbide_client_config: CarbideClientConfig,
+        instrumentation: Instrumentation,
     ) -> Self {
         Self {
+            instrumentation,
             dhcp_config,
             host_config,
             relay_response_port,
-            forge_client_config,
+            carbide_client_config,
             service_config: ServiceConfig::default(),
             reply_retirement: ReplyRetirement::new(CancellationToken::new()),
         }

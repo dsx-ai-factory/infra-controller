@@ -39,8 +39,8 @@ const (
 	leases              = "/apis/coordination.k8s.io/v1"
 	core                = "/api/v1"
 	listPage            = 500
-	maxListItems        = 100_000
-	listTimeout         = maxListItems / listPage * time.Second // a second a page at the cap
+	maxListItems        = 200_000
+	listTimeout         = maxListItems / listPage * CallTimeout
 	maxReplyBytes       = 16 << 20
 	errorBodyWait       = time.Second // how long a non-2xx body is read for its reason
 	serviceAccountToken = "/var/run/secrets/kubernetes.io/serviceaccount/token"
@@ -435,7 +435,7 @@ func matServiceFrom(s corev1.Service) MatService {
 
 func podFrom(p corev1.Pod) PodInfo {
 	info := PodInfo{
-		Name: p.Name, Labels: p.Labels, Annotations: p.Annotations, Phase: string(p.Status.Phase),
+		Name: p.Name, UID: string(p.UID), Labels: p.Labels, Annotations: p.Annotations, Phase: string(p.Status.Phase),
 		CreatedAt: p.CreationTimestamp.UTC(), IP: p.Status.PodIP,
 	}
 	if p.CreationTimestamp.IsZero() {

@@ -499,7 +499,7 @@ func TestCreateInstanceTypeHandler_Handle(t *testing.T) {
 			},
 			wantErr:  false,
 			respCode: http.StatusBadRequest,
-			errMsg:   "Unsupported Device Type specified for GPU Capability",
+			errMsg:   "unsupported Device Type specified for GPU Capability",
 		},
 		{
 			name: "test create Instance Type API endpoint with unsupported Network device type",
@@ -514,7 +514,7 @@ func TestCreateInstanceTypeHandler_Handle(t *testing.T) {
 			},
 			wantErr:  false,
 			respCode: http.StatusBadRequest,
-			errMsg:   "Unsupported Device Type specified for Network Capability",
+			errMsg:   "unsupported Device Type specified for Network Capability",
 		},
 		{
 			name: "test create Instance Type API endpoint with device type on unsupported capability type",
@@ -529,7 +529,7 @@ func TestCreateInstanceTypeHandler_Handle(t *testing.T) {
 			},
 			wantErr:  false,
 			respCode: http.StatusBadRequest,
-			errMsg:   "Unsupported Device Type: DPU specified for Capability type CPU",
+			errMsg:   "unsupported Device Type: DPU specified for Capability type CPU",
 		},
 	}
 	for _, tt := range tests {
@@ -2309,7 +2309,7 @@ func TestUpdateInstanceTypeHandler_Handle(t *testing.T) {
 				},
 			},
 			wantRespCode: http.StatusBadRequest,
-			errMsg:       "Unsupported Device Type specified for GPU Capability",
+			errMsg:       "unsupported Device Type specified for GPU Capability",
 		},
 		{
 			name: "test Instance Type update fail with NVLink device type on Network capability",
@@ -2335,7 +2335,7 @@ func TestUpdateInstanceTypeHandler_Handle(t *testing.T) {
 				},
 			},
 			wantRespCode: http.StatusBadRequest,
-			errMsg:       "Unsupported Device Type specified for Network Capability",
+			errMsg:       "unsupported Device Type specified for Network Capability",
 		},
 		{
 			name: "test Instance Type update fail with device type on CPU capability",
@@ -2361,7 +2361,7 @@ func TestUpdateInstanceTypeHandler_Handle(t *testing.T) {
 				},
 			},
 			wantRespCode: http.StatusBadRequest,
-			errMsg:       "Unsupported Device Type: DPU specified for Capability type CPU",
+			errMsg:       "unsupported Device Type: DPU specified for Capability type CPU",
 		},
 		{
 			name: "test Instance Type update success with mixed capabilities including valid device types",

@@ -25,11 +25,13 @@ mod intrusion_events;
 mod leak_events;
 mod nmxc_domain_state;
 mod rack_leak;
+mod resource_status;
 pub use health_report::HealthReportProcessor;
 pub use intrusion_events::BmcIntrusionEventProcessor;
 pub use leak_events::LeakEventProcessor;
 pub use nmxc_domain_state::NmxcDomainStateProcessor;
 pub use rack_leak::RackLeakProcessor;
+pub use resource_status::ResourceStatusProcessor;
 
 use crate::HealthError;
 use crate::metrics::{ComponentMetrics, MetricsManager};

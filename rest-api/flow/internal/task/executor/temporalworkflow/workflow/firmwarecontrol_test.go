@@ -194,11 +194,29 @@ func TestFirmwareControlWorkflow(t *testing.T) {
 		Parameters: map[string]any{operationrules.ParamOperation: "power_on"},
 	}}
 
+	selectionReqInfo := rackReqInfo
+	selectionRule := *rackReqInfo.RuleDefinition
+	selectionRule.Steps = append([]operationrules.SequenceStep(nil), rackReqInfo.RuleDefinition.Steps...)
+	selectionReqInfo.RuleDefinition = &selectionRule
+	selectionRule.Steps[2].PreOperation = []operationrules.ActionConfig{powerAction}
+	selectionRule.Steps[2].PostOperation = []operationrules.ActionConfig{powerAction}
+
+	nvosReqInfo := rackReqInfo
+	nvosRule := *rackReqInfo.RuleDefinition
+	nvosRule.Steps = append([]operationrules.SequenceStep(nil), rackReqInfo.RuleDefinition.Steps...)
+	nvosReqInfo.RuleDefinition = &nvosRule
+	nvosRule.Steps[0].PreOperation = []operationrules.ActionConfig{powerAction}
+	nvosRule.Steps[0].PostOperation = []operationrules.ActionConfig{powerAction}
+
 	testCases := map[string]struct {
 		reqInfo         task.ExecutionInfo
 		info            *operations.FirmwareControlTaskInfo
 		activityError   error
 		expectError     bool
+		subsets         map[devicetypes.ComponentType][]string
+		skippedTypes    []string
+		noFirmware      bool
+		subSelection    *temporalworkflow.Version
 		versions        map[devicetypes.ComponentType]string
 		selection       *temporalworkflow.Version
 		computeStatus   report.Status
@@ -213,6 +231,32 @@ func TestFirmwareControlWorkflow(t *testing.T) {
 		postFailure     bool
 		wantStepErrors  map[string]string
 	}{
+		"bios skips powershelf including its power actions": {
+			reqInfo: selectionReqInfo, info: &operations.FirmwareControlTaskInfo{Operation: operations.FirmwareOperationUpgrade, SubTargets: []string{"bios"}},
+			versions:     map[devicetypes.ComponentType]string{devicetypes.ComponentTypeCompute: "", devicetypes.ComponentTypeNVSwitch: ""},
+			skippedTypes: []string{"PowerShelf"},
+		},
+		"nvos skips compute and powershelf including compute power actions": {
+			reqInfo: nvosReqInfo, info: &operations.FirmwareControlTaskInfo{Operation: operations.FirmwareOperationUpgrade, SubTargets: []string{"nvos"}},
+			versions:     map[devicetypes.ComponentType]string{devicetypes.ComponentTypeNVSwitch: ""},
+			skippedTypes: []string{"Compute", "PowerShelf"},
+		},
+
+		"mixed selections reach each child as only its applicable subset": {
+			reqInfo: rackReqInfo, info: &operations.FirmwareControlTaskInfo{Operation: operations.FirmwareOperationUpgrade, SubTargets: []string{"bmc", "psu"}},
+			versions: map[devicetypes.ComponentType]string{devicetypes.ComponentTypeCompute: "", devicetypes.ComponentTypeNVSwitch: "", devicetypes.ComponentTypePowerShelf: ""},
+			subsets:  map[devicetypes.ComponentType][]string{devicetypes.ComponentTypeCompute: {"bmc"}, devicetypes.ComponentTypeNVSwitch: {"bmc"}, devicetypes.ComponentTypePowerShelf: {"psu"}},
+		},
+		"invalid selection fails before any child or power action": {
+			reqInfo: selectionReqInfo, info: &operations.FirmwareControlTaskInfo{Operation: operations.FirmwareOperationUpgrade, SubTargets: []string{"bios", "typo"}},
+			expectError: true, noFirmware: true,
+		},
+		"existing parent retains unpartitioned child inputs": {
+			reqInfo: rackReqInfo, info: &operations.FirmwareControlTaskInfo{Operation: operations.FirmwareOperationUpgrade, SubTargets: []string{"bios"}},
+			versions:     map[devicetypes.ComponentType]string{devicetypes.ComponentTypeCompute: "", devicetypes.ComponentTypeNVSwitch: "", devicetypes.ComponentTypePowerShelf: ""},
+			subSelection: &legacySelection,
+		},
+
 		"legacy history schedules omitted component": {
 			reqInfo: task.ExecutionInfo{
 				TaskID: uuid.MustParse("00000000-0000-0000-0000-000000000001"), Components: firmwareTestComponents("comp1"),
@@ -424,6 +468,14 @@ func TestFirmwareControlWorkflow(t *testing.T) {
 		},
 	}
 
+	// The predecessor recorded a Compute child even with a Switch-only version
+	// mapping. Explicit subtargets must not change that recorded command stream.
+	legacyTargets := testCases["legacy history schedules omitted component"]
+	legacyTargetsInfo := *legacyTargets.info
+	legacyTargetsInfo.SubTargets = []string{"nvos"}
+	legacyTargets.info = &legacyTargetsInfo
+	testCases["recorded parent with explicit subtargets retains its child schedule"] = legacyTargets
+
 	for name, tc := range testCases {
 		t.Run(name, func(t *testing.T) {
 			if tc.history != "" {
@@ -455,6 +507,9 @@ func TestFirmwareControlWorkflow(t *testing.T) {
 			env.RegisterActivityWithOptions(mockGetPowerStatus, activity.RegisterOptions{
 				Name: activitypkg.NameGetPowerStatus,
 			})
+			if tc.subSelection != nil {
+				env.OnGetVersion(firmwareSubTargetSelectionChangeID, temporalworkflow.DefaultVersion, 1).Return(*tc.subSelection)
+			}
 			if tc.selection != nil {
 				env.OnGetVersion("firmware-layered-component-selection", temporalworkflow.DefaultVersion, 1).Return(*tc.selection)
 			}
@@ -473,6 +528,9 @@ func TestFirmwareControlWorkflow(t *testing.T) {
 					}
 					expectedInfo := *tc.info
 					expectedInfo.TargetVersion = version
+					if tc.subsets != nil {
+						expectedInfo.SubTargets = tc.subsets[componentType]
+					}
 					env.OnActivity(mockFirmwareControl, mock.Anything, target, expectedInfo).Return(nil).Once()
 				}
 			}
@@ -550,6 +608,29 @@ func TestFirmwareControlWorkflow(t *testing.T) {
 			}
 			if tc.versions != nil {
 				env.AssertExpectations(t)
+			}
+			if len(tc.skippedTypes) > 0 {
+				var result report.Report
+				require.NoError(t, json.Unmarshal(finalReport, &result))
+				for _, typ := range tc.skippedTypes {
+					found := false
+					for _, stage := range result.Stages {
+						for _, step := range stage.Steps {
+							if step.ComponentType == typ {
+								found = true
+								assert.Equal(t, report.StatusSkipped, step.Status)
+								assert.Zero(t, step.TotalComponents)
+							}
+						}
+					}
+					require.True(t, found)
+				}
+				env.AssertActivityNumberOfCalls(t, activitypkg.NameFirmwareControl, len(tc.versions))
+				env.AssertActivityNumberOfCalls(t, activitypkg.NamePowerControl, 0)
+			}
+			if tc.noFirmware {
+				env.AssertActivityNumberOfCalls(t, activitypkg.NameFirmwareControl, 0)
+				env.AssertActivityNumberOfCalls(t, activitypkg.NamePowerControl, 0)
 			}
 			if tc.computeStatus != "" {
 				require.NoError(t, env.GetWorkflowError())

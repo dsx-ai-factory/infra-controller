@@ -17,10 +17,9 @@
 
 //! Handler for RackState::Created.
 //!
-//! The rack stays in Created until the expected device counts (looked up
-//! from the config-file RackProfile via the rack's `rack_profile_id`
-//! column) match the actual device counts (machines, switches,
-//! power shelves with `rack_id` FK).
+//! The rack stays in Created until its switch count reaches the profile minimum.
+//! Compute and power shelf shortages are reported through rack health without
+//! blocking ingestion.
 
 use carbide_uuid::rack::RackId;
 use model::rack::RackState;
@@ -43,18 +42,10 @@ pub(crate) fn handle_created(
         }
     };
 
-    if component_counts.compute < capabilities.compute.count
-        || component_counts.switch < capabilities.switch.count
-        || component_counts.power_shelf < capabilities.power_shelf.count
-    {
+    if component_counts.switch < capabilities.switch.count {
         return Ok(StateHandlerOutcome::wait(format!(
-            "waiting for devices: compute={}/{}, switch={}/{}, power_shelf={}/{}",
-            component_counts.compute,
-            capabilities.compute.count,
-            component_counts.switch,
-            capabilities.switch.count,
-            component_counts.power_shelf,
-            capabilities.power_shelf.count,
+            "waiting for switches: switch={}/{}",
+            component_counts.switch, capabilities.switch.count,
         )));
     }
 
@@ -63,7 +54,7 @@ pub(crate) fn handle_created(
         compute_count = component_counts.compute,
         switch_count = component_counts.switch,
         power_shelf_count = component_counts.power_shelf,
-        "Rack has all expected devices (compute, switch, power_shelf). Transitioning to Discovering.",
+        "Rack has enough switches. Transitioning to Discovering.",
     );
     Ok(StateHandlerOutcome::transition(RackState::Discovering))
 }

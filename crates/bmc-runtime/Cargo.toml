@@ -27,12 +27,12 @@ repository.workspace = true
 async-trait = { workspace = true }
 bmc-drivers = { path = "../bmc-drivers" }
 bmc-platform = { path = "../bmc-platform" }
+carbide-api-model = { path = "../api-model", default-features = false }
 carbide-instrument = { path = "../instrument" }
 carbide-ipmi = { path = "../ipmi" }
 carbide-redfish = { path = "../redfish" }
 carbide-secrets = { path = "../secrets", default-features = false }
 carbide-utils = { path = "../utils", default-features = false }
-carbide-uuid = { path = "../uuid" }
 mac_address = { features = ["serde"], workspace = true }
 nv-redfish = { features = [
     "accounts",
@@ -51,6 +51,7 @@ thiserror = { workspace = true }
 tracing = { workspace = true }
 
 [dev-dependencies]
+arc-swap = { workspace = true }
 axum = { workspace = true }
 bmc-mock = { path = "../bmc-mock" }
 carbide-instrument = { path = "../instrument", features = ["test-support"] }

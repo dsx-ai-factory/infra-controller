@@ -55,7 +55,9 @@ impl Virsh<'_> {
         match state.trim() {
             "running" | "idle" | "blocked" | "paused" | "in shutdown" | "pmsuspended" => Ok(true),
             "shut off" | "crashed" => Ok(false),
-            state => eyre::bail!("virsh domstate returned an unknown domain state: {state}"),
+            state => {
+                eyre::bail!("virsh domstate returned an unknown domain state: {state}");
+            }
         }
     }
 

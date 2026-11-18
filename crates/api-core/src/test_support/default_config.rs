@@ -39,10 +39,11 @@ use model::resource_pool::{self};
 use regex::Regex;
 
 use crate::cfg::file::{
-    AuthConfig, CarbideConfig, DpaInterfaceStateControllerConfig, DpuConfig as InitialDpuConfig,
-    DsxExchangeEventBusConfig, EwEthersConfig, ExtensionServiceStateControllerConfig, FnnConfig,
-    IbPartitionStateControllerConfig, KmsConfig, ListenMode, MachineUpdater,
-    MeasuredBootMetricsCollectorConfig, MqttAuthConfig, NetworkSecurityGroupConfig,
+    AuthConfig, BmcBackend, CarbideConfig, DpaInterfaceStateControllerConfig, DpfInterfaceIdentity,
+    DpuConfig as InitialDpuConfig, DsxExchangeEventBusConfig, EwEthersConfig,
+    ExtensionServiceStateControllerConfig, FnnConfig, HostInterceptBridging,
+    HostRepresentorBridgingConfig, IbPartitionStateControllerConfig, KmsConfig, ListenMode,
+    MachineUpdater, MeasuredBootMetricsCollectorConfig, MqttAuthConfig, NetworkSecurityGroupConfig,
     NetworkSegmentStateControllerConfig, NodeAuthConfig, PowerShelfStateControllerConfig,
     RackStateControllerConfig, SecretsConfig, SpdmConfig, SpdmStateControllerConfig, SvpcConfig,
     SwitchStateControllerConfig, TracingConfig, VmaasConfig, VpcPeeringPolicy,
@@ -52,14 +53,9 @@ use crate::cfg::file::{
     default_max_find_by_ids, default_max_site_prefix_isolation_rules,
     default_max_site_prefixes_per_tenant, default_pxe_public_base_url, default_shutdown_timeout,
 };
-#[cfg(test)]
-use crate::cfg::file::{
-    DpfInterfaceIdentity, HostInterceptBridging, HostRepresentorBridgingConfig,
-};
 
 /// Returns the default configuration with one selected PF and the requested sparse DPF VFs.
-#[cfg(test)]
-pub(crate) fn with_dpf_intercept_topology(selected_vfs: &[u8]) -> CarbideConfig {
+pub fn with_dpf_intercept_topology(selected_vfs: &[u8]) -> CarbideConfig {
     let mut config = get();
     config.dpf.enabled = true;
 
@@ -155,8 +151,9 @@ pub fn get() -> CarbideConfig {
     CarbideConfig {
         default_tenant_routing_profile_type: "EXTERNAL".to_string(),
         enable_admin_ui: true,
-        web_ui_sidebar_tools: vec![],
-        web_ui_logs_link_template: String::new(),
+        web_ui: Default::default(),
+        deprecated_web_ui_sidebar_tools: None,
+        deprecated_web_ui_logs_link_template: None,
         log_history: Default::default(),
         node_auth: Default::default(),
         observability: Default::default(),
@@ -215,6 +212,7 @@ pub fn get() -> CarbideConfig {
         allow_bmc_basic_auth_fallback: false,
         allow_insecure_discovery: true,
         scout_boot_interface_correction_enabled: false,
+        maintenance_end_boot_config_recheck_enabled: false,
         initial_domain_name: Some("test.com".to_string()),
         sitename: Some("testsite".to_string()),
         initial_dpu_agent_upgrade_policy: None,
@@ -301,6 +299,7 @@ pub fn get() -> CarbideConfig {
         },
         host_models: host_firmware_example(),
         bmc_driver_rules: Vec::new(),
+        bmc_backend: BmcBackend::default(),
         firmware_global: FirmwareGlobal::test_default(),
         machine_updater: MachineUpdater {
             instance_autoreboot_period: None,
@@ -489,4 +488,19 @@ fn host_firmware_example() -> HashMap<String, Firmware> {
             },
         ),
     ])
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn test_default_config_vf_enabled() {
+        let config = super::get();
+        assert!(
+            config
+                .vmaas_config
+                .as_ref()
+                .map(|vc| vc.allow_instance_vf)
+                .unwrap_or(true)
+        );
+    }
 }

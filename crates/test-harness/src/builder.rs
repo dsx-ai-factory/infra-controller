@@ -103,16 +103,19 @@ impl TestHarnessBuilder {
         .await
         .expect("common pool creation must succeed");
 
+        let instrumentation = carbide_instrument::Instrumentation::new(test_meter.meter());
         let work_lock_manager_handle = db::work_lock_manager::start(
             &mut join_set,
             db_pool.clone(),
             work_lock_manager::KeepaliveConfig::default(),
+            instrumentation.clone(),
         )
         .await
         .expect("work_lock_manager failed to start: no available connections?");
 
         let api = f(
             TestApiBuilder::new(db_pool, common_pools, work_lock_manager_handle)
+                .with_instrumentation(instrumentation)
                 .with_resource_pool_registry(resource_pool_registry),
         )
         .with_metric_emitter(ApiMetricsEmitter::new(&test_meter.meter()))

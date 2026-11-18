@@ -17,9 +17,13 @@
 
 use std::fmt;
 use std::net::SocketAddr;
+use std::sync::Arc;
 
 use async_trait::async_trait;
-use bmc_platform::PlatformError;
+use bmc_platform::{AuthError, PlatformError};
+use carbide_secrets::credentials::{
+    BmcCredentialType, CredentialKey, CredentialReader, Credentials,
+};
 use mac_address::MacAddress;
 use nv_redfish::bmc_http::BmcCredentials;
 use serde::{Deserialize, Serialize};
@@ -133,9 +137,62 @@ pub trait RuntimeCredentialProvider: Send + Sync {
     async fn issue(&self, request: &CredentialRequest) -> Result<CredentialLease, PlatformError>;
 }
 
+/// Issues no Redfish credentials: nico-bmc-proxy authenticates upstream and
+/// strips any it receives, so Redfish connections never send the password.
+pub(crate) struct ProxyAuthenticated;
+
+#[async_trait]
+impl RuntimeCredentialProvider for ProxyAuthenticated {
+    async fn issue(&self, _request: &CredentialRequest) -> Result<CredentialLease, PlatformError> {
+        Ok(CredentialLease::new(BmcCredentials::anonymous()))
+    }
+}
+
+/// Issues the stored per-BMC root credentials for basic-auth connections.
+pub struct StoredRootCredentials {
+    credential_reader: Arc<dyn CredentialReader>,
+}
+
+impl StoredRootCredentials {
+    pub fn new(credential_reader: Arc<dyn CredentialReader>) -> Self {
+        Self { credential_reader }
+    }
+}
+
+#[async_trait]
+impl RuntimeCredentialProvider for StoredRootCredentials {
+    async fn issue(&self, request: &CredentialRequest) -> Result<CredentialLease, PlatformError> {
+        let key = CredentialKey::BmcCredentials {
+            credential_type: BmcCredentialType::BmcRoot {
+                bmc_mac_address: request.bmc_mac_address(),
+            },
+        };
+        match self.credential_reader.get_credentials(&key).await {
+            Ok(Some(Credentials::UsernamePassword { username, password }))
+                if !password.is_empty() =>
+            {
+                Ok(CredentialLease::new(BmcCredentials::new(
+                    username, password,
+                )))
+            }
+            Ok(_) => Err(PlatformError::Auth(AuthError::CredentialsUnavailable)),
+            Err(error) => {
+                tracing::warn!(
+                    bmc = %request.bmc_address(),
+                    caller = request.caller_identity(),
+                    error = %error,
+                    "BMC root credentials could not be read"
+                );
+                Err(PlatformError::Auth(AuthError::CredentialsUnavailable))
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::RecordingStore;
 
     #[test]
     fn credential_lease_debug_is_fully_redacted() {
@@ -148,6 +205,38 @@ mod tests {
         assert!(debug.contains("[REDACTED]"));
         assert!(!debug.contains("operator"));
         assert!(!debug.contains("secret-value"));
+    }
+
+    #[tokio::test]
+    async fn stored_root_credentials_require_a_non_empty_password() {
+        let request = CredentialRequest::new(
+            "machine-controller".to_string(),
+            MacAddress::new([2, 0, 0, 0, 0, 1]),
+            "192.0.2.10:443".parse().expect("valid socket address"),
+            RuntimeAuthMode::Basic,
+        );
+        let unavailable = Err(PlatformError::Auth(AuthError::CredentialsUnavailable));
+        let cases = [
+            (
+                "stored",
+                Ok(Some(Credentials::new("root", "secret"))),
+                Ok(()),
+            ),
+            ("missing", Ok(None), unavailable.clone()),
+            (
+                "empty password",
+                Ok(Some(Credentials::new("root", ""))),
+                unavailable.clone(),
+            ),
+            ("unreadable", Err(()), unavailable),
+        ];
+        for (name, stored, expected) in cases {
+            let issued = StoredRootCredentials::new(Arc::new(RecordingStore::new(stored)))
+                .issue(&request)
+                .await
+                .map(drop);
+            assert_eq!(issued, expected, "{name}");
+        }
     }
 
     #[test]

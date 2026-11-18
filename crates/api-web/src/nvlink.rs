@@ -30,7 +30,7 @@ use rpc::forge::forge_server::Forge;
 use uuid::Uuid;
 
 use super::pagination::{self, PageContext, PaginationParams};
-use super::{Base, health};
+use super::{Base, filters, health};
 
 #[derive(serde::Serialize, Template)]
 #[template(path = "nvlink_partition_show.html")]
@@ -516,7 +516,7 @@ async fn fetch_logical_partitions(
         }
 
         let show_lp = ShowLogicalPartition {
-            partition: lp.clone(),
+            partition: lp,
             physical_partitions: show_physical_partitions,
         };
         show_partitions.push(show_lp);

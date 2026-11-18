@@ -18,7 +18,7 @@ nico-admin-cli vpc change-routing-profile [--if-version-match]
 ## DESCRIPTION
 
 Change a supported FNN VPC between configured profiles with opposite
-internal settings. Core validates the destination against the tenants
+internal settings. Core validates the destination against the tenant's
 access tier and retains the previous VNI until an explicit release. A
 Core commit does not prove DPU/fabric convergence or guarantee that a
 later change back will be accepted.
@@ -90,7 +90,7 @@ Sort output by specified field
 
 `-h, --help`
 
-Print help (see a summary with -h)
+Print help (see a summary with '-h')
 
 `<ID>`
 
@@ -98,7 +98,7 @@ VPC ID whose routing profile will change
 
 `<ROUTING_PROFILE_TYPE>`
 
-Nonempty destination profile name from the sites Core configuration
+Nonempty destination profile name from the site's Core configuration
 
 ## Examples
 

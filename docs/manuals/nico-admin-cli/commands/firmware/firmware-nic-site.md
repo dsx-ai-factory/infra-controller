@@ -19,7 +19,7 @@ Manage site-wide NIC firmware profile selections by exact
 part-number/PSID pair. A site selection applies only when no card,
 machine, or allocation selection exists for a device. It selects a live
 profile, not a pinned profile revision; the selection version is
-independent of the profiles edit version. These commands do not change
+independent of the profile's edit version. These commands do not change
 profile definitions, fetch artifacts, or start firmware updates. Finish
 upgrading all Core replicas before assigning site selections.
 
@@ -53,7 +53,7 @@ Sort output by specified field
 
 `-h, --help`
 
-Print help (see a summary with -h)
+Print help (see a summary with '-h')
 
 ## Examples
 

@@ -6,6 +6,7 @@ package store
 import (
 	"context"
 	"errors"
+	"fmt"
 	"math"
 	"net/http"
 	"strings"
@@ -762,6 +763,61 @@ func TestTheAllocatableCapabilityIsReadAndEnforced(t *testing.T) {
 			} else {
 				eq(t, []any{errors.As(err, new(history.Unavailable)), queried}, []any{true, true}, flag, err)
 			}
+		})
+	}
+}
+
+func TestProbeDemandCalibration(t *testing.T) {
+	for _, bad := range []string{"healthy", "late", "rate", "gap", "age", "reset", "edge", "missing-rest"} {
+		t.Run(fmt.Sprint(bad), func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				s := newSite(t, DefaultOptions, Config{})
+				now := time.Now()
+				for _, api := range []string{"nico-api", "nico-rest-api"} {
+					if bad == "missing-rest" && api == "nico-rest-api" {
+						continue
+					}
+					for i, offset := range []int64{-86304, -56304, -26296} {
+						if bad == "late" {
+							offset -= 3712
+						}
+						if bad == "age" {
+							offset -= 5000
+						}
+						if bad == "edge" {
+							offset = []int64{-90500, -59600, -29000}[i]
+						}
+						if bad == "gap" {
+							offset = []int64{-90000, -60000, 0}[i]
+						}
+						value := float64(i) * 5
+						if bad == "rate" && api == "nico-api" {
+							value = float64(i) * 60
+						}
+						if bad == "reset" && i == 2 {
+							value = 0
+						}
+						if api == "nico-api" {
+							s.store.Add("carbide_db_pool_idle_conns", now.Add(time.Duration(offset)*time.Millisecond).UnixMilli(), []float64{510, 219, 822}[i], "pod", "api-1")
+						}
+						s.store.Add("carbide_site_health_probe_calls_total", now.Add(time.Duration(offset)*time.Millisecond).UnixMilli(), value, "job", "j", "namespace", "ns", "api", api, "call", "source", "result", "ok")
+					}
+				}
+				if _, e := s.client.PoolHealthy(context.Background(), now.Add(time.Minute), map[string]string{"pod": "api-1"}); (e == nil) != (bad != "gap" && bad != "age") {
+					t.Fatalf("pool=%v", e)
+				}
+				extras := []float64{0}
+				if bad == "healthy" {
+					extras = []float64{0, .5, .8, .9, -1, math.NaN(), math.Inf(1)}
+				}
+				for _, extra := range extras {
+					err := s.client.ProbeDemand(context.Background(), now.Add(time.Minute), time.Minute, extra)
+					if (err != nil) != (bad != "healthy" && bad != "late" && bad != "edge" || extra+10.0/60.008 >= 1 || !(extra >= 0 && extra < 1)) {
+						t.Fatalf("extra=%v demand=%v", extra, err)
+					}
+
+				}
+			})
 		})
 	}
 }

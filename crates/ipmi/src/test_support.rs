@@ -19,7 +19,6 @@ use std::net::SocketAddr;
 
 use async_trait::async_trait;
 use carbide_secrets::credentials::CredentialKey;
-use carbide_uuid::machine::MachineId;
 
 use crate::IPMITool;
 
@@ -29,7 +28,6 @@ pub(super) struct IPMIToolTestImpl {}
 impl IPMITool for IPMIToolTestImpl {
     async fn restart(
         &self,
-        _machine_id: &MachineId,
         _bmc_address: SocketAddr,
         _legacy_boot: bool,
         _credential_key: &CredentialKey,

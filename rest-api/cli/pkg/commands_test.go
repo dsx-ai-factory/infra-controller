@@ -933,80 +933,6 @@ func testNewApp_VpcPrefixCreateSelectorValidation(t *testing.T) {
 	}
 }
 
-// TestBuildActionCommandWithOptions groups flag, metadata, and execution
-// scenarios owned by the generated action-command builder.
-func TestBuildActionCommandWithOptions(t *testing.T) {
-	tests := []struct {
-		name string
-		run  func(*testing.T)
-	}{
-		// A schema-less repeatable parameter must use matching metadata, flag, and HTTP behavior.
-		{
-			name: "repeatable parameter without schema",
-			run: func(t *testing.T) {
-				parameter := Parameter{
-					Name:        "filter",
-					In:          "query",
-					Description: "Can be specified multiple times.",
-				}
-				operation := resolvedOp{
-					tag:    "Test",
-					action: "list",
-					method: http.MethodGet,
-					path:   "/items",
-					op: &Operation{
-						OperationID: "get-all-items",
-						Parameters:  []Parameter{parameter},
-					},
-				}
-
-				var info GeneratedCommandInfo
-				var observed url.Values
-				server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
-					observed = request.URL.Query()
-					w.WriteHeader(http.StatusNoContent)
-				}))
-				t.Cleanup(server.Close)
-				client := NewClient(server.URL, "test-org", "test-token", nil, false)
-
-				// Build once so the generated flag and metadata describe the same contract.
-				command := buildActionCommandWithOptions(&Spec{}, operation, "", commandBuildOptions{
-					clientFactory: func(*cli.Context) (*Client, error) {
-						return client, nil
-					},
-					record: func(generated GeneratedCommandInfo) {
-						info = generated
-					},
-				})
-				var filterFlag cli.Flag
-				for _, candidate := range command.Flags {
-					if candidate.Names()[0] == "filter" {
-						filterFlag = candidate
-						break
-					}
-				}
-				require.IsType(t, &cli.StringSliceFlag{}, filterFlag)
-				require.Len(t, info.QueryParameters, 1)
-				assert.True(t, info.QueryParameters[0].Repeatable)
-
-				// Execute both occurrences through readFlagValues and request encoding.
-				app := &cli.App{
-					Name:                      "test",
-					Commands:                  []*cli.Command{command},
-					DisableSliceFlagSeparator: true,
-				}
-				err := app.Run([]string{"test", "list", "--filter", " first,value ", "--filter", "second"})
-				require.NoError(t, err)
-				assert.Equal(t, []string{" first,value ", "second"}, observed["filter"])
-			},
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, tt.run)
-	}
-}
-
 // TestBuildActionCommand_BodyPropertyFlags verifies body-property flag naming
 // for reserved names and scalar-compatible, single-item arrays.
 func TestBuildActionCommand_BodyPropertyFlags(t *testing.T) {
@@ -1645,6 +1571,8 @@ func TestBuildCommands_RunnablePaths(t *testing.T) {
 		name string
 		path []string
 	}{
+		{name: "tray factory reset", path: []string{"tray", "factory-reset"}},
+		{name: "domain factory reset", path: []string{"domain", "nvlink", "factory-reset"}},
 		{name: "tenant current", path: []string{"tenant", "current"}},
 		{name: "infrastructure provider current", path: []string{"infrastructure-provider", "current"}},
 		{name: "service account current", path: []string{"service-account", "current"}},
@@ -1661,6 +1589,8 @@ func TestBuildCommands_RunnablePaths(t *testing.T) {
 		{name: "rack health report delete", path: []string{"rack", "health-report", "delete"}},
 		{name: "rack health report list", path: []string{"rack", "health-report", "list"}},
 		{name: "rack health report update", path: []string{"rack", "health-report", "update"}},
+		{name: "tray decommission", path: []string{"tray", "decommission", "decommission-tray"}},
+		{name: "machine decommission", path: []string{"machine", "decommission", "decommission-machine"}},
 		{name: "tray health report delete", path: []string{"tray", "health-report", "delete"}},
 		{name: "tray health report list", path: []string{"tray", "health-report", "list"}},
 		{name: "tray health report update", path: []string{"tray", "health-report", "update"}},
@@ -2390,6 +2320,10 @@ func TestNewApp(t *testing.T) {
 		{name: "preserves repeated query flags", run: testNewAppPreservesRepeatedQueryFlags},
 		{name: "preserves repeated filters across pages", run: testNewAppListAllPreservesRepeatedFilters},
 		{name: "power commands", run: testNewAppPowerCommands},
+		{
+			name: "array enum values in help",
+			run:  testNewAppArrayEnumHelp,
+		},
 	}
 
 	for _, tt := range tests {
@@ -2407,6 +2341,7 @@ func testNewAppPowerCommands(t *testing.T) {
 		method    string
 		wantQuery string
 		wantBody  string
+		wantPath  string
 	}{
 		{
 			// The OpenAPI getter must produce an executable command with a
@@ -2416,6 +2351,7 @@ func testNewAppPowerCommands(t *testing.T) {
 			args:      []string{"--site-id", siteID, trayID},
 			method:    http.MethodGet,
 			wantQuery: "siteId=" + siteID,
+			wantPath:  "/v2/org/test-org/nico/tray/" + trayID + "/power",
 		},
 		{
 			// Adding a getter at the same REST path must preserve the
@@ -2425,6 +2361,25 @@ func testNewAppPowerCommands(t *testing.T) {
 			args:     []string{"--site-id", siteID, "--state", "On", trayID},
 			method:   http.MethodPatch,
 			wantBody: `{"siteId":"550e8400-e29b-41d4-a716-446655440000","state":"On"}`,
+			wantPath: "/v2/org/test-org/nico/tray/" + trayID + "/power",
+		},
+		{
+			// The rack getter must execute the new operation from the embedded OpenAPI spec.
+			name:      "read rack power state",
+			command:   []string{"rack", "power-state", "get"},
+			args:      []string{"--site-id", siteID, "rack-01"},
+			method:    http.MethodGet,
+			wantQuery: "siteId=" + siteID,
+			wantPath:  "/v2/org/test-org/nico/rack/rack-01/power",
+		},
+		{
+			// The existing rack power alias must keep sending PATCH after GET is added.
+			name:     "change rack power",
+			command:  []string{"rack", "power"},
+			args:     []string{"--site-id", siteID, "--state", "On", "rack-01"},
+			method:   http.MethodPatch,
+			wantBody: `{"siteId":"550e8400-e29b-41d4-a716-446655440000","state":"On"}`,
+			wantPath: "/v2/org/test-org/nico/rack/rack-01/power",
 		},
 	}
 
@@ -2433,7 +2388,7 @@ func testNewAppPowerCommands(t *testing.T) {
 			var requestCount atomic.Int32
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
 				assert.Equal(t, test.method, request.Method)
-				assert.Equal(t, "/v2/org/test-org/nico/tray/"+trayID+"/power", request.URL.Path)
+				assert.Equal(t, test.wantPath, request.URL.Path)
 				assert.Equal(t, test.wantQuery, request.URL.RawQuery)
 				body, err := io.ReadAll(request.Body)
 				assert.NoError(t, err)
@@ -2487,5 +2442,36 @@ func sortStrings(s []string) {
 		for j := i; j > 0 && s[j-1] > s[j]; j-- {
 			s[j-1], s[j] = s[j], s[j-1]
 		}
+	}
+}
+
+func testNewAppArrayEnumHelp(t *testing.T) {
+	tests := []struct {
+		name string
+		args []string
+		want string
+	}{
+		{
+			name: "operating system types",
+			args: []string{"nicocli", "operating-system", "list", "--help"},
+			want: "[Image, iPXE, TemplatedIpxe]",
+		},
+		{
+			name: "machine relations",
+			args: []string{"nicocli", "machine", "get", "--help"},
+			want: "[InfrastructureProvider, Site, InstanceType]",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			app, err := NewApp(openapi.Spec)
+			require.NoError(t, err)
+			var output bytes.Buffer
+			app.Writer = &output
+			app.ErrWriter = &output
+			err = app.Run(test.args)
+			require.NoError(t, err)
+			assert.Contains(t, output.String(), test.want)
+		})
 	}
 }

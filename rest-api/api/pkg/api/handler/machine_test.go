@@ -2543,7 +2543,7 @@ func TestMachineHandler_Update(t *testing.T) {
 					machineRepairResetReady(t)
 				},
 				verifyOnlineRepair: func(t *testing.T) {
-					inst, gerr := isd.GetByID(context.Background(), nil, iOnlineRepairReady.ID, nil)
+					inst, gerr := isd.GetByID(context.Background(), nil, iOnlineRepairReady.ID, nil, false)
 					require.NoError(t, gerr)
 					assert.Equal(t, cdbm.InstanceStatusRepairing, inst.Status)
 					assert.Equal(t, "false", inst.Labels[model.InstanceLabelOnlineRepairAllowAutoDeletion])
@@ -2569,7 +2569,7 @@ func TestMachineHandler_Update(t *testing.T) {
 					machineRepairResetReady(t)
 				},
 				verifyOnlineRepair: func(t *testing.T) {
-					inst, gerr := isd.GetByID(context.Background(), nil, iOnlineRepairReady.ID, nil)
+					inst, gerr := isd.GetByID(context.Background(), nil, iOnlineRepairReady.ID, nil, false)
 					require.NoError(t, gerr)
 					assert.Equal(t, cdbm.InstanceStatusRepairing, inst.Status)
 					assert.Equal(t, "true", inst.Labels[model.InstanceLabelOnlineRepairAllowAutoDeletion])
@@ -2595,7 +2595,7 @@ func TestMachineHandler_Update(t *testing.T) {
 					machineRepairSetRepairing(t)
 				},
 				verifyOnlineRepair: func(t *testing.T) {
-					inst, gerr := isd.GetByID(context.Background(), nil, iOnlineRepairReady.ID, nil)
+					inst, gerr := isd.GetByID(context.Background(), nil, iOnlineRepairReady.ID, nil, false)
 					require.NoError(t, gerr)
 					assert.Equal(t, cdbm.InstanceStatusReady, inst.Status)
 					_, has := inst.Labels[model.InstanceLabelOnlineRepairAllowAutoDeletion]
@@ -2630,7 +2630,7 @@ func TestMachineHandler_Update(t *testing.T) {
 					require.NoError(t, uerr)
 				},
 				verifyOnlineRepair: func(t *testing.T) {
-					inst, gerr := isd.GetByID(context.Background(), nil, iOnlineRepairReady.ID, nil)
+					inst, gerr := isd.GetByID(context.Background(), nil, iOnlineRepairReady.ID, nil, false)
 					require.NoError(t, gerr)
 					assert.Equal(t, cdbm.InstanceStatusReady, inst.Status)
 					_, has := inst.Labels[model.InstanceLabelOnlineRepairAllowAutoDeletion]
@@ -2672,7 +2672,7 @@ func TestMachineHandler_Update(t *testing.T) {
 				},
 				verifyOnlineRepair: func(t *testing.T) {
 					t.Helper()
-					inst, gerr := isd.GetByID(context.Background(), nil, iOnlineRepairReady.ID, nil)
+					inst, gerr := isd.GetByID(context.Background(), nil, iOnlineRepairReady.ID, nil, false)
 					require.NoError(t, gerr)
 					assert.Equal(t, cdbm.InstanceStatusReady, inst.Status)
 					_, has := inst.Labels[model.InstanceLabelOnlineRepairAllowAutoDeletion]
@@ -2704,7 +2704,7 @@ func TestMachineHandler_Update(t *testing.T) {
 					machineRepairResetReady(t)
 				},
 				verifyOnlineRepair: func(t *testing.T) {
-					inst, gerr := isd.GetByID(context.Background(), nil, iOnlineRepairReady.ID, nil)
+					inst, gerr := isd.GetByID(context.Background(), nil, iOnlineRepairReady.ID, nil, false)
 					require.NoError(t, gerr)
 					assert.Equal(t, cdbm.InstanceStatusRepairing, inst.Status)
 					assertOnlineRepairLatestStatusDetail(t, iOnlineRepairReady.ID, cdbm.InstanceStatusRepairing, "Instance is currently being repaired")
@@ -3489,7 +3489,7 @@ func TestMachineHandler_Delete(t *testing.T) {
 					require.NotEmpty(t, machineInterfaces)
 				}
 				if tc.hasAttachedInstance {
-					_, err = cdbm.NewInstanceDAO(fixture.DBSession).GetByID(context.Background(), nil, linkedInstanceID, nil)
+					_, err = cdbm.NewInstanceDAO(fixture.DBSession).GetByID(context.Background(), nil, linkedInstanceID, nil, false)
 					require.NoError(t, err)
 					interfaces, _, err := cdbm.NewInterfaceDAO(fixture.DBSession).GetAll(context.Background(), nil, cdbm.InterfaceFilterInput{InstanceIDs: []uuid.UUID{linkedInstanceID}}, cdbp.PageInput{Limit: cutil.GetPtr(cdbp.TotalLimit)}, nil)
 					require.NoError(t, err)
@@ -3677,7 +3677,7 @@ func TestMachineHandler_Delete(t *testing.T) {
 		assert.True(t, retained.IsForceDeletionComplete)
 		assert.True(t, retained.IsForceDeletionRequested)
 		assert.False(t, retained.IsUsableByTenant)
-		_, err = cdbm.NewInstanceDAO(fixture.DBSession).GetByID(ctx, nil, instance.ID, nil)
+		_, err = cdbm.NewInstanceDAO(fixture.DBSession).GetByID(ctx, nil, instance.ID, nil, false)
 		require.NoError(t, err, "force deletion and present inventory preserve the owner Instance")
 		replay := fixture.Request(t, handler.Handle, http.MethodDelete, forceQuery, nil, "")
 		require.Equal(t, http.StatusAccepted, replay.Code, replay.Body.String())

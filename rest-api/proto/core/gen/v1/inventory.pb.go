@@ -2184,11 +2184,9 @@ func (x *VpcPrefixInventory) GetInventoryPage() *InventoryPage {
 }
 
 // SitePrefixInventory reports one message from a periodic SitePrefix inventory
-// run. Every SUCCESS message uses the same timestamp and repeats the complete
-// item_ids set in SitePrefix ID order. In a complete nonempty run, the
-// site_prefixes payloads are ordered, disjoint, and together contain exactly
-// one record matching each item_ids entry. Receipt of the final page and that
-// exact union make the run complete. total_pages on a non-final page is an
+// run. Every SUCCESS message uses the same timestamp. Only the final page
+// carries the complete item_ids set in SitePrefix ID order. The site_prefixes
+// payloads are ordered and disjoint. total_pages on a non-final page is an
 // estimate and may increase if later messages must be smaller.
 //
 // An unpaged FAILED message represents a collection failure detected before
@@ -2197,9 +2195,9 @@ func (x *VpcPrefixInventory) GetInventoryPage() *InventoryPage {
 // An empty SUCCESS run is one message with current_page 1, zero total_pages and
 // total_items, page_size set to the effective configured publish page size, and
 // empty lists. Omitted repeated fields and empty lists have the same meaning.
-// Receivers must leave REST IP Block records unchanged for a FAILED message.
-// They may process SitePrefixes present on SUCCESS pages, but must not treat
-// any ID as missing until the run is complete.
+// Receivers leave REST IP Block records unchanged for FAILED messages, process
+// each SUCCESS page on arrival, and reconcile absence from the final page's
+// item_ids without requiring receipt of every earlier page.
 type SitePrefixInventory struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// SitePrefixes included in this page
@@ -2210,7 +2208,7 @@ type SitePrefixInventory struct {
 	InventoryStatus InventoryStatus `protobuf:"varint,3,opt,name=inventory_status,json=inventoryStatus,proto3,enum=inventory.InventoryStatus" json:"inventory_status,omitempty"`
 	// Message describing the inventory status
 	StatusMsg string `protobuf:"bytes,4,opt,name=status_msg,json=statusMsg,proto3" json:"status_msg,omitempty"`
-	// Page information, including every SitePrefix ID in a successful run
+	// Page information; only the final page includes every SitePrefix ID
 	InventoryPage *InventoryPage `protobuf:"bytes,5,opt,name=inventory_page,json=inventoryPage,proto3" json:"inventory_page,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
