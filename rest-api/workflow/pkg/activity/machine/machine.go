@@ -833,6 +833,12 @@ func (mm *ManageMachine) UpdateMachinesInDB(ctx context.Context, siteIDStr strin
 		}
 
 		for _, existingMachine := range missingMachines {
+			// A Machine created within the inventory interval, such as by the next cycle's first page,
+			// can be absent from an inventory the Site collected before it existed.
+			if site.IsTimeWithinStaleInventoryThreshold(existingMachine.Created) {
+				continue
+			}
+
 			// Machine not found in reported inventory, set status to error and mark as missing
 			slogger := logger.With().Str("Machine ID", existingMachine.ID).Logger()
 

@@ -289,8 +289,13 @@ impl StateHandler for IBPartitionStateHandler {
                                 };
 
                                 let mut txn = ctx.services.db_pool.begin().await?;
-                                db::ib_partition::update_status(state.id, &state.status, &mut txn)
-                                    .await?;
+                                db::ib_partition::update_status(
+                                    state.id,
+                                    &state.status,
+                                    &mut txn,
+                                    &ctx.services.instrumentation,
+                                )
+                                .await?;
 
                                 if let Err(e) = ib_result {
                                     return Ok(StateHandlerOutcome::transition(

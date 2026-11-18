@@ -278,9 +278,23 @@ func (c *Client) FamilyStatus(ctx context.Context, until time.Time, family probe
 // timeout. A second summary waits for the one in flight: a wait that ends
 // first is history.Busy.
 func (c *Client) Summarize(ctx context.Context, until time.Time, f probeapi.Filter, p probeapi.SummaryParams) (probeapi.SummaryResponse, error) {
+	return c.summarize(ctx, until, f, p, 0)
+}
+
+// FirmwareSummary pins both configuration revision series for the whole window.
+func (c *Client) FirmwareSummary(ctx context.Context, until time.Time, f probeapi.Filter, p probeapi.SummaryParams, revision uint64) (probeapi.SummaryResponse, error) {
+	if f.FirmwareComponent == nil || revision == 0 {
+		return probeapi.SummaryResponse{}, unavailable("firmware revision/filter missing")
+	}
+	return c.summarize(ctx, until, f, p, revision)
+}
+
+func (c *Client) summarize(ctx context.Context, until time.Time, f probeapi.Filter, p probeapi.SummaryParams, revision uint64) (probeapi.SummaryResponse, error) {
 	var none probeapi.SummaryResponse
 	until = c.end(until)
-	hc := history.Context{Probe: c.meta, Now: time.Now, Until: until}
+	meta := c.meta
+	meta.FirmwareRevision = revision
+	hc := history.Context{Probe: meta, Now: time.Now, Until: until}
 	r, err := history.Prepare(ctx, hc, f, p, c.opts.MaxWindow)
 	if err != nil {
 		return none, err
@@ -389,6 +403,9 @@ func (c *Client) read(ctx context.Context, hc history.Context, r *history.Reques
 	for _, need := range r.Spec.Needs {
 		capability := need.Capability()
 		queries = append(queries, query{names: []string{capability.Gauge}, matchers: c.selector([3]string{capability.Label, "=", capability.Value})})
+	}
+	if r.Spec.Metric == "hosts_firmware" {
+		queries = append(queries, query{names: []string{probeapi.Prefix + "firmware_config_revision", probeapi.Prefix + "host_firmware_config_revision", probeapi.MetricSweepStart, probeapi.MetricSweepComplete, probeapi.Prefix + "last_attempt_failed"}, matchers: c.selector([3]string{"family", "=~", "host|config_nico_api|"})})
 	}
 	g := gathered{series: make([]map[string]*history.RawSeries, len(queries)), at: make([]map[string]map[int64]float64, len(queries))}
 	for i := range queries {

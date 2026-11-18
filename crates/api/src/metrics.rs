@@ -84,6 +84,18 @@ pub(super) fn register_runtime_metrics(meter: &Meter, spancount_reader: Option<S
     register_tokio_runtime_metrics(meter, tokio::runtime::Handle::current());
 }
 
+/// Exports `carbide_api_ready` from the same controller `/ready` reads, so the gauge
+/// that alerts and dashboards use cannot disagree with what Kubernetes sees.
+pub(super) fn register_api_ready_gauge(meter: &Meter, health_controller: HealthController) {
+    meter
+        .u64_observable_gauge("carbide_api_ready")
+        .with_description("Whether the NICo API is ready to serve requests; mirrors /ready")
+        .with_callback(move |observer| {
+            observer.observe(u64::from(health_controller.is_ready()), &[]);
+        })
+        .build();
+}
+
 fn admission_duration_histogram_view() -> carbide_metrics_utils::Result<OtelView> {
     carbide_metrics_utils::new_view(
         "carbide_api_admission_*_duration",
@@ -201,6 +213,24 @@ mod tests {
     use prometheus::{Encoder, TextEncoder};
 
     use super::*;
+
+    /// The gauge follows the controller `/ready` reads, in both directions.
+    #[test]
+    fn api_ready_gauge_follows_health_controller() {
+        let test_meter = TestMeter::default();
+        let health_controller = HealthController::new();
+        health_controller.set_ready(false);
+        register_api_ready_gauge(&test_meter.meter(), health_controller.clone());
+
+        for (ready, expected) in [(false, "0"), (true, "1"), (false, "0")] {
+            health_controller.set_ready(ready);
+            assert_eq!(
+                test_meter.formatted_metric("carbide_api_ready").as_deref(),
+                Some(expected),
+                "ready={ready}"
+            );
+        }
+    }
 
     /// The worker count and one busy-time series per worker are exported.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

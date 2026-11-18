@@ -20,7 +20,7 @@ This file contains a list of metrics exported by NVIDIA Infra Controller (NICo).
 <tr><td>carbide_api_db_span_query_time_milliseconds</td><td>histogram</td><td>Total time the request spent inside a span on database transactions</td></tr>
 <tr><td>carbide_api_grpc_server_duration_milliseconds</td><td>histogram</td><td>Processing time for a request on the carbide API server</td></tr>
 <tr><td>carbide_api_host_admin_address_reconcile_failures_total</td><td>counter</td><td>Number of host admin address reconciliations that failed after a discovery committed</td></tr>
-<tr><td>carbide_api_ready</td><td>gauge</td><td>Whether the NICo API is running</td></tr>
+<tr><td>carbide_api_ready</td><td>gauge</td><td>Whether the NICo API is ready to serve requests; mirrors /ready</td></tr>
 <tr><td>carbide_api_secrets_request_duration_milliseconds</td><td>histogram</td><td>Duration of Postgres secrets operations, in milliseconds.</td></tr>
 <tr><td>carbide_api_secrets_requests_failed_total</td><td>counter</td><td>Number of failed Postgres secrets operations.</td></tr>
 <tr><td>carbide_api_secrets_requests_succeeded_total</td><td>counter</td><td>Number of successful Postgres secrets operations.</td></tr>

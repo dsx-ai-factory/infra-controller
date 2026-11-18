@@ -18,6 +18,7 @@
 use std::collections::BTreeMap;
 
 use carbide_uuid::extension_service::ExtensionServiceId;
+use carbide_uuid::machine::DpuMachineId;
 use chrono::prelude::*;
 use config_version::{ConfigVersion, Versioned};
 use mac_address::MacAddress;
@@ -64,6 +65,23 @@ pub enum ServiceVpcAddressFamily {
 pub struct ServiceVpcInterfaceRequirement {
     /// Address family used by this interface.
     pub address_family: ServiceVpcAddressFamily,
+}
+
+/// Retains desired DPU exclusions across attachment cleanup and DPF chain recreation.
+#[derive(Debug, Clone, PartialEq, Eq, sqlx::FromRow)]
+pub struct ExtensionServiceChainSelector {
+    /// Extension service whose chain uses these exclusions.
+    pub service_id: ExtensionServiceId,
+    /// Zero-based service interface position.
+    #[sqlx(try_from = "i32")]
+    pub interface_ordinal: u32,
+    /// Fixed service-VPC slot selected by the chain.
+    #[sqlx(try_from = "i32")]
+    pub slot: u32,
+    /// DPUs excluded from this chain; ordering has no meaning.
+    pub excluded_dpu_ids: Vec<DpuMachineId>,
+    /// Configuration version advanced whenever exclusion membership changes.
+    pub version: ConfigVersion,
 }
 
 /// Stable MAC assignment shared by every attachment of one service interface.
