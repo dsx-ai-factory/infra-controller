@@ -1366,16 +1366,20 @@ mod tests {
     /// Core can consume a one-time request when serving the first response, so
     /// a failed marked script must run again without another boot-script GET.
     #[test]
-    fn static_ipxe_menu_retries_only_marked_boot_scripts() {
+    fn static_ipxe_menu_reexecutes_only_marked_boot_scripts() {
         assert!(STATIC_IPXE_MENU_TEMPLATE.contains(
-            ":nico_ready\n\
+            ":fetch_nico_boot\n\
+             inc nico-boot-attempt\n\
              imgfree nico-boot ||\n\
              set nico-retry-provisioning 0\n\
-             time chain --name nico-boot ${nico-pxe-base}/api/v0/pxe/boot?buildarch=${buildarch}&platform=${platform}&manufacturer=${manufacturer}&product=${product}&serial=${serial} && goto exit_to_firmware || goto retry_nico_boot"
+             echo NICo boot attempt ${nico-boot-attempt}/${nico-boot-max-attempts}\n\
+             time imgfetch --name nico-boot ${nico-pxe-base}/api/v0/pxe/boot?buildarch=${buildarch}&platform=${platform}&manufacturer=${manufacturer}&product=${product}&serial=${serial} || goto retry_nico_download\n\
+             time imgexec nico-boot && goto exit_to_firmware || goto retry_nico_boot"
         ));
         assert!(STATIC_IPXE_MENU_TEMPLATE.contains(
             ":retry_nico_boot\n\
-             iseq ${nico-retry-provisioning} 1 || goto error_handler\n\
+             set nico-boot-error ${errno:hexraw}\n\
+             iseq ${nico-retry-provisioning} 1 || goto retry_nico_attempt\n\
              imgstat nico-boot || goto error_handler\n\
              prompt --key p --timeout 30000 Hit the ${bold}p${boldoff} key to open NICo menu; retrying in 30 seconds... && goto nico_menu ||\n\
              time imgexec nico-boot && goto exit_to_firmware || goto retry_nico_boot"
@@ -1385,7 +1389,7 @@ mod tests {
                 .matches("/api/v0/pxe/boot?")
                 .count(),
             1,
-            "retrying should reuse the served script instead of requesting it again"
+            "the download loop should contain the only boot-script request"
         );
     }
 
