@@ -441,6 +441,7 @@ async fn reconcile_admin_addresses_locks_segments_only_for_a_repair(
                 active_config_changed: true,
             },
         },
+        // This leaves the shared host without a primary, so keep it last.
         Case {
             change: HostChange::ClearPrimaryFlag,
             expect: ReconcileExpectation::Fails,
@@ -453,8 +454,8 @@ async fn reconcile_admin_addresses_locks_segments_only_for_a_repair(
         admin_subdomain.is_some(),
         "the domain checks need an admin segment with a subdomain"
     );
+    let mh = create_managed_host_multi_dpu(&env, 2).await;
     for Case { change, expect } in cases {
-        let mh = create_managed_host_multi_dpu(&env, 2).await;
         apply_host_change(&env, &mh, change).await?;
         let before = host_interface_state(&env, &mh).await?;
 
