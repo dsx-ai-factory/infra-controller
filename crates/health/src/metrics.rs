@@ -23,6 +23,7 @@ use std::hash::Hash;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use bytes::Bytes;
 use dashmap::DashMap;
@@ -40,6 +41,7 @@ use prometheus::{
 };
 use serde::{Deserialize, Serialize};
 use tokio::net::TcpStream;
+use tokio::sync::oneshot;
 use tokio_util::sync::CancellationToken;
 
 use crate::HealthError;
@@ -776,8 +778,70 @@ enum Encoding {
 #[error("telemetry request cancelled")]
 struct RequestCancelled;
 
+/// Delay before accepting again after an accept error. Descriptor exhaustion
+/// lasts until a descriptor is closed, so an immediate retry would spin.
+const ACCEPT_RETRY_DELAY: Duration = Duration::from_millis(100);
+
+/// Retries allowed in one run of consecutive accept failures: 30 s at
+/// `ACCEPT_RETRY_DELAY`, well under the liveness probe's failure window. The
+/// next failure stops the server.
+const ACCEPT_RETRY_LIMIT: u32 = 300;
+
+/// A run of consecutive accept failures is logged at its first failure and
+/// then once per this many retries: 10 s at `ACCEPT_RETRY_DELAY`.
+const ACCEPT_RETRIES_PER_WARNING: u32 = 100;
+
+/// Accept kept failing through `ACCEPT_RETRY_LIMIT` retries.
+#[derive(Debug, thiserror::Error)]
+#[error("accept failed after {limit} retries: {source}", limit = ACCEPT_RETRY_LIMIT)]
+struct AcceptFailed {
+    source: std::io::Error,
+}
+
+/// Starts the metrics server on its own thread with a single-threaded runtime,
+/// so work on the caller's runtime cannot delay `/livez`.
+///
+/// The returned future resolves when the server stops: `Ok` after `shutdown`,
+/// otherwise the reason it could not start or keep serving. Dropping the
+/// future leaves the server running until `shutdown`.
+pub(crate) fn spawn_metrics_server(
+    addr: SocketAddr,
+    manager: Arc<MetricsManager>,
+    config: PrometheusSinkConfig,
+    shutdown: CancellationToken,
+) -> impl Future<Output = Result<(), BoxedErr>> {
+    let (stopped_tx, stopped_rx) = oneshot::channel();
+
+    let spawned = std::thread::Builder::new()
+        .name("metrics-server".to_string())
+        .spawn(move || {
+            let result = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .map_err(BoxedErr::from)
+                .and_then(|runtime| {
+                    runtime.block_on(run_metrics_server_with_config(
+                        addr, manager, config, shutdown,
+                    ))
+                });
+
+            // The receiver is gone when the service has already exited.
+            stopped_tx.send(result).ok();
+        });
+
+    async move {
+        // The thread is detached and reports through the channel.
+        drop(spawned?);
+
+        // The sender is dropped without a result only when the thread panics.
+        stopped_rx
+            .await
+            .unwrap_or_else(|_| Err("metrics server thread panicked".into()))
+    }
+}
+
 /// Serve metrics until shutdown. Dropping the server future cancels accepted connections.
-pub(crate) async fn run_metrics_server_with_config(
+async fn run_metrics_server_with_config(
     addr: SocketAddr,
     manager: Arc<MetricsManager>,
     config: PrometheusSinkConfig,
@@ -793,12 +857,68 @@ pub(crate) async fn run_metrics_server_with_config(
         "Metrics server listening (paths: /metrics, /telemetry, /livez)"
     );
 
+    serve_connections(|| listener.accept(), manager, config, &shutdown).await?;
+
+    Ok(())
+}
+
+/// Accepts and serves connections until `shutdown`. An accept error is retried
+/// after `ACCEPT_RETRY_DELAY`, and an accepted connection ends the run of
+/// failures.
+///
+/// `accept` is a parameter so accept errors can be injected.
+///
+/// # Errors
+///
+/// Returns [`AcceptFailed`] when accept still fails after `ACCEPT_RETRY_LIMIT`
+/// retries in one run.
+async fn serve_connections<F>(
+    mut accept: impl FnMut() -> F,
+    manager: Arc<MetricsManager>,
+    config: PrometheusSinkConfig,
+    shutdown: &CancellationToken,
+) -> Result<(), AcceptFailed>
+where
+    F: Future<Output = std::io::Result<(TcpStream, SocketAddr)>>,
+{
+    // Retries since the last accepted connection.
+    let mut retries = 0_u32;
+
     loop {
-        let (stream, _) = tokio::select! {
+        let accepted = tokio::select! {
             biased;
 
             () = shutdown.cancelled() => return Ok(()),
-            accepted = listener.accept() => accepted?,
+            accepted = accept() => accepted,
+        };
+
+        let stream = match accepted {
+            Ok((stream, _)) => {
+                retries = 0;
+                stream
+            }
+            Err(error) => {
+                if retries == ACCEPT_RETRY_LIMIT {
+                    return Err(AcceptFailed { source: error });
+                }
+
+                if retries.is_multiple_of(ACCEPT_RETRIES_PER_WARNING) {
+                    tracing::warn!(
+                        %error,
+                        consecutive_failure_count = retries + 1,
+                        "Metrics server accept failed; retrying"
+                    );
+                }
+
+                retries += 1;
+
+                tokio::select! {
+                    biased;
+
+                    () = shutdown.cancelled() => return Ok(()),
+                    () = tokio::time::sleep(ACCEPT_RETRY_DELAY) => continue,
+                }
+            }
         };
 
         let manager = manager.clone();
@@ -851,10 +971,17 @@ async fn serve_request<B>(
 ) -> Result<Response<Full<Bytes>>, RequestCancelled> {
     match (req.method(), req.uri().path()) {
         (&Method::GET, "/livez") => Ok(text_response(StatusCode::OK, "ok")),
-        (&Method::GET, "/metrics") => Ok(serve_prometheus(
-            manager.export_metrics().map(Bytes::from),
-            "service metrics",
-        )),
+        (&Method::GET, "/metrics") => {
+            // Gathering walks every collector registry, so it runs on the
+            // blocking pool and leaves this thread free to answer /livez.
+            let export = tokio::task::spawn_blocking(move || manager.export_metrics())
+                .await
+                .map_err(HealthError::from)
+                .flatten()
+                .map(Bytes::from);
+
+            Ok(serve_prometheus(export, "service metrics"))
+        }
         (&Method::GET, "/telemetry") => {
             let mut response = serve_telemetry(req.headers(), manager, &config, connection).await?;
 
