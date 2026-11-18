@@ -59,6 +59,10 @@ If you are running from an environment that requires a SOCKS proxy, set the prox
 export https_proxy=socks5://127.0.0.1:8888
 ```
 
+If the NICo API or Grafana host name only resolves on the proxy's side, use
+`socks5h://` instead, so the proxy resolves it. See
+[SOCKS5 proxy](../../manuals/nico-admin-cli.md#socks5-proxy).
+
 ***Note:*** When running from inside the cluster (nico-api pod), the proxy is not required.
 
 ### 4. Required Information
