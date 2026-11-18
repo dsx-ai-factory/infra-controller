@@ -233,7 +233,7 @@ fn topology_firmware_versions(report: &EndpointExplorationReport) -> Option<(&st
         .map(String::as_str)
         .map(str::trim)
         .filter(|version| !version.is_empty())
-        .or_else(|| report.system_bios_version())?;
+        .or_else(|| report.observed_host_bios_version())?;
 
     Some((bmc_version, bios_version))
 }
@@ -3880,6 +3880,63 @@ mod tests {
             }],
             ..Default::default()
         }
+    }
+
+    /// Builds the firmware layout GB200 exposes when `System_0` omits its BIOS version.
+    fn gb200_firmware_report() -> EndpointExplorationReport {
+        EndpointExplorationReport {
+            service: vec![Service {
+                id: "FirmwareInventory".to_string(),
+                inventories: vec![
+                    Inventory {
+                        id: "FW_BMC_0".to_string(),
+                        version: Some("observed-bmc".to_string()),
+                        ..Default::default()
+                    },
+                    Inventory {
+                        id: "HGX_FW_CPU_0".to_string(),
+                        version: Some("observed-bios".to_string()),
+                        ..Default::default()
+                    },
+                ],
+            }],
+            systems: vec![ComputerSystem {
+                id: "System_0".to_string(),
+                bios_version: None,
+                ..Default::default()
+            }],
+            ..Default::default()
+        }
+    }
+
+    /// Verifies GB200's firmware inventory supplies both topology versions.
+    #[test]
+    fn topology_firmware_versions_uses_gb200_inventory_fallbacks() {
+        // Use the GB200 layout with no BIOS version on System_0.
+        let report = gb200_firmware_report();
+
+        assert_eq!(
+            topology_firmware_versions(&report),
+            Some(("observed-bmc", "observed-bios"))
+        );
+    }
+
+    /// Verifies configured firmware versions remain authoritative for GB200.
+    #[test]
+    fn topology_firmware_versions_prefers_configuration_over_gb200_inventory() {
+        // Populate both configured values on a report that also has inventory fallbacks.
+        let mut report = gb200_firmware_report();
+        report
+            .versions
+            .insert(FirmwareComponentType::Bmc, "configured-bmc".to_string());
+        report
+            .versions
+            .insert(FirmwareComponentType::Uefi, "configured-bios".to_string());
+
+        assert_eq!(
+            topology_firmware_versions(&report),
+            Some(("configured-bmc", "configured-bios"))
+        );
     }
 
     #[test]

@@ -54,6 +54,11 @@ use crate::switch::switch_id;
 const ABSENT_MANUFACTURER: &str = "unknown";
 const ABSENT_MODEL: &str = "nomodel";
 
+/// GB200 reports the host BMC version in this firmware inventory entry.
+const GB200_HOST_BMC_INVENTORY_ID: &str = "FW_BMC_0";
+/// GB200 leaves `System_0.BiosVersion` blank and reports the host BIOS here.
+const GB200_HOST_BIOS_INVENTORY_ID: &str = "HGX_FW_CPU_0";
+
 /// Derives an endpoint's hardware class from what its BMC reports about the
 /// host system: manufacturer and model, joined by `_`.
 ///
@@ -1476,8 +1481,8 @@ impl EndpointExplorationReport {
             .unwrap_or_default()
     }
 
-    /// BMC firmware observed directly from the exact `BMC` inventory entry.
-    pub fn observed_host_bmc_version(&self) -> Option<&str> {
+    /// Returns a non-blank version from one exact firmware inventory entry.
+    fn firmware_inventory_version(&self, inventory_id: &str) -> Option<&str> {
         self.service
             .iter()
             .find(|service| service.id == "FirmwareInventory")
@@ -1485,11 +1490,17 @@ impl EndpointExplorationReport {
                 service
                     .inventories
                     .iter()
-                    .find(|inventory| inventory.id == "BMC")
+                    .find(|inventory| inventory.id == inventory_id)
             })
             .and_then(|inventory| inventory.version.as_deref())
             .map(str::trim)
             .filter(|version| !version.is_empty())
+    }
+
+    /// BMC firmware observed from the standard entry or GB200's host BMC entry.
+    pub fn observed_host_bmc_version(&self) -> Option<&str> {
+        self.firmware_inventory_version("BMC")
+            .or_else(|| self.firmware_inventory_version(GB200_HOST_BMC_INVENTORY_ID))
     }
 
     /// Host BIOS/UEFI version observed on the `System_0` resource.
@@ -1500,6 +1511,12 @@ impl EndpointExplorationReport {
             .and_then(|system| system.bios_version.as_deref())
             .map(str::trim)
             .filter(|version| !version.is_empty())
+    }
+
+    /// Host BIOS observed from `System_0` or GB200's firmware inventory fallback.
+    pub fn observed_host_bios_version(&self) -> Option<&str> {
+        self.system_bios_version()
+            .or_else(|| self.firmware_inventory_version(GB200_HOST_BIOS_INVENTORY_ID))
     }
 
     pub fn dpu_component_version(&self, component: FirmwareComponentType) -> Option<String> {
@@ -4947,6 +4964,51 @@ mod tests {
             blank_report.system_bios_version(),
             None,
             "blank System_0 BIOS versions are treated as absent"
+        );
+    }
+
+    /// Verifies GB200 firmware inventory fills only a missing host BIOS observation.
+    #[test]
+    fn observed_host_bios_version_prefers_system_and_falls_back_to_gb200_inventory() {
+        let report = |system_version: Option<&str>, inventory_version: Option<&str>| {
+            EndpointExplorationReport {
+                systems: vec![ComputerSystem {
+                    id: "System_0".to_string(),
+                    bios_version: system_version.map(str::to_string),
+                    ..Default::default()
+                }],
+                service: vec![Service {
+                    id: "FirmwareInventory".to_string(),
+                    inventories: inventory_version
+                        .map(|version| Inventory {
+                            id: GB200_HOST_BIOS_INVENTORY_ID.to_string(),
+                            version: Some(version.to_string()),
+                            ..Default::default()
+                        })
+                        .into_iter()
+                        .collect(),
+                }],
+                ..Default::default()
+            }
+        };
+
+        // The standard Redfish property remains authoritative when populated.
+        assert_eq!(
+            report(Some("system-version"), Some("inventory-version")).observed_host_bios_version(),
+            Some("system-version")
+        );
+
+        // GB200's inventory entry supplies the version when System_0 omits it.
+        assert_eq!(
+            report(None, Some(" inventory-version ")).observed_host_bios_version(),
+            Some("inventory-version")
+        );
+
+        // Missing and blank sources both mean no observed host BIOS version.
+        assert_eq!(report(None, None).observed_host_bios_version(), None);
+        assert_eq!(
+            report(Some(" \t "), Some("  ")).observed_host_bios_version(),
+            None
         );
     }
 
