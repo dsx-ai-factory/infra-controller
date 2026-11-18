@@ -17,7 +17,7 @@
 
 //! `nico-pre-build`: the build host can produce the ISO and the images.
 
-use crate::harness::{Check, todo};
+use crate::harness::Check;
 
 pub(crate) const CHECKS: &[Check] = &[
     Check {
@@ -39,7 +39,7 @@ pub(crate) const CHECKS: &[Check] = &[
                  strings; cases: all stubs pass; `gomplate` absent fails by name; a stub printing \
                  the Debian `yq` banner fails the flavour; free space below the total fails \
                  naming both sizes.",
-        run: todo,
+        run: None,
     },
     Check {
         id: "build.checkouts.tags",
@@ -57,7 +57,7 @@ pub(crate) const CHECKS: &[Check] = &[
                  Test: temporary git repositories with tags created in the test; cases: all at \
                  tag passes; one behind fails naming both tags; a dirty tree warns; a missing \
                  directory fails.",
-        run: todo,
+        run: None,
     },
     Check {
         id: "build.artifacts.reachable",
@@ -78,7 +78,7 @@ pub(crate) const CHECKS: &[Check] = &[
                  Test: a local HTTP stub serving the paths; cases: all 200 passes; one 404 fails \
                  naming the artifact; 401 fails naming the entitlement; a combination not in the \
                  table fails.",
-        run: todo,
+        run: None,
     },
     Check {
         id: "build.registry.push",
@@ -96,7 +96,7 @@ pub(crate) const CHECKS: &[Check] = &[
                  Test: a local `registry:2` container with and without basic auth; cases: \
                  anonymous push passes; wrong credentials fail at login; a read-only registry \
                  fails at push; an untrusted CA fails naming `caSource`.",
-        run: todo,
+        run: None,
     },
     Check {
         id: "build.registry.manifest",
@@ -112,6 +112,6 @@ pub(crate) const CHECKS: &[Check] = &[
                  decisions.\n\
                  Test: a local registry seeded with tags in the test; cases: all present passes; \
                  one missing fails by name; RMS unticked does not require the RMS images.",
-        run: todo,
+        run: None,
     },
 ];

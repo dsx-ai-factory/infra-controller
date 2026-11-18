@@ -218,7 +218,7 @@ func (*pendingExpectedMachineWriteFailureHook) AfterQuery(context.Context, *bun.
 
 func TestExpectedMachineCreateInput_JSON(t *testing.T) {
 	t.Run("decodes the stored recovery contract", func(t *testing.T) {
-		const stored = `{"ExpectedMachineID":"00000000-0000-0000-0000-000000000001","SiteID":"00000000-0000-0000-0000-000000000002","CreatedBy":"00000000-0000-0000-0000-000000000003","BmcMacAddress":"00:11:22:33:44:01","ChassisSerialNumber":"stored-serial","SkuID":"stored-sku","Name":"stored name","HostLifecycleProfile":{"disable_lockdown":false}}`
+		const stored = `{"ExpectedMachineID":"00000000-0000-0000-0000-000000000001","SiteID":"00000000-0000-0000-0000-000000000002","CreatedBy":"00000000-0000-0000-0000-000000000003","BmcMacAddress":"00:11:22:33:44:01","ChassisSerialNumber":"stored-serial","SkuID":"stored-sku","Name":"stored name","RetainBmcCredentials":true,"HostLifecycleProfile":{"disable_lockdown":false}}`
 		var input ExpectedMachineCreateInput
 		require.NoError(t, json.Unmarshal([]byte(stored), &input))
 		require.Equal(t, ExpectedMachineCreateInput{
@@ -227,6 +227,7 @@ func TestExpectedMachineCreateInput_JSON(t *testing.T) {
 			CreatedBy:         uuid.MustParse("00000000-0000-0000-0000-000000000003"),
 			BmcMacAddress:     "00:11:22:33:44:01", ChassisSerialNumber: "stored-serial",
 			SkuID: cutil.GetPtr("stored-sku"), Name: cutil.GetPtr("stored name"),
+			RetainBmcCredentials: cutil.GetPtr(true),
 			HostLifecycleProfile: HostLifecycleProfile{DisableLockdown: cutil.GetPtr(false)},
 		}, input)
 	})

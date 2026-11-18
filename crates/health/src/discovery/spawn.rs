@@ -1652,7 +1652,9 @@ mod tests {
         assert!(reading.ends_with(" 42"));
         assert!(!exported.contains("serial_number=\"switch-host\""));
 
-        let shutdown = ctx.drain_collectors(Duration::from_secs(5)).await;
+        let shutdown = ctx
+            .drain_collectors(tokio::time::Instant::now() + Duration::from_secs(5))
+            .await;
 
         assert_eq!(shutdown.timed_out, 0);
     }

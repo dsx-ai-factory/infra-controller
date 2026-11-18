@@ -17,7 +17,7 @@
 
 //! `nico-pre-host`: each site controller over Redfish from the staging host, before the control-plane DPU is provisioned.
 
-use crate::harness::{Check, todo};
+use crate::harness::Check;
 
 pub(crate) const CHECKS: &[Check] = &[
     Check {
@@ -39,7 +39,7 @@ pub(crate) const CHECKS: &[Check] = &[
                  Test: bmc-mock profiles for the supported models; cases: the reference profile \
                  passes; one socket fails naming cores; 128 GiB fails memory; a single NVMe fails \
                  the layout; 384 GiB warns.",
-        run: todo,
+        run: None,
     },
     Check {
         id: "host.hardware.tpm",
@@ -53,7 +53,7 @@ pub(crate) const CHECKS: &[Check] = &[
                  Skip: never.\n\
                  Test: bmc-mock profiles; cases: TPM 2.0 enabled passes; absent fails; disabled \
                  fails; 1.2 fails naming the version.",
-        run: todo,
+        run: None,
     },
     Check {
         id: "host.firmware.bmc",
@@ -70,7 +70,7 @@ pub(crate) const CHECKS: &[Check] = &[
                  Test: bmc-mock profiles with FirmwareVersion set per case; cases: equal passes; \
                  above warns; below fails naming both; a model not in the table fails naming the \
                  model.",
-        run: todo,
+        run: None,
     },
     Check {
         id: "host.firmware.uefi",
@@ -82,7 +82,7 @@ pub(crate) const CHECKS: &[Check] = &[
                  Fail: as `host.firmware.bmc`, fix: update the UEFI firmware.\n\
                  Skip: never.\n\
                  Test: as `host.firmware.bmc` with BiosVersion.",
-        run: todo,
+        run: None,
     },
     Check {
         id: "host.uefi.posture",
@@ -101,7 +101,7 @@ pub(crate) const CHECKS: &[Check] = &[
                  Test: bmc-mock profiles; cases: all on passes; Secure Boot off on one host fails \
                  naming it; SR-IOV off with VFs used fails; SR-IOV off without VFs passes; an \
                  unmapped vendor fails naming the missing map.",
-        run: todo,
+        run: None,
     },
     Check {
         id: "host.bmc.virtual-media",
@@ -120,7 +120,7 @@ pub(crate) const CHECKS: &[Check] = &[
                  Skip: never.\n\
                  Test: bmc-mock profiles; cases: two slots pass; one slot warns naming the two-pass \
                  install it blocks; no CD slot fails; a slot without the action fails.",
-        run: todo,
+        run: None,
     },
     Check {
         id: "host.dpu.mode",
@@ -136,7 +136,7 @@ pub(crate) const CHECKS: &[Check] = &[
                  Skip: when `dpu-in-the-site-controllers` is `no DPU`.\n\
                  Test: bmc-mock DPU profiles; cases: BF3 in DPU mode passes; NIC mode fails; BF4 \
                  fails naming BF4; firmware below the pin fails naming both; `no DPU` skips.",
-        run: todo,
+        run: None,
     },
     Check {
         id: "host.dpu.ports",
@@ -151,7 +151,7 @@ pub(crate) const CHECKS: &[Check] = &[
                  Skip: when `no DPU`.\n\
                  Test: bmc-mock profiles; cases: both up passes; one down warns naming the port; \
                  adapter missing fails; `no DPU` skips.",
-        run: todo,
+        run: None,
     },
     Check {
         id: "host.power.control",
@@ -166,7 +166,7 @@ pub(crate) const CHECKS: &[Check] = &[
                  Skip: never.\n\
                  Test: bmc-mock profiles; cases: the full set passes; `ForceRestart` absent fails \
                  naming it; PowerState unreadable fails.",
-        run: todo,
+        run: None,
     },
     Check {
         id: "host.count.answering",
@@ -178,7 +178,7 @@ pub(crate) const CHECKS: &[Check] = &[
                  Skip: never. The other host checks run on the controllers that answer.\n\
                  Test: bmc-mock with one instance stopped; cases: all answer passes; one down \
                  fails naming it.",
-        run: todo,
+        run: None,
     },
     Check {
         id: "host.bmc.ntp",
@@ -193,7 +193,7 @@ pub(crate) const CHECKS: &[Check] = &[
                  Skip: never.\n\
                  Test: bmc-mock profiles; cases: equal passes; disabled fails; one extra server \
                  warns; a different server fails naming both lists.",
-        run: todo,
+        run: None,
     },
     Check {
         id: "host.nic.links",
@@ -210,6 +210,6 @@ pub(crate) const CHECKS: &[Check] = &[
                  evidence of an absent OS).\n\
                  Test: fixture `ip -j` outputs fed to the parser; cases: both up passes; one link \
                  down fails; a VLAN missing fails naming it; a DPU skips.",
-        run: todo,
+        run: None,
     },
 ];

@@ -16,6 +16,9 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/NVIDIA/infra-controller/dev/k8s/scale-test/internal/config"
+	"github.com/NVIDIA/infra-controller/dev/k8s/scale-test/internal/ingestion"
 )
 
 func TestRunPrintsVersionAndRefusesOtherCommands(t *testing.T) {
@@ -88,22 +91,7 @@ func TestIngestionRefusesABadSetupBeforeTheRun(t *testing.T) {
 }
 
 func TestReadmeExamples(t *testing.T) {
-	helm, err := exec.LookPath("helm")
-	if err != nil {
-		t.Skip("helm is required to render documentation examples")
-	}
-	chart, err := filepath.Abs("../../../../../helm/scale-test")
-	if err != nil {
-		t.Fatal(err)
-	}
-	readme, err := os.ReadFile(filepath.Join(chart, "README.md"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	values, err := os.ReadFile(filepath.Join(chart, "values.yaml"))
-	if err != nil {
-		t.Fatal(err)
-	}
+	helm, chart, readme, values := readmeInputs(t)
 	var yamlBlocks, commands []string
 	for _, block := range strings.Split(string(readme), "```")[1:] {
 		language, body, ok := strings.Cut(block, "\n")
@@ -112,10 +100,13 @@ func TestReadmeExamples(t *testing.T) {
 		}
 		switch language {
 		case "yaml":
+			if strings.HasPrefix(body, "# Firmware overlay:") {
+				continue
+			}
 			yamlBlocks = append(yamlBlocks, body)
 		case "sh", "bash":
 			for _, command := range strings.Split(strings.ReplaceAll(body, "\\\n", ""), "\n") {
-				if strings.HasPrefix(command, "helm ") {
+				if strings.HasPrefix(command, "helm ") && !strings.HasPrefix(command, "helm install fw-") {
 					commands = append(commands, command)
 				}
 			}
@@ -144,13 +135,7 @@ func TestReadmeExamples(t *testing.T) {
 	for _, changed := range []bool{false, true} {
 		t.Run(fmt.Sprint(changed), func(t *testing.T) {
 			dir := t.TempDir()
-			site := `image: {repository: registry.example/scale-test, digest: sha256:0000000000000000000000000000000000000000000000000000000000000000}
-inventory: {clientSecret: nico-cert, expected: {hosts: 1000000, dpus: 4, racks: 2, switches: 0, powerShelves: 0, release: v2026.1}, spiffe: {trustDomain: example.org, serviceBasePaths: "/a/,/b/"}}
-persistence: {storageClass: fast}
-probeUrl: http://probe.example:9010
-store: {url: http://store.example:9090, tokenSecret: store-token}
-runner: {controlPlane: [{namespace: core, labelSelector: app=nico-api}], instance: {apiPoolSelector: {namespace: core, job: api}, apiPoolReplicas: 1}}
-`
+			site := readmeSiteValues
 			replace := strings.NewReplacer("<ns>", "example", "<registry>", "registry.example", "<digest>", strings.Repeat("0", 64), "<class>", "fast", "<fresh-id>", "fresh", "<site UUID>", "00000000-0000-4000-8000-000000000001", "<capability name>", "gpu", "<probe repository>", "registry.example/probe", "<pinned simulator boot commands>", "exit")
 			if len(yamlBlocks) != 1 {
 				t.Fatal("update example values handling for new YAML blocks")
@@ -191,25 +176,9 @@ runner: {controlPlane: [{namespace: core, labelSelector: app=nico-api}], instanc
 					flags = append(flags, flag)
 				}
 				previous[fields[2]] = flags
-				ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-				output, err := exec.CommandContext(ctx, helm, append([]string{"template", fields[2], chart}, flags...)...).CombinedOutput()
-				cancel()
-				if err != nil {
-					t.Fatalf("%s: %v\n%s", command, err, output)
-				}
+				_, docs := renderReadme(t, helm, chart, fields[2], flags)
 				renders++
-				decoder := yaml.NewDecoder(bytes.NewReader(output))
-				for {
-					var doc struct {
-						Kind     string
-						Metadata struct{ Name string }
-						Data     map[string]string
-					}
-					if err := decoder.Decode(&doc); err == io.EOF {
-						break
-					} else if err != nil {
-						t.Fatal(err)
-					}
+				for _, doc := range docs {
 					if fields[2] != "instance-test" {
 						continue
 					}
@@ -263,4 +232,154 @@ runner: {controlPlane: [{namespace: core, labelSelector: app=nico-api}], instanc
 			}
 		})
 	}
+}
+
+func TestFirmwareChartExamples(t *testing.T) {
+	helm, chart, b, _ := readmeInputs(t)
+	_, tail, ok := strings.Cut(string(b), "# Firmware overlay:")
+	if !ok {
+		t.Fatal("firmware overlay missing")
+	}
+	overlay, _, ok := strings.Cut(tail, "```")
+	if !ok {
+		t.Fatal("firmware overlay incomplete")
+	}
+	_, overlay, _ = strings.Cut(overlay, "\n")
+	replace := strings.NewReplacer("ADMIN_CLI_SECRET", "admin-writer", "SITE_LOCK_NAME", "site-lock", "CORE_NAMESPACE", "core", "UEFI_TARGET_VERSION", "1.30", "TARGET_VERSION", "1.20", "UEFI_ARTIFACT_URL", "https://artifact.invalid/uefi", "UEFI_ARTIFACT_SHA256", strings.Repeat("ab", 32))
+	commands := []string{}
+	for _, line := range strings.Split(strings.ReplaceAll(string(b), "\\\n", ""), "\n") {
+		if strings.HasPrefix(line, "helm install fw-") {
+			commands = append(commands, line)
+		}
+	}
+	if len(commands) != 3 {
+		t.Fatalf("firmware examples=%d", len(commands))
+	}
+	for _, changed := range []bool{false, true} {
+		for _, command := range commands {
+			t.Run(fmt.Sprintf("%v/%s", changed, strings.Fields(command)[2]), func(t *testing.T) {
+				dir := t.TempDir()
+				body := replace.Replace(overlay)
+				n := uint64(5)
+				if changed {
+					body = strings.ReplaceAll(body, "'n': 5", "'n': 7")
+					n = 7
+				}
+				file := filepath.Join(dir, "firmware-values.yaml")
+				if err := os.WriteFile(file, []byte(body), 0600); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(filepath.Join(dir, "site-values.yaml"), []byte(readmeSiteValues), 0600); err != nil {
+					t.Fatal(err)
+				}
+				fields := strings.Fields(command)
+				args := []string{}
+				for _, arg := range fields[4:] {
+					if arg == "--wait" || arg == "--wait-for-jobs" || strings.HasPrefix(arg, "--timeout=") {
+						continue
+					}
+					arg = replace.Replace(arg)
+					switch arg {
+					case "firmware-values.yaml":
+						arg = file
+					case "site-values.yaml":
+						arg = filepath.Join(dir, arg)
+					}
+					args = append(args, arg)
+				}
+				rendered, docs := renderReadme(t, helm, chart, fields[2], args)
+				found := false
+				for _, doc := range docs {
+					if doc.Kind != "ConfigMap" || doc.Data["config.yaml"] == "" {
+						continue
+					}
+					var cfg config.Config
+					if err := yaml.Unmarshal([]byte(doc.Data["config.yaml"]), &cfg); err != nil {
+						t.Fatal(err)
+					}
+					if cfg.Journal.Claim != fields[2]+"-scale-test-run-data" {
+						t.Fatal("firmware must use its own release claim", cfg.Journal.Claim)
+					}
+					s, err := ingestion.ParseFirmwareSettings(cfg.Settings)
+					if err != nil {
+						t.Fatal(err)
+					}
+					wantComponent, wantVersion := "bmc", "1.20"
+					if strings.Contains(command, "component=uefi") {
+						wantComponent, wantVersion = "uefi", "1.30"
+						if s.Firmware.ArtifactURL != "https://artifact.invalid/uefi" || s.Firmware.ArtifactSHA256 != strings.Repeat("ab", 32) {
+							t.Fatal("UEFI must use its own artifact", s.Firmware)
+						}
+					}
+					if s.Firmware.TargetVersion != wantVersion {
+						t.Fatal("target version lost precision", s.Firmware.TargetVersion)
+					}
+					if s.Firmware.N != n || string(s.Firmware.Component) != wantComponent || strings.Contains(doc.Data["config.yaml"], "rest:") {
+						t.Fatalf("wrong rendered firmware settings: %+v", s.Firmware)
+					}
+					found = true
+				}
+
+				if !found || !bytes.Contains(rendered, []byte("terminationGracePeriodSeconds: 1080")) || !bytes.Contains(rendered, []byte(`secretName: "admin-writer"`)) || bytes.Contains(rendered, []byte("fixture-probe")) {
+					t.Fatal("firmware native config, admin Secret or grace missing")
+				}
+			})
+		}
+	}
+}
+
+const readmeSiteValues = `image: {repository: registry.example/scale-test, digest: sha256:0000000000000000000000000000000000000000000000000000000000000000}
+inventory: {clientSecret: nico-cert, expected: {hosts: 1000000, dpus: 4, racks: 2, switches: 0, powerShelves: 0, release: v2026.1}, spiffe: {trustDomain: example.org, serviceBasePaths: "/a/,/b/"}}
+persistence: {storageClass: fast}
+probeUrl: http://probe.example:9010
+store: {url: http://store.example:9090, tokenSecret: store-token}
+runner: {controlPlane: [{namespace: core, labelSelector: app=nico-api}], instance: {apiPoolSelector: {namespace: core, job: api}, apiPoolReplicas: 1}}
+`
+
+type readmeDocument struct {
+	Kind     string
+	Metadata struct{ Name string }
+	Data     map[string]string
+}
+
+func readmeInputs(t *testing.T) (string, string, []byte, []byte) {
+	t.Helper()
+	helm, err := exec.LookPath("helm")
+	if err != nil {
+		t.Skip("helm is required to render documentation examples")
+	}
+	chart, err := filepath.Abs("../../../../../helm/scale-test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	readme, err := os.ReadFile(filepath.Join(chart, "README.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	values, err := os.ReadFile(filepath.Join(chart, "values.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return helm, chart, readme, values
+}
+func renderReadme(t *testing.T, helm, chart, release string, flags []string) ([]byte, []readmeDocument) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	output, err := exec.CommandContext(ctx, helm, append([]string{"template", release, chart}, flags...)...).CombinedOutput()
+	if err != nil {
+		t.Fatalf("%v: %s", err, output)
+	}
+	decoder := yaml.NewDecoder(bytes.NewReader(output))
+	docs := []readmeDocument{}
+	for {
+		var doc readmeDocument
+		if err := decoder.Decode(&doc); err == io.EOF {
+			break
+		} else if err != nil {
+			t.Fatal(err)
+		}
+		docs = append(docs, doc)
+	}
+	return output, docs
 }

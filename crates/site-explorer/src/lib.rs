@@ -68,6 +68,7 @@ pub use endpoint_exploration_service::{
     EndpointExplorationService, EndpointExplorationServiceError,
 };
 mod credentials;
+pub use credentials::{SiteWideBmcPassword, SiteWideBmcPasswordLoader};
 mod endpoint_lock;
 mod metrics;
 pub mod suppression;
@@ -1157,11 +1158,18 @@ impl SiteExplorer {
         metrics: &mut SiteExplorationMetrics,
     ) -> SiteExplorerResult<SiteIdentifiedHosts> {
         let run_context = self.acknowledge_site_explorer_suppressions().await?;
-        self.check_preconditions(metrics).await?;
+        let sitewide_bmc_password = self
+            .endpoint_explorer
+            .load_sitewide_bmc_password()
+            .await
+            .map_err(|err| SiteExplorerError::EndpointExplorationError {
+                action: "load_sitewide_bmc_password",
+                err,
+            })?;
 
         let update_explored_endpoints_start = Instant::now();
         let (expected_endpoint_index, explored_this_run) = self
-            .update_explored_endpoints(metrics, &run_context)
+            .update_explored_endpoints(metrics, &run_context, &sitewide_bmc_password)
             .await?;
         let ExploredThisRun {
             endpoints: explored_this_run,
@@ -1758,23 +1766,6 @@ impl SiteExplorer {
         Ok(false)
     }
 
-    /// Checks if all data that a site exploration run requires is actually configured
-    ///
-    /// Doing this upfront avoids the risk of trying to log into BMCs without
-    /// the necessary credentials - which could trigger a lockout.
-    async fn check_preconditions(
-        &self,
-        metrics: &mut SiteExplorationMetrics,
-    ) -> SiteExplorerResult<()> {
-        self.endpoint_explorer
-            .check_preconditions(metrics)
-            .await
-            .map_err(|err| SiteExplorerError::EndpointExplorationError {
-                action: "check_preconditions",
-                err,
-            })
-    }
-
     /// Loads the run's suppressed and DPF-provisioning BMC sets, acknowledging
     /// pending suppressions that require endpoint guards. DPF provisioning does
     /// not wait for acknowledgement.
@@ -1851,6 +1842,7 @@ impl SiteExplorer {
         &self,
         metrics: &mut SiteExplorationMetrics,
         run_context: &SiteExplorerRunContext,
+        sitewide_bmc_password: &SiteWideBmcPassword,
     ) -> SiteExplorerResult<(ExploredEndpointIndex, ExploredThisRun)> {
         let load_start = Instant::now();
         let mut txn = self.txn_begin().await?;
@@ -2309,6 +2301,9 @@ impl SiteExplorer {
                                 .last_explored
                                 .and_then(ExploredEndpoint::boot_interface_target)
                                 .map(Into::into),
+                            Box::new(|| {
+                                Box::pin(std::future::ready(Ok(sitewide_bmc_password.clone())))
+                            }),
                         )
                         .await
                     else {

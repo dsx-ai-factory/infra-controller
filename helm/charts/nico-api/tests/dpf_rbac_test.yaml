@@ -2,6 +2,39 @@ suite: DPF RBAC
 templates:
   - dpf-rbac.yaml
 tests:
+  # Distinct clusters need distinct named credentials without broad Secret reads.
+  - it: grants only named observer credential reads for configured clusters
+    documentIndex: 0
+    set:
+      dpf.rbacCreate: true
+      dpf.serviceVpcObserverClusters: [carbide-dpf-cluster, another-cluster]
+    asserts:
+      - contains:
+          path: rules
+          content:
+            apiGroups: ["svc.dpu.nvidia.com"]
+            resources: ["dpuservicecredentialrequests"]
+            resourceNames: [nico-service-vpc-observer-19205ee90d2f8fe2, nico-service-vpc-observer-8af3e43aeae637f1]
+            verbs: ["get"]
+      - contains:
+          path: rules
+          content:
+            apiGroups: [""]
+            resources: ["secrets"]
+            resourceNames: [nico-service-vpc-observer-19205ee90d2f8fe2, nico-service-vpc-observer-8af3e43aeae637f1]
+            verbs: ["get"]
+      - notContains:
+          path: rules
+          content:
+            apiGroups: [""]
+            resources: ["secrets"]
+            verbs: ["get"]
+      - notContains:
+          path: rules
+          content:
+            apiGroups: [""]
+            resources: ["secrets"]
+            verbs: ["list"]
   - it: scopes shared BMC Secret updates to the derived Secret
     documentIndex: 0
     set:

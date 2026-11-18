@@ -22,8 +22,8 @@ use carbide_uuid::infiniband::IBPartitionId;
 use chrono::{DateTime, Utc};
 use config_version::{ConfigVersion, Versioned};
 use serde::{Deserialize, Serialize};
+use sqlx::Row;
 use sqlx::postgres::PgRow;
-use sqlx::{FromRow, Row};
 
 use crate::StateSla;
 use crate::controller_outcome::PersistentStateHandlerOutcome;
@@ -243,14 +243,18 @@ struct IbPartitionMtuFallback {
     raw_mtu: i32,
 }
 
-/// Keeps SQL NULL `pkey` values unset and rejects invalid PKey, rate-limit,
-/// and service-level integers with a `sqlx::Error::ColumnDecode` containing
-/// the column and original error. In the scalar `mtu` column, `2048` and `4096`
-/// decode as `2` and `4`; canonical `2` and `4` are unchanged. Other integers
-/// use the default MTU (`4`) and emit `ib_partition_mtu_fallback` on every
-/// decode that reaches the fallback, even if a later field fails validation.
-impl<'r> FromRow<'r, PgRow> for IBPartition {
-    fn from_row(row: &'r PgRow) -> Result<Self, sqlx::Error> {
+impl IBPartition {
+    /// Keeps SQL NULL `pkey` values unset and rejects invalid PKey, rate-limit,
+    /// and service-level integers with a `sqlx::Error::ColumnDecode` containing
+    /// the column and original error. In the scalar `mtu` column, `2048` and `4096`
+    /// decode as `2` and `4`; canonical `2` and `4` are unchanged. Other integers
+    /// use the default MTU (`4`) and emit `ib_partition_mtu_fallback` on every
+    /// decode that reaches the fallback, even if a later field fails validation.
+    /// Records fallback through the supplied instrumentation.
+    pub fn from_row(
+        row: &PgRow,
+        instrumentation: &carbide_instrument::Instrumentation,
+    ) -> Result<Self, sqlx::Error> {
         let controller_state: sqlx::types::Json<IBPartitionControllerState> =
             row.try_get("controller_state")?;
         let state_outcome: Option<sqlx::types::Json<PersistentStateHandlerOutcome>> =
@@ -298,7 +302,7 @@ impl<'r> FromRow<'r, PgRow> for IBPartition {
                     2 | 2048 => IBMtu(2),
                     4 | 4096 => IBMtu(4),
                     raw_mtu => {
-                        carbide_instrument::emit(IbPartitionMtuFallback {
+                        instrumentation.emit(IbPartitionMtuFallback {
                             ib_partition_id: id,
                             raw_mtu,
                         });

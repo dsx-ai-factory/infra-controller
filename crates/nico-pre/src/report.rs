@@ -21,11 +21,11 @@ use std::fmt::Write as _;
 
 use eyre::Result;
 
-use crate::check::{ExitCode, RunResult};
+use crate::check::RunResult;
 
-/// The text report; `exit` is the status the command returns, which the header prints
-/// (a blocked gate or an unwritten result file raises it above the rows' own worst).
-pub(crate) fn text(result: &RunResult, exit: ExitCode) -> String {
+/// The text report; the header prints `result.exit`, the status the command returns (a
+/// blocked gate or an unwritten result file raises it above the rows' own worst).
+pub(crate) fn text(result: &RunResult) -> String {
     let mut out = String::new();
     let _ = writeln!(
         out,
@@ -34,7 +34,7 @@ pub(crate) fn text(result: &RunResult, exit: ExitCode) -> String {
         result.checklist,
         result.site.replace(['\n', '\r'], " ⏎ "),
         result.rows.len(),
-        exit.code()
+        result.exit
     );
     if result.rows.is_empty() {
         return out;

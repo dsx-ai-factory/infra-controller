@@ -25,7 +25,7 @@ use std::fmt::Write as _;
 
 use crate::checklists::Checklist;
 
-/// One line per check: id, implemented or todo, expected.
+/// One line per check: id, implemented or not, expected.
 pub(crate) fn text() -> String {
     let mut out = String::new();
     let (total, done) = totals();

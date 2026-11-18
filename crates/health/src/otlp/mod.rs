@@ -29,12 +29,13 @@ use std::time::Duration;
 use carbide_instrument::LabelValue;
 use opentelemetry::StringValue;
 use tokio::task::JoinSet;
+use tokio_util::sync::CancellationToken;
 use tonic::transport::{Channel, ClientTlsConfig, Endpoint};
 
 use crate::HealthError;
 use crate::collectors::{BackoffConfig, ExponentialBackoff};
 use crate::config::{OtlpTargetConfig, OtlpTlsConfig};
-use crate::sink::DedupQueue;
+use crate::sink::{DedupQueue, DeliveryCounts};
 
 /// Maximum time allowed to establish a replacement OTLP channel.
 const OTLP_RELOAD_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
@@ -120,15 +121,16 @@ pub(crate) struct OtlpExportResponse {
 }
 
 impl OtlpExportResponse {
-    /// Counts acknowledged records, excluding rejections reported by the receiver.
-    /// Invalid rejection counts produce a warning and no counter increment.
+    /// Counts acknowledged records, excluding rejections reported by the
+    /// receiver, and returns that count. Invalid rejection counts produce a
+    /// warning and no counter increment, and acknowledge no records.
     fn record(
         &self,
         target: &OtlpTargetConfig,
         signal: OtlpSignal,
         record_count: usize,
         instrumentation: &carbide_instrument::Instrumentation,
-    ) {
+    ) -> usize {
         let accepted = usize::try_from(self.rejected_records)
             .ok()
             .and_then(|rejected| record_count.checked_sub(rejected));
@@ -143,7 +145,7 @@ impl OtlpExportResponse {
                 "otlp receiver returned an invalid rejection count; export count omitted"
             );
 
-            return;
+            return 0;
         };
 
         if self.rejected_records > 0 || !self.error_message.is_empty() {
@@ -163,6 +165,8 @@ impl OtlpExportResponse {
             },
             accepted as u64,
         );
+
+        accepted
     }
 }
 
@@ -357,12 +361,18 @@ const MAX_EXPORT_RETRIES: usize = 5;
 ///
 /// Successful responses increment the egress counter by the acknowledged record
 /// count. Partial-success responses exclude rejected records and are not retried.
+///
+/// Calls `settle` as each range finishes, with the outcome of its items. A range
+/// that builds no records counts as delivered. When a partial-success response
+/// rejects `n` wire records, `min(n, items)` of the range's items count as
+/// failed, since one item can encode several wire records.
 pub(crate) async fn export_items<E: OtlpExport>(
     export: &mut E,
     items: &[E::Item],
     target: &OtlpTargetConfig,
     signal: OtlpSignal,
     instrumentation: &carbide_instrument::Instrumentation,
+    mut settle: impl FnMut(ExportOutcome),
 ) {
     let observed_nanos = convert::export_time_nanos();
     // Ranges waiting to be sent, the next one last.
@@ -371,7 +381,13 @@ pub(crate) async fn export_items<E: OtlpExport>(
     while let Some(range) = pending.pop() {
         let request = export.build(&items[range.clone()], observed_nanos);
         let record_count = E::record_count(&request);
+
         if record_count == 0 {
+            settle(ExportOutcome {
+                delivered: range.len(),
+                failed: 0,
+            });
+
             continue;
         }
         if range.len() > 1 && E::encoded_len(&request) > target.max_request_bytes {
@@ -393,7 +409,14 @@ pub(crate) async fn export_items<E: OtlpExport>(
 
             match export.send(request).await {
                 Ok(response) => {
-                    response.record(target, signal, record_count, instrumentation);
+                    let acknowledged =
+                        response.record(target, signal, record_count, instrumentation);
+                    let failed = (record_count - acknowledged).min(range.len());
+
+                    settle(ExportOutcome {
+                        delivered: range.len() - failed,
+                        failed,
+                    });
 
                     tracing::debug!(
                         endpoint = %target.endpoint,
@@ -438,11 +461,27 @@ pub(crate) async fn export_items<E: OtlpExport>(
                         attempt,
                         endpoint: target.endpoint.clone(),
                     });
+
+                    settle(ExportOutcome {
+                        delivered: 0,
+                        failed: range.len(),
+                    });
+
                     break;
                 }
             }
         }
     }
+}
+
+/// Items of one finished [`export_items`] range, by outcome.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub(crate) struct ExportOutcome {
+    /// Items the receiver acknowledged.
+    pub(crate) delivered: usize,
+
+    /// Items the receiver rejected or that were dropped after a failed send.
+    pub(crate) failed: usize,
 }
 
 /// Drains `queue` to `target` for one signal for as long as the task runs.
@@ -458,10 +497,19 @@ pub(crate) async fn export_items<E: OtlpExport>(
 /// Exports share one connection, which is replaced when the target's TLS
 /// material is reloaded. Queue storage is converted to export items after
 /// removal, so compact metric entries do not change batching or retries.
+///
+/// Once `flush_token` is cancelled, the drain stops reloading TLS material,
+/// exports everything queued in batches without waiting for `flush_interval`,
+/// still within `max_concurrent_exports`, and returns when those exports
+/// finish. A drain that has not connected stops retrying and returns without
+/// exporting. `counts` records the export items staged into batches, and
+/// their outcomes once each export finishes.
 async fn run_drain<K, Q, E>(
     queue: Arc<DedupQueue<K, Q>>,
     target: OtlpTargetConfig,
     signal: OtlpSignal,
+    flush_token: CancellationToken,
+    counts: DeliveryCounts,
     make_export: impl Fn(Channel) -> E,
     instrumentation: carbide_instrument::Instrumentation,
 ) where
@@ -471,7 +519,11 @@ async fn run_drain<K, Q, E>(
     E::Item: Send + Sync + 'static,
 {
     let target = Arc::new(target);
-    let mut export = make_export(connect(&target, signal).await);
+    let Some(channel) = connect(&target, signal, &flush_token).await else {
+        return;
+    };
+
+    let mut export = make_export(channel);
     let mut batch = Vec::with_capacity(target.batch_size);
     let mut metric_indices = HashMap::new();
     let mut interval = tokio::time::interval(target.flush_interval);
@@ -493,9 +545,11 @@ async fn run_drain<K, Q, E>(
     tls_reload_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
     let mut in_flight = JoinSet::new();
+    let mut flushing = false;
     loop {
         let mut flush_partial = false;
         tokio::select! {
+            () = flush_token.cancelled(), if !flushing => flushing = true,
             Some(result) = in_flight.join_next(), if !in_flight.is_empty() => {
                 if let Err(error) = result {
                     tracing::error!(%error, endpoint = %target.endpoint, ?signal, "otlp export task failed");
@@ -503,9 +557,10 @@ async fn run_drain<K, Q, E>(
             }
             () = queue.notified(), if in_flight.len() < target.max_concurrent_exports => {}
             _ = interval.tick() => flush_partial = true,
-            _ = tls_reload_interval.tick(), if target.tls.is_some() => {
-                match connect_replacement_target(&target).await {
-                    Ok(channel) => {
+            _ = tls_reload_interval.tick(), if target.tls.is_some() && !flushing => {
+                match flush_token.run_until_cancelled(connect_replacement_target(&target)).await {
+                    None => flushing = true,
+                    Some(Ok(channel)) => {
                         export = make_export(channel);
                         tracing::debug!(
                             endpoint = %target.endpoint,
@@ -513,7 +568,7 @@ async fn run_drain<K, Q, E>(
                             "refreshed otlp target TLS material"
                         );
                     }
-                    Err(error) => {
+                    Some(Err(error)) => {
                         tracing::warn!(
                             ?error,
                             endpoint = %target.endpoint,
@@ -526,14 +581,17 @@ async fn run_drain<K, Q, E>(
         }
 
         while in_flight.len() < target.max_concurrent_exports {
+            let staged = batch.len();
             drain_batch(
                 std::iter::from_fn(|| queue.pop()),
                 &mut batch,
                 (signal == OtlpSignal::Metrics).then_some(&mut metric_indices),
                 target.batch_size,
             );
+
+            counts.start(batch.len() - staged);
             let full = batch.len() >= target.batch_size;
-            let send_partial = flush_partial && !batch.is_empty();
+            let send_partial = (flush_partial || flushing) && !batch.is_empty();
             if !full && !send_partial {
                 break;
             }
@@ -542,14 +600,24 @@ async fn run_drain<K, Q, E>(
             in_flight.spawn(export_batch(
                 export.clone(),
                 ready,
+                counts.clone(),
                 target.clone(),
                 signal,
                 instrumentation.clone(),
             ));
-            if !full {
+
+            // A flush keeps draining after a partial batch: replacements can
+            // end a pass before the queue is empty.
+            if !full && !flushing {
                 break;
             }
             interval.reset();
+        }
+
+        // The pass above stops early only when exports are saturated, so with
+        // none in flight the queue and staging batch are both empty.
+        if flushing && in_flight.is_empty() {
+            return;
         }
     }
 }
@@ -557,11 +625,26 @@ async fn run_drain<K, Q, E>(
 async fn export_batch<E: OtlpExport>(
     mut export: E,
     batch: Vec<E::Item>,
+    counts: DeliveryCounts,
     target: Arc<OtlpTargetConfig>,
     signal: OtlpSignal,
     instrumentation: carbide_instrument::Instrumentation,
 ) {
-    export_items(&mut export, &batch, &target, signal, &instrumentation).await;
+    export_items(
+        &mut export,
+        &batch,
+        &target,
+        signal,
+        &instrumentation,
+        |outcome| {
+            counts.finish(
+                outcome.delivered + outcome.failed,
+                outcome.delivered,
+                outcome.failed,
+            );
+        },
+    )
+    .await;
 }
 
 /// Tops `batch` up to `batch_size`, consuming at most that many queue entries.
@@ -618,7 +701,14 @@ impl<T> IntoExportItem<T> for Box<T> {
 }
 
 /// Connects to `target`, retrying with backoff until it succeeds.
-async fn connect(target: &OtlpTargetConfig, signal: OtlpSignal) -> Channel {
+///
+/// Returns `None` instead of retrying once `flush_token` is cancelled; an
+/// attempt already in progress still completes.
+async fn connect(
+    target: &OtlpTargetConfig,
+    signal: OtlpSignal,
+    flush_token: &CancellationToken,
+) -> Option<Channel> {
     let mut backoff = ExponentialBackoff::new(&BackoffConfig {
         initial: Duration::from_secs(1),
         max: Duration::from_secs(30),
@@ -636,7 +726,11 @@ async fn connect(target: &OtlpTargetConfig, signal: OtlpSignal) -> Channel {
                     retry_in = ?delay,
                     "failed to configure otlp target connection"
                 );
-                tokio::time::sleep(delay).await;
+
+                flush_token
+                    .run_until_cancelled(tokio::time::sleep(delay))
+                    .await?;
+
                 continue;
             }
         };
@@ -644,7 +738,7 @@ async fn connect(target: &OtlpTargetConfig, signal: OtlpSignal) -> Channel {
         match endpoint.connect().await {
             Ok(channel) => {
                 tracing::info!(endpoint = %target.endpoint, ?signal, "connected to otlp target");
-                return channel;
+                return Some(channel);
             }
             Err(error) => {
                 let delay = backoff.next_delay();
@@ -655,7 +749,10 @@ async fn connect(target: &OtlpTargetConfig, signal: OtlpSignal) -> Channel {
                     retry_in = ?delay,
                     "failed to connect to otlp target"
                 );
-                tokio::time::sleep(delay).await;
+
+                flush_token
+                    .run_until_cancelled(tokio::time::sleep(delay))
+                    .await?;
             }
         }
     }
@@ -1066,15 +1163,31 @@ mod tests {
             include_diagnostics: false,
             include_alert_details: false,
         };
+
         let started = tokio::time::Instant::now();
+        let mut outcome = super::ExportOutcome::default();
+
         export_items(
             &mut export,
             &case.items,
             &target,
             OtlpSignal::Logs,
             metrics.instrumentation(),
+            |range| {
+                outcome.delivered += range.delivered;
+                outcome.failed += range.failed;
+            },
         )
         .await;
+
+        assert_eq!(
+            outcome,
+            super::ExportOutcome {
+                delivered: case.items.len(),
+                failed: 0,
+            },
+            "splitting and retries must settle each record once",
+        );
 
         assert_eq!(
             metrics.counter_delta(
@@ -1121,8 +1234,11 @@ mod tests {
                 error_message: error_message.to_string(),
             };
 
+            let mut acknowledged = None;
+
             let logs = capture_logs(|| {
-                response.record(&target, OtlpSignal::Logs, 3, metrics.instrumentation())
+                acknowledged =
+                    Some(response.record(&target, OtlpSignal::Logs, 3, metrics.instrumentation()));
             });
 
             assert_eq!(
@@ -1130,6 +1246,8 @@ mod tests {
                 accepted,
                 "{scenario}",
             );
+
+            assert_eq!(acknowledged, Some(accepted as usize), "{scenario}");
 
             assert_eq!(!logs.is_empty(), warning, "{scenario}");
         }
@@ -1162,16 +1280,28 @@ mod tests {
                 sent: Vec::new(),
             };
 
+            let mut outcomes = Vec::new();
+
             export_items(
                 &mut export,
                 &[1, 2, 3],
                 &target,
                 OtlpSignal::Logs,
                 metrics.instrumentation(),
+                |outcome| outcomes.push(outcome),
             )
             .await;
 
             assert_eq!(export.sent.len(), attempts, "{code:?}");
+
+            assert_eq!(
+                outcomes,
+                [super::ExportOutcome {
+                    delivered: 0,
+                    failed: 3,
+                }],
+                "{code:?}",
+            );
 
             assert_eq!(
                 metrics.counter_delta(
