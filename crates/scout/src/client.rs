@@ -84,7 +84,7 @@ pub(super) fn firmware_download_config(
         require_client_cert: config.require_client_cert,
         use_mgmt_vrf: config.use_mgmt_vrf,
         request_timeout: config.request_timeout,
-        socks_proxy: config.socks_proxy,
+        socks_proxy: config.socks_proxy.map(|proxy| proxy.address),
         connect_retries_max: config.connect_retries_max,
         connect_retries_interval: config.connect_retries_interval,
     };
