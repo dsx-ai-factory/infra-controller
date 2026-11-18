@@ -1625,7 +1625,7 @@ impl NvlPartitionMonitor {
 
         let fleet_load_started = Instant::now();
         let mut txn = self.db_pool.txn_begin().await?;
-        let managed_host_snapshots = self.load_mnnvl_managed_host_snapshots(txn.as_mut()).await?;
+        let managed_host_snapshots = self.load_mnnvl_managed_host_snapshots(&mut txn).await?;
         let mut machine_nvlink_info = machine::find_nvlink_info_by_machine_ids(
             &mut txn,
             &managed_host_snapshots.keys().copied().collect::<Vec<_>>(),

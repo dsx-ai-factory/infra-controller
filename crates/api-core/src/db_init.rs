@@ -123,7 +123,7 @@ pub(crate) async fn create_initial_networks(
     networks: &HashMap<String, NetworkDefinition>,
 ) -> Result<(), CarbideError> {
     let mut txn = Transaction::begin(db_pool).await?;
-    db::tenant_prefix_overlap::lock_checks(txn.as_mut()).await?;
+    db::tenant_prefix_overlap::lock_checks(&mut txn).await?;
     let domains = db::dns::domain::find_by(
         &mut txn,
         ObjectColumnFilter::<db::dns::domain::IdColumn>::All,
@@ -457,7 +457,7 @@ pub(crate) async fn create_admin_vpc(api: &Api, vpc_vni: Option<u32>) -> Result<
     }
 
     let mut txn = api.txn_begin().await?;
-    db::tenant_prefix_overlap::lock_checks(txn.as_mut()).await?;
+    db::tenant_prefix_overlap::lock_checks(&mut txn).await?;
 
     let configured_vni = vpc_vni as i32;
     let admin_segments = db::network_segment::admin(&mut txn).await?;

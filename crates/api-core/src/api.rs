@@ -4556,8 +4556,9 @@ impl Api {
     // This function can just async when
     // https://github.com/rust-lang/rust/issues/110011 will be
     // implemented
+    /// Starts a transaction on the API database pool, preserving the caller location.
     #[track_caller]
-    pub(crate) fn txn_begin(
+    pub fn txn_begin(
         &self,
     ) -> impl Future<Output = Result<db::Transaction<'static>, DatabaseError>> {
         let loc = Location::caller();

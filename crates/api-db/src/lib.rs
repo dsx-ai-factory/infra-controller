@@ -826,10 +826,22 @@ pub struct Transaction<'a> {
     inner: sqlx::PgTransaction<'a>,
 }
 
-impl<'a> AsMut<sqlx::PgTransaction<'a>> for Transaction<'a> {
+impl AsMut<sqlx::PgConnection> for Transaction<'_> {
     #[inline]
-    fn as_mut(&mut self) -> &mut sqlx::PgTransaction<'a> {
+    fn as_mut(&mut self) -> &mut sqlx::PgConnection {
         &mut self.inner
+    }
+}
+
+impl<'a> From<Transaction<'a>> for sqlx::PgTransaction<'a> {
+    fn from(transaction: Transaction<'a>) -> Self {
+        transaction.inner
+    }
+}
+
+impl<'a> From<sqlx::PgTransaction<'a>> for Transaction<'a> {
+    fn from(inner: sqlx::PgTransaction<'a>) -> Self {
+        Self { inner }
     }
 }
 
@@ -1024,6 +1036,7 @@ pub async fn set_read_only_snapshot(txn: &mut sqlx::PgConnection) -> Result<(), 
 /// Starts transactions that own a connection acquired from a PostgreSQL pool.
 pub trait TransactionVending {
     /// Starts a transaction without retaining a borrow of the pool.
+    #[track_caller]
     fn txn_begin(&self) -> impl Future<Output = Result<Transaction<'static>, DatabaseError>>;
 }
 

@@ -2063,7 +2063,7 @@ pub(crate) async fn batch_allocate_instances(
     {
         // Take the overlap lock before Machine, NSG, or prefix locks so a
         // waiting allocation reads the policy committed by the prior writer.
-        db::tenant_prefix_overlap::lock_checks(txn.as_mut()).await?;
+        db::tenant_prefix_overlap::lock_checks(&mut txn).await?;
     }
 
     // Preserve unsupported-preparation error precedence before allocation work.

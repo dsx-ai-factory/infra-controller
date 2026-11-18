@@ -55,7 +55,7 @@ async fn begin(
     authority: &CompletionAuthority,
 ) -> Result<ResourcePoolAllocation, RemoteAllocationError> {
     let mut txn = Transaction::begin(pool).await?;
-    let saved = super::begin(txn.as_mut(), request, authority).await?;
+    let saved = super::begin(&mut txn, request, authority).await?;
     txn.commit().await?;
     Ok(saved)
 }

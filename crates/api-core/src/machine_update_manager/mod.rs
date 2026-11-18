@@ -362,7 +362,7 @@ async fn update_transaction(
     .execute(txn.as_pgconn())
     .await
     .map_err(|error| db::DatabaseError::query("set machine update statement timeout", error))?;
-    work_lock.fence_transaction(txn.as_mut()).await?;
+    work_lock.fence_transaction(&mut txn).await?;
     Ok(txn)
 }
 

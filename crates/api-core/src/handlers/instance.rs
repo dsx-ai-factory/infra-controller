@@ -1552,7 +1552,7 @@ pub(crate) async fn update_instance_config(
     // requires overlap admission here.
     let needs_overlap_check = mh_snapshot.has_managed_dpus() && network_expands;
     if needs_overlap_check {
-        db::tenant_prefix_overlap::lock_checks(txn.as_mut()).await?;
+        db::tenant_prefix_overlap::lock_checks(&mut txn).await?;
         // No resource locks precede this wait. Reload the retained networks,
         // but keep the request's original version rather than rebasing it.
         mh_snapshot = db::managed_host::load_snapshot(
@@ -2603,7 +2603,7 @@ pub(super) async fn force_delete_instance(
     // Admin. Recheck after external cleanup, with the Machine row locked so
     // neither the requested wait nor the network configuration can change.
     let mut txn = api.txn_begin().await?;
-    db::tenant_prefix_overlap::lock_checks(txn.as_mut()).await?;
+    db::tenant_prefix_overlap::lock_checks(&mut txn).await?;
     if db::instance::find_by_id(&mut txn, instance_id)
         .await?
         .is_none()

@@ -206,7 +206,7 @@ async fn create_vpc(
         if let VpcCreation::Configured(new_vpc) = &creation {
             // Hold this lock only while checking and inserting, never during
             // provider work. Another startup may have created the name meanwhile.
-            db::vpc::lock_initial_name(txn.as_mut(), &new_vpc.metadata.name).await?;
+            db::vpc::lock_initial_name(&mut txn, &new_vpc.metadata.name).await?;
             if !db::vpc::find_by_name(&mut txn, &new_vpc.metadata.name)
                 .await?
                 .is_empty()
