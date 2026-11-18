@@ -76,7 +76,7 @@ func TestSubmitPowerOffTask(t *testing.T) {
 			require.NotNil(t, comp.External)
 			assert.Equal(t, tc.componentType, comp.External.Type)
 			assert.Equal(t, "component-1", comp.External.ID)
-			assert.Equal(t, operation.ConflictStrategyQueue, req.ConflictStrategy)
+			assert.Equal(t, operation.ConflictStrategyPreempt, req.ConflictStrategy)
 			assert.Contains(t, req.Description, "component-1")
 			var info operations.PowerControlTaskInfo
 			require.NoError(t, json.Unmarshal(req.Operation.Info, &info))

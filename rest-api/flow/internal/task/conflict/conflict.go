@@ -339,6 +339,11 @@ func (r *Resolver) HasConflict(
 	return builtinRule.Conflicts(incoming, activeTasks), nil
 }
 
+// Conflicts reports whether two tasks conflict under the built-in hardware policy.
+func Conflicts(incoming, existing *taskdef.Task) bool {
+	return builtinRule.Conflicts(incoming, []*taskdef.Task{existing})
+}
+
 // HasScheduleConflict reports whether the incoming operation would conflict
 // with any of the existing schedule operations.
 //
