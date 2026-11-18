@@ -17,5 +17,6 @@
 pub(crate) mod cli_options;
 pub(crate) mod dispatch;
 pub(crate) mod measurement;
+pub(crate) mod proxy;
 pub(crate) mod run;
 pub(crate) mod runtime;
