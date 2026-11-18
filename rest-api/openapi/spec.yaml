@@ -33095,13 +33095,13 @@ components:
           type:
             - string
             - 'null'
-          maxLength: 16
+          maxLength: 255
           description: Username for accessing the Expected Machine's BMC
         defaultBmcPassword:
           type:
             - string
             - 'null'
-          maxLength: 20
+          maxLength: 255
           description: Password for accessing the Expected Machine's BMC
         chassisSerialNumber:
           type: string
@@ -33295,7 +33295,7 @@ components:
             - string
             - 'null'
           minLength: 1
-          maxLength: 16
+          maxLength: 255
           description: Username for accessing the Expected Machine's BMC. Omission or null preserves the value. A non-empty value can be supplied without defaultBmcPassword.
         defaultBmcPassword:
           type:
@@ -33303,7 +33303,7 @@ components:
             - 'null'
           minLength: 1
           writeOnly: true
-          maxLength: 20
+          maxLength: 255
           description: Password for accessing the Expected Machine's BMC. Omission or null preserves the value. A non-empty value can be supplied without defaultBmcUsername.
         chassisSerialNumber:
           type:

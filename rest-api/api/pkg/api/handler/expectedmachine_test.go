@@ -300,6 +300,24 @@ func TestCreateExpectedMachineHandler_Handle(t *testing.T) {
 			expectedStatus: http.StatusCreated,
 		},
 		{
+			name: "successful creation with long BMC user and password",
+			requestBody: model.APIExpectedMachineCreateRequest{
+				SiteID:                   site.ID.String(),
+				BmcMacAddress:            "00:11:22:33:44:72",
+				DefaultBmcUsername:       cutil.GetPtr(strings.Repeat("u", 255)),
+				DefaultBmcPassword:       cutil.GetPtr(strings.Repeat("p", 255)),
+				ChassisSerialNumber:      "CHASSIS123",
+				FallbackDPUSerialNumbers: []string{"DPU001", "DPU002"},
+				Labels:                   map[string]string{"env": "test"},
+			},
+			setupContext: func(c echo.Context) {
+				c.Set("user", createMockUser(org))
+				c.SetParamNames("orgName")
+				c.SetParamValues(org)
+			},
+			expectedStatus: http.StatusCreated,
+		},
+		{
 			name:            "successful creation with omitted collections",
 			requestBodyJSON: fmt.Sprintf(`{"siteId":%q,"bmcMacAddress":"00:11:22:33:44:56","chassisSerialNumber":"CHASSIS-EMPTY"}`, site.ID.String()),
 			setupContext: func(c echo.Context) {
