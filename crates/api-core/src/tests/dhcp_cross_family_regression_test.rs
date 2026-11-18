@@ -131,7 +131,7 @@ async fn test_dhcp_v6_info_request_infers_one_slaac_eui64_address(
 
     // Read back the persisted address and confirm it is the EUI-64 SLAAC GUA.
     let mut txn = pool.txn_begin().await?;
-    let interfaces = db::machine_interface::find_by_mac_address(txn.as_mut(), mac).await?;
+    let interfaces = db::machine_interface::find_by_mac_address(&mut *txn, mac).await?;
     assert_eq!(interfaces.len(), 1);
     assert_eq!(
         response.fqdn,
@@ -226,7 +226,7 @@ async fn test_dhcp_v6_info_request_with_non_64_prefix_returns_options_only(
 
     // Verify the observation persisted the interface identity, but no address.
     let mut txn = pool.txn_begin().await?;
-    let interfaces = db::machine_interface::find_by_mac_address(txn.as_mut(), mac).await?;
+    let interfaces = db::machine_interface::find_by_mac_address(&mut *txn, mac).await?;
     assert_eq!(interfaces.len(), 1);
     assert_eq!(response.machine_interface_id, Some(interfaces[0].id));
     assert_eq!(
@@ -299,7 +299,7 @@ async fn test_dhcp_v6_info_request_on_non_reserved_segment_rejects_known_interfa
 
     // Verify the known interface stayed on its original segment with its v4 lease.
     let mut txn = pool.txn_begin().await?;
-    let interface = db::machine_interface::find_one(txn.as_mut(), interface_id).await?;
+    let interface = db::machine_interface::find_one(&mut *txn, interface_id).await?;
     assert_eq!(interface.segment_id, other_segment);
     let addresses =
         db::machine_interface_address::find_for_interface(&mut txn, interface_id).await?;
@@ -307,7 +307,7 @@ async fn test_dhcp_v6_info_request_on_non_reserved_segment_rejects_known_interfa
     assert_eq!(addresses[0].address, v4_address);
 
     // Verify no second managed interface or SLAAC row was created.
-    let interfaces = db::machine_interface::find_by_mac_address(txn.as_mut(), mac).await?;
+    let interfaces = db::machine_interface::find_by_mac_address(&mut *txn, mac).await?;
     assert_eq!(interfaces.len(), 1);
     txn.rollback().await?;
 

@@ -291,13 +291,13 @@ async fn set_after_create_absence_check_remains_current(pool: sqlx::PgPool) {
         .await
         .expect("lock credential path for create");
     assert!(
-        !db::secrets::exists(create_txn.as_mut(), &path)
+        !db::secrets::exists(&mut *create_txn, &path)
             .await
             .expect("check credential absence"),
         "test path must start empty"
     );
     let create_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
-        .fetch_one(create_txn.as_mut())
+        .fetch_one(&mut *create_txn)
         .await
         .expect("read creator backend PID");
 
@@ -648,7 +648,7 @@ async fn create_waiting_on_path_lock_does_not_block_bulk_write(pool: sqlx::PgPoo
         .await
         .expect("take legacy path advisory lock");
     assert!(
-        !db::secrets::exists(legacy_txn.as_mut(), &path)
+        !db::secrets::exists(&mut *legacy_txn, &path)
             .await
             .expect("check legacy path"),
         "test path must start empty"
@@ -686,7 +686,7 @@ async fn create_waiting_on_path_lock_does_not_block_bulk_write(pool: sqlx::PgPoo
 
     let mut bulk_txn = pool.txn_begin().await.expect("begin bulk transaction");
     sqlx::query("SET LOCAL lock_timeout = '250ms'")
-        .execute(bulk_txn.as_mut())
+        .execute(&mut *bulk_txn)
         .await
         .expect("set bulk table-lock timeout");
     let bulk_lock_result = db::secrets::lock_for_bulk_write(&mut bulk_txn).await;

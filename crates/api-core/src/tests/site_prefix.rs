@@ -87,7 +87,7 @@ async fn persist_tenant_site_prefix(
         sqlx::query("UPDATE site_prefixes SET lifecycle_state = $1 WHERE id = $2")
             .bind(lifecycle_state)
             .bind(site_prefix.id)
-            .execute(txn.as_mut())
+            .execute(&mut *txn)
             .await
             .unwrap();
     }
@@ -568,7 +568,7 @@ async fn concurrent_tenant_roots_share_the_site_isolation_limit(pool: sqlx::PgPo
         .await
         .unwrap();
     let blocker_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
-        .fetch_one(blocker.as_mut())
+        .fetch_one(&mut *blocker)
         .await
         .unwrap();
     let first_id = SitePrefixId::new();
@@ -811,7 +811,7 @@ async fn uncovered_retained_tenant_root_blocks_fnn_admin_and_startup_but_not_ver
     .await;
     let mut txn = env.pool.txn_begin().await.unwrap();
     assert!(
-        db::tenant_prefix_overlap::find_duplicate_vpc_ids(txn.as_mut(), false)
+        db::tenant_prefix_overlap::find_duplicate_vpc_ids(&mut *txn, false)
             .await
             .unwrap()
             .is_empty()
@@ -1474,7 +1474,7 @@ async fn runtime_config_retains_removed_operator_root_until_child_hard_delete(
     let retiring_root_id: SitePrefixId =
         sqlx::query_scalar("SELECT id FROM site_prefixes WHERE prefix = $1")
             .bind(retiring_root)
-            .fetch_one(txn.as_mut())
+            .fetch_one(&mut *txn)
             .await?;
     let vpc_id = VpcId::new();
     sqlx::query("INSERT INTO vpcs (id, name, organization_id, version) VALUES ($1, $2, $3, $4)")
@@ -1482,7 +1482,7 @@ async fn runtime_config_retains_removed_operator_root_until_child_hard_delete(
         .bind("runtime-config-retained-root")
         .bind("tenant-a")
         .bind(ConfigVersion::initial())
-        .execute(txn.as_mut())
+        .execute(&mut *txn)
         .await?;
     let child_id = VpcPrefixId::new();
     sqlx::query(
@@ -1494,7 +1494,7 @@ async fn runtime_config_retains_removed_operator_root_until_child_hard_delete(
     .bind("retained child")
     .bind(vpc_id)
     .bind(retiring_root_id)
-    .execute(txn.as_mut())
+    .execute(&mut *txn)
     .await?;
     txn.commit().await?;
 
@@ -1625,7 +1625,7 @@ async fn runtime_config_retains_removed_operator_root_until_direct_segment_hard_
     let retiring_root_id: SitePrefixId =
         sqlx::query_scalar("SELECT id FROM site_prefixes WHERE prefix = $1")
             .bind(retiring_root)
-            .fetch_one(txn.as_mut())
+            .fetch_one(&mut *txn)
             .await?;
     txn.commit().await?;
     assert_operator_retirement_waits(&env, retiring_root_id).await;
@@ -1757,7 +1757,7 @@ async fn dpu_response_retains_containing_roots_for_unassigned_predecessor_prefix
     .bind("10.1.2.0/24".parse::<IpNetwork>()?)
     .bind("ambiguous predecessor child")
     .bind(predecessor_vpc_id)
-    .execute(txn.as_mut())
+    .execute(&mut *txn)
     .await?;
     txn.commit().await?;
 

@@ -709,7 +709,7 @@ async fn growth_waits_for_the_competing_successor_before_checking_its_predecesso
     storage::lock_binding(&mut writer, harness.binding.binding_id).await?;
     storage::insert(&mut writer, &winner).await?;
     let writer_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
-        .fetch_one(writer.as_mut())
+        .fetch_one(&mut *writer)
         .await?;
     let mut competing_growth = eligibility();
     competing_growth
@@ -1041,10 +1041,10 @@ async fn cancelled_registration_reads_return_the_only_connection(database: PgPoo
     let harness = Harness::new(database, Fault::None).await;
     let mut blocker = harness.database.txn_begin().await?;
     let blocker_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
-        .fetch_one(blocker.as_mut())
+        .fetch_one(&mut *blocker)
         .await?;
     sqlx::query("LOCK TABLE resource_pool_registration IN ACCESS EXCLUSIVE MODE")
-        .execute(blocker.as_mut())
+        .execute(&mut *blocker)
         .await?;
     // Configure every pool before starting reads so fixture setup does not
     // consume their PostgreSQL statement deadlines.

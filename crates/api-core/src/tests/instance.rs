@@ -4821,7 +4821,7 @@ async fn test_service_vpc_coordinator_serializes_competing_allocations(
         db::ConditionalWrite::Applied(_)
     ));
     let first_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
-        .fetch_one(first_txn.as_mut())
+        .fetch_one(first_txn.as_pgconn())
         .await?;
 
     // Start the disjoint second attachment and verify it waits for the exclusive
@@ -5053,7 +5053,7 @@ async fn test_service_vpc_coordinator_rolls_back_competing_same_instance_additio
         db::ConditionalWrite::Applied(_)
     ));
     let winner_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
-        .fetch_one(winner_txn.as_mut())
+        .fetch_one(winner_txn.as_pgconn())
         .await?;
 
     // Start the competing addition from the same InstanceSnapshot and verify the exclusive
@@ -5422,7 +5422,7 @@ async fn test_service_vpc_coordinator_rolls_back_earlier_intent_after_late_exhau
         .expect_err("the second endpoint must exhaust the only link prefix");
     assert!(matches!(error, crate::CarbideError::ResourceExhausted(_)));
     let generated = db::network_segment::find_by(
-        allocation_txn.as_mut(),
+        allocation_txn.as_pgconn(),
         ObjectColumnFilter::One(db::network_segment::VpcColumn, &service_vpc_id),
         NetworkSegmentSearchConfig::default(),
     )
@@ -5431,7 +5431,7 @@ async fn test_service_vpc_coordinator_rolls_back_earlier_intent_after_late_exhau
     let address_count: i64 =
         sqlx::query_scalar("SELECT count(*) FROM instance_addresses WHERE vpc_id = $1")
             .bind(service_vpc_id)
-            .fetch_one(allocation_txn.as_mut())
+            .fetch_one(allocation_txn.as_pgconn())
             .await?;
     assert_eq!(address_count, 1);
     let parent = db::vpc_prefix::get_for_allocation_by_ids(allocation_txn.as_mut(), &[parent_id])
@@ -6368,7 +6368,7 @@ async fn test_service_vpc_coordinator_serializes_with_default_force_delete(
         db::ConditionalWrite::Applied(_)
     ));
     let activation_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
-        .fetch_one(activation.as_mut())
+        .fetch_one(activation.as_pgconn())
         .await?;
 
     // Start the public default decision and verify it waits for activation's Machine row lock.
@@ -6470,7 +6470,7 @@ async fn test_service_vpc_coordinator_serializes_with_orphan_force_delete(
     };
     let endpoint = endpoint.clone();
     let activation_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
-        .fetch_one(activation.as_mut())
+        .fetch_one(activation.as_pgconn())
         .await?;
 
     // Start the public override and verify its decision waits for the same Machine row lock.

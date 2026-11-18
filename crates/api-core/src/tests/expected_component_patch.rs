@@ -558,7 +558,7 @@ async fn patch_expected_machine_dpu_loopback_reservation_restore_owned(pool: PgP
     let dpu_id = from_hardware_info_with_type(&dpu_hw, MachineType::Dpu).unwrap();
     let mut txn = pool.txn_begin().await.unwrap();
     let blocker_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
-        .fetch_one(txn.as_mut())
+        .fetch_one(&mut *txn)
         .await
         .unwrap();
     db::expected_dpu_loopback_reservation::find_by_dpu_oob_net0_mac_for_update(
@@ -1714,13 +1714,13 @@ async fn patch_expected_machine_merges_after_a_concurrent_writer_commits(
 
     let mut blocker = env.pool.txn_begin().await?;
     let blocker_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
-        .fetch_one(blocker.as_mut())
+        .fetch_one(&mut *blocker)
         .await?;
     sqlx::query("UPDATE expected_machines SET bmc_username=$1, bmc_password=$2 WHERE id=$3")
         .bind("concurrent-user")
         .bind("concurrent-password")
         .bind(id)
-        .execute(blocker.as_mut())
+        .execute(&mut *blocker)
         .await?;
     let api = env.api.clone();
     let patch_task = tokio::spawn(async move {
@@ -1773,7 +1773,7 @@ async fn expected_power_shelf_update_locks_inventory_before_interface(
 
     let mut blocker = env.pool.txn_begin().await?;
     let blocker_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
-        .fetch_one(blocker.as_mut())
+        .fetch_one(&mut *blocker)
         .await?;
     db::expected_power_shelf::find_by_id_for_update(&mut blocker, id)
         .await?
@@ -1794,7 +1794,7 @@ async fn expected_power_shelf_update_locks_inventory_before_interface(
     let interface_lock: Result<MachineInterfaceId, _> =
         sqlx::query_scalar("SELECT id FROM machine_interfaces WHERE id=$1 FOR UPDATE NOWAIT")
             .bind(interface_id)
-            .fetch_one(probe.as_mut())
+            .fetch_one(&mut *probe)
             .await;
     probe.rollback().await?;
     blocker.commit().await?;
@@ -1844,7 +1844,7 @@ async fn expected_switch_update_locks_inventory_before_interface(
 
     let mut blocker = env.pool.txn_begin().await?;
     let blocker_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
-        .fetch_one(blocker.as_mut())
+        .fetch_one(&mut *blocker)
         .await?;
     db::expected_switch::find_for_update(
         &mut blocker,
@@ -1869,7 +1869,7 @@ async fn expected_switch_update_locks_inventory_before_interface(
     let interface_lock: Result<MachineInterfaceId, _> =
         sqlx::query_scalar("SELECT id FROM machine_interfaces WHERE id=$1 FOR UPDATE NOWAIT")
             .bind(interface_id)
-            .fetch_one(probe.as_mut())
+            .fetch_one(&mut *probe)
             .await;
     probe.rollback().await?;
     blocker.commit().await?;

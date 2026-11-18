@@ -771,7 +771,7 @@ async fn empty_version_skips_current_non_rms_switches(
 
     let mut txn = pool.txn_begin().await?;
 
-    let address = db::machine_interface::lookup_bmc_ip_by_mac_address(txn.as_mut(), switch_mac)
+    let address = db::machine_interface::lookup_bmc_ip_by_mac_address(&mut *txn, switch_mac)
         .await?
         .into_iter()
         .next()

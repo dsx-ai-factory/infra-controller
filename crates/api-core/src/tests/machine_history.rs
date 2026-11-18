@@ -255,7 +255,7 @@ async fn test_old_machine_state_history(
         .bind(host_machine_id.to_string())
         .bind(r#"{"state": "hostinit", "machine_state": {"state": "nolongerarealstate"}}"#)
         .bind(ConfigVersion::initial())
-        .execute(txn.as_mut())
+        .execute(&mut *txn)
         .await?;
 
     let machine = db::machine::find_one(

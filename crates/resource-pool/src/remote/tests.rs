@@ -803,13 +803,13 @@ async fn worker_takeover_prevents_saving_an_intent_with_the_previous_guard(
         .await?;
     let mut takeover = harness.database.txn_begin().await?;
     let blocker_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
-        .fetch_one(takeover.as_mut())
+        .fetch_one(&mut *takeover)
         .await?;
     let new_worker_id: Uuid = sqlx::query_scalar(
         "UPDATE work_locks SET worker_id = gen_random_uuid() WHERE work_key = $1 RETURNING worker_id",
     )
     .bind(&work_key)
-    .fetch_one(takeover.as_mut())
+    .fetch_one(&mut *takeover)
     .await?;
 
     // Hold the replacement uncommitted until the old worker reaches its fence.
@@ -1912,13 +1912,13 @@ async fn foreground_expiry_cleans_up_after_abandonment_cannot_be_saved(
     // must fail to persist even though the provider has already allocated.
     let mut blocker = harness.database.txn_begin().await?;
     let blocker_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
-        .fetch_one(blocker.as_mut())
+        .fetch_one(&mut *blocker)
         .await?;
     sqlx::query(
         "SELECT allocation_id FROM resource_pool_allocations WHERE allocation_id = $1 FOR UPDATE",
     )
     .bind(harness.request.request_id)
-    .fetch_one(blocker.as_mut())
+    .fetch_one(&mut *blocker)
     .await?;
     harness.cancel.cancel();
     tokio::select! {
@@ -2229,13 +2229,13 @@ async fn shutdown_stops_a_database_wait_without_dispatching(database: PgPool) ->
     begin_request(&harness.database, &harness.request, &harness.authority).await?;
     let mut blocker = harness.database.txn_begin().await?;
     let blocker_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
-        .fetch_one(blocker.as_mut())
+        .fetch_one(&mut *blocker)
         .await?;
     sqlx::query(
         "SELECT allocation_id FROM resource_pool_allocations WHERE allocation_id = $1 FOR UPDATE",
     )
     .bind(harness.request.request_id)
-    .fetch_one(blocker.as_mut())
+    .fetch_one(&mut *blocker)
     .await?;
     let mut pending = Box::pin(
         harness
@@ -2296,10 +2296,10 @@ async fn cancelled_read_returns_its_only_connection_while_the_table_stays_locked
     );
     let mut blocker = harness.database.txn_begin().await?;
     let blocker_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
-        .fetch_one(blocker.as_mut())
+        .fetch_one(&mut *blocker)
         .await?;
     sqlx::query("LOCK TABLE resource_pool_allocations IN ACCESS EXCLUSIVE MODE")
-        .execute(blocker.as_mut())
+        .execute(&mut *blocker)
         .await?;
     let mut pending = Box::pin(remote.reconcile(harness.request.request_id, &harness.cancel));
     tokio::select! {
@@ -2344,11 +2344,11 @@ async fn database_wait_preserves_a_shorter_operator_timeout(database: PgPool) ->
         .await?;
     let mut txn = super::database_transaction(&single_connection).await?;
     let timeout: String = sqlx::query_scalar("SHOW statement_timeout")
-        .fetch_one(txn.as_mut())
+        .fetch_one(txn.as_pgconn())
         .await?;
     assert_eq!(timeout, "1s");
     let error = sqlx::query("SELECT pg_sleep(2)")
-        .execute(txn.as_mut())
+        .execute(txn.as_pgconn())
         .await
         .expect_err("the operator's shorter timeout must interrupt the query");
     assert_eq!(

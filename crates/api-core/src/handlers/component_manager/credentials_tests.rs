@@ -286,10 +286,10 @@ async fn expected_credentials_cancellation_releases_pool_capacity(
 
     let mut blocker = pool.txn_begin().await?;
     sqlx::query("LOCK TABLE expected_switches IN ACCESS EXCLUSIVE MODE")
-        .execute(blocker.as_mut())
+        .execute(&mut *blocker)
         .await?;
     let blocker_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
-        .fetch_one(blocker.as_mut())
+        .fetch_one(&mut *blocker)
         .await?;
     let mut read = Box::pin(fetch_expected_credentials(
         RackComponent::SwitchBmc,
@@ -872,10 +872,10 @@ async fn component_credentials_cancellation_releases_pool_capacity(
     let reader_pid = reader_session(&reader_pool).await?;
     let mut blocker = pool.txn_begin().await?;
     sqlx::query("LOCK TABLE power_shelves IN ACCESS EXCLUSIVE MODE")
-        .execute(blocker.as_mut())
+        .execute(&mut *blocker)
         .await?;
     let blocker_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
-        .fetch_one(blocker.as_mut())
+        .fetch_one(&mut *blocker)
         .await?;
     let mut read = Box::pin(api.get_component_credentials(request(shelf)));
     let blocked_pid = tokio::select! {
@@ -1002,9 +1002,9 @@ async fn component_credentials_read_ends_at_its_deadline(pool: sqlx::PgPool) -> 
     ] {
         let reader_pid = reader_session(&reader_pool).await?;
         let mut blocker = pool.txn_begin().await?;
-        sqlx::query(lock_table).execute(blocker.as_mut()).await?;
+        sqlx::query(lock_table).execute(&mut *blocker).await?;
         let blocker_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
-            .fetch_one(blocker.as_mut())
+            .fetch_one(&mut *blocker)
             .await?;
         let (expire, expired) = tokio::sync::oneshot::channel();
         let mut stalled = Box::pin(read(expired));

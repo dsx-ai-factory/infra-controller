@@ -371,7 +371,7 @@ pub async fn try_lock_group_for_update(
     let query = "SELECT id FROM machine_group_member_ids($1)";
     let machine_ids: Vec<MachineId> = sqlx::query_scalar(query)
         .bind(machine_id)
-        .fetch_all(txn.as_mut())
+        .fetch_all(&mut *txn)
         .await
         .map_err(|error| DatabaseError::query(query, error))?;
     if machine_ids.is_empty() {
@@ -1523,7 +1523,7 @@ pub async fn update_network_status_observation(
     let updated: Option<(MachineId,)> = sqlx::query_as(query)
         .bind(sqlx::types::Json(&observation))
         .bind(machine_id)
-        .fetch_optional(txn.as_mut())
+        .fetch_optional(&mut *txn)
         .await
         .map_err(|e| DatabaseError::query(query, e))?;
 
@@ -1642,7 +1642,7 @@ pub async fn update_extension_service_status_observation(
         .bind(machine_id)
         .bind(service_type.to_string())
         .bind(sqlx::types::Json(observation))
-        .fetch_optional(txn.as_mut())
+        .fetch_optional(&mut *txn)
         .await
         .map_err(|e| DatabaseError::query(query, e))?;
     if updated.is_some() {
@@ -1655,7 +1655,7 @@ pub async fn update_extension_service_status_observation(
     let identity_query = "SELECT id FROM machines WHERE id = $1";
     let machine_exists: Option<(MachineId,)> = sqlx::query_as(identity_query)
         .bind(machine_id)
-        .fetch_optional(txn.as_mut())
+        .fetch_optional(&mut *txn)
         .await
         .map_err(|e| DatabaseError::query(identity_query, e))?;
     if machine_exists.is_some() {
@@ -2232,7 +2232,7 @@ async fn is_force_deleting_or_deleted(
     let is_force_deleting: Option<bool> = sqlx::query_scalar(query)
         .bind(machine_id)
         .bind(sqlx::types::Json(&ManagedHostState::ForceDeletion))
-        .fetch_optional(txn.as_mut())
+        .fetch_optional(&mut *txn)
         .await
         .map_err(|error| DatabaseError::query(query, error))?;
     Ok(is_force_deleting.unwrap_or(true))
@@ -2264,7 +2264,7 @@ async fn try_update_network_config_inner(
         .bind(reject_force_deletion)
         .bind(sqlx::types::Json(&ManagedHostState::ForceDeletion))
         .bind(expected_created)
-        .fetch_one(txn.as_mut())
+        .fetch_one(&mut *txn)
         .await;
 
     match target_result {
@@ -2297,7 +2297,7 @@ async fn try_update_network_config_inner(
             sqlx::query(group_query)
                 .bind(next_version)
                 .bind(machine_id)
-                .execute(txn.as_mut())
+                .execute(&mut *txn)
                 .await
                 .map_err(|e| DatabaseError::query(group_query, e))?;
             Ok(ConditionalWrite::Applied(()))
@@ -2387,7 +2387,7 @@ pub async fn lock_rows_for_stable_id_sync(
     let query = "SELECT id FROM machine_interfaces WHERE machine_id = $1 ORDER BY id FOR UPDATE";
     sqlx::query(query)
         .bind(predicted_host_id)
-        .execute(txn.as_mut())
+        .execute(&mut *txn)
         .await
         .map_err(|e| DatabaseError::query(query, e))?;
     let query = "SELECT id FROM machines WHERE id = $1 FOR UPDATE";
@@ -2457,7 +2457,7 @@ pub async fn try_sync_stable_id_with_current_machine_id_for_host(
     sqlx::query(query)
         .bind(stable_machine_id)
         .bind(current_machine_id)
-        .execute(txn.as_mut())
+        .execute(&mut *txn)
         .await
         .map_err(|e| DatabaseError::query(query, e))?;
 
@@ -2467,7 +2467,7 @@ pub async fn try_sync_stable_id_with_current_machine_id_for_host(
     let machine_id = sqlx::query_as(query)
         .bind(stable_machine_id)
         .bind(current_machine_id)
-        .fetch_one(txn.as_mut())
+        .fetch_one(&mut *txn)
         .await
         .map_err(|e| DatabaseError::query(query, e))?;
 
@@ -2680,7 +2680,7 @@ pub async fn create_with_requested_loopback(
         }))
         .bind(sqlx::types::Json(&host_profile))
         .bind(spx_multiplane.as_ref().map(sqlx::types::Json))
-        .fetch_one(txn.as_mut())
+        .fetch_one(&mut *txn)
         .await
         .map_err(|e| DatabaseError::query(query, e))?;
 
@@ -3378,7 +3378,7 @@ pub async fn lock_nic_firmware_state(
                 )";
     sqlx::query(query)
         .bind(host_id.to_string())
-        .execute(txn.as_mut())
+        .execute(&mut *txn)
         .await
         .map_err(|error| DatabaseError::query(query, error))?;
     let query = "SELECT id FROM machines
@@ -3513,14 +3513,14 @@ async fn lock_nic_firmware_failure_state(
     let query = "SELECT id FROM machine_interfaces WHERE machine_id = $1 ORDER BY id";
     let expected_interfaces: Vec<MachineInterfaceId> = sqlx::query_scalar(query)
         .bind(host_id)
-        .fetch_all(txn.as_mut())
+        .fetch_all(&mut *txn)
         .await
         .map_err(|error| DatabaseError::query(query, error))?;
     let query = "SELECT id FROM machine_interfaces WHERE machine_id = $1
                  ORDER BY id FOR UPDATE SKIP LOCKED";
     let locked_interfaces: Vec<MachineInterfaceId> = sqlx::query_scalar(query)
         .bind(host_id)
-        .fetch_all(txn.as_mut())
+        .fetch_all(&mut *txn)
         .await
         .map_err(|error| DatabaseError::query(query, error))?;
     if locked_interfaces != expected_interfaces {
@@ -3534,7 +3534,7 @@ async fn lock_nic_firmware_failure_state(
                  ) ORDER BY id";
     let dpu_ids: Vec<DpuMachineId> = sqlx::query_scalar(query)
         .bind(host_id)
-        .fetch_all(txn.as_mut())
+        .fetch_all(&mut *txn)
         .await
         .map_err(|error| DatabaseError::query(query, error))?;
     for dpu_id in dpu_ids {
@@ -3572,7 +3572,7 @@ pub async fn prepare_nic_firmware_owner_release(
     let owner: Option<InstanceId> = sqlx::query_scalar(query)
         .bind(instance_id)
         .bind(host_id)
-        .fetch_optional(txn.as_mut())
+        .fetch_optional(&mut *txn)
         .await
         .map_err(|error| DatabaseError::query(query, error))?;
     if owner.is_none() {
@@ -4007,7 +4007,7 @@ pub async fn try_set_machine_maintenance_requested(
     let lock_query = "SELECT controller_state FROM machines WHERE id = $1 FOR UPDATE";
     let state: Option<sqlx::types::Json<ManagedHostState>> = sqlx::query_scalar(lock_query)
         .bind(machine_id)
-        .fetch_optional(txn.as_mut())
+        .fetch_optional(&mut *txn)
         .await
         .map_err(|error| DatabaseError::query(lock_query, error))?;
     let Some(state) = state.filter(|state| state.accepts_maintenance_request()) else {
@@ -4746,7 +4746,7 @@ pub async fn record_force_delete_admin_ack_requirement(
     let query = "SELECT force_delete_requires_admin_ack FROM machines WHERE id = $1";
     let recorded: Option<bool> = sqlx::query_scalar(query)
         .bind(machine_id)
-        .fetch_one(txn.as_mut())
+        .fetch_one(&mut *txn)
         .await
         .map_err(|error| DatabaseError::query(query, error))?;
     if let Some(recorded) = recorded

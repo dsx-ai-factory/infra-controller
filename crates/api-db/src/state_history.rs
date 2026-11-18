@@ -251,7 +251,7 @@ mod tests {
                 .await
                 .map_err(|err| err.to_string())?;
             let pid = sqlx::query_scalar::<_, i32>("SELECT pg_backend_pid()")
-                .fetch_one(txn.as_mut())
+                .fetch_one(&mut *txn)
                 .await
                 .map_err(|err| err.to_string())?;
             pid_sender

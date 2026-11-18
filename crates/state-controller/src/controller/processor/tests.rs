@@ -299,7 +299,7 @@ async fn delayed_claim_commit_is_not_dispatched_and_recovers_after_expiry(
     .await?;
     let mut blocker = pool.txn_begin().await?;
     sqlx::query("SELECT pg_advisory_xact_lock(6778)")
-        .execute(blocker.as_mut())
+        .execute(&mut *blocker)
         .await?;
 
     let mut processor = processor(pool.clone());
@@ -461,7 +461,7 @@ async fn renamed_object_keeps_single_aggregate_count(pool: sqlx::PgPool) -> eyre
         .bind(RENAMED_ID)
         .bind(sqlx::types::Json(TestObjectControllerState::B))
         .bind(ORIGINAL_ID)
-        .execute(txn.as_mut())
+        .execute(&mut *txn)
         .await?;
     db::queue_objects(
         &mut txn,
@@ -542,7 +542,7 @@ async fn renamed_object_keeps_single_aggregate_count(pool: sqlx::PgPool) -> eyre
     let mut txn = pool.txn_begin().await?;
     sqlx::query("DELETE FROM test_state_controller_queued_objects WHERE object_id=$1")
         .bind(RENAMED_ID)
-        .execute(txn.as_mut())
+        .execute(&mut *txn)
         .await?;
     db::queue_objects(
         &mut txn,
@@ -644,7 +644,7 @@ async fn late_result_for_id_absent_from_database_does_not_contribute(
     sqlx::query("UPDATE test_objects SET id=$1 WHERE id=$2")
         .bind(RENAMED_ID)
         .bind(ORIGINAL_ID)
-        .execute(txn.as_mut())
+        .execute(&mut *txn)
         .await?;
     txn.commit().await?;
     assert!(

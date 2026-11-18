@@ -446,7 +446,7 @@ async fn vpc_peering_rejects_direct_and_sibling_retained_prefixes(
     let mut txn = env.pool.txn_begin().await?;
     db::tenant_prefix_overlap::lock_checks(&mut txn).await?;
     let blocker_pid = sqlx::query_scalar("SELECT pg_backend_pid()")
-        .fetch_one(txn.as_mut())
+        .fetch_one(&mut *txn)
         .await?;
     let retained_prefix_id = retain_peering_overlap_prefix(&mut txn, &vpcs[2]).await?;
 

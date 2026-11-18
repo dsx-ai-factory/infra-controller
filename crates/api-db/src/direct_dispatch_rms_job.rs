@@ -210,7 +210,7 @@ pub async fn replace_firmware_jobs(
                       WHERE bmc_mac = $1 AND job_kind IN ('firmware_object', 'switch_system_image')";
     sqlx::query(delete_sql)
         .bind(bmc_mac)
-        .execute(txn.as_mut())
+        .execute(&mut *txn)
         .await
         .map_err(|e| DatabaseError::new(delete_sql, e))?;
 
@@ -223,7 +223,7 @@ pub async fn replace_firmware_jobs(
             .bind(job_kind.as_str())
             .bind(job_id)
             .bind(action_id)
-            .execute(txn.as_mut())
+            .execute(&mut *txn)
             .await
             .map_err(|e| DatabaseError::new(insert_sql, e))?;
     }
@@ -387,23 +387,23 @@ mod tests {
              VALUES ('02:00:00:00:00:01', 'firmware_object', 'old-fw', '2026-10-01 10:00:00+00'),
                     ('02:00:00:00:00:01', 'switch_system_image', 'old-image', '2026-10-02 10:00:00+00')",
         )
-        .execute(txn.as_mut())
+        .execute(&mut *txn)
         .await
         .unwrap();
         let predecessor: Vec<(String, String, String)> = sqlx::query_as(
             "SELECT job_kind, job_id, created::text FROM direct_dispatch_firmware_update_jobs ORDER BY job_kind",
         )
-        .fetch_all(txn.as_mut())
+        .fetch_all(&mut *txn)
         .await
         .unwrap();
         sqlx::raw_sql(RENAME_MIGRATION)
-            .execute(txn.as_mut())
+            .execute(&mut *txn)
             .await
             .unwrap();
         let migrated: Vec<(String, String, String)> = sqlx::query_as(
             "SELECT job_kind, job_id, created::text FROM direct_dispatch_rms_jobs ORDER BY job_kind",
         )
-        .fetch_all(txn.as_mut())
+        .fetch_all(&mut *txn)
         .await
         .unwrap();
         assert_eq!(migrated, predecessor);

@@ -729,7 +729,7 @@ async fn integrated_dpu_asn_creation_retries_a_busy_group(database: PgPool) -> e
     )
     .bind(env.admin_segment())
     .bind(host_id)
-    .fetch_one(txn.as_mut())
+    .fetch_one(&mut *txn)
     .await?;
     txn.commit().await?;
     assert!(
@@ -957,7 +957,7 @@ async fn integrated_dpu_asn_allocation_failures_preserve_creation(
         let mut txn = fixture.env.pool.txn_begin().await?;
         sqlx::query("DELETE FROM resource_pool WHERE name = $1")
             .bind(FNN_ASN)
-            .execute(txn.as_mut())
+            .execute(&mut *txn)
             .await?;
         if exhausted {
             db::resource_pool::populate(
@@ -1716,7 +1716,7 @@ async fn integrated_dpu_asn_dispatcher_keeps_batch_rollback(database: PgPool) ->
     }
     sqlx::query("DELETE FROM resource_pool WHERE name = $1")
         .bind(FNN_ASN)
-        .execute(txn.as_mut())
+        .execute(&mut *txn)
         .await?;
     db::resource_pool::populate(
         &env.common_pools.ethernet.pool_fnn_asn,
@@ -1756,7 +1756,7 @@ async fn integrated_dpu_asn_dispatcher_keeps_batch_rollback(database: PgPool) ->
 
     let mut held = env.pool.txn_begin().await?;
     let blocker: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
-        .fetch_one(held.as_mut())
+        .fetch_one(&mut *held)
         .await?;
     db::machine::lock_by_id_for_update(&mut held, &ids[1]).await?;
     let cancel = CancellationToken::new();
@@ -2109,7 +2109,7 @@ async fn remote_dpu_discovery_and_site_repair_reuse_a_lost_reply(
         let mut interface_gate = fixture.env.pool.txn_begin().await?;
         sqlx::query("SELECT id FROM machine_interfaces WHERE id = $1 FOR UPDATE")
             .bind(inputs.request.machine_interface_id.expect("DPU OOB interface"))
-            .fetch_one(interface_gate.as_mut()).await?;
+            .fetch_one(&mut *interface_gate).await?;
         fixture.provider.allocate_pause.resume.notify_one();
         let saved = tokio::select! {
             result = &mut discovery => panic!("discovery passed the interface gate: {result:?}"),
@@ -2361,7 +2361,7 @@ async fn remote_dpu_discovery_rechecks_host_link_after_preparation(
         // locks. No DPU exists yet, so preparation still calls the provider.
         let host_interface_id = dpu_discover_dhcp(&fixture.env, &host_mac.to_string()).await;
         let mut txn = fixture.env.pool.txn_begin().await?;
-        let host_interface = db::machine_interface::find_one(txn.as_mut(), host_interface_id).await?;
+        let host_interface = db::machine_interface::find_one(&mut *txn, host_interface_id).await?;
         db::machine::get_or_create(
             &mut txn, Some(db::machine::MachineCreationPools::All(&fixture.env.common_pools)), &host_id, &host_interface, None,
         ).await?;
@@ -2388,7 +2388,7 @@ async fn remote_dpu_discovery_rechecks_host_link_after_preparation(
         // at this gate before writing any machine or interface rows.
         let mut gate = fixture.env.pool.txn_begin().await?;
         db::machine_interface::lock_all_admin_segments(&mut gate).await?;
-        let gate_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()").fetch_one(gate.as_mut()).await?;
+        let gate_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()").fetch_one(&mut *gate).await?;
         fixture.provider.allocate_pause.resume.notify_one();
         let discovery_pid = tokio::select! {
             result = &mut discovery => panic!("discovery bypassed the segment gate: {result:?}"),
@@ -2437,7 +2437,7 @@ async fn remote_dpu_stale_force_delete_preserves_same_id_replacement(
         // Replacement and stale cleanup then queue behind the same segment gate.
         let mut gate = fixture.env.pool.txn_begin().await?;
         db::machine_interface::lock_all_admin_segments(&mut gate).await?;
-        let gate_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()").fetch_one(gate.as_mut()).await?;
+        let gate_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()").fetch_one(&mut *gate).await?;
         let api = fixture.env.api.clone();
         let mut first = Box::pin(api.admin_force_delete_machine(Request::new(forge::AdminForceDeleteMachineRequest {
             host_query: inputs.machine_id.to_string(), ..Default::default()
@@ -2453,7 +2453,7 @@ async fn remote_dpu_stale_force_delete_preserves_same_id_replacement(
         // than another public discovery RPC that would need this same lock.
         let mut replacement_txn = fixture.env.pool.txn_begin().await?;
         let replacement_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
-            .fetch_one(replacement_txn.as_mut()).await?;
+            .fetch_one(&mut *replacement_txn).await?;
         let mut replacement = Box::pin(async {
             db::machine_interface::lock_all_admin_segments(&mut replacement_txn).await?;
             assert!(db::machine::find_one(&fixture.env.pool, &inputs.machine_id, MachineSearchConfig::default()).await?.is_none());

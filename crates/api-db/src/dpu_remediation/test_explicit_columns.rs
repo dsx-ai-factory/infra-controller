@@ -40,7 +40,7 @@ async fn remediation_queries_survive_added_columns(
          ALTER TABLE dpu_remediations ADD COLUMN test_added_column text;
          ALTER TABLE applied_dpu_remediations ADD COLUMN test_added_column text;",
     )
-    .execute(migration.as_mut())
+    .execute(&mut *migration)
     .await?;
     migration.commit().await?;
 

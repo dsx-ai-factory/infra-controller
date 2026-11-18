@@ -264,8 +264,7 @@ impl StateHandler for SitePrefixReadiness {
         if current.status.lifecycle_state == SitePrefixLifecycleState::Deleting {
             if current.status.authority == SitePrefixAuthority::OperatorManaged {
                 if db::site_prefix::operator_managed_prefix_has_retained_children(
-                    txn.as_mut(),
-                    *object_id,
+                    &mut *txn, *object_id,
                 )
                 .await?
                 {
@@ -276,7 +275,7 @@ impl StateHandler for SitePrefixReadiness {
                 }
             } else {
                 let vpc_prefix_count =
-                    db::vpc_prefix::count_vpc_prefixes_by_site_prefix_id(txn.as_mut(), *object_id)
+                    db::vpc_prefix::count_vpc_prefixes_by_site_prefix_id(&mut *txn, *object_id)
                         .await?;
                 if vpc_prefix_count > 0 {
                     return Ok(StateHandlerOutcome::wait(format!(

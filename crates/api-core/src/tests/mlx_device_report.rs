@@ -1415,7 +1415,7 @@ async fn firmware_observation_waits_for_current_card_state(pool: sqlx::PgPool) {
             .pop()
             .unwrap();
     let writer_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
-        .fetch_one(writer.as_mut())
+        .fetch_one(&mut *writer)
         .await
         .unwrap();
     let publish = env.api.publish_mlx_observation_report(machine_request(

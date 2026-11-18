@@ -37,7 +37,7 @@ async fn expected_power_shelf_queries_survive_added_columns(
         "SET LOCAL lock_timeout = '5s';
          ALTER TABLE expected_power_shelves ADD COLUMN test_added_column text;",
     )
-    .execute(migration.as_mut())
+    .execute(&mut *migration)
     .await?;
     migration.commit().await?;
 
@@ -201,7 +201,7 @@ async fn expected_power_shelf_lookup_rejects_non_host_prefix(
          WHERE expected_power_shelf_id = $1",
     )
     .bind(id)
-    .execute(txn.as_mut())
+    .execute(&mut *txn)
     .await?;
     let error = find_by_id(&mut txn, id)
         .await

@@ -238,7 +238,7 @@ async fn creation_waits_for_every_host_and_dpu_without_repeating_fanout(pool: sq
             .await
             .unwrap();
         let blocker_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
-            .fetch_one(blocker.as_mut())
+            .fetch_one(&mut *blocker)
             .await
             .unwrap();
         let mut readiness = controller(&env);
@@ -271,7 +271,7 @@ async fn creation_waits_for_every_host_and_dpu_without_repeating_fanout(pool: sq
         );
         sqlx::query("UPDATE site_prefixes SET controller_state_outcome = NULL WHERE id = $1")
             .bind(id)
-            .execute(blocker.as_mut())
+            .execute(&mut *blocker)
             .await
             .unwrap();
         blocker.commit().await.unwrap();
@@ -579,7 +579,7 @@ async fn fanout_failure_rolls_back_and_recovery_retries(pool: sqlx::PgPool) {
         .await
         .unwrap();
     let reader_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
-        .fetch_one(reader.as_mut())
+        .fetch_one(&mut *reader)
         .await
         .unwrap();
     let mut readiness = controller(&env);
@@ -634,7 +634,7 @@ async fn retirement_wins_before_readiness_promotion(pool: sqlx::PgPool) {
         .await
         .unwrap();
     let blocker_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
-        .fetch_one(blocker.as_mut())
+        .fetch_one(&mut *blocker)
         .await
         .unwrap();
     let mut readiness = controller(&env);

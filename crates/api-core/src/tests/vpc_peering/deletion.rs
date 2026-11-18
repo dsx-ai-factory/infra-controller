@@ -335,7 +335,7 @@ async fn concurrent_peering_deletions_wait_for_the_receiver(
     let mut blocker = env.pool.txn_begin().await?;
     db::tenant_prefix_overlap::lock_checks(&mut blocker).await?;
     let blocker_pid = sqlx::query_scalar("SELECT pg_backend_pid()")
-        .fetch_one(blocker.as_mut())
+        .fetch_one(&mut *blocker)
         .await?;
     let first_api = env.api.clone();
     let first_id = peering_ids[0];
@@ -413,13 +413,13 @@ async fn deletion_rechecks_receivers_after_acquiring_routing_lock(
     let mut writer = env.pool.txn_begin().await?;
     db::tenant_prefix_overlap::lock_checks(&mut writer).await?;
     let writer_pid = sqlx::query_scalar("SELECT pg_backend_pid()")
-        .fetch_one(writer.as_mut())
+        .fetch_one(&mut *writer)
         .await?;
     let mut controller = deletion_controller(&env);
     let completion = controller.run_single_iteration_ext(false);
     let change_receiver = async {
         wait_for_blocked_query(&env.pool, writer_pid, "tenant_prefix_overlap:checks").await;
-        let config = db::machine::get_network_config(writer.as_mut(), &dpu.into()).await?;
+        let config = db::machine::get_network_config(&mut *writer, &dpu.into()).await?;
         assert!(matches!(
             db::machine::try_update_network_config(
                 &mut writer,
@@ -430,7 +430,7 @@ async fn deletion_rechecks_receivers_after_acquiring_routing_lock(
             .await?,
             db::ConditionalWrite::Applied(())
         ));
-        let new_version = db::machine::get_network_config(writer.as_mut(), &dpu.into())
+        let new_version = db::machine::get_network_config(&mut *writer, &dpu.into())
             .await?
             .version;
         writer.commit().await?;
@@ -493,11 +493,11 @@ async fn deletion_receiver_conflict_rolls_back_all_requested_updates(
         .expect("created peering has an ID");
     let mut updater = env.pool.txn_begin().await?;
     let updater_pid = sqlx::query_scalar("SELECT pg_backend_pid()")
-        .fetch_one(updater.as_mut())
+        .fetch_one(&mut *updater)
         .await?;
     sqlx::query("SELECT id FROM machines WHERE id = $1 FOR UPDATE")
         .bind(last_id)
-        .fetch_one(updater.as_mut())
+        .fetch_one(&mut *updater)
         .await?;
 
     let deletion = env
@@ -608,7 +608,7 @@ async fn deletion_selects_old_and_pending_receiver_attachments(pool: PgPool) {
             .await;
         let mut txn = env.pool.txn_begin().await.unwrap();
         let instance_ids = db::instance::find_ids(
-            txn.as_mut(),
+            &mut *txn,
             model::instance::InstanceSearchFilter {
                 vpc_id: Some(vpc.to_string()),
                 ..Default::default()
@@ -618,7 +618,7 @@ async fn deletion_selects_old_and_pending_receiver_attachments(pool: PgPool) {
         .unwrap();
         assert_eq!(instance_ids.len(), 1);
         let instance = db::instance::find(
-            txn.as_mut(),
+            &mut *txn,
             db::ObjectColumnFilter::List(db::instance::IdColumn, &instance_ids),
         )
         .await
@@ -630,7 +630,7 @@ async fn deletion_selects_old_and_pending_receiver_attachments(pool: PgPool) {
         // uses that complete query rather than only current interfaces.
         let deleted_addresses = sqlx::query("DELETE FROM instance_addresses WHERE instance_id = $1")
             .bind(instance_ids[0])
-            .execute(txn.as_mut())
+            .execute(&mut *txn)
             .await
             .unwrap();
         assert_eq!(deleted_addresses.rows_affected(), 1);
@@ -656,7 +656,7 @@ async fn deletion_selects_old_and_pending_receiver_attachments(pool: PgPool) {
                 .bind(instance_ids[0])
                 .bind(sqlx::types::Json(empty_network))
                 .bind(sqlx::types::Json(update))
-                .execute(txn.as_mut())
+                .execute(&mut *txn)
                 .await
                 .unwrap();
             let retained = db::vpc_peering::find_by_ids(&mut txn, vec![id])

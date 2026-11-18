@@ -369,7 +369,7 @@ async fn test_dynamic_allocation_retries_late_conflict_and_rolls_back_partial_ad
     )
     .await?;
     let owner_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
-        .fetch_one(owner_txn.as_mut())
+        .fetch_one(&mut *owner_txn)
         .await?;
 
     // The uncommitted reservation is invisible during candidate selection.
@@ -967,7 +967,7 @@ async fn test_ipv6_allocation_skips_parked_reservation(
          SET LOCAL enable_indexonlyscan = off;
          SET LOCAL enable_bitmapscan = off;",
     )
-    .execute(txn.as_mut())
+    .execute(&mut *txn)
     .await?;
     let mac = "aa:bb:cc:dd:49:07".parse()?;
     let interface = db::machine_interface::create(
@@ -1359,7 +1359,7 @@ async fn test_family_recovery_retries_late_conflict_without_rolling_back_sibling
     )
     .await?;
     let owner_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
-        .fetch_one(owner_txn.as_mut())
+        .fetch_one(&mut *owner_txn)
         .await?;
 
     let static_v4 = "192.0.25.42".parse()?;

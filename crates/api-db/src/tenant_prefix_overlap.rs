@@ -182,13 +182,13 @@ mod tests {
             hashtextextended('tenant_prefix_overlap:checks', 0))";
         assert!(
             !sqlx::query_scalar::<_, bool>(query)
-                .fetch_one(writer.as_mut())
+                .fetch_one(&mut *writer)
                 .await?
         );
         first.rollback().await?;
         assert!(
             !sqlx::query_scalar::<_, bool>(query)
-                .fetch_one(writer.as_mut())
+                .fetch_one(&mut *writer)
                 .await?
         );
         second.commit().await?;
@@ -205,12 +205,12 @@ mod tests {
         let mut holder = pool.txn_begin().await?;
         lock_checks(&mut holder).await?;
         let holder_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
-            .fetch_one(holder.as_mut())
+            .fetch_one(&mut *holder)
             .await?;
 
         let mut waiter = pool.txn_begin().await?;
         let waiter_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
-            .fetch_one(waiter.as_mut())
+            .fetch_one(&mut *waiter)
             .await?;
 
         let wait_for_lock = async {

@@ -2362,11 +2362,11 @@ async fn desired_nic_firmware_keeps_selections_and_profiles_in_one_snapshot(pool
     // commit, so mixing snapshots would report a false incompatibility.
     let mut writer = env.pool.txn_begin().await.unwrap();
     sqlx::query("LOCK TABLE nic_firmware_profiles IN ACCESS EXCLUSIVE MODE")
-        .execute(writer.as_mut())
+        .execute(&mut *writer)
         .await
         .unwrap();
     let writer_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
-        .fetch_one(writer.as_mut())
+        .fetch_one(&mut *writer)
         .await
         .unwrap();
     let request = GetDesiredNicFirmwareRequest {

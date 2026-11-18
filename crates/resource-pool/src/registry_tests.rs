@@ -82,7 +82,7 @@ async fn runtime_lookup_borrows_resolved_backend_without_database_access(
     // Any SQL lookup would fail in this aborted transaction.
     let mut txn = database.txn_begin().await?;
     sqlx::query("SELECT 1 / 0")
-        .execute(txn.as_mut())
+        .execute(&mut *txn)
         .await
         .expect_err("division by zero must abort the transaction");
     let Some(backend) = registry.get_or_load_backend(&mut txn, "resolved").await? else {
@@ -109,7 +109,7 @@ async fn runtime_lookup_uses_the_callers_transaction_without_caching_results(
             .await?
             .is_none()
     );
-    assert!(binding::all(txn.as_mut()).await?.is_empty());
+    assert!(binding::all(&mut *txn).await?.is_empty());
 
     binding::bind_or_verify(&mut txn, &selection).await?;
     assert!(matches!(
@@ -150,7 +150,7 @@ async fn runtime_lookup_uses_unbound_sql_values_without_saving_or_caching_a_bind
         registry.get_or_load_backend(&mut txn, pool.name()).await?,
         Some(ResourcePoolBackend::Integrated(_))
     ));
-    assert!(binding::all(txn.as_mut()).await?.is_empty());
+    assert!(binding::all(&mut *txn).await?.is_empty());
     assert!(registry.get(pool.name()).is_none());
     txn.rollback().await?;
 
@@ -162,7 +162,7 @@ async fn runtime_lookup_uses_unbound_sql_values_without_saving_or_caching_a_bind
             .await?
             .is_none()
     );
-    assert!(binding::all(txn.as_mut()).await?.is_empty());
+    assert!(binding::all(&mut *txn).await?.is_empty());
     txn.commit().await?;
     Ok(())
 }
@@ -739,7 +739,7 @@ async fn remote_resolution_retains_authority_across_alias_changes(
     // or consult SQL; an aborted transaction makes a SQL fallback observable.
     let mut txn = database.txn_begin().await?;
     sqlx::query("SELECT 1 / 0")
-        .execute(txn.as_mut())
+        .execute(&mut *txn)
         .await
         .expect_err("abort transaction");
     let Some(backend) = registry.get_or_load_backend(&mut txn, "vpc-vni").await? else {

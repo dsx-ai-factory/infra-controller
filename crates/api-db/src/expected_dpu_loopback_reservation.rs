@@ -631,10 +631,7 @@ mod tests {
             ),
         ];
         replace_for_machine(&mut txn, host.parse()?, &swapped).await?;
-        assert_eq!(
-            find_for_machine(txn.as_mut(), host.parse()?).await?,
-            swapped
-        );
+        assert_eq!(find_for_machine(&mut *txn, host.parse()?).await?, swapped);
         txn.commit().await?;
         Ok(())
     }

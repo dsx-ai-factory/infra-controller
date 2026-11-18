@@ -203,7 +203,7 @@ mod tests {
                 .bind(state)
                 .bind(Json(&parameters))
                 .bind(Json(result))
-                .execute(txn.as_mut())
+                .execute(&mut *txn)
                 .await?;
                 match state {
                     AllocationState::CancelRequested => {
@@ -246,10 +246,10 @@ mod tests {
 
         let mut blocker = pool.txn_begin().await?;
         sqlx::query("LOCK TABLE resource_pool_allocations IN ACCESS EXCLUSIVE MODE")
-            .execute(blocker.as_mut())
+            .execute(&mut *blocker)
             .await?;
         let blocker_pid = sqlx::query_scalar("SELECT pg_backend_pid()")
-            .fetch_one(blocker.as_mut())
+            .fetch_one(&mut *blocker)
             .await?;
         let mut pending = Box::pin(sample(&pool, &metrics));
         tokio::select! {
@@ -292,10 +292,10 @@ mod tests {
         let cancel = CancellationToken::new();
         let mut blocker = pool.txn_begin().await?;
         sqlx::query("LOCK TABLE resource_pool_allocations IN ACCESS EXCLUSIVE MODE")
-            .execute(blocker.as_mut())
+            .execute(&mut *blocker)
             .await?;
         let blocker_pid = sqlx::query_scalar("SELECT pg_backend_pid()")
-            .fetch_one(blocker.as_mut())
+            .fetch_one(&mut *blocker)
             .await?;
         start_cleanup_metrics(pool.clone(), meter.meter(), &mut tasks, cancel.clone())?;
         wait_for_blocked_query(
@@ -310,10 +310,10 @@ mod tests {
 
         let mut blocker = pool.txn_begin().await?;
         sqlx::query("LOCK TABLE resource_pool_allocations IN ACCESS EXCLUSIVE MODE")
-            .execute(blocker.as_mut())
+            .execute(&mut *blocker)
             .await?;
         let blocker_pid = sqlx::query_scalar("SELECT pg_backend_pid()")
-            .fetch_one(blocker.as_mut())
+            .fetch_one(&mut *blocker)
             .await?;
         tokio::time::pause();
         tokio::time::advance(SAMPLE_INTERVAL + Duration::from_millis(1)).await;

@@ -129,7 +129,7 @@ async fn handle_wait_for_os_machine_interface(
     let total = nvos_mac_addresses.len();
 
     for mac_address in &nvos_mac_addresses {
-        let mi = db::machine_interface::find_by_mac_address(txn.as_mut(), *mac_address).await?;
+        let mi = db::machine_interface::find_by_mac_address(&mut *txn, *mac_address).await?;
         let interface = match mi.first() {
             Some(iface) => iface,
             None => continue,

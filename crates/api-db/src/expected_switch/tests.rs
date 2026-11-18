@@ -107,7 +107,7 @@ async fn expected_switch_queries_survive_added_columns(
         "SET LOCAL lock_timeout = '5s';
          ALTER TABLE expected_switches ADD COLUMN test_added_column text;",
     )
-    .execute(migration.as_mut())
+    .execute(&mut *migration)
     .await?;
     migration.commit().await?;
 
@@ -338,7 +338,7 @@ async fn expected_switch_lookup_rejects_non_host_prefixes(
 
         // PostgreSQL accepts this prefix, but SQLx decodes `IpAddr` only with
         // a /32 (IPv4) or /128 (IPv6) prefix.
-        sqlx::query(query).bind(id).execute(txn.as_mut()).await?;
+        sqlx::query(query).bind(id).execute(&mut *txn).await?;
         let error = find_by_id(&mut txn, id).await.map(|_| ()).expect_err(
             "a non-host prefix must fail decoding rather than become an absent address",
         );

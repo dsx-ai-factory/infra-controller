@@ -526,7 +526,7 @@ async fn update_gates_match_find_upgrade_needed(
         sqlx::raw_sql(sqlx::AssertSqlSafe(
             case.setup.replace("{host}", &host_id.to_string()),
         ))
-        .execute(txn.as_mut())
+        .execute(&mut *txn)
         .await?;
 
         let selected = find_upgrade_needed(&mut txn, case.global_enabled, case.ready_only)
@@ -545,7 +545,7 @@ async fn update_gates_match_find_upgrade_needed(
         let firmware_autoupdate: Option<bool> =
             sqlx::query_scalar("SELECT firmware_autoupdate FROM machines WHERE id = $1")
                 .bind(host_id)
-                .fetch_one(txn.as_mut())
+                .fetch_one(&mut *txn)
                 .await?;
         txn.rollback().await?;
 
@@ -572,7 +572,7 @@ async fn fresh_gate_rows(
     host_id: HostMachineId,
 ) -> Result<Vec<HostUpdateGateRow>, Box<dyn std::error::Error>> {
     let mut txn = env.pool.txn_begin().await?;
-    let overrides = db::host_firmware_config::list_configs(txn.as_mut()).await?;
+    let overrides = db::host_firmware_config::list_configs(&mut *txn).await?;
     let catalog = env
         .config
         .get_firmware_config()

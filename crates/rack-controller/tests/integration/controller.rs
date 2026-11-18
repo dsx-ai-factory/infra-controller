@@ -329,7 +329,7 @@ async fn test_can_retrieve_rack_state_history_with_real_handler(
     {
         let mut txn = pool.txn_begin().await?;
         let machines = db_machine::find(
-            txn.as_mut(),
+            &mut *txn,
             db::ObjectFilter::List(&[machine_id_1, machine_id_2]),
             MachineSearchConfig::default(),
         )

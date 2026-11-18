@@ -1177,7 +1177,7 @@ async fn controller_replay_keeps_its_request_and_definition_until_cleanup(
         .await?;
     assert!(!rolled_back.is_complete(&mut txn).await?);
     assert_eq!(
-        storage::load(txn.as_mut(), original.allocation_id)
+        storage::load(&mut *txn, original.allocation_id)
             .await?
             .expect("staged cancellation")
             .state,
@@ -1300,7 +1300,7 @@ async fn controller_replay_keeps_its_request_and_definition_until_cleanup(
     let mut txn = fixture.database.txn_begin().await?;
     assert_eq!(replacement_allocation.allocate(&mut txn).await?, 2);
     assert_eq!(
-        storage::load(txn.as_mut(), replacement.allocation_id)
+        storage::load(&mut *txn, replacement.allocation_id)
             .await?
             .expect("replacement attached in the entity transaction")
             .state,
@@ -2003,7 +2003,7 @@ async fn competing_preparations_preserve_the_callers_transaction(database: PgPoo
         let mut txn = database.txn_begin().await?;
         sqlx::query("INSERT INTO shared_test_creation (id) VALUES ($1)")
             .bind(creation_id)
-            .execute(txn.as_mut())
+            .execute(&mut *txn)
             .await?;
         match selected
             .prepare_request(
@@ -2026,7 +2026,7 @@ async fn competing_preparations_preserve_the_callers_transaction(database: PgPoo
                 sqlx::query("UPDATE shared_test_creation SET request_id = $1 WHERE id = $2")
                     .bind(request.request_id)
                     .bind(creation_id)
-                    .execute(txn.as_mut())
+                    .execute(&mut *txn)
                     .await?;
                 // Commit before returning: the competing INSERT waits for
                 // this transaction before it can report its constraint error.
@@ -2046,7 +2046,7 @@ async fn competing_preparations_preserve_the_callers_transaction(database: PgPoo
                 let updated =
                     sqlx::query("UPDATE shared_test_creation SET request_id = id WHERE id = $1")
                         .bind(creation_id)
-                        .execute(txn.as_mut())
+                        .execute(&mut *txn)
                         .await?;
                 assert_eq!(updated.rows_affected(), 1);
                 txn.rollback().await?;
@@ -2073,7 +2073,7 @@ async fn competing_preparations_preserve_the_callers_transaction(database: PgPoo
     let mut txn = fixture.database.txn_begin().await?;
     sqlx::query("INSERT INTO shared_test_creation (id) VALUES ($1)")
         .bind(discarded_creation_id)
-        .execute(txn.as_mut())
+        .execute(&mut *txn)
         .await?;
     let prepared = selected
         .prepare_request(
@@ -2094,7 +2094,7 @@ async fn competing_preparations_preserve_the_callers_transaction(database: PgPoo
     sqlx::query("UPDATE shared_test_creation SET request_id = $1 WHERE id = $2")
         .bind(discarded_request_id)
         .bind(discarded_creation_id)
-        .execute(txn.as_mut())
+        .execute(&mut *txn)
         .await?;
     txn.rollback().await?;
     assert_eq!(
@@ -2112,10 +2112,10 @@ async fn competing_preparations_preserve_the_callers_transaction(database: PgPoo
 
     let mut blocker = fixture.database.txn_begin().await?;
     sqlx::query("LOCK TABLE resource_pool_allocations IN SHARE MODE")
-        .execute(blocker.as_mut())
+        .execute(&mut *blocker)
         .await?;
     let blocker_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
-        .fetch_one(blocker.as_mut())
+        .fetch_one(&mut *blocker)
         .await?;
     let unblock = async {
         // Both preparations must finish their history reads and reach INSERT
@@ -2331,8 +2331,8 @@ async fn retained_other_pool_cannot_hide_older_cleanup(database: PgPool) -> Test
     replay.completion_authority = authority.clone();
     let mut txn = fixture.database.txn_begin().await?;
     sqlx::query("UPDATE resource_pool_allocations SET state = 'pending', remote_request = $1 WHERE allocation_id = $2")
-        .bind(Json(replay)).bind(newer.allocation_id).execute(txn.as_mut()).await?;
-    let before = storage::load(txn.as_mut(), newer.allocation_id).await?;
+        .bind(Json(replay)).bind(newer.allocation_id).execute(&mut *txn).await?;
+    let before = storage::load(&mut *txn, newer.allocation_id).await?;
     assert!(matches!(
         destination
             .prepare_request(
@@ -2346,10 +2346,7 @@ async fn retained_other_pool_cannot_hide_older_cleanup(database: PgPool) -> Test
             .await,
         Err(ResourcePoolBackendError::CleanupPending)
     ));
-    assert_eq!(
-        storage::load(txn.as_mut(), newer.allocation_id).await?,
-        before
-    );
+    assert_eq!(storage::load(&mut *txn, newer.allocation_id).await?, before);
     txn.rollback().await?;
     assert_eq!(
         fixture.cleanup_status().await?,
@@ -2463,10 +2460,10 @@ async fn queued_preparation_cannot_skip_unseen_attached_generations(
         "SELECT allocation_id FROM resource_pool_allocations WHERE allocation_id = $1 FOR UPDATE",
     )
     .bind(original.allocation_id)
-    .fetch_one(blocker.as_mut())
+    .fetch_one(&mut *blocker)
     .await?;
     let blocker_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
-        .fetch_one(blocker.as_mut())
+        .fetch_one(&mut *blocker)
         .await?;
     let mut waiting_txn = fixture.database.txn_begin().await?;
     let error = {
@@ -2513,7 +2510,7 @@ async fn queued_preparation_cannot_skip_unseen_attached_generations(
             .bind(Uuid::new_v4()).bind(binding.binding_id).bind(descriptor.name())
             .bind(OwnerType::Machine.to_string()).bind("machine-1")
             .bind(Json(request)).bind(Json(AllocationResult::Allocated(granted)))
-            .execute(blocker.as_mut()).await?;
+            .execute(&mut *blocker).await?;
         }
         blocker.commit().await?;
         waiting
@@ -2728,7 +2725,7 @@ async fn shared_membership_preserves_growth_and_mixed_backend_values(
         )
         .bind(invalid.encode_to_vec())
         .bind(binding.binding_id)
-        .execute(txn.as_mut())
+        .execute(&mut *txn)
         .await?;
         assert!(
             matches!(
@@ -2752,7 +2749,7 @@ async fn shared_membership_preserves_growth_and_mixed_backend_values(
     // Missing acknowledgement is an error rather than a falsely empty pool.
     sqlx::query("DELETE FROM resource_pool_registration WHERE binding_id = $1")
         .bind(binding.binding_id)
-        .execute(txn.as_mut())
+        .execute(&mut *txn)
         .await?;
     assert!(matches!(
         fixture.registry.has_values(&mut txn, &other).await,

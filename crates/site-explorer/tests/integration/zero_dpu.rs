@@ -416,7 +416,7 @@ async fn test_zero_dpu_recovers_primary_from_retained_boot_interface(
     // the declared-primary path -- is what settles the boot interface below.
     let mut txn = env.pool.txn_begin().await?;
     let registered =
-        db::expected_machine::find_by_bmc_mac_address(txn.as_mut(), mock_host.bmc_mac_address)
+        db::expected_machine::find_by_bmc_mac_address(&mut *txn, mock_host.bmc_mac_address)
             .await?
             .expect("registered zero-DPU expected machine");
     assert!(

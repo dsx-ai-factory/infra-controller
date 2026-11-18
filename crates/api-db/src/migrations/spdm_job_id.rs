@@ -105,26 +105,26 @@ async fn spdm_job_migration_restarts_legacy_polling(
     .await?;
     let mut writer = pool.txn_begin().await?;
     let writer_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
-        .fetch_one(writer.as_mut())
+        .fetch_one(&mut *writer)
         .await?;
     sqlx::query(
         "UPDATE machines SET controller_state = $1::jsonb, name = 'live legacy writer'
          WHERE id = 'spdm-migration-0'",
     )
     .bind(cases[0].input)
-    .execute(writer.as_mut())
+    .execute(&mut *writer)
     .await?;
 
     let mut migration = pool.txn_begin().await?;
     let migration_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
-        .fetch_one(migration.as_mut())
+        .fetch_one(&mut *migration)
         .await?;
     // Commit the old writer only once the migration is waiting on its row.
     // PostgreSQL must recheck that row and reset the freshly committed legacy state.
     tokio::time::timeout(Duration::from_secs(10), async {
         tokio::try_join!(
             async {
-                sqlx::raw_sql(MIGRATION).execute(migration.as_mut()).await?;
+                sqlx::raw_sql(MIGRATION).execute(&mut *migration).await?;
                 migration
                     .commit()
                     .await

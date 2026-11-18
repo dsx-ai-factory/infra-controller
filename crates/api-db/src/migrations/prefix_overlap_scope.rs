@@ -182,7 +182,7 @@ async fn scoped_prefix_constraints_reject_invalid_keys_and_conflicts(pool: PgPoo
     let mut txn = pool.txn_begin().await.unwrap();
     sqlx::query("UPDATE network_vpc_prefixes SET overlap_vpc_id = vpc_id WHERE id = $1::uuid")
         .bind(PARENT)
-        .execute(txn.as_mut())
+        .execute(&mut *txn)
         .await
         .unwrap();
     sqlx::query(
@@ -190,7 +190,7 @@ async fn scoped_prefix_constraints_reject_invalid_keys_and_conflicts(pool: PgPoo
     )
     .bind(VPC)
     .bind(PARENT)
-    .execute(txn.as_mut())
+    .execute(&mut *txn)
     .await
     .unwrap();
 
@@ -224,7 +224,7 @@ async fn scoped_prefix_constraints_reject_invalid_keys_and_conflicts(pool: PgPoo
         ),
     ] {
         let mut attempt = crate::Transaction::begin_inner(&mut txn).await.unwrap();
-        let error = query.execute(attempt.as_mut()).await.expect_err(scenario);
+        let error = query.execute(&mut *attempt).await.expect_err(scenario);
         assert_eq!(
             error.as_database_error().and_then(|e| e.constraint()),
             Some(expected),
@@ -254,7 +254,7 @@ async fn scoped_prefix_constraints_reject_invalid_keys_and_conflicts(pool: PgPoo
         ),
     ] {
         let mut attempt = crate::Transaction::begin_inner(&mut txn).await.unwrap();
-        let error = query.execute(attempt.as_mut()).await.expect_err(scenario);
+        let error = query.execute(&mut *attempt).await.expect_err(scenario);
         assert_eq!(
             error.as_database_error().and_then(|e| e.constraint()),
             Some(expected),
@@ -271,7 +271,7 @@ async fn scoped_prefix_constraints_reject_invalid_keys_and_conflicts(pool: PgPoo
         .bind(other_parent)
         .bind(OTHER_VPC)
         .bind(ROOT)
-        .execute(attempt.as_mut())
+        .execute(&mut *attempt)
         .await
         .unwrap_err();
     assert_eq!(
@@ -285,20 +285,20 @@ async fn scoped_prefix_constraints_reject_invalid_keys_and_conflicts(pool: PgPoo
     sqlx::query(
         "ALTER TABLE network_vpc_prefixes DROP CONSTRAINT network_vpc_prefixes_globally_unique",
     )
-    .execute(txn.as_mut())
+    .execute(&mut *txn)
     .await
     .unwrap();
     sqlx::query(insert_parent)
         .bind(other_parent)
         .bind(OTHER_VPC)
         .bind(ROOT)
-        .execute(txn.as_mut())
+        .execute(&mut *txn)
         .await
         .unwrap();
     let segment: NetworkSegmentId = sqlx::query_scalar(
         "INSERT INTO network_segments (name, version) VALUES ('other scope', 'V1-T0') RETURNING id",
     )
-    .fetch_one(txn.as_mut())
+    .fetch_one(&mut *txn)
     .await
     .unwrap();
     let insert_child = "INSERT INTO network_prefixes (segment_id, prefix, vpc_prefix_id, vpc_prefix, overlap_vpc_id)
@@ -308,7 +308,7 @@ async fn scoped_prefix_constraints_reject_invalid_keys_and_conflicts(pool: PgPoo
         .bind(segment)
         .bind(other_parent)
         .bind(OTHER_VPC)
-        .execute(attempt.as_mut())
+        .execute(&mut *attempt)
         .await
         .unwrap_err();
     assert_eq!(
@@ -317,19 +317,19 @@ async fn scoped_prefix_constraints_reject_invalid_keys_and_conflicts(pool: PgPoo
     );
     attempt.rollback().await.unwrap();
     sqlx::query("ALTER TABLE network_prefixes DROP CONSTRAINT network_prefixes_prefix_excl")
-        .execute(txn.as_mut())
+        .execute(&mut *txn)
         .await
         .unwrap();
     sqlx::query(insert_child)
         .bind(segment)
         .bind(other_parent)
         .bind(OTHER_VPC)
-        .execute(txn.as_mut())
+        .execute(&mut *txn)
         .await
         .unwrap();
     let empty_segment: NetworkSegmentId = sqlx::query_scalar(
         "INSERT INTO network_segments (name, version) VALUES ('conflict attempt', 'V1-T0') RETURNING id",
-    ).fetch_one(txn.as_mut()).await.unwrap();
+    ).fetch_one(&mut *txn).await.unwrap();
 
     for (scenario, query, expected) in [
         (
@@ -373,7 +373,7 @@ async fn scoped_prefix_constraints_reject_invalid_keys_and_conflicts(pool: PgPoo
         ),
     ] {
         let mut attempt = crate::Transaction::begin_inner(&mut txn).await.unwrap();
-        let error = query.execute(attempt.as_mut()).await.expect_err(scenario);
+        let error = query.execute(&mut *attempt).await.expect_err(scenario);
         assert_eq!(error.as_database_error().and_then(|e| e.constraint()), Some(expected), "{scenario}");
         attempt.rollback().await.unwrap();
     }

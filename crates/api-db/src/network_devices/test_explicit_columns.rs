@@ -38,7 +38,7 @@ async fn network_device_queries_survive_added_columns(
          ALTER TABLE network_devices ADD COLUMN test_added_column text;
          ALTER TABLE port_to_network_device_map ADD COLUMN test_added_column text;",
     )
-    .execute(migration.as_mut())
+    .execute(&mut *migration)
     .await?;
     migration.commit().await?;
 

@@ -337,7 +337,7 @@ async fn vpc_consumers_preserve_independent_named_integrated_bindings(
         &selections,
     )
     .await?;
-    let bindings = db::resource_pool::binding::all(txn.as_mut()).await?;
+    let bindings = db::resource_pool::binding::all(&mut *txn).await?;
     txn.commit().await?;
     let env =
         create_test_env_with_overrides(pool, TestEnvOverrides::default().with_fnn_config(None))
@@ -1546,7 +1546,7 @@ async fn vpc_policy_updates_skip_unneeded_overlap_locks_without_restoring_stale_
     let mut overlap_txn = env.pool.txn_begin().await?;
     db::tenant_prefix_overlap::lock_checks(&mut overlap_txn).await?;
     let blocker_pid = sqlx::query_scalar("SELECT pg_backend_pid()")
-        .fetch_one(overlap_txn.as_mut())
+        .fetch_one(&mut *overlap_txn)
         .await?;
     tokio::time::timeout(
         Duration::from_secs(5),
@@ -1600,7 +1600,7 @@ async fn vpc_policy_updates_skip_unneeded_overlap_locks_without_restoring_stale_
     let mut policy_txn = env.pool.txn_begin().await?;
     db::tenant_prefix_overlap::lock_checks(&mut policy_txn).await?;
     let blocker_pid = sqlx::query_scalar("SELECT pg_backend_pid()")
-        .fetch_one(policy_txn.as_mut())
+        .fetch_one(&mut *policy_txn)
         .await?;
     let persisted = db::vpc::update(
         &UpdateVpc {
@@ -2396,7 +2396,7 @@ async fn change_vpc_routing_profile_rejects_unsupported_state_without_changes(
         let mut txn = env.pool.txn_begin().await?;
         sqlx::query("DELETE FROM resource_pool WHERE name = $1")
             .bind(external_pool)
-            .execute(txn.as_mut())
+            .execute(&mut *txn)
             .await?;
         for auto_assign in [false, true] {
             let values = original_external_values

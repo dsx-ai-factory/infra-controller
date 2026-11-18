@@ -365,13 +365,13 @@ async fn test_wrong_version_failures_count_once_per_outcome(
             sqlx::query::<_>(query)
                 .bind(sqlx::types::Json(version))
                 .bind(&dpu_id)
-                .execute(txn.as_mut())
+                .execute(&mut *txn)
                 .await
                 .unwrap();
             let query = r#"UPDATE machines set reprovisioning_requested = NULL where id = $1"#;
             sqlx::query(query)
                 .bind(&dpu_id)
-                .execute(txn.as_mut())
+                .execute(&mut *txn)
                 .await
                 .unwrap();
             // The in-update marker the manager looks for when deciding a
@@ -467,7 +467,7 @@ async fn test_clear_completed_updates_dpf_host_off_list_version(
     let query = r#"UPDATE machines set reprovisioning_requested = NULL where id = $1"#;
     sqlx::query(query)
         .bind(mh.dpu().id.to_string())
-        .execute(txn.as_mut())
+        .execute(&mut *txn)
         .await?;
     db::machine::insert_health_report(
         &mut txn,

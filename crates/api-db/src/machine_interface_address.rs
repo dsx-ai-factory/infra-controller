@@ -797,7 +797,7 @@ mod tests {
         barrier.wait().await;
         let mut txn = pool.txn_begin().await?;
 
-        match insert(txn.as_mut(), interface_id, address, allocation_type).await {
+        match insert(txn.as_pgconn(), interface_id, address, allocation_type).await {
             Ok(()) => txn.commit().await,
             Err(error) => {
                 txn.rollback().await?;
@@ -950,7 +950,7 @@ mod tests {
             "INSERT INTO network_segments (name, version)
              VALUES ('static-after-slaac', 'V1-T0') RETURNING id",
         )
-        .fetch_one(setup.as_mut())
+        .fetch_one(&mut *setup)
         .await?;
         let interface_id = create_test_interface(
             &mut setup,
@@ -964,7 +964,7 @@ mod tests {
         let mut holder = pool.txn_begin().await?;
         sqlx::query("SELECT id FROM machine_interfaces WHERE id = $1 FOR UPDATE")
             .bind(interface_id)
-            .fetch_one(holder.as_mut())
+            .fetch_one(&mut *holder)
             .await?;
         insert(
             &mut holder,
@@ -974,11 +974,11 @@ mod tests {
         )
         .await?;
         let holder_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
-            .fetch_one(holder.as_mut())
+            .fetch_one(&mut *holder)
             .await?;
         let mut waiter = pool.txn_begin().await?;
         let waiter_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
-            .fetch_one(waiter.as_mut())
+            .fetch_one(&mut *waiter)
             .await?;
         let static_address: IpAddr = "2001:db8::16".parse()?;
 
@@ -1018,7 +1018,7 @@ mod tests {
             "INSERT INTO network_segments (name, version)
              VALUES ('expiry-after-owner-move', 'V1-T0') RETURNING id",
         )
-        .fetch_one(setup.as_mut())
+        .fetch_one(&mut *setup)
         .await?;
         let source_interface_id = create_test_interface(
             &mut setup,
@@ -1050,15 +1050,15 @@ mod tests {
         for interface_id in interface_ids {
             sqlx::query("SELECT id FROM machine_interfaces WHERE id = $1 FOR UPDATE")
                 .bind(interface_id)
-                .fetch_one(holder.as_mut())
+                .fetch_one(&mut *holder)
                 .await?;
         }
         let holder_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
-            .fetch_one(holder.as_mut())
+            .fetch_one(&mut *holder)
             .await?;
         let mut waiter = pool.txn_begin().await?;
         let waiter_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
-            .fetch_one(waiter.as_mut())
+            .fetch_one(&mut *waiter)
             .await?;
 
         let expire_address = async {
@@ -1077,7 +1077,7 @@ mod tests {
             .bind(destination_interface_id)
             .bind(source_interface_id)
             .bind(address)
-            .execute(holder.as_mut())
+            .execute(&mut *holder)
             .await?;
             assert_eq!(moved.rows_affected(), 1);
             holder.commit().await?;
@@ -1112,7 +1112,7 @@ mod tests {
             "INSERT INTO network_segments (name, version)
              VALUES ('static-removal-after-replacement', 'V1-T0') RETURNING id",
         )
-        .fetch_one(setup.as_mut())
+        .fetch_one(&mut *setup)
         .await?;
         let interface_id = create_test_interface(
             &mut setup,
@@ -1135,14 +1135,14 @@ mod tests {
         let mut holder = pool.txn_begin().await?;
         sqlx::query("SELECT id FROM machine_interfaces WHERE id = $1 FOR UPDATE")
             .bind(interface_id)
-            .fetch_one(holder.as_mut())
+            .fetch_one(&mut *holder)
             .await?;
         let holder_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
-            .fetch_one(holder.as_mut())
+            .fetch_one(&mut *holder)
             .await?;
         let mut waiter = pool.txn_begin().await?;
         let waiter_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
-            .fetch_one(waiter.as_mut())
+            .fetch_one(&mut *waiter)
             .await?;
 
         let remove_address = async {
@@ -1188,7 +1188,7 @@ mod tests {
              VALUES ('address-owner-race', 'V1-T0')
              RETURNING id",
         )
-        .fetch_one(setup_txn.as_mut())
+        .fetch_one(&mut *setup_txn)
         .await?;
         let first_mac: MacAddress = "02:00:00:00:00:11".parse()?;
         let second_mac: MacAddress = "02:00:00:00:00:12".parse()?;
@@ -1300,7 +1300,7 @@ mod tests {
              VALUES ('address-family-conflict', 'V1-T0')
              RETURNING id",
         )
-        .fetch_one(txn.as_mut())
+        .fetch_one(&mut *txn)
         .await?;
         let interface_id = create_test_interface(
             &mut txn,
@@ -1356,7 +1356,7 @@ mod tests {
              VALUES ('host-addresses-only', 'V1-T0')
              RETURNING id",
         )
-        .fetch_one(txn.as_mut())
+        .fetch_one(&mut *txn)
         .await?;
         let interface_id = create_test_interface(
             &mut txn,
@@ -1371,7 +1371,7 @@ mod tests {
              VALUES ($1, '192.0.2.20/24'::inet)",
         )
         .bind(interface_id)
-        .execute(txn.as_mut())
+        .execute(&mut *txn)
         .await
         .expect_err("a machine-interface address with a network mask should be rejected");
         match error {
@@ -1398,7 +1398,7 @@ mod tests {
             "INSERT INTO network_segments (name, version)
              VALUES ('legacy-active-insert', 'V1-T0') RETURNING id",
         )
-        .fetch_one(txn.as_mut())
+        .fetch_one(&mut *txn)
         .await?;
         let interface_id =
             create_test_interface(&mut txn, segment_id, "02:00:00:00:00:20".parse()?, "legacy")
@@ -1410,7 +1410,7 @@ mod tests {
              VALUES ($1, '192.0.2.51'::inet)",
         )
         .bind(interface_id)
-        .execute(txn.as_mut())
+        .execute(&mut *txn)
         .await?;
 
         let addresses = find_for_interface(&mut txn, interface_id).await?;
@@ -1432,7 +1432,7 @@ mod tests {
             "INSERT INTO machine_interface_addresses (address, allocation_type)
              VALUES ('192.0.2.52'::inet, 'static')",
         )
-        .execute(txn.as_mut())
+        .execute(&mut *txn)
         .await
         .expect_err("an address with no interface and no reserved MAC should be rejected");
         match error {
@@ -1467,7 +1467,7 @@ mod tests {
             "SELECT count(*) FROM machine_interface_addresses WHERE address = $1::inet",
         )
         .bind(address)
-        .fetch_one(txn.as_mut())
+        .fetch_one(&mut *txn)
         .await?;
         assert_eq!(owner_count, 1);
 
@@ -1479,7 +1479,7 @@ mod tests {
              WHERE mia.address = $1::inet",
         )
         .bind(address)
-        .fetch_one(txn.as_mut())
+        .fetch_one(&mut *txn)
         .await?;
         assert_eq!(active_join, 0);
 
@@ -1550,7 +1550,7 @@ mod tests {
             "INSERT INTO network_segments (name, version)
              VALUES ('reserved-active-conflict', 'V1-T0') RETURNING id",
         )
-        .fetch_one(txn.as_mut())
+        .fetch_one(&mut *txn)
         .await?;
         let interface_mac: MacAddress = "02:00:00:00:00:23".parse()?;
         let interface_id =
@@ -1639,7 +1639,7 @@ mod tests {
             "INSERT INTO network_segments (name, version)
              VALUES ('mark-park-restore', 'V1-T0') RETURNING id",
         )
-        .fetch_one(txn.as_mut())
+        .fetch_one(&mut *txn)
         .await?;
         let mac: MacAddress = "02:00:00:00:00:30".parse()?;
         let interface_id = create_test_interface(&mut txn, segment_id, mac, "lifecycle").await?;
@@ -1705,7 +1705,7 @@ mod tests {
             "INSERT INTO network_segments (name, version)
              VALUES ('release-parked-only', 'V1-T0') RETURNING id",
         )
-        .fetch_one(txn.as_mut())
+        .fetch_one(&mut *txn)
         .await?;
         let mac: MacAddress = "02:00:00:00:00:32".parse()?;
         let parked: IpAddr = "192.0.2.61".parse()?;
@@ -1756,7 +1756,7 @@ mod tests {
             "INSERT INTO network_segments (name, version)
              VALUES ('force-wipe-release', 'V1-T0') RETURNING id",
         )
-        .fetch_one(txn.as_mut())
+        .fetch_one(&mut *txn)
         .await?;
         let mac: MacAddress = "02:00:00:00:00:33".parse()?;
         let interface_id = create_test_interface(&mut txn, segment_id, mac, "wipe").await?;
@@ -1786,7 +1786,7 @@ mod tests {
             "INSERT INTO network_segments (name, version)
              VALUES ('mark-races-deletion', 'V1-T0') RETURNING id",
         )
-        .fetch_one(setup.as_mut())
+        .fetch_one(&mut *setup)
         .await?;
         let mac: MacAddress = "02:00:00:00:00:34".parse()?;
         let interface_id = create_test_interface(&mut setup, segment_id, mac, "mark-race").await?;
@@ -1798,12 +1798,12 @@ mod tests {
         let mut holder = pool.txn_begin().await?;
         crate::machine_interface::delete(&interface_id, &mut holder, false).await?;
         let holder_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
-            .fetch_one(holder.as_mut())
+            .fetch_one(&mut *holder)
             .await?;
 
         let mut waiter = pool.txn_begin().await?;
         let waiter_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
-            .fetch_one(waiter.as_mut())
+            .fetch_one(&mut *waiter)
             .await?;
 
         let mark = async {

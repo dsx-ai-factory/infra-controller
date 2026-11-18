@@ -451,7 +451,7 @@ mod tests {
     async fn test_get_returns_err_for_missing_id(pool: sqlx::PgPool) {
         let mut txn = pool.txn_begin().await.unwrap();
         let id = Uuid::nil();
-        let err = get(txn.as_mut(), id).await.unwrap_err();
+        let err = get(&mut *txn, id).await.unwrap_err();
         assert!(err.is_not_found());
     }
 
@@ -517,7 +517,7 @@ mod tests {
         }
 
         let deleting_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
-            .fetch_one(txn.as_mut())
+            .fetch_one(&mut *txn)
             .await
             .unwrap();
         let mut waiter = pool.txn_begin().await.unwrap();
@@ -545,7 +545,7 @@ mod tests {
     #[crate::sqlx_test]
     async fn test_get_many_returns_empty_for_missing_ids(pool: sqlx::PgPool) {
         let mut txn = pool.txn_begin().await.unwrap();
-        let rows = get_many(txn.as_mut(), &[Uuid::nil()]).await.unwrap();
+        let rows = get_many(&mut *txn, &[Uuid::nil()]).await.unwrap();
         assert!(rows.is_empty());
     }
 
@@ -644,7 +644,7 @@ mod tests {
             let mut txn = pool.txn_begin().await.unwrap();
             // The timestamp defaults use the transaction's `NOW()` value.
             let timestamp: DateTime<Utc> = sqlx::query_scalar("SELECT NOW()")
-                .fetch_one(txn.as_mut())
+                .fetch_one(&mut *txn)
                 .await
                 .unwrap();
 
@@ -672,7 +672,7 @@ mod tests {
             };
             assert_record(&created, &expected, "create");
 
-            let fetched = get(txn.as_mut(), created.id).await.unwrap();
+            let fetched = get(&mut *txn, created.id).await.unwrap();
             assert_record(&fetched, &expected, "get");
         }
     }

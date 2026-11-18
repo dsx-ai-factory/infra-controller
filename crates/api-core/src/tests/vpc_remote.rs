@@ -717,7 +717,7 @@ async fn configured_vpcs_converge_on_one_name(database: PgPool) -> eyre::Result<
     )]);
     let mut blocker = fixture.env.pool.txn_begin().await?;
     let blocker_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
-        .fetch_one(blocker.as_mut())
+        .fetch_one(&mut *blocker)
         .await?;
     db::vpc::lock_initial_name(&mut blocker, "concurrent-initial").await?;
     let (first, second) = {
@@ -945,7 +945,7 @@ async fn configured_vpc_name_wait_is_bounded_and_cancellable(database: PgPool) -
         )]);
         let mut blocker = fixture.env.pool.txn_begin().await?;
         let pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
-            .fetch_one(blocker.as_mut())
+            .fetch_one(&mut *blocker)
             .await?;
         db::vpc::lock_initial_name(&mut blocker, name).await?;
         let error = {
@@ -1234,10 +1234,10 @@ async fn remote_routing_retains_assignments_until_confirmed_release(
         "SELECT allocation_id FROM resource_pool_allocations WHERE allocation_id = $1 FOR UPDATE",
     )
     .bind(original.allocation_id)
-    .fetch_one(blocker.as_mut())
+    .fetch_one(&mut *blocker)
     .await?;
     let pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
-        .fetch_one(blocker.as_mut())
+        .fetch_one(&mut *blocker)
         .await?;
     let blocked_release = cancelled_api.release_vpc_inactive_vni(Request::new(request.clone()));
     tokio::pin!(blocked_release);
@@ -1502,7 +1502,7 @@ async fn remote_routing_failed_completion_keeps_active_and_cancels_unused(
                 });
                 sqlx::query("INSERT INTO instances (machine_id, tenant_org, network_config, nvlink_config) VALUES ($1, $2, $3, '{\"gpu_configs\": []}'::jsonb)")
                     .bind(late_machine).bind(&tenant).bind(sqlx::types::Json(network))
-                    .execute(txn.as_mut()).await?;
+                    .execute(&mut *txn).await?;
                 txn.commit().await?;
                 (Code::FailedPrecondition, Some("interface routing override"))
             }
@@ -1787,10 +1787,10 @@ async fn remote_routing_admission_deadline_precedes_provider_work(
     let mut blocker = fixture.env.pool.txn_begin().await?;
     sqlx::query("SELECT id FROM vpcs WHERE id = $1 FOR UPDATE")
         .bind(id)
-        .fetch_one(blocker.as_mut())
+        .fetch_one(&mut *blocker)
         .await?;
     let pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
-        .fetch_one(blocker.as_mut())
+        .fetch_one(&mut *blocker)
         .await?;
     let api = fixture.env.api.clone();
     let change =
@@ -1997,10 +1997,10 @@ async fn remote_routing_cancellation_drops_final_admission(database: PgPool) -> 
         let mut blocker = fixture.env.pool.txn_begin().await?;
         sqlx::query("SELECT id FROM vpcs WHERE id = $1 FOR UPDATE")
             .bind(id)
-            .fetch_one(blocker.as_mut())
+            .fetch_one(&mut *blocker)
             .await?;
         let pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
-            .fetch_one(blocker.as_mut())
+            .fetch_one(&mut *blocker)
             .await?;
         pause.resume.notify_one();
         tokio::select! {

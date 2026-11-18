@@ -1718,7 +1718,7 @@ async fn test_count_instances_referencing_partition(pool: sqlx::PgPool) {
     let mut txn = env.pool.txn_begin().await.unwrap();
     sqlx::query("UPDATE instances SET deleted = NOW() WHERE id = $1::uuid")
         .bind(tinstance.id)
-        .execute(txn.as_mut())
+        .execute(&mut *txn)
         .await
         .unwrap();
     txn.commit().await.unwrap();
@@ -1735,12 +1735,12 @@ async fn test_count_instances_referencing_partition(pool: sqlx::PgPool) {
     let mut txn = env.pool.txn_begin().await.unwrap();
     sqlx::query("DELETE FROM instance_addresses WHERE instance_id = $1::uuid")
         .bind(tinstance.id)
-        .execute(txn.as_mut())
+        .execute(&mut *txn)
         .await
         .unwrap();
     sqlx::query("DELETE FROM instances WHERE id = $1::uuid")
         .bind(tinstance.id)
-        .execute(txn.as_mut())
+        .execute(&mut *txn)
         .await
         .unwrap();
     txn.commit().await.unwrap();
@@ -1866,7 +1866,7 @@ async fn test_postpone_partition_deletion_while_instances_reference_it(pool: sql
     {
         let mut txn = env.pool.txn_begin().await.unwrap();
         let db_partition = db::ib_partition::find_by(
-            txn.as_mut(),
+            &mut *txn,
             ObjectColumnFilter::One(db::ib_partition::IdColumn, &ib_partition_id),
             &carbide_instrument::Instrumentation::noop(),
         )
@@ -1897,7 +1897,7 @@ async fn test_postpone_partition_deletion_while_instances_reference_it(pool: sql
     let mut txn = env.pool.txn_begin().await.unwrap();
     sqlx::query("UPDATE instances SET deleted = NOW() WHERE id = $1::uuid")
         .bind(tinstance.id)
-        .execute(txn.as_mut())
+        .execute(&mut *txn)
         .await
         .unwrap();
     txn.commit().await.unwrap();
@@ -1931,12 +1931,12 @@ async fn test_postpone_partition_deletion_while_instances_reference_it(pool: sql
     let mut txn = env.pool.txn_begin().await.unwrap();
     sqlx::query("DELETE FROM instance_addresses WHERE instance_id = $1::uuid")
         .bind(tinstance.id)
-        .execute(txn.as_mut())
+        .execute(&mut *txn)
         .await
         .unwrap();
     sqlx::query("DELETE FROM instances WHERE id = $1::uuid")
         .bind(tinstance.id)
-        .execute(txn.as_mut())
+        .execute(&mut *txn)
         .await
         .unwrap();
     txn.commit().await.unwrap();

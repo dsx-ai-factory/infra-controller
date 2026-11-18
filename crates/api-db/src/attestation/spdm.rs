@@ -894,7 +894,7 @@ mod tests {
         );
         sqlx::query("INSERT INTO machines (id, dpf) VALUES ($1, '{}'::jsonb)")
             .bind(machine_id)
-            .execute(txn.as_mut())
+            .execute(&mut *txn)
             .await?;
         // One unfinished claim and both terminal results exercise metadata-only updates.
         for (device_id, state, completed, locked) in [
@@ -911,13 +911,13 @@ mod tests {
                 (machine_id, device_id, nonce, state, job_id, started_at, completed_at, evidence_collection_locked)
                 VALUES ($1, $2, gen_random_uuid(), $3, $4, now(), CASE WHEN $5 THEN now() END, $6)")
                 .bind(machine_id).bind(device_id).bind(sqlx::types::Json(state)).bind(job_id)
-                .bind(completed).bind(locked).execute(txn.as_mut()).await?;
+                .bind(completed).bind(locked).execute(&mut *txn).await?;
         }
         let unchanged_query = "SELECT jsonb_agg(to_jsonb(a) - 'cancelled_at' - 'cancellation_target' - 'cancellation_cleanup_started_at' ORDER BY device_id)
             FROM spdm_machine_devices_attestation a WHERE job_id = $1";
         let before: serde_json::Value = sqlx::query_scalar(unchanged_query)
             .bind(job_id)
-            .fetch_one(txn.as_mut())
+            .fetch_one(&mut *txn)
             .await?;
         let mut first_cleanup = None;
         // Both direction changes and a repeated target remain valid, including terminal rows.
@@ -928,7 +928,7 @@ mod tests {
             SpdmCancellationTarget::Waive,
         ] {
             sqlx::query("UPDATE spdm_machine_devices_attestation SET cancelled_at = now() - INTERVAL '1 minute' WHERE job_id = $1")
-                .bind(job_id).execute(txn.as_mut()).await?;
+                .bind(job_id).execute(&mut *txn).await?;
             request_attestation_cancellation(&mut txn, &job_id, target).await?;
             let rows: Vec<(
                 chrono::DateTime<chrono::Utc>,
@@ -939,7 +939,7 @@ mod tests {
                  FROM spdm_machine_devices_attestation WHERE job_id = $1 ORDER BY device_id",
             )
             .bind(job_id)
-            .fetch_all(txn.as_mut())
+            .fetch_all(&mut *txn)
             .await?;
             first_cleanup = first_cleanup.or(rows[0].2);
             assert_eq!(
@@ -953,7 +953,7 @@ mod tests {
             }
             let after: serde_json::Value = sqlx::query_scalar(unchanged_query)
                 .bind(job_id)
-                .fetch_one(txn.as_mut())
+                .fetch_one(&mut *txn)
                 .await?;
             assert_eq!(
                 before, after,
@@ -996,7 +996,7 @@ mod tests {
         let mut txn = pool.txn_begin().await?;
         sqlx::query("INSERT INTO machines (id, dpf) VALUES ($1, '{}'::jsonb)")
             .bind(machine_id)
-            .execute(txn.as_mut())
+            .execute(&mut *txn)
             .await?;
         sqlx::query(
             "INSERT INTO spdm_machine_devices_attestation
@@ -1008,7 +1008,7 @@ mod tests {
             "verification failed".into(),
         )))
         .bind(job_id)
-        .execute(txn.as_mut())
+        .execute(&mut *txn)
         .await?;
         request_attestation_cancellation(&mut txn, &job_id, SpdmCancellationTarget::Waive).await?;
         txn.commit().await?;
@@ -1023,7 +1023,7 @@ mod tests {
         // A real PostgreSQL lock timeout proves an opposite request cannot overtake recovery.
         let mut opposite = pool.txn_begin().await?;
         sqlx::query("SET LOCAL lock_timeout = '50ms'")
-            .execute(opposite.as_mut())
+            .execute(&mut *opposite)
             .await?;
         let error =
             request_attestation_cancellation(&mut opposite, &job_id, SpdmCancellationTarget::Fail)
@@ -1053,21 +1053,21 @@ mod tests {
         sqlx::query(
             "CREATE TEMP TABLE spdm_machine_devices_attestation (cancelled_at TIMESTAMPTZ)",
         )
-        .execute(txn.as_mut())
+        .execute(&mut *txn)
         .await?;
         sqlx::query(
             "INSERT INTO spdm_machine_devices_attestation VALUES (NULL), ('2026-09-01T12:00:00Z')",
         )
-        .execute(txn.as_mut())
+        .execute(&mut *txn)
         .await?;
         sqlx::raw_sql(include_str!(
             "../../migrations/20261103135543_spdm_fail_requested_at.sql"
         ))
-        .execute(txn.as_mut())
+        .execute(&mut *txn)
         .await?;
         let rows: Vec<(Option<String>, Option<chrono::DateTime<chrono::Utc>>)> = sqlx::query_as(
             "SELECT cancellation_target, cancellation_cleanup_started_at FROM spdm_machine_devices_attestation ORDER BY cancelled_at NULLS FIRST")
-            .fetch_all(txn.as_mut()).await?;
+            .fetch_all(&mut *txn).await?;
         assert_eq!(
             rows,
             vec![
@@ -1077,7 +1077,7 @@ mod tests {
         );
         // A main-branch writer can still record a waiver without knowing the new columns.
         sqlx::query("INSERT INTO spdm_machine_devices_attestation (cancelled_at) VALUES (now())")
-            .execute(txn.as_mut())
+            .execute(&mut *txn)
             .await?;
         Ok(())
     }
@@ -1105,7 +1105,7 @@ mod tests {
         for machine_id in [populated_machine, empty_machine] {
             sqlx::query("INSERT INTO machines (id, dpf) VALUES ($1, '{}'::jsonb)")
                 .bind(machine_id)
-                .execute(txn.as_mut())
+                .execute(&mut *txn)
                 .await?;
         }
         // Include an excluded failure so a complete selection proves the device filter still applies.
@@ -1126,7 +1126,7 @@ mod tests {
             .bind(device_id)
             .bind(sqlx::types::Json(state))
             .bind(job_id)
-            .execute(txn.as_mut())
+            .execute(&mut *txn)
             .await?;
         }
         txn.commit().await?;
@@ -1309,7 +1309,7 @@ mod tests {
                 for (index, member_id) in machine_ids.iter().enumerate() {
                     sqlx::query("INSERT INTO machines (id, dpf) VALUES ($1, '{}'::jsonb)")
                         .bind(member_id)
-                        .execute(txn.as_mut())
+                        .execute(&mut *txn)
                         .await
                         .map_err(|e| e.to_string())?;
 
@@ -1337,7 +1337,7 @@ mod tests {
                             serde_json::to_value(state).map_err(|error| error.to_string())?
                         }))
                         .bind(job_id)
-                        .execute(txn.as_mut())
+                        .execute(&mut *txn)
                         .await
                         .map_err(|e| e.to_string())?;
                     }
@@ -1346,7 +1346,7 @@ mod tests {
                     // Override only the selected machine's first device; the shared job keeps its membership.
                     sqlx::query("UPDATE spdm_machine_devices_attestation SET cancelled_at = now(), cancellation_target = $2
                         WHERE job_id = $1 AND machine_id = $3 AND device_id = 'GPU_0'")
-                        .bind(job_id).bind(target).bind(machine_id).execute(txn.as_mut()).await.map_err(|e| e.to_string())?;
+                        .bind(job_id).bind(target).bind(machine_id).execute(&mut *txn).await.map_err(|e| e.to_string())?;
                 }
                 machine_ids.sort_by_key(ToString::to_string);
 
@@ -1427,7 +1427,7 @@ mod tests {
         for id in machines.into_iter().chain(non_hosts) {
             sqlx::query("INSERT INTO machines (id, dpf) VALUES ($1, '{}'::jsonb)")
                 .bind(id)
-                .execute(txn.as_mut())
+                .execute(&mut *txn)
                 .await?;
         }
         let older_job = uuid::Uuid::from_u128(1);
@@ -1492,7 +1492,7 @@ mod tests {
                  VALUES ($1, $2, gen_random_uuid(), $3, $4, $5, $6)",
             ).bind(machine).bind(device).bind(sqlx::types::Json(state)).bind(job)
                 .bind(time + chrono::Duration::minutes(minutes)).bind(controller)
-                .execute(txn.as_mut()).await?;
+                .execute(&mut *txn).await?;
         }
         let mut expected = vec![
             (machines[0], Some(SpdmAttestationStatus::Passed)),

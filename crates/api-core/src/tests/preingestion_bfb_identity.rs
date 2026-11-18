@@ -227,7 +227,7 @@ async fn bfb_recovery_rechecks_identity_before_external_actions(pool: sqlx::PgPo
     .unwrap();
     sqlx::query("DELETE FROM machine_interface_addresses WHERE interface_id = $1")
         .bind(replacement_interface.id)
-        .execute(txn.as_mut())
+        .execute(&mut *txn)
         .await
         .unwrap();
     txn.commit().await.unwrap();
@@ -312,7 +312,7 @@ async fn bfb_recovery_rechecks_identity_before_external_actions(pool: sqlx::PgPo
             .await
             .unwrap();
             sqlx::query("UPDATE explored_endpoints SET preingestion_state = jsonb_set(preingestion_state, '{started_at}', to_jsonb(now() - INTERVAL '15 minutes')) WHERE address = $1")
-                .bind(dpu_ip).execute(txn.as_mut()).await.unwrap();
+                .bind(dpu_ip).execute(&mut *txn).await.unwrap();
             txn.commit().await.unwrap();
         } else if boundary == "legacy" {
             sqlx::query("UPDATE explored_endpoints SET preingestion_state = preingestion_state - 'dpu_bmc_mac' WHERE address = $1")

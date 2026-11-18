@@ -1025,7 +1025,7 @@ async fn component_reset_dispatches_valid_targets_and_polls_by_identity(pool: sq
         sqlx::query("UPDATE switches SET rack_id = $1 WHERE id = $2")
             .bind(&rack_id)
             .bind(id)
-            .execute(txn.as_mut())
+            .execute(&mut *txn)
             .await
             .unwrap();
     }
@@ -1511,12 +1511,12 @@ async fn component_reset_tracks_pre_ingestion_mac_after_ingestion(pool: sqlx::Pg
     sqlx::query("UPDATE expected_switches SET rack_id = $1 WHERE bmc_mac_address = $2")
         .bind(&rack_id)
         .bind(bmc_mac)
-        .execute(txn.as_mut())
+        .execute(&mut *txn)
         .await
         .unwrap();
     sqlx::query("DELETE FROM switches WHERE id = $1")
         .bind(switch.id)
-        .execute(txn.as_mut())
+        .execute(&mut *txn)
         .await
         .unwrap();
     txn.commit().await.unwrap();

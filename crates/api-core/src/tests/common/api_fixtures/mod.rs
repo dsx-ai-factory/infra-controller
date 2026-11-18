@@ -3018,7 +3018,7 @@ pub(in crate::tests) async fn update_time_params(
         .bind(version)
         .bind(last_reboot_time)
         .bind(last_discovery_time)
-        .execute(txn.as_mut())
+        .execute(&mut *txn)
         .await
         .unwrap();
     txn.commit().await.unwrap();

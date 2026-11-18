@@ -247,13 +247,13 @@ impl RemotePoolFixture {
         // such as `vpc-vni`, loses its Integrated inventory and binding before
         // it moves; a new test pool has none of these rows yet.
         let mut txn = env.pool.txn_begin().await?;
-        let mut definitions = db::resource_pool::all_stored_defs(txn.as_mut()).await?;
+        let mut definitions = db::resource_pool::all_stored_defs(&mut *txn).await?;
         for pool in pools {
             let allocations: i64 = sqlx::query_scalar(
                 "SELECT count(*) FROM resource_pool_allocations WHERE pool_name = $1",
             )
             .bind(pool.name)
-            .fetch_one(txn.as_mut())
+            .fetch_one(&mut *txn)
             .await?;
             assert_eq!(
                 allocations, 0,
@@ -267,7 +267,7 @@ impl RemotePoolFixture {
             ] {
                 sqlx::query(query)
                     .bind(pool.name)
-                    .execute(txn.as_mut())
+                    .execute(&mut *txn)
                     .await?;
             }
             definitions.insert(

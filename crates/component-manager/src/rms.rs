@@ -9430,11 +9430,11 @@ mod tests {
                 _ => "LOCK TABLE power_shelves IN ACCESS EXCLUSIVE MODE",
             };
             sqlx::query(lock_statement)
-                .execute(blocker.as_mut())
+                .execute(&mut *blocker)
                 .await
                 .unwrap();
             let blocker_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
-                .fetch_one(blocker.as_mut())
+                .fetch_one(&mut *blocker)
                 .await
                 .unwrap();
             let mut read = Box::pin(request());
@@ -9709,7 +9709,7 @@ mod tests {
         let owner_id = seed_machine(&mut txn, CT_MAC_2, CT_IP_1, "CT-002", &owner_rack_id).await;
         let update = sqlx::query("UPDATE machines SET rack_id = NULL WHERE id = $1")
             .bind(owner_id)
-            .execute(txn.as_mut())
+            .execute(&mut *txn)
             .await
             .expect("clear the current owner's rack");
         assert_eq!(update.rows_affected(), 1);

@@ -715,11 +715,11 @@ async fn tracking_sessions_bound_acquisition_drop_blocked_reads_and_release_befo
             .expect("reader PID");
         let mut blocker = pool.txn_begin().await.expect("block tracking table");
         sqlx::query("LOCK TABLE direct_dispatch_rms_jobs IN ACCESS EXCLUSIVE MODE")
-            .execute(blocker.as_mut())
+            .execute(&mut *blocker)
             .await
             .expect("table lock");
         let blocker_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
-            .fetch_one(blocker.as_mut())
+            .fetch_one(&mut *blocker)
             .await
             .expect("blocker PID");
         let mut read = Box::pin(ComputeTrayManager::get_firmware_jobs(&backend, &macs));
@@ -822,11 +822,11 @@ async fn tracking_recovery_permit_gates_sessions_independently_of_pool_size(pool
         let deadline = Instant::now() + READ_TIMEOUT;
         let mut blocker = pool.txn_begin().await.expect("first tracking blocker");
         sqlx::query("LOCK TABLE direct_dispatch_rms_jobs IN ACCESS EXCLUSIVE MODE")
-            .execute(blocker.as_mut())
+            .execute(&mut *blocker)
             .await
             .expect("lock tracking table");
         let blocker_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
-            .fetch_one(blocker.as_mut())
+            .fetch_one(&mut *blocker)
             .await
             .expect("blocker PID");
         let mut first = Box::pin(backend.read_known_firmware_jobs(
@@ -886,11 +886,11 @@ async fn tracking_recovery_permit_gates_sessions_independently_of_pool_size(pool
         // proves it was admitted after the first recovery released its permit.
         let mut blocker = pool.txn_begin().await.expect("second tracking blocker");
         sqlx::query("LOCK TABLE direct_dispatch_rms_jobs IN ACCESS EXCLUSIVE MODE")
-            .execute(blocker.as_mut())
+            .execute(&mut *blocker)
             .await
             .expect("relock tracking table");
         let blocker_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
-            .fetch_one(blocker.as_mut())
+            .fetch_one(&mut *blocker)
             .await
             .expect("second blocker PID");
         tokio::select! {

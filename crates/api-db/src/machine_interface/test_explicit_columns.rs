@@ -40,7 +40,7 @@ async fn interface_queries_survive_added_columns(
          ALTER TABLE predicted_machine_interfaces ADD COLUMN test_added_column text;
          ALTER TABLE machine_boot_override ADD COLUMN test_added_column text;",
     )
-    .execute(migration.as_mut())
+    .execute(&mut *migration)
     .await?;
     migration.commit().await?;
 

@@ -1231,7 +1231,7 @@ async fn test_find_one_linked_returns_explored_endpoint_address(pool: sqlx::PgPo
     assert_eq!(linked.address, None);
 
     let address =
-        db::machine_interface::lookup_bmc_ip_by_mac_address(txn.as_mut(), linked.bmc_mac_address)
+        db::machine_interface::lookup_bmc_ip_by_mac_address(&mut *txn, linked.bmc_mac_address)
             .await
             .unwrap()
             .into_iter()
@@ -1324,7 +1324,7 @@ async fn test_add_with_bmc_ip_creates_static_interface(
     .await;
 
     let mut txn = env.pool.txn_begin().await?;
-    let interfaces = db::machine_interface::find_by_mac_address(txn.as_mut(), bmc_mac).await?;
+    let interfaces = db::machine_interface::find_by_mac_address(&mut *txn, bmc_mac).await?;
     assert_eq!(
         interfaces.len(),
         1,
@@ -1373,7 +1373,7 @@ async fn test_add_without_bmc_ip_creates_no_interface(
         .await?;
 
     let mut txn = env.pool.txn_begin().await?;
-    let interfaces = db::machine_interface::find_by_mac_address(txn.as_mut(), bmc_mac).await?;
+    let interfaces = db::machine_interface::find_by_mac_address(&mut *txn, bmc_mac).await?;
     assert!(
         interfaces.is_empty(),
         "should not create interface without bmc_ip_address"

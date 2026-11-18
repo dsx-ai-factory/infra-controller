@@ -45,7 +45,7 @@ async fn spdm_snapshot_survives_added_columns(
         "SET LOCAL lock_timeout = '5s';
          ALTER TABLE spdm_machine_devices_attestation ADD COLUMN test_added_column text;",
     )
-    .execute(migration.as_mut())
+    .execute(&mut *migration)
     .await?;
     migration.commit().await?;
 

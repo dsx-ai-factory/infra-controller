@@ -249,7 +249,7 @@ async fn concurrent_nic_firmware_writes_preserve_the_committed_tenant_config(poo
     .await
     .unwrap();
     let blocker_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
-        .fetch_one(winner.as_mut())
+        .fetch_one(&mut *winner)
         .await
         .unwrap();
     let competing_clear = async {
@@ -292,7 +292,7 @@ async fn profile_deletion_wins_over_waiting_tenant_selection(pool: PgPool) {
         .await
         .unwrap();
     let blocker_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
-        .fetch_one(winner.as_mut())
+        .fetch_one(&mut *winner)
         .await
         .unwrap();
     let competing_set = async {
@@ -459,7 +459,7 @@ async fn tenant_nic_firmware_migration_preserves_existing_rows_and_enforces_prof
         "UPDATE tenants SET nic_firmware_profile_id = 'missing-profile' WHERE organization_id = $1",
     )
     .bind(&tenant.organization_id)
-    .execute(txn.as_mut())
+    .execute(&mut *txn)
     .await
     .unwrap_err();
     assert_eq!(

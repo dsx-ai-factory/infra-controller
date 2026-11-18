@@ -175,11 +175,11 @@ async fn test_lldp_topology_update(pool: sqlx::PgPool) -> Result<(), Box<dyn std
 
     let query =
         "UPDATE port_to_network_device_map SET network_device_id=NULL WHERE local_port='oob_net0'";
-    sqlx::query(query).execute(txn.as_mut()).await.unwrap();
+    sqlx::query(query).execute(&mut *txn).await.unwrap();
     let query = "UPDATE network_devices SET id='mac=a1:b1:c1:00:00:11', name='Test' WHERE id='mac=a1:b1:c1:00:00:01'";
-    sqlx::query(query).execute(txn.as_mut()).await.unwrap();
+    sqlx::query(query).execute(&mut *txn).await.unwrap();
     let query = "UPDATE port_to_network_device_map SET network_device_id='mac=a1:b1:c1:00:00:11' WHERE local_port='oob_net0'";
-    sqlx::query(query).execute(txn.as_mut()).await.unwrap();
+    sqlx::query(query).execute(&mut *txn).await.unwrap();
     txn.commit().await.unwrap();
 
     let topology = env

@@ -1280,7 +1280,7 @@ mod tests {
     async fn reset_failed_preingestion_propagates_database_errors(pool: sqlx::PgPool) {
         let mut txn = pool.txn_begin().await.unwrap();
         sqlx::query("SET TRANSACTION READ ONLY")
-            .execute(txn.as_mut())
+            .execute(&mut *txn)
             .await
             .unwrap();
 
@@ -1428,10 +1428,10 @@ mod tests {
         // One that is complete -> excluded by the predicate.
         seed_endpoint(&mut txn, "10.0.0.4", PreingestionState::Complete).await;
 
-        let rows = find_preingest_not_waiting_not_error(txn.as_mut())
+        let rows = find_preingest_not_waiting_not_error(&mut *txn)
             .await
             .unwrap();
-        let count = count_preingest_not_waiting_not_error(txn.as_mut())
+        let count = count_preingest_not_waiting_not_error(&mut *txn)
             .await
             .unwrap();
 
@@ -1451,8 +1451,8 @@ mod tests {
         // Not installing -> excluded.
         seed_endpoint(&mut txn, "10.0.1.3", PreingestionState::Initial).await;
 
-        let rows = find_preingest_installing(txn.as_mut()).await.unwrap();
-        let count = count_preingest_installing(txn.as_mut()).await.unwrap();
+        let rows = find_preingest_installing(&mut *txn).await.unwrap();
+        let count = count_preingest_installing(&mut *txn).await.unwrap();
 
         assert_eq!(rows.len(), 2, "two endpoints are installing firmware");
         assert_eq!(count, 2, "count agrees with the row count");
@@ -1710,7 +1710,7 @@ mod tests {
             .await
             .unwrap();
 
-        let counts = hardware_class_counts(txn.as_mut()).await.unwrap();
+        let counts = hardware_class_counts(&mut *txn).await.unwrap();
 
         let tallied: Vec<_> = counts
             .iter()
@@ -1742,12 +1742,12 @@ mod tests {
         .unwrap();
 
         assert!(
-            hardware_class_recorded(txn.as_mut(), HARDWARE_CLASS)
+            hardware_class_recorded(&mut *txn, HARDWARE_CLASS)
                 .await
                 .unwrap()
         );
         assert!(
-            !hardware_class_recorded(txn.as_mut(), OTHER_HARDWARE_CLASS)
+            !hardware_class_recorded(&mut *txn, OTHER_HARDWARE_CLASS)
                 .await
                 .unwrap()
         );
@@ -1773,9 +1773,7 @@ mod tests {
 
         insert(address, &report, false, &mut txn).await.unwrap();
 
-        let endpoints = find_by_mac_address(txn.as_mut(), mac_address)
-            .await
-            .unwrap();
+        let endpoints = find_by_mac_address(&mut *txn, mac_address).await.unwrap();
         assert_eq!(endpoints.len(), 1);
         assert_eq!(endpoints[0].address, address);
     }

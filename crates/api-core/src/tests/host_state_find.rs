@@ -211,7 +211,7 @@ async fn full_and_compact(
 ) {
     let mut txn = env.pool.txn_begin().await.unwrap();
     let full = db::managed_host::load_by_machine_ids(
-        txn.as_mut(),
+        &mut *txn,
         host_ids,
         LoadSnapshotOptions::default().with_host_health(env.config.host_health),
     )

@@ -51,9 +51,7 @@ async fn existing_skus_keep_null_updated_and_new_rows_get_default(
         .await?;
 
     let mut txn = pool.txn_begin().await?;
-    sqlx::raw_sql(UPDATED_MIGRATION)
-        .execute(txn.as_mut())
-        .await?;
+    sqlx::raw_sql(UPDATED_MIGRATION).execute(&mut *txn).await?;
     txn.commit().await?;
 
     assert_eq!(updated_of(&pool, "existing").await, None);

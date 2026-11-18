@@ -240,7 +240,7 @@ mod test {
             "SET LOCAL lock_timeout = '5s';
              ALTER TABLE attestation_profiles ADD COLUMN test_added_column text;",
         )
-        .execute(migration.as_mut())
+        .execute(&mut *migration)
         .await
         .unwrap();
         migration.commit().await.unwrap();
@@ -351,17 +351,14 @@ mod test {
         );
         assert_eq!(created.updated_by, OPERATOR);
 
-        let found = find(txn.as_mut(), "dell-inc_poweredge-r750")
+        let found = find(&mut *txn, "dell-inc_poweredge-r750")
             .await
             .unwrap()
             .unwrap();
         assert_eq!(found.policy_document, gpu_allowlist());
         assert_eq!(found.version, created.version);
         assert!(
-            find(txn.as_mut(), "nvidia_dgx-gb200")
-                .await
-                .unwrap()
-                .is_none(),
+            find(&mut *txn, "nvidia_dgx-gb200").await.unwrap().is_none(),
             "a class with no profile reads as absent, not as a default"
         );
     }
@@ -439,7 +436,7 @@ mod test {
             matches!(error, DatabaseError::ConcurrentModificationError(..)),
             "expected a concurrent-modification error, got {error:?}"
         );
-        let stored = find(txn.as_mut(), "dell-inc_poweredge-r750")
+        let stored = find(&mut *txn, "dell-inc_poweredge-r750")
             .await
             .unwrap()
             .unwrap();
@@ -480,7 +477,7 @@ mod test {
             "expected a concurrent-modification error, got {error:?}"
         );
         assert!(
-            find(txn.as_mut(), "dell-inc_poweredge-r750")
+            find(&mut *txn, "dell-inc_poweredge-r750")
                 .await
                 .unwrap()
                 .is_some(),
@@ -491,7 +488,7 @@ mod test {
             .await
             .unwrap();
         assert!(
-            find(txn.as_mut(), "dell-inc_poweredge-r750")
+            find(&mut *txn, "dell-inc_poweredge-r750")
                 .await
                 .unwrap()
                 .is_none()
@@ -597,7 +594,7 @@ mod test {
             create(&mut txn, class, &all, OPERATOR).await.unwrap();
         }
 
-        let classes: Vec<_> = list(txn.as_mut())
+        let classes: Vec<_> = list(&mut *txn)
             .await
             .unwrap()
             .into_iter()

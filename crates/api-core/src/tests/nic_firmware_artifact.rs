@@ -1067,11 +1067,11 @@ async fn blocked_snapshots_release_pool_capacity_on_deadline_and_cancellation(po
             .expect("original snapshot backend");
         let mut blocker = pool.txn_begin().await.expect("begin schema lock");
         let blocker_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
-            .fetch_one(blocker.as_mut())
+            .fetch_one(&mut *blocker)
             .await
             .expect("schema lock backend");
         sqlx::query("LOCK TABLE machines IN ACCESS EXCLUSIVE MODE")
-            .execute(blocker.as_mut())
+            .execute(&mut *blocker)
             .await
             .expect("hold schema lock");
         let cache = cache(256);
@@ -1312,7 +1312,7 @@ async fn retention_snapshot_sees_membership_committed_while_waiting_for_the_lock
         .await
         .expect("lock new retention membership");
     let writer_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
-        .fetch_one(writer.as_mut())
+        .fetch_one(&mut *writer)
         .await
         .unwrap();
     let requested = uri(&operation, &digest(IMAGE), "image");
@@ -1339,7 +1339,7 @@ async fn retention_snapshot_sees_membership_committed_while_waiting_for_the_lock
         .bind(sqlx::types::Json(ManagedHostState::NicFirmwareUpdating {
             operation: operation.clone(),
         }))
-        .execute(writer.as_mut())
+        .execute(&mut *writer)
         .await
         .expect("authorize requester in the same writer transaction");
     let mut retained_operation = operation;
@@ -1353,7 +1353,7 @@ async fn retention_snapshot_sees_membership_committed_while_waiting_for_the_lock
         .bind(sqlx::types::Json(ManagedHostState::NicFirmwareUpdating {
             operation: retained_operation,
         }))
-        .execute(writer.as_mut())
+        .execute(&mut *writer)
         .await
         .expect("save new membership");
     writer.commit().await.expect("commit new operation");

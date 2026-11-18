@@ -215,7 +215,7 @@ async fn hold_vpc_prefix_create<'a>(
     let mut txn = env.pool.txn_begin().await?;
     db::tenant_prefix_overlap::lock_checks(&mut txn).await?;
     let blocker_pid = sqlx::query_scalar("SELECT pg_backend_pid()")
-        .fetch_one(txn.as_mut())
+        .fetch_one(&mut *txn)
         .await?;
     let vpc = db::vpc::find_by_with_lock(
         txn.as_mut(),
@@ -256,7 +256,7 @@ async fn hold_attached_segment_create<'a>(
     let mut txn = env.pool.txn_begin().await?;
     db::tenant_prefix_overlap::lock_checks(&mut txn).await?;
     let blocker_pid = sqlx::query_scalar("SELECT pg_backend_pid()")
-        .fetch_one(txn.as_mut())
+        .fetch_one(&mut *txn)
         .await?;
     db::network_segment::persist(
         NewNetworkSegment {
@@ -596,7 +596,7 @@ async fn generated_linknets_inherit_scope_but_adopted_segments_stay_global(
         "SELECT vpc_prefix_id, overlap_vpc_id FROM network_prefixes WHERE segment_id = $1",
     )
     .bind(generated_id)
-    .fetch_one(txn.as_mut())
+    .fetch_one(&mut *txn)
     .await?;
     assert_eq!(generated, (Some(parent_id), Some(vpc_id)));
     txn.commit().await?;
@@ -641,7 +641,7 @@ async fn configured_networks_reject_scoped_children_but_preserve_global_parents(
     let child_scope: Option<VpcId> =
         sqlx::query_scalar("SELECT overlap_vpc_id FROM network_prefixes WHERE segment_id = $1")
             .bind(child_id)
-            .fetch_one(txn.as_mut())
+            .fetch_one(&mut *txn)
             .await?;
     assert_eq!(child_scope, Some(vpc_id));
     txn.commit().await?;
@@ -828,7 +828,7 @@ async fn eligible_exact_overlap_uses_distinct_vpc_scopes(
     let mut peering_txn = env.pool.txn_begin().await?;
     db::tenant_prefix_overlap::lock_checks(&mut peering_txn).await?;
     let blocker_pid = sqlx::query_scalar("SELECT pg_backend_pid()")
-        .fetch_one(peering_txn.as_mut())
+        .fetch_one(&mut *peering_txn)
         .await?;
     let peering_id = VpcPeeringId::new();
     db::vpc_peering::create(&mut peering_txn, vpc_a, peering_candidate, peering_id).await?;
@@ -1476,7 +1476,7 @@ async fn unattached_segment_preserves_global_compatibility_and_rechecks_stored_s
     let mut segment_txn = env.pool.txn_begin().await?;
     db::tenant_prefix_overlap::lock_checks(&mut segment_txn).await?;
     let blocker_pid = sqlx::query_scalar("SELECT pg_backend_pid()")
-        .fetch_one(segment_txn.as_mut())
+        .fetch_one(&mut *segment_txn)
         .await?;
     let segment = NewNetworkSegment::try_from(unattached_host_inband_segment_request(
         NetworkSegmentId::new(),
@@ -1527,7 +1527,7 @@ async fn scoped_vpc_prefix_rechecks_after_unattached_segment_commit(
     let mut segment_txn = env.pool.txn_begin().await?;
     db::tenant_prefix_overlap::lock_checks(&mut segment_txn).await?;
     let blocker_pid = sqlx::query_scalar("SELECT pg_backend_pid()")
-        .fetch_one(segment_txn.as_mut())
+        .fetch_one(&mut *segment_txn)
         .await?;
     let segment = NewNetworkSegment::try_from(unattached_host_inband_segment_request(
         NetworkSegmentId::new(),
@@ -2860,7 +2860,7 @@ async fn exact_site_prefix_attachment_enforces_lineage_and_round_trips(
         sqlx::query_scalar("SELECT id FROM site_prefixes WHERE prefix = $1 AND authority = $2")
             .bind(operator_root)
             .bind(SitePrefixAuthority::OperatorManaged)
-            .fetch_one(txn.as_mut())
+            .fetch_one(&mut *txn)
             .await?;
     txn.commit().await?;
     let legacy = env
@@ -3048,7 +3048,7 @@ async fn omitted_site_prefix_id_serializes_with_tenant_root_creation(
 
     let mut site_prefix_create = env.pool.txn_begin().await?;
     let blocker_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
-        .fetch_one(site_prefix_create.as_mut())
+        .fetch_one(&mut *site_prefix_create)
         .await?;
     db::site_prefix::create_tenant_managed(
         NewTenantManagedSitePrefix {
@@ -3100,13 +3100,13 @@ async fn omitted_site_prefix_id_serializes_with_first_operator_root_reconciliati
     let operator_root: IpNetwork = "198.19.0.0/16".parse()?;
     let mut reconciliation = env.pool.txn_begin().await?;
     let blocker_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
-        .fetch_one(reconciliation.as_mut())
+        .fetch_one(&mut *reconciliation)
         .await?;
     db::site_prefix::reconcile_configured(&mut reconciliation, &[operator_root]).await?;
     let operator_root_id: SitePrefixId =
         sqlx::query_scalar("SELECT id FROM site_prefixes WHERE prefix = $1")
             .bind(operator_root)
-            .fetch_one(reconciliation.as_mut())
+            .fetch_one(&mut *reconciliation)
             .await?;
 
     let vpc_prefix_id = VpcPrefixId::new();
@@ -3143,7 +3143,7 @@ async fn vpc_prefix_create_rechecks_parent_after_concurrent_retirement(
 
     let mut retirement = env.pool.txn_begin().await?;
     let blocker_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
-        .fetch_one(retirement.as_mut())
+        .fetch_one(&mut *retirement)
         .await?;
     let current = db::site_prefix::find_by_id_for_update(&mut retirement, site_prefix_id)
         .await?
@@ -3252,7 +3252,7 @@ async fn tenant_managed_lineage_blocks_virtualization_transition_and_race(
     .await;
     let mut child_create = env.pool.txn_begin().await?;
     let blocker_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
-        .fetch_one(child_create.as_mut())
+        .fetch_one(&mut *child_create)
         .await?;
     let locked_vpc = db::vpc::find_by_with_lock(
         child_create.as_mut(),

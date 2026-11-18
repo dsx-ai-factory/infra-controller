@@ -58,7 +58,7 @@ async fn retired_operator_prefix_does_not_block_split_ranges(pool: sqlx::PgPool)
         .await
         .unwrap();
     assert!(
-        db::site_prefix::find_operator_managed_prefixes_with_retained_vpc_prefixes(txn.as_mut())
+        db::site_prefix::find_operator_managed_prefixes_with_retained_vpc_prefixes(&mut *txn)
             .await
             .unwrap()
             .is_empty()
@@ -396,7 +396,7 @@ async fn retirement_waits_for_exact_children_and_preserves_other_roots(pool: sql
         .bind("retirement VPC")
         .bind(tenant)
         .bind(ConfigVersion::initial())
-        .execute(txn.as_mut())
+        .execute(&mut *txn)
         .await
         .unwrap();
         sqlx::query(
@@ -408,7 +408,7 @@ async fn retirement_waits_for_exact_children_and_preserves_other_roots(pool: sql
         .bind("retained child")
         .bind(vpc_id)
         .bind(parent)
-        .execute(txn.as_mut())
+        .execute(&mut *txn)
         .await
         .unwrap();
     }
@@ -533,7 +533,7 @@ async fn operator_restoration_invalidates_pending_retirement(pool: sqlx::PgPool)
         .await
         .unwrap();
     let restoration_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
-        .fetch_one(restoration.as_mut())
+        .fetch_one(&mut *restoration)
         .await
         .unwrap();
     let mut retirement = controller(&env);
@@ -575,7 +575,7 @@ async fn retirement_retries_after_interrupted_parent_lock(pool: sqlx::PgPool) {
         .await
         .unwrap();
     let blocker_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
-        .fetch_one(blocker.as_mut())
+        .fetch_one(&mut *blocker)
         .await
         .unwrap();
     let mut retirement = controller(&env);
@@ -586,7 +586,7 @@ async fn retirement_retries_after_interrupted_parent_lock(pool: sqlx::PgPool) {
     let routing_lock_available: bool = sqlx::query_scalar(
         "SELECT pg_try_advisory_xact_lock(hashtextextended('tenant_prefix_overlap:checks', 0))",
     )
-    .fetch_one(blocker.as_mut())
+    .fetch_one(&mut *blocker)
     .await
     .unwrap();
     assert!(
@@ -595,7 +595,7 @@ async fn retirement_retries_after_interrupted_parent_lock(pool: sqlx::PgPool) {
     );
     let canceled: bool = sqlx::query_scalar("SELECT pg_cancel_backend($1)")
         .bind(blocked_pid)
-        .fetch_one(blocker.as_mut())
+        .fetch_one(&mut *blocker)
         .await
         .unwrap();
     assert!(canceled);
@@ -668,7 +668,7 @@ async fn child_creation_racing_physical_retirement_observes_missing_parent(pool:
         .await
         .unwrap();
     let blocker_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
-        .fetch_one(blocker.as_mut())
+        .fetch_one(&mut *blocker)
         .await
         .unwrap();
     let mut retirement = controller(&env);

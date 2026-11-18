@@ -2210,11 +2210,11 @@ mod tests {
         .remove(0);
 
         let new_owner_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
-            .fetch_one(new_owner.as_mut())
+            .fetch_one(&mut *new_owner)
             .await?;
         let mut stale_txn = pool.txn_begin().await?;
         let stale_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
-            .fetch_one(stale_txn.as_mut())
+            .fetch_one(&mut *stale_txn)
             .await?;
         let stale_release = async {
             let result = release(
@@ -2554,7 +2554,7 @@ mod tests {
                      FROM resource_pool WHERE name = $1 ORDER BY value::integer",
             )
             .bind(pool_handle.name())
-            .fetch_all(txn.as_mut())
+            .fetch_all(&mut *txn)
             .await?;
             assert_eq!(
                 rows,

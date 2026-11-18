@@ -260,7 +260,7 @@ async fn seed_firmware_context(
     // a distinct earlier timestamp so its report lookup is unambiguous.
     sqlx::query("UPDATE machine_interfaces SET created = created - interval '1 second' WHERE mac_address = $1")
         .bind(MacAddress::new([2, 0, 0, 0, 0, 11]))
-        .execute(txn.as_mut())
+        .execute(&mut *txn)
         .await?;
     db::explored_endpoints::insert(
         host_ip,
@@ -833,10 +833,10 @@ async fn context_snapshot_is_consistent_and_releases_its_healthy_session(
         .await?;
     let mut writer = pool.txn_begin().await?;
     sqlx::query("LOCK TABLE explored_endpoints IN ACCESS EXCLUSIVE MODE")
-        .execute(writer.as_mut())
+        .execute(&mut *writer)
         .await?;
     let blocker_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
-        .fetch_one(writer.as_mut())
+        .fetch_one(&mut *writer)
         .await?;
     let ids = [fixture.hosts[0]];
     let mut read = Box::pin(load(
@@ -859,12 +859,11 @@ async fn context_snapshot_is_consistent_and_releases_its_healthy_session(
 
     // The writer owns the table lock. Replace both selection inputs so a mixed
     // report/catalog snapshot cannot retain a matching model by accident.
-    let report_version =
-        db::explored_endpoints::find_by_ips(writer.as_mut(), vec![fixture.host_ip])
-            .await?
-            .pop()
-            .expect("seeded report")
-            .report_version;
+    let report_version = db::explored_endpoints::find_by_ips(&mut *writer, vec![fixture.host_ip])
+        .await?
+        .pop()
+        .expect("seeded report")
+        .report_version;
     assert!(matches!(
         db::explored_endpoints::try_update(
             fixture.host_ip,

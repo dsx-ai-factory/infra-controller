@@ -229,7 +229,7 @@ pub(crate) async fn create_test_state_controller_tables(pool: &sqlx::PgPool) {
         controller_state_outcome JSONB
     );",
     )
-    .execute(txn.as_mut())
+    .execute(&mut *txn)
     .await
     .unwrap();
 
@@ -238,7 +238,7 @@ pub(crate) async fn create_test_state_controller_tables(pool: &sqlx::PgPool) {
         id uuid DEFAULT gen_random_uuid() NOT NULL
     );",
     )
-    .execute(txn.as_mut())
+    .execute(&mut *txn)
     .await
     .unwrap();
 
@@ -248,7 +248,7 @@ pub(crate) async fn create_test_state_controller_tables(pool: &sqlx::PgPool) {
         started_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
     );",
     )
-    .execute(txn.as_mut())
+    .execute(&mut *txn)
     .await
     .unwrap();
 
@@ -259,7 +259,7 @@ pub(crate) async fn create_test_state_controller_tables(pool: &sqlx::PgPool) {
         processing_started_at timestamptz NOT NULL DEFAULT NOW()
     );",
     )
-    .execute(txn.as_mut())
+    .execute(&mut *txn)
     .await
     .unwrap();
 
@@ -706,7 +706,7 @@ async fn test_state_controller_drains_claimed_work_on_shutdown(
     .await?;
     let transition_state: sqlx::types::Json<TestObjectControllerState> =
         sqlx::query_scalar("SELECT controller_state FROM test_objects WHERE id = 'transition'")
-            .fetch_one(txn.as_mut())
+            .fetch_one(&mut *txn)
             .await?;
     txn.commit().await?;
     queued.sort_by(|a, b| a.object_id.cmp(&b.object_id));
@@ -1689,7 +1689,7 @@ impl StateHandler for TestInvalidationStateHandler {
             .await
             .map_err(StateHandlerError::from_transaction)?;
         sqlx::query("INSERT INTO test_iteration_writes VALUES ('handler')")
-            .execute(txn.as_mut())
+            .execute(&mut *txn)
             .await?;
 
         let batch_writes = self.batch_writes.clone();

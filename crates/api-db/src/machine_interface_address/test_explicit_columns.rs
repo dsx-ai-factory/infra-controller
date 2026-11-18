@@ -108,7 +108,7 @@ async fn interface_address_and_dhcp_entry_queries_survive_added_columns(
          ALTER TABLE machine_interface_addresses ADD COLUMN test_added_column text;
          ALTER TABLE dhcp_entries ADD COLUMN test_added_column text;",
     )
-    .execute(migration.as_mut())
+    .execute(&mut *migration)
     .await?;
     migration.commit().await?;
 

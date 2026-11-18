@@ -143,13 +143,13 @@ async fn retained_startup_audit_shares_read_lock_and_waits_for_writes(pool: PgPo
         .await
         .unwrap();
     let writer_pid = sqlx::query_scalar("SELECT pg_backend_pid()")
-        .fetch_one(writer.as_mut())
+        .fetch_one(&mut *writer)
         .await
         .unwrap();
     let prefix_id = retain_prefix(&env, &mut writer, &other_vpc, "10.118.1.0/24").await;
     sqlx::query("UPDATE network_vpc_prefixes SET deleted = NOW() WHERE id = $1")
         .bind(prefix_id)
-        .execute(writer.as_mut())
+        .execute(&mut *writer)
         .await
         .unwrap();
 
@@ -167,7 +167,7 @@ async fn retained_startup_audit_shares_read_lock_and_waits_for_writes(pool: PgPo
         .await
         .unwrap();
     assert_eq!(
-        db::tenant_prefix_overlap::find_duplicate_vpc_ids(txn.as_mut(), false)
+        db::tenant_prefix_overlap::find_duplicate_vpc_ids(&mut *txn, false)
             .await
             .unwrap(),
         expected
@@ -184,7 +184,7 @@ async fn retained_startup_audit_shares_read_lock_and_waits_for_writes(pool: PgPo
             expect: Outcome::Yields(true),
         },
     ] {
-        let txn = txn.as_mut();
+        let txn = &mut *txn;
         case.check_async(|source_ids| async move {
             db::tenant_prefix_overlap::vpcs_use_duplicate_space(txn, &source_ids)
                 .await
@@ -193,12 +193,12 @@ async fn retained_startup_audit_shares_read_lock_and_waits_for_writes(pool: PgPo
         .await;
     }
     assert!(
-        !db::tenant_prefix_overlap::has_direct_prefix_overlap(txn.as_mut(), &[])
+        !db::tenant_prefix_overlap::has_direct_prefix_overlap(&mut *txn, &[])
             .await
             .unwrap()
     );
     assert!(
-        !db::tenant_prefix_overlap::has_direct_prefix_overlap(txn.as_mut(), &[VpcId::new()])
+        !db::tenant_prefix_overlap::has_direct_prefix_overlap(&mut *txn, &[VpcId::new()])
             .await
             .unwrap()
     );

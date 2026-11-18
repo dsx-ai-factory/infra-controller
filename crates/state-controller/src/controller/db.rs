@@ -162,7 +162,7 @@ pub async fn queue_objects(
         let query = builder.build();
 
         let result = query
-            .execute(txn.as_mut())
+            .execute(&mut *txn)
             .await
             .map_err(|e| DatabaseError::new("StateController::queue_object", e))?;
         num_enqueued += result.rows_affected() as usize;
@@ -258,7 +258,7 @@ pub async fn delete_queued_objects(
 
         let query = builder.build();
         let result = query
-            .execute(txn.as_mut())
+            .execute(&mut *txn)
             .await
             .map_err(|e| DatabaseError::new("StateController::delete_queued_objects", e))?;
 
@@ -294,7 +294,7 @@ mod tests {
              ALTER TABLE test_state_controller_iteration_ids ADD COLUMN test_added_column text;
              ALTER TABLE test_state_controller_queued_objects ADD COLUMN test_added_column text;",
         )
-        .execute(migration.as_mut())
+        .execute(&mut *migration)
         .await?;
         migration.commit().await?;
 

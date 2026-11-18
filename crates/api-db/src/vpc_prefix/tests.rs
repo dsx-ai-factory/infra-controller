@@ -46,7 +46,7 @@ async fn prefix_queries_survive_added_columns(
          ALTER TABLE network_prefixes ADD COLUMN test_added_column uuid;
          ALTER TABLE network_vpc_prefixes ADD COLUMN test_added_column uuid;",
     )
-    .execute(migration.as_mut())
+    .execute(&mut *migration)
     .await?;
     migration.commit().await?;
 
@@ -77,7 +77,7 @@ async fn exercise_prefix_queries(
     sqlx::query("INSERT INTO vpcs (id, name, version) VALUES ($1, 'prefix query test', $2)")
         .bind(vpc_id)
         .bind(version)
-        .execute(txn.as_mut())
+        .execute(&mut *txn)
         .await?;
     sqlx::query(
         "INSERT INTO network_segments (id, name, version, vpc_id)
@@ -86,7 +86,7 @@ async fn exercise_prefix_queries(
     .bind(segment_id)
     .bind(version)
     .bind(vpc_id)
-    .execute(txn.as_mut())
+    .execute(&mut *txn)
     .await?;
 
     let parent = persist(
@@ -153,7 +153,7 @@ async fn exercise_prefix_queries(
         ),
         (
             "containing_prefix",
-            network_prefix::containing_prefix(txn.as_mut(), &child_prefix.to_string()).await?,
+            network_prefix::containing_prefix(&mut *txn, &child_prefix.to_string()).await?,
         ),
         (
             "find_by",
@@ -165,7 +165,7 @@ async fn exercise_prefix_queries(
         ),
         (
             "find_allocation_occupancy",
-            network_prefix::find_allocation_occupancy(txn.as_mut(), vpc_prefix_id, parent_prefix)
+            network_prefix::find_allocation_occupancy(&mut *txn, vpc_prefix_id, parent_prefix)
                 .await?,
         ),
         (
@@ -266,7 +266,7 @@ async fn exercise_prefix_queries(
 
     let vpc_version: ConfigVersion = sqlx::query_scalar("SELECT version FROM vpcs WHERE id = $1")
         .bind(vpc_id)
-        .fetch_one(txn.as_mut())
+        .fetch_one(&mut *txn)
         .await?;
     assert_eq!(
         mark_as_deleted(

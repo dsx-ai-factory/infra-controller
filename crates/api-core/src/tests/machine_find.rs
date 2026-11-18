@@ -196,11 +196,11 @@ async fn test_find_machines_by_ids_returns_unassociated_dpus(pool: sqlx::PgPool)
     // Remove the fixture's predicted-host association while retaining the DPU row.
     sqlx::query("UPDATE machine_interfaces SET attached_dpu_machine_id = NULL WHERE attached_dpu_machine_id = $1 AND machine_id != $1")
         .bind(dpu_id)
-        .execute(txn.as_mut())
+        .execute(&mut *txn)
         .await
         .unwrap();
 
-    let dpu = db::machine::find_one(txn.as_mut(), &dpu_id, MachineSearchConfig::default())
+    let dpu = db::machine::find_one(&mut *txn, &dpu_id, MachineSearchConfig::default())
         .await
         .unwrap()
         .unwrap();
@@ -214,7 +214,7 @@ async fn test_find_machines_by_ids_returns_unassociated_dpus(pool: sqlx::PgPool)
         .unwrap();
 
     assert!(
-        db::machine::DpuHostAssociations::load(txn.as_mut(), &[dpu_id])
+        db::machine::DpuHostAssociations::load(&mut *txn, &[dpu_id])
             .await
             .unwrap()
             .host_machine_id(&dpu_id)
@@ -375,7 +375,7 @@ async fn test_find_machine_by_ipv6(pool: sqlx::PgPool) {
     sqlx::query("INSERT INTO machine_interface_addresses (interface_id, address) VALUES ($1, $2)")
         .bind(interface_id)
         .bind(ipv6)
-        .execute(txn.as_mut())
+        .execute(&mut *txn)
         .await
         .unwrap();
     txn.commit().await.unwrap();
@@ -1198,11 +1198,11 @@ async fn test_find_machine_states_releases_blocked_connection(pool: sqlx::PgPool
 
         let mut blocker = pool.txn_begin().await.unwrap();
         sqlx::query("LOCK TABLE machines IN ACCESS EXCLUSIVE MODE")
-            .execute(blocker.as_mut())
+            .execute(&mut *blocker)
             .await
             .unwrap();
         let blocker_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
-            .fetch_one(blocker.as_mut())
+            .fetch_one(&mut *blocker)
             .await
             .unwrap();
         let id = MachineId::new(MachineIdSource::Tpm, [42; 32], MachineType::Host);

@@ -230,7 +230,7 @@ async fn only_removed_stateful_families_are_recorded(
             }
         }
         let recorded: (bool, bool) = sqlx::query_as("SELECT ipv4_allocation_removed, ipv6_allocation_removed FROM machine_interfaces WHERE id = $1")
-            .bind(interface_id).fetch_one(txn.as_mut()).await?;
+            .bind(interface_id).fetch_one(&mut *txn).await?;
         let expected = match family {
             IpAddressFamily::Ipv4 => (case.recorded, false),
             IpAddressFamily::Ipv6 => (false, case.recorded),
@@ -281,7 +281,7 @@ async fn removal_evidence_rolls_back_with_the_address(
     let recorded: bool =
         sqlx::query_scalar("SELECT ipv4_allocation_removed FROM machine_interfaces WHERE id = $1")
             .bind(interface_id)
-            .fetch_one(txn.as_mut())
+            .fetch_one(txn.as_pgconn())
             .await?;
     assert!(!recorded);
     assert_eq!(
@@ -300,7 +300,7 @@ async fn migration_preserves_addresses_and_does_not_guess_removals(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mut txn = pool.txn_begin().await?;
     sqlx::raw_sql("ALTER TABLE machine_interfaces DROP COLUMN ipv4_allocation_removed, DROP COLUMN ipv6_allocation_removed")
-        .execute(txn.as_mut()).await?;
+        .execute(&mut *txn).await?;
     let interface_id = create_interface(&mut txn).await?;
     addresses::insert(
         &mut txn,
@@ -318,13 +318,11 @@ async fn migration_preserves_addresses_and_does_not_guess_removals(
     .await?;
     sqlx::query("UPDATE machine_interfaces SET last_dhcp = now() WHERE id = $1")
         .bind(interface_id)
-        .execute(txn.as_mut())
+        .execute(&mut *txn)
         .await?;
-    sqlx::raw_sql(REMOVAL_MIGRATION)
-        .execute(txn.as_mut())
-        .await?;
+    sqlx::raw_sql(REMOVAL_MIGRATION).execute(&mut *txn).await?;
     let recorded: (bool, bool) = sqlx::query_as("SELECT ipv4_allocation_removed, ipv6_allocation_removed FROM machine_interfaces WHERE id = $1")
-        .bind(interface_id).fetch_one(txn.as_mut()).await?;
+        .bind(interface_id).fetch_one(&mut *txn).await?;
     assert_eq!(recorded, (false, false));
     assert!(!can_apply_expected_allocation(&mut txn, interface_id, IpAddressFamily::Ipv4).await?);
     assert!(can_apply_expected_allocation(&mut txn, interface_id, IpAddressFamily::Ipv6).await?);

@@ -2138,7 +2138,7 @@ mod test_batched_lookups {
         let claimed_data = r#"{"serviceID":"contended-dpf-id","values":{"payload":"\u0000"}}"#;
         let mut first = pool.txn_begin().await.expect("begin first create");
         let first_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
-            .fetch_one(first.as_mut())
+            .fetch_one(&mut *first)
             .await
             .expect("get first backend");
         create(
@@ -2167,7 +2167,7 @@ mod test_batched_lookups {
         let second_service_id = ExtensionServiceId::new();
         let mut second = pool.txn_begin().await.expect("begin second create");
         let second_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
-            .fetch_one(second.as_mut())
+            .fetch_one(&mut *second)
             .await
             .expect("get second backend");
         {
@@ -2714,7 +2714,7 @@ mod test_batched_lookups {
              controller_state = '{\"state\":\"creating\"}'::jsonb WHERE id = $1",
         )
         .bind(deleting_id)
-        .execute(txn.as_mut())
+        .execute(&mut *txn)
         .await
         .expect("prepare DPF registration");
         let controller_version = find_by_ids(&mut txn, &[deleting_id], false, false)
@@ -2729,7 +2729,7 @@ mod test_batched_lookups {
             "UPDATE extension_services SET created = '2026-01-01'::timestamptz WHERE id = $1",
         )
         .bind(active_id)
-        .execute(txn.as_mut())
+        .execute(&mut *txn)
         .await
         .expect("order active service before DPF registration");
         request_dpf_helm_chart_deletion(
@@ -2845,7 +2845,7 @@ mod test_batched_lookups {
         )
         .bind(service_id)
         .bind(initial_version)
-        .execute(txn.as_mut())
+        .execute(&mut *txn)
         .await
         .expect("corrupt only the older version's timestamp");
 
@@ -2894,7 +2894,7 @@ mod test_batched_lookups {
         let tenant = TENANT_ORG.parse()?;
         // `CURRENT_TIMESTAMP` is fixed for this transaction, including the `created` default.
         let created_at = sqlx::query_scalar("SELECT CURRENT_TIMESTAMP")
-            .fetch_one(txn.as_mut())
+            .fetch_one(&mut *txn)
             .await?;
         let expected_initial = ExtensionServiceVersionInfo {
             service_id: ExtensionServiceId::new(),

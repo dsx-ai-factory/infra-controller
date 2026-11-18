@@ -34,7 +34,7 @@ async fn sku_queries_survive_added_columns(
         "SET LOCAL lock_timeout = '5s';
          ALTER TABLE machine_skus ADD COLUMN test_added_column text;",
     )
-    .execute(migration.as_mut())
+    .execute(&mut *migration)
     .await?;
     migration.commit().await?;
 

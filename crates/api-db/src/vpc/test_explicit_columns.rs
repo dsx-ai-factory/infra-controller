@@ -50,7 +50,7 @@ async fn vpc_queries_survive_added_columns(pool: PgPool) -> Result<(), Box<dyn s
         "SET LOCAL lock_timeout = '5s';
          ALTER TABLE vpcs ADD COLUMN test_added_column text;",
     )
-    .execute(migration.as_mut())
+    .execute(&mut *migration)
     .await?;
     migration.commit().await?;
 
@@ -71,7 +71,7 @@ async fn exercise_vpc_queries(
     )
     .bind(&nsg_id)
     .bind(id.to_string())
-    .execute(txn.as_mut())
+    .execute(&mut *txn)
     .await?;
     let metadata = Metadata {
         name: format!("projection-{id}"),
@@ -129,13 +129,13 @@ async fn exercise_vpc_queries(
     .bind(segment_id)
     .bind(id.to_string())
     .bind(id)
-    .execute(txn.as_mut())
+    .execute(&mut *txn)
     .await?;
 
     for (operation, rows) in [
         (
             "find_by",
-            find_by(txn.as_mut(), ObjectColumnFilter::One(IdColumn, &id)).await?,
+            find_by(&mut *txn, ObjectColumnFilter::One(IdColumn, &id)).await?,
         ),
         (
             "find_by_with_lock",
@@ -149,7 +149,7 @@ async fn exercise_vpc_queries(
         ("find_by_vni", find_by_vni(&mut txn, vni).await?),
         (
             "find_by_segment",
-            find_by_segment(txn.as_mut(), segment_id)
+            find_by_segment(&mut *txn, segment_id)
                 .await?
                 .into_iter()
                 .collect(),
@@ -216,7 +216,7 @@ async fn exercise_vpc_queries(
     vpc.config.network_virtualization_type = VpcVirtualizationType::Fnn;
     assert_eq!(updated, vpc);
     assert_eq!(
-        find_by(txn.as_mut(), ObjectColumnFilter::One(IdColumn, &id)).await?,
+        find_by(&mut *txn, ObjectColumnFilter::One(IdColumn, &id)).await?,
         vec![vpc.clone()]
     );
 

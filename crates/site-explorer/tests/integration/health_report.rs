@@ -286,7 +286,7 @@ async fn test_site_explorer_machine_audit_state_bulk_lookup_matches_existing_pat
 
     let mut txn = pool.txn_begin().await?;
     db::machine::update_site_explorer_health_report(
-        txn.as_mut(),
+        txn.as_pgconn(),
         &created_host.host.id,
         &site_explorer_report,
     )
@@ -297,7 +297,8 @@ async fn test_site_explorer_machine_audit_state_bulk_lookup_matches_existing_pat
     let mut existing_path_states = Vec::new();
     let mut txn = pool.txn_begin().await?;
     for bmc_ip in &bmc_ips {
-        let Some(machine_id) = db::machine::find_id_by_bmc_ip(txn.as_mut(), bmc_ip).await? else {
+        let Some(machine_id) = db::machine::find_id_by_bmc_ip(txn.as_pgconn(), bmc_ip).await?
+        else {
             continue;
         };
         let machine = db::machine::find(

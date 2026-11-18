@@ -152,7 +152,7 @@ mod test {
             "SELECT COUNT(*) FROM hardware_class_attesters WHERE hardware_class = $1",
         )
         .bind(CLASS)
-        .fetch_one(txn.as_mut())
+        .fetch_one(&mut *txn)
         .await
         .unwrap();
         assert_eq!(recorded, 2);
@@ -192,12 +192,12 @@ mod test {
             .bind(address)
             .bind(CLASS)
             .bind(digest)
-            .execute(txn.as_mut())
+            .execute(&mut *txn)
             .await
             .unwrap();
         }
 
-        let counted: Vec<_> = counts_by_class(txn.as_mut())
+        let counted: Vec<_> = counts_by_class(&mut *txn)
             .await
             .unwrap()
             .into_iter()

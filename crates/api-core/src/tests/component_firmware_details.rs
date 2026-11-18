@@ -2100,7 +2100,7 @@ async fn component_firmware_details_keep_owning_sources_and_target_identity(
     sqlx::query("UPDATE racks SET controller_state = $1 WHERE id = $2")
         .bind(sqlx::types::Json(rack_state))
         .bind(&second_rack)
-        .execute(txn.as_mut())
+        .execute(&mut *txn)
         .await?;
     db::rack::update_firmware_upgrade_job(
         &mut txn,

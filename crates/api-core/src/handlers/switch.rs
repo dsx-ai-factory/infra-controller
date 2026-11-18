@@ -225,7 +225,7 @@ pub(crate) async fn find_switch(
     let mut nvos_info_by_switch = if switch_ids.is_empty() {
         HashMap::new()
     } else {
-        load_switch_nvos_info(txn.as_mut(), &switch_ids)
+        load_switch_nvos_info(&mut *txn, &switch_ids)
             .await
             .map_err(|e| CarbideError::Internal {
                 message: format!("Failed to get switch NVOS endpoint info: {}", e),

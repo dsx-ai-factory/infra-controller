@@ -869,7 +869,7 @@ async fn test_direct_discovery_applies_dpu_loopback_reservation(
     // Changing intent does not readdress this live DPU on rediscovery.
     let mut txn = env.pool.txn_begin().await?;
     let mut expected =
-        db::expected_machine::find_by_bmc_mac_address(txn.as_mut(), "aa:bb:cc:dd:ee:10".parse()?)
+        db::expected_machine::find_by_bmc_mac_address(&mut *txn, "aa:bb:cc:dd:ee:10".parse()?)
             .await?
             .expect("reservation host exists");
     expected
@@ -965,10 +965,10 @@ async fn test_direct_discovery_retries_changed_loopback_reservation(
     // preparation is suspended, without relying on scheduler timing.
     let mut gate = env.pool.txn_begin().await?;
     sqlx::query("LOCK TABLE resource_pool IN ACCESS EXCLUSIVE MODE")
-        .execute(gate.as_mut())
+        .execute(&mut *gate)
         .await?;
     let gate_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
-        .fetch_one(gate.as_mut())
+        .fetch_one(&mut *gate)
         .await?;
     let discovery = env.api.discover_machine(discovery_request_from(
         &hardware_info,
@@ -981,7 +981,7 @@ async fn test_direct_discovery_retries_changed_loopback_reservation(
         _ = wait_for_blocked_query(&env.pool, gate_pid, "SELECT value FROM resource_pool") => {},
     }
     let mut writer = env.pool.txn_begin().await?;
-    let mut expected = db::expected_machine::find_by_bmc_mac_address(writer.as_mut(), host_bmc_mac)
+    let mut expected = db::expected_machine::find_by_bmc_mac_address(&mut *writer, host_bmc_mac)
         .await?
         .expect("reservation host exists");
     expected
@@ -1481,7 +1481,7 @@ async fn test_first_host_discovery_requests_the_admin_segments_shared_before_its
     let mut gate = env.pool.txn_begin().await?;
     db::machine_interface::lock_all_admin_segments(&mut gate).await?;
     let gate_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
-        .fetch_one(gate.as_mut())
+        .fetch_one(&mut *gate)
         .await?;
 
     let discovery = host_discover_machine(&env, &host_config, host_interface_id);
@@ -1550,11 +1550,11 @@ async fn test_first_host_discovery_locks_host_rows_first_under_shared_segment_lo
 
     let mut blocker = env.pool.txn_begin().await?;
     let blocker_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
-        .fetch_one(blocker.as_mut())
+        .fetch_one(&mut *blocker)
         .await?;
     sqlx::query("SELECT id FROM machine_interfaces WHERE id = $1 FOR UPDATE")
         .bind(lowest_interface_id)
-        .fetch_one(blocker.as_mut())
+        .fetch_one(&mut *blocker)
         .await?;
 
     let discovery = host_discover_machine(&env, &host_config, host_interface_id);
@@ -1589,14 +1589,14 @@ async fn test_first_host_discovery_locks_host_rows_first_under_shared_segment_lo
 
     let mut probe = env.pool.txn_begin().await?;
     sqlx::query("SET LOCAL lock_timeout = '1s'")
-        .execute(probe.as_mut())
+        .execute(&mut *probe)
         .await?;
     db::machine_interface::lock_all_admin_segments_for_allocation(&mut probe).await?;
     probe.rollback().await?;
 
     let mut probe = env.pool.txn_begin().await?;
     sqlx::query("SET LOCAL lock_timeout = '1s'")
-        .execute(probe.as_mut())
+        .execute(&mut *probe)
         .await?;
     let error = db::machine_interface::lock_all_admin_segments(&mut probe)
         .await
@@ -1673,7 +1673,7 @@ async fn check_legacy_first_dpu_discovery_waits_on_admin_segment_locks(
     let mut gate = env.pool.txn_begin().await?;
     db::machine_interface::lock_all_admin_segments(&mut gate).await?;
     let gate_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
-        .fetch_one(gate.as_mut())
+        .fetch_one(&mut *gate)
         .await?;
 
     let discovery = dpu_discover_machine(&env, dpu, dpu_interface_id);
@@ -1720,11 +1720,11 @@ async fn test_creation_lock_request_is_admitted_while_dpu_rediscovery_is_in_flig
     // Park the rediscovery on its first row write, the caller interface row.
     let mut blocker = env.pool.txn_begin().await?;
     let blocker_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
-        .fetch_one(blocker.as_mut())
+        .fetch_one(&mut *blocker)
         .await?;
     sqlx::query("SELECT id FROM machine_interfaces WHERE id = $1 FOR UPDATE")
         .bind(dpu_interface.id)
-        .fetch_one(blocker.as_mut())
+        .fetch_one(&mut *blocker)
         .await?;
 
     let rediscovery = dpu_discover_machine(&env, dpu, dpu_interface.id);
@@ -1752,7 +1752,7 @@ async fn test_creation_lock_request_is_admitted_while_dpu_rediscovery_is_in_flig
 
     let mut probe = env.pool.txn_begin().await?;
     sqlx::query("SET LOCAL lock_timeout = '1s'")
-        .execute(probe.as_mut())
+        .execute(&mut *probe)
         .await?;
     db::machine_interface::lock_all_admin_segments_for_allocation(&mut probe).await?;
     probe.rollback().await?;
@@ -1798,11 +1798,11 @@ async fn test_dpu_rediscovery_locks_the_host_link_row_before_the_machines_rows(
 
     let mut blocker = env.pool.txn_begin().await?;
     let blocker_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
-        .fetch_one(blocker.as_mut())
+        .fetch_one(&mut *blocker)
         .await?;
     sqlx::query("SELECT id FROM machine_interfaces WHERE id = $1 FOR UPDATE")
         .bind(host_link.id)
-        .fetch_one(blocker.as_mut())
+        .fetch_one(&mut *blocker)
         .await?;
 
     let rediscovery = dpu_discover_machine(&env, dpu, dpu_interface.id);
@@ -1882,11 +1882,11 @@ async fn test_dpu_rediscovery_retries_after_busy_group_without_blocking_admin_re
     setup.commit().await?;
     let mut blocker = env.pool.txn_begin().await?;
     let blocker_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
-        .fetch_one(blocker.as_mut())
+        .fetch_one(&mut *blocker)
         .await?;
     sqlx::query("SELECT id FROM machines WHERE id = $1 FOR UPDATE")
         .bind(host_machine_id)
-        .fetch_one(blocker.as_mut())
+        .fetch_one(&mut *blocker)
         .await?;
 
     let error = tokio::time::timeout(
@@ -2783,11 +2783,11 @@ async fn test_first_host_discovery_repairs_what_an_overlapping_dpu_discovery_mis
     // interface rows already locked for the rename.
     let mut blocker = env.pool.txn_begin().await?;
     let blocker_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
-        .fetch_one(blocker.as_mut())
+        .fetch_one(&mut *blocker)
         .await?;
     sqlx::query("SELECT id FROM machines WHERE id = $1 FOR UPDATE")
         .bind(predicted_host_id)
-        .fetch_one(blocker.as_mut())
+        .fetch_one(&mut *blocker)
         .await?;
 
     let metrics = MetricsCapture::for_registry(env.test_meter.registry());
@@ -2915,7 +2915,7 @@ async fn test_discover_dpu_does_not_create_machine_when_site_explorer_creates_ma
     assert_eq!(response.unwrap_err().code(), Code::PermissionDenied);
     let mut txn = env.pool.txn_begin().await?;
     let interface = db::machine_interface::find_one(
-        txn.as_mut(),
+        &mut *txn,
         dhcp_response
             .machine_interface_id
             .expect("DHCP discovery must return an interface ID"),
@@ -2924,7 +2924,7 @@ async fn test_discover_dpu_does_not_create_machine_when_site_explorer_creates_ma
     assert_eq!(interface.machine_id, None);
     assert!(
         db::machine::find_one(
-            txn.as_mut(),
+            &mut *txn,
             &expected_machine_id,
             MachineSearchConfig {
                 include_dpus: true,
@@ -3509,7 +3509,7 @@ async fn test_secure_discovery_promotes_predicted_host_by_remote_ip(
     let dpu_machine_id = create_dpu_machine(&env, &host_config).await;
     let host_interface_id = host_discover_dhcp(&env, &host_config, &dpu_machine_id).await;
     let mut txn = env.pool.txn_begin().await?;
-    let host_interface = db::machine_interface::find_one(txn.as_mut(), host_interface_id).await?;
+    let host_interface = db::machine_interface::find_one(&mut *txn, host_interface_id).await?;
     txn.commit().await?;
     let predicted_machine_id = HostMachineId::try_from(
         host_interface
@@ -3600,7 +3600,7 @@ async fn test_secure_discovery_rejects_stable_host_identity_mismatch_without_mut
     let dpu_machine_id = create_dpu_machine(&env, &host_config).await;
     let host_interface_id = host_discover_dhcp(&env, &host_config, &dpu_machine_id).await;
     let mut txn = env.pool.txn_begin().await?;
-    let host_interface = db::machine_interface::find_one(txn.as_mut(), host_interface_id).await?;
+    let host_interface = db::machine_interface::find_one(&mut *txn, host_interface_id).await?;
     txn.commit().await?;
     let remote_ip = host_interface.addresses[0];
     let expected_machine_id = from_hardware_info(&HardwareInfo::from(&host_config))?;
@@ -3649,12 +3649,12 @@ async fn test_secure_discovery_rejects_stable_host_identity_mismatch_without_mut
 
     assert_eq!(response.unwrap_err().code(), Code::PermissionDenied);
     let mut txn = env.pool.txn_begin().await?;
-    let host_interface = db::machine_interface::find_one(txn.as_mut(), host_interface_id).await?;
+    let host_interface = db::machine_interface::find_one(&mut *txn, host_interface_id).await?;
     assert_eq!(host_interface.machine_id, Some(expected_machine_id));
     let topology_count: (i64,) =
         sqlx::query_as("SELECT count(*) FROM machine_topologies WHERE machine_id = $1")
             .bind(mismatching_machine_id)
-            .fetch_one(txn.as_mut())
+            .fetch_one(&mut *txn)
             .await?;
     assert_eq!(topology_count.0, 0);
 
@@ -3917,11 +3917,11 @@ async fn test_scout_pci_reconciliation_serializes_with_instance_allocation(
         create_scout_test_host(&env, BootInterfaceSelectionSource::RedfishChassisId).await?;
     let mut reconciliation_machine_blocker = env.pool.txn_begin().await?;
     let reconciliation_blocker_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
-        .fetch_one(reconciliation_machine_blocker.as_mut())
+        .fetch_one(&mut *reconciliation_machine_blocker)
         .await?;
     sqlx::query("SELECT id FROM machines WHERE id = $1 FOR UPDATE")
         .bind(reconciliation_host_id)
-        .fetch_one(reconciliation_machine_blocker.as_mut())
+        .fetch_one(&mut *reconciliation_machine_blocker)
         .await?;
 
     let reconciliation_api = env.api.clone();
@@ -3983,11 +3983,11 @@ async fn test_scout_pci_reconciliation_serializes_with_instance_allocation(
 
     let mut allocation_machine_blocker = env.pool.txn_begin().await?;
     let blocker_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
-        .fetch_one(allocation_machine_blocker.as_mut())
+        .fetch_one(&mut *allocation_machine_blocker)
         .await?;
     sqlx::query("SELECT id FROM machines WHERE id = $1 FOR UPDATE")
         .bind(allocation_host_id)
-        .fetch_one(allocation_machine_blocker.as_mut())
+        .fetch_one(&mut *allocation_machine_blocker)
         .await?;
 
     let allocation_api = env.api.clone();

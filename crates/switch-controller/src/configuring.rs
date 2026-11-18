@@ -184,7 +184,7 @@ pub(crate) async fn ensure_nvos_admin_credentials(
         db::expected_switch::find_by_bmc_mac_address(&mut txn, bmc_mac_address).await?;
 
     let operation = db::credential_rotation::device_rotation_operation_state(
-        txn.as_mut(),
+        &mut *txn,
         db::credential_rotation::CredentialRotationType::Nvos,
         bmc_mac_address,
     )

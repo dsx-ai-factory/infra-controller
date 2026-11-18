@@ -74,7 +74,7 @@ async fn sku_reads_check_schema_version_without_rejecting_historical_versions(po
             "infiniband_devices": []
         }))
         .bind(case.stored_version)
-        .execute(txn.as_mut())
+        .execute(&mut *txn)
         .await
         .expect("store SKU schema version");
 

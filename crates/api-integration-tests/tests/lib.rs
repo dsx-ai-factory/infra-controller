@@ -2308,7 +2308,7 @@ async fn prepare_dpu_certificate_expiry(
         .try_into()?;
     let mut txn = test_env.db_pool.txn_begin().await?;
     let mut observation = db::machine::find_one(
-        txn.as_mut(),
+        &mut *txn,
         &dpu_id,
         model::machine::machine_search_config::MachineSearchConfig {
             include_dpus: true,

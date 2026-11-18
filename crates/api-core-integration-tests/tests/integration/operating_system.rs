@@ -664,7 +664,7 @@ async fn test_concurrent_operating_system_updates_preserve_committed_fields(pool
             .await
             .expect("holder transaction should start");
         let holder_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
-            .fetch_one(holder.as_mut())
+            .fetch_one(&mut *holder)
             .await
             .expect("holder backend PID should be available");
         let existing = db::operating_system::get_for_update(&mut holder, os_id.into())

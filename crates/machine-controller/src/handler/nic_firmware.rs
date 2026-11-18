@@ -336,7 +336,7 @@ pub(super) async fn handle(
                 .max(chrono::Duration::seconds(
                     REBOOT_ATTEMPT_TIMEOUT.as_secs() as i64 + 60,
                 ));
-            let now = db::machine::database_now(txn.as_mut()).await?;
+            let now = db::machine::database_now(&mut *txn).await?;
             if last_attempt_at.is_some_and(|attempt| now < attempt + retry_delay) {
                 return Ok(StateHandlerOutcome::wait(
                     "waiting for Scout to report the NIC firmware activation reboot".into(),

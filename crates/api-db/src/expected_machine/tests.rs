@@ -100,7 +100,7 @@ async fn expected_machine_queries_survive_added_columns(
         "SET LOCAL lock_timeout = '5s';
          ALTER TABLE expected_machines ADD COLUMN test_added_column text;",
     )
-    .execute(migration.as_mut())
+    .execute(&mut *migration)
     .await?;
     migration.commit().await?;
 
@@ -165,8 +165,8 @@ async fn exercise_expected_machine_queries(
     assert_machine(&create(&mut txn, expected.clone()).await?, &expected);
 
     for found in [
-        find_by_bmc_mac_address(txn.as_mut(), expected.bmc_mac_address).await?,
-        find_by_id(txn.as_mut(), id).await?,
+        find_by_bmc_mac_address(&mut *txn, expected.bmc_mac_address).await?,
+        find_by_id(&mut *txn, id).await?,
         find_by_interface_mac_address(&mut txn, interface_mac).await?,
         find_for_update(
             &mut txn,
@@ -189,7 +189,7 @@ async fn exercise_expected_machine_queries(
     }
 
     for found in [
-        find_all(txn.as_mut()).await?,
+        find_all(&mut *txn).await?,
         find_all_for_replace(&mut txn).await?,
         find_all_by_rack_id(&mut txn, &rack_id).await?,
     ] {

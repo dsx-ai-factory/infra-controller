@@ -733,7 +733,7 @@ mod test {
             .bind(MacAddress::from([0, 0x11, 0x22, 0x33, 0x44, ordinal]))
             .bind(format!("0000:{ordinal:02x}:00.0"))
             .bind(interface_type)
-            .execute(txn.as_mut())
+            .execute(&mut *txn)
             .await
             .unwrap();
         }

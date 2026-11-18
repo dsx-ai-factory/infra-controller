@@ -352,11 +352,11 @@ async fn saved_request_and_result_survive_entity_rollback(pool: PgPool) -> eyre:
 
     let mut entity_txn = pool.txn_begin().await?;
     let entity_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
-        .fetch_one(entity_txn.as_mut())
+        .fetch_one(&mut *entity_txn)
         .await?;
     sqlx::query("INSERT INTO remote_test_entity VALUES ($1)")
         .bind(request.request_id)
-        .execute(entity_txn.as_mut())
+        .execute(&mut *entity_txn)
         .await?;
     assert_eq!(
         attach(&mut entity_txn, request.request_id, &authority, &assignment).await?,
@@ -1122,12 +1122,12 @@ async fn attachment_and_cancellation_commit_only_one_result(pool: PgPool) -> eyr
         save_assignment(&pool, request.request_id, &assignment).await?;
         let mut first = pool.txn_begin().await?;
         let first_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
-            .fetch_one(first.as_mut())
+            .fetch_one(&mut *first)
             .await?;
         if attach_first {
             sqlx::query("INSERT INTO remote_test_entity VALUES ($1)")
                 .bind(request.request_id)
-                .execute(first.as_mut())
+                .execute(&mut *first)
                 .await?;
             assert_eq!(
                 attach(&mut first, request.request_id, &authority, &assignment).await?,
@@ -1146,7 +1146,7 @@ async fn attachment_and_cancellation_commit_only_one_result(pool: PgPool) -> eyr
             } else {
                 sqlx::query("INSERT INTO remote_test_entity VALUES ($1)")
                     .bind(request.request_id)
-                    .execute(second.as_mut())
+                    .execute(&mut *second)
                     .await?;
                 attach(&mut second, request.request_id, &authority, &assignment).await?
             };
@@ -1323,10 +1323,10 @@ async fn foreground_writes_recheck_deadline_after_waiting_for_the_row(
             WHERE allocation_id = $1 FOR UPDATE",
         )
         .bind(request.request_id)
-        .fetch_one(blocker.as_mut())
+        .fetch_one(&mut *blocker)
         .await?;
         let blocker_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
-            .fetch_one(blocker.as_mut())
+            .fetch_one(&mut *blocker)
             .await?;
         let mut writer = pool.txn_begin().await?;
         let write_attempt = async {
@@ -1672,7 +1672,7 @@ async fn entity_deletion_commits_release_work_for_later_cleanup(pool: PgPool) ->
     let mut create = pool.txn_begin().await?;
     sqlx::query("INSERT INTO remote_test_entity VALUES ($1)")
         .bind(request.request_id)
-        .execute(create.as_mut())
+        .execute(&mut *create)
         .await?;
     assert_eq!(
         attach(&mut create, request.request_id, &authority, &assignment).await?,
@@ -1696,7 +1696,7 @@ async fn entity_deletion_commits_release_work_for_later_cleanup(pool: PgPool) ->
         let mut deletion = pool.txn_begin().await?;
         sqlx::query("DELETE FROM remote_test_entity WHERE id = $1")
             .bind(request.request_id)
-            .execute(deletion.as_mut())
+            .execute(&mut *deletion)
             .await?;
         assert_eq!(
             request_release(&mut deletion, request.request_id, &assignment.allocation_id).await?,
@@ -1904,7 +1904,7 @@ async fn allocation_reads_survive_added_columns(pool: PgPool) -> eyre::Result<()
         "SET LOCAL lock_timeout = '5s';
         ALTER TABLE resource_pool_allocations ADD COLUMN test_added_column TEXT;",
     )
-    .execute(migration.as_mut())
+    .execute(&mut *migration)
     .await?;
     migration.commit().await?;
 
@@ -2122,7 +2122,7 @@ async fn opaque_provider_strings_survive_replay_release_and_recovery(
         ] {
             assert_eq!(
                 super::latest_for_owner_slot(
-                    cleanup.as_mut(),
+                    &mut *cleanup,
                     request.owner.owner_type,
                     owner_id,
                     slot,
@@ -2264,10 +2264,10 @@ async fn provider_string_indexes_preserve_allocations_with_a_live_writer(
     )
     .await?;
     let limit = NonZeroU16::new(10).unwrap();
-    let old_integrated = allocation::list(txn.as_mut(), inventory.name(), None, limit).await?;
+    let old_integrated = allocation::list(&mut *txn, inventory.name(), None, limit).await?;
     assert_eq!(old_integrated.len(), 1);
     let writer_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
-        .fetch_one(txn.as_mut())
+        .fetch_one(&mut *txn)
         .await?;
 
     let migrations = sqlx::migrate!("./migrations");
@@ -2450,7 +2450,7 @@ async fn owner_slot_lookup_keeps_terminal_generations_across_pools(
         vec![other_pool.request_id, current.request_id]
     );
     let inspecting_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
-        .fetch_one(inspecting.as_mut())
+        .fetch_one(&mut *inspecting)
         .await?;
     let mut releasing = pool.txn_begin().await?;
     let release_older = async {

@@ -273,11 +273,9 @@ impl PowerShelfCreator {
 
         db_power_shelf::create(&mut txn, &new_power_shelf).await?;
 
-        let mi = db::machine_interface::find_by_mac_address(
-            txn.as_mut(),
-            expected_shelf.bmc_mac_address,
-        )
-        .await?;
+        let mi =
+            db::machine_interface::find_by_mac_address(&mut *txn, expected_shelf.bmc_mac_address)
+                .await?;
         if let Some(interface) = mi.first() {
             // A power shelf's BMC/PMC interface is its management endpoint, so
             // associate it with the shelf and annotate it as `Bmc` (like

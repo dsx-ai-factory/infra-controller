@@ -778,7 +778,7 @@ mod tests {
             "UPDATE machines SET firmware_autoupdate = false, description = 'preserve me', labels = '{\"team\":\"network\"}' WHERE id = $1",
         )
         .bind(host.id)
-        .execute(txn.as_mut())
+        .execute(&mut *txn)
         .await
         .unwrap();
         txn.commit().await.unwrap();
@@ -1084,7 +1084,7 @@ mod tests {
         let mut txn = pool.txn_begin().await.unwrap();
         sqlx::query("UPDATE machines SET mlx_device_observation = NULL WHERE id = $1")
             .bind(host.id)
-            .execute(txn.as_mut())
+            .execute(&mut *txn)
             .await
             .unwrap();
         set_machine_config(&mut txn, &host.id, None, Some(&[]), version)
@@ -1210,7 +1210,7 @@ mod tests {
                 // admit a replacement card selection.
                 sqlx::query("UPDATE machines SET mlx_device_observation = NULL WHERE id = $1")
                     .bind(host.id)
-                    .execute(txn.as_mut())
+                    .execute(&mut *txn)
                     .await
                     .unwrap();
             }
@@ -1239,7 +1239,7 @@ mod tests {
                 )
                 .bind(host.id)
                 .bind(dpu)
-                .execute(txn.as_mut())
+                .execute(&mut *txn)
                 .await
                 .unwrap();
             }
@@ -1329,7 +1329,7 @@ mod tests {
             set_machine_config(&mut txn, &host.id, Some(&id), None, host.version)
                 .await
                 .unwrap();
-            let host = crate::machine::find_one(txn.as_mut(), &host.id, Default::default())
+            let host = crate::machine::find_one(&mut *txn, &host.id, Default::default())
                 .await
                 .unwrap()
                 .unwrap();
@@ -1345,12 +1345,12 @@ mod tests {
             )
             .await
             .unwrap();
-            let expected = crate::machine::find_one(winner.as_mut(), &host.id, Default::default())
+            let expected = crate::machine::find_one(&mut *winner, &host.id, Default::default())
                 .await
                 .unwrap()
                 .unwrap();
             let blocker: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
-                .fetch_one(winner.as_mut())
+                .fetch_one(&mut *winner)
                 .await
                 .unwrap();
             let loser = async {
@@ -1445,7 +1445,7 @@ mod tests {
             set_machine_config(&mut txn, &host.id, Some(&selected_id), None, host.version)
                 .await
                 .unwrap();
-            let host = crate::machine::find_one(txn.as_mut(), &host.id, Default::default())
+            let host = crate::machine::find_one(&mut *txn, &host.id, Default::default())
                 .await
                 .unwrap()
                 .unwrap();
@@ -1471,14 +1471,14 @@ mod tests {
                 crate::ConditionalWrite::Applied(())
             );
             let saved_observation =
-                crate::machine::find_one(scout.as_mut(), &host.id, Default::default())
+                crate::machine::find_one(&mut *scout, &host.id, Default::default())
                     .await
                     .unwrap()
                     .unwrap()
                     .status
                     .mlx_device_observation;
             let blocker: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
-                .fetch_one(scout.as_mut())
+                .fetch_one(&mut *scout)
                 .await
                 .unwrap();
             let setter = async {
@@ -1838,7 +1838,7 @@ mod tests {
                 )
                 .bind(host.id)
                 .bind(dpu)
-                .execute(txn.as_mut())
+                .execute(&mut *txn)
                 .await
                 .unwrap();
             } else {
@@ -1852,7 +1852,7 @@ mod tests {
                 );
             }
             let saved_observation =
-                crate::machine::find_one(txn.as_mut(), &host.id, Default::default())
+                crate::machine::find_one(&mut *txn, &host.id, Default::default())
                     .await
                     .unwrap()
                     .unwrap()
@@ -1967,12 +1967,12 @@ mod tests {
                     .unwrap()
             };
             let expected_host =
-                crate::machine::find_one(winner.as_mut(), &host.id, Default::default())
+                crate::machine::find_one(&mut *winner, &host.id, Default::default())
                     .await
                     .unwrap()
                     .unwrap();
             let blocker: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
-                .fetch_one(winner.as_mut())
+                .fetch_one(&mut *winner)
                 .await
                 .unwrap();
             let loser = async {
@@ -2078,7 +2078,7 @@ mod tests {
                             "{drift}"
                         );
                         let saved_observation =
-                            crate::machine::find_one(txn.as_mut(), &host.id, Default::default())
+                            crate::machine::find_one(&mut *txn, &host.id, Default::default())
                                 .await
                                 .unwrap()
                                 .unwrap()
@@ -2171,7 +2171,7 @@ mod tests {
         // The harness applies all migrations. Remove only this migration's
         // column to restore its predecessor before populating the host.
         sqlx::query("ALTER TABLE machines DROP COLUMN nic_firmware_profile_id")
-            .execute(txn.as_mut())
+            .execute(&mut *txn)
             .await
             .unwrap();
         let id: NicFirmwareProfileId = "existing".parse().unwrap();
@@ -2180,19 +2180,19 @@ mod tests {
         let before: serde_json::Value =
             sqlx::query_scalar("SELECT to_jsonb(m) FROM machines m WHERE id = $1")
                 .bind(host.id)
-                .fetch_one(txn.as_mut())
+                .fetch_one(&mut *txn)
                 .await
                 .unwrap();
         sqlx::raw_sql(include_str!(
             "../migrations/20261013011104_machine_nic_firmware_profile.sql"
         ))
-        .execute(txn.as_mut())
+        .execute(&mut *txn)
         .await
         .unwrap();
         let after: serde_json::Value =
             sqlx::query_scalar("SELECT to_jsonb(m) FROM machines m WHERE id = $1")
                 .bind(host.id)
-                .fetch_one(txn.as_mut())
+                .fetch_one(&mut *txn)
                 .await
                 .unwrap();
         let mut expected = before;
@@ -2201,12 +2201,12 @@ mod tests {
         set_machine_config(&mut txn, &host.id, Some(&id), None, host.version)
             .await
             .unwrap();
-        let stored = crate::machine::find_one(txn.as_mut(), &host.id, Default::default())
+        let stored = crate::machine::find_one(&mut *txn, &host.id, Default::default())
             .await
             .unwrap()
             .unwrap();
         assert_eq!(stored.config.nic_firmware_profile_id.as_ref(), Some(&id));
-        let stored_profile = find_by_ids(txn.as_mut(), std::slice::from_ref(&id))
+        let stored_profile = find_by_ids(&mut *txn, std::slice::from_ref(&id))
             .await
             .unwrap()
             .pop()
@@ -2215,7 +2215,7 @@ mod tests {
         assert_eq!(stored_profile.version, profile.version);
         let error = sqlx::query("DELETE FROM nic_firmware_profiles WHERE id = $1")
             .bind(&id)
-            .execute(txn.as_mut())
+            .execute(&mut *txn)
             .await
             .unwrap_err();
         let error = error.as_database_error().unwrap();
@@ -2247,37 +2247,37 @@ mod tests {
         set_machine_config(&mut txn, &host.id, Some(&id), None, host.version)
             .await
             .unwrap();
-        let before = crate::machine::find_one(txn.as_mut(), &host.id, Default::default())
+        let before = crate::machine::find_one(&mut *txn, &host.id, Default::default())
             .await
             .unwrap()
             .unwrap();
         let before_row: serde_json::Value =
             sqlx::query_scalar("SELECT to_jsonb(m) FROM machines m WHERE id = $1")
                 .bind(host.id)
-                .fetch_one(txn.as_mut())
+                .fetch_one(&mut *txn)
                 .await
                 .unwrap();
 
         // `set_machine_config` and `find_one` read the child aggregate, so
         // finish preparing the fixture before removing that table.
         sqlx::query("DROP TABLE machine_nic_firmware_overrides")
-            .execute(txn.as_mut())
+            .execute(&mut *txn)
             .await
             .unwrap();
         sqlx::raw_sql(include_str!(
             "../migrations/20261013213139_machine_nic_firmware_overrides.sql"
         ))
-        .execute(txn.as_mut())
+        .execute(&mut *txn)
         .await
         .unwrap();
         let after_row: serde_json::Value =
             sqlx::query_scalar("SELECT to_jsonb(m) FROM machines m WHERE id = $1")
                 .bind(host.id)
-                .fetch_one(txn.as_mut())
+                .fetch_one(&mut *txn)
                 .await
                 .unwrap();
         assert_eq!(after_row, before_row);
-        let after = crate::machine::find_one(txn.as_mut(), &host.id, Default::default())
+        let after = crate::machine::find_one(&mut *txn, &host.id, Default::default())
             .await
             .unwrap()
             .unwrap();
@@ -2324,7 +2324,7 @@ mod tests {
                 .bind(machine)
                 .bind(sqlx::types::Json(selector))
                 .bind(selected_profile)
-                .execute(txn.as_mut())
+                .execute(&mut *txn)
                 .await
                 .unwrap_err();
             assert_eq!(
@@ -2337,30 +2337,26 @@ mod tests {
         sqlx::query("UPDATE machines SET id = $1 WHERE id = $2")
             .bind(missing_host)
             .bind(host.id)
-            .execute(txn.as_mut())
+            .execute(&mut *txn)
             .await
             .unwrap();
-        let renamed = crate::machine::find_one(txn.as_mut(), &missing_host, Default::default())
+        let renamed = crate::machine::find_one(&mut *txn, &missing_host, Default::default())
             .await
             .unwrap()
             .unwrap();
         assert_eq!(renamed.config.nic_firmware_card_selections, cards);
         sqlx::query("DELETE FROM machines WHERE id = $1")
             .bind(missing_host)
-            .execute(txn.as_mut())
+            .execute(&mut *txn)
             .await
             .unwrap();
         let remaining: i64 =
             sqlx::query_scalar("SELECT count(*) FROM machine_nic_firmware_overrides")
-                .fetch_one(txn.as_mut())
+                .fetch_one(&mut *txn)
                 .await
                 .unwrap();
         assert_eq!(remaining, 0);
-        let stored_profile = find_by_ids(txn.as_mut(), &[id])
-            .await
-            .unwrap()
-            .pop()
-            .unwrap();
+        let stored_profile = find_by_ids(&mut *txn, &[id]).await.unwrap().pop().unwrap();
         assert_eq!(stored_profile.config, profile.config);
         assert_eq!(stored_profile.version, profile.version);
         txn.commit().await.unwrap();
@@ -2381,7 +2377,7 @@ mod tests {
             .await
             .unwrap();
         let blocker_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
-            .fetch_one(winner.as_mut())
+            .fetch_one(&mut *winner)
             .await
             .unwrap();
 
@@ -2526,7 +2522,7 @@ mod tests {
                 Some(updated)
             };
             let blocker_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
-                .fetch_one(winner.as_mut())
+                .fetch_one(&mut *winner)
                 .await
                 .unwrap();
             let competing_update = async {
@@ -2591,7 +2587,7 @@ mod tests {
             .bind(sqlx::types::Json(&incompatible))
             .bind(profile_version)
             .bind(&id)
-            .execute(txn.as_mut())
+            .execute(&mut *txn)
             .await
             .unwrap();
         txn.commit().await.unwrap();
@@ -2662,7 +2658,7 @@ mod tests {
                 )
             };
             let blocker: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
-                .fetch_one(winner.as_mut())
+                .fetch_one(&mut *winner)
                 .await
                 .unwrap();
             let loser = async {
@@ -2896,13 +2892,13 @@ mod tests {
         // Recreate only the predecessor tables in a private schema, with a real
         // catalog row present before applying the migration being tested.
         sqlx::raw_sql("CREATE SCHEMA nic_predecessor; SET LOCAL search_path TO nic_predecessor")
-            .execute(txn.as_mut())
+            .execute(&mut *txn)
             .await
             .unwrap();
         sqlx::raw_sql(include_str!(
             "../migrations/20261001211240_nic_firmware_profiles.sql"
         ))
-        .execute(txn.as_mut())
+        .execute(&mut *txn)
         .await
         .unwrap();
         let id = "existing".parse().unwrap();
@@ -2910,7 +2906,7 @@ mod tests {
         sqlx::raw_sql(include_str!(
             "../migrations/20261009195417_nic_firmware_site_defaults.sql"
         ))
-        .execute(txn.as_mut())
+        .execute(&mut *txn)
         .await
         .unwrap();
         let hardware = NicFirmwareHardware {
@@ -2920,14 +2916,14 @@ mod tests {
         let selection = set_site_selection(&mut txn, &hardware, &id, None)
             .await
             .unwrap();
-        let rows = find_site_selections(txn.as_mut()).await.unwrap();
+        let rows = find_site_selections(&mut *txn).await.unwrap();
         // Logical selection names must still read the complete row stored by
         // the unchanged predecessor schema.
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].hardware, hardware);
         assert_eq!(rows[0].profile_id, id);
         assert_eq!(rows[0].version, selection.version);
-        let stored = find_by_ids(txn.as_mut(), std::slice::from_ref(&id))
+        let stored = find_by_ids(&mut *txn, std::slice::from_ref(&id))
             .await
             .unwrap()
             .pop()
@@ -2936,7 +2932,7 @@ mod tests {
         assert_eq!(stored.version, profile.version);
         let error = sqlx::query("DELETE FROM nic_firmware_profiles WHERE id = $1")
             .bind(&id)
-            .execute(txn.as_mut())
+            .execute(&mut *txn)
             .await
             .unwrap_err();
         let error = error.as_database_error().unwrap();

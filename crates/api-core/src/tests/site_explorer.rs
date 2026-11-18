@@ -139,16 +139,16 @@ async fn admin_address_reconciliation_republishes_a_config_changed_under_it(
     // Leave the existing host needing an admin address and DNS metadata repair.
     sqlx::query("DELETE FROM machine_interface_addresses WHERE interface_id = $1")
         .bind(primary.id)
-        .execute(txn.as_mut())
+        .execute(&mut *txn)
         .await?;
     sqlx::query(
         "UPDATE machine_interfaces SET hostname = 'needs-reconciliation', domain_id = NULL
          WHERE id = $1",
     )
     .bind(primary.id)
-    .execute(txn.as_mut())
+    .execute(&mut *txn)
     .await?;
-    let before = db::machine_interface::find_one(txn.as_mut(), primary.id).await?;
+    let before = db::machine_interface::find_one(&mut *txn, primary.id).await?;
     assert!(before.addresses.is_empty());
     db::explored_endpoints::request_exploration_for_addresses(&[host_bmc_ip], txn.as_mut()).await?;
     txn.commit().await?;
@@ -217,14 +217,14 @@ async fn admin_address_reconciliation_republishes_a_config_changed_under_it(
     );
 
     let mut txn = env.pool.txn_begin().await?;
-    let after = db::machine_interface::find_one(txn.as_mut(), primary.id).await?;
+    let after = db::machine_interface::find_one(&mut *txn, primary.id).await?;
     assert!(!after.addresses.is_empty(), "the address repair commits");
     assert_ne!(
         after.hostname, before.hostname,
         "the hostname repair commits"
     );
     assert!(after.domain_id.is_some(), "the domain repair commits");
-    let after_config = db::machine::get_network_config(txn.as_mut(), &host_id).await?;
+    let after_config = db::machine::get_network_config(&mut *txn, &host_id).await?;
     assert_eq!(after_config.value, winning_config);
     assert_eq!(
         after_config.version.version_nr(),
@@ -249,16 +249,16 @@ async fn boot_target_repair_retries_after_a_concurrent_host_network_write(
         let boot_host_id: carbide_uuid::machine::HostMachineId = host_id.into();
         let dpu_id = mh.dpu().id;
         let mut txn = env.pool.txn_begin().await?;
-        let desired = db::machine_desired_boot_interface::get(txn.as_mut(), &boot_host_id)
+        let desired = db::machine_desired_boot_interface::get(&mut *txn, &boot_host_id)
             .await?
             .expect("original desired boot target");
         // Leave an incomplete boot target so the real repair must take its
         // mutation path rather than returning early for a complete pair.
         sqlx::query("DELETE FROM machine_boot_interfaces WHERE machine_id = $1")
             .bind(host_id)
-            .execute(txn.as_mut())
+            .execute(&mut *txn)
             .await?;
-        let before = db::machine::get_network_config(txn.as_mut(), &dpu_id).await?;
+        let before = db::machine::get_network_config(&mut *txn, &dpu_id).await?;
         txn.commit().await?;
         // Park the real host-first network writer on the DPU. It already owns
         // the host row at this point, reproducing the opposite lock order.
@@ -266,7 +266,7 @@ async fn boot_target_repair_retries_after_a_concurrent_host_network_write(
         let blocker_pid: i32 =
             sqlx::query_scalar("SELECT pg_backend_pid() FROM machines WHERE id = $1 FOR UPDATE")
                 .bind(dpu_id)
-                .fetch_one(blocker.as_mut())
+                .fetch_one(&mut *blocker)
                 .await?;
         let quarantine = model::machine::network::ManagedHostQuarantineState {
             reason: Some("concurrent host network write".to_owned()),
@@ -373,7 +373,7 @@ async fn site_explorer_rechecks_absent_identity_after_the_allocation_fence(
         let mut barrier = env.pool.txn_begin().await?;
         db::machine_interface::lock_all_admin_segments(&mut barrier).await?;
         let barrier_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
-            .fetch_one(barrier.as_mut()).await?;
+            .fetch_one(&mut *barrier).await?;
         let mut creation = Box::pin(creator.create_managed_host(&explored, &mut host_report, Some(&expected), &env.pool));
         tokio::select! {
             result = &mut creation => panic!("creation bypassed the allocation fence: {result:?}"),
@@ -645,7 +645,7 @@ async fn test_site_explorer_fixtures_zerodpu_site_explorer_before_host_dhcp(
         .await?
         .expect("the host should have a pending interface prediction");
     assert!(
-        db::machine_interface::find_by_mac_address(txn.as_mut(), inband_mac)
+        db::machine_interface::find_by_mac_address(&mut *txn, inband_mac)
             .await?
             .is_empty()
     );
@@ -1058,7 +1058,7 @@ async fn set_endpoint_boot_interface_target(
     .bind(mac_address)
     .bind(interface_id)
     .bind(bmc_ip)
-    .execute(txn.as_mut())
+    .execute(&mut *txn)
     .await?;
     txn.commit().await?;
 

@@ -333,7 +333,7 @@ mod tests {
         let (instance_id, machine_id) = create_instance(&mut txn, 4, &tenant.organization_id).await;
         let version = sqlx::query_scalar("SELECT version FROM machines WHERE id = $1")
             .bind(machine_id)
-            .fetch_one(txn.as_mut())
+            .fetch_one(&mut *txn)
             .await
             .unwrap();
         crate::nic_firmware::set_machine_config(
@@ -349,7 +349,7 @@ mod tests {
         let selected_version: ConfigVersion =
             sqlx::query_scalar("SELECT version FROM machines WHERE id = $1")
                 .bind(machine_id)
-                .fetch_one(txn.as_mut())
+                .fetch_one(&mut *txn)
                 .await
                 .unwrap();
         // Persisted selectors remain meaningful snapshot input when inventory
@@ -363,7 +363,7 @@ mod tests {
             .bind(machine_id)
             .bind(Json(&card.selector))
             .bind(&card.profile_id)
-            .execute(txn.as_mut())
+            .execute(&mut *txn)
             .await
             .unwrap();
         let (_, snapshot) = capture(&mut txn, &[instance_id])
@@ -495,7 +495,7 @@ mod tests {
             let mut allocation = pool.txn_begin().await.unwrap();
             sqlx::query("SELECT id FROM machines WHERE id = $1 FOR UPDATE")
                 .bind(machine_id)
-                .execute(allocation.as_mut())
+                .execute(&mut *allocation)
                 .await
                 .unwrap();
             let mut writer = pool.txn_begin().await.unwrap();
@@ -558,7 +558,7 @@ mod tests {
             let mut read = pool.txn_begin().await.unwrap();
             sqlx::query("SELECT id FROM machines WHERE id = $1 FOR UPDATE")
                 .bind(machine_id)
-                .execute(read.as_mut())
+                .execute(&mut *read)
                 .await
                 .unwrap();
             let (_, after) = capture(&mut read, &[instance_id])
@@ -607,16 +607,16 @@ mod tests {
         let mut allocation = pool.txn_begin().await.unwrap();
         sqlx::query("SELECT id FROM machines WHERE id = $1 FOR UPDATE")
             .bind(machine_id)
-            .execute(allocation.as_mut())
+            .execute(&mut *allocation)
             .await
             .unwrap();
         let mut writer = pool.txn_begin().await.unwrap();
         sqlx::query("LOCK TABLE nic_firmware_profiles IN ACCESS EXCLUSIVE MODE")
-            .execute(writer.as_mut())
+            .execute(&mut *writer)
             .await
             .unwrap();
         let writer_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
-            .fetch_one(writer.as_mut())
+            .fetch_one(&mut *writer)
             .await
             .unwrap();
 

@@ -867,7 +867,7 @@ async fn instance_overlap_stored_pairs_validate_startup_and_dpu_config(pool: sql
                         ..Default::default()
                     }))
                     .bind(second_vpc_id)
-                    .execute(txn.as_mut())
+                    .execute(&mut *txn)
                     .await
                     .unwrap();
             }
@@ -877,7 +877,7 @@ async fn instance_overlap_stored_pairs_validate_startup_and_dpu_config(pool: sql
                         vni: Some(second_vpc.status.vni.unwrap() + 100000),
                     }))
                     .bind(second_vpc_id)
-                    .execute(txn.as_mut())
+                    .execute(&mut *txn)
                     .await
                     .unwrap();
             }

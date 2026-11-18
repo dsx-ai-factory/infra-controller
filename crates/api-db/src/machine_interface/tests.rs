@@ -95,7 +95,7 @@ async fn create_static_assignments_segment(
             allocation_strategy: AllocationStrategy::Reserved,
             infer_slaac_eui64_addresses: false,
         },
-        txn.as_mut(),
+        txn.as_pgconn(),
         NetworkSegmentControllerState::Ready,
     )
     .await?;
@@ -125,7 +125,7 @@ async fn create_test_segment(
             allocation_strategy: AllocationStrategy::Reserved,
             infer_slaac_eui64_addresses: false,
         },
-        txn.as_mut(),
+        txn.as_pgconn(),
         NetworkSegmentControllerState::Ready,
     )
     .await?;
@@ -146,7 +146,7 @@ async fn create_managed_segment(
     let mut txn = pool.txn_begin().await?;
     db::network_segment::persist(
         definition,
-        txn.as_mut(),
+        txn.as_pgconn(),
         NetworkSegmentControllerState::Ready,
     )
     .await?;
@@ -254,7 +254,7 @@ async fn proactive_admin_discovery_preserves_existing_mac_ownership(
     for machine_id in [dpu_id, host_id, other_dpu_id] {
         sqlx::query("INSERT INTO machines (id, dpf) VALUES ($1, '{}'::jsonb)")
             .bind(machine_id)
-            .execute(txn.as_mut())
+            .execute(&mut *txn)
             .await?;
     }
     let segments = db::network_segment::admin(&mut txn).await?;
@@ -289,7 +289,7 @@ async fn proactive_admin_discovery_preserves_existing_mac_ownership(
     .await?;
     txn.commit().await?;
     let mut txn = pool.txn_begin().await?;
-    let persisted = find_one(txn.as_mut(), original.id).await?;
+    let persisted = find_one(&mut *txn, original.id).await?;
     assert_eq!(discovered.id, original.id);
     assert_eq!(persisted.segment_id, segments[1].id);
     assert_eq!(persisted.addresses, vec![reserved_address]);
@@ -323,7 +323,7 @@ async fn proactive_admin_discovery_preserves_existing_mac_ownership(
         error,
         DatabaseError::NetworkSegmentDuplicateMacAddress(address) if address == mac
     ));
-    let original_after_rejection = find_one(txn.as_mut(), original.id).await?;
+    let original_after_rejection = find_one(&mut *txn, original.id).await?;
     assert_eq!(original_after_rejection.segment_id, persisted.segment_id);
     assert_eq!(original_after_rejection.addresses, persisted.addresses);
     assert_eq!(original_after_rejection.machine_id, persisted.machine_id);
@@ -331,7 +331,7 @@ async fn proactive_admin_discovery_preserves_existing_mac_ownership(
         original_after_rejection.attached_dpu_machine_id,
         persisted.attached_dpu_machine_id,
     );
-    let duplicate = find_one(txn.as_mut(), duplicate.id).await?;
+    let duplicate = find_one(&mut *txn, duplicate.id).await?;
     assert!(duplicate.attached_dpu_machine_id.is_none());
     assert!(duplicate.addresses.is_empty());
     Ok(())
@@ -374,7 +374,7 @@ async fn proactive_admin_discovery_rejects_foreign_managed_ownership(
     for machine_id in [host_id, original_dpu_id] {
         sqlx::query("INSERT INTO machines (id, dpf) VALUES ($1, '{}'::jsonb)")
             .bind(machine_id)
-            .execute(txn.as_mut())
+            .execute(&mut *txn)
             .await?;
     }
     let foreign_segment = db::network_segment::find_by_name(&mut txn, "foreign-underlay").await?;
@@ -411,7 +411,7 @@ async fn proactive_admin_discovery_rejects_foreign_managed_ownership(
     txn.commit().await?;
 
     let mut txn = pool.txn_begin().await?;
-    let persisted = find_one(txn.as_mut(), original.id).await?;
+    let persisted = find_one(&mut *txn, original.id).await?;
     assert_eq!(persisted.segment_id, foreign_segment_id);
     assert_eq!(persisted.addresses, original.addresses);
     assert_eq!(persisted.machine_id, Some(host_id));
@@ -420,7 +420,7 @@ async fn proactive_admin_discovery_rejects_foreign_managed_ownership(
         Some(original_dpu_id.try_into()?),
     );
     assert!(persisted.primary_interface);
-    assert_eq!(find_by_mac_address(txn.as_mut(), mac).await?.len(), 1);
+    assert_eq!(find_by_mac_address(&mut *txn, mac).await?.len(), 1);
     txn.rollback().await?;
     Ok(())
 }
@@ -529,7 +529,7 @@ async fn proactive_admin_discovery_selects_eligible_segment(
             None,
         )
         .await?;
-        let persisted = find_one(txn.as_mut(), discovered.id).await?;
+        let persisted = find_one(&mut *txn, discovered.id).await?;
         assert_eq!(persisted.segment_id, available_id, "{}", case.name);
         assert_eq!(persisted.addresses.len(), 1, "{}", case.name);
         let available_prefix: ipnetwork::IpNetwork = case.available_prefix.parse()?;
@@ -581,7 +581,7 @@ async fn proactive_admin_discovery_requires_gateway_for_ipv4_prefix(
     .await
     .unwrap_err();
     assert!(matches!(error, DatabaseError::AdminNetworkNotConfigured));
-    assert!(find_by_mac_address(txn.as_mut(), mac).await?.is_empty());
+    assert!(find_by_mac_address(&mut *txn, mac).await?.is_empty());
     Ok(())
 }
 
@@ -637,7 +637,7 @@ async fn proactive_admin_discovery_rejects_unreserved_mac(
             "{name}",
         );
         assert!(
-            find_by_mac_address(txn.as_mut(), mac).await?.is_empty(),
+            find_by_mac_address(&mut *txn, mac).await?.is_empty(),
             "{name}"
         );
         txn.rollback().await?;
@@ -687,7 +687,7 @@ async fn reconcile_interface_segment_preserves_static_assignment_lookup_failure(
     assert!(source.to_string().contains("unsupported"), "{source:?}");
 
     // Read before committing to prove the decode failure did not abort the transaction.
-    let pending = find_one(txn.as_mut(), original.id).await?;
+    let pending = find_one(&mut *txn, original.id).await?;
     txn.commit().await?;
     let persisted = find_one(&pool, original.id).await?;
     for (source, interface) in [
@@ -711,7 +711,7 @@ async fn observed_dhcp_unknown_relay_is_failed_precondition(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mut txn = pool.txn_begin().await?;
     let error = find_or_create_observed_machine_interface(
-        txn.as_mut(),
+        txn.as_pgconn(),
         None,
         "02:00:00:00:71:04".parse()?,
         &["2001:db8:dead::1".parse()?],
@@ -763,7 +763,7 @@ async fn observed_dhcp_rechecks_static_assignment_before_moving_segment(
         sqlx::query("UPDATE network_segments SET subdomain_id = $1 WHERE id = $2")
             .bind(domain_id)
             .bind(segment_id)
-            .execute(setup.as_mut())
+            .execute(&mut *setup)
             .await?;
     }
     static_segment.config.subdomain_id = Some(static_domain.id);
@@ -787,11 +787,11 @@ async fn observed_dhcp_rechecks_static_assignment_before_moving_segment(
     let mut assigning = pool.txn_begin().await?;
     lock_for_address_assignment(&mut assigning, interface.id).await?;
     let assigning_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
-        .fetch_one(assigning.as_mut())
+        .fetch_one(&mut *assigning)
         .await?;
     let mut observing = pool.txn_begin().await?;
     let observing_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
-        .fetch_one(observing.as_mut())
+        .fetch_one(&mut *observing)
         .await?;
 
     // INFORMATION-REQUEST uses this entry point without allocating an
@@ -881,17 +881,17 @@ async fn discovery_lookup_rechecks_address_after_assignment(
     let replacement_address: IpAddr = "192.0.2.99".parse()?;
     let mut setup = pool.txn_begin().await?;
     preallocate_machine_interface(&mut setup, mac, original_address, None).await?;
-    let interface_id = find_by_mac_address(setup.as_mut(), mac).await?[0].id;
+    let interface_id = find_by_mac_address(&mut *setup, mac).await?[0].id;
     setup.commit().await?;
 
     let mut holder = pool.txn_begin().await?;
     lock_for_address_assignment(&mut holder, interface_id).await?;
     let holder_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
-        .fetch_one(holder.as_mut())
+        .fetch_one(&mut *holder)
         .await?;
     let mut waiter = pool.txn_begin().await?;
     let waiter_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
-        .fetch_one(waiter.as_mut())
+        .fetch_one(&mut *waiter)
         .await?;
 
     let lookup = async {
@@ -980,7 +980,7 @@ async fn dhcp_creation_rejects_a_segment_selected_after_locking(
         "unexpected allocation error: {error:?}"
     );
     assert!(
-        find_by_mac_address(txn.as_mut(), mac_address)
+        find_by_mac_address(&mut *txn, mac_address)
             .await?
             .is_empty()
     );
@@ -1102,21 +1102,21 @@ VALUES
         .bind(boot_mac)
         .bind(segment_b)
         .bind(other_mac)
-        .execute(txn.as_mut())
+        .execute(txn.as_pgconn())
         .await?;
 
-    set_boot_interface_id(boot_mac, "NIC.Slot.7-1-1", txn.as_mut()).await?;
+    set_boot_interface_id(boot_mac, "NIC.Slot.7-1-1", txn.as_pgconn()).await?;
 
     let boot_ids: Vec<Option<String>> = sqlx::query_scalar(
         "SELECT boot_interface_id FROM machine_interfaces WHERE mac_address=$1 ORDER BY hostname",
     )
     .bind(boot_mac)
-    .fetch_all(txn.as_mut())
+    .fetch_all(txn.as_pgconn())
     .await?;
     let other_id: Option<String> =
         sqlx::query_scalar("SELECT boot_interface_id FROM machine_interfaces WHERE mac_address=$1")
             .bind(other_mac)
-            .fetch_one(txn.as_mut())
+            .fetch_one(txn.as_pgconn())
             .await?;
 
     assert_eq!(
@@ -1147,11 +1147,11 @@ async fn test_preallocate_machine_interface_is_idempotent(
     let ip: std::net::IpAddr = "192.0.2.241".parse().unwrap();
 
     let mut txn = pool.txn_begin().await?;
-    preallocate_machine_interface(txn.as_mut(), mac, ip, None).await?;
+    preallocate_machine_interface(txn.as_pgconn(), mac, ip, None).await?;
     txn.commit().await?;
 
     let mut txn = pool.txn_begin().await?;
-    preallocate_machine_interface(txn.as_mut(), mac, ip, None).await?;
+    preallocate_machine_interface(txn.as_pgconn(), mac, ip, None).await?;
     let interfaces = find_by_mac_address(&mut txn, mac).await?;
     txn.commit().await?;
 
@@ -1188,23 +1188,24 @@ async fn test_preallocate_machine_interface_is_idempotent_without_static_assignm
     )
     .bind(segment_id)
     .bind(mac)
-    .fetch_one(txn.as_mut())
+    .fetch_one(txn.as_pgconn())
     .await?;
     crate::machine_interface_address::insert(
-        txn.as_mut(),
+        txn.as_pgconn(),
         interface_id,
         ip,
         AllocationType::Static,
     )
     .await?;
 
-    preallocate_machine_interface(txn.as_mut(), mac, ip, None).await?;
+    preallocate_machine_interface(txn.as_pgconn(), mac, ip, None).await?;
     let legacy_expected_interface = ExpectedInterface {
         mac_address: Some(mac),
         fixed_ip: Some(ip),
         ..Default::default()
     };
-    preallocate_expected_machine_interface(txn.as_mut(), &legacy_expected_interface, None).await?;
+    preallocate_expected_machine_interface(txn.as_pgconn(), &legacy_expected_interface, None)
+        .await?;
 
     // An explicit policy requires a managed prefix even when the exact
     // external reservation already exists. Resolve it before the idempotent
@@ -1214,12 +1215,12 @@ async fn test_preallocate_machine_interface_is_idempotent_without_static_assignm
         ..legacy_expected_interface
     };
     let error =
-        preallocate_expected_machine_interface(txn.as_mut(), &explicit_expected_interface, None)
+        preallocate_expected_machine_interface(txn.as_pgconn(), &explicit_expected_interface, None)
             .await
             .expect_err("an explicit fixed policy should require a managed prefix");
     assert!(matches!(error, DatabaseError::InvalidArgument(_)));
 
-    let interfaces = find_by_mac_address(txn.as_mut(), mac).await?;
+    let interfaces = find_by_mac_address(txn.as_pgconn(), mac).await?;
     txn.commit().await?;
 
     assert_eq!(interfaces.len(), 1);
@@ -1253,11 +1254,11 @@ async fn test_expected_declaration_does_not_reclassify_attached_dpu_interface(
     let mut txn = pool.txn_begin().await?;
     sqlx::query("INSERT INTO machines (id, dpf) VALUES ($1, '{}'::jsonb)")
         .bind(dpu_id)
-        .execute(txn.as_mut())
+        .execute(txn.as_pgconn())
         .await?;
-    let segment = db::network_segment::find_by_name(txn.as_mut(), segment_name).await?;
+    let segment = db::network_segment::find_by_name(txn.as_pgconn(), segment_name).await?;
     let interface = create_without_addresses(
-        txn.as_mut(),
+        txn.as_pgconn(),
         &segment,
         &mac,
         true,
@@ -1265,7 +1266,7 @@ async fn test_expected_declaration_does_not_reclassify_attached_dpu_interface(
         None,
     )
     .await?;
-    associate_interface_with_dpu_machine(&interface.id, &dpu_id, txn.as_mut()).await?;
+    associate_interface_with_dpu_machine(&interface.id, &dpu_id, txn.as_pgconn()).await?;
 
     let expected_interface = ExpectedInterface {
         mac_address: Some(mac),
@@ -1273,7 +1274,7 @@ async fn test_expected_declaration_does_not_reclassify_attached_dpu_interface(
         ..Default::default()
     };
     let reconciled = find_or_create_machine_interface(
-        txn.as_mut(),
+        txn.as_pgconn(),
         None,
         mac,
         &[relay],
@@ -1316,11 +1317,11 @@ async fn test_expected_interface_settings_do_not_overwrite_concurrent_dpu_associ
     let mut setup_txn = pool.txn_begin().await?;
     sqlx::query("INSERT INTO machines (id, dpf) VALUES ($1, '{}'::jsonb)")
         .bind(dpu_id)
-        .execute(setup_txn.as_mut())
+        .execute(setup_txn.as_pgconn())
         .await?;
-    let segment = db::network_segment::find_by_name(setup_txn.as_mut(), segment_name).await?;
+    let segment = db::network_segment::find_by_name(setup_txn.as_pgconn(), segment_name).await?;
     let interface = create_without_addresses(
-        setup_txn.as_mut(),
+        setup_txn.as_pgconn(),
         &segment,
         &mac,
         true,
@@ -1331,9 +1332,9 @@ async fn test_expected_interface_settings_do_not_overwrite_concurrent_dpu_associ
     setup_txn.commit().await?;
 
     let mut snapshot_txn = pool.txn_begin().await?;
-    let mut stale_interface = find_one(snapshot_txn.as_mut(), interface.id).await?;
+    let mut stale_interface = find_one(snapshot_txn.as_pgconn(), interface.id).await?;
     let updated = update_unassociated_expected_interface_settings(
-        snapshot_txn.as_mut(),
+        snapshot_txn.as_pgconn(),
         interface.id,
         Some(InterfaceType::Data),
         Some(true),
@@ -1346,12 +1347,13 @@ async fn test_expected_interface_settings_do_not_overwrite_concurrent_dpu_associ
     snapshot_txn.commit().await?;
 
     let mut association_txn = pool.txn_begin().await?;
-    associate_interface_with_dpu_machine(&interface.id, &dpu_id, association_txn.as_mut()).await?;
+    associate_interface_with_dpu_machine(&interface.id, &dpu_id, association_txn.as_pgconn())
+        .await?;
     association_txn.commit().await?;
 
     let mut expected_txn = pool.txn_begin().await?;
     reconcile_unassociated_expected_interface_settings(
-        expected_txn.as_mut(),
+        expected_txn.as_pgconn(),
         &mut stale_interface,
         Some(InterfaceType::Bmc),
         Some(false),
@@ -1366,7 +1368,7 @@ async fn test_expected_interface_settings_do_not_overwrite_concurrent_dpu_associ
     expected_txn.commit().await?;
 
     let mut verify_txn = pool.txn_begin().await?;
-    let reconciled = find_one(verify_txn.as_mut(), interface.id).await?;
+    let reconciled = find_one(verify_txn.as_pgconn(), interface.id).await?;
     verify_txn.commit().await?;
 
     assert_eq!(reconciled.attached_dpu_machine_id, Some(dpu_id.try_into()?));
@@ -1390,11 +1392,11 @@ async fn test_preallocate_machine_interface_rejects_conflicting_ip(
     let ip2: std::net::IpAddr = "192.0.2.243".parse().unwrap();
 
     let mut txn = pool.txn_begin().await?;
-    preallocate_machine_interface(txn.as_mut(), mac, ip1, None).await?;
+    preallocate_machine_interface(txn.as_pgconn(), mac, ip1, None).await?;
     txn.commit().await?;
 
     let mut txn = pool.txn_begin().await?;
-    let result = preallocate_machine_interface(txn.as_mut(), mac, ip2, None).await;
+    let result = preallocate_machine_interface(txn.as_pgconn(), mac, ip2, None).await;
     assert!(
         matches!(result, Err(DatabaseError::InvalidArgument(_))),
         "preallocating a different IP for the same MAC should be rejected, got {result:?}"
@@ -1424,7 +1426,7 @@ async fn fixed_preallocation_rechecks_static_address_after_waiting(
     )
     .bind(segment_id)
     .bind(mac)
-    .fetch_one(setup.as_mut())
+    .fetch_one(&mut *setup)
     .await?;
     setup.commit().await?;
 
@@ -1433,7 +1435,7 @@ async fn fixed_preallocation_rechecks_static_address_after_waiting(
     let mut holder = pool.txn_begin().await?;
     sqlx::query("SELECT id FROM machine_interfaces WHERE id = $1 FOR UPDATE")
         .bind(interface_id)
-        .fetch_one(holder.as_mut())
+        .fetch_one(&mut *holder)
         .await?;
     db::machine_interface_address::insert(
         &mut holder,
@@ -1443,11 +1445,11 @@ async fn fixed_preallocation_rechecks_static_address_after_waiting(
     )
     .await?;
     let holder_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
-        .fetch_one(holder.as_mut())
+        .fetch_one(&mut *holder)
         .await?;
     let mut waiter = pool.txn_begin().await?;
     let waiter_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
-        .fetch_one(waiter.as_mut())
+        .fetch_one(&mut *waiter)
         .await?;
 
     // Preallocation must reject the different static address after waiting;
@@ -1515,11 +1517,11 @@ async fn test_preallocate_machine_interface_rejects_ip_owned_by_different_mac(
     let ip: std::net::IpAddr = "192.0.2.248".parse().unwrap();
 
     let mut txn = pool.txn_begin().await?;
-    preallocate_machine_interface(txn.as_mut(), mac_a, ip, None).await?;
+    preallocate_machine_interface(txn.as_pgconn(), mac_a, ip, None).await?;
     txn.commit().await?;
 
     let mut txn = pool.txn_begin().await?;
-    let result = preallocate_machine_interface(txn.as_mut(), mac_b, ip, None).await;
+    let result = preallocate_machine_interface(txn.as_pgconn(), mac_b, ip, None).await;
     assert!(
         matches!(result, Err(DatabaseError::InvalidArgument(_))),
         "preallocating an IP owned by a different MAC should be rejected, got {result:?}"
@@ -1541,14 +1543,14 @@ async fn test_preallocate_machine_interface_recreates_after_deletion(
     let ip: std::net::IpAddr = "192.0.2.244".parse().unwrap();
 
     let mut txn = pool.txn_begin().await?;
-    preallocate_machine_interface(txn.as_mut(), mac, ip, None).await?;
+    preallocate_machine_interface(txn.as_pgconn(), mac, ip, None).await?;
     let interfaces_before = find_by_mac_address(&mut txn, mac).await?;
     let interface_id = interfaces_before[0].id;
-    delete(&interface_id, txn.as_mut(), false).await?;
+    delete(&interface_id, txn.as_pgconn(), false).await?;
     txn.commit().await?;
 
     let mut txn = pool.txn_begin().await?;
-    preallocate_machine_interface(txn.as_mut(), mac, ip, None).await?;
+    preallocate_machine_interface(txn.as_pgconn(), mac, ip, None).await?;
     let interfaces_after = find_by_mac_address(&mut txn, mac).await?;
     txn.commit().await?;
 
@@ -1581,7 +1583,7 @@ async fn test_preallocate_machine_interface_promotes_interface_type(
 
     // Initial preallocation lands as InterfaceType::Data.
     let mut txn = pool.txn_begin().await?;
-    preallocate_machine_interface(txn.as_mut(), mac, ip, None).await?;
+    preallocate_machine_interface(txn.as_pgconn(), mac, ip, None).await?;
     let before = find_by_mac_address(&mut txn, mac).await?;
     assert_eq!(
         before[0].interface_type,
@@ -1593,7 +1595,7 @@ async fn test_preallocate_machine_interface_promotes_interface_type(
     // Re-preallocate the same (MAC, IP) but as the BMC variant. Helper should promote
     // the existing row's interface_type rather than erroring or creating a duplicate.
     let mut txn = pool.txn_begin().await?;
-    preallocate_bmc_machine_interface(txn.as_mut(), mac, ip, None).await?;
+    preallocate_bmc_machine_interface(txn.as_pgconn(), mac, ip, None).await?;
     let after = find_by_mac_address(&mut txn, mac).await?;
     txn.commit().await?;
 
@@ -1783,9 +1785,9 @@ async fn test_expected_interface_role_controls_fixed_preallocation(
         };
 
         let mut txn = pool.txn_begin().await?;
-        preallocate_expected_machine_interface(txn.as_mut(), &expected_interface, None).await?;
+        preallocate_expected_machine_interface(txn.as_pgconn(), &expected_interface, None).await?;
         let interfaces =
-            find_by_mac_address(txn.as_mut(), expected_interface.mac_address.unwrap()).await?;
+            find_by_mac_address(txn.as_pgconn(), expected_interface.mac_address.unwrap()).await?;
         txn.commit().await?;
 
         assert_eq!(interfaces.len(), 1, "case: {name}");
@@ -1826,18 +1828,19 @@ async fn test_fixed_host_preallocation_does_not_override_machine_wide_primary_se
     };
 
     let mut txn = pool.txn_begin().await?;
-    preallocate_expected_machine_interface(txn.as_mut(), &expected_interface, None).await?;
-    let interface_id = find_by_mac_address(txn.as_mut(), expected_interface.mac_address.unwrap())
-        .await?
-        .pop()
-        .expect("fixed Host preallocation should create an interface")
-        .id;
+    preallocate_expected_machine_interface(txn.as_pgconn(), &expected_interface, None).await?;
+    let interface_id =
+        find_by_mac_address(txn.as_pgconn(), expected_interface.mac_address.unwrap())
+            .await?
+            .pop()
+            .expect("fixed Host preallocation should create an interface")
+            .id;
 
     // DHCP applies the ExpectedMachine-wide primary declaration. A later Site
     // Explorer pass must not replace it with the Host creation default.
-    set_primary_interface(&interface_id, false, txn.as_mut()).await?;
-    preallocate_expected_machine_interface(txn.as_mut(), &expected_interface, None).await?;
-    let interface = find_one(txn.as_mut(), interface_id).await?;
+    set_primary_interface(&interface_id, false, txn.as_pgconn()).await?;
+    preallocate_expected_machine_interface(txn.as_pgconn(), &expected_interface, None).await?;
+    let interface = find_one(txn.as_pgconn(), interface_id).await?;
     txn.commit().await?;
 
     assert!(!interface.primary_interface);
@@ -1868,14 +1871,14 @@ async fn test_fixed_preallocation_resolves_managed_prefix_and_segment_type(
         fixed_ip: Some("198.51.100.61".parse()?),
         ..Default::default()
     };
-    preallocate_expected_machine_interface(txn.as_mut(), &legacy_hint, None).await?;
-    let interface = find_by_mac_address(txn.as_mut(), legacy_hint.mac_address.unwrap())
+    preallocate_expected_machine_interface(txn.as_pgconn(), &legacy_hint, None).await?;
+    let interface = find_by_mac_address(txn.as_pgconn(), legacy_hint.mac_address.unwrap())
         .await?
         .pop()
         .expect("legacy fixed interface should be preallocated");
     assert_eq!(interface.segment_id, underlay_segment);
     let reconciled = validate_existing_mac_and_create(
-        txn.as_mut(),
+        txn.as_pgconn(),
         legacy_hint.mac_address.unwrap(),
         &["198.51.100.1".parse()?],
         Some(legacy_hint.clone()),
@@ -1893,13 +1896,13 @@ async fn test_fixed_preallocation_resolves_managed_prefix_and_segment_type(
         fixed_ip: Some("203.0.113.64".parse()?),
         ..Default::default()
     };
-    preallocate_expected_machine_interface(txn.as_mut(), &legacy_typed_segment, None).await?;
+    preallocate_expected_machine_interface(txn.as_pgconn(), &legacy_typed_segment, None).await?;
     let legacy_interface =
-        find_by_mac_address(txn.as_mut(), legacy_typed_segment.mac_address.unwrap())
+        find_by_mac_address(txn.as_pgconn(), legacy_typed_segment.mac_address.unwrap())
             .await?
             .pop()
             .expect("legacy fixed interface should be preallocated");
-    let static_assignments = db::network_segment::static_assignments(txn.as_mut()).await?;
+    let static_assignments = db::network_segment::static_assignments(txn.as_pgconn()).await?;
     assert_eq!(
         legacy_interface.segment_id, static_assignments.id,
         "a legacy Host declaration must not turn its DHCP selector into a fixed-address guard",
@@ -1911,9 +1914,9 @@ async fn test_fixed_preallocation_resolves_managed_prefix_and_segment_type(
         fixed_ip: Some("203.0.113.69".parse()?),
         ..Default::default()
     };
-    preallocate_expected_machine_interface(txn.as_mut(), &legacy_host_bmc, None).await?;
+    preallocate_expected_machine_interface(txn.as_pgconn(), &legacy_host_bmc, None).await?;
     let legacy_host_bmc_interface =
-        find_by_mac_address(txn.as_mut(), legacy_host_bmc.mac_address.unwrap())
+        find_by_mac_address(txn.as_pgconn(), legacy_host_bmc.mac_address.unwrap())
             .await?
             .pop()
             .expect("legacy Host BMC fixed interface should be preallocated");
@@ -1933,10 +1936,10 @@ async fn test_fixed_preallocation_resolves_managed_prefix_and_segment_type(
     )
     .bind(non_target_segment)
     .bind(misplaced_mac)
-    .fetch_one(txn.as_mut())
+    .fetch_one(txn.as_pgconn())
     .await?;
     crate::machine_interface_address::insert(
-        txn.as_mut(),
+        txn.as_pgconn(),
         misplaced_interface_id,
         misplaced_ip,
         AllocationType::Static,
@@ -1948,11 +1951,12 @@ async fn test_fixed_preallocation_resolves_managed_prefix_and_segment_type(
         fixed_ip: Some(misplaced_ip),
         ..Default::default()
     };
-    let error = preallocate_expected_machine_interface(txn.as_mut(), &misplaced_reservation, None)
-        .await
-        .expect_err("an exact reservation on another segment should be rejected");
+    let error =
+        preallocate_expected_machine_interface(txn.as_pgconn(), &misplaced_reservation, None)
+            .await
+            .expect_err("an exact reservation on another segment should be rejected");
     assert!(matches!(error, DatabaseError::InvalidArgument(_)));
-    let misplaced_interface = find_one(txn.as_mut(), misplaced_interface_id).await?;
+    let misplaced_interface = find_one(txn.as_pgconn(), misplaced_interface_id).await?;
     assert_eq!(misplaced_interface.segment_id, non_target_segment);
 
     /// One generalized fixed-address declaration that must reject the
@@ -2011,16 +2015,17 @@ async fn test_fixed_preallocation_resolves_managed_prefix_and_segment_type(
             ..Default::default()
         };
 
-        let error = preallocate_expected_machine_interface(txn.as_mut(), &expected_interface, None)
-            .await
-            .expect_err(case.name);
+        let error =
+            preallocate_expected_machine_interface(txn.as_pgconn(), &expected_interface, None)
+                .await
+                .expect_err(case.name);
         assert!(
             matches!(error, DatabaseError::InvalidArgument(_)),
             "case: {}",
             case.name,
         );
         assert!(
-            find_by_mac_address(txn.as_mut(), expected_interface.mac_address.unwrap())
+            find_by_mac_address(txn.as_pgconn(), expected_interface.mac_address.unwrap())
                 .await?
                 .is_empty(),
             "case: {}",
@@ -2035,7 +2040,7 @@ async fn test_fixed_preallocation_resolves_managed_prefix_and_segment_type(
         fixed_ip: Some("198.51.100.62".parse()?),
         ..Default::default()
     };
-    let error = preallocate_expected_machine_interface(txn.as_mut(), &wrong_guard, None)
+    let error = preallocate_expected_machine_interface(txn.as_pgconn(), &wrong_guard, None)
         .await
         .expect_err("the typed segment guard should reject a different segment type");
     assert!(matches!(error, DatabaseError::InvalidArgument(_)));
@@ -2047,7 +2052,7 @@ async fn test_fixed_preallocation_resolves_managed_prefix_and_segment_type(
         fixed_ip: Some("203.0.113.63".parse()?),
         ..Default::default()
     };
-    let error = preallocate_expected_machine_interface(txn.as_mut(), &outside_guard, None)
+    let error = preallocate_expected_machine_interface(txn.as_pgconn(), &outside_guard, None)
         .await
         .expect_err("a guarded fixed IP should belong to a configured segment");
     assert!(matches!(error, DatabaseError::InvalidArgument(_)));
@@ -2077,7 +2082,7 @@ async fn test_explicit_policy_opts_existing_host_interface_into_segment_guard(
     let relay = "198.51.100.1".parse()?;
 
     let mut txn = pool.txn_begin().await?;
-    preallocate_machine_interface(txn.as_mut(), mac_address, fixed_ip, None).await?;
+    preallocate_machine_interface(txn.as_pgconn(), mac_address, fixed_ip, None).await?;
 
     let legacy_interface = ExpectedInterface {
         mac_address: Some(mac_address),
@@ -2085,7 +2090,7 @@ async fn test_explicit_policy_opts_existing_host_interface_into_segment_guard(
         ..Default::default()
     };
     let reconciled = validate_existing_mac_and_create(
-        txn.as_mut(),
+        txn.as_pgconn(),
         mac_address,
         &[relay],
         Some(legacy_interface.clone()),
@@ -2099,7 +2104,7 @@ async fn test_explicit_policy_opts_existing_host_interface_into_segment_guard(
         ..legacy_interface
     };
     let error = validate_existing_mac_and_create(
-        txn.as_mut(),
+        txn.as_pgconn(),
         mac_address,
         &[relay],
         Some(explicit_policy),
@@ -2185,7 +2190,7 @@ async fn test_expected_interface_role_controls_observed_interface_creation(
         };
         let mut txn = pool.txn_begin().await?;
         let interface = find_or_create_observed_machine_interface(
-            txn.as_mut(),
+            txn.as_pgconn(),
             None,
             expected_interface.mac_address.unwrap(),
             &[relay],
@@ -2368,7 +2373,7 @@ async fn create_admin_segment(
             allocation_strategy: AllocationStrategy::Dynamic,
             infer_slaac_eui64_addresses: false,
         },
-        txn.as_mut(),
+        txn.as_pgconn(),
         NetworkSegmentControllerState::Ready,
     )
     .await?;
@@ -2407,7 +2412,7 @@ async fn allocation_mode_locks_ipv4_only_admin_segments_shared(
     let shared_modes = vec!["ShareLock".to_string(); admin_segment_count];
     assert_eq!(held_advisory_lock_modes(&mut holder).await?, shared_modes);
     let holder_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
-        .fetch_one(holder.as_mut())
+        .fetch_one(&mut *holder)
         .await?;
 
     let mut peer = pool.txn_begin().await?;
@@ -2417,7 +2422,7 @@ async fn allocation_mode_locks_ipv4_only_admin_segments_shared(
     )
     .await??;
     let peer_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
-        .fetch_one(peer.as_mut())
+        .fetch_one(&mut *peer)
         .await?;
 
     // The locked reconcile pass takes the same set in the same mode: no wait

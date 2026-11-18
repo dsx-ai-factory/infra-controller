@@ -63,7 +63,7 @@ ranges = [{ start = "172.0.1.0", end = "172.0.1.255" }]
 
     let mut txn = db_pool.txn_begin().await?;
     assert_eq!(
-        db::resource_pool::stats(txn.as_mut(), pool.name()).await?,
+        db::resource_pool::stats(&mut *txn, pool.name()).await?,
         St {
             used: 0,
             free: 255,
@@ -99,7 +99,7 @@ prefix = "172.0.1.0/24"
 
     let mut txn = db_pool.txn_begin().await?;
     assert_eq!(
-        db::resource_pool::stats(txn.as_mut(), pool.name()).await?,
+        db::resource_pool::stats(&mut *txn, pool.name()).await?,
         St {
             used: 0,
             free: 255,
@@ -455,7 +455,7 @@ async fn test_simple(db_pool: sqlx::PgPool) -> Result<(), eyre::Report> {
         db::resource_pool::allocate(&pool, &mut txn, OwnerType::Machine, "123", None).await?;
     assert_eq!(auto_allocated, "1");
     assert_eq!(
-        db::resource_pool::stats(txn.as_mut(), pool.name()).await?,
+        db::resource_pool::stats(&mut *txn, pool.name()).await?,
         St {
             used: 1,
             free: 1,
@@ -486,7 +486,7 @@ async fn test_simple(db_pool: sqlx::PgPool) -> Result<(), eyre::Report> {
     .await?;
     assert_eq!(non_auto_allocated, "2");
     assert_eq!(
-        db::resource_pool::stats(txn.as_mut(), pool.name()).await?,
+        db::resource_pool::stats(&mut *txn, pool.name()).await?,
         St {
             used: 2,
             free: 0,
@@ -516,7 +516,7 @@ async fn test_simple(db_pool: sqlx::PgPool) -> Result<(), eyre::Report> {
     );
 
     assert_eq!(
-        db::resource_pool::stats(txn.as_mut(), pool.name()).await?,
+        db::resource_pool::stats(&mut *txn, pool.name()).await?,
         St {
             used: 0,
             free: 2,
@@ -544,7 +544,7 @@ async fn test_rollback(db_pool: sqlx::PgPool) -> Result<(), eyre::Report> {
     let mut txn = db_pool.txn_begin().await?;
     db::resource_pool::allocate(&pool, &mut txn, OwnerType::Machine, "my_id", None).await?;
     assert_eq!(
-        db::resource_pool::stats(txn.as_mut(), pool.name()).await?,
+        db::resource_pool::stats(&mut *txn, pool.name()).await?,
         St {
             used: 1,
             free: 0,
@@ -698,7 +698,7 @@ async fn test_allocate(db_pool: sqlx::PgPool) -> Result<(), eyre::Report> {
     let v1 =
         db::resource_pool::allocate(&pool, &mut txn1, OwnerType::Machine, "my_id", None).await?;
     assert_eq!(
-        db::resource_pool::stats(txn1.as_mut(), pool.name()).await?,
+        db::resource_pool::stats(&mut *txn1, pool.name()).await?,
         St {
             used: 1,
             free: 1,
@@ -714,7 +714,7 @@ async fn test_allocate(db_pool: sqlx::PgPool) -> Result<(), eyre::Report> {
     let v2 =
         db::resource_pool::allocate(&pool, &mut txn2, OwnerType::Machine, "my_id", None).await?;
     assert_eq!(
-        db::resource_pool::stats(txn2.as_mut(), pool.name()).await?,
+        db::resource_pool::stats(&mut *txn2, pool.name()).await?,
         St {
             used: 1,
             free: 1,
@@ -1512,15 +1512,15 @@ async fn remove_fixture_pkey_pool(db_pool: &sqlx::PgPool, name: &str) -> eyre::R
     let mut txn = db_pool.txn_begin().await?;
     sqlx::query("DELETE FROM resource_pool WHERE name = $1")
         .bind(name)
-        .execute(txn.as_mut())
+        .execute(&mut *txn)
         .await?;
     sqlx::query("DELETE FROM resource_pool_def WHERE name = $1")
         .bind(name)
-        .execute(txn.as_mut())
+        .execute(&mut *txn)
         .await?;
     sqlx::query("DELETE FROM resource_pool_binding WHERE pool_name = $1")
         .bind(name)
-        .execute(txn.as_mut())
+        .execute(&mut *txn)
         .await?;
     txn.commit().await?;
     Ok(())

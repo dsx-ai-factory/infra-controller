@@ -93,7 +93,7 @@ async fn inspection_preserves_local_inventory_and_numeric_list(
         .await?;
     }
     let existing =
-        db::resource_pool::binding::load(txn.as_mut(), model::resource_pool::common::VPC_VNI)
+        db::resource_pool::binding::load(&mut *txn, model::resource_pool::common::VPC_VNI)
             .await?
             .expect("fixture VPC pool binding");
     let empty = db::resource_pool::binding::bind_or_verify(
@@ -538,10 +538,10 @@ async fn polling_retains_samples_after_database_failure_and_cancels_sql(
 
     let mut blocker = database.txn_begin().await?;
     sqlx::query("LOCK TABLE resource_pool IN ACCESS EXCLUSIVE MODE")
-        .execute(blocker.as_mut())
+        .execute(&mut *blocker)
         .await?;
     let blocker_pid = sqlx::query_scalar("SELECT pg_backend_pid()")
-        .fetch_one(blocker.as_mut())
+        .fetch_one(&mut *blocker)
         .await?;
     advance_stats_poll().await;
     wait_for_blocked_query(&database, blocker_pid, "FROM resource_pool").await;
@@ -594,10 +594,10 @@ async fn polling_retains_samples_after_database_failure_and_cancels_sql(
 
     let mut blocker = database.txn_begin().await?;
     sqlx::query("LOCK TABLE resource_pool IN ACCESS EXCLUSIVE MODE")
-        .execute(blocker.as_mut())
+        .execute(&mut *blocker)
         .await?;
     let blocker_pid = sqlx::query_scalar("SELECT pg_backend_pid()")
-        .fetch_one(blocker.as_mut())
+        .fetch_one(&mut *blocker)
         .await?;
     advance_stats_poll().await;
     wait_for_blocked_query(&database, blocker_pid, "FROM resource_pool").await;

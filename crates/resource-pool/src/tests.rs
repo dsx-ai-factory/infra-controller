@@ -175,7 +175,7 @@ async fn integrated_forwards_pool_values_and_owners_in_the_borrowed_transaction(
     let rows: Vec<Entry> = sqlx::query_as(entries)
         .bind(descriptor.name())
         .bind(other_descriptor.name())
-        .fetch_all(txn.as_mut())
+        .fetch_all(&mut *txn)
         .await?;
     assert_eq!(
         rows,
@@ -455,7 +455,7 @@ async fn shared_allocation_defers_integrated_reservation_until_the_entity_transa
     // cached Integrated selection must prepare automatic and requested values.
     let mut txn = database.txn_begin().await?;
     let error = sqlx::query("SELECT 1 / 0")
-        .execute(txn.as_mut())
+        .execute(&mut *txn)
         .await
         .expect_err("division by zero aborts the preparation transaction");
     assert_eq!(
@@ -572,7 +572,7 @@ async fn shared_allocation_defers_integrated_reservation_until_the_entity_transa
         )
         .bind(descriptor.name())
         .bind(expected.to_string())
-        .fetch_one(txn.as_mut())
+        .fetch_one(&mut *txn)
         .await?;
         assert_eq!(
             automatic,
@@ -582,7 +582,7 @@ async fn shared_allocation_defers_integrated_reservation_until_the_entity_transa
         let allocated: Json<ResourcePoolEntryState> = sqlx::query_scalar(state_query)
             .bind(descriptor.name())
             .bind(expected.to_string())
-            .fetch_one(txn.as_mut())
+            .fetch_one(&mut *txn)
             .await?;
         assert_eq!(
             allocated.0,

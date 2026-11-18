@@ -282,7 +282,7 @@ pub async fn set_primary_interface(
     let (id, changed): (MachineInterfaceId, bool) = sqlx::query_as(query)
         .bind(primary)
         .bind(*interface_id)
-        .fetch_one(txn.as_mut())
+        .fetch_one(&mut *txn)
         .await
         .map_err(|e| DatabaseError::query(query, e))?;
     if changed {
@@ -305,7 +305,7 @@ pub async fn set_primary_interfaces(
     let changed: Vec<MachineInterfaceId> = sqlx::query_scalar(query)
         .bind(primary)
         .bind(interface_ids)
-        .fetch_all(txn.as_mut())
+        .fetch_all(&mut *txn)
         .await
         .map_err(|error| DatabaseError::query(query, error))?;
     crate::dns::domain::bump_serial_for_interfaces(txn, &changed).await
@@ -358,7 +358,7 @@ pub async fn demote_primary_interfaces_for_machine(
     let query = "UPDATE machine_interfaces SET primary_interface=false WHERE machine_id=$1 AND primary_interface=true";
     let demoted = sqlx::query(query)
         .bind(machine_id)
-        .execute(txn.as_mut())
+        .execute(&mut *txn)
         .await
         .map_err(|e| DatabaseError::query(query, e))?;
     if demoted.rows_affected() > 0 {
@@ -505,7 +505,7 @@ pub async fn set_interface_type(
     let (id, changed): (MachineInterfaceId, bool) = sqlx::query_as(query)
         .bind(interface_type)
         .bind(*interface_id)
-        .fetch_one(txn.as_mut())
+        .fetch_one(&mut *txn)
         .await
         .map_err(|e| DatabaseError::query(query, e))?;
     if changed {
@@ -837,7 +837,7 @@ pub async fn find_by_machine_id_for_update(
     "#;
     let interface_ids: Vec<MachineInterfaceId> = sqlx::query_scalar(query)
         .bind(machine_id)
-        .fetch_all(txn.as_mut())
+        .fetch_all(&mut *txn)
         .await
         .map_err(|error| DatabaseError::query(query, error))?;
     if interface_ids.is_empty() {
@@ -1211,7 +1211,7 @@ WHERE id = $3::uuid
         .bind(interface_type)
         .bind(primary_interface)
         .bind(interface_id)
-        .execute(txn.as_mut())
+        .execute(&mut *txn)
         .await
         .map(|result| result.rows_affected() == 1)
         .map_err(|error| DatabaseError::query(query, error))?;
@@ -2594,7 +2594,7 @@ pub async fn lock_network_segments_exclusive(
         let query = "SELECT pg_advisory_xact_lock(hashtextextended($1::text, 0))";
         sqlx::query_scalar::<_, ()>(query)
             .bind(format!("network_segment.{id}"))
-            .fetch_one(txn.as_mut())
+            .fetch_one(&mut *txn)
             .await
             .map_err(|e| DatabaseError::query(query, e))?;
     }
@@ -2616,7 +2616,7 @@ pub async fn lock_network_segments_shared(
         let query = "SELECT pg_advisory_xact_lock_shared(hashtextextended($1::text, 0))";
         sqlx::query_scalar::<_, ()>(query)
             .bind(format!("network_segment.{id}"))
-            .fetch_one(txn.as_mut())
+            .fetch_one(&mut *txn)
             .await
             .map_err(|e| DatabaseError::query(query, e))?;
     }
@@ -2799,7 +2799,7 @@ pub async fn find_optional_for_update_by_ip(
     "#;
     let interface_ids: Vec<(MachineInterfaceId,)> = sqlx::query_as(query)
         .bind(remote_ip)
-        .fetch_all(txn.as_mut())
+        .fetch_all(&mut *txn)
         .await
         .map_err(|e| DatabaseError::query(query, e))?;
 
@@ -2814,7 +2814,7 @@ pub async fn find_optional_for_update_by_ip(
             let owner = sqlx::query_scalar::<_, MachineInterfaceId>(query)
                 .bind(interface_id)
                 .bind(remote_ip)
-                .fetch_optional(txn.as_mut())
+                .fetch_optional(&mut *txn)
                 .await
                 .map_err(|e| DatabaseError::query(query, e))?;
             if owner.is_none() {
@@ -2885,7 +2885,7 @@ pub async fn find_for_update_if_matches_instance_ip(
     let mut interfaces: Vec<MachineInterfaceSnapshot> = sqlx::query_as(QUERY)
         .bind(interface_id)
         .bind(remote_ip)
-        .fetch_all(txn.as_mut())
+        .fetch_all(&mut *txn)
         .await
         .map_err(|e| DatabaseError::query(QUERY, e))?;
 
@@ -3966,7 +3966,7 @@ async fn load_host_admin_interfaces(
 ) -> DatabaseResult<Vec<AdminInterfaceForReconcile>> {
     let rows: Vec<AdminInterfaceForReconcileRow> = sqlx::query_as(query)
         .bind(host_machine_id)
-        .fetch_all(txn.as_mut())
+        .fetch_all(&mut *txn)
         .await
         .map_err(|e| DatabaseError::query(query, e))?;
 
@@ -4162,7 +4162,7 @@ RETURNING mia.address"#;
         .bind(source_interface_id)
         .bind(address)
         .bind(AllocationType::Dhcp)
-        .fetch_optional(txn.as_mut())
+        .fetch_optional(&mut *txn)
         .await
         .map_err(|e| DatabaseError::query(query, e))?;
 
@@ -4192,7 +4192,7 @@ async fn delete_dhcp_addresses_from_interface(
     let removed: Vec<IpAddr> = sqlx::query_scalar(query)
         .bind(interface_id)
         .bind(AllocationType::Dhcp)
-        .fetch_all(txn.as_mut())
+        .fetch_all(&mut *txn)
         .await
         .map_err(|e| DatabaseError::query(query, e))?;
     if !removed.is_empty() {
@@ -4220,7 +4220,7 @@ async fn validate_domain_reference_update(
     let query = "SELECT domain_id FROM machine_interfaces WHERE id = $1 FOR UPDATE";
     let current_domain: Option<Option<DomainId>> = sqlx::query_scalar(query)
         .bind(interface_id)
-        .fetch_optional(txn.as_mut())
+        .fetch_optional(&mut *txn)
         .await
         .map_err(|error| DatabaseError::query(query, error))?;
     if current_domain.is_some_and(|current| current != Some(domain_id)) {
@@ -4252,7 +4252,7 @@ RETURNING (SELECT domain_id FROM machine_interfaces WHERE id = $3)"#;
         .bind(hostname)
         .bind(domain_id)
         .bind(interface_id)
-        .fetch_optional(txn.as_mut())
+        .fetch_optional(&mut *txn)
         .await
         .map_err(|e| DatabaseError::query(query, e))?;
     let Some(previous_domain) = previous_domain else {
@@ -4363,7 +4363,7 @@ pub async fn update_segment_id(
         .bind(segment_id)
         .bind(domain_id)
         .bind(interface_id)
-        .fetch_optional(txn.as_mut())
+        .fetch_optional(&mut *txn)
         .await
         .map_err(|e| DatabaseError::query(query, e))?;
     let Some(previous_domain) = previous_domain else {
@@ -4650,7 +4650,7 @@ pub async fn delete(
     crate::machine_boot_override::clear(txn, *interface_id).await?;
     let deleted: Option<(MacAddress, Option<String>)> = sqlx::query_as(query)
         .bind(*interface_id)
-        .fetch_optional(txn.as_mut())
+        .fetch_optional(&mut *txn)
         .await
         .map_err(|e| DatabaseError::query(query, e))?;
 

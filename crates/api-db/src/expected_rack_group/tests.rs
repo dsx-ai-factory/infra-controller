@@ -16,15 +16,15 @@ async fn expected_rack_group_migration_requires_empty_table(
     let mut txn = pool.txn_begin().await?;
     // Reconstruct the predecessor schema before tables depending on rack groups existed.
     sqlx::raw_sql("DROP TABLE nvlink_domain_members; DROP TABLE nvlink_domains;")
-        .execute(txn.as_mut())
+        .execute(&mut *txn)
         .await?;
     sqlx::query("DROP TABLE expected_rack_groups")
-        .execute(txn.as_mut())
+        .execute(&mut *txn)
         .await?;
     sqlx::raw_sql(include_str!(
         "../../migrations/20260919210839_expected_rack_groups.sql"
     ))
-    .execute(txn.as_mut())
+    .execute(&mut *txn)
     .await?;
     let migration = include_str!("../../migrations/20260922172535_expected_rack_group_racks.sql");
 
@@ -38,11 +38,11 @@ async fn expected_rack_group_migration_requires_empty_table(
         ),
     ] {
         sqlx::query("INSERT INTO expected_rack_groups (rack_group_id, topology, rack_ids, members) VALUES ('legacy', 'topology', $1, $2)")
-            .bind(&rack_ids).bind(&members).execute(txn.as_mut()).await?;
+            .bind(&rack_ids).bind(&members).execute(&mut *txn).await?;
         // Match the migration runner's transaction boundary.
         let mut attempt = crate::Transaction::begin_inner(&mut txn).await?;
         let error = sqlx::raw_sql(migration)
-            .execute(attempt.as_mut())
+            .execute(&mut *attempt)
             .await
             .unwrap_err();
         assert_eq!(
@@ -53,12 +53,12 @@ async fn expected_rack_group_migration_requires_empty_table(
         let retained: (serde_json::Value, serde_json::Value) = sqlx::query_as(
             "SELECT rack_ids, members FROM expected_rack_groups WHERE rack_group_id='legacy'",
         )
-        .fetch_one(txn.as_mut())
+        .fetch_one(&mut *txn)
         .await?;
         assert_eq!(retained, (rack_ids, members));
         let schema: Vec<(String, String)> = sqlx::query_as(
             "SELECT column_name::text, is_nullable::text FROM information_schema.columns WHERE table_schema='public' AND table_name='expected_rack_groups' AND column_name IN ('racks', 'rack_ids', 'members') ORDER BY column_name"
-        ).fetch_all(txn.as_mut()).await?;
+        ).fetch_all(&mut *txn).await?;
         assert_eq!(
             schema,
             vec![
@@ -67,19 +67,19 @@ async fn expected_rack_group_migration_requires_empty_table(
             ]
         );
         sqlx::query("DELETE FROM expected_rack_groups WHERE rack_group_id='legacy'")
-            .execute(txn.as_mut())
+            .execute(&mut *txn)
             .await?;
     }
 
-    sqlx::raw_sql(migration).execute(txn.as_mut()).await?;
+    sqlx::raw_sql(migration).execute(&mut *txn).await?;
     sqlx::raw_sql(include_str!(
         "../../migrations/20261002183132_expected_rack_group_protocol.sql"
     ))
-    .execute(txn.as_mut())
+    .execute(&mut *txn)
     .await?;
     let mut old_writer = crate::Transaction::begin_inner(&mut txn).await?;
     let error = sqlx::query("INSERT INTO expected_rack_groups (rack_group_id, topology, rack_ids, members) VALUES ('old-writer', 'topology', '[]', '[]')")
-        .execute(old_writer.as_mut()).await.unwrap_err();
+        .execute(&mut *old_writer).await.unwrap_err();
     let error = error.as_database_error().unwrap();
     assert_eq!(error.code().as_deref(), Some("23502"));
     assert_eq!(
@@ -99,7 +99,7 @@ async fn expected_rack_group_migration_requires_empty_table(
         }
         create(&mut txn, &boundary).await?;
         let untouched: bool = sqlx::query_scalar("SELECT rack_ids IS NULL AND members IS NULL AND racks IS NOT NULL FROM expected_rack_groups WHERE rack_group_id=$1")
-            .bind(&boundary.rack_group_id).fetch_one(txn.as_mut()).await?;
+            .bind(&boundary.rack_group_id).fetch_one(&mut *txn).await?;
         assert!(untouched);
         assert_eq!(
             find_by_rack_group_id(&mut txn, &boundary.rack_group_id).await?,
@@ -129,7 +129,7 @@ async fn expected_rack_group_concurrent_replacements(
         clear(&mut first).await?;
         let mut second = pool.txn_begin().await?;
         let pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
-            .fetch_one(second.as_mut())
+            .fetch_one(&mut *second)
             .await?;
         let writer = tokio::spawn(async move {
             clear(&mut second).await.unwrap();

@@ -64,7 +64,7 @@ async fn profile_and_bundle_queries_survive_added_columns(
          ALTER TABLE measurement_bundles ADD COLUMN test_added_column text;
          ALTER TABLE measurement_bundles_values ADD COLUMN test_added_column text;",
     )
-    .execute(migration.as_mut())
+    .execute(&mut *migration)
     .await?;
     migration.commit().await?;
 
@@ -98,11 +98,11 @@ async fn exercise_profile_and_bundle_queries(
         &created,
     );
     assert_record(
-        &profile::get_all_measurement_profile_records(txn.as_mut()).await?,
+        &profile::get_all_measurement_profile_records(&mut *txn).await?,
         &[&created],
     );
     assert_record(
-        &profile::get_measurement_profile_attrs_for_profile_id(txn.as_mut(), created.profile_id)
+        &profile::get_measurement_profile_attrs_for_profile_id(&mut *txn, created.profile_id)
             .await?,
         &attributes,
     );
@@ -162,7 +162,7 @@ async fn exercise_profile_and_bundle_queries(
     assert_eq!(active.state, MeasurementBundleState::Active);
     for expected in [&pending, &active] {
         assert_record(
-            &bundle::get_measurement_bundle_by_id(txn.as_mut(), expected.bundle_id)
+            &bundle::get_measurement_bundle_by_id(&mut *txn, expected.bundle_id)
                 .await?
                 .expect("persisted bundle"),
             expected,
@@ -179,8 +179,7 @@ async fn exercise_profile_and_bundle_queries(
     assert_eq!(value.pcr_register, 7);
     assert_eq!(value.sha_any, "aabbcc");
     assert_record(
-        &bundle::get_measurement_bundle_values_for_bundle_id(txn.as_mut(), active.bundle_id)
-            .await?,
+        &bundle::get_measurement_bundle_values_for_bundle_id(&mut *txn, active.bundle_id).await?,
         &[&value],
     );
 
@@ -229,7 +228,7 @@ async fn exercise_profile_and_bundle_queries(
         expected.state = state;
         assert_record(&updated, &expected);
         assert_record(
-            &bundle::get_measurement_bundle_by_id(txn.as_mut(), active.bundle_id)
+            &bundle::get_measurement_bundle_by_id(&mut *txn, active.bundle_id)
                 .await?
                 .expect("persisted bundle state"),
             &expected,
@@ -243,7 +242,7 @@ async fn exercise_profile_and_bundle_queries(
         &[value],
     );
     assert!(
-        bundle::get_measurement_bundle_values_for_bundle_id(txn.as_mut(), active.bundle_id)
+        bundle::get_measurement_bundle_values_for_bundle_id(&mut *txn, active.bundle_id)
             .await?
             .is_empty()
     );
@@ -256,7 +255,7 @@ async fn exercise_profile_and_bundle_queries(
         );
     }
     assert!(
-        bundle::get_measurement_bundle_records(txn.as_mut())
+        bundle::get_measurement_bundle_records(&mut *txn)
             .await?
             .is_empty()
     );
@@ -294,7 +293,7 @@ async fn report_and_journal_queries_survive_added_columns(
          ALTER TABLE measurement_reports_values ADD COLUMN test_added_column text;
          ALTER TABLE measurement_journal ADD COLUMN test_added_column text;",
     )
-    .execute(migration.as_mut())
+    .execute(&mut *migration)
     .await?;
     migration.commit().await?;
 
@@ -456,16 +455,16 @@ async fn exercise_report_and_journal_queries(
     sqlx::query("UPDATE measurement_journal SET ts = $1 WHERE journal_id = $2")
         .bind(timestamp)
         .bind(older_journal.journal_id)
-        .execute(txn.as_mut())
+        .execute(&mut *txn)
         .await?;
     assert_record(
-        &machine::get_latest_journal_for_id(txn.as_mut(), machine_id)
+        &machine::get_latest_journal_for_id(&mut *txn, machine_id)
             .await?
             .expect("latest journal record"),
         &updated,
     );
     assert_record(
-        &super::journal::get_latest_journal_for_id(txn.as_mut(), machine_id)
+        &super::journal::get_latest_journal_for_id(&mut *txn, machine_id)
             .await?
             .expect("latest journal model"),
         &updated,
@@ -547,7 +546,7 @@ async fn candidate_machine_queries_survive_added_columns(
                 "SET LOCAL lock_timeout = '5s';
                  ALTER TABLE machine_topologies ADD COLUMN test_added_column text;",
             )
-            .execute(migration.as_mut())
+            .execute(&mut *migration)
             .await?;
             migration.commit().await?;
         }
@@ -580,7 +579,7 @@ async fn approval_queries_survive_added_columns(
          ALTER TABLE measurement_approved_machines ADD COLUMN test_added_column text;
          ALTER TABLE measurement_approved_profiles ADD COLUMN test_added_column text;",
     )
-    .execute(migration.as_mut())
+    .execute(&mut *migration)
     .await?;
     migration.commit().await?;
 
@@ -622,7 +621,7 @@ async fn exercise_approval_queries(
             &approved_machine,
         );
         assert_record(
-            &site::get_approved_machines(txn.as_mut()).await?,
+            &site::get_approved_machines(&mut *txn).await?,
             &[&approved_machine],
         );
         let removed_machine = if remove_by_approval_id {
@@ -636,7 +635,7 @@ async fn exercise_approval_queries(
                 .await?
         };
         assert_record(&removed_machine, &approved_machine);
-        assert!(site::get_approved_machines(txn.as_mut()).await?.is_empty());
+        assert!(site::get_approved_machines(&mut *txn).await?.is_empty());
 
         let approved_profile = site::insert_into_approved_profiles(
             &mut txn,
@@ -663,7 +662,7 @@ async fn exercise_approval_queries(
             &approved_profile,
         );
         assert_record(
-            &site::get_approved_profiles(txn.as_mut()).await?,
+            &site::get_approved_profiles(&mut *txn).await?,
             &[&approved_profile],
         );
         let removed_profile = if remove_by_approval_id {
@@ -676,7 +675,7 @@ async fn exercise_approval_queries(
             site::remove_from_approved_profiles_by_profile_id(&mut txn, profile.profile_id).await?
         };
         assert_record(&removed_profile, &approved_profile);
-        assert!(site::get_approved_profiles(txn.as_mut()).await?.is_empty());
+        assert!(site::get_approved_profiles(&mut *txn).await?.is_empty());
     }
     txn.rollback().await?;
     Ok(())
@@ -729,7 +728,7 @@ async fn site_import_preserves_records_across_added_columns(
                  ALTER TABLE measurement_bundles ADD COLUMN test_added_column text;
                  ALTER TABLE measurement_bundles_values ADD COLUMN test_added_column text;",
             )
-            .execute(migration.as_mut())
+            .execute(&mut *migration)
             .await?;
             migration.commit().await?;
         }

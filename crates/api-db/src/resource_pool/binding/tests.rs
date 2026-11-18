@@ -181,7 +181,7 @@ async fn caller_rollback_removes_bindings_written_before_a_conflict(
     let mut txn = pool.txn_begin().await?;
     let new = integrated("new", ResourcePoolValueDomain::IpAddress);
     let created = bind_or_verify(&mut txn, &new).await?;
-    assert_eq!(load(txn.as_mut(), &new.pool_name).await?, Some(created));
+    assert_eq!(load(&mut *txn, &new.pool_name).await?, Some(created));
     let conflicting = ResourcePoolSelection {
         authority_id: "different-authority".to_string(),
         ..existing
@@ -203,11 +203,11 @@ async fn concurrent_first_bindings_return_the_committed_identity(pool: PgPool) -
     let mut first_txn = pool.txn_begin().await?;
     let first = bind_or_verify(&mut first_txn, &requested).await?;
     let first_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
-        .fetch_one(first_txn.as_mut())
+        .fetch_one(&mut *first_txn)
         .await?;
     let mut second_txn = pool.txn_begin().await?;
     let second_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
-        .fetch_one(second_txn.as_mut())
+        .fetch_one(&mut *second_txn)
         .await?;
 
     let second_binding = async {
@@ -253,7 +253,7 @@ async fn migration_and_bootstrap_preserve_legacy_resources_and_snapshots(
          DROP TABLE resource_pool_allocations;
          DROP TABLE resource_pool_binding;",
     )
-    .execute(txn.as_mut())
+    .execute(&mut *txn)
     .await?;
     sqlx::raw_sql(
         r#"INSERT INTO resource_pool
@@ -273,26 +273,26 @@ async fn migration_and_bootstrap_preserve_legacy_resources_and_snapshots(
             ('legacy-allocated', '{"type":"ipv6","prefix":"2001:db8::/64"}'),
             ('legacy-snapshot-only', '{"type":"ipv6prefix","ranges":[]}');"#,
     )
-    .execute(txn.as_mut())
+    .execute(&mut *txn)
     .await?;
     let old_resources: Vec<Value> = sqlx::query_scalar(
         "SELECT to_jsonb(resource_pool) FROM resource_pool ORDER BY name, value",
     )
-    .fetch_all(txn.as_mut())
+    .fetch_all(&mut *txn)
     .await?;
     let old_snapshots: Vec<Value> = sqlx::query_scalar(
         "SELECT to_jsonb(resource_pool_def) FROM resource_pool_def ORDER BY name",
     )
-    .fetch_all(txn.as_mut())
+    .fetch_all(&mut *txn)
     .await?;
 
     sqlx::raw_sql(include_str!(
         "../../../migrations/20261007234129_resource_pool_binding.sql"
     ))
-    .execute(txn.as_mut())
+    .execute(&mut *txn)
     .await?;
-    assert!(all(txn.as_mut()).await?.is_empty());
-    let existing = existing_pool_domains(txn.as_mut()).await?;
+    assert!(all(&mut *txn).await?.is_empty());
+    let existing = existing_pool_domains(&mut *txn).await?;
     assert_eq!(
         existing,
         HashMap::from([
@@ -345,10 +345,10 @@ async fn mixed_legacy_resource_domains_fail_before_binding(pool: PgPool) -> eyre
            VALUES ('mixed', '1', 'integer', '{"state":"free"}'),
                   ('mixed', '192.0.2.1', 'ipv4', '{"state":"free"}')"#,
     )
-    .execute(txn.as_mut())
+    .execute(&mut *txn)
     .await?;
 
-    let error = existing_pool_domains(txn.as_mut())
+    let error = existing_pool_domains(&mut *txn)
         .await
         .expect_err("one logical pool cannot have two stored value domains");
     let BindingError::MixedValueDomains {
@@ -365,7 +365,7 @@ async fn mixed_legacy_resource_domains_fail_before_binding(pool: PgPool) -> eyre
             || (first == ResourcePoolValueDomain::IpAddress
                 && second == ResourcePoolValueDomain::Integer)
     );
-    assert!(all(txn.as_mut()).await?.is_empty());
+    assert!(all(&mut *txn).await?.is_empty());
     txn.rollback().await?;
     Ok(())
 }

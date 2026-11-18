@@ -454,7 +454,7 @@ mod tests {
                      VALUES ('occupancy', 'occupancy', $1)",
         )
         .bind(version)
-        .execute(txn.as_mut())
+        .execute(&mut *txn)
         .await?;
         let root: carbide_uuid::site_prefix::SitePrefixId = sqlx::query_scalar(
             "INSERT INTO site_prefixes
@@ -464,7 +464,7 @@ mod tests {
         )
         .bind(carbide_uuid::site_prefix::SitePrefixId::new())
         .bind(version)
-        .fetch_one(txn.as_mut())
+        .fetch_one(&mut *txn)
         .await?;
 
         for (vpc_id, name) in [(target_vpc_id, "target VPC"), (other_vpc_id, "other VPC")] {
@@ -475,7 +475,7 @@ mod tests {
             .bind(vpc_id)
             .bind(name)
             .bind(version)
-            .execute(txn.as_mut())
+            .execute(&mut *txn)
             .await?;
         }
 
@@ -492,7 +492,7 @@ mod tests {
             .bind(name)
             .bind(vpc_id)
             .bind(root)
-            .execute(txn.as_mut())
+            .execute(&mut *txn)
             .await?;
         }
 
@@ -557,7 +557,7 @@ mod tests {
             } else {
                 model::network_segment::NetworkSegmentType::HostInband
             })
-            .execute(txn.as_mut())
+            .execute(&mut *txn)
             .await?;
             let network_prefix: NetworkPrefix = sqlx::query_as(
                 r#"
@@ -577,14 +577,14 @@ mod tests {
             .bind(case.parent_id)
             .bind(case.parent_id.map(|_| parent))
             .bind(case.scope)
-            .fetch_one(txn.as_mut())
+            .fetch_one(&mut *txn)
             .await?;
             if case.occupies_target {
                 expected.push(network_prefix.id);
             }
         }
 
-        let occupancy = find_allocation_occupancy(txn.as_mut(), target_parent_id, parent).await?;
+        let occupancy = find_allocation_occupancy(&mut *txn, target_parent_id, parent).await?;
         let occupied =
             occupied_prefix_count(parent, 31, occupancy.iter().map(|prefix| prefix.prefix));
         let mut actual: Vec<NetworkPrefixId> = occupancy.iter().map(|prefix| prefix.id).collect();
@@ -609,13 +609,13 @@ mod tests {
         // its child first to preserve the exact-parent scope foreign key.
         sqlx::query("UPDATE network_prefixes SET overlap_vpc_id = NULL WHERE vpc_prefix_id = $1")
             .bind(target_parent_id)
-            .execute(txn.as_mut())
+            .execute(&mut *txn)
             .await?;
         sqlx::query("UPDATE network_vpc_prefixes SET overlap_vpc_id = NULL WHERE id = $1")
             .bind(target_parent_id)
-            .execute(txn.as_mut())
+            .execute(&mut *txn)
             .await?;
-        let occupancy = find_allocation_occupancy(txn.as_mut(), target_parent_id, parent).await?;
+        let occupancy = find_allocation_occupancy(&mut *txn, target_parent_id, parent).await?;
         assert_eq!(occupancy.len(), 5);
         let loaded = crate::vpc_prefix::get_by_id(
             &mut txn,

@@ -390,7 +390,7 @@ async fn integrated_release_waits_for_reallocation_and_removes_its_record(
     )
     .await?;
     let reallocation_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
-        .fetch_one(reallocation.as_mut())
+        .fetch_one(&mut *reallocation)
         .await?;
     let release = release(&inventory, &mut connection, 1, OwnerType::Machine, "owner");
     let commit_reallocation = async {

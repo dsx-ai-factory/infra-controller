@@ -136,7 +136,7 @@ async fn caller_transactions_preserve_history_and_pending_revisions(
     assert_eq!(lock_binding(&mut txn, binding.binding_id).await?, binding);
     insert(&mut txn, &pending).await?;
     assert_eq!(
-        load(txn.as_mut(), binding.binding_id, 1).await?,
+        load(&mut *txn, binding.binding_id, 1).await?,
         Some(pending.clone())
     );
     txn.rollback().await?;
@@ -160,7 +160,7 @@ async fn caller_transactions_preserve_history_and_pending_revisions(
     let mut txn = pool.txn_begin().await?;
     acknowledge(&mut txn, binding.binding_id, 1).await?;
     assert_eq!(
-        load(txn.as_mut(), binding.binding_id, 1).await?,
+        load(&mut *txn, binding.binding_id, 1).await?,
         Some(accepted.clone())
     );
     txn.rollback().await?;
@@ -205,7 +205,7 @@ async fn binding_lock_serializes_registration_and_allows_key_shares(
         binding
     );
     let first_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
-        .fetch_one(first_txn.as_mut())
+        .fetch_one(&mut *first_txn)
         .await?;
 
     // Foreign-key checks take this lock when an allocation references the binding.
@@ -215,7 +215,7 @@ async fn binding_lock_serializes_registration_and_allows_key_shares(
          WHERE binding_id = $1 FOR KEY SHARE NOWAIT",
     )
     .bind(binding.binding_id)
-    .fetch_one(key_share_txn.as_mut())
+    .fetch_one(&mut *key_share_txn)
     .await?;
     assert_eq!(referenced_id, binding.binding_id);
     key_share_txn.commit().await?;
@@ -267,7 +267,7 @@ async fn original_migration_preserves_pools_and_requires_true_singleton(
     sqlx::raw_sql(include_str!(
         "../../../migrations/20261021212048_resource_pool_registration.sql"
     ))
-    .execute(txn.as_mut())
+    .execute(&mut *txn)
     .await?;
     txn.commit().await?;
 

@@ -35,7 +35,7 @@ async fn ek_verification_queries_survive_added_columns(
         "SET LOCAL lock_timeout = '5s';
          ALTER TABLE ek_cert_verification_status ADD COLUMN test_added_column text;",
     )
-    .execute(migration.as_mut())
+    .execute(&mut *migration)
     .await?;
     migration.commit().await?;
 

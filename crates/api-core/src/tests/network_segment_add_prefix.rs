@@ -695,7 +695,7 @@ async fn competing_prefix_additions_serialize(pool: sqlx::PgPool) -> eyre::Resul
     let target = db::network_segment::find_by_name(&mut blocker, "concurrent").await?;
     db::tenant_prefix_overlap::lock_checks(&mut blocker).await?;
     let blocker_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
-        .fetch_one(blocker.as_mut())
+        .fetch_one(&mut *blocker)
         .await?;
     let first = forge::AddNetworkSegmentPrefixRequest {
         network_segment_id: Some(target.id),
@@ -764,7 +764,7 @@ async fn deletion_reads_prefixes_after_pending_addition(pool: sqlx::PgPool) -> e
     db::tenant_prefix_overlap::lock_checks(&mut addition).await?;
     let target = db::network_segment::find_by_name(&mut addition, "delete-race").await?;
     let blocker_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
-        .fetch_one(addition.as_mut())
+        .fetch_one(&mut *addition)
         .await?;
     let prefix = NewNetworkPrefix {
         prefix: "2001:db8:52::/64".parse()?,

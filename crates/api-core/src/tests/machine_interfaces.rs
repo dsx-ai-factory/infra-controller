@@ -225,7 +225,7 @@ async fn reconcile_admin_addresses_moves_dhcp_to_new_primary_and_is_idempotent(
     let reserved =
         sqlx::query("UPDATE network_segments SET allocation_strategy = 'reserved' WHERE id = $1")
             .bind(primary.segment_id)
-            .execute(txn.as_mut())
+            .execute(&mut *txn)
             .await?;
     assert_eq!(reserved.rows_affected(), 1);
     db::machine_interface::set_primary_interface(&primary.id, false, &mut txn).await?;
@@ -275,8 +275,8 @@ async fn reconcile_admin_addresses_moves_dhcp_to_new_primary_and_is_idempotent(
     txn.commit().await?;
 
     let mut txn = env.pool.txn_begin().await?;
-    let new_primary = db::machine_interface::find_one(txn.as_mut(), secondary.id).await?;
-    let old_primary = db::machine_interface::find_one(txn.as_mut(), primary.id).await?;
+    let new_primary = db::machine_interface::find_one(&mut *txn, secondary.id).await?;
+    let old_primary = db::machine_interface::find_one(&mut *txn, primary.id).await?;
     assert_eq!(new_primary.addresses, vec![active_address]);
     assert!(old_primary.addresses.is_empty());
     txn.commit().await?;
@@ -314,7 +314,7 @@ async fn reconcile_admin_addresses_requires_an_existing_address_on_reserved_segm
     let reserved =
         sqlx::query("UPDATE network_segments SET allocation_strategy = 'reserved' WHERE id = $1")
             .bind(primary.segment_id)
-            .execute(txn.as_mut())
+            .execute(&mut *txn)
             .await?;
     assert_eq!(reserved.rows_affected(), 1);
     assert!(
@@ -339,7 +339,7 @@ async fn reconcile_admin_addresses_requires_an_existing_address_on_reserved_segm
     txn.rollback().await?;
 
     let mut txn = env.pool.txn_begin().await?;
-    let persisted = db::machine_interface::find_one(txn.as_mut(), primary.id).await?;
+    let persisted = db::machine_interface::find_one(&mut *txn, primary.id).await?;
     assert!(persisted.addresses.is_empty());
     assert!(
         db::machine_interface_address::find_for_interface(&mut txn, primary.id)
@@ -357,7 +357,7 @@ async fn reconcile_admin_addresses_requires_an_existing_address_on_reserved_segm
     txn.commit().await?;
 
     let mut txn = env.pool.txn_begin().await?;
-    let persisted = db::machine_interface::find_one(txn.as_mut(), primary.id).await?;
+    let persisted = db::machine_interface::find_one(&mut *txn, primary.id).await?;
     assert_eq!(persisted.addresses, vec![*active_address]);
     let addresses = db::machine_interface_address::find_for_interface(&mut txn, primary.id).await?;
     let [address] = addresses.as_slice() else {
@@ -464,7 +464,7 @@ async fn reconcile_admin_addresses_locks_segments_only_for_a_repair(
         let mut gate = env.pool.txn_begin().await?;
         db::machine_interface::lock_all_admin_segments(&mut gate).await?;
         let gate_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
-            .fetch_one(gate.as_mut())
+            .fetch_one(&mut *gate)
             .await?;
 
         let mut txn = env.pool.txn_begin().await?;
@@ -665,7 +665,7 @@ async fn after_commit_reconcile_retries_once_a_transient_failure_clears(
     hold_every_admin_address_lock(&env, &mut address_gate).await?;
     let mut segment_gate = env.pool.txn_begin().await?;
     let segment_gate_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
-        .fetch_one(segment_gate.as_mut())
+        .fetch_one(&mut *segment_gate)
         .await?;
     db::machine_interface::lock_all_admin_segments(&mut segment_gate).await?;
 
@@ -686,7 +686,7 @@ async fn after_commit_reconcile_retries_once_a_transient_failure_clears(
     segment_gate.rollback().await?;
     let mut segment_gate = env.pool.txn_begin().await?;
     let segment_gate_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
-        .fetch_one(segment_gate.as_mut())
+        .fetch_one(&mut *segment_gate)
         .await?;
     tokio::select! {
         result = &mut reconcile => {
@@ -821,13 +821,13 @@ async fn apply_host_change(
             sqlx::query("UPDATE machine_interfaces SET domain_id = $1 WHERE id = $2")
                 .bind(env.domain)
                 .bind(dormant.id)
-                .execute(txn.as_mut())
+                .execute(&mut *txn)
                 .await?;
         }
         HostChange::PrimaryDomainCleared => {
             sqlx::query("UPDATE machine_interfaces SET domain_id = NULL WHERE id = $1")
                 .bind(primary.id)
-                .execute(txn.as_mut())
+                .execute(&mut *txn)
                 .await?;
         }
         HostChange::ClearPrimaryFlag => {
@@ -836,14 +836,14 @@ async fn apply_host_change(
         HostChange::PrimaryAddressesDeleted => {
             sqlx::query("DELETE FROM machine_interface_addresses WHERE interface_id = $1")
                 .bind(primary.id)
-                .execute(txn.as_mut())
+                .execute(&mut *txn)
                 .await?;
             sqlx::query(
                 "UPDATE machine_interfaces SET hostname = 'needs-reconciliation', domain_id = NULL
                  WHERE id = $1",
             )
             .bind(primary.id)
-            .execute(txn.as_mut())
+            .execute(&mut *txn)
             .await?;
         }
     }
@@ -2176,7 +2176,7 @@ async fn test_static_create_returns_address_already_in_use(
 
     // Existing interface is untouched.
     let mut txn = env.pool.txn_begin().await?;
-    let found = db::machine_interface::find_by_ip(txn.as_mut(), target_ip).await?;
+    let found = db::machine_interface::find_by_ip(&mut *txn, target_ip).await?;
     let found = found.expect("existing interface should still own the IP");
     assert_eq!(found.id, existing_interface.id);
     assert_eq!(found.mac_address, existing_mac);

@@ -2068,7 +2068,7 @@ pub(in crate::tests) async fn new_switch(
     // machine_interface back to the switch and annotate it `Bmc`, so that
     // `bmc_info` resolves via the interface link.
     let bmc_interfaces =
-        db::machine_interface::find_by_mac_address(txn.as_mut(), expected_switch.bmc_mac_address)
+        db::machine_interface::find_by_mac_address(&mut *txn, expected_switch.bmc_mac_address)
             .await
             .map_err(|e| eyre::eyre!("failed to find BMC machine interface: {:?}", e))?;
     if let Some(interface) = bmc_interfaces.first() {

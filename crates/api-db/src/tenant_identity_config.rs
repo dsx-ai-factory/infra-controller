@@ -688,13 +688,13 @@ ecbC7Qcisdw2/9l8bk/zfF9gvu4kh3hXZzMWgk+vj1e8KSX+NYswYiacQA==
         );
         sqlx::query("INSERT INTO machines (id, dpf) VALUES ($1, '{}'::jsonb)")
             .bind(machine_id)
-            .execute(txn.as_mut())
+            .execute(&mut *txn)
             .await
             .expect("create instance machine");
         sqlx::query("INSERT INTO instances (machine_id, tenant_org) VALUES ($1, $2)")
             .bind(machine_id)
             .bind(&org_id)
-            .execute(txn.as_mut())
+            .execute(&mut *txn)
             .await
             .expect("create tenant instance");
 
@@ -747,7 +747,7 @@ ecbC7Qcisdw2/9l8bk/zfF9gvu4kh3hXZzMWgk+vj1e8KSX+NYswYiacQA==
                 .bind(machine_id)
                 .bind(case.instance_org)
                 .bind(case.deleted.then(Utc::now))
-                .execute(txn.as_mut())
+                .execute(&mut *txn)
                 .await
                 .expect("set instance lookup conditions");
             sqlx::query(
@@ -755,7 +755,7 @@ ecbC7Qcisdw2/9l8bk/zfF9gvu4kh3hXZzMWgk+vj1e8KSX+NYswYiacQA==
             )
             .bind(&org_id)
             .bind(case.enabled)
-            .execute(txn.as_mut())
+            .execute(&mut *txn)
             .await
             .expect("set identity config lookup conditions");
 
@@ -803,7 +803,7 @@ ecbC7Qcisdw2/9l8bk/zfF9gvu4kh3hXZzMWgk+vj1e8KSX+NYswYiacQA==
         .await
         .expect("rotate signing key");
         let blocker_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
-            .fetch_one(rotation.as_mut())
+            .fetch_one(&mut *rotation)
             .await
             .expect("get rotation backend");
         let config = IdentityConfig {
@@ -882,7 +882,7 @@ ecbC7Qcisdw2/9l8bk/zfF9gvu4kh3hXZzMWgk+vj1e8KSX+NYswYiacQA==
             )
             .bind(org_id.as_str())
             .bind(now - ChronoDuration::seconds(60))
-            .execute(setup.as_mut())
+            .execute(&mut *setup)
             .await
             .expect("expire the first signing slot");
             setup.commit().await.expect("commit setup");
@@ -934,7 +934,7 @@ ecbC7Qcisdw2/9l8bk/zfF9gvu4kh3hXZzMWgk+vj1e8KSX+NYswYiacQA==
                 CollectionTime::AtExpiry => expires_at,
             };
             let blocker_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
-                .fetch_one(rotation.as_mut())
+                .fetch_one(&mut *rotation)
                 .await
                 .expect("get rotation backend");
             let collect = async {
@@ -1007,7 +1007,7 @@ ecbC7Qcisdw2/9l8bk/zfF9gvu4kh3hXZzMWgk+vj1e8KSX+NYswYiacQA==
         .await
         .expect("create first identity config");
         let blocker_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
-            .fetch_one(first_txn.as_mut())
+            .fetch_one(&mut *first_txn)
             .await
             .expect("get first creation backend");
         let competing_config = IdentityConfig {
@@ -1286,7 +1286,7 @@ ecbC7Qcisdw2/9l8bk/zfF9gvu4kh3hXZzMWgk+vj1e8KSX+NYswYiacQA==
                WHERE organization_id = $1"#,
         )
         .bind(org_id.as_str())
-        .execute(txn.as_mut())
+        .execute(&mut *txn)
         .await
         .unwrap();
 
@@ -1333,7 +1333,7 @@ ecbC7Qcisdw2/9l8bk/zfF9gvu4kh3hXZzMWgk+vj1e8KSX+NYswYiacQA==
                WHERE organization_id = $1"#,
         )
         .bind(org_id.as_str())
-        .execute(txn.as_mut())
+        .execute(&mut *txn)
         .await
         .unwrap();
 

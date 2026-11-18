@@ -418,7 +418,7 @@ mod tests {
         assert_eq!(addresses[0].allocation_type, AllocationType::Static);
         let mut probe = pool.txn_begin().await?;
         sqlx::query("SET LOCAL lock_timeout = '1s'")
-            .execute(probe.as_mut())
+            .execute(&mut *probe)
             .await?;
         db::machine_interface::lock_network_segments_exclusive(
             &mut probe,
@@ -430,12 +430,12 @@ mod tests {
 
         let mut assigning = pool.txn_begin().await?;
         let assigning_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
-            .fetch_one(assigning.as_mut())
+            .fetch_one(&mut *assigning)
             .await?;
         db::machine_interface::lock_for_address_assignment(&mut assigning, interface.id).await?;
         let mut outer_txn = pool.txn_begin().await?;
         let applying_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
-            .fetch_one(outer_txn.as_mut())
+            .fetch_one(&mut *outer_txn)
             .await?;
         let applying_interface = expected_interface.clone();
         let mut applying = tokio::task::JoinSet::new();
@@ -479,7 +479,7 @@ mod tests {
         let mut probe = pool.txn_begin().await?;
         sqlx::query("SELECT id FROM machine_interfaces WHERE id = $1 FOR UPDATE NOWAIT")
             .bind(interface.id)
-            .fetch_one(probe.as_mut())
+            .fetch_one(&mut *probe)
             .await?;
         let addresses =
             db::machine_interface_address::find_for_interface(&mut probe, interface.id).await?;
@@ -548,7 +548,7 @@ mod tests {
             "INSERT INTO network_segments (name, version)
              VALUES ('expected-update-skip', 'V1-T0') RETURNING id",
         )
-        .fetch_one(setup.as_mut())
+        .fetch_one(&mut *setup)
         .await?;
         let mac_address: MacAddress = "02:00:00:00:53:99".parse()?;
         let interface_id: MachineInterfaceId = sqlx::query_scalar(
@@ -557,7 +557,7 @@ mod tests {
         )
         .bind(segment_id)
         .bind(mac_address)
-        .fetch_one(setup.as_mut())
+        .fetch_one(&mut *setup)
         .await?;
         let address = "2001:db8::5398".parse()?;
         db::machine_interface_address::insert(
@@ -580,7 +580,7 @@ mod tests {
         let mut competing_txn = pool.txn_begin().await?;
         sqlx::query("SELECT id FROM machine_interfaces WHERE id = $1 FOR UPDATE NOWAIT")
             .bind(interface_id)
-            .execute(competing_txn.as_mut())
+            .execute(&mut *competing_txn)
             .await?;
         let addresses =
             db::machine_interface_address::find_for_interface(&mut competing_txn, interface_id)
@@ -604,7 +604,7 @@ mod tests {
             "INSERT INTO network_segments (name, version)
              VALUES ('expected-update-race', 'V1-T0') RETURNING id",
         )
-        .fetch_one(setup.as_mut())
+        .fetch_one(&mut *setup)
         .await?;
         let mac_address: MacAddress = "02:00:00:00:53:98".parse()?;
         let interface_id: MachineInterfaceId = sqlx::query_scalar(
@@ -613,7 +613,7 @@ mod tests {
         )
         .bind(segment_id)
         .bind(mac_address)
-        .fetch_one(setup.as_mut())
+        .fetch_one(&mut *setup)
         .await?;
         setup.commit().await?;
 
@@ -621,7 +621,7 @@ mod tests {
         let mut holder = pool.txn_begin().await?;
         sqlx::query("SELECT id FROM machine_interfaces WHERE id = $1 FOR UPDATE")
             .bind(interface_id)
-            .execute(holder.as_mut())
+            .execute(&mut *holder)
             .await?;
         db::machine_interface_address::insert(
             &mut holder,
@@ -631,11 +631,11 @@ mod tests {
         )
         .await?;
         let holder_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
-            .fetch_one(holder.as_mut())
+            .fetch_one(&mut *holder)
             .await?;
         let mut waiter = pool.txn_begin().await?;
         let waiter_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
-            .fetch_one(waiter.as_mut())
+            .fetch_one(&mut *waiter)
             .await?;
 
         // The expected-data update starts with an addressless snapshot. Its

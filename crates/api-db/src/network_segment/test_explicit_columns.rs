@@ -32,12 +32,12 @@ async fn network_segment_queries_survive_added_columns(
     let mut txn = crate::Transaction::begin_inner(&mut connection).await?;
     let domain_id: DomainId =
         sqlx::query_scalar("INSERT INTO domains (name) VALUES ('projection.example') RETURNING id")
-            .fetch_one(txn.as_mut())
+            .fetch_one(&mut *txn)
             .await?;
     let vpc_id: VpcId = sqlx::query_scalar(
         "INSERT INTO vpcs (name, version) VALUES ('projection-vpc', 'V1-T0') RETURNING id",
     )
-    .fetch_one(txn.as_mut())
+    .fetch_one(&mut *txn)
     .await?;
     let id = NetworkSegmentId::new();
     sqlx::query(
@@ -55,7 +55,7 @@ async fn network_segment_queries_survive_added_columns(
     .bind(id)
     .bind(domain_id)
     .bind(vpc_id)
-    .execute(txn.as_mut())
+    .execute(&mut *txn)
     .await?;
     let prefix_id = NetworkPrefixId::new();
     sqlx::query(
@@ -64,7 +64,7 @@ async fn network_segment_queries_survive_added_columns(
     )
     .bind(prefix_id)
     .bind(id)
-    .execute(txn.as_mut())
+    .execute(&mut *txn)
     .await?;
     let history = crate::state_history::persist(
         &mut txn,
@@ -86,7 +86,7 @@ async fn network_segment_queries_survive_added_columns(
                 "SET LOCAL lock_timeout = '5s';
                  ALTER TABLE network_segments ADD COLUMN test_added_column text;",
             )
-            .execute(migration.as_mut())
+            .execute(&mut *migration)
             .await?;
             migration.commit().await?;
         }
@@ -174,12 +174,12 @@ async fn network_segment_reads_reject_invalid_allocation_strategy(pool: PgPool) 
          VALUES ($1, 'invalid-allocation-strategy', 'V1-T0', 'unsupported')",
     )
     .bind(id)
-    .execute(txn.as_mut())
+    .execute(&mut *txn)
     .await
     .expect("store an invalid allocation strategy");
 
     let error = find_by(
-        txn.as_mut(),
+        &mut *txn,
         ObjectColumnFilter::One(IdColumn, &id),
         NetworkSegmentSearchConfig::default(),
     )

@@ -103,7 +103,7 @@ pub async fn gate_before_credential_change(
         .await?;
     }
     let rows = db::bmc_suppression::find_many(
-        txn.as_mut(),
+        &mut *txn,
         macs,
         BmcSuppressionSubsystem::SiteExplorer,
         source,

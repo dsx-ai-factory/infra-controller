@@ -2507,7 +2507,7 @@ mod tests {
         );
 
         let persisted: i64 = sqlx::query_scalar("SELECT count(*) FROM instances")
-            .fetch_one(txn.as_mut())
+            .fetch_one(&mut *txn)
             .await
             .unwrap();
         assert_eq!(
@@ -2567,14 +2567,14 @@ mod tests {
         // reference-free instance derives its OS from the inline script
         // column, and the soft-deleted reference keeps the id-only variant
         // rather than decoding (or erroring on) the deleted row's contents.
-        let snapshot = find_by_id(txn.as_mut(), no_os_ref).await.unwrap().unwrap();
+        let snapshot = find_by_id(&mut *txn, no_os_ref).await.unwrap().unwrap();
         assert_eq!(
             snapshot.config.os.variant,
             OperatingSystemVariant::Ipxe(InlineIpxe {
                 ipxe_script: INSTANCE_IPXE_SCRIPT.to_string()
             })
         );
-        let snapshot = find_by_id(txn.as_mut(), deleted_os_ref)
+        let snapshot = find_by_id(&mut *txn, deleted_os_ref)
             .await
             .unwrap()
             .unwrap();
@@ -2585,7 +2585,7 @@ mod tests {
 
         // find() projects the OS column the same way; both instances decode.
         let ids = [no_os_ref, deleted_os_ref];
-        let snapshots = find(txn.as_mut(), ObjectColumnFilter::List(IdColumn, &ids))
+        let snapshots = find(&mut *txn, ObjectColumnFilter::List(IdColumn, &ids))
             .await
             .unwrap();
         assert_eq!(snapshots.len(), 2);
@@ -5134,8 +5134,8 @@ mod count_ids_tests {
         let mut txn = pool.txn_begin().await.unwrap();
         let filter = seed_instances(&mut txn, "count-ids-tenant", "count-ids-type", N).await;
 
-        let ids = find_ids(txn.as_mut(), filter.clone()).await.unwrap();
-        let count = count_ids(txn.as_mut(), filter).await.unwrap();
+        let ids = find_ids(&mut *txn, filter.clone()).await.unwrap();
+        let count = count_ids(&mut *txn, filter).await.unwrap();
 
         // find_ids materialized N ids; count_ids returned the scalar tally.
         assert_eq!(ids.len(), N, "find_ids should materialize {N} ids");
@@ -5159,7 +5159,7 @@ mod count_ids_tests {
         let _ = seed_instances(&mut txn, "tenant-a", "type-b", 2).await;
         let _ = seed_instances(&mut txn, "tenant-b", "type-a", 2).await;
 
-        let count = count_ids(txn.as_mut(), filter).await.unwrap();
+        let count = count_ids(&mut *txn, filter).await.unwrap();
         assert_eq!(count, 3, "only tenant-a/type-a instances are counted");
     }
 }

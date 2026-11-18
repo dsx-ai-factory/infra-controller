@@ -983,7 +983,7 @@ async fn test_time_sync_reset_skipped_for_ingested_host(
         "UPDATE explored_endpoints SET waiting_for_explorer_refresh = false WHERE address = $1",
     )
     .bind(host_bmc_ip)
-    .execute(txn.as_mut())
+    .execute(&mut *txn)
     .await?;
     txn.commit().await?;
 

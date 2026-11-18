@@ -71,7 +71,7 @@ pub async fn import_vault_secrets(
     // Take it before the table lock so an old importer can finish its writes,
     // then recheck its marker before this batch changes anything.
     db::secrets::lock_path_advisory(&mut txn, VAULT_IMPORT_MARKER_PATH).await?;
-    if db::secrets::exists(txn.as_mut(), VAULT_IMPORT_MARKER_PATH).await? {
+    if db::secrets::exists(&mut *txn, VAULT_IMPORT_MARKER_PATH).await? {
         txn.rollback().await?;
         return Ok(ImportResult::AlreadyComplete);
     }
@@ -85,7 +85,7 @@ pub async fn import_vault_secrets(
                 .iter()
                 .map(|(path, _)| path.as_str())
                 .collect::<Vec<_>>();
-            db::secrets::find_existing_paths(txn.as_mut(), &paths).await?
+            db::secrets::find_existing_paths(&mut *txn, &paths).await?
         }
         ImportApproach::All => Default::default(),
     };

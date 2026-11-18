@@ -1512,7 +1512,7 @@ mod tests {
             "SET LOCAL lock_timeout = '5s';
              ALTER TABLE instance_addresses ADD COLUMN test_added_column text;",
         )
-        .execute(migration.as_mut())
+        .execute(&mut *migration)
         .await?;
         migration.commit().await?;
 

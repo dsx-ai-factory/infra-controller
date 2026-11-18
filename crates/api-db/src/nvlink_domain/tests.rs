@@ -199,7 +199,7 @@ async fn concurrent_claims_are_atomic(pool: sqlx::PgPool) {
     create(&mut first, &domain).await.unwrap();
     let mut second = pool.txn_begin().await.unwrap();
     let pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
-        .fetch_one(second.as_mut())
+        .fetch_one(&mut *second)
         .await
         .unwrap();
     let competing = NvLinkDomain {
@@ -256,17 +256,17 @@ async fn migration_preserves_existing_inventory(pool: sqlx::PgPool) {
     sqlx::raw_sql(include_str!(
         "../../migrations/20261014011133_expected_nvlink_domains.sql"
     ))
-    .execute(txn.as_mut())
+    .execute(&mut *txn)
     .await
     .unwrap();
     sqlx::raw_sql("INSERT INTO expected_nvlink_domains (id, rack_group_id) VALUES ('12345678-1234-5678-90ab-cdef01234567', 'group');
         INSERT INTO expected_nvlink_domain_members (domain_id, bmc_mac_address) VALUES ('12345678-1234-5678-90ab-cdef01234567', '00:11:22:33:44:55');")
-        .execute(txn.as_mut()).await.unwrap();
+        .execute(&mut *txn).await.unwrap();
     let mut attempt = crate::Transaction::begin_inner(&mut txn).await.unwrap();
     let error = sqlx::raw_sql(include_str!(
         "../../migrations/20261111000712_nvlink_domain_positions.sql"
     ))
-    .execute(attempt.as_mut())
+    .execute(&mut *attempt)
     .await
     .unwrap_err();
     assert_eq!(
@@ -276,18 +276,18 @@ async fn migration_preserves_existing_inventory(pool: sqlx::PgPool) {
     attempt.rollback().await.unwrap();
     let retained: String =
         sqlx::query_scalar("SELECT bmc_mac_address::text FROM expected_nvlink_domain_members")
-            .fetch_one(txn.as_mut())
+            .fetch_one(&mut *txn)
             .await
             .unwrap();
     assert_eq!(retained, "00:11:22:33:44:55");
     sqlx::query("DELETE FROM expected_nvlink_domains")
-        .execute(txn.as_mut())
+        .execute(&mut *txn)
         .await
         .unwrap();
     sqlx::raw_sql(include_str!(
         "../../migrations/20261111000712_nvlink_domain_positions.sql"
     ))
-    .execute(txn.as_mut())
+    .execute(&mut *txn)
     .await
     .unwrap();
     create(&mut txn, &domain).await.unwrap();

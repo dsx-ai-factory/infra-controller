@@ -1396,14 +1396,14 @@ mod tests {
         let wrote_nothing: bool = sqlx::query_scalar(
             "SELECT backend_xid IS NULL FROM pg_stat_activity WHERE pid = pg_backend_pid()",
         )
-        .fetch_one(txn.as_mut())
+        .fetch_one(&mut *txn)
         .await
         .unwrap();
         assert!(wrote_nothing, "preview must not write or lock a row");
         let sibling: String = sqlx::query_scalar(
             "SELECT hostname FROM machine_interfaces WHERE mac_address = '02:00:00:00:00:99'::macaddr",
         )
-        .fetch_one(txn.as_mut())
+        .fetch_one(&mut *txn)
         .await
         .unwrap();
         assert_eq!(sibling, "sn-test-123");

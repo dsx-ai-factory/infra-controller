@@ -336,7 +336,7 @@ async fn test_vlan_reallocate(db_pool: sqlx::PgPool) -> Result<(), eyre::Report>
     let mut txn = db_pool.txn_begin().await?;
     sqlx::query("DELETE FROM resource_pool WHERE name = $1")
         .bind(VLANID)
-        .execute(txn.as_mut())
+        .execute(&mut *txn)
         .await?;
     txn.commit().await?;
 
@@ -361,10 +361,10 @@ async fn test_vlan_reallocate(db_pool: sqlx::PgPool) -> Result<(), eyre::Report>
     let mut txn = db_pool.txn_begin().await?;
     let vni: i32 = sqlx::query_scalar("SELECT vni_id FROM network_segments WHERE id = $1")
         .bind(segment.id)
-        .fetch_one(txn.as_mut())
+        .fetch_one(&mut *txn)
         .await?;
     assert_eq!(
-        db::resource_pool::stats(txn.as_mut(), vlan_pool.name()).await?,
+        db::resource_pool::stats(&mut *txn, vlan_pool.name()).await?,
         ResourcePoolStats {
             used: 1,
             free: 0,
@@ -395,14 +395,14 @@ async fn test_vlan_reallocate(db_pool: sqlx::PgPool) -> Result<(), eyre::Report>
 
     // Value is free
     let mut txn = db_pool.txn_begin().await?;
-    let vni_entry = db::resource_pool::find_value(txn.as_mut(), &vni.to_string())
+    let vni_entry = db::resource_pool::find_value(&mut *txn, &vni.to_string())
         .await?
         .into_iter()
         .find(|entry| entry.pool_name == env.common_pools.ethernet.pool_vni.name())
         .expect("segment VNI must remain in its pool");
     assert_eq!(vni_entry.state.0, ResourcePoolEntryState::Free);
     assert_eq!(
-        db::resource_pool::stats(txn.as_mut(), vlan_pool.name()).await?,
+        db::resource_pool::stats(&mut *txn, vlan_pool.name()).await?,
         ResourcePoolStats {
             used: 0,
             free: 1,
@@ -428,7 +428,7 @@ async fn test_vlan_reallocate(db_pool: sqlx::PgPool) -> Result<(), eyre::Report>
     // Value allocated again
     let mut txn = db_pool.txn_begin().await?;
     assert_eq!(
-        db::resource_pool::stats(txn.as_mut(), vlan_pool.name()).await?,
+        db::resource_pool::stats(&mut *txn, vlan_pool.name()).await?,
         ResourcePoolStats {
             used: 1,
             free: 0,
@@ -686,7 +686,7 @@ async fn test_static_assignment_initialization_preserves_lookup_failure(
 
     // The decode failure must leave this transaction usable and unchanged.
     let pending: serde_json::Value = sqlx::query_scalar(snapshot_query)
-        .fetch_one(txn.as_mut())
+        .fetch_one(txn.as_pgconn())
         .await?;
     assert_eq!(pending, original);
     txn.commit().await?;
@@ -825,7 +825,7 @@ async fn network_segment_allocation_failures_use_api_instrumentation(
         let mut txn = env.pool.txn_begin().await?;
         sqlx::query("DELETE FROM resource_pool WHERE name = $1")
             .bind(pool_name)
-            .execute(txn.as_mut())
+            .execute(&mut *txn)
             .await?;
         db::resource_pool::populate(&source_pool, &mut txn, vec![1], true).await?;
         db::resource_pool::allocate(&source_pool, &mut txn, owner_type, owner_id, None).await?;
@@ -1990,7 +1990,7 @@ async fn test_update_svi_ip_post_instance_allocation(
     // must use 192.0.4.3.
     sqlx::query(query)
         .bind(segments[0].prefixes[0].id)
-        .execute(txn.as_mut())
+        .execute(&mut *txn)
         .await
         .unwrap();
 

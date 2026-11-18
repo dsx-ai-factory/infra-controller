@@ -47,7 +47,7 @@ async fn loopback_queries_survive_added_columns(
         "SET LOCAL lock_timeout = '5s';
          ALTER TABLE vpc_dpu_loopbacks ADD COLUMN test_added_column text;",
     )
-    .execute(migration.as_mut())
+    .execute(&mut *migration)
     .await?;
     migration.commit().await?;
 
@@ -120,7 +120,7 @@ async fn exercise_loopback_queries(
         "fm100ds7blqjsadm2uuh3qqbf1h7k8pmf47um6v9uckrg7l03po8mhqgvng".parse()?;
     sqlx::query("INSERT INTO machines (id, dpf) VALUES ($1, '{}')")
         .bind(dpu_id)
-        .execute(txn.as_mut())
+        .execute(&mut *txn)
         .await?;
     let admin_vpc_id: VpcId = "28dc4893-c081-4efc-9a63-a82e62ccbe12".parse()?;
     let selected_vpc_id: VpcId = "a2dbd9a4-a0bf-40a3-9329-239d5416c313".parse()?;
@@ -135,7 +135,7 @@ async fn exercise_loopback_queries(
             .bind(vpc_id)
             .bind(name)
             .bind(ConfigVersion::initial())
-            .execute(txn.as_mut())
+            .execute(&mut *txn)
             .await?;
         let loopback_ip = get_or_allocate_loopback_ip_for_vpc(
             &common_pools,
@@ -153,7 +153,7 @@ async fn exercise_loopback_queries(
     )
     .bind(admin_vpc_id)
     .bind(ConfigVersion::initial())
-    .execute(txn.as_mut())
+    .execute(&mut *txn)
     .await?;
     assert_loopback_allocations(
         &mut txn,
@@ -170,7 +170,7 @@ async fn exercise_loopback_queries(
     );
     sqlx::query("INSERT INTO machines (id, dpf) VALUES ($1, '{}')")
         .bind(host_id)
-        .execute(txn.as_mut())
+        .execute(&mut *txn)
         .await?;
     let instance_id = InstanceId::new();
     sqlx::query(
@@ -179,7 +179,7 @@ async fn exercise_loopback_queries(
     )
     .bind(instance_id)
     .bind(host_id)
-    .execute(txn.as_mut())
+    .execute(&mut *txn)
     .await?;
     crate::instance::find_by_id_for_update(&mut txn, instance_id)
         .await?

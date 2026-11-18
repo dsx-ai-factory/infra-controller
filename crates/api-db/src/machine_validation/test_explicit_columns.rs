@@ -47,7 +47,7 @@ async fn validation_run_queries_survive_added_columns(
         "SET LOCAL lock_timeout = '5s';
          ALTER TABLE machine_validation ADD COLUMN test_added_column text;",
     )
-    .execute(migration.as_mut())
+    .execute(&mut *migration)
     .await?;
     migration.commit().await?;
 
@@ -243,7 +243,7 @@ async fn external_config_queries_survive_added_columns(
         "SET LOCAL lock_timeout = '5s';
          ALTER TABLE machine_validation_external_config ADD COLUMN test_added_column text;",
     )
-    .execute(migration.as_mut())
+    .execute(&mut *migration)
     .await?;
     migration.commit().await?;
 
@@ -302,7 +302,7 @@ async fn validation_execution_queries_survive_added_columns(
          ALTER TABLE machine_validation_attempt_logs ADD COLUMN test_added_column text;
          ALTER TABLE machine_validation_results ADD COLUMN test_added_column text;",
     )
-    .execute(migration.as_mut())
+    .execute(&mut *migration)
     .await?;
     migration.commit().await?;
 

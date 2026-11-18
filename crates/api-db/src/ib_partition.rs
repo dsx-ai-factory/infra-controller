@@ -1048,7 +1048,7 @@ mod tests {
         // The migration to `status.pkey` cleared this column on older rows.
         sqlx::query("UPDATE ib_partitions SET pkey = NULL WHERE id = $1")
             .bind(partition.id)
-            .execute(txn.as_mut())
+            .execute(&mut *txn)
             .await
             .unwrap();
         let renamed_metadata = Metadata {
@@ -1180,7 +1180,7 @@ mod tests {
                                 "DELETE FROM resource_pool WHERE name = $1 AND value = '42'",
                             )
                             .bind(pkey_pool.name())
-                            .execute(txn.as_mut())
+                            .execute(&mut *txn)
                             .await
                             .unwrap();
                         }
@@ -1238,7 +1238,7 @@ mod tests {
             "ALTER TABLE resource_pool ADD CONSTRAINT reject_pkey_release \
              CHECK (allocated IS NOT NULL) NOT VALID",
         )
-        .execute(txn.as_mut())
+        .execute(&mut *txn)
         .await
         .unwrap();
         txn.commit().await.unwrap();
@@ -1274,7 +1274,7 @@ mod tests {
             }))
             .bind(pkey_pool.name())
             .bind(u16::from(pkey).to_string())
-            .execute(txn.as_mut())
+            .execute(&mut *txn)
             .await
             .unwrap();
         txn.commit().await.unwrap();

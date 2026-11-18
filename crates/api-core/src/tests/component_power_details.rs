@@ -637,7 +637,7 @@ async fn credentials_finishing_after_deadline_do_not_start_more_work(
     sqlx::query("UPDATE switches SET rack_id = $1 WHERE id = $2")
         .bind(rack_id)
         .bind(switch.id)
-        .execute(txn.as_mut())
+        .execute(&mut *txn)
         .await?;
     txn.commit().await?;
     let bmc_mac_address = switch.bmc_mac_address.expect("discovered switch BMC");
@@ -942,10 +942,10 @@ async fn power_policy_uses_the_machine_snapshot_during_concurrent_updates(
     // Snapshot setup and identity reads precede this blocked policy read.
     let mut writer = pool.txn_begin().await?;
     sqlx::query("LOCK TABLE power_options IN ACCESS EXCLUSIVE MODE")
-        .execute(writer.as_mut())
+        .execute(&mut *writer)
         .await?;
     let writer_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
-        .fetch_one(writer.as_mut())
+        .fetch_one(&mut *writer)
         .await?;
     let mut request = Box::pin(api.get_component_power_details(host_request(&[host])));
     let blocked_pid = tokio::select! {
@@ -1174,11 +1174,9 @@ async fn blocked_snapshots_release_pool_capacity(pool: sqlx::PgPool) -> TestResu
             ),
         };
         let mut blocker = pool.txn_begin().await?;
-        sqlx::query(lock_statement)
-            .execute(blocker.as_mut())
-            .await?;
+        sqlx::query(lock_statement).execute(&mut *blocker).await?;
         let blocker_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
-            .fetch_one(blocker.as_mut())
+            .fetch_one(&mut *blocker)
             .await?;
         let mut request = Box::pin(api.get_component_power_details(host_request(&[host])));
         let blocked_pid = tokio::select! {
@@ -1925,7 +1923,7 @@ async fn rms_switch_and_shelf_reads_use_their_roles_without_host_policy(
     )
     .bind("power-switch-nvos.example.test")
     .bind(nvos_mac)
-    .execute(txn.as_mut())
+    .execute(&mut *txn)
     .await?;
     db::expected_power_shelf::create(
         &mut txn,

@@ -584,7 +584,7 @@ pub(in crate::tests) mod tests {
              VALUES ('historical-definition', '', $1, 4)",
         )
         .bind(sqlx::types::Json(&candidate.components))
-        .execute(txn.as_mut())
+        .execute(&mut *txn)
         .await?;
         db::sku::create(&mut txn, &candidate).await?;
         txn.commit().await?;
@@ -2575,7 +2575,7 @@ pub(in crate::tests) mod tests {
         )
         .await?;
         let metadata_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
-            .fetch_one(metadata_txn.as_mut())
+            .fetch_one(&mut *metadata_txn)
             .await?;
 
         let mut replacement =
@@ -3026,10 +3026,10 @@ pub(in crate::tests) mod tests {
 
         let mut txn = db::Transaction::begin_inner(connection.as_mut()).await?;
         let metadata_updated: chrono::DateTime<chrono::Utc> = sqlx::query_scalar("SELECT NOW()")
-            .fetch_one(txn.as_mut())
+            .fetch_one(txn.as_pgconn())
             .await?;
         db::sku::update_metadata(
-            txn.as_mut(),
+            txn.as_pgconn(),
             original_sku.id.clone(),
             Some("updated description".to_string()),
             None,
@@ -3048,9 +3048,9 @@ pub(in crate::tests) mod tests {
         replace_req.description = "replaced description".to_string();
         let mut txn = db::Transaction::begin_inner(connection.as_mut()).await?;
         let replacement_updated: chrono::DateTime<chrono::Utc> = sqlx::query_scalar("SELECT NOW()")
-            .fetch_one(txn.as_mut())
+            .fetch_one(txn.as_pgconn())
             .await?;
-        let replaced_sku = db::sku::replace(txn.as_mut(), &replace_req).await?;
+        let replaced_sku = db::sku::replace(txn.as_pgconn(), &replace_req).await?;
         txn.commit().await?;
         assert_eq!(replaced_sku.description, "replaced description");
         assert_eq!(replaced_sku.created, fetched.created);

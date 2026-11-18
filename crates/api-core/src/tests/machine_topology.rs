@@ -53,7 +53,7 @@ async fn test_topology_update_on_machineid_update(pool: sqlx::PgPool) {
     sqlx::query(query)
         .bind(host.id.to_string())
         .bind("fm100hsag07peffp850l14kvmhrqjf9h6jslilfahaknhvb6sq786c0g3jg")
-        .execute(txn.as_mut())
+        .execute(&mut *txn)
         .await
         .expect("update failed");
     txn.commit().await.unwrap();

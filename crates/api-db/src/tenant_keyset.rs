@@ -243,7 +243,7 @@ mod tests {
             "SET LOCAL lock_timeout = '5s';
              ALTER TABLE tenant_keysets ADD COLUMN test_added_column text;",
         )
-        .execute(migration.as_mut())
+        .execute(&mut *migration)
         .await?;
         migration.commit().await?;
 
@@ -295,7 +295,7 @@ mod tests {
         for (operation, keysets) in [
             (
                 "find_by_ids",
-                find_by_ids(txn.as_mut(), vec![expected.keyset_identifier.clone()], true).await?,
+                find_by_ids(&mut *txn, vec![expected.keyset_identifier.clone()], true).await?,
             ),
             (
                 "find all for tenant",

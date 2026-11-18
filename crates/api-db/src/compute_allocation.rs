@@ -357,7 +357,7 @@ mod tests {
             "SET LOCAL lock_timeout = '5s';
              ALTER TABLE compute_allocations ADD COLUMN test_added_column text;",
         )
-        .execute(migration.as_mut())
+        .execute(&mut *migration)
         .await?;
         migration.commit().await?;
 

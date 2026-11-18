@@ -605,7 +605,7 @@ async fn test_dpu_interface_predictions_apply_when_dhcp_follows_multi_dpu_machin
     for (dpu_index, dpu) in mock_host.dpus.iter().enumerate() {
         let dpu_index = dpu_index.try_into().expect("DPU index should fit into u8");
         let interfaces =
-            db::machine_interface::find_by_mac_address(txn.as_mut(), dpu.oob_mac_address).await?;
+            db::machine_interface::find_by_mac_address(&mut *txn, dpu.oob_mac_address).await?;
         assert_eq!(interfaces.len(), 1);
         assert_eq!(
             interfaces[0].machine_id,
@@ -2602,7 +2602,7 @@ async fn test_machine_creator_rejects_partial_dpu_machine_set(
     let mut txn = env.pool.txn_begin().await?;
     assert!(
         db::machine::find_one(
-            txn.as_mut(),
+            &mut *txn,
             &fixture.dpu_machine_ids[&1],
             MachineSearchConfig::default(),
         )
@@ -2841,7 +2841,7 @@ async fn test_zero_dpu_loopback_reservations_follow_host_policy(
         if let Some(host_id) = host_id {
             assert!(
                 db::machine::find_one(
-                    txn.as_mut(),
+                    &mut *txn,
                     &host_id,
                     MachineSearchConfig {
                         include_predicted_host: true,
@@ -2855,7 +2855,7 @@ async fn test_zero_dpu_loopback_reservations_follow_host_policy(
         }
         assert_eq!(
             db::expected_dpu_loopback_reservation::find_for_machine(
-                txn.as_mut(),
+                &mut *txn,
                 host.bmc_mac_address,
             )
             .await?,
@@ -2863,7 +2863,7 @@ async fn test_zero_dpu_loopback_reservations_follow_host_policy(
             "{scenario} must preserve reservation intent"
         );
         assert!(matches!(
-            db::resource_pool::find_value_in_pool(loopback_pool, txn.as_mut(), &address)
+            db::resource_pool::find_value_in_pool(loopback_pool, &mut *txn, &address)
                 .await?
                 .unwrap()
                 .state,
@@ -3035,7 +3035,7 @@ async fn test_machine_creator_applies_multi_dpu_loopback_reservations(
     )
     .await?;
     let mut expected =
-        db::expected_machine::find_by_bmc_mac_address(txn.as_mut(), mock_host.bmc_mac_address)
+        db::expected_machine::find_by_bmc_mac_address(&mut *txn, mock_host.bmc_mac_address)
             .await?
             .expect("reservation host exists");
     expected
@@ -3116,7 +3116,7 @@ async fn test_machine_creator_applies_multi_dpu_loopback_reservations(
     );
     for (dpu, expected_v4, expected_v6) in [(&dpu_a, a_v4, a_v6), (&dpu_b, b_v4, b_v6)] {
         let machine = db::machine::find_one(
-            txn.as_mut(),
+            &mut *txn,
             &from_hardware_info(&HardwareInfo::from(dpu))?,
             search.clone(),
         )
@@ -3131,7 +3131,7 @@ async fn test_machine_creator_applies_multi_dpu_loopback_reservations(
     assert!(matches!(
         db::resource_pool::find_value_in_pool(
             common_pools.ethernet.pool_loopback_ip.as_ref(),
-            txn.as_mut(),
+            &mut *txn,
             &IpAddr::V4(future_address),
         )
         .await?
@@ -3208,10 +3208,10 @@ async fn test_machine_creator_retries_changed_loopback_reservation_set(
             // database gate proves the edit commits during preparation.
             let mut gate = env.pool.txn_begin().await?;
             sqlx::query("LOCK TABLE resource_pool IN ACCESS EXCLUSIVE MODE")
-                .execute(gate.as_mut())
+                .execute(&mut *gate)
                 .await?;
             let gate_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
-                .fetch_one(gate.as_mut())
+                .fetch_one(&mut *gate)
                 .await?;
             let creation = creator.create_managed_host(
                 &fixture.host,

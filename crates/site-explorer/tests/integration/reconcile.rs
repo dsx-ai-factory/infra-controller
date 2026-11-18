@@ -75,7 +75,7 @@ async fn test_site_explorer_reconcile_is_idempotent(
     }
 
     let mut txn = pool.txn_begin().await?;
-    let interfaces = db::machine_interface::find_by_mac_address(txn.as_mut(), bmc_mac).await?;
+    let interfaces = db::machine_interface::find_by_mac_address(&mut *txn, bmc_mac).await?;
     txn.commit().await?;
     assert_eq!(
         interfaces.len(),
@@ -134,7 +134,7 @@ async fn test_site_explorer_reconcile_preallocates_host_nic_fixed_ip(
     explorer.run_single_iteration().await?;
 
     let mut txn = pool.txn_begin().await?;
-    let nic_iface = db::machine_interface::find_by_mac_address(txn.as_mut(), nic_mac).await?;
+    let nic_iface = db::machine_interface::find_by_mac_address(&mut *txn, nic_mac).await?;
     txn.commit().await?;
     assert_eq!(
         nic_iface.len(),
@@ -209,15 +209,15 @@ async fn test_site_explorer_reconcile_tolerates_per_entry_conflicts(
 
     let mut txn = pool.txn_begin().await?;
     // Exactly one of {mac_a, mac_b} won the race for the shared IP.
-    let a = db::machine_interface::find_by_mac_address(txn.as_mut(), mac_a).await?;
-    let b = db::machine_interface::find_by_mac_address(txn.as_mut(), mac_b).await?;
+    let a = db::machine_interface::find_by_mac_address(&mut *txn, mac_a).await?;
+    let b = db::machine_interface::find_by_mac_address(&mut *txn, mac_b).await?;
     let winners = a.len() + b.len();
     assert_eq!(
         winners, 1,
         "exactly one of the two conflicting MACs should have a preallocated row"
     );
     // The third, non-conflicting entry must still be preallocated.
-    let c = db::machine_interface::find_by_mac_address(txn.as_mut(), mac_c).await?;
+    let c = db::machine_interface::find_by_mac_address(&mut *txn, mac_c).await?;
     assert_eq!(
         c.len(),
         1,
@@ -271,7 +271,7 @@ async fn test_site_explorer_reconcile_preallocates_nvos_ip(
 
     // Baseline: no NVOS interface yet.
     let mut txn = pool.txn_begin().await?;
-    let before = db::machine_interface::find_by_mac_address(txn.as_mut(), nvos_mac).await?;
+    let before = db::machine_interface::find_by_mac_address(&mut *txn, nvos_mac).await?;
     assert!(
         before.is_empty(),
         "no machine_interface should exist before site-explorer reconciles for {nvos_mac}"
@@ -304,7 +304,7 @@ async fn test_site_explorer_reconcile_preallocates_nvos_ip(
     );
 
     let mut txn = pool.txn_begin().await?;
-    let after = db::machine_interface::find_by_mac_address(txn.as_mut(), nvos_mac).await?;
+    let after = db::machine_interface::find_by_mac_address(&mut *txn, nvos_mac).await?;
     assert_eq!(
         after.len(),
         1,
