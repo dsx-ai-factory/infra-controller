@@ -25,6 +25,7 @@
 mod bmc_control;
 mod connector;
 mod convert;
+mod lockdown;
 mod power;
 
 pub use bmc_control::BackendBmcControl;
@@ -33,6 +34,7 @@ use carbide_redfish::nv_redfish::RedfishBmc;
 pub use connector::{BmcConnectError, BmcConnector};
 pub use convert::platform_error;
 use libredfish::Redfish;
+pub use lockdown::BackendLockdown;
 pub use power::BackendPower;
 
 /// A connected BMC on the configured backend.

@@ -21,7 +21,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use bmc_platform::{PowerState, ResetType};
+use bmc_platform::{LockdownDesiredState, PowerState, ResetType};
 use carbide_redfish::boot_interface::BootInterfaceTarget;
 use libredfish::RoleId;
 use libredfish::model::service_root::RedfishVendor;
@@ -341,7 +341,8 @@ impl AuthenticatedBmc for MockEndpointExplorer {
         &self,
         _address: SocketAddr,
         _interface: &MachineInterfaceSnapshot,
-        _action: libredfish::EnabledDisabled,
+        _report: Option<&EndpointExplorationReport>,
+        _desired: LockdownDesiredState,
     ) -> Result<(), EndpointExplorationError> {
         Ok(())
     }
@@ -350,6 +351,7 @@ impl AuthenticatedBmc for MockEndpointExplorer {
         &self,
         _address: SocketAddr,
         _interface: &MachineInterfaceSnapshot,
+        _report: Option<&EndpointExplorationReport>,
     ) -> Result<LockdownStatus, EndpointExplorationError> {
         Ok(LockdownStatus {
             status: InternalLockdownStatus::Disabled,

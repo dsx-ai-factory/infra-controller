@@ -33,7 +33,7 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
 use bmc_backend::{BackendBmc, BmcConnectError, BmcConnector};
-use bmc_platform::{PlatformError, PowerState, ResetType};
+use bmc_platform::{LockdownDesiredState, LockdownScope, PlatformError, PowerState, ResetType};
 use bmc_runtime::{ConnectError, DriverConnector, ExploredConnectError};
 use carbide_firmware::{
     ArtifactStatus, FirmwareConfigSnapshot, FirmwareDownloader, ResolvedFirmwareArtifactSource,
@@ -3791,17 +3791,22 @@ impl PreingestionManagerStatic {
 
         // Re-ingested XCC hosts may retain firmware lockdown from their
         // previous lifecycle. HostInit restores policy after pre-ingestion.
-        if endpoint_clone.report.vendor == Some(bmc_vendor::BMCVendor::Lenovo)
-            && let Err(error) = redfish_client
-                .lockdown_bmc(libredfish::EnabledDisabled::Disabled)
-                .await
-        {
-            tracing::warn!(
-                bmc_ip_address = %endpoint_clone.address,
-                %error,
-                "Failed to unlock Lenovo firmware updates; upload deferred"
-            );
-            return Ok(false);
+        if endpoint_clone.report.vendor == Some(bmc_vendor::BMCVendor::Lenovo) {
+            let unlock = match self.connect_bmc(endpoint_clone.address, db_pool).await {
+                Ok(bmc) => bmc
+                    .set_lockdown(LockdownScope::Bmc, LockdownDesiredState::Disabled)
+                    .await
+                    .map_err(|error| error.to_string()),
+                Err(error) => Err(error.to_string()),
+            };
+            if let Err(error) = unlock {
+                tracing::warn!(
+                    bmc_ip_address = %endpoint_clone.address,
+                    %error,
+                    "Failed to unlock Lenovo firmware updates; upload deferred"
+                );
+                return Ok(false);
+            }
         }
 
         tracing::debug!(
