@@ -73,7 +73,7 @@ pub async fn handle_error(
         return Ok(StateHandlerOutcome::transition(RackState::Maintenance {
             maintenance_state: first_maintenance_state(scope),
         })
-        .with_txn(txn.into()));
+        .with_txn(txn));
     }
 
     if recovery_policy == RackErrorRecoveryPolicy::MaintenanceRequestRequired {
@@ -93,7 +93,7 @@ pub async fn handle_error(
             .txn_begin()
             .await
             .map_err(StateHandlerError::from_transaction)?;
-        return Ok(StateHandlerOutcome::transition(RackState::Ready).with_txn(txn.into()));
+        return Ok(StateHandlerOutcome::transition(RackState::Ready).with_txn(txn));
     }
 
     Ok(StateHandlerOutcome::wait(format!(

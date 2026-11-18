@@ -1035,7 +1035,7 @@ async fn concurrent_begins_preserve_request_identity_and_owner_slots(
                 }
                 tokio::time::sleep(Duration::from_millis(10)).await;
             }
-            blocker.commit().await?;
+            blocker.commit().await.map_err(eyre::Report::from)?;
             Ok::<(), eyre::Report>(())
         };
         let (first_result, second_result, committed) =

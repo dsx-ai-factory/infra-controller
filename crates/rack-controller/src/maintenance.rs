@@ -211,7 +211,7 @@ async fn request_compute_host_restarts(
             restart_machine_ids: Some(machine_ids),
         },
     })
-    .with_txn(txn.into()))
+    .with_txn(txn))
 }
 
 async fn wait_for_compute_host_restarts(
@@ -543,7 +543,7 @@ async fn terminate_active_rack_maintenance(
         cause,
         recovery_policy: RackErrorRecoveryPolicy::MaintenanceRequestRequired,
     })
-    .with_txn(txn.into()))
+    .with_txn(txn))
 }
 
 /// Aggregated firmware progress for machines, switches, and power shelves
@@ -1394,7 +1394,7 @@ async fn transition_to_rack_error_with_firmware_job(
         cause,
         recovery_policy: RackErrorRecoveryPolicy::MaintenanceRequestRequired,
     })
-    .with_txn(txn.into()))
+    .with_txn(txn))
 }
 
 /// If `maintenance_requested` is set, clear it and persist the updated config
@@ -1419,7 +1419,7 @@ async fn clear_maintenance_requested_on_error(
         .await
         .map_err(StateHandlerError::from_transaction)?;
     db_rack::update(txn.as_mut(), rack_id, &state.config).await?;
-    Ok(outcome.with_txn(txn.into()))
+    Ok(outcome.with_txn(txn))
 }
 
 fn nvos_update_selected(scope: &MaintenanceScope) -> bool {
@@ -2527,7 +2527,7 @@ async fn verify_scale_up_fabric_manager_v2(
         return Ok(StateHandlerOutcome::transition(RackState::Maintenance {
             maintenance_state: RackMaintenanceState::Completed,
         })
-        .with_txn(txn.into()));
+        .with_txn(txn));
     }
 
     txn.commit()
@@ -2930,7 +2930,7 @@ async fn handle_maintenance_inner(
                         rack_firmware_upgrade: FirmwareUpgradeState::WaitForComplete,
                     },
                 })
-                .with_txn(txn.into()))
+                .with_txn(txn))
             }
             FirmwareUpgradeState::WaitForComplete => {
                 if state.firmware_upgrade_job.is_none() {
@@ -2995,7 +2995,7 @@ async fn handle_maintenance_inner(
                         cause,
                         recovery_policy: RackErrorRecoveryPolicy::MaintenanceRequestRequired,
                     })
-                    .with_txn(recovery_txn.into()));
+                    .with_txn(recovery_txn));
                 }
 
                 let Some(rack_firmware_update_manager) =
@@ -3196,7 +3196,7 @@ async fn handle_maintenance_inner(
                             total,
                             pending_device_ids.join(", ")
                         ))
-                        .with_txn(txn.into()))
+                        .with_txn(txn))
                     }
                     DeviceFirmwareProgress::Failed {
                         failed_device_ids,
@@ -3249,7 +3249,7 @@ async fn handle_maintenance_inner(
                             cause,
                             recovery_policy: RackErrorRecoveryPolicy::MaintenanceRequestRequired,
                         })
-                        .with_txn(recovery_txn.into()))
+                        .with_txn(recovery_txn))
                     }
                     DeviceFirmwareProgress::Completed { completed, total } => {
                         let now = chrono::Utc::now();
@@ -3276,7 +3276,7 @@ async fn handle_maintenance_inner(
                         Ok(StateHandlerOutcome::transition(RackState::Maintenance {
                             maintenance_state: next_maintenance_state,
                         })
-                        .with_txn(txn.into()))
+                        .with_txn(txn))
                     }
                 }
             }
@@ -3548,7 +3548,7 @@ async fn handle_maintenance_inner(
                         nvos_update: NvosUpdateState::WaitForComplete,
                     },
                 })
-                .with_txn(txn.into()))
+                .with_txn(txn))
             }
             NvosUpdateState::WaitForComplete => {
                 let current_job = match &state.nvos_update_job {
@@ -3598,7 +3598,7 @@ async fn handle_maintenance_inner(
                             cause: cause.to_string(),
                             recovery_policy: RackErrorRecoveryPolicy::MaintenanceRequestRequired,
                         })
-                        .with_txn(txn.into()));
+                        .with_txn(txn));
                     };
 
                     for switch in job.all_switches_mut() {
@@ -3800,7 +3800,7 @@ async fn handle_maintenance_inner(
                         "nvos password recovery: {}/{} switches completed",
                         password_updates_completed, total
                     ))
-                    .with_txn(txn.into()));
+                    .with_txn(txn));
                 }
 
                 if images_terminal && failed > 0 {
@@ -3822,7 +3822,7 @@ async fn handle_maintenance_inner(
                         cause,
                         recovery_policy: RackErrorRecoveryPolicy::MaintenanceRequestRequired,
                     })
-                    .with_txn(txn.into()));
+                    .with_txn(txn));
                 }
 
                 if completed < total {
@@ -3832,7 +3832,7 @@ async fn handle_maintenance_inner(
                         "nvos update: {}/{} switches completed",
                         completed, total
                     ))
-                    .with_txn(txn.into()));
+                    .with_txn(txn));
                 }
 
                 let next = if total > 0 {
@@ -3856,7 +3856,7 @@ async fn handle_maintenance_inner(
                 Ok(StateHandlerOutcome::transition(RackState::Maintenance {
                     maintenance_state: next,
                 })
-                .with_txn(txn.into()))
+                .with_txn(txn))
             }
         },
         RackMaintenanceState::ConfigureNmxCluster {
@@ -3972,7 +3972,7 @@ async fn handle_maintenance_inner(
                             rack_firmware_upgrade: FirmwareUpgradeState::WaitForComplete,
                         },
                     })
-                    .with_txn(txn.into()));
+                    .with_txn(txn));
                 }
             }
             tracing::info!(
@@ -3995,7 +3995,7 @@ async fn handle_maintenance_inner(
                     .await
                     .map_err(StateHandlerError::from_transaction)?;
                 db_rack::update(txn.as_mut(), id, &state.config).await?;
-                outcome = outcome.with_txn(txn.into());
+                outcome = outcome.with_txn(txn);
             }
 
             Ok(outcome)

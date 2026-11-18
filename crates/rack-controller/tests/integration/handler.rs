@@ -692,7 +692,7 @@ async fn test_expected_no_definition_stays_parked(
     // `handle_created` also returns `Wait`, so a bare `Wait { .. }` would keep passing if
     // an unresolvable profile ever started resolving -- which is the whole thing this test
     // is here to catch. (`StateHandlerOutcome` has no `Debug`, since it holds a
-    // `PgTransaction`, so pull the reason out rather than formatting the outcome.)
+    // `db::Transaction`, so pull the reason out rather than formatting the outcome.)
     let reason = match &outcome {
         StateHandlerOutcome::Wait { reason, .. } => reason.as_str(),
         _ => panic!("expected the handler to wait, not advance"),
@@ -9231,7 +9231,7 @@ async fn run_rack_handler_and_apply_writes(
         .await?;
     let mut txn = match outcome.take_transaction() {
         Some(txn) => txn,
-        None => pool.txn_begin().await?.into(),
+        None => pool.txn_begin().await?,
     };
     db_writes.apply_all(&mut txn).await?;
     txn.commit().await?;

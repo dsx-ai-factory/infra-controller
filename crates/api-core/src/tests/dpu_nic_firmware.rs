@@ -529,7 +529,7 @@ async fn test_clear_completed_updates_dpf_host_off_list_version(
 impl TestManagedHost {
     pub(in crate::tests) async fn update_nic_firmware_version(
         &self,
-        txn: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+        txn: &mut db::Transaction<'_>,
     ) -> CarbideResult<()> {
         update_nic_firmware_version(txn, &self.dpu().id, "11.10.1000").await
     }

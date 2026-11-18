@@ -933,7 +933,7 @@ async fn host_exploration_requested(
 /// taken and returns `TryAgain`. The segment lock itself stays free.
 async fn hold_every_admin_address_lock(
     env: &common::api_fixtures::TestEnv,
-    gate: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    gate: &mut db::Transaction<'_>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mut txn = env.pool.txn_begin().await?;
     let segment = db::network_segment::admin(&mut txn)

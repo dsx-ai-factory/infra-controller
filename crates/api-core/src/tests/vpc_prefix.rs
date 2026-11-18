@@ -46,7 +46,7 @@ use rpc::forge::{
     PrefixMatchType, VpcDeletionRequest, VpcPrefixCreationRequest, VpcPrefixDeletionRequest,
     VpcPrefixSearchQuery,
 };
-use sqlx::{PgPool, PgTransaction};
+use sqlx::PgPool;
 use tonic::Request;
 
 use crate::cfg::file::{
@@ -211,7 +211,7 @@ async fn hold_vpc_prefix_create<'a>(
     vpc_id: VpcId,
     site_prefix_id: SitePrefixId,
     prefix: &str,
-) -> Result<(PgTransaction<'a>, i32), Box<dyn std::error::Error>> {
+) -> Result<(db::Transaction<'a>, i32), Box<dyn std::error::Error>> {
     let mut txn = env.pool.txn_begin().await?;
     db::tenant_prefix_overlap::lock_checks(&mut txn).await?;
     let blocker_pid = sqlx::query_scalar("SELECT pg_backend_pid()")
@@ -243,7 +243,7 @@ async fn hold_vpc_prefix_create<'a>(
         &mut txn,
     )
     .await?;
-    Ok((txn.into(), blocker_pid))
+    Ok((txn, blocker_pid))
 }
 
 /// Test-specific function that persists an attached segment while the returned
@@ -252,7 +252,7 @@ async fn hold_attached_segment_create<'a>(
     env: &'a TestEnv,
     vpc_id: VpcId,
     prefix: &str,
-) -> Result<(PgTransaction<'a>, i32), Box<dyn std::error::Error>> {
+) -> Result<(db::Transaction<'a>, i32), Box<dyn std::error::Error>> {
     let mut txn = env.pool.txn_begin().await?;
     db::tenant_prefix_overlap::lock_checks(&mut txn).await?;
     let blocker_pid = sqlx::query_scalar("SELECT pg_backend_pid()")
@@ -282,7 +282,7 @@ async fn hold_attached_segment_create<'a>(
         NetworkSegmentControllerState::Ready,
     )
     .await?;
-    Ok((txn.into(), blocker_pid))
+    Ok((txn, blocker_pid))
 }
 
 /// Test-specific function that builds an attached segment with one direct prefix.

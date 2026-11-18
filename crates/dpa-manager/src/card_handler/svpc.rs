@@ -30,7 +30,7 @@ use model::dpa_interface::{DpaInterface, DpaInterfaceControllerState};
 use model::instance::snapshot::InstanceSnapshot;
 use model::machine::{HostMachine, ManagedHostStateSnapshot};
 use mqttea::client::MqtteaClient;
-use sqlx::{PgConnection, PgTransaction};
+use sqlx::PgConnection;
 
 use super::DpaInterfaceStateHandler;
 use crate::errors::{DpaManagerError, DpaManagerResult};
@@ -95,7 +95,7 @@ impl SvpcInterfaceHandler {
         client: Arc<MqtteaClient>,
         dpa_info: &Arc<DpaInfo>,
         metrics: &mut DpaMonitorMetrics,
-    ) -> DpaManagerResult<Option<PgTransaction<'a>>> {
+    ) -> DpaManagerResult<Option<db::Transaction<'a>>> {
         let this_mac = dpa_interface.mac_address;
 
         let instance_version = instance.spx_config_version;
@@ -201,7 +201,7 @@ impl SvpcInterfaceHandler {
         dpa_info: &Arc<DpaInfo>,
         hb_interval: TimeDelta,
         metrics: &mut DpaMonitorMetrics,
-    ) -> DpaManagerResult<Option<PgTransaction<'a>>> {
+    ) -> DpaManagerResult<Option<db::Transaction<'a>>> {
         let nic_version = dpa_interface.network_config.version;
         let nic_version_str = nic_version.to_string();
 
@@ -556,7 +556,7 @@ impl DpaInterfaceStateHandler for SvpcInterfaceHandler {
             tracing::info!(next_state = ?new_state, "Dpa Interface state transition");
             return Ok(HandlerResult {
                 new_state: Some(new_state),
-                txn: Some(txn.into()),
+                txn: Some(txn),
             });
         }
 
@@ -676,7 +676,7 @@ impl DpaInterfaceStateHandler for SvpcInterfaceHandler {
             tracing::info!(next_state = ?new_state, "rekey: card unlocked, transitioning to relock");
             return Ok(HandlerResult {
                 new_state: Some(new_state),
-                txn: Some(txn.into()),
+                txn: Some(txn),
             });
         }
 
@@ -735,7 +735,7 @@ impl DpaInterfaceStateHandler for SvpcInterfaceHandler {
             tracing::info!(next_state = ?new_state, "rekey: card relocked, returning to Ready");
             return Ok(HandlerResult {
                 new_state: Some(new_state),
-                txn: Some(txn.into()),
+                txn: Some(txn),
             });
         }
 

@@ -61,7 +61,7 @@ pub async fn handle_ready(
             .await
             .map_err(StateHandlerError::from_transaction)?;
         db_rack::update(txn.as_mut(), id, &state.config).await?;
-        return Ok(StateHandlerOutcome::transition(RackState::Discovering).with_txn(txn.into()));
+        return Ok(StateHandlerOutcome::transition(RackState::Discovering).with_txn(txn));
     }
 
     if config.reprovision_requested {
@@ -84,7 +84,7 @@ pub async fn handle_ready(
                 rack_firmware_upgrade: FirmwareUpgradeState::Start,
             },
         })
-        .with_txn(txn.into()));
+        .with_txn(txn));
     }
 
     if let Some(scope) = &config.maintenance_requested {
@@ -125,7 +125,7 @@ pub async fn handle_ready(
         return Ok(StateHandlerOutcome::transition(RackState::Maintenance {
             maintenance_state: first_maintenance_state(scope),
         })
-        .with_txn(txn.into()));
+        .with_txn(txn));
     }
 
     if let Some(cause) = detect_component_failure(id, ctx).await? {
@@ -145,7 +145,7 @@ pub async fn handle_ready(
             cause,
             recovery_policy: RackErrorRecoveryPolicy::ComponentsReady,
         })
-        .with_txn(txn.into()));
+        .with_txn(txn));
     }
 
     Ok(StateHandlerOutcome::wait(

@@ -264,7 +264,7 @@ fn allocation_request(
 /// Queue both requests on the held Machine lock before allowing either to run.
 async fn requests_in_machine_lock_order<F, S>(
     pool: &sqlx::PgPool,
-    mut blocker: sqlx::Transaction<'_, sqlx::Postgres>,
+    mut blocker: db::Transaction<'_>,
     first: F,
     second: S,
 ) -> (F::Output, S::Output)

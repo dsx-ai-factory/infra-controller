@@ -74,7 +74,7 @@ use crate::tests::common::rpc_builder::VpcCreationRequest;
 
 /// Creates a VPC with one stretchable segment for direct SVI allocation tests.
 async fn create_stretchable_segment_for_svi_test(
-    txn: &mut sqlx::PgTransaction<'_>,
+    txn: &mut db::Transaction<'_>,
     name: &str,
     prefixes: Vec<NewNetworkPrefix>,
 ) -> Result<(VpcId, NetworkSegmentId), db::DatabaseError> {
@@ -88,7 +88,7 @@ async fn create_stretchable_segment_for_svi_test(
 }
 
 async fn create_stretchable_segment_for_svi_test_with_vpc_type(
-    txn: &mut sqlx::PgTransaction<'_>,
+    txn: &mut db::Transaction<'_>,
     name: &str,
     network_virtualization_type: VpcVirtualizationType,
     prefixes: Vec<NewNetworkPrefix>,

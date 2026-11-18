@@ -19,8 +19,8 @@ use model::resource_pool::remote::{
     AllocationAssignment, AllocationResult, CleanupConfirmation, CompletionAuthority,
     RemoteAllocationParameters, RemoteAllocationRequest,
 };
+use sqlx::PgConnection;
 use sqlx::types::Json;
-use sqlx::{PgConnection, PgTransaction};
 use uuid::Uuid;
 
 use crate::db_read::DbReader;
@@ -77,7 +77,7 @@ pub struct OperationNotCurrent;
 /// This write does not include an entity or controller desire write. Persist any
 /// controller desire first; attachment must check that it is still current.
 pub async fn begin(
-    txn: &mut PgTransaction<'_>,
+    txn: &mut crate::Transaction<'_>,
     request: &RemoteAllocationRequest,
     completion_authority: &CompletionAuthority,
 ) -> Result<ResourcePoolAllocation, RemoteAllocationError> {
@@ -414,7 +414,7 @@ pub async fn record_result(
 /// order in attachment, deletion, and recovery paths. This helper does not lock
 /// the entity.
 pub async fn attach(
-    txn: &mut PgTransaction<'_>,
+    txn: &mut crate::Transaction<'_>,
     request_id: Uuid,
     completion_authority: &CompletionAuthority,
     assignment: &AllocationAssignment,
@@ -470,7 +470,7 @@ pub async fn request_cancel(
 /// database clock. An unexpired attempt, controller request, or non-pending row
 /// returns `NotApplied`. The caller keeps this write in its fenced transaction.
 pub async fn request_cancel_if_expired(
-    txn: &mut PgTransaction<'_>,
+    txn: &mut crate::Transaction<'_>,
     request_id: Uuid,
 ) -> Result<ConditionalWrite<(), OperationNotCurrent>, DatabaseError> {
     // As in `attach`, take the row lock before checking the deadline. A request
@@ -505,7 +505,7 @@ pub async fn request_cancel_if_expired(
 /// Pass the original validated handle unchanged.
 /// Repeating release after the state changes returns `NotApplied`.
 pub async fn request_release(
-    txn: &mut PgTransaction<'_>,
+    txn: &mut crate::Transaction<'_>,
     request_id: Uuid,
     provider_allocation_id: &str,
 ) -> Result<ConditionalWrite<(), OperationNotCurrent>, DatabaseError> {
@@ -533,7 +533,7 @@ pub async fn request_release(
 /// The caller must obtain confirmation before opening this transaction; no
 /// provider I/O belongs in it.
 pub async fn confirm_cleanup(
-    txn: &mut PgTransaction<'_>,
+    txn: &mut crate::Transaction<'_>,
     request_id: Uuid,
     confirmation: CleanupConfirmation,
 ) -> Result<ConditionalWrite<(), OperationNotCurrent>, DatabaseError> {

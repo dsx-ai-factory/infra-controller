@@ -53,7 +53,7 @@ pub trait TestMachine {
 
     fn db_machine<'a, 'txn>(
         &'a self,
-        txn: &'a mut sqlx::PgTransaction<'txn>,
+        txn: &'a mut db::Transaction<'txn>,
     ) -> impl Future<Output = AnyMachine> + 'a {
         async move {
             db::machine::find_one(txn.as_mut(), &self.id(), MachineSearchConfig::default())

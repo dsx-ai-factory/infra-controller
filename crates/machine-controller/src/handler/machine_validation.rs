@@ -150,7 +150,7 @@ async fn handle_validation_boot_config_stage(
                 machine_id: machine_id.into(),
                 retry_count: 0,
             })
-            .with_txn(txn.into()))
+            .with_txn(txn))
         }
     }
 }
@@ -184,7 +184,7 @@ async fn skip_machine_validation(
             machine_validation_id = %validation_id,
             "machine validation completion ignored because run is no longer active"
         );
-        return Ok(StateHandlerOutcome::do_nothing().with_txn(txn.into()));
+        return Ok(StateHandlerOutcome::do_nothing().with_txn(txn));
     }
     let machine_validation = db::machine_validation::find_by_id(txn.as_mut(), validation_id)
         .await
@@ -203,7 +203,7 @@ async fn skip_machine_validation(
             skip_reboot_wait: true,
         },
     })
-    .with_txn(txn.into()))
+    .with_txn(txn))
 }
 
 pub(crate) async fn handle_machine_validation_state(
@@ -668,7 +668,7 @@ pub(crate) async fn handle_machine_validation_requested(
                 .await?;
                 // Health Alert ?
                 // Rare screnario, if something googfed up in DB
-                return Ok(Some(StateHandlerOutcome::do_nothing().with_txn(txn.into())));
+                return Ok(Some(StateHandlerOutcome::do_nothing().with_txn(txn)));
             }
         };
 
@@ -680,7 +680,7 @@ pub(crate) async fn handle_machine_validation_requested(
             },
         };
         return Ok(Some(
-            StateHandlerOutcome::transition(next_state).with_txn(txn.into()),
+            StateHandlerOutcome::transition(next_state).with_txn(txn),
         ));
     }
     Ok(None)

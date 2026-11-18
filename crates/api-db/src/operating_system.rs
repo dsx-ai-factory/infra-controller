@@ -21,7 +21,7 @@ use carbide_ipxe_renderer::{
 use carbide_uuid::{DbColumns, DbTable};
 use chrono::{DateTime, Utc};
 use serde::Deserialize;
-use sqlx::{FromRow, PgConnection, PgTransaction};
+use sqlx::{FromRow, PgConnection};
 use uuid::Uuid;
 
 use crate::DatabaseError;
@@ -191,7 +191,7 @@ pub async fn get(
 /// Missing or soft-deleted rows return a query error wrapping
 /// `sqlx::Error::RowNotFound`, like [`get`].
 pub async fn get_for_update(
-    txn: &mut PgTransaction<'_>,
+    txn: &mut crate::Transaction<'_>,
     id: Uuid,
 ) -> Result<OperatingSystem, DatabaseError> {
     let query = format!(

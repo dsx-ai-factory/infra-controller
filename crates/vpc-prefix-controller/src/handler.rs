@@ -110,21 +110,21 @@ impl StateHandler for VpcPrefixStateHandler {
                             "VPC Prefix still has network prefix references",
                         );
                         tracing::info!(%vpc_prefix_id, next_state = ?new_state, "VPC Prefix state transition");
-                        Ok(StateHandlerOutcome::transition(new_state).with_txn(txn.into()))
+                        Ok(StateHandlerOutcome::transition(new_state).with_txn(txn))
                     } else if chrono::Utc::now() >= *delete_at {
                         // Move to the terminal database delete state after the drain deadline.
                         let new_state = VpcPrefixControllerState::Deleting {
                             deletion_state: VpcPrefixDeletionState::DBDelete,
                         };
                         tracing::info!(%vpc_prefix_id, next_state = ?new_state, "VPC Prefix state transition");
-                        Ok(StateHandlerOutcome::transition(new_state).with_txn(txn.into()))
+                        Ok(StateHandlerOutcome::transition(new_state).with_txn(txn))
                     } else {
                         // The dependency graph is drained, but the grace deadline has not passed.
                         Ok(StateHandlerOutcome::wait(format!(
                             "Cannot delete VPC prefix from database until draining completes at {}",
                             delete_at.to_rfc3339()
                         ))
-                        .with_txn(txn.into()))
+                        .with_txn(txn))
                     }
                 }
                 VpcPrefixDeletionState::DBDelete => {
@@ -141,7 +141,7 @@ impl StateHandler for VpcPrefixStateHandler {
                         "VPC Prefix getting removed from the database",
                     );
                     db::vpc_prefix::final_delete(*vpc_prefix_id, &mut txn).await?;
-                    Ok(StateHandlerOutcome::deleted().with_txn(txn.into()))
+                    Ok(StateHandlerOutcome::deleted().with_txn(txn))
                 }
             },
         }

@@ -35,7 +35,7 @@ use model::machine::{
     ManagedHostState, ManagedHostStateSnapshot, StateMachineArea,
 };
 use regex::Regex;
-use sqlx::{PgPool, PgTransaction};
+use sqlx::PgPool;
 use state_controller::state_handler::{
     StateHandlerContext, StateHandlerError, StateHandlerOutcome,
 };
@@ -244,7 +244,9 @@ pub async fn trigger_attestation(
 
     // API triggers have no machine transition to persist with the new job.
     if let Some(txn) = txn {
-        txn.commit().await?;
+        txn.commit()
+            .await
+            .map_err(StateHandlerError::from_transaction)?;
     }
     result.emit_scheduling_event(instrumentation, *machine_id);
 
@@ -257,7 +259,7 @@ async fn schedule(
     bmc_info: &BmcInfo,
     machine_id: &MachineId,
     triggered_by_mh_controller: bool,
-) -> Result<(SchedulingResult, Option<PgTransaction<'static>>), StateHandlerError> {
+) -> Result<(SchedulingResult, Option<db::Transaction<'static>>), StateHandlerError> {
     // Keep BMC discovery outside the write transaction so slow Redfish requests
     // do not keep a database transaction open.
     let mut attester_ids = selection
@@ -316,7 +318,7 @@ async fn schedule(
             devices_scheduled: records_inserted,
             ..result
         },
-        Some(txn.into()),
+        Some(txn),
     ))
 }
 
@@ -489,7 +491,7 @@ pub(crate) async fn handle_spdm_attestation_failed_recovery(
         }
         _ => return Ok(StateHandlerOutcome::do_nothing()),
     };
-    Ok(StateHandlerOutcome::transition(next_state).with_txn(txn.into()))
+    Ok(StateHandlerOutcome::transition(next_state).with_txn(txn))
 }
 
 pub(crate) async fn handle_spdm_trigger_state(
@@ -568,7 +570,7 @@ pub(crate) async fn handle_spdm_poll_state(
                     %job_id,
                     "SPDM attestation job not found; restarting attestation"
                 );
-                return Ok(StateHandlerOutcome::transition(restart_state).with_txn(txn.into()));
+                return Ok(StateHandlerOutcome::transition(restart_state).with_txn(txn));
             }
             Err(error) => return Err(error.into()),
         };
@@ -591,7 +593,7 @@ pub(crate) async fn handle_spdm_poll_state(
             %job_id,
             "SPDM attester selection changed; retiring job and restarting attestation"
         );
-        return Ok(StateHandlerOutcome::transition(restart_state).with_txn(txn.into()));
+        return Ok(StateHandlerOutcome::transition(restart_state).with_txn(txn));
     }
     // Serialise cancellation updates with accepting these results into the lifecycle.
     db::attestation::spdm::lock_machine_attestations(&mut txn, host_machine_id, &job_device_ids)
@@ -606,7 +608,7 @@ pub(crate) async fn handle_spdm_poll_state(
 
     match attestation_status {
         SpdmAttestationStatus::Passed | SpdmAttestationStatus::Waived => {
-            Ok(StateHandlerOutcome::transition(next_skip_state).with_txn(txn.into()))
+            Ok(StateHandlerOutcome::transition(next_skip_state).with_txn(txn))
         }
         SpdmAttestationStatus::Failed => {
             // Use the same job devices and latest revisions as the machine status.
@@ -635,7 +637,7 @@ pub(crate) async fn handle_spdm_poll_state(
                 retry_count: 0,
                 machine_id: *host_machine_id,
             })
-            .with_txn(txn.into()))
+            .with_txn(txn))
         }
         SpdmAttestationStatus::InProgress => Ok(StateHandlerOutcome::do_nothing()),
     }

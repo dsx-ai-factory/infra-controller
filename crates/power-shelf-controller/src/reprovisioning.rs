@@ -109,7 +109,7 @@ async fn rack_failed_abort_outcome(
     db_power_shelf::clear_power_shelf_reprovisioning_requested(txn.as_mut(), *power_shelf_id)
         .await?;
     Ok(Some(
-        StateHandlerOutcome::transition(PowerShelfControllerState::Ready).with_txn(txn.into()),
+        StateHandlerOutcome::transition(PowerShelfControllerState::Ready).with_txn(txn),
     ))
 }
 
@@ -168,7 +168,7 @@ pub async fn handle_reprovisioning(
                     .await?;
                     Ok(
                         StateHandlerOutcome::transition(PowerShelfControllerState::Ready)
-                            .with_txn(txn.into()),
+                            .with_txn(txn),
                     )
                 }
                 model::rack::RackFirmwareUpgradeState::Failed { cause } => {
@@ -187,7 +187,7 @@ pub async fn handle_reprovisioning(
                         StateHandlerOutcome::transition(PowerShelfControllerState::Error {
                             cause: cause.clone(),
                         })
-                        .with_txn(txn.into()),
+                        .with_txn(txn),
                     )
                 }
                 model::rack::RackFirmwareUpgradeState::Started

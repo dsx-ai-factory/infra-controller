@@ -266,7 +266,7 @@ async fn finish_maintenance(
             "Completed maintenance request is no longer pending"
         );
     }
-    Ok(StateHandlerOutcome::transition(next_state).with_txn(txn.into()))
+    Ok(StateHandlerOutcome::transition(next_state).with_txn(txn))
 }
 
 async fn finish_maintenance_outcome(

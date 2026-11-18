@@ -2971,7 +2971,7 @@ pub(crate) async fn validate_ib_partition_ownership(
 /// The caller must persist the instance configuration before committing it.
 /// Update validation keeps its existing errors, which differ from batch allocation.
 pub(crate) async fn validate_spx_partition_ownership(
-    txn: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    txn: &mut db::Transaction<'_>,
     instance_tenant: &TenantOrganizationId,
     spxcfg: &InstanceSpxConfig,
 ) -> Result<(), CarbideError> {

@@ -44,5 +44,5 @@ pub async fn handle_deleting(
         .await
         .map_err(StateHandlerError::from_transaction)?;
     db_switch::final_delete(*switch_id, &mut txn).await?;
-    Ok(StateHandlerOutcome::deleted().with_txn(txn.into()))
+    Ok(StateHandlerOutcome::deleted().with_txn(txn))
 }

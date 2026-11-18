@@ -36,7 +36,7 @@ use model::network_prefix::NetworkPrefix;
 use model::network_segment::{
     NetworkSegment, NetworkSegmentControllerState, NetworkSegmentSearchConfig, NetworkSegmentType,
 };
-use sqlx::{FromRow, PgConnection, PgTransaction, query_as};
+use sqlx::{FromRow, PgConnection, query_as};
 
 use super::{ObjectColumnFilter, network_segment, vpc};
 use crate::db_read::DbReader;
@@ -937,9 +937,9 @@ impl AssignIpsFrom<OverlayAddressAllocation> for InstanceInterfaceConfig {
 }
 
 pub async fn allocate_svi_ip(
-    // Note: This is a PgTransaction, not a PgConnection, because we will be doing table locking,
+    // Note: This is a crate::Transaction, not a PgConnection, because we will be doing table locking,
     // which must happen in a transaction.
-    txn: &mut PgTransaction<'_>,
+    txn: &mut crate::Transaction<'_>,
     segment: &NetworkSegment,
 ) -> DatabaseResult<(NetworkPrefixId, IpAddr)> {
     let dhcp_handler: Box<dyn UsedIpResolver<PgConnection> + Send> =

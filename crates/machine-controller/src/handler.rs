@@ -751,7 +751,7 @@ impl MachineStateHandler {
                 db::machine::clear_dpu_reprovisioning_request(txn.as_mut(), &dpu_id, true).await?;
             }
         }
-        Ok(StateHandlerOutcome::wait(reason).with_txn(txn.into()))
+        Ok(StateHandlerOutcome::wait(reason).with_txn(txn))
     }
 
     /// Commits the start before hardware work, so Clear cannot cancel the
@@ -951,7 +951,7 @@ impl MachineStateHandler {
                         last_seen = %observed_at,
                         "DPU is not sending network status observations, marking unhealthy");
                         // The next iteration will run with the now unhealthy network
-                        return Ok(StateHandlerOutcome::do_nothing().with_txn(txn.into()));
+                        return Ok(StateHandlerOutcome::do_nothing().with_txn(txn));
                     }
                 }
             }
@@ -1023,7 +1023,7 @@ impl MachineStateHandler {
             return Ok(StateHandlerOutcome::transition(ManagedHostState::Reset {
                 reset_state: ResetState::DeletingInstance,
             })
-            .with_txn(txn.into()));
+            .with_txn(txn));
         }
 
         if dpu_reprovisioning_needed(&mh_snapshot.dpu_snapshots) {
@@ -1373,7 +1373,7 @@ impl MachineStateHandler {
                                     DecommissioningState::SuppressingSiteExplorer,
                             },
                         )
-                        .with_txn(txn.into()));
+                        .with_txn(txn));
                     }
                 }
 
@@ -1576,7 +1576,7 @@ impl MachineStateHandler {
                         false,
                     )
                     .await?;
-                    return Ok(StateHandlerOutcome::transition(next_state).with_txn(txn.into()));
+                    return Ok(StateHandlerOutcome::transition(next_state).with_txn(txn));
                 }
 
                 // Check to see if measurement machine (i.e. attestation) state has changed
@@ -1849,8 +1849,7 @@ impl MachineStateHandler {
                             model::bmc_suppression::BmcSuppressionSource::BmcCredentialRotation,
                         )
                         .await?;
-                        Ok(StateHandlerOutcome::transition(ManagedHostState::Ready)
-                            .with_txn(txn.into()))
+                        Ok(StateHandlerOutcome::transition(ManagedHostState::Ready).with_txn(txn))
                     }
                     RotationStep::Retry { retry_count } => Ok(StateHandlerOutcome::transition(
                         ManagedHostState::RotatingBmc { retry_count },
@@ -2188,7 +2187,7 @@ impl MachineStateHandler {
                         .await
                         .map_err(StateHandlerError::from_transaction)?;
                     db::machine::clear_failure_details(host_machine_id, &mut txn).await?;
-                    return Ok(outcome.with_txn(txn.into()));
+                    return Ok(outcome.with_txn(txn));
                 }
 
                 match details.cause {
@@ -2226,9 +2225,7 @@ impl MachineStateHandler {
                                     },
                                 },
                             };
-                            return Ok(
-                                StateHandlerOutcome::transition(next_state).with_txn(txn.into())
-                            );
+                            return Ok(StateHandlerOutcome::transition(next_state).with_txn(txn));
                         }
 
                         // Wait till failure_retry_time is over except first time.
@@ -2305,9 +2302,7 @@ impl MachineStateHandler {
                                 .await
                                 .map_err(StateHandlerError::from_transaction)?;
                             db::machine::clear_failure_details(machine_id, &mut txn).await?;
-                            return Ok(
-                                StateHandlerOutcome::transition(next_state).with_txn(txn.into())
-                            );
+                            return Ok(StateHandlerOutcome::transition(next_state).with_txn(txn));
                         }
 
                         if trigger_reboot_if_needed(
@@ -2632,7 +2627,7 @@ impl MachineStateHandler {
                         instance_state: InstanceState::WaitingForDpaToBeReady,
                     };
                 }
-                Ok(StateHandlerOutcome::transition(next_state).with_txn(txn.into()))
+                Ok(StateHandlerOutcome::transition(next_state).with_txn(txn))
             }
             ManagedHostState::BomValidating {
                 bom_validating_state,
@@ -2948,7 +2943,7 @@ impl MachineStateHandler {
                 timeout_threshold = %timeout_threshold,
                 "Scout heartbeat timeout detected, adding health alert"
             );
-            return Ok(Some(StateHandlerOutcome::do_nothing().with_txn(txn.into())));
+            return Ok(Some(StateHandlerOutcome::do_nothing().with_txn(txn)));
         }
 
         if since_last_contact < timeout_threshold && scout_timeout_alert_exists {
@@ -2965,7 +2960,7 @@ impl MachineStateHandler {
                 timeout_threshold = %timeout_threshold,
                 "Scout heartbeat recovered, removing health alert"
             );
-            return Ok(Some(StateHandlerOutcome::do_nothing().with_txn(txn.into())));
+            return Ok(Some(StateHandlerOutcome::do_nothing().with_txn(txn)));
         }
 
         Ok(None)
@@ -4645,7 +4640,7 @@ async fn handle_dpu_reprovision(
                     dpu_machine_id,
                     &state.host_snapshot,
                 )?)
-                .with_txn(txn.into()),
+                .with_txn(txn),
             )
         }
         ReprovisionState::NotUnderReprovision => {
@@ -5718,7 +5713,7 @@ impl DpuMachineStateHandler {
                             e
                         ))
                     })?;
-                    Ok(StateHandlerOutcome::transition(next_state).with_txn(txn.into()))
+                    Ok(StateHandlerOutcome::transition(next_state).with_txn(txn))
                 } else {
                     Ok(StateHandlerOutcome::transition(next_state))
                 }
@@ -7831,7 +7826,7 @@ async fn handle_ready_boot_config(
                                         },
                                     )
                                 });
-                        return Ok(StateHandlerOutcome::transition(next_state).with_txn(txn.into()));
+                        return Ok(StateHandlerOutcome::transition(next_state).with_txn(txn));
                     }
                 }
             }
@@ -8029,7 +8024,7 @@ async fn handle_ready_boot_config(
                                         ReadyBootConfigState::Failed { failure },
                                     )
                                 });
-                        return Ok(StateHandlerOutcome::transition(next_state).with_txn(txn.into()));
+                        return Ok(StateHandlerOutcome::transition(next_state).with_txn(txn));
                     }
                 }
             }
@@ -8113,7 +8108,7 @@ async fn handle_ready_boot_config(
                                 mh_snapshot.host_snapshot.id.into(),
                             )
                         });
-                return Ok(StateHandlerOutcome::transition(next_state).with_txn(txn.into()));
+                return Ok(StateHandlerOutcome::transition(next_state).with_txn(txn));
             }
 
             let mut txn = ctx
@@ -8154,7 +8149,7 @@ async fn handle_ready_boot_config(
                 }
             };
 
-            Ok(StateHandlerOutcome::transition(next_state).with_txn(txn.into()))
+            Ok(StateHandlerOutcome::transition(next_state).with_txn(txn))
         }
         // Handled above so superseding intent can restart a parked failure.
         ReadyBootConfigState::Failed { .. } => Ok(StateHandlerOutcome::do_nothing()),
@@ -8332,7 +8327,7 @@ async fn complete_host_init_lockdown(
             "Discarded HostInit boot configuration observation",
         );
     }
-    Ok(outcome.with_txn(txn.into()))
+    Ok(outcome.with_txn(txn))
 }
 
 /// TODO: we need to handle the case where the job is deleted for some reason
@@ -8635,7 +8630,7 @@ async fn handle_host_uefi_setup(
                     },
                 },
             })
-            .with_txn(txn.into()))
+            .with_txn(txn))
         }
         // Deprecated: Kept for backwards compatibility with hosts that may be in this state.
         UefiSetupState::LockdownHost => Ok(StateHandlerOutcome::transition(
@@ -9447,7 +9442,7 @@ impl StateHandler for InstanceStateHandler {
                     {
                         process_dpu_use_admin_network_state_change(&mut txn, mh_snapshot).await?;
                     }
-                    Ok(StateHandlerOutcome::transition(next_state).with_txn(txn.into()))
+                    Ok(StateHandlerOutcome::transition(next_state).with_txn(txn))
                 }
                 InstanceState::WaitingForNetworkConfig => {
                     // It should be first state to process here.
@@ -9651,7 +9646,7 @@ impl StateHandler for InstanceStateHandler {
                     // Publish attachment cleanup with the readiness result computed from the same
                     // InstanceExtensionServicesStatus.
                     Ok(match txn {
-                        Some(txn) => outcome.with_txn(txn.into()),
+                        Some(txn) => outcome.with_txn(txn),
                         None => outcome,
                     })
                 }
@@ -9895,11 +9890,11 @@ impl StateHandler for InstanceStateHandler {
                             .await?;
                         }
 
-                        Ok(StateHandlerOutcome::transition(next_state).with_txn(txn.into()))
+                        Ok(StateHandlerOutcome::transition(next_state).with_txn(txn))
                     } else if let Some(txn) = txn_opt {
                         // Commit extension cleanup before the observer performs
                         // Redfish I/O in a separate attempt.
-                        Ok(StateHandlerOutcome::do_nothing().with_txn(txn.into()))
+                        Ok(StateHandlerOutcome::do_nothing().with_txn(txn))
                     } else {
                         let observation_outcome =
                             boot_interface_observation::observe_verified_boot_interface(
@@ -10229,7 +10224,7 @@ impl StateHandler for InstanceStateHandler {
                     let next_state = ManagedHostState::Assigned {
                         instance_state: InstanceState::WaitingForNetworkReconfig,
                     };
-                    Ok(StateHandlerOutcome::transition(next_state).with_txn(txn.into()))
+                    Ok(StateHandlerOutcome::transition(next_state).with_txn(txn))
                 }
                 InstanceState::WaitingForNetworkReconfig => {
                     // Has forge-dpu-agent applied the new network config so that
@@ -10417,7 +10412,7 @@ impl StateHandler for InstanceStateHandler {
                         },
                     };
 
-                    Ok(StateHandlerOutcome::transition(next_state).with_txn(txn.into()))
+                    Ok(StateHandlerOutcome::transition(next_state).with_txn(txn))
                 }
                 InstanceState::DPUReprovision { .. } => {
                     // Reaching DPUReprovision with no DPUs is technically a
@@ -10530,7 +10525,7 @@ impl StateHandler for InstanceStateHandler {
                     let next_state = ManagedHostState::Assigned {
                         instance_state: InstanceState::WaitingForDpaToBeReady,
                     };
-                    Ok(StateHandlerOutcome::transition(next_state).with_txn(txn.into()))
+                    Ok(StateHandlerOutcome::transition(next_state).with_txn(txn))
                 }
                 InstanceState::WaitingForDpaToBeReady => {
                     // Check each DPA interface to see if it has acted on updating the network config.
@@ -10752,7 +10747,7 @@ async fn handle_instance_network_config_update_request(
             )
             .await?;
 
-            Ok(StateHandlerOutcome::transition(next_state).with_txn(txn.into()))
+            Ok(StateHandlerOutcome::transition(next_state).with_txn(txn))
         }
         NetworkConfigUpdateState::WaitingForConfigSynced => {
             let next_state = ManagedHostState::Assigned {
@@ -10863,7 +10858,7 @@ async fn handle_instance_network_config_update_request(
             let next_state = ManagedHostState::Assigned {
                 instance_state: InstanceState::Ready,
             };
-            Ok(StateHandlerOutcome::transition(next_state).with_txn(txn.into()))
+            Ok(StateHandlerOutcome::transition(next_state).with_txn(txn))
         }
     }
 }
@@ -11347,7 +11342,7 @@ async fn rack_failed_abort_host_reprovision_outcome(
         .map_err(StateHandlerError::from_transaction)?;
     db::host_machine_update::clear_host_reprovisioning_request(txn.as_mut(), machine_id).await?;
     Ok(Some(
-        StateHandlerOutcome::transition(target_state).with_txn(txn.into()),
+        StateHandlerOutcome::transition(target_state).with_txn(txn),
     ))
 }
 
@@ -12881,7 +12876,7 @@ impl HostUpgradeState {
                             },
                             state.managed_state.get_host_repro_retry_count(),
                         ))
-                        .with_txn(txn.into()))
+                        .with_txn(txn))
                     }
                     _ => {
                         // Unexpected state
@@ -13315,7 +13310,7 @@ impl HostUpgradeState {
             {
                 Applied(()) | NotApplied(EndpointReportNotCurrent) => {}
             }
-            Ok(StateHandlerOutcome::do_nothing().with_txn(txn.into()))
+            Ok(StateHandlerOutcome::do_nothing().with_txn(txn))
         }
     }
 

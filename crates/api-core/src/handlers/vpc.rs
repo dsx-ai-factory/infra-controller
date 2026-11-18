@@ -41,7 +41,7 @@ use model::vpc::{
     ChangeVpcRoutingProfile, NewVpc, UpdateVpc, UpdateVpcVirtualization,
     VpcRoutingProfileOverrides, VpcStatus, VpcVirtualizationTypeCapabilities,
 };
-use sqlx::{PgConnection, PgTransaction};
+use sqlx::PgConnection;
 use tonic::{Request, Response, Status};
 
 use super::{tenant_prefix_overlap, vni};
@@ -896,7 +896,7 @@ struct RoutingChangeAdmission<'a> {
 /// destination's current access, attachments, ownership and pool membership.
 async fn routing_change_admission<'a>(
     api: &'a Api,
-    txn: &mut PgTransaction<'_>,
+    txn: &mut db::Transaction<'_>,
     change: &ChangeVpcRoutingProfile,
 ) -> Result<RoutingChangeAdmission<'a>, CarbideError> {
     let observed_vpc = db::vpc::find_by(
@@ -1261,7 +1261,7 @@ pub(crate) async fn release_inactive_vni(
 /// Commit the caller's transaction before waiting on its returned cleanup handle.
 async fn release_inactive_vpc_vni(
     api: &Api,
-    txn: &mut PgTransaction<'_>,
+    txn: &mut db::Transaction<'_>,
     vpc: &model::vpc::Vpc,
     expected_inactive_vni: u32,
 ) -> Result<(i32, AllocationCleanup), CarbideError> {

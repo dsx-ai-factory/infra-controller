@@ -94,7 +94,7 @@ async fn handle_suppressing_site_explorer(
             "waiting for Site Explorer suppression acknowledgement".to_string(),
         )
     };
-    Ok(outcome.with_txn(txn.into()))
+    Ok(outcome.with_txn(txn))
 }
 
 async fn handle_suppressing_bmc_dhcp(
@@ -141,7 +141,7 @@ async fn handle_suppressing_bmc_dhcp(
         StateHandlerOutcome::transition(PowerShelfControllerState::Decommissioning {
             decommissioning_state: PowerShelfDecommissioningState::FactoryResetBmc,
         })
-        .with_txn(txn.into()),
+        .with_txn(txn),
     )
 }
 
@@ -240,6 +240,6 @@ async fn handle_deleting_managed_credentials(
         StateHandlerOutcome::transition(PowerShelfControllerState::Decommissioning {
             decommissioning_state: PowerShelfDecommissioningState::Decommissioned,
         })
-        .with_txn(txn.into()),
+        .with_txn(txn),
     )
 }

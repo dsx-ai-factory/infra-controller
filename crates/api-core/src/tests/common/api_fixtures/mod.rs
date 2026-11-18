@@ -419,12 +419,11 @@ impl TestEnv {
     }
 
     /// Create database transaction for tests.
-    pub(in crate::tests) async fn db_txn(&self) -> sqlx::Transaction<'_, sqlx::Postgres> {
+    pub(in crate::tests) async fn db_txn(&self) -> db::Transaction<'_> {
         self.pool
             .txn_begin()
             .await
             .expect("Unable to create transaction on database pool")
-            .into()
     }
 
     fn fill_machine_information(
@@ -598,8 +597,7 @@ impl TestEnv {
                 .boxed()
                 .await;
 
-            let mut txn: sqlx::Transaction<'static, sqlx::Postgres> =
-                self.pool.txn_begin().await.unwrap().into();
+            let mut txn: db::Transaction<'static> = self.pool.txn_begin().await.unwrap();
             let machine = db::machine::find_one(
                 txn.as_mut(),
                 host_machine_id,

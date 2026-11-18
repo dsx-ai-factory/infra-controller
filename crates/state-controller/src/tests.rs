@@ -1683,7 +1683,11 @@ impl StateHandler for TestInvalidationStateHandler {
             .await?;
         }
 
-        let mut txn = self.pool.txn_begin().await?;
+        let mut txn = self
+            .pool
+            .txn_begin()
+            .await
+            .map_err(StateHandlerError::from_transaction)?;
         sqlx::query("INSERT INTO test_iteration_writes VALUES ('handler')")
             .execute(txn.as_mut())
             .await?;
@@ -1709,7 +1713,7 @@ impl StateHandler for TestInvalidationStateHandler {
         if self.stage == InvalidationStage::Handler {
             ConditionalWrite::<(), _>::NotApplied(ControllerStateNotCurrent).check_applied()?;
         }
-        Ok(StateHandlerOutcome::transition(TestObjectControllerState::B).with_txn(txn.into()))
+        Ok(StateHandlerOutcome::transition(TestObjectControllerState::B).with_txn(txn))
     }
 }
 

@@ -151,7 +151,7 @@ impl SpdmAttestationStateHandler {
             }
             SpdmCancellationTarget::Waive => SpdmAttestationState::Waived,
         };
-        Ok(StateHandlerOutcome::transition(next_state).with_txn(txn.into()))
+        Ok(StateHandlerOutcome::transition(next_state).with_txn(txn))
     }
 }
 
@@ -246,7 +246,7 @@ impl StateHandler for SpdmAttestationStateHandler {
                 .await?;
                 Ok(
                     StateHandlerOutcome::transition(SpdmAttestationState::FetchCertificate)
-                        .with_txn(txn.into()),
+                        .with_txn(txn),
                 )
             }
             SpdmAttestationState::FetchCertificate => {
@@ -285,7 +285,7 @@ impl StateHandler for SpdmAttestationStateHandler {
                         last_redfish_failure_tstamp: None,
                     },
                 )
-                .with_txn(txn.into()))
+                .with_txn(txn))
             }
             SpdmAttestationState::TriggerEvidenceCollection {
                 retry_count,
@@ -324,7 +324,7 @@ impl StateHandler for SpdmAttestationStateHandler {
                                 "Exceeded redfish retry limit while attempting to collect evidence"
                                     .to_string(),
                             ))
-                            .with_txn(txn.into()),
+                            .with_txn(txn),
                         );
                     }
                     if chrono::Utc::now() < *last_failure_time + chrono::Duration::minutes(1) {
@@ -457,7 +457,7 @@ impl StateHandler for SpdmAttestationStateHandler {
                                     "Could not get evidence target from DB".to_string(),
                                 ),
                             )
-                            .with_txn(txn.into()));
+                            .with_txn(txn));
                         };
                         let evidence = redfish_client
                             .get_evidence(url)
@@ -483,7 +483,7 @@ impl StateHandler for SpdmAttestationStateHandler {
                         .await?;
                         Ok(
                             StateHandlerOutcome::transition(SpdmAttestationState::NrasVerification)
-                                .with_txn(txn.into()),
+                                .with_txn(txn),
                         )
                     }
                     EvidenceCollectionTaskStateClass::InProgress
@@ -574,7 +574,7 @@ impl StateHandler for SpdmAttestationStateHandler {
                                 StateHandlerOutcome::transition(SpdmAttestationState::Failed(
                                     "Too many retries triggering evidence collection".to_string(),
                                 ))
-                                .with_txn(txn.into()),
+                                .with_txn(txn),
                             )
                         } else {
                             Ok(StateHandlerOutcome::transition(
@@ -584,7 +584,7 @@ impl StateHandler for SpdmAttestationStateHandler {
                                     last_redfish_failure_tstamp: None,
                                 },
                             )
-                            .with_txn(txn.into()))
+                            .with_txn(txn))
                         }
                     }
                 }
@@ -660,7 +660,7 @@ impl StateHandler for SpdmAttestationStateHandler {
                     .map_err(StateHandlerError::from_transaction)?;
                 db::attestation::spdm::release_evidence_collection_lock(&mut txn, object_id)
                     .await?;
-                Ok(StateHandlerOutcome::transition(next_state).with_txn(txn.into()))
+                Ok(StateHandlerOutcome::transition(next_state).with_txn(txn))
             }
             SpdmAttestationState::NrasVerification => {
                 let client = self.verifier.client(self.nras_config.clone());
@@ -705,7 +705,7 @@ impl StateHandler for SpdmAttestationStateHandler {
                     .map_err(StateHandlerError::from_transaction)?;
                 db::attestation::spdm::set_completed_at(&mut txn, machine_id, device_id, job_id)
                     .await?;
-                Ok(StateHandlerOutcome::do_nothing().with_txn(txn.into()))
+                Ok(StateHandlerOutcome::do_nothing().with_txn(txn))
             }
         }
     }

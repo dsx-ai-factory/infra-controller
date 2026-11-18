@@ -1775,7 +1775,7 @@ async fn test_reboot_no_retry_during_firmware_update(pool: sqlx::PgPool) {
 
     env.run_machine_state_controller_iteration().await;
 
-    let mut txn: sqlx::Transaction<'_, sqlx::Postgres> = env.pool.txn_begin().await.unwrap().into();
+    let mut txn: db::Transaction<'_> = env.pool.txn_begin().await.unwrap();
     let host = mh.host().db_machine(&mut txn).await;
     let dpu = mh.dpu().db_machine(&mut txn).await;
     let last_reboot_requested = host.status.last_reboot_requested.as_ref().unwrap();

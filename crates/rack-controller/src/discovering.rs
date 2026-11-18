@@ -72,7 +72,7 @@ pub async fn handle_discovering(
             "waiting for switches ready: switch={}/{}",
             ready_switches, capabilities.switch.count,
         ))
-        .with_txn(txn.into()));
+        .with_txn(txn));
     }
 
     tracing::info!(
@@ -89,5 +89,5 @@ pub async fn handle_discovering(
             rack_firmware_upgrade: FirmwareUpgradeState::Start,
         },
     })
-    .with_txn(txn.into()))
+    .with_txn(txn))
 }

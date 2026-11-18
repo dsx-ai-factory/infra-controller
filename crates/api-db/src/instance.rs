@@ -1088,7 +1088,7 @@ pub async fn trigger_update_network_config_request(
     instance_id: &InstanceId,
     current: &InstanceNetworkConfig,
     requested: &InstanceNetworkConfig,
-    txn: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    txn: &mut crate::Transaction<'_>,
 ) -> Result<(), DatabaseError> {
     let mut network_config_request = InstanceNetworkConfigUpdate {
         old_config: current.clone(),

@@ -117,7 +117,7 @@ pub(super) async fn handle_suppressing_site_explorer(
         ))
     };
 
-    Ok(outcome.with_txn(txn.into()))
+    Ok(outcome.with_txn(txn))
 }
 
 pub(super) async fn handle_deconfiguring_host(
@@ -344,7 +344,7 @@ pub(super) async fn handle_deconfiguring_host(
             db::machine::clear_bios_password_set_time(&machine.id, &mut txn).await?;
             Ok(
                 StateHandlerOutcome::transition(deconfiguring_dpus_after_host_reset(state))
-                    .with_txn(txn.into()),
+                    .with_txn(txn),
             )
         }
         DeconfiguringHostState::ClearSuperNicLockdown => {
@@ -389,7 +389,7 @@ pub(super) async fn handle_deconfiguring_host(
                         deconfiguring_state: DeconfiguringHostState::WaitForSuperNicLockdown,
                     },
                 })
-                .with_txn(txn.into()),
+                .with_txn(txn),
             )
         }
         DeconfiguringHostState::WaitForSuperNicLockdown => {
@@ -441,7 +441,7 @@ pub(super) async fn handle_deconfiguring_host(
                         deconfiguring_state: DeconfiguringHostState::ResetUefiSettings,
                     },
                 })
-                .with_txn(txn.into()),
+                .with_txn(txn),
             )
         }
         DeconfiguringHostState::ResetUefiSettings => {
@@ -740,7 +740,7 @@ pub(super) async fn handle_suppressing_oob_dhcp(
         StateHandlerOutcome::transition(ManagedHostState::Decommissioning {
             decommissioning_state: DecommissioningState::PowerCyclingHost,
         })
-        .with_txn(txn.into()),
+        .with_txn(txn),
     )
 }
 
@@ -911,7 +911,7 @@ async fn factory_reset_bmc(
             "restoring DHCP after an unresolved factory reset for BMC {}",
             machine.id
         ))
-        .with_txn(txn.into()));
+        .with_txn(txn));
     }
     // Connect first to ensure BMC is reachable before suppressing DHCP.
     let bmc = ctx.services.connect_bmc(machine).await?;
@@ -1015,7 +1015,7 @@ pub(super) async fn handle_deleting_managed_credentials(
         StateHandlerOutcome::transition(ManagedHostState::Decommissioning {
             decommissioning_state: DecommissioningState::Decommissioned,
         })
-        .with_txn(txn.into()),
+        .with_txn(txn),
     )
 }
 

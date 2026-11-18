@@ -180,10 +180,7 @@ pub async fn handle_rotating_bmc(
                 model::bmc_suppression::BmcSuppressionSource::BmcCredentialRotation,
             )
             .await?;
-            Ok(
-                StateHandlerOutcome::transition(SwitchControllerState::Ready)
-                    .with_txn(resume_txn.into()),
-            )
+            Ok(StateHandlerOutcome::transition(SwitchControllerState::Ready).with_txn(resume_txn))
         }
         RotationStep::Retry { retry_count } => Ok(StateHandlerOutcome::transition(
             SwitchControllerState::RotatingBmc { retry_count },

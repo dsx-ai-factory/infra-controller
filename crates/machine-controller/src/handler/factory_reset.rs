@@ -689,7 +689,7 @@ async fn remove_suppression(
         model::bmc_suppression::BmcSuppressionSource::FactoryResetBmc,
     )
     .await?;
-    Ok(power_cycle.with_txn(txn.into()))
+    Ok(power_cycle.with_txn(txn))
 }
 
 #[cfg(test)]

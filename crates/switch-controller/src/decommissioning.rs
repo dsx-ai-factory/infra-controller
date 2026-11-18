@@ -55,7 +55,7 @@ async fn suppress_dhcp(
     mac_address: MacAddress,
     interface: &str,
     ctx: &mut StateHandlerContext<'_, SwitchStateHandlerContextObjects>,
-) -> Result<sqlx::PgTransaction<'static>, StateHandlerError> {
+) -> Result<db::Transaction<'static>, StateHandlerError> {
     let mut txn = ctx
         .services
         .db_pool
@@ -82,7 +82,7 @@ async fn suppress_dhcp(
         db::machine_interface::record_deletion(&mut txn).await?;
     }
 
-    Ok(txn.into())
+    Ok(txn)
 }
 
 pub(super) async fn handle_decommissioning(
@@ -164,7 +164,7 @@ async fn handle_suppressing_site_explorer(
             "waiting for Site Explorer suppression acknowledgement".to_string(),
         )
     };
-    Ok(outcome.with_txn(txn.into()))
+    Ok(outcome.with_txn(txn))
 }
 
 async fn handle_suppressing_nvos_dhcp(
@@ -398,6 +398,6 @@ async fn handle_deleting_managed_credentials(
         StateHandlerOutcome::transition(decommissioning(
             SwitchDecommissioningState::Decommissioned,
         ))
-        .with_txn(txn.into()),
+        .with_txn(txn),
     )
 }

@@ -315,7 +315,7 @@ pub(super) async fn handle(
                         not_before: reported_at,
                     },
                 )
-                .with_txn(txn.into()));
+                .with_txn(txn));
             }
             if snapshot
                 .aggregate_health
@@ -324,7 +324,7 @@ pub(super) async fn handle(
                 return Ok(StateHandlerOutcome::wait(
                     "NIC firmware activation reboot is blocked by a health override".into(),
                 )
-                .with_txn(txn.into()));
+                .with_txn(txn));
             }
             // Count from the persisted attempt start. The minimum includes the
             // bounded 120-second call plus a minute for Scout to report back.
@@ -341,7 +341,7 @@ pub(super) async fn handle(
                 return Ok(StateHandlerOutcome::wait(
                     "waiting for Scout to report the NIC firmware activation reboot".into(),
                 )
-                .with_txn(txn.into()));
+                .with_txn(txn));
             }
             // Commit the attempt marker before external work so retries retain
             // the same interval across controller crashes. A crash before sending
@@ -469,7 +469,7 @@ pub(super) async fn handle(
                 return Ok(StateHandlerOutcome::transition(ManagedHostState::Assigned {
                     instance_state: InstanceState::WaitingForRebootToReady,
                 })
-                .with_txn(txn.into()));
+                .with_txn(txn));
             }
             let reason = match machine_failure_reason {
                 Some(blocker) if !reason.contains(blocker.as_str()) => {
@@ -723,7 +723,7 @@ async fn complete(
     )
     .await?
     .check_applied()?;
-    Ok(StateHandlerOutcome::transition(continuation).with_txn(txn.into()))
+    Ok(StateHandlerOutcome::transition(continuation).with_txn(txn))
 }
 
 #[cfg(test)]

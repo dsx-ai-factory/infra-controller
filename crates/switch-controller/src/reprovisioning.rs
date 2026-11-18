@@ -149,7 +149,7 @@ async fn rack_failed_abort_outcome(
         .map_err(StateHandlerError::from_transaction)?;
     db_switch::clear_switch_reprovisioning_requested(txn.as_mut(), *switch_id).await?;
     Ok(Some(
-        StateHandlerOutcome::transition(SwitchControllerState::Ready).with_txn(txn.into()),
+        StateHandlerOutcome::transition(SwitchControllerState::Ready).with_txn(txn),
     ))
 }
 
@@ -221,10 +221,7 @@ pub async fn handle_reprovisioning(
                         .map_err(StateHandlerError::from_transaction)?;
                     db_switch::clear_switch_reprovisioning_requested(txn.as_mut(), *switch_id)
                         .await?;
-                    Ok(
-                        StateHandlerOutcome::transition(SwitchControllerState::Ready)
-                            .with_txn(txn.into()),
-                    )
+                    Ok(StateHandlerOutcome::transition(SwitchControllerState::Ready).with_txn(txn))
                 }
                 model::rack::RackFirmwareUpgradeState::Failed { cause } => {
                     tracing::warn!(
@@ -247,7 +244,7 @@ pub async fn handle_reprovisioning(
                         StateHandlerOutcome::transition(SwitchControllerState::Error {
                             cause: cause.clone(),
                         })
-                        .with_txn(txn.into()),
+                        .with_txn(txn),
                     )
                 }
                 model::rack::RackFirmwareUpgradeState::Started
@@ -298,7 +295,7 @@ pub async fn handle_reprovisioning(
                             .await?;
                         Ok(
                             StateHandlerOutcome::transition(SwitchControllerState::Ready)
-                                .with_txn(txn.into()),
+                                .with_txn(txn),
                         )
                     }
                 }
@@ -315,7 +312,7 @@ pub async fn handle_reprovisioning(
                         StateHandlerOutcome::transition(SwitchControllerState::Error {
                             cause: cause.clone(),
                         })
-                        .with_txn(txn.into()),
+                        .with_txn(txn),
                     )
                 }
                 model::rack::SwitchNvosUpdateState::Started
@@ -344,7 +341,7 @@ pub async fn handle_reprovisioning(
                         StateHandlerOutcome::transition(SwitchControllerState::Error {
                             cause: cause.clone(),
                         })
-                        .with_txn(txn.into()),
+                        .with_txn(txn),
                     );
                 }
                 if let Some(reason) = fabric_manager_status.reason.as_ref() {
@@ -359,7 +356,7 @@ pub async fn handle_reprovisioning(
                             .await?;
                         return Ok(
                             StateHandlerOutcome::transition(SwitchControllerState::Ready)
-                                .with_txn(txn.into()),
+                                .with_txn(txn),
                         );
                     }
                     return Ok(StateHandlerOutcome::wait(reason.clone()));
@@ -372,7 +369,7 @@ pub async fn handle_reprovisioning(
                 .await
                 .map_err(StateHandlerError::from_transaction)?;
             db_switch::clear_switch_reprovisioning_requested(txn.as_mut(), *switch_id).await?;
-            Ok(StateHandlerOutcome::transition(SwitchControllerState::Ready).with_txn(txn.into()))
+            Ok(StateHandlerOutcome::transition(SwitchControllerState::Ready).with_txn(txn))
         }
     }
 }

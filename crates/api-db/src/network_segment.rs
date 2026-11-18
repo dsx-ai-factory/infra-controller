@@ -30,7 +30,7 @@ use model::network_segment::{
     NetworkDefinition, NetworkSegment, NetworkSegmentControllerState, NetworkSegmentSearchConfig,
     NetworkSegmentType, NewNetworkSegment,
 };
-use sqlx::{PgConnection, PgTransaction};
+use sqlx::PgConnection;
 
 use crate::config_drift::{ConfigDefinitionDrifted, ConfigDriftKind, ConfigResourceKind};
 use crate::db_read::DbReader;
@@ -984,7 +984,7 @@ pub async fn mark_as_deleted(
 /// `instance_addresses`.
 pub async fn final_delete(
     segment_id: NetworkSegmentId,
-    txn: &mut PgTransaction<'_>,
+    txn: &mut crate::Transaction<'_>,
 ) -> Result<NetworkSegmentId, DatabaseError> {
     // Recheck inside the delete transaction. The table lock serializes this
     // read against the allocator's exclusive lock on `instance_addresses`,
@@ -1098,7 +1098,7 @@ pub async fn mark_as_deleted_no_validation(
 /// across all DPUs via VRR.
 pub async fn allocate_svi_ip(
     value: &NetworkSegment,
-    txn: &mut PgTransaction<'_>,
+    txn: &mut crate::Transaction<'_>,
 ) -> Result<IpAddr, DatabaseError> {
     let mut first_svi_ip = None;
 

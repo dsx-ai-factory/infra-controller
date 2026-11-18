@@ -96,7 +96,7 @@ pub(in crate::tests) mod tests {
 
         txn.commit().await?;
 
-        let mut txn: sqlx::Transaction<'_, sqlx::Postgres> = env.pool.txn_begin().await?.into();
+        let mut txn: db::Transaction<'_> = env.pool.txn_begin().await?;
 
         match get_ek_cert_by_machine_id(&mut txn, &machine_id).await {
             Err(e) => assert_eq!(e.to_string(), "internal error: hardware info not found"),
@@ -145,7 +145,7 @@ pub(in crate::tests) mod tests {
 
         txn.commit().await?;
 
-        let mut txn: sqlx::Transaction<'_, sqlx::Postgres> = env.pool.txn_begin().await?.into();
+        let mut txn: db::Transaction<'_> = env.pool.txn_begin().await?;
 
         // set ek cert to None to trigger an error
         hardware_info.tpm_ek_certificate = None;
@@ -153,7 +153,7 @@ pub(in crate::tests) mod tests {
 
         txn.commit().await?;
 
-        let mut txn: sqlx::Transaction<'_, sqlx::Postgres> = env.pool.txn_begin().await?.into();
+        let mut txn: db::Transaction<'_> = env.pool.txn_begin().await?;
 
         match get_ek_cert_by_machine_id(&mut txn, &machine_id).await {
             Err(e) => assert_eq!(
@@ -260,7 +260,7 @@ pub(in crate::tests) mod tests {
 
         txn.commit().await?;
 
-        let mut txn: sqlx::Transaction<'_, sqlx::Postgres> = env.pool.txn_begin().await?.into();
+        let mut txn: db::Transaction<'_> = env.pool.txn_begin().await?;
 
         let ek_cert_status = ek_cert_verification_status::get_by_machine_id(txn.as_mut(), host_id)
             .await
@@ -281,8 +281,7 @@ pub(in crate::tests) mod tests {
             MachineId::from_str("fm100hseddco33hvlofuqvg543p6p9aj60g76q5cq491g9m9tgtf2dk0530")
                 .unwrap();
 
-        let mut txn: sqlx::Transaction<'_, sqlx::Postgres> =
-            env.pool.txn_begin().await.unwrap().into();
+        let mut txn: db::Transaction<'_> = env.pool.txn_begin().await.unwrap();
 
         let ek_cert = TpmEkCertificate::from(EK_CERT_SERIALIZED.to_vec());
 
@@ -295,7 +294,7 @@ pub(in crate::tests) mod tests {
 
         txn.commit().await?;
 
-        let mut txn: sqlx::Transaction<'_, sqlx::Postgres> = env.pool.txn_begin().await?.into();
+        let mut txn: db::Transaction<'_> = env.pool.txn_begin().await?;
 
         let ek_cert_status = ek_cert_verification_status::get_by_machine_id(txn.as_mut(), host_id)
             .await
@@ -322,8 +321,7 @@ pub(in crate::tests) mod tests {
         hasher.update(EK_CERT_SERIALIZED);
         let tpm_ek_cert_sha256 = hasher.finalize();
 
-        let mut txn: sqlx::Transaction<'_, sqlx::Postgres> =
-            env.pool.txn_begin().await.unwrap().into();
+        let mut txn: db::Transaction<'_> = env.pool.txn_begin().await.unwrap();
 
         // execute and verify
         match match_update_existing_ek_cert_status_against_ca(
@@ -363,8 +361,7 @@ pub(in crate::tests) mod tests {
         hasher.update(EK_CERT_SERIALIZED);
         let tpm_ek_cert_sha256 = hasher.finalize();
 
-        let mut txn: sqlx::Transaction<'_, sqlx::Postgres> =
-            env.pool.txn_begin().await.unwrap().into();
+        let mut txn: db::Transaction<'_> = env.pool.txn_begin().await.unwrap();
 
         // execute and verify
         match match_update_existing_ek_cert_status_against_ca(
@@ -405,8 +402,7 @@ pub(in crate::tests) mod tests {
         hasher.update(EK_CERT_SERIALIZED);
         let tpm_ek_cert_sha256 = hasher.finalize();
 
-        let mut txn: sqlx::Transaction<'_, sqlx::Postgres> =
-            env.pool.txn_begin().await.unwrap().into();
+        let mut txn: db::Transaction<'_> = env.pool.txn_begin().await.unwrap();
 
         // execute and verify
         match match_update_existing_ek_cert_status_against_ca(
@@ -440,8 +436,7 @@ pub(in crate::tests) mod tests {
 
         let ek_cert = TpmEkCertificate::from(EK_CERT_SERIALIZED.to_vec());
 
-        let mut txn: sqlx::Transaction<'_, sqlx::Postgres> =
-            env.pool.txn_begin().await.unwrap().into();
+        let mut txn: db::Transaction<'_> = env.pool.txn_begin().await.unwrap();
 
         if match_insert_new_ek_cert_status_against_ca(&mut txn, &ek_cert, &machine_id)
             .await
@@ -453,8 +448,7 @@ pub(in crate::tests) mod tests {
         txn.commit().await?;
 
         // execute - call with unmatching ek
-        let mut txn: sqlx::Transaction<'_, sqlx::Postgres> =
-            env.pool.txn_begin().await.unwrap().into();
+        let mut txn: db::Transaction<'_> = env.pool.txn_begin().await.unwrap();
 
         let mut hasher = Sha256::new();
         hasher.update(EK_CERT_SERIALIZED);
@@ -472,8 +466,7 @@ pub(in crate::tests) mod tests {
         txn.commit().await?;
 
         // verify - make sql query, ek status should remain unmatched
-        let mut txn: sqlx::Transaction<'_, sqlx::Postgres> =
-            env.pool.txn_begin().await.unwrap().into();
+        let mut txn: db::Transaction<'_> = env.pool.txn_begin().await.unwrap();
         let query = "SELECT * from ek_cert_verification_status;";
         let all_ek_cert_statuses =
             sqlx::query_as::<_, model::attestation::EkCertVerificationStatus>(query)
@@ -514,8 +507,7 @@ pub(in crate::tests) mod tests {
             .expect("Failed to add CA cert");
 
         // verify
-        let mut txn: sqlx::Transaction<'_, sqlx::Postgres> =
-            env.pool.txn_begin().await.unwrap().into();
+        let mut txn: db::Transaction<'_> = env.pool.txn_begin().await.unwrap();
         let query = "SELECT * from tpm_ca_certs;";
         let all_ca_certs = sqlx::query_as::<_, model::attestation::TpmCaCert>(query)
             .fetch_all(&mut *txn)
@@ -541,8 +533,7 @@ pub(in crate::tests) mod tests {
         let machineid_1 = create_machine_with_ek_cert(&EK_CERT_SERIALIZED, &env).await?;
         let machineid_2 = create_machine_with_ek_cert(&EK2_CERT_SERIALIZED, &env).await?;
 
-        let mut txn: sqlx::Transaction<'_, sqlx::Postgres> =
-            env.pool.txn_begin().await.unwrap().into();
+        let mut txn: db::Transaction<'_> = env.pool.txn_begin().await.unwrap();
 
         // insert two new ek cert statuses
         match_insert_new_ek_cert_status_against_ca(
@@ -571,8 +562,7 @@ pub(in crate::tests) mod tests {
             .expect("Failed to add CA cert");
 
         // verify
-        let mut txn: sqlx::Transaction<'_, sqlx::Postgres> =
-            env.pool.txn_begin().await.unwrap().into();
+        let mut txn: db::Transaction<'_> = env.pool.txn_begin().await.unwrap();
         let query = "SELECT * from ek_cert_verification_status ORDER BY serial_num;";
         let all_ek_cert_statuses =
             sqlx::query_as::<_, model::attestation::EkCertVerificationStatus>(query)
@@ -684,8 +674,7 @@ pub(in crate::tests) mod tests {
         let machineid_1 = create_machine_with_ek_cert(&EK_CERT_SERIALIZED, &env).await?;
         let machineid_2 = create_machine_with_ek_cert(&EK2_CERT_SERIALIZED, &env).await?;
 
-        let mut txn: sqlx::Transaction<'_, sqlx::Postgres> =
-            env.pool.txn_begin().await.unwrap().into();
+        let mut txn: db::Transaction<'_> = env.pool.txn_begin().await.unwrap();
 
         // insert two new ek cert statuses
         match_insert_new_ek_cert_status_against_ca(
@@ -761,8 +750,7 @@ pub(in crate::tests) mod tests {
         let machineid_1 = create_machine_with_ek_cert(&EK_CERT_SERIALIZED, &env).await?;
         let machineid_2 = create_machine_with_ek_cert(&EK2_CERT_SERIALIZED, &env).await?;
 
-        let mut txn: sqlx::Transaction<'_, sqlx::Postgres> =
-            env.pool.txn_begin().await.unwrap().into();
+        let mut txn: db::Transaction<'_> = env.pool.txn_begin().await.unwrap();
 
         // insert two new ek cert statuses
         match_insert_new_ek_cert_status_against_ca(
@@ -899,8 +887,7 @@ pub(in crate::tests) mod tests {
         let machineid_1 = create_machine_with_ek_cert(&EK_CERT_SERIALIZED, &env).await?;
         let machineid_2 = create_machine_with_ek_cert(&EK2_CERT_SERIALIZED, &env).await?;
 
-        let mut txn: sqlx::Transaction<'_, sqlx::Postgres> =
-            env.pool.txn_begin().await.unwrap().into();
+        let mut txn: db::Transaction<'_> = env.pool.txn_begin().await.unwrap();
 
         // insert two new ek cert statuses
         match_insert_new_ek_cert_status_against_ca(
@@ -1031,8 +1018,7 @@ pub(in crate::tests) mod tests {
         // verify
         response.expect("Expected discover_machine to return Ok");
 
-        let mut txn: sqlx::Transaction<'_, sqlx::Postgres> =
-            env.pool.txn_begin().await.unwrap().into();
+        let mut txn: db::Transaction<'_> = env.pool.txn_begin().await.unwrap();
         let query = "SELECT * from ek_cert_verification_status;";
         let all_ek_cert_statuses =
             sqlx::query_as::<_, model::attestation::EkCertVerificationStatus>(query)
@@ -1078,8 +1064,7 @@ pub(in crate::tests) mod tests {
         // verify
         response.expect("Expected discover_machine to return Ok");
 
-        let mut txn: sqlx::Transaction<'_, sqlx::Postgres> =
-            env.pool.txn_begin().await.unwrap().into();
+        let mut txn: db::Transaction<'_> = env.pool.txn_begin().await.unwrap();
         let query = "SELECT * from ek_cert_verification_status;";
         let all_ek_cert_statuses =
             sqlx::query_as::<_, model::attestation::EkCertVerificationStatus>(query)
@@ -1139,8 +1124,7 @@ pub(in crate::tests) mod tests {
         response.expect("Failed to call discover_machine first time");
 
         // now aftifically unmatch the ek status
-        let mut txn: sqlx::Transaction<'_, sqlx::Postgres> =
-            env.pool.txn_begin().await.unwrap().into();
+        let mut txn: db::Transaction<'_> = env.pool.txn_begin().await.unwrap();
         ek_cert_verification_status::unmatch_ca_verification_status(
             &mut txn,
             cert_id_response.id.unwrap().ca_cert_id,
@@ -1149,8 +1133,7 @@ pub(in crate::tests) mod tests {
 
         txn.commit().await?;
 
-        let mut txn: sqlx::Transaction<'_, sqlx::Postgres> =
-            env.pool.txn_begin().await.unwrap().into();
+        let mut txn: db::Transaction<'_> = env.pool.txn_begin().await.unwrap();
         let query = "SELECT * from ek_cert_verification_status;";
         let all_ek_cert_statuses =
             sqlx::query_as::<_, model::attestation::EkCertVerificationStatus>(query)
@@ -1177,8 +1160,7 @@ pub(in crate::tests) mod tests {
         // verify
         response.expect("Failed to call discover_machine second time");
 
-        let mut txn: sqlx::Transaction<'_, sqlx::Postgres> =
-            env.pool.txn_begin().await.unwrap().into();
+        let mut txn: db::Transaction<'_> = env.pool.txn_begin().await.unwrap();
         let query = "SELECT * from ek_cert_verification_status;";
         let all_ek_cert_statuses =
             sqlx::query_as::<_, model::attestation::EkCertVerificationStatus>(query)

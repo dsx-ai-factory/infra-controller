@@ -770,7 +770,7 @@ async fn process_object<IO: StateControllerIO>(
         let (handler_outcome, mut txn) = match handler_output {
             Ok(mut outcome) => {
                 let mut txn = if let Some(txn) = outcome.take_transaction() {
-                    ::db::Transaction::from(txn)
+                    txn
                 } else {
                     pool.txn_begin()
                         .await

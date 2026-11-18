@@ -1066,7 +1066,7 @@ async fn handle_dpf_reprovisioning(
             .map_err(StateHandlerError::from_transaction)?;
         db::machine::mark_machine_ingestion_done_with_dpf(&mut txn, &state.host_snapshot.id)
             .await?;
-        return Ok(outcome.with_txn(txn.into()));
+        return Ok(outcome.with_txn(txn));
     }
 
     tracing::info!(machine_id = %dpu_snapshot.id, "DPF initiate reprovision of DPU");

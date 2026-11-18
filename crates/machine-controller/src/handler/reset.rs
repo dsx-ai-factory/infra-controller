@@ -93,7 +93,7 @@ async fn handle_deleting_instance(
         return Ok(StateHandlerOutcome::wait(
             "waiting for DPUs to apply Admin networking before deleting the Instance".to_string(),
         )
-        .with_txn(txn.into()));
+        .with_txn(txn));
     }
 
     // Retain the Instance and its resources until every topology DPU has
@@ -152,7 +152,7 @@ async fn handle_deleting_instance(
 
     // Publish Instance deletion, network-segment and loopback release, and failure-record cleanup
     // with the next reset state so reset cannot resume from partially cleaned database state.
-    Ok(StateHandlerOutcome::transition(next).with_txn(txn.into()))
+    Ok(StateHandlerOutcome::transition(next).with_txn(txn))
 }
 
 /// Deletes the host's DPF CRs and polls until they are gone.
@@ -259,6 +259,6 @@ async fn start_host_reingestion(
         StateHandlerOutcome::transition(ManagedHostState::DpuDiscoveringState {
             dpu_states: DpuDiscoveringStates { states: dpu_states },
         })
-        .with_txn(txn.into()),
+        .with_txn(txn),
     )
 }

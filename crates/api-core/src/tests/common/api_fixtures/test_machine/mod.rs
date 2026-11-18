@@ -36,7 +36,7 @@ pub(in crate::tests) struct TestMachine<ID: MachineIdSubtypeTrait> {
     api: Arc<Api>,
 }
 
-type Txn<'a> = sqlx::Transaction<'a, sqlx::Postgres>;
+type Txn<'a> = db::Transaction<'a>;
 
 impl<ID> TestMachine<ID>
 where

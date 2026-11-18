@@ -9,7 +9,7 @@ use db::resource_pool::remote as storage;
 use db::{ConditionalWrite, DatabaseError};
 use model::resource_pool::OwnerType;
 use model::resource_pool::allocation::AllocationState;
-use sqlx::{PgConnection, PgPool, PgTransaction};
+use sqlx::{PgConnection, PgPool};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
@@ -208,7 +208,7 @@ impl ResourcePoolRegistry {
     /// creation IDs. A new attempt may have started after the capture committed.
     pub async fn request_cancellation(
         &self,
-        txn: &mut PgTransaction<'_>,
+        txn: &mut db::Transaction<'_>,
         owner_type: OwnerType,
         owner_id: &str,
         slot: &str,

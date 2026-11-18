@@ -329,5 +329,5 @@ pub(crate) async fn handle_rotating_nic_lockdown(
             StateHandlerError::GenericError(eyre!("clear nic lockdown force request: {e}"))
         })?;
     }
-    Ok(StateHandlerOutcome::transition(ManagedHostState::Ready).with_txn(txn.into()))
+    Ok(StateHandlerOutcome::transition(ManagedHostState::Ready).with_txn(txn))
 }

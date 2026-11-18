@@ -23,7 +23,6 @@ pub(crate) mod zone;
 use carbide_uuid::network::NetworkSegmentId;
 use ipnetwork::IpNetwork;
 use model::dns::NewDomain;
-use sqlx::PgTransaction;
 
 use crate::DatabaseResult;
 
@@ -100,7 +99,7 @@ pub fn cidr_to_reverse_zone(prefix: IpNetwork) -> Option<String> {
 /// reverse-zone row until the DNS request path has a trusted VPC discriminator.
 pub async fn ensure_reverse_zones(
     prefixes: &[IpNetwork],
-    txn: &mut PgTransaction<'_>,
+    txn: &mut crate::Transaction<'_>,
 ) -> DatabaseResult<()> {
     let reverse_zones = reverse_zones_for_prefixes(prefixes);
     let zone_names = reverse_zones
@@ -127,7 +126,7 @@ pub async fn ensure_reverse_zones(
 pub async fn remove_reverse_zones(
     prefixes: &[IpNetwork],
     removed_segment_id: NetworkSegmentId,
-    txn: &mut PgTransaction<'_>,
+    txn: &mut crate::Transaction<'_>,
 ) -> DatabaseResult<()> {
     let reverse_zones = reverse_zones_for_prefixes(prefixes);
     let zone_names = reverse_zones
@@ -161,7 +160,7 @@ fn reverse_zones_for_prefixes(prefixes: &[IpNetwork]) -> Vec<(String, IpNetwork)
 async fn ensure_reverse_zone_locked(
     prefix: IpNetwork,
     zone: String,
-    txn: &mut PgTransaction<'_>,
+    txn: &mut crate::Transaction<'_>,
 ) -> DatabaseResult<()> {
     if !reverse_zone_has_live_prefix(txn, prefix).await? {
         return Ok(());
@@ -187,7 +186,7 @@ async fn remove_reverse_zone_locked(
     prefix: IpNetwork,
     zone: String,
     removed_segment_id: NetworkSegmentId,
-    txn: &mut PgTransaction<'_>,
+    txn: &mut crate::Transaction<'_>,
 ) -> DatabaseResult<()> {
     if reverse_zone_has_other_live_prefix(txn, prefix, removed_segment_id).await? {
         return Ok(());
@@ -216,7 +215,7 @@ async fn remove_reverse_zone_locked(
 /// so a transaction touching both address families cannot deadlock with the
 /// same names in another order.
 pub async fn lock_reverse_zone_names(
-    txn: &mut PgTransaction<'_>,
+    txn: &mut crate::Transaction<'_>,
     names: &[String],
 ) -> DatabaseResult<()> {
     let names = names
@@ -227,7 +226,7 @@ pub async fn lock_reverse_zone_names(
 }
 
 async fn lock_normalized_reverse_zone_names(
-    txn: &mut PgTransaction<'_>,
+    txn: &mut crate::Transaction<'_>,
     names: &[String],
 ) -> DatabaseResult<()> {
     let mut names = names.to_vec();
@@ -245,7 +244,7 @@ async fn lock_normalized_reverse_zone_names(
 }
 
 async fn reverse_zone_has_live_prefix(
-    txn: &mut PgTransaction<'_>,
+    txn: &mut crate::Transaction<'_>,
     prefix: IpNetwork,
 ) -> DatabaseResult<bool> {
     let query = r#"
@@ -265,7 +264,7 @@ async fn reverse_zone_has_live_prefix(
 }
 
 async fn reverse_zone_has_other_live_prefix(
-    txn: &mut PgTransaction<'_>,
+    txn: &mut crate::Transaction<'_>,
     prefix: IpNetwork,
     removed_segment_id: NetworkSegmentId,
 ) -> DatabaseResult<bool> {
@@ -300,7 +299,7 @@ mod tests {
     /// Inserts the minimum live segment and prefix rows without touching DNS.
     /// The returned segment ID lets deletion tests retire the exact owner.
     async fn insert_network_prefix(
-        txn: &mut sqlx::PgTransaction<'_>,
+        txn: &mut crate::Transaction<'_>,
         name: &str,
         prefix: ipnetwork::IpNetwork,
     ) -> NetworkSegmentId {

@@ -76,7 +76,7 @@ use model::resource_pool::ResourcePoolError;
 use model::resource_pool::common::{CommonPools, LOOPBACK_IP_V6};
 use serde::{Deserialize, Serialize};
 use sqlx::postgres::PgRow;
-use sqlx::{FromRow, PgConnection, PgTransaction, Pool, Postgres, Row};
+use sqlx::{FromRow, PgConnection, Pool, Postgres, Row};
 
 use super::{DatabaseError, ObjectFilter, Transaction, queries};
 use crate::db_read::DbReader;
@@ -1029,7 +1029,7 @@ pub async fn update_restart_verification_status(
     current_reboot: MachineLastRebootRequested,
     verified: Option<bool>,
     attempts: i32,
-    txn: &mut PgTransaction<'_>,
+    txn: &mut crate::Transaction<'_>,
 ) -> Result<ConditionalWrite<(), RebootVerificationNotCurrent>, DatabaseError> {
     let query = "SELECT last_reboot_requested FROM machines WHERE id=$1 FOR NO KEY UPDATE";
     let stored: Option<Option<sqlx::types::Json<MachineLastRebootRequested>>> =

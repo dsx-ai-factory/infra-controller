@@ -242,7 +242,7 @@ impl StateHandler for SitePrefixReadiness {
                 .wait_for_isolation(&mut txn, *object_id, requested_at)
                 .await?
             {
-                return Ok(wait.with_txn(txn.into()));
+                return Ok(wait.with_txn(txn));
             }
             db::tenant_prefix_overlap::lock_config(&mut txn).await?;
         } else {
@@ -250,10 +250,10 @@ impl StateHandler for SitePrefixReadiness {
         }
         let Some(current) = db::site_prefix::find_by_id_for_update(&mut txn, *object_id).await?
         else {
-            return Ok(StateHandlerOutcome::deleted().with_txn(txn.into()));
+            return Ok(StateHandlerOutcome::deleted().with_txn(txn));
         };
         if current.status.lifecycle_state != state.status.lifecycle_state {
-            return Ok(StateHandlerOutcome::do_nothing().with_txn(txn.into()));
+            return Ok(StateHandlerOutcome::do_nothing().with_txn(txn));
         }
         if current.version != state.version {
             return Err(StateHandlerError::IterationInvalidated {
@@ -272,7 +272,7 @@ impl StateHandler for SitePrefixReadiness {
                     return Ok(StateHandlerOutcome::wait(
                         "waiting for retained VPC prefixes or direct network prefixes without ready operator coverage".to_string(),
                     )
-                    .with_txn(txn.into()));
+                    .with_txn(txn));
                 }
             } else {
                 let vpc_prefix_count =
@@ -282,14 +282,14 @@ impl StateHandler for SitePrefixReadiness {
                     return Ok(StateHandlerOutcome::wait(format!(
                         "waiting for {vpc_prefix_count} VPC prefix references to be physically removed"
                     ))
-                    .with_txn(txn.into()));
+                    .with_txn(txn));
                 }
             }
             db::site_prefix::final_delete(*object_id, &mut txn).await?;
-            return Ok(StateHandlerOutcome::deleted().with_txn(txn.into()));
+            return Ok(StateHandlerOutcome::deleted().with_txn(txn));
         }
         if current.status.authority != SitePrefixAuthority::TenantManaged {
-            return Ok(StateHandlerOutcome::do_nothing().with_txn(txn.into()));
+            return Ok(StateHandlerOutcome::do_nothing().with_txn(txn));
         }
 
         let isolation_required = matches!(
@@ -306,12 +306,12 @@ impl StateHandler for SitePrefixReadiness {
             .wait_for_isolation(&mut txn, *object_id, requested_at)
             .await?
         {
-            return Ok(wait.with_txn(txn.into()));
+            return Ok(wait.with_txn(txn));
         }
 
         // Keep the routing and root locks through the framework's transition.
         // A later assignment gets the complete prefix set; a concurrent delete
         // cannot be overwritten by this readiness decision.
-        Ok(StateHandlerOutcome::transition(SitePrefixLifecycleState::Ready).with_txn(txn.into()))
+        Ok(StateHandlerOutcome::transition(SitePrefixLifecycleState::Ready).with_txn(txn))
     }
 }

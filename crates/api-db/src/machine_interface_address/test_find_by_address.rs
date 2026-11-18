@@ -30,7 +30,7 @@ use model::network_segment::{
 use crate as db;
 use crate::TransactionVending as _;
 
-async fn init_dwrt1_domain(txn: &mut sqlx::PgTransaction<'_>) -> db::DatabaseResult<Domain> {
+async fn init_dwrt1_domain(txn: &mut crate::Transaction<'_>) -> db::DatabaseResult<Domain> {
     db::dns::domain::persist(NewDomain::new("dwrt1.com"), txn.as_mut()).await
 }
 

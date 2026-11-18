@@ -22,7 +22,6 @@
 //! references use the underlying prefix indexes.
 
 use carbide_uuid::vpc::{VpcId, VpcPrefixId};
-use sqlx::PgTransaction;
 
 use crate::db_read::DbReader;
 use crate::{DatabaseError, DatabaseResult};
@@ -138,7 +137,7 @@ pub async fn find_overlapping_vpc_prefix_pairs(
 /// in the same transaction. Otherwise, two requests can each see no overlap or
 /// enough admission capacity and both commit. PostgreSQL releases the lock on commit
 /// or rollback.
-pub async fn lock_checks(txn: &mut PgTransaction<'_>) -> DatabaseResult<()> {
+pub async fn lock_checks(txn: &mut crate::Transaction<'_>) -> DatabaseResult<()> {
     let query = "SELECT pg_advisory_xact_lock(\
             hashtextextended('tenant_prefix_overlap:checks', 0))";
     sqlx::query(query)
@@ -151,7 +150,7 @@ pub async fn lock_checks(txn: &mut PgTransaction<'_>) -> DatabaseResult<()> {
 /// `lock_config` keeps routing writers out while configuration is checked and
 /// rendered, but allows unrelated DPU requests to run together. Take it before
 /// resource locks, just like [`lock_checks`]; never upgrade it to a writer lock.
-pub async fn lock_config(txn: &mut PgTransaction<'_>) -> DatabaseResult<()> {
+pub async fn lock_config(txn: &mut crate::Transaction<'_>) -> DatabaseResult<()> {
     let query = "SELECT pg_advisory_xact_lock_shared(\
             hashtextextended('tenant_prefix_overlap:checks', 0))";
     sqlx::query(query)

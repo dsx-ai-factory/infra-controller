@@ -33,7 +33,7 @@ use crate::TransactionVending as _;
 use crate::test_support::network_segment::admin_segment;
 use crate::test_support::postgres::wait_for_blocked_query;
 
-async fn init_dwrt1_domain(txn: &mut sqlx::PgTransaction<'_>) -> db::DatabaseResult<Domain> {
+async fn init_dwrt1_domain(txn: &mut crate::Transaction<'_>) -> db::DatabaseResult<Domain> {
     db::dns::domain::persist(NewDomain::new("dwrt1.com"), txn.as_mut()).await
 }
 

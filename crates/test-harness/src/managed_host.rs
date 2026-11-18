@@ -50,7 +50,7 @@ pub struct TestManagedHost {
 
 impl TestManagedHost {
     /// Reloads this host and its instance within the caller's transaction.
-    pub async fn snapshot(&self, txn: &mut sqlx::PgTransaction<'_>) -> ManagedHostStateSnapshot {
+    pub async fn snapshot(&self, txn: &mut db::Transaction<'_>) -> ManagedHostStateSnapshot {
         db::managed_host::load_snapshot(txn.as_mut(), &self.host.id.into(), Default::default())
             .await
             .unwrap()

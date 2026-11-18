@@ -189,7 +189,7 @@ pub async fn handle_rotating_bmc(
             .await?;
             Ok(
                 StateHandlerOutcome::transition(PowerShelfControllerState::Ready)
-                    .with_txn(resume_txn.into()),
+                    .with_txn(resume_txn),
             )
         }
         RotationStep::Retry { retry_count } => Ok(StateHandlerOutcome::transition(

@@ -18,7 +18,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use carbide_instrument::{Event, LabelValue};
-use sqlx::{PgPool, PgTransaction};
+use sqlx::PgPool;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc, oneshot};
 use tokio::task::JoinSet;
 use tokio::time::MissedTickBehavior;
@@ -496,7 +496,7 @@ impl WorkLock {
     /// Keep the transaction short and free of external I/O. A replica that
     /// tries to acquire this key waits for the fence in its single manager
     /// loop, which also delays that replica's unrelated lock commands.
-    pub async fn fence_transaction(&self, txn: &mut PgTransaction<'_>) -> DatabaseResult<()> {
+    pub async fn fence_transaction(&self, txn: &mut crate::Transaction<'_>) -> DatabaseResult<()> {
         let query = r#"
 SELECT true
 FROM work_locks

@@ -73,7 +73,7 @@ impl<T> Drop for TestTaskHandle<T> {
     }
 }
 
-async fn backend_pid(txn: &mut sqlx::Transaction<'_, sqlx::Postgres>) -> i32 {
+async fn backend_pid(txn: &mut db::Transaction<'_>) -> i32 {
     sqlx::query_scalar("SELECT pg_backend_pid()")
         .fetch_one(txn.as_mut())
         .await

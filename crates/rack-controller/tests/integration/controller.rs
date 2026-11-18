@@ -132,9 +132,14 @@ impl StateHandler for TestRackStateHandler {
             },
             RackState::Deleting => {
                 // Rack is being deleted
-                let mut txn = ctx.services.db_pool.txn_begin().await?;
+                let mut txn = ctx
+                    .services
+                    .db_pool
+                    .txn_begin()
+                    .await
+                    .map_err(StateHandlerError::from_transaction)?;
                 db::rack::final_delete(&mut txn, rack_id).await?;
-                return Ok(StateHandlerOutcome::deleted().with_txn(txn.into()));
+                return Ok(StateHandlerOutcome::deleted().with_txn(txn));
             }
             _ => return Ok(StateHandlerOutcome::do_nothing()),
         };

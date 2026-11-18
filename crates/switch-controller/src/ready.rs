@@ -59,7 +59,7 @@ pub async fn handle_ready(
             StateHandlerOutcome::transition(SwitchControllerState::Decommissioning {
                 decommissioning_state: SwitchDecommissioningState::SuppressingSiteExplorer,
             })
-            .with_txn(txn.into()),
+            .with_txn(txn),
         );
     }
 
@@ -93,7 +93,7 @@ pub async fn handle_ready(
             db_switch::clear_switch_reprovisioning_requested(txn.as_mut(), *switch_id).await?;
             return Ok(
                 StateHandlerOutcome::transition(SwitchControllerState::Error { cause })
-                    .with_txn(txn.into()),
+                    .with_txn(txn),
             );
         }
 
@@ -110,7 +110,7 @@ pub async fn handle_ready(
                 .await
                 .map_err(StateHandlerError::from_transaction)?;
             db_switch::clear_switch_reprovisioning_requested(txn.as_mut(), *switch_id).await?;
-            return Ok(StateHandlerOutcome::do_nothing().with_txn(txn.into()));
+            return Ok(StateHandlerOutcome::do_nothing().with_txn(txn));
         };
 
         tracing::info!(

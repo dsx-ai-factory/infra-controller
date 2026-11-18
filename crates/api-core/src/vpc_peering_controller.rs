@@ -186,14 +186,14 @@ impl StateHandler for VpcPeeringDeletion {
         // An unsynced receiver only delays deletion. Do the ordinary wait
         // without the routing lock, then lock and repeat before removing it.
         if let Some(wait) = Self::wait_for_receivers(&mut txn, state).await? {
-            return Ok(wait.with_txn(txn.into()));
+            return Ok(wait.with_txn(txn));
         }
         // `Deleting` peerings are already absent from DPU responses. Sharing
         // the routing lock keeps writers out without blocking those reads.
         db::tenant_prefix_overlap::lock_config(&mut txn).await?;
         let Some(current) = db::vpc_peering::find_by_id_for_update(&mut txn, *object_id).await?
         else {
-            return Ok(StateHandlerOutcome::deleted().with_txn(txn.into()));
+            return Ok(StateHandlerOutcome::deleted().with_txn(txn));
         };
         if current.deletion_version != state.deletion_version {
             return Err(StateHandlerError::IterationInvalidated {
@@ -201,9 +201,9 @@ impl StateHandler for VpcPeeringDeletion {
             });
         }
         if let Some(wait) = Self::wait_for_receivers(&mut txn, &current).await? {
-            return Ok(wait.with_txn(txn.into()));
+            return Ok(wait.with_txn(txn));
         }
         db::vpc_peering::final_delete(&mut txn, *object_id).await?;
-        Ok(StateHandlerOutcome::deleted().with_txn(txn.into()))
+        Ok(StateHandlerOutcome::deleted().with_txn(txn))
     }
 }

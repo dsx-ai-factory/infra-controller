@@ -150,7 +150,7 @@ use mac_address::MacAddress;
 use model::ConfigValidationError;
 use model::hardware_info::HardwareInfoError;
 use model::tenant::TenantError;
-use sqlx::{Acquire, PgPool, PgTransaction, Postgres};
+use sqlx::{Acquire, PgPool, Postgres};
 use tonic::Status;
 
 use crate::ip_allocator::DhcpError;
@@ -823,25 +823,13 @@ fn record_database_transaction_rollback_failure(
 /// borrows its connection for `'a`.
 #[derive(Debug)]
 pub struct Transaction<'a> {
-    inner: sqlx::PgTransaction<'a>,
+    inner: sqlx::Transaction<'a, Postgres>,
 }
 
 impl AsMut<sqlx::PgConnection> for Transaction<'_> {
     #[inline]
     fn as_mut(&mut self) -> &mut sqlx::PgConnection {
         &mut self.inner
-    }
-}
-
-impl<'a> From<Transaction<'a>> for sqlx::PgTransaction<'a> {
-    fn from(transaction: Transaction<'a>) -> Self {
-        transaction.inner
-    }
-}
-
-impl<'a> From<sqlx::PgTransaction<'a>> for Transaction<'a> {
-    fn from(inner: sqlx::PgTransaction<'a>) -> Self {
-        Self { inner }
     }
 }
 
@@ -949,7 +937,7 @@ impl<'a> Transaction<'a> {
 }
 
 impl<'a> Deref for Transaction<'a> {
-    type Target = sqlx::PgTransaction<'a>;
+    type Target = sqlx::PgConnection;
 
     #[inline]
     fn deref(&self) -> &Self::Target {
@@ -970,7 +958,7 @@ pub trait WithTransaction {
     fn with_txn<'pool, T, E>(
         &'pool self,
         f: impl for<'txn> FnOnce(
-            &'txn mut PgTransaction<'pool>,
+            &'txn mut Transaction<'pool>,
         ) -> futures::future::BoxFuture<'txn, Result<T, E>>
         + Send,
     ) -> impl Future<Output = DatabaseResult<Result<T, E>>> + Send
@@ -984,7 +972,7 @@ impl WithTransaction for PgPool {
     fn with_txn<'pool, T, E>(
         &'pool self,
         f: impl for<'txn> FnOnce(
-            &'txn mut PgTransaction<'pool>,
+            &'txn mut Transaction<'pool>,
         ) -> futures::future::BoxFuture<'txn, Result<T, E>>
         + Send,
     ) -> impl Future<Output = DatabaseResult<Result<T, E>>>
@@ -994,19 +982,17 @@ impl WithTransaction for PgPool {
     {
         let caller = Location::caller();
         async move {
-            let mut t = self
-                .begin()
-                .await
-                .map_err(|e| DatabaseError::txn_begin(e, caller))?;
+            let mut t = Transaction::begin_with_location(self, caller).await?;
             match f(&mut t).await {
                 Ok(output) => {
-                    t.commit()
+                    t.inner
+                        .commit()
                         .await
                         .map_err(|e| DatabaseError::txn_commit(e, caller))?;
                     Ok(Ok(output))
                 }
                 Err(e) => {
-                    if let Err(error) = t.rollback().await {
+                    if let Err(error) = t.inner.rollback().await {
                         record_database_transaction_rollback_failure(
                             DatabaseTransactionRollbackTrigger::ClosureError,
                             caller,

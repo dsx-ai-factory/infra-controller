@@ -15,7 +15,7 @@ use db::machine::MachineCreationIdentity;
 use db::{ConditionalWrite, DatabaseError, Transaction, TransactionVending as _};
 use model::resource_pool::common::CommonPools;
 use model::resource_pool::{OwnerType, ResourcePoolError};
-use sqlx::{PgConnection, PgPool, PgTransaction};
+use sqlx::{PgConnection, PgPool};
 use tokio_util::sync::CancellationToken;
 
 /// The allocation purpose identifying a DPU's FNN ASN.
@@ -250,7 +250,7 @@ impl<'a> PreparedDpuAsn<'a> {
     /// Creation records allocation failures and continues; backfill returns them.
     pub async fn attach(
         &self,
-        txn: &mut PgTransaction<'_>,
+        txn: &mut db::Transaction<'_>,
     ) -> Result<(), ResourcePoolBackendError> {
         if matches!(&self.preparation, AsnPreparation::Unneeded) {
             return Ok(());

@@ -3941,7 +3941,7 @@ impl NvlPartitionMonitor {
 
     async fn update_db_with_nmx_c_operations(
         &self,
-        txn: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+        txn: &mut db::Transaction<'_>,
         completed_nmx_c_operations: HashMap<NvLinkLogicalPartitionId, Vec<NmxcPartitionOperation>>,
         nmx_c_partitions: &HashMap<String, PartitionInfo>,
     ) -> NvLinkManagerResult<()> {
@@ -4097,7 +4097,7 @@ impl NvlPartitionMonitor {
 
     async fn load_mnnvl_managed_host_snapshots(
         &self,
-        txn: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+        txn: &mut db::Transaction<'_>,
     ) -> NvLinkManagerResult<HashMap<HostMachineId, ManagedHostStateSnapshot>> {
         let mnvvl_machine_ids = find_machine_ids::<HostMachineId>(
             txn.as_mut(),

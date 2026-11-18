@@ -220,7 +220,7 @@ pub(super) async fn observe_verified_boot_interface(
         }
     }
 
-    Ok(StateHandlerOutcome::do_nothing().with_txn(observation_txn.into()))
+    Ok(StateHandlerOutcome::do_nothing().with_txn(observation_txn))
 }
 
 #[cfg(test)]

@@ -33,7 +33,7 @@ use model::machine::{
     HostHealthConfig, LoadSnapshotOptions, ManagedHostState, ManagedHostStateSnapshot,
 };
 use mqttea::client::MqtteaClient;
-use sqlx::{PgConnection, PgPool, PgTransaction};
+use sqlx::{PgConnection, PgPool};
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 use tracing::Instrument;
@@ -68,7 +68,7 @@ pub struct DbServices {
 // If we started a transaction in the handler, the transaction is returned.
 pub(crate) struct HandlerResult {
     new_state: Option<DpaInterfaceControllerState>,
-    txn: Option<PgTransaction<'static>>,
+    txn: Option<db::Transaction<'static>>,
 }
 
 impl DpaMonitor {
@@ -229,7 +229,7 @@ impl DpaMonitor {
                 let handler_result = self.handle_dpa_interface(mh, idx, metrics).await?;
 
                 let new_state = handler_result.new_state;
-                let txn = handler_result.txn.map(db::Transaction::from);
+                let txn = handler_result.txn;
 
                 if let Some(new_state) = new_state {
                     let new_version = controller_state.version.increment();
@@ -404,7 +404,7 @@ impl DpaMonitor {
         hb_interval: TimeDelta,
         vni: u32,
         metrics: &mut DpaMonitorMetrics,
-    ) -> DpaManagerResult<Option<PgTransaction<'a>>> {
+    ) -> DpaManagerResult<Option<db::Transaction<'a>>> {
         // We are in the Ready or Assigned state and we continue to be in the same state.
         // In this state, we will send SetVni command to the DPA if
         //    (1) if the heartbeat interval has elapsed since the heartbeat
@@ -448,7 +448,7 @@ impl DpaMonitor {
         vni: u32,
         heart_beat: bool,
         revision_str: String,
-    ) -> DpaManagerResult<Option<PgTransaction<'a>>> {
+    ) -> DpaManagerResult<Option<db::Transaction<'a>>> {
         let services = &self.db_services;
 
         // Send a heartbeat command, indicated by the revision string being "NIL".
@@ -477,7 +477,7 @@ impl DpaMonitor {
                             "Error updating DPA interface heartbeat time",
                         );
                     }
-                    Ok(Some(txn.into()))
+                    Ok(Some(txn))
                 } else {
                     Ok(None)
                 }

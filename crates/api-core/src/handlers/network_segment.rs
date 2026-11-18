@@ -28,7 +28,7 @@ use model::network_segment::{
 };
 use model::site_prefix::SitePrefixLifecycleState;
 use model::vpc::VpcVirtualizationTypeCapabilities;
-use sqlx::{PgConnection, PgTransaction};
+use sqlx::PgConnection;
 use tonic::{Request, Response, Status};
 
 use crate::api::{Api, log_request_data};
@@ -640,7 +640,7 @@ pub(crate) async fn find_state_histories(
 /// set once before creating any missing zones.
 pub(crate) async fn save(
     api: &Api,
-    txn: &mut PgTransaction<'_>,
+    txn: &mut db::Transaction<'_>,
     ns: NewNetworkSegment,
     set_to_ready: bool,
     allocate_svi_ip: bool,
@@ -668,7 +668,7 @@ pub(crate) async fn save(
 /// Callers hold the overlap transaction lock through validation and persistence.
 pub(crate) async fn save_without_reverse_zones(
     api: &Api,
-    txn: &mut PgTransaction<'_>,
+    txn: &mut db::Transaction<'_>,
     mut ns: NewNetworkSegment,
     set_to_ready: bool,
     allocate_svi_ip: bool,

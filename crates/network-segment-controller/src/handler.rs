@@ -168,19 +168,19 @@ impl StateHandler for NetworkSegmentStateHandler {
                                 },
                             };
                             tracing::info!(network_segment_id = %segment_id, next_state = ?new_state, "Network Segment state transition");
-                            Ok(StateHandlerOutcome::transition(new_state).with_txn(txn.into()))
+                            Ok(StateHandlerOutcome::transition(new_state).with_txn(txn))
                         } else if chrono::Utc::now() >= *delete_at {
                             let new_state = NetworkSegmentControllerState::Deleting {
                                 deletion_state: NetworkSegmentDeletionState::DBDelete,
                             };
                             tracing::info!(network_segment_id = %segment_id, next_state = ?new_state, "Network Segment state transition");
-                            Ok(StateHandlerOutcome::transition(new_state).with_txn(txn.into()))
+                            Ok(StateHandlerOutcome::transition(new_state).with_txn(txn))
                         } else {
                             Ok(StateHandlerOutcome::wait(format!(
                                 "Cannot delete from database until draining completes at {}",
                                 delete_at.to_rfc3339()
                             ))
-                            .with_txn(txn.into()))
+                            .with_txn(txn))
                         }
                     }
                     NetworkSegmentDeletionState::DBDelete => {
@@ -224,7 +224,7 @@ impl StateHandler for NetworkSegmentStateHandler {
                             "Network Segment getting removed from the database",
                         );
                         db::network_segment::final_delete(*segment_id, &mut txn).await?;
-                        Ok(StateHandlerOutcome::deleted().with_txn(txn.into()))
+                        Ok(StateHandlerOutcome::deleted().with_txn(txn))
                     }
                 }
             }

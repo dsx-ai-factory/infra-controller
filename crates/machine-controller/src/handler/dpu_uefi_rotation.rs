@@ -323,7 +323,7 @@ pub(crate) async fn handle_rotating_dpu_uefi(
                 )
                 .await?;
             }
-            Ok(StateHandlerOutcome::transition(ManagedHostState::Ready).with_txn(txn.into()))
+            Ok(StateHandlerOutcome::transition(ManagedHostState::Ready).with_txn(txn))
         }
         // Client creation failed (credential store, TCP, or the vendor
         // probe): return Err so the state framework retries; quarantine is
@@ -368,7 +368,7 @@ pub(crate) async fn handle_rotating_dpu_uefi(
                 )
                 .await?;
             }
-            Ok(StateHandlerOutcome::transition(ManagedHostState::Ready).with_txn(txn.into()))
+            Ok(StateHandlerOutcome::transition(ManagedHostState::Ready).with_txn(txn))
         }
     }
 }

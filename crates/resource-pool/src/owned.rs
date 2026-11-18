@@ -10,7 +10,7 @@ use db::{ConditionalWrite, DatabaseError};
 use model::resource_pool::allocation::{AllocationSource, AllocationState};
 use model::resource_pool::remote::AllocationResult;
 use model::resource_pool::{OwnerType, ResourcePool};
-use sqlx::{PgConnection, PgTransaction};
+use sqlx::PgConnection;
 use uuid::Uuid;
 
 use crate::remote::{RemoteResourcePoolError, wire};
@@ -134,7 +134,7 @@ where
     /// An allocation that no longer permits release returns `NotApplied`.
     pub async fn release(
         self,
-        txn: &mut PgTransaction<'_>,
+        txn: &mut db::Transaction<'_>,
     ) -> Result<ConditionalWrite<(), ResourcePoolAllocationNotOwned>, ResourcePoolBackendError>
     {
         self.registry

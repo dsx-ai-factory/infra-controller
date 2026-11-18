@@ -186,7 +186,7 @@ impl StateHandler for IBPartitionStateHandler {
                                         return Ok(StateHandlerOutcome::wait(format!(
                                             "Waiting for {instance_count} instance(s) to release IB partition"
                                         ))
-                                        .with_txn(txn.into()));
+                                        .with_txn(txn));
                                     }
 
                                     let pkey_pool = ctx
@@ -209,7 +209,7 @@ impl StateHandler for IBPartitionStateHandler {
                                     )
                                     .await?
                                     .check_applied()?;
-                                    Ok(StateHandlerOutcome::deleted().with_txn(txn.into()))
+                                    Ok(StateHandlerOutcome::deleted().with_txn(txn))
                                 }
                                 _ => Err(ufm_error("get_ib_network", e.into())),
                             }
@@ -314,9 +314,9 @@ impl StateHandler for IBPartitionStateHandler {
                                             cause: format!("Failed to update IB partition {e}"),
                                         },
                                     )
-                                    .with_txn(txn.into()));
+                                    .with_txn(txn));
                                 } else {
-                                    Ok(StateHandlerOutcome::do_nothing().with_txn(txn.into()))
+                                    Ok(StateHandlerOutcome::do_nothing().with_txn(txn))
                                 }
                             }
 

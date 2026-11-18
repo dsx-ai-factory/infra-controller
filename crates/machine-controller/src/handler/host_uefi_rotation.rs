@@ -432,7 +432,7 @@ async fn set_rotating_host_uefi_password(
             } else {
                 StateHandlerOutcome::transition(ManagedHostState::Ready)
             };
-            Ok(outcome.with_txn(txn.into()))
+            Ok(outcome.with_txn(txn))
         }
     }
 }
@@ -504,7 +504,7 @@ async fn finish_rotating_host_uefi(
         )
         .await?;
     }
-    Ok(StateHandlerOutcome::transition(ManagedHostState::Ready).with_txn(txn.into()))
+    Ok(StateHandlerOutcome::transition(ManagedHostState::Ready).with_txn(txn))
 }
 
 #[cfg(test)]

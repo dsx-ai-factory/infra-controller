@@ -2950,7 +2950,7 @@ async fn test_admin_force_delete_tenant_state(pool: sqlx::PgPool) {
     // mapping to `TenantState::Terminating` from the RPC's network
     // acknowledgement workflow.
 
-    let mut txn: sqlx::Transaction<'_, sqlx::Postgres> = env.pool.txn_begin().await.unwrap().into();
+    let mut txn: db::Transaction<'_> = env.pool.txn_begin().await.unwrap();
 
     let host_machine = mh.host().db_machine(&mut txn).await;
 
