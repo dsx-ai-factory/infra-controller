@@ -27,16 +27,24 @@ use model::site_explorer::{
     BlueFieldOperatingMode, EndpointExplorationError, EndpointExplorationReport, LockdownStatus,
 };
 
-use super::metrics::SiteExplorationMetrics;
+use super::{SiteWideBmcPassword, SiteWideBmcPasswordLoader};
 
 /// This trait defines how the `SiteExplorer` will query information about endpoints
 #[async_trait::async_trait]
 pub trait EndpointExplorer: Send + Sync + 'static {
+    /// Loads the site's current BMC root password and its rotation version once per pass.
+    async fn load_sitewide_bmc_password(
+        &self,
+    ) -> Result<SiteWideBmcPassword, EndpointExplorationError>;
+
     /// Query an endpoint for information
     ///
     /// The query carries the information `MachineInterface` information that is derived
     /// from DHCP requests as well as the information that might have been fetched in
     /// a previous exploration.
+    ///
+    /// The loader is called only when ingestion needs the site-wide password;
+    /// stored or retained BMC credentials do not require it for manual exploration.
     async fn explore_endpoint(
         &self,
         address: SocketAddr,
@@ -44,12 +52,8 @@ pub trait EndpointExplorer: Send + Sync + 'static {
         expected: Option<&ExpectedEntity>,
         last_exploration_error: Option<&EndpointExplorationError>,
         boot_interface: Option<&BootInterfaceTarget>,
+        load_sitewide_bmc_password: SiteWideBmcPasswordLoader<'_>,
     ) -> Result<EndpointExplorationReport, EndpointExplorationError>;
-
-    async fn check_preconditions(
-        &self,
-        metrics: &mut SiteExplorationMetrics,
-    ) -> Result<(), EndpointExplorationError>;
 }
 
 /// Authenticated BMC operations, resolving stored credentials from the
@@ -141,10 +145,13 @@ pub trait AuthenticatedBmc: Send + Sync + 'static {
         interface: &MachineInterfaceSnapshot,
     ) -> Result<Option<bool>, EndpointExplorationError>;
 
+    /// Runs libredfish's `machine_setup`, or under the drivers stages only the
+    /// BIOS settings.
     async fn machine_setup(
         &self,
         address: SocketAddr,
         interface: &MachineInterfaceSnapshot,
+        report: Option<&EndpointExplorationReport>,
         boot_interface: Option<&BootInterfaceTarget>,
     ) -> Result<(), EndpointExplorationError>;
 

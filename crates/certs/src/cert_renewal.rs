@@ -160,7 +160,7 @@ impl ClientCertRenewer {
 
 #[cfg(test)]
 mod tests {
-    use carbide_instrument::emit;
+
     use carbide_instrument::testing::{CapturedLog, MetricsCapture, capture_logs};
 
     use super::*;
@@ -176,11 +176,13 @@ mod tests {
     /// renewal window as context -- and moves only the `outcome="ok"` series.
     #[test]
     fn successful_renewal_logs_info_and_counts_ok() {
-        let metrics = MetricsCapture::start();
+        let metrics = MetricsCapture::owned();
         let logs = capture_logs(|| {
-            emit(CertRenewalCompleted::Succeeded {
-                next_attempt_in_secs: 432_000,
-            });
+            metrics
+                .instrumentation()
+                .emit(CertRenewalCompleted::Succeeded {
+                    next_attempt_in_secs: 432_000,
+                });
         });
 
         assert_eq!(logs.len(), 1);
@@ -203,12 +205,14 @@ mod tests {
     /// `outcome="error"` series.
     #[test]
     fn failed_renewal_logs_error_and_counts_error() {
-        let metrics = MetricsCapture::start();
+        let metrics = MetricsCapture::owned();
         let logs = capture_logs(|| {
-            emit(CertRenewalCompleted::Failed {
-                error: "renew_certificates: deadline exceeded".to_string(),
-                next_attempt_in_secs: 90,
-            });
+            metrics
+                .instrumentation()
+                .emit(CertRenewalCompleted::Failed {
+                    error: "renew_certificates: deadline exceeded".to_string(),
+                    next_attempt_in_secs: 90,
+                });
         });
 
         assert_eq!(logs.len(), 1);
@@ -234,12 +238,12 @@ mod tests {
     /// nothing counts and nothing logs.
     #[test]
     fn skipped_renewal_neither_counts_nor_logs() {
-        let metrics = MetricsCapture::start();
+        let metrics = MetricsCapture::owned();
         // A fresh renewer's first renewal is days away, so this call skips.
         let mut renewer = ClientCertRenewer::new(
             "https://localhost:1".to_string(),
             Arc::new(CarbideClientConfig::new(String::new(), None)),
-            carbide_instrument::Instrumentation::global(),
+            metrics.instrumentation().clone(),
         );
         let runtime = tokio::runtime::Builder::new_current_thread()
             .build()

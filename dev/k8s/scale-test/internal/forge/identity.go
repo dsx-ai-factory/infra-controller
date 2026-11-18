@@ -1,9 +1,9 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-// Package forge is the nico-api (forge.Forge) client the runner writes with. nico-api lets the machine-a-tron service call the expected-inventory Add* RPCs, so the
-// client certificate's SPIFFE ID must classify as that service under the site's SPIFFE settings. nico-api accepts a TLS client with no certificate, so the key must load
-// and match the certificate before any call.
+// Package forge provides verified mTLS writes to nico-api. Expected-inventory
+// writes require the MAT SPIFFE identity. Firmware uses an admin certificate
+// whose issuer mapping is authorized by Core. Both paths require a matching key.
 package forge
 
 import (
@@ -13,9 +13,11 @@ import (
 	"encoding/pem"
 	"errors"
 	"fmt"
+	"io"
 	"net/url"
 	"os"
 	"strings"
+	"syscall"
 )
 
 // WriteService is the service nico-api authorizes for expected-inventory writes.
@@ -36,6 +38,7 @@ type spiffeID struct {
 // CheckIdentity returns the SPIFFE ID of the first certificate in certPEM when it names WriteService under spiffe. The error never repeats the configured trust domain or
 // the certificate's SPIFFE ID.
 func CheckIdentity(certPEM []byte, spiffe SpiffeSettings) (string, error) {
+
 	leaf, err := firstCert(certPEM)
 	if err != nil {
 		return "", err
@@ -259,13 +262,22 @@ func CheckKeyPairFiles(certPath, keyPath string) error {
 }
 
 func readFile(path string) ([]byte, error) {
-	data, err := os.ReadFile(path)
+	file, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NONBLOCK, 0)
 	if err != nil {
-		// os error text holds the path; keep only the path and a fixed cause.
 		if os.IsNotExist(err) {
 			return nil, fmt.Errorf("%s: no such file", path)
 		}
 		return nil, fmt.Errorf("%s: could not be read", path)
+	}
+	defer func() { _ = file.Close() }()
+	info, err := file.Stat()
+	if err != nil || !info.Mode().IsRegular() {
+		return nil, errors.New("credential is not a regular file")
+	}
+	const limit = 1 << 20
+	data, err := io.ReadAll(io.LimitReader(file, limit+1))
+	if err != nil || len(data) > limit {
+		return nil, errors.New("credential read failed or exceeded 1 MiB")
 	}
 	return data, nil
 }

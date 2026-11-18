@@ -118,10 +118,11 @@ type ManagerImpl struct {
 	maxWaitingPerRack   int
 	defaultQueueTimeout time.Duration
 
-	ctx       context.Context
-	cancel    context.CancelFunc
-	startOnce sync.Once
-	stopOnce  sync.Once
+	ctx         context.Context
+	cancel      context.CancelFunc
+	startOnce   sync.Once
+	stopOnce    sync.Once
+	reconcileWG sync.WaitGroup
 }
 
 // New creates a new task manager.
@@ -182,6 +183,8 @@ func (m *ManagerImpl) Start(ctx context.Context) error {
 		m.cancel = cancel
 
 		m.promoter.Start(startCtx)
+		m.reconcileWG.Add(1)
+		go m.reconcileLoop(startCtx)
 	})
 
 	return startErr
@@ -194,6 +197,7 @@ func (m *ManagerImpl) Stop(ctx context.Context) {
 			m.cancel()
 		}
 
+		m.reconcileWG.Wait()
 		if m.executor != nil {
 			if err := m.executor.Stop(ctx); err != nil {
 				log.Warn().Err(err).Msg("failed to stop executor")
@@ -204,7 +208,8 @@ func (m *ManagerImpl) Stop(ctx context.Context) {
 
 // SubmitTask submits a task to the task manager.
 // The TargetSpec is resolved to racks via inventory; one Task is created per
-// rack. Returns the IDs of all created tasks.
+// rack. ConflictStrategy selects rejection, queueing, or trusted internal
+// preemption with runtime SubmitOptions. Returns the admitted task IDs.
 func (m *ManagerImpl) SubmitTask(
 	ctx context.Context,
 	req *operation.Request,
@@ -215,6 +220,12 @@ func (m *ManagerImpl) SubmitTask(
 
 	if err := req.Validate(); err != nil {
 		return nil, err
+	}
+
+	preempt := req.ConflictStrategy == operation.ConflictStrategyPreempt
+	create := m.createAndExecuteTask
+	if preempt {
+		create = m.createAndExecutePreemptingTask
 	}
 
 	// A caller may retry after task submission succeeded but persisting the
@@ -230,7 +241,7 @@ func (m *ManagerImpl) SubmitTask(
 			return nil, err
 		}
 		if existing != nil && (existing.IsScheduled() ||
-			existing.Status == taskcommon.TaskStatusWaiting) {
+			existing.Status.IsFinished() || (!preempt && existing.Status == taskcommon.TaskStatusWaiting)) {
 			return []uuid.UUID{existing.ID}, nil
 		}
 	}
@@ -247,7 +258,7 @@ func (m *ManagerImpl) SubmitTask(
 	// Create and execute task for each rack.
 	var taskIDs []uuid.UUID
 	for _, targetRack := range rackMap {
-		taskID, err := m.createAndExecuteTask(ctx, req, targetRack)
+		taskID, err := create(ctx, req, targetRack)
 		if err != nil {
 			log.Error().
 				Err(err).
@@ -666,6 +677,9 @@ func (m *ManagerImpl) createAndExecuteIdempotentTask(
 				}
 			}
 
+			if task.Status.IsFinished() {
+				return nil
+			}
 			if task.IsScheduled() {
 				log.Info().
 					Str("task_id", task.ID.String()).
@@ -889,7 +903,7 @@ func (m *ManagerImpl) resolveAndExecuteTaskWithTransaction(
 			statusCtx, cancel = context.WithTimeout(context.WithoutCancel(ctx), schedulingCleanupTimeout)
 			defer cancel()
 		}
-		if uerr := m.taskStore.UpdateTaskStatus(statusCtx, &taskdef.TaskStatusUpdate{
+		if _, uerr := m.taskStore.UpdateTaskStatus(statusCtx, &taskdef.TaskStatusUpdate{
 			ID:      task.ID,
 			Status:  taskcommon.TaskStatusFailed,
 			Message: message.ForFailure(err),
@@ -965,7 +979,7 @@ func (m *ManagerImpl) handleSchedulingPersistenceFailure(
 		context.WithoutCancel(ctx),
 		schedulingCleanupTimeout,
 	)
-	statusErr := m.taskStore.UpdateTaskStatus(statusCtx, &taskdef.TaskStatusUpdate{
+	_, statusErr := m.taskStore.UpdateTaskStatus(statusCtx, &taskdef.TaskStatusUpdate{
 		ID:      persistErr.taskID,
 		Status:  taskcommon.TaskStatusFailed,
 		Message: message.ForFailure(persistErr),
@@ -1009,7 +1023,7 @@ func (m *ManagerImpl) deferUnlinkedTask(
 			"Expired: target linkage unavailable before queue timeout: %v",
 			unlinkedErr,
 		)
-		if err := m.taskStore.UpdateTaskStatus(ctx, &taskdef.TaskStatusUpdate{
+		if _, err := m.taskStore.UpdateTaskStatus(ctx, &taskdef.TaskStatusUpdate{
 			ID:      task.ID,
 			Status:  status,
 			Message: statusMessage,
@@ -1047,7 +1061,8 @@ func (m *ManagerImpl) deferUnlinkedTask(
 			if status == taskcommon.TaskStatusWaiting {
 				update.QueueExpiresAt = deadline
 			}
-			return m.taskStore.UpdateTaskStatus(txCtx, update)
+			_, err = m.taskStore.UpdateTaskStatus(txCtx, update)
+			return err
 		}
 
 		var err error
@@ -1121,7 +1136,7 @@ func (m *ManagerImpl) CancelTask(ctx context.Context, taskID uuid.UUID) error {
 		}
 	}
 
-	return m.taskStore.UpdateTaskStatus(
+	_, err = m.taskStore.UpdateTaskStatus(
 		ctx,
 		&taskdef.TaskStatusUpdate{
 			ID:      taskID,
@@ -1129,6 +1144,7 @@ func (m *ManagerImpl) CancelTask(ctx context.Context, taskID uuid.UUID) error {
 			Message: "Cancelled by user",
 		},
 	)
+	return err
 }
 
 // loadRackForTask re-fetches the rack for a task and filters its component

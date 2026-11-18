@@ -78,8 +78,7 @@ use nv_redfish::assembly::Model as AssemblyModel;
 use nv_redfish::computer_system::BootOption;
 use nv_redfish::core::ODataId;
 use nv_redfish::oem::ami::config_bmc::{
-    LockdownBiosSettingsChangeState, LockdownBiosUpgradeDowngradeState,
-    LockoutBiosVariableWriteMode, LockoutHostControlState,
+    LockdownBiosSettingsChangeState, LockdownBiosUpgradeDowngradeState, LockoutHostControlState,
 };
 use nv_redfish::oem::lenovo::computer_system::{FpMode, PortSwitchingTo};
 use nv_redfish::oem::lenovo::manager::KcsState;
@@ -1007,12 +1006,6 @@ fn lenovo_ami_lockdown_status(
                 .map(|v| v == LockoutHostControlState::Enable),
         ),
         (
-            "LockoutBiosVariableWriteMode",
-            attrs
-                .lockout_bios_variable_write_mode
-                .map(|v| v == LockoutBiosVariableWriteMode::Enable),
-        ),
-        (
             "LockdownBiosSettingsChange",
             attrs
                 .lockdown_bios_settings_change
@@ -1579,7 +1572,7 @@ mod tests {
             let attrs = serde_json::from_value(serde_json::json!({
                 "@odata.id": "/redfish/v1/Managers/Self/Oem/ConfigBMC",
                 "LockoutHostControl": value,
-                "LockoutBiosVariableWriteMode": value,
+                "LockoutBiosVariableWriteMode": if value == "Enable" { "Disable" } else { "Enable" },
                 "LockdownBiosSettingsChange": value,
                 "LockdownBiosUpgradeDowngrade": value,
             }))

@@ -153,6 +153,7 @@ struct SwitchDetail {
     nvos_ports: Vec<SwitchNvosPortRecord>,
     metadata_detail: super::MetadataDetail,
     health_detail: super::HealthDetail,
+    health_panel: Option<super::health::HealthPanel>,
     history: StateHistoryTable,
 }
 
@@ -246,12 +247,7 @@ impl SwitchDetail {
         let lifecycle = status.and_then(|s| s.lifecycle.clone()).unwrap_or_default();
         let power_state = status.and_then(|s| s.power_state.clone());
         let health_status = status.and_then(|s| s.health_status.clone());
-        let health_detail = super::HealthDetail::new(
-            format!("/admin/switch/{id}/health"),
-            "Go to Switch health reports",
-            status.and_then(|s| s.health.clone()),
-            status.map(|s| s.health_sources.clone()).unwrap_or_default(),
-        );
+        let health_detail = super::HealthDetail::new(status.and_then(|s| s.health.clone()));
         let metadata_detail = super::MetadataDetail {
             metadata: switch.metadata.unwrap_or_default(),
             metadata_version: switch.version,
@@ -281,6 +277,7 @@ impl SwitchDetail {
             nvos_ports,
             metadata_detail,
             health_detail,
+            health_panel: None, // filled in later
             history,
         }
     }
@@ -320,12 +317,16 @@ pub(super) async fn detail(
         }
     };
 
+    let switch_id_parsed = switch.id;
     let mut detail = SwitchDetail::new(switch, history);
     detail.firmware_inventory = FirmwareInventory::load(
         &api,
         detail.bmc_info.as_ref().and_then(|bmc| bmc.ip.as_deref()),
     )
     .await;
+    if let Some(switch_id) = switch_id_parsed {
+        detail.health_panel = super::health::switch_health_panel(&api, switch_id).await;
+    }
     (StatusCode::OK, Html(detail.render().unwrap())).into_response()
 }
 

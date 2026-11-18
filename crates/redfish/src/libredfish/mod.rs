@@ -103,15 +103,18 @@ fn emit_dpu_uefi_password_setup_skipped_if_needed(
 /// object. Only this constructor yields a [`BmcCredentialOps`]: it is built
 /// from the raw `libredfish` pool, which an intermediary-routing pool does
 /// not have -- credential operations always authenticate to the BMC itself.
+/// RED metrics use `instrumentation`; retain its provider while clients can run.
 pub fn new_pool_with_credential_ops(
     credential_reader: Arc<dyn CredentialReader>,
     pool: libredfish::RedfishClientPool,
     proxy_address: Arc<ArcSwap<Option<HostPortPair>>>,
+    instrumentation: Instrumentation,
 ) -> (Arc<dyn RedfishClientPool>, Arc<dyn BmcCredentialOps>) {
     let inner = Arc::new(implementation::RedfishClientPoolImpl::new(
         credential_reader,
         pool,
         proxy_address,
+        instrumentation,
     ));
     (inner.clone(), inner)
 }
@@ -124,15 +127,18 @@ pub fn new_pool_with_credential_ops(
 /// should be built with the client identity the proxy's mTLS listener
 /// expects, and *without* `danger_accept_invalid_certs` -- the proxy,
 /// unlike a BMC, presents a verifiable certificate.
+/// RED metrics use `instrumentation`; retain its provider while clients can run.
 pub fn new_proxied_pool(
     credential_reader: Arc<dyn CredentialReader>,
     pool: libredfish::RedfishClientPool,
     proxy: HostPortPair,
+    instrumentation: Instrumentation,
 ) -> Arc<dyn RedfishClientPool> {
     Arc::new(implementation::ProxiedRedfishClientPoolImpl::new(
         credential_reader,
         pool,
         proxy,
+        instrumentation,
     ))
 }
 
@@ -965,11 +971,11 @@ mod tests {
             run = |bios_attrs: serde_json::Value| {
                 let bios_attrs: std::collections::HashMap<String, serde_json::Value> =
                     serde_json::from_value(bios_attrs).expect("valid test BIOS response");
-                let metrics = MetricsCapture::start();
+                let metrics = MetricsCapture::owned();
                 let mut skipped = false;
                 let logs = capture_logs(|| {
                     skipped = emit_dpu_uefi_password_setup_skipped_if_needed(&bios_attrs,
-                        &Instrumentation::global(),
+                        metrics.instrumentation(),
                     );
                 });
                 let logs = logs
@@ -1653,7 +1659,7 @@ mod tests {
                 &double_access(),
                 true,
                 site_creds(),
-                &Instrumentation::global(),
+                &Instrumentation::noop(),
             )
             .await
             .expect_err("client creation failure must fail the op");
@@ -1686,7 +1692,7 @@ mod tests {
                 &double_access(),
                 true,
                 site_creds(),
-                &Instrumentation::global(),
+                &Instrumentation::noop(),
             )
             .await
             .expect_err("store read failure must fail the op");

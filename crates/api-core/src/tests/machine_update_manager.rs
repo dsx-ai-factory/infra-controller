@@ -359,7 +359,7 @@ fn test_start(pool: sqlx::PgPool) {
         &mut join_set,
         pool.clone(),
         Default::default(),
-        carbide_instrument::Instrumentation::global(),
+        carbide_instrument::Instrumentation::noop(),
     )
     .await
     .unwrap();
@@ -413,7 +413,7 @@ fn test_run_single_iteration_propagates_lock_infrastructure_failure(pool: sqlx::
         &mut join_set,
         pool.clone(),
         Default::default(),
-        carbide_instrument::Instrumentation::global(),
+        carbide_instrument::Instrumentation::noop(),
     )
     .await
     .unwrap();
@@ -462,7 +462,7 @@ fn update_manager_uses_policy_interval(pool: sqlx::PgPool) {
         &mut join_set,
         pool.clone(),
         Default::default(),
-        carbide_instrument::Instrumentation::global(),
+        carbide_instrument::Instrumentation::noop(),
     )
     .await
     .unwrap();
@@ -477,7 +477,10 @@ fn update_manager_uses_policy_interval(pool: sqlx::PgPool) {
         let update_manager = MachineUpdateManager::new(
             pool.clone(),
             Arc::new(config),
-            opentelemetry::global::meter("test"),
+            opentelemetry::metrics::MeterProvider::meter(
+                &opentelemetry::metrics::noop::NoopMeterProvider::new(),
+                "test",
+            ),
             work_lock_manager_handle.clone(),
             None,
             carbide_instrument::Instrumentation::new(instrumentation_meter.meter()),

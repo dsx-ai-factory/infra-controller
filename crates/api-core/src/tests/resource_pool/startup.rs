@@ -666,7 +666,7 @@ async fn registration_cancellation_preserves_provider_acceptance(
     db::resource_pool::reconcile_pool_defs(
         &mut txn,
         &fixture.definitions,
-        &carbide_instrument::Instrumentation::global(),
+        &carbide_instrument::Instrumentation::noop(),
     )
     .await?;
     txn.commit().await?;

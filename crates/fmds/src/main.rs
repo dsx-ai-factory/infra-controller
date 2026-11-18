@@ -291,7 +291,7 @@ mod tests {
             FmdsState::try_new(
                 "https://api.test".into(),
                 None,
-                carbide_instrument::Instrumentation::global(),
+                carbide_instrument::Instrumentation::noop(),
             )
             .expect("FMDS state"),
         );

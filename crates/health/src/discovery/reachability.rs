@@ -325,7 +325,7 @@ mod tests {
             Arc::new(NoopLimiter),
             Arc::new(MetricsManager::new("reachability_targets").expect("metrics manager")),
             Arc::new(config.clone()),
-            carbide_instrument::Instrumentation::global(),
+            carbide_instrument::Instrumentation::noop(),
         )
         .expect("discovery context");
 
@@ -477,7 +477,7 @@ mod tests {
             Arc::new(config),
             None,
             None,
-            carbide_instrument::Instrumentation::global(),
+            carbide_instrument::Instrumentation::noop(),
         )
         .expect("discovery context should start");
 
@@ -587,7 +587,9 @@ mod tests {
         assert!(ctx.collectors.reachability_specs.is_empty());
         assert!(ctx.collectors.contains(CollectorKind::Sensor, &key));
 
-        let shutdown = ctx.drain_collectors(Duration::from_secs(5)).await;
+        let shutdown = ctx
+            .drain_collectors(tokio::time::Instant::now() + Duration::from_secs(5))
+            .await;
 
         assert_eq!(shutdown.timed_out, 0);
     }

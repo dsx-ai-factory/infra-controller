@@ -275,10 +275,10 @@ func NewGetAllSpectrumXPartitionHandler(dbSession *cdb.Session, cfg *config.Conf
 // @Produce json
 // @Security ApiKeyAuth
 // @Param org path string true "Name of NGC organization"
-// @Param siteId query string false "ID of Site"
-// @Param status query string false "Filter by status e.g. 'Pending', 'Error'"
+// @Param siteId query []string false "ID of Site" collectionFormat(multi)
+// @Param status query []string false "Filter by status e.g. 'Pending', 'Error'" collectionFormat(multi)
 // @Param query query string false "Query input for full text search"
-// @Param includeRelation query string false "Related entities to include in response e.g. 'Site', 'Tenant'"
+// @Param includeRelation query []string false "Related entities to include in response e.g. 'Site', 'Tenant'" collectionFormat(multi)
 // @Param pageNumber query integer false "Page number of results returned"
 // @Param pageSize query integer false "Number of results per page"
 // @Param orderBy query string false "Order by field"
@@ -450,7 +450,7 @@ func NewGetSpectrumXPartitionHandler(dbSession *cdb.Session, cfg *config.Config)
 // @Security ApiKeyAuth
 // @Param org path string true "Name of NGC organization"
 // @Param spectrumXPartitionId path string true "ID of SpectrumXPartition"
-// @Param includeRelation query string false "Related entities to include in response e.g. 'Site', 'Tenant'"
+// @Param includeRelation query []string false "Related entities to include in response e.g. 'Site', 'Tenant'" collectionFormat(multi)
 // @Success 200 {object} model.APISpectrumXPartition
 // @Router /v2/org/{org}/nico/spectrumx-partition/{spectrumXPartitionId} [get]
 func (gsxph GetSpectrumXPartitionHandler) Handle(c echo.Context) error {

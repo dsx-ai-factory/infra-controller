@@ -17,9 +17,9 @@
 
 use std::sync::Arc;
 
+use carbide_dpu_agent_utils::utils::create_forge_client;
 use carbide_instrument::{Event, LabelValue, MetricFamily};
 use eyre::eyre;
-use forge_dpu_agent_utils::utils::create_forge_client;
 use rpc::forge::InstancePhoneHomeLastContactRequest;
 
 use crate::state::FmdsState;

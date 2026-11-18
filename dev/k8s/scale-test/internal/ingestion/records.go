@@ -173,7 +173,7 @@ func rackProfile(g inventory.RackGroup) (string, error) {
 func rackGroup(rack *inventory.RackIntent) *corev1.ExpectedRackGroup {
 	members := make([]*corev1.ExpectedRackGroupMember, 0, len(rack.Group.Members))
 	for _, m := range rack.Group.Members {
-		members = append(members, &corev1.ExpectedRackGroupMember{Type: m.Type, Manufacturer: m.Manufacturer, Id: m.ID})
+		members = append(members, &corev1.ExpectedRackGroupMember{CartridgeIndex: proto.Uint32(m.CartridgeIndex), Type: m.Type, Manufacturer: m.Manufacturer, Id: m.ID})
 	}
 	return &corev1.ExpectedRackGroup{
 		RackGroupId: &corev1.RackGroupId{Id: rack.Group.RackGroupID},

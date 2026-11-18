@@ -584,7 +584,7 @@ struct HostReconciliationPhaseFinished {
 
 #[cfg(test)]
 mod tests {
-    use carbide_instrument::emit;
+
     use carbide_instrument::testing::{ApproxHistogramSum, MetricsCapture, capture_logs};
     use carbide_test_support::value_scenarios;
 
@@ -603,8 +603,8 @@ mod tests {
 
         value_scenarios!(
             run = |(event, phase, identity_field, identity): (HostReconciliationFailed, &str, &str, String)| {
-                let metrics = MetricsCapture::start();
-                let logs = capture_logs(|| emit(event));
+                let metrics = MetricsCapture::owned();
+                let logs = capture_logs(|| metrics.instrumentation().emit(event));
                 assert_eq!(logs.len(), 1);
                 assert_eq!(logs[0].level, tracing::Level::WARN);
                 assert_eq!(logs[0].field("event_name"), Some("host_reconciliation_failed"));
@@ -636,8 +636,8 @@ mod tests {
 
         value_scenarios!(
             run = |(phase, label)| {
-                let metrics = MetricsCapture::start();
-                emit(HostReconciliationPhaseFinished {
+                let metrics = MetricsCapture::owned();
+                metrics.instrumentation().emit(HostReconciliationPhaseFinished {
                     phase,
                     duration: Duration::from_millis(20),
                 });

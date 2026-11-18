@@ -364,7 +364,7 @@ func NewGetAllInstanceTypeHandler(dbSession *cdb.Session, tc temporalClient.Clie
 // @Param includeAllocationStats query boolean false "Allocation stats to include in response"
 // @Param includeMachineAssignment query boolean false "Machine associations entity to include in response (Provider only)"
 // @Param excludeUnallocated query boolean false "Exclude unallocated Instance Types (Tenant only)"
-// @Param includeRelation query string false "Related entities to include in response e.g. 'InfrastructureProvider', 'Tenant', 'Site'"
+// @Param includeRelation query []string false "Related entities to include in response e.g. 'InfrastructureProvider', 'Tenant', 'Site'" collectionFormat(multi)
 // @Param pageNumber query integer false "Page number of results returned"
 // @Param pageSize query integer false "Number of results per page"
 // @Param orderBy query string false "Order by field"
@@ -703,7 +703,7 @@ func NewGetInstanceTypeHandler(dbSession *cdb.Session, tc temporalClient.Client,
 // @Param id query string true "ID of Instance Type"
 // @Param includeAllocationStats query boolean false "Allocation stats to include in response"
 // @Param includeMachineAssignment query boolean false "Machine associations entity to include in response (Provider only)"
-// @Param includeRelation query string false "Related entities to include in response e.g. 'InfrastructureProvider', 'Site'"
+// @Param includeRelation query []string false "Related entities to include in response e.g. 'InfrastructureProvider', 'Site'" collectionFormat(multi)
 // @Success 200 {object} []model.APIInstanceType
 // @Router /v2/org/{org}/nico/instance/type/{id} [get]
 func (gith GetInstanceTypeHandler) Handle(c echo.Context) error {

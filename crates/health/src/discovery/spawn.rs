@@ -1098,7 +1098,7 @@ mod tests {
             limiter,
             metrics_manager,
             Arc::new(config),
-            carbide_instrument::Instrumentation::global(),
+            carbide_instrument::Instrumentation::noop(),
         )
         .expect("context should initialize")
     }
@@ -1652,7 +1652,9 @@ mod tests {
         assert!(reading.ends_with(" 42"));
         assert!(!exported.contains("serial_number=\"switch-host\""));
 
-        let shutdown = ctx.drain_collectors(Duration::from_secs(5)).await;
+        let shutdown = ctx
+            .drain_collectors(tokio::time::Instant::now() + Duration::from_secs(5))
+            .await;
 
         assert_eq!(shutdown.timed_out, 0);
     }
@@ -1957,7 +1959,7 @@ mod tests {
                 10,
                 std::num::NonZeroUsize::MIN,
                 crate::bmc::BmcInstrumentation::new(
-                    carbide_instrument::Instrumentation::global(),
+                    carbide_instrument::Instrumentation::noop(),
                     None,
                 ),
             )
@@ -2245,7 +2247,7 @@ mod tests {
             limiter,
             metrics_manager,
             Arc::new(auto_mode_config(true)),
-            carbide_instrument::Instrumentation::global(),
+            carbide_instrument::Instrumentation::noop(),
         )
         .expect("context should initialize");
 
@@ -2305,7 +2307,7 @@ mod tests {
             limiter,
             metrics_manager,
             Arc::new(auto_mode_config(false)),
-            carbide_instrument::Instrumentation::global(),
+            carbide_instrument::Instrumentation::noop(),
         )
         .expect("context should initialize");
 
@@ -2343,7 +2345,7 @@ mod tests {
             limiter,
             metrics_manager,
             Arc::new(auto_mode_config(false)),
-            carbide_instrument::Instrumentation::global(),
+            carbide_instrument::Instrumentation::noop(),
         )
         .expect("context should initialize");
 

@@ -138,7 +138,10 @@ async fn artifact_route_uses_tls_machine_identity(pool: sqlx::PgPool) {
         ApiListenMode::Tls(tls),
         "127.0.0.1:0".parse().unwrap(),
         &auth,
-        opentelemetry::global::meter("artifact_tls_test"),
+        opentelemetry::metrics::MeterProvider::meter(
+            &opentelemetry::metrics::noop::NoopMeterProvider::new(),
+            "artifact_tls_test",
+        ),
         None,
         cache.cache.clone(),
         cancel.clone(),

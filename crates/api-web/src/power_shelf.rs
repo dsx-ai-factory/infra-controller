@@ -120,6 +120,7 @@ struct PowerShelfDetail {
     firmware_inventory: FirmwareInventory,
     metadata_detail: super::MetadataDetail,
     health_detail: super::HealthDetail,
+    health_panel: Option<super::health::HealthPanel>,
     history: StateHistoryTable,
 }
 
@@ -137,16 +138,8 @@ impl PowerShelfDetail {
             .and_then(|s| s.lifecycle.clone())
             .unwrap_or_default();
         let power_state = shelf.status.as_ref().and_then(|s| s.power_state.clone());
-        let health_detail = super::HealthDetail::new(
-            format!("/admin/power-shelf/{id}/health"),
-            "Go to Power Shelf health reports",
-            shelf.status.as_ref().and_then(|s| s.health.clone()),
-            shelf
-                .status
-                .as_ref()
-                .map(|s| s.health_sources.clone())
-                .unwrap_or_default(),
-        );
+        let health_detail =
+            super::HealthDetail::new(shelf.status.as_ref().and_then(|s| s.health.clone()));
         let metadata_detail = super::MetadataDetail {
             metadata: shelf.metadata.unwrap_or_default(),
             metadata_version: shelf.version,
@@ -169,6 +162,7 @@ impl PowerShelfDetail {
             firmware_inventory: FirmwareInventory::default(),
             metadata_detail,
             health_detail,
+            health_panel: None, // filled in later
             history,
         }
     }
@@ -211,12 +205,16 @@ pub(super) async fn detail(
         }
     };
 
+    let shelf_id = shelf.id;
     let mut detail = PowerShelfDetail::new(shelf, history);
     detail.firmware_inventory = FirmwareInventory::load(
         &api,
         detail.bmc_info.as_ref().and_then(|bmc| bmc.ip.as_deref()),
     )
     .await;
+    if let Some(shelf_id) = shelf_id {
+        detail.health_panel = super::health::power_shelf_health_panel(&api, shelf_id).await;
+    }
     (StatusCode::OK, Html(detail.render().unwrap())).into_response()
 }
 

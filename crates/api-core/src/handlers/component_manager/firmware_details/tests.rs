@@ -420,6 +420,7 @@ fn active_host_target_and_outstanding_request_remain_independent() {
                 power_drains_needed: None,
                 started_at: accepted_at() + chrono::Duration::minutes(1),
                 deadline: accepted_at() + chrono::Duration::hours(1),
+                delivered_at: None,
                 task_json: "scout-payload-secret".into(),
                 result: Some(ScoutUpgradeResult {
                     success: false,

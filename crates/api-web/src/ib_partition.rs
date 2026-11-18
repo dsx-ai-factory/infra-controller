@@ -166,7 +166,7 @@ struct IbPartitionDetail {
     id: String,
     config_version: String,
     tenant_organization_id: String,
-    metadata: rpc::forge::Metadata,
+    metadata_detail: super::MetadataDetail,
     state_display: super::StateDisplay,
     state_sla_detail: super::StateSlaDetail,
     pkey: String,
@@ -182,7 +182,10 @@ impl From<forgerpc::IbPartition> for IbPartitionDetail {
             id: partition.id.map(|id| id.to_string()).unwrap_or_default(),
             config_version: partition.config_version,
             tenant_organization_id: partition.config.unwrap_or_default().tenant_organization_id,
-            metadata: partition.metadata.unwrap_or_default(),
+            metadata_detail: super::MetadataDetail {
+                metadata: partition.metadata.unwrap_or_default(),
+                metadata_version: String::new(),
+            },
             state_display: super::StateDisplay {
                 state: partition
                     .status

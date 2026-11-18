@@ -126,18 +126,94 @@ impl BackendBmcControl<'_> {
     pub async fn set_ipmi_over_lan(&self, enabled: bool) -> Result<DriverOutcome, PlatformError> {
         match self {
             Self::Libredfish(client) => {
-                let target = if enabled {
-                    EnabledDisabled::Enabled
-                } else {
-                    EnabledDisabled::Disabled
-                };
                 client
-                    .enable_ipmi_over_lan(target)
+                    .enable_ipmi_over_lan(enabled_disabled(enabled))
                     .await
                     .map_err(platform_error)?;
                 Ok(DriverOutcome::complete())
             }
             Self::Drivers(bmc_control) => bmc_control.set_ipmi_over_lan(enabled).await,
         }
+    }
+
+    /// Whether the BMC controls the host's management network access:
+    /// libredfish recognizes a Vera Rubin service root, and the drivers
+    /// support [`BmcControl::host_management_network_access`], whether or not
+    /// the BMC reports the access.
+    pub async fn controls_host_management_network_access(&self) -> Result<bool, PlatformError> {
+        match self {
+            Self::Libredfish(client) => client
+                .get_service_root()
+                .await
+                .map(|root| root.is_vera_rubin())
+                .map_err(platform_error),
+            Self::Drivers(bmc_control) => {
+                supported(bmc_control.host_management_network_access().await)
+            }
+        }
+    }
+
+    /// See [`BmcControl::set_host_management_network_access`].
+    pub async fn set_host_management_network_access(
+        &self,
+        enabled: bool,
+    ) -> Result<DriverOutcome, PlatformError> {
+        match self {
+            Self::Libredfish(client) => {
+                client
+                    .set_enable_onboard_nics(enabled_disabled(enabled))
+                    .await
+                    .map_err(platform_error)?;
+                Ok(DriverOutcome::complete())
+            }
+            Self::Drivers(bmc_control) => {
+                bmc_control
+                    .set_host_management_network_access(enabled)
+                    .await
+            }
+        }
+    }
+}
+
+fn enabled_disabled(enabled: bool) -> EnabledDisabled {
+    if enabled {
+        EnabledDisabled::Enabled
+    } else {
+        EnabledDisabled::Disabled
+    }
+}
+
+/// Whether an operation that answered `result` is supported.
+fn supported<T>(result: Result<T, PlatformError>) -> Result<bool, PlatformError> {
+    match result {
+        Ok(_) => Ok(true),
+        Err(PlatformError::Unsupported) => Ok(false),
+        Err(error) => Err(error),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use carbide_test_support::value_scenarios;
+
+    use super::*;
+
+    #[test]
+    fn host_management_network_access_is_controlled_wherever_it_is_supported() {
+        let not_ready = || PlatformError::NotReady {
+            message: "not ready".to_string(),
+        };
+        value_scenarios!(supported:
+            "supported, reported or not" {
+                Ok(Some(false)) => Ok(true),
+                Ok(None) => Ok(true),
+            }
+            "unsupported" {
+                Err(PlatformError::Unsupported) => Ok(false),
+            }
+            "unreadable" {
+                Err(not_ready()) => Err(not_ready()),
+            }
+        );
     }
 }

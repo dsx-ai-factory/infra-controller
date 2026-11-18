@@ -830,12 +830,12 @@ mod tests {
     /// certificate.
     #[test]
     fn missing_connection_attributes_logs_counts_and_delegates() {
-        let metrics = MetricsCapture::start();
+        let metrics = MetricsCapture::owned();
         let recorder = AuthContextRecorder::default();
         let middleware = CertDescriptionMiddleware::<NoAuthorization>::new(
             None,
             spiffe_context(),
-            carbide_instrument::Instrumentation::global(),
+            metrics.instrumentation().clone(),
         );
         let mut service = middleware.layer(recorder.clone());
 
@@ -882,11 +882,11 @@ mod tests {
     /// certificate -- is not a rejection: the counter must not move.
     #[test]
     fn valid_chain_with_unmappable_intermediate_counts_no_rejection() {
-        let metrics = MetricsCapture::start();
+        let metrics = MetricsCapture::owned();
         let middleware = CertDescriptionMiddleware::<NoAuthorization>::new(
             None,
             spiffe_context(),
-            carbide_instrument::Instrumentation::global(),
+            metrics.instrumentation().clone(),
         );
         let mut service = middleware.layer(Terminal);
 
@@ -922,11 +922,11 @@ mod tests {
     /// moves carbide_authn_client_cert_rejected_total.
     #[test]
     fn rejected_client_cert_logs_and_counts() {
-        let metrics = MetricsCapture::start();
+        let metrics = MetricsCapture::owned();
         let middleware = CertDescriptionMiddleware::<NoAuthorization>::new(
             None,
             spiffe_context(),
-            carbide_instrument::Instrumentation::global(),
+            metrics.instrumentation().clone(),
         );
         let mut service = middleware.layer(Terminal);
 
@@ -1014,7 +1014,7 @@ mod tests {
         let middleware = CertDescriptionMiddleware::<NoAuthorization>::new(
             None,
             spiffe_context(),
-            carbide_instrument::Instrumentation::global(),
+            carbide_instrument::Instrumentation::noop(),
         )
         .with_bearer_authenticator(Arc::new(FakeAuth(
             "spiffe://example.test/carbide-system/machine/m1".to_string(),
@@ -1039,7 +1039,7 @@ mod tests {
             let middleware = CertDescriptionMiddleware::<NoAuthorization>::new(
                 None,
                 spiffe_context(),
-                carbide_instrument::Instrumentation::global(),
+                carbide_instrument::Instrumentation::noop(),
             )
             .with_bearer_authenticator(Arc::new(FakeAuth(
                 "spiffe://example.test/carbide-system/machine/m1".to_string(),
@@ -1060,7 +1060,7 @@ mod tests {
             let middleware = CertDescriptionMiddleware::<NoAuthorization>::new(
                 None,
                 spiffe_context(),
-                carbide_instrument::Instrumentation::global(),
+                carbide_instrument::Instrumentation::noop(),
             )
             .with_bearer_authenticator(Arc::new(FakeAuth(
                 "spiffe://example.test/carbide-system/machine/m1".to_string(),
@@ -1080,7 +1080,7 @@ mod tests {
         let middleware = CertDescriptionMiddleware::<NoAuthorization>::new(
             None,
             spiffe_context(),
-            carbide_instrument::Instrumentation::global(),
+            carbide_instrument::Instrumentation::noop(),
         )
         .with_bearer_authenticator(Arc::new(FakeAuth(
             "spiffe://example.test/carbide-system/machine/m1".to_string(),
@@ -1134,7 +1134,7 @@ mod tests {
         let middleware = CertDescriptionMiddleware::<NoAuthorization>::new(
             None,
             spiffe_context(),
-            carbide_instrument::Instrumentation::global(),
+            carbide_instrument::Instrumentation::noop(),
         )
         .with_machine_certs_enabled(machine_certs_enabled);
         let chain = chain
@@ -1190,7 +1190,7 @@ mod tests {
         let middleware = CertDescriptionMiddleware::<NoAuthorization>::new(
             None,
             spiffe_context(),
-            carbide_instrument::Instrumentation::global(),
+            carbide_instrument::Instrumentation::noop(),
         );
         let principals = principals_for_certs(
             middleware,
@@ -1212,7 +1212,7 @@ mod tests {
         let middleware = CertDescriptionMiddleware::<NoAuthorization>::new(
             None,
             spiffe_context(),
-            carbide_instrument::Instrumentation::global(),
+            carbide_instrument::Instrumentation::noop(),
         )
         .with_machine_certs_enabled(false)
         .with_bearer_authenticator(Arc::new(FakeAuth(
@@ -1241,7 +1241,7 @@ mod tests {
         let middleware = CertDescriptionMiddleware::<NoAuthorization>::new(
             None,
             spiffe_context(),
-            carbide_instrument::Instrumentation::global(),
+            carbide_instrument::Instrumentation::noop(),
         )
         .with_machine_certs_enabled(false);
         let principals = principals_for_certs(
@@ -1269,7 +1269,7 @@ mod tests {
         let middleware = CertDescriptionMiddleware::<NoAuthorization>::new(
             None,
             spiffe_context(),
-            carbide_instrument::Instrumentation::global(),
+            carbide_instrument::Instrumentation::noop(),
         )
         .with_machine_certs_enabled(false);
         let principals = principals_for_certs(
@@ -1293,7 +1293,7 @@ mod tests {
         let middleware = CertDescriptionMiddleware::<NoAuthorization>::new(
             None,
             spiffe_context(),
-            carbide_instrument::Instrumentation::global(),
+            carbide_instrument::Instrumentation::noop(),
         )
         .with_bearer_authenticator(Arc::new(FakeAuth(
             "spiffe://example.test/carbide-system/machine/m1".to_string(),
@@ -1323,7 +1323,7 @@ mod tests {
         let middleware = CertDescriptionMiddleware::<NoAuthorization>::new(
             None,
             spiffe_context(),
-            carbide_instrument::Instrumentation::global(),
+            carbide_instrument::Instrumentation::noop(),
         )
         .with_machine_certs_enabled(false);
         let principals = principals_for_certs(
@@ -1345,7 +1345,7 @@ mod tests {
         let middleware = CertDescriptionMiddleware::<NoAuthorization>::new(
             None,
             spiffe_context(),
-            carbide_instrument::Instrumentation::global(),
+            carbide_instrument::Instrumentation::noop(),
         );
         let principals = principals_for_certs(
             middleware,
@@ -1366,7 +1366,7 @@ mod tests {
         let middleware = CertDescriptionMiddleware::<NoAuthorization>::new(
             None,
             spiffe_context(),
-            carbide_instrument::Instrumentation::global(),
+            carbide_instrument::Instrumentation::noop(),
         );
         let principals = principals_for(middleware, Some("Bearer good")).await;
         assert!(

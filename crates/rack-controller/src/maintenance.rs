@@ -4020,12 +4020,12 @@ mod tests {
             run = |delete_fails: bool| {
                 let credential_manager = TestCredentialManager::default();
                 credential_manager.set_delete_credentials_failure(delete_fails);
-                let metrics = MetricsCapture::start();
+                let metrics = MetricsCapture::owned();
                 let logs = capture_logs(|| {
                     runtime.block_on(delete_rack_maintenance_access_token(
                         &credential_manager,
                         &rack_id,
-                        &carbide_instrument::Instrumentation::global(),
+                        metrics.instrumentation(),
                     ));
                 })
                 .into_iter()

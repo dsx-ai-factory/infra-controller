@@ -201,10 +201,8 @@ pub struct MockRmsApi {
     get_job_status_responses: Mutex<VecDeque<Result<rms::GetJobStatusResponse, RackManagerError>>>,
     get_job_status_calls: Mutex<Vec<rms::GetJobStatusRequest>>,
 
-    get_firmware_job_status_responses:
-        Mutex<VecDeque<Result<rms::GetFirmwareJobStatusResponse, RackManagerError>>>,
     get_firmware_job_status_calls: Mutex<Vec<rms::GetFirmwareJobStatusRequest>>,
-    blocked_firmware_status: Mutex<VecDeque<BlockedRmsRequest>>,
+    blocked_job_status: Mutex<VecDeque<BlockedRmsRequest>>,
 
     // Switch firmware calls.
     list_switch_firmware_responses:
@@ -354,9 +352,8 @@ impl MockRmsApi {
             batch_disable_switch_mtls_calls: Default::default(),
             get_job_status_responses: Default::default(),
             get_job_status_calls: Default::default(),
-            get_firmware_job_status_responses: Default::default(),
             get_firmware_job_status_calls: Default::default(),
-            blocked_firmware_status: Default::default(),
+            blocked_job_status: Default::default(),
             list_switch_firmware_responses: Default::default(),
             list_switch_firmware_calls: Default::default(),
             push_switch_firmware_responses: Default::default(),
@@ -465,23 +462,7 @@ impl MockRmsApi {
         (arrival, release)
     }
 
-    /// Pauses the next firmware status request after recording the request and before
-    /// taking its queued response. The returned receiver signals when the call pauses.
-    /// Send `()` through the returned sender, or drop the sender, to resume the call.
-    ///
-    /// # Panics
-    ///
-    /// Panics if the next firmware status request is already set to pause.
-    pub async fn block_next_get_firmware_job_status(
-        &self,
-    ) -> (oneshot::Receiver<()>, oneshot::Sender<()>) {
-        self.block_next_firmware_job_status_requests(1)
-            .await
-            .pop()
-            .expect("one firmware status gate was requested")
-    }
-
-    /// Arms `count` firmware-status gates in request order. Each arrival is sent
+    /// Arms `count` job-status gates in request order. Each arrival is sent
     /// after request recording and before its queued response is consumed.
     /// Gates are consumed in call order; responses are taken in resume order.
     /// Dropping a request leaves its queued response for a later call. A new
@@ -490,16 +471,13 @@ impl MockRmsApi {
     ///
     /// # Panics
     ///
-    /// Panics if any firmware status gate is already armed.
-    pub async fn block_next_firmware_job_status_requests(
+    /// Panics if any job status gate is already armed.
+    pub async fn block_next_job_status_requests(
         &self,
         count: usize,
     ) -> Vec<(oneshot::Receiver<()>, oneshot::Sender<()>)> {
-        let mut blocked = self.blocked_firmware_status.lock().await;
-        assert!(
-            blocked.is_empty(),
-            "a firmware status blocker is already armed"
-        );
+        let mut blocked = self.blocked_job_status.lock().await;
+        assert!(blocked.is_empty(), "a job status blocker is already armed");
         (0..count)
             .map(|_| {
                 let (entered, arrival) = oneshot::channel();
@@ -830,14 +808,10 @@ impl MockRmsApi {
         rms::GetJobStatusResponse
     );
 
-    impl_enqueue_inspect!(
-        enqueue_get_firmware_job_status,
-        get_firmware_job_status_calls,
-        get_firmware_job_status_responses,
-        get_firmware_job_status_calls,
-        rms::GetFirmwareJobStatusRequest,
-        rms::GetFirmwareJobStatusResponse
-    );
+    /// Returns legacy requests so tests can reject accidental deprecated polling.
+    pub async fn get_firmware_job_status_calls(&self) -> Vec<rms::GetFirmwareJobStatusRequest> {
+        self.get_firmware_job_status_calls.lock().await.clone()
+    }
 
     // Switch firmware
     impl_enqueue_inspect!(
@@ -1134,14 +1108,14 @@ impl MockRmsApi {
         }
     }
 
-    /// Success response for `get_firmware_job_status`.
-    pub fn firmware_job_status_ok(
-        state: rms::FirmwareJobState,
-    ) -> rms::GetFirmwareJobStatusResponse {
-        rms::GetFirmwareJobStatusResponse {
-            status: rms::ReturnCode::Success as i32,
-            job_state: state as i32,
-            ..Default::default()
+    /// Returns one attributed job record for firmware polling tests.
+    pub fn job_status_ok(job_id: &str, state: rms::JobExecutionState) -> rms::GetJobStatusResponse {
+        rms::GetJobStatusResponse {
+            job_states: vec![rms::JobStatus {
+                job_id: job_id.to_owned(),
+                execution_state: state as i32,
+                ..Default::default()
+            }],
         }
     }
 
@@ -1317,6 +1291,14 @@ impl RmsApi for MockRmsApi {
         cmd: rms::GetJobStatusRequest,
     ) -> Result<rms::GetJobStatusResponse, RackManagerError> {
         self.get_job_status_calls.lock().await.push(cmd);
+
+        let blocked = self.blocked_job_status.lock().await.pop_front();
+
+        if let Some(blocked) = blocked {
+            blocked.entered.send(()).ok();
+            blocked.resume.await.ok();
+        }
+
         pop_or_err(&mut self.get_job_status_responses.lock().await)
     }
 
@@ -1598,15 +1580,7 @@ impl RmsApi for MockRmsApi {
         cmd: rms::GetFirmwareJobStatusRequest,
     ) -> Result<rms::GetFirmwareJobStatusResponse, RackManagerError> {
         self.get_firmware_job_status_calls.lock().await.push(cmd);
-
-        let blocked = self.blocked_firmware_status.lock().await.pop_front();
-
-        if let Some(blocked) = blocked {
-            blocked.entered.send(()).ok();
-            blocked.resume.await.ok();
-        }
-
-        pop_or_err(&mut self.get_firmware_job_status_responses.lock().await)
+        Err(tonic::Status::unimplemented("legacy firmware status polling is unsupported").into())
     }
     async fn list_switch_firmware(
         &self,

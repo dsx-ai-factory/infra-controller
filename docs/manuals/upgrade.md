@@ -394,6 +394,31 @@ Moving a site off Vault entirely, including certificate issuance and the Vault i
 
 ## Version-specific upgrade notes
 
+### Upgrades That Introduce Automatic Site IP Block Reconciliation
+
+Before upgrading, re-add any removed fabric range whose IP Block you need to keep.
+Renaming a Site IP Block no longer prevents deletion when its range is removed
+from the Site configuration. Compatible manually created IP Blocks with the same
+range and routing type as a current or removed fabric prefix are also managed by
+the Site configuration. A Site-managed IP Block whose range is no longer configured
+moves to `Deleting`, blocking new Allocations and resizing, and is deleted once it
+is no longer in use.
+
+If an IP Block remains `Deleting` after its Allocations are deleted, follow the
+manual cleanup guidance in
+[Creating Site IP Blocks](/infra-controller/rest-api-reference/getting-started#creating-site-ip-blocks).
+
+Upgrade the Site Agent in the same rollout as the REST API. Site IP Blocks then
+follow the Site's `site_fabric_prefixes` through the Site Agent's inventory instead
+of the Site configuration report. Until a Site's Site Agent is upgraded, adding,
+removing, or resizing a fabric prefix on that Site does not change its IP Blocks.
+
+Site configuration inventory runs started before the REST upgrade can fail during
+the rollout. Subsequent scheduled runs resume Site metadata updates.
+
+The Site Agent needs NICo Core `2.1.0` or later. With an older Core, collection fails
+and IP Blocks are left unchanged.
+
 ### Upgrades That Introduce Asynchronous Peering Deletion
 
 Follow these steps the first time you upgrade to the peering deletion behavior
@@ -452,6 +477,18 @@ nico-rest-api:
 Only a client in a listed org is a service account, and only for requests to that org. A client credentials token from any other client is now authorized by its roles in the requested org, like a user token. That includes `serviceAccount: false`, where it used to get `401`. A disconnected config with more than one `isServiceAccount: true` claim mapping across custom issuers also fails to start.
 
 In connected mode, `serviceAccountOrgs` can list more than one org. Custom issuer `isServiceAccount` mappings, which used to require disconnected mode, are now accepted in connected mode with no limit on their number.
+
+### 2.4 → 2.5: Firmware upgrade timeout based on time Scout polled for task
+
+In NICo versions prior to 2.5, the timeout clock for a firmware upgrade starts when the controller creates the task, even though Scout has not yet received the task and is *not guaranteed to do so*. In version 2.5, the timeout clock resets to zero the first time Scout polls the controller and receives the task.
+
+**Impact:** In a situation that meets all of the following conditions, the newer Core marks a pending task as timed out, unless the last Scout contact time happens to fall within 30 minutes of upgrade task creation:
+
+- A firmware upgrade task is created prior to a NICo upgrade
+- Scout successfully receives the task
+- The actual firmware upgrade begins but does not complete
+
+This situation delays the upgrade process before it completes, since the result of the ongoing firmware upgrade will be discarded, and a potentially unnecessary retry will be triggered.
 
 ### 2.3 → 2.4: Standalone Temporal/Keycloak PostgreSQL deprecated
 

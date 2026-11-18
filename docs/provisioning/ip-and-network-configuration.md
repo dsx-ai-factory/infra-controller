@@ -774,7 +774,7 @@ loop with `socks.forge` for stock agents or `socks.nico` for rebranded images.
 openssl s_client -connect carbide-api.forge:443 </dev/null 2>/dev/null | grep -E '^(subject|Verify)'
 
 # nico-pxe
-curl -sf --max-time 5 http://carbide-pxe.forge/ -o /dev/null && echo OK || echo FAILED
+curl -sf --max-time 5 http://carbide-pxe.forge/metrics -o /dev/null && echo OK || echo FAILED
 
 # unbound recursing externally
 dig +short +timeout=3 example.com @unbound.nico

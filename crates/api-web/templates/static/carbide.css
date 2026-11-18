@@ -9,9 +9,10 @@
   --bg-secondary: #f8f9fa;
   --bg-tertiary: #f0f2f4;
   --bg-nav: rgba(255, 255, 255, 0.95);
+  /* Opaque sidebar color, for its pinned header and footer */
+  --bg-nav-solid: #ffffff;
   --bg-table: rgba(255, 255, 255, 0.9);
   --bg-card: rgba(255, 255, 255, 0.8);
-  --bg-run-status: rgba(255, 255, 255, 0.78);
   --bg-warning: #fff5eb;
   
   --text-primary: #0d0d0d;
@@ -32,8 +33,7 @@
   --warning: #ed8936;
   --info: #3182ce;
   --bg-error-button: rgba(229, 62, 62, 0.85);
-  --bg-warning-button: rgba(237, 137, 54, 0.85);
-  
+  --bg-warning-button: rgba(237, 137, 54, 0.85);  
   /* Borders */
   --border-color: #e2e8f0;
   --scrollbar-thumb: rgba(0, 0, 0, 0.2);
@@ -45,47 +45,48 @@
   --shadow-md: 0 10px 15px -3px rgba(0, 0, 0, 0.1), 0 4px 6px -2px rgba(0, 0, 0, 0.05);
 }
 
-/* Follow the desktop preference, including changes while a page is open.
+/* Dark theme. base.html sets data-theme before the page renders: the sidebar
+   toggle's stored choice, else the desktop preference (followed live).
    color-scheme also themes browser-provided controls and scrollbars. */
-@media (prefers-color-scheme: dark) {
-  :root {
-    color-scheme: dark;
+:root[data-theme="dark"] {
+  color-scheme: dark;
 
-    --bg-primary: #1b2027;
-    --bg-secondary: #12161c;
-    --bg-tertiary: #272e38;
-    --bg-nav: rgba(27, 32, 39, 0.95);
-    --bg-table: rgba(27, 32, 39, 0.9);
-    --bg-card: rgba(27, 32, 39, 0.8);
-    --bg-run-status: rgba(27, 32, 39, 0.78);
-    --bg-warning: #35291c;
+  /* Neutral charcoal in the style of Slack's dark mode: surfaces step up in
+     lightness instead of relying on shadows, with thin neutral dividers */
+  --bg-primary: #222529;
+  --bg-secondary: #18181b;
+  --bg-tertiary: #2c2d30;
+  --bg-nav: rgba(25, 23, 29, 0.95);
+  --bg-nav-solid: #19171d;
+  --bg-table: rgba(34, 37, 41, 0.9);
+  --bg-card: rgba(34, 37, 41, 0.8);
+  --bg-warning: #35291c;
 
-    --text-primary: #f0f3f6;
-    --text-secondary: #d0d7e0;
-    --text-muted: #a3afbf;
-    --text-on-accent: #12161c;
-    --text-warning-title: #ffb86b;
+  --text-primary: #e8e8e8;
+  --text-secondary: #d1d2d3;
+  --text-muted: #ababad;
+  --text-on-accent: #1a1d21;
+  --text-warning-title: #ffb86b;
 
-    --accent-green: #96d641;
-    --accent-green-hover: #b3ec6b;
-    --accent-green-light: #293b1e;
-    --bg-accent-button: #76b900;
+  --accent-green: #96d641;
+  --accent-green-hover: #b3ec6b;
+  --accent-green-light: #293b1e;
+  --bg-accent-button: #76b900;
 
-    --success: #96d641;
-    --error: #ff8585;
-    --warning: #ffb86b;
-    --info: #80bfff;
-    --bg-error-button: #ff8585;
-    --bg-warning-button: #ffb86b;
+  --success: #96d641;
+  --error: #ff8585;
+  --warning: #ffb86b;
+  --info: #80bfff;
+  --bg-error-button: #ff8585;
+  --bg-warning-button: #ffb86b;
 
-    --border-color: #414b59;
-    --scrollbar-thumb: rgba(255, 255, 255, 0.25);
-    --scrollbar-thumb-hover: rgba(255, 255, 255, 0.4);
+  --border-color: #35373b;
+  --scrollbar-thumb: rgba(255, 255, 255, 0.25);
+  --scrollbar-thumb-hover: rgba(255, 255, 255, 0.4);
 
-    --shadow-sm: 0 1px 2px 0 rgba(0, 0, 0, 0.25);
-    --shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.3), 0 2px 4px -1px rgba(0, 0, 0, 0.2);
-    --shadow-md: 0 10px 15px -3px rgba(0, 0, 0, 0.3), 0 4px 6px -2px rgba(0, 0, 0, 0.2);
-  }
+  --shadow-sm: 0 1px 2px 0 rgba(0, 0, 0, 0.2);
+  --shadow: 0 1px 3px 0 rgba(0, 0, 0, 0.25);
+  --shadow-md: 0 4px 12px -2px rgba(0, 0, 0, 0.3);
 }
 
 /* ------------------------------------------------------------------------
@@ -127,7 +128,7 @@ h1, h2, h3, h4, h5, h6 {
 }
 
 h1 {
-  font-size: 2rem;
+  font-size: 1.6rem;
   letter-spacing: -0.02em;
   margin-bottom: 1.5rem;
 }
@@ -135,8 +136,6 @@ h1 {
 h2 {
   font-size: 1.5rem;
   margin-top: 2rem;
-  margin-bottom: 1rem;
-  color: var(--accent-green);
 }
 
 h3 {
@@ -190,6 +189,8 @@ pre code {
    Layout - Navigation Sidebar
    ------------------------------------------------------------------------ */
 nav {
+  display: flex;
+  flex-direction: column;
   width: 260px;
   height: 100vh;
   position: fixed;
@@ -256,48 +257,178 @@ nav h3 a:hover {
   text-decoration: none;
 }
 
+/* Site name and search stay put while the links scroll under them */
+nav .nav-header {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  /* Solid, so links scrolling underneath don't show through */
+  background-color: var(--bg-nav-solid);
+  border-bottom: 1px solid var(--border-color);
+}
+
+/* Dark mode toggle (.btn-plain) in a footer pinned to the bottom of the
+   sidebar, styled as a sidebar row */
+nav .nav-footer {
+  position: sticky;
+  bottom: 0;
+  margin-top: auto;
+  padding: 0.5rem 0;
+  background-color: var(--bg-nav-solid);
+  border-top: 1px solid var(--border-color);
+}
+
+nav .nav-footer button.theme-toggle {
+  display: flex;
+  align-items: center;
+  gap: 0.65rem;
+  width: calc(100% - 1.5rem);
+  margin: 0 0.75rem;
+  padding: 0.45rem 0.65rem;
+  border-radius: 6px;
+  color: var(--text-secondary);
+  font-size: 0.95rem;
+  text-align: left;
+  transition: background-color 0.15s ease;
+}
+
+nav .nav-footer button.theme-toggle:hover:enabled {
+  background-color: var(--bg-tertiary);
+  color: var(--text-primary);
+}
+
+/* "Dark mode" with a moon in the light theme; "Light mode" with a sun in the dark */
+:root[data-theme="dark"] nav .theme-icon-moon,
+:root:not([data-theme="dark"]) nav .theme-icon-sun {
+  display: none;
+}
+
+/* Lines up with the sidebar rows, leaving room for the whole placeholder */
+nav .nav-header .search-container {
+  margin: 0.5rem 0.75rem 0.85rem;
+}
+
+nav .nav-header .search-container input[type="search"] {
+  padding: 0.5rem 0.6rem 0.5rem 2.1rem;
+  font-size: 0.875rem;
+}
+
+nav .nav-header .search-container button[type="submit"] {
+  left: 0.3rem;
+}
+
 nav ul {
   list-style: none;
   padding: 0;
   margin: 0;
 }
 
-nav a:not(#site-name):not(nav h3 a) {
-  display: block;
+nav ul.nav-top {
+  margin-top: 0.75rem;
+}
+
+/* Rows: top-level links and group headers share one look, an icon then the label */
+nav ul.nav-top a,
+nav details.nav-group > summary,
+nav details.nav-group > summary:hover {
+  display: flex;
+  align-items: center;
+  gap: 0.65rem;
+  width: auto;
+  margin: 0.1rem 0.75rem;
+  padding: 0.45rem 0.65rem;
+  background: transparent;
+  border: none;
+  border-radius: 6px;
+  box-shadow: none;
   color: var(--text-secondary);
+  font-size: 0.95rem;
+  font-weight: 500;
   text-decoration: none;
-  padding: 0.6rem 1.5rem;
-  transition: all 0.2s ease;
-  border-left: 3px solid transparent;
-  font-size: 1rem;
+  transition: background-color 0.15s ease;
 }
 
-nav ul ul a {
-  padding-left: 2.5rem !important;
-  font-size: 0.95rem !important;
-  color: var(--text-muted) !important;
+nav .nav-icon {
+  flex: 0 0 auto;
+  width: 17px;
+  height: 17px;
+  color: var(--text-muted);
 }
 
-nav a:not(#site-name):not(nav h3 a):hover,
-nav a:not(#site-name):not(nav h3 a).active {
-  background-color: var(--accent-green-light);
+/* Group headers: chevron on the right, pointing down when open */
+nav details.nav-group {
+  margin: 0;
+  border-radius: 0;
+  overflow: visible;
+}
+
+nav details.nav-group > summary {
+  list-style: none;
+}
+
+nav details.nav-group > summary::-webkit-details-marker {
+  display: none;
+}
+
+nav details.nav-group > summary > span {
+  flex: 1;
+}
+
+nav details.nav-group > summary::after {
+  content: "";
+  width: 0.4rem;
+  height: 0.4rem;
+  margin-right: 0.25rem;
+  border-right: 1.5px solid var(--text-muted);
+  border-bottom: 1.5px solid var(--text-muted);
+  transform: rotate(-45deg);
+  transition: transform 0.15s ease;
+}
+
+nav details.nav-group[open] > summary::after {
+  transform: rotate(45deg);
+}
+
+/* Group items hang off a thin line under the group's icon */
+nav details.nav-group > ul {
+  margin: 0.1rem 0.75rem 0.4rem 1.95rem;
+  padding-left: 0.6rem;
+  border-left: 1px solid var(--border-color);
+}
+
+nav details.nav-group > ul a {
+  display: block;
+  margin: 0.05rem 0;
+  padding: 0.35rem 0.65rem;
+  border-radius: 6px;
+  color: var(--text-secondary);
+  font-size: 0.9rem;
+  text-decoration: none;
+  transition: background-color 0.15s ease;
+}
+
+nav ul.nav-top a:hover,
+nav details.nav-group > summary:hover,
+nav details.nav-group > ul a:hover {
+  background-color: var(--bg-tertiary);
   color: var(--text-primary);
-  border-left-color: var(--accent-green);
 }
 
 /* Link for the current page, marked by the sidebar script in base.html */
-nav a:not(#site-name):not(nav h3 a).active {
+nav ul a.active,
+nav ul a.active:hover {
+  background-color: var(--bg-tertiary);
+  color: var(--text-primary);
   font-weight: 600;
 }
 
-nav ul ul a.active {
-  color: var(--text-primary) !important;
+nav ul a.active .nav-icon {
+  color: var(--text-primary);
 }
 
-nav hr {
-  border: none;
-  border-top: 1px solid var(--border-color);
-  margin: 1rem 0;
+/* The footer sits at the bottom; nothing else shrinks to make room for it */
+nav > * {
+  flex-shrink: 0;
 }
 
 /* Site name styling */
@@ -326,18 +457,44 @@ nav hr {
 
 /* Search bar in navigation */
 .search-container {
+  position: relative;
   display: flex;
   align-items: center;
   margin: 1rem 1.5rem;
-  gap: 0.5rem;
+}
+
+/* The submit button (.btn-plain) is the magnifier inside the box, as in the
+   table filter box. Only its color transitions: the base button's
+   transition: all flickers as the input behind it changes background. */
+.search-container button[type="submit"] {
+  position: absolute;
+  top: 50%;
+  left: 0.4rem;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  margin: 0;
+  padding: 0;
+  color: var(--text-muted);
+  transform: translateY(-50%);
+  box-sizing: border-box;
+  transition: color 0.15s ease;
+}
+
+.search-container button[type="submit"]:hover:enabled,
+.search-container:focus-within button[type="submit"] {
+  color: var(--accent-green);
 }
 
 .search-container input[type="search"] {
   flex: 1;
+  margin: 0;
   background-color: var(--bg-tertiary);
   border: 1px solid var(--border-color);
   color: var(--text-primary);
-  padding: 0.5rem 1rem;
+  padding: 0.5rem 1rem 0.5rem 2.3rem;
   border-radius: 8px;
   font-size: 0.9rem;
   transition: all 0.2s ease;
@@ -367,6 +524,14 @@ main {
   background-color: var(--bg-secondary);
 }
 
+/* On wide screens the page content stops growing and stays centered. Page
+   corner controls (the JSON link) are positioned against this box. */
+.main-content {
+  position: relative;
+  max-width: 1360px;
+  margin: 0 auto;
+}
+
 /* ------------------------------------------------------------------------
    Tables
    ------------------------------------------------------------------------ */
@@ -383,21 +548,10 @@ table {
   table-layout: fixed;
 }
 
-/* Overview and details tables have auto layout */
-table.overview,
-table.detailsview {
+/* Overview tables have auto layout */
+table.overview {
   width: 100%;
   table-layout: auto;
-}
-
-/* Detail view tables have fixed label column width */
-table.detailsview th {
-  width: 18%;
-  min-width: 140px;
-}
-
-table.detailsview td {
-  overflow: visible;
 }
 
 /* Table headers */
@@ -430,13 +584,6 @@ td .bubble {
   vertical-align: middle;
 }
 
-/* Prevent overflow in fixed layout tables */
-table[style*="table-layout: fixed"] td {
-  word-wrap: break-word;
-  overflow-wrap: break-word;
-  max-width: 0;
-}
-
 tr:last-child td {
   border-bottom: none;
 }
@@ -460,6 +607,22 @@ tr:last-child td {
   display: none;
 }
 
+/* Trailing per-row action button in list tables */
+td.row-action {
+  width: 1%;
+  white-space: nowrap;
+}
+
+td.row-action form {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+}
+
+td.row-action input[type="submit"] {
+  margin: 0;
+}
+
 /* Nested tables for sub-data */
 td table {
   margin: 1.5rem;
@@ -471,21 +634,6 @@ td table {
   box-sizing: border-box;
   position: relative;
   z-index: 1;
-}
-
-/* Tables in cells with padding: 0 */
-td[style*="padding: 0"] {
-  padding: 1rem !important;
-}
-
-td[style*="padding: 0"] table {
-  margin: 0 !important;
-  width: 100%;
-  box-sizing: border-box;
-}
-
-td[style*="padding: 0"] + td[style*="padding: 0"] {
-  padding-left: 0.5rem !important;
 }
 
 /* Nested table styling */
@@ -500,21 +648,6 @@ td table th {
 td table td {
   padding: 0.75rem 1rem;
   background-color: transparent;
-}
-
-/* Ensure proper z-index layering for nested tables */
-.detailsview td {
-  position: relative;
-  z-index: 0;
-}
-
-.detailsview td > table {
-  table-layout: auto;
-  word-break: break-word;
-  max-width: 100%;
-  overflow: visible;
-  z-index: 10;
-  position: relative;
 }
 
 /* Sortable table styling */
@@ -539,8 +672,7 @@ td table td {
   color: var(--accent-green) !important;
 }
 
-.sortable thead th:not(.no-sort)[aria-sort]::after,
-.sortable thead th:not(.no-sort).indicator-left[aria-sort]::before {
+.sortable thead th:not(.no-sort)[aria-sort]::after {
   color: var(--accent-green) !important;
 }
 
@@ -649,8 +781,6 @@ input[type="checkbox"] {
   cursor: pointer;
 }
 
-
-
 /* ------------------------------------------------------------------------
    Buttons
    ------------------------------------------------------------------------ */
@@ -694,6 +824,38 @@ input[type="submit"]:hover:not(.disabled) {
   border-color: var(--accent-green-hover);
 }
 
+/* Button variants. Each lists its :hover state with the same selector weight
+   as the global hover fill above, so a variant only states its look once.
+   Size and placement stay with the component. */
+
+/* Secondary: white with a gray outline; green outline and text on hover or
+   while .active (e.g. an open panel or a paused stream) */
+button.btn-secondary,
+button.btn-secondary:hover:enabled:not(.tab-button) {
+  background-color: var(--bg-primary);
+  border: 1px solid var(--border-color);
+  box-shadow: var(--shadow-sm);
+  color: var(--text-secondary);
+}
+
+button.btn-secondary:hover:enabled:not(.tab-button),
+button.btn-secondary.active {
+  border-color: var(--accent-green);
+  color: var(--accent-green);
+}
+
+/* Plain: no fill, outline, shadow, or blur layer, even when disabled; for
+   icon and row buttons */
+button.btn-plain,
+button.btn-plain:disabled,
+button.btn-plain:hover:enabled:not(.tab-button) {
+  background: transparent;
+  border: none;
+  box-shadow: none;
+  -webkit-backdrop-filter: none;
+  backdrop-filter: none;
+}
+
 .config-card input[type="submit"].disabled:hover {
   background-color: rgba(113, 128, 150, 0.1) !important;
   box-shadow: var(--shadow-sm);
@@ -717,140 +879,7 @@ input[type="submit"]:hover:not(.disabled) {
   flex-shrink: 0;
 }
 
-/* Prominent banner shown when required site-wide default credentials are unset
-   (endpoint exploration fails until they are configured). */
-.missing-credentials-banner {
-  margin: 0 0 20px 0;
-  padding: 14px 18px;
-  background-color: var(--bg-warning);
-  border: 1px solid var(--warning);
-  border-left: 6px solid var(--warning);
-  border-radius: 8px;
-  color: var(--text-secondary);
-  box-shadow: var(--shadow-sm);
-}
-
-.missing-credentials-banner-title {
-  font-weight: 700;
-  font-size: 1.05rem;
-  color: var(--text-warning-title);
-  margin-bottom: 6px;
-}
-
-.missing-credentials-banner p {
-  margin: 6px 0;
-}
-
-.missing-credentials-banner ul {
-  margin: 6px 0 6px 1.25rem;
-}
-
-.missing-credentials-banner li {
-  margin: 2px 0;
-}
-
-.missing-credentials-banner code {
-  background-color: var(--bg-tertiary);
-  padding: 1px 5px;
-  border-radius: 4px;
-  font-family: 'Consolas', 'Monaco', monospace;
-  font-size: 0.85rem;
-}
-
-.missing-credentials-banner-hint {
-  color: var(--text-muted);
-  font-size: 0.9rem;
-}
-
-.site-explorer-run-status {
-  margin: 0 0 20px 0;
-  padding: 14px 18px;
-  background-color: var(--bg-run-status);
-  border: 1px solid var(--border-color);
-  border-left: 6px solid var(--border-color);
-  border-radius: 8px;
-  box-shadow: var(--shadow-sm);
-}
-
-.site-explorer-run-status.success {
-  border-left-color: var(--success);
-}
-
-.site-explorer-run-status.warning {
-  border-left-color: var(--warning);
-}
-
-.site-explorer-run-status.error {
-  border-left-color: var(--error);
-}
-
-.site-explorer-run-status-header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 1rem;
-  margin-bottom: 0.75rem;
-}
-
-.site-explorer-run-status-title {
-  font-weight: 700;
-  font-size: 1.05rem;
-  color: var(--text-primary);
-}
-
-.site-explorer-run-status-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
-  gap: 0.75rem;
-  margin: 0;
-}
-
-.site-explorer-run-status-grid div {
-  min-width: 0;
-}
-
-.site-explorer-run-status-grid dt {
-  color: var(--text-muted);
-  font-size: 0.8rem;
-  font-weight: 600;
-  text-transform: uppercase;
-}
-
-.site-explorer-run-status-grid dd {
-  color: var(--text-secondary);
-  overflow-wrap: anywhere;
-}
-
-.site-explorer-run-error {
-  margin-top: 0.75rem;
-}
-
-.site-explorer-run-error pre {
-  max-height: 130px;
-  margin: 0;
-  border-radius: 8px;
-}
-
-.site-explorer-run-empty {
-  color: var(--text-muted);
-  margin: 0;
-}
-
 /* Search button icon */
-.search-container input[type="submit"] {
-  width: 40px;
-  height: 40px;
-  padding: 0;
-  margin: 0;
-  box-sizing: border-box;
-  flex-shrink: 0;
-  font-size: 0.9rem;
-  background-image: url('data:image/svg+xml;charset=UTF-8,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="white"><path d="M15.5 14h-.79l-.28-.27C15.41 12.59 16 11.11 16 9.5 16 5.91 13.09 3 9.5 3S3 5.91 3 9.5 5.91 16 9.5 16c1.61 0 3.09-.59 4.23-1.57l.27.28v.79l5 5L22 19l-5-5zm-6 0C8.01 14 6 11.99 6 9.5S8.01 5 9.5 5 13 7.01 13 9.5 10.99 14 9.5 14z"/></svg>');
-  background-repeat: no-repeat;
-  background-position: center;
-  background-size: 20px;
-}
-
 /* Delete buttons */
 #delete-link,
 .delete-button {
@@ -907,10 +936,16 @@ input[type="submit"]:hover:not(.disabled) {
 }
 
 /* JSON/Delete button container (top right) */
+/* Content being replaced by another tab's (tabs.js link tabs) */
+[data-tab-swap].tab-loading {
+  opacity: 0.55;
+  transition: opacity 0.15s ease;
+}
+
 div#json {
   position: absolute;
-  top: 2rem;
-  right: 3rem;
+  top: 0;
+  right: 0;
   display: flex;
   gap: 0.75rem;
   align-items: center;
@@ -940,45 +975,6 @@ div#json a:hover {
   border-color: var(--accent-green-hover);
 }
 
-/* Button groups for forms */
-.button-group {
-  display: block;
-  margin: 1rem 0;
-}
-
-.button-group > form,
-.button-group > div {
-  display: inline-flex;
-  align-items: center;
-  gap: 0.5rem;
-  margin: 0.5rem 0;
-}
-
-.button-group label {
-  margin: 0;
-  font-weight: normal;
-  font-size: 0.9rem;
-}
-
-.button-group input[type="checkbox"],
-.button-group input[type="submit"],
-.button-group button {
-  margin: 0;
-}
-
-/* Horizontal button group variant */
-.button-group.horizontal {
-  display: flex;
-  align-items: center;
-  gap: 1.5rem;
-  flex-wrap: wrap;
-}
-
-.button-group.horizontal > form,
-.button-group.horizontal > div {
-  margin: 0;
-}
-
 /* Form-specific button/input layouts */
 td form {
   display: inline-block;
@@ -1000,7 +996,7 @@ td form button {
    
    1. BUBBLE SYSTEM - Primary status indicators (machine states, etc.)
    2. TABLE CELL BACKGROUNDS - Highlighted table cells  
-   3. TEXT COLORS - Simple colored text without backgrounds
+   3. TEXT COLORS - .text-success/.text-error/.text-warning, under Utility Classes
    
    Color Scheme:
    - Success/Healthy: Green (#76b900)
@@ -1070,12 +1066,6 @@ td form button {
    Provides subtle background color to entire table cell for emphasis.
    ------------------------------------------------------------------------ */
 
-td.cell-success {
-  background-color: rgba(118, 185, 0, 0.1);
-  color: var(--success);
-  font-weight: 500;
-}
-
 td.cell-error {
   background-color: rgba(229, 62, 62, 0.1);
   color: var(--error);
@@ -1101,19 +1091,6 @@ td.cell-warning a:hover {
 }
 
 /* ------------------------------------------------------------------------
-   4. TEXT COLORS - Simple Colored Text
-   
-   Used for: Simple text that needs color emphasis without backgrounds
-   Format: <span class="text-success">Success Text</span>
-   
-   Utility classes for basic text coloring.
-   ------------------------------------------------------------------------ */
-
-.text-success { color: var(--success); }
-.text-error { color: var(--error); }
-.text-warning { color: var(--warning); }
-
-/* ------------------------------------------------------------------------
    SPECIALIZED COMPONENTS
    
    Components with specific styling requirements that don't fit the
@@ -1122,25 +1099,24 @@ td.cell-warning a:hover {
 
 /* Health alert classification pills - used by backend health_alert_classifications_fmt filter */
 div.health_alert_classification {
-  background-color: var(--error);
+  background-color: rgba(229, 62, 62, 0.15);
   border-radius: 20px;
   margin: 2px;
   display: inline-block;
   padding: 0.4rem 1rem;
-  color: var(--text-on-accent);
+  color: var(--error);
   font-size: 0.9rem;
   font-weight: 500;
-  box-shadow: var(--shadow-sm);
-  border: 1px solid var(--warning);
-  -webkit-backdrop-filter: blur(10px);
-  backdrop-filter: blur(10px);
+  border: 1px solid var(--error);
 }
 
 /* ------------------------------------------------------------------------
    Specialty Components
    ------------------------------------------------------------------------ */
 
-/* Machine ID display with truncation */
+/* IDs render as two halves that join into the full ID: everything but the
+   last six characters, then those six. Only the first half shrinks, so a
+   narrow ID loses its middle: "fm100ds…acguc0". */
 .machine_id {
   width: 14ch;
   display: inline-flex;
@@ -1151,6 +1127,7 @@ div.health_alert_classification {
 
 .machine_id > div:first-child {
   flex: 0 1 auto;
+  min-width: 0;
   text-overflow: ellipsis;
   overflow: hidden;
   white-space: nowrap;
@@ -1161,25 +1138,331 @@ div.health_alert_classification {
   white-space: nowrap;
 }
 
-/* Full machine ID in detail views (no truncation) */
-.detailsview .machine_id {
+/* Where there is room, IDs widen enough to read the type prefix and most of
+   the hash, but stop short of the full ID so ID-heavy pages stay calm */
+.data-table .machine_id,
+.overview-card.fit-full table.overview .machine_id {
   width: auto;
+  max-width: 22ch;
 }
 
-.detailsview .machine_id > div:first-child {
-  text-overflow: initial;
+/* Restrict bubble width in overview tables */
+.overview .bubble {
+  max-width: 35ch;
+}
+
+/* ------------------------------------------------------------------------
+   List tables (table.overview), in the detail-page data-table style.
+   table_filter.js wraps each one in .overview-card, which scrolls sideways
+   on its own; the first column stays put while scrolling.
+   ------------------------------------------------------------------------ */
+.overview-card {
+  margin-bottom: 1.5rem;
+  overflow-x: auto;
+  background-color: var(--bg-primary);
+  border: 1px solid var(--border-color);
+  border-radius: 12px;
+  box-shadow: var(--shadow);
+}
+
+.overview-card > table.overview {
+  margin: 0;
   overflow: visible;
+  background: transparent;
+  border-radius: 0;
+  box-shadow: none;
+  -webkit-backdrop-filter: none;
+  backdrop-filter: none;
 }
 
-/* Hide suffix in detail views to avoid duplication */
-.detailsview .machine_id > div:nth-child(2) {
+table.overview > thead > tr > th,
+table.overview > tfoot > tr > th,
+table.overview > tfoot > th {
+  padding: 0.75rem 0.85rem;
+  background-color: var(--bg-primary);
+  border-bottom: 1px solid var(--border-color);
+  color: var(--text-muted);
+  font-size: 0.85rem;
+  white-space: nowrap;
+}
+
+table.overview > tfoot > tr > th,
+table.overview > tfoot > th {
+  border-top: 1px solid var(--border-color);
+  border-bottom: none;
+}
+
+table.overview > tbody > tr > td {
+  padding: 0.7rem 0.85rem;
+  color: var(--text-primary);
+  vertical-align: middle;
+}
+
+table.overview > tbody > tr > td.cell-warning {
+  color: var(--warning);
+}
+
+table.overview > tbody > tr > td.cell-error {
+  color: var(--error);
+}
+
+table.overview > tbody > tr:last-child > td {
+  border-bottom: none;
+}
+
+table.overview > tbody > tr:hover > td {
+  background-color: rgba(118, 185, 0, 0.04);
+}
+
+table.overview > thead > tr > th:first-child,
+table.overview > tbody > tr > td:first-child {
+  position: sticky;
+  left: 0;
+  z-index: 1;
+  background-color: var(--bg-primary);
+}
+
+table.overview > tbody > tr:hover > td:first-child {
+  background: linear-gradient(rgba(118, 185, 0, 0.04), rgba(118, 185, 0, 0.04)) var(--bg-primary);
+}
+
+table.overview .bubble {
+  margin: 0.1rem 0;
+  padding: 0.2rem 0.75rem;
+}
+
+/* Cell content shared by list tables */
+table.overview td.cell-nowrap {
+  white-space: nowrap;
+}
+
+/* A host's DPUs, under the host ID */
+.cell-dpu {
+  margin-top: 0.2rem;
+}
+
+/* Long states wrap after a "/" onto up to two lines, then end in an ellipsis */
+table.overview .bubble.state-bubble,
+table.overview .state-cell .bubble {
+  display: -webkit-inline-box;
+  max-width: 17ch;
+  overflow: hidden;
+  border-radius: 12px;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  vertical-align: middle;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
+
+/* table_filter.js adds fit-text when shortened text fits in full, and fit-full
+   when machine IDs fit at their wider width too */
+.fit-full-only {
   display: none;
 }
 
-/* Restrict bubble width only in overview tables and health-related tables */
-.overview .bubble,
-table[style*="table-layout: fixed"] .bubble {
-  max-width: 35ch;
+.overview-card.fit-text .fit-short,
+.overview-card.fit-full .fit-short {
+  display: none;
+}
+
+.overview-card.fit-text .fit-full-only,
+.overview-card.fit-full .fit-full-only {
+  display: inline;
+}
+
+/* With room, states widen but still clamp at two lines (the title carries the
+   rest), so a long state handler detail can't crowd out the machine IDs */
+.overview-card.fit-text table.overview .bubble.state-bubble,
+.overview-card.fit-full table.overview .bubble.state-bubble,
+.overview-card.fit-text table.overview .state-cell .bubble,
+.overview-card.fit-full table.overview .state-cell .bubble {
+  max-width: 34ch;
+}
+
+.health-cell,
+.health-cell:hover {
+  display: block;
+  text-decoration: none;
+}
+
+/* One line per alert: the alert ID in a light red chip, then its target */
+.health-alert-line {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin: 0.15rem 0;
+  white-space: nowrap;
+}
+
+.health-alert-chip {
+  padding: 0.05rem 0.5rem;
+  border: 1px solid rgba(229, 62, 62, 0.35);
+  border-radius: 6px;
+  background-color: rgba(229, 62, 62, 0.08);
+  color: var(--error);
+  font-size: 0.9rem;
+  font-weight: 500;
+}
+
+.health-alert-target {
+  color: var(--text-secondary);
+  font-size: 0.9rem;
+}
+
+/* Network device name; long names wrap after a "." first, anywhere as a last resort */
+.device-name {
+  display: block;
+  color: var(--text-primary);
+  overflow-wrap: anywhere;
+}
+
+/* Secondary identifier (MAC, device ID) under a cell's main value, in a grey code chip */
+/* Block of its own line but only as wide as its text. Not display: table, which
+   inherits the row's border-collapse and loses its padding. */
+table.overview code.cell-chip {
+  display: block;
+  width: fit-content;
+  margin-top: 0.2rem;
+  padding: 0.05rem 0.4rem;
+  color: var(--text-secondary);
+  font-size: 0.85rem;
+  white-space: nowrap;
+}
+
+/* Exploration error: JSON toggle and Clear; the JSON opens below at a readable width */
+table.overview > tbody > tr > td.endpoint-error-cell {
+  max-width: 28rem;
+}
+
+.endpoint-error button.endpoint-error-json,
+.endpoint-error button.endpoint-error-json:hover:enabled {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  background-color: var(--bg-primary);
+  border: 1px solid var(--error);
+  color: var(--error);
+}
+
+.endpoint-error button.endpoint-error-json::after {
+  content: "";
+  width: 0.4rem;
+  height: 0.4rem;
+  margin-top: -0.2rem;
+  border-right: 1.5px solid currentColor;
+  border-bottom: 1.5px solid currentColor;
+  transform: rotate(45deg);
+  transition: transform 0.15s ease;
+}
+
+.endpoint-error button.endpoint-error-json[aria-expanded="true"]::after {
+  margin-top: 0.2rem;
+  transform: rotate(-135deg);
+}
+
+.endpoint-error button.endpoint-error-json:hover:enabled,
+.endpoint-error button.endpoint-error-json[aria-expanded="true"] {
+  background-color: rgba(229, 62, 62, 0.1);
+}
+
+pre.endpoint-error-detail {
+  max-height: 300px;
+  margin: 0.5rem 0 0;
+  overflow: auto;
+  font-size: 0.8rem;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+/* JSON toggle with its Clear button beside it */
+.endpoint-error {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  white-space: nowrap;
+}
+
+.endpoint-error form {
+  margin: 0;
+}
+
+.endpoint-error button[type="submit"] {
+  margin: 0;
+  padding: 0.15rem 0.65rem;
+  font-size: 0.85rem;
+}
+
+/* Several values stacked in one cell, one per line. Lines share a fixed height so
+   parallel stacks in neighboring cells (one line per DPU) stay aligned. */
+table.overview .cell-lines > div {
+  display: flex;
+  align-items: center;
+  min-height: 1.9rem;
+}
+
+table.overview .cell-lines code.cell-chip {
+  margin-top: 0;
+}
+
+/* Long free-text descriptions wrap at a readable width */
+table.overview > tbody > tr > td.device-description {
+  min-width: 12rem;
+  max-width: 26rem;
+  color: var(--text-secondary);
+  line-height: 1.45;
+}
+
+/* Connected DPUs: the DPU's ID chip, then its local → remote port */
+dl.port-list {
+  display: grid;
+  grid-template-columns: max-content max-content;
+  align-items: center;
+  gap: 0.35rem 0.85rem;
+  margin: 0;
+  white-space: nowrap;
+}
+
+dl.port-list dd {
+  margin: 0;
+  color: var(--text-secondary);
+  font-family: 'Consolas', 'Monaco', monospace;
+  font-size: 0.85rem;
+}
+
+/* Address entries: a role label, then the IP with its MAC underneath */
+dl.addr-list {
+  display: grid;
+  grid-template-columns: max-content max-content;
+  gap: 0.5rem 0.75rem;
+  margin: 0;
+  white-space: nowrap;
+}
+
+dl.addr-list dt {
+  color: var(--text-muted);
+  font-size: 0.78rem;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  line-height: 1.35rem;
+  text-transform: uppercase;
+}
+
+dl.addr-list dd {
+  display: flex;
+  flex-direction: column;
+  margin: 0;
+  line-height: 1.35rem;
+}
+
+/* MACs in the same grey code chip as the NICo version on the config page */
+dl.addr-list code.addr-mac {
+  align-self: flex-start;
+  margin-top: 0.15rem;
+  padding: 0.05rem 0.4rem;
+  color: var(--text-secondary);
+  font-size: 0.85rem;
+  line-height: 1.25rem;
 }
 
 /* Details/Summary expandable sections */
@@ -1299,57 +1582,55 @@ details > *:not(summary) {
   color: var(--text-muted);
 }
 
-/* Health report actions - JSON details and remove button layout */
-.health-report-actions {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 0.5rem;
-  flex-wrap: wrap;
-  min-height: 1.5rem;
+/* Redfish action requests (Redfish Actions page, Redfish browser past actions) */
+table.data-table.redfish-requests td {
+  vertical-align: top;
 }
 
-.health-report-actions details {
-  flex: 1;
-  min-width: 120px;
-  align-self: center;
-}
-
-.health-report-actions summary {
+table.data-table pre.cell-pre {
+  max-width: 22rem;
+  max-height: 10rem;
   margin: 0;
-  line-height: 1.5rem;
+  padding: 0.4rem 0.6rem;
+  overflow: auto;
+  border: none;
+  border-radius: 6px;
+  box-shadow: none;
+  font-size: 0.8rem;
 }
 
-.health-report-actions button {
-  flex-shrink: 0;
+.redfish-approver + .redfish-approver {
+  margin-top: 0.35rem;
 }
 
-.cancel-cell {
-  padding: 1rem;
-  button {
-    background-color: color-mix(in srgb, red, transparent 30%);
-    border: 1px solid red;
-    padding: 0.5rem;
+table.data-table td.redfish-results {
+  color: var(--text-secondary);
+  font-family: 'Consolas', 'Monaco', monospace;
+  font-size: 0.8rem;
+  white-space: nowrap;
+}
 
-  }
-  button:hover {
-    background-color: red;
-    border: 1px solid red;
-  }
+table.redfish-requests button {
+  margin: 0;
+  padding: 0.3rem 0.85rem;
+  font-size: 0.85rem;
+}
+
+table.redfish-requests button.cancel,
+table.redfish-requests button.cancel:hover:enabled {
+  background-color: transparent;
+  border: 1px solid var(--error);
+  box-shadow: none;
+  color: var(--error);
+}
+
+table.redfish-requests button.cancel:hover:enabled {
+  background-color: rgba(229, 62, 62, 0.1);
 }
 
 /* ------------------------------------------------------------------------
    Configuration Cards
    ------------------------------------------------------------------------ */
-
-/* Grid container for configuration cards */
-.config-cards-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fill, 260px);
-  gap: 1rem;
-  width: 100%;
-  overflow: visible;
-}
 
 /* Individual configuration card */
 .config-card {
@@ -1385,21 +1666,6 @@ details > *:not(summary) {
   color: var(--text-primary);
 }
 
-/* Card action area */
-.config-card-action {
-  display: flex;
-  flex-direction: column;
-  gap: 0.5rem;
-}
-
-.config-card-reminder {
-  height: 1rem;
-  line-height: 1rem;
-  color: var(--text-muted);
-  font-size: 0.9rem;
-  white-space: nowrap;
-}
-
 /* Circular question-mark help marker next to a config card title */
 .config-card-help {
   position: relative;
@@ -1433,8 +1699,8 @@ details > *:not(summary) {
   border: 1px solid var(--border-color);
   border-radius: 8px;
   box-shadow: var(--shadow-md);
-  font-size: 0.8rem;
-  line-height: 1.35;
+  font-size: 0.9rem;
+  line-height: 1.4;
   white-space: normal;
   transition: opacity 0.15s ease-in-out;
 }
@@ -1445,11 +1711,88 @@ details > *:not(summary) {
   opacity: 1;
 }
 
-/* Full width button in card */
-.config-card-action input[type="submit"],
-.config-card-action button {
+/* ------------------------------------------------------------------------
+   Action Cards
+   Uniform cards: title row, description, fields, then buttons pinned to the
+   bottom so every card in a row lines up. The ID selectors override the
+   shared form layouts (power_control.html, bmc_reset.html, quarantine,
+   maintenance) defined above.
+   ------------------------------------------------------------------------ */
+
+.action-cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  grid-auto-rows: 1fr;
+  gap: 1rem;
+  margin-bottom: 2rem;
+}
+
+.action-cards .config-card {
+  width: auto;
+}
+
+.action-card-description {
+  min-height: 2.6em;
+  margin: 0;
+  color: var(--text-muted);
+  font-size: 0.95rem;
+  line-height: 1.3;
+  overflow-wrap: anywhere;
+}
+
+.action-card form,
+.action-card #powercontrol_action,
+.action-card #bmcreset_action,
+.action-card #quarantine_action,
+.action-card #maintenance_action {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 0.5rem;
+  margin: 0;
+}
+
+.action-card #powercontrol_action select {
   width: 100%;
   margin: 0;
+}
+
+.action-card label {
+  margin: 0;
+  font-weight: 400;
+}
+
+.action-card #bmcreset_action > div {
+  margin: 0;
+}
+
+.action-card form input[type="submit"],
+.action-card form button {
+  width: 100%;
+  margin: 0;
+}
+
+/* Buttons sit at the bottom of every card. The ID selectors outrank the
+   shared form layouts (power_control.html, bmc_reset.html, quarantine,
+   maintenance) defined above. */
+.action-card form > input[type="submit"],
+.action-card form > button[type="submit"],
+.action-card form > .action-card-buttons,
+.action-card #powercontrol_action > [type="submit"],
+.action-card #bmcreset_action > [type="submit"],
+.action-card #quarantine_action > [type="submit"],
+.action-card #maintenance_action > [type="submit"] {
+  margin-top: auto;
+}
+
+.action-card-buttons {
+  display: flex;
+  gap: 0.5rem;
+}
+
+.action-card-buttons > * {
+  flex: 1;
 }
 
 /* ------------------------------------------------------------------------
@@ -1457,61 +1800,97 @@ details > *:not(summary) {
    ------------------------------------------------------------------------ */
 
 /* Redfish and UFM browser forms */
-#redfish_console {
+/* Muted one-line description under a page title */
+.page-intro {
+  max-width: 60rem;
+  margin: -0.25rem 0 1.5rem;
+  color: var(--text-secondary);
+}
+
+/* Muted summary line under a section heading, above its table's filter */
+.section-intro {
+  margin: -0.25rem 0 0.75rem;
+  color: var(--text-muted);
+  font-size: 0.9rem;
+}
+
+/* Query form card (UFM, NMX-C, and Redfish browsers): labelled fields in one
+   row, then the submit */
+form.entity-summary.query-console {
   display: flex;
-  align-items: center;
+  flex-wrap: wrap;
+  align-items: flex-end;
   gap: 1rem;
-  margin: 2rem 0;
+  padding: 1.25rem 1.5rem;
 }
 
-#ufm_console {
-  margin: 2rem 0;
-}
-
-#ufm_console > div {
+.query-field {
   display: flex;
-  align-items: center;
-  gap: 1rem;
-  margin-bottom: 1rem;
-  flex-wrap: nowrap;
-}
-
-#redfish_console input[type="text"] {
-  width: 75%;
-  height: 40px;
-  padding: 0.5rem 1rem;
-  font-size: 1rem;
-}
-
-#ufm_console select {
-  width: 300px;
-  flex-shrink: 0;
-  height: 40px;
-  padding: 0.5rem 1rem;
-  font-size: 1rem;
-}
-
-#ufm_console input[type="text"] {
-  flex: 1;
-  min-width: 300px;
-  height: 40px;
-  padding: 0.5rem 1rem;
-  font-size: 1rem;
-}
-
-#redfish_console input[type="submit"],
-#ufm_console input[type="submit"] {
-  height: 40px;
-  padding: 0.5rem 1.25rem;
+  flex-direction: column;
+  gap: 0.35rem;
   margin: 0;
-  font-size: 1rem;
+}
+
+/* Small uppercase field labels: query forms and the Logs toolbar */
+.query-field > span,
+.query-field > label,
+.log-field {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: 0.8rem;
+  font-weight: 600;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+
+.query-field.query-field-wide {
+  flex: 1;
+  min-width: 18rem;
+}
+
+/* A type picker joined to its value, e.g. NMX-C endpoint kind and ID */
+.query-field-group {
+  display: flex;
+  gap: 0.5rem;
+}
+
+.query-field-group input[type="text"] {
+  flex: 1;
+}
+
+/* Own chevron with room on the right; the native arrow ignores padding */
+.query-field select {
+  width: 18rem;
+  height: 40px;
+  margin: 0;
+  padding: 0 2.25rem 0 0.75rem;
+  -webkit-appearance: none;
+  appearance: none;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%23718096' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E");
+  background-position: right 0.8rem center;
+  background-repeat: no-repeat;
+  background-size: 12px;
+}
+
+.query-field-group select {
+  width: auto;
   flex-shrink: 0;
 }
 
-#ufm_console label {
-  font-weight: 500;
-  margin-right: 0.5rem;
-  display: inline-block;
+.query-field input[type="text"] {
+  width: 100%;
+  height: 40px;
+  margin: 0;
+  padding: 0 0.85rem;
+  box-sizing: border-box;
+  font-family: 'Consolas', 'Monaco', monospace;
+  font-size: 0.95rem;
+}
+
+form.query-console input[type="submit"] {
+  height: 40px;
+  margin: 0;
+  padding: 0 1.25rem;
 }
 
 /* ------------------------------------------------------------------------
@@ -1522,8 +1901,7 @@ details > *:not(summary) {
 .text-success { color: var(--success); }
 .text-error { color: var(--error); }
 .text-warning { color: var(--warning); }
-.text-center { text-align: center; }
-.font-bold { font-weight: bold; }
+.text-muted { color: var(--text-muted); }
 
 /* Layout utilities */
 .section { margin: 2rem 0; }
@@ -1540,8 +1918,7 @@ td > div {
   overflow-x: auto;
 }
 
-/* Only style the pre/code blocks inside overflow divs, not the div itself */
-div[style*="overflow: auto"] > pre,
+/* Code blocks wrapped in a div inside a table cell */
 td > div > pre {
   background-color: var(--bg-tertiary);
   border: 1px solid var(--border-color);
@@ -1550,16 +1927,6 @@ td > div > pre {
   margin: 0;
   box-shadow: var(--shadow-sm);
   overflow: auto;
-}
-
-/* For divs with overflow in table cells (like state history), limit the height */
-td div[style*="overflow: auto"] {
-  max-height: 40vh;
-}
-
-/* For response sections (not in tables), allow content to expand */
-.detailsview > tbody > tr > td > div[style*="overflow: auto"] {
-  max-height: none;
 }
 
 /* Style pre elements that aren't already inside overflow divs */
@@ -1572,7 +1939,6 @@ pre:not(div[style*="overflow: auto"] > pre):not(td > div > pre) {
   box-shadow: var(--shadow-sm);
   overflow: auto;
 }
-
 
 /* ------------------------------------------------------------------------
    Inline Action Spinner
@@ -1591,16 +1957,6 @@ pre:not(div[style*="overflow: auto"] > pre):not(td > div > pre) {
 
 .submitting .action-spinner {
   display: inline-block;
-}
-
-.config-card-action.submitting .action-spinner {
-  display: block;
-  margin: 0.5rem auto;
-}
-
-.config-card-action.submitting input[type="submit"],
-.config-card-action.submitting button[type="submit"] {
-  display: none;
 }
 
 .actions-busy input[type="submit"],
@@ -1801,6 +2157,1319 @@ div#json a#refresh-endpoint:hover {
 }
 
 /* ------------------------------------------------------------------------
+   Entity Title
+   Detail page title row: muted type label, the ID in a code chip, and the
+   page links on the right.
+   ------------------------------------------------------------------------ */
+
+.entity-title-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  margin-bottom: 1.5rem;
+}
+
+.entity-title-row div#json {
+  position: static;
+}
+
+.entity-title {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.75rem;
+  min-width: 0;
+  margin: 0;
+  font-size: 1rem;
+  letter-spacing: normal;
+}
+
+.entity-title-label {
+  color: var(--text-primary);
+  font-size: 1.75rem;
+  font-weight: 600;
+}
+
+.entity-title code {
+  padding: 0.35rem 0.75rem;
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  color: var(--text-primary);
+  font-size: 1.1rem;
+  font-weight: 500;
+  overflow-wrap: anywhere;
+}
+
+.icon-button,
+.icon-button:hover:enabled:not(.tab-button) {
+  display: inline-flex;
+  align-items: center;
+  margin: 0;
+  padding: 0.4rem;
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  background-color: transparent;
+  color: var(--text-muted);
+  box-shadow: none;
+}
+
+.icon-button:hover:enabled:not(.tab-button) {
+  border-color: var(--accent-green);
+  color: var(--accent-green);
+}
+
+.icon-button .icon-check,
+.icon-button.copied .icon-copy {
+  display: none;
+}
+
+.icon-button.copied .icon-check {
+  display: block;
+}
+
+.icon-button.copied,
+.icon-button.copied:hover:enabled:not(.tab-button) {
+  border-color: var(--success);
+  color: var(--success);
+}
+
+.icon-button.copy-failed,
+.icon-button.copy-failed:hover:enabled:not(.tab-button) {
+  border-color: var(--error);
+  color: var(--error);
+}
+
+/* Keep detail pages readable on very wide monitors */
+.detail-page {
+  max-width: 1680px;
+}
+
+/* Section headings, e.g. "Lifecycle" */
+.detail-page h2 {
+  font-size: 1.3rem;
+}
+
+/* Subsection headings sit clearly below the h2 section headings */
+.detail-page h3 {
+  margin-top: 1.25rem;
+  margin-bottom: 0.6rem;
+  font-size: 1.05rem;
+}
+
+/* ------------------------------------------------------------------------
+   Entity Summary
+   At-a-glance label/value strip between a detail page title and its tabs.
+   ------------------------------------------------------------------------ */
+
+.entity-summary {
+  margin-bottom: 1.5rem;
+  background-color: var(--bg-table);
+  border: 1px solid var(--border-color);
+  border-radius: 12px;
+  box-shadow: var(--shadow);
+  overflow: hidden;
+}
+
+.entity-summary a:hover {
+  text-decoration: none;
+}
+
+.entity-summary .bubble {
+  margin: 0;
+  padding: 0.2rem 0.75rem;
+}
+
+/* Status bar: the badges an operator checks first */
+.entity-summary-status {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  row-gap: 0.75rem;
+  padding: 1rem 1.5rem;
+  background-color: var(--bg-tertiary);
+  border-bottom: 1px solid var(--border-color);
+}
+
+.entity-summary-stat {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.6rem;
+  padding: 0 1.5rem;
+  /* Darker than other borders so it shows against the gray status band */
+  border-left: 1px solid color-mix(in srgb, var(--border-color) 70%, var(--text-muted));
+  color: var(--text-secondary);
+  font-size: 1rem;
+}
+
+.entity-summary-stat:first-child {
+  padding-left: 0;
+  border-left: none;
+}
+
+.entity-summary-label {
+  color: var(--text-muted);
+  font-size: 0.85rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.entity-summary-hint {
+  color: var(--text-secondary);
+  font-size: 1rem;
+}
+
+.entity-summary-actions {
+  margin-left: auto;
+}
+
+.entity-summary-actions input[type="submit"] {
+  margin: 0;
+}
+
+/* Toolbar row along the top of a card, e.g. a small inline form */
+.entity-summary-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.75rem;
+  padding: 0.75rem 1.5rem;
+  border-bottom: 1px solid var(--border-color);
+}
+
+.entity-summary-toolbar form {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.entity-summary-toolbar input[type="text"] {
+  width: 16rem;
+}
+
+.entity-summary-toolbar input[type="submit"] {
+  margin: 0;
+}
+
+/* Failure line between the status bar and the groups */
+.entity-summary-alert {
+  padding: 0.75rem 1.5rem;
+  background-color: rgba(229, 62, 62, 0.1);
+  border-bottom: 1px solid var(--border-color);
+  color: var(--error);
+  font-weight: 500;
+  overflow-wrap: anywhere;
+}
+
+/* Page notice, e.g. missing default credentials: square, with a warning edge */
+.entity-summary.entity-summary-notice {
+  margin-bottom: 1rem;
+  padding: 0.65rem 1.25rem;
+  border-left: 4px solid var(--warning);
+  border-radius: 0;
+}
+
+.entity-summary .entity-summary-notice-title {
+  margin: 0 0 0.15rem;
+  color: var(--text-warning-title);
+  font-size: 0.95rem;
+}
+
+.entity-summary-notice p {
+  margin: 0;
+  color: var(--text-secondary);
+  font-size: 0.9rem;
+}
+
+/* Last Site Explorer run: status bar, then one row of label-over-value facts */
+.entity-summary.run-status {
+  margin-bottom: 1.25rem;
+}
+
+.run-status .entity-summary-status {
+  padding: 0.5rem 1.5rem;
+}
+
+.run-status .entity-summary-status .bubble {
+  padding: 0.1rem 0.65rem;
+  font-size: 0.85rem;
+}
+
+/* Each fact is as wide as its content: counts stay narrow, timestamps stay on one line */
+.run-status-facts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem 2.5rem;
+  margin: 0;
+  padding: 0.85rem 1.5rem;
+}
+
+.run-status-facts dt {
+  color: var(--text-muted);
+  font-size: 0.78rem;
+  font-weight: 600;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+
+.run-status-facts dd {
+  margin: 0.15rem 0 0;
+  color: var(--text-primary);
+  font-weight: 500;
+  white-space: nowrap;
+}
+
+/* Neutral detail line under the status bar, e.g. a state's fields */
+.entity-summary-note {
+  padding: 0.75rem 1.5rem;
+  border-bottom: 1px solid var(--border-color);
+  color: var(--text-secondary);
+}
+
+.entity-summary-note > code,
+.entity-summary-alert > code {
+  margin-left: 0.5rem;
+  padding: 0;
+  background: transparent;
+  color: inherit;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+/* Alert carrying details plus an action, e.g. last exploration error + Clear */
+.entity-summary-alert-action {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+}
+
+.entity-summary .entity-summary-alert-action pre {
+  flex: 1;
+  max-height: 240px;
+  margin: 0;
+  overflow: auto;
+  color: var(--text-primary);
+  font-weight: 500;
+}
+
+/* Error section placed above the groups: ruled below instead of above */
+.entity-summary-table.entity-summary-error {
+  border-top: none;
+  border-bottom: 1px solid var(--border-color);
+}
+
+.entity-summary-error-body {
+  padding: 0.75rem 1.5rem;
+}
+
+.entity-summary-alert-action input[type="submit"] {
+  margin: 0;
+}
+
+/* Status label, a possibly long status bubble, and its action on one row */
+.entity-summary-setup {
+  align-items: center;
+  border-top: 1px solid var(--border-color);
+  border-bottom: none;
+}
+
+.entity-summary-setup > .entity-summary-label {
+  white-space: nowrap;
+}
+
+.entity-summary-setup-status {
+  display: flex;
+  flex: 1;
+  align-items: center;
+  gap: 0.6rem;
+  min-width: 0;
+  color: var(--text-primary);
+  font-weight: 500;
+  overflow-wrap: anywhere;
+}
+
+.entity-summary-setup-status > span {
+  font-weight: 600;
+}
+
+.entity-summary-setup-status > .bubble {
+  font-weight: 500;
+}
+
+.entity-summary-setup-status > .entity-summary-setup-diffs {
+  min-width: 0;
+  padding: 0.35rem 0.65rem;
+  border: 1px solid rgba(229, 62, 62, 0.4);
+  border-radius: 6px;
+  background-color: rgba(229, 62, 62, 0.06);
+  color: var(--error);
+  font-weight: 500;
+  line-height: 1.4;
+}
+.entity-summary-setup > form {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin: 0 0 0 auto;
+  flex-shrink: 0;
+}
+
+.entity-summary-setup input[type="text"] {
+  width: 14rem;
+  margin: 0;
+}
+
+/* Grouped reference details below the status bar */
+.entity-summary-groups {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+}
+
+.entity-summary-group {
+  min-width: 0;
+  padding: 1rem 1.5rem;
+  border-left: 1px solid var(--border-color);
+}
+
+.entity-summary-group:first-child {
+  border-left: none;
+}
+
+/* Card name along the top edge, e.g. "Chassis 1" */
+.entity-summary .entity-summary-title {
+  margin: 0;
+  padding: 0.9rem 1.5rem;
+  background-color: var(--bg-tertiary);
+  border-bottom: 1px solid var(--border-color);
+  font-size: 1.1rem;
+}
+
+/* A status bar under a card title is content, not a second header band */
+.entity-summary-title + .entity-summary-status {
+  background-color: transparent;
+}
+
+/* Full-width table section inside a summary card, set off by a heading band */
+.entity-summary-table {
+  border-top: 1px solid var(--border-color);
+}
+
+.entity-summary .entity-summary-table h4 {
+  margin: 0;
+  padding: 0.7rem 1.5rem;
+  background-color: var(--bg-secondary);
+  border-bottom: 1px solid var(--border-color);
+}
+
+.entity-summary-table table.data-table td {
+  white-space: nowrap;
+}
+
+/* PCR digests are long: let descriptions and hashes wrap instead of scrolling */
+table.data-table.pcr-table td {
+  white-space: normal;
+}
+
+.pcr-table td:first-child,
+.pcr-table td:last-child {
+  white-space: nowrap;
+}
+
+table.data-table.pcr-table code {
+  font-size: 0.85rem;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+.pcr-table td:nth-child(2) {
+  min-width: 10rem;
+}
+
+.pcr-table td:nth-child(3),
+.pcr-table td:nth-child(4) {
+  min-width: 14rem;
+}
+
+/* Attestation IDs: one-line chips that end in an ellipsis only when the column
+   is too narrow; the title carries the full ID */
+.entity-summary-group dd > code.id-chip {
+  max-width: 100%;
+  padding: 0.05rem 0.4rem;
+  color: var(--text-secondary);
+  font-size: 0.85rem;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* A card that opens with a section band needs no rule above it */
+.entity-summary > .entity-summary-table:first-child {
+  border-top: none;
+}
+
+/* JSON state snapshots inside a history table */
+table.data-table.history-table td {
+  vertical-align: top;
+}
+
+table.data-table.history-table td:last-child {
+  width: 100%;
+}
+
+table.data-table.history-table pre {
+  max-height: 240px;
+  margin: 0;
+  overflow: auto;
+  font-size: 0.85rem;
+}
+
+/* A short list of names shown as code chips inside a summary group */
+.entity-summary-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+}
+
+/* Public keys are one long token: wrap them within the column */
+table.data-table.key-table td:last-child {
+  width: 100%;
+}
+
+table.data-table.key-table code {
+  white-space: normal;
+  overflow-wrap: anywhere;
+  font-size: 0.85rem;
+}
+
+/* Submit row along the bottom edge of a card */
+.entity-summary-footer {
+  display: flex;
+  justify-content: flex-end;
+  gap: 0.5rem;
+  padding: 0.75rem 1.5rem;
+  border-top: 1px solid var(--border-color);
+}
+
+.entity-summary-footer input[type="submit"],
+.entity-summary-footer button {
+  margin: 0;
+}
+
+/* Editable fields inside a card: label column, then the control */
+.entity-summary-fields {
+  display: grid;
+  grid-template-columns: max-content minmax(0, 1fr);
+  column-gap: 1.5rem;
+  padding: 0.5rem 1.5rem;
+}
+
+.entity-summary-fields > label {
+  padding: 0.6rem 0;
+  color: var(--text-muted);
+  font-size: 0.82rem;
+  font-weight: 600;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+
+.entity-summary-fields > div {
+  padding: 0.35rem 0;
+}
+
+.entity-summary-fields input[type="text"],
+.entity-summary-fields input[type="number"],
+.entity-summary-fields textarea {
+  width: 100%;
+  margin: 0;
+}
+
+.entity-summary-fields textarea {
+  min-height: 6rem;
+  font-family: 'Consolas', 'Monaco', monospace;
+  font-size: 0.9rem;
+}
+
+/* The card clips overflow, so band tooltips open downward over the section */
+.entity-summary-table h4 .config-card-tooltip {
+  top: calc(100% + 8px);
+  bottom: auto;
+  font-weight: 400;
+  letter-spacing: normal;
+  text-transform: none;
+}
+
+.entity-summary-group h4,
+.entity-summary-table h4 {
+  margin: 0 0 0.6rem;
+  font-size: 0.85rem;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--text-primary);
+}
+
+/* One ruled row per field: label left, value right */
+.entity-summary-group dl {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  margin: 0;
+}
+
+.entity-summary-group dt,
+.entity-summary-group dd {
+  display: flex;
+  align-items: center;
+  padding: 0.45rem 0;
+  border-bottom: 1px solid var(--border-color);
+}
+
+.entity-summary-group dt:last-of-type,
+.entity-summary-group dd:last-of-type {
+  border-bottom: none;
+}
+
+.entity-summary-group dt {
+  padding-right: 1.5rem;
+  color: var(--text-muted);
+  font-size: 0.82rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.entity-summary-group dd {
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 0.4rem;
+  min-width: 0;
+  margin: 0;
+  color: var(--text-primary);
+  text-align: right;
+  overflow-wrap: anywhere;
+}
+
+/* Full IDs that lose their middle only when the column is too narrow */
+.entity-summary-group dd > a {
+  min-width: 0;
+  max-width: 100%;
+}
+
+.entity-summary-group .machine_id {
+  display: flex;
+  width: auto;
+  max-width: 100%;
+}
+
+/* Values such as config versions carry a second line */
+.entity-summary-group dd small {
+  flex-basis: 100%;
+  color: var(--text-muted);
+  text-align: right;
+}
+
+/* Lists whose labels are data (label keys, model names), not field names */
+.entity-summary-group .entity-summary-list dt {
+  color: var(--text-secondary);
+  font-size: 1rem;
+  font-weight: 400;
+  text-transform: none;
+  letter-spacing: normal;
+  overflow-wrap: anywhere;
+}
+
+.entity-summary-columns {
+  max-height: 320px;
+  overflow-y: auto;
+}
+
+.entity-summary-block {
+  line-height: 1.9;
+  color: var(--text-secondary);
+  overflow-wrap: anywhere;
+}
+
+.entity-summary-block .bubble {
+  margin: 0 0 0 0.25rem;
+}
+.entity-summary-empty {
+  margin: 0;
+  padding: 1rem 1.5rem;
+  color: var(--text-muted);
+}
+
+/* Collapsible raw data along the bottom edge of a card */
+.entity-summary-details {
+  margin: 0;
+  padding: 0.75rem 1.5rem;
+  border-top: 1px solid var(--border-color);
+}
+
+.entity-summary-details details {
+  margin: 0;
+  overflow: visible;
+}
+
+.entity-summary-details summary,
+.entity-summary-details summary:hover {
+  padding: 0;
+  margin: 0;
+  border: none;
+  background: transparent;
+  box-shadow: none;
+  color: var(--text-secondary);
+  font-size: 0.95rem;
+}
+
+.entity-summary-details[open] > summary,
+.entity-summary-details details[open] > summary {
+  margin-bottom: 0.75rem;
+}
+
+.entity-summary-details pre {
+  max-height: 400px;
+}
+
+/* Firmware inventory: a muted note, then a table spanning the card's full width */
+.firmware-inventory-note {
+  margin: 0 0 0.75rem;
+  color: var(--text-muted);
+  font-size: 0.9rem;
+}
+
+.entity-summary-details .firmware-inventory-table {
+  margin: 0 -1.5rem -0.75rem;
+  border-top: 1px solid var(--border-color);
+}
+
+.icon-link {
+  display: inline-flex;
+  align-items: center;
+  color: var(--text-muted);
+}
+
+.icon-link:hover {
+  color: var(--accent-green);
+}
+
+/* ------------------------------------------------------------------------
+   Health Report Editor
+   ------------------------------------------------------------------------ */
+
+.health-report-editor {
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+}
+
+.health-report-templates {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.health-report-templates .entity-summary-label {
+  margin-right: 0.25rem;
+}
+
+/* Secondary pills, so the submit button stays the only primary action */
+.health-report-templates button,
+.health-report-templates button:hover:enabled:not(.tab-button) {
+  margin: 0;
+  padding: 0.3rem 0.85rem;
+  border-radius: 20px;
+  font-size: 0.85rem;
+  background-color: var(--bg-tertiary);
+  color: var(--text-secondary);
+  border-color: var(--border-color);
+  box-shadow: none;
+}
+
+.health-report-templates button:hover:enabled:not(.tab-button) {
+  border-color: var(--accent-green);
+  color: var(--text-primary);
+}
+
+.health-report-editor textarea {
+  margin: 0;
+}
+
+.health-report-editor-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+}
+
+.health-report-editor-footer button {
+  margin: 0;
+}
+
+/* ------------------------------------------------------------------------
+   Alert and Report Rows
+   One row per health alert or health report inside an .entity-summary card.
+   ------------------------------------------------------------------------ */
+
+.alert-row,
+.report-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 1.5rem;
+  padding: 0.9rem 1.5rem;
+  border-bottom: 1px solid var(--border-color);
+}
+
+.alert-row {
+  box-shadow: inset 3px 0 0 var(--error);
+}
+
+.entity-summary > .alert-row:last-child,
+.entity-summary > .report-row:last-child {
+  border-bottom: none;
+}
+
+.alert-row-main,
+.report-row-main {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  gap: 0.35rem;
+  min-width: 0;
+}
+
+.alert-row-title {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem;
+  color: var(--text-primary);
+}
+
+.alert-row-target {
+  padding: 0.1rem 0.5rem;
+  border-radius: 4px;
+  background-color: var(--bg-tertiary);
+  color: var(--text-secondary);
+  font-family: 'Consolas', 'Monaco', monospace;
+  font-size: 0.85rem;
+}
+
+.alert-row-message {
+  color: var(--text-secondary);
+  overflow-wrap: anywhere;
+}
+
+.alert-row-meta {
+  color: var(--text-muted);
+  font-size: 0.9rem;
+}
+
+.alert-row-side {
+  display: flex;
+  flex-direction: column;
+  flex-shrink: 0;
+  align-items: flex-end;
+  gap: 0.4rem;
+  max-width: 40%;
+}
+
+.alert-row-classifications,
+.report-row-alerts {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.3rem;
+}
+
+.alert-row-classifications {
+  justify-content: flex-end;
+}
+
+/* Classification pills sized to sit inside a row */
+.alert-row div.health_alert_classification,
+.report-row div.health_alert_classification,
+.list-row div.health_alert_classification,
+.timeline-row div.health_alert_classification {
+  margin: 0;
+  padding: 0.25rem 0.8rem;
+  font-size: 0.85rem;
+  border-color: var(--error);
+  box-shadow: none;
+}
+
+.report-row-alerts .bubble {
+  margin: 0;
+  padding: 0.2rem 0.75rem;
+  font-size: 0.9rem;
+}
+
+.report-row-json {
+  margin: 0;
+}
+
+.report-row-json summary,
+.report-row-json summary:hover {
+  padding: 0;
+  margin: 0;
+  border: none;
+  background: transparent;
+  box-shadow: none;
+  color: var(--text-muted);
+  font-size: 0.9rem;
+}
+
+.report-row-json pre {
+  max-height: 300px;
+  margin-top: 0.5rem;
+}
+
+.report-row-actions button {
+  margin: 0;
+}
+
+/* ------------------------------------------------------------------------
+   List Rows
+   One row per item (interface, run, history record) inside an
+   .entity-summary card. Fields flow into as many columns as fit, so wide
+   screens show more per line instead of stretching gaps.
+   ------------------------------------------------------------------------ */
+
+.list-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 1.5rem;
+  padding: 0.9rem 1.5rem;
+  border-bottom: 1px solid var(--border-color);
+}
+
+.entity-summary > .list-row:last-child {
+  border-bottom: none;
+}
+
+.list-row-main {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  gap: 0.5rem;
+  min-width: 0;
+}
+
+.list-row-title {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem;
+  min-width: 0;
+  color: var(--text-primary);
+}
+
+/* ------------------------------------------------------------------------
+   Data Table
+   Lightweight table for uniform lists inside an .entity-summary card: one
+   header row, aligned columns, no per-row labels.
+   ------------------------------------------------------------------------ */
+
+.data-table-scroll {
+  overflow-x: auto;
+}
+
+table.data-table {
+  width: 100%;
+  margin: 0;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+  -webkit-backdrop-filter: none;
+  backdrop-filter: none;
+  table-layout: auto;
+}
+
+table.data-table th {
+  padding: 0.7rem 1rem;
+  background: transparent;
+  border-bottom: 1px solid var(--border-color);
+  color: var(--text-muted);
+  font-size: 0.8rem;
+  white-space: nowrap;
+}
+
+table.data-table td {
+  padding: 0.75rem 1rem;
+  color: var(--text-primary);
+  vertical-align: middle;
+}
+
+table.data-table th:first-child,
+table.data-table td:first-child {
+  padding-left: 1.5rem;
+}
+
+table.data-table th:last-child,
+table.data-table td:last-child {
+  padding-right: 1.5rem;
+}
+
+table.data-table tbody tr:hover td {
+  background-color: rgba(118, 185, 0, 0.04);
+}
+
+table.data-table code {
+  padding: 0;
+  background: transparent;
+  color: var(--text-primary);
+  font-size: 0.95rem;
+  white-space: nowrap;
+}
+
+/* Same size as list-table bubbles */
+table.data-table .bubble {
+  margin: 0.1rem 0.25rem 0.1rem 0;
+  padding: 0.2rem 0.75rem;
+  white-space: nowrap;
+}
+
+/* Several status bubbles in one cell wrap onto more lines instead of widening it */
+table.data-table td.cell-bubbles {
+  min-width: 9rem;
+  white-space: normal;
+}
+
+table.data-table td.cell-mac {
+  white-space: nowrap;
+}
+
+table.data-table code.mac + .bubble {
+  margin-left: 0.6rem;
+}
+
+/* MAC addresses in the same bordered chip as the machine ID in the title */
+code.mac,
+table.data-table code.mac {
+  display: inline-block;
+  padding: 0.1rem 0.5rem;
+  border: 1px solid var(--border-color);
+  border-radius: 6px;
+  background-color: var(--bg-tertiary);
+  color: var(--text-primary);
+  font-size: 0.9rem;
+  line-height: 1.4;
+  white-space: nowrap;
+}
+
+.entity-summary pre.entity-summary-pre {
+  max-height: 600px;
+  margin: 0;
+  padding: 1rem 1.5rem;
+  overflow: auto;
+  border: none;
+  border-radius: 0;
+  box-shadow: none;
+}
+
+/* Start and end times stay on one line; long headers wrap instead */
+.validation-table td:nth-child(4),
+.validation-table td:nth-child(5) {
+  white-space: nowrap;
+}
+
+table.validation-table th {
+  white-space: normal;
+}
+
+/* Long IDs that should give up width before other columns do */
+table.data-table code.code-wrap {
+  white-space: normal;
+}
+
+table.data-table td.cell-action {
+  width: 1%;
+  text-align: right;
+  white-space: nowrap;
+}
+
+table.data-table td.cell-action form,
+table.data-table td.cell-action input[type="submit"] {
+  margin: 0;
+}
+
+.cell-sub {
+  display: block;
+  color: var(--text-muted);
+  font-size: 0.9rem;
+}
+
+/* Capabilities: type label, model, then count, one ruled row each */
+.entity-summary-group dl.capability-list {
+  grid-template-columns: max-content minmax(0, 1fr) max-content;
+}
+
+.capability-list dd.capability-model {
+  justify-content: flex-start;
+  padding-right: 1rem;
+  text-align: left;
+}
+
+.capability-list dd.capability-count {
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.capability-list dd.capability-count::before {
+  content: "×";
+  margin-right: 0.1rem;
+  color: var(--text-muted);
+  font-weight: 400;
+}
+
+.entity-summary-group .capability-list dd:nth-last-of-type(2) {
+  border-bottom: none;
+}
+
+/* Search matches: type and object stay on one line; details take the rest */
+table.data-table.search-results td:first-child {
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+table.data-table.search-results td:nth-child(2) {
+  white-space: nowrap;
+}
+
+/* Object links share the machine ID chip's monospace text and link color */
+table.data-table.search-results a.search-object {
+  font-family: 'Consolas', 'Monaco', monospace;
+  font-size: 0.9rem;
+}
+
+/* Machine IDs lose their middle here; the details column carries the full ID */
+table.data-table.search-results .machine_id {
+  width: 16ch;
+}
+
+table.data-table.search-results .machine_id > div:first-child {
+  text-overflow: ellipsis;
+  overflow: hidden;
+}
+
+table.data-table.search-results td:last-child {
+  width: 100%;
+  color: var(--text-secondary);
+  overflow-wrap: anywhere;
+}
+
+/* Capability, driver, rule rows, laid out like the capability list */
+.entity-summary-group dl.driver-list {
+  grid-template-columns: max-content minmax(0, 1fr) max-content;
+}
+
+.driver-list dd.driver-name {
+  justify-content: flex-start;
+  padding-right: 1rem;
+  text-align: left;
+}
+
+.driver-list dd.driver-rule {
+  white-space: nowrap;
+}
+
+/* Driver and rule names in the same bordered chip as MAC addresses */
+.driver-list code {
+  display: inline-block;
+  padding: 0.1rem 0.5rem;
+  border: 1px solid var(--border-color);
+  border-radius: 6px;
+  background-color: var(--bg-tertiary);
+  color: var(--text-primary);
+  font-size: 0.9rem;
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+}
+
+.driver-rule-matched {
+  color: var(--success);
+  font-weight: 600;
+}
+
+/* Column labels above each half of the list */
+.entity-summary-group .driver-list .driver-list-head {
+  padding-top: 0;
+  padding-bottom: 0.35rem;
+  color: var(--text-muted);
+  font-size: 0.78rem;
+  font-weight: 600;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+
+.entity-summary-group .driver-list dd:nth-last-of-type(2) {
+  border-bottom: none;
+}
+
+/* Small icon link after a section heading, e.g. "open on its own page" */
+.heading-link {
+  margin-left: 0.5rem;
+  vertical-align: middle;
+}
+
+/* ------------------------------------------------------------------------
+   History Timeline
+   State and health history: when and for how long on the left, what in
+   the middle. The current (newest) entry carries a green accent.
+   ------------------------------------------------------------------------ */
+
+.timeline-row {
+  display: grid;
+  grid-template-columns: 15rem minmax(0, 1fr) auto;
+  gap: 1.5rem;
+  align-items: start;
+  padding: 0.9rem 1.5rem;
+  border-bottom: 1px solid var(--border-color);
+}
+
+.entity-summary > .timeline-row:last-child {
+  border-bottom: none;
+}
+
+.timeline-row.current {
+  box-shadow: inset 3px 0 0 var(--accent-green);
+}
+
+.timeline-time {
+  color: var(--text-primary);
+  font-variant-numeric: tabular-nums;
+}
+
+.timeline-duration {
+  color: var(--text-muted);
+  font-size: 0.9rem;
+}
+
+.timeline-row.current .timeline-duration {
+  color: var(--accent-green-hover);
+  font-weight: 500;
+}
+
+.timeline-what {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  min-width: 0;
+}
+
+/* Health history: the left border shows whether that record was healthy */
+.timeline-row.healthy {
+  box-shadow: inset 3px 0 0 var(--success);
+}
+
+.timeline-row.unhealthy {
+  box-shadow: inset 3px 0 0 var(--error);
+}
+
+.timeline-healthy {
+  color: var(--text-secondary);
+}
+
+/* Each record's alerts in a small bordered table */
+.timeline-what table.alert-table {
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  overflow: hidden;
+}
+
+.timeline-what table.alert-table th,
+.timeline-what table.alert-table td {
+  padding: 0.5rem 0.75rem;
+}
+
+.timeline-what table.alert-table td:first-child,
+.timeline-what table.alert-table td:nth-child(2) {
+  white-space: nowrap;
+}
+
+.timeline-what table.alert-table .machine_id {
+  width: 14ch;
+}
+
+.timeline-what table.alert-table .machine_id > div:first-child {
+  text-overflow: ellipsis;
+  overflow: hidden;
+}
+
+.timeline-what table.alert-table td:last-child {
+  width: 100%;
+  color: var(--text-secondary);
+  overflow-wrap: anywhere;
+}
+
+.timeline-what > .alert-row-classifications {
+  justify-content: flex-start;
+}
+
+.timeline-what > .alert-row-classifications br {
+  display: none;
+}
+
+.timeline-what pre.timeline-json {
+  max-height: 240px;
+  margin: 0;
+  overflow: auto;
+  font-size: 0.85rem;
+}
+
+/* State history: no trailing column, so the JSON runs to the card edge */
+.timeline-row.timeline-row-wide {
+  grid-template-columns: 15rem minmax(0, 1fr);
+  align-items: stretch;
+}
+
+/* Time at the top of the left column, state version at the bottom */
+.timeline-row-wide .timeline-when {
+  display: flex;
+  flex-direction: column;
+}
+
+.timeline-when code.timeline-version {
+  align-self: flex-start;
+  margin-top: auto;
+  padding: 0.5rem 0 0;
+  background: transparent;
+  color: var(--text-muted);
+  font-size: 0.85rem;
+}
+
+@media (max-width: 1100px) {
+  .timeline-row,
+  .timeline-row.timeline-row-wide {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 0.5rem;
+  }
+}
+
+.entity-summary > .entity-summary-details:first-child {
+  border-top: none;
+}
+
+/* Brief green outline on a card reached through an in-page link */
+@keyframes flash-highlight {
+  0%, 40% {
+    border-color: var(--accent-green);
+    box-shadow: 0 0 0 3px rgba(118, 185, 0, 0.3);
+  }
+  100% {
+    border-color: var(--border-color);
+    box-shadow: var(--shadow-sm);
+  }
+}
+
+.flash-highlight {
+  animation: flash-highlight 1.8s ease-out;
+}
+
+/* ------------------------------------------------------------------------
    Tab System
    ------------------------------------------------------------------------ */
 
@@ -1810,6 +3479,7 @@ div#json a#refresh-endpoint:hover {
   margin-bottom: 2rem;
   margin-top: 1.5rem;
   position: relative;
+  border-bottom: 1px solid var(--border-color);
 }
 
 .tab-button {
@@ -1827,6 +3497,7 @@ div#json a#refresh-endpoint:hover {
 
 .tab-button:hover {
   color: var(--text-secondary);
+  text-decoration: none;
 }
 
 .tab-button.active {
@@ -1850,6 +3521,11 @@ div#json a#refresh-endpoint:hover {
 
 .tab-content.active {
   display: block;
+}
+
+/* The tab nav already spaces the first heading */
+.tab-content > h2:first-child {
+  margin-top: 0;
 }
 
 @keyframes fadeIn {
@@ -1891,12 +3567,7 @@ div#json a#refresh-endpoint:hover {
   th, td {
     padding: 0.75rem 1rem;
   }
-  
-  table.detailsview th {
-    width: 26%;
-    min-width: 120px;
-  }
-  
+
   .tab-nav {
     overflow-x: auto;
     -webkit-overflow-scrolling: touch;
@@ -2018,21 +3689,39 @@ span.page-link.disabled {
   margin: 0 0 0.75rem;
 }
 
-.table-filter-input {
+/* Search box with a leading magnifier icon */
+.table-filter-search {
+  position: relative;
+  display: flex;
+  align-items: center;
   flex: 0 1 22rem;
-  background-color: var(--bg-tertiary);
+}
+
+.table-filter-search > svg {
+  position: absolute;
+  left: 0.8rem;
+  color: var(--text-muted);
+  pointer-events: none;
+}
+
+/* Same weight as the global input[type="search"] rule (height: auto), and
+   later in the file, so it wins wherever the class is used */
+input.table-filter-input {
+  width: 100%;
+  height: 40px;
+  margin: 0;
+  padding: 0 1rem 0 2.3rem;
+  background-color: var(--bg-primary);
   border: 1px solid var(--border-color);
   color: var(--text-primary);
-  padding: 0.5rem 1rem;
   border-radius: 8px;
   font-size: 0.9rem;
   transition: all 0.2s ease;
   box-shadow: var(--shadow-sm);
-  height: 40px;
   box-sizing: border-box;
 }
 
-.table-filter-input:focus {
+input.table-filter-input:focus {
   outline: none;
   border-color: var(--accent-green);
   background-color: var(--bg-primary);
@@ -2046,6 +3735,31 @@ span.page-link.disabled {
 .table-filter-count {
   font-size: 0.85rem;
   color: var(--text-muted);
+}
+
+/* "Filters" button (.btn-secondary) beside the search box; same height as the input */
+.table-filter button.table-filter-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  height: 40px;
+  margin: 0;
+  padding: 0 1rem;
+  font-size: 0.9rem;
+}
+
+/* The button replaces the panel's own toggle; the panel shows only when open */
+details.table-filters-enhanced {
+  margin: 0;
+}
+
+details.table-filters-enhanced:not([open]),
+details.table-filters-enhanced > summary {
+  display: none;
+}
+
+details.table-filters-enhanced .filter-container {
+  margin-bottom: 0.75rem;
 }
 
 .table-filter-count.table-filter-empty {
@@ -2089,11 +3803,16 @@ span.page-link.disabled {
   color: var(--text-primary);
 }
 
-.config-toolbar input[type="search"] {
+.config-toolbar .config-search {
   flex: 1;
   min-width: 240px;
   max-width: 32rem;
-  padding: 0.5rem 0.75rem;
+}
+
+.config-toolbar input[type="search"] {
+  width: 100%;
+  margin: 0;
+  padding: 0.5rem 0.75rem 0.5rem 2.3rem;
   border: 1px solid var(--border-color);
   border-radius: 8px;
   font-size: 0.9rem;
@@ -2234,13 +3953,17 @@ table.config-options th:nth-child(1) {
   width: 45%;
 }
 
+/* Same white header as the data tables */
 table.config-options th {
-  text-align: left;
-  font-size: 0.85rem;
-  font-weight: 500;
-  color: var(--text-muted);
-  padding: 0.4rem 0.75rem;
+  padding: 0.7rem 0.75rem;
+  background-color: var(--bg-primary);
   border-bottom: 1px solid var(--border-color);
+  color: var(--text-muted);
+  font-size: 0.8rem;
+  font-weight: 600;
+  letter-spacing: 0.05em;
+  text-align: left;
+  text-transform: uppercase;
 }
 
 table.config-options td {
@@ -2301,7 +4024,7 @@ td.config-value pre {
   margin-left: 0.4rem;
   padding: 0.05rem 0.5rem;
   border-radius: 10px;
-  font-size: 0.75rem;
+  font-size: 0.8rem;
   color: var(--info);
   background-color: rgba(49, 130, 206, 0.12);
 }
@@ -2311,7 +4034,7 @@ td.config-value pre {
   margin-left: 0.4rem;
   padding: 0.05rem 0.5rem;
   border-radius: 10px;
-  font-size: 0.75rem;
+  font-size: 0.8rem;
   color: var(--accent-green-hover);
   background-color: var(--accent-green-light);
 }
@@ -2395,18 +4118,67 @@ td.config-value pre {
   display: block;
 }
 
-@media (max-width: 768px) {
-  .detailsview.telemetry-table {
-    table-layout: fixed;
-  }
-
-  .detailsview.telemetry-table th {
-    width: 5rem;
-    min-width: 0;
-  }
-
-  .detailsview.telemetry-table th,
-  .detailsview.telemetry-table td {
-    padding: 0.75rem;
-  }
+/* ------------------------------------------------------------------------
+   Live Logs (api_logs.html)
+   ------------------------------------------------------------------------ */
+section.entity-summary.log-viewer {
+  flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column; margin: 0;
 }
+
+.log-toolbar {
+  display: flex; flex-wrap: wrap; align-items: center; gap: .75rem;
+  padding: .75rem 1rem; border-bottom: 1px solid var(--border-color);
+}
+
+/* Source picker: segmented control of .btn-plain buttons, the selected source
+   a raised white pill */
+.log-sources {
+  display: inline-flex; gap: 2px; padding: 3px;
+  background: var(--bg-tertiary); border: 1px solid var(--border-color); border-radius: 8px;
+}
+.log-sources button {
+  margin: 0; padding: .3rem .85rem; border-radius: 6px;
+  color: var(--text-secondary); font-size: .9rem;
+}
+.log-sources button.active { background: var(--bg-primary); color: var(--text-primary); box-shadow: var(--shadow-sm); }
+.log-sources button:disabled { color: var(--text-muted); opacity: .6; cursor: not-allowed; }
+
+.log-field { display: inline-flex; align-items: center; gap: .5rem; }
+.log-field select {
+  width: auto; height: 36px; margin: 0; padding: 0 .75rem;
+  font-weight: 400; letter-spacing: normal; text-transform: none;
+}
+
+.log-search { flex: 1 1 18rem; max-width: 28rem; }
+.log-search input.table-filter-input { height: 36px; }
+
+.log-spans { display: inline-flex; align-items: center; gap: .4rem; margin: 0; color: var(--text-secondary); font-size: .9rem; font-weight: 400; }
+.log-spans input { margin: 0; }
+
+#log-status { margin-left: auto; padding: .15rem .7rem; font-size: .85rem; }
+
+/* Pause / Clear (.btn-secondary), same height as the search box */
+.log-toolbar > button { height: 36px; margin: 0; padding: 0 1rem; font-size: .9rem; }
+
+#log-output {
+  font-family: ui-monospace, Menlo, Consolas, monospace;
+  font-size: 12px; line-height: 1.45;
+  flex: 1 1 auto; min-height: 0; overflow-y: auto; overflow-anchor: none; scrollbar-gutter: stable;
+  margin: 0; padding: .75rem 1rem; background: #0f1115; color: #d4d4d4;
+  white-space: pre-wrap; word-break: break-word;
+}
+.log-row { display: block; }
+.log-row .ts  { color: #6a737d; }
+.log-row .tgt { color: #6a9ad4; }
+.log-row .loc { color: #6b7280; }
+.log-row.lvl-ERROR { color: #ff6b6b; }
+.log-row.lvl-WARN  { color: #ffd166; }
+.log-row.lvl-INFO  { color: #d4d4d4; }
+.log-row.lvl-DEBUG { color: #9aa5b1; }
+.log-row.lvl-TRACE { color: #6b7280; }
+/* SPAN lines are very frequent, so keep them just slightly dimmer than INFO.
+   TODO(chet): Consider italicizing them too. */
+.log-row.lvl-SPAN  { color: #9a9a9a; }
+.log-row .sid { color: #6a9ad4; cursor: pointer; text-decoration: underline dotted; }
+.log-row.lag { color: #ffa500; font-style: italic; }
+.log-row.hidden { display: none; }

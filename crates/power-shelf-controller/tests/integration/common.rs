@@ -93,7 +93,7 @@ impl ControllerEnv {
             Some(pool.clone()),
             None,
             None,
-            carbide_instrument::Instrumentation::global(),
+            carbide_instrument::Instrumentation::noop(),
         )
         .await
         .expect("test component manager should build");

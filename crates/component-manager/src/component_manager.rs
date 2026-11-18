@@ -770,7 +770,12 @@ pub async fn build_component_manager(
                 )
             })?;
             Arc::new(
-                crate::nsm::NsmSwitchBackend::connect(&endpoint.url, endpoint.tls.as_ref()).await?,
+                crate::nsm::NsmSwitchBackend::connect(
+                    &endpoint.url,
+                    endpoint.tls.as_ref(),
+                    instrumentation.clone(),
+                )
+                .await?,
             )
         }
         NvSwitchBackend::Rms => {
@@ -805,8 +810,12 @@ pub async fn build_component_manager(
                 )
             })?;
             Arc::new(
-                crate::psm::PsmPowerShelfBackend::connect(&endpoint.url, endpoint.tls.as_ref())
-                    .await?,
+                crate::psm::PsmPowerShelfBackend::connect(
+                    &endpoint.url,
+                    endpoint.tls.as_ref(),
+                    instrumentation.clone(),
+                )
+                .await?,
             )
         }
         PowerShelfBackend::Rms => {
@@ -1538,7 +1547,7 @@ mod tests {
             None,
             None,
             None,
-            carbide_instrument::Instrumentation::global(),
+            carbide_instrument::Instrumentation::noop(),
         )
         .await
         .unwrap();
@@ -1570,7 +1579,7 @@ mod tests {
             Some(db),
             None,
             None,
-            carbide_instrument::Instrumentation::global(),
+            carbide_instrument::Instrumentation::noop(),
         )
         .await
         .expect("RMS switch backend should build");
@@ -1609,7 +1618,7 @@ mod tests {
             None,
             None,
             None,
-            carbide_instrument::Instrumentation::global(),
+            carbide_instrument::Instrumentation::noop(),
         )
         .await
         .unwrap_err();
@@ -1634,7 +1643,7 @@ mod tests {
             None,
             None,
             None,
-            carbide_instrument::Instrumentation::global(),
+            carbide_instrument::Instrumentation::noop(),
         )
         .await
         .unwrap_err();
@@ -1666,7 +1675,7 @@ mod tests {
             None,
             None,
             None,
-            carbide_instrument::Instrumentation::global(),
+            carbide_instrument::Instrumentation::noop(),
         )
         .await
         .unwrap_err();
@@ -1695,7 +1704,7 @@ mod tests {
             None,
             None,
             None,
-            carbide_instrument::Instrumentation::global(),
+            carbide_instrument::Instrumentation::noop(),
         )
         .await;
         let Err(error) = result else {
@@ -1729,7 +1738,7 @@ mod tests {
             None,
             None,
             None,
-            carbide_instrument::Instrumentation::global(),
+            carbide_instrument::Instrumentation::noop(),
         )
         .await;
         let Err(error) = result else {

@@ -2251,6 +2251,7 @@ async fn put_in_waiting_for_scout_upgrade(
             power_drains_needed,
             started_at: chrono::Utc::now(),
             deadline,
+            delivered_at: Some(chrono::Utc::now()),
             task_json: String::new(),
             result,
         },
@@ -2515,7 +2516,7 @@ async fn test_waiting_for_scout_upgrade_past_deadline_times_out(
     assert!(
         reason
             .as_deref()
-            .is_some_and(|r| r.starts_with("scout firmware upgrade timed out")),
+            .is_some_and(|r| r.starts_with("scout firmware upgrade completion report missing")),
         "unexpected reason: {reason:?}",
     );
 

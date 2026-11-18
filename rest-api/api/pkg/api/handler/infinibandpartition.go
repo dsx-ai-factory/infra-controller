@@ -323,7 +323,7 @@ func NewGetAllInfiniBandPartitionHandler(dbSession *cdb.Session, tc temporalClie
 // @Param siteId query string true "ID of Site"
 // @Param status query string false "Filter by status" e.g. 'Pending', 'Error'"
 // @Param query query string false "Query input for full text search"
-// @Param includeRelation query string false "Related entities to include in response e.g. 'InfrastructureProvider', 'Tenant'"
+// @Param includeRelation query []string false "Related entities to include in response e.g. 'InfrastructureProvider', 'Tenant'" collectionFormat(multi)
 // @Param pageNumber query integer false "Page number of results returned"
 // @Param pageSize query integer false "Number of results per page"
 // @Param orderBy query string false "Order by field"
@@ -522,7 +522,7 @@ func NewGetInfiniBandPartitionHandler(dbSession *cdb.Session, tc temporalClient.
 // @Security ApiKeyAuth
 // @Param org path string true "Name of NGC organization"
 // @Param id path string true "ID of InfiniBandPartition"
-// @Param includeRelation query string false "Related entities to include in response e.g. 'Site', 'Tenant'"
+// @Param includeRelation query []string false "Related entities to include in response e.g. 'Site', 'Tenant'" collectionFormat(multi)
 // @Success 200 {object} model.APIInfiniBandPartition
 // @Router /v2/org/{org}/nico/infiniband-partition/{id} [get]
 func (gibph GetInfiniBandPartitionHandler) Handle(c echo.Context) error {
