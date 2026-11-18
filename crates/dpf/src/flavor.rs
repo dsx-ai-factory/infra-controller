@@ -336,15 +336,18 @@ fn render_bf4_pf_preflight(topology: &DpfInterceptBridging) -> String {
         return String::new();
     }
 
-    // Search the semantic `phys_port_name`, rejecting both absence and ambiguity rather than
-    // selecting whichever runtime netdev happens to appear first.
+    // CX9 E/W NICs expose the same semantic port names. Restrict discovery to the BF4
+    // embedded NIC (15b3:a2df), as DPF does for N/S ports, before checking uniqueness.
     let mut script = String::from(concat!(
         "sys_class_net=${NICO_SYS_CLASS_NET:-/sys/class/net}\n",
         "resolve_dpf_pf() {\n",
-        "    local semantic_name=$1 result_variable=$2 phys_port_name netdev\n",
+        "    local semantic_name=$1 result_variable=$2 phys_port_name netdev netdev_dir\n",
         "    local -a matches=()\n",
         "    for phys_port_name in \"$sys_class_net\"/*/phys_port_name; do\n",
         "        [[ -r \"$phys_port_name\" ]] || continue\n",
+        "        netdev_dir=${phys_port_name%/phys_port_name}\n",
+        "        [[ -r \"$netdev_dir/device/vendor\" && -r \"$netdev_dir/device/device\" ]] || continue\n",
+        "        [[ \"$(<\"$netdev_dir/device/vendor\")\" == 0x15b3 && \"$(<\"$netdev_dir/device/device\")\" == 0xa2df ]] || continue\n",
         "        if [[ \"$(<\"$phys_port_name\")\" == \"$semantic_name\" ]]; then\n",
         "            netdev=$(basename \"${phys_port_name%/phys_port_name}\")\n",
         "            matches+=(\"$netdev\")\n",
@@ -2613,19 +2616,24 @@ mod tests {
     /// Executes generic-BF4 preflight against a synthetic `sys/class/net` tree.
     fn run_bf4_preflight(
         topology: &DpfInterceptBridging,
-        phys_port_names: &[(&str, &str)],
+        phys_port_names: &[(&str, &str, &str)],
         prefix: &str,
         suffix: &str,
     ) -> Output {
         let fixture =
             std::env::temp_dir().join(format!("carbide-dpf-bf4-sysfs-{}", uuid::Uuid::new_v4()));
 
-        // Materialize only the semantic sysfs surface consumed by provisioning.
-        for (netdev, phys_port_name) in phys_port_names {
+        // Materialize the semantic port name and its backing PCI device identity.
+        for (netdev, phys_port_name, device_id) in phys_port_names {
             let netdev_dir = fixture.join(netdev);
-            fs::create_dir_all(&netdev_dir).expect("synthetic netdev directory must be created");
+            fs::create_dir_all(netdev_dir.join("device"))
+                .expect("synthetic netdev PCI directory must be created");
             fs::write(netdev_dir.join("phys_port_name"), phys_port_name)
                 .expect("synthetic phys_port_name must be written");
+            fs::write(netdev_dir.join("device/vendor"), "0x15b3")
+                .expect("synthetic PCI vendor must be written");
+            fs::write(netdev_dir.join("device/device"), device_id)
+                .expect("synthetic PCI device must be written");
         }
         let script = format!("{prefix}\n{}\n{suffix}", render_bf4_pf_preflight(topology));
         let output = Command::new("bash")
@@ -2647,9 +2655,14 @@ mod tests {
         ));
         // Map the semantic PF to a different runtime name so command checks prove resolution.
         let netdev = fixture.join("sys-class-net/en8f2");
-        fs::create_dir_all(&netdev).expect("synthetic Astra netdev directory must be created");
+        fs::create_dir_all(netdev.join("device"))
+            .expect("synthetic Astra PCI directory must be created");
         fs::write(netdev.join("phys_port_name"), "c2pf3")
             .expect("synthetic Astra phys_port_name must be written");
+        fs::write(netdev.join("device/vendor"), "0x15b3")
+            .expect("synthetic Astra PCI vendor must be written");
+        fs::write(netdev.join("device/device"), "0xa2df")
+            .expect("synthetic Astra PCI device must be written");
 
         // Use an executable child so failure exercises the production hook's guarded invocation.
         let pre_ovs = fixture.join("pre-ovs.sh");
@@ -3584,7 +3597,7 @@ done
         // Exact semantic names resolve independently of unrelated sysfs entries.
         let output = run_bf4_preflight(
             &topology,
-            &[("en8f2", "c2pf3"), ("noise", "c2pf30")],
+            &[("en8f2", "c2pf3", "0xa2df"), ("noise", "c2pf30", "0xa2df")],
             "",
             "printf '%s' \"$dpf_c2p3_netdev\"",
         );
@@ -3597,6 +3610,68 @@ done
         assert!(script.contains("host_representor=\"${dpf_c2p3_netdev}vf4\""));
         assert!(script.contains("external_ids='{}' || true"));
         assert!(!script.contains("phys_port_name 'c2pf3vf4'"));
+    }
+
+    /// Verifies BF4 discovery ignores eight CX9s sharing its semantic port name and fails closed
+    /// when the remaining candidate has missing or incompatible PCI identity.
+    #[test]
+    fn bf4_intercept_bridging_preflight_scopes_port_names_to_bf4_hardware() {
+        let topology = DpfInterceptBridging::new(
+            vec![DpfInterceptBridge::new(
+                DpfInterfaceIdentity {
+                    controller_id: 1,
+                    pf_id: 0,
+                    vf_id: None,
+                },
+                "br-pf0",
+                "p-pf0",
+            )],
+            16,
+        )
+        .unwrap();
+        let devices = [
+            ("bf4", "c1pf0", "0xa2df"),
+            ("cx9-0", "c1pf0", "0x1025"),
+            ("cx9-1", "c1pf0", "0x1025"),
+            ("cx9-2", "c1pf0", "0x1025"),
+            ("cx9-3", "c1pf0", "0x1025"),
+            ("cx9-4", "c1pf0", "0x1025"),
+            ("cx9-5", "c1pf0", "0x1025"),
+            ("cx9-6", "c1pf0", "0x1025"),
+            ("cx9-7", "c1pf0", "0x1025"),
+        ];
+        let missing = "expected exactly one BF4 PF netdev with phys_port_name c1pf0; found 0\n";
+
+        value_scenarios!(
+            run = |prefix: &str| {
+                let output = run_bf4_preflight(
+                    &topology,
+                    &devices,
+                    prefix,
+                    "printf '%s' \"$dpf_c1p0_netdev\"",
+                );
+                (
+                    output.status.success(),
+                    String::from_utf8_lossy(&output.stdout).into_owned(),
+                    String::from_utf8_lossy(&output.stderr).into_owned(),
+                )
+            };
+            "one BF4 among eight CX9 port-name collisions" {
+                "" => (true, "bf4".to_string(), String::new()),
+            }
+            "missing PCI identity" {
+                r#"rm "$NICO_SYS_CLASS_NET/bf4/device/device""# =>
+                    (false, String::new(), missing.to_string()),
+            }
+            "foreign vendor with BF4 device ID" {
+                r#"printf '%s' 0x1234 > "$NICO_SYS_CLASS_NET/bf4/device/vendor""# =>
+                    (false, String::new(), missing.to_string()),
+            }
+            "only CX9 candidates" {
+                r#"printf '%s' 0x1025 > "$NICO_SYS_CLASS_NET/bf4/device/device""# =>
+                    (false, String::new(), missing.to_string()),
+            }
+        );
     }
 
     /// Verifies generic-BF4 preflight fails before OVS mutation for missing or ambiguous PFs.
@@ -3629,7 +3704,7 @@ done
         .unwrap();
 
         value_scenarios!(
-            run = |matches: Vec<(&str, &str)>| {
+            run = |matches: Vec<(&str, &str, &str)>| {
                 let output = run_bf4_preflight(&topology, &matches, "", "");
                 (
                     output.status.success(),
@@ -3638,7 +3713,7 @@ done
             };
             "missing exact PF" {
                 // A similar semantic name must not satisfy exact matching.
-                vec![("en8f2", "c2pf30")] => (
+                vec![("en8f2", "c2pf30", "0xa2df")] => (
                     false,
                     "expected exactly one BF4 PF netdev with phys_port_name c2pf3; found 0\n".to_string(),
                 ),
@@ -3646,7 +3721,7 @@ done
 
             "ambiguous exact PF" {
                 // Multiple exact matches are unsafe and must fail before bridge creation.
-                vec![("en8f2", "c2pf3"), ("en9f2", "c2pf3")] => (
+                vec![("en8f2", "c2pf3", "0xa2df"), ("en9f2", "c2pf3", "0xa2df")] => (
                     false,
                     "expected exactly one BF4 PF netdev with phys_port_name c2pf3; found 2\n".to_string(),
                 ),
