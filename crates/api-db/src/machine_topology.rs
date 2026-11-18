@@ -61,37 +61,6 @@ async fn update(
     Ok(res)
 }
 
-/// Updates only one machine's stored BIOS version and date, because a BIOS upgrade done outside
-/// NICo must be picked up at rediscovery without replacing the rest of the stored inventory.
-async fn update_bios_version_and_date_by_machine_id(
-    txn: &mut PgConnection,
-    machine_id: &MachineId,
-    bios_version: &str,
-    bios_date: &str,
-) -> DatabaseResult<MachineTopology> {
-    // Preserve the discovery refresh gate while updating only the BIOS fields
-    // that can legitimately change outside NICo.
-    let query = format!(
-        r#"UPDATE machine_topologies SET topology =
-                jsonb_set(
-                    jsonb_set(topology, '{{discovery_data,Info,dmi_data,bios_version}}', $2),
-                    '{{discovery_data,Info,dmi_data,bios_date}}',
-                    $3
-                )
-            WHERE machine_id = $1
-                AND topology->'discovery_data'->'Info'->'dmi_data' IS NOT NULL
-            RETURNING {}"#,
-        MachineTopology::db_table_columns(),
-    );
-    sqlx::query_as(sqlx::AssertSqlSafe(query.as_str()))
-        .bind(machine_id)
-        .bind(sqlx::types::Json(bios_version))
-        .bind(sqlx::types::Json(bios_date))
-        .fetch_one(txn)
-        .await
-        .map_err(|e| DatabaseError::query(&query, e))
-}
-
 pub async fn create_or_update(
     txn: &mut PgConnection,
     machine_id: &MachineId,
@@ -105,31 +74,6 @@ pub async fn create_or_update(
         if topology.topology_update_needed {
             return update(txn, &machine_id, hardware_info).await;
         }
-
-        // A BIOS upgrade can happen outside NICo, so accept those two DMI
-        // fields without opening the gate for the rest of Scout's inventory.
-        if let (Some(stored_dmi), Some(incoming_dmi)) = (
-            topology.topology.discovery_data.info.dmi_data.as_ref(),
-            hardware_info.dmi_data.as_ref(),
-        ) && !incoming_dmi.bios_version.trim().is_empty()
-            && (stored_dmi.bios_version != incoming_dmi.bios_version
-                || stored_dmi.bios_date != incoming_dmi.bios_date)
-        {
-            tracing::info!(
-                %machine_id,
-                old_bios_version = %stored_dmi.bios_version,
-                new_bios_version = %incoming_dmi.bios_version,
-                "Refreshing BIOS version from machine discovery",
-            );
-            return update_bios_version_and_date_by_machine_id(
-                txn,
-                &machine_id,
-                &incoming_dmi.bios_version,
-                &incoming_dmi.bios_date,
-            )
-            .await;
-        }
-
         return Ok(topology.clone());
     }
 
