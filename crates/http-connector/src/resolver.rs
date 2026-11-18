@@ -914,6 +914,30 @@ mod tests {
         Record::from_rdata(name.parse().unwrap(), 60, RData::from(address))
     }
 
+    async fn accept_socks_request(proxy: &TcpListener, target: &[u8]) -> TokioTcpStream {
+        let (mut socket, _) = proxy.accept().await.expect("accept proxy connection");
+        let mut greeting = [0; 3];
+        socket
+            .read_exact(&mut greeting)
+            .await
+            .expect("read greeting");
+        assert_eq!(greeting, [5, 1, 0]);
+        socket
+            .write_all(&[5, 0])
+            .await
+            .expect("accept authentication");
+        let mut expected = vec![5, 1, 0];
+        expected.extend_from_slice(target);
+        expected.extend_from_slice(&12345_u16.to_be_bytes());
+        let mut request = vec![0; expected.len()];
+        socket
+            .read_exact(&mut request)
+            .await
+            .expect("read connect request");
+        assert_eq!(request, expected);
+        socket
+    }
+
     /// Drives the lookup until the fixture observes the required
     /// event. Completion before that event would bypass the branch under test.
     async fn pending_until<F: Future + ?Sized, R: Future>(
@@ -1915,31 +1939,12 @@ mod tests {
         /// Reading each target proves which family is being attempted. Holding
         /// the SOCKS reply makes this independent of host routing and TCP timing.
         async fn accept_target(proxy: &TcpListener, ipv6: bool) -> TokioTcpStream {
-            let (mut socket, _) = proxy.accept().await.expect("accept proxy connection");
-            let mut greeting = [0; 3];
-            socket
-                .read_exact(&mut greeting)
-                .await
-                .expect("read greeting");
-            assert_eq!(greeting, [5, 1, 0]);
-            socket
-                .write_all(&[5, 0])
-                .await
-                .expect("accept authentication");
-            let mut expected = vec![5, 1, 0, if ipv6 { 4 } else { 1 }];
-            if ipv6 {
-                expected.extend_from_slice(&Ipv6Addr::LOCALHOST.octets());
+            let target = if ipv6 {
+                [&[4][..], &Ipv6Addr::LOCALHOST.octets()].concat()
             } else {
-                expected.extend_from_slice(&Ipv4Addr::LOCALHOST.octets());
-            }
-            expected.extend_from_slice(&12345_u16.to_be_bytes());
-            let mut request = vec![0; expected.len()];
-            socket
-                .read_exact(&mut request)
-                .await
-                .expect("read connect request");
-            assert_eq!(request, expected);
-            socket
+                [&[1][..], &Ipv4Addr::LOCALHOST.octets()].concat()
+            };
+            accept_socks_request(proxy, &target).await
         }
 
         for (scenario, cached_dns) in [("pending AAAA", false), ("cached DNS", true)] {
@@ -2041,6 +2046,57 @@ mod tests {
             .await;
             server.stop().await;
         }
+    }
+
+    #[tokio::test]
+    async fn remote_dns_proxy_sends_the_host_name_without_resolving_it() {
+        let server = DnsServer::start_with_config(
+            vec![],
+            ResolverConfig::default(),
+            CarbideResolverOpts::default(),
+            None,
+            vec![],
+            None,
+        )
+        .await;
+        let proxy = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
+            .await
+            .expect("bind proxy");
+        let proxy_address = proxy.local_addr().expect("proxy address");
+        let mut metrics = ConnectorMetrics::default();
+        let mut connector = CarbideHttpConnector::new_with_resolver(server.resolver.clone());
+        connector.set_socks5_proxy(Some(proxy_address.to_string()));
+        connector.set_socks5_remote_dns(true);
+        connector.set_connect_retries_max(Some(1));
+        connector.set_connect_retries_interval(Some(Duration::ZERO));
+        connector.set_metrics(metrics.clone());
+
+        let serve_proxy = async {
+            let name = b"service.test";
+            let mut target = vec![3, name.len() as u8];
+            target.extend_from_slice(name);
+            for reply in [5, 0] {
+                accept_socks_request(&proxy, &target)
+                    .await
+                    .write_all(&[5, reply, 0, 1, 127, 0, 0, 1, 0, 1])
+                    .await
+                    .expect("reply to connect request");
+            }
+        };
+        let connection = tower_service::Service::call(
+            &mut connector,
+            "http://service.test:12345".parse().expect("service URI"),
+        );
+        let ((), client) = tokio::time::timeout(Duration::from_secs(5), async {
+            tokio::join!(serve_proxy, connection)
+        })
+        .await
+        .expect("remote DNS connection timed out");
+        client.expect("retried connection");
+        assert_eq!(metrics.get_total_errors(), 1);
+        assert_eq!(metrics.get_total_successes(), 1);
+        assert_eq!(metrics.get_attempts_for_addr(&proxy_address), Some(2));
+        assert_eq!(server.stop().await, vec![]);
     }
 
     /// An IPv6-only local binding cannot retry an IPv4 result after AAAA fails.

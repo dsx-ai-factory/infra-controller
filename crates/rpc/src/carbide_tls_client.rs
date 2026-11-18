@@ -21,7 +21,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use carbide_http_connector::connector::CarbideHttpConnector;
 use carbide_http_connector::resolver::{CarbideResolver, CarbideResolverOpts};
-use carbide_tls::client_config::ClientCert;
+use carbide_tls::client_config::{ClientCert, SocksProxy};
 use carbide_tls::dummy_tls_verifier::DummyTlsVerifier;
 use eyre::Result;
 use hickory_resolver::config::ResolverConfig;
@@ -185,7 +185,7 @@ pub struct CarbideClientConfig {
     /// value assigned directly to this field after construction takes precedence over the
     /// environment, same as every other knob on this struct.
     pub request_timeout: Option<Duration>,
-    pub socks_proxy: Option<String>,
+    pub socks_proxy: Option<SocksProxy>,
     pub connect_retries_max: Option<u32>,
     pub connect_retries_interval: Option<Duration>,
     /// Optional node-auth token provider (issue #355). When set, each request
@@ -457,7 +457,7 @@ impl CarbideClientConfig {
         }
     }
 
-    pub fn socks_proxy(&mut self, socks_proxy: Option<String>) {
+    pub fn socks_proxy(&mut self, socks_proxy: Option<SocksProxy>) {
         self.socks_proxy = socks_proxy;
     }
 }
@@ -842,7 +842,10 @@ impl<'a> CarbideTlsClient<'a> {
         if self.carbide_client_config.use_mgmt_vrf {
             http.set_interface("mgmt".to_string());
         }
-        http.set_socks5_proxy(self.carbide_client_config.socks_proxy.clone());
+        if let Some(proxy) = &self.carbide_client_config.socks_proxy {
+            http.set_socks5_proxy(Some(proxy.address.clone()));
+            http.set_socks5_remote_dns(proxy.remote_dns);
+        }
         http.enforce_http(false);
 
         // Configure the TCP timeout; CarbideHttpConnector::set_connect_timeout
@@ -1185,6 +1188,48 @@ mod tests {
                 .is_err(),
             "the refused connection never reaches the listener"
         );
+    }
+
+    #[tokio::test]
+    async fn socks5h_proxy_receives_the_api_host_name() {
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
+        let proxy = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let mut config = CarbideClientConfig::new(String::new(), None);
+        config.socks_proxy(Some(SocksProxy {
+            address: proxy.local_addr().unwrap().to_string(),
+            remote_dns: true,
+        }));
+        let url = "http://nico-api.invalid:1079";
+        let connector = CarbideTlsClient::new(&config)
+            .build_https_client(url)
+            .await
+            .unwrap();
+        let serve_proxy = async {
+            let (mut socket, _) = proxy.accept().await.unwrap();
+            let mut greeting = [0; 3];
+            socket.read_exact(&mut greeting).await.unwrap();
+            assert_eq!(greeting, [5, 1, 0]);
+            socket.write_all(&[5, 0]).await.unwrap();
+            let name = b"nico-api.invalid";
+            let mut expected = vec![5, 1, 0, 3, name.len() as u8];
+            expected.extend_from_slice(name);
+            expected.extend_from_slice(&1079_u16.to_be_bytes());
+            let mut request = vec![0; expected.len()];
+            socket.read_exact(&mut request).await.unwrap();
+            assert_eq!(request, expected);
+            socket
+                .write_all(&[5, 0, 0, 1, 127, 0, 0, 1, 0, 1])
+                .await
+                .unwrap();
+            socket
+        };
+        let (_socket, connection) = tokio::time::timeout(Duration::from_secs(5), async {
+            tokio::join!(serve_proxy, connector.oneshot(url.parse::<Uri>().unwrap()))
+        })
+        .await
+        .expect("the proxy receives the connection");
+        assert!(connection.is_ok());
     }
 
     /// A connection task spawned while a call's span is current runs outside

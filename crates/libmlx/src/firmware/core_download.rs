@@ -7,7 +7,7 @@
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use carbide_tls::client_config::ClientCert;
+use carbide_tls::client_config::{ClientCert, SocksProxy};
 use http_body_util::BodyExt;
 use rpc::carbide_tls_client::{
     CarbideClientConfig, CarbideTlsClient, CarbideTlsClientError, ConfigurationError,
@@ -124,7 +124,10 @@ impl CoreFirmwareDownloadConfig {
             require_client_cert: self.require_client_cert,
             use_mgmt_vrf: self.use_mgmt_vrf,
             request_timeout: self.request_timeout,
-            socks_proxy: self.socks_proxy.clone(),
+            socks_proxy: self.socks_proxy.clone().map(|address| SocksProxy {
+                address,
+                remote_dns: false,
+            }),
             connect_retries_max: self.connect_retries_max,
             connect_retries_interval: self.connect_retries_interval,
             ..Default::default()

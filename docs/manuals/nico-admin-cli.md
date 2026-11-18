@@ -76,12 +76,21 @@ nico-admin-cli version
 ### SOCKS5 proxy
 
 The CLI honors `http_proxy` / `https_proxy` (or their uppercase variants)
-**only when the URL scheme is `socks5`**. HTTP/HTTPS proxies are rejected
-with a "Only SOCKS5 Proxy supported" error. This is enforced in
-`get_proxy_info()`; see `crates/tls/src/client_config.rs`.
+**only when the URL scheme is `socks5` or `socks5h`**. HTTP/HTTPS proxies are
+rejected with an "Only SOCKS5 Proxy supported (socks5:// or socks5h://)" error.
+This is enforced in `get_proxy_info()`; see `crates/tls/src/client_config.rs`.
+The proxy address must be an IP address and port.
+
+With `socks5`, the CLI resolves the API host name itself and sends the proxy
+the resolved address. With `socks5h`, the CLI does not resolve the API host
+name and sends it to the proxy, which resolves it. Use `socks5h` when the API
+host name only resolves on the proxy's side. An API URL whose host is an IP
+address is sent as that address with either scheme.
 
 ```sh
-export https_proxy=socks5://localhost:1080
+export https_proxy=socks5://127.0.0.1:1080
+# or, to let the proxy resolve the API host name:
+# export https_proxy=socks5h://127.0.0.1:1080
 nico-admin-cli machine show
 ```
 

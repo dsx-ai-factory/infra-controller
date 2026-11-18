@@ -231,7 +231,17 @@ pub fn get_config_from_file() -> Option<FileConfig> {
     None
 }
 
-pub fn get_proxy_info() -> Result<Option<String>, ClientConfigError> {
+/// SOCKS5 proxy taken from the proxy environment variables.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SocksProxy {
+    /// `host:port` of the proxy itself.
+    pub address: String,
+    /// Whether the proxy resolves target host names (`socks5h://`) instead of
+    /// the client (`socks5://`).
+    pub remote_dns: bool,
+}
+
+pub fn get_proxy_info() -> Result<Option<SocksProxy>, ClientConfigError> {
     std::env::var("http_proxy")
         .ok()
         .or_else(|| std::env::var("https_proxy").ok())
@@ -239,14 +249,16 @@ pub fn get_proxy_info() -> Result<Option<String>, ClientConfigError> {
         .or_else(|| std::env::var("HTTPS_PROXY").ok())
         .map_or(Ok(None), |proxy| {
             let uri = Uri::from_str(&proxy).map_err(|_| ClientConfigError::UrlParseError(proxy))?;
-            if uri
-                .scheme_str()
-                .is_some_and(|s| !s.eq_ignore_ascii_case("socks5"))
-            {
-                return Err(ClientConfigError::UrlParseError(
-                    "Only SOCKS5 Proxy supported".to_owned(),
-                ));
-            }
+            let remote_dns = match uri.scheme_str() {
+                None => false,
+                Some(scheme) if scheme.eq_ignore_ascii_case("socks5") => false,
+                Some(scheme) if scheme.eq_ignore_ascii_case("socks5h") => true,
+                Some(_) => {
+                    return Err(ClientConfigError::UrlParseError(
+                        "Only SOCKS5 Proxy supported (socks5:// or socks5h://)".to_owned(),
+                    ));
+                }
+            };
             let host = uri.host().unwrap_or_default().to_owned();
             let port = uri
                 .port_u16()
@@ -254,7 +266,10 @@ pub fn get_proxy_info() -> Result<Option<String>, ClientConfigError> {
             if host.is_empty() {
                 Ok(None)
             } else {
-                Ok(Some(host + ":" + &port))
+                Ok(Some(SocksProxy {
+                    address: host + ":" + &port,
+                    remote_dns,
+                }))
             }
         })
 }
@@ -376,7 +391,7 @@ mod tests {
     }
 
     /// Caller must hold `ENV_LOCK` before invoking this function.
-    fn parse_proxy(input: ProxyInput) -> Result<Option<String>, &'static str> {
+    fn parse_proxy(input: ProxyInput) -> Result<Option<SocksProxy>, &'static str> {
         clear_env(PROXY_ENV_KEYS);
         for (key, value) in input.vars {
             set_env(key, value);
@@ -621,16 +636,37 @@ mod tests {
             "socks5 proxy" {
                 ProxyInput {
                     vars: &[("http_proxy", "socks5://localhost:1080")]
-                } => Yields(Some("localhost:1080".to_string())),
+                } => Yields(Some(SocksProxy {
+                    address: "localhost:1080".to_string(),
+                    remote_dns: false,
+                })),
+            }
+
+            "socks5h proxy resolves names remotely" {
+                ProxyInput {
+                    vars: &[("http_proxy", "socks5h://127.0.0.1:1080")]
+                } => Yields(Some(SocksProxy {
+                    address: "127.0.0.1:1080".to_string(),
+                    remote_dns: true,
+                })),
+                ProxyInput {
+                    vars: &[("HTTPS_PROXY", "SOCKS5H://127.0.0.1:1080")]
+                } => Yields(Some(SocksProxy {
+                    address: "127.0.0.1:1080".to_string(),
+                    remote_dns: true,
+                })),
             }
 
             "proxy precedence" {
                 ProxyInput {
                     vars: &[
-                        ("HTTPS_PROXY", "socks5://fallback.example.com:1080"),
+                        ("HTTPS_PROXY", "socks5h://fallback.example.com:1080"),
                         ("http_proxy", "socks5://first.example.com:2222"),
                     ]
-                } => Yields(Some("first.example.com:2222".to_string())),
+                } => Yields(Some(SocksProxy {
+                    address: "first.example.com:2222".to_string(),
+                    remote_dns: false,
+                })),
             }
 
             "unsupported proxy" {
