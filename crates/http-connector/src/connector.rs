@@ -17,9 +17,8 @@
 use std::collections::HashMap;
 use std::error::Error as StdError;
 use std::future::Future;
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, ToSocketAddrs};
 use std::pin::Pin;
-use std::str::FromStr;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
@@ -308,24 +307,34 @@ impl ConnectingTcpRemote {
         let mut err = None;
         for addr in &mut self.addrs {
             if let Some(proxy) = config.socks5_proxy.as_deref() {
-                let proxy_addr = SocketAddr::from_str(proxy)
-                    .map_err(|e| ConnectError::new("Invalid proxy setting", e))?;
-                let connect_start = Instant::now();
-                match connect_with_socks_proxy(
-                    proxy_addr,
-                    addr,
-                    config.clone(),
-                    self.connect_timeout,
-                )?
-                .await
-                {
-                    Ok(tcp) => {
-                        self.metrics.connect_success(proxy_addr, connect_start);
-                        return Ok(tcp);
+                match proxy.to_socket_addrs() {
+                    Ok(proxy_addrs) => {
+                        // try all resolved ips
+                        for proxy_addr in proxy_addrs {
+                            let connect_start = Instant::now();
+                            match connect_with_socks_proxy(
+                                proxy_addr,
+                                addr,
+                                config.clone(),
+                                self.connect_timeout,
+                            )?
+                            .await
+                            {
+                                Ok(tcp) => {
+                                    self.metrics.connect_success(proxy_addr, connect_start);
+                                    return Ok(tcp);
+                                }
+                                Err(e) => {
+                                    trace!(
+                                        "Resolved proxy address '{proxy_addr}' unreachable: {}",
+                                        e
+                                    )
+                                }
+                            }
+                        }
                     }
                     Err(e) => {
-                        self.metrics.connect_error(proxy_addr, connect_start, &e);
-                        err = Some(e);
+                        return Err(ConnectError::new("Invalid proxy setting", e));
                     }
                 }
             } else {
