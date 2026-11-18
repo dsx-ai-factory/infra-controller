@@ -50,8 +50,6 @@ navigation:
               path: getting-started/prerequisites/bmc-oob-setup.md
         - page: Sizing and Scale Guidance
           path: getting-started/sizing-and-scale.md
-        - page: Scale FAQ
-          path: getting-started/scale-faq.md
         - page: Known Issues
           path: known-issues.md
         - page: Building NICo Containers

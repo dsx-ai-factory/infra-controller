@@ -398,13 +398,16 @@ Open `helm-prereqs/values/nico-core.yaml` and update the VIP for each service:
 | Service | Values key | Pool to use |
 |---------|-----------|-------------|
 | `nico-api` external API | `nico-api.externalService.annotations` | External (client-facing) |
-| `nico-dhcp` | `nico-dhcp.externalService.annotations` | Internal (cluster-facing) |
+| `nico-dhcp-external` (DHCPv4) | `nico-dhcp.externalService.annotations` | Internal (relay-facing IPv4) |
 | `nico-dns` instance-0 | `nico-dns.externalService.perPodAnnotations[0]` | Internal or External |
 | `nico-dns` instance-1 | `nico-dns.externalService.perPodAnnotations[1]` | Internal or External |
 | `nico-pxe` | `nico-pxe.externalService.annotations` | Internal (cluster-facing) |
 | `nico-ssh-console-rs` | `nico-ssh-console-rs.externalService.annotations` | Internal (cluster-facing) |
 
 All IPs must be within the `IPAddressPool` ranges you defined in `values/metallb-config.yaml` and must be unique across services.
+
+When DHCPv6 is enabled, assign `nico-dhcp6-external` a separate IPv6 VIP from
+an IPv6 pool, following [Deploy DHCPv6](../provisioning/dhcpv6-deployment.md).
 
 - **nico-dhcp Note**: `externalService.enabled: true` must be set explicitly; it defaults to false in the chart.
 - **nico-dns Note**: Use `perPodAnnotations` (a list) rather than `annotations` because each replica gets its own VIP.
@@ -583,10 +586,13 @@ All LoadBalancer services should have an external IP from your `IPAddressPool` r
 ### Verify That DHCP and PXE Are Serving
 
 ```bash
-kubectl get svc nico-dhcp nico-pxe -n nico-system
+kubectl get svc nico-dhcp-external nico-pxe-external -n nico-system
 ```
 
-Both external IPs should be within your internal VIP pool range.
+Both external IPs should be within your internal VIP pool range. This checks
+address assignment; also verify a DHCP exchange through the relay and a PXE
+download from the managed network. For optional DHCPv6, follow
+[Deployment Verification](../provisioning/dhcpv6-deployment.md#deployment-verification-and-metrics).
 
 ### Acquire a Keycloak Access Token
 
@@ -681,7 +687,7 @@ curl -sS -H "Authorization: Bearer $TOKEN" \
 
 #### 6. Verify your Site
 
-**Do not run `nicocli site create`.** In `setup.sh` phase 7i, the `nico-rest-site-agent-bootstrap` Helm hook Job registers the site (`POST /v1/site` to `nico-rest-site-manager`). It obtains the one-time password (OTP) from site-manager and stores the registration in the `site-registration` Secret before the Site Agent starts. Running `nicocli site create` would create a second site that the already-deployed site-agent cannot use — the site-agent is bound to the UUID generated during setup and cannot be reassigned without a full redeploy.
+**Do not run `nicocli site create`.** In `setup.sh` phase 7i, the `nico-rest-site-agent-bootstrap` Helm hook Job registers the site (`POST /v1/site` to `nico-rest-site-manager`). It obtains the one-time password (OTP) from site-manager and stores the registration in the `site-registration` Secret before the Site Agent starts. Running `nicocli site create` creates a second site and does not rebind the deployed Site Agent. To bind this installation to an existing site, set `NICO_SITE_UUID` and rerun `setup.sh`. Setup removes stale registration and re-bootstraps the agent.
 
 This is a **one-to-one deployment**: one site per NICo installation. The site is managed by `setup.sh`; do not create additional sites manually.
 
@@ -725,7 +731,7 @@ the [Reference Installation](installation-options/reference-install.md) guide.
 
 Configure the out-of-band network to relay BMC DHCP requests to the NICo DHCP service.
 
-1. *Configure the DHCP relay* on your OOB switches to forward DHCP requests to the `nico-dhcp` LoadBalancer VIP (assigned in Step 3h).
+1. *Configure the DHCP relay* on your OOB switches for each address family in use. Send DHCPv4 requests to the `nico-dhcp-external` LoadBalancer VIP on UDP 67 (assigned in Step 3h). For optional DHCPv6, use the separate `nico-dhcp6-external` IPv6 VIP on UDP 547, following [Deploy DHCPv6](../provisioning/dhcpv6-deployment.md).
 
 1. *Verify DHCP requests are reaching NICo* by checking the DHCP service logs:
 

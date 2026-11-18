@@ -37,7 +37,7 @@ The chart is designed for production environments where NICo manages the full li
 
 For the full list of required secrets, ConfigMaps, and infrastructure setup steps, see [PREREQUISITES.md](./PREREQUISITES.md).
 
-### Plan the site values
+### Plan the Site Values
 
 Complete these inputs before installing the chart:
 

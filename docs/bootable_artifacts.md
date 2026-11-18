@@ -57,7 +57,7 @@ VIP ingress capacity, and rack uplinks. Include cold pod starts, when every
 PXE replica may need to pull and unpack its artifact images. With MetalLB
 L2, one node receives all traffic for a service VIP even when several PXE
 pods exist; review the [MetalLB Mode](getting-started/quick-start.md#3g-configure-metallb)
-when assessing that path. The [Scale FAQ](getting-started/scale-faq.md)
+when assessing that path. The [Scale FAQ](getting-started/sizing-and-scale.md#scale-faq)
 also covers placement of registries and OS repositories.
 
 ## 1. Install Build Tools

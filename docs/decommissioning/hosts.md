@@ -53,17 +53,19 @@ decommissioned to bypass an unverified DPU reset.
 
 ### Unsupported Power Cycle
 
-If decommissioning stops while powering the host off or on, inspect the
-BMC's advertised power actions and the failed request. Some Supermicro
-models do not advertise the OEM AC power-cycle action that older clients
-attempt to use; [issue #7928](https://github.com/dsx-ai-factory/infra-controller/issues/7928)
-tracks this capability-detection problem.
+On older builds without the [Supermicro power-action check](https://github.com/dsx-ai-factory/infra-controller/pull/8501)
+or [unsupported-action fallback](https://github.com/dsx-ai-factory/infra-controller/pull/8336),
+decommissioning can remain in `PowerCyclingHost` when the BMC lacks an
+AC power-cycle action. Builds containing both fixes check advertised support
+and continue with `ForceOff` followed by `On` when AC power cycle is unsupported.
+[Issue #7928](https://github.com/dsx-ai-factory/infra-controller/issues/7928)
+tracks the remaining real-hardware confirmation; the
+[simulated verification passed](https://github.com/dsx-ai-factory/infra-controller/issues/7928#issuecomment-6612952286).
 
-Record the model, BMC firmware, NICo revision, and requested action. Ask the
-hardware and lifecycle owners to choose a supported power operation and
-verify the resulting power state before continuing. A successful manual
-power action alone does not establish that the remaining decommission
-steps have completed.
+If the symptom persists on a build containing both fixes, record the model,
+BMC firmware, NICo revision, advertised actions, and failed request for the
+hardware and lifecycle owners. A successful manual power action alone does
+not establish that the remaining decommission steps have completed.
 
 ## What the workflow changes
 
