@@ -25,7 +25,7 @@ use carbide_machine_controller::metrics::MachineMetrics;
 use carbide_redfish::libredfish::test_support::RedfishSimAction;
 use carbide_uuid::machine::HostMachineId;
 use carbide_uuid::network::NetworkSegmentId;
-use db::ConditionalWrite;
+use db::{ConditionalWrite, TransactionVending as _};
 use libredfish::{PowerState, RedfishError, SystemPowerControl};
 use model::bmc_suppression::{BmcSuppressionSource, BmcSuppressionSubsystem, NewBmcSuppression};
 use model::dpa_interface::{DpaInterfaceControllerState, DpaInterfaceType, NewDpaInterface};
@@ -264,7 +264,7 @@ fn allocation_request(
 /// Queue both requests on the held Machine lock before allowing either to run.
 async fn requests_in_machine_lock_order<F, S>(
     pool: &sqlx::PgPool,
-    mut blocker: sqlx::Transaction<'_, sqlx::Postgres>,
+    mut blocker: db::Transaction<'_>,
     first: F,
     second: S,
 ) -> (F::Output, S::Output)
@@ -784,7 +784,7 @@ async fn decommission_requires_redfish_bfb_install_support(pool: sqlx::PgPool) {
             .contains("dpus do not support bfb installation")
     );
 
-    let mut txn = env.pool.begin().await.unwrap();
+    let mut txn = env.pool.txn_begin().await.unwrap();
     let host = managed_host.host().db_machine(&mut txn).await;
     assert!(!host.decommission_requested);
     txn.commit().await.unwrap();
@@ -810,7 +810,7 @@ async fn decommission_requires_redfish_bfb_install_support(pool: sqlx::PgPool) {
         .await
         .unwrap();
 
-    let mut txn = env.pool.begin().await.unwrap();
+    let mut txn = env.pool.txn_begin().await.unwrap();
     let host = managed_host.host().db_machine(&mut txn).await;
     assert!(host.decommission_requested);
     txn.commit().await.unwrap();

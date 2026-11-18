@@ -308,7 +308,7 @@ pub(crate) async fn create(
     }
 
     let mut txn = api.txn_begin().await?;
-    ::db::tenant_prefix_overlap::lock_checks(txn.as_mut()).await?;
+    ::db::tenant_prefix_overlap::lock_checks(&mut txn).await?;
 
     // Resolve and lock the exact SitePrefix before locking the VPC. The shared
     // row lock permits concurrent child creation but conflicts with retirement

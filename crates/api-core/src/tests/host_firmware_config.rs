@@ -19,6 +19,7 @@ use std::sync::Arc;
 
 use carbide_uuid::machine::HostMachineId;
 use chrono::Utc;
+use db::TransactionVending as _;
 use db::desired_firmware::desired_firmware_rows;
 use db::host_machine_update::{find_update_gates, find_upgrade_needed};
 use model::firmware::{Firmware, FirmwareComponentType};
@@ -97,7 +98,7 @@ async fn upsert_host_firmware_config_creates_and_merges_versions(
         vec![("28.47.2682", Some(true)), ("28.48.1111", Some(false))]
     );
 
-    let mut txn = env.pool.begin().await?;
+    let mut txn = env.pool.txn_begin().await?;
     let stored = db::host_firmware_config::get(&mut txn, "Nvidia", "dgxh100")
         .await?
         .expect("stored host firmware config")
@@ -191,7 +192,7 @@ async fn upsert_host_firmware_config_rejects_added_component_without_ordering_up
 
     assert_eq!(error.code(), Code::InvalidArgument);
 
-    let mut txn = env.pool.begin().await?;
+    let mut txn = env.pool.txn_begin().await?;
     let stored = db::host_firmware_config::get(&mut txn, "Nvidia", "DGXH100")
         .await?
         .expect("stored host firmware config")
@@ -230,7 +231,7 @@ async fn delete_host_firmware_config_removes_existing_row(
         }))
         .await?;
 
-    let mut txn = env.pool.begin().await?;
+    let mut txn = env.pool.txn_begin().await?;
     let stored = db::host_firmware_config::get(&mut txn, "Nvidia", "DGXH100").await?;
     txn.commit().await?;
 
@@ -360,7 +361,7 @@ async fn upsert_host_firmware_config_drives_machine_update_manager(
     .await?;
     assert_eq!(desired_bmc_version.as_deref(), Some("9.99.99.99"));
 
-    let mut txn = env.pool.begin().await?;
+    let mut txn = env.pool.txn_begin().await?;
     let host = managed_host.host().db_machine(&mut txn).await;
     txn.commit().await?;
 
@@ -519,7 +520,7 @@ async fn update_gates_match_find_upgrade_needed(
             })
             .collect();
         // Each case runs in its own transaction, so both readers see its setup.
-        let mut txn = env.pool.begin().await?;
+        let mut txn = env.pool.txn_begin().await?;
         db::desired_firmware::snapshot_desired_firmware(&mut txn, &models).await?;
         // The setup is a test literal and the substituted host ID is generated.
         sqlx::raw_sql(sqlx::AssertSqlSafe(
@@ -570,7 +571,7 @@ async fn fresh_gate_rows(
     env: &TestEnv,
     host_id: HostMachineId,
 ) -> Result<Vec<HostUpdateGateRow>, Box<dyn std::error::Error>> {
-    let mut txn = env.pool.begin().await?;
+    let mut txn = env.pool.txn_begin().await?;
     let overrides = db::host_firmware_config::list_configs(&mut *txn).await?;
     let catalog = env
         .config
@@ -591,7 +592,7 @@ async fn fresh_gate_rows(
 }
 
 pub(super) async fn host_reprovision_requested(env: &TestEnv, host: &TestManagedHost) -> bool {
-    let mut txn = env.pool.begin().await.unwrap();
+    let mut txn = env.pool.txn_begin().await.unwrap();
     let machine = host.host().db_machine(&mut txn).await;
     txn.rollback().await.unwrap();
     machine.host_reprovision_requested.is_some()
@@ -647,7 +648,7 @@ async fn gates_follow_override_without_manager(
     upsert_bmc_target(false).await?;
     let rows = fresh_gate_rows(&env, host_id).await?;
     assert_eq!(host_update_eligibility(&rows, None, None, false), Ok(()));
-    let mut txn = env.pool.begin().await?;
+    let mut txn = env.pool.txn_begin().await?;
     let stale = find_upgrade_needed(&mut txn, true, false).await?;
     txn.rollback().await?;
     assert!(stale.iter().all(|update| update.id != host_id));

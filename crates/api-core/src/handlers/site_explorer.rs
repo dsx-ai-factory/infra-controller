@@ -551,7 +551,7 @@ mod tests {
             [0x26; 32],
             MachineType::Host,
         );
-        let mut txn = env.api.database_connection.begin().await.unwrap();
+        let mut txn = env.api.txn_begin().await.unwrap();
         db::machine::create(
             txn.as_mut(),
             None,

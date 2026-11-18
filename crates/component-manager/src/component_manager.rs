@@ -920,7 +920,7 @@ mod tests {
     use carbide_secrets::credentials::{CredentialKey, CredentialReader, CredentialWriter};
     use carbide_secrets::test_support::credentials::TestCredentialManager;
     use carbide_uuid::rack::RackId;
-    use db::ObjectColumnFilter;
+    use db::{ObjectColumnFilter, TransactionVending as _};
     use model::rack::{
         FirmwareUpgradeJob, MaintenanceActivity, MaintenanceScope, RackConfig,
         RackErrorRecoveryPolicy, RackState,
@@ -1179,7 +1179,7 @@ mod tests {
 
     async fn create_rack_in_state(pool: &PgPool, state: RackState) -> RackId {
         let rack_id = RackId::new(uuid::Uuid::new_v4().to_string());
-        let mut txn = pool.begin().await.unwrap();
+        let mut txn = pool.txn_begin().await.unwrap();
         let rack = db::rack::create(txn.as_mut(), &rack_id, None, &RackConfig::default(), None)
             .await
             .unwrap();
@@ -1264,7 +1264,7 @@ mod tests {
         // Exact retries are idempotent, including after the rack state has
         // moved on. A different request is busy and cannot replace it.
         let rack = load_rack(&pool, &ready_rack).await;
-        let mut txn = pool.begin().await.unwrap();
+        let mut txn = pool.txn_begin().await.unwrap();
         assert_eq!(
             db::rack::try_update_controller_state(
                 txn.as_mut(),
@@ -1424,7 +1424,7 @@ mod tests {
         // Firmware bookkeeping is cleared in the same transaction that
         // accepts a firmware maintenance request.
         let firmware_rack = create_rack_in_state(&pool, RackState::Ready).await;
-        let mut txn = pool.begin().await.unwrap();
+        let mut txn = pool.txn_begin().await.unwrap();
         db::rack::update_firmware_upgrade_job(
             txn.as_mut(),
             &firmware_rack,
@@ -1465,7 +1465,7 @@ mod tests {
 
         // Soft-deleted racks cannot accept new maintenance work.
         let deleted_rack = create_rack_in_state(&pool, RackState::Ready).await;
-        let mut txn = pool.begin().await.unwrap();
+        let mut txn = pool.txn_begin().await.unwrap();
         db::rack::mark_as_deleted(&deleted_rack, txn.as_mut())
             .await
             .unwrap();

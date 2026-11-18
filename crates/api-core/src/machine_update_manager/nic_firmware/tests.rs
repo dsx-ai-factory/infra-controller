@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use carbide_uuid::machine::{HostMachineId, MachineId, MachineIdSource, MachineType};
+use db::TransactionVending as _;
 use model::machine::ManagedHostState;
 use model::machine::nic_firmware::NicFirmwarePhase;
 
@@ -24,7 +25,7 @@ async fn failed_workflow_occupies_its_host_until_state_departure(
         reason: "settled failure after original lockdown readback".into(),
     };
     operation.validate()?;
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
     db::machine::create(
         &mut txn,
         None,
@@ -36,7 +37,7 @@ async fn failed_workflow_occupies_its_host_until_state_departure(
     .await?;
     txn.commit().await?;
 
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
     assert_eq!(
         NicFirmwareUpdate
             .get_updates_in_progress(txn.as_mut())
@@ -49,7 +50,7 @@ async fn failed_workflow_occupies_its_host_until_state_departure(
         .bind(sqlx::types::Json(ManagedHostState::Ready))
         .execute(&pool)
         .await?;
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
     assert!(
         NicFirmwareUpdate
             .get_updates_in_progress(txn.as_mut())

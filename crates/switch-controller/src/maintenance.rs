@@ -24,7 +24,7 @@ use carbide_utils::none_if_empty::NoneIfEmpty;
 use carbide_uuid::switch::SwitchId;
 use component_manager::error::ComponentManagerError;
 use component_manager::nv_switch_manager::{SwitchComponentResult, SwitchEndpoint};
-use db::switch as db_switch;
+use db::{TransactionVending as _, switch as db_switch};
 use mac_address::MacAddress;
 use model::component_manager::PowerAction;
 use model::switch::{
@@ -251,7 +251,12 @@ async fn finish_maintenance(
         return Ok(StateHandlerOutcome::transition(next_state));
     };
 
-    let mut txn = ctx.services.db_pool.begin().await?;
+    let mut txn = ctx
+        .services
+        .db_pool
+        .txn_begin()
+        .await
+        .map_err(StateHandlerError::from_transaction)?;
     if let db::ConditionalWrite::NotApplied(reason) =
         db_switch::clear_switch_maintenance_requested(&mut txn, *switch_id, request).await?
     {

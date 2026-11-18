@@ -10,8 +10,8 @@ use carbide_resource_pool::{PoolDefinitionSource, registration};
 use carbide_resource_pool_api::v1;
 use carbide_resource_pool_api::v1::resource_pool_server::ResourcePool as ProviderResourcePool;
 use carbide_utils::test_support::test_meter::TestMeter;
-use db::ConditionalWrite;
 use db::resource_pool::{binding, registration as stored_registration, remote};
+use db::{ConditionalWrite, TransactionVending as _};
 use futures::StreamExt;
 use model::resource_pool::allocation::{AllocationSource, AllocationState};
 use model::resource_pool::registration::ResourcePoolRegistration;
@@ -268,7 +268,7 @@ async fn registration_restart_keeps_seed_and_pending_request(database: PgPool) -
         request: growth.encode_to_vec(),
         accepted: false,
     };
-    let mut txn = fixture.env.pool.begin().await?;
+    let mut txn = fixture.env.pool.txn_begin().await?;
     stored_registration::lock_binding(&mut txn, pending_binding.binding_id).await?;
     stored_registration::insert(&mut txn, &pending_growth).await?;
     txn.commit().await?;
@@ -306,7 +306,7 @@ async fn registration_restart_keeps_seed_and_pending_request(database: PgPool) -
         fixture.env.pool.clone(),
         &fixture.env.config.resource_pool_backends,
     )?;
-    let mut txn = fixture.env.pool.begin().await?;
+    let mut txn = fixture.env.pool.txn_begin().await?;
     let registry = monitor
         .resolve_registry(
             PoolDefinitionSource::ListenOnly,
@@ -376,7 +376,7 @@ async fn registration_rejects_missing_or_empty_saved_seed(database: PgPool) -> e
         &fixture.env.config.resource_pool_backends,
     )?;
     // Save only the binding, as a partially restored database could contain.
-    let mut txn = fixture.env.pool.begin().await?;
+    let mut txn = fixture.env.pool.txn_begin().await?;
     let registry = monitor
         .resolve_registry(
             PoolDefinitionSource::SeedConfiguration,
@@ -405,7 +405,7 @@ async fn registration_rejects_missing_or_empty_saved_seed(database: PgPool) -> e
     ];
     for (seed, expected_error) in cases {
         if let Some(seed) = &seed {
-            let mut txn = fixture.env.pool.begin().await?;
+            let mut txn = fixture.env.pool.txn_begin().await?;
             db::resource_pool::insert_pool_def(&mut txn, REMOTE_POOL, seed).await?;
             txn.commit().await?;
         }
@@ -654,7 +654,7 @@ async fn registration_cancellation_preserves_provider_acceptance(
         fixture.env.pool.clone(),
         &fixture.env.config.resource_pool_backends,
     )?;
-    let mut txn = fixture.env.pool.begin().await?;
+    let mut txn = fixture.env.pool.txn_begin().await?;
     let registry = monitor
         .resolve_registry(
             PoolDefinitionSource::SeedConfiguration,
@@ -763,7 +763,7 @@ async fn startup_joins_shared_recovery_and_cleanup_sampler(database: PgPool) -> 
     let owner_id = Uuid::new_v4().to_string();
     let pool = ResourcePool::<i32>::new(REMOTE_POOL.to_owned(), ValueType::Integer);
     let registry = &fixture.env.api.resource_pool_registry;
-    let mut txn = fixture.env.pool.begin().await?;
+    let mut txn = fixture.env.pool.txn_begin().await?;
     let selected = registry
         .select(&mut txn, &pool)
         .await?
@@ -779,7 +779,7 @@ async fn startup_joins_shared_recovery_and_cleanup_sampler(database: PgPool) -> 
             &fixture.cancel,
         )
         .await?;
-    let mut txn = fixture.env.pool.begin().await?;
+    let mut txn = fixture.env.pool.txn_begin().await?;
     assert_eq!(allocation.allocate(&mut txn).await?, 20_001);
     txn.commit().await?;
     let attached = remote::latest_for_owner_slot(
@@ -801,7 +801,7 @@ async fn startup_joins_shared_recovery_and_cleanup_sampler(database: PgPool) -> 
 
     // Commit the release while recovery is stopped. The test calls only the
     // shared pool interface; the worker below must finish the provider cleanup.
-    let mut txn = fixture.env.pool.begin().await?;
+    let mut txn = fixture.env.pool.txn_begin().await?;
     let owned = registry
         .find_owned(&pool, &mut txn, OwnerType::Machine, &owner_id, "test-value")
         .await?

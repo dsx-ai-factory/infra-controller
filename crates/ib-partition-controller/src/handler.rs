@@ -22,6 +22,7 @@ use carbide_ib_fabric::ib::{
 };
 use carbide_instrument::{Event, LabelValue};
 use carbide_uuid::infiniband::IBPartitionId;
+use db::TransactionVending as _;
 use model::ib::{DEFAULT_IB_FABRIC_NAME, IBQosConf};
 use model::ib_partition::{IBPartition, IBPartitionControllerState, IBPartitionStatus};
 use state_controller::CheckApplied;
@@ -158,7 +159,12 @@ impl StateHandler for IBPartitionStateHandler {
                                     // this partition. This prevents deleting a partition that
                                     // instances still depend on, which would cause errors when
                                     // the instance state handler tries to unbind ports.
-                                    let mut txn = ctx.services.db_pool.begin().await?;
+                                    let mut txn = ctx
+                                        .services
+                                        .db_pool
+                                        .txn_begin()
+                                        .await
+                                        .map_err(StateHandlerError::from_transaction)?;
                                     db::ib_partition::lock_for_delete(&mut txn, *partition_id)
                                         .await?
                                         .check_applied()?;
@@ -288,7 +294,12 @@ impl StateHandler for IBPartitionStateHandler {
                                     Ok(())
                                 };
 
-                                let mut txn = ctx.services.db_pool.begin().await?;
+                                let mut txn = ctx
+                                    .services
+                                    .db_pool
+                                    .txn_begin()
+                                    .await
+                                    .map_err(StateHandlerError::from_transaction)?;
                                 db::ib_partition::update_status(
                                     state.id,
                                     &state.status,

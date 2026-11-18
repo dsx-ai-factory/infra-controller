@@ -23,6 +23,7 @@ use carbide_site_explorer::dpu_loopback::{
 use carbide_site_explorer::errors::SiteExplorerError;
 use carbide_site_explorer::{MachineCreator, SiteExplorer};
 use carbide_uuid::machine::{MachineId, MachineIdSource, MachineInterfaceId, MachineType};
+use db::TransactionVending as _;
 use db::resource_pool::remote;
 use model::expected_machine::ExpectedMachine;
 use model::hardware_info::HardwareInfo;
@@ -599,7 +600,7 @@ async fn remote_dpu_asn_attachment_avoids_blocking_cancels_its_provider_reservat
     .await?;
     assert!(prepared.has_provider_reservation());
     let pending = asn_receipt(&fixture, machine_id).await?;
-    let mut txn = fixture.env.pool.begin().await?;
+    let mut txn = fixture.env.pool.txn_begin().await?;
     db::machine::create(
         &mut txn,
         None,
@@ -614,9 +615,9 @@ async fn remote_dpu_asn_attachment_avoids_blocking_cancels_its_provider_reservat
         .bind(machine_id)
         .execute(&fixture.env.pool)
         .await?;
-    let mut held = fixture.env.pool.begin().await?;
+    let mut held = fixture.env.pool.txn_begin().await?;
     db::machine::lock_by_id_for_update(&mut held, &machine_id).await?;
-    let mut txn = fixture.env.pool.begin().await?;
+    let mut txn = fixture.env.pool.txn_begin().await?;
     tokio::time::timeout(Duration::from_secs(1), prepared.attach(&mut txn)).await??;
     txn.commit().await?;
     held.rollback().await?;
@@ -638,7 +639,7 @@ async fn remote_dpu_asn_attachment_avoids_blocking_cancels_its_provider_reservat
     );
     assert_eq!(fixture.provider.local.provisioned_count(), 0);
     drop(prepared);
-    let mut txn = fixture.env.pool.begin().await?;
+    let mut txn = fixture.env.pool.txn_begin().await?;
     db::machine::force_cleanup(&mut txn, &machine_id).await?;
     txn.commit().await?;
     let prepared = PreparedDpuAsn::prepare(
@@ -650,7 +651,7 @@ async fn remote_dpu_asn_attachment_avoids_blocking_cancels_its_provider_reservat
     )
     .await?;
     let pending = asn_receipt(&fixture, machine_id).await?;
-    let mut txn = fixture.env.pool.begin().await?;
+    let mut txn = fixture.env.pool.txn_begin().await?;
     db::machine::create(
         &mut txn,
         None,
@@ -661,9 +662,9 @@ async fn remote_dpu_asn_attachment_avoids_blocking_cancels_its_provider_reservat
     )
     .await?;
     txn.commit().await?;
-    let mut held = fixture.env.pool.begin().await?;
+    let mut held = fixture.env.pool.txn_begin().await?;
     db::machine::lock_by_id_for_update(&mut held, &machine_id).await?;
-    let mut txn = fixture.env.pool.begin().await?;
+    let mut txn = fixture.env.pool.txn_begin().await?;
     let error = tokio::time::timeout(Duration::from_secs(1), prepared.attach(&mut txn))
         .await?
         .expect_err("a missing ASN must retry when its machine group is busy");
@@ -710,7 +711,7 @@ async fn integrated_dpu_asn_creation_retries_a_busy_group(database: PgPool) -> e
         [72; 32],
         MachineType::Dpu,
     );
-    let mut txn = env.pool.begin().await?;
+    let mut txn = env.pool.txn_begin().await?;
     db::machine::create(
         &mut txn,
         None,
@@ -748,9 +749,9 @@ async fn integrated_dpu_asn_creation_retries_a_busy_group(database: PgPool) -> e
         &env.api.cancel_token,
     )
     .await?;
-    let mut held = env.pool.begin().await?;
+    let mut held = env.pool.txn_begin().await?;
     db::machine::lock_by_id_for_update(&mut held, &host_id).await?;
-    let mut txn = env.pool.begin().await?;
+    let mut txn = env.pool.txn_begin().await?;
     db::machine_interface::lock_all_admin_segments_for_allocation(&mut txn).await?;
     prepared.check_identity(&mut txn).await?;
     db::machine::create(
@@ -799,7 +800,7 @@ async fn integrated_dpu_asn_creation_retries_a_busy_group(database: PgPool) -> e
         &env.api.cancel_token,
     )
     .await?;
-    let mut txn = env.pool.begin().await?;
+    let mut txn = env.pool.txn_begin().await?;
     db::machine_interface::lock_all_admin_segments_for_allocation(&mut txn).await?;
     retry.check_identity(&mut txn).await?;
     db::machine::create(
@@ -823,7 +824,7 @@ async fn integrated_dpu_asn_creation_retries_a_busy_group(database: PgPool) -> e
     let asn = db::machine::get_asn(&env.pool, &machine_id)
         .await?
         .expect("retry committed its native ASN");
-    let mut txn = env.pool.begin().await?;
+    let mut txn = env.pool.txn_begin().await?;
     assert_eq!(
         db::resource_pool::find_owned_allocation(
             &env.common_pools.ethernet.pool_fnn_asn,
@@ -953,7 +954,7 @@ async fn integrated_dpu_asn_allocation_failures_preserve_creation(
             .remote(LOOPBACK_IP)
             .reconcile(loopback.allocation_id, &fixture.cancel)
             .await?;
-        let mut txn = fixture.env.pool.begin().await?;
+        let mut txn = fixture.env.pool.txn_begin().await?;
         sqlx::query("DELETE FROM resource_pool WHERE name = $1")
             .bind(FNN_ASN)
             .execute(&mut *txn)
@@ -1120,7 +1121,7 @@ async fn remote_dpu_asn_pending_deletion_and_stale_absence_keep_exact_cleanup(
     Box::pin(async move {
         let (fixture, inputs) =
             inputs_for_fixture(RemotePoolFixture::start_asn(database).await?, 1).await?;
-        let mut txn = fixture.env.pool.begin().await?;
+        let mut txn = fixture.env.pool.txn_begin().await?;
         db::machine::create(
             &mut txn,
             None,
@@ -1221,7 +1222,7 @@ async fn remote_dpu_asn_pending_deletion_and_stale_absence_keep_exact_cleanup(
         )
         .await?;
         assert!(asn.has_provider_reservation());
-        let mut txn = fixture.env.pool.begin().await?;
+        let mut txn = fixture.env.pool.txn_begin().await?;
         db::machine::create(
             &mut txn,
             None,
@@ -1244,7 +1245,7 @@ async fn remote_dpu_asn_pending_deletion_and_stale_absence_keep_exact_cleanup(
             fixture.env.api.instrumentation.clone(),
         )
         .await?;
-        let mut txn = fixture.env.pool.begin().await?;
+        let mut txn = fixture.env.pool.txn_begin().await?;
         loopback.check_identity(&mut txn).await?;
         assert!(matches!(
             asn.check_identity(&mut txn).await,
@@ -1284,7 +1285,7 @@ async fn remote_dpu_asn_backfill_preserves_deleting_and_replacement_rows(
             [77; 32],
             MachineType::Dpu,
         );
-        let mut txn = fixture.env.pool.begin().await?;
+        let mut txn = fixture.env.pool.txn_begin().await?;
         db::machine::create(
             &mut txn,
             None,
@@ -1317,7 +1318,7 @@ async fn remote_dpu_asn_backfill_preserves_deleting_and_replacement_rows(
             }
 
             let pending = asn_receipt(&fixture, machine_id).await?;
-            let mut txn = fixture.env.pool.begin().await?;
+            let mut txn = fixture.env.pool.txn_begin().await?;
             if replace {
                 db::machine::force_cleanup(&mut txn, &machine_id).await?;
                 db::machine::create(
@@ -1382,7 +1383,7 @@ async fn remote_dpu_asn_backfill_preserves_deleting_and_replacement_rows(
             drop(backfill);
 
             if !replace {
-                let mut txn = fixture.env.pool.begin().await?;
+                let mut txn = fixture.env.pool.txn_begin().await?;
                 let machine = db::machine::find_one(
                     txn.as_mut(),
                     &machine_id,
@@ -1441,7 +1442,7 @@ async fn remote_dpu_asn_backfill_continues_and_skips_absent_rows(
         first.cancel(&fixture.env.pool).await?;
         let blocked = asn_receipt(&fixture, ids[0]).await?;
 
-        let mut txn = fixture.env.pool.begin().await?;
+        let mut txn = fixture.env.pool.txn_begin().await?;
         for id in ids {
             db::machine::create(
                 &mut txn,
@@ -1473,7 +1474,7 @@ async fn remote_dpu_asn_backfill_continues_and_skips_absent_rows(
         }
 
         // The scan has reached the second DPU; remove the third before its turn.
-        let mut txn = fixture.env.pool.begin().await?;
+        let mut txn = fixture.env.pool.txn_begin().await?;
         db::machine::force_cleanup(&mut txn, &ids[2]).await?;
         txn.commit().await?;
         fixture.provider.allocate_pause.resume.notify_one();
@@ -1526,7 +1527,7 @@ async fn remote_dpu_asn_backfill_continues_after_provider_failure(
         )
     });
     ids.sort();
-    let mut txn = fixture.env.pool.begin().await?;
+    let mut txn = fixture.env.pool.txn_begin().await?;
     for id in ids {
         db::machine::create(
             &mut txn,
@@ -1589,7 +1590,7 @@ async fn remote_dpu_asn_cleans_sibling_after_fatal_preparation(
         inputs_for_fixture(RemotePoolFixture::start_asn(database).await?, 1).await?;
     let owner_id = inputs.machine_id.to_string();
     let loopback_pool = &fixture.env.common_pools.ethernet.pool_loopback_ip;
-    let mut txn = fixture.env.pool.begin().await?;
+    let mut txn = fixture.env.pool.txn_begin().await?;
     // Duplicate native ownership fails during lookup, before an entity transaction.
     let mut loopbacks = Vec::new();
     for _ in 0..2 {
@@ -1659,7 +1660,7 @@ async fn remote_dpu_asn_cleans_sibling_after_fatal_preparation(
         );
         assert_eq!(fixture.provider.local.provisioned_count(), 0);
     }
-    let mut txn = fixture.env.pool.begin().await?;
+    let mut txn = fixture.env.pool.txn_begin().await?;
     for value in loopbacks {
         assert_eq!(
             db::resource_pool::release(
@@ -1701,7 +1702,7 @@ async fn integrated_dpu_asn_dispatcher_keeps_batch_rollback(database: PgPool) ->
             MachineType::Dpu,
         )
     });
-    let mut txn = env.pool.begin().await?;
+    let mut txn = env.pool.txn_begin().await?;
     for id in ids {
         db::machine::create(
             &mut txn,
@@ -1743,7 +1744,7 @@ async fn integrated_dpu_asn_dispatcher_keeps_batch_rollback(database: PgPool) ->
         assert_eq!(db::machine::get_asn(&env.pool, &id).await?, None);
     }
     assert_eq!(db::resource_pool::stats(&env.pool, FNN_ASN).await?.used, 0);
-    let mut txn = env.pool.begin().await?;
+    let mut txn = env.pool.txn_begin().await?;
     db::resource_pool::populate(
         &env.common_pools.ethernet.pool_fnn_asn,
         &mut txn,
@@ -1753,7 +1754,7 @@ async fn integrated_dpu_asn_dispatcher_keeps_batch_rollback(database: PgPool) ->
     .await?;
     txn.commit().await?;
 
-    let mut held = env.pool.begin().await?;
+    let mut held = env.pool.txn_begin().await?;
     let blocker: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
         .fetch_one(&mut *held)
         .await?;
@@ -1884,7 +1885,7 @@ async fn owning_site_explorer(
     );
     // Enter the owning iteration at ingestion, after the separate firmware
     // and BMC setup lifecycle has completed for these fixture reports.
-    let mut txn = fixture.env.pool.begin().await?;
+    let mut txn = fixture.env.pool.txn_begin().await?;
     for (address, report) in &endpoints {
         db::explored_endpoints::insert(*address, report, false, &mut txn).await?;
         db::explored_endpoints::set_preingestion_complete(*address, &mut txn).await?;
@@ -1956,7 +1957,7 @@ async fn integrated_dpu_requested_loopback_preserves_existing_ownership(
     let owned: Ipv4Addr = "192.0.2.11".parse()?;
     let replacement: Ipv4Addr = "192.0.2.12".parse()?;
     let pool = env.common_pools.ethernet.pool_loopback_ip.as_ref();
-    let mut setup = env.pool.begin().await?;
+    let mut setup = env.pool.txn_begin().await?;
     db::resource_pool::populate(
         pool,
         &mut setup,
@@ -1986,7 +1987,7 @@ async fn integrated_dpu_requested_loopback_preserves_existing_ownership(
     ] {
         let machine_id: MachineId = machine_id.parse()?;
         if let Some(address) = prior_allocation {
-            let mut txn = env.pool.begin().await?;
+            let mut txn = env.pool.txn_begin().await?;
             db::resource_pool::allocate(
                 pool,
                 &mut txn,
@@ -2008,7 +2009,7 @@ async fn integrated_dpu_requested_loopback_preserves_existing_ownership(
         )
         .await?;
         assert!(!prepared.has_provider_reservation());
-        let mut txn = env.pool.begin().await?;
+        let mut txn = env.pool.txn_begin().await?;
         db::machine_interface::lock_all_admin_segments_for_allocation(&mut txn).await?;
         prepared.check_identity(&mut txn).await?;
         db::machine::create(
@@ -2029,7 +2030,7 @@ async fn integrated_dpu_requested_loopback_preserves_existing_ownership(
         assert_eq!(config.loopback_ip, Some(IpAddr::V4(expected)));
 
         config.loopback_ip = None;
-        let mut txn = env.pool.begin().await?;
+        let mut txn = env.pool.txn_begin().await?;
         assert_eq!(
             db::machine::try_update_network_config(&mut txn, &machine_id, version, &config).await?,
             db::ConditionalWrite::Applied(()),
@@ -2045,7 +2046,7 @@ async fn integrated_dpu_requested_loopback_preserves_existing_ownership(
             env.api.instrumentation.clone(),
         )
         .await?;
-        let mut txn = env.pool.begin().await?;
+        let mut txn = env.pool.txn_begin().await?;
         repair.check_identity(&mut txn).await?;
         repair.attach(&mut txn, false).await?;
         txn.commit().await?;
@@ -2079,7 +2080,7 @@ async fn remote_dpu_discovery_and_site_repair_reuse_a_lost_reply(
         let creator = creator(&fixture);
         // Keep a machine present without its loopback, so the finder negative
         // below depends on Pending ownership being excluded, not row absence.
-        let mut txn = fixture.env.pool.begin().await?;
+        let mut txn = fixture.env.pool.txn_begin().await?;
         db::machine::create(&mut txn, Some(&fixture.env.common_pools), &inputs.machine_id,
             ManagedHostState::Created, None, CURRENT_STATE_MODEL_VERSION).await?;
         txn.commit().await?;
@@ -2105,7 +2106,7 @@ async fn remote_dpu_discovery_and_site_repair_reuse_a_lost_reply(
 
         // Preflight has finished. Hold the caller interface so the real provider
         // reply can be saved while the entity transaction cannot attach it.
-        let mut interface_gate = fixture.env.pool.begin().await?;
+        let mut interface_gate = fixture.env.pool.txn_begin().await?;
         sqlx::query("SELECT id FROM machine_interfaces WHERE id = $1 FOR UPDATE")
             .bind(inputs.request.machine_interface_id.expect("DPU OOB interface"))
             .fetch_one(&mut *interface_gate).await?;
@@ -2142,7 +2143,7 @@ async fn remote_dpu_discovery_and_site_repair_reuse_a_lost_reply(
 
         // Losing the configuration field must preserve both finder ownership
         // and the reservation that Site Explorer restores on its next pass.
-        let mut txn = fixture.env.pool.begin().await?;
+        let mut txn = fixture.env.pool.txn_begin().await?;
         let mut cleared = before.value.clone();
         cleared.loopback_ip = None;
         assert_eq!(db::machine::try_update_network_config(
@@ -2299,7 +2300,7 @@ async fn remote_dpu_deletion_during_preparation_preserves_replacement(
         let (fixture, inputs) = fixture(database).await?;
         // Start with an existing row but no IPv4 loopback, so preparation
         // captures this lifetime before leaving the database for provider I/O.
-        let mut txn = fixture.env.pool.begin().await?;
+        let mut txn = fixture.env.pool.txn_begin().await?;
         db::machine::create(&mut txn, Some(&fixture.env.common_pools), &inputs.machine_id,
             ManagedHostState::Created, None, CURRENT_STATE_MODEL_VERSION).await?;
         let original_identity = db::machine::MachineCreationIdentity::capture(txn.as_mut(), &inputs.machine_id).await?;
@@ -2359,7 +2360,7 @@ async fn remote_dpu_discovery_rechecks_host_link_after_preparation(
         // An already-owned host NIC initially permits discovery to skip segment
         // locks. No DPU exists yet, so preparation still calls the provider.
         let host_interface_id = dpu_discover_dhcp(&fixture.env, &host_mac.to_string()).await;
-        let mut txn = fixture.env.pool.begin().await?;
+        let mut txn = fixture.env.pool.txn_begin().await?;
         let host_interface = db::machine_interface::find_one(&mut *txn, host_interface_id).await?;
         db::machine::get_or_create(
             &mut txn, Some(db::machine::MachineCreationPools::All(&fixture.env.common_pools)), &host_id, &host_interface, None,
@@ -2385,7 +2386,7 @@ async fn remote_dpu_discovery_rechecks_host_link_after_preparation(
 
         // Hold segment locks after that committed change. Discovery must wait
         // at this gate before writing any machine or interface rows.
-        let mut gate = fixture.env.pool.begin().await?;
+        let mut gate = fixture.env.pool.txn_begin().await?;
         db::machine_interface::lock_all_admin_segments(&mut gate).await?;
         let gate_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()").fetch_one(&mut *gate).await?;
         fixture.provider.allocate_pause.resume.notify_one();
@@ -2434,7 +2435,7 @@ async fn remote_dpu_stale_force_delete_preserves_same_id_replacement(
         let original_created = db::machine::MachineCreationIdentity::capture(&fixture.env.pool, &inputs.machine_id).await?.created();
         // Stop cleanup after its RPC has captured and admitted the old lifetime.
         // Replacement and stale cleanup then queue behind the same segment gate.
-        let mut gate = fixture.env.pool.begin().await?;
+        let mut gate = fixture.env.pool.txn_begin().await?;
         db::machine_interface::lock_all_admin_segments(&mut gate).await?;
         let gate_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()").fetch_one(&mut *gate).await?;
         let api = fixture.env.api.clone();
@@ -2450,7 +2451,7 @@ async fn remote_dpu_stale_force_delete_preserves_same_id_replacement(
         // transaction deliberately holds the segment lock while preparing on a
         // separate connection; replacement uses the shared consumer API rather
         // than another public discovery RPC that would need this same lock.
-        let mut replacement_txn = fixture.env.pool.begin().await?;
+        let mut replacement_txn = fixture.env.pool.txn_begin().await?;
         let replacement_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
             .fetch_one(&mut *replacement_txn).await?;
         let mut replacement = Box::pin(async {

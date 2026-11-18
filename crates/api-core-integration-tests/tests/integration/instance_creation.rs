@@ -38,8 +38,7 @@ async fn test_allocate_instance_with_labels(_: PgPoolOptions, options: PgConnect
     let txn = env
         .harness
         .api()
-        .database_connection
-        .begin()
+        .txn_begin()
         .await
         .expect("Unable to create transaction on database pool");
     txn.commit().await.unwrap();
@@ -137,8 +136,7 @@ async fn test_instance_hostname_creation(_: PgPoolOptions, options: PgConnectOpt
     let txn = env
         .harness
         .api()
-        .database_connection
-        .begin()
+        .txn_begin()
         .await
         .expect("Unable to create transaction on database pool");
     txn.commit().await.unwrap();
@@ -168,8 +166,7 @@ async fn test_instance_hostname_creation(_: PgPoolOptions, options: PgConnectOpt
     let txn = env
         .harness
         .api()
-        .database_connection
-        .begin()
+        .txn_begin()
         .await
         .expect("Unable to create transaction on database pool");
     txn.commit().await.unwrap();

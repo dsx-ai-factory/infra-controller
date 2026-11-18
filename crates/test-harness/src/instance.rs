@@ -56,7 +56,7 @@ impl TestInstance {
     }
 
     /// Reloads this instance within the caller's transaction.
-    pub async fn db_instance(&self, txn: &mut sqlx::PgTransaction<'_>) -> InstanceSnapshot {
+    pub async fn db_instance(&self, txn: &mut db::Transaction<'_>) -> InstanceSnapshot {
         db::instance::find_by_id(txn.as_mut(), self.id)
             .await
             .unwrap()

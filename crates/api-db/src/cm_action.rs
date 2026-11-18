@@ -12,7 +12,7 @@ use carbide_uuid::power_shelf::PowerShelfId;
 use carbide_uuid::rack::RackId;
 use carbide_uuid::switch::SwitchId;
 use serde::{Deserialize, Serialize};
-use sqlx::{Acquire, PgConnection, PgPool};
+use sqlx::{PgConnection, PgPool};
 use trace_propagation::correlation::{self, TraceId};
 use uuid::Uuid;
 
@@ -205,10 +205,7 @@ pub(crate) async fn set_maintenance(
             "rack maintenance requires rack-specific update helpers".into(),
         ));
     }
-    let mut txn = connection
-        .begin()
-        .await
-        .map_err(|error| DatabaseError::query("cm_action::begin", error))?;
+    let mut txn = crate::Transaction::begin_inner(connection).await?;
     if !lock(&mut txn, target).await? {
         let (table, _, id, _) = target.parts();
         return Err(DatabaseError::NotFoundError { kind: table, id });
@@ -235,9 +232,7 @@ pub(crate) async fn set_maintenance(
         .await
         .map_err(|error| DatabaseError::query(&query, error))?;
     reconcile(&mut txn, target).await?;
-    txn.commit()
-        .await
-        .map_err(|error| DatabaseError::query("cm_action::commit", error))?;
+    txn.commit().await?;
     Ok(())
 }
 
@@ -255,14 +250,9 @@ pub(crate) async fn clear_maintenance(
             "rack maintenance requires rack-specific update helpers".into(),
         ));
     }
-    let mut txn = connection
-        .begin()
-        .await
-        .map_err(|error| DatabaseError::query("cm_action::begin", error))?;
+    let mut txn = crate::Transaction::begin_inner(connection).await?;
     if !lock(&mut txn, target).await? {
-        txn.rollback()
-            .await
-            .map_err(|error| DatabaseError::query("cm_action::rollback", error))?;
+        txn.rollback().await?;
         return Ok(crate::ConditionalWrite::NotApplied(
             crate::MaintenanceRequestNotCurrent,
         ));
@@ -284,9 +274,7 @@ pub(crate) async fn clear_maintenance(
         == 1;
     complete(&mut txn, action_id).await?;
     reconcile(&mut txn, target).await?;
-    txn.commit()
-        .await
-        .map_err(|error| DatabaseError::query("cm_action::commit", error))?;
+    txn.commit().await?;
     Ok(if cleared {
         crate::ConditionalWrite::Applied(())
     } else {
@@ -335,6 +323,7 @@ mod tests {
     use model::switch::{SwitchControllerState, SwitchMaintenanceOperation};
 
     use super::*;
+    use crate::TransactionVending as _;
 
     #[tokio::test]
     async fn large_maintenance_future_does_not_expand_correlation_wrapper() {
@@ -519,7 +508,7 @@ mod tests {
             )
             .await?
         };
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
         crate::switch::set_switch_maintenance_requested(
             &mut txn,
             switch.id,

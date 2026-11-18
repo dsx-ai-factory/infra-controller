@@ -41,7 +41,7 @@ use model::vpc::{
     ChangeVpcRoutingProfile, NewVpc, UpdateVpc, UpdateVpcVirtualization,
     VpcRoutingProfileOverrides, VpcStatus, VpcVirtualizationTypeCapabilities,
 };
-use sqlx::{PgConnection, PgTransaction};
+use sqlx::PgConnection;
 use tonic::{Request, Response, Status};
 
 use super::{tenant_prefix_overlap, vni};
@@ -206,7 +206,7 @@ async fn create_vpc(
         if let VpcCreation::Configured(new_vpc) = &creation {
             // Hold this lock only while checking and inserting, never during
             // provider work. Another startup may have created the name meanwhile.
-            db::vpc::lock_initial_name(txn.as_mut(), &new_vpc.metadata.name).await?;
+            db::vpc::lock_initial_name(&mut txn, &new_vpc.metadata.name).await?;
             if !db::vpc::find_by_name(&mut txn, &new_vpc.metadata.name)
                 .await?
                 .is_empty()
@@ -896,7 +896,7 @@ struct RoutingChangeAdmission<'a> {
 /// destination's current access, attachments, ownership and pool membership.
 async fn routing_change_admission<'a>(
     api: &'a Api,
-    txn: &mut PgTransaction<'_>,
+    txn: &mut db::Transaction<'_>,
     change: &ChangeVpcRoutingProfile,
 ) -> Result<RoutingChangeAdmission<'a>, CarbideError> {
     let observed_vpc = db::vpc::find_by(
@@ -1261,7 +1261,7 @@ pub(crate) async fn release_inactive_vni(
 /// Commit the caller's transaction before waiting on its returned cleanup handle.
 async fn release_inactive_vpc_vni(
     api: &Api,
-    txn: &mut PgTransaction<'_>,
+    txn: &mut db::Transaction<'_>,
     vpc: &model::vpc::Vpc,
     expected_inactive_vni: u32,
 ) -> Result<(i32, AllocationCleanup), CarbideError> {
@@ -2181,20 +2181,21 @@ mod tests {
             env.api.work_lock_manager_handle.clone(),
         )
         .build();
-        let mut blocker = pool.begin().await?;
+        use db::TransactionVending as _;
+        let mut blocker = pool.txn_begin().await?;
         sqlx::query("SELECT pg_advisory_xact_lock(8555)")
-            .execute(&mut *blocker)
+            .execute(blocker.as_mut())
             .await?;
         let pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
-            .fetch_one(&mut *blocker)
+            .fetch_one(blocker.as_mut())
             .await?;
         let phase = run_vni_phase(&api, "native timing test", |mut txn| async move {
             let timeout: String = sqlx::query_scalar("SHOW statement_timeout")
-                .fetch_one(txn.as_pgconn())
+                .fetch_one(txn.as_mut())
                 .await
                 .map_err(|error| db::DatabaseError::query("read statement timeout", error))?;
             sqlx::query("SELECT pg_advisory_xact_lock(8555)")
-                .execute(txn.as_pgconn())
+                .execute(txn.as_mut())
                 .await
                 .map_err(|error| db::DatabaseError::query("wait for advisory lock", error))?;
             txn.commit().await?;

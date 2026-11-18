@@ -188,13 +188,9 @@ pub(crate) async fn find_switch(
     request: Request<rpc::SwitchQuery>,
 ) -> Result<Response<rpc::SwitchList>, Status> {
     let query = request.into_inner();
-    let mut txn = api
-        .database_connection
-        .begin()
-        .await
-        .map_err(|e| CarbideError::Internal {
-            message: format!("Database error: {}", e),
-        })?;
+    let mut txn = api.txn_begin().await.map_err(|e| CarbideError::Internal {
+        message: format!("Database error: {}", e),
+    })?;
 
     // Handle ID search (takes precedence)
     let switch_list = if let Some(id) = query.switch_id {
@@ -483,13 +479,9 @@ pub(crate) async fn delete_switch(
         }
     };
 
-    let mut txn = api
-        .database_connection
-        .begin()
-        .await
-        .map_err(|e| CarbideError::Internal {
-            message: format!("Database error: {}", e),
-        })?;
+    let mut txn = api.txn_begin().await.map_err(|e| CarbideError::Internal {
+        message: format!("Database error: {}", e),
+    })?;
 
     let mut switch_list = db_switch::find_by(
         &mut txn,

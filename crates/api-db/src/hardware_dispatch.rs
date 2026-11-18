@@ -168,6 +168,7 @@ mod tests {
     use sqlx::PgPool;
 
     use super::*;
+    use crate::TransactionVending as _;
 
     /// Keep the stored command independent of an API or Scout connection.
     fn owner(machine_id: MachineId) -> HardwareDispatchOwner {
@@ -180,7 +181,7 @@ mod tests {
     /// Use ordinary machine creation so snapshot loading sees a valid Ready
     /// host, while the additive nullable column starts without a command.
     async fn seed_host(pool: &PgPool, host: HostMachineId) {
-        let mut txn = pool.begin().await.unwrap();
+        let mut txn = pool.txn_begin().await.unwrap();
         crate::machine::create(
             txn.as_mut(),
             None,
@@ -207,7 +208,7 @@ mod tests {
         assert!(before.status.hardware_dispatch.is_none());
         let sender = owner(host.into());
         let token = uuid::Uuid::new_v4();
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
         assert_eq!(begin(txn.as_mut(), token, &sender).await?, Some(host));
         txn.commit().await?;
 
@@ -222,7 +223,7 @@ mod tests {
         assert_eq!(saved.token, token);
         assert_eq!(saved.owner, sender);
         assert!(saved.is_pending());
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
         assert!(matches!(
             begin(txn.as_mut(), uuid::Uuid::new_v4(), &sender).await,
             Err(DatabaseError::FailedPrecondition(_))
@@ -241,7 +242,7 @@ mod tests {
             (token, &other_machine),
             (uuid::Uuid::new_v4(), &sender),
         ] {
-            let mut txn = pool.begin().await?;
+            let mut txn = pool.txn_begin().await?;
             assert!(!settle(txn.as_mut(), host, candidate, sender).await?);
             txn.commit().await?;
             let mut conn = pool.acquire().await?;
@@ -250,7 +251,7 @@ mod tests {
 
         // Exact completion permits one replacement, but delayed completion of
         // the old request cannot release that newer command.
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
         assert!(settle(txn.as_mut(), host, token, &sender).await?);
         let settled = find(txn.as_mut(), token).await?.unwrap().1;
         assert!(!settle(txn.as_mut(), host, token, &sender).await?);
@@ -282,7 +283,7 @@ mod tests {
             .bind(Json(state))
             .execute(&pool)
             .await?;
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
         assert!(matches!(
             begin(txn.as_mut(), uuid::Uuid::new_v4(), &owner(host.into())).await,
             Err(DatabaseError::FailedPrecondition(_))
@@ -307,7 +308,7 @@ mod tests {
         seed_host(&pool, host).await;
         let sender = owner(host.into());
         let token = uuid::Uuid::new_v4();
-        let mut first = pool.begin().await.unwrap();
+        let mut first = pool.txn_begin().await.unwrap();
         let blocker: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
             .fetch_one(first.as_mut())
             .await
@@ -317,7 +318,7 @@ mod tests {
         let second_pool = pool.clone();
         let second_owner = sender.clone();
         let waiter = tokio::spawn(async move {
-            let mut second = second_pool.begin().await.unwrap();
+            let mut second = second_pool.txn_begin().await.unwrap();
             let result = begin(second.as_mut(), uuid::Uuid::new_v4(), &second_owner).await;
             second.rollback().await.unwrap();
             result

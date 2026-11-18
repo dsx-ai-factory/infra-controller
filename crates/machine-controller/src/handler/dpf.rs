@@ -30,6 +30,7 @@ use carbide_dpf::{
 };
 use carbide_redfish::state_handler::state_handler_platform_error as platform_error;
 use carbide_uuid::machine::{DpuMachineId, MachineId, MachineIdSubtypeTrait};
+use db::TransactionVending as _;
 use model::expected_machine::ExpectedMachine;
 use model::machine::{
     DpfState, DpuInitState, DpuMachine, DpuReprovisionStates, FailureCause, FailureDetails,
@@ -1057,7 +1058,12 @@ async fn handle_dpf_reprovisioning(
         )?;
 
         let outcome = StateHandlerOutcome::transition(next);
-        let mut txn = ctx.services.db_pool.begin().await?;
+        let mut txn = ctx
+            .services
+            .db_pool
+            .txn_begin()
+            .await
+            .map_err(StateHandlerError::from_transaction)?;
         db::machine::mark_machine_ingestion_done_with_dpf(&mut txn, &state.host_snapshot.id)
             .await?;
         return Ok(outcome.with_txn(txn));

@@ -28,6 +28,7 @@ use common::api_fixtures::{
     create_managed_host_multi_dpu, create_managed_host_with_hardware_info_template,
     create_test_env, reboot_completed,
 };
+use db::TransactionVending as _;
 use libredfish::{EnabledDisabled, SystemPowerControl};
 use model::instance::status::tenant::TenantState;
 use model::machine::{
@@ -276,7 +277,7 @@ async fn prepare_dpu_reprovision_host_boot_check(
     mh: &TestManagedHost,
 ) -> TestMachine<DpuMachineId> {
     let dpu_machine = mh.dpu();
-    let mut txn = env.pool.begin().await.unwrap();
+    let mut txn = env.pool.txn_begin().await.unwrap();
     db::machine::update_state(
         &mut txn,
         &mh.id,
@@ -296,7 +297,7 @@ async fn prepare_dpu_reprovision_host_boot_check(
 async fn test_dpu_for_set_clear_reprovisioning(pool: sqlx::PgPool) {
     let env = create_test_env(pool).await;
     let mh = common::api_fixtures::create_managed_host(&env).await;
-    let mut txn = env.pool.begin().await.unwrap();
+    let mut txn = env.pool.txn_begin().await.unwrap();
     let dpu = mh.dpu().db_machine(&mut txn).await;
 
     assert!(dpu.reprovision_requested.is_none(),);
@@ -498,7 +499,7 @@ async fn test_dpu_reprovision_viking_finishes_parked_boot_order_recovery(pool: s
             power_state: PowerState::Off,
         },
     ));
-    let mut txn = env.pool.begin().await.unwrap();
+    let mut txn = env.pool.txn_begin().await.unwrap();
     db::machine::update_state(&mut txn, &mh.id, &parked_recovery)
         .await
         .unwrap();
@@ -588,7 +589,7 @@ async fn test_dpu_reprovision_viking_finishes_parked_boot_order_recovery(pool: s
     // Once BIOS is intact, the same safe terminal skips boot-order
     // verification and completes the repair.
     env.redfish_sim.set_is_bios_setup(true);
-    let mut txn = env.pool.begin().await.unwrap();
+    let mut txn = env.pool.txn_begin().await.unwrap();
     db::machine::update_state(&mut txn, &mh.id, &safe_terminal)
         .await
         .unwrap();
@@ -613,7 +614,7 @@ async fn test_dpu_reprovision_viking_finishes_parked_boot_order_recovery(pool: s
 async fn test_dpu_for_reprovisioning_fail_if_maintenance_not_set(pool: sqlx::PgPool) {
     let env = create_test_env(pool).await;
     let mh = common::api_fixtures::create_managed_host(&env).await;
-    let mut txn = env.pool.begin().await.unwrap();
+    let mut txn = env.pool.txn_begin().await.unwrap();
     let dpu = mh.dpu().db_machine(&mut txn).await;
 
     assert!(dpu.reprovision_requested.is_none(),);
@@ -880,7 +881,7 @@ async fn test_dpu_agent_control_uses_host_state_and_requires_attachment(pool: sq
     let env = create_test_env(pool).await;
     let mh = create_managed_host(&env).await;
     let dpu_id = mh.dpu_ids[0];
-    let mut txn = env.pool.begin().await.unwrap();
+    let mut txn = env.pool.txn_begin().await.unwrap();
     let host = mh.host().db_machine(&mut txn).await;
     let dpu = mh.dpu().db_machine(&mut txn).await;
 
@@ -909,7 +910,7 @@ async fn test_dpu_agent_control_uses_host_state_and_requires_attachment(pool: sq
         .into_inner();
     assert!(matches!(response.action, Some(Action::Discovery(_))));
 
-    let mut txn = env.pool.begin().await.unwrap();
+    let mut txn = env.pool.txn_begin().await.unwrap();
     sqlx::query("UPDATE machines SET controller_state = '{}'::jsonb WHERE id = $1")
         .bind(dpu_id)
         .execute(txn.as_mut())
@@ -932,7 +933,7 @@ async fn test_dpu_agent_control_uses_host_state_and_requires_attachment(pool: sq
         .into_inner();
     assert!(matches!(response.action, Some(Action::Discovery(_))));
 
-    let mut txn = env.pool.begin().await.unwrap();
+    let mut txn = env.pool.txn_begin().await.unwrap();
     sqlx::query(
         "UPDATE machine_interfaces SET attached_dpu_machine_id = NULL
          WHERE attached_dpu_machine_id = $1 AND machine_id != $1",
@@ -963,7 +964,7 @@ async fn test_agent_control_updates_scout_contact_only_for_host_requests(pool: s
     let stale_contact_time = "2020-01-01T00:00:00Z"
         .parse::<chrono::DateTime<Utc>>()
         .unwrap();
-    let mut txn = env.pool.begin().await.unwrap();
+    let mut txn = env.pool.txn_begin().await.unwrap();
     db::machine::update_state(&mut txn, &mh.id.into(), &ManagedHostState::Ready)
         .await
         .unwrap();
@@ -989,7 +990,7 @@ async fn test_agent_control_updates_scout_contact_only_for_host_requests(pool: s
             .await
             .unwrap();
 
-        let mut txn = env.pool.begin().await.unwrap();
+        let mut txn = env.pool.txn_begin().await.unwrap();
         let host_contact_time = mh
             .host()
             .db_machine(&mut txn)
@@ -1020,7 +1021,7 @@ async fn test_agent_control_updates_scout_contact_only_for_host_requests(pool: s
 async fn test_dpu_for_reprovisioning_with_no_firmware_upgrade(pool: sqlx::PgPool) {
     let env = create_test_env(pool).await;
     let mh = common::api_fixtures::create_managed_host(&env).await;
-    let mut txn = env.pool.begin().await.unwrap();
+    let mut txn = env.pool.txn_begin().await.unwrap();
     let dpu = mh.dpu().db_machine(&mut txn).await;
 
     assert!(dpu.reprovision_requested.is_none(),);
@@ -1125,7 +1126,7 @@ async fn test_instance_reprov_with_firmware_upgrade_impl(pool: sqlx::PgPool) {
         .build_and_return()
         .await;
 
-    let mut txn = env.pool.begin().await.unwrap();
+    let mut txn = env.pool.txn_begin().await.unwrap();
     let dpu_interface = mh.dpu().first_interface(&mut txn).await;
     txn.commit().await.unwrap();
 
@@ -1152,7 +1153,7 @@ async fn instance_reprov_start(
         .await
         .unwrap();
 
-    let mut txn = env.pool.begin().await.unwrap();
+    let mut txn = env.pool.txn_begin().await.unwrap();
     let dpu = mh.dpu().db_machine(&mut txn).await;
     assert_eq!(dpu.reprovision_requested.unwrap().initiator, "AdminCli");
     txn.commit().await.unwrap();
@@ -1168,7 +1169,7 @@ async fn instance_reprov_start(
     env.run_machine_state_controller_iteration().await;
     env.run_machine_state_controller_iteration().await;
 
-    let mut txn = env.pool.begin().await.unwrap();
+    let mut txn = env.pool.txn_begin().await.unwrap();
     let dpu = mh.dpu().db_machine(&mut txn).await;
     assert!(matches!(
         dpu.current_state(),
@@ -1194,7 +1195,7 @@ async fn instance_reprov_install_dpu_os(
 
     env.run_machine_state_controller_iteration().await;
 
-    let mut txn = env.pool.begin().await.unwrap();
+    let mut txn = env.pool.txn_begin().await.unwrap();
     let dpu = mh.dpu().db_machine(&mut txn).await;
     assert_eq!(
         dpu.current_state(),
@@ -1226,7 +1227,7 @@ async fn instance_reprov_install_dpu_os(
     );
     mh.dpu().discovery_completed().await;
 
-    let mut txn = env.pool.begin().await.unwrap();
+    let mut txn = env.pool.txn_begin().await.unwrap();
     env.run_machine_state_controller_iteration().await;
     let dpu = mh.dpu().db_machine(&mut txn).await;
     assert_eq!(
@@ -1246,7 +1247,7 @@ async fn instance_reprov_install_dpu_os(
         "This state assumes an OS is provisioned and will exit into the OS in 5 seconds."
     ));
 
-    let mut txn = env.pool.begin().await.unwrap();
+    let mut txn = env.pool.txn_begin().await.unwrap();
     env.run_machine_state_controller_iteration().await;
     let dpu = mh.dpu().db_machine(&mut txn).await;
     assert_eq!(
@@ -1257,7 +1258,7 @@ async fn instance_reprov_install_dpu_os(
 
     assert_reprov_tenant_state(env, mh, tinstance, TenantState::Updating).await;
 
-    let mut txn = env.pool.begin().await.unwrap();
+    let mut txn = env.pool.txn_begin().await.unwrap();
     env.run_machine_state_controller_iteration().await;
     let dpu = mh.dpu().db_machine(&mut txn).await;
     assert_eq!(
@@ -1268,7 +1269,7 @@ async fn instance_reprov_install_dpu_os(
 
     assert_reprov_tenant_state(env, mh, tinstance, TenantState::Updating).await;
 
-    let mut txn = env.pool.begin().await.unwrap();
+    let mut txn = env.pool.txn_begin().await.unwrap();
     env.run_machine_state_controller_iteration().await;
     let dpu = mh.dpu().db_machine(&mut txn).await;
     assert_eq!(
@@ -1320,7 +1321,7 @@ async fn assert_reprov_tenant_state(
     tinstance: &TestInstance<'_, '_>,
     expected: TenantState,
 ) {
-    let mut txn = env.pool.begin().await.unwrap();
+    let mut txn = env.pool.txn_begin().await.unwrap();
     let host = mh.host().db_machine(&mut txn).await;
     let db_instance = tinstance.db_instance(&mut txn).await;
     txn.commit().await.unwrap();
@@ -1375,7 +1376,7 @@ async fn instance_reprov_without_firmware_upgrade(pool: sqlx::PgPool) {
         .build()
         .await;
 
-    let mut txn = env.pool.begin().await.unwrap();
+    let mut txn = env.pool.txn_begin().await.unwrap();
     let dpu_interface = mh.dpu().first_interface(&mut txn).await;
     let host_interface = mh.host().first_interface(&mut txn).await;
     let dpu_arch = MachineArchitecture::Arm;
@@ -1535,7 +1536,7 @@ async fn instance_reprov_without_firmware_upgrade(pool: sqlx::PgPool) {
 async fn test_dpu_for_set_but_clear_failed(pool: sqlx::PgPool) {
     let env = create_test_env(pool).await;
     let mh = common::api_fixtures::create_managed_host(&env).await;
-    let mut txn = env.pool.begin().await.unwrap();
+    let mut txn = env.pool.txn_begin().await.unwrap();
     let dpu = mh.dpu().db_machine(&mut txn).await;
     assert!(dpu.reprovision_requested.is_none(),);
 
@@ -1575,7 +1576,7 @@ async fn test_dpu_for_set_but_clear_failed(pool: sqlx::PgPool) {
             .is_err()
     );
 
-    let mut txn = env.pool.begin().await.unwrap();
+    let mut txn = env.pool.txn_begin().await.unwrap();
     let dpu = mh.dpu().db_machine(&mut txn).await;
     assert!(dpu.reprovision_requested.is_some(),);
 }
@@ -1590,7 +1591,7 @@ async fn test_reboot_retry(pool: sqlx::PgPool) {
 async fn test_reboot_retry_impl(pool: sqlx::PgPool) {
     let env = create_test_env(pool).await;
     let mh = common::api_fixtures::create_managed_host(&env).await;
-    let mut txn = env.pool.begin().await.unwrap();
+    let mut txn = env.pool.txn_begin().await.unwrap();
     let dpu = mh.dpu().db_machine(&mut txn).await;
 
     assert!(dpu.reprovision_requested.is_none(),);
@@ -1659,7 +1660,7 @@ async fn test_reboot_retry_impl(pool: sqlx::PgPool) {
 
     // Retry 2
     update_time_params(&env.pool, &dpu, 2, None).await;
-    let mut txn = env.pool.begin().await.unwrap();
+    let mut txn = env.pool.txn_begin().await.unwrap();
     let dpu_ = mh.dpu().db_machine(&mut txn).await;
 
     assert!(matches!(
@@ -1715,7 +1716,7 @@ async fn test_reboot_retry_impl(pool: sqlx::PgPool) {
 async fn test_reboot_no_retry_during_firmware_update(pool: sqlx::PgPool) {
     let env = create_test_env(pool).await;
     let mh = common::api_fixtures::create_managed_host(&env).await;
-    let mut txn = env.pool.begin().await.unwrap();
+    let mut txn = env.pool.txn_begin().await.unwrap();
     let dpu = mh.dpu().db_machine(&mut txn).await;
 
     assert!(dpu.reprovision_requested.is_none(),);
@@ -1774,7 +1775,7 @@ async fn test_reboot_no_retry_during_firmware_update(pool: sqlx::PgPool) {
 
     env.run_machine_state_controller_iteration().await;
 
-    let mut txn: sqlx::Transaction<'_, sqlx::Postgres> = env.pool.begin().await.unwrap();
+    let mut txn: db::Transaction<'_> = env.pool.txn_begin().await.unwrap();
     let host = mh.host().db_machine(&mut txn).await;
     let dpu = mh.dpu().db_machine(&mut txn).await;
     let last_reboot_requested = host.status.last_reboot_requested.as_ref().unwrap();
@@ -1797,7 +1798,7 @@ async fn test_reboot_no_retry_during_firmware_update(pool: sqlx::PgPool) {
 async fn test_clear_with_function_call(pool: sqlx::PgPool) {
     let env = create_test_env(pool).await;
     let mh = common::api_fixtures::create_managed_host(&env).await;
-    let mut txn = env.pool.begin().await.unwrap();
+    let mut txn = env.pool.txn_begin().await.unwrap();
     let dpu = mh.dpu().db_machine(&mut txn).await;
 
     txn.commit().await.unwrap();
@@ -1807,20 +1808,20 @@ async fn test_clear_with_function_call(pool: sqlx::PgPool) {
 
     mh.dpu().trigger_dpu_reprovisioning(Mode::Set, true).await;
 
-    let mut txn = env.pool.begin().await.unwrap();
+    let mut txn = env.pool.txn_begin().await.unwrap();
     assert!(
         db::machine::clear_dpu_reprovisioning_request(&mut txn, &dpu.id, true)
             .await
             .is_ok()
     );
     txn.rollback().await.unwrap();
-    let mut txn = env.pool.begin().await.unwrap();
+    let mut txn = env.pool.txn_begin().await.unwrap();
     db::machine::update_dpu_reprovision_start_time(&dpu.id, &mut txn)
         .await
         .unwrap();
     txn.commit().await.unwrap();
 
-    let mut txn = env.pool.begin().await.unwrap();
+    let mut txn = env.pool.txn_begin().await.unwrap();
     assert!(
         db::machine::clear_dpu_reprovisioning_request(&mut txn, &dpu.id, true)
             .await
@@ -1833,7 +1834,7 @@ async fn test_clear_with_function_call(pool: sqlx::PgPool) {
 async fn test_clear_maintenance_when_reprov_is_set(pool: sqlx::PgPool) {
     let env = create_test_env(pool).await;
     let mh = common::api_fixtures::create_managed_host(&env).await;
-    let mut txn = env.pool.begin().await.unwrap();
+    let mut txn = env.pool.txn_begin().await.unwrap();
     let dpu = mh.dpu().db_machine(&mut txn).await;
 
     txn.commit().await.unwrap();
@@ -1888,7 +1889,7 @@ async fn test_dpu_reset(pool: sqlx::PgPool) {
 async fn test_restart_dpu_reprov(pool: sqlx::PgPool) {
     let env = create_test_env(pool).await;
     let mh = common::api_fixtures::create_managed_host(&env).await;
-    let mut txn = env.pool.begin().await.unwrap();
+    let mut txn = env.pool.txn_begin().await.unwrap();
     let dpu = mh.dpu().db_machine(&mut txn).await;
 
     txn.commit().await.unwrap();
@@ -1917,7 +1918,7 @@ async fn test_restart_dpu_reprov(pool: sqlx::PgPool) {
         env.run_machine_state_controller_iteration().await;
     }
 
-    let mut txn = env.pool.begin().await.unwrap();
+    let mut txn = env.pool.txn_begin().await.unwrap();
 
     let dpu = mh.dpu().db_machine(&mut txn).await;
     assert_eq!(
@@ -1982,7 +1983,7 @@ async fn test_restart_dpu_reprov_unassigned_host_boot_failure(pool: sqlx::PgPool
     mh.mark_machine_for_updates().await;
 
     let failed_at = Utc::now();
-    let mut txn = env.pool.begin().await.unwrap();
+    let mut txn = env.pool.txn_begin().await.unwrap();
     db::machine::trigger_dpu_reprovisioning_request(&dpu_machine.id, &mut txn, "AdminCli", true)
         .await
         .unwrap();
@@ -2042,7 +2043,7 @@ async fn test_dpu_for_reprovisioning_with_firmware_upgrade_multidpu_onedpu_repro
 ) {
     let env = create_test_env(pool).await;
     let mh = create_managed_host_multi_dpu(&env, 2).await;
-    let mut txn = env.pool.begin().await.unwrap();
+    let mut txn = env.pool.txn_begin().await.unwrap();
     let dpus = mh.dpu_db_machines(&mut txn).await;
     assert!(dpus[0].reprovision_requested.is_none(),);
 
@@ -2176,7 +2177,7 @@ async fn test_dpu_for_reprovisioning_with_firmware_upgrade_multidpu_onedpu_repro
 async fn test_dpu_for_reprovisioning_with_firmware_upgrade_multidpu_bothdpu(pool: sqlx::PgPool) {
     let env = create_test_env(pool).await;
     let mh = create_managed_host_multi_dpu(&env, 2).await;
-    let mut txn = env.pool.begin().await.unwrap();
+    let mut txn = env.pool.txn_begin().await.unwrap();
     let dpus = mh.dpu_db_machines(&mut txn).await;
     assert!(dpus[0].reprovision_requested.is_none());
 
@@ -2337,7 +2338,7 @@ async fn test_instance_reprov_restart_failed_impl(pool: sqlx::PgPool) {
         .build()
         .await;
 
-    let mut txn = env.pool.begin().await.unwrap();
+    let mut txn = env.pool.txn_begin().await.unwrap();
     let dpu_interface = mh.dpu().first_interface(&mut txn).await;
     let host_interface = mh.host().first_interface(&mut txn).await;
     let dpu_arch = MachineArchitecture::Arm;
@@ -2482,7 +2483,7 @@ async fn test_instance_reprov_restart_failed_impl(pool: sqlx::PgPool) {
         rpc::forge::forge_agent_control_response::LegacyAction::Noop as i32
     );
 
-    let mut txn = env.pool.begin().await.unwrap();
+    let mut txn = env.pool.txn_begin().await.unwrap();
     let dpu = mh.dpu().db_machine(&mut txn).await;
     let failed_at = Utc::now();
     let deserialized = FailureDetails {
@@ -2625,7 +2626,7 @@ async fn test_dpu_for_reprovisioning_cannot_restart_if_not_started(pool: sqlx::P
     let mh = common::api_fixtures::create_managed_host(&env).await;
     mh.mark_machine_for_updates().await;
 
-    let mut txn = env.pool.begin().await.unwrap();
+    let mut txn = env.pool.txn_begin().await.unwrap();
     let dpu = mh.dpu().db_machine(&mut txn).await;
 
     assert!(dpu.reprovision_requested.is_none(),);

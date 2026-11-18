@@ -281,6 +281,7 @@ pub async fn final_delete(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::TransactionVending as _;
 
     #[crate::sqlx_test]
     async fn spx_labels_migration_preserves_existing_rows_and_old_writers(pool: sqlx::PgPool) {
@@ -327,7 +328,7 @@ mod tests {
 
     #[crate::sqlx_test]
     async fn missing_partition_delete_preserves_row_not_found(pool: sqlx::PgPool) {
-        let mut txn = pool.begin().await.expect("begin deletion");
+        let mut txn = pool.txn_begin().await.expect("begin deletion");
         let id = uuid::Uuid::new_v4().into();
         let error = lock_for_delete(&mut txn, id)
             .await

@@ -26,7 +26,7 @@ use model::vpc::{
     ChangeVpcRoutingProfile, NewVpc, PowerResourceGroupUpdate, UpdateVpc, UpdateVpcVirtualization,
     Vpc, VpcStatus,
 };
-use sqlx::{PgConnection, PgTransaction};
+use sqlx::PgConnection;
 
 use super::{ColumnInfo, FilterableQueryBuilder, ObjectColumnFilter, network_segment, vpc};
 use crate::db_read::DbReader;
@@ -358,7 +358,7 @@ pub async fn change_routing_profile(
 /// Serializes configured VPC insertion for one name across startup instances.
 /// Recheck the name after taking this transaction-scoped lock. API-created
 /// VPCs can still share names and do not participate in this startup-only lock.
-pub async fn lock_initial_name(txn: &mut PgTransaction<'_>, name: &str) -> DatabaseResult<()> {
+pub async fn lock_initial_name(txn: &mut crate::Transaction<'_>, name: &str) -> DatabaseResult<()> {
     let query = "SELECT pg_advisory_xact_lock(hashtextextended('initial-vpc:' || $1, 0))";
     sqlx::query(query)
         .bind(name)
@@ -544,9 +544,9 @@ pub async fn update(value: &UpdateVpc, txn: &mut PgConnection) -> DatabaseResult
 
 pub async fn update_virtualization(
     value: &UpdateVpcVirtualization,
-    // Note: This is a PgTransaction, not a PgConnection, because we will be doing table locking,
+    // Note: This is a crate::Transaction, not a PgConnection, because we will be doing table locking,
     // which must happen in a transaction.
-    txn: &mut PgTransaction<'_>,
+    txn: &mut crate::Transaction<'_>,
 ) -> DatabaseResult<Vpc> {
     let query = format!(
         "UPDATE vpcs
@@ -654,6 +654,7 @@ pub async fn increment_vpc_version(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::TransactionVending as _;
 
     #[crate::sqlx_test]
     async fn routing_profile_migration_preserves_rows_and_active_vni_uniqueness(
@@ -715,7 +716,7 @@ mod tests {
     async fn try_delete_ignores_references_to_already_deleted_vpc(pool: sqlx::PgPool) {
         let vpc_id = VpcId::new();
         let machine_id = uuid::Uuid::new_v4();
-        let mut txn = pool.begin().await.unwrap();
+        let mut txn = pool.txn_begin().await.unwrap();
         sqlx::query(
             "INSERT INTO vpcs (id, name, version, deleted) \
              VALUES ($1, 'already-deleted-vpc', 'V1-T0', NOW())",

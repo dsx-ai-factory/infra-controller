@@ -21,7 +21,7 @@
 use carbide_uuid::site_prefix::SitePrefixId;
 use chrono::{DateTime, Utc};
 use config_version::{ConfigVersion, Versioned};
-use db::{ConditionalWrite, ControllerStateNotCurrent, DatabaseError};
+use db::{ConditionalWrite, ControllerStateNotCurrent, DatabaseError, TransactionVending as _};
 use model::StateSla;
 use model::controller_outcome::PersistentStateHandlerOutcome;
 use model::site_prefix::{
@@ -221,7 +221,11 @@ impl StateHandler for SitePrefixReadiness {
         ) {
             return Ok(StateHandlerOutcome::do_nothing());
         }
-        let mut txn = ctx.services.begin().await?;
+        let mut txn = ctx
+            .services
+            .txn_begin()
+            .await
+            .map_err(StateHandlerError::from_transaction)?;
         // Retirement drains retained children; it neither waits for
         // another DPU acknowledgement nor generates a new isolation request.
         let requested_at = if state.status.lifecycle_state == SitePrefixLifecycleState::Provisioning

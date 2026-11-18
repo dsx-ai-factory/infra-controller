@@ -193,13 +193,9 @@ pub(crate) async fn add_expected_switch(
 
     validate_expected_switch(&mut switch, true)?;
 
-    let mut txn = api
-        .database_connection
-        .begin()
-        .await
-        .map_err(|e| CarbideError::Internal {
-            message: format!("Database error: {}", e),
-        })?;
+    let mut txn = api.txn_begin().await.map_err(|e| CarbideError::Internal {
+        message: format!("Database error: {}", e),
+    })?;
 
     db_expected_switch::create(&mut txn, switch)
         .await
@@ -224,13 +220,9 @@ pub(crate) async fn delete_expected_switch(
                 CarbideError::InvalidArgument(e.to_string())
             })?;
 
-    let mut txn = api
-        .database_connection
-        .begin()
-        .await
-        .map_err(|e| CarbideError::Internal {
-            message: format!("Database error: {}", e),
-        })?;
+    let mut txn = api.txn_begin().await.map_err(|e| CarbideError::Internal {
+        message: format!("Database error: {}", e),
+    })?;
 
     db_expected_switch::delete(&mut txn, &req)
         .await
@@ -258,13 +250,9 @@ pub(crate) async fn update_expected_switch(
         |fields| fields.contains(&ExpectedSwitchUpdateField::NvosInterfaces),
     );
 
-    let mut txn = api
-        .database_connection
-        .begin()
-        .await
-        .map_err(|e| CarbideError::Internal {
-            message: format!("Database error: {}", e),
-        })?;
+    let mut txn = api.txn_begin().await.map_err(|e| CarbideError::Internal {
+        message: format!("Database error: {}", e),
+    })?;
 
     let mut switch: ExpectedSwitch = if let Some(update_mask) = update_mask {
         let lookup: ExpectedSwitchRequest = rpc::ExpectedSwitchRequest {
@@ -477,13 +465,9 @@ pub(crate) async fn get_expected_switch(
                 CarbideError::InvalidArgument(e.to_string())
             })?;
 
-    let mut txn = api
-        .database_connection
-        .begin()
-        .await
-        .map_err(|e| CarbideError::Internal {
-            message: format!("Database error: {}", e),
-        })?;
+    let mut txn = api.txn_begin().await.map_err(|e| CarbideError::Internal {
+        message: format!("Database error: {}", e),
+    })?;
 
     let expected_switch = db_expected_switch::find(&mut txn, &req)
         .await
@@ -509,13 +493,9 @@ pub(crate) async fn get_all_expected_switches(
     api: &Api,
     _request: Request<()>,
 ) -> Result<Response<rpc::ExpectedSwitchList>, Status> {
-    let mut txn = api
-        .database_connection
-        .begin()
-        .await
-        .map_err(|e| CarbideError::Internal {
-            message: format!("Database error: {}", e),
-        })?;
+    let mut txn = api.txn_begin().await.map_err(|e| CarbideError::Internal {
+        message: format!("Database error: {}", e),
+    })?;
 
     let expected_switches = db_expected_switch::find_all(&mut txn)
         .await
@@ -554,13 +534,9 @@ pub(crate) async fn replace_all_expected_switches(
         switches.push(switch);
     }
 
-    let mut txn = api
-        .database_connection
-        .begin()
-        .await
-        .map_err(|e| CarbideError::Internal {
-            message: format!("Database error: {}", e),
-        })?;
+    let mut txn = api.txn_begin().await.map_err(|e| CarbideError::Internal {
+        message: format!("Database error: {}", e),
+    })?;
 
     // Clear all existing expected switches
     db_expected_switch::clear(&mut txn)
@@ -585,13 +561,9 @@ pub(crate) async fn delete_all_expected_switches(
     api: &Api,
     _request: Request<()>,
 ) -> Result<Response<()>, Status> {
-    let mut txn = api
-        .database_connection
-        .begin()
-        .await
-        .map_err(|e| CarbideError::Internal {
-            message: format!("Database error: {}", e),
-        })?;
+    let mut txn = api.txn_begin().await.map_err(|e| CarbideError::Internal {
+        message: format!("Database error: {}", e),
+    })?;
 
     db_expected_switch::clear(&mut txn)
         .await
@@ -608,13 +580,9 @@ pub(crate) async fn get_all_expected_switches_linked(
     api: &Api,
     _request: Request<()>,
 ) -> Result<Response<rpc::LinkedExpectedSwitchList>, Status> {
-    let mut txn = api
-        .database_connection
-        .begin()
-        .await
-        .map_err(|e| CarbideError::Internal {
-            message: format!("Database error: {}", e),
-        })?;
+    let mut txn = api.txn_begin().await.map_err(|e| CarbideError::Internal {
+        message: format!("Database error: {}", e),
+    })?;
 
     let linked_expected_switches = db_expected_switch::find_all_linked(&mut txn)
         .await
@@ -640,15 +608,11 @@ pub(super) async fn query(
     api: &Api,
     mac: MacAddress,
 ) -> Result<Option<model::expected_switch::ExpectedSwitch>, CarbideError> {
-    let mut txn = api.database_connection.begin().await.map_err(|e| {
-        CarbideError::from(DatabaseError::new("begin find_many_by_bmc_mac_address", e))
-    })?;
+    let mut txn = api.txn_begin().await?;
 
     let mut expected = db_expected_switch::find_many_by_bmc_mac_address(&mut txn, &[mac]).await?;
 
-    txn.commit().await.map_err(|e| {
-        CarbideError::from(DatabaseError::new("commit find_many_by_bmc_mac_address", e))
-    })?;
+    txn.commit().await?;
 
     Ok(expected.remove(&mac))
 }

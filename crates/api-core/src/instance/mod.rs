@@ -2063,7 +2063,7 @@ pub(crate) async fn batch_allocate_instances(
     {
         // Take the overlap lock before Machine, NSG, or prefix locks so a
         // waiting allocation reads the policy committed by the prior writer.
-        db::tenant_prefix_overlap::lock_checks(txn.as_mut()).await?;
+        db::tenant_prefix_overlap::lock_checks(&mut txn).await?;
     }
 
     // Preserve unsupported-preparation error precedence before allocation work.
@@ -2971,7 +2971,7 @@ pub(crate) async fn validate_ib_partition_ownership(
 /// The caller must persist the instance configuration before committing it.
 /// Update validation keeps its existing errors, which differ from batch allocation.
 pub(crate) async fn validate_spx_partition_ownership(
-    txn: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    txn: &mut db::Transaction<'_>,
     instance_tenant: &TenantOrganizationId,
     spxcfg: &InstanceSpxConfig,
 ) -> Result<(), CarbideError> {

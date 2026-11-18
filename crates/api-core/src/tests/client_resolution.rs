@@ -21,6 +21,7 @@ use common::api_fixtures::{
     create_managed_host_with_config, create_test_env, create_test_env_with_overrides,
     get_config_with_rack_profiles,
 };
+use db::TransactionVending as _;
 use ipnetwork::IpNetwork;
 use model::expected_machine::ExpectedMachineData;
 use model::instance::config::network::{
@@ -52,7 +53,7 @@ async fn assert_client_resolution_fails_closed(
     client_ip: std::net::IpAddr,
     private_ids: &[String],
 ) {
-    let mut txn = env.pool.begin().await.unwrap();
+    let mut txn = env.pool.txn_begin().await.unwrap();
     let error = resolve_machine_interface_for_test(txn.as_mut(), client_ip)
         .await
         .expect_err("PXE resolution should reject an ambiguous client address");
@@ -107,7 +108,7 @@ async fn test_resolve_machine_interface_via_direct_admin_ip(pool: sqlx::PgPool) 
     let env = create_test_env(pool).await;
     let mh = create_managed_host(&env).await;
 
-    let mut txn = env.pool.begin().await.unwrap();
+    let mut txn = env.pool.txn_begin().await.unwrap();
     let interfaces = db::machine_interface::find_by_machine_ids(txn.as_mut(), &[mh.host().id])
         .await
         .unwrap();
@@ -116,7 +117,7 @@ async fn test_resolve_machine_interface_via_direct_admin_ip(pool: sqlx::PgPool) 
     let expected_interface_id = host_iface.id;
     txn.rollback().await.unwrap();
 
-    let mut txn = env.pool.begin().await.unwrap();
+    let mut txn = env.pool.txn_begin().await.unwrap();
     let resolved = resolve_machine_interface_for_test(txn.as_mut(), admin_ip)
         .await
         .expect("admin IP should resolve to its machine_interface");
@@ -134,7 +135,7 @@ async fn test_resolve_machine_interface_via_instance_address(pool: sqlx::PgPool)
     let mh =
         create_managed_host_with_config(&env, env.managed_host_config().with_dpu_count(2)).await;
 
-    let mut txn = env.pool.begin().await.unwrap();
+    let mut txn = env.pool.txn_begin().await.unwrap();
     let host = mh.host().db_machine(&mut txn).await;
     let expected_interface_id = host
         .status
@@ -161,7 +162,7 @@ async fn test_resolve_machine_interface_via_instance_address(pool: sqlx::PgPool)
         .build()
         .await;
 
-    let mut txn = env.pool.begin().await.unwrap();
+    let mut txn = env.pool.txn_begin().await.unwrap();
     let instance_addresses = db::instance_address::find_all_by_instance_id_and_segment_id(
         txn.as_mut(),
         &tinstance.id,
@@ -224,7 +225,7 @@ async fn test_resolve_machine_interface_via_instance_address(pool: sqlx::PgPool)
         .await
         .unwrap();
 
-        let mut txn = env.pool.begin().await.unwrap();
+        let mut txn = env.pool.txn_begin().await.unwrap();
         let resolved = resolve_machine_interface_for_test(txn.as_mut(), tenant_ip)
             .await
             .map(|interface| interface.id)
@@ -253,7 +254,7 @@ async fn test_domainless_dpu_cloud_init_rejects_custom_override(
     let dpu_id =
         common::api_fixtures::dpu::create_dpu_machine(&env, &env.managed_host_config()).await;
 
-    let mut txn = env.pool.begin().await?;
+    let mut txn = env.pool.txn_begin().await?;
     let interfaces = db::machine_interface::find_by_machine_ids(txn.as_mut(), &[dpu_id]).await?;
     let [interface] = interfaces[&dpu_id].as_slice() else {
         panic!("fixture DPU must have one non-BMC interface")
@@ -334,7 +335,7 @@ async fn test_domainless_cloud_init_requires_owned_host_data(
     )
     .await;
 
-    let mut txn = env.pool.begin().await?;
+    let mut txn = env.pool.txn_begin().await?;
     let host = db::machine_interface::find_one(txn.as_mut(), host_interface_id).await?;
     let predicted_host_id = PredictedHostMachineId::try_from(host.machine_id.unwrap())?;
     assert_eq!(host.interface_type, InterfaceType::Data);
@@ -417,7 +418,7 @@ async fn test_domainless_cloud_init_requires_owned_host_data(
 async fn test_resolve_machine_interface_unknown_ip_returns_not_found(pool: sqlx::PgPool) {
     let env = create_test_env(pool).await;
 
-    let mut txn = env.pool.begin().await.unwrap();
+    let mut txn = env.pool.txn_begin().await.unwrap();
     let result =
         resolve_machine_interface_for_test(txn.as_mut(), "203.0.113.99".parse().unwrap()).await;
     txn.rollback().await.unwrap();
@@ -438,7 +439,7 @@ async fn test_client_resolution_rejects_duplicate_overlay_addresses(pool: sqlx::
     let env = create_test_env(pool).await;
     let client_ip = "10.20.30.50".parse().unwrap();
 
-    let mut txn = env.pool.begin().await.unwrap();
+    let mut txn = env.pool.txn_begin().await.unwrap();
     let owners = [
         common::overlay_address::seed_overlay_address_owner(
             txn.as_mut(),
@@ -473,7 +474,7 @@ async fn test_client_resolution_rejects_unrelated_underlay_and_overlay_owners(po
     let env = create_test_env(pool).await;
     let managed_host = create_managed_host(&env).await;
 
-    let mut txn = env.pool.begin().await.unwrap();
+    let mut txn = env.pool.txn_begin().await.unwrap();
     let interfaces =
         db::machine_interface::find_by_machine_ids(txn.as_mut(), &[managed_host.host().id])
             .await
@@ -514,7 +515,7 @@ async fn test_client_resolution_rejects_same_machine_different_segment_owners(po
     let env = create_test_env(pool).await;
     let managed_host = create_managed_host(&env).await;
 
-    let mut txn = env.pool.begin().await.unwrap();
+    let mut txn = env.pool.txn_begin().await.unwrap();
     let interfaces =
         db::machine_interface::find_by_machine_ids(txn.as_mut(), &[managed_host.host().id])
             .await
@@ -587,7 +588,7 @@ async fn test_zero_dpu_cloud_init_prefers_instance_when_ip_matches_host_interfac
         "zero-DPU fixture should produce no DPU machines"
     );
 
-    let mut txn = env.pool.begin().await.unwrap();
+    let mut txn = env.pool.txn_begin().await.unwrap();
     let host_interfaces = db::machine_interface::find_by_machine_ids(txn.as_mut(), &[mh.host().id])
         .await
         .unwrap();
@@ -797,7 +798,7 @@ async fn test_cloud_init_local_hostname_set_from_instance_name(pool: sqlx::PgPoo
 
     let mh = create_managed_host_with_config(&env, ManagedHostConfig::zero_dpu()).await;
 
-    let mut txn = env.pool.begin().await.unwrap();
+    let mut txn = env.pool.txn_begin().await.unwrap();
     let host_interfaces = db::machine_interface::find_by_machine_ids(txn.as_mut(), &[mh.host().id])
         .await
         .unwrap();
@@ -908,7 +909,7 @@ async fn test_cloud_init_local_hostname_omitted_when_instance_name_is_not_a_vali
 
     let mh = create_managed_host_with_config(&env, ManagedHostConfig::zero_dpu()).await;
 
-    let mut txn = env.pool.begin().await.unwrap();
+    let mut txn = env.pool.txn_begin().await.unwrap();
     let host_interfaces = db::machine_interface::find_by_machine_ids(txn.as_mut(), &[mh.host().id])
         .await
         .unwrap();
@@ -999,7 +1000,7 @@ async fn dpu_nvconfig_profile_resolution_uses_report_or_rack_and_dpu_identity(po
     )
     .await;
 
-    let mut txn = env.pool.begin().await.unwrap();
+    let mut txn = env.pool.txn_begin().await.unwrap();
     let rack_id = TestRackDbBuilder::new()
         .with_rack_profile_id(TEST_RMS_RACK_PROFILE_ID)
         .persist(txn.as_mut())
@@ -1017,7 +1018,7 @@ async fn dpu_nvconfig_profile_resolution_uses_report_or_rack_and_dpu_identity(po
     .await;
     let dpu = managed_host.dpu();
 
-    let mut txn = env.pool.begin().await.unwrap();
+    let mut txn = env.pool.txn_begin().await.unwrap();
     let dpu_machine = dpu.db_machine(&mut txn).await;
     let mut hardware_info = dpu_machine
         .status
@@ -1038,7 +1039,7 @@ async fn dpu_nvconfig_profile_resolution_uses_report_or_rack_and_dpu_identity(po
         .unwrap();
     txn.commit().await.unwrap();
 
-    let mut txn = env.pool.begin().await.unwrap();
+    let mut txn = env.pool.txn_begin().await.unwrap();
     let dpu_interfaces = db::machine_interface::find_by_machine_ids(txn.as_mut(), &[dpu.id])
         .await
         .unwrap();
@@ -1060,7 +1061,7 @@ async fn dpu_nvconfig_profile_resolution_uses_report_or_rack_and_dpu_identity(po
 
     // Non-DPF provisioning sees the same early ingestion window as DPF: the
     // Redfish report is present, but the host does not have a rack yet.
-    let mut txn = env.pool.begin().await.unwrap();
+    let mut txn = env.pool.txn_begin().await.unwrap();
     sqlx::query("UPDATE machines SET rack_id = NULL WHERE id = $1")
         .bind(managed_host.id)
         .execute(txn.as_mut())
@@ -1087,7 +1088,7 @@ async fn dpu_nvconfig_profile_resolution_uses_report_or_rack_and_dpu_identity(po
 
     // A recognized report is more specific than the rack fallback. A GB300
     // report must not inherit the GB200 profile from stale rack metadata.
-    let mut txn = env.pool.begin().await.unwrap();
+    let mut txn = env.pool.txn_begin().await.unwrap();
     sqlx::query("UPDATE machines SET rack_id = $1 WHERE id = $2")
         .bind(rack_id.as_str())
         .bind(managed_host.id)

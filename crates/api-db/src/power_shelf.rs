@@ -944,6 +944,7 @@ mod tests {
     use model::power_shelf::PowerShelfConfig;
 
     use super::*;
+    use crate::TransactionVending as _;
     use crate::test_support::power_shelf::{create_seeded, create_seeded_with_config, seeded_id};
 
     #[crate::sqlx_test]
@@ -953,7 +954,7 @@ mod tests {
         use model::rack::RackConfig;
 
         let rack_id = RackId::new("rack-nvlink-domain");
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
         crate::rack::create(
             txn.as_mut(),
             &rack_id,
@@ -1026,7 +1027,7 @@ mod tests {
     ) -> Result<(), Box<dyn std::error::Error>> {
         let expected_domain: NvLinkDomainId = "11111111-1111-1111-1111-111111111111".parse()?;
         let other_domain: NvLinkDomainId = "22222222-2222-2222-2222-222222222222".parse()?;
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
 
         for (rack, seed, stored_domain, deleted) in [
             ("rack-missing", 31, None, false),
@@ -1082,7 +1083,7 @@ mod tests {
         use carbide_uuid::network::NetworkSegmentId;
         use model::allocation_type::AllocationType;
 
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
 
         let shelf = create_seeded(&mut txn, 10, "BMC info shelf").await?;
         let other = create_seeded(&mut txn, 11, "Data-only shelf").await?;
@@ -1166,7 +1167,7 @@ mod tests {
     async fn test_power_shelf_database_operations(
         pool: sqlx::PgPool,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
 
         let power_shelf = create_seeded_with_config(
             &mut txn,
@@ -1207,7 +1208,7 @@ mod tests {
     async fn test_power_shelf_status_update(
         pool: sqlx::PgPool,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
 
         let mut power_shelf = create_seeded_with_config(
             &mut txn,
@@ -1242,7 +1243,7 @@ mod tests {
     async fn test_power_shelf_controller_state_transitions(
         pool: sqlx::PgPool,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
 
         let power_shelf = create_seeded_with_config(
             &mut txn,
@@ -1335,7 +1336,7 @@ mod tests {
     async fn test_power_shelf_list_segment_ids(
         pool: sqlx::PgPool,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
 
         let configs = [
             ("List Test Power Shelf 1", 5000, 240),
@@ -1383,7 +1384,7 @@ mod tests {
     async fn test_power_shelf_controller_state_outcome(
         pool: sqlx::PgPool,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
 
         let power_shelf = create_seeded_with_config(
             &mut txn,
@@ -1429,7 +1430,7 @@ mod tests {
     async fn test_set_power_shelf_maintenance_requested_power_on(
         pool: sqlx::PgPool,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
         let shelf = create_seeded(&mut txn, 1, "PowerOn shelf").await?;
         assert!(
             shelf.power_shelf_maintenance_requested.is_none(),
@@ -1462,7 +1463,7 @@ mod tests {
     async fn test_set_power_shelf_maintenance_requested_power_off(
         pool: sqlx::PgPool,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
         let shelf = create_seeded(&mut txn, 2, "PowerOff shelf").await?;
 
         set_power_shelf_maintenance_requested(
@@ -1494,7 +1495,7 @@ mod tests {
     async fn test_set_power_shelf_maintenance_requested_overwrites(
         pool: sqlx::PgPool,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
         let shelf = create_seeded(&mut txn, 3, "Overwrite shelf").await?;
 
         set_power_shelf_maintenance_requested(
@@ -1529,7 +1530,7 @@ mod tests {
     async fn test_clear_power_shelf_maintenance_requested(
         pool: sqlx::PgPool,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
         let shelf = create_seeded(&mut txn, 4, "Clear shelf").await?;
 
         // Test clearing both flavors of operation.
@@ -1569,7 +1570,7 @@ mod tests {
     async fn test_clear_power_shelf_maintenance_requested_when_none(
         pool: sqlx::PgPool,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
         let shelf = create_seeded(&mut txn, 5, "Idempotent clear shelf").await?;
         assert!(shelf.power_shelf_maintenance_requested.is_none());
 
@@ -1593,7 +1594,7 @@ mod tests {
     async fn test_set_decommission_requested(
         pool: sqlx::PgPool,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
         let shelf = create_seeded(&mut txn, 6, "Decommission request shelf").await?;
 
         set_decommission_requested(&mut txn, shelf.id).await?;
@@ -1613,7 +1614,7 @@ mod tests {
     async fn find_all_bmc_mac_addresses_and_names_matches_single_lookup(
         pool: sqlx::PgPool,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
         let live_mac: MacAddress = "02:00:00:00:0c:01".parse()?;
         let deleted_mac: MacAddress = "02:00:00:00:0c:02".parse()?;
         // `power_shelves.bmc_mac_address` references `expected_power_shelves`.
@@ -1691,7 +1692,7 @@ mod tests {
         use carbide_uuid::network::NetworkSegmentId;
         use model::allocation_type::AllocationType;
 
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
 
         let mac_a: MacAddress = "02:00:00:00:0d:01".parse()?;
         let mac_b: MacAddress = "02:00:00:00:0d:02".parse()?;
@@ -1895,7 +1896,7 @@ mod tests {
     async fn endpoint_resolution_requires_the_shelf_to_own_the_interface(
         pool: sqlx::PgPool,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
 
         let segment_1 = seed_underlay_segment(txn.as_mut(), "owned-interface-1").await?;
         let segment_2 = seed_underlay_segment(txn.as_mut(), "owned-interface-2").await?;

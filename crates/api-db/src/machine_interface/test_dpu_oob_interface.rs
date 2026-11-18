@@ -19,7 +19,9 @@ use carbide_uuid::machine::{MachineIdSource, MachineType};
 
 use super::*;
 
-async fn seed_dpus(pool: &sqlx::PgPool) -> Result<(MachineId, MachineId), sqlx::Error> {
+async fn seed_dpus(
+    pool: &sqlx::PgPool,
+) -> Result<(MachineId, MachineId), Box<dyn std::error::Error>> {
     let dpu_id = MachineId::new(
         MachineIdSource::ProductBoardChassisSerial,
         [0x81; 32],
@@ -30,7 +32,7 @@ async fn seed_dpus(pool: &sqlx::PgPool) -> Result<(MachineId, MachineId), sqlx::
         [0x82; 32],
         MachineType::Dpu,
     );
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
     for machine_id in [dpu_id, other_dpu_id] {
         sqlx::query("INSERT INTO machines (id, dpf) VALUES ($1, '{}'::jsonb)")
             .bind(machine_id)
@@ -47,7 +49,7 @@ async fn prediction_preserves_ownership_and_the_callers_transaction(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let (dpu_id, other_dpu_id) = seed_dpus(&pool).await?;
     let mac_address = MacAddress::new([2, 0, 0, 0, 0x81, 1]);
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
 
     assert!(ensure_dpu_oob_interface_ownership(txn.as_mut(), &dpu_id, mac_address).await?);
     let initial =
@@ -111,7 +113,7 @@ async fn existing_interface_ownership_is_preserved(
         (3, "another DPU", Some(other_dpu_id), other_dpu_id, false),
     ] {
         let mac_address = MacAddress::new([2, 0, 0, 0, 0x82, suffix]);
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
         let interface_id = insert_machine_interface(
             txn.as_mut(),
             &segment_id,

@@ -47,7 +47,7 @@ use common::api_fixtures::{
 };
 use config_version::ConfigVersion;
 use db::network_segment::IdColumn;
-use db::{self, ObjectColumnFilter};
+use db::{self, ObjectColumnFilter, TransactionVending as _};
 use futures_util::future::join_all;
 use ipnetwork::{IpNetwork, Ipv4Network, Ipv6Network};
 use itertools::Itertools;
@@ -3273,7 +3273,7 @@ async fn test_deleted_slaac_vpc_rejects_manual_segment_address_allocation(pool: 
     let network_config =
         InstanceNetworkConfig::for_segment_ids(&[fixture.segment_id], &[], &[fixture.vpc_id]);
     let allocation_task = tokio::spawn(async move {
-        let mut txn = allocation_pool.begin().await.unwrap();
+        let mut txn = allocation_pool.txn_begin().await.unwrap();
         let result =
             db::instance_address::allocate(txn.as_mut(), instance_id, network_config, &machine)
                 .await;
@@ -3352,7 +3352,7 @@ async fn test_slaac_allocation_blocks_and_defeats_segment_final_delete(pool: PgP
     let deletion_pool = fixture.env.pool.clone();
     let segment_id = fixture.segment_id;
     let deletion_task = tokio::spawn(async move {
-        let mut txn = deletion_pool.begin().await.unwrap();
+        let mut txn = deletion_pool.txn_begin().await.unwrap();
         let result = db::network_segment::final_delete(segment_id, &mut txn).await;
         txn.rollback().await.unwrap();
         result
@@ -3412,7 +3412,7 @@ async fn test_auto_vpc_prefix_selection_retries_concurrent_network_prefix_insert
 
     // Keep a conflicting child prefix uncommitted so allocation cannot observe
     // it before choosing the same linknet and waiting on the exclusion constraint.
-    let mut blocker = fixture.env.pool.begin().await.unwrap();
+    let mut blocker = fixture.env.pool.txn_begin().await.unwrap();
     let blocker_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
         .fetch_one(blocker.as_mut())
         .await
@@ -3490,7 +3490,7 @@ async fn test_auto_vpc_prefix_selection_rechecks_concurrent_candidate_deletion(p
 
     // Hold the lower candidate's soft-delete uncommitted. Candidate discovery
     // still sees the prior active row, while its selected-row lock must wait.
-    let mut blocker = fixture.env.pool.begin().await.unwrap();
+    let mut blocker = fixture.env.pool.txn_begin().await.unwrap();
     let blocker_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
         .fetch_one(blocker.as_mut())
         .await
@@ -3545,7 +3545,7 @@ async fn test_auto_vpc_prefix_selection_freezes_concurrent_candidate_insert(pool
 
     // Hold the first candidate so a blocked selected-row lock proves the
     // allocation transaction already froze its candidate query result.
-    let mut blocker = fixture.env.pool.begin().await.unwrap();
+    let mut blocker = fixture.env.pool.txn_begin().await.unwrap();
     let blocker_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
         .fetch_one(blocker.as_mut())
         .await
@@ -4280,7 +4280,7 @@ async fn allocate_automatic_ipv4_network(
     vpc_id: VpcId,
 ) -> Result<InstanceNetworkConfig, crate::CarbideError> {
     let mut config = automatic_network_config(vpc_id, InstanceInterfaceIpFamilyMode::Ipv4Only);
-    let mut txn = pool.begin().await.unwrap();
+    let mut txn = pool.txn_begin().await.unwrap();
     let result = allocate_network(&mut config, txn.as_mut()).await;
 
     // Commit successful generated resources; failed attempts must leave no outer effects.
@@ -4649,7 +4649,7 @@ async fn test_service_vpc_coordinator_allocates_enabled_ipv6_127_endpoint(
         .expect("IPv6 coordinator host has an instance");
 
     // Allocate and write through `update_service_network_config`, as complete updates do.
-    let mut allocation = db::Transaction::begin(&env.pool).await?;
+    let mut allocation = env.pool.txn_begin().await?;
     let network =
         crate::instance::service_vpc::allocate_for_instance_with_supported_families_for_test(
             &env.api,
@@ -4791,7 +4791,7 @@ async fn test_service_vpc_coordinator_serializes_competing_allocations(
         .expect("second host has an instance");
 
     // Let the first transaction allocate and publish conditionally while retaining every lock.
-    let mut first_txn = db::Transaction::begin(&env.pool).await?;
+    let mut first_txn = env.pool.txn_begin().await?;
     let first_network =
         crate::instance::service_vpc::allocate_for_instance_with_supported_families_for_test(
             &env.api,
@@ -4832,7 +4832,7 @@ async fn test_service_vpc_coordinator_serializes_competing_allocations(
     let second_pool = env.pool.clone();
     let second_api = env.api.clone();
     let pending_second = TestTaskHandle::new(tokio::spawn(async move {
-        let mut txn = db::Transaction::begin(&second_pool).await.unwrap();
+        let mut txn = second_pool.txn_begin().await.unwrap();
         let network =
             crate::instance::service_vpc::allocate_for_instance_with_supported_families_for_test(
                 &second_api,
@@ -5023,7 +5023,7 @@ async fn test_service_vpc_coordinator_rolls_back_competing_same_instance_additio
     };
 
     // Publish the first endpoint conditionally while retaining all allocation and instance locks.
-    let mut winner_txn = db::Transaction::begin(&env.pool).await?;
+    let mut winner_txn = env.pool.txn_begin().await?;
     let winner_network =
         crate::instance::service_vpc::allocate_for_instance_with_supported_families_for_test(
             &env.api,
@@ -5064,7 +5064,7 @@ async fn test_service_vpc_coordinator_rolls_back_competing_same_instance_additio
     let competing_host_snapshot = fixture.host_snapshot.clone();
     let instance_id = fixture.instance_id;
     let pending_loser = TestTaskHandle::new(tokio::spawn(async move {
-        let mut txn = db::Transaction::begin(&competing_pool).await.unwrap();
+        let mut txn = competing_pool.txn_begin().await.unwrap();
         let result =
             crate::instance::service_vpc::allocate_for_instance_with_supported_families_for_test(
                 &competing_api,
@@ -5225,7 +5225,7 @@ async fn test_service_vpc_coordinator_persists_all_target_dpu_identities(
         .expect("multi-DPU host has an instance");
 
     // Allocate both service interfaces and write them through `update_service_network_config`.
-    let mut activation = db::Transaction::begin(&env.pool).await?;
+    let mut activation = env.pool.txn_begin().await?;
     let network =
         crate::instance::service_vpc::allocate_for_instance_with_supported_families_for_test(
             &env.api,
@@ -5405,7 +5405,7 @@ async fn test_service_vpc_coordinator_rolls_back_earlier_intent_after_late_exhau
         .expect("host has an instance");
 
     // The first sorted DPU allocates before the second exhausts the VPC prefix.
-    let mut allocation_txn = db::Transaction::begin(&env.pool).await?;
+    let mut allocation_txn = env.pool.txn_begin().await?;
     let error =
         crate::instance::service_vpc::allocate_for_instance_with_supported_families_for_test(
             &env.api,
@@ -5748,7 +5748,7 @@ async fn test_service_vpc_coordinator_rejects_multi_dpu_addition_when_one_target
     };
 
     // Run the coordinator in an outer transaction and roll back the rejected all-DPU addition.
-    let mut allocation_txn = db::Transaction::begin(&env.pool).await?;
+    let mut allocation_txn = env.pool.txn_begin().await?;
     let error =
         crate::instance::service_vpc::allocate_for_instance_with_supported_families_for_test(
             &env.api,
@@ -6011,7 +6011,7 @@ async fn test_service_vpc_coordinator_distinguishes_missing_and_deleted_vpcs(
         let request = RequestedInstanceExtensionServicesConfig {
             service_configs: vec![selection],
         };
-        let mut txn = db::Transaction::begin(&env.pool).await?;
+        let mut txn = env.pool.txn_begin().await?;
 
         // Run the complete pre-gate coordinator so classification comes only from the selected VPC row.
         let error =
@@ -6124,7 +6124,7 @@ async fn test_service_vpc_coordinator_revalidates_machine_eligibility_after_lock
     transition.commit().await?;
 
     // Plan from the stale Ready snapshot and require the locked Machine reload to reject it.
-    let mut allocation = db::Transaction::begin(&env.pool).await?;
+    let mut allocation = env.pool.txn_begin().await?;
     let error =
         crate::instance::service_vpc::allocate_for_instance_with_supported_families_for_test(
             &env.api,
@@ -6174,7 +6174,7 @@ async fn test_service_vpc_coordinator_rejects_soft_deleted_locked_instance(
     deletion.commit().await?;
 
     // Plan from the stale live snapshot and require the locked Instance reload to classify deletion.
-    let mut allocation = db::Transaction::begin(&env.pool).await?;
+    let mut allocation = env.pool.txn_begin().await?;
     let error =
         crate::instance::service_vpc::allocate_for_instance_with_supported_families_for_test(
             &env.api,
@@ -6277,7 +6277,7 @@ async fn test_service_vpc_coordinator_classifies_service_candidate_failures(
 
     for case in cases {
         // Run each fault plan in a fresh outer transaction so no row can contaminate the next case.
-        let mut allocation = db::Transaction::begin(&env.pool).await?;
+        let mut allocation = env.pool.txn_begin().await?;
         let (result, attempts) =
             crate::instance::service_vpc::with_service_candidate_faults_for_test(
                 case.faults,
@@ -6338,7 +6338,7 @@ async fn test_service_vpc_coordinator_serializes_with_default_force_delete(
     let pool = PgPoolOptions::new().connect_with(options).await?;
     let env = create_service_vpc_coordinator_test_env(pool).await;
     let fixture = create_service_vpc_coordinator_fixture(&env, "default-force-delete-race").await?;
-    let mut activation = db::Transaction::begin(&env.pool).await?;
+    let mut activation = env.pool.txn_begin().await?;
     let network =
         crate::instance::service_vpc::allocate_for_instance_with_supported_families_for_test(
             &env.api,
@@ -6436,7 +6436,7 @@ async fn test_service_vpc_coordinator_serializes_with_orphan_force_delete(
         .returning(|_, _| Ok(()));
     let env = create_service_vpc_coordinator_test_env_with_dpf_sdk(pool, Arc::new(dpf_sdk)).await;
     let fixture = create_service_vpc_coordinator_fixture(&env, "orphan-force-delete-race").await?;
-    let mut activation = db::Transaction::begin(&env.pool).await?;
+    let mut activation = env.pool.txn_begin().await?;
     let network =
         crate::instance::service_vpc::allocate_for_instance_with_supported_families_for_test(
             &env.api,
@@ -6854,7 +6854,7 @@ async fn test_service_vpc_coordinator_preserves_existing_endpoint_after_astra_re
     };
 
     // Retry the exact attachment after reclassification without invoking any new-allocation gate.
-    let mut retry_txn = db::Transaction::begin(&env.pool).await?;
+    let mut retry_txn = env.pool.txn_begin().await?;
     let retry_network =
         crate::instance::service_vpc::allocate_for_instance_with_supported_families_for_test(
             &env.api,
@@ -6919,7 +6919,7 @@ async fn test_service_vpc_coordinator_rejects_family_disabled_for_deployment(
     let fixture = create_service_vpc_coordinator_fixture(&env, "disabled-family").await?;
 
     // Open only the implementation test gate and require deployment configuration to reject IPv4.
-    let mut allocation = db::Transaction::begin(&env.pool).await?;
+    let mut allocation = env.pool.txn_begin().await?;
     let error =
         crate::instance::service_vpc::allocate_for_instance_with_supported_families_for_test(
             &env.api,
@@ -6984,7 +6984,7 @@ async fn test_service_vpc_coordinator_rejects_deferred_registration(
     state_txn.commit().await?;
 
     // Run the coordinator with family support enabled and require the non-Ready lifecycle state to fail first.
-    let mut allocation = db::Transaction::begin(&env.pool).await?;
+    let mut allocation = env.pool.txn_begin().await?;
     let error =
         crate::instance::service_vpc::allocate_for_instance_with_supported_families_for_test(
             &env.api,
@@ -7033,7 +7033,7 @@ async fn test_service_vpc_coordinator_rejects_unknown_dpu_deployment(
     let fixture = create_service_vpc_coordinator_fixture(&env, "unknown-deployment").await?;
 
     // Attempt activation and require the classifier error to remain an admission failure.
-    let mut allocation = db::Transaction::begin(&env.pool).await?;
+    let mut allocation = env.pool.txn_begin().await?;
     let error =
         crate::instance::service_vpc::allocate_for_instance_with_supported_families_for_test(
             &env.api,
@@ -7153,7 +7153,7 @@ async fn test_service_vpc_coordinator_rejects_mixed_target_family_support(
     };
 
     // Bypass only implementation support and require the disabled generic BF4 target to reject all targets.
-    let mut allocation = db::Transaction::begin(&env.pool).await?;
+    let mut allocation = env.pool.txn_begin().await?;
     let error =
         crate::instance::service_vpc::allocate_for_instance_with_supported_families_for_test(
             &env.api,
@@ -7209,7 +7209,7 @@ async fn test_service_vpc_coordinator_does_not_fall_back_to_another_prefix_famil
         .await?;
 
     // Request the registered IPv4 interface and require exact-family candidate validation to fail.
-    let mut allocation = db::Transaction::begin(&env.pool).await?;
+    let mut allocation = env.pool.txn_begin().await?;
     let error =
         crate::instance::service_vpc::allocate_for_instance_with_supported_families_for_test(
             &env.api,
@@ -8071,7 +8071,7 @@ async fn test_update_instance_complete_config_rolls_back_allocations_on_final_ca
 
     // Increment only `config_version` after the request's initial read, then let it proceed
     // through service allocation and host staging to the final compare-and-swap.
-    let mut concurrent_write = db::Transaction::begin(&env.pool).await?;
+    let mut concurrent_write = env.pool.txn_begin().await?;
     db::instance::update_config(
         concurrent_write.as_mut(),
         fixture.instance_id,
@@ -13087,7 +13087,7 @@ async fn test_factory_reset_bmc_on_release_sanitizes_host_bmc(
             .await
             .unwrap()
             .expect("expected_machines row for the fixture host");
-        let mut txn = env.pool.begin().await.unwrap();
+        let mut txn = env.pool.txn_begin().await.unwrap();
         db::expected_machine::update_bmc_credentials(
             &mut expected,
             txn.as_mut(),
@@ -13135,7 +13135,7 @@ async fn test_factory_reset_bmc_on_release_sanitizes_host_bmc(
             .unwrap()
             && suppression.acknowledged_at.is_none()
         {
-            let mut txn = env.pool.begin().await.unwrap();
+            let mut txn = env.pool.txn_begin().await.unwrap();
             db::bmc_suppression::acknowledge(
                 txn.as_mut(),
                 host_bmc_mac,
@@ -13147,7 +13147,7 @@ async fn test_factory_reset_bmc_on_release_sanitizes_host_bmc(
             acknowledged = true;
         }
 
-        let mut txn = env.pool.begin().await.unwrap();
+        let mut txn = env.pool.txn_begin().await.unwrap();
         let machine = mh.host().db_machine(&mut txn).await;
         let state = machine.current_state().clone();
         txn.commit().await.unwrap();
@@ -13172,7 +13172,7 @@ async fn test_factory_reset_bmc_on_release_sanitizes_host_bmc(
                 machine.current_version().version_nr(),
                 (chrono::Utc::now() - chrono::Duration::seconds(120)).timestamp_micros()
             );
-            let mut txn = env.pool.begin().await.unwrap();
+            let mut txn = env.pool.txn_begin().await.unwrap();
             sqlx::query("UPDATE machines SET controller_state_version=$1 WHERE id=$2")
                 .bind(aged_version)
                 .bind(machine.id.to_string())

@@ -32,13 +32,9 @@ pub(crate) async fn find_power_shelf(
     request: Request<rpc::PowerShelfQuery>,
 ) -> Result<Response<rpc::PowerShelfList>, Status> {
     let query = request.into_inner();
-    let mut txn = api
-        .database_connection
-        .begin()
-        .await
-        .map_err(|e| CarbideError::Internal {
-            message: format!("Database error: {}", e),
-        })?;
+    let mut txn = api.txn_begin().await.map_err(|e| CarbideError::Internal {
+        message: format!("Database error: {}", e),
+    })?;
 
     // Handle ID search (takes precedence)
     let power_shelf_list = if let Some(id) = query.power_shelf_id {
@@ -211,13 +207,9 @@ pub(crate) async fn delete_power_shelf(
         }
     };
 
-    let mut txn = api
-        .database_connection
-        .begin()
-        .await
-        .map_err(|e| CarbideError::Internal {
-            message: format!("Database error: {}", e),
-        })?;
+    let mut txn = api.txn_begin().await.map_err(|e| CarbideError::Internal {
+        message: format!("Database error: {}", e),
+    })?;
 
     let mut power_shelf_list = db_power_shelf::find_by(
         &mut txn,

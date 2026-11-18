@@ -26,6 +26,7 @@ use carbide_secrets::credentials::{
 };
 use carbide_secrets::{CredentialConfig, VaultConfig, create_credential_manager};
 use carbide_utils::HostPortPair;
+use db::TransactionVending as _;
 use eyre::Report;
 use metrics_endpoint::MetricsSetup;
 use sqlx::migrate::MigrateDatabase;
@@ -170,7 +171,7 @@ async fn drop_pg_database_with_retry_if_exists(db_url: &str) -> eyre::Result<()>
             }
         }
         let db_pool = sqlx::Pool::<sqlx::postgres::Postgres>::connect(db_url).await?;
-        let mut txn = db_pool.begin().await?;
+        let mut txn = db_pool.txn_begin().await?;
         sqlx::query(
             r#"
         SELECT pg_terminate_backend(pg_stat_activity.pid)

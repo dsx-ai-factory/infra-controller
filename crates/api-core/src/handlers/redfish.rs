@@ -31,7 +31,7 @@ use db::redfish_actions::{
     ActionNotClaimed, ApprovalNotRecorded, approve_request, delete_request, fetch_request,
     find_serials, insert_request, list_requests, set_applied, update_response,
 };
-use db::{ConditionalWrite, Transaction, TransactionVending};
+use db::{ConditionalWrite, TransactionVending};
 use http::header::CONTENT_TYPE;
 use http::uri::Authority;
 use http::{HeaderMap, HeaderValue, Uri};
@@ -368,7 +368,7 @@ async fn update_response_in_tx(
     index: usize,
     response: BMCResponse,
 ) -> Result<(), tonic::Status> {
-    let mut txn = Transaction::begin(pool).await?;
+    let mut txn = pool.txn_begin().await?;
     update_response(request, &mut txn, response, index).await?;
     txn.commit().await?;
     Ok(())

@@ -21,7 +21,7 @@ use carbide_ib_fabric::config::IBFabricConfig;
 use carbide_instrument::testing::MetricsCapture;
 use carbide_uuid::infiniband::IBPartitionId;
 use db::db_read::PgPoolReader;
-use db::{self, ObjectColumnFilter};
+use db::{self, ObjectColumnFilter, TransactionVending as _};
 use model::ib::{DEFAULT_IB_FABRIC_NAME, IBMtu, IBNetwork, IBQosConf, IBRateLimit, IBServiceLevel};
 use model::ib_partition::{IBPartition, IBPartitionConfig, IBPartitionStatus, NewIBPartition};
 use model::metadata::Metadata;
@@ -517,7 +517,7 @@ async fn test_update_ib_partition(pool: sqlx::PgPool) -> Result<(), Box<dyn std:
             description: "new description".to_string(),
         },
     };
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
     let mut partition: IBPartition = db::ib_partition::create(
         new_partition,
         &mut txn,
@@ -568,7 +568,7 @@ async fn test_update_ib_partition(pool: sqlx::PgPool) -> Result<(), Box<dyn std:
         pkey: partition.status.as_ref().and_then(|s| s.pkey),
     });
     // What we're testing
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
     db::ib_partition::update_status(
         partition.id,
         &partition.status,
@@ -611,7 +611,7 @@ async fn test_reject_update_with_invalid_metadata(
             description: "new description".to_string(),
         },
     };
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
     let mut partition: IBPartition = db::ib_partition::create(
         new_partition,
         &mut txn,
@@ -630,7 +630,7 @@ async fn test_reject_update_with_invalid_metadata(
 
     partition.metadata.name = "".to_string(); // Invalid name
 
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
     let result = db::ib_partition::update_metadata(
         partition.id,
         partition.version,
@@ -773,7 +773,7 @@ async fn test_duplicate_ib_partition(pool: sqlx::PgPool) {
     let status = partition.status.as_mut().unwrap();
     status.pkey = Some(pkey.to_string().parse().unwrap());
 
-    let mut txn = pool.begin().await.unwrap();
+    let mut txn = pool.txn_begin().await.unwrap();
     db::ib_partition::update_status(
         partition.id,
         &partition.status,

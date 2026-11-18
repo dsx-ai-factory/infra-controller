@@ -1203,6 +1203,7 @@ mod tests {
     use carbide_uuid::machine::MachineId;
 
     use super::*;
+    use crate::TransactionVending as _;
 
     fn test_machine_id() -> MachineId {
         MachineId::from_str("fm100htes3rn1npvbtm5qd57dkilaag7ljugl1llmm7rfuq1ov50i0rpl30").unwrap()
@@ -1320,7 +1321,7 @@ mod tests {
         use model::machine_validation::{MachineValidationState, MachineValidationStatus};
 
         let observed_at = DateTime::from_timestamp(1_700_000_000, 0).unwrap();
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
         let id = insert_active_validation(txn.as_mut(), observed_at).await?;
         assert_eq!(
             record_heartbeat(txn.as_mut(), &id, None, None, None, observed_at).await?,
@@ -1330,7 +1331,7 @@ mod tests {
         let run = crate::machine_validation::find_by_id(&pool, &id).await?;
         assert_eq!(run.last_heartbeat_at, Some(observed_at));
 
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
         let ConditionalWrite::Applied(_) = crate::machine_validation::update_end_time_if_active(
             txn.as_mut(),
             &id,
@@ -1367,7 +1368,7 @@ mod tests {
     async fn find_stale_active_attempts_respects_heartbeat_and_duration_fallback(
         pool: sqlx::PgPool,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
         let now = chrono::Utc::now();
         let validation_id = insert_active_validation(txn.as_mut(), now).await?;
 
@@ -1454,7 +1455,7 @@ mod tests {
         ];
 
         for case in cases {
-            let mut txn = pool.begin().await?;
+            let mut txn = pool.txn_begin().await?;
             let validation_id = insert_active_validation(txn.as_mut(), case.started_at).await?;
             let attempt_id = insert_attempt(
                 txn.as_mut(),

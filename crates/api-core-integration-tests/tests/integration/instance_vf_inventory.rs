@@ -44,7 +44,7 @@ async fn test_dpf_topology_rejects_unselected_vf_on_create_and_update(
     let config = carbide_api_core::test_support::default_config::with_dpf_intercept_topology(&[7]);
     let env = InstanceEnv::new(pool, config).await;
     let mh = env.create_managed_host(ManagedHostConfig::default()).await;
-    let mut txn = env.harness.api().database_connection.begin().await.unwrap();
+    let mut txn = env.harness.api().txn_begin().await.unwrap();
     db::machine::mark_machine_ingestion_done_with_dpf(&mut txn, &host_id(&mh))
         .await
         .unwrap();
@@ -745,7 +745,7 @@ async fn test_public_instance_endpoints_reject_out_of_range_wire_vfs(
     let env = InstanceEnv::new(pool, config).await;
     let create_mh = env.create_managed_host(ManagedHostConfig::default()).await;
     let update_mh = env.create_managed_host(ManagedHostConfig::default()).await;
-    let mut txn = env.harness.api().database_connection.begin().await.unwrap();
+    let mut txn = env.harness.api().txn_begin().await.unwrap();
     for mh in [&create_mh, &update_mh] {
         db::machine::mark_machine_ingestion_done_with_dpf(&mut txn, &host_id(mh))
             .await

@@ -5,14 +5,14 @@
 
 use trace_propagation::correlation::{TraceId, scope};
 
-use crate::ConditionalWrite;
+use crate::{ConditionalWrite, TransactionVending as _};
 
 #[crate::sqlx_test]
 async fn machine_maintenance_trace_correlation(
     pool: sqlx::PgPool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let trace_id: TraceId = "1234567890abcdef1234567890abcdef".parse()?;
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
     let id: carbide_uuid::machine::HostMachineId =
         "fm100htes3rn1npvbtm5qd57dkilaag7ljugl1llmm7rfuq1ov50i0rpl30".parse()?;
     crate::machine::create(
@@ -135,7 +135,7 @@ async fn switch_maintenance_trace_correlation(
     pool: sqlx::PgPool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let trace_id: TraceId = "1234567890abcdef1234567890abcdef".parse()?;
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
     let id = crate::test_support::switch::create_seeded_discovered(
         txn.as_mut(),
         78,
@@ -281,7 +281,7 @@ async fn power_shelf_maintenance_trace_correlation(
     pool: sqlx::PgPool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let trace_id: TraceId = "1234567890abcdef1234567890abcdef".parse()?;
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
     let id = crate::test_support::power_shelf::create_seeded(txn.as_mut(), 78, "trace correlation")
         .await?
         .id;

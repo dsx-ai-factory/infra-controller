@@ -23,7 +23,7 @@ use carbide_uuid::extension_service::ExtensionServiceId;
 use carbide_uuid::machine::DpuMachineId;
 use chrono::{DateTime, Utc};
 use config_version::Versioned;
-use db::extension_service as db_extension_service;
+use db::{TransactionVending as _, extension_service as db_extension_service};
 use eyre::eyre;
 use itertools::Itertools;
 use model::extension_service::{
@@ -370,7 +370,10 @@ async fn persist_dpf_helm_chart_placement_observation(
             .collect(),
     };
 
-    let mut txn = db_pool.begin().await?;
+    let mut txn = db_pool
+        .txn_begin()
+        .await
+        .map_err(StateHandlerError::from_transaction)?;
     db::machine::update_extension_service_status_observation(
         txn.as_mut(),
         &dpu_id,
@@ -379,7 +382,9 @@ async fn persist_dpf_helm_chart_placement_observation(
     )
     .await?
     .check_applied()?;
-    txn.commit().await?;
+    txn.commit()
+        .await
+        .map_err(StateHandlerError::from_transaction)?;
 
     Ok(observation)
 }

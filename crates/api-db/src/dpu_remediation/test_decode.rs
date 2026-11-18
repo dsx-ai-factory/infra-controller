@@ -23,11 +23,14 @@ use model::dpu_remediation::NewRemediation;
 use model::machine::{CURRENT_STATE_MODEL_VERSION, ManagedHostState};
 use sqlx::PgPool;
 
-use crate::DatabaseError;
+use crate::{DatabaseError, TransactionVending as _};
 
 #[crate::sqlx_test]
 async fn id_lookups_ignore_unrelated_json_while_record_reads_reject_it(pool: PgPool) {
-    let mut txn = pool.begin().await.expect("begin remediation decode test");
+    let mut txn = pool
+        .txn_begin()
+        .await
+        .expect("begin remediation decode test");
     let machine_id = MachineId::new(
         MachineIdSource::ProductBoardChassisSerial,
         [0x74; 32],
@@ -146,7 +149,7 @@ async fn id_lookups_ignore_unrelated_json_while_record_reads_reject_it(pool: PgP
 async fn applied_id_lookups_preserve_filters_and_attempts(
     pool: PgPool,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
     assert!(super::find_remediation_ids(&mut txn).await?.is_empty());
     let [first_machine_id, second_machine_id, missing_machine_id] =
         [0x76, 0x77, 0x78].map(|byte| {

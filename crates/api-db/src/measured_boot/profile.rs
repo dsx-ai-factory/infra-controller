@@ -26,7 +26,7 @@ use carbide_uuid::machine::MachineId;
 use carbide_uuid::measured_boot::MeasurementSystemProfileId;
 use measured_boot::profile::MeasurementSystemProfile;
 use measured_boot::records::{MeasurementSystemProfileAttrRecord, MeasurementSystemProfileRecord};
-use sqlx::{PgConnection, PgTransaction};
+use sqlx::PgConnection;
 
 use crate::db_read::DbReader;
 use crate::measured_boot::interface::common;
@@ -42,7 +42,7 @@ use crate::measured_boot::interface::profile::{
 use crate::{DatabaseError, DatabaseResult};
 
 pub async fn new(
-    txn: &mut PgTransaction<'_>,
+    txn: &mut crate::Transaction<'_>,
     name: Option<String>,
     attrs: &HashMap<String, String>,
 ) -> DatabaseResult<MeasurementSystemProfile> {
@@ -68,7 +68,7 @@ pub fn from_info_and_attrs(
 }
 
 pub async fn match_from_attrs_or_new(
-    txn: &mut PgTransaction<'_>,
+    txn: &mut crate::Transaction<'_>,
     attrs: &HashMap<String, String>,
 ) -> DatabaseResult<MeasurementSystemProfile> {
     match match_profile(txn.as_mut(), attrs).await? {
@@ -258,7 +258,7 @@ where
 /// into both the measurement_system_profiles and measurement_system_profiles_attrs
 /// tables.
 pub async fn create_measurement_profile(
-    txn: &mut PgTransaction<'_>,
+    txn: &mut crate::Transaction<'_>,
     profile_name: String,
     attrs: &HashMap<String, String>,
 ) -> DatabaseResult<MeasurementSystemProfile> {

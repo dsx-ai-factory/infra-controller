@@ -150,7 +150,7 @@ use mac_address::MacAddress;
 use model::ConfigValidationError;
 use model::hardware_info::HardwareInfoError;
 use model::tenant::TenantError;
-use sqlx::{Acquire, PgPool, PgTransaction, Postgres};
+use sqlx::{Acquire, PgPool, Postgres};
 use tonic::Status;
 
 use crate::ip_allocator::DhcpError;
@@ -823,12 +823,12 @@ fn record_database_transaction_rollback_failure(
 /// borrows its connection for `'a`.
 #[derive(Debug)]
 pub struct Transaction<'a> {
-    inner: sqlx::PgTransaction<'a>,
+    inner: sqlx::Transaction<'a, Postgres>,
 }
 
-impl<'a> AsMut<sqlx::PgTransaction<'a>> for Transaction<'a> {
+impl AsMut<sqlx::PgConnection> for Transaction<'_> {
     #[inline]
-    fn as_mut(&mut self) -> &mut sqlx::PgTransaction<'a> {
+    fn as_mut(&mut self) -> &mut sqlx::PgConnection {
         &mut self.inner
     }
 }
@@ -937,7 +937,7 @@ impl<'a> Transaction<'a> {
 }
 
 impl<'a> Deref for Transaction<'a> {
-    type Target = sqlx::PgTransaction<'a>;
+    type Target = sqlx::PgConnection;
 
     #[inline]
     fn deref(&self) -> &Self::Target {
@@ -958,7 +958,7 @@ pub trait WithTransaction {
     fn with_txn<'pool, T, E>(
         &'pool self,
         f: impl for<'txn> FnOnce(
-            &'txn mut PgTransaction<'pool>,
+            &'txn mut Transaction<'pool>,
         ) -> futures::future::BoxFuture<'txn, Result<T, E>>
         + Send,
     ) -> impl Future<Output = DatabaseResult<Result<T, E>>> + Send
@@ -972,7 +972,7 @@ impl WithTransaction for PgPool {
     fn with_txn<'pool, T, E>(
         &'pool self,
         f: impl for<'txn> FnOnce(
-            &'txn mut PgTransaction<'pool>,
+            &'txn mut Transaction<'pool>,
         ) -> futures::future::BoxFuture<'txn, Result<T, E>>
         + Send,
     ) -> impl Future<Output = DatabaseResult<Result<T, E>>>
@@ -982,19 +982,17 @@ impl WithTransaction for PgPool {
     {
         let caller = Location::caller();
         async move {
-            let mut t = self
-                .begin()
-                .await
-                .map_err(|e| DatabaseError::txn_begin(e, caller))?;
+            let mut t = Transaction::begin_with_location(self, caller).await?;
             match f(&mut t).await {
                 Ok(output) => {
-                    t.commit()
+                    t.inner
+                        .commit()
                         .await
                         .map_err(|e| DatabaseError::txn_commit(e, caller))?;
                     Ok(Ok(output))
                 }
                 Err(e) => {
-                    if let Err(error) = t.rollback().await {
+                    if let Err(error) = t.inner.rollback().await {
                         record_database_transaction_rollback_failure(
                             DatabaseTransactionRollbackTrigger::ClosureError,
                             caller,
@@ -1024,6 +1022,7 @@ pub async fn set_read_only_snapshot(txn: &mut sqlx::PgConnection) -> Result<(), 
 /// Starts transactions that own a connection acquired from a PostgreSQL pool.
 pub trait TransactionVending {
     /// Starts a transaction without retaining a borrow of the pool.
+    #[track_caller]
     fn txn_begin(&self) -> impl Future<Output = Result<Transaction<'static>, DatabaseError>>;
 }
 
@@ -1066,8 +1065,8 @@ mod tests {
                 .map_err(|e| DatabaseError::query(query, e))
         }
 
-        let mut first = pool.begin().await?;
-        let mut second = pool.begin().await?;
+        let mut first = pool.txn_begin().await?;
+        let mut second = pool.txn_begin().await?;
         lock(&mut first, 1).await?;
         lock(&mut second, 2).await?;
         let (first_result, second_result) = tokio::join!(lock(&mut first, 2), lock(&mut second, 1));
@@ -1086,10 +1085,10 @@ mod tests {
 
     #[crate::sqlx_test]
     async fn read_only_snapshot_rejects_writes(pool: PgPool) {
-        let mut txn = pool.begin().await.unwrap();
+        let mut txn = pool.txn_begin().await.unwrap();
         set_read_only_snapshot(&mut txn).await.unwrap();
         let error = sqlx::query("CREATE TABLE read_only_snapshot_probe (id int)")
-            .execute(&mut *txn)
+            .execute(txn.as_mut())
             .await
             .expect_err("a read-only transaction rejects writes");
         // read_only_sql_transaction
@@ -1204,6 +1203,24 @@ mod tests {
                 }
             },
         );
+    }
+
+    #[tokio::test]
+    async fn transaction_extension_retains_caller_location() {
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .connect_lazy("postgresql://unused/unused")
+            .unwrap();
+        pool.close().await;
+
+        let caller_line = line!() + 1;
+        let begin = pool.txn_begin();
+        let DatabaseError::Sqlx(error) = begin.await.unwrap_err() else {
+            panic!("closed pool should return a SQLx error");
+        };
+        assert!(matches!(error.source, sqlx::Error::PoolClosed));
+        assert_eq!(error.query, "transaction begin");
+        assert_eq!(error.file, file!());
+        assert_eq!(error.line, caller_line);
     }
 
     #[test]

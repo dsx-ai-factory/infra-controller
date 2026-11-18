@@ -19,7 +19,7 @@
 
 use carbide_uuid::switch::SwitchId;
 use db::db_read::PgPoolReader;
-use db::{ObjectColumnFilter, rack as db_rack, switch as db_switch};
+use db::{ObjectColumnFilter, TransactionVending as _, rack as db_rack, switch as db_switch};
 use model::rack::{MaintenanceActivity, RackState};
 use model::switch::{ReProvisioningState, Switch, SwitchControllerState, SwitchReprovisionRequest};
 use state_controller::state_handler::{
@@ -141,7 +141,12 @@ async fn rack_failed_abort_outcome(
         "Rack is in Error; aborting switch ReProvisioning and returning to Ready",
     );
 
-    let mut txn = ctx.services.db_pool.begin().await?;
+    let mut txn = ctx
+        .services
+        .db_pool
+        .txn_begin()
+        .await
+        .map_err(StateHandlerError::from_transaction)?;
     db_switch::clear_switch_reprovisioning_requested(txn.as_mut(), *switch_id).await?;
     Ok(Some(
         StateHandlerOutcome::transition(SwitchControllerState::Ready).with_txn(txn),
@@ -208,7 +213,12 @@ pub async fn handle_reprovisioning(
                         ));
                     }
 
-                    let mut txn = ctx.services.db_pool.begin().await?;
+                    let mut txn = ctx
+                        .services
+                        .db_pool
+                        .txn_begin()
+                        .await
+                        .map_err(StateHandlerError::from_transaction)?;
                     db_switch::clear_switch_reprovisioning_requested(txn.as_mut(), *switch_id)
                         .await?;
                     Ok(StateHandlerOutcome::transition(SwitchControllerState::Ready).with_txn(txn))
@@ -222,7 +232,12 @@ pub async fn handle_reprovisioning(
                         "Switch rack firmware update failed; transitioning to Error"
                     );
 
-                    let mut txn = ctx.services.db_pool.begin().await?;
+                    let mut txn = ctx
+                        .services
+                        .db_pool
+                        .txn_begin()
+                        .await
+                        .map_err(StateHandlerError::from_transaction)?;
                     db_switch::clear_switch_reprovisioning_requested(txn.as_mut(), *switch_id)
                         .await?;
                     Ok(
@@ -270,7 +285,12 @@ pub async fn handle_reprovisioning(
                             },
                         ))
                     } else {
-                        let mut txn = ctx.services.db_pool.begin().await?;
+                        let mut txn = ctx
+                            .services
+                            .db_pool
+                            .txn_begin()
+                            .await
+                            .map_err(StateHandlerError::from_transaction)?;
                         db_switch::clear_switch_reprovisioning_requested(txn.as_mut(), *switch_id)
                             .await?;
                         Ok(
@@ -280,7 +300,12 @@ pub async fn handle_reprovisioning(
                     }
                 }
                 model::rack::SwitchNvosUpdateState::Failed { cause } => {
-                    let mut txn = ctx.services.db_pool.begin().await?;
+                    let mut txn = ctx
+                        .services
+                        .db_pool
+                        .txn_begin()
+                        .await
+                        .map_err(StateHandlerError::from_transaction)?;
                     db_switch::clear_switch_reprovisioning_requested(txn.as_mut(), *switch_id)
                         .await?;
                     Ok(
@@ -304,7 +329,12 @@ pub async fn handle_reprovisioning(
             };
             if fabric_manager_status.display_status() != "running" {
                 if let Some(cause) = fabric_manager_status.error_message.as_ref() {
-                    let mut txn = ctx.services.db_pool.begin().await?;
+                    let mut txn = ctx
+                        .services
+                        .db_pool
+                        .txn_begin()
+                        .await
+                        .map_err(StateHandlerError::from_transaction)?;
                     db_switch::clear_switch_reprovisioning_requested(txn.as_mut(), *switch_id)
                         .await?;
                     return Ok(
@@ -316,7 +346,12 @@ pub async fn handle_reprovisioning(
                 }
                 if let Some(reason) = fabric_manager_status.reason.as_ref() {
                     if !reason.is_empty() {
-                        let mut txn = ctx.services.db_pool.begin().await?;
+                        let mut txn = ctx
+                            .services
+                            .db_pool
+                            .txn_begin()
+                            .await
+                            .map_err(StateHandlerError::from_transaction)?;
                         db_switch::clear_switch_reprovisioning_requested(txn.as_mut(), *switch_id)
                             .await?;
                         return Ok(
@@ -327,7 +362,12 @@ pub async fn handle_reprovisioning(
                     return Ok(StateHandlerOutcome::wait(reason.clone()));
                 }
             }
-            let mut txn = ctx.services.db_pool.begin().await?;
+            let mut txn = ctx
+                .services
+                .db_pool
+                .txn_begin()
+                .await
+                .map_err(StateHandlerError::from_transaction)?;
             db_switch::clear_switch_reprovisioning_requested(txn.as_mut(), *switch_id).await?;
             Ok(StateHandlerOutcome::transition(SwitchControllerState::Ready).with_txn(txn))
         }

@@ -30,7 +30,7 @@ use carbide_switch_controller::nvos_password_rotation::{
 use carbide_test_harness::prelude::{sqlx_test, sqlx_testing};
 use component_manager::mock::MockNvSwitchManager;
 use component_manager::nv_switch_manager::SwitchPasswordRotationState;
-use db::{ConditionalWrite, switch as db_switch};
+use db::{ConditionalWrite, TransactionVending as _, switch as db_switch};
 use model::switch::{ConfiguringState, Switch, SwitchControllerState};
 use state_controller::db_write_batch::DbWriteBatch;
 use state_controller::state_handler::StateHandlerContext;
@@ -92,7 +92,7 @@ async fn publish_target(
         .await
         .expect("failed to seed NVOS target credential");
 
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
 
     let staged = match current_version {
         Some(current_version) => {
@@ -148,7 +148,7 @@ async fn stage_submitted_rotation(
     target_version: i32,
     job_id: &str,
 ) -> TestResult<i32> {
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
 
     let ConditionalWrite::Applied(attempt) =
         db::credential_rotation::record_device_rotation_started(
@@ -325,7 +325,7 @@ async fn configuring_skips_credentials_when_rotation_is_not_actionable(
             .await
             .expect("failed to remove the per-switch NVOS credential");
 
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
 
         transition_switch_controller_state(
             txn.as_mut(),
@@ -419,7 +419,7 @@ async fn ready_switch_submits_version_zero_target(pool: sqlx::PgPool) -> TestRes
     .execute(&pool)
     .await?;
 
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
 
     transition_switch_controller_state(txn.as_mut(), &switch_id, SwitchControllerState::Ready)
         .await?;
@@ -751,7 +751,7 @@ async fn controller_converges_directly_to_latest_revision(pool: sqlx::PgPool) ->
         .await
         .expect("replace per-device NVOS credential with a stale password");
 
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
 
     transition_switch_controller_state(txn.as_mut(), &switch_id, SwitchControllerState::Ready)
         .await?;

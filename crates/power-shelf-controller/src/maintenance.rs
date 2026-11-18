@@ -24,7 +24,7 @@ use carbide_uuid::power_shelf::PowerShelfId;
 use component_manager::power_shelf_manager::{
     PowerShelfComponentResult, PowerShelfEndpoint, PowerShelfVendor,
 };
-use db::power_shelf as db_power_shelf;
+use db::{TransactionVending as _, power_shelf as db_power_shelf};
 use mac_address::MacAddress;
 use model::component_manager::PowerAction;
 use model::power_shelf::{
@@ -334,7 +334,12 @@ async fn finish_maintenance(
         return Ok(StateHandlerOutcome::transition(next_state));
     };
 
-    let mut txn = ctx.services.db_pool.begin().await?;
+    let mut txn = ctx
+        .services
+        .db_pool
+        .txn_begin()
+        .await
+        .map_err(StateHandlerError::from_transaction)?;
     if let db::ConditionalWrite::NotApplied(reason) =
         db_power_shelf::clear_power_shelf_maintenance_requested(&mut txn, *power_shelf_id, request)
             .await?

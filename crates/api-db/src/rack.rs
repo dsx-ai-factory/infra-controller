@@ -215,12 +215,7 @@ pub async fn update(
     rack_id: &RackId,
     config: &RackConfig,
 ) -> DatabaseResult<Rack> {
-    use sqlx::Acquire;
-
-    let mut txn = (&mut *connection)
-        .begin()
-        .await
-        .map_err(|error| DatabaseError::query("rack::update begin", error))?;
+    let mut txn = crate::Transaction::begin_inner(connection).await?;
     if !crate::cm_action::lock(&mut txn, crate::cm_action::Target::Rack(rack_id)).await? {
         return Err(DatabaseError::NotFoundError {
             kind: "rack",
@@ -289,9 +284,7 @@ pub async fn update(
         .map_err(|e| DatabaseError::new(query, e))?;
 
     crate::cm_action::reconcile(&mut txn, crate::cm_action::Target::Rack(rack_id)).await?;
-    txn.commit()
-        .await
-        .map_err(|error| DatabaseError::query("rack::update commit", error))?;
+    txn.commit().await?;
     Ok(rack)
 }
 
@@ -304,12 +297,7 @@ pub async fn consume_maintenance_termination_request(
     connection: &mut PgConnection,
     rack_id: &RackId,
 ) -> DatabaseResult<Rack> {
-    use sqlx::Acquire;
-
-    let mut txn = (&mut *connection)
-        .begin()
-        .await
-        .map_err(|error| DatabaseError::query("rack::terminate begin", error))?;
+    let mut txn = crate::Transaction::begin_inner(connection).await?;
     let query = r#"UPDATE racks
         SET config = jsonb_set(
             jsonb_set(config, '{maintenance_requested}', 'null'::jsonb),
@@ -330,9 +318,7 @@ pub async fn consume_maintenance_termination_request(
         .map_err(|e| DatabaseError::new(query, e))?;
 
     crate::cm_action::reconcile(&mut txn, crate::cm_action::Target::Rack(rack_id)).await?;
-    txn.commit()
-        .await
-        .map_err(|error| DatabaseError::query("rack::terminate commit", error))?;
+    txn.commit().await?;
     Ok(rack)
 }
 

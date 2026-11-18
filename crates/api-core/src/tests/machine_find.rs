@@ -23,7 +23,7 @@ use carbide_uuid::machine::{
 use carbide_uuid::rack::RackId;
 use common::api_fixtures::dpu::create_dpu_machine;
 use common::api_fixtures::{create_managed_host, create_test_env, site_explorer};
-use db::{AnnotatedSqlxError, ObjectFilter};
+use db::{AnnotatedSqlxError, ObjectFilter, TransactionVending as _};
 use health_report::{
     HealthAlertClassification, HealthProbeAlert, HealthReport, HealthReportApplyMode,
 };
@@ -141,7 +141,7 @@ async fn test_find_machine_by_id(pool: sqlx::PgPool) {
     let env = create_test_env(pool).await;
     let host_config = env.managed_host_config();
     let dpu_machine_id = create_dpu_machine(&env, &host_config).await;
-    let mut txn = env.pool.begin().await.unwrap();
+    let mut txn = env.pool.txn_begin().await.unwrap();
 
     let machine = db::machine::find_by_query(&mut txn, &dpu_machine_id.to_string())
         .await
@@ -191,7 +191,7 @@ async fn test_find_machines_by_ids_returns_unassociated_dpus(pool: sqlx::PgPool)
         med_model: None,
     };
 
-    let mut txn = env.pool.begin().await.unwrap();
+    let mut txn = env.pool.txn_begin().await.unwrap();
 
     // Remove the fixture's predicted-host association while retaining the DPU row.
     sqlx::query("UPDATE machine_interfaces SET attached_dpu_machine_id = NULL WHERE attached_dpu_machine_id = $1 AND machine_id != $1")
@@ -265,7 +265,7 @@ async fn test_find_machines_by_ids_returns_unassociated_dpus(pool: sqlx::PgPool)
 
     for (label, include_history, health_override, has_sla) in cases {
         if let Some((mode, report)) = health_override {
-            let mut txn = env.pool.begin().await.unwrap();
+            let mut txn = env.pool.txn_begin().await.unwrap();
 
             db::machine::insert_health_report(&mut txn, &machine_id, mode, &report, false)
                 .await
@@ -321,7 +321,7 @@ async fn test_find_machine_by_ip(pool: sqlx::PgPool) {
     let host_config = env.managed_host_config();
     let dpu_machine_id = create_dpu_machine(&env, &host_config).await;
 
-    let mut txn = env.pool.begin().await.unwrap();
+    let mut txn = env.pool.txn_begin().await.unwrap();
     let dpu_machine = db::machine::find_one(
         txn.as_mut(),
         &dpu_machine_id,
@@ -359,7 +359,7 @@ async fn test_find_machine_by_ipv6(pool: sqlx::PgPool) {
     let host_config = env.managed_host_config();
     let dpu_machine_id = create_dpu_machine(&env, &host_config).await;
 
-    let mut txn = env.pool.begin().await.unwrap();
+    let mut txn = env.pool.txn_begin().await.unwrap();
     let dpu_machine = db::machine::find_one(
         txn.as_mut(),
         &dpu_machine_id,
@@ -381,7 +381,7 @@ async fn test_find_machine_by_ipv6(pool: sqlx::PgPool) {
     txn.commit().await.unwrap();
 
     // Look up the machine by its IPv6 address.
-    let mut txn = pool.begin().await.unwrap();
+    let mut txn = pool.txn_begin().await.unwrap();
     let machine = db::machine::find_by_query(&mut txn, "fd00::100")
         .await
         .unwrap()
@@ -393,7 +393,7 @@ async fn test_find_machine_by_ipv6(pool: sqlx::PgPool) {
 async fn test_find_machine_without_sku(pool: sqlx::PgPool) {
     let env = create_test_env(pool).await;
     let mh = create_managed_host(&env).await;
-    let mut txn = env.pool.begin().await.unwrap();
+    let mut txn = env.pool.txn_begin().await.unwrap();
 
     let machine = mh.host().db_machine(&mut txn).await;
 
@@ -407,7 +407,7 @@ async fn test_find_machine_with_sku(pool: sqlx::PgPool) {
         .unwrap()
         .into();
 
-    let mut txn = env.pool.begin().await.unwrap();
+    let mut txn = env.pool.txn_begin().await.unwrap();
     db::sku::create(&mut txn, &sku).await.unwrap();
     txn.commit().await.unwrap();
 
@@ -492,7 +492,7 @@ async fn test_find_machine_by_mac(pool: sqlx::PgPool) {
     let host_config = env.managed_host_config();
     let dpu_machine_id = create_dpu_machine(&env, &host_config).await;
 
-    let mut txn = env.pool.begin().await.unwrap();
+    let mut txn = env.pool.txn_begin().await.unwrap();
     let dpu_machine = db::machine::find_one(
         txn.as_mut(),
         &dpu_machine_id,
@@ -533,7 +533,7 @@ async fn test_find_machine_by_hostname(pool: sqlx::PgPool) {
     let host_config = env.managed_host_config();
     let dpu_machine_id = create_dpu_machine(&env, &host_config).await;
 
-    let mut txn = env.pool.begin().await.unwrap();
+    let mut txn = env.pool.txn_begin().await.unwrap();
     let dpu_machine = db::machine::find_one(
         txn.as_mut(),
         &dpu_machine_id,
@@ -637,7 +637,7 @@ async fn test_find_machine_ids(pool: sqlx::PgPool) {
         host_config.get_and_assert_single_dpu(),
     ))
     .unwrap();
-    let mut txn = env.pool.begin().await.unwrap();
+    let mut txn = env.pool.txn_begin().await.unwrap();
 
     let machine_ids = db::machine::find_machine_ids::<MachineId>(txn.as_mut(), config)
         .await
@@ -704,7 +704,7 @@ async fn test_find_dpu_machine_ids(pool: sqlx::PgPool) {
         host_config.get_and_assert_single_dpu(),
     ))
     .unwrap();
-    let mut txn = env.pool.begin().await.unwrap();
+    let mut txn = env.pool.txn_begin().await.unwrap();
 
     let machine_ids = db::machine::find_machine_ids::<MachineId>(txn.as_mut(), config)
         .await
@@ -729,7 +729,7 @@ async fn test_find_predicted_host_machine_ids(pool: sqlx::PgPool) {
         host_config.get_and_assert_single_dpu(),
     ))
     .unwrap();
-    let mut txn = env.pool.begin().await.unwrap();
+    let mut txn = env.pool.txn_begin().await.unwrap();
 
     let machine_ids = db::machine::find_machine_ids::<MachineId>(txn.as_mut(), config)
         .await
@@ -747,7 +747,7 @@ async fn test_find_host_machine_ids_when_predicted(pool: sqlx::PgPool) {
     let env = create_test_env(pool).await;
     let host_config = env.managed_host_config();
     let _dpu_machine_id = create_dpu_machine(&env, &host_config).await;
-    let mut txn = env.pool.begin().await.unwrap();
+    let mut txn = env.pool.txn_begin().await.unwrap();
 
     let machine_ids = db::machine::find_machine_ids::<MachineId>(txn.as_mut(), config)
         .await
@@ -763,7 +763,7 @@ async fn test_find_host_machine_ids(pool: sqlx::PgPool) {
     let env = create_test_env(pool).await;
     let (host_machine_id, _) = create_managed_host(&env).await.into();
 
-    let mut txn = env.pool.begin().await.unwrap();
+    let mut txn = env.pool.txn_begin().await.unwrap();
 
     tracing::info!("finding machine ids");
     let machine_ids = db::machine::find_machine_ids(txn.as_mut(), config)
@@ -790,7 +790,7 @@ async fn test_find_mixed_host_machine_ids(pool: sqlx::PgPool) {
     ))
     .unwrap();
 
-    let mut txn = env.pool.begin().await.unwrap();
+    let mut txn = env.pool.txn_begin().await.unwrap();
 
     tracing::info!("finding machine ids");
     let machine_ids = db::machine::find_machine_ids::<MachineId>(txn.as_mut(), config)
@@ -1196,7 +1196,7 @@ async fn test_find_machine_states_releases_blocked_connection(pool: sqlx::PgPool
         )
         .build();
 
-        let mut blocker = pool.begin().await.unwrap();
+        let mut blocker = pool.txn_begin().await.unwrap();
         sqlx::query("LOCK TABLE machines IN ACCESS EXCLUSIVE MODE")
             .execute(&mut *blocker)
             .await

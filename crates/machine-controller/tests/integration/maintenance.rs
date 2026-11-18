@@ -30,6 +30,7 @@ use component_manager::compute_tray_manager::{
 use component_manager::error::ComponentManagerError;
 use component_manager::mock::{MockNvSwitchManager, MockPowerShelfManager};
 use component_manager::types::FirmwareUpdateOptions;
+use db::TransactionVending as _;
 use model::component_manager::{ComputeTrayComponent, PowerAction};
 use model::controller_outcome::PersistentStateHandlerOutcome;
 use model::machine::{
@@ -870,7 +871,7 @@ async fn chassis_reset_preserves_replacement_including_legacy_state(pool: PgPool
         enter_requested_state(&env, &host, operation.clone(), EntryState::Ready).await;
         env.run_single_iteration().await;
         if legacy {
-            let mut txn = pool.begin().await.unwrap();
+            let mut txn = pool.txn_begin().await.unwrap();
             db::machine::update_state(
                 &mut txn,
                 &host.host.id,

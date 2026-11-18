@@ -19,6 +19,7 @@
 
 use carbide_secrets::credentials::{BmcCredentialType, CredentialKey, CredentialWriter};
 use carbide_uuid::power_shelf::PowerShelfId;
+use db::TransactionVending as _;
 use model::bmc_suppression::{BmcSuppressionSource, BmcSuppressionSubsystem, NewBmcSuppression};
 use model::power_shelf::{PowerShelf, PowerShelfControllerState, PowerShelfDecommissioningState};
 use state_controller::state_handler::{
@@ -67,7 +68,12 @@ async fn handle_suppressing_site_explorer(
             object_id: power_shelf_id.to_string(),
             missing: "bmc_mac",
         })?;
-    let mut txn = ctx.services.db_pool.begin().await?;
+    let mut txn = ctx
+        .services
+        .db_pool
+        .txn_begin()
+        .await
+        .map_err(StateHandlerError::from_transaction)?;
     let suppression = db::bmc_suppression::upsert(
         &mut txn,
         &NewBmcSuppression {
@@ -105,7 +111,12 @@ async fn handle_suppressing_bmc_dhcp(
             object_id: power_shelf_id.to_string(),
             missing: "bmc_mac",
         })?;
-    let mut txn = ctx.services.db_pool.begin().await?;
+    let mut txn = ctx
+        .services
+        .db_pool
+        .txn_begin()
+        .await
+        .map_err(StateHandlerError::from_transaction)?;
     let suppression = db::bmc_suppression::upsert(
         &mut txn,
         &NewBmcSuppression {
@@ -212,7 +223,12 @@ async fn handle_deleting_managed_credentials(
             ))
         })?;
 
-    let mut txn = ctx.services.db_pool.begin().await?;
+    let mut txn = ctx
+        .services
+        .db_pool
+        .txn_begin()
+        .await
+        .map_err(StateHandlerError::from_transaction)?;
     db::credential_rotation::delete_device_converged(
         &mut txn,
         bmc_mac,

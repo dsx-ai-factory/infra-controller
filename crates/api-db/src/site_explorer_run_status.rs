@@ -141,11 +141,13 @@ ON CONFLICT (id) DO UPDATE SET
 mod tests {
     use model::site_explorer::SiteExplorerLastRun;
 
+    use crate::TransactionVending as _;
+
     #[crate::sqlx_test]
     async fn fetch_decodes_complete_run_record(
         pool: sqlx::PgPool,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
         let finished_at = "2026-01-02T03:04:05Z".parse()?;
         let expected = SiteExplorerLastRun {
             started_at: "2026-01-02T03:00:00Z".parse()?,

@@ -1473,9 +1473,9 @@ mod test_batched_lookups {
     };
     use model::metadata::Metadata;
     use model::tenant::TenantOrganizationId;
-    use sqlx::Acquire as _;
 
     use super::*;
+    use crate::TransactionVending as _;
 
     const TENANT_ORG: &str = "test-org";
     const SQL_VIOLATION_INTERFACE_MAC_ORDINAL_NEGATIVE: &str =
@@ -1488,7 +1488,10 @@ mod test_batched_lookups {
     async fn deployment_type_migration_preserves_existing_placement(pool: sqlx::PgPool) {
         // Seed both service types, including a deleted Helm registration that must retain policy.
         let [(pod_id, _), (helm_id, _)] = seed_services(&pool, 2).await.try_into().unwrap();
-        let mut txn = pool.begin().await.expect("begin migration contract test");
+        let mut txn = pool
+            .txn_begin()
+            .await
+            .expect("begin migration contract test");
         sqlx::query(
             "UPDATE extension_services SET type = 'dpf_helm_chart', dpu_target = 'primary',
              deleted = NOW() WHERE id = $1",
@@ -1552,7 +1555,9 @@ mod test_batched_lookups {
             ("unknown", None),
         ];
         for (deployment_type, target) in cases {
-            let mut attempt = txn.begin().await.expect("begin invalid-policy savepoint");
+            let mut attempt = crate::Transaction::begin_inner(&mut txn)
+                .await
+                .expect("begin invalid-policy savepoint");
             let error = sqlx::query(
                 "UPDATE extension_services SET deployment_type = $1, dpu_target = $2 WHERE id = $3",
             )
@@ -1582,7 +1587,10 @@ mod test_batched_lookups {
     async fn service_vpc_migration_and_mac_accessor_contract(pool: sqlx::PgPool) {
         let [(service_id, _), (other_service_id, _)] =
             seed_services(&pool, 2).await.try_into().unwrap();
-        let mut txn = pool.begin().await.expect("begin migration contract test");
+        let mut txn = pool
+            .txn_begin()
+            .await
+            .expect("begin migration contract test");
 
         // Restore the actual predecessor schema around a realistic service row, then
         // apply exactly what ships under the migration runner's transaction boundary.
@@ -1615,7 +1623,9 @@ mod test_batched_lookups {
 
         // The database rejects negative ordinals even when a caller bypasses
         // the typed accessor, preserving the zero-based interface contract.
-        let mut attempt = txn.begin().await.expect("begin negative-ordinal savepoint");
+        let mut attempt = crate::Transaction::begin_inner(&mut txn)
+            .await
+            .expect("begin negative-ordinal savepoint");
         let error = sqlx::query(
             "INSERT INTO extension_service_interface_macs
              (service_id, interface_ordinal, mac_address)
@@ -1732,7 +1742,9 @@ mod test_batched_lookups {
             .execute(txn.as_mut())
             .await
             .expect("remove the predecessor version dependency");
-        let mut attempt = txn.begin().await.expect("begin parent-delete savepoint");
+        let mut attempt = crate::Transaction::begin_inner(&mut txn)
+            .await
+            .expect("begin parent-delete savepoint");
         let error = sqlx::query("DELETE FROM extension_services WHERE id = $1")
             .bind(service_id)
             .execute(attempt.as_mut())
@@ -1769,7 +1781,7 @@ mod test_batched_lookups {
         n: usize,
     ) -> Vec<(ExtensionServiceId, ConfigVersion)> {
         let tenant: TenantOrganizationId = TENANT_ORG.parse().expect("valid tenant org id");
-        let mut txn = pool.begin().await.expect("begin");
+        let mut txn = pool.txn_begin().await.expect("begin");
 
         // Extension services carry an FK to tenants(organization_id); seed the tenant first.
         crate::tenant::create_and_persist(
@@ -1823,7 +1835,7 @@ mod test_batched_lookups {
         change: ServiceVpcChainExclusion,
     ) -> ConditionalWrite<ExtensionServiceChainSelector, ChainSelectorNotCurrent> {
         // Give each writer its own transaction, including concurrent test writers.
-        let mut txn = pool.begin().await.expect("begin exclusion update");
+        let mut txn = pool.txn_begin().await.expect("begin exclusion update");
         let outcome = try_update_chain_exclusion(
             txn.as_mut(),
             service_id,
@@ -2124,7 +2136,7 @@ mod test_batched_lookups {
         let first_service_id = ExtensionServiceId::new();
         let claimed_id = "contended-dpf-id";
         let claimed_data = r#"{"serviceID":"contended-dpf-id","values":{"payload":"\u0000"}}"#;
-        let mut first = pool.begin().await.expect("begin first create");
+        let mut first = pool.txn_begin().await.expect("begin first create");
         let first_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
             .fetch_one(&mut *first)
             .await
@@ -2153,7 +2165,7 @@ mod test_batched_lookups {
         let upper_id = "CONTENDED-DPF-ID";
         let upper_data = r#"{"serviceID":"CONTENDED-DPF-ID"}"#;
         let second_service_id = ExtensionServiceId::new();
-        let mut second = pool.begin().await.expect("begin second create");
+        let mut second = pool.txn_begin().await.expect("begin second create");
         let second_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
             .fetch_one(&mut *second)
             .await
@@ -2234,7 +2246,7 @@ mod test_batched_lookups {
         let (active_service_id, initial_version) = seeded[0];
         let (deleted_service_id, _) = seeded[1];
         let missing_service_id = ExtensionServiceId::new();
-        let mut txn = pool.begin().await.expect("begin winning updates");
+        let mut txn = pool.txn_begin().await.expect("begin winning updates");
         for (service_id, version) in seeded {
             let (service, _) = update(
                 &mut txn,
@@ -2301,7 +2313,7 @@ mod test_batched_lookups {
             expected_error,
         } in cases
         {
-            let mut txn = pool.begin().await.expect("begin stale update");
+            let mut txn = pool.txn_begin().await.expect("begin stale update");
             let before = find_by_ids(&mut txn, &[service_id], true, false)
                 .await
                 .expect("load parent before rejected update");
@@ -2335,7 +2347,7 @@ mod test_batched_lookups {
             // Commit to prove rejection didn't leave any database changes.
             txn.commit().await.expect("commit rejected update");
 
-            let mut txn = pool.begin().await.expect("begin persistence check");
+            let mut txn = pool.txn_begin().await.expect("begin persistence check");
             let after = find_by_ids(&mut txn, &[service_id], true, false)
                 .await
                 .expect("reload parent after rejected update");
@@ -2393,7 +2405,7 @@ mod test_batched_lookups {
     async fn dpf_helm_chart_controller_persistence_is_versioned_and_retained(pool: sqlx::PgPool) {
         let tenant: TenantOrganizationId = TENANT_ORG.parse().expect("valid tenant org id");
         let service_id = ExtensionServiceId::new();
-        let mut txn = pool.begin().await.expect("begin");
+        let mut txn = pool.txn_begin().await.expect("begin");
         crate::tenant::create_and_persist(
             TENANT_ORG.to_string(),
             Metadata {
@@ -2693,7 +2705,10 @@ mod test_batched_lookups {
     async fn inventory_ids_retain_in_progress_deletion(pool: sqlx::PgPool) {
         let [(active_id, _), (deleting_id, version)] =
             seed_services(&pool, 2).await.try_into().unwrap();
-        let mut txn = pool.begin().await.expect("begin inventory lifecycle test");
+        let mut txn = pool
+            .txn_begin()
+            .await
+            .expect("begin inventory lifecycle test");
         sqlx::query(
             "UPDATE extension_services SET type = 'dpf_helm_chart', dpu_target = 'all_active',
              controller_state = '{\"state\":\"creating\"}'::jsonb WHERE id = $1",
@@ -2795,7 +2810,7 @@ mod test_batched_lookups {
     #[crate::sqlx_test]
     async fn snapshot_rejects_malformed_older_active_version(pool: sqlx::PgPool) {
         let [(service_id, initial_version)] = seed_services(&pool, 1).await.try_into().unwrap();
-        let mut txn = pool.begin().await.expect("begin snapshot decode test");
+        let mut txn = pool.txn_begin().await.expect("begin snapshot decode test");
         let version_change = initial_version.incremental_change();
         let (_, updated) = update(
             &mut txn,
@@ -2864,7 +2879,7 @@ mod test_batched_lookups {
     async fn version_queries_decode_complete_records(
         pool: sqlx::PgPool,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
         crate::tenant::create_and_persist(
             TENANT_ORG.to_string(),
             Metadata {

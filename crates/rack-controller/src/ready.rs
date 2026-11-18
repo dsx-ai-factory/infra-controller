@@ -22,7 +22,8 @@ use carbide_rack_controller::maintenance::first_maintenance_state;
 use carbide_uuid::machine::MachineId;
 use carbide_uuid::rack::RackId;
 use db::{
-    machine as db_machine, power_shelf as db_power_shelf, rack as db_rack, switch as db_switch,
+    TransactionVending as _, machine as db_machine, power_shelf as db_power_shelf, rack as db_rack,
+    switch as db_switch,
 };
 use model::DeletedFilter;
 use model::machine::machine_search_config::MachineSearchConfig;
@@ -53,7 +54,12 @@ pub async fn handle_ready(
             "Rack topology changed, transitioning from Ready to Discovering",
         );
         state.config.topology_changed = false;
-        let mut txn = ctx.services.db_pool.begin().await?;
+        let mut txn = ctx
+            .services
+            .db_pool
+            .txn_begin()
+            .await
+            .map_err(StateHandlerError::from_transaction)?;
         db_rack::update(txn.as_mut(), id, &state.config).await?;
         return Ok(StateHandlerOutcome::transition(RackState::Discovering).with_txn(txn));
     }
@@ -66,7 +72,12 @@ pub async fn handle_ready(
         state.config.reprovision_requested = false;
         state.config.ingestion_in_progress = false;
         state.config.maintenance_requested = None;
-        let mut txn = ctx.services.db_pool.begin().await?;
+        let mut txn = ctx
+            .services
+            .db_pool
+            .txn_begin()
+            .await
+            .map_err(StateHandlerError::from_transaction)?;
         db_rack::update(txn.as_mut(), id, &state.config).await?;
         return Ok(StateHandlerOutcome::transition(RackState::Maintenance {
             maintenance_state: RackMaintenanceState::FirmwareUpgrade {
@@ -105,7 +116,12 @@ pub async fn handle_ready(
         }
         // Leave maintenance_requested set; the maintenance handler reads the
         // scope to decide which activities to run and clears it on Completed.
-        let txn = ctx.services.db_pool.begin().await?;
+        let txn = ctx
+            .services
+            .db_pool
+            .txn_begin()
+            .await
+            .map_err(StateHandlerError::from_transaction)?;
         return Ok(StateHandlerOutcome::transition(RackState::Maintenance {
             maintenance_state: first_maintenance_state(scope),
         })
@@ -118,7 +134,12 @@ pub async fn handle_ready(
             cause = %cause,
             "Rack transitioning from Ready to Error",
         );
-        let txn = ctx.services.db_pool.begin().await?;
+        let txn = ctx
+            .services
+            .db_pool
+            .txn_begin()
+            .await
+            .map_err(StateHandlerError::from_transaction)?;
         return Ok(StateHandlerOutcome::transition(RackState::Error {
             certificate_failure: None,
             cause,
@@ -138,7 +159,12 @@ pub(super) async fn detect_component_failure(
     rack_id: &RackId,
     ctx: &mut StateHandlerContext<'_, RackStateHandlerContextObjects>,
 ) -> Result<Option<String>, StateHandlerError> {
-    let mut txn = ctx.services.db_pool.begin().await?;
+    let mut txn = ctx
+        .services
+        .db_pool
+        .txn_begin()
+        .await
+        .map_err(StateHandlerError::from_transaction)?;
 
     let failed_switches = db_switch::find_ids(
         txn.as_mut(),
@@ -172,7 +198,9 @@ pub(super) async fn detect_component_failure(
     )
     .await?;
 
-    txn.commit().await?;
+    txn.commit()
+        .await
+        .map_err(StateHandlerError::from_transaction)?;
 
     if failed_switches.is_empty() && failed_power_shelves.is_empty() && failed_machines.is_empty() {
         return Ok(None);
