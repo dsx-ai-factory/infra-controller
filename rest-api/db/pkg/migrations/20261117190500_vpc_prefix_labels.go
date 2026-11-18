@@ -5,18 +5,50 @@ package migrations
 
 import (
 	"context"
+	"database/sql"
+	"fmt"
 
+	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/model"
 	"github.com/uptrace/bun"
 )
 
 func init() {
 	Migrations.MustRegister(func(ctx context.Context, db *bun.DB) error {
-		_, err := db.ExecContext(ctx, `
-			ALTER TABLE vpc_prefix ADD COLUMN IF NOT EXISTS labels JSONB;
-			UPDATE vpc_prefix SET labels = '{}'::jsonb WHERE labels IS NULL;
-			ALTER TABLE vpc_prefix ALTER COLUMN labels SET DEFAULT '{}'::jsonb;
-			ALTER TABLE vpc_prefix ALTER COLUMN labels SET NOT NULL;
-		`)
-		return err
-	}, nil)
+		tx, terr := db.BeginTx(ctx, &sql.TxOptions{})
+		if terr != nil {
+			handlePanic(terr, "failed to begin transaction")
+		}
+
+		_, err := tx.NewAddColumn().
+			Model((*model.VpcPrefix)(nil)).
+			IfNotExists().
+			ColumnExpr("labels JSONB NOT NULL DEFAULT ('{}')").
+			Exec(ctx)
+		handleError(tx, err)
+
+		// Fresh databases create the column from the current model before this
+		// migration runs, so enforce the same upgrade constraints in either path.
+		_, err = tx.Exec("UPDATE vpc_prefix SET labels = '{}'::jsonb WHERE labels IS NULL")
+		handleError(tx, err)
+		_, err = tx.Exec("ALTER TABLE vpc_prefix ALTER COLUMN labels SET DEFAULT '{}'::jsonb")
+		handleError(tx, err)
+		_, err = tx.Exec("ALTER TABLE vpc_prefix ALTER COLUMN labels SET NOT NULL")
+		handleError(tx, err)
+
+		_, err = tx.Exec("DROP INDEX IF EXISTS vpc_prefix_tsv_idx")
+		handleError(tx, err)
+		_, err = tx.Exec("CREATE INDEX vpc_prefix_tsv_idx ON vpc_prefix USING gin(to_tsvector('english', name || ' ' || status || ' ' || labels::text))")
+		handleError(tx, err)
+
+		terr = tx.Commit()
+		if terr != nil {
+			handlePanic(terr, "failed to commit transaction")
+		}
+
+		fmt.Print(" [up migration] Added 'labels' column to 'vpc_prefix' table successfully. ")
+		return nil
+	}, func(ctx context.Context, db *bun.DB) error {
+		fmt.Print(" [down migration] ")
+		return nil
+	})
 }

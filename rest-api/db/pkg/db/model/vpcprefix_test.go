@@ -536,6 +536,10 @@ func TestVpcPrefixSQLDAO_GetAll(t *testing.T) {
 	vps := []VpcPrefix{}
 
 	for i := 0; i < totalCount; i++ {
+		labels := map[string]string{}
+		if i == 0 {
+			labels["owner"] = "launchlayer"
+		}
 		if i%2 == 0 {
 			vpcPrefix, err := vpsd.Create(ctx, nil, VpcPrefixCreateInput{
 				Name:         fmt.Sprintf("VpcPrefix-%v", i),
@@ -544,6 +548,7 @@ func TestVpcPrefixSQLDAO_GetAll(t *testing.T) {
 				VpcID:        vpc1.ID,
 				TenantID:     tenant1.ID,
 				IpBlockID:    &ipBlock1.ID,
+				Labels:       labels,
 				Prefix:       prefix,
 				PrefixLength: 24,
 				Status:       VpcPrefixStatusReady,
@@ -560,6 +565,7 @@ func TestVpcPrefixSQLDAO_GetAll(t *testing.T) {
 				VpcID:        vpc2.ID,
 				TenantID:     tenant2.ID,
 				IpBlockID:    &ipBlock2.ID,
+				Labels:       labels,
 				Prefix:       prefix,
 				PrefixLength: 24,
 				Status:       VpcPrefixStatusReady,
@@ -670,6 +676,13 @@ func TestVpcPrefixSQLDAO_GetAll(t *testing.T) {
 			searchQuery:   cutil.GetPtr("VpcPrefix-"),
 			expectedCount: paginator.DefaultLimit,
 			expectedTotal: &totalCount,
+			expectedError: false,
+		},
+		{
+			desc:          "GetAll with label search query returns objects",
+			searchQuery:   cutil.GetPtr("launchlayer"),
+			expectedCount: 1,
+			expectedTotal: cutil.GetPtr(1),
 			expectedError: false,
 		},
 		{

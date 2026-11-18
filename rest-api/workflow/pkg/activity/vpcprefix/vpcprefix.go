@@ -8,11 +8,13 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"maps"
 	"net/netip"
 
 	"github.com/google/uuid"
 	"github.com/rs/zerolog"
 	"github.com/rs/zerolog/log"
+	"go.temporal.io/sdk/client"
 
 	cdb "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
 	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/ipam"
@@ -20,6 +22,7 @@ import (
 	cdbp "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/paginator"
 
 	sc "github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/client/site"
+	"github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/queue"
 	"github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/util"
 
 	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
@@ -163,6 +166,17 @@ func (mvp ManageVpcPrefix) UpdateVpcPrefixesInDB(ctx context.Context, siteID uui
 			}
 		}
 
+		if status != cdbm.VpcPrefixStatusDeleting && controllerVpcPrefix.Metadata != nil {
+			reportedVpcPrefix := new(cdbm.VpcPrefix)
+			reportedVpcPrefix.FromProto(controllerVpcPrefix)
+			if vpcPrefix.Name != reportedVpcPrefix.Name ||
+				!maps.Equal(vpcPrefix.Labels, reportedVpcPrefix.Labels) {
+				serr := mvp.UpdateVpcPrefixMetadata(ctx, siteID, vpcPrefix.ID)
+				if serr != nil {
+					slogger.Error().Err(serr).Msg("failed to synchronize VPC Prefix metadata with Site")
+				}
+			}
+		}
 	}
 
 	// Populate list of VpcPrefixes that were not found
@@ -553,6 +567,54 @@ func (mvp ManageVpcPrefix) createOrUpdateVpcPrefixFromSite(
 		return nil
 	}
 	return vpcPrefix
+}
+
+// UpdateVpcPrefixMetadata reloads authoritative REST metadata and sends it to
+// Core through the existing Site workflow.
+func (mvp ManageVpcPrefix) UpdateVpcPrefixMetadata(ctx context.Context, siteID, vpcPrefixID uuid.UUID) error {
+	logger := log.With().
+		Str("Activity", "UpdateVpcPrefixMetadata").
+		Str("Site ID", siteID.String()).
+		Str("VPC Prefix ID", vpcPrefixID.String()).
+		Logger()
+
+	stc, err := mvp.siteClientPool.GetClientByID(siteID)
+	if err != nil {
+		return fmt.Errorf("failed to retrieve Temporal client for Site: %w", err)
+	}
+
+	return cdb.WithTx(ctx, mvp.dbSession, func(tx *cdb.Tx) error {
+		lockErr := tx.TryAcquireAdvisoryLock(
+			ctx,
+			cdb.GetAdvisoryLockIDFromString(vpcPrefixID.String()),
+			nil,
+		)
+		if lockErr != nil {
+			return fmt.Errorf("failed to acquire VPC Prefix metadata lock: %w", lockErr)
+		}
+
+		vpcPrefix, getErr := cdbm.NewVpcPrefixDAO(mvp.dbSession).GetByID(ctx, tx, vpcPrefixID, nil)
+		if getErr != nil {
+			return fmt.Errorf("failed to retrieve VPC Prefix from DB: %w", getErr)
+		}
+
+		vpcPrefixProto := vpcPrefix.ToProto(nil)
+		request := &corev1.VpcPrefixUpdateRequest{
+			Id:       vpcPrefixProto.Id,
+			Metadata: vpcPrefixProto.Metadata,
+		}
+		workflowOptions := client.StartWorkflowOptions{
+			ID:        "site-vpc-prefix-update-metadata-" + vpcPrefixID.String(),
+			TaskQueue: queue.SiteTaskQueue,
+		}
+		workflowRun, executeErr := stc.ExecuteWorkflow(ctx, workflowOptions, "UpdateVpcPrefix", request)
+		if executeErr != nil {
+			return fmt.Errorf("failed to trigger workflow to update VPC Prefix metadata: %w", executeErr)
+		}
+
+		logger.Info().Str("Workflow ID", workflowRun.GetID()).Msg("triggered workflow to update VPC Prefix metadata")
+		return nil
+	})
 }
 
 // getControllerVpcPrefixStatus maps Controller VPC Prefix tenant state into REST status and status-detail text.

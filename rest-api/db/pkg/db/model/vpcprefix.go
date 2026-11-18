@@ -426,9 +426,10 @@ func (vpsd VpcPrefixSQLDAO) GetAll(ctx context.Context, tx *db.Tx, filter VpcPre
 	if ok {
 		query = query.WhereGroup(" AND ", func(q *bun.SelectQuery) *bun.SelectQuery {
 			return q.
-				Where("to_tsvector('english', (coalesce(vp.name, ' ') || ' ' || coalesce(vp.status, ' '))) @@ to_tsquery('english', ?)", *normalizedTokens).
+				Where("to_tsvector('english', (coalesce(vp.name, ' ') || ' ' || coalesce(vp.status, ' ') || ' ' || coalesce(vp.labels::text, ' '))) @@ to_tsquery('english', ?)", *normalizedTokens).
 				WhereOr("vp.name ILIKE ?", "%"+searchQuery+"%").
-				WhereOr("vp.status ILIKE ?", "%"+searchQuery+"%")
+				WhereOr("vp.status ILIKE ?", "%"+searchQuery+"%").
+				WhereOr("vp.labels::text ILIKE ?", "%"+searchQuery+"%")
 		})
 		cotel.SetAttribute(vpDAOSpan, attribute.String("search_query", searchQuery))
 	}
