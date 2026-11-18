@@ -2103,6 +2103,7 @@ pub struct DpfConfig {
     pub enabled: bool,
     /// Uses DPUService-based Service names and peer addresses in NICo's DHCP, FMDS,
     /// DPU-agent, and OTel charts. Defaults to false to preserve legacy naming.
+    /// Selects HBN and DTS `service.nameSource`: `dpuService` when true, otherwise `release`.
     /// Enable only with DPF 30.0 rc.4 or newer and HBN, DTS, and NICo chart versions
     /// that support this naming scheme.
     /// This site-wide value overrides per-service Helm values and is read at startup.
@@ -2556,6 +2557,8 @@ pub struct DpfServiceConfig {
     pub docker_image_pull_secret: Option<String>,
     /// Chart-native values deep-merged over NICo's generated template values.
     /// Tables merge recursively. Scalars and arrays replace generated values.
+    /// For HBN and DTS, `multiClusterSupport` overrides `service.nameSource` after merging:
+    /// `dpuService` when enabled, or `release` when disabled or omitted.
     #[serde(default)]
     pub extra_helm_values: Option<serde_json::Map<String, serde_json::Value>>,
 }
