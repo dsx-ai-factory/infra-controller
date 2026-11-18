@@ -74,6 +74,8 @@ type WorkflowComponent struct {
 
 // ExecutionInfo contains the information needed to execute a task.
 type ExecutionInfo struct {
+	// TraceID is persisted in Task.Attributes and in Temporal execution inputs.
+	TraceID    string `json:"trace_id,omitempty"`
 	TaskID     uuid.UUID
 	Components []WorkflowComponent
 

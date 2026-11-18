@@ -99,10 +99,13 @@ impl<S> LogFmtLayer<S>
 where
     S: Subscriber + for<'span> LookupSpan<'span>,
 {
-    /// Include the enclosing span's real `trace_id`, retaining the local `span_id`.
+    /// Include the originating task-local or enclosing span's OTel `trace_id`,
+    /// retaining the local `span_id`. Task-local correlation takes precedence
+    /// even when its INFO span is filtered out. Configured span fields take
+    /// precedence over the OTel fallback.
     ///
-    /// Omits the field when no valid context exists, including when no OTel layer
-    /// is installed. Install this layer before the OpenTelemetry layer so span
+    /// Without a configured value, omits the field when no valid context exists,
+    /// including when no OTel layer is installed. Install this layer before the OpenTelemetry layer so span
     /// completions can read the context before it is removed. Disabled by default.
     pub fn with_trace_context(self) -> Self {
         Self {
@@ -379,8 +382,17 @@ where
             }
             None => (self.resolve_event_fields(None), None),
         };
-        if let Some(trace_id) = trace_id {
+        // Task-local correlation survives filters that disable cm_operation.
+        if let Some(trace_id) = self
+            .trace_context
+            .as_ref()
+            .and_then(|_| trace_propagation::correlation::local_id())
+        {
             event_fields.retain(|(name, _)| name != "trace_id");
+            event_fields.push(("trace_id".to_string(), trace_id.to_string()));
+        } else if let Some(trace_id) = trace_id
+            && !event_fields.iter().any(|(name, _)| name == "trace_id")
+        {
             event_fields.push(("trace_id".to_string(), trace_id.to_string()));
         }
 
@@ -488,8 +500,16 @@ where
 
         // Resolve from this span's own resolved values.
         let mut event_fields = self.resolve_event_fields(Some(&data.resolved_event_fields));
-        if let Some(trace_id) = trace_id {
+        if let Some(trace_id) = self
+            .trace_context
+            .as_ref()
+            .and_then(|_| trace_propagation::correlation::local_id())
+        {
             event_fields.retain(|(name, _)| name != "trace_id");
+            event_fields.push(("trace_id".to_string(), trace_id.to_string()));
+        } else if let Some(trace_id) = trace_id
+            && !event_fields.iter().any(|(name, _)| name == "trace_id")
+        {
             event_fields.push(("trace_id".to_string(), trace_id.to_string()));
         }
 
@@ -903,6 +923,60 @@ mod tests {
     use tracing_opentelemetry::OpenTelemetrySpanExt;
     use tracing_subscriber::EnvFilter;
     use tracing_subscriber::prelude::*;
+
+    #[tokio::test]
+    async fn persisted_trace_id_wins_over_background_trace() {
+        use tracing::Instrument;
+        use tracing::instrument::WithSubscriber;
+
+        let id = trace_propagation::correlation::TraceId::generate();
+        for (filter, otel_enabled) in [
+            ("info", false),
+            ("info", true),
+            ("warn", false),
+            ("warn", true),
+        ] {
+            let writer = TestWriter::new();
+            let output = writer.clone();
+            let provider = SdkTracerProvider::builder().build();
+            let subscriber =
+                tracing_subscriber::registry()
+                    .with(
+                        layer()
+                            .with_trace_context()
+                            .with_event_fields(vec![EventField::new("trace_id")])
+                            .with_writer(Arc::new(move || Box::new(output.clone()))),
+                    )
+                    .with(otel_enabled.then(|| {
+                        tracing_opentelemetry::layer().with_tracer(provider.tracer("test"))
+                    }))
+                    .with(EnvFilter::new(filter));
+            async {
+                trace_propagation::correlation::resume(Some(id), async {
+                    tracing::warn!(trace_id = "incorrect", "restored event");
+                    async {
+                        tracing::warn!("child event");
+                    }
+                    .instrument(tracing::warn_span!("child"))
+                    .await;
+                })
+                .await;
+                tracing::warn!("outside event");
+            }
+            .with_subscriber(subscriber)
+            .await;
+            let text = writer.text();
+            for line in text.lines() {
+                if line.contains("outside event") {
+                    assert!(!line.contains("trace_id="), "{line}");
+                } else {
+                    assert!(line.contains(&format!("trace_id={id}")), "{line}");
+                    assert_eq!(line.matches("trace_id=").count(), 1, "{line}");
+                }
+            }
+            assert_eq!(text.lines().count(), if filter == "info" { 5 } else { 4 });
+        }
+    }
 
     use super::*;
 

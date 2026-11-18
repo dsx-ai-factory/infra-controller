@@ -1931,10 +1931,14 @@ async fn test_dpu_rediscovery_retries_after_busy_group_without_blocking_admin_re
         used_before
     );
     let mut probe = env.pool.begin().await?;
-    assert!(
-        db::machine::try_lock_by_id_for_update(&mut probe, &dpu_machine_id).await?,
-        "failed attachment must release its partial DPU lock"
-    );
+    // SQLx queues rollback when the rejected discovery's transaction is dropped.
+    // Allow that rollback to finish, but fail if it keeps the DPU locked.
+    sqlx::query("SET LOCAL lock_timeout = '1s'")
+        .execute(&mut *probe)
+        .await?;
+    db::machine::lock_by_id_for_update(&mut probe, &dpu_machine_id)
+        .await
+        .expect("failed attachment must release its partial DPU lock");
     probe.rollback().await?;
 
     // Admin repair can now hold the interface and queue on the host; the
