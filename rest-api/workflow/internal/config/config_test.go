@@ -9,6 +9,8 @@ import (
 
 	"github.com/spf13/viper"
 	"github.com/stretchr/testify/assert"
+
+	cwfn "github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/namespace"
 )
 
 func TestNewConfig(t *testing.T) {
@@ -66,9 +68,17 @@ func TestConfig_Validate(t *testing.T) {
 	}{
 		{
 			name:                    "unset settings use the defaults",
+			values:                  map[string]string{ConfigTemporalNamespace: cwfn.CloudNamespace},
 			wantRetention:           DefaultSiteNamespaceRetention,
 			wantSuccessfulRetention: DefaultSiteNamespaceSuccessfulInventoryRetention,
-			wantExecutionSize:       DefaultMaxConcurrentActivityExecutionSize,
+			wantExecutionSize:       MaxMaxConcurrentActivityExecutionSize,
+		},
+		{
+			name:                    "unset activity execution size is capped on the site worker",
+			values:                  map[string]string{ConfigTemporalNamespace: cwfn.SiteNamespace},
+			wantRetention:           DefaultSiteNamespaceRetention,
+			wantSuccessfulRetention: DefaultSiteNamespaceSuccessfulInventoryRetention,
+			wantExecutionSize:       DefaultSiteMaxConcurrentActivityExecutionSize,
 		},
 		{
 			name: "zero disables both Site namespace retention settings",
@@ -123,8 +133,11 @@ func TestConfig_Validate(t *testing.T) {
 			wantSuccessfulRetention: 96 * time.Hour,
 		},
 		{
-			name:                    "activity execution size override up to the maximum is honored",
-			values:                  map[string]string{ConfigWorkerMaxConcurrentActivityExecutionSize: "1000"},
+			name: "activity execution size override up to the maximum is honored on the site worker",
+			values: map[string]string{
+				ConfigTemporalNamespace:                        cwfn.SiteNamespace,
+				ConfigWorkerMaxConcurrentActivityExecutionSize: "1000",
+			},
 			wantRetention:           DefaultSiteNamespaceRetention,
 			wantSuccessfulRetention: DefaultSiteNamespaceSuccessfulInventoryRetention,
 			wantExecutionSize:       MaxMaxConcurrentActivityExecutionSize,

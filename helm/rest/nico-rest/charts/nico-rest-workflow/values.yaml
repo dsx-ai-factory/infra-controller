@@ -71,7 +71,9 @@ config:
   # worker:
   #   # Concurrent activity task pollers, 1 to 20. Default 10.
   #   maxConcurrentActivityPollers: 10
-  #   # Activities executed at once, 1 to 1000. Default 32.
+  #   # Activities executed at once, 1 to 1000. Default 32 on the site worker and
+  #   # 1000, the Temporal SDK default, on the cloud worker. A set value applies
+  #   # to both workers.
   #   maxConcurrentActivityExecutionSize: 32
   temporal:
     host: temporal-frontend.temporal

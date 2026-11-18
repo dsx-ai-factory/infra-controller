@@ -890,7 +890,7 @@ The cloud worker uses `siteManager.svcEndpoint` to roll each Site's OTP when its
 
 The site worker sets the `site` namespace retention to `temporal.siteNamespace.retention` on startup, `72h` by default. That's how long failed, canceled, terminated, and timed out workflows are kept. An hourly cron deletes successful inventory workflows sooner, once they are older than `temporal.siteNamespace.successfulInventoryRetention`, `24h` by default. It has to be shorter than a nonzero `temporal.siteNamespace.retention`, otherwise the cloud and site workers exit on startup. Set either value to `0` to turn it off. If Temporal rejects the retention update, the worker logs a warning and starts anyway. If the cron can't be started, the worker exits before it polls, so the pod restarts and tries again. Temporal only applies a new retention to workflows that close after the change.
 
-Each worker pod runs at most `worker.maxConcurrentActivityExecutionSize` activities at once, `32` by default. It accepts `1` to `1000`, and a value outside that range makes the cloud worker and the site worker exit on startup.
+Each worker pod runs at most `worker.maxConcurrentActivityExecutionSize` activities at once. When it isn't set, a site worker pod runs `32` and a cloud worker pod keeps the Temporal SDK default of `1000`. A set value applies to both workers. It accepts `1` to `1000`, and a value outside that range makes the cloud worker and the site worker exit on startup.
 
 ### Secrets mounted at runtime
 
