@@ -18,6 +18,7 @@
 use carbide_uuid::machine::{MachineIdSource, MachineType};
 
 use super::*;
+use crate::TransactionVending as _;
 
 async fn seed_dpus(
     pool: &sqlx::PgPool,

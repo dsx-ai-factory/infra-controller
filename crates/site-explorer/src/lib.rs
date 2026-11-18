@@ -646,6 +646,7 @@ impl SiteExplorer {
             host_reconciler: HostReconciler::new(
                 database_connection.clone(),
                 explorer_config.retained_boot_interface_window,
+                explorer_config.machine_creation_timeout,
                 resource_pool_registry.clone(),
                 common_pools.clone(),
                 instrumentation.clone(),
