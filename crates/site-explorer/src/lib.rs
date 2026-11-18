@@ -729,7 +729,7 @@ impl SiteExplorer {
     // https://github.com/rust-lang/rust/issues/110011 will be
     // implemented
     #[track_caller]
-    fn txn_begin(&self) -> impl Future<Output = SiteExplorerResult<db::Transaction<'_>>> {
+    fn txn_begin(&self) -> impl Future<Output = SiteExplorerResult<db::Transaction<'static>>> {
         let loc = Location::caller();
         db::Transaction::begin_with_location(&self.database_connection, loc).map_err(Into::into)
     }

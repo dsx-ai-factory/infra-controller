@@ -43,7 +43,7 @@ async fn database_attempt<T>(
 
 /// Set a server-side statement bound as well as the outer attempt deadline.
 /// A dropped SQLx future must not leave the server waiting indefinitely.
-async fn database_transaction(pool: &PgPool) -> CarbideResult<db::Transaction<'_>> {
+async fn database_transaction(pool: &PgPool) -> CarbideResult<db::Transaction<'static>> {
     let mut txn = db::Transaction::begin(pool).await?;
     let query = "SELECT set_config('statement_timeout', $1, true)";
     sqlx::query(query)
