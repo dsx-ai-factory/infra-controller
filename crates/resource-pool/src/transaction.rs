@@ -15,7 +15,7 @@ pub(crate) const DATABASE_WAIT_TIMEOUT: Duration = Duration::from_secs(5);
 /// supply those deadlines when needed and commit before waiting for a provider.
 /// After cancellation, a started statement can finish under its server-side limit
 /// before PostgreSQL processes the queued rollback.
-pub async fn database_transaction(pool: &PgPool) -> Result<Transaction<'_>, DatabaseError> {
+pub async fn database_transaction(pool: &PgPool) -> Result<Transaction<'static>, DatabaseError> {
     let mut txn = Transaction::begin(pool).await?;
     // A dropped SQLx query can retain its pooled connection and any work-lock
     // fence until PostgreSQL finishes the statement and runs the queued rollback.

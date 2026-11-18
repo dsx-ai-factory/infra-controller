@@ -4559,7 +4559,7 @@ impl Api {
     #[track_caller]
     pub(crate) fn txn_begin(
         &self,
-    ) -> impl Future<Output = Result<db::Transaction<'_>, DatabaseError>> {
+    ) -> impl Future<Output = Result<db::Transaction<'static>, DatabaseError>> {
         let loc = Location::caller();
         db::Transaction::begin_with_location(&self.database_connection, loc)
     }
@@ -4580,7 +4580,7 @@ impl Api {
         &self,
         machine_id: &MachineId,
         search_config: MachineSearchConfig,
-    ) -> impl Future<Output = CarbideResult<(AnyMachine, db::Transaction<'_>)>> {
+    ) -> impl Future<Output = CarbideResult<(AnyMachine, db::Transaction<'static>)>> {
         let loc = Location::caller();
         let machine_id = machine_id.to_machine_id();
         async move {
