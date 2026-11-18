@@ -110,7 +110,7 @@ fn hook_library_path() -> PathBuf {
                     Err(e) => {
                         panic!(
                             "Invalid utf8 finding Kea hook library: {}",
-                            &e.into_utf8_lossy()
+                            e.into_utf8_lossy()
                         );
                     }
                 };

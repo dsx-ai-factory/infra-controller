@@ -6932,7 +6932,9 @@ mod tests {
 
         assert!(
             calls
-                .chunks_exact(2)
+                .as_chunks::<2>()
+                .0
+                .iter()
                 .all(|pair| pair[0].job_id == "child" && pair[1].job_id == "parent")
         );
 
