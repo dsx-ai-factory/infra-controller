@@ -5098,7 +5098,7 @@ func TestUpdateInstanceHandler_Handle(t *testing.T) {
 	)
 	staleMacAddress := "00:11:22:33:44:55"
 	staleIPAddress := "192.0.2.15"
-	// An older retiring row with the same identity. Only the most recent is reactivated.
+	// An older retiring row with the same identity.
 	duplicateDeletingSpectrumXAttachment, sxaErr := cdbm.NewSpectrumXAttachmentDAO(dbSession).Create(ctx, nil, cdbm.SpectrumXAttachmentCreateInput{
 		InstanceID:           spectrumXReissueInstance.ID,
 		SiteID:               st1.ID,
@@ -5993,7 +5993,7 @@ func TestUpdateInstanceHandler_Handle(t *testing.T) {
 			},
 		},
 		{
-			name: "test Instance update reactivates a matching Deleting SpectrumX Attachment without duplicating it",
+			name: "test Instance update creates a new SpectrumX Attachment when the matching one is Deleting",
 			fields: fields{
 				dbSession: dbSession,
 				tc:        tc,
@@ -6018,19 +6018,24 @@ func TestUpdateInstanceHandler_Handle(t *testing.T) {
 				expectedSiteSpectrumXAttachmentCount: cutil.GetPtr(1),
 				afterHandle: func(t *testing.T) {
 					sxaDAO := cdbm.NewSpectrumXAttachmentDAO(dbSession)
-					reactivated, gerr := sxaDAO.Get(context.Background(), nil, deletingSpectrumXAttachment.ID, nil)
+					// Deleting is terminal, so every retiring row is left for inventory and
+					// keeps the Site allocations and Updated time its cleanup relies on.
+					retiring, gerr := sxaDAO.Get(context.Background(), nil, deletingSpectrumXAttachment.ID, nil)
 					require.NoError(t, gerr)
-					assert.Equal(t, cdbm.SpectrumXAttachmentStatusPending, reactivated.Status)
-					assert.Nil(t, reactivated.MacAddress)
-					assert.Nil(t, reactivated.IPAddress)
-
-					replacement, gerr := sxaDAO.Get(context.Background(), nil, replacementSpectrumXAttachment.ID, nil)
-					require.NoError(t, gerr)
-					assert.Equal(t, cdbm.SpectrumXAttachmentStatusDeleting, replacement.Status)
+					assert.Equal(t, cdbm.SpectrumXAttachmentStatusDeleting, retiring.Status)
+					require.NotNil(t, retiring.MacAddress)
+					assert.Equal(t, staleMacAddress, *retiring.MacAddress)
+					require.NotNil(t, retiring.IPAddress)
+					assert.Equal(t, staleIPAddress, *retiring.IPAddress)
+					assert.True(t, retiring.Updated.Equal(deletingSpectrumXAttachment.Updated))
 
 					duplicate, gerr := sxaDAO.Get(context.Background(), nil, duplicateDeletingSpectrumXAttachment.ID, nil)
 					require.NoError(t, gerr)
 					assert.Equal(t, cdbm.SpectrumXAttachmentStatusDeleting, duplicate.Status)
+
+					replacement, gerr := sxaDAO.Get(context.Background(), nil, replacementSpectrumXAttachment.ID, nil)
+					require.NoError(t, gerr)
+					assert.Equal(t, cdbm.SpectrumXAttachmentStatusDeleting, replacement.Status)
 
 					attachments, count, gerr := sxaDAO.GetAll(
 						context.Background(),
@@ -6040,8 +6045,14 @@ func TestUpdateInstanceHandler_Handle(t *testing.T) {
 						nil,
 					)
 					require.NoError(t, gerr)
-					assert.Equal(t, 3, count)
-					require.Len(t, attachments, 3)
+					assert.Equal(t, 4, count)
+					require.Len(t, attachments, 4)
+
+					created := attachments[len(attachments)-1]
+					assert.Equal(t, sxp1.ID, created.SpectrumXPartitionID)
+					assert.Equal(t, cdbm.SpectrumXAttachmentStatusPending, created.Status)
+					assert.Nil(t, created.MacAddress)
+					assert.Nil(t, created.IPAddress)
 				},
 			},
 			verifySiteControllerRequest: true,
@@ -9674,8 +9685,14 @@ func TestUpdateInstanceHandler_Handle(t *testing.T) {
 						for _, reqSxA := range tt.args.reqData.SpectrumXAttachments {
 							matched := 0
 							for _, apiSxA := range rst.SpectrumXAttachments {
+								// Retiring rows stay in the response as Deleting, as they do for
+								// InfiniBand Interfaces, and can share the requested identity.
+								if apiSxA.Status == cdbm.SpectrumXAttachmentStatusDeleting {
+									continue
+								}
 								if apiSxA.SpectrumXPartitionID != reqSxA.SpectrumXPartitionID ||
 									apiSxA.Device != reqSxA.Device ||
+									apiSxA.DeviceInstance != *reqSxA.DeviceInstance ||
 									apiSxA.AttachmentType != reqSxA.AttachmentType {
 									continue
 								}

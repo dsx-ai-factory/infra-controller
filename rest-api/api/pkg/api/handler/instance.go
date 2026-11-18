@@ -4138,13 +4138,12 @@ func (uih UpdateInstanceHandler) Handle(c echo.Context) error {
 		if apiRequest.SpectrumXAttachments == nil {
 			newOrExistingSxAs = existingSxAs
 		} else {
-			// Bucket existing SpectrumX Attachment rows by identity so we can align with the incoming request.
-			existingSxAMap := make(map[string][]cdbm.SpectrumXAttachment)
-
-			// There can be multiple historical rows per key; ordering existingSxAs by Created ascending makes the slice per key chronological.
+			existingSxAByKey := make(map[string]cdbm.SpectrumXAttachment, len(existingSxAs))
 			for i := range existingSxAs {
-				key := existingSxAs[i].Key()
-				existingSxAMap[key] = append(existingSxAMap[key], existingSxAs[i])
+				if existingSxAs[i].Status == cdbm.SpectrumXAttachmentStatusDeleting {
+					continue
+				}
+				existingSxAByKey[existingSxAs[i].Key()] = existingSxAs[i]
 			}
 
 			retainedSxAIDs := map[uuid.UUID]bool{}
@@ -4166,77 +4165,45 @@ func (uih UpdateInstanceHandler) Handle(c echo.Context) error {
 					AttachmentType:       apiSxA.AttachmentType,
 				}
 
-				existingSxAsForKey := existingSxAMap[requestedSxA.Key()]
-
-				// Check the status of the most recent SpectrumX Attachment for this key. The
-				// request is authoritative desired state, so a Deleting row is reactivated
-				// rather than duplicated by a new row that inventory cannot distinguish from
-				// the retiring attachment.
-				var existing cdbm.SpectrumXAttachment
-				reusable := len(existingSxAsForKey) > 0
+				existing, reusable := existingSxAByKey[requestedSxA.Key()]
 				if reusable {
-					mostRecentSxA := existingSxAsForKey[len(existingSxAsForKey)-1]
-					existing = mostRecentSxA
-				}
-				reactivating := reusable && existing.Status == cdbm.SpectrumXAttachmentStatusDeleting
-				updated := &existing
-				if reusable {
-					// Older Deleting rows with this identity are omitted from the response,
-					// which carries each requested attachment once. Inventory removes them
-					// once it observes the active row.
-					for i := range existingSxAsForKey {
-						retainedSxAIDs[existingSxAsForKey[i].ID] = true
-					}
+					retainedSxAIDs[existing.ID] = true
 
 					// The reuse key covers partition, device, device instance and attachment
 					// type but not the OVS metadata, so a request that changes only its bridge
 					// name or OVN network name still reuses this row. Persist the new metadata
 					// and carry the updated row forward; otherwise the Site keeps the stale
 					// bridge and the response reports it too.
-					metadataChanged := !stringPtrEqual(existing.BridgeName, apiSxA.BridgeName) ||
-						!stringPtrEqual(existing.OvnNetworkName, apiSxA.OvnNetworkName)
-					if reactivating || metadataChanged {
-						updateInput := cdbm.SpectrumXAttachmentUpdateInput{
+					if !stringPtrEqual(existing.BridgeName, apiSxA.BridgeName) ||
+						!stringPtrEqual(existing.OvnNetworkName, apiSxA.OvnNetworkName) {
+						updated, uerr := sxaDAO.Update(ctx, tx, cdbm.SpectrumXAttachmentUpdateInput{
 							SpectrumXAttachmentID: existing.ID,
 							BridgeName:            apiSxA.BridgeName,
 							OvnNetworkName:        apiSxA.OvnNetworkName,
-						}
-						if reactivating {
-							updateInput.Status = cutil.GetPtr(cdbm.SpectrumXAttachmentStatusPending)
-							updateInput.IsMissingOnSite = cutil.GetPtr(false)
-						}
-						var uerr error
-						updated, uerr = sxaDAO.Update(ctx, tx, updateInput)
-						if reactivating && uerr == cdb.ErrDoesNotExist {
-							// Inventory removed the retiring row after it was read above, so
-							// there is nothing left to reactivate and a new row is created.
-							reusable = false
-						} else if uerr != nil {
+						})
+						if uerr != nil {
 							logger.Error().Err(uerr).Msg("failed to update SpectrumX Attachment metadata in DB")
 							return cutil.NewAPIError(http.StatusInternalServerError, "Failed to update SpectrumX Attachment for Instance, DB error", nil)
 						}
-					}
-				}
-				if reusable {
-					// A reactivated row must not expose stale Site allocations. Update only
-					// writes non-nil values, so optional fields are cleared explicitly.
-					clearInput := cdbm.SpectrumXAttachmentClearInput{
-						SpectrumXAttachmentID: existing.ID,
-						MacAddress:            reactivating,
-						IPAddress:             reactivating,
-						VirtualFunctionID:     reactivating && existing.VirtualFunctionID != nil,
-						OvnNetworkName:        apiSxA.OvnNetworkName == nil && existing.OvnNetworkName != nil,
-					}
-					if clearInput.MacAddress || clearInput.IPAddress || clearInput.VirtualFunctionID || clearInput.OvnNetworkName {
-						var cerr error
-						updated, cerr = sxaDAO.Clear(ctx, tx, clearInput)
-						if cerr != nil {
-							logger.Error().Err(cerr).Msg("failed to clear SpectrumX Attachment fields in DB")
-							return cutil.NewAPIError(http.StatusInternalServerError, "Failed to update SpectrumX Attachment for Instance, DB error", nil)
+
+						// Update only writes provided values, so a dropped OVN network name is
+						// cleared explicitly.
+						if apiSxA.OvnNetworkName == nil && existing.OvnNetworkName != nil {
+							updated, uerr = sxaDAO.Clear(ctx, tx, cdbm.SpectrumXAttachmentClearInput{
+								SpectrumXAttachmentID: existing.ID,
+								OvnNetworkName:        true,
+							})
+							if uerr != nil {
+								logger.Error().Err(uerr).Msg("failed to clear SpectrumX Attachment OVN network name in DB")
+								return cutil.NewAPIError(http.StatusInternalServerError, "Failed to update SpectrumX Attachment for Instance, DB error", nil)
+							}
 						}
+
+						newOrExistingSxAs = append(newOrExistingSxAs, *updated)
+						continue
 					}
 
-					newOrExistingSxAs = append(newOrExistingSxAs, *updated)
+					newOrExistingSxAs = append(newOrExistingSxAs, existing)
 					continue
 				}
 
@@ -4281,9 +4248,8 @@ func (uih UpdateInstanceHandler) Handle(c echo.Context) error {
 				}
 
 				// Carried into the response so a retiring attachment still appears with its
-				// Deleting status, matching what a following GET reports. A Deleting duplicate
-				// of a requested attachment is the exception and is skipped above. The Site
-				// config build below filters these out.
+				// Deleting status, matching what a following GET reports. The Site config
+				// build below filters these out.
 				newOrExistingSxAs = append(newOrExistingSxAs, existingSxAs[i])
 			}
 		}
