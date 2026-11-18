@@ -5098,6 +5098,18 @@ func TestUpdateInstanceHandler_Handle(t *testing.T) {
 	)
 	staleMacAddress := "00:11:22:33:44:55"
 	staleIPAddress := "192.0.2.15"
+	// An older retiring row with the same identity. Only the most recent is reactivated.
+	duplicateDeletingSpectrumXAttachment, sxaErr := cdbm.NewSpectrumXAttachmentDAO(dbSession).Create(ctx, nil, cdbm.SpectrumXAttachmentCreateInput{
+		InstanceID:           spectrumXReissueInstance.ID,
+		SiteID:               st1.ID,
+		SpectrumXPartitionID: sxp1.ID,
+		Device:               "NVIDIA BlueField-3 B3140L E-Series FHHL SuperNIC",
+		DeviceInstance:       0,
+		AttachmentType:       cdbm.SpectrumXAttachmentTypePhysical,
+		Status:               cdbm.SpectrumXAttachmentStatusDeleting,
+		CreatedBy:            tnu1.ID,
+	})
+	require.NoError(t, sxaErr)
 	deletingSpectrumXAttachment, sxaErr := cdbm.NewSpectrumXAttachmentDAO(dbSession).Create(ctx, nil, cdbm.SpectrumXAttachmentCreateInput{
 		InstanceID:           spectrumXReissueInstance.ID,
 		SiteID:               st1.ID,
@@ -5107,18 +5119,6 @@ func TestUpdateInstanceHandler_Handle(t *testing.T) {
 		AttachmentType:       cdbm.SpectrumXAttachmentTypePhysical,
 		MacAddress:           &staleMacAddress,
 		IPAddress:            &staleIPAddress,
-		Status:               cdbm.SpectrumXAttachmentStatusDeleting,
-		CreatedBy:            tnu1.ID,
-	})
-	require.NoError(t, sxaErr)
-	// A second retiring row with the same identity. Only the oldest is reactivated.
-	duplicateDeletingSpectrumXAttachment, sxaErr := cdbm.NewSpectrumXAttachmentDAO(dbSession).Create(ctx, nil, cdbm.SpectrumXAttachmentCreateInput{
-		InstanceID:           spectrumXReissueInstance.ID,
-		SiteID:               st1.ID,
-		SpectrumXPartitionID: sxp1.ID,
-		Device:               "NVIDIA BlueField-3 B3140L E-Series FHHL SuperNIC",
-		DeviceInstance:       0,
-		AttachmentType:       cdbm.SpectrumXAttachmentTypePhysical,
 		Status:               cdbm.SpectrumXAttachmentStatusDeleting,
 		CreatedBy:            tnu1.ID,
 	})

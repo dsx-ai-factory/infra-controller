@@ -4138,15 +4138,13 @@ func (uih UpdateInstanceHandler) Handle(c echo.Context) error {
 		if apiRequest.SpectrumXAttachments == nil {
 			newOrExistingSxAs = existingSxAs
 		} else {
-			existingSxAByKey := make(map[string]cdbm.SpectrumXAttachment, len(existingSxAs))
-			deletingSxAsByKey := make(map[string][]cdbm.SpectrumXAttachment)
+			// Bucket existing SpectrumX Attachment rows by identity so we can align with the incoming request.
+			existingSxAMap := make(map[string][]cdbm.SpectrumXAttachment)
+
+			// There can be multiple historical rows per key; ordering existingSxAs by Created ascending makes the slice per key chronological.
 			for i := range existingSxAs {
-				if existingSxAs[i].Status == cdbm.SpectrumXAttachmentStatusDeleting {
-					key := existingSxAs[i].Key()
-					deletingSxAsByKey[key] = append(deletingSxAsByKey[key], existingSxAs[i])
-					continue
-				}
-				existingSxAByKey[existingSxAs[i].Key()] = existingSxAs[i]
+				key := existingSxAs[i].Key()
+				existingSxAMap[key] = append(existingSxAMap[key], existingSxAs[i])
 			}
 
 			retainedSxAIDs := map[uuid.UUID]bool{}
@@ -4168,25 +4166,26 @@ func (uih UpdateInstanceHandler) Handle(c echo.Context) error {
 					AttachmentType:       apiSxA.AttachmentType,
 				}
 
-				sxaKey := requestedSxA.Key()
-				existing, reusable := existingSxAByKey[sxaKey]
-				deletingMatches := deletingSxAsByKey[sxaKey]
-				if !reusable && len(deletingMatches) > 0 {
-					// The request is authoritative desired state. Reactivate the oldest
-					// matching row rather than creating a duplicate that inventory cannot
-					// distinguish from the retiring attachment.
-					existing = deletingMatches[0]
-					reusable = true
+				existingSxAsForKey := existingSxAMap[requestedSxA.Key()]
+
+				// Check the status of the most recent SpectrumX Attachment for this key. The
+				// request is authoritative desired state, so a Deleting row is reactivated
+				// rather than duplicated by a new row that inventory cannot distinguish from
+				// the retiring attachment.
+				var existing cdbm.SpectrumXAttachment
+				reusable := len(existingSxAsForKey) > 0
+				if reusable {
+					mostRecentSxA := existingSxAsForKey[len(existingSxAsForKey)-1]
+					existing = mostRecentSxA
 				}
 				reactivating := reusable && existing.Status == cdbm.SpectrumXAttachmentStatusDeleting
 				updated := &existing
 				if reusable {
-					retainedSxAIDs[existing.ID] = true
-					// Redundant Deleting rows with this identity are omitted from the
-					// response, which carries each requested attachment once. Inventory
-					// removes them once it observes the active row.
-					for i := range deletingMatches {
-						retainedSxAIDs[deletingMatches[i].ID] = true
+					// Older Deleting rows with this identity are omitted from the response,
+					// which carries each requested attachment once. Inventory removes them
+					// once it observes the active row.
+					for i := range existingSxAsForKey {
+						retainedSxAIDs[existingSxAsForKey[i].ID] = true
 					}
 
 					// The reuse key covers partition, device, device instance and attachment

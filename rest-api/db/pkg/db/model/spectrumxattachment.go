@@ -313,8 +313,6 @@ type SpectrumXAttachmentDAO interface {
 	//
 	Delete(ctx context.Context, tx *db.Tx, id uuid.UUID) error
 	//
-	DeleteIfDeleting(ctx context.Context, tx *db.Tx, id uuid.UUID, updated time.Time) error
-	//
 	DeleteAllBySiteID(ctx context.Context, tx *db.Tx, siteID uuid.UUID) error
 }
 
@@ -665,29 +663,6 @@ func (sxasd SpectrumXAttachmentSQLDAO) Delete(ctx context.Context, tx *db.Tx, id
 	}
 
 	return nil
-}
-
-// DeleteIfDeleting deletes a SpectrumXAttachment only while it is still the Deleting row
-// the caller read, identified by its updated time. A row reactivated since that read
-// survives, and so does one that was reactivated and retired again, because its
-// staleness window restarted. The delete itself checks both, after waiting for a
-// concurrent update of the row to commit.
-func (sxasd SpectrumXAttachmentSQLDAO) DeleteIfDeleting(ctx context.Context, tx *db.Tx, id uuid.UUID, updated time.Time) (retErr error) {
-	ctx, SpectrumXAttachmentDAOSpan := cotel.StartSpan(ctx, "SpectrumXAttachmentDAO.DeleteIfDeleting")
-	defer func() { cotel.EndSpan(SpectrumXAttachmentDAOSpan, retErr) }()
-	cotel.SetAttribute(SpectrumXAttachmentDAOSpan, attribute.String("id", id.String()))
-
-	sxa := &SpectrumXAttachment{
-		ID: id,
-	}
-
-	_, err := db.GetIDB(tx, sxasd.dbSession).NewDelete().Model(sxa).
-		Where("id = ?", id).
-		Where("status = ?", SpectrumXAttachmentStatusDeleting).
-		Where("updated = ?", updated).
-		Exec(ctx)
-
-	return err
 }
 
 // DeleteAllBySiteID deletes all SpectrumXAttachment records for a given Site

@@ -1400,7 +1400,18 @@ func (mi ManageInstance) UpdateInstancesInDB(ctx context.Context, siteID uuid.UU
 			// These rows were picked from a read taken earlier in this run. An Instance
 			// update can reactivate one since then, so only a row that is still Deleting
 			// and unchanged since that read is removed.
-			serr := sxaDeleteDAO.DeleteIfDeleting(ctx, nil, sxa.ID, sxa.Updated)
+			curSxA, serr := sxaDeleteDAO.Get(ctx, nil, sxa.ID, nil)
+			if serr != nil {
+				if serr != cdb.ErrDoesNotExist {
+					logger.Error().Err(serr).Str("SpectrumX Attachment ID", sxa.ID.String()).Msg("Failed to retrieve SpectrumX Attachment, DB error")
+				}
+				continue
+			}
+			if curSxA.Status != cdbm.SpectrumXAttachmentStatusDeleting || !curSxA.Updated.Equal(sxa.Updated) {
+				continue
+			}
+
+			serr = sxaDeleteDAO.Delete(ctx, nil, sxa.ID)
 			if serr != nil {
 				logger.Error().Err(serr).Str("SpectrumX Attachment ID", sxa.ID.String()).Msg("Failed to delete SpectrumX Attachment, DB error")
 			}

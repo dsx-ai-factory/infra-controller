@@ -476,46 +476,6 @@ func TestSpectrumXAttachmentSQLDAO_Lifecycle(t *testing.T) {
 	assert.Nil(t, cleared.IPAddress)
 	assert.Nil(t, cleared.VirtualFunctionID)
 
-	// Inventory picks retiring rows from an earlier read, so its delete must leave a row
-	// that was reactivated since then and remove only one that is still Deleting.
-	require.NoError(t, sxaDAO.DeleteIfDeleting(ctx, nil, created.ID, cleared.Updated))
-	_, err = sxaDAO.Get(ctx, nil, created.ID, nil)
-	require.NoError(t, err, "a row that is not Deleting must survive")
-
-	retiring, err := sxaDAO.Create(ctx, nil, SpectrumXAttachmentCreateInput{
-		InstanceID:           fx.instance.ID,
-		SiteID:               fx.site.ID,
-		SpectrumXPartitionID: fx.partition.ID,
-		Device:               "NVIDIA BlueField-3 B3140L E-Series FHHL SuperNIC",
-		DeviceInstance:       2,
-		AttachmentType:       SpectrumXAttachmentTypePhysical,
-		Status:               SpectrumXAttachmentStatusDeleting,
-		CreatedBy:            fx.user.ID,
-	})
-	require.NoError(t, err)
-	selected, err := sxaDAO.Get(ctx, nil, retiring.ID, nil)
-	require.NoError(t, err)
-
-	// A row reactivated and retired again after it was selected is Deleting with a new
-	// updated time, so the earlier selection must not remove it.
-	_, err = sxaDAO.Update(ctx, nil, SpectrumXAttachmentUpdateInput{
-		SpectrumXAttachmentID: retiring.ID,
-		Status:                cutil.GetPtr(SpectrumXAttachmentStatusPending),
-	})
-	require.NoError(t, err)
-	retired, err := sxaDAO.Update(ctx, nil, SpectrumXAttachmentUpdateInput{
-		SpectrumXAttachmentID: retiring.ID,
-		Status:                cutil.GetPtr(SpectrumXAttachmentStatusDeleting),
-	})
-	require.NoError(t, err)
-	require.NoError(t, sxaDAO.DeleteIfDeleting(ctx, nil, retiring.ID, selected.Updated))
-	_, err = sxaDAO.Get(ctx, nil, retiring.ID, nil)
-	require.NoError(t, err, "a row retired again after selection must survive")
-
-	require.NoError(t, sxaDAO.DeleteIfDeleting(ctx, nil, retiring.ID, retired.Updated))
-	_, err = sxaDAO.Get(ctx, nil, retiring.ID, nil)
-	assert.ErrorIs(t, err, db.ErrDoesNotExist)
-
 	require.NoError(t, sxaDAO.DeleteAllBySiteID(ctx, nil, fx.site.ID))
 	_, err = sxaDAO.Get(ctx, nil, created.ID, nil)
 	assert.ErrorIs(t, err, db.ErrDoesNotExist)
