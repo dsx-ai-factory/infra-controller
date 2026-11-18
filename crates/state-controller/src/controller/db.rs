@@ -17,6 +17,7 @@
 
 //! Database access methods used in the StateController framework
 
+use ::db::TransactionVending as _;
 use db::work_lock_manager::{AcquireLockError, WorkLockManagerHandle};
 use db::{BIND_LIMIT, DatabaseError};
 use sqlx::{PgConnection, PgPool};
@@ -98,7 +99,7 @@ pub async fn lock_and_start_iteration(
     let work_lock = work_lock_manager_handle
         .try_acquire_lock(format!("lock_iteration::{table_id}"))
         .await?;
-    let mut txn = ::db::Transaction::begin(pool).await?;
+    let mut txn = pool.txn_begin().await?;
     let iteration_data = create_iteration(&mut txn, table_id).await?;
     delete_old_iterations(&mut txn, table_id, iteration_data.id).await?;
     txn.commit().await?;
@@ -161,7 +162,7 @@ pub async fn queue_objects(
         let query = builder.build();
 
         let result = query
-            .execute(&mut *txn)
+            .execute(txn.as_mut())
             .await
             .map_err(|e| DatabaseError::new("StateController::queue_object", e))?;
         num_enqueued += result.rows_affected() as usize;
@@ -257,7 +258,7 @@ pub async fn delete_queued_objects(
 
         let query = builder.build();
         let result = query
-            .execute(&mut *txn)
+            .execute(txn.as_mut())
             .await
             .map_err(|e| DatabaseError::new("StateController::delete_queued_objects", e))?;
 

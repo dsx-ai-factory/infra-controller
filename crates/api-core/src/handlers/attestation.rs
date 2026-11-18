@@ -21,7 +21,7 @@ use carbide_machine_controller::handler::attestation::{
     SchedulingOutcome, select_machine_attesters, trigger_attestation,
 };
 use carbide_uuid::machine::{MachineId, MachineType};
-use db::ObjectFilter;
+use db::{ObjectFilter, TransactionVending as _};
 use itertools::Itertools;
 use model::attestation::spdm as model_spdm;
 use model::bmc_info::BmcInfo;
@@ -433,14 +433,19 @@ async fn assess_machine_attestation(
     let attestation_status = if device_ids.is_empty() {
         None
     } else {
-        let mut txn = db_pool.begin().await?;
+        let mut txn = db_pool
+            .txn_begin()
+            .await
+            .map_err(StateHandlerError::from_transaction)?;
         let status = db::attestation::spdm::list_single_machine_attestation_status(
             &mut txn,
             machine_id,
             Some(&device_ids),
         )
         .await?;
-        txn.commit().await?;
+        txn.commit()
+            .await
+            .map_err(StateHandlerError::from_transaction)?;
         Some(status)
     };
     // Selection success reports what was selected, without implying a job was scheduled.

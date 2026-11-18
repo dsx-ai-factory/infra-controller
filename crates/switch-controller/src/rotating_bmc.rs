@@ -40,6 +40,7 @@ use carbide_credential_rotation::{
     BmcEndpoint, BmcRotationTick, RotateOutcome, RotationStep, advance, rotate_bmc,
 };
 use carbide_uuid::switch::SwitchId;
+use db::TransactionVending as _;
 use libredfish::model::service_root::RedfishVendor;
 use model::switch::{Switch, SwitchControllerState};
 use state_controller::state_handler::{
@@ -153,7 +154,12 @@ pub async fn handle_rotating_bmc(
             // than silently drop the operator's request.
             let mut txn = None;
             if force && matches!(step, RotationStep::Settled) {
-                let mut t = ctx.services.db_pool.begin().await?;
+                let mut t = ctx
+                    .services
+                    .db_pool
+                    .txn_begin()
+                    .await
+                    .map_err(StateHandlerError::from_transaction)?;
                 db::switch::clear_bmc_credential_rotation_requested(&mut t, *switch_id).await?;
                 txn = Some(t);
             }
@@ -161,7 +167,12 @@ pub async fn handle_rotating_bmc(
             // skip window ends exactly when the rotation does.
             let mut resume_txn = match txn.take() {
                 Some(txn) => txn,
-                None => ctx.services.db_pool.begin().await?,
+                None => ctx
+                    .services
+                    .db_pool
+                    .txn_begin()
+                    .await
+                    .map_err(StateHandlerError::from_transaction)?,
             };
             site_explorer_pause::resume_after_credential_change(
                 &mut resume_txn,
@@ -169,7 +180,10 @@ pub async fn handle_rotating_bmc(
                 model::bmc_suppression::BmcSuppressionSource::BmcCredentialRotation,
             )
             .await?;
-            Ok(StateHandlerOutcome::transition(SwitchControllerState::Ready).with_txn(resume_txn))
+            Ok(
+                StateHandlerOutcome::transition(SwitchControllerState::Ready)
+                    .with_txn(resume_txn.into()),
+            )
         }
         RotationStep::Retry { retry_count } => Ok(StateHandlerOutcome::transition(
             SwitchControllerState::RotatingBmc { retry_count },

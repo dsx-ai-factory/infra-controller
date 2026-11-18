@@ -15,6 +15,7 @@
  * limitations under the License.
  */
 
+use db::TransactionVending as _;
 mod metrics;
 
 use std::default::Default;
@@ -209,7 +210,7 @@ impl MachineValidationManager {
         // later phase restart from a lower MachineId while higher-ID locks
         // from an earlier phase were still held, recreating SQLSTATE 40P01
         // (`deadlock_detected`) with another ordered multi-machine writer.
-        let mut txn = db::Transaction::begin(&self.database_connection).await?;
+        let mut txn = self.database_connection.txn_begin().await?;
         let mut completions = Vec::new();
         for validation in db::machine::MachineRowLockOrderIter::new(
             db::machine_validation::find_active(&mut txn).await?,
@@ -227,7 +228,7 @@ impl MachineValidationManager {
             .into_iter()
             .for_each(|completion| self.instrumentation.emit(completion));
 
-        let mut txn = db::Transaction::begin(&self.database_connection).await?;
+        let mut txn = self.database_connection.txn_begin().await?;
         let mut completions = Vec::new();
         for stale_attempt in db::machine::MachineRowLockOrderIter::new(
             db::machine_validation_execution::find_stale_active_attempts(
@@ -256,7 +257,7 @@ impl MachineValidationManager {
             .into_iter()
             .for_each(|completion| self.instrumentation.emit(completion));
 
-        let mut txn = db::Transaction::begin(&self.database_connection).await?;
+        let mut txn = self.database_connection.txn_begin().await?;
         let mut completions = Vec::new();
         for validation in db::machine::MachineRowLockOrderIter::new(stale_validations(
             db::machine_validation::find_active(&mut txn).await?,
@@ -330,7 +331,7 @@ impl MachineValidationManager {
         // Attempt logs are diagnostic data. Sweep a bounded batch each pass so
         // retention never turns into an unbounded delete transaction.
         const ATTEMPT_LOG_CLEANUP_BATCH_SIZE: i64 = 1_000;
-        let mut txn = db::Transaction::begin(&self.database_connection).await?;
+        let mut txn = self.database_connection.txn_begin().await?;
         let removed = db::machine_validation_execution::delete_expired_attempt_log_chunks(
             txn.as_pgconn(),
             self.config.attempt_logs.retention,

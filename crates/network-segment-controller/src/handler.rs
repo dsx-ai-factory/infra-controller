@@ -20,8 +20,8 @@
 use std::sync::Arc;
 
 use carbide_uuid::network::NetworkSegmentId;
-use db::ConditionalWrite;
 use db::resource_pool::ResourcePoolAllocationNotOwned;
+use db::{ConditionalWrite, TransactionVending as _};
 use model::network_prefix::NetworkPrefix;
 use model::network_segment::{
     NetworkSegment, NetworkSegmentControllerState, NetworkSegmentDeletionState, NetworkSegmentType,
@@ -145,7 +145,12 @@ impl StateHandler for NetworkSegmentStateHandler {
                         // Check here whether the IPs are actually freed.
                         // If ones are still allocated, we can not delete and have to
                         // update the `delete_at` timestamp.
-                        let mut txn = ctx.services.db_pool.begin().await?;
+                        let mut txn = ctx
+                            .services
+                            .db_pool
+                            .txn_begin()
+                            .await
+                            .map_err(StateHandlerError::from_transaction)?;
                         if db::instance_address::segment_has_allocations(&mut txn, &state.id)
                             .await?
                         {
@@ -163,23 +168,28 @@ impl StateHandler for NetworkSegmentStateHandler {
                                 },
                             };
                             tracing::info!(network_segment_id = %segment_id, next_state = ?new_state, "Network Segment state transition");
-                            Ok(StateHandlerOutcome::transition(new_state).with_txn(txn))
+                            Ok(StateHandlerOutcome::transition(new_state).with_txn(txn.into()))
                         } else if chrono::Utc::now() >= *delete_at {
                             let new_state = NetworkSegmentControllerState::Deleting {
                                 deletion_state: NetworkSegmentDeletionState::DBDelete,
                             };
                             tracing::info!(network_segment_id = %segment_id, next_state = ?new_state, "Network Segment state transition");
-                            Ok(StateHandlerOutcome::transition(new_state).with_txn(txn))
+                            Ok(StateHandlerOutcome::transition(new_state).with_txn(txn.into()))
                         } else {
                             Ok(StateHandlerOutcome::wait(format!(
                                 "Cannot delete from database until draining completes at {}",
                                 delete_at.to_rfc3339()
                             ))
-                            .with_txn(txn))
+                            .with_txn(txn.into()))
                         }
                     }
                     NetworkSegmentDeletionState::DBDelete => {
-                        let mut txn = ctx.services.db_pool.begin().await?;
+                        let mut txn = ctx
+                            .services
+                            .db_pool
+                            .txn_begin()
+                            .await
+                            .map_err(StateHandlerError::from_transaction)?;
                         // Free or reassigned values leave this segment nothing to release.
                         if let Some(vni) = state.status.vni.take() {
                             match db::resource_pool::release(
@@ -214,7 +224,7 @@ impl StateHandler for NetworkSegmentStateHandler {
                             "Network Segment getting removed from the database",
                         );
                         db::network_segment::final_delete(*segment_id, &mut txn).await?;
-                        Ok(StateHandlerOutcome::deleted().with_txn(txn))
+                        Ok(StateHandlerOutcome::deleted().with_txn(txn.into()))
                     }
                 }
             }

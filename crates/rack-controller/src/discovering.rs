@@ -23,7 +23,7 @@
 
 use carbide_rack_controller::context::RackStateHandlerContextObjects;
 use carbide_uuid::rack::{RackId, RackProfileId};
-use db::{rack as db_rack, switch as db_switch};
+use db::{TransactionVending as _, rack as db_rack, switch as db_switch};
 use model::rack::{FirmwareUpgradeState, Rack, RackMaintenanceState, RackState};
 use state_controller::state_handler::{
     StateHandlerContext, StateHandlerError, StateHandlerOutcome,
@@ -50,7 +50,12 @@ pub async fn handle_discovering(
         }
     };
 
-    let mut txn = ctx.services.db_pool.begin().await?;
+    let mut txn = ctx
+        .services
+        .db_pool
+        .txn_begin()
+        .await
+        .map_err(StateHandlerError::from_transaction)?;
 
     let ready_switches = db_switch::find_ids(
         txn.as_mut(),
@@ -67,7 +72,7 @@ pub async fn handle_discovering(
             "waiting for switches ready: switch={}/{}",
             ready_switches, capabilities.switch.count,
         ))
-        .with_txn(txn));
+        .with_txn(txn.into()));
     }
 
     tracing::info!(
@@ -84,5 +89,5 @@ pub async fn handle_discovering(
             rack_firmware_upgrade: FirmwareUpgradeState::Start,
         },
     })
-    .with_txn(txn))
+    .with_txn(txn.into()))
 }

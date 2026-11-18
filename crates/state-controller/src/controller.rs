@@ -197,3 +197,12 @@ enum IterationError {
     #[error("state handler error: {0}")]
     StateHandlerError(#[from] StateHandlerError),
 }
+
+impl IterationError {
+    fn from_transaction(error: DatabaseError) -> Self {
+        match error {
+            DatabaseError::Sqlx(error) => Self::TransactionError(error.source),
+            error => Self::from(error),
+        }
+    }
+}

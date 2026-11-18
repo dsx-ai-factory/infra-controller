@@ -23,7 +23,7 @@ use carbide_uuid::vpc::VpcId;
 use db::dns::domain;
 use db::network_segment::reconcile_network_defs;
 use db::vpc::{self};
-use db::{ObjectColumnFilter, Transaction, dpu_agent_upgrade_policy, network_segment};
+use db::{ObjectColumnFilter, TransactionVending as _, dpu_agent_upgrade_policy, network_segment};
 use itertools::Itertools;
 use model::dns::{Domain, NewDomain};
 use model::firmware::AgentUpgradePolicyChoice;
@@ -48,7 +48,7 @@ pub(crate) async fn create_initial_domain(
     db_pool: sqlx::pool::Pool<Postgres>,
     domain_name: &str,
 ) -> Result<bool, CarbideError> {
-    let mut txn = Transaction::begin(&db_pool).await?;
+    let mut txn = db_pool.txn_begin().await?;
     let domains = domain::find_by(&mut txn, ObjectColumnFilter::<domain::IdColumn>::All).await?;
     if domains.is_empty() {
         let domain = NewDomain::new(domain_name);
@@ -122,7 +122,7 @@ pub(crate) async fn create_initial_networks(
     db_pool: &Pool<Postgres>,
     networks: &HashMap<String, NetworkDefinition>,
 ) -> Result<(), CarbideError> {
-    let mut txn = Transaction::begin(db_pool).await?;
+    let mut txn = db_pool.txn_begin().await?;
     db::tenant_prefix_overlap::lock_checks(&mut txn).await?;
     let domains = db::dns::domain::find_by(
         &mut txn,
@@ -342,7 +342,7 @@ pub(crate) async fn ensure_static_assignments_segment(
 pub(crate) async fn update_network_segments_svi_ip(
     db_pool: &Pool<Postgres>,
 ) -> Result<(), CarbideError> {
-    let mut txn = Transaction::begin(db_pool).await?;
+    let mut txn = db_pool.txn_begin().await?;
     let all_segments = db::network_segment::find_by(
         &mut txn,
         ObjectColumnFilter::<network_segment::IdColumn>::All,
@@ -393,7 +393,7 @@ pub(crate) async fn update_network_segments_svi_ip(
             continue;
         }
 
-        let mut txn = Transaction::begin(db_pool).await?;
+        let mut txn = db_pool.txn_begin().await?;
 
         match db::network_segment::allocate_svi_ip(&segment, &mut txn).await {
             Ok(_) => {
@@ -417,7 +417,7 @@ pub(crate) async fn store_initial_dpu_agent_upgrade_policy(
     db_pool: &Pool<Postgres>,
     initial_dpu_agent_upgrade_policy: Option<AgentUpgradePolicyChoice>,
 ) -> Result<(), CarbideError> {
-    let mut txn = Transaction::begin(db_pool).await?;
+    let mut txn = db_pool.txn_begin().await?;
     let initial_policy: AgentUpgradePolicy = initial_dpu_agent_upgrade_policy
         .unwrap_or(AgentUpgradePolicyChoice::UpDown)
         .into();

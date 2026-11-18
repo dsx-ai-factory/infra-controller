@@ -19,7 +19,9 @@
 
 use carbide_uuid::power_shelf::PowerShelfId;
 use db::db_read::PgPoolReader;
-use db::{ObjectColumnFilter, power_shelf as db_power_shelf, rack as db_rack};
+use db::{
+    ObjectColumnFilter, TransactionVending as _, power_shelf as db_power_shelf, rack as db_rack,
+};
 use model::power_shelf::{
     PowerShelf, PowerShelfControllerState, PowerShelfReprovisionRequest, ReProvisioningState,
 };
@@ -98,11 +100,16 @@ async fn rack_failed_abort_outcome(
         "Rack is in Error; aborting power shelf ReProvisioning and returning to Ready",
     );
 
-    let mut txn = ctx.services.db_pool.begin().await?;
+    let mut txn = ctx
+        .services
+        .db_pool
+        .txn_begin()
+        .await
+        .map_err(StateHandlerError::from_transaction)?;
     db_power_shelf::clear_power_shelf_reprovisioning_requested(txn.as_mut(), *power_shelf_id)
         .await?;
     Ok(Some(
-        StateHandlerOutcome::transition(PowerShelfControllerState::Ready).with_txn(txn),
+        StateHandlerOutcome::transition(PowerShelfControllerState::Ready).with_txn(txn.into()),
     ))
 }
 
@@ -148,7 +155,12 @@ pub async fn handle_reprovisioning(
 
             match &firmware_upgrade_status.status {
                 model::rack::RackFirmwareUpgradeState::Completed => {
-                    let mut txn = ctx.services.db_pool.begin().await?;
+                    let mut txn = ctx
+                        .services
+                        .db_pool
+                        .txn_begin()
+                        .await
+                        .map_err(StateHandlerError::from_transaction)?;
                     db_power_shelf::clear_power_shelf_reprovisioning_requested(
                         txn.as_mut(),
                         *power_shelf_id,
@@ -156,11 +168,16 @@ pub async fn handle_reprovisioning(
                     .await?;
                     Ok(
                         StateHandlerOutcome::transition(PowerShelfControllerState::Ready)
-                            .with_txn(txn),
+                            .with_txn(txn.into()),
                     )
                 }
                 model::rack::RackFirmwareUpgradeState::Failed { cause } => {
-                    let mut txn = ctx.services.db_pool.begin().await?;
+                    let mut txn = ctx
+                        .services
+                        .db_pool
+                        .txn_begin()
+                        .await
+                        .map_err(StateHandlerError::from_transaction)?;
                     db_power_shelf::clear_power_shelf_reprovisioning_requested(
                         txn.as_mut(),
                         *power_shelf_id,
@@ -170,7 +187,7 @@ pub async fn handle_reprovisioning(
                         StateHandlerOutcome::transition(PowerShelfControllerState::Error {
                             cause: cause.clone(),
                         })
-                        .with_txn(txn),
+                        .with_txn(txn.into()),
                     )
                 }
                 model::rack::RackFirmwareUpgradeState::Started

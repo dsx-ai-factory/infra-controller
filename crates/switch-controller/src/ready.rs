@@ -18,7 +18,7 @@
 //! Handler for SwitchControllerState::Ready.
 
 use carbide_uuid::switch::SwitchId;
-use db::switch as db_switch;
+use db::{TransactionVending as _, switch as db_switch};
 use model::switch::{ConfiguringState, Switch, SwitchControllerState, SwitchDecommissioningState};
 use state_controller::state_handler::{
     StateHandlerContext, StateHandlerError, StateHandlerOutcome,
@@ -48,13 +48,18 @@ pub async fn handle_ready(
     }
 
     if state.decommission_requested {
-        let mut txn = ctx.services.db_pool.begin().await?;
+        let mut txn = ctx
+            .services
+            .db_pool
+            .txn_begin()
+            .await
+            .map_err(StateHandlerError::from_transaction)?;
         db_switch::clear_decommission_requested(&mut txn, *switch_id).await?;
         return Ok(
             StateHandlerOutcome::transition(SwitchControllerState::Decommissioning {
                 decommissioning_state: SwitchDecommissioningState::SuppressingSiteExplorer,
             })
-            .with_txn(txn),
+            .with_txn(txn.into()),
         );
     }
 
@@ -79,11 +84,16 @@ pub async fn handle_ready(
                 "unknown initiator for switch reprovisioning request: {}",
                 req.initiator
             );
-            let mut txn = ctx.services.db_pool.begin().await?;
+            let mut txn = ctx
+                .services
+                .db_pool
+                .txn_begin()
+                .await
+                .map_err(StateHandlerError::from_transaction)?;
             db_switch::clear_switch_reprovisioning_requested(txn.as_mut(), *switch_id).await?;
             return Ok(
                 StateHandlerOutcome::transition(SwitchControllerState::Error { cause })
-                    .with_txn(txn),
+                    .with_txn(txn.into()),
             );
         }
 
@@ -93,9 +103,14 @@ pub async fn handle_ready(
                 initiator = %req.initiator,
                 "Rack reprovision request has no switch-relevant activities; clearing request"
             );
-            let mut txn = ctx.services.db_pool.begin().await?;
+            let mut txn = ctx
+                .services
+                .db_pool
+                .txn_begin()
+                .await
+                .map_err(StateHandlerError::from_transaction)?;
             db_switch::clear_switch_reprovisioning_requested(txn.as_mut(), *switch_id).await?;
-            return Ok(StateHandlerOutcome::do_nothing().with_txn(txn));
+            return Ok(StateHandlerOutcome::do_nothing().with_txn(txn.into()));
         };
 
         tracing::info!(

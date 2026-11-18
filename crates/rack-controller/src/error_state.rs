@@ -21,6 +21,7 @@ use carbide_rack_controller::context::RackStateHandlerContextObjects;
 use carbide_rack_controller::maintenance::first_maintenance_state;
 use carbide_rack_controller::ready::detect_component_failure;
 use carbide_uuid::rack::RackId;
+use db::TransactionVending as _;
 use model::rack::{Rack, RackConfig, RackErrorRecoveryPolicy, RackState};
 use state_controller::state_handler::{
     StateHandlerContext, StateHandlerError, StateHandlerOutcome,
@@ -63,11 +64,16 @@ pub async fn handle_error(
                 "Rack on-demand maintenance requested from Error state (partial: machines, switches, power shelves, activities), transitioning to Maintenance",
             );
         }
-        let txn = ctx.services.db_pool.begin().await?;
+        let txn = ctx
+            .services
+            .db_pool
+            .txn_begin()
+            .await
+            .map_err(StateHandlerError::from_transaction)?;
         return Ok(StateHandlerOutcome::transition(RackState::Maintenance {
             maintenance_state: first_maintenance_state(scope),
         })
-        .with_txn(txn));
+        .with_txn(txn.into()));
     }
 
     if recovery_policy == RackErrorRecoveryPolicy::MaintenanceRequestRequired {
@@ -81,8 +87,13 @@ pub async fn handle_error(
             rack_id = %id,
             "No terminal component failure remains, transitioning rack from Error back to Ready",
         );
-        let txn = ctx.services.db_pool.begin().await?;
-        return Ok(StateHandlerOutcome::transition(RackState::Ready).with_txn(txn));
+        let txn = ctx
+            .services
+            .db_pool
+            .txn_begin()
+            .await
+            .map_err(StateHandlerError::from_transaction)?;
+        return Ok(StateHandlerOutcome::transition(RackState::Ready).with_txn(txn.into()));
     }
 
     Ok(StateHandlerOutcome::wait(format!(

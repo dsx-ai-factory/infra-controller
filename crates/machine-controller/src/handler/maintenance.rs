@@ -25,7 +25,7 @@ use carbide_secrets::credentials::{
 use carbide_uuid::machine::HostMachineId;
 use chrono::Utc;
 use component_manager::compute_tray_manager::{ComputeTrayEndpoint, ComputeTrayResult};
-use db::machine as db_machine;
+use db::{TransactionVending as _, machine as db_machine};
 use mac_address::MacAddress;
 use model::component_manager::PowerAction;
 use model::controller_outcome::PersistentStateHandlerOutcome;
@@ -433,7 +433,12 @@ async fn finish_maintenance(
         return Ok(StateHandlerOutcome::transition(next_state));
     };
 
-    let mut txn = ctx.services.db_pool.begin().await?;
+    let mut txn = ctx
+        .services
+        .db_pool
+        .txn_begin()
+        .await
+        .map_err(StateHandlerError::from_transaction)?;
     if let db::ConditionalWrite::NotApplied(reason) =
         db_machine::clear_machine_maintenance_requested(&mut txn, *host_machine_id, request).await?
     {
@@ -443,7 +448,7 @@ async fn finish_maintenance(
             "Completed maintenance request is no longer pending"
         );
     }
-    Ok(StateHandlerOutcome::transition(next_state).with_txn(txn))
+    Ok(StateHandlerOutcome::transition(next_state).with_txn(txn.into()))
 }
 
 /// If a maintenance request has been posted via `machine_maintenance_requested`,

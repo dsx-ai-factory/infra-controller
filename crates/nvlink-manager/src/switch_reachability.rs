@@ -52,6 +52,7 @@ use async_trait::async_trait;
 use carbide_utils::periodic_timer::PeriodicTimer;
 use carbide_uuid::switch::SwitchId;
 use chrono::{DateTime, Utc};
+use db::TransactionVending as _;
 use db::work_lock_manager::{WorkLock, WorkLockManagerHandle};
 use health_report::{HealthProbeAlert, HealthProbeId, HealthReport, HealthReportApplyMode};
 use sqlx::PgPool;
@@ -484,7 +485,7 @@ impl SwitchReachabilityMonitor {
     /// Verifies the held lock still names this replica. A takeover changes the
     /// lock's worker, which the fence detects as a failed precondition.
     async fn still_owns(&self, lock: &WorkLock) -> NvLinkManagerResult<bool> {
-        let mut txn = self.db_pool.begin().await.map_err(|e| {
+        let mut txn = self.db_pool.txn_begin().await.map_err(|e| {
             NvLinkManagerError::internal(format!("Failed to begin transaction: {e}"))
         })?;
         let owns = match lock.fence_transaction(&mut txn).await {
@@ -733,7 +734,7 @@ impl SwitchReachabilityMonitor {
         stored: bool,
     ) -> Result<(), WriteFailure> {
         let result = async {
-            let mut txn = self.db_pool.begin().await.map_err(|e| {
+            let mut txn = self.db_pool.txn_begin().await.map_err(|e| {
                 NvLinkManagerError::internal(format!("Failed to begin transaction: {e}"))
             })?;
             lock.fence_transaction(&mut txn).await?;

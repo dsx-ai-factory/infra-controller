@@ -21,6 +21,7 @@ use carbide_redfish::libredfish::error::state_handler_redfish_error as redfish_e
 use carbide_uuid::machine::MachineId;
 use chrono::{DateTime, SubsecRound, Utc};
 use config_version::ConfigVersion;
+use db::TransactionVending as _;
 use itertools::Itertools;
 use libredfish::model::component_integrity::{ComponentIntegrities, ComponentIntegrity};
 use model::attestation::profile::{AttesterSelectionMode, ProfileResolution, SelectionOutcome};
@@ -292,7 +293,10 @@ async fn schedule(
         .map(|x| from_component_integrity(x, machine_id, &time_now, bmc_info, &job_id))
         .collect_vec();
 
-    let mut txn = db_pool.begin().await?;
+    let mut txn = db_pool
+        .txn_begin()
+        .await
+        .map_err(StateHandlerError::from_transaction)?;
 
     // Origin belongs to the whole job, so all its device rows receive the same value.
     let records_inserted = db::attestation::spdm::insert_device_attestations(
@@ -312,7 +316,7 @@ async fn schedule(
             devices_scheduled: records_inserted,
             ..result
         },
-        Some(txn),
+        Some(txn.into()),
     ))
 }
 
@@ -443,7 +447,12 @@ pub(crate) async fn handle_spdm_attestation_failed_recovery(
             .collect_vec()
     };
 
-    let mut txn = ctx.services.db_pool.begin().await?;
+    let mut txn = ctx
+        .services
+        .db_pool
+        .txn_begin()
+        .await
+        .map_err(StateHandlerError::from_transaction)?;
     // Keep a terminal override stable until the recovery transition commits.
     db::attestation::spdm::lock_machine_attestations(
         &mut txn,
@@ -480,7 +489,7 @@ pub(crate) async fn handle_spdm_attestation_failed_recovery(
         }
         _ => return Ok(StateHandlerOutcome::do_nothing()),
     };
-    Ok(StateHandlerOutcome::transition(next_state).with_txn(txn))
+    Ok(StateHandlerOutcome::transition(next_state).with_txn(txn.into()))
 }
 
 pub(crate) async fn handle_spdm_trigger_state(
@@ -543,7 +552,11 @@ pub(crate) async fn handle_spdm_poll_state(
 
     // Recheck current membership before accepting a terminal job's results.
     let selection = select_managed_host_attesters(services, mh_snapshot, host_machine_id).await?;
-    let mut txn = services.db_pool.begin().await?;
+    let mut txn = services
+        .db_pool
+        .txn_begin()
+        .await
+        .map_err(StateHandlerError::from_transaction)?;
 
     // Retention can remove a job during Redfish discovery; restart in the caller's lifecycle stage.
     let job_attestations =
@@ -555,7 +568,7 @@ pub(crate) async fn handle_spdm_poll_state(
                     %job_id,
                     "SPDM attestation job not found; restarting attestation"
                 );
-                return Ok(StateHandlerOutcome::transition(restart_state).with_txn(txn));
+                return Ok(StateHandlerOutcome::transition(restart_state).with_txn(txn.into()));
             }
             Err(error) => return Err(error.into()),
         };
@@ -578,7 +591,7 @@ pub(crate) async fn handle_spdm_poll_state(
             %job_id,
             "SPDM attester selection changed; retiring job and restarting attestation"
         );
-        return Ok(StateHandlerOutcome::transition(restart_state).with_txn(txn));
+        return Ok(StateHandlerOutcome::transition(restart_state).with_txn(txn.into()));
     }
     // Serialise cancellation updates with accepting these results into the lifecycle.
     db::attestation::spdm::lock_machine_attestations(&mut txn, host_machine_id, &job_device_ids)
@@ -593,7 +606,7 @@ pub(crate) async fn handle_spdm_poll_state(
 
     match attestation_status {
         SpdmAttestationStatus::Passed | SpdmAttestationStatus::Waived => {
-            Ok(StateHandlerOutcome::transition(next_skip_state).with_txn(txn))
+            Ok(StateHandlerOutcome::transition(next_skip_state).with_txn(txn.into()))
         }
         SpdmAttestationStatus::Failed => {
             // Use the same job devices and latest revisions as the machine status.
@@ -622,7 +635,7 @@ pub(crate) async fn handle_spdm_poll_state(
                 retry_count: 0,
                 machine_id: *host_machine_id,
             })
-            .with_txn(txn))
+            .with_txn(txn.into()))
         }
         SpdmAttestationStatus::InProgress => Ok(StateHandlerOutcome::do_nothing()),
     }

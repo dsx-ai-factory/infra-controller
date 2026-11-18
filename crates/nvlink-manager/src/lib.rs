@@ -3657,7 +3657,7 @@ impl NvlPartitionMonitor {
             .collect();
 
         let clear_started = Instant::now();
-        let mut obs_txn = self.db_pool.begin().await.map_err(|e| {
+        let mut obs_txn = self.db_pool.txn_begin().await.map_err(|e| {
             NvLinkManagerError::internal(format!(
                 "Failed to create transaction for clearing nvlink status observations: {e}"
             ))
@@ -3694,7 +3694,7 @@ impl NvlPartitionMonitor {
         if observations.is_empty() {
             return Ok(());
         }
-        let mut obs_txn = self.db_pool.begin().await.map_err(|e| {
+        let mut obs_txn = self.db_pool.txn_begin().await.map_err(|e| {
             NvLinkManagerError::internal(format!(
                 "Failed to create transaction for nvlink status observation: {e}"
             ))

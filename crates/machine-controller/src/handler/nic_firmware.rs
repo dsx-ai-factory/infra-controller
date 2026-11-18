@@ -13,6 +13,7 @@ use std::time::Duration;
 use bmc_platform::ResetType;
 use carbide_libmlx_model::firmware::operation::FirmwareOperationState;
 use chrono::{DateTime, Utc};
+use db::TransactionVending as _;
 use model::machine::machine_search_config::MachineSearchConfig;
 use model::machine::nic_firmware::{
     NicFirmwareActivation, NicFirmwareBaselineContinuation, NicFirmwareLockdownPolicy,
@@ -263,7 +264,12 @@ pub(super) async fn handle(
             // taken before Scout's report must not cause an avoidable reboot.
             let version = snapshot.host_snapshot.state.version;
             let host_machine_id = snapshot.host_snapshot.id;
-            let mut txn = ctx.services.db_pool.begin().await?;
+            let mut txn = ctx
+                .services
+                .db_pool
+                .txn_begin()
+                .await
+                .map_err(StateHandlerError::from_transaction)?;
             db::machine::lock_nic_firmware_state(&mut txn, &host_machine_id, version)
                 .await?
                 .check_applied()?;
@@ -309,7 +315,7 @@ pub(super) async fn handle(
                         not_before: reported_at,
                     },
                 )
-                .with_txn(txn));
+                .with_txn(txn.into()));
             }
             if snapshot
                 .aggregate_health
@@ -318,7 +324,7 @@ pub(super) async fn handle(
                 return Ok(StateHandlerOutcome::wait(
                     "NIC firmware activation reboot is blocked by a health override".into(),
                 )
-                .with_txn(txn));
+                .with_txn(txn.into()));
             }
             // Count from the persisted attempt start. The minimum includes the
             // bounded 120-second call plus a minute for Scout to report back.
@@ -330,12 +336,12 @@ pub(super) async fn handle(
                 .max(chrono::Duration::seconds(
                     REBOOT_ATTEMPT_TIMEOUT.as_secs() as i64 + 60,
                 ));
-            let now = db::machine::database_now(&mut *txn).await?;
+            let now = db::machine::database_now(txn.as_mut()).await?;
             if last_attempt_at.is_some_and(|attempt| now < attempt + retry_delay) {
                 return Ok(StateHandlerOutcome::wait(
                     "waiting for Scout to report the NIC firmware activation reboot".into(),
                 )
-                .with_txn(txn));
+                .with_txn(txn.into()));
             }
             // Commit the attempt marker before external work so retries retain
             // the same interval across controller crashes. A crash before sending
@@ -356,7 +362,9 @@ pub(super) async fn handle(
             )
             .await?
             .check_applied()?;
-            txn.commit().await?;
+            txn.commit()
+                .await
+                .map_err(StateHandlerError::from_transaction)?;
 
             let attempt = tokio::time::timeout(
                 REBOOT_ATTEMPT_TIMEOUT,
@@ -444,7 +452,12 @@ pub(super) async fn handle(
                 // Only safe, independently restored failure reaches this phase.
                 // A deleted original owner must still follow normal network and
                 // instance teardown; jumping to cleanup would skip those steps.
-                let mut txn = ctx.services.db_pool.begin().await?;
+                let mut txn = ctx
+                    .services
+                    .db_pool
+                    .txn_begin()
+                    .await
+                    .map_err(StateHandlerError::from_transaction)?;
                 db::machine::prepare_nic_firmware_owner_release(
                     &mut txn,
                     &snapshot.host_snapshot.id,
@@ -456,7 +469,7 @@ pub(super) async fn handle(
                 return Ok(StateHandlerOutcome::transition(ManagedHostState::Assigned {
                     instance_state: InstanceState::WaitingForRebootToReady,
                 })
-                .with_txn(txn));
+                .with_txn(txn.into()));
             }
             let reason = match machine_failure_reason {
                 Some(blocker) if !reason.contains(blocker.as_str()) => {
@@ -696,7 +709,12 @@ async fn complete(
     };
     // Recheck the owner under the same locks and transaction as the ordinary
     // controller state transition, so a stale snapshot cannot hand off a host.
-    let mut txn = ctx.services.db_pool.begin().await?;
+    let mut txn = ctx
+        .services
+        .db_pool
+        .txn_begin()
+        .await
+        .map_err(StateHandlerError::from_transaction)?;
     db::machine::prepare_nic_firmware_completion(
         &mut txn,
         &snapshot.host_snapshot.id,
@@ -705,7 +723,7 @@ async fn complete(
     )
     .await?
     .check_applied()?;
-    Ok(StateHandlerOutcome::transition(continuation).with_txn(txn))
+    Ok(StateHandlerOutcome::transition(continuation).with_txn(txn.into()))
 }
 
 #[cfg(test)]

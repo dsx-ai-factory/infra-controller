@@ -29,6 +29,7 @@ use carbide_redfish::libredfish::BmcCredentialOps;
 use carbide_redfish::libredfish::conv::IntoLibredfish;
 use carbide_redfish::nv_redfish::NvRedfishClientPool;
 use carbide_secrets::credentials::{CredentialManager, Credentials};
+use db::TransactionVending as _;
 use libredfish::model::service_root::RedfishVendor;
 use mac_address::MacAddress;
 use model::expected_entity::{BmcCredentialsData, ExpectedEntity};
@@ -304,7 +305,8 @@ impl BmcEndpointExplorer {
                 key: format!("device_credential_rotation/bmc/{bmc_mac_address}"),
                 cause,
             };
-            let mut txn = db::Transaction::begin(database_connection)
+            let mut txn = database_connection
+                .txn_begin()
                 .await
                 .map_err(|e| record_err(e.to_string()))?;
             db::credential_rotation::record_device_enrolled(
@@ -343,7 +345,8 @@ impl BmcEndpointExplorer {
                 key: format!("device_credential_rotation/dpu_bmc_service/{bmc_mac_address}"),
                 cause,
             };
-            let mut txn = db::Transaction::begin(database_connection)
+            let mut txn = database_connection
+                .txn_begin()
                 .await
                 .map_err(|e| record_err(e.to_string()))?;
             db::credential_rotation::record_device_enrolled(

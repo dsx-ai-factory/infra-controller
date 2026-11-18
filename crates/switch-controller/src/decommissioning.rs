@@ -22,6 +22,7 @@ use carbide_secrets::credentials::{BmcCredentialType, CredentialKey, CredentialW
 use carbide_uuid::switch::SwitchId;
 use component_manager::error::ComponentManagerError;
 use component_manager::nv_switch_manager::SwitchFactoryResetState;
+use db::TransactionVending as _;
 use mac_address::MacAddress;
 use model::bmc_suppression::{BmcSuppressionSource, BmcSuppressionSubsystem, NewBmcSuppression};
 use model::switch::{Switch, SwitchControllerState, SwitchDecommissioningState};
@@ -55,7 +56,12 @@ async fn suppress_dhcp(
     interface: &str,
     ctx: &mut StateHandlerContext<'_, SwitchStateHandlerContextObjects>,
 ) -> Result<sqlx::PgTransaction<'static>, StateHandlerError> {
-    let mut txn = ctx.services.db_pool.begin().await?;
+    let mut txn = ctx
+        .services
+        .db_pool
+        .txn_begin()
+        .await
+        .map_err(StateHandlerError::from_transaction)?;
     let suppression = db::bmc_suppression::upsert(
         &mut txn,
         &NewBmcSuppression {
@@ -76,7 +82,7 @@ async fn suppress_dhcp(
         db::machine_interface::record_deletion(&mut txn).await?;
     }
 
-    Ok(txn)
+    Ok(txn.into())
 }
 
 pub(super) async fn handle_decommissioning(
@@ -132,7 +138,12 @@ async fn handle_suppressing_site_explorer(
         .and_then(|info| info.mac)
         .or(switch.bmc_mac_address)
         .ok_or_else(|| missing_data(switch_id, "bmc_mac"))?;
-    let mut txn = ctx.services.db_pool.begin().await?;
+    let mut txn = ctx
+        .services
+        .db_pool
+        .txn_begin()
+        .await
+        .map_err(StateHandlerError::from_transaction)?;
     let suppression = db::bmc_suppression::upsert(
         &mut txn,
         &NewBmcSuppression {
@@ -153,7 +164,7 @@ async fn handle_suppressing_site_explorer(
             "waiting for Site Explorer suppression acknowledgement".to_string(),
         )
     };
-    Ok(outcome.with_txn(txn))
+    Ok(outcome.with_txn(txn.into()))
 }
 
 async fn handle_suppressing_nvos_dhcp(
@@ -364,7 +375,12 @@ async fn handle_deleting_managed_credentials(
             ))
         })?;
 
-    let mut txn = ctx.services.db_pool.begin().await?;
+    let mut txn = ctx
+        .services
+        .db_pool
+        .txn_begin()
+        .await
+        .map_err(StateHandlerError::from_transaction)?;
     db::credential_rotation::delete_device_converged(
         &mut txn,
         bmc_mac_address,
@@ -382,6 +398,6 @@ async fn handle_deleting_managed_credentials(
         StateHandlerOutcome::transition(decommissioning(
             SwitchDecommissioningState::Decommissioned,
         ))
-        .with_txn(txn),
+        .with_txn(txn.into()),
     )
 }

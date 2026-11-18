@@ -14,6 +14,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+use db::TransactionVending as _;
 pub(crate) mod dpu_nic_firmware;
 pub(crate) mod dpu_nic_firmware_metrics;
 mod host_firmware;
@@ -243,7 +244,7 @@ impl MachineUpdateManager {
             self.instrumentation.emit(event);
         }
 
-        let mut txn = Transaction::begin(&self.database_connection).await?;
+        let mut txn = self.database_connection.txn_begin().await?;
 
         // current host machines in maintenance
         let mut current_updating_machines = HashSet::<HostMachineId>::new();
@@ -297,7 +298,7 @@ impl MachineUpdateManager {
         let current_updating_count = current_updating_machines.len();
 
         //refresh snapshots for metrics
-        let mut txn = Transaction::begin(&self.database_connection).await?;
+        let mut txn = self.database_connection.txn_begin().await?;
         let snapshots = self.get_all_snapshots(&mut txn).await?;
         txn.commit().await?;
 
@@ -352,7 +353,7 @@ async fn update_transaction(
     pool: &PgPool,
     work_lock: &WorkLock,
 ) -> CarbideResult<Transaction<'static>> {
-    let mut txn = Transaction::begin(pool).await?;
+    let mut txn = pool.txn_begin().await?;
     sqlx::query(
         "SELECT set_config('statement_timeout', \
             LEAST(NULLIF(setting::bigint, 0), $1::text::bigint)::text, true) \

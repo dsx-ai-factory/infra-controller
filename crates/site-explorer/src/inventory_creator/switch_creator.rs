@@ -18,7 +18,7 @@
 use std::collections::HashSet;
 
 use carbide_uuid::switch::SwitchId;
-use db::DatabaseError;
+use db::TransactionVending as _;
 use mac_address::MacAddress;
 use model::expected_switch::ExpectedSwitch;
 use model::site_explorer::{EndpointType, ExploredManagedSwitch};
@@ -40,18 +40,12 @@ impl SwitchCreator {
         expected_endpoint_index: &ExploredEndpointIndex,
         suppressed_bmc_macs: &HashSet<MacAddress>,
     ) -> SiteExplorerResult<Vec<ExploredManagedSwitch>> {
-        let mut txn = self
-            .database_connection
-            .begin()
-            .await
-            .map_err(|e| DatabaseError::new("load find_all_preingestion_complete data", e))?;
+        let mut txn = self.database_connection.txn_begin().await?;
 
         let explored_endpoints =
             db::explored_endpoints::find_all_preingestion_complete(&mut txn).await?;
 
-        txn.commit()
-            .await
-            .map_err(|e| DatabaseError::new("end find_all_preingestion_complete data", e))?;
+        txn.commit().await?;
         let managed_switches = explored_endpoints
             .iter()
             .filter(|ep| {
@@ -165,19 +159,14 @@ impl SwitchCreator {
         expected_switch: &ExpectedSwitch,
         pool: &PgPool,
     ) -> SiteExplorerResult<bool> {
-        let mut txn = pool
-            .begin()
-            .await
-            .map_err(|e| DatabaseError::new("begin create_managed_switch", e))?;
+        let mut txn = pool.txn_begin().await?;
 
         let created = self
             .create_switch(&mut txn, explored_managed_switch, expected_switch)
             .await?
             .is_some();
 
-        txn.commit()
-            .await
-            .map_err(|e| DatabaseError::new("commit create_managed_switch", e))?;
+        txn.commit().await?;
 
         Ok(created)
     }

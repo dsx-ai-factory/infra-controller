@@ -22,6 +22,7 @@ use carbide_ib_fabric::ib::{
 };
 use carbide_instrument::{Event, LabelValue};
 use carbide_uuid::infiniband::IBPartitionId;
+use db::TransactionVending as _;
 use model::ib::{DEFAULT_IB_FABRIC_NAME, IBQosConf};
 use model::ib_partition::{IBPartition, IBPartitionControllerState, IBPartitionStatus};
 use state_controller::CheckApplied;
@@ -158,7 +159,12 @@ impl StateHandler for IBPartitionStateHandler {
                                     // this partition. This prevents deleting a partition that
                                     // instances still depend on, which would cause errors when
                                     // the instance state handler tries to unbind ports.
-                                    let mut txn = ctx.services.db_pool.begin().await?;
+                                    let mut txn = ctx
+                                        .services
+                                        .db_pool
+                                        .txn_begin()
+                                        .await
+                                        .map_err(StateHandlerError::from_transaction)?;
                                     db::ib_partition::lock_for_delete(&mut txn, *partition_id)
                                         .await?
                                         .check_applied()?;
@@ -180,7 +186,7 @@ impl StateHandler for IBPartitionStateHandler {
                                         return Ok(StateHandlerOutcome::wait(format!(
                                             "Waiting for {instance_count} instance(s) to release IB partition"
                                         ))
-                                        .with_txn(txn));
+                                        .with_txn(txn.into()));
                                     }
 
                                     let pkey_pool = ctx
@@ -203,7 +209,7 @@ impl StateHandler for IBPartitionStateHandler {
                                     )
                                     .await?
                                     .check_applied()?;
-                                    Ok(StateHandlerOutcome::deleted().with_txn(txn))
+                                    Ok(StateHandlerOutcome::deleted().with_txn(txn.into()))
                                 }
                                 _ => Err(ufm_error("get_ib_network", e.into())),
                             }
@@ -288,7 +294,12 @@ impl StateHandler for IBPartitionStateHandler {
                                     Ok(())
                                 };
 
-                                let mut txn = ctx.services.db_pool.begin().await?;
+                                let mut txn = ctx
+                                    .services
+                                    .db_pool
+                                    .txn_begin()
+                                    .await
+                                    .map_err(StateHandlerError::from_transaction)?;
                                 db::ib_partition::update_status(
                                     state.id,
                                     &state.status,
@@ -303,9 +314,9 @@ impl StateHandler for IBPartitionStateHandler {
                                             cause: format!("Failed to update IB partition {e}"),
                                         },
                                     )
-                                    .with_txn(txn));
+                                    .with_txn(txn.into()));
                                 } else {
-                                    Ok(StateHandlerOutcome::do_nothing().with_txn(txn))
+                                    Ok(StateHandlerOutcome::do_nothing().with_txn(txn.into()))
                                 }
                             }
 

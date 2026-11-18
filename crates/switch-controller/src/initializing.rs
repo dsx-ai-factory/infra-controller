@@ -18,6 +18,7 @@
 //! Handler for SwitchControllerState::Initializing.
 
 use carbide_uuid::switch::SwitchId;
+use db::TransactionVending as _;
 use model::machine_interface_address::MachineInterfaceAssociation;
 use model::switch::{
     ConfiguringState, DisableMtlsState, InitializingState, Switch, SwitchControllerState,
@@ -59,7 +60,12 @@ async fn handle_wait_for_os_machine_interface(
         ));
     };
 
-    let mut txn = ctx.services.db_pool.begin().await?;
+    let mut txn = ctx
+        .services
+        .db_pool
+        .txn_begin()
+        .await
+        .map_err(StateHandlerError::from_transaction)?;
 
     let expected_switch =
         db::expected_switch::find_by_bmc_mac_address(&mut txn, bmc_mac_address).await?;
@@ -123,7 +129,7 @@ async fn handle_wait_for_os_machine_interface(
     let total = nvos_mac_addresses.len();
 
     for mac_address in &nvos_mac_addresses {
-        let mi = db::machine_interface::find_by_mac_address(&mut *txn, *mac_address).await?;
+        let mi = db::machine_interface::find_by_mac_address(txn.as_mut(), *mac_address).await?;
         let interface = match mi.first() {
             Some(iface) => iface,
             None => continue,
@@ -171,7 +177,9 @@ async fn handle_wait_for_os_machine_interface(
         }
     }
 
-    txn.commit().await?;
+    txn.commit()
+        .await
+        .map_err(StateHandlerError::from_transaction)?;
 
     tracing::info!(
         switch_id = %switch_id,

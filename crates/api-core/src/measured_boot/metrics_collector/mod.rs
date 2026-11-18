@@ -18,6 +18,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use db::TransactionVending as _;
 use measured_boot::journal::MeasurementJournal;
 use measured_boot::records::MeasurementBundleState;
 use tokio::task::JoinSet;
@@ -150,7 +151,7 @@ impl MeasuredBootMetricsCollector {
     async fn collect_metrics(&self) -> CarbideResult<()> {
         let mut metrics = MeasuredBootMetricsCollectorMetrics::new();
 
-        let mut txn = db::Transaction::begin(&self.database_connection).await?;
+        let mut txn = self.database_connection.txn_begin().await?;
 
         let profiles = db::measured_boot::profile::get_all(&mut txn).await?;
         for system_profile in profiles.iter() {

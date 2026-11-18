@@ -229,18 +229,20 @@ impl DpaMonitor {
                 let handler_result = self.handle_dpa_interface(mh, idx, metrics).await?;
 
                 let new_state = handler_result.new_state;
-                let txn = handler_result.txn;
+                let txn = handler_result.txn.map(db::Transaction::from);
 
                 if let Some(new_state) = new_state {
                     let new_version = controller_state.version.increment();
 
-                    let mut txn =
-                        match txn {
-                            Some(t) => t,
-                            None => self.db_services.db_pool.begin().await.map_err(|e| {
-                                db::AnnotatedSqlxError::new("dpa_monitor begin txn", e)
-                            })?,
-                        };
+                    let mut txn = match txn {
+                        Some(t) => t,
+                        None => self
+                            .db_services
+                            .db_pool
+                            .txn_begin()
+                            .await
+                            .map_err(DpaManagerError::from_transaction)?,
+                    };
 
                     match db::dpa_interface::try_update_controller_state(
                         &mut txn,
@@ -252,9 +254,9 @@ impl DpaMonitor {
                     .await?
                     {
                         Applied(()) => {
-                            txn.commit().await.map_err(|e| {
-                                db::AnnotatedSqlxError::new("dpa_monitor commit txn", e)
-                            })?;
+                            txn.commit()
+                                .await
+                                .map_err(DpaManagerError::from_transaction)?;
                         }
                         NotApplied(ControllerStateNotCurrent) => {
                             // The interface changed or disappeared. Roll back the
@@ -265,7 +267,7 @@ impl DpaMonitor {
                 } else if let Some(txn) = txn {
                     txn.commit()
                         .await
-                        .map_err(|e| db::AnnotatedSqlxError::new("dpa_monitor commit txn", e))?;
+                        .map_err(DpaManagerError::from_transaction)?;
                 }
             }
         }
@@ -462,10 +464,11 @@ impl DpaMonitor {
         {
             Ok(()) => {
                 if heart_beat {
-                    let mut txn =
-                        services.db_pool.begin().await.map_err(|e| {
-                            db::AnnotatedSqlxError::new("dpa_monitor hb begin txn", e)
-                        })?;
+                    let mut txn = services
+                        .db_pool
+                        .txn_begin()
+                        .await
+                        .map_err(DpaManagerError::from_transaction)?;
                     let res = db::dpa_interface::update_last_hb_time(state, &mut txn).await;
                     if let Err(error) = res {
                         tracing::error!(
@@ -474,7 +477,7 @@ impl DpaMonitor {
                             "Error updating DPA interface heartbeat time",
                         );
                     }
-                    Ok(Some(txn))
+                    Ok(Some(txn.into()))
                 } else {
                     Ok(None)
                 }

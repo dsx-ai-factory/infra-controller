@@ -1408,8 +1408,7 @@ async fn group_switch_ids_by_rack(
     switch_ids: &[SwitchId],
 ) -> Result<Vec<RackFirmwareMaintenanceTarget>, Status> {
     let mut txn = api
-        .database_connection
-        .begin()
+        .txn_begin()
         .await
         .map_err(|e| Status::internal(format!("failed to begin transaction: {e}")))?;
     let switches = db::switch::find_by(
@@ -1450,8 +1449,7 @@ async fn group_power_shelf_ids_by_rack(
     power_shelf_ids: &[PowerShelfId],
 ) -> Result<Vec<RackFirmwareMaintenanceTarget>, Status> {
     let mut txn = api
-        .database_connection
-        .begin()
+        .txn_begin()
         .await
         .map_err(|e| Status::internal(format!("failed to begin transaction: {e}")))?;
     let power_shelves = db::power_shelf::find_by(

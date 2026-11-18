@@ -24,7 +24,7 @@ use std::collections::HashSet;
 
 use mac_address::MacAddress;
 
-use crate::DatabaseError;
+use crate::{DatabaseError, TransactionVending as _};
 
 /// Backend operation whose current job reference is tracked for a device.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -202,10 +202,7 @@ pub async fn replace_firmware_jobs(
             "reset jobs cannot replace firmware references".to_owned(),
         ));
     }
-    let mut txn = db
-        .begin()
-        .await
-        .map_err(|e| DatabaseError::new("direct_dispatch_rms_job::begin", e))?;
+    let mut txn = db.txn_begin().await?;
 
     crate::cm_action::lock_firmware(&mut txn, bmc_mac).await?;
 
@@ -213,7 +210,7 @@ pub async fn replace_firmware_jobs(
                       WHERE bmc_mac = $1 AND job_kind IN ('firmware_object', 'switch_system_image')";
     sqlx::query(delete_sql)
         .bind(bmc_mac)
-        .execute(&mut *txn)
+        .execute(txn.as_mut())
         .await
         .map_err(|e| DatabaseError::new(delete_sql, e))?;
 
@@ -226,16 +223,14 @@ pub async fn replace_firmware_jobs(
             .bind(job_kind.as_str())
             .bind(job_id)
             .bind(action_id)
-            .execute(&mut *txn)
+            .execute(txn.as_mut())
             .await
             .map_err(|e| DatabaseError::new(insert_sql, e))?;
     }
 
     crate::cm_action::reconcile_firmware(&mut txn, bmc_mac).await?;
 
-    txn.commit()
-        .await
-        .map_err(|e| DatabaseError::new("direct_dispatch_rms_job::commit", e))?;
+    txn.commit().await?;
     Ok(())
 }
 

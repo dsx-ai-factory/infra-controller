@@ -19,7 +19,7 @@
 
 use carbide_uuid::vpc_peering::VpcPeeringId;
 use config_version::{ConfigVersion, Versioned};
-use db::{ConditionalWrite, ControllerStateNotCurrent, DatabaseError};
+use db::{ConditionalWrite, ControllerStateNotCurrent, DatabaseError, TransactionVending as _};
 use model::StateSla;
 use model::controller_outcome::PersistentStateHandlerOutcome;
 use model::vpc::VpcPeering;
@@ -178,18 +178,22 @@ impl StateHandler for VpcPeeringDeletion {
         _controller_state: &PeeringDeletionState,
         ctx: &mut StateHandlerContext<Self>,
     ) -> Result<StateHandlerOutcome<PeeringDeletionState>, StateHandlerError> {
-        let mut txn = ctx.services.begin().await?;
+        let mut txn = ctx
+            .services
+            .txn_begin()
+            .await
+            .map_err(StateHandlerError::from_transaction)?;
         // An unsynced receiver only delays deletion. Do the ordinary wait
         // without the routing lock, then lock and repeat before removing it.
         if let Some(wait) = Self::wait_for_receivers(&mut txn, state).await? {
-            return Ok(wait.with_txn(txn));
+            return Ok(wait.with_txn(txn.into()));
         }
         // `Deleting` peerings are already absent from DPU responses. Sharing
         // the routing lock keeps writers out without blocking those reads.
         db::tenant_prefix_overlap::lock_config(&mut txn).await?;
         let Some(current) = db::vpc_peering::find_by_id_for_update(&mut txn, *object_id).await?
         else {
-            return Ok(StateHandlerOutcome::deleted().with_txn(txn));
+            return Ok(StateHandlerOutcome::deleted().with_txn(txn.into()));
         };
         if current.deletion_version != state.deletion_version {
             return Err(StateHandlerError::IterationInvalidated {
@@ -197,9 +201,9 @@ impl StateHandler for VpcPeeringDeletion {
             });
         }
         if let Some(wait) = Self::wait_for_receivers(&mut txn, &current).await? {
-            return Ok(wait.with_txn(txn));
+            return Ok(wait.with_txn(txn.into()));
         }
         db::vpc_peering::final_delete(&mut txn, *object_id).await?;
-        Ok(StateHandlerOutcome::deleted().with_txn(txn))
+        Ok(StateHandlerOutcome::deleted().with_txn(txn.into()))
     }
 }

@@ -25,7 +25,7 @@ use carbide_resource_pool::ResourcePoolRegistry;
 use carbide_uuid::machine::{DpuMachineId, HostMachineId, MachineId, PredictedHostMachineId};
 use carbide_uuid::rack::RackId;
 use component_manager::MachineInfoProvider;
-use db::Transaction;
+use db::TransactionVending as _;
 use db::machine_interface::MachineInterfaces;
 use futures_util::StreamExt;
 use futures_util::future::join_all;
@@ -220,7 +220,7 @@ impl MachineCreator {
     /// fallback.
     async fn ensure_racks_before_dispatch(&self, rack_ids: &[RackId]) {
         let result = async {
-            let mut txn = Transaction::begin(&self.database_connection).await?;
+            let mut txn = self.database_connection.txn_begin().await?;
             for rack_id in rack_ids {
                 crate::ensure_rack_exists(&mut txn, rack_id).await?;
             }
@@ -518,7 +518,7 @@ impl MachineCreator {
     ) -> SiteExplorerResult<ManagedHostCreation> {
         let machine_data = Some(&expected_machine.data);
         let mut managed_host = ManagedHost::init(explored_host);
-        let mut txn = Transaction::begin(pool).await?;
+        let mut txn = pool.txn_begin().await?;
         let host_dpu_policy = HostDpuPolicy::resolve(
             Some(expected_machine.data.dpu_policy),
             self.config.dpu_policy,

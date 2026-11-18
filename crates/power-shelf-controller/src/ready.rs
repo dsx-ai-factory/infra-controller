@@ -19,7 +19,7 @@
 
 use carbide_uuid::power_shelf::PowerShelfId;
 use component_manager::component_common::{PowerStatePollOutcome, interpret_power_state_poll};
-use db::power_shelf as db_power_shelf;
+use db::{TransactionVending as _, power_shelf as db_power_shelf};
 use model::power_shelf::{
     PowerShelf, PowerShelfControllerState, PowerShelfDecommissioningState, PowerShelfStatus,
 };
@@ -57,13 +57,18 @@ pub async fn handle_ready(
     }
 
     if state.decommission_requested {
-        let mut txn = ctx.services.db_pool.begin().await?;
+        let mut txn = ctx
+            .services
+            .db_pool
+            .txn_begin()
+            .await
+            .map_err(StateHandlerError::from_transaction)?;
         db_power_shelf::clear_decommission_requested(txn.as_mut(), *power_shelf_id).await?;
         return Ok(
             StateHandlerOutcome::transition(PowerShelfControllerState::Decommissioning {
                 decommissioning_state: PowerShelfDecommissioningState::SuppressingSiteExplorer,
             })
-            .with_txn(txn),
+            .with_txn(txn.into()),
         );
     }
 
@@ -88,13 +93,18 @@ pub async fn handle_ready(
                 initiator = %req.initiator,
                 "Rack reprovision request ignored; rack_firmware_reprovisioning_enabled is false"
             );
-            let mut txn = ctx.services.db_pool.begin().await?;
+            let mut txn = ctx
+                .services
+                .db_pool
+                .txn_begin()
+                .await
+                .map_err(StateHandlerError::from_transaction)?;
             db_power_shelf::clear_power_shelf_reprovisioning_requested(
                 txn.as_mut(),
                 *power_shelf_id,
             )
             .await?;
-            return Ok(StateHandlerOutcome::do_nothing().with_txn(txn));
+            return Ok(StateHandlerOutcome::do_nothing().with_txn(txn.into()));
         }
 
         if !req.initiator.starts_with("rack-") {
@@ -106,7 +116,12 @@ pub async fn handle_ready(
                 "unknown initiator for power shelf reprovisioning request: {}",
                 req.initiator
             );
-            let mut txn = ctx.services.db_pool.begin().await?;
+            let mut txn = ctx
+                .services
+                .db_pool
+                .txn_begin()
+                .await
+                .map_err(StateHandlerError::from_transaction)?;
             db_power_shelf::clear_power_shelf_reprovisioning_requested(
                 txn.as_mut(),
                 *power_shelf_id,
@@ -114,7 +129,7 @@ pub async fn handle_ready(
             .await?;
             return Ok(
                 StateHandlerOutcome::transition(PowerShelfControllerState::Error { cause })
-                    .with_txn(txn),
+                    .with_txn(txn.into()),
             );
         }
 
@@ -124,13 +139,18 @@ pub async fn handle_ready(
                 initiator = %req.initiator,
                 "Rack reprovision request has no power-shelf-relevant activities; clearing request"
             );
-            let mut txn = ctx.services.db_pool.begin().await?;
+            let mut txn = ctx
+                .services
+                .db_pool
+                .txn_begin()
+                .await
+                .map_err(StateHandlerError::from_transaction)?;
             db_power_shelf::clear_power_shelf_reprovisioning_requested(
                 txn.as_mut(),
                 *power_shelf_id,
             )
             .await?;
-            return Ok(StateHandlerOutcome::do_nothing().with_txn(txn));
+            return Ok(StateHandlerOutcome::do_nothing().with_txn(txn.into()));
         };
 
         tracing::info!(
@@ -307,7 +327,7 @@ async fn persist_observed_power_state(
 
     let previous_status = state.status.replace(new_status);
 
-    let mut txn = match ctx.services.db_pool.begin().await {
+    let mut txn = match ctx.services.db_pool.txn_begin().await {
         Ok(txn) => txn,
         Err(error) => {
             state.status = previous_status;
@@ -336,5 +356,5 @@ async fn persist_observed_power_state(
         "PowerShelf Ready: persisted observed power state",
     );
 
-    Some(txn)
+    Some(txn.into())
 }

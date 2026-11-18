@@ -18,6 +18,7 @@
 //! State handler implementation for VPC prefixes.
 
 use carbide_uuid::vpc::VpcPrefixId;
+use db::TransactionVending as _;
 use model::vpc_prefix::{VpcPrefix, VpcPrefixControllerState, VpcPrefixDeletionState};
 use state_controller::state_handler::{
     StateHandler, StateHandlerContext, StateHandlerError, StateHandlerOutcome,
@@ -88,7 +89,12 @@ impl StateHandler for VpcPrefixStateHandler {
             }
             VpcPrefixControllerState::Deleting { deletion_state } => match deletion_state {
                 VpcPrefixDeletionState::DrainNetworkPrefixes { delete_at } => {
-                    let mut txn = ctx.services.db_pool.begin().await?;
+                    let mut txn = ctx
+                        .services
+                        .db_pool
+                        .txn_begin()
+                        .await
+                        .map_err(StateHandlerError::from_transaction)?;
 
                     // Keep the prefix until generated segment prefixes have released it.
                     let referenced_prefixes =
@@ -104,25 +110,30 @@ impl StateHandler for VpcPrefixStateHandler {
                             "VPC Prefix still has network prefix references",
                         );
                         tracing::info!(%vpc_prefix_id, next_state = ?new_state, "VPC Prefix state transition");
-                        Ok(StateHandlerOutcome::transition(new_state).with_txn(txn))
+                        Ok(StateHandlerOutcome::transition(new_state).with_txn(txn.into()))
                     } else if chrono::Utc::now() >= *delete_at {
                         // Move to the terminal database delete state after the drain deadline.
                         let new_state = VpcPrefixControllerState::Deleting {
                             deletion_state: VpcPrefixDeletionState::DBDelete,
                         };
                         tracing::info!(%vpc_prefix_id, next_state = ?new_state, "VPC Prefix state transition");
-                        Ok(StateHandlerOutcome::transition(new_state).with_txn(txn))
+                        Ok(StateHandlerOutcome::transition(new_state).with_txn(txn.into()))
                     } else {
                         // The dependency graph is drained, but the grace deadline has not passed.
                         Ok(StateHandlerOutcome::wait(format!(
                             "Cannot delete VPC prefix from database until draining completes at {}",
                             delete_at.to_rfc3339()
                         ))
-                        .with_txn(txn))
+                        .with_txn(txn.into()))
                     }
                 }
                 VpcPrefixDeletionState::DBDelete => {
-                    let mut txn = ctx.services.db_pool.begin().await?;
+                    let mut txn = ctx
+                        .services
+                        .db_pool
+                        .txn_begin()
+                        .await
+                        .map_err(StateHandlerError::from_transaction)?;
 
                     // Remove the prefix row after all network_prefix references are gone.
                     tracing::info!(
@@ -130,7 +141,7 @@ impl StateHandler for VpcPrefixStateHandler {
                         "VPC Prefix getting removed from the database",
                     );
                     db::vpc_prefix::final_delete(*vpc_prefix_id, &mut txn).await?;
-                    Ok(StateHandlerOutcome::deleted().with_txn(txn))
+                    Ok(StateHandlerOutcome::deleted().with_txn(txn.into()))
                 }
             },
         }

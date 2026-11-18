@@ -36,7 +36,7 @@ use chrono::Utc;
 use component_manager::MachineInfoProvider;
 use config::SiteExplorerConfig;
 use db::explored_endpoints::EndpointReportNotCurrent;
-use db::{self, ConditionalWrite, DatabaseError, Transaction, machine};
+use db::{self, ConditionalWrite, DatabaseError, Transaction, TransactionVending as _, machine};
 use futures_util::stream::FuturesUnordered;
 use futures_util::{StreamExt, TryFutureExt};
 use itertools::Itertools;
@@ -1377,19 +1377,13 @@ impl SiteExplorer {
         // so MACs that never return don't occupy table rows indefinitely.
         // (A no-op without a window: records wait for their machine.)
         if self.config.retained_boot_interface_window.is_some() {
-            let mut txn = self
-                .database_connection
-                .begin()
-                .await
-                .map_err(|e| DatabaseError::new("begin retained boot interface sweep", e))?;
+            let mut txn = self.database_connection.txn_begin().await?;
             let swept = db::retained_boot_interface::delete_expired(
                 &mut txn,
                 self.config.retained_boot_interface_window,
             )
             .await?;
-            txn.commit()
-                .await
-                .map_err(|e| DatabaseError::new("end retained boot interface sweep", e))?;
+            txn.commit().await?;
             if swept > 0 {
                 tracing::info!(
                     removed_retained_boot_interface_count = swept,
@@ -3471,7 +3465,7 @@ pub async fn try_preallocate_one(
     kind: &'static str,
     retained_window: Option<chrono::Duration>,
 ) {
-    let mut txn = match db::Transaction::begin(pool).await {
+    let mut txn = match pool.txn_begin().await {
         Ok(t) => t,
         Err(error) => {
             tracing::warn!(
@@ -3555,7 +3549,7 @@ pub async fn try_apply_expected_interface(
     if expected_interface.resolved_ip_allocation() != ExpectedInterfaceIpAllocation::Fixed {
         return;
     }
-    let mut txn = match db::Transaction::begin(pool).await {
+    let mut txn = match pool.txn_begin().await {
         Ok(txn) => txn,
         Err(error) => {
             tracing::warn!(
@@ -3747,7 +3741,7 @@ pub async fn get_machine_state_by_bmc_ip(
     database_connection: &PgPool,
     bmc_ip: &str,
 ) -> Result<String, DatabaseError> {
-    let mut txn = Transaction::begin(database_connection).await?;
+    let mut txn = database_connection.txn_begin().await?;
 
     let state = match db::machine_topology::find_machine_id_by_bmc_ip(txn.as_pgconn(), bmc_ip)
         .await?

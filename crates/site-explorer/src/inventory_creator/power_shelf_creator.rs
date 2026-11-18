@@ -18,7 +18,7 @@
 use std::collections::HashSet;
 
 use carbide_uuid::power_shelf::{PowerShelfIdSource, PowerShelfType};
-use db::{DatabaseError, ObjectColumnFilter, power_shelf as db_power_shelf};
+use db::{ObjectColumnFilter, TransactionVending as _, power_shelf as db_power_shelf};
 use mac_address::MacAddress;
 use model::expected_power_shelf::ExpectedPowerShelf;
 use model::power_shelf::{NewPowerShelf, PowerShelfConfig};
@@ -42,18 +42,12 @@ impl PowerShelfCreator {
         expected_endpoint_index: &ExploredEndpointIndex,
         suppressed_bmc_macs: &HashSet<MacAddress>,
     ) -> SiteExplorerResult<Vec<(ExploredEndpoint, EndpointExplorationReport)>> {
-        let mut txn = self
-            .database_connection
-            .begin()
-            .await
-            .map_err(|e| DatabaseError::new("load find_all_preingestion_complete data", e))?;
+        let mut txn = self.database_connection.txn_begin().await?;
 
         let explored_endpoints =
             db::explored_endpoints::find_all_preingestion_complete(&mut txn).await?;
 
-        txn.commit()
-            .await
-            .map_err(|e| DatabaseError::new("end find_all_preingestion_complete data", e))?;
+        txn.commit().await?;
 
         let mut explored_power_shelves = Vec::new();
         for ep in explored_endpoints.into_iter() {
@@ -170,10 +164,7 @@ impl PowerShelfCreator {
         expected_shelf: &ExpectedPowerShelf,
         pool: &PgPool,
     ) -> SiteExplorerResult<bool> {
-        let mut txn = pool
-            .begin()
-            .await
-            .map_err(|e| DatabaseError::new("begin load create_power_shelf", e))?;
+        let mut txn = pool.txn_begin().await?;
 
         // Defense against the duplicate-power-shelves bug: if a power shelf
         // already exists in the database for this BMC MAC, don't make another
@@ -190,9 +181,7 @@ impl PowerShelfCreator {
                 bmc_ip_address = %explored_endpoint.address,
                 "Power shelf already exists; skipping discovery",
             );
-            txn.rollback()
-                .await
-                .map_err(|e| DatabaseError::new("rollback create_power_shelf", e))?;
+            txn.rollback().await?;
             return Ok(false);
         }
 
@@ -212,9 +201,7 @@ impl PowerShelfCreator {
                         bmc_ip_address = %explored_endpoint.address,
                         "Power shelf already exists; skipping creation"
                     );
-                    txn.rollback()
-                        .await
-                        .map_err(|e| DatabaseError::new("rollback create_power_shelf", e))?;
+                    txn.rollback().await?;
                     return Ok(false);
                 }
             }
@@ -286,9 +273,11 @@ impl PowerShelfCreator {
 
         db_power_shelf::create(&mut txn, &new_power_shelf).await?;
 
-        let mi =
-            db::machine_interface::find_by_mac_address(&mut *txn, expected_shelf.bmc_mac_address)
-                .await?;
+        let mi = db::machine_interface::find_by_mac_address(
+            txn.as_mut(),
+            expected_shelf.bmc_mac_address,
+        )
+        .await?;
         if let Some(interface) = mi.first() {
             // A power shelf's BMC/PMC interface is its management endpoint, so
             // associate it with the shelf and annotate it as `Bmc` (like
@@ -309,9 +298,7 @@ impl PowerShelfCreator {
             let _ = crate::ensure_rack_exists(txn.as_mut(), rack_id).await?;
         }
         // No need to update the power shelf name again; it was already set in config above.
-        txn.commit()
-            .await
-            .map_err(|e| DatabaseError::new("end create_power_shelf", e))?;
+        txn.commit().await?;
 
         tracing::info!(
             %power_shelf_id,

@@ -16,6 +16,7 @@
  */
 use std::panic::Location;
 
+use ::db::TransactionVending as _;
 use carbide_uuid::machine::{InvalidMachineType, MachineId};
 use db::DatabaseError;
 use model::controller_outcome::PersistentStateHandlerOutcome;
@@ -312,7 +313,7 @@ impl<S> StateHandlerOutcome<S> {
             &'txn mut PgTransaction<'static>,
         ) -> futures::future::BoxFuture<'txn, Result<(), E>>
         + Send,
-    ) -> sqlx::Result<Result<Self, E>>
+    ) -> Result<Result<Self, E>, StateHandlerError>
     where
         E: Send,
     {
@@ -325,7 +326,13 @@ impl<S> StateHandlerOutcome<S> {
 
         let txn = match txn_opt {
             Some(txn) => txn,
-            None => txn_opt.insert(pg_pool.begin().await?),
+            None => txn_opt.insert(
+                pg_pool
+                    .txn_begin()
+                    .await
+                    .map_err(StateHandlerError::from_transaction)?
+                    .into(),
+            ),
         };
 
         Ok(f(txn).await.map(|()| self))
@@ -428,6 +435,14 @@ impl From<InvalidMachineType> for StateHandlerError {
 }
 
 impl StateHandlerError {
+    /// Preserves the transaction error category at wrapped transaction boundaries.
+    pub fn from_transaction(error: DatabaseError) -> Self {
+        match error {
+            DatabaseError::Sqlx(error) => Self::TransactionError(Box::new(error.source)),
+            error => Self::from(error),
+        }
+    }
+
     /// Returns the label that will be used to identify the error in metrics
     ///
     /// This will be a simplified description of the error, to avoid having too

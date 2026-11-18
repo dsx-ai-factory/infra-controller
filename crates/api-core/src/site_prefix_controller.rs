@@ -21,7 +21,7 @@
 use carbide_uuid::site_prefix::SitePrefixId;
 use chrono::{DateTime, Utc};
 use config_version::{ConfigVersion, Versioned};
-use db::{ConditionalWrite, ControllerStateNotCurrent, DatabaseError};
+use db::{ConditionalWrite, ControllerStateNotCurrent, DatabaseError, TransactionVending as _};
 use model::StateSla;
 use model::controller_outcome::PersistentStateHandlerOutcome;
 use model::site_prefix::{
@@ -221,7 +221,11 @@ impl StateHandler for SitePrefixReadiness {
         ) {
             return Ok(StateHandlerOutcome::do_nothing());
         }
-        let mut txn = ctx.services.begin().await?;
+        let mut txn = ctx
+            .services
+            .txn_begin()
+            .await
+            .map_err(StateHandlerError::from_transaction)?;
         // Retirement drains retained children; it neither waits for
         // another DPU acknowledgement nor generates a new isolation request.
         let requested_at = if state.status.lifecycle_state == SitePrefixLifecycleState::Provisioning
@@ -238,7 +242,7 @@ impl StateHandler for SitePrefixReadiness {
                 .wait_for_isolation(&mut txn, *object_id, requested_at)
                 .await?
             {
-                return Ok(wait.with_txn(txn));
+                return Ok(wait.with_txn(txn.into()));
             }
             db::tenant_prefix_overlap::lock_config(&mut txn).await?;
         } else {
@@ -246,10 +250,10 @@ impl StateHandler for SitePrefixReadiness {
         }
         let Some(current) = db::site_prefix::find_by_id_for_update(&mut txn, *object_id).await?
         else {
-            return Ok(StateHandlerOutcome::deleted().with_txn(txn));
+            return Ok(StateHandlerOutcome::deleted().with_txn(txn.into()));
         };
         if current.status.lifecycle_state != state.status.lifecycle_state {
-            return Ok(StateHandlerOutcome::do_nothing().with_txn(txn));
+            return Ok(StateHandlerOutcome::do_nothing().with_txn(txn.into()));
         }
         if current.version != state.version {
             return Err(StateHandlerError::IterationInvalidated {
@@ -260,31 +264,32 @@ impl StateHandler for SitePrefixReadiness {
         if current.status.lifecycle_state == SitePrefixLifecycleState::Deleting {
             if current.status.authority == SitePrefixAuthority::OperatorManaged {
                 if db::site_prefix::operator_managed_prefix_has_retained_children(
-                    &mut *txn, *object_id,
+                    txn.as_mut(),
+                    *object_id,
                 )
                 .await?
                 {
                     return Ok(StateHandlerOutcome::wait(
                         "waiting for retained VPC prefixes or direct network prefixes without ready operator coverage".to_string(),
                     )
-                    .with_txn(txn));
+                    .with_txn(txn.into()));
                 }
             } else {
                 let vpc_prefix_count =
-                    db::vpc_prefix::count_vpc_prefixes_by_site_prefix_id(&mut *txn, *object_id)
+                    db::vpc_prefix::count_vpc_prefixes_by_site_prefix_id(txn.as_mut(), *object_id)
                         .await?;
                 if vpc_prefix_count > 0 {
                     return Ok(StateHandlerOutcome::wait(format!(
                         "waiting for {vpc_prefix_count} VPC prefix references to be physically removed"
                     ))
-                    .with_txn(txn));
+                    .with_txn(txn.into()));
                 }
             }
             db::site_prefix::final_delete(*object_id, &mut txn).await?;
-            return Ok(StateHandlerOutcome::deleted().with_txn(txn));
+            return Ok(StateHandlerOutcome::deleted().with_txn(txn.into()));
         }
         if current.status.authority != SitePrefixAuthority::TenantManaged {
-            return Ok(StateHandlerOutcome::do_nothing().with_txn(txn));
+            return Ok(StateHandlerOutcome::do_nothing().with_txn(txn.into()));
         }
 
         let isolation_required = matches!(
@@ -301,12 +306,12 @@ impl StateHandler for SitePrefixReadiness {
             .wait_for_isolation(&mut txn, *object_id, requested_at)
             .await?
         {
-            return Ok(wait.with_txn(txn));
+            return Ok(wait.with_txn(txn.into()));
         }
 
         // Keep the routing and root locks through the framework's transition.
         // A later assignment gets the complete prefix set; a concurrent delete
         // cannot be overwritten by this readiness decision.
-        Ok(StateHandlerOutcome::transition(SitePrefixLifecycleState::Ready).with_txn(txn))
+        Ok(StateHandlerOutcome::transition(SitePrefixLifecycleState::Ready).with_txn(txn.into()))
     }
 }

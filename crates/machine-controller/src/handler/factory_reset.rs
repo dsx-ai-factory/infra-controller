@@ -79,6 +79,7 @@ use carbide_credential_rotation::site_explorer_pause::{self, GateDecision};
 use carbide_redfish::libredfish::RedfishAuth;
 use carbide_redfish::state_handler::state_handler_platform_error as platform_error;
 use carbide_secrets::credentials::{BmcCredentialType, CredentialKey, Credentials};
+use db::TransactionVending as _;
 use eyre::eyre;
 use libredfish::model::service_root::RedfishVendor;
 use mac_address::MacAddress;
@@ -676,14 +677,19 @@ async fn remove_suppression(
     // the deletion transaction, so no row lock is held across the Redfish call.
     let power_cycle = transition_to_power_cycle(ctx, mh_snapshot).await?;
 
-    let mut txn = ctx.services.db_pool.begin().await?;
+    let mut txn = ctx
+        .services
+        .db_pool
+        .txn_begin()
+        .await
+        .map_err(StateHandlerError::from_transaction)?;
     site_explorer_pause::resume_after_credential_change(
         &mut txn,
         &[host_bmc_mac],
         model::bmc_suppression::BmcSuppressionSource::FactoryResetBmc,
     )
     .await?;
-    Ok(power_cycle.with_txn(txn))
+    Ok(power_cycle.with_txn(txn.into()))
 }
 
 #[cfg(test)]

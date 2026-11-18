@@ -15,6 +15,7 @@
  * limitations under the License.
  */
 
+use db::TransactionVending as _;
 pub mod config;
 pub mod errors;
 pub mod ib;
@@ -565,11 +566,7 @@ impl IbFabricMonitor {
         machine_id: HostMachineId,
         membership: &IbMembership,
     ) -> IbResult<bool> {
-        let mut txn = self
-            .db_pool
-            .begin()
-            .await
-            .map_err(|e| DatabaseError::new("begin retired IB membership transaction", e))?;
+        let mut txn = self.db_pool.txn_begin().await?;
 
         let machine_exists = db::machine::find_one(
             txn.as_mut(),
@@ -582,9 +579,7 @@ impl IbFabricMonitor {
         .await?
         .is_some();
         if !machine_exists {
-            txn.commit()
-                .await
-                .map_err(|e| DatabaseError::new("commit retired IB membership transaction", e))?;
+            txn.commit().await?;
             return Ok(false);
         }
 
@@ -651,9 +646,7 @@ impl IbFabricMonitor {
             }
         }
 
-        txn.commit()
-            .await
-            .map_err(|e| DatabaseError::new("commit retired IB membership transaction", e))?;
+        txn.commit().await?;
 
         Ok(still_live)
     }

@@ -30,7 +30,6 @@ use model::network_segment::{
 
 use super::*;
 use crate as db;
-use crate::TransactionVending as _;
 use crate::test_support::postgres::wait_for_blocked_query;
 
 #[test]

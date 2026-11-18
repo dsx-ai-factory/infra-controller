@@ -46,6 +46,7 @@ use carbide_credential_rotation::{
     BmcEndpoint, BmcRotationTick, RotateOutcome, RotationStep, advance, rotate_bmc,
 };
 use carbide_uuid::power_shelf::PowerShelfId;
+use db::TransactionVending as _;
 use model::power_shelf::{PowerShelf, PowerShelfControllerState};
 use state_controller::state_handler::{
     StateHandlerContext, StateHandlerError, StateHandlerOutcome,
@@ -157,7 +158,12 @@ pub async fn handle_rotating_bmc(
             // flag set and let the entry guard re-attempt on a later sweep rather
             // than silently drop the operator's request.
             let txn = if force && matches!(step, RotationStep::Settled) {
-                let mut t = ctx.services.db_pool.begin().await?;
+                let mut t = ctx
+                    .services
+                    .db_pool
+                    .txn_begin()
+                    .await
+                    .map_err(StateHandlerError::from_transaction)?;
                 db::power_shelf::clear_bmc_credential_rotation_requested(&mut t, *power_shelf_id)
                     .await?;
                 Some(t)
@@ -168,7 +174,12 @@ pub async fn handle_rotating_bmc(
             // skip window ends exactly when the rotation does.
             let mut resume_txn = match txn {
                 Some(txn) => txn,
-                None => ctx.services.db_pool.begin().await?,
+                None => ctx
+                    .services
+                    .db_pool
+                    .txn_begin()
+                    .await
+                    .map_err(StateHandlerError::from_transaction)?,
             };
             site_explorer_pause::resume_after_credential_change(
                 &mut resume_txn,
@@ -178,7 +189,7 @@ pub async fn handle_rotating_bmc(
             .await?;
             Ok(
                 StateHandlerOutcome::transition(PowerShelfControllerState::Ready)
-                    .with_txn(resume_txn),
+                    .with_txn(resume_txn.into()),
             )
         }
         RotationStep::Retry { retry_count } => Ok(StateHandlerOutcome::transition(

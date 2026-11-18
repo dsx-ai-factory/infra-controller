@@ -19,7 +19,7 @@ use std::str::FromStr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use ::db::{DatabaseError, Transaction};
+use ::db::{DatabaseError, TransactionVending as _};
 use config_version::Versioned;
 use model::controller_outcome::PersistentStateHandlerOutcome;
 use opentelemetry::KeyValue;
@@ -447,7 +447,11 @@ impl<IO: StateControllerIO> StateProcessor<IO> {
         let deadline = tokio::time::Instant::now() + self.iteration_config.max_object_handling_time;
         let capacity = capacity.min(u32::MAX as usize) as u32;
         let objects = tokio::time::timeout_at(deadline, async {
-            let mut txn = self.pool.begin().await?;
+            let mut txn = self
+                .pool
+                .txn_begin()
+                .await
+                .map_err(IterationError::from_transaction)?;
             let queued = db::acquire_queued_objects(
                 &mut txn,
                 IO::DB_QUEUED_OBJECTS_TABLE_NAME,
@@ -456,7 +460,9 @@ impl<IO: StateControllerIO> StateProcessor<IO> {
                 self.iteration_config.max_object_handling_time * 3,
             )
             .await?;
-            txn.commit().await?;
+            txn.commit()
+                .await
+                .map_err(IterationError::from_transaction)?;
             Ok::<_, IterationError>(queued)
         })
         .await
@@ -563,7 +569,7 @@ impl<IO: StateControllerIO> StateProcessor<IO> {
 
         // Replace completed claims with requested follow-up entries in one transaction so a failed
         // commit cannot lose queued work.
-        let mut txn = Transaction::begin(&self.pool).await?;
+        let mut txn = self.pool.txn_begin().await?;
         let num_deleted = db::delete_queued_objects(
             &mut txn,
             IO::DB_QUEUED_OBJECTS_TABLE_NAME,
@@ -715,7 +721,10 @@ async fn process_object<IO: StateControllerIO>(
                 state: String::new(),
             });
         }
-        let mut txn = pool.begin().await?;
+        let mut txn = pool
+            .txn_begin()
+            .await
+            .map_err(StateHandlerError::from_transaction)?;
         let mut snapshot = io
             .load_object_state(&mut txn, &object_id)
             .await?
@@ -747,7 +756,9 @@ async fn process_object<IO: StateControllerIO>(
 
         // Commit the transaction now, since we don't want to leave a txn open
         // throughout handle_object_state.
-        txn.commit().await?;
+        txn.commit()
+            .await
+            .map_err(StateHandlerError::from_transaction)?;
 
         let handler_output = handler
             .handle_object_state(&object_id, &mut snapshot, &controller_state.value, &mut ctx)
@@ -759,13 +770,17 @@ async fn process_object<IO: StateControllerIO>(
         let (handler_outcome, mut txn) = match handler_output {
             Ok(mut outcome) => {
                 let mut txn = if let Some(txn) = outcome.take_transaction() {
-                    txn
+                    ::db::Transaction::from(txn)
                 } else {
-                    pool.begin().await?
+                    pool.txn_begin()
+                        .await
+                        .map_err(StateHandlerError::from_transaction)?
                 };
                 if let Err(e) = pending_db_writes.apply_all(&mut txn).await {
                     if matches!(e, StateHandlerError::IterationInvalidated { .. }) {
-                        txn.rollback().await?;
+                        txn.rollback()
+                            .await
+                            .map_err(StateHandlerError::from_transaction)?;
                         return Err(e);
                     }
                     // If there's an error running the writes, count that as the handler outcome
@@ -775,7 +790,12 @@ async fn process_object<IO: StateControllerIO>(
                 }
             }
             Err(e @ StateHandlerError::IterationInvalidated { .. }) => return Err(e),
-            Err(e) => (Err(e), pool.begin().await?),
+            Err(e) => (
+                Err(e),
+                pool.txn_begin()
+                    .await
+                    .map_err(StateHandlerError::from_transaction)?,
+            ),
         };
 
         let mut next_state = None;
@@ -810,7 +830,9 @@ async fn process_object<IO: StateControllerIO>(
             {
                 // The state transition did not apply, so roll back the handler's
                 // other writes too, including queued observations.
-                txn.rollback().await?;
+                txn.rollback()
+                    .await
+                    .map_err(StateHandlerError::from_transaction)?;
                 return Err(error);
             }
             io.persist_state_history(&mut txn, &object_id, new_version, next)
@@ -845,14 +867,21 @@ async fn process_object<IO: StateControllerIO>(
                 io.persist_outcome(&mut txn, &object_id, db_outcome).await?;
             }
 
-            txn.commit().await.map_err(StateHandlerError::from)?;
+            txn.commit()
+                .await
+                .map_err(StateHandlerError::from_transaction)?;
         } else if !matches!(handler_outcome, Ok(StateHandlerOutcome::Deleted { .. })) {
             // Whatever is the reason, outcome must be stored in db.
             let _ = txn.rollback().await;
-            let mut txn = pool.begin().await?;
+            let mut txn = pool
+                .txn_begin()
+                .await
+                .map_err(StateHandlerError::from_transaction)?;
             let db_outcome = PersistentStateHandlerOutcome::from_result(handler_outcome.as_ref());
             io.persist_outcome(&mut txn, &object_id, db_outcome).await?;
-            txn.commit().await.map_err(StateHandlerError::from)?;
+            txn.commit()
+                .await
+                .map_err(StateHandlerError::from_transaction)?;
         }
 
         // Only emit the next state as metric if the transaction was actually
@@ -1145,6 +1174,15 @@ impl<T: 'static> JoinMany<T> for JoinSet<T> {
             results
         } else {
             vec![]
+        }
+    }
+}
+
+impl IterationError {
+    fn from_transaction(error: DatabaseError) -> Self {
+        match error {
+            DatabaseError::Sqlx(error) => Self::TransactionError(error.source),
+            error => Self::from(error),
         }
     }
 }

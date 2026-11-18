@@ -18,7 +18,6 @@
 use std::str::FromStr;
 
 use ::rpc::forge as rpc;
-use db::DatabaseError;
 use mac_address::MacAddress;
 use model::machine::LoadSnapshotOptions;
 use tonic::{Request, Response, Status};
@@ -158,12 +157,7 @@ pub(crate) async fn determine_machine_ingestion_state(
     )?)
     .map_err(CarbideError::MacAddressParseError)?;
 
-    let mut txn = api.database_connection.begin().await.map_err(|e| {
-        CarbideError::from(DatabaseError::new(
-            "begin determine_machine_ingestion_state",
-            e,
-        ))
-    })?;
+    let mut txn = api.txn_begin().await.map_err(CarbideError::from)?;
 
     let explored_endpoint = match find_explored_endpoint(&mut txn, &mac_address).await? {
         FindExploredEndpoint::Found(explored_endpoint) => *explored_endpoint,

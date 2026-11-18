@@ -20,6 +20,7 @@ use std::sync::Arc;
 use carbide_instrument::{Event, LabelValue, Outcome};
 use carbide_redfish::libredfish::conv::IntoModel;
 use carbide_redfish::libredfish::error::state_handler_redfish_error as redfish_error;
+use db::TransactionVending as _;
 use itertools::Itertools;
 use libredfish::Redfish;
 use libredfish::model::task::TaskState;
@@ -133,7 +134,12 @@ impl SpdmAttestationStateHandler {
         ctx: &mut StateHandlerContext<'_, SpdmStateHandlerContextObjects>,
     ) -> Result<StateHandlerOutcome<SpdmAttestationState>, StateHandlerError> {
         // Completion and lock release must be committed together, including the timeout path.
-        let mut txn = ctx.services.db_pool.begin().await?;
+        let mut txn = ctx
+            .services
+            .db_pool
+            .txn_begin()
+            .await
+            .map_err(StateHandlerError::from_transaction)?;
         let target = db::attestation::spdm::lock_cancellation_target(&mut txn, object_id).await?;
         db::attestation::spdm::release_evidence_collection_lock(&mut txn, object_id).await?;
         db::attestation::spdm::set_completed_at(&mut txn, &object_id.0, &object_id.1, &object_id.2)
@@ -145,7 +151,7 @@ impl SpdmAttestationStateHandler {
             }
             SpdmCancellationTarget::Waive => SpdmAttestationState::Waived,
         };
-        Ok(StateHandlerOutcome::transition(next_state).with_txn(txn))
+        Ok(StateHandlerOutcome::transition(next_state).with_txn(txn.into()))
     }
 }
 
@@ -228,14 +234,19 @@ impl StateHandler for SpdmAttestationStateHandler {
                 };
 
                 let metadata = SpdmMachineDeviceMetadata { firmware_version };
-                let mut txn = ctx.services.db_pool.begin().await?;
+                let mut txn = ctx
+                    .services
+                    .db_pool
+                    .txn_begin()
+                    .await
+                    .map_err(StateHandlerError::from_transaction)?;
                 db::attestation::spdm::update_metadata(
                     &mut txn, machine_id, device_id, job_id, &metadata,
                 )
                 .await?;
                 Ok(
                     StateHandlerOutcome::transition(SpdmAttestationState::FetchCertificate)
-                        .with_txn(txn),
+                        .with_txn(txn.into()),
                 )
             }
             SpdmAttestationState::FetchCertificate => {
@@ -253,7 +264,12 @@ impl StateHandler for SpdmAttestationStateHandler {
                     .await
                     .map_err(|error| redfish_error("fetch certificate", error))?;
 
-                let mut txn = ctx.services.db_pool.begin().await?;
+                let mut txn = ctx
+                    .services
+                    .db_pool
+                    .txn_begin()
+                    .await
+                    .map_err(StateHandlerError::from_transaction)?;
                 db::attestation::spdm::update_certificate(
                     &mut txn,
                     &object_id.0,
@@ -269,7 +285,7 @@ impl StateHandler for SpdmAttestationStateHandler {
                         last_redfish_failure_tstamp: None,
                     },
                 )
-                .with_txn(txn))
+                .with_txn(txn.into()))
             }
             SpdmAttestationState::TriggerEvidenceCollection {
                 retry_count,
@@ -293,7 +309,12 @@ impl StateHandler for SpdmAttestationStateHandler {
                         }
                         // This is a best-effort cutoff, not confirmation that collection stopped.
                         tracing::warn!(%object_id, "SPDM evidence collection retries exhausted; releasing the evidence collection lock without BMC confirmation after the cancellation timeout");
-                        let mut txn = ctx.services.db_pool.begin().await?;
+                        let mut txn = ctx
+                            .services
+                            .db_pool
+                            .txn_begin()
+                            .await
+                            .map_err(StateHandlerError::from_transaction)?;
                         db::attestation::spdm::release_evidence_collection_lock(
                             &mut txn, object_id,
                         )
@@ -303,7 +324,7 @@ impl StateHandler for SpdmAttestationStateHandler {
                                 "Exceeded redfish retry limit while attempting to collect evidence"
                                     .to_string(),
                             ))
-                            .with_txn(txn),
+                            .with_txn(txn.into()),
                         );
                     }
                     if chrono::Utc::now() < *last_failure_time + chrono::Duration::minutes(1) {
@@ -327,7 +348,12 @@ impl StateHandler for SpdmAttestationStateHandler {
                 };
                 // only try and obtain the lock if we don't already hold it
                 if !snapshot.evidence_collection_locked {
-                    let mut txn = ctx.services.db_pool.begin().await?;
+                    let mut txn = ctx
+                        .services
+                        .db_pool
+                        .txn_begin()
+                        .await
+                        .map_err(StateHandlerError::from_transaction)?;
                     if !db::attestation::spdm::try_acquire_evidence_collection_lock(
                         &mut txn,
                         object_id,
@@ -340,7 +366,9 @@ impl StateHandler for SpdmAttestationStateHandler {
                                 .to_string(),
                         ));
                     }
-                    txn.commit().await?;
+                    txn.commit()
+                        .await
+                        .map_err(StateHandlerError::from_transaction)?;
                 }
                 // Ownership must survive both this transaction and a process
                 // restart, including an ambiguous failure of the following POST.
@@ -414,7 +442,12 @@ impl StateHandler for SpdmAttestationStateHandler {
                         // read the result
                         let Some(url) = &snapshot.evidence_target else {
                             // This is an unrecoverable error due to db discrepancy.
-                            let mut txn = ctx.services.db_pool.begin().await?;
+                            let mut txn = ctx
+                                .services
+                                .db_pool
+                                .txn_begin()
+                                .await
+                                .map_err(StateHandlerError::from_transaction)?;
                             db::attestation::spdm::release_evidence_collection_lock(
                                 &mut txn, object_id,
                             )
@@ -424,13 +457,18 @@ impl StateHandler for SpdmAttestationStateHandler {
                                     "Could not get evidence target from DB".to_string(),
                                 ),
                             )
-                            .with_txn(txn));
+                            .with_txn(txn.into()));
                         };
                         let evidence = redfish_client
                             .get_evidence(url)
                             .await
                             .map_err(|e| redfish_error("get_task_state", e))?;
-                        let mut txn = ctx.services.db_pool.begin().await?;
+                        let mut txn = ctx
+                            .services
+                            .db_pool
+                            .txn_begin()
+                            .await
+                            .map_err(StateHandlerError::from_transaction)?;
                         db::attestation::spdm::update_evidence(
                             &mut txn,
                             &object_id.0,
@@ -445,7 +483,7 @@ impl StateHandler for SpdmAttestationStateHandler {
                         .await?;
                         Ok(
                             StateHandlerOutcome::transition(SpdmAttestationState::NrasVerification)
-                                .with_txn(txn),
+                                .with_txn(txn.into()),
                         )
                     }
                     EvidenceCollectionTaskStateClass::InProgress
@@ -520,7 +558,12 @@ impl StateHandler for SpdmAttestationStateHandler {
                         }
 
                         // A confirmed stop permits releasing the claim before retrying or failing.
-                        let mut txn = ctx.services.db_pool.begin().await?;
+                        let mut txn = ctx
+                            .services
+                            .db_pool
+                            .txn_begin()
+                            .await
+                            .map_err(StateHandlerError::from_transaction)?;
                         db::attestation::spdm::release_evidence_collection_lock(
                             &mut txn, object_id,
                         )
@@ -531,7 +574,7 @@ impl StateHandler for SpdmAttestationStateHandler {
                                 StateHandlerOutcome::transition(SpdmAttestationState::Failed(
                                     "Too many retries triggering evidence collection".to_string(),
                                 ))
-                                .with_txn(txn),
+                                .with_txn(txn.into()),
                             )
                         } else {
                             Ok(StateHandlerOutcome::transition(
@@ -541,7 +584,7 @@ impl StateHandler for SpdmAttestationStateHandler {
                                     last_redfish_failure_tstamp: None,
                                 },
                             )
-                            .with_txn(txn))
+                            .with_txn(txn.into()))
                         }
                     }
                 }
@@ -609,10 +652,15 @@ impl StateHandler for SpdmAttestationStateHandler {
                         last_redfish_failure_tstamp: None,
                     }
                 };
-                let mut txn = ctx.services.db_pool.begin().await?;
+                let mut txn = ctx
+                    .services
+                    .db_pool
+                    .txn_begin()
+                    .await
+                    .map_err(StateHandlerError::from_transaction)?;
                 db::attestation::spdm::release_evidence_collection_lock(&mut txn, object_id)
                     .await?;
-                Ok(StateHandlerOutcome::transition(next_state).with_txn(txn))
+                Ok(StateHandlerOutcome::transition(next_state).with_txn(txn.into()))
             }
             SpdmAttestationState::NrasVerification => {
                 let client = self.verifier.client(self.nras_config.clone());
@@ -649,10 +697,15 @@ impl StateHandler for SpdmAttestationStateHandler {
             | SpdmAttestationState::Failed(_)
             | SpdmAttestationState::Waived => {
                 // Finalise the timestamp without applying later resolution requests.
-                let mut txn = ctx.services.db_pool.begin().await?;
+                let mut txn = ctx
+                    .services
+                    .db_pool
+                    .txn_begin()
+                    .await
+                    .map_err(StateHandlerError::from_transaction)?;
                 db::attestation::spdm::set_completed_at(&mut txn, machine_id, device_id, job_id)
                     .await?;
-                Ok(StateHandlerOutcome::do_nothing().with_txn(txn))
+                Ok(StateHandlerOutcome::do_nothing().with_txn(txn.into()))
             }
         }
     }

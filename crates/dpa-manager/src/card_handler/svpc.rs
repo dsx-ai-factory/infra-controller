@@ -23,7 +23,7 @@ use carbide_uuid::dpa_interface::DpaInterfaceId;
 use carbide_uuid::spx::{NULL_SPX_PARTITION_ID, SpxPartitionId};
 use chrono::TimeDelta;
 use db::credential_rotation::NoStagedCredentialRotation;
-use db::{self, ObjectColumnFilter};
+use db::{self, ObjectColumnFilter, TransactionVending as _};
 use mac_address::MacAddress;
 use model::dpa_interface::DpaLockMode::{Locked, Unlocked};
 use model::dpa_interface::{DpaInterface, DpaInterfaceControllerState};
@@ -69,9 +69,9 @@ impl SvpcInterfaceHandler {
     ) -> DpaManagerResult<u32> {
         let db_pool = monitor.db_services.db_pool.clone();
         let mut txn = db_pool
-            .begin()
+            .txn_begin()
             .await
-            .map_err(|e| db::AnnotatedSqlxError::new("get_partition_vni begin txn", e))?;
+            .map_err(DpaManagerError::from_transaction)?;
         let partition = db::spx_partition::find_by(
             txn.as_mut(),
             ObjectColumnFilter::List(db::spx_partition::IdColumn, &[partition_id]),
@@ -79,7 +79,7 @@ impl SvpcInterfaceHandler {
         .await?;
         txn.commit()
             .await
-            .map_err(|e| db::AnnotatedSqlxError::new("get_partition_vni commit txn", e))?;
+            .map_err(DpaManagerError::from_transaction)?;
         Ok(partition
             .into_iter()
             .next()
@@ -546,9 +546,9 @@ impl DpaInterfaceStateHandler for SvpcInterfaceHandler {
             let mut txn = monitor
                 .db_services
                 .db_pool
-                .begin()
+                .txn_begin()
                 .await
-                .map_err(|e| db::AnnotatedSqlxError::new("handle_locking begin txn", e))?;
+                .map_err(DpaManagerError::from_transaction)?;
             record_lock_convergence(txn.as_mut(), dpa_interface.id, dpa_interface.mac_address)
                 .await?;
 
@@ -556,7 +556,7 @@ impl DpaInterfaceStateHandler for SvpcInterfaceHandler {
             tracing::info!(next_state = ?new_state, "Dpa Interface state transition");
             return Ok(HandlerResult {
                 new_state: Some(new_state),
-                txn: Some(txn),
+                txn: Some(txn.into()),
             });
         }
 
@@ -659,9 +659,12 @@ impl DpaInterfaceStateHandler for SvpcInterfaceHandler {
         };
 
         if cs.lockmode == Some(Unlocked) {
-            let mut txn = monitor.db_services.db_pool.begin().await.map_err(|e| {
-                db::AnnotatedSqlxError::new("handle_rotate_key_unlocking begin txn", e)
-            })?;
+            let mut txn = monitor
+                .db_services
+                .db_pool
+                .txn_begin()
+                .await
+                .map_err(DpaManagerError::from_transaction)?;
             db::credential_rotation::record_device_unlocked(
                 txn.as_mut(),
                 dpa_interface.mac_address,
@@ -673,7 +676,7 @@ impl DpaInterfaceStateHandler for SvpcInterfaceHandler {
             tracing::info!(next_state = ?new_state, "rekey: card unlocked, transitioning to relock");
             return Ok(HandlerResult {
                 new_state: Some(new_state),
-                txn: Some(txn),
+                txn: Some(txn.into()),
             });
         }
 
@@ -719,9 +722,12 @@ impl DpaInterfaceStateHandler for SvpcInterfaceHandler {
         };
 
         if cs.lockmode == Some(Locked) {
-            let mut txn = monitor.db_services.db_pool.begin().await.map_err(|e| {
-                db::AnnotatedSqlxError::new("handle_rotate_key_locking begin txn", e)
-            })?;
+            let mut txn = monitor
+                .db_services
+                .db_pool
+                .txn_begin()
+                .await
+                .map_err(DpaManagerError::from_transaction)?;
             record_lock_convergence(txn.as_mut(), dpa_interface.id, dpa_interface.mac_address)
                 .await?;
 
@@ -729,7 +735,7 @@ impl DpaInterfaceStateHandler for SvpcInterfaceHandler {
             tracing::info!(next_state = ?new_state, "rekey: card relocked, returning to Ready");
             return Ok(HandlerResult {
                 new_state: Some(new_state),
-                txn: Some(txn),
+                txn: Some(txn.into()),
             });
         }
 
