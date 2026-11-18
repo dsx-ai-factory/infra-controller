@@ -1049,6 +1049,7 @@ stateDiagram-v2
     state hr_completed <<choice>>
 
     state "Assigned/Ready" as Assigned_A_Ready
+    state "HostInit/WaitingForLockdown" as HI_WaitingForLockdown
 
     Ready --> HR_CheckingFirmware : Host reprovision request
     Assigned_A_BootingWithDiscoveryImage --> HR_CheckingFirmware : Host reprovision request
@@ -1062,8 +1063,12 @@ stateDiagram-v2
     HR_WaitingForScript --> HR_CheckingFirmwareRepeat : Script completed
     HR_WaitingForScript --> HR_FailedFirmwareUpgrade : Script failed
     HR_CheckingFirmware --> HR_CheckingFirmwareRepeat : No explored endpoint data
-    HR_CheckingFirmware --> hr_completed : FW info not found
-    HR_CheckingFirmwareRepeat --> hr_completed : FW info not found
+    HR_CheckingFirmware --> HI_WaitingForLockdown : No FW config, Ready host requires lockdown re-enable
+    HR_CheckingFirmwareRepeat --> HI_WaitingForLockdown : No FW config, Ready host requires lockdown re-enable
+    HR_CheckingFirmware --> hr_completed : No FW config, Ready host requires no lockdown change
+    HR_CheckingFirmwareRepeat --> hr_completed : No FW config, Ready host requires no lockdown change
+    HR_CheckingFirmware --> hr_completed : No FW config, Assigned host, ForceRestart
+    HR_CheckingFirmwareRepeat --> hr_completed : No FW config, Assigned host, ForceRestart
     HR_CheckingFirmware --> HR_WaitingForUpload
     HR_WaitingForUpload --> HR_CheckingFirmwareRepeat : No upload status upload error
     HR_WaitingForUpload --> HR_WaitingForFirmwareUpgrade : Upload success
