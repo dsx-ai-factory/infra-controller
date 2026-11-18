@@ -117,6 +117,7 @@ fn build_exploration_report(
         vendor: Some(bmc_vendor::BMCVendor::Dell),
         last_exploration_error: None,
         last_exploration_latency: None,
+        probe_started_at: None,
         managers: vec![],
         systems: vec![ComputerSystem {
             model: Some(model.to_string()),

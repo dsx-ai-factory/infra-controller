@@ -31,6 +31,7 @@ use carbide_test_harness::test_support::fixture_config::{
     DpuConfigExt as _, FixtureDefault as _, ManagedHostConfigExt as _,
 };
 use carbide_uuid::machine::{MachineId, MachineType};
+use chrono::Utc;
 use db::explored_endpoints::EndpointReportNotCurrent;
 use db::sku::CURRENT_SKU_VERSION;
 use db::{ConditionalWrite, ObjectFilter};
@@ -1219,7 +1220,9 @@ async fn test_preingestion_refresh_wait_is_served_within_the_budget(
             })
             .collect(),
     );
+    let run_started = Utc::now();
     explorer.run_single_iteration().await?;
+    let run_finished = Utc::now();
 
     assert_eq!(
         explorer
@@ -1236,6 +1239,14 @@ async fn test_preingestion_refresh_wait_is_served_within_the_budget(
     let mut txn = env.pool.begin().await?;
     let parked_after = db::explored_endpoints::find_all_by_ip(parked_ip, txn.as_mut()).await?;
     assert!(!parked_after[0].waiting_for_explorer_refresh);
+    let probe_started_at = parked_after[0]
+        .report
+        .probe_started_at
+        .expect("a stored report records when its probe started");
+    assert!(
+        (run_started..=run_finished).contains(&probe_started_at),
+        "probe start {probe_started_at} must fall within the run {run_started}..={run_finished}"
+    );
     assert_eq!(
         parked_after[0].report_version.version_nr(),
         parked_before[0].report_version.version_nr() + 1
