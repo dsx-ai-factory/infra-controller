@@ -590,9 +590,8 @@ kubectl get svc nico-dhcp-external nico-pxe-external -n nico-system
 ```
 
 Both external IPs should be within your internal VIP pool range. This checks
-address assignment; also verify a DHCP exchange through the relay and a PXE
-download from the managed network. For optional DHCPv6, follow
-[Deployment Verification](../provisioning/dhcpv6-deployment.md#deployment-verification-and-metrics).
+address assignment. Verify DHCP and PXE from a client after configuring the
+relay in [Step 6](#step-6--connect-the-oob-network).
 
 ### Acquire a Keycloak Access Token
 
@@ -738,6 +737,11 @@ Configure the out-of-band network to relay BMC DHCP requests to the NICo DHCP se
    ```bash
    kubectl logs -n nico-system -l app.kubernetes.io/name=nico-dhcp --tail=20
    ```
+
+1. *Verify the client path* with a representative client after configuring the
+   relay. Confirm a DHCP exchange through the relay and a PXE download from
+   the managed network. For optional DHCPv6, follow
+   [Deployment Verification](../provisioning/dhcpv6-deployment.md#deployment-verification-and-metrics).
 
 For detailed OOB network requirements, refer to the [BMC and Out-of-Band Setup](prerequisites/bmc-oob-setup.md) guide.
 
