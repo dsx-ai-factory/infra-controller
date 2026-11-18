@@ -4970,6 +4970,11 @@ mod tests {
     /// Verifies GB200 firmware inventory fills only a missing host BIOS observation.
     #[test]
     fn observed_host_bios_version_prefers_system_and_falls_back_to_gb200_inventory() {
+        struct BiosVersionCase {
+            system_version: Option<&'static str>,
+            inventory_version: Option<&'static str>,
+        }
+
         let report = |system_version: Option<&str>, inventory_version: Option<&str>| {
             EndpointExplorationReport {
                 systems: vec![ComputerSystem {
@@ -4992,23 +4997,37 @@ mod tests {
             }
         };
 
-        // The standard Redfish property remains authoritative when populated.
-        assert_eq!(
-            report(Some("system-version"), Some("inventory-version")).observed_host_bios_version(),
-            Some("system-version")
-        );
+        value_scenarios!(
+            run = |case: BiosVersionCase| {
+                report(case.system_version, case.inventory_version)
+                    .observed_host_bios_version()
+                    .map(str::to_string)
+            };
+            "host BIOS source precedence and normalization" {
+                // The standard Redfish property must win when both sources are usable.
+                BiosVersionCase {
+                    system_version: Some("system-version"),
+                    inventory_version: Some("inventory-version"),
+                } => Some("system-version".to_string()),
 
-        // GB200's inventory entry supplies the version when System_0 omits it.
-        assert_eq!(
-            report(None, Some(" inventory-version ")).observed_host_bios_version(),
-            Some("inventory-version")
-        );
+                // An absent System_0 value activates GB200's trimmed inventory fallback.
+                BiosVersionCase {
+                    system_version: None,
+                    inventory_version: Some(" inventory-version "),
+                } => Some("inventory-version".to_string()),
 
-        // Missing and blank sources both mean no observed host BIOS version.
-        assert_eq!(report(None, None).observed_host_bios_version(), None);
-        assert_eq!(
-            report(Some(" \t "), Some("  ")).observed_host_bios_version(),
-            None
+                // Missing sources represent no observation, rather than malformed values.
+                BiosVersionCase {
+                    system_version: None,
+                    inventory_version: None,
+                } => None,
+
+                // Whitespace-only values are present but unusable and must normalize to absence.
+                BiosVersionCase {
+                    system_version: Some(" \t "),
+                    inventory_version: Some("  "),
+                } => None,
+            }
         );
     }
 

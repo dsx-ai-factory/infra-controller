@@ -3909,33 +3909,36 @@ mod tests {
         }
     }
 
-    /// Verifies GB200's firmware inventory supplies both topology versions.
+    /// Verifies GB200 topology versions use inventory fallbacks unless configuration overrides them.
     #[test]
-    fn topology_firmware_versions_uses_gb200_inventory_fallbacks() {
-        // Use the GB200 layout with no BIOS version on System_0.
-        let report = gb200_firmware_report();
+    fn topology_firmware_versions_selects_gb200_sources_by_precedence() {
+        value_scenarios!(
+            run = |report| {
+                topology_firmware_versions(&report)
+                    .map(|(bmc, bios)| (bmc.to_string(), bios.to_string()))
+            };
+            "GB200 topology firmware sources" {
+                // Without matching configuration, GB200's inventory entries provide both versions.
+                gb200_firmware_report() => Some((
+                    "observed-bmc".to_string(),
+                    "observed-bios".to_string(),
+                )),
 
-        assert_eq!(
-            topology_firmware_versions(&report),
-            Some(("observed-bmc", "observed-bios"))
-        );
-    }
-
-    /// Verifies configured firmware versions remain authoritative for GB200.
-    #[test]
-    fn topology_firmware_versions_prefers_configuration_over_gb200_inventory() {
-        // Populate both configured values on a report that also has inventory fallbacks.
-        let mut report = gb200_firmware_report();
-        report
-            .versions
-            .insert(FirmwareComponentType::Bmc, "configured-bmc".to_string());
-        report
-            .versions
-            .insert(FirmwareComponentType::Uefi, "configured-bios".to_string());
-
-        assert_eq!(
-            topology_firmware_versions(&report),
-            Some(("configured-bmc", "configured-bios"))
+                // Configured extraction remains authoritative when the same report has both sources.
+                {
+                    let mut report = gb200_firmware_report();
+                    report
+                        .versions
+                        .insert(FirmwareComponentType::Bmc, "configured-bmc".to_string());
+                    report
+                        .versions
+                        .insert(FirmwareComponentType::Uefi, "configured-bios".to_string());
+                    report
+                } => Some((
+                    "configured-bmc".to_string(),
+                    "configured-bios".to_string(),
+                )),
+            }
         );
     }
 
