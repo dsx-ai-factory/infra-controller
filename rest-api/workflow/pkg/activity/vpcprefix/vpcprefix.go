@@ -149,6 +149,36 @@ func (mvp ManageVpcPrefix) UpdateVpcPrefixesInDB(ctx context.Context, siteID uui
 			continue
 		}
 
+		// Runs before the status update below, which changes the row's Updated time.
+		if status != cdbm.VpcPrefixStatusDeleting && controllerVpcPrefix.Metadata != nil {
+			reportedVpcPrefix := new(cdbm.VpcPrefix)
+			reportedVpcPrefix.FromProto(controllerVpcPrefix)
+
+			// A row with no labels never had them set through REST, so labels the
+			// Site reports for it are adopted. Pushing the empty set instead would
+			// erase labels nobody asked to clear. A row that was not adopted changed
+			// recently and may have just been cleared, so it is left for a later run.
+			syncMetadata := true
+			if len(vpcPrefix.Labels) == 0 && len(reportedVpcPrefix.Labels) > 0 {
+				adopted, serr := mvp.adoptVpcPrefixLabelsFromSite(ctx, site, vpcPrefix.ID, reportedVpcPrefix.Labels)
+				if serr != nil {
+					slogger.Error().Err(serr).Msg("failed to adopt VPC Prefix labels from Site")
+				}
+				if adopted {
+					vpcPrefix.Labels = reportedVpcPrefix.Labels
+				}
+				syncMetadata = adopted
+			}
+
+			if syncMetadata && (vpcPrefix.Name != reportedVpcPrefix.Name ||
+				!maps.Equal(vpcPrefix.Labels, reportedVpcPrefix.Labels)) {
+				serr := mvp.UpdateVpcPrefixMetadata(ctx, siteID, vpcPrefix.ID, controllerVpcPrefix.Metadata.Description)
+				if serr != nil {
+					slogger.Error().Err(serr).Msg("failed to synchronize VPC Prefix metadata with Site")
+				}
+			}
+		}
+
 		if vpcPrefix.Status != status {
 			err = mvp.updateVpcPrefixStatusInDB(ctx, nil, vpcPrefix.ID, &status, &statusMessage)
 			if err != nil {
@@ -166,17 +196,6 @@ func (mvp ManageVpcPrefix) UpdateVpcPrefixesInDB(ctx context.Context, siteID uui
 			}
 		}
 
-		if status != cdbm.VpcPrefixStatusDeleting && controllerVpcPrefix.Metadata != nil {
-			reportedVpcPrefix := new(cdbm.VpcPrefix)
-			reportedVpcPrefix.FromProto(controllerVpcPrefix)
-			if vpcPrefix.Name != reportedVpcPrefix.Name ||
-				!maps.Equal(vpcPrefix.Labels, reportedVpcPrefix.Labels) {
-				serr := mvp.UpdateVpcPrefixMetadata(ctx, siteID, vpcPrefix.ID)
-				if serr != nil {
-					slogger.Error().Err(serr).Msg("failed to synchronize VPC Prefix metadata with Site")
-				}
-			}
-		}
 	}
 
 	// Populate list of VpcPrefixes that were not found
@@ -565,9 +584,46 @@ func (mvp ManageVpcPrefix) createOrUpdateVpcPrefixFromSite(
 	return vpcPrefix
 }
 
+// adoptVpcPrefixLabelsFromSite copies Site-reported labels into a VPC Prefix that
+// has none, and reports whether it did. It re-reads the row under the update
+// lock and leaves a row that gained labels or changed within the stale inventory
+// threshold, because an older inventory snapshot must not undo a recent clear.
+func (mvp ManageVpcPrefix) adoptVpcPrefixLabelsFromSite(ctx context.Context, site *cdbm.Site, vpcPrefixID uuid.UUID, labels cdbm.Labels) (bool, error) {
+	adopted := false
+	err := cdb.WithTx(ctx, mvp.dbSession, func(tx *cdb.Tx) error {
+		lockErr := tx.TryAcquireAdvisoryLock(
+			ctx,
+			cdb.GetAdvisoryLockIDFromString(vpcPrefixID.String()),
+			nil,
+		)
+		if lockErr != nil {
+			return fmt.Errorf("failed to acquire VPC Prefix metadata lock: %w", lockErr)
+		}
+
+		vpcPrefixDAO := cdbm.NewVpcPrefixDAO(mvp.dbSession)
+		vpcPrefix, getErr := vpcPrefixDAO.GetByID(ctx, tx, vpcPrefixID, nil)
+		if getErr != nil {
+			return fmt.Errorf("failed to retrieve VPC Prefix from DB: %w", getErr)
+		}
+		if len(vpcPrefix.Labels) > 0 || site.IsTimeWithinStaleInventoryThreshold(vpcPrefix.Updated) {
+			return nil
+		}
+
+		_, updateErr := vpcPrefixDAO.Update(ctx, tx, cdbm.VpcPrefixUpdateInput{VpcPrefixID: vpcPrefixID, Labels: labels})
+		if updateErr != nil {
+			return fmt.Errorf("failed to update VPC Prefix labels in DB: %w", updateErr)
+		}
+		adopted = true
+		return nil
+	})
+	return adopted, err
+}
+
 // UpdateVpcPrefixMetadata reloads authoritative REST metadata and sends it to
-// Core through the existing Site workflow.
-func (mvp ManageVpcPrefix) UpdateVpcPrefixMetadata(ctx context.Context, siteID, vpcPrefixID uuid.UUID) error {
+// Core through the existing Site workflow. REST does not store a description
+// and Core replaces all metadata on update, so the reported description is
+// sent back unchanged.
+func (mvp ManageVpcPrefix) UpdateVpcPrefixMetadata(ctx context.Context, siteID, vpcPrefixID uuid.UUID, description string) error {
 	logger := log.With().
 		Str("Activity", "UpdateVpcPrefixMetadata").
 		Str("Site ID", siteID.String()).
@@ -595,6 +651,7 @@ func (mvp ManageVpcPrefix) UpdateVpcPrefixMetadata(ctx context.Context, siteID, 
 		}
 
 		vpcPrefixProto := vpcPrefix.ToProto(nil)
+		vpcPrefixProto.Metadata.Description = description
 		request := &corev1.VpcPrefixUpdateRequest{
 			Id:       vpcPrefixProto.Id,
 			Metadata: vpcPrefixProto.Metadata,
