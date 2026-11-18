@@ -9357,7 +9357,7 @@ enum NetworkSecurityGroupSource {
   NSG_SOURCE_INVALID  = 0; // Should be rejected.  There is no default NSG source, and the reporter should be explicit about the source.
   NSG_SOURCE_NONE     = 1; // No NSG is applied: neither VPC, Instance, nor interface has an NSG configured.
   NSG_SOURCE_VPC      = 2; // NSG sourced from NSG configured on VPC.
-  NSG_SOURCE_INSTANCE = 3; // NSG sourced from NSG configured on instance, which overrides VPC.
+  NSG_SOURCE_INSTANCE = 3; // NSG sourced from NSG configured on instance, which overrides VPC policy only for host interfaces.
 }
 
 message NetworkSecurityGroupStatus {
@@ -9369,11 +9369,11 @@ message NetworkSecurityGroupStatus {
 }
 
 enum NetworkSecurityGroupPropagationStatus {
-  NSG_PROP_STATUS_UNKNOWN = 0; // The status could not be determined.
+  NSG_PROP_STATUS_UNKNOWN = 0; // The status could not be determined. The details field explains applied counts above expected counts or equal counts with nonempty unpropagated_instance_ids.
   NSG_PROP_STATUS_FULL    = 1; // Fully propagated across all related objects.
-  NSG_PROP_STATUS_PARTIAL = 2; // Propagation across some related objects but not all. E.g., Two out of three instances.
-  NSG_PROP_STATUS_NONE    = 3; // No issues, but no propagation has completed yet.
-  NSG_PROP_STATUS_ERROR   = 4; // Propagation is in a failed state and will not complete.
+  NSG_PROP_STATUS_PARTIAL = 2; // The applied interface count is nonzero and below the expected count (for example, two out of three instances with one expected interface each).
+  NSG_PROP_STATUS_NONE    = 3; // The applied interface count is zero and the expected count is nonzero. This does not establish absence of propagation failures.
+  NSG_PROP_STATUS_ERROR   = 4; // Propagation is in a failed state and will not complete. GetNetworkSecurityGroupPropagationStatus does not return this value.
 }
 
 message NetworkSecurityGroupPropagationObjectStatus {
@@ -9386,22 +9386,33 @@ message NetworkSecurityGroupPropagationObjectStatus {
   string id                                    = 1;
 
   NetworkSecurityGroupPropagationStatus status = 2;
+  // Contains "matching interface totals include unpropagated instances" when
+  // expected and applied interface counts match with nonempty unpropagated_instance_ids.
   optional string details                      = 3;
 
   // Any instances IDs related to the object
-  // In the case of VPCs, it would be any instances
-  // that do not have a more specific NSG applied at
-  // the instance level.
+  // For VPCs, include instances with host interfaces without a more specific NSG configured
+  // and instances with active service interfaces, even with an instance NSG.
+  // Active service interfaces belong to undeleted instances and reference an
+  // extension-service attachment whose id matches the interface's attachment_id
+  // and whose removed field is unset.
+  // Instance IDs are deduplicated independently of interface counts.
   repeated string related_instance_ids         = 4;
 
   // Any instances IDs related to the object that
   // are negatively affecting the propagation status
   // of the object.
-  // In the case of VPCs, it would be any instances
-  // that do not have a more specific NSG applied at
-  // the instance level and that do not have the
-  // current NSG ID and version used by the parent
-  // VPC.
+  // For VPCs, include an instance when expected and applied interface counts
+  // differ for its host interfaces or active service interfaces. Applied
+  // counts use observations matching the current VPC NSG source, ID, and version.
+  // Service counts compare distinct configured (dpu_id, internal_uuid) pairs with
+  // observations for that UUID in the configured DPU's service_vpc_network_observation.
+  // Host counts compare distinct configured interface UUIDs with matching
+  // observation rows across attached DPUs. Duplicate observations can hide
+  // missing host interface evidence, and host observations are not restricted
+  // to the DPU receiving each interface.
+  // Host interfaces with a more specific NSG configured do not contribute; service
+  // interfaces always use VPC policy. Instance IDs are deduplicated.
   repeated string unpropagated_instance_ids    = 5;
 }
 
@@ -9414,22 +9425,29 @@ message NetworkSecurityGroupIdList {
   repeated string ids = 3;
 }
 
+// At least one vpc_ids or instance_ids entry is required. Their combined number
+// of entries must not exceed the server's max_find_by_ids setting.
+// Violations return INVALID_ARGUMENT.
 message GetNetworkSecurityGroupPropagationStatusRequest {
   // Used to check the propagation of NSGs applied to VPCs across
-  // all interfaces of all instances under those VPCs.
-  // This is checking observed network_security_group_version
-  // of the interfaces with a source of VPC.
+  // host interfaces using VPC policy and active service interfaces selecting
+  // those VPCs, including VPCs used only by services.
+  // Check the observed network_security_group source, ID and version.
+  // VPCs without an attached NSG or counted interfaces are omitted.
+  // An attached NSG with empty rules still requires matching evidence.
   repeated string vpc_ids                                        = 1;
 
   // Used to check the propagation of NSGs applied to instances
-  // across all interfaces of those instances.
-  // This is checking observed network_security_group_version
+  // across host interfaces of those instances; service interfaces are excluded.
+  // Check the observed network_security_group source, ID, and version
   // of the interfaces with a source of INSTANCE.
   repeated string instance_ids                                   = 2;
 
   // Used to restrict the status results to
   // objects with attachments to a specific set of
   // NetworkSecurityGroups
+  // Omit this field to allow any attached NSG within the requested objects.
+  // A present field with an empty ids list selects no objects.
   optional NetworkSecurityGroupIdList network_security_group_ids = 3;
 }
 
