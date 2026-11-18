@@ -920,6 +920,16 @@ func (ush UpdateVpcPrefixHandler) Handle(c echo.Context) error {
 	// no timeout occurred and the normal flow continues.
 	var timeoutResp func() error
 	err = cdb.WithTx(ctx, ush.dbSession, func(tx *cdb.Tx) error {
+		derr := tx.TryAcquireAdvisoryLock(
+			ctx,
+			cdb.GetAdvisoryLockIDFromString(vpcPrefix.ID.String()),
+			nil,
+		)
+		if derr != nil {
+			logger.Error().Err(derr).Msg("failed to acquire VPC Prefix update lock")
+			return cutil.NewAPIError(http.StatusInternalServerError, "Failed to update VPC prefix, could not acquire data store lock", nil)
+		}
+
 		updated, derr := vpDAO.Update(ctx, tx, cdbm.VpcPrefixUpdateInput{
 			VpcPrefixID: vpcPrefix.ID,
 			Name:        apiRequest.Name,

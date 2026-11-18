@@ -73,9 +73,19 @@ func TestVpcPrefixLabelsMigration(t *testing.T) {
 	defer dbSession.Close()
 
 	existingID := uuid.New()
-	_, err := dbSession.DB.ExecContext(ctx, `CREATE TABLE vpc_prefix (id UUID PRIMARY KEY)`)
+	_, err := dbSession.DB.ExecContext(ctx, `
+		CREATE TABLE vpc_prefix (
+			id UUID PRIMARY KEY,
+			name TEXT NOT NULL,
+			status TEXT NOT NULL
+		)
+	`)
 	require.NoError(t, err)
-	_, err = dbSession.DB.ExecContext(ctx, `INSERT INTO vpc_prefix (id) VALUES (?)`, existingID)
+	_, err = dbSession.DB.ExecContext(
+		ctx,
+		`INSERT INTO vpc_prefix (id, name, status) VALUES (?, 'existing', 'Ready')`,
+		existingID,
+	)
 	require.NoError(t, err)
 
 	targetMigrations := migrate.NewMigrations()
@@ -107,7 +117,11 @@ func TestVpcPrefixLabelsMigration(t *testing.T) {
 	assert.JSONEq(t, `{}`, labels)
 
 	newID := uuid.New()
-	_, err = dbSession.DB.ExecContext(ctx, `INSERT INTO vpc_prefix (id) VALUES (?)`, newID)
+	_, err = dbSession.DB.ExecContext(
+		ctx,
+		`INSERT INTO vpc_prefix (id, name, status) VALUES (?, 'new', 'Ready')`,
+		newID,
+	)
 	require.NoError(t, err)
 	err = dbSession.DB.QueryRowContext(
 		ctx,
@@ -129,6 +143,14 @@ func TestVpcPrefixLabelsMigration(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "NO", nullable)
 	assert.Contains(t, defaultExpression, "'{}'::jsonb")
+
+	var indexDefinition string
+	err = dbSession.DB.QueryRowContext(
+		ctx,
+		`SELECT pg_get_indexdef('public.vpc_prefix_tsv_idx'::regclass)`,
+	).Scan(&indexDefinition)
+	require.NoError(t, err)
+	assert.Contains(t, indexDefinition, "labels")
 }
 
 func TestMachineLabelsGinOpsMigration(t *testing.T) {

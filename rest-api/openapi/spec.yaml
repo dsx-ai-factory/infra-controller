@@ -4082,7 +4082,7 @@ paths:
             type: string
           in: query
           name: query
-          description: Search for matches across all VPC Prefixes. Input will be matched against name and status fields
+          description: Search for matches across all VPC Prefixes. Input will be matched against name, status, and labels fields
         - schema:
             type: string
             enum:

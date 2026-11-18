@@ -64,6 +64,39 @@ func (h *testVpcPrefixLockAttemptHook) AfterQuery(_ context.Context, event *bun.
 	})
 }
 
+type testVpcPrefixConcurrentUpdateLockHook struct {
+	mu              sync.Mutex
+	attempts        int
+	firstAttempted  chan<- struct{}
+	secondAttempted chan<- struct{}
+	releaseFirst    <-chan struct{}
+}
+
+func (h *testVpcPrefixConcurrentUpdateLockHook) BeforeQuery(ctx context.Context, _ *bun.QueryEvent) context.Context {
+	return ctx
+}
+
+func (h *testVpcPrefixConcurrentUpdateLockHook) AfterQuery(_ context.Context, event *bun.QueryEvent) {
+	if event.Err != nil || !strings.Contains(event.Query, "pg_try_advisory_xact_lock") {
+		return
+	}
+
+	h.mu.Lock()
+	h.attempts++
+	attempt := h.attempts
+	switch attempt {
+	case 1:
+		close(h.firstAttempted)
+	case 2:
+		close(h.secondAttempted)
+	}
+	h.mu.Unlock()
+
+	if attempt == 1 {
+		<-h.releaseFirst
+	}
+}
+
 func testVPCPrefixCIDREntity(t *testing.T, vp *cdbm.VpcPrefix) string {
 	t.Helper()
 	require.NotNil(t, vp)
@@ -1329,6 +1362,15 @@ func TestVpcPrefixHandler_GetAll(t *testing.T) {
 			expectedTotal:  &totalCount,
 		},
 		{
+			name:           "success when query search label specified",
+			reqOrgName:     tnOrg1,
+			user:           tnu,
+			querySearch:    cutil.GetPtr("list"),
+			expectedStatus: http.StatusOK,
+			expectedCnt:    paginator.DefaultLimit,
+			expectedTotal:  &totalCount,
+		},
+		{
 			name:           "success when query search status specified",
 			reqOrgName:     tnOrg1,
 			user:           tnu,
@@ -2149,6 +2191,76 @@ func TestVpcPrefixHandler_Update(t *testing.T) {
 			}
 		})
 	}
+
+	t.Run("concurrent empty and label updates keep Core and REST labels consistent", func(t *testing.T) {
+		firstLockAttempted := make(chan struct{})
+		secondLockAttempted := make(chan struct{})
+		releaseFirst := make(chan struct{})
+		dbSession.DB.AddQueryHook(&testVpcPrefixConcurrentUpdateLockHook{
+			firstAttempted:  firstLockAttempted,
+			secondAttempted: secondLockAttempted,
+			releaseFirst:    releaseFirst,
+		})
+
+		type updateResult struct {
+			response *httptest.ResponseRecorder
+			err      error
+		}
+		results := make(chan updateResult, 2)
+		runUpdate := func(body string) {
+			e := echo.New()
+			req := httptest.NewRequest(http.MethodPatch, "/", strings.NewReader(body))
+			req.Header.Set(echo.HeaderContentType, echo.MIMEApplicationJSON)
+			rec := httptest.NewRecorder()
+			ec := e.NewContext(req, rec)
+			ec.SetParamNames("orgName", "id")
+			ec.SetParamValues(tnOrg1, vpcprefix2.ID)
+			ec.Set("user", tnu)
+			ec.SetRequest(ec.Request().WithContext(ctx))
+
+			handler := UpdateVpcPrefixHandler{
+				dbSession: dbSession,
+				tc:        tempClient,
+				scp:       scp,
+				cfg:       cfg,
+			}
+			results <- updateResult{response: rec, err: handler.Handle(ec)}
+		}
+
+		finalLabels := map[string]string{"owner": "concurrent"}
+		labelUpdateBody, err := json.Marshal(model.APIVpcPrefixUpdateRequest{Labels: finalLabels})
+		require.NoError(t, err)
+		callsBefore := len(tsc.Calls)
+
+		go runUpdate(`{}`)
+		<-firstLockAttempted
+		go runUpdate(string(labelUpdateBody))
+		<-secondLockAttempted
+		close(releaseFirst)
+
+		firstResult := <-results
+		secondResult := <-results
+		require.NoError(t, firstResult.err)
+		require.NoError(t, secondResult.err)
+		assert.Equal(t, http.StatusOK, firstResult.response.Code, firstResult.response.Body.String())
+		assert.Equal(t, http.StatusOK, secondResult.response.Code, secondResult.response.Body.String())
+
+		persisted, err := cdbm.NewVpcPrefixDAO(dbSession).GetByID(
+			ctx,
+			nil,
+			uuid.MustParse(vpcprefix2.ID),
+			nil,
+		)
+		require.NoError(t, err)
+		assert.Equal(t, cdbm.Labels(finalLabels), persisted.Labels)
+
+		require.Equal(t, callsBefore+2, len(tsc.Calls))
+		lastRequest, ok := tsc.Calls[len(tsc.Calls)-1].Arguments[3].(*corev1.VpcPrefixUpdateRequest)
+		require.True(t, ok)
+		var coreLabels cdbm.Labels
+		coreLabels.FromProto(lastRequest.GetMetadata().GetLabels())
+		assert.Equal(t, cdbm.Labels(finalLabels), coreLabels)
+	})
 }
 
 func TestVpcPrefixHandler_Delete(t *testing.T) {
