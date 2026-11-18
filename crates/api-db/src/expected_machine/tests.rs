@@ -37,7 +37,7 @@ async fn expected_machine_queries_survive_alter_bmc_password_and_bmc_username_co
     assert_eq!(after, before);
 
     let interface_mac: MacAddress = "01:00:00:03:02:01".parse()?;
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
 
     let mut expected_machine = find_by_bmc_mac_address(&mut *txn, interface_mac)
         .await?
@@ -51,7 +51,7 @@ async fn expected_machine_queries_survive_alter_bmc_password_and_bmc_username_co
     .await?;
     txn.commit().await?;
 
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
     let expected_machine_check = find_by_bmc_mac_address(&mut *txn, interface_mac)
         .await?
         .unwrap();
@@ -64,7 +64,7 @@ async fn expected_machine_queries_survive_alter_bmc_password_and_bmc_username_co
         ("u".repeat(256), "p".repeat(255)),
         ("u".repeat(255), "p".repeat(256)),
     ] {
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
         let err = update_bmc_credentials(&mut expected_machine, &mut txn, username, password).await;
         assert!(err.is_err());
         let Err(err) = err else {

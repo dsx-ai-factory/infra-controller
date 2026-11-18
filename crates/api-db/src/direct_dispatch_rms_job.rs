@@ -72,10 +72,7 @@ pub async fn save(
     job_kind: RmsJobKind,
     job_id: &str,
 ) -> Result<(), DatabaseError> {
-    let mut txn = db
-        .begin()
-        .await
-        .map_err(|error| DatabaseError::query("direct_dispatch_rms_job::begin", error))?;
+    let mut txn = db.txn_begin().await?;
     crate::cm_action::lock_firmware(&mut txn, bmc_mac).await?;
     let action_id = crate::cm_action::firmware(&mut txn, bmc_mac, job_kind, job_id).await?;
     let sql = "INSERT INTO direct_dispatch_rms_jobs (bmc_mac, job_kind, job_id, action_id) \
@@ -91,9 +88,7 @@ pub async fn save(
         .await
         .map_err(|e| DatabaseError::new(sql, e))?;
     crate::cm_action::reconcile_firmware(&mut txn, bmc_mac).await?;
-    txn.commit()
-        .await
-        .map_err(|error| DatabaseError::query("direct_dispatch_rms_job::commit", error))?;
+    txn.commit().await?;
     Ok(())
 }
 
@@ -103,10 +98,7 @@ pub async fn delete(
     bmc_mac: MacAddress,
     job_kind: RmsJobKind,
 ) -> Result<(), DatabaseError> {
-    let mut txn = db
-        .begin()
-        .await
-        .map_err(|error| DatabaseError::query("direct_dispatch_rms_job::begin", error))?;
+    let mut txn = db.txn_begin().await?;
     crate::cm_action::lock_firmware(&mut txn, bmc_mac).await?;
     let sql = "DELETE FROM direct_dispatch_rms_jobs \
                WHERE bmc_mac = $1 AND job_kind = $2";
@@ -117,9 +109,7 @@ pub async fn delete(
         .await
         .map_err(|e| DatabaseError::new(sql, e))?;
     crate::cm_action::reconcile_firmware(&mut txn, bmc_mac).await?;
-    txn.commit()
-        .await
-        .map_err(|error| DatabaseError::query("direct_dispatch_rms_job::commit", error))?;
+    txn.commit().await?;
     Ok(())
 }
 
