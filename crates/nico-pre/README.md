@@ -82,7 +82,7 @@ output and one task for a coder. The harness (`src/harness.rs`) runs the table, 
 an error or a panic into a `!` row for that check alone, honours `--only`/`--skip`, prints, and
 writes the result file. To land a check:
 
-1. Find its entry in the table (registered as `run: todo`, shown as ⚠ "not implemented yet")
+1. Find its entry in the table (registered as `run: None`, shown as ⚠ "not implemented yet")
    or add one: a stable id `<checklist>.<area>.<name>`, the expected value as the row prints
    it, and `detail`, the spec: what it reads, when it passes, warns, fails or skips, and how
    it is tested. Every registered entry already carries one; implement against it.

@@ -17,7 +17,7 @@
 
 //! `nico-pre-stage`: the staging host can run setup.sh and reach every site controller and BMC.
 
-use crate::harness::{Check, todo};
+use crate::harness::Check;
 
 pub(crate) const CHECKS: &[Check] = &[
     Check {
@@ -33,7 +33,7 @@ pub(crate) const CHECKS: &[Check] = &[
                  Skip: never.\n\
                  Test: a fixture PATH of stubs; cases: all pass; `helm` 3.11 fails naming the \
                  minimum; `helm-diff` missing fails; a `python3` whose PyYAML import fails fails.",
-        run: todo,
+        run: None,
     },
     Check {
         id: "stage.registry.pull",
@@ -51,7 +51,7 @@ pub(crate) const CHECKS: &[Check] = &[
                  Test: a local registry with a self-signed certificate; cases: CA trusted passes; \
                  CA absent fails naming trust; a wrong secret fails with 401; a missing image \
                  fails by name.",
-        run: todo,
+        run: None,
     },
     Check {
         id: "stage.reach.bmcs",
@@ -65,7 +65,7 @@ pub(crate) const CHECKS: &[Check] = &[
                  Skip: never.\n\
                  Test: bmc-mock instances; cases: all answer passes; one address unreachable \
                  fails naming it; 401 fails naming the credential.",
-        run: todo,
+        run: None,
     },
     Check {
         id: "stage.egress.endpoints",
@@ -84,7 +84,7 @@ pub(crate) const CHECKS: &[Check] = &[
                  resolver and HTTP server; cases: `Connected` with all answering passes; one \
                  refused fails by name; air-gapped skips; `Proxied` goes through the proxy \
                  variable.",
-        run: todo,
+        run: None,
     },
     Check {
         id: "stage.checkouts.state",
@@ -104,7 +104,7 @@ pub(crate) const CHECKS: &[Check] = &[
                  Test: temporary git repositories with a submodule; cases: all pass; an empty \
                  submodule fails naming it; `NICO_RMS_CHART` pointing at a chart of the right \
                  version passes; a wrong doca tag fails naming both.",
-        run: todo,
+        run: None,
     },
     Check {
         id: "stage.charts.reachable",
@@ -122,7 +122,7 @@ pub(crate) const CHECKS: &[Check] = &[
                  Test: a local index stub plus an archive directory; cases: `Connected` with all \
                  answering passes; one index 404 fails; air-gapped with one archive missing fails \
                  by name; an archive at another version fails naming both.",
-        run: todo,
+        run: None,
     },
     Check {
         id: "stage.reach.ssh",
@@ -139,6 +139,6 @@ pub(crate) const CHECKS: &[Check] = &[
                  Test: a local sshd container; cases: key accepted passes; a wrong key fails \
                  naming auth; an unreachable host fails naming the timeout; all refused fails \
                  naming every host.",
-        run: todo,
+        run: None,
     },
 ];

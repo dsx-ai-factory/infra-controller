@@ -21,7 +21,7 @@ use std::net::IpAddr;
 
 use ipnet::IpNet;
 
-use crate::harness::{Check, Ctx, Outcome, todo};
+use crate::harness::{Check, Ctx, Outcome};
 
 pub(crate) const CHECKS: &[Check] = &[
     Check {
@@ -34,7 +34,8 @@ pub(crate) const CHECKS: &[Check] = &[
                  Pass: every named path exists; observed `7 files present`.\n\
                  Warn: `cpDpuSiteYaml` named while the site controllers carry no DPU; fix: drop \
                  it or correct the decision. `expectedMachines` named but not present yet: it is \
-                 read from step 7, so before then its absence is a warning, not a failure.\n\
+                 read from step 7, so before then its absence is a warning, not a failure. Both \
+                 warnings share one row.\n\
                  Fail: `cpDpuSiteYaml` absent while the decision is a DPU, or any named path \
                  missing; observed names the key and the path (`coreValues: \
                  ./helm-prereqs/values/nico-core.yaml`); fix: correct the path or put the file \
@@ -44,40 +45,43 @@ pub(crate) const CHECKS: &[Check] = &[
                  present passes; one missing fails naming key and path; `cpDpuSiteYaml` absent \
                  with a DPU fails; named with `no DPU` warns; only `expectedMachines` absent \
                  warns.",
-        run: collaterals_present,
+        run: Some(collaterals_present),
     },
     Check {
         id: "config.segments.admin",
         expected: "the admin segment fits the fleet: usable addresses beyond the reserved block cover counts.hosts with headroom, and its MTU is within pathMtu",
         detail: "Reads: `network.segments.admin`, `network.pathMtu`, `counts.hosts`, the \
                  `managed-host-kinds-in-the-fleet` decision; `reserve_first` from the admin \
-                 table in the TOML inside `collaterals.coreValues` whose `prefix` or \
+                 table in the NICo TOML inside `collaterals.coreValues` (the site TOML merged \
+                 over `configFiles.nicoApiConfig` when the values carry one, as nico-api merges \
+                 them) whose `prefix` or \
                  `prefix_v6` is the planned admin prefix, or the only admin table when none \
-                 names it (5, the default, when the file is absent or names no \
-                 `reserve_first`; a file that does not parse, several admin tables none with \
-                 the planned prefix, or a `reserve_first` that is not a non-negative integer, \
-                 is a tool error for this row).\n\
+                 names it (5, the default, only when the file is absent or has no admin \
+                 table; an admin table without `reserve_first`, a file that does not parse, \
+                 several admin tables none with the planned prefix, or a `reserve_first` that \
+                 is not a non-negative integer, is a tool error for this row).\n\
                  Pass: usable addresses, counted as Core's allocator does (the prefix less the \
-                 first `reserve_first` addresses from the network address, 5 by default, less \
+                 first `reserve_first` addresses from the network address, assumed 5 when the TOML is absent, less \
                  the broadcast address, less the gateway when it lies outside the reserved \
                  block), at or above `counts.hosts` with 20% spare, and the segment MTU within \
                  `pathMtu`; observed `10.10.60.0/24: 250 usable for 128 hosts, mtu 9000 within \
                  pathMtu 9000`.\n\
                  Warn: under 20% spare; observed `leaves 9 spare addresses for 240 hosts`; fix: \
-                 widen the prefix before the fleet grows. A mixed fleet (Zero-DPU hosts among \
+                 widen the prefix before the fleet grows. A mixed fleet (Zero-DPU or NIC-mode hosts among \
                  the kinds) that does not fit: `counts.hosts` is only an upper bound on the \
                  admin demand, so the shortfall is a warning naming both numbers; fix: confirm \
                  the DPU hosts fit or widen the prefix.\n\
                  Fail: fewer usable addresses than hosts, or MTU above `pathMtu`; observed names \
                  both numbers; fix: widen the prefix or lower `counts.hosts`, keep the MTU within \
                  `pathMtu`.\n\
-                 Skip: the address demand (not the MTU) when the fleet is zero-DPU hosts only, \
-                 which boot on HostInband and take no admin address. Alignment and the gateway \
+                 Skip: the address demand (not the MTU) when every kind in the fleet boots on \
+                 HostInband (Zero-DPU hosts, DPU hosts NICo flips to NIC mode) and takes no admin \
+                 address. Alignment and the gateway \
                  are the gate's rows and are not repeated.\n\
                  Test: the example spliced one line at a time; cases: 128 hosts passes; 300 \
-                 fails; 240 warns; `pathMtu: 1500` fails naming both MTUs; a zero-DPU fleet on \
-                 a /29 admin segment passes; a mixed fleet on a /29 warns.",
-        run: admin_segment,
+                 fails; 240 warns; `pathMtu: 1500` fails naming both MTUs; a zero-DPU fleet and a \
+                 NIC-mode fleet on a /29 admin segment pass; a mixed fleet on a /29 warns.",
+        run: Some(admin_segment),
     },
     Check {
         id: "config.consistency.prefixes",
@@ -104,7 +108,7 @@ pub(crate) const CHECKS: &[Check] = &[
                  passes; a TOML segment shifted into another's range fails naming both; a \
                  gateway moved outside its prefix fails; a misaligned prefix in the site yaml \
                  fails.",
-        run: todo,
+        run: None,
     },
     Check {
         id: "config.consistency.pools",
@@ -139,7 +143,7 @@ pub(crate) const CHECKS: &[Check] = &[
                  the ASN row; `datacenterAsn` set inside the per-DPU range fails; a hostInband \
                  prefix narrowed to /26 for 128 hosts fails; `counts.dpus: 0` passes; the \
                  control-plane prefix narrowed to /30 fails its row.",
-        run: todo,
+        run: None,
     },
     Check {
         id: "config.consistency.site-controllers",
@@ -160,7 +164,7 @@ pub(crate) const CHECKS: &[Check] = &[
                  Test: the example spliced plus a helm-prereqs values fixture; cases: the example \
                  passes with the placeholder warning; two controllers fails; a PVC below the row \
                  fails naming both sizes; external Postgres skips the Postgres rows only.",
-        run: todo,
+        run: None,
     },
     Check {
         id: "config.sitedef.agreement",
@@ -179,7 +183,7 @@ pub(crate) const CHECKS: &[Check] = &[
                  agreeing set passes; one value changed in the TOML fails naming key, both values \
                  and file; the same value changed in site-def fails identically; a key absent \
                  from one file is not a mismatch.",
-        run: todo,
+        run: None,
     },
     Check {
         id: "config.cp-dpu-yaml.rules",
@@ -200,7 +204,7 @@ pub(crate) const CHECKS: &[Check] = &[
                  cases: the sample passes; `fnn` removed with SMN on the DPU fails; a \
                  `routeTargetsToImport` entry in the wrong shape fails with the builder's \
                  message; a placeholder MAC warns; `no DPU` skips.",
-        run: todo,
+        run: None,
     },
     Check {
         id: "config.toml.rules",
@@ -225,7 +229,7 @@ pub(crate) const CHECKS: &[Check] = &[
                  one); cases: the fixture passes; a misspelled key fails with the parser's line; \
                  `dpu_policy` flipped fails naming both values; a segment MTU above `pathMtu` \
                  fails; the anycast key added warns.",
-        run: todo,
+        run: None,
     },
     Check {
         id: "config.helm-prereqs.rules",
@@ -250,7 +254,7 @@ pub(crate) const CHECKS: &[Check] = &[
                  Test: the nico-dev values files as fixture; cases: the fixture passes; a VIP \
                  moved outside the pool fails; NTP differing from site-def fails; `BF4 generic` \
                  chosen without its seed entry fails; REST unticked skips the REST rows.",
-        run: todo,
+        run: None,
     },
     Check {
         id: "config.metallb.rules",
@@ -269,7 +273,7 @@ pub(crate) const CHECKS: &[Check] = &[
                  a pool narrowed so a VIP falls outside fails naming it; one peer's `peerASN` off \
                  by one fails naming both; with `no DPU` and `torPeers` the peers are compared \
                  with the ToRs.",
-        run: todo,
+        run: None,
     },
     Check {
         id: "config.setup.command",
@@ -287,7 +291,7 @@ pub(crate) const CHECKS: &[Check] = &[
                  Test: `setup.command` spliced in the example; cases: the example passes; \
                  `--skip-rms` removed with RMS unticked fails; `--skip-dpf` added with `Install` \
                  fails; `--core-values other.yaml` fails naming both paths.",
-        run: todo,
+        run: None,
     },
     Check {
         id: "config.setup.env",
@@ -306,7 +310,7 @@ pub(crate) const CHECKS: &[Check] = &[
                  Test: `setup.env` spliced; cases: the example passes; `NICO_CORE_IMAGE_TAG` \
                  changed fails naming both tags; `NICO_DPF_DPU_INTERFACE` removed with `Install` \
                  fails; the same with `Skip` passes.",
-        run: todo,
+        run: None,
     },
     Check {
         id: "config.derived.decisions",
@@ -324,7 +328,7 @@ pub(crate) const CHECKS: &[Check] = &[
                  `dpf: Skip` pinned against the example command fails naming both; \
                  `credential-store` pinned to the value the TOML holds passes; a TOML without \
                  `[secrets]` leaves `credential-store` ambiguous and fails.",
-        run: todo,
+        run: None,
     },
 ];
 
@@ -379,16 +383,34 @@ fn collaterals_present(ctx: &Ctx) -> eyre::Result<Outcome> {
                 .to_string(),
         });
     }
+    // Both warnings in one row, like the failures above.
+    let mut warnings: Vec<(&str, &str)> = Vec::new();
     if no_dpu && c.cp_dpu_site_yaml.is_some() {
-        return Ok(Outcome::Warn {
-            observed: "cpDpuSiteYaml named although the site controllers carry no DPU".to_string(),
-            fix: "drop it, or correct dpu-in-the-site-controllers".to_string(),
-        });
+        warnings.push((
+            "cpDpuSiteYaml named although the site controllers carry no DPU",
+            "drop it, or correct dpu-in-the-site-controllers",
+        ));
     }
-    if !later.is_empty() {
+    let later = (!later.is_empty())
+        .then(|| format!("not yet present, needed from step 7: {}", later.join(", ")));
+    if let Some(later) = &later {
+        warnings.push((
+            later,
+            "write the expected-machines file before the ingest checklist",
+        ));
+    }
+    if !warnings.is_empty() {
         return Ok(Outcome::Warn {
-            observed: format!("not yet present, needed from step 7: {}", later.join(", ")),
-            fix: "write the expected-machines file before the ingest checklist".to_string(),
+            observed: warnings
+                .iter()
+                .map(|(o, _)| *o)
+                .collect::<Vec<_>>()
+                .join("; "),
+            fix: warnings
+                .iter()
+                .map(|(_, f)| *f)
+                .collect::<Vec<_>>()
+                .join("; "),
         });
     }
     Ok(Outcome::Pass(format!("{} files present", named.len())))
@@ -492,6 +514,32 @@ mod tests {
             }
             other => panic!("expected a warning, got {other:?}"),
         }
+        // With the controllers carrying no DPU as well, both warnings share the row.
+        let mut sd = sd;
+        sd.decisions.insert(
+            "dpu-in-the-site-controllers".to_string(),
+            crate::sitedef::DecisionValue::One("no DPU".to_string()),
+        );
+        let dec = crate::gate::effective_decisions(&sd, Register::builtin());
+        let ctx = Ctx {
+            sd: &sd,
+            site_def_path: &site_def_path,
+            decisions: &dec,
+            evidence: None,
+        };
+        match collaterals_present(&ctx).unwrap() {
+            Outcome::Warn { observed, fix } => {
+                assert!(
+                    observed.contains("cpDpuSiteYaml") && observed.contains("expectedMachines:"),
+                    "{observed}"
+                );
+                assert!(
+                    fix.contains("drop it") && fix.contains("expected-machines"),
+                    "{fix}"
+                );
+            }
+            other => panic!("expected one warning row, got {other:?}"),
+        }
     }
 }
 
@@ -589,18 +637,31 @@ fn admin_reserve_first(ctx: &Ctx) -> eyre::Result<u64> {
         serde_yaml::from_str(&text).wrap_err_with(|| format!("parsing {}", path.display()))?;
     // The umbrella chart nests the nico-api subchart's values under `nico-api`.
     let root = values.get("nico-api").unwrap_or(&values);
-    // No TOML in the file names no `reserve_first`, so Core's default applies; whether
-    // the TOML has to be there is the config checklist's question.
-    let Some(toml_text) = root
-        .get("siteConfig")
-        .and_then(|c| c.get("nicoApiSiteConfig"))
-        .and_then(serde_yaml::Value::as_str)
-    else {
-        return Ok(ADMIN_RESERVED);
+    // nico-api merges the site TOML over the global one, key by key: the global file is
+    // `configFiles.nicoApiConfig` when the values carry one, else the chart's built-in
+    // file, which has no network tables. No TOML in the file names no `reserve_first`, so
+    // Core's default applies; whether the TOML has to be there is the config checklist's
+    // question.
+    let toml_text = |section: &str, key: &str| {
+        root.get(section)
+            .and_then(|c| c.get(key))
+            .and_then(serde_yaml::Value::as_str)
+            .filter(|t| !t.trim().is_empty())
     };
-    let table: toml::Table = toml_text
-        .parse()
-        .wrap_err_with(|| format!("{}: the NICo TOML does not parse", path.display()))?;
+    let global_text = toml_text("configFiles", "nicoApiConfig");
+    let site_text = toml_text("siteConfig", "nicoApiSiteConfig");
+    if global_text.is_none() && site_text.is_none() {
+        return Ok(ADMIN_RESERVED);
+    }
+    let mut table = toml::Table::new();
+    for (which, text) in [("global", global_text), ("site", site_text)] {
+        if let Some(text) = text {
+            let parsed: toml::Table = text.parse().wrap_err_with(|| {
+                format!("{}: the {which} NICo TOML does not parse", path.display())
+            })?;
+            merge_toml(&mut table, parsed);
+        }
+    }
     // Core allows several admin networks; the planned segment's table is the one whose
     // prefix matches. A lone admin table without a prefix match is still the planned one.
     let planned = ctx.sd.network.segments.admin.prefix;
@@ -632,10 +693,14 @@ fn admin_reserve_first(ctx: &Ctx) -> eyre::Result<u64> {
             admins.len()
         ),
     };
-    let reserved = admin.and_then(|admin| admin.get("reserve_first"));
-    // Absent means Core's default; present but not a non-negative integer is a value Core
-    // would reject, so it is an error here, not the default.
-    let reserved = match reserved {
+    // Core requires `reserve_first` in an admin network table (its `NetworkDefinition` has
+    // no default), so an absent key is an error, as is a value Core would reject. Only a
+    // TOML with no admin table at all leaves the default standing.
+    let reserved = match admin.and_then(|admin| admin.get("reserve_first")) {
+        None if admin.is_some() => eyre::bail!(
+            "{}: the admin table for {planned} has no reserve_first, which nico-api requires",
+            path.display()
+        ),
         None => ADMIN_RESERVED,
         Some(v) => match v.as_integer() {
             Some(n) if n >= 0 => n as u64,
@@ -646,6 +711,19 @@ fn admin_reserve_first(ctx: &Ctx) -> eyre::Result<u64> {
         },
     };
     Ok(reserved)
+}
+
+/// `from` merged over `into` as nico-api merges its global and site TOML: tables key by
+/// key, any other value replaced.
+fn merge_toml(into: &mut toml::Table, from: toml::Table) {
+    for (key, value) in from {
+        match (into.get_mut(&key), value) {
+            (Some(toml::Value::Table(a)), toml::Value::Table(b)) => merge_toml(a, b),
+            (_, value) => {
+                into.insert(key, value);
+            }
+        }
+    }
 }
 
 /// Addresses the TOML's `[networks.admin] reserve_first` keeps back by default,
@@ -662,14 +740,15 @@ const HEADROOM_PERCENT: u64 = 20;
 fn admin_segment(ctx: &Ctx) -> eyre::Result<Outcome> {
     let n = &ctx.sd.network;
     let seg = &n.segments.admin;
-    // Zero-DPU hosts boot on HostInband and take no admin address. The site definition
-    // counts hosts without their kind, so for a mixed fleet `counts.hosts` is only an
-    // upper bound on the admin demand.
+    // Zero-DPU hosts and DPU hosts NICo flips to NIC mode boot on HostInband and take no
+    // admin address. The site definition counts hosts without their kind, so for a mixed
+    // fleet `counts.hosts` is only an upper bound on the admin demand.
+    const INBAND_ONLY: [&str; 2] = ["Zero-DPU hosts", "DPU hosts NICo flips to NIC mode"];
+    let inband = |k: &String| INBAND_ONLY.contains(&k.as_str());
     let kinds = ctx.decision("managed-host-kinds-in-the-fleet");
-    let zero_dpu_only =
-        kinds.is_some_and(|kinds| !kinds.is_empty() && kinds.iter().all(|k| k == "Zero-DPU hosts"));
-    let mixed = !zero_dpu_only && kinds.is_some_and(|k| k.iter().any(|k| k == "Zero-DPU hosts"));
-    let hosts = if zero_dpu_only {
+    let inband_only = kinds.is_some_and(|kinds| !kinds.is_empty() && kinds.iter().all(inband));
+    let mixed = !inband_only && kinds.is_some_and(|k| k.iter().any(inband));
+    let hosts = if inband_only {
         0
     } else {
         u64::from(ctx.sd.counts.hosts)
@@ -682,7 +761,7 @@ fn admin_segment(ctx: &Ctx) -> eyre::Result<Outcome> {
     if usable < hosts && mixed {
         warnings.push(format!(
             "{} has {usable} usable addresses for at most {hosts} hosts; counts.hosts includes \
-             Zero-DPU hosts, which take no admin address",
+             hosts that boot on HostInband and take no admin address",
             seg.prefix
         ));
     } else if usable < hosts {
@@ -721,9 +800,9 @@ fn admin_segment(ctx: &Ctx) -> eyre::Result<Outcome> {
             },
         });
     }
-    Ok(Outcome::Pass(if zero_dpu_only {
+    Ok(Outcome::Pass(if inband_only {
         format!(
-            "{}: zero-DPU fleet, no admin addresses needed; mtu {} within pathMtu {}",
+            "{}: the fleet boots on HostInband, no admin addresses needed; mtu {} within pathMtu {}",
             seg.prefix, seg.mtu, n.path_mtu
         )
     } else {
@@ -748,8 +827,8 @@ mod admin_segment_tests {
             "splice target `{from}` not in the example"
         );
         let mut text = EXAMPLE.replacen(from, to, 1);
-        if to.contains("Zero-DPU hosts") {
-            // A /29 for 128 hosts: only the zero-DPU skip can make it pass.
+        if to.contains("Zero-DPU hosts") || to.contains("NIC mode") {
+            // A /29 for 128 hosts: only the HostInband exemption can make it pass.
             text = text.replacen(
                 "admin:           { prefix: 10.10.60.0/24, gateway: 10.10.60.1",
                 "admin:           { prefix: 10.10.60.0/29, gateway: 10.10.60.1",
@@ -823,6 +902,71 @@ mod admin_segment_tests {
         }
     }
 
+    /// nico-api reads the site TOML merged over the global one, so an admin table in
+    /// `configFiles.nicoApiConfig` counts, and a site key wins over the global one.
+    #[test]
+    fn the_global_config_is_merged_under_the_site_config() {
+        let run = |values_text: &str| {
+            let dir = tempfile::tempdir().unwrap();
+            let values = dir.path().join("helm-prereqs/values");
+            std::fs::create_dir_all(&values).unwrap();
+            std::fs::write(values.join("nico-core.yaml"), values_text).unwrap();
+            let site_def = dir.path().join("site-def.yaml");
+            std::fs::write(&site_def, EXAMPLE).unwrap();
+            let sd = crate::sitedef::load(&site_def).unwrap();
+            let dec = crate::gate::effective_decisions(&sd, Register::builtin());
+            let ctx = Ctx {
+                sd: &sd,
+                site_def_path: &site_def,
+                decisions: &dec,
+                evidence: None,
+            };
+            admin_segment(&ctx).unwrap()
+        };
+        const GLOBAL: &str = "nico-api:\n  configFiles:\n    nicoApiConfig: |\n      [networks.admin]\n      type = \"admin\"\n      prefix = \"10.10.60.0/24\"\n      reserve_first = 130\n";
+        match run(GLOBAL) {
+            Outcome::Fail { observed, .. } => {
+                assert!(observed.contains("125 usable"), "{observed}")
+            }
+            other => panic!("the global table's reservation counts: {other:?}"),
+        }
+        let site = format!(
+            "{GLOBAL}  siteConfig:\n    nicoApiSiteConfig: |\n      [networks.admin]\n      reserve_first = 5\n"
+        );
+        match run(&site) {
+            Outcome::Pass(observed) => assert!(observed.contains("250 usable"), "{observed}"),
+            other => panic!("the site key wins over the global one: {other:?}"),
+        }
+    }
+
+    /// Core requires the key, so an admin table without it is a tool error, not the default.
+    #[test]
+    fn an_admin_table_without_a_reservation_is_an_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let values = dir.path().join("helm-prereqs/values");
+        std::fs::create_dir_all(&values).unwrap();
+        std::fs::write(
+            values.join("nico-core.yaml"),
+            "nico-api:\n  siteConfig:\n    nicoApiSiteConfig: |\n      [networks.admin]\n      type = \"admin\"\n      prefix = \"10.10.60.0/24\"\n",
+        )
+        .unwrap();
+        let site_def = dir.path().join("site-def.yaml");
+        std::fs::write(&site_def, EXAMPLE).unwrap();
+        let sd = crate::sitedef::load(&site_def).unwrap();
+        let dec = crate::gate::effective_decisions(&sd, Register::builtin());
+        let ctx = Ctx {
+            sd: &sd,
+            site_def_path: &site_def,
+            decisions: &dec,
+            evidence: None,
+        };
+        let err = admin_segment(&ctx).expect_err("a missing reservation is an error");
+        assert!(
+            format!("{err:#}").contains("no reserve_first, which nico-api requires"),
+            "{err:#}"
+        );
+    }
+
     /// A `reserve_first` Core would reject is a tool error for the row, not the default.
     #[test]
     fn an_invalid_reservation_is_an_error() {
@@ -884,7 +1028,14 @@ mod admin_segment_tests {
                 from: "managed-host-kinds-in-the-fleet: [DPU hosts booting through the DPU on the Admin segment]",
                 to: "managed-host-kinds-in-the-fleet: [Zero-DPU hosts]",
                 want: |o| matches!(o, Outcome::Pass(_)),
-                observed_has: "zero-DPU fleet, no admin addresses needed",
+                observed_has: "boots on HostInband, no admin addresses needed",
+            },
+            Case {
+                name: "a fleet NICo flips to NIC mode needs no admin addresses either",
+                from: "managed-host-kinds-in-the-fleet: [DPU hosts booting through the DPU on the Admin segment]",
+                to: "managed-host-kinds-in-the-fleet: [DPU hosts NICo flips to NIC mode]",
+                want: |o| matches!(o, Outcome::Pass(_)),
+                observed_has: "boots on HostInband, no admin addresses needed",
             },
             Case {
                 name: "a mixed fleet that does not fit the total only warns",
@@ -909,7 +1060,6 @@ mod admin_segment_tests {
                 Outcome::Warn { observed, .. } | Outcome::Fail { observed, .. } => {
                     observed.as_str()
                 }
-                Outcome::Todo => "",
             };
             assert!(
                 observed.contains(c.observed_has),

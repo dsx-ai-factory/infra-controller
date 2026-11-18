@@ -118,7 +118,9 @@ without it those checks run only from media on the controller), `uplinks` (optio
 | `denyPrefixes` | no | list of prefixes | Pin of a derived value; a collateral that contradicts it fails. |
 | `serviceVips` | no | `{api, dhcp, dns0, dns1, pxe, sshConsole}` | Pin of the derived VIP layout. |
 
-Every prefix in this table must be aligned to its mask and no two may overlap.
+Every prefix in this table must be aligned to its mask and no two may overlap, except
+`denyPrefixes`: they are aggregates that cover planned prefixes by design, so they are checked
+for alignment only.
 
 ## `counts`, `fleet`, `versions`, `credentials`, `setup`
 
@@ -136,7 +138,10 @@ Every prefix in this table must be aligned to its mask and no two may overlap.
   included) and its
   options, with assignments before either, after any `cd … &&`. A command that merely names it (`test -x ./setup.sh &&`) is not
   it; when no command qualifies, the first one naming it is read. A line that does not run
-  `setup.sh` (a developer site deployed by other scripts) makes no decision and is not compared.
+  `setup.sh` (a developer site deployed by other scripts) makes no decision and is not compared. A word setup.sh does not accept fails the row, as
+  setup.sh itself exits on it, and a component control (`NICO_SKIP_*`, `NICO_INSTALL_*`,
+  `WITH_OBSERVABILITY`, `NICO_INSTALL_CONTOUR`) given as a `{from: …}` secret cannot be checked
+  and fails the row unless a switch decides it.
 
 ## Examples
 

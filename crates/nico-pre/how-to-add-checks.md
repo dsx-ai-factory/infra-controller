@@ -39,7 +39,7 @@ Every check has this exact signature. `Ctx` and `Outcome` come from `crate::harn
 
 ### 2. The table entry
 
-Find your check's id in the file's `CHECKS` table. It is registered already with `run: todo`,
+Find your check's id in the file's `CHECKS` table. It is registered already with `run: None`,
 which prints as ⚠ "not implemented yet". Point it at your function:
 
 ```rust
@@ -54,7 +54,7 @@ Check {
              Skip: never.\n\
              Test: the example spliced one line at a time; cases: ...",
     // the registered spec, kept as is: a test checks that every entry carries all its labelled lines
-    run: admin_segment,
+    run: Some(admin_segment),
 },
 ```
 
@@ -168,9 +168,9 @@ cargo make clippy && cargo make check-format-nightly                          # 
 cargo run -q -p nico-pre -- checks --format md > crates/nico-pre/CHECKS.md
 ```
 
-The team repository's `sites/ytl/test-checklists.sh` runs every checklist against the ytl site
-definition and asserts each registered id appears exactly once. Add your id to its table when
-you add an entry to `CHECKS`.
+A site's own test script, kept with its site definition, runs every checklist and asserts that
+each registered id appears exactly once. When you add an entry to `CHECKS`, add your id to the
+table of every such script your team keeps.
 
 ## Checklist for the PR
 
