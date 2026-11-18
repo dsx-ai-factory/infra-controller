@@ -57,7 +57,10 @@ protocol gateway. To replicate it on a fresh site:
    `./setup.sh --skip-dpf --core-values <copy>` from `helm-prereqs/`. The
    overlay header and the
    [dpf-sim-controller quick start](https://github.com/dsx-ai-factory/infra-controller/blob/main/dev/k8s/dpf-sim-controller/README.md#quick-start-against-a-machine-a-tron-cluster)
-   give the `make deploy` command and the namespace it creates.
+   give the `make deploy` command and the namespace it creates. The running
+   simulator also creates the `DPFOperatorConfig` whose `status.version`
+   nico-api reads at startup. Until that version exists nico-api exits with
+   `failed to initialize DPF SDK`, so keep this order.
 1. Check the rack profile. nico-api derives an expected rack's profile id from
    the expected rack group that declares it: the group topology in upper case,
    an underscore, the compute vendor in upper case, and the suffix
