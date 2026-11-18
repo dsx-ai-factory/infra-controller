@@ -687,7 +687,7 @@ fn select_persisted_switch_firmware_status(
         .iter()
         .filter_map(|s| s.updated_at.as_ref())
         .max()
-        .cloned();
+        .copied();
     if state == State::FwStateFailed {
         let error = statuses
             .iter()
@@ -7897,11 +7897,11 @@ mod tests {
 
     #[test]
     fn switch_firmware_status_aggregates_selected_activities() {
+        use ::rpc::forge::FirmwareUpdateState as State;
         use model::rack::{
             MaintenanceScope, RackFirmwareUpgradeState as Hardware, SwitchNvosUpdateState as Nvos,
             SwitchNvosUpdateStatus,
         };
-        use rpc::FirmwareUpdateState as State;
 
         let accepted_at = chrono::Utc::now();
         let current = accepted_at + chrono::Duration::seconds(1);
